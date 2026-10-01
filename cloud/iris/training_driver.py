@@ -282,10 +282,10 @@ class LocalRLRunner:
             select_literal_proxy_port,
         )
 
-        if not self.config.ingress_host:
+        if self.config.target_cluster and not self.config.ingress_host:
             raise ValueError(
-                "ingress_mode=controller requires --ingress_host (the public "
-                "controller-ingress host; iris.oa.dev for the federated CoreWeave path)."
+                "federated controller ingress (target_cluster set) requires --ingress_host, "
+                "the parent that mints the token (iris.oa.dev)."
             )
         # Federated parent-minting reads the parent (marin) controller config from the
         # env the launcher forwards; surface it here so a misconfig fails loud early.
@@ -326,7 +326,7 @@ class LocalRLRunner:
                     api_base = federated_capability_api_base(endpoint_name, ingress_host=self.config.ingress_host)
                     mint_where = f"PARENT (federated -> {self.config.target_cluster})"
                 else:
-                    api_base = capability_api_base(self.config.ingress_host, endpoint_name)
+                    api_base = capability_api_base(endpoint_name)
                     mint_where = "local controller"
                 # Publish the capability URL as the harbor-specific HARBOR_MODEL_ENDPOINT.
                 # opencode (harbor agents/installed/opencode.py::_build_register_config_command)
