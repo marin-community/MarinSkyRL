@@ -37,6 +37,8 @@ from skyrl_train.inference_observability import (
     trainer_metrics,
 )
 
+from skyrl_train.mismatch_probe.callback import MismatchProbeCallback
+
 from .base import TrainerCallback, TrainerState, TrainerControl, CallbackHandler
 from .types import (
     CHECKPOINT_CALLBACK_TYPE,
@@ -782,6 +784,8 @@ def create_default_callbacks(cfg: DictConfig) -> List[TrainerCallback]:
         has_logging = any(isinstance(cb, LoggingCallback) for cb in callbacks)
         if not has_logging:
             callbacks.append(LoggingCallback())
+        if cfg.trainer.get("mismatch_probe", {}).get("enabled", False):
+            callbacks.append(MismatchProbeCallback(cfg))
         return callbacks
 
     # Fall back to legacy interval-based configuration
@@ -859,6 +863,8 @@ def create_default_callbacks(cfg: DictConfig) -> List[TrainerCallback]:
     # Logging callback (always enabled)
     callbacks.append(LoggingCallback())
 
+    if cfg.trainer.get("mismatch_probe", {}).get("enabled", False):
+        callbacks.append(MismatchProbeCallback(cfg))
     return callbacks
 
 

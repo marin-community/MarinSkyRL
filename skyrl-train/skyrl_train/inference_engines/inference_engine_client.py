@@ -359,12 +359,10 @@ class InferenceEngineClient(InferenceEngineInterface):
         prompt_logprobs: List[Optional[Any]] = [None for _ in range(n)]
         student_topk_indices: List[Optional[List[List[int]]]] = [None for _ in range(n)]
         behavior_topk_logprobs: List[Optional[List[List[float]]]] = [None for _ in range(n)]
-        prefix_cache_hit_tokens: List[Optional[int]] = [None for _ in range(n)]
         # a bit hacky for now
         add_resp_logprobs = False
         add_prompt_logprobs = False
         add_student_topk = False
-        add_prefix_cache_hit_tokens = False
 
         for indices, result in zip(indices_list, results):
             selected_ids = result.get("student_topk_indices")
@@ -375,17 +373,10 @@ class InferenceEngineClient(InferenceEngineInterface):
                 if len(selected_ids) != len(indices) or len(selected_scores) != len(indices):
                     raise ValueError("Inference engine student top-K rows must align with responses")
                 add_student_topk = True
-            cached = result.get("prefix_cache_hit_tokens")
-            if cached is not None:
-                if len(cached) != len(indices):
-                    raise ValueError("Inference engine cache-hit rows must align with responses")
-                add_prefix_cache_hit_tokens = True
             for local_idx, original_idx in enumerate(indices):
                 responses[original_idx] = result["responses"][local_idx]
                 stop_reasons[original_idx] = result["stop_reasons"][local_idx]
                 response_ids[original_idx] = result["response_ids"][local_idx]
-                if cached is not None:
-                    prefix_cache_hit_tokens[original_idx] = cached[local_idx]
                 if result.get("response_logprobs", None):
                     add_resp_logprobs = True
                     response_logprobs[original_idx] = result["response_logprobs"][local_idx]
@@ -412,10 +403,6 @@ class InferenceEngineClient(InferenceEngineInterface):
                 raise ValueError("Inference engine omitted student top-K evidence for part of the batch")
             output["student_topk_indices"] = student_topk_indices
             output["behavior_topk_logprobs"] = behavior_topk_logprobs
-        if add_prefix_cache_hit_tokens:
-            if any(value is None for value in prefix_cache_hit_tokens):
-                raise ValueError("Inference engine omitted cache-hit counts for part of the batch")
-            output["prefix_cache_hit_tokens"] = prefix_cache_hit_tokens
         return output
 
     async def begin_online_eagle_capture(self, config: Dict[str, Any]) -> List[OnlineEagleResult]:
@@ -490,8 +477,6 @@ class InferenceEngineClient(InferenceEngineInterface):
         accum_student_topk_indices: List[List[int]] = []
         accum_behavior_topk_logprobs: List[List[float]] = []
         saw_student_topk: Optional[bool] = None
-        saw_prefix_cache_hit_tokens: Optional[bool] = None
-        accum_prefix_cache_hit_tokens = 0
         stop_reason: str = ABORT_FINISH_REASON
 
         # We only use it if generation is completed in one turn to maintain original behavior with no retry.
@@ -533,8 +518,6 @@ class InferenceEngineClient(InferenceEngineInterface):
                 accum_student_topk_indices = []
                 accum_behavior_topk_logprobs = []
                 saw_student_topk = None
-                saw_prefix_cache_hit_tokens = None
-                accum_prefix_cache_hit_tokens = 0
                 num_turns = 0
                 stop_reason = ABORT_FINISH_REASON
                 continue
@@ -574,16 +557,6 @@ class InferenceEngineClient(InferenceEngineInterface):
                 accum_student_topk_indices.extend(selected_ids[0])
                 accum_behavior_topk_logprobs.extend(selected_scores[0])
 
-            cached = partial_response.get("prefix_cache_hit_tokens")
-            has_cached = cached is not None
-            if saw_prefix_cache_hit_tokens is not None and saw_prefix_cache_hit_tokens != has_cached:
-                raise ValueError("Inference engine omitted cache-hit counts for part of a response")
-            saw_prefix_cache_hit_tokens = has_cached
-            if has_cached:
-                if len(cached) != 1 or cached[0] < 0:
-                    raise ValueError("Inference engine returned invalid cache-hit counts")
-                accum_prefix_cache_hit_tokens += cached[0]
-
             # 3.5 Accumulate outputs
             accum_response_ids.extend(new_response_ids)
             if new_response_logprobs is not None:
@@ -610,8 +583,6 @@ class InferenceEngineClient(InferenceEngineInterface):
         if saw_student_topk:
             output["student_topk_indices"] = [accum_student_topk_indices]
             output["behavior_topk_logprobs"] = [accum_behavior_topk_logprobs]
-        if saw_prefix_cache_hit_tokens:
-            output["prefix_cache_hit_tokens"] = [accum_prefix_cache_hit_tokens]
         return output
 
     async def _chat_completion_with_retry(

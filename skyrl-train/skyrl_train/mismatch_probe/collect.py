@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import math
 import os
 import random
@@ -14,7 +13,7 @@ from datetime import UTC, datetime
 import numpy as np
 import ray
 import torch
-from finestore import mismatch_probe as mismatch
+from finestore.rl import mismatch_probe as mismatch
 from loguru import logger
 
 from skyrl_train.config.mismatch_probe import (
@@ -40,10 +39,11 @@ from skyrl_train.mismatch_probe.archive import (
 from skyrl_train.mismatch_probe.protocol import (
     probe_hash,
     request_seed,
-    require_token_identity,
+    ProbeSample,
 )
 from skyrl_train.mismatch_probe.modes import NATIVE_MODE, REPEAT_MODE, TRAINER_MODES
 from skyrl_train.mismatch_probe.provenance import manifest
+from skyrl_train.metric_names import TOKEN_PROVENANCE_RECONSTRUCTED_FRACTION_METRIC
 from skyrl_train.models.megatron_router_replay import SENTINEL_EXPERT_ID
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.trajectory_runners.trajectory_processing import (
@@ -132,24 +132,21 @@ class ProbeCollector:
     def __init__(self, cfg):
         self.cfg = cfg
         self.spec = cfg.trainer.mismatch_probe
-        self.updates = tuple(self.spec.score_after_updates)
+        self.updates = int(self.spec.updates)
         self.archive_uri = self.spec.archive_uri
         self.archive: MismatchArchive | None = None
         self.probes = None
         self.training_input: TrainingInputBatch | None = None
         self.probe_hash: str | None = None
-        self.starting_weights_hash: str | None = None
         self.source_manifest = None
         self.generation_scores: list[np.ndarray] | None = None
         self.timing: dict[str, float] = {}
-        self.weights: dict[int, str] = {}
         self.batch_layout: BatchLayout | None = None
         self.metrics: dict[str, object] = {}
         self.created_at = datetime.now(UTC).isoformat()
         self.starting_global_step: int | None = None
         self.scored_global_steps: dict[int, int] = {}
         self.tokenizer_fingerprint: str | None = None
-        self.cache_hit_tokens: dict[str, int] = {}
 
     async def _generate(self, trainer):
         if trainer.eval_dataset is None:
@@ -182,7 +179,10 @@ class ProbeCollector:
                         [prompt], 1, sampling, trainer.cfg.environment.env_class, "eval", 0
                     )
                     request["trajectory_ids"][0].repetition_id = repetition
-                    batches.append(await trainer.trajectory_runner.run(request))
+                    batch = await trainer.trajectory_runner.run(request)
+                    if (batch.get("rollout_metrics") or {}).get(TOKEN_PROVENANCE_RECONSTRUCTED_FRACTION_METRIC, 0):
+                        raise ValueError("mismatch probe rejects re-tokenized responses")
+                    batches.append(batch)
                     seeds.append(seed)
                     sample_ids.append(f"{prompt['uid']}:{repetition}")
                     uids.append(prompt["uid"])
@@ -282,13 +282,6 @@ class ProbeCollector:
             trainer_response = training_input["sequences"][
                 position, prompt_width : prompt_width + response_length
             ].tolist()
-            require_token_identity(
-                sample_id=sample_id,
-                expected_prompt=trajectory["prompt_token_ids"][position],
-                trainer_prompt=trainer_prompt,
-                engine_response=generated[position],
-                trainer_response=trainer_response,
-            )
             routes = training_input.get("rollout_routed_experts")
             encoded_routes = _encode_routes(None if routes is None else routes[position], response_length)
             route_valid_mask = None
@@ -329,7 +322,14 @@ class ProbeCollector:
                 )
             )
         digest = probe_hash(
-            (row.sample_id, row.prompt_token_ids, row.vllm_output_ids, row.response_mask, row.loss_mask) for row in rows
+            ProbeSample(
+                row.sample_id,
+                tuple(row.prompt_token_ids),
+                tuple(row.vllm_output_ids),
+                tuple(row.response_mask),
+                tuple(row.loss_mask),
+            )
+            for row in rows
         )
         if self.source_manifest is not None and digest != self.probe_hash:
             raise ValueError("reuse_probe token hash changed during trainer collation")
@@ -422,12 +422,6 @@ class ProbeCollector:
                     offset += len(row.vllm_output_ids)
             label = rescore_label(update, cache_mode)
             self.timing[f"{label}/seconds"] = duration
-            cache_hits = output.get("prefix_cache_hit_tokens")
-            if cache_hits is None or len(cache_hits) != len(prefixes):
-                raise ValueError("vLLM re-read omitted prefix-cache hit counts")
-            self.cache_hit_tokens[label] = sum(cache_hits)
-            if cache_mode == CACHE_OFF and self.cache_hit_tokens[label]:
-                raise ValueError("cache-off re-read unexpectedly used cached prefix tokens")
             for row, values in zip(rows, chosen, strict=True):
                 if len(values) != len(row.vllm_output_ids) or not all(math.isfinite(value) for value in values):
                     raise ValueError(f"vLLM re-read returned incomplete or nonfinite scores for {row.sample_id}")
@@ -437,19 +431,13 @@ class ProbeCollector:
                         sample_id=row.sample_id,
                         scorer=RESCORE_SCORER,
                         update=update,
-                        weights_hash=self.weights[update],
+                        global_step=trainer.global_step,
                         cache_mode=cache_mode,
                         logprobs=values,
                         forward_seconds=duration / len(rows),
                     )
                 )
         return result
-
-    def _policy_weights_hash(self, trainer) -> str:
-        shards = ray.get(trainer.policy_model.async_run_ray_method("pass_through", "probe_weights_digest"))
-        if not shards or not all(isinstance(shard, str) and len(shard) == 64 for shard in shards):
-            raise ValueError("policy workers did not return complete weight digests")
-        return "sha256:" + hashlib.sha256("".join(shards).encode()).hexdigest()
 
     def _route_observations(self, outputs, mode: str):
         """Gather PP-owned router choices by frozen sample and captured layer."""
@@ -550,7 +538,7 @@ class ProbeCollector:
                         scorer=TRAINER_SCORER,
                         mode=mode,
                         update=update,
-                        weights_hash=self.weights[update],
+                        global_step=trainer.global_step,
                         logprobs=logprobs,
                         forward_seconds=duration / n,
                         expert_choices=(
@@ -600,13 +588,20 @@ async def collect(probe: ProbeCollector, trainer, *, update: int) -> list[mismat
             probe._collate_and_freeze(
                 trainer, samples.trajectory, samples.prompt_ids, samples.sample_ids, samples.seeds
             )
+            if probe.source_manifest is not None:
+                current = manifest(probe, trainer, status=BUILDING_STATUS)
+                if (current.checkpoint_path, current.starting_global_step, current.runtime_commit) != (
+                    probe.source_manifest.checkpoint_path,
+                    probe.source_manifest.starting_global_step,
+                    probe.source_manifest.runtime_commit,
+                ):
+                    raise ValueError("reuse_probe starting checkpoint, step or runtime differs from the source archive")
         elif probe.training_input is None:
             raise RuntimeError("mismatch probe update 0 was not collected")
 
         # The policy is still offloaded and the inference engine awake after
         # each normal weight sync. Re-read first, then temporarily swap residency.
         rescore_started = time.monotonic()
-        probe.weights[update] = "pending"
         rescore_rows = await probe._rescore_vllm(trainer, update)
         probe.timing[f"update@{update}/vllm_total_seconds"] = time.monotonic() - rescore_started
         if trainer.colocate_all:
@@ -615,20 +610,7 @@ async def collect(probe: ProbeCollector, trainer, *, update: int) -> list[mismat
             if trainer.colocate_all:
                 trainer.policy_model.backload_to_gpu(backload_optimizer=False, backload_model=True)
             try:
-                probe.weights[update] = probe._policy_weights_hash(trainer)
-                if update == 0:
-                    probe.starting_weights_hash = probe.weights[0]
-                    if (
-                        probe.source_manifest is not None
-                        and probe.source_manifest.starting_weights_hash != probe.weights[0]
-                    ):
-                        raise ValueError("reuse_probe starting weights differ from the source archive")
-                # Re-read rows were delayed until this exact weight identity is known.
-                for row in rescore_rows:
-                    row.weights_hash = probe.weights[update]
                 trainer_rows = probe._trainer_scores(trainer, update)
-                if probe._policy_weights_hash(trainer) != probe.weights[update]:
-                    raise ValueError(f"probe scoring changed policy weights or buffers at update {update}")
             finally:
                 if trainer.colocate_all:
                     trainer.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
@@ -645,7 +627,7 @@ async def collect(probe: ProbeCollector, trainer, *, update: int) -> list[mismat
                         sample_id=row.sample_id,
                         scorer=GENERATION_SCORER,
                         update=0,
-                        weights_hash=probe.weights[0],
+                        global_step=trainer.global_step,
                         logprobs=values,
                     )
                 )
@@ -695,7 +677,7 @@ async def collect(probe: ProbeCollector, trainer, *, update: int) -> list[mismat
         trainer.all_metrics[f"mismatch_probe/update_{update}/collated_route_bytes"] = (
             probe.batch_layout.collated_route_bytes
         )
-        status = COMPLETE_STATUS if update == probe.updates[-1] else BUILDING_STATUS
+        status = COMPLETE_STATUS if update == probe.updates else BUILDING_STATUS
         if probe.archive is None:
             probe.archive = await asyncio.to_thread(
                 MismatchArchive, probe.archive_uri, writer_id=f"probe-{os.getpid()}"

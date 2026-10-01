@@ -20,7 +20,10 @@ def run_config(config_path: Path) -> None:
     run = cast(Callable[[DictConfig], None], getattr(importlib.import_module(module), "run"))
     if config.skyrl.get("trainer", {}).get("mismatch_probe", {}).get("enabled"):
         with open_dict(config.skyrl):
-            config.skyrl.runtime = {"launcher_commit": str(config.runtime.launcher_commit)}
+            config.skyrl.runtime = {
+                "launcher_commit": str(config.runtime.launcher_commit),
+                "checkpoint_path": str(config.skyrl.trainer.resume_path or config.inputs.model.uri),
+            }
     run(config.skyrl)
 
 

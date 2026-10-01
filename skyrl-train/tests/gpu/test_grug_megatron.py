@@ -15,7 +15,7 @@ import math
 
 import pytest
 from types import SimpleNamespace
-from finestore.mismatch_probe import ProbeRow
+from finestore.rl.mismatch_probe import ProbeRow
 import ray
 import torch
 from ray.util.placement_group import placement_group
@@ -604,7 +604,6 @@ def test_grug_probe_reread_keeps_chosen_tokens_with_prefix_cache(tmp_path):
         cfg.trainer.mismatch_probe.archive_uri = str(tmp_path / "probe")
         probe = ProbeCollector(cfg)
         probe.probe_hash = "gpu-reread"
-        probe.weights[0] = "same-weights"
         probe.probes = [
             ProbeRow(
                 probe_hash=probe.probe_hash,
@@ -621,14 +620,12 @@ def test_grug_probe_reread_keeps_chosen_tokens_with_prefix_cache(tmp_path):
             )
             for index, (prompt, response) in enumerate(zip(prompts, responses, strict=True))
         ]
-        reread = asyncio.run(probe._rescore_vllm(SimpleNamespace(inference_engine_client=client), 0))
+        reread = asyncio.run(probe._rescore_vllm(SimpleNamespace(inference_engine_client=client, global_step=0), 0))
         scores = [
             [value for row in reread if row.cache_mode == mode for value in row.logprobs] for mode in ("off", "on")
         ]
         assert all(len(values) == sum(map(len, responses)) for values in scores)
         assert all(math.isfinite(value) for values in scores for value in values)
-        assert probe.cache_hit_tokens["vllm.rescore@0"] == 0
-        assert probe.cache_hit_tokens["vllm.rescore@0:on"] > 0
         torch.testing.assert_close(torch.tensor(scores[0]), torch.tensor(scores[1]), rtol=0, atol=1e-4)
     finally:
         ray.shutdown()

@@ -1458,12 +1458,10 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         student_topk_indices: List[List[List[int]]] = []
         behavior_topk_logprobs: List[List[List[float]]] = []
         all_prompt_logprobs: Optional[List] = None
-        prefix_cache_hit_tokens: list[int] = []
         params_by_prompt = sampling_params if isinstance(sampling_params, list) else [sampling_params] * len(outputs)
         if len(params_by_prompt) != len(outputs):
             raise ValueError("vLLM sampling parameters do not align with output rows")
         for output, row_params in zip(outputs, params_by_prompt, strict=True):
-            prefix_cache_hit_tokens.append(int(output.num_cached_tokens or 0))
             # TODO(tgriggs): Support n>1 sampling.
             assert len(output.outputs) == 1, (
                 "Each prompt should have only one responses. n>1 sampling is supported by copying prompts."
@@ -1532,7 +1530,6 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         if response_top_k is not None and response_top_k > 0:
             result["student_topk_indices"] = student_topk_indices
             result["behavior_topk_logprobs"] = behavior_topk_logprobs
-        result["prefix_cache_hit_tokens"] = prefix_cache_hit_tokens
         return result
 
     def get_model_max_len(self) -> int:

@@ -3,6 +3,7 @@ defaults:
   - megatron_config@trainer.policy.megatron_config: policy
   - megatron_config@trainer.ref.megatron_config: ref
   - skyrl_gym_config: default
+  - mismatch_probe@trainer.mismatch_probe: default
 
 data:
   train_data: ["${oc.env:HOME}/data/gsm8k/train.parquet"]
@@ -340,16 +341,6 @@ trainer:
 
   step_wise_training: false
 
-  mismatch_probe:
-    enabled: false
-    prompts: {count: 128, samples_per_prompt: 4}
-    seed: null
-    archive_uri: null
-    reuse_probe: null
-    score_after_updates: [0, 1, 2]
-    extra_trainer_modes: []
-    filtered_replay: {keep_fraction: null}
-    rescore_prefix_cache: "off"
 
 generator:
   model_name: ${trainer.policy.model.path}

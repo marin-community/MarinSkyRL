@@ -60,20 +60,9 @@ def validate_mismatch_probe_config(
     seed = probe.get("seed")
     if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
         raise ValueError("trainer.mismatch_probe.seed must be a non-negative integer")
-    updates = probe.get("score_after_updates")
-    if (
-        not isinstance(updates, Sequence)
-        or isinstance(updates, str)
-        or not updates
-        or any(isinstance(update, bool) or not isinstance(update, int) or update < 0 for update in updates)
-        or list(updates) != sorted(set(updates))
-        or updates[0] != 0
-    ):
-        raise ValueError(
-            "trainer.mismatch_probe.score_after_updates must be sorted, unique, non-negative and start at 0"
-        )
-    if trainer.get("max_steps") != updates[-1]:
-        raise ValueError("trainer.max_steps must equal max(trainer.mismatch_probe.score_after_updates)")
+    updates = probe.get("updates")
+    if isinstance(updates, bool) or not isinstance(updates, int) or updates < 0:
+        raise ValueError("trainer.mismatch_probe.updates must be a non-negative integer")
     modes = probe.get("extra_trainer_modes") or []
     if (
         not isinstance(modes, Sequence)

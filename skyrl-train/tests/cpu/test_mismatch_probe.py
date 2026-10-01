@@ -1,11 +1,12 @@
-import hashlib
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import ray
 import torch
-from finestore import mismatch_probe as mismatch
+from finestore.rl import mismatch_probe as mismatch
+from omegaconf import OmegaConf
+from skyrl_train.metric_names import TOKEN_PROVENANCE_RECONSTRUCTED_FRACTION_METRIC
 from tokenizers import Tokenizer, models
 from transformers import PreTrainedTokenizerFast
 
@@ -16,7 +17,8 @@ from skyrl_train.group_admission import GroupAdvantageInvariant
 from skyrl_train.inference_engines.vllm_teacher_oracle import tokenizer_vocabulary_fingerprint
 from skyrl_train.mismatch_probe.archive import MismatchArchive, read_frozen_probe
 from skyrl_train.mismatch_probe.collect import ProbeCollector
-from skyrl_train.mismatch_probe.callback import MismatchProbeCallback
+from skyrl_train.callbacks.builtin import create_default_callbacks
+from skyrl_train.callbacks.base import CallbackHandler
 from skyrl_train.models.megatron_router_replay import MegatronRouterReplay
 from skyrl_train.training_batch import TrainingOutputBatch
 from skyrl_train.trainer import RayPPOTrainer
@@ -36,7 +38,6 @@ class _InferenceEndpoint:
                 [None] + [{token: float(probabilities[token])} for token in sequence[1:]]
                 for sequence in request["prompt_token_ids"]
             ],
-            "prefix_cache_hit_tokens": [0 for _ in request["prompt_token_ids"]],
             "student_topk_indices": [
                 [[params["logprob_token_ids"][0]]] for params in request["sampling_params_per_prompt"]
             ],
@@ -55,8 +56,6 @@ class _PolicyEndpoint:
         ]
 
     def async_run_ray_method(self, dispatch, method, *, data=None):
-        if method == "probe_weights_digest":
-            return ["0" * 64]
         if method != "probe_forward":
             raise ValueError(method)
         width = data.metadata["response_length"]
@@ -91,8 +90,9 @@ class _PolicyEndpoint:
         return outputs
 
 
+@pytest.mark.parametrize("explicit_callbacks", [False, True])
 @pytest.mark.asyncio
-async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_path, monkeypatch):
+async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_path, monkeypatch, explicit_callbacks):
     uri = str(tmp_path / "probe")
     tokenizer = PreTrainedTokenizerFast(
         tokenizer_object=Tokenizer(models.WordLevel({str(i): i for i in range(32)}, unk_token="0")),
@@ -106,7 +106,7 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
     cfg.trainer.mismatch_probe.prompts.samples_per_prompt = 1
     cfg.trainer.policy.megatron_config.moe_router_replay = True
     cfg.trainer.algorithm.advantage_estimator = "uniform"
-    cfg.trainer.algorithm.use_tis = False
+    cfg.trainer.algorithm.off_policy_correction = "none"
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
     trainer.cfg = cfg
     trainer.group_advantage_invariant = GroupAdvantageInvariant.no_group_advantage(physical_group_size=1)
@@ -135,14 +135,13 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
     assert not collector.training_input["loss_mask"][-1].any()
     for row in probes:
         assert row.route_valid_mask == [[True], [False], [True], [False]]
-    weights_hash = "sha256:" + hashlib.sha256(("0" * 64).encode()).hexdigest()
     generation = [
         mismatch.ScoreRow(
             probe_hash=collector.probe_hash,
             sample_id=row.sample_id,
             scorer="vllm.generate",
             update=0,
-            weights_hash=weights_hash,
+            global_step=7,
             logprobs=values.tolist(),
         )
         for row, values in zip(probes, trajectory["rollout_logprobs"], strict=True)
@@ -151,11 +150,12 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
         archive=uri,
         status=mismatch.ArchiveStatus.BUILDING,
         probe_hash=collector.probe_hash,
-        starting_weights_hash=weights_hash,
+        checkpoint_path=str(cfg.trainer.policy.model.path),
+        runtime_commit=None,
         tokenizer_fingerprint=tokenizer_vocabulary_fingerprint(tokenizer),
-        starting_global_step=1,
+        starting_global_step=7,
         scored_updates=[0],
-        scored_global_steps=[1],
+        scored_global_steps=[7],
         architecture="tiny-grug",
         vllm_enforce_eager=False,
         optimizer_steps_per_update=0,
@@ -178,7 +178,7 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
     finally:
         archive.close()
     source = read_frozen_probe(uri)
-    assert source.manifest.starting_weights_hash == weights_hash
+    assert source.manifest.starting_global_step == 7
     assert source.probes == probes
     assert list(source.generations.values()) == generation
     cfg.trainer.mismatch_probe.reuse_probe = uri
@@ -190,21 +190,54 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
         np.testing.assert_array_equal(restored, original)
 
     cfg.trainer.mismatch_probe.archive_uri = str(tmp_path / "reused")
-    cfg.trainer.mismatch_probe.score_after_updates = [0, 1, 2]
+    cfg.trainer.mismatch_probe.updates = 2
     trainer.total_training_steps = 9
     trainer.global_step = 7
     trainer.colocate_all = False
     trainer.all_timings = {}
-    callback = MismatchProbeCallback(cfg)
-    control = TrainerControl()
-    await callback.on_train_begin_async(TrainerState(7, 0, 9, 9), control, trainer=trainer)
+    cfg.trainer.mismatch_probe.enabled = True
+    OmegaConf.update(cfg, "trainer.callbacks", [{"type": "logging"}] if explicit_callbacks else None, force_add=True)
+    OmegaConf.update(cfg, "trainer.enable_db_registration", False, force_add=True)
+    cfg.trainer.eval_interval = -1
+    cfg.trainer.ckpt_interval = -1
+    cfg.generator.inference_stats_interval = 0
+    handler = CallbackHandler(create_default_callbacks(cfg))
+    control = await handler.call_event_async("on_train_begin", TrainerState(7, 0, 9, 9), TrainerControl(), trainer=trainer)
     for step in (8, 9):
         trainer.global_step = step
-        await callback.on_step_end_async(TrainerState(step, 0, 9, 9), control, trainer=trainer)
-    callback.on_train_end(TrainerState(9, 0, 9, 9), control, trainer=trainer)
+        await handler.call_event_async("on_step_end", TrainerState(step, 0, 9, 9), control, trainer=trainer)
+    await handler.call_event_async("on_train_end", TrainerState(9, 0, 9, 9), control, trainer=trainer)
     chained = read_frozen_probe(cfg.trainer.mismatch_probe.archive_uri)
+    assert control.step_limit == 9
     assert chained.manifest.scored_updates == [0, 1, 2]
     assert chained.manifest.scored_global_steps == [7, 8, 9]
     assert chained.manifest.starting_global_step == 7
     assert chained.probes == probes
     assert chained.generations == source.generations
+
+    class ValidationPrompts:
+        def __len__(self):
+            return 3
+
+        def __getitem__(self, index):
+            return {"uid": f"prompt-{index}", "prompt": [], "env_class": None, "env_extras": {}}
+
+        def collate_fn(self, prompts):
+            return prompts
+
+    class Runner:
+        async def start_eval_session(self, **kwargs):
+            pass
+
+        async def stop_eval_session(self):
+            pass
+
+        async def run(self, request):
+            batch = {key: value[:1] for key, value in trajectory.items()}
+            batch["rollout_metrics"] = {TOKEN_PROVENANCE_RECONSTRUCTED_FRACTION_METRIC: 1.0}
+            return batch
+
+    trainer.eval_dataset = ValidationPrompts()
+    trainer.trajectory_runner = Runner()
+    with pytest.raises(ValueError, match="rejects re-tokenized responses"):
+        await collector._generate(trainer)

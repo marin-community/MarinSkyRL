@@ -125,7 +125,6 @@ def test_checked_in_behavior_logprob_configs_use_validated_sampling():
 
 
 def test_mismatch_probe_samples_the_distribution_the_trainer_scores():
-    """A probe run leaves no sampling transform, including the first-token stop mask, the trainer omits."""
     from unittest import mock
 
     from skyrl_train.config.utils import get_default_config
@@ -139,9 +138,9 @@ def test_mismatch_probe_samples_the_distribution_the_trainer_scores():
     probe.archive_uri = "memory://probe"
     probe.prompts.count = 2
     probe.prompts.samples_per_prompt = 1
-    probe.score_after_updates = [0]
+    probe.updates = 0
     cfg.trainer.max_steps = 0
-    cfg.trainer.algorithm.use_tis = False
+    cfg.trainer.algorithm.off_policy_correction = "none"
     cfg.generator.require_exact_chat_transport = True
     cfg.generator.sampling_params.temperature = 1.0
     cfg.generator.sampling_params.logprobs = 0

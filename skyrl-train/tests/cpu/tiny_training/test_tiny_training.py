@@ -7,6 +7,9 @@ from pathlib import Path
 import pytest
 import torch
 from transformers import AutoModelForCausalLM
+from omegaconf import OmegaConf
+from skyrl_train.callbacks.base import TrainerCallback
+from skyrl_train.callbacks.builtin import register_callback
 
 from marinskyrl.checkpoint_paths import POLICY_CHECKPOINT_SUBDIRECTORY
 from tests.cpu.tiny_training.cpu_backend import CHECKPOINT_FILE_TEMPLATE, CausalLMPolicy
@@ -34,6 +37,29 @@ RESUMED_STEP = 1
 # A run takes under half a minute on an idle host. The margin absorbs slower CI hosts and concurrent pytest-xdist
 # workers, and stays above the experiment's admission stall timeout so a stall reports its own error.
 RUN_TIMEOUT_SECONDS = 300
+
+
+@register_callback("test_step_limit")
+class _StepLimit(TrainerCallback):
+    def __init__(self, limit: int):
+        self.limit = limit
+
+    def on_train_begin(self, state, control, **kwargs):
+        control.step_limit = self.limit
+        return control
+
+
+def _run_limited_training(root: Path, model: Path, limits: tuple[int, ...]) -> None:
+    cfg = experiment.tiny_training_config(
+        root, model, TrainingMode.SYNC, RolloutShape.SINGLE_TURN, max_steps=1, checkpoint_interval=1
+    )
+    OmegaConf.update(
+        cfg,
+        "trainer.callbacks",
+        [{"type": "test_step_limit", "limit": limit} for limit in limits] + [{"type": "checkpoint", "save_steps": 1}],
+        force_add=True,
+    )
+    experiment.run_tiny_training(cfg)
 
 
 @pytest.fixture(scope="module")
@@ -145,6 +171,21 @@ def test_async_training_resumes_with_committed_groups(runs: ForkServerContext, t
     _train(runs, tmp_path, tiny_policy, mode, shape, steps=NUM_STEPS, checkpoint_interval=1)
 
     _assert_trained_to_max_steps(tmp_path, mode, shape)
+
+
+def test_callback_limits_resume_at_max_steps_and_keep_the_smallest_limit(runs, tmp_path, tiny_policy):
+    for limits in ((1,), (3, 4), (3,)):
+        run = runs.Process(target=_run_limited_training, args=(tmp_path, tiny_policy, limits))
+        run.start()
+        run.join(RUN_TIMEOUT_SECONDS)
+        if run.exitcode is None:
+            run.kill()
+            run.join()
+            pytest.fail("callback-limited training did not finish")
+        assert run.exitcode == 0
+    assert [record["trainer/global_step"] for record in _trained_steps(tmp_path)] == [1, 2, 3]
+    checkpoint = tmp_path / "ckpts" / "global_step_3" / "trainer_state.pt"
+    assert checkpoint.exists()
 
 
 def test_one_step_is_independent_of_micro_batch_size(runs: ForkServerContext, tmp_path: Path, tiny_policy: Path):

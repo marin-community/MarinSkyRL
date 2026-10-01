@@ -26,7 +26,7 @@ import copy
 from types import SimpleNamespace
 
 import numpy as np
-from finestore import mismatch_probe as mismatch
+from finestore.rl import mismatch_probe as mismatch
 from finestore.reader import ReadView
 from omegaconf import open_dict
 from safetensors.torch import load_file
@@ -203,7 +203,6 @@ def test_probe_forward_scores_all_modes_and_records_pipeline_routes(tmp_path, la
         collector.probes = probes
         collector.probe_hash = "fixture"
         collector.training_input = padded
-        collector.weights[0] = "fixture-weights"
         collector.batch_layout = BatchLayout(
             sample_ids=[row.sample_id for row in probes],
             native_order=list(range(len(probes))),
@@ -216,9 +215,7 @@ def test_probe_forward_scores_all_modes_and_records_pipeline_routes(tmp_path, la
             * padded["rollout_routed_experts"].element_size(),
             nonzero_advantage_samples=int((padded["advantages"].abs().sum(dim=1) > 0).sum()),
         )
-        before = ray.get(policy.async_run_ray_method("pass_through", "probe_weights_digest"))
         scores = collector._trainer_scores(trainer, 0)
-        assert before == ray.get(policy.async_run_ray_method("pass_through", "probe_weights_digest"))
         archive = MismatchArchive(collector.archive_uri, writer_id="gpu-owner")
         try:
             archive.write(probes=probes, scores=scores)

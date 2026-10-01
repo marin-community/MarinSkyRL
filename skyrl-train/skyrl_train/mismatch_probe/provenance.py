@@ -13,7 +13,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 import torch
-from finestore import mismatch_probe as mismatch
+from finestore.rl import mismatch_probe as mismatch
 from omegaconf import OmegaConf
 
 from skyrl_train.inference_engines.vllm_teacher_oracle import tokenizer_vocabulary_fingerprint
@@ -63,7 +63,12 @@ def manifest(probe, trainer, *, status: mismatch.ArchiveStatus):
         archive=probe.archive_uri,
         status=status,
         probe_hash=probe.probe_hash,
-        starting_weights_hash=probe.starting_weights_hash,
+        checkpoint_path=str(
+            probe.cfg.get("runtime", {}).get("checkpoint_path")
+            or trainer.cfg.trainer.resume_path
+            or trainer.cfg.trainer.policy.model.path
+        ),
+        runtime_commit=software["marinskyrl_commit"],
         source_probe_archive=probe.spec.reuse_probe,
         tokenizer_fingerprint=probe.tokenizer_fingerprint,
         starting_global_step=probe.starting_global_step,
@@ -80,7 +85,5 @@ def manifest(probe, trainer, *, status: mismatch.ArchiveStatus):
         hardware_json=json.dumps({"placement": OmegaConf.to_container(trainer.cfg.trainer.placement)}, sort_keys=True),
         batch_layout_json=json.dumps(asdict(probe.batch_layout), sort_keys=True),
         timing_json=json.dumps(probe.timing, sort_keys=True),
-        step_metrics_json=json.dumps(
-            probe.metrics | {"weights": probe.weights, "cache_hit_tokens": probe.cache_hit_tokens}, sort_keys=True
-        ),
+        step_metrics_json=json.dumps(probe.metrics, sort_keys=True),
     )

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from finestore import mismatch_probe as mismatch
+from finestore.rl import mismatch_probe as mismatch
 from finestore.reader import ReadView
 from finestore.store import DataStore
 

@@ -1,6 +1,5 @@
 import asyncio
 import copy
-import hashlib
 import importlib.util
 import os
 from collections import defaultdict
@@ -76,15 +75,6 @@ from marinskyrl.runtime_options import WeightSyncTransport
 class _MegatronInitMode(StrEnum):
     TRAINING = "training"
     CHECKPOINT_EXPORT = "checkpoint-export"
-
-
-_PROBE_HASH_CHUNK_BYTES = 8 * 1024 * 1024
-
-
-def _update_probe_tensor_digest(digest, tensor: torch.Tensor) -> None:
-    flat = tensor.detach().contiguous().view(torch.uint8).flatten()
-    for offset in range(0, flat.numel(), _PROBE_HASH_CHUNK_BYTES):
-        digest.update(flat[offset : offset + _PROBE_HASH_CHUNK_BYTES].cpu().numpy().tobytes())
 
 
 class MegatronWorker:
@@ -283,15 +273,6 @@ class MegatronWorker:
                 module.training = was_training
             MegatronStrategy.load_rng_state(rng_state)
             rng_tracker.set_states(tracker_states)
-
-    def probe_weights_digest(self) -> str:
-        """Hash each local model shard exactly for same-weight and update checks."""
-        digest = hashlib.sha256()
-        for chunk_index, chunk in enumerate(self.actor_module):
-            for name, tensor in (*chunk.named_parameters(), *chunk.named_buffers()):
-                digest.update(f"{chunk_index}:{name}:{tensor.dtype}:{tuple(tensor.shape)}\0".encode())
-                _update_probe_tensor_digest(digest, tensor)
-        return digest.hexdigest()
 
     def _log_forward_fingerprint(self, call: str, micro_payloads: list[MegatronForwardMicroBatch]) -> None:
         """Log checksums of this rank's inputs and parameters so two calls can be compared."""

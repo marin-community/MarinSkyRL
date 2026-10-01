@@ -23,7 +23,6 @@ from transformers import AutoTokenizer
 from collections import defaultdict, deque
 
 import numpy as np
-from skyrl_train.mismatch_probe.callback import MismatchProbeCallback
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
@@ -378,8 +377,6 @@ class RayPPOTrainer:
             self.callback_handler = CallbackHandler(callbacks)
         else:
             self.callback_handler = DefaultCallbackHandler(cfg)
-        if cfg.trainer.mismatch_probe.enabled:
-            self.callback_handler.add_callback(MismatchProbeCallback(cfg))
 
         # Trainer control object for callback coordination
         self._control = TrainerControl()
@@ -1255,22 +1252,8 @@ class RayPPOTrainer:
                 self._restored_rollout_state = None
                 restored_data = True
 
-        probe = self.cfg.trainer.mismatch_probe
-        if probe.enabled:
-            final_step = self.global_step + probe.score_after_updates[-1]
-            available_steps = self.available_training_steps + (0 if restored_data else self.global_step)
-            if final_step > available_steps:
-                raise ValueError("mismatch probe update schedule exceeds the available training batches")
-            self.total_training_steps = final_step
-
         await self._start_draft_trainer()
         await self._sync_policy_for_rollouts(reason="initial")
-
-        # Synchronize before checking completion so a requested final evaluation uses the checkpoint weights.
-        # The loaded global_step counts completed steps, so >= treats a resume exactly at max_steps as complete.
-        if self.resume_mode != ResumeMode.NONE and self.global_step >= self.total_training_steps and not probe.enabled:
-            await self._handle_resume_at_max_steps()
-            return
 
         self._log_startup_timings()
         self._record_run_configuration()
@@ -1285,6 +1268,16 @@ class RayPPOTrainer:
             self._control,
             trainer=self,
         )
+
+        if self._control.step_limit is not None:
+            limit = self._control.step_limit
+            available_steps = self.available_training_steps + (0 if restored_data else self.global_step)
+            if limit < self.global_step or limit > available_steps:
+                raise ValueError("callback step limit exceeds the available training batches")
+            self.total_training_steps = limit
+        elif self.resume_mode != ResumeMode.NONE and self.global_step >= self.total_training_steps:
+            await self._handle_resume_at_max_steps()
+            return
 
         if self._control.should_training_stop:
             await self._finalize_training(
