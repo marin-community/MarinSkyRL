@@ -2,6 +2,9 @@
 uv run --isolated --group dev --extra cpu pytest tests/cpu/test_eval.py
 """
 
+import gzip
+import json
+import zipfile
 from unittest.mock import MagicMock
 
 import pytest
@@ -84,9 +87,20 @@ def test_eval_reports_normalized_verifier_score_alongside_raw_reward():
 
 
 @pytest.mark.asyncio
-async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path, monkeypatch):
+@pytest.mark.parametrize("global_step", [None, 5])
+async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path, monkeypatch, global_step):
     monkeypatch.setitem(registry, "custom_env", registry["gsm8k"])
     cfg = configure_eval(dummy_config, tmp_path)
+    cfg.generator.trajectory_retention = OmegaConf.create(
+        {
+            "enabled": True,
+            "required": True,
+            "output_path": str(tmp_path / "trajectories"),
+            "run_id": "eval-test",
+            "phases": ["eval"],
+            "sample_count_per_step": 2,
+        }
+    )
 
     prompts_batch = [
         {
@@ -117,7 +131,7 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path, monkey
     runner = DummyRunner(trajectory_batch)
 
     tokenizer = MagicMock()
-    tokenizer.decode.side_effect = lambda tokens: "decoded"
+    tokenizer.decode.side_effect = lambda tokens, **kwargs: "decoded"
     # The run's shared sink is a Ray actor; an in-process sink with the same configuration keeps this test off Ray.
     sink = TrajectorySink(
         parse_trajectory_retention_config(cfg.generator.trajectory_retention),
@@ -129,10 +143,23 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path, monkey
         eval_dataloader=eval_dataloader,
         trajectory_runner=runner,
         cfg=cfg,
-        global_step=5,
+        global_step=global_step,
         tokenizer=tokenizer,
         trajectory_sink=sink,
     )
+
+    sink.close()
+    records = []
+    for archive_path in (tmp_path / "trajectories").rglob("*.zip"):
+        with zipfile.ZipFile(archive_path) as archive:
+            records.extend(
+                json.loads(gzip.decompress(archive.read(name)))
+                for name in archive.namelist()
+                if name.startswith("records/") and name.endswith(".json.gz")
+            )
+    assert len(records) == 2
+    assert {r["global_step"] for r in records} == {0 if global_step is None else global_step}
+    assert sorted(r["response"]["token_ids"] for r in records) == [[201], [202]]
 
     expected_metrics = {
         "eval/dataset_a/avg_score": 1.0,
