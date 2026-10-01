@@ -259,6 +259,7 @@ class DirectModelClient:
                 **{key: value for key, value in sampling_params.items() if key not in _CHAT_SAMPLING_EXCLUSIONS},
                 **chat_options,
                 "return_token_ids": True,
+                "include_stop_str_in_output": False,
             }
             body[EXACT_PROMPT_TOKEN_IDS_KEY] = prompt_ids
             if sampling_params.get("stop") is not None:
@@ -294,7 +295,11 @@ class DirectModelClient:
             text = message.get("content") or ""
             # Some serving configurations omit reasoning parsers and remove
             # special delimiters from content. Exact tokens retain the boundary.
-            decoded = self._client.tokenizer.decode(response_ids, skip_special_tokens=False)
+            tokenizer = self._client.tokenizer
+            semantic_ids = (
+                response_ids[:-1] if response_ids and response_ids[-1] == tokenizer.eos_token_id else response_ids
+            )
+            decoded = tokenizer.decode(semantic_ids, skip_special_tokens=False)
             if any(marker in decoded for pair in REASONING_DELIMITERS for marker in pair):
                 text = final_answer_text(decoded)
             logprob_items = (choice.get("logprobs") or {}).get("content")

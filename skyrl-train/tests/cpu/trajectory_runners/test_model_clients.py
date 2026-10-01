@@ -37,6 +37,43 @@ async def test_direct_model_client_preserves_engine_tokens():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reasoning", ["", "<think>\nCalculate the answer.\n</think>\n\n"])
+async def test_chat_answer_omits_stop_text_but_keeps_stop_token_evidence(load_tokenizer, reasoning):
+    tokenizer = load_tokenizer("Qwen/Qwen3-0.6B", revision="c1899de")
+    tokens = tokenizer.encode(reasoning + "20<|im_end|>", add_special_tokens=False)
+    engine = AsyncMock()
+    engine.model_name = "qwen"
+    engine.tokenizer = tokenizer
+    engine.tokenize.return_value = {"tokens": [1, 2]}
+
+    async def respond(payload):
+        content = "20<|im_end|>" if payload["json"].get("include_stop_str_in_output") else "20"
+        return {
+            "choices": [
+                {
+                    "message": {"role": "assistant", "content": content},
+                    "finish_reason": "stop",
+                    "token_ids": tokens,
+                    "logprobs": {"content": [{"logprob": -0.5} for _ in tokens]},
+                }
+            ]
+        }
+
+    engine.chat_completion.side_effect = respond
+    result = await DirectModelClient(engine).generate(
+        {
+            "prompts": [[{"role": "user", "content": "What is ten plus ten?"}]],
+            "chat_completion_params": [{}],
+            "sampling_params": {"include_stop_str_in_output": True, "logprobs": 0},
+        }
+    )
+    assert result["responses"] == ["20"]
+    assert result["assistant_messages"] == [{"role": "assistant", "content": "20"}]
+    assert result["response_ids"] == [tokens]
+    assert result["response_logprobs"] == [[-0.5] * len(tokens)]
+
+
+@pytest.mark.asyncio
 async def test_direct_chat_client_preserves_server_error_identity_without_message():
     engine = AsyncMock()
     engine.model_name = "snowball"
@@ -167,6 +204,7 @@ async def test_direct_model_client_uses_vllm_chat_rendering_for_row_request_opti
         "parallel_tool_calls": False,
         "max_completion_tokens": 128,
         "return_token_ids": True,
+        "include_stop_str_in_output": False,
         "logprobs": True,
     }
     assert output["prompt_ids"] == [[11, 12, 13]]

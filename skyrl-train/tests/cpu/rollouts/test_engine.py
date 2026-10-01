@@ -189,6 +189,7 @@ async def test_task_grade_and_exact_tokens_reach_the_leased_buffer(task_inputs, 
     else:
         assert batch["rollout_logprobs"] is None
     assert batch["unshaped_rewards"] == [1.0]
+    assert batch["rollout_metrics"]["generate/failed_trajectory_fraction"] == 0.0
     assert batch["teacher_route_keys"] == ["arithmetic"]
     assert batch["data_sources"] == ["arithmetic"]
     assert batch["trajectory_ids"] == [TrajectoryID("arithmetic", 0)]
@@ -198,6 +199,7 @@ async def test_task_grade_and_exact_tokens_reach_the_leased_buffer(task_inputs, 
         "generate/task_rollout/tasks": 1.0,
         "generate/task_rollout/turns": 1.0,
         "generate/task_rollout/multi_turn_tasks": 0.0,
+        "generate/task_rollout/tool_tasks": 0.0,
         "generate/task_rollout/generated_tokens": 2.0,
         "generate/task_rollout/missing_logprob_tokens": 0.0 if with_logprobs else 2.0,
     }
@@ -1379,6 +1381,7 @@ async def test_harbor_source_materialization_runs_without_the_original_directory
     await worker.run_task(RolloutTask(RolloutLease("lease", 0, 1), {"uid": uid}, request), writer)
     batch = writer.groups[0][1].trajectory_batch
     assert batch["unshaped_rewards"] == [0.75]
+    assert batch["rollout_metrics"]["generate/task_rollout/tool_tasks"] == 1.0
     assert batch["response_ids"] == [[3, 4, 90, 91, 5, 6]]
     assert batch["loss_masks"] == [[1, 1, 0, 0, 1, 1]]
     np.testing.assert_allclose(batch["rollout_logprobs"], [[-0.1, -0.2, 0, 0, -0.1, -0.2]])
@@ -1557,6 +1560,9 @@ async def test_genrm_final_grades_and_credit_reach_training_batch(
     if failed_peer:
         failed_indices = [index for index, rollout in enumerate(rollouts) if rollout.failure is not None]
         assert len(failed_indices) == 1
+        assert batch["rollout_metrics"]["generate/failed_trajectory_fraction"] == pytest.approx(
+            1.0 if failed_judge else 1 / count
+        )
         failed_index = failed_indices[0]
         assert batch["exception_types"][failed_index] == "ModelServerError"
         assert batch["verification_results"][failed_index].score is None

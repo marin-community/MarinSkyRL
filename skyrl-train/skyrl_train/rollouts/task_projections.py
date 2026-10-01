@@ -17,6 +17,7 @@ from skyrl_train.trajectory_runners.projections import (
     logprobs_requested,
 )
 from skyrl_train.trajectory_runners.selected_topk import align_student_topk
+from skyrl_train.trajectory_runners.trajectory_processing import get_batch_failure_metrics
 from skyrl_train.trajectory_runners.types import AgentLoopOutput, TrajectoryBatch, TrajectoryRequestBatch
 from skyrl_train.utils.harbor_errors import (
     DEFAULT_ERROR_HANDLING_CONFIG,
@@ -250,10 +251,26 @@ def merge_task_metrics(
 ) -> None:
     """Count task evidence and preserve environment-specific metrics."""
     metrics = batch.get("rollout_metrics") or {}
+    failed = [
+        rollout
+        for rollout in rollouts
+        if rollout.failure is not None or rollout.grade.status not in {Outcome.GRADED, Outcome.SKIPPED}
+    ]
+    excluded = batch["exclude_from_baseline"]
+    final_steps = batch.get("is_last_step") or [True] * len(excluded)
+    metrics.update(
+        get_batch_failure_metrics(
+            num_trials=len(rollouts),
+            num_failed_trajectories=len(failed),
+            num_failed_instances=len({rollout.task_id for rollout in failed}),
+            num_masked_trajectories=sum(masked and last for masked, last in zip(excluded, final_steps, strict=True)),
+        )
+    )
     counters = {
         "tasks": len(rollouts),
         "turns": sum(len(rollout.steps) for rollout in rollouts),
         "multi_turn_tasks": sum(len(rollout.steps) > 1 for rollout in rollouts),
+        "tool_tasks": sum(any(step.turn.message.get("tool_calls") for step in rollout.steps) for rollout in rollouts),
         "generated_tokens": sum(sum(rollout.loss_mask) for rollout in rollouts),
         "missing_logprob_tokens": sum(sum(rollout.loss_mask) for rollout in rollouts if rollout.logprobs is None),
     }
