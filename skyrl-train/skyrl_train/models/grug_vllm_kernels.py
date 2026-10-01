@@ -20,7 +20,6 @@ position (one row). ``vllm_token_logprobs`` is model runner V2's log-probability
 
 from __future__ import annotations
 
-import functools
 import math
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -44,8 +43,6 @@ VLLM_MAX_CUDA_GRAPH_TOKENS = 512
 H100_SMS = 132
 # ``vllm_experts`` addresses each expert's weights in units of this many elements from the lowest-addressed one.
 EXPERT_OFFSET_ELEMENTS = 16
-# vLLM's paged KV-cache block for Grug's FA3 layers, in tokens.
-KV_CACHE_BLOCK = 16
 # The probe engines' ``max_num_batched_tokens``: the rows of a full vLLM prefill step.
 VLLM_MAX_BATCHED_TOKENS = 8192
 # Model runner V2 computes prompt log-probabilities from LM-head calls of this many rows
@@ -227,57 +224,86 @@ def window_row_requests(query_start: torch.Tensor, key_lengths: torch.Tensor, wi
     )
 
 
-@functools.lru_cache(maxsize=64)
-def _window_row_split(rows: int, requests: int, window: int, device: torch.device) -> WindowRowRequests:
-    """``window_row_requests`` for ``requests`` sequences of ``rows`` rows, built on the host and moved to ``device``
-    once, so a forward never waits for the device to count the requests."""
-    split = window_row_requests(
-        torch.arange(0, (requests + 1) * rows, rows, dtype=torch.int32),
-        torch.full((requests,), rows, dtype=torch.int32),
-        window,
-    )
-    return WindowRowRequests(*(tensor.to(device) for tensor in (split.query_start, split.key_lengths, split.owner)))
-
-
 def _fa3_window_rows_forward(query, key, value, *, rows: int, requests: int, window: int, scale: float):
-    """Sliding-window FA3 over ``requests`` sequences of ``rows`` rows with every row past the window a one-row request.
+    """Sliding-window FA3 over ``requests`` sequences of ``rows`` rows, each row past the window computed as a
+    decode-invariant engine computes it: alone, its 128-key blocks starting at its own window start.
 
-    The keys and values sit in vLLM's paged layout (``KV_CACHE_BLOCK``-token blocks, one block table row per request) so
-    that overlapping key ranges can be addressed; FA3's paged path is the one vLLM's engine runs.
+    The rows before the window read every key from position 0 and run as one local request per sequence. Each later row
+    runs as a one-row request of FA3's causal kernel over exactly its window of keys: ``cu_seqlens_k`` holds the window
+    starts and ``seqused_k`` the window, so the causal kernel walks the same blocks from the same first key as the
+    local kernel's one-row request that a decode step runs, on 64-row tiles where the local kernel runs 128 (FA3 picks
+    one MMA warpgroup for few query rows only off sliding-window layers). ``max_seqlen_q`` is 2: at 1, FA3 runs these
+    requests non-causal, whose 176-key blocks group the keys otherwise. The bytes equal the one-row local requests' on
+    every row (harness ``fa3_window_check``). vLLM's Python wrapper accepts ``cu_seqlens_k`` or ``seqused_k``, not both,
+    so the causal requests call the FA3 op with the wrapper's arguments.
     """
     from vllm.vllm_flash_attn import flash_attn_varlen_func
 
-    blocks = -(-rows // KV_CACHE_BLOCK)
-    padding = blocks * KV_CACHE_BLOCK - rows
-    kv_heads, head_dim = key.shape[1:]
-
-    def paged(tensor: torch.Tensor) -> torch.Tensor:
-        sequences = tensor.view(requests, rows, kv_heads, head_dim)
-        if padding:
-            sequences = torch.nn.functional.pad(sequences, (0, 0, 0, 0, 0, padding))
-        return sequences.reshape(requests * blocks, KV_CACHE_BLOCK, kv_heads, head_dim).contiguous()
-
     device = query.device
-    split = _window_row_split(rows, requests, window, device)
-    block_table = torch.arange(requests * blocks, dtype=torch.int32, device=device).view(requests, blocks)
-    # FA3's value only: the gradient is the trainer's own attention backward (``fa3_attention``).
-    with torch.no_grad():
-        key_cache, value_cache = paged(key), paged(value)
-    return flash_attn_varlen_func(
-        q=query,
-        k=key_cache,
-        v=value_cache,
-        max_seqlen_q=min(rows, window),
-        cu_seqlens_q=split.query_start,
-        max_seqlen_k=rows,
-        seqused_k=split.key_lengths,
-        block_table=block_table[split.owner],
-        softmax_scale=scale,
-        causal=True,
-        window_size=[window - 1, 0],
-        fa_version=3,
-        num_splits=1,
-    )
+    output = torch.empty_like(query)
+    heads_out = torch.arange(0, 2 * window, window, dtype=torch.int32, device=device)
+    later = rows - window
+    later_queries = torch.arange(later + 1, dtype=torch.int32, device=device)
+    seqused_k = torch.full((later,), window, dtype=torch.int32, device=device)
+    for index in range(requests):
+        first = index * rows
+        flash_attn_varlen_func(
+            q=query[first : first + window],
+            k=key[first : first + window],
+            v=value[first : first + window],
+            max_seqlen_q=window,
+            cu_seqlens_q=heads_out,
+            max_seqlen_k=window,
+            cu_seqlens_k=heads_out,
+            softmax_scale=scale,
+            causal=True,
+            window_size=[window - 1, 0],
+            fa_version=3,
+            num_splits=1,
+            out=output[first : first + window],
+        )
+        # Row p's keys are rows p - window + 1 .. p of the same sequence.
+        window_starts = torch.arange(first + 1, first + later + 2, dtype=torch.int32, device=device)
+        torch.ops._vllm_fa3_C.fwd(
+            query[first + window : first + rows],
+            key,
+            value,
+            None,  # k_new
+            None,  # v_new
+            None,  # q_v
+            output[first + window : first + rows],
+            later_queries,  # cu_seqlens_q: one row per request
+            window_starts,  # cu_seqlens_k: each request's first key
+            None,  # cu_seqlens_k_new
+            None,  # seqused_q
+            seqused_k,
+            2,  # max_seqlen_q
+            window,  # max_seqlen_k
+            None,  # page_table
+            None,  # kv_batch_idx
+            None,  # leftpad_k
+            None,  # rotary_cos
+            None,  # rotary_sin
+            None,  # seqlens_rotary
+            None,  # q_descale
+            None,  # k_descale
+            None,  # v_descale
+            scale,
+            True,  # is_causal
+            -1,  # window_size_left
+            -1,  # window_size_right
+            0.0,  # softcap
+            True,  # is_rotary_interleaved
+            None,  # scheduler_metadata
+            1,  # num_splits
+            None,  # pack_gqa
+            0,  # sm_margin
+            None,  # s_aux
+            1,  # cp_world_size
+            0,  # cp_rank
+            None,  # cp_tot_seqused_k
+        )
+    return output
 
 
 def fa3_attention_sbhd(
