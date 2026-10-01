@@ -866,7 +866,10 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         if verification.status is VerificationStatus.SKIPPED:
             disposition = TrainingDisposition.train(reason="verification skipped")
         elif verification.status is not VerificationStatus.VERIFIED:
-            disposition = TrainingDisposition.mask("verifier unavailable", exception_type="VerifierUnavailable")
+            exception_type = (
+                "VerifierRuntimeError" if verification.status is VerificationStatus.ERROR else "VerifierUnavailable"
+            )
+            disposition = TrainingDisposition.mask("verifier unavailable", exception_type=exception_type)
             optimization_reward = 0.0
             if token_rewards is not None:
                 token_rewards = tuple(0.0 for _ in token_rewards)

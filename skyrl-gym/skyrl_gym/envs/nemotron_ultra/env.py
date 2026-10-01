@@ -207,7 +207,9 @@ class NemotronUltraEnv(BaseTextEnv):
         except (requests.RequestException, RuntimeError, ValueError) as error:
             details = {
                 "agent": self.agent,
-                "error_type": type(error).__name__,
+                "error_type": "VerifierRuntimeError",
+                "error_category": "infrastructure",
+                "cause_error_type": type(error).__name__,
                 "error_message": str(error),
                 "grading_action": action,
             }
