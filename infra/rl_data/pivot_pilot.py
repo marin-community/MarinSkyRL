@@ -77,11 +77,16 @@ def prepare(prepared: Path, output: Path) -> dict:
     return manifest
 
 
-def freeze(split: Path, rescored: list[Path], output: Path, student: str) -> dict:
+def freeze(
+    split: Path, rescored: list[Path], output: Path, student: str, exclusions: dict[str, str] | None = None
+) -> dict:
     """Freeze tool-name selection only after complete, terminal K=8 coverage."""
     table = pq.read_table(split / "candidates.parquet")
     rows = table.to_pylist()
     candidates = {row_identity(row)[0] for row in rows}
+    exclusions = exclusions or {}
+    if exclusions.keys() - candidates or any(not reason for reason in exclusions.values()):
+        raise ValueError("Exclusions must identify training candidates and state their reasons")
     groups = defaultdict(dict)
     record_ids = set()
     for path in rescored:
@@ -111,7 +116,7 @@ def freeze(split: Path, rescored: list[Path], output: Path, student: str) -> dic
             if any(r["status"] != "infrastructure_error" for _, r in history[:-1]):
                 raise ValueError("A successful or excluded profiling attempt was resampled")
             terminal.append(history[-1][1])
-        usable = all(record["status"] == "verified" for record in terminal)
+        usable = all(record["status"] == "verified" for record in terminal) and source_id not in exclusions
         passed = None
         if usable:
             scores = [record["scores"]["tool_name"] for record in terminal]
@@ -126,7 +131,9 @@ def freeze(split: Path, rescored: list[Path], output: Path, student: str) -> dic
                 signal_groups[verifier].append(values)
             if 1 <= passed <= 3:
                 selected.append(row)
-        statistics.append(dict(source_id=source_id, task=task, usable=usable, successes=passed))
+        statistics.append(
+            dict(source_id=source_id, task=task, usable=usable, successes=passed, exclusion=exclusions.get(source_id))
+        )
     if not selected:
         raise ValueError("No pivots selected")
     control = random.Random(SEED).sample(sorted(eligible, key=lambda row: row_identity(row)[0]), len(selected))
@@ -153,6 +160,7 @@ def freeze(split: Path, rescored: list[Path], output: Path, student: str) -> dic
         profiles=[dict(path=str(path), sha256=file_sha256(path)) for path in rescored],
         counts={name: len(group) for name, group in datasets.items()},
         excluded=len(rows) - len(eligible),
+        explicit_exclusions=exclusions,
         signal_availability=group_signal,
         identity_hashes={name: identity_hash(group) for name, group in datasets.items()},
         artifacts={name: {"sha256": file_sha256(output / f"{name}.parquet")} for name in datasets},
@@ -275,6 +283,7 @@ def main():
     frozen.add_argument("--rescored", type=Path, nargs="+", required=True)
     frozen.add_argument("--output", type=Path, required=True)
     frozen.add_argument("--student", choices=STUDENTS, required=True)
+    frozen.add_argument("--exclusions", type=Path, help="JSON source-ID to reason mapping for unusable rows")
     recipes = commands.add_parser("recipes")
     recipes.add_argument("--frozen", type=Path, required=True)
     recipes.add_argument("--split", type=Path, required=True)
@@ -293,7 +302,8 @@ def main():
     if args.command == "prepare":
         result = prepare(args.prepared, args.output)
     elif args.command == "freeze":
-        result = freeze(args.split, args.rescored, args.output, args.student)
+        exclusions = json.loads(args.exclusions.read_text()) if args.exclusions else None
+        result = freeze(args.split, args.rescored, args.output, args.student, exclusions)
     elif args.command == "recipes":
         paths = write_pilot_recipes(
             args.frozen,

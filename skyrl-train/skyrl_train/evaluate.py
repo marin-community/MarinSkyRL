@@ -249,11 +249,11 @@ async def evaluate(
             "split": pilot.split_hash,
             "quick": pilot.quick_hash,
             "sampling": dict(cfg.generator.eval_sampling_params),
-            "verifiers": (
+            "verifiers": [
                 "tool_name:expected_tool_name_match:v1",
                 "nemo:word_count_threshold=0:v1",
                 "exact:strict_recursive_arguments:v1",
-            ),
+            ],
         }
     )
     if cache and global_step in (None, 0) and io.exists(cache):
