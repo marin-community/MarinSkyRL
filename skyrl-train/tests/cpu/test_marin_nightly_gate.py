@@ -341,7 +341,7 @@ def test_cat_count_series_requires_finite_learning_and_enough_evidence(tmp_path,
         assert failures == []
 
 
-@pytest.mark.parametrize("lane", ["async", "sync"])
+@pytest.mark.parametrize("lane", ["async", "sync", "async-filter"])
 @pytest.mark.parametrize("mutation", ["healthy", "flat_eval", "missing_step_zero", "missing_initial_metric"])
 def test_cat_count_shipped_specs_require_learning_from_step_zero(lane, mutation):
     path = SHIPPED_SPEC.parent / f"cat-count-canary-qwen2.5-0.5b-{lane}.json"
@@ -360,6 +360,9 @@ def test_cat_count_shipped_specs_require_learning_from_step_zero(lane, mutation)
         "environment/exact_n20": 0.25,
         "policy/rollout_train_prob_diff_mean": 1.003,
     }
+    if lane == "async-filter":
+        metrics["reward/zero_std_group_fraction"] = 0.0
+        metrics["async/dynamic_sampling/discarded_rate"] = 0.25
     steps = [StepMetrics("train", step, metrics) for step in range(1, max(10, spec.min_train_steps) + 1)]
     evaluations = [
         StepMetrics("eval", step, {"eval/train/avg_score": score}) for step, score in ((0, 0.55), (5, 0.30), (10, 0.80))
