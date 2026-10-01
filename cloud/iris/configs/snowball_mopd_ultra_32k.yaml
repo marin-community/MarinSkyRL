@@ -1,6 +1,8 @@
 # Snowball 67B-A2B three-teacher on-policy distillation at a 32K window on a blend-proportional
 # sample of NVIDIA's Nemotron Ultra MOPD blend. Nine H100 nodes: four PP2 x EP8 learner
 # nodes, two EP8 rollout nodes, and one pinned EP8 teacher node per Snowball expert.
+# Request 768 GB of host memory per node: at 512 GB, the eight learner processes per node
+# (about 60 GB each while saving) ran the node out of memory during checkpoint saves.
 #
 # The sample (infra/rl_data/nemotron_ultra_mopd_subset.py --rows) routes every generator of the
 # blend, so rows keep their teacher_route column and the stock shuffle preserves the blend's mix.
