@@ -15,6 +15,11 @@ runtime dependencies pin each published wheel by URL and SHA-256.
 `build_native.sh` is a manual release tool. CI and runtime installation do not
 invoke it; they consume the published, hash-pinned wheels.
 
+Its Transformer Engine source pin reproduces the superseded 2.11 x86_64 wheel.
+The adopted 2.19 x86_64 and aarch64 wheels have separate provenance in their
+[release record](https://github.com/marin-community/MarinSkyRL/releases/tag/fa4-te219-cu132-20260920-694f3adf),
+with adoption URLs and hashes in `uv.lock`.
+
 Every source is fetched by exact commit. The pinned 2.8.3 FlashAttention wheel
 was built with an unused package excluded; its
 [release record](https://github.com/marin-community/MarinSkyRL/releases/tag/native-cu132-fa283-20260920)
