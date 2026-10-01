@@ -366,12 +366,14 @@ class ProbeCollector:
         if trainer.eval_dataset is None:
             raise ValueError("mismatch probe requires the run's validation dataset")
         count = int(self.spec.prompts.count)
+        offset = int(self.spec.prompts.get("offset", 0))
         samples = int(self.spec.prompts.samples_per_prompt)
-        if len(trainer.eval_dataset) < count:
+        if len(trainer.eval_dataset) < offset + count:
             raise ValueError(
-                f"mismatch probe requested {count} validation prompts but only {len(trainer.eval_dataset)} exist"
+                f"mismatch probe requested validation prompts {offset}..{offset + count - 1} "
+                f"but only {len(trainer.eval_dataset)} exist"
             )
-        prompts = trainer.eval_dataset.collate_fn([trainer.eval_dataset[i] for i in range(count)])
+        prompts = trainer.eval_dataset.collate_fn([trainer.eval_dataset[i] for i in range(offset, offset + count)])
         batches = []
         seeds = []
         sample_ids = []

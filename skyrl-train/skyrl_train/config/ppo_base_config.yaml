@@ -359,7 +359,8 @@ trainer:
 
   mismatch_probe:
     enabled: false
-    prompts: {count: 128, samples_per_prompt: 4}
+    # offset: index of the first validation prompt scored, so a confirmation probe can use prompts disjoint from another's.
+    prompts: {count: 128, samples_per_prompt: 4, offset: 0}
     seed: null
     archive_uri: null
     reuse_probe: null

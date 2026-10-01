@@ -60,6 +60,9 @@ def validate_mismatch_probe_config(
         value = prompts.get(field)
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ValueError(f"trainer.mismatch_probe.prompts.{field} must be a positive integer")
+    offset = prompts.get("offset", 0)
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        raise ValueError("trainer.mismatch_probe.prompts.offset must be a non-negative integer")
     if prompts["count"] * prompts["samples_per_prompt"] < 2:
         raise ValueError("trainer.mismatch_probe requires at least two samples to change repeat packing")
     seed = probe.get("seed")
