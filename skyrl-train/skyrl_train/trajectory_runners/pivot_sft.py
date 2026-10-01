@@ -4,6 +4,7 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
+from skyrl_gym.verification import VerificationResult
 from skyrl_train.trajectory_runners.base import TrajectoryRunner, propagate_data_sources
 from skyrl_train.trajectory_runners.types import TrajectoryBatch, TrajectoryRequestBatch
 
@@ -84,6 +85,12 @@ class PivotSFTRunner(TrajectoryRunner):
             rewards=[0.0] * len(actions),
             loss_masks=[[1] * len(action) for action in actions],
             rollout_logprobs=None,
+            verification_results=[
+                VerificationResult.skipped(
+                    "teacher-forced demonstration", diagnostics={"record_kind": "teacher_forced"}
+                )
+                for _ in actions
+            ],
             stop_reasons=["stop"] * len(actions),
             rollout_metrics={"sft/examples": len(actions), "sft/target_tokens": sum(map(len, actions))},
         )

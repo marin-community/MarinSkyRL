@@ -662,6 +662,8 @@ _OPTIONAL_HYDRA_PATTERNS = {
     ".rope_scaling",
     ".wrap_policy",
     ".transformer_config_kwargs",
+    ".environment.skyrl_gym.nemotron_ultra.pivot_reward",
+    ".environment.skyrl_gym.nemotron_ultra.pivot_arm",
 }
 
 

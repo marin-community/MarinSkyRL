@@ -111,6 +111,7 @@ from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_lo
 from skyrl_train.evaluate import evaluate, evaluate_step_wise
 from skyrl_train.callbacks.base import TrainerCallback, TrainerState, TrainerControl, CallbackHandler
 from skyrl_train.callbacks.builtin import DefaultCallbackHandler, RefModelUpdateCallback
+from marinskyrl.pivot_pilot import diagnostic_metrics
 from skyrl_train.training_tokens import TrainingTokens, loss_token_budget
 from skyrl_train.telemetry import (
     TRAINER_ROLE,
@@ -1624,6 +1625,7 @@ class RayPPOTrainer:
             )
             assert trajectory_batch["rollout_metrics"] is not None, "Rollout metrics should be non-null."
             self.all_metrics.update(trajectory_batch["rollout_metrics"])
+            self.all_metrics.update(diagnostic_metrics(trajectory_batch, prefix="train/pivot"))
             self.all_metrics.update(
                 {
                     "async/staleness_mean": sum(stalenesses) / len(stalenesses),

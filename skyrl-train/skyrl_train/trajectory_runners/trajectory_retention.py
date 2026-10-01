@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 import asyncio
@@ -20,6 +22,7 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from transformers import PreTrainedTokenizerBase
 
 from marinskyrl.resource_locator import join_resource_path
+from marinskyrl.pivot_grades import archive_grade_table, grade_table_path, validate_archive_grade_table
 from marinskyrl.pivot_history import profile_record_summary
 from skyrl_train.trajectory_runners.types import (
     TrajectoryRequestBatch,
@@ -58,6 +61,7 @@ _SELECTION_FRACTION = "fraction"
 _SELECTION_MANDATORY = "mandatory"
 _ARCHIVE_DIRECTORY = "archives"
 _ARCHIVE_MANIFEST = "manifest.json"
+_PUBLICATION_LEDGERS: dict[str, _RetentionLedger] = {}
 
 
 @dataclass(frozen=True)
@@ -395,7 +399,7 @@ def build_trajectory_records(
     if verifier_tests is not None and len(verifier_tests) != len(output["response_ids"]):
         raise ValueError("verifier tests must have one entry per trajectory row")
     # A request's step names the policy version being trained, which has completed one fewer update.
-    model_version_step = max(0, metadata.global_step - 1)
+    model_version_step = max(0, metadata.global_step - int(metadata.training_phase == "train"))
 
     records = []
     for group in _group_rows(input_batch, output):
@@ -496,6 +500,17 @@ def _copy_ledger(ledger: _RetentionLedger) -> _RetentionLedger:
         step_bytes=dict(ledger.step_bytes),
         records=dict(ledger.records),
         archives=dict(ledger.archives),
+    )
+
+
+def _uses_append_only_ledger(config: TrajectoryRetentionConfig) -> bool:
+    """Whether every selected record is retained and can only add to the ledger."""
+    return (
+        config.sample_count_per_step == 0
+        and config.sample_fraction == 1.0
+        and config.max_bytes_per_step is None
+        and config.max_bytes_per_run is None
+        and not config.grade_table
     )
 
 
@@ -702,7 +717,51 @@ def _reconciled_ledger(writer: TrajectoryWriter, config: TrajectoryRetentionConf
 def _initialize_publication(request: PublicationRequest) -> _RetentionLedger:
     writer = _FilesystemTrajectoryWriter(request.output_path)
     config = parse_trajectory_retention_config(request.retention_config)
-    return _reconciled_ledger(writer, config)
+    ledger = _reconciled_ledger(writer, config)
+    if config.grade_table:
+        for path in ledger.archives:
+            raw = writer.read_bytes(path)
+            table_path = grade_table_path(path)
+            if not writer.exists(table_path):
+                writer.write_bytes(
+                    table_path,
+                    archive_grade_table(raw, join_resource_path(request.output_path, path)),
+                )
+            validate_archive_grade_table(raw, writer.read_bytes(table_path))
+    return ledger
+
+
+def _publish_incremental_archives(request: PublicationRequest) -> _RetentionLedger:
+    """Publish append-only archives without rewriting the growing index.
+
+    Profiling stores every response with no byte or count cap. Its archives are immutable and
+    contain the complete retention metadata, so rewriting the complete ledger for every small
+    archive would make publication quadratic in the number of responses.
+    """
+    if request.archives is None:
+        raise ValueError("incremental trajectory publication has no archives")
+    writer = _FilesystemTrajectoryWriter(request.output_path)
+    ledger = _PUBLICATION_LEDGERS.get(request.output_path)
+    if ledger is None:
+        ledger = _initialize_publication(request)
+        _PUBLICATION_LEDGERS[request.output_path] = ledger
+
+    for path, payload in request.archives.items():
+        if not writer.exists(path):
+            writer.write_bytes(path, payload)
+        if path not in ledger.archives:
+            _add_archive_to_ledger(ledger, path, payload)
+
+    return ledger
+
+
+def _checkpoint_publication(request: PublicationRequest) -> _RetentionLedger:
+    ledger = _PUBLICATION_LEDGERS.get(request.output_path)
+    if ledger is None:
+        ledger = _initialize_publication(request)
+        _PUBLICATION_LEDGERS[request.output_path] = ledger
+    _FilesystemTrajectoryWriter(request.output_path).write_json(_LEDGER_NAME, to_jsonable(ledger))
+    return ledger
 
 
 def _publish_archives(request: PublicationRequest) -> _RetentionLedger:
@@ -712,6 +771,13 @@ def _publish_archives(request: PublicationRequest) -> _RetentionLedger:
     for path, payload in request.archives.items():
         if not writer.exists(path):
             writer.write_bytes(path, payload)
+        if request.retention_config.get("grade_table", False):
+            table_path = grade_table_path(path)
+            if not writer.exists(table_path):
+                writer.write_bytes(
+                    table_path, archive_grade_table(payload, join_resource_path(request.output_path, path))
+                )
+            validate_archive_grade_table(payload, writer.read_bytes(table_path))
     ledger = _RetentionLedger.from_json(request.ledger)
     writer.write_json(_LEDGER_NAME, to_jsonable(ledger))
     return ledger
@@ -721,14 +787,20 @@ def _publication_worker(request: PublicationRequest) -> PublicationResult:
     try:
         if request.operation is PublicationOperation.INITIALIZE:
             ledger = _initialize_publication(request)
+            _PUBLICATION_LEDGERS[request.output_path] = ledger
         elif request.operation is PublicationOperation.PUBLISH:
-            ledger = _publish_archives(request)
+            if request.incremental_ledger:
+                ledger = _publish_incremental_archives(request)
+            else:
+                ledger = _publish_archives(request)
+        elif request.operation is PublicationOperation.CHECKPOINT:
+            ledger = _checkpoint_publication(request)
         else:
             raise ValueError(f"unknown trajectory publication operation: {request.operation}")
         return PublicationResult(
             request_id=request.request_id,
             record_count=request.record_count,
-            ledger=to_jsonable(ledger),
+            ledger=None if request.incremental_ledger else to_jsonable(ledger),
         )
     except BaseException as error:
         return PublicationResult(
@@ -793,6 +865,7 @@ class TrajectorySink:
         self._pending_operation: PublicationOperation | None = None
         self._pending_archive_paths: tuple[str, ...] = ()
         self._pending_archive_bytes = 0
+        self._incremental_ledger = _uses_append_only_ledger(config)
         if config.enabled:
             result = self.publisher.execute(self._initialization_request())
             if result.error is None:
@@ -828,6 +901,31 @@ class TrajectorySink:
     def close(self) -> None:
         """Finish or cancel the pending publication within the shutdown deadline, then publish queued records."""
         with self._lock:
+            if self._incremental_ledger and self.config.required:
+                if self._queued:
+                    try:
+                        result = self.publisher.execute(self._queued_publication())
+                        if result.error is not None:
+                            logger.error(
+                                "Trajectory retention publication did not finish during shutdown: {}", result.error
+                            )
+                    except Exception as error:
+                        logger.error("Trajectory retention publication failed during shutdown: {}", error)
+                request = PublicationRequest(
+                    request_id="checkpoint",
+                    operation=PublicationOperation.CHECKPOINT,
+                    output_path=self.config.output_path,
+                    retention_config=to_jsonable(self.config),
+                    incremental_ledger=True,
+                )
+                try:
+                    result = self.publisher.execute(request)
+                    if result.error is not None:
+                        logger.error("Trajectory retention ledger checkpoint failed during shutdown: {}", result.error)
+                finally:
+                    self.publisher.close()
+                return
+
             result = self.publisher.close()
             if result is not None:
                 self._finish_publication(result, _empty_metrics())
@@ -918,18 +1016,20 @@ class TrajectorySink:
             operation=PublicationOperation.PUBLISH,
             output_path=self.config.output_path,
             archives=archives,
-            ledger=to_jsonable(self._ledger),
+            ledger=None if self._incremental_ledger else to_jsonable(self._ledger),
             retention_config=to_jsonable(self.config),
             record_count=record_count,
+            incremental_ledger=self._incremental_ledger,
         )
 
     def _queue_selected(self, records: Sequence[TrajectoryRecord], metrics: dict[str, float]) -> None:
         """Queue the payload-bounded priority prefix of the records that qualify for retention."""
         assert self._ledger is not None
-        selection_ledger = _copy_ledger(self._ledger)
+        selection_ledger = self._ledger if self._incremental_ledger else _copy_ledger(self._ledger)
+        seen_record_ids = set()
         selected = []
         for record in sorted(records, key=self._sample_score):
-            if record.record_id in selection_ledger.records:
+            if record.record_id in selection_ledger.records or record.record_id in seen_record_ids:
                 metrics[f"{RETENTION_METRIC_PREFIX}/duplicates"] += 1.0
                 continue
             selection = self._selection(record, selection_ledger)
@@ -938,7 +1038,9 @@ class TrajectorySink:
             metrics[f"{RETENTION_METRIC_PREFIX}/selected"] += 1.0
             payload = self._encode_record(record)
             selected_record = _SelectedRecord(record=record, payload=payload, selection=selection)
-            self._add_selected_record(selection_ledger, selected_record)
+            if not self._incremental_ledger:
+                self._add_selected_record(selection_ledger, selected_record)
+            seen_record_ids.add(record.record_id)
             selected.append(selected_record)
 
         if not selected:
@@ -1054,7 +1156,9 @@ class TrajectorySink:
             reasons.append(_SELECTION_FRACTION)
 
         displaced_id = None
-        count_samples = self._count_samples(ledger, self._step_key(record))
+        count_samples = (
+            self._count_samples(ledger, self._step_key(record)) if self.config.sample_count_per_step > 0 else []
+        )
         if self.config.sample_count_per_step > 0:
             if len(count_samples) < self.config.sample_count_per_step:
                 reasons.append(_SELECTION_COUNT)

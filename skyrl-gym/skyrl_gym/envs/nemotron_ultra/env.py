@@ -32,7 +32,7 @@ from skyrl_gym.envs.nemotron_ultra.rdkit_chemistry import grade_rdkit_chemistry
 from skyrl_gym.envs.nemotron_ultra.sandbox import SandboxClient
 from skyrl_gym.envs.nemotron_ultra.structured_outputs import grade_structured_output
 from skyrl_gym.envs.nemotron_ultra.terminal import grade_terminal
-from skyrl_gym.envs.nemotron_ultra.tool_call import grade_expected_action
+from skyrl_gym.envs.nemotron_ultra.tool_call import grade_expected_action, grade_pivot_verifiers, PIVOT_VERIFIERS
 from skyrl_gym.verification import RolloutEvidence, VerificationResult
 
 _NS_TOOLS_AGENT = "ns_tools_simple_agent"
@@ -90,6 +90,10 @@ class NemotronUltraEnv(BaseTextEnv):
         if ultra.get("route") != "skyrl_gym":
             raise ValueError("terminal-bench Nemotron Ultra rows must not execute in the SkyRL Gym environment")
         self.agent = str(ultra["agent"])
+        self.pivot_reward = env_config.get("pivot_reward")
+        self.pivot_arm = env_config.get("pivot_arm")
+        if self.pivot_reward is not None and self.pivot_reward not in PIVOT_VERIFIERS:
+            raise ValueError(f"Unknown pivot reward: {self.pivot_reward}")
         self.record = self._decode_mapping(ultra.get("record_json"), "record_json")
         self.request = self._decode_mapping(ultra.get("request_json"), "request_json")
         self.evidence: RolloutEvidence | None = None
@@ -235,11 +239,19 @@ class NemotronUltraEnv(BaseTextEnv):
             reward, details = grade_terminal(action, self.record)
             diagnostics.update(details)
         elif self.agent in _TOOL_COMPARISON_AGENTS:
-            reward, category = grade_expected_action(
-                self.record["expected_action"],
-                self._assistant_message(action),
-            )
-            diagnostics["category"] = category.value
+            if self.pivot_reward is not None:
+                grades = grade_pivot_verifiers(self.record["expected_action"], self._assistant_message(action))
+                diagnostics["pivot"] = {
+                    **grades,
+                    "training_reward": self.pivot_reward if self.pivot_arm.startswith("rl_") else None,
+                    "training_arm": self.pivot_arm,
+                }
+                reward = grades["scores"][self.pivot_reward]
+            else:
+                reward, category = grade_expected_action(
+                    self.record["expected_action"], self._assistant_message(action)
+                )
+                diagnostics["category"] = category.value
         elif self.agent == "calendar_simple_agent":
             reward, reason = grade_calendar(action, self.record["exp_cal_state"])
             diagnostics["reason"] = reason

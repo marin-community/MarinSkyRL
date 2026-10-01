@@ -306,6 +306,22 @@ trainer:
   # Optional OPD stage boundary. Stops after the first optimizer batch whose
   # cumulative teacher-scored tokens reach the budget.
   distillation_token_budget: null
+  pivot_pilot:
+    arm: null
+    quick_source_ids: []
+    split_hash: null
+    quick_hash: null
+    baseline_cache: null
+    archive_root: null
+    grade_table_root: null
+    train_data_sha256: null
+    validation_data_sha256: null
+    quick_data_sha256: null
+    selected_data_uri: null
+    selected_data_sha256: null
+    verifier_tool_name_id: null
+    verifier_nemo_id: null
+    verifier_exact_id: null
   loss_token_budget: null
   eval_loss_token_interval: null
   reset_distillation_token_count_on_resume: false
@@ -529,6 +545,7 @@ generator:
     # Set either bound to null to make that dimension unlimited.
     max_bytes_per_step: 838860800
     max_bytes_per_run: 26843545600
+    grade_table: false
     required: false
     publish_timeout_seconds: 120
     shutdown_timeout_seconds: 30

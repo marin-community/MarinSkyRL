@@ -12,6 +12,7 @@ from typing import Any, Protocol
 class PublicationOperation(StrEnum):
     INITIALIZE = "initialize"
     PUBLISH = "publish"
+    CHECKPOINT = "checkpoint"
 
 
 @dataclass(frozen=True)
@@ -23,6 +24,7 @@ class PublicationRequest:
     ledger: Mapping[str, Any] | None = None
     retention_config: Mapping[str, Any] | None = None
     record_count: int = 0
+    incremental_ledger: bool = False
 
 
 @dataclass(frozen=True)
