@@ -38,6 +38,8 @@ expert-parallel addition order:
 - ``vllm_norms``: every RMS norm and gated-norm product takes its value from compiled vLLM's Inductor kernels,
   each input norm from the unrounded sum that formed its input (as ``input_norm_variance``) and the final norm
   from the unrounded last-layer sum (as ``final_norm_fp32``); the gradients are those flags' and ``gated_norm``'s;
+- ``vllm_swiglu``: the shared expert's activation ``silu(gate) * up`` takes its value from compiled vLLM's Inductor
+  kernel (its exponential and division); the gradient is ``shared_swiglu``'s. It replaces ``shared_swiglu``;
 - ``vllm_log_softmax``: the log-probabilities come from ``log_softmax(dtype=float32)`` of the bf16 logits, as
   vLLM computes prompt log-probabilities; the gradient is the trainer's own log-softmax's.
 
@@ -71,6 +73,7 @@ class GrugNumerics:
     vllm_xsa: bool = False
     vllm_qk: bool = False
     vllm_norms: bool = False
+    vllm_swiglu: bool = False
     vllm_log_softmax: bool = False
 
 

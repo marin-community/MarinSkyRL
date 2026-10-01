@@ -445,20 +445,32 @@ def _install_ep_combine_hooks(layer: TransformerLayer) -> None:
 
 
 def _install_shared_swiglu_hooks(shared: SharedExpertMLP) -> None:
-    """Recompute the shared expert's activation with one rounding when ``shared_swiglu`` is active."""
+    """Recompute the shared expert's activation with one rounding under ``shared_swiglu`` or ``vllm_swiglu``.
+
+    Under ``vllm_swiglu`` the value comes from compiled vLLM's activation kernel and the gradient from
+    ``shared_swiglu``'s computation.
+    """
     stored: dict[str, torch.Tensor] = {}
 
+    def recomputed() -> bool:
+        numerics = active_numerics()
+        return numerics.shared_swiglu or numerics.vllm_swiglu
+
     def keep_fc1_output(module, args, output):
-        if active_numerics().shared_swiglu:
+        if recomputed():
             stored["fc1"] = output[0] if isinstance(output, tuple) else output
 
     def replace_fc2_input(module, args):
-        if not active_numerics().shared_swiglu:
+        if not recomputed():
             return None
         fc1_output = stored.pop("fc1", None)
         if fc1_output is None:
-            raise RuntimeError("shared_swiglu requires the shared expert's fc1 output")
-        return (swiglu_single_rounding(fc1_output), *args[1:])
+            raise RuntimeError("shared_swiglu and vllm_swiglu require the shared expert's fc1 output")
+        if not active_numerics().vllm_swiglu:
+            return (swiglu_single_rounding(fc1_output), *args[1:])
+        gate, up = torch.chunk(fc1_output, 2, dim=-1)
+        value = vllm_inductor.shared_activation(gate, up).view(gate.shape)
+        return (vllm_value(value, lambda: swiglu_single_rounding(fc1_output)), *args[1:])
 
     shared.linear_fc1.register_forward_hook(keep_fc1_output)
     shared.linear_fc2.register_forward_pre_hook(replace_fc2_input)
