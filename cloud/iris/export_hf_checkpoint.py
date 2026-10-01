@@ -142,6 +142,8 @@ def checkpoint_export_launch_config(
     config.artifacts.attempts_root = export_attempt_root
     config.artifacts.resolved_config_uri = join_resource_path(export_attempt_root, "resolved.yaml")
     config.artifacts.terminal_manifest_uri = join_resource_path(export_attempt_root, "terminal.json")
+    config.ray.rendezvous_dir = join_resource_path(export_attempt_root, "rendezvous")
+    config.ray.log_dir = join_resource_path(export_attempt_root, "ray-logs")
 
     # Export is policy-only. Keep the role-plan inputs internally consistent so
     # launch validation derives exactly the saved policy gang, without reserving

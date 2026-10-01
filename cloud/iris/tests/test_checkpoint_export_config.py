@@ -18,6 +18,10 @@ def _training_config():
         {
             "run": {"id": "run", "attempt_id": "attempt", "mode": "train", "export_hf": True},
             "runtime": {"entrypoint": "skyrl_train.entrypoints.main_base", "profile": "megatron"},
+            "ray": {
+                "rendezvous_dir": "s3://run/attempts/rendezvous",
+                "log_dir": "s3://run/attempts/ray-logs",
+            },
             "iris": {
                 "job_name": "run",
                 "allocation": {"num_nodes": 2, "gpus_per_node": 8, "gpu_variant": "H100"},
@@ -94,6 +98,18 @@ def test_checkpoint_export_config_preserves_federated_routing() -> None:
 
     assert config.iris.target_cluster == "cw-rno2a"
     assert config.iris.parent_cluster_config == "/tmp/marin.yaml"
+
+
+def test_checkpoint_exports_do_not_share_training_ray_state() -> None:
+    training = _training_config()
+    request = _request()
+    first = checkpoint_export_launch_config(training, request, _spec(request))
+    next_request = replace(request, step=8, checkpoint_path="s3://run/checkpoints/global_step_8")
+    second = checkpoint_export_launch_config(training, next_request, _spec(next_request))
+
+    for field in ("rendezvous_dir", "log_dir"):
+        assert len({config.ray[field] for config in (training, first, second)}) == 3
+    assert training.ray == _training_config().ray
 
 
 def test_checkpoint_export_config_preserves_saved_policy_geometry_on_whole_nodes() -> None:

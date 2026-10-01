@@ -25,6 +25,10 @@ A successful synchronous launch submits and verifies the terminal export before
 returning. A detached `--no-wait` launch returns after submission, so its caller
 is responsible for terminal export handling.
 
+Checkpoint exports keep Ray rendezvous state and logs under
+`<attempts_root>/export-<step>/`. Exporting a saved checkpoint can therefore run
+alongside training without replacing its Ray head record.
+
 ## Request lifecycle
 
 The request is written only after the source checkpoint completes. It records
