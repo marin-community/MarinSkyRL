@@ -465,7 +465,7 @@ def aggregate_scores(
     tiebreak_count = 0
 
     # Process each comparison
-    for (score_1, score_2, ranking), (i, j, _judge_idx) in zip(comparison_results, comparison_metadata):
+    for (score_1, score_2, ranking), (i, j, _judge_idx) in zip(comparison_results, comparison_metadata, strict=True):
         all_individual_scores.extend([score_1, score_2])
 
         # Apply tiebreaker when scores are equal

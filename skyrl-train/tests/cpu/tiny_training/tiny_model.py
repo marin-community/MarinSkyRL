@@ -1,6 +1,8 @@
 """A tiny Qwen2 policy and GSM8K-format dataset for end-to-end CPU training runs.
 
-The model is a hand-shaped bigram policy. Zeroed attention and MLP output projections make each
+The tokenizer is byte-level with ChatML special tokens and a single ``####`` token, so the policy's vocabulary
+has a few hundred entries; a production-sized vocabulary makes the output projection dominate every CPU forward
+and backward pass. The model is a hand-shaped bigram policy. Zeroed attention and MLP output projections make each
 position's hidden state a function of its current token only, and the embedding and LM head encode
 a transition table over five answer tokens. The policy emits ``#### 1`` (the GSM8K reward format)
 with moderate probability, so GRPO groups have reward variance and RL can raise the success rate.
@@ -11,9 +13,17 @@ import json
 from pathlib import Path
 
 import torch
-from transformers import AutoTokenizer, Qwen2Config, Qwen2ForCausalLM
+from tokenizers import Tokenizer, decoders, models, pre_tokenizers
+from transformers import PreTrainedTokenizerFast, Qwen2Config, Qwen2ForCausalLM
 
-TOKENIZER_SOURCE = "Qwen/Qwen2.5-0.5B-Instruct"
+END_OF_TURN = "<|im_end|>"
+# ChatML, as Qwen's template renders conversations without tools or a default system prompt.
+CHAT_TEMPLATE = (
+    "{%- for message in messages %}"
+    "{{- '<|im_start|>' + message.role + '\\n' + message.content + '<|im_end|>\\n' }}"
+    "{%- endfor %}"
+    "{%- if add_generation_prompt %}{{- '<|im_start|>assistant\\n' }}{%- endif %}"
+)
 GROUND_TRUTH = "1"
 # Dataset bins for curriculum sampling, in grade order.
 CURRICULUM_BINS = ("g0-even", "g1-odd")
@@ -36,12 +46,12 @@ TRANSITIONS = (
 
 def build_tiny_policy(output_dir: Path) -> Path:
     """Write the tiny policy and its tokenizer as a Hugging Face model directory."""
-    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_SOURCE)
+    tokenizer = _tiny_tokenizer()
     answer_ids = [_single_token_id(tokenizer, text) for text in ANSWER_TOKENS]
-    next_ids = [*answer_ids, tokenizer.convert_tokens_to_ids("<|im_end|>")]
+    next_ids = [*answer_ids, tokenizer.convert_tokens_to_ids(END_OF_TURN)]
 
     config = Qwen2Config(
-        vocab_size=151936,
+        vocab_size=len(tokenizer),
         hidden_size=HIDDEN_SIZE,
         intermediate_size=2 * HIDDEN_SIZE,
         num_hidden_layers=2,
@@ -50,7 +60,7 @@ def build_tiny_policy(output_dir: Path) -> Path:
         max_position_embeddings=1024,
         tie_word_embeddings=False,
         bos_token_id=tokenizer.bos_token_id,
-        eos_token_id=tokenizer.convert_tokens_to_ids("<|im_end|>"),
+        eos_token_id=tokenizer.convert_tokens_to_ids(END_OF_TURN),
         torch_dtype="float32",
     )
     torch.manual_seed(0)
@@ -107,3 +117,20 @@ def _single_token_id(tokenizer, text: str) -> int:
     if len(token_ids) != 1:
         raise ValueError(f"{text!r} is not a single token: {token_ids}")
     return token_ids[0]
+
+
+def _tiny_tokenizer() -> PreTrainedTokenizerFast:
+    """A byte-level tokenizer with ChatML's special tokens and the GSM8K answer marker as one token."""
+    alphabet = sorted(pre_tokenizers.ByteLevel.alphabet())
+    backend = Tokenizer(models.BPE(vocab={char: index for index, char in enumerate(alphabet)}, merges=[]))
+    backend.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=False)
+    backend.decoder = decoders.ByteLevel()
+    tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=backend,
+        eos_token=END_OF_TURN,
+        pad_token="<|endoftext|>",
+        additional_special_tokens=["<|im_start|>"],
+    )
+    tokenizer.add_tokens([ANSWER_TOKENS[0]])
+    tokenizer.chat_template = CHAT_TEMPLATE
+    return tokenizer

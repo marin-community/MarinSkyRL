@@ -13,6 +13,7 @@ from typing import Any, TypeVar
 import ray
 from loguru import logger
 from omegaconf import DictConfig
+from ray.actor import ActorHandle
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from marinskyrl.environment_contract import TrainingType
@@ -44,7 +45,8 @@ from skyrl_train.rollouts.workers import RolloutWorkers
 from skyrl_train.telemetry import record_generated_work, record_rollout_buffer
 from skyrl_train.trajectory_runners.trajectory_processing import prepare_trajectory_request
 from skyrl_train.trajectory_runners.types import TrajectoryRequestBatch
-from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
+from skyrl_train.config.objective_spec import rollout_logprobs_required
+from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
 
 _T = TypeVar("_T")
 
@@ -102,9 +104,16 @@ def prompt_order_from_config(config: DictConfig, dataset: PromptGroupDataset) ->
     return CurriculumOrder(dataset, curriculum, seed=seed, window_size=batch_size)
 
 
+def start_rollout_buffer(config: RolloutBufferConfig) -> ActorHandle:
+    """Start the rollout buffer actor on this node, beside the trainer that reads every payload through it."""
+    node = NodeAffinitySchedulingStrategy(node_id=ray.get_runtime_context().get_node_id(), soft=False)
+    return ray.remote(RolloutBuffer).options(num_cpus=0, scheduling_strategy=node).remote(config)
+
+
 class TrainingContext:
     """The prompt loader, the rollout buffer, and the rollout tasks in flight between them.
 
+    ``buffer`` is a ``RolloutBuffer`` actor, usually from ``start_rollout_buffer``; the context kills it on ``close``.
     ``start`` runs the coordinator loop: for every lease the buffer grants, it takes the next prompt
     from the loader and hands one task to a rollout worker, which writes the result to the buffer. A failed
     task fails training: the next ``next_batch`` or ``publish`` raises its error. With ``rollout_spans`` it
@@ -119,6 +128,7 @@ class TrainingContext:
         self,
         loader: PromptLoader,
         config: RolloutBufferConfig,
+        buffer: ActorHandle,
         content_policy: RolloutContentPolicy,
         request_spec: RolloutRequestSpec,
         workers: RolloutWorkers,
@@ -133,9 +143,7 @@ class TrainingContext:
         self._rollout_spans = rollout_spans
         self.mode = TrainingType.SYNC if config.max_staleness_steps == 0 else TrainingType.ASYNC
         self._policy_step = 0
-        # The trainer reads every payload through this actor; keep it beside the trainer.
-        node = NodeAffinitySchedulingStrategy(node_id=ray.get_runtime_context().get_node_id(), soft=False)
-        self._buffer = ray.remote(RolloutBuffer).options(num_cpus=0, scheduling_strategy=node).remote(config)
+        self._buffer = buffer
         self._payloads = payloads
         self._writer = payloads.writer(self._buffer, content_policy)
         self._in_flight: dict[str, RolloutTask] = {}
@@ -167,12 +175,15 @@ class TrainingContext:
         )
         admission = GroupAdmissionPolicy(
             GroupAdvantageInvariant.from_config(algorithm.resolved_group_advantage),
-            rollout_logprobs_required=policy_loss_requires_rollout_logprobs(algorithm.policy_loss_type),
+            rollout_logprobs_required=rollout_logprobs_required(
+                algorithm, loss_spec=PolicyLossRegistry.spec(algorithm.policy_loss_type)
+            ),
         )
         object_store_root = config.trainer.rollout_buffer.object_store_root
         return cls(
             PromptLoader(dataset, prompt_order_from_config(config, dataset), batch_size=batch_size),
             buffer_config,
+            start_rollout_buffer(buffer_config),
             RolloutContentPolicy(admission, selection),
             RolloutRequestSpec.from_config(config),
             workers,

@@ -2,13 +2,14 @@
 
 The experiments swap only the Megatron policy worker and the vLLM engines for the CPU backend.
 Ray runs locally with logical GPUs so placement code runs unchanged. Synchronous training runs the standard
-entrypoint at staleness 0; asynchronous training runs the Gym worker-pool entrypoint at positive staleness, so
-the two modes also cover both rollout-worker topologies. The asynchronous run also writes each rollout payload
-to its own object. Either mode runs single-turn groups, or multi-turn groups trained step-wise.
+entrypoint at staleness 0 and asynchronous training at positive staleness; the asynchronous run also writes each
+rollout payload to its own object. Either mode runs single-turn groups, or multi-turn groups trained step-wise.
 
 Usage::
 
     uv run --frozen --no-sync python -m tests.cpu.tiny_training.experiment --mode async --shape step-wise --steps 20
+
+Without ``--model``, the experiment first writes the tiny policy under its root.
 """
 
 import argparse
@@ -19,26 +20,35 @@ from pathlib import Path
 
 import ray
 from omegaconf import DictConfig, OmegaConf
-
 from skyrl_train.config.trajectory_runner_capabilities import (
     TrajectoryRunnerMode,
     validate_trajectory_runner_capabilities,
 )
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.dataset import PromptDataset
-from skyrl_train.entrypoints.gym_worker_pool import GymWorkerPoolExp
 from skyrl_train.entrypoints.main_base import BasePPOExp, EntrypointOperation
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import RayWrappedInferenceEngine
 from skyrl_train.utils import validate_cfg
+
 from tests.cpu.tiny_training.cpu_backend import CPUInferenceEngine, CPUPolicyWorker
 from tests.cpu.tiny_training.tiny_model import build_tiny_policy, write_gsm8k_dataset
 
+# Eight logical CPUs leave room for rollout workers and a second run's policy actor in a shared session.
+LOGICAL_CPUS = 8
 LOGICAL_GPUS = 4
 METRICS_FILE = "metrics.jsonl"
-STALL_TIMEOUT_SECONDS = 30
+# Reports a stalled run with an admission error well inside the test's run timeout. Concurrent test workers can
+# starve a healthy run for tens of seconds, so this bounds hangs rather than measuring speed.
+STALL_TIMEOUT_SECONDS = 120
 TRAIN_BATCH_SIZE = 4
-WORKER_ENV_VARS = {"HF_HUB_OFFLINE": "1", "TOKENIZERS_PARALLELISM": "false", "OMP_NUM_THREADS": "4"}
+# Workers import the CPU backend from this package whatever directory the run starts in.
+WORKER_ENV_VARS = {
+    "PYTHONPATH": os.pathsep.join((str(Path(__file__).parents[3]), str(Path(__file__).parents[4] / "skyrl-gym"))),
+    "HF_HUB_OFFLINE": "1",
+    "TOKENIZERS_PARALLELISM": "false",
+    "OMP_NUM_THREADS": "1",
+}
 
 
 class TrainingMode(StrEnum):
@@ -69,18 +79,21 @@ def sampling_kind(mode: TrainingMode, shape: RolloutShape) -> str | None:
 
 def tiny_training_config(
     root: Path,
+    model_dir: Path,
     mode: TrainingMode,
     shape: RolloutShape,
     *,
     max_steps: int,
     checkpoint_interval: int,
     num_prompts: int = 64,
+    dp_size: int = 1,
+    micro_batch_size: int = 8,
+    max_in_flight: int = 8,
 ) -> DictConfig:
-    """Build a complete training config for the tiny policy under ``root``.
+    """Build a complete training config for the policy in ``model_dir``, writing its data and outputs under ``root``.
 
     The run resumes from the latest checkpoint under ``root``, if an earlier run left one.
     """
-    model_dir = build_tiny_policy(root / "model")
     max_turns = MAX_TURNS[shape]
     cfg = get_default_config()
     overrides = {
@@ -92,7 +105,7 @@ def tiny_training_config(
         "trainer": {
             "step_wise_training": shape is RolloutShape.STEP_WISE,
             "debug_mode": "off",
-            "placement": {"colocate_all": False, "policy_num_gpus_per_node": 1},
+            "placement": {"colocate_all": False, "policy_num_gpus_per_node": dp_size},
             "policy": {"model": {"path": str(model_dir)}, "optimizer_config": {"lr": 1.0e-3}},
             # A stalled step fails with the buffer's state long before the test's subprocess timeout.
             "algorithm": {
@@ -102,13 +115,13 @@ def tiny_training_config(
             },
             "rollout_buffer": {
                 "max_staleness_steps": MAX_STALENESS_STEPS[mode],
-                "max_in_flight": 8,
+                "max_in_flight": max_in_flight,
                 "object_store_root": str(root / "rollouts") if OBJECT_STORE_PAYLOADS[mode] else None,
             },
             "train_batch_size": TRAIN_BATCH_SIZE,
             "policy_mini_batch_size": TRAIN_BATCH_SIZE,
-            "micro_train_batch_size_per_gpu": 8,
-            "micro_forward_batch_size_per_gpu": 8,
+            "micro_train_batch_size_per_gpu": micro_batch_size,
+            "micro_forward_batch_size_per_gpu": micro_batch_size,
             "use_sample_packing": False,
             "max_steps": max_steps,
             "eval_before_train": False,
@@ -131,7 +144,8 @@ def tiny_training_config(
             # Each retention storage operation spawns a process that re-imports the entrypoint.
             "trajectory_retention": {"enabled": False},
         },
-        "trajectory_runner": {"rollout_workers": {"num_workers": 2, "cpus_per_worker": 1}},
+        # Local workers read a warm page cache, so they start together.
+        "trajectory_runner": {"rollout_workers": {"num_workers": 2, "cpus_per_worker": 1, "start_interval_seconds": 0}},
     }
     return OmegaConf.merge(cfg, overrides)
 
@@ -166,6 +180,16 @@ class TinyTrainingExp(BasePPOExp):
             num_workers=1,
         )
 
+    def get_eval_dataset(self):
+        if self.cfg.trainer.eval_interval <= 0 or not self.cfg.data.val_data:
+            return None
+        return PromptDataset(
+            datasets=self.cfg.data.val_data,
+            tokenizer=self.tokenizer,
+            max_prompt_length=self.cfg.trainer.max_prompt_length,
+            num_workers=1,
+        )
+
     def get_tracker(self):
         return JsonlTracker(Path(self.cfg.trainer.export_path) / METRICS_FILE)
 
@@ -189,22 +213,31 @@ class TinyTrainingExp(BasePPOExp):
         return InferenceEngineClient(engines, self.tokenizer, self.cfg)
 
 
-class TinyWorkerPoolTrainingExp(TinyTrainingExp, GymWorkerPoolExp):
-    """The Gym worker-pool entrypoint with the CPU backend."""
-
-
-EXPERIMENTS = {TrainingMode.SYNC: TinyTrainingExp, TrainingMode.ASYNC: TinyWorkerPoolTrainingExp}
-
-
-def run_tiny_training(cfg: DictConfig, mode: TrainingMode) -> None:
+def run_tiny_training(cfg: DictConfig) -> None:
     """Validate the config as the production driver does, then run in a fresh local Ray session."""
     validate_cfg(cfg)
     validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.SKYRL_GYM, EntrypointOperation.TRAIN)
-    ray.init(num_cpus=os.cpu_count(), num_gpus=LOGICAL_GPUS, runtime_env={"env_vars": WORKER_ENV_VARS})
+    ray.init(
+        num_cpus=LOGICAL_CPUS,
+        num_gpus=LOGICAL_GPUS,
+        runtime_env={"env_vars": WORKER_ENV_VARS},
+        # No test reads the dashboard; skipping it saves each concurrent run its start-up time and memory.
+        include_dashboard=False,
+    )
     try:
-        EXPERIMENTS[mode](cfg).run()
+        TinyTrainingExp(cfg).run()
     finally:
         ray.shutdown()
+
+
+def run_experiment(
+    root: Path, model_dir: Path, mode: TrainingMode, shape: RolloutShape, *, max_steps: int, checkpoint_interval: int
+) -> None:
+    """Train the policy in ``model_dir`` under ``root``, resuming from a checkpoint an earlier run left there."""
+    cfg = tiny_training_config(
+        root, model_dir, mode, shape, max_steps=max_steps, checkpoint_interval=checkpoint_interval
+    )
+    run_tiny_training(cfg)
 
 
 def main() -> None:
@@ -214,11 +247,18 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=20)
     parser.add_argument("--checkpoint-interval", type=int, default=-1, help="-1 saves no checkpoints")
     parser.add_argument("--root", type=Path, required=True)
+    parser.add_argument("--model", type=Path, help="a tiny policy directory from build_tiny_policy")
     args = parser.parse_args()
+    model_dir = args.model or build_tiny_policy(args.root / "model")
     cfg = tiny_training_config(
-        args.root, args.mode, args.shape, max_steps=args.steps, checkpoint_interval=args.checkpoint_interval
+        args.root,
+        model_dir,
+        args.mode,
+        args.shape,
+        max_steps=args.steps,
+        checkpoint_interval=args.checkpoint_interval,
     )
-    run_tiny_training(cfg, args.mode)
+    run_tiny_training(cfg)
 
 
 if __name__ == "__main__":

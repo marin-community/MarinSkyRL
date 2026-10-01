@@ -5,6 +5,7 @@ import collections
 import functools
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 from omegaconf import OmegaConf
@@ -100,7 +101,10 @@ class ScriptedRunner(TrajectoryRunner):
             "loss_masks": [[0] * 3] * 2 if uid == "masked" else [[1] * 3] * 2,
             "stop_reasons": ["stop", "length"],
             "rollout_metrics": {},
-            "rollout_logprobs": [[-1.0, -0.5, -0.25], [-1.0, -0.5, -0.25]],
+            "rollout_logprobs": [
+                np.asarray([-1.0, -0.5, -0.25], dtype=np.float32),
+                np.asarray([-1.0, -0.5, -0.25], dtype=np.float32),
+            ],
         }
         return output
 
@@ -148,7 +152,8 @@ def _config(max_staleness_steps: int):
             "algorithm": {"use_kl_loss": False, "dynamic_sampling": {"type": "filter"}},
         },
     )
-    OmegaConf.update(cfg, "generator", {"n_samples_per_prompt": 2})
+    # Retention off gives the trainer its in-process disabled sink instead of a Ray actor.
+    OmegaConf.update(cfg, "generator", {"n_samples_per_prompt": 2, "trajectory_retention": {"enabled": False}})
     OmegaConf.update(cfg, "data", {"shuffle": False})
     return cfg
 
@@ -198,11 +203,9 @@ async def _train_two_steps(monkeypatch, max_staleness_steps: int) -> RayPPOTrain
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("max_staleness_steps", [0, 1])
-async def test_two_steps_deliver_every_record_the_dashboard_reads(
-    ray_module, delivered_telemetry, monkeypatch, max_staleness_steps
-):
-    trainer = await _train_two_steps(monkeypatch, max_staleness_steps)
+async def test_two_steps_deliver_every_record_the_dashboard_reads(ray_module, delivered_telemetry, monkeypatch):
+    # Async (staleness 1) exercises every record the sync configuration emits; tiny_training covers sync.
+    trainer = await _train_two_steps(monkeypatch, max_staleness_steps=1)
     rows = delivered_telemetry.flush()
 
     # The launch environment names the training type, and every record carries it.

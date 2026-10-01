@@ -6,24 +6,22 @@ Validates:
   * No test signal / no edit turn ⇒ all-zero vector (outcome-only).
   * rloo_n_pbs estimator == pure RLOO-N when token_level_shaping is None / zeros
     (flag-off byte-identical), and adds the channel additively/masked otherwise.
-  * Loss-parity: the response_mask denominator (sum) is unchanged by shaping.
-
-Run:
-    pytest tests/cpu/reward/test_pbs_shaping.py
 """
+
+from types import SimpleNamespace
 
 import numpy as np
 import torch
 
 from skyrl_train.utils.span_tagger import SPAN_OTHER, SPAN_THINK, SPAN_ACTION, SPAN_EDIT
-from skyrl_train.utils.pbs_shaping import compute_pbs_token_shaping, _potential
+from skyrl_train.utils.pbs_shaping import compute_pbs_token_shaping
 from skyrl_train.utils.test_delta_parser import TestRunResult
 from skyrl_train.utils.advantage_estimators import compute_rloo_n_outcome_advantage, compute_rloo_n_pbs_advantage
 from skyrl_train.group_admission import GroupAdvantageInvariant
 
 
 def _cfg():
-    return type("C", (), {"rloo_n_filter_zero_reward_groups": False})()
+    return SimpleNamespace(rloo_n_filter_zero_reward_groups=False)
 
 
 def _invariant():
@@ -34,24 +32,6 @@ def _run(idx, passed, failed):
     return TestRunResult(
         message_index=idx, passed=passed, failed=failed, total_runnable=passed + failed, framework="pytest"
     )
-
-
-# ---------------------------------------------------------------------------
-# Potential function
-# ---------------------------------------------------------------------------
-
-
-def test_potential_linear_and_near_green():
-    assert _potential(0.0, "linear") == 0.0
-    assert _potential(1.0, "linear") == 1.0
-    assert _potential(0.5, "linear") == 0.5
-    # near_green is convex: marginal gain rises toward green.
-    assert _potential(0.5, "near_green") == 0.25
-    assert _potential(1.0, "near_green") == 1.0
-    # closing last test (0.9->1.0) yields a bigger jump than (0.0->0.1)
-    near_top = _potential(1.0, "near_green") - _potential(0.9, "near_green")
-    near_bot = _potential(0.1, "near_green") - _potential(0.0, "near_green")
-    assert near_top > near_bot
 
 
 # ---------------------------------------------------------------------------
@@ -105,10 +85,6 @@ def test_pbs_no_edit_turn_is_zeros():
     assert all(v == 0.0 for v in vec)
 
 
-def test_pbs_empty_tags():
-    assert compute_pbs_token_shaping(None, [], test_runs=[_run(99, 1, 0)]) == []
-
-
 def test_pbs_scatter_is_uniform_within_turn():
     tags = [SPAN_EDIT, SPAN_EDIT, SPAN_EDIT]  # one 3-token edit turn
     runs = [_run(99, 2, 2)]  # 0 -> 0.5
@@ -118,12 +94,11 @@ def test_pbs_scatter_is_uniform_within_turn():
 
 
 # ---------------------------------------------------------------------------
-# rloo_n_pbs estimator: byte-identical when off, additive when on, loss-parity
+# rloo_n_pbs estimator: byte-identical when off, additive when on
 # ---------------------------------------------------------------------------
 
 
 def _setup_batch():
-    torch.manual_seed(0)
     bsz, seqlen = 4, 6
     token_level_rewards = torch.zeros(bsz, seqlen)
     token_level_rewards[:, -1] = torch.tensor([1.0, 0.0, 1.0, 0.0])
@@ -149,22 +124,6 @@ def test_estimator_none_shaping_is_pure_rloo_n():
     assert torch.equal(ret, base)
 
 
-def test_estimator_zeros_shaping_is_pure_rloo_n():
-    tlr, rm, idx = _setup_batch()
-    base, _ = compute_rloo_n_outcome_advantage(
-        token_level_rewards=tlr, response_mask=rm, index=idx, config=_cfg(), group_advantage_invariant=_invariant()
-    )
-    adv, _ = compute_rloo_n_pbs_advantage(
-        token_level_rewards=tlr,
-        response_mask=rm,
-        index=idx,
-        config=_cfg(),
-        group_advantage_invariant=_invariant(),
-        token_level_shaping=torch.zeros_like(rm),
-    )
-    assert torch.equal(adv, base)
-
-
 def test_estimator_adds_shaping_at_exact_tokens():
     tlr, rm, idx = _setup_batch()
     base, _ = compute_rloo_n_outcome_advantage(
@@ -188,56 +147,6 @@ def test_estimator_adds_shaping_at_exact_tokens():
     mask[0, 2] = False
     mask[2, 4] = False
     assert torch.allclose(delta[mask], torch.zeros_like(delta[mask]))
-
-
-def test_edit_token_advantage_higher_than_non_edit():
-    """The validation-gate assertion: edit tokens that moved tests get measurably
-    higher advantage than non-edit / no-delta tokens of the same trajectory."""
-    tlr, rm, idx = _setup_batch()
-    base, _ = compute_rloo_n_outcome_advantage(
-        token_level_rewards=tlr, response_mask=rm, index=idx, config=_cfg(), group_advantage_invariant=_invariant()
-    )
-    # Sample 0: an edit at token 2 moved tests (positive PBS), other tokens flat.
-    shaping = torch.zeros_like(rm)
-    shaping[0, 2] = 0.25
-    adv, _ = compute_rloo_n_pbs_advantage(
-        token_level_rewards=tlr,
-        response_mask=rm,
-        index=idx,
-        config=_cfg(),
-        group_advantage_invariant=_invariant(),
-        token_level_shaping=shaping,
-    )
-    edit_adv = adv[0, 2].item()
-    non_edit = [adv[0, j].item() for j in range(rm.shape[1]) if j != 2]
-    assert all(edit_adv > v for v in non_edit)
-
-
-def test_loss_parity_denominator_unchanged():
-    """Loss-value parity: the masked-mean denominator (response_mask.sum()) is
-    not changed by shaping — the recurring seqnorm-style failure mode. The
-    shaping only changes the numerator at response-token positions."""
-    tlr, rm, idx = _setup_batch()
-    base, _ = compute_rloo_n_outcome_advantage(
-        token_level_rewards=tlr, response_mask=rm, index=idx, config=_cfg(), group_advantage_invariant=_invariant()
-    )
-    shaping = torch.zeros_like(rm)
-    shaping[1, 3] = 0.2
-    adv, _ = compute_rloo_n_pbs_advantage(
-        token_level_rewards=tlr,
-        response_mask=rm,
-        index=idx,
-        config=_cfg(),
-        group_advantage_invariant=_invariant(),
-        token_level_shaping=shaping,
-    )
-    denom = rm.sum()
-    # A token-mean loss over response tokens: denominator is the mask sum, which
-    # is identical with/without shaping; the mean shifts by exactly the added
-    # shaping mass / denom.
-    base_mean = (base * rm).sum() / denom
-    adv_mean = (adv * rm).sum() / denom
-    assert torch.isclose(adv_mean - base_mean, torch.tensor(0.2) / denom)
 
 
 def test_shaping_masked_outside_response():

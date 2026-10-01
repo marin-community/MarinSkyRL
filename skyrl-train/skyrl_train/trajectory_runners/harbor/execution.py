@@ -8,17 +8,13 @@ import ray
 from omegaconf import DictConfig, OmegaConf
 from transformers import PreTrainedTokenizerBase
 
-from skyrl_train.rollouts.workers import WorkerShard
+from skyrl_train.rollouts.workers import WorkerShard, detached_config
 from skyrl_train.trajectory_runners.base import TrajectoryRunner
-from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled
+from skyrl_train.config.objective_spec import LossSpec, rollout_logprobs_required
+from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
 
 DEFAULT_CONCURRENT_TRIALS = 16
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", None)
-
-
-def _detached(config: DictConfig) -> DictConfig:
-    """Return a serializable copy without OmegaConf parent references."""
-    return OmegaConf.create(OmegaConf.to_container(config, resolve=True))
 
 
 def configured_concurrent_trials(terminal_bench_config: DictConfig) -> int:
@@ -54,13 +50,15 @@ class HarborRunnerSpec:
     config: DictConfig
     runner_config: DictConfig
     terminal_bench_config: DictConfig
+    loss_spec: LossSpec
 
     @classmethod
     def from_config(cls, config: DictConfig) -> HarborRunnerSpec:
         return cls(
-            config=_detached(config),
-            runner_config=_detached(config.generator),
-            terminal_bench_config=_detached(config.terminal_bench_config),
+            config=detached_config(config),
+            loss_spec=PolicyLossRegistry.spec(config.trainer.algorithm.policy_loss_type),
+            runner_config=detached_config(config.generator),
+            terminal_bench_config=detached_config(config.terminal_bench_config),
         )
 
     def build(self, tokenizer: PreTrainedTokenizerBase, shard: WorkerShard) -> TrajectoryRunner:
@@ -83,7 +81,7 @@ class HarborRunnerSpec:
             eval_concurrent_trials=configured_concurrent_trials(self.terminal_bench_config),
             tokenizer=tokenizer,
             moe_router_replay=bool(self.config.trainer.policy.megatron_config.get("moe_router_replay", False)),
-            rollout_logprobs_required=rollout_logprobs_enabled(algorithm),
+            rollout_logprobs_required=rollout_logprobs_required(algorithm, loss_spec=self.loss_spec),
             tito_full=algorithm.get("tito_full", None),
             tis_splice=bool(algorithm.tis_splice),
             tis_lcs_alert_threshold=float(algorithm.tis_lcs_alert_threshold),

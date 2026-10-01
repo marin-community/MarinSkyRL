@@ -713,7 +713,8 @@ def _publish_archives(request: PublicationRequest) -> _RetentionLedger:
     return ledger
 
 
-def _publication_worker(request: PublicationRequest, sender) -> None:
+def execute_publication(request: PublicationRequest) -> PublicationResult:
+    """Perform one storage operation, reporting any failure in the result rather than raising."""
     try:
         if request.operation is PublicationOperation.INITIALIZE:
             ledger = _initialize_publication(request)
@@ -721,23 +722,17 @@ def _publication_worker(request: PublicationRequest, sender) -> None:
             ledger = _publish_archives(request)
         else:
             raise ValueError(f"unknown trajectory publication operation: {request.operation}")
-        sender.send(
-            PublicationResult(
-                request_id=request.request_id,
-                record_count=request.record_count,
-                ledger=to_jsonable(ledger),
-            )
+    except Exception as error:
+        return PublicationResult(
+            request_id=request.request_id,
+            record_count=request.record_count,
+            error=f"{type(error).__name__}: {error}",
         )
-    except BaseException as error:
-        sender.send(
-            PublicationResult(
-                request_id=request.request_id,
-                record_count=request.record_count,
-                error=f"{type(error).__name__}: {error}",
-            )
-        )
-    finally:
-        sender.close()
+    return PublicationResult(
+        request_id=request.request_id,
+        record_count=request.record_count,
+        ledger=to_jsonable(ledger),
+    )
 
 
 def _empty_metrics() -> dict[str, float]:
@@ -783,7 +778,7 @@ class TrajectorySink:
         self.config = config
         self.tokenizer = tokenizer
         self.publisher = publisher or ProcessTrajectoryPublisher(
-            _publication_worker,
+            execute_publication,
             publish_timeout_seconds=config.publish_timeout_seconds,
             shutdown_timeout_seconds=config.shutdown_timeout_seconds,
         )
@@ -1158,8 +1153,6 @@ class SharedTrajectorySink:
         ray.get(self._actor.bind_runner.remote(runner_name))
 
     def retain(self, input_batch: TrajectoryRequestBatch, output: TrajectoryBatch) -> dict[str, float]:
-        if not self.config.enabled:
-            return {}
         return ray.get(self._actor.retain.remote(input_batch, output))
 
     def close(self) -> None:
@@ -1167,9 +1160,27 @@ class SharedTrajectorySink:
         ray.kill(self._actor)
 
 
-def make_trajectory_sink(config: DictConfig, tokenizer: PreTrainedTokenizerBase) -> SharedTrajectorySink:
+class DisabledTrajectorySink:
+    """The sink of a run that retains nothing, which needs no actor."""
+
+    def __init__(self, config: TrajectoryRetentionConfig):
+        self.config = config
+
+    def bind_runner(self, runner_name: str) -> None:
+        """Nothing is retained, so no runner identity is recorded."""
+
+    def retain(self, input_batch: TrajectoryRequestBatch, output: TrajectoryBatch) -> dict[str, float]:
+        return {}
+
+    def close(self) -> None:
+        """The sink holds no resources."""
+
+
+def make_trajectory_sink(config: DictConfig, tokenizer: PreTrainedTokenizerBase) -> RetentionSink:
     """Start the run's sink on this node, where a local ``output_path`` resolves as it does here."""
     retention = parse_trajectory_retention_config(config.get("trajectory_retention"))
+    if not retention.enabled:
+        return DisabledTrajectorySink(retention)
     node = NodeAffinitySchedulingStrategy(node_id=ray.get_runtime_context().get_node_id(), soft=False)
     actor = ray.remote(TrajectorySink).options(num_cpus=0, scheduling_strategy=node).remote(retention, tokenizer)
     return SharedTrajectorySink(retention, actor)

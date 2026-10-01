@@ -3,7 +3,7 @@ Expected templated strings used for
 skyrl-train/tests/cpu/trajectory_runners/test_skyrl_gym_runner_chat_templating.py::test_skyrl_gym_runner_chat_templating_exact
 """
 
-from datetime import date
+LLAMA3_2_DATE_STRING = "01 Jan 2024"
 
 
 # Produced by expected_str = tokenizer.apply_chat_template(expected_chat_history, tokenize=False)
@@ -38,7 +38,7 @@ b<|im_end|>
 LLAMA3_2_EXPECTED_STR = f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 
 Cutting Knowledge Date: December 2023
-Today Date: {date.today().strftime("%d %b %Y")}
+Today Date: {LLAMA3_2_DATE_STRING}
 
 <|eot_id|><|start_header_id|>user<|end_header_id|>
 

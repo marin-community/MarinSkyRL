@@ -97,6 +97,7 @@ trainer:
     enable_numa_affinity: false
   strategy: megatron
   policy:
+    max_consecutive_nonfinite_steps: 3
     host_memory_monitor:
       enabled: true
       interval_seconds: 60
@@ -209,8 +210,6 @@ trainer:
     tis_lcs_alert_threshold: 0.005
     enable_token_reward_channel: false
     think_token_weight: 1.0
-    think_token_cost: 0.0
-    think_max_cost_per_turn: 0.05
     sapo:
       tau_pos: 1.0
       tau_neg: 1.05
@@ -237,25 +236,8 @@ trainer:
       ppo_kl_coef: 1.0
     
     cispo:
-      cispo_eps_clip_low: 0
+      cispo_eps_clip_low: 1.0
       cispo_eps_clip_high: 5
-
-    z_clip:
-      enabled: false
-      alpha: 0.97
-      z_thresh: 2.5
-      warmup_steps: 25
-      mode: "zscore"
-      clip_option: "adaptive_scaling"
-      clip_factor: 1.0
-      skip_update_on_spike: false
-
-    stale_clip:
-      enabled: false
-      alpha: 0.3
-      entropy_threshold: 0.15
-      entropy_window: 10
-      min_lr_scale: 0.1
 
   # Rollout workers generate prompt groups under leases from the rollout buffer; each step trains on
   # train_batch_size groups. At 0 staleness every group comes from the current policy (synchronous training).
@@ -322,7 +304,7 @@ trainer:
   policy_mini_batch_size: 256
   critic_mini_batch_size: 256
   micro_train_batch_size_per_gpu: 1
-  micro_forward_batch_size_per_gpu: 1
+  micro_forward_batch_size_per_gpu: ${trainer.micro_train_batch_size_per_gpu}
   update_ref_every_epoch: false
   use_sample_packing: true
   # Disaggregated only: keep the policy's optimizer state and gradient buffers on
@@ -373,6 +355,10 @@ generator:
   backend: "vllm"
   vllm_attention_backend: null
   weight_sync_backend: "nccl"
+  # vLLM pause policy during weight sync. abort ends in-flight streams; keep preserves them.
+  weight_sync_pause:
+    mode: keep
+    clear_cache: true
   # How weights reach the engines. "broadcast": trainer rank 0 sends every tensor to every engine.
   # "expert_block": each MoE expert matrix is broadcast from a Megatron rank that holds it to the vLLM
   # workers that serve it. Needs engines that are not colocated with training, a Grug MoE on the megatron
@@ -535,10 +521,13 @@ environment:
   env_class: "gsm8k"
 
 trajectory_runner:
-  # Rollout worker processes for runners that generate outside the trainer process (Harbor, and SkyRL-Gym under
-  # the gym_worker_pool entrypoint). Every worker runs on the trainer's node.
+  # Rollout worker processes, which run SkyRL-Gym and Harbor outside the trainer process. Every worker runs on the
+  # trainer's node; each runner type (Gym, and Harbor under terminal-bench routing) gets its own pool of this size.
   rollout_workers:
     num_workers: 4
     cpus_per_worker: 8
     executor_threads: 256 # width of each worker's default thread pool, which Harbor's model client runs on
     progress_timeout_seconds: 21600 # fail a worker's requests when none of them completes for this long
+    # Workers start one at a time, this long after the previous one is up, so their imports and tokenizer loads
+    # from a shared filesystem do not overlap; zero starts them all at once.
+    start_interval_seconds: 2.0

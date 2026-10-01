@@ -7,7 +7,7 @@ import torch
 import torch.distributed
 
 
-PROFILE_UPDATE_INDEX = 1  # Let one PPO update warm the model before capture.
+PROFILE_UPDATE_INDEX = 1  # Let one training call warm the kernels before capture.
 
 
 class Profiler:

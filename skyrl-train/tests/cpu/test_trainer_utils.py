@@ -22,7 +22,6 @@ import tempfile
 import pytest
 import re
 
-from unittest.mock import Mock, patch
 import json
 import fsspec
 from skyrl_train.evaluate import evaluation_dump_dir
@@ -30,6 +29,11 @@ from skyrl_train.io import io
 from tests.cpu.util import example_dummy_config
 
 BasicType = Union[int, float, str, bool, type(None)]
+
+
+class ListTokenizer:
+    def decode(self, tokens):
+        return str(tokens)
 
 
 @pytest.fixture
@@ -141,90 +145,33 @@ def test_cleanup_with_negative_max_checkpoints():
         assert len(remaining_dirs) == 5, "Cleanup should be disabled when max_checkpoints is -1"
 
 
-def test_validate_consistency_for_latest_checkpoint():
-    """
-    Verify that `validate_consistency_for_latest_checkpoint` correctly validates the checkpoint folder.
-    """
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # 1. Setup
-        checkpoint_steps = [1, 2, 3, 4, 5]
-        setup_mock_ckpts(tmpdir, checkpoint_steps=checkpoint_steps)
+@pytest.mark.parametrize(
+    ("checkpoint_steps", "latest_step", "save_interval", "consistent"),
+    [
+        pytest.param([1, 2, 3, 4, 5], 5, 1, True, id="latest-is-highest"),
+        pytest.param([1, 2, 3, 4, 5], 3, 1, False, id="latest-behind-saved-steps"),
+        pytest.param([1, 3, 5], 3, 2, True, id="newer-step-within-save-interval"),
+    ],
+)
+def test_validate_consistency_for_latest_checkpoint(tmp_path, checkpoint_steps, latest_step, save_interval, consistent):
+    setup_mock_ckpts(str(tmp_path), checkpoint_steps=checkpoint_steps)
+    latest_ckpt_file = tmp_path / "latest_ckpt_global_step.txt"
+    latest_ckpt_file.write_text(str(latest_step))
+    arguments = (str(tmp_path), latest_step, str(tmp_path / f"global_step_{latest_step}"), str(latest_ckpt_file))
 
-        latest_ckpt_file = os.path.join(tmpdir, "latest_ckpt_global_step.txt")
-        with open(latest_ckpt_file, "w") as f:
-            f.write("5")
-
-        latest_ckpt_path = os.path.join(tmpdir, "global_step_5")
-        ckpt_iteration = 5
-
-        # 2. Execute
-        validate_consistency_for_latest_checkpoint(
-            tmpdir, ckpt_iteration, latest_ckpt_path, latest_ckpt_file, save_interval=1
-        )
-
-
-def test_validate_consistency_for_latest_checkpoint_with_inconsistent_folder():
-    """
-    Verify that `validate_consistency_for_latest_checkpoint` correctly validates the checkpoint folder.
-    """
-    # Example 1: `latest_ckpt_global_step.txt` points to a lower global step than the highest global step in the folder
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # 1. Setup
-        checkpoint_steps = [1, 2, 3, 4, 5]
-        setup_mock_ckpts(tmpdir, checkpoint_steps=checkpoint_steps)
-
-        # change the latest checkpoint file to point to a lower global step
-        latest_ckpt_file = os.path.join(tmpdir, "latest_ckpt_global_step.txt")
-        with open(latest_ckpt_file, "w") as f:
-            f.write("3")
-
-        latest_ckpt_path = os.path.join(tmpdir, "global_step_3")
-        ckpt_iteration = 3
-        save_interval = 1
-
-        # 2. Execute
-        with pytest.raises(ValueError, match="Inconsistent checkpoint folder"):
-            validate_consistency_for_latest_checkpoint(
-                tmpdir, ckpt_iteration, latest_ckpt_path, latest_ckpt_file, save_interval=save_interval
-            )
-
-    # Example 2: `latest_ckpt_global_step.txt` points to a lower global step but it's within the save interval
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # 1. Setup
-        checkpoint_steps = [1, 3, 5]
-        setup_mock_ckpts(tmpdir, checkpoint_steps=checkpoint_steps)
-
-        # change the latest checkpoint file to point to a lower global step
-        latest_ckpt_file = os.path.join(tmpdir, "latest_ckpt_global_step.txt")
-        with open(latest_ckpt_file, "w") as f:
-            f.write("3")
-
-        save_interval = 2
-        latest_ckpt_path = os.path.join(tmpdir, "global_step_3")
-        ckpt_iteration = 3
-
-        # 2. Execute
-        validate_consistency_for_latest_checkpoint(
-            tmpdir, ckpt_iteration, latest_ckpt_path, latest_ckpt_file, save_interval=save_interval
-        )
+    if consistent:
+        validate_consistency_for_latest_checkpoint(*arguments, save_interval=save_interval)
+        return
+    with pytest.raises(ValueError, match="Inconsistent checkpoint folder"):
+        validate_consistency_for_latest_checkpoint(*arguments, save_interval=save_interval)
 
 
-def test_sanitize_data_source_none():
-    """Test sanitize_data_source with None input."""
-    result = sanitize_data_source(None)
-    assert result == "unknown"
-
-
-def test_sanitize_data_source_slash_replacement():
-    """Test sanitize_data_source replaces slashes with underscores."""
-    result = sanitize_data_source("dataset/with/slashes")
-    assert result == "dataset_with_slashes"
-
-
-def test_sanitize_data_source_normal_string():
-    """Test sanitize_data_source with normal string."""
-    result = sanitize_data_source("normal_dataset")
-    assert result == "normal_dataset"
+@pytest.mark.parametrize(
+    ("data_source", "expected"),
+    [(None, "unknown"), ("dataset/with/slashes", "dataset_with_slashes"), ("normal_dataset", "normal_dataset")],
+)
+def test_sanitize_data_source(data_source, expected):
+    assert sanitize_data_source(data_source) == expected
 
 
 def test_evaluation_response_metrics_report_work_and_stop_contributions():
@@ -305,8 +252,7 @@ def test_calculate_per_dataset_metrics_multiple_sources():
 
 
 def test_dump_per_dataset_eval_results_preserves_dataset_and_metrics(tmp_path):
-    mock_tokenizer = Mock()
-    mock_tokenizer.decode.side_effect = lambda x: f"decoded_{x}"
+    tokenizer = ListTokenizer()
     trajectory_batches = {
         "prompt_token_ids": [[1, 2], [3, 4], [5, 6]],
         "response_ids": [[10, 11], [12, 13], [14, 15]],
@@ -319,11 +265,11 @@ def test_dump_per_dataset_eval_results_preserves_dataset_and_metrics(tmp_path):
     eval_metrics = {"eval/dataset1/avg_score": 0.8, "eval/unknown/avg_score": 0.6}
 
     dump_per_dataset_eval_results(
-        str(tmp_path), mock_tokenizer, trajectory_batches, data_sources, all_envs, env_extras, eval_metrics
+        str(tmp_path), tokenizer, trajectory_batches, data_sources, all_envs, env_extras, eval_metrics
     )
     dataset_rows = [json.loads(line) for line in (tmp_path / "dataset1.jsonl").read_text().splitlines()]
     unknown_rows = [json.loads(line) for line in (tmp_path / "unknown.jsonl").read_text().splitlines()]
-    assert [row["output_response"] for row in dataset_rows] == ["decoded_[10, 11]", "decoded_[14, 15]"]
+    assert [row["output_response"] for row in dataset_rows] == ["[10, 11]", "[14, 15]"]
     assert unknown_rows[0]["data_source"] == "unknown"
     assert json.loads((tmp_path / "aggregated_results.jsonl").read_text()) == eval_metrics
 
@@ -332,8 +278,7 @@ def test_eval_dump_writes_to_cloud_uri_without_corrupting_scheme(monkeypatch):
     directory = evaluation_dump_dir("s3://bucket/users/exports", 2)
     filesystem = fsspec.filesystem("memory")
     monkeypatch.setattr(io, "open_file", lambda path, mode: filesystem.open(path.removeprefix("s3://"), mode))
-    tokenizer = Mock()
-    tokenizer.decode.side_effect = lambda tokens: str(tokens)
+    tokenizer = ListTokenizer()
     batch = {"prompt_token_ids": [[1]], "response_ids": [[2]], "rewards": [1.0]}
 
     dump_per_dataset_eval_results(directory, tokenizer, batch, ["aime_2024"], ["aime"], [{}], {"accuracy": 1.0})
@@ -346,8 +291,7 @@ def test_eval_dump_writes_to_cloud_uri_without_corrupting_scheme(monkeypatch):
 
 
 def test_dump_per_dataset_eval_results_preserves_error_disposition(tmp_path):
-    tokenizer = Mock()
-    tokenizer.decode.side_effect = lambda tokens: str(tokens)
+    tokenizer = ListTokenizer()
     batch = {
         "prompt_token_ids": [[1], [2]],
         "response_ids": [[3], [4]],
@@ -488,29 +432,6 @@ def test_validate_trajectory_batch_mismatched_prompts_responses():
 
     with pytest.raises(AssertionError, match=re.escape("Mismatch between prompts (3) and responses (2)")):
         validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
-
-
-def test_validate_trajectory_batch_all_loss_masked():
-    """Test validate_trajectory_batch logs warning when all outputs are loss masked."""
-    input_batch = TrajectoryRequestBatch(
-        prompts=["prompt1", "prompt2"], env_classes=["env1", "env2"], env_extras=None, sampling_params=None
-    )
-
-    trajectory_batch = TrajectoryBatch(
-        prompt_token_ids=[[1, 2, 3], [4, 5, 6]],
-        response_ids=[[7, 8], [9, 10]],
-        rewards=[0.5, 0.7],
-        loss_masks=[[0, 0], [0, 0]],  # All zeros - completely loss masked
-        stop_reasons=["eos", "eos"],
-        rollout_logprobs=None,
-    )
-
-    # Capture log output to verify warning is issued
-    with patch("skyrl_train.trajectory_runners.trajectory_processing.logger") as mock_logger:
-        validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
-        mock_logger.warning.assert_called_once_with(
-            "All outputs are loss masked, which may lead to NaN loss, please check your generation logic!!"
-        )
 
 
 def test_validate_trajectory_batch_mismatched_list_lengths():

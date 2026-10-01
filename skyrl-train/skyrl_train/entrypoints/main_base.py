@@ -23,6 +23,7 @@ from loguru import logger
 import asyncio
 import multiprocessing as mp
 
+from skyrl_train.config.objective_spec import rollout_logprobs_required
 from skyrl_train.config.trajectory_runner_capabilities import (
     EntrypointOperation,
     TrajectoryRunnerMode,
@@ -143,6 +144,14 @@ def create_ray_wrapped_inference_engines_from_config(
         **OmegaConf.to_container(cfg.generator.engine_init_kwargs, resolve=True),
         "openai_sampling_params": OmegaConf.to_container(cfg.generator.sampling_params, resolve=True),
     }
+    if cfg.generator.backend == "vllm":
+        # The template resolver imports Torch from the optional trainer runtime.
+        from skyrl_train.trajectory_runners.trajectory_processing import get_custom_chat_template  # noqa: PLC0415
+
+        engine_init_kwargs["chat_template"] = get_custom_chat_template(cfg.generator.chat_template)
+        engine_init_kwargs["default_chat_template_kwargs"] = OmegaConf.to_container(
+            cfg.generator.chat_template_kwargs, resolve=True
+        )
     engine_init_kwargs["tokenizer"] = cfg.trainer.policy.model.tokenizer_path
     tokenizer_revision = cfg.trainer.policy.model.get("tokenizer_revision")
     if tokenizer_revision is not None:
@@ -249,32 +258,6 @@ def create_remote_inference_engines_from_config(cfg: DictConfig, tokenizer: PreT
         # external `vllm serve` launch — SkyRL does not spawn remote servers. Carried here
         # for geometry/GPU-accounting consistency (DCP reuses the TP GPUs; no extra GPUs).
         decode_context_parallel_size=cfg.generator.get("inference_engine_decode_context_parallel_size", 1),
-    )
-
-
-def build_gym_trajectory_runner(
-    cfg: DictConfig, tokenizer: PreTrainedTokenizerBase, inference_engine_client: InferenceEngineClient
-) -> TrajectoryRunner:
-    """Build the SkyRL-Gym runner, collecting step-wise trajectories when step-wise training is enabled."""
-    from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection  # noqa: PLC0415
-    from skyrl_train.trajectory_runners.skyrl_gym import (  # noqa: PLC0415
-        SkyRLGymTrajectoryRunner,
-        TrajectoryPipeline,
-    )
-    from skyrl_train.trajectory_runners.step_wise import StepWiseRolloutCollector  # noqa: PLC0415
-
-    pipeline = None
-    if cfg.trainer.step_wise_training:
-        pipeline = TrajectoryPipeline(
-            StepWiseRolloutCollector,
-            StepWiseTrajectoryProjection(cfg.generator, tokenizer),
-        )
-    return SkyRLGymTrajectoryRunner(
-        trajectory_runner_cfg=cfg.generator,
-        skyrl_gym_cfg=cfg.environment.skyrl_gym,
-        inference_engine_client=inference_engine_client,
-        tokenizer=tokenizer,
-        pipeline=pipeline,
     )
 
 
@@ -464,12 +447,17 @@ class BasePPOExp:
         return pg
 
     def get_trajectory_runner(self, cfg, tokenizer, inference_engine_client):
-        """Initialize the configured trajectory runner.
+        """Run SkyRL-Gym, and Harbor for Nemotron Ultra's terminal-bench rows, in rollout worker processes.
 
         Returns:
             TrajectoryRunner: The runner.
         """
-        gym_runner = build_gym_trajectory_runner(cfg, tokenizer, inference_engine_client)
+        del tokenizer
+        from skyrl_train.rollouts.workers import RolloutWorkerPool, RolloutWorkerResources  # noqa: PLC0415
+        from skyrl_train.trajectory_runners.skyrl_gym_execution import GymRunnerSpec  # noqa: PLC0415
+
+        resources = RolloutWorkerResources.from_config(cfg)
+        gym_runner = RolloutWorkerPool(GymRunnerSpec.from_config(cfg, inference_engine_client.engines), resources)
         terminal_bench_data = list(cfg.data.get("terminal_bench_data", []))
         if not terminal_bench_data:
             return gym_runner
@@ -477,19 +465,20 @@ class BasePPOExp:
         if cfg.trainer.step_wise_training:
             raise ValueError("Nemotron Ultra terminal-bench routing is incompatible with step-wise training")
 
-        from skyrl_train.rollouts.workers import RolloutWorkerPool, RolloutWorkerResources  # noqa: PLC0415
         from skyrl_train.trajectory_runners.harbor.execution import HarborRunnerSpec  # noqa: PLC0415
         from skyrl_train.trajectory_runners.nemotron_ultra import NemotronUltraTrajectoryRouter  # noqa: PLC0415
-        from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled  # noqa: PLC0415
+        from skyrl_train.utils.algorithm_registry import PolicyLossRegistry  # noqa: PLC0415
 
         if not cfg.get("terminal_bench_config"):
             raise ValueError("data.terminal_bench_data requires terminal_bench_config")
-        harbor_runner = RolloutWorkerPool(HarborRunnerSpec.from_config(cfg), RolloutWorkerResources.from_config(cfg))
+        harbor_runner = RolloutWorkerPool(HarborRunnerSpec.from_config(cfg), resources)
         return NemotronUltraTrajectoryRouter(
             gym_runner=gym_runner,
             harbor_runner=harbor_runner,
             terminal_bench_data=terminal_bench_data,
-            require_rollout_logprobs=rollout_logprobs_enabled(cfg.trainer.algorithm),
+            require_rollout_logprobs=rollout_logprobs_required(
+                cfg.trainer.algorithm, loss_spec=PolicyLossRegistry.spec(cfg.trainer.algorithm.policy_loss_type)
+            ),
             tis_lcs_alert_threshold=float(cfg.trainer.algorithm.tis_lcs_alert_threshold),
         )
 
@@ -681,13 +670,17 @@ def run_ray_driver(
     from skyrl_train.entrypoints.ray_lifecycle import exit_without_ray_destructors, shutdown_ray  # noqa: PLC0415
     from marinskyrl.process_diagnostics import write_exception_receipt  # noqa: PLC0415
     from skyrl_train.telemetry import DRIVER_ROLE, process_telemetry  # noqa: PLC0415
+    from skyrl_train import objective  # noqa: F401, PLC0415 - register losses when the training runtime loads
     from skyrl_train.utils import validate_cfg  # noqa: PLC0415
     from skyrl_train.utils.logging_utils import log_exception_as_text  # noqa: PLC0415
     from skyrl_train.utils.progress import configure_progress  # noqa: PLC0415 - keep launcher imports Torch-free
     from skyrl_train.utils.utils import initialize_ray  # noqa: PLC0415
+    from skyrl_train.utils.algorithm_registry import PolicyLossRegistry  # noqa: PLC0415
 
     validate_cfg(cfg)
-    validate_trajectory_runner_capabilities(cfg, runner_mode, operation)
+    validate_trajectory_runner_capabilities(
+        cfg, runner_mode, operation, loss_spec=PolicyLossRegistry.spec(cfg.trainer.algorithm.policy_loss_type)
+    )
     configure_progress(cfg.trainer.progress)
 
     initialize_ray(cfg)

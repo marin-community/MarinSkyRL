@@ -1,469 +1,42 @@
-"""
-uv  run --isolated --group dev --extra cpu pytest tests/cpu/test_trainer.py
-"""
+"""RayPPOTrainer driver behavior: checkpoint durability, resume, advantages, collation, and batch sizing."""
 
 import asyncio
+import copy
 import threading
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
-import torch
 import pytest
-from jaxtyping import Float, Integer
+import ray
+import torch
 from omegaconf import OmegaConf
-from pytest import approx
-from unittest.mock import AsyncMock, MagicMock, patch
 
-
+import skyrl_train.trainer as trainer_module
+from skyrl_train.callbacks.base import TrainerControl
+from skyrl_train.config.utils import get_default_config
+from marinskyrl.distillation import compile_distillation_plan_from_config
+from skyrl_train.distillation import ChosenTokenTeacherInput, TeacherTopKInput, TopKTeacherEvidence
 from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.group_admission import GroupAdvantageInvariant
-import skyrl_train.trainer as trainer_module
 from skyrl_train.rollouts.context import TrainingContextState
 from skyrl_train.rollouts.loader import PromptLoaderState
 from skyrl_train.trainer import CheckpointSnapshot, RayPPOTrainer
-from skyrl_train.utils.trainer_utils import ResumeMode
-from skyrl_train.utils.policy_losses import ppo_policy_loss
-from skyrl_train.training_batch import TrainingBatchIterator, TrainingInputBatch, TrainingOutputBatch
-from skyrl_train.models.grug_moe import GrugMoeForCausalLM
-from skyrl_train.models.grug_query_bias import (
-    GrugLossFreeBiasUpdater,
-    GrugQuantileBiasUpdater,
-    GrugQueryBiasCapturePlan,
-    GrugQueryBiasShardLayout,
-    GrugQueryBiasWindow,
-    next_loss_free_query_bias,
-    next_query_bias,
-)
-from marinskyrl.speculative_decoding import SpeculativeDecodingConfig
-from skyrl_train.draft_trainer import DraftCheckpoint
-from skyrl_train.inference_engines.vllm.online_eagle_trainer import OnlineEagleUpdateResult
-import numpy as np
-from skyrl_train.distillation import SampledReverseKLInput, SparseForwardKLInput, TopKTeacherEvidence
+from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.trajectory_runners.types import TrajectoryID
-from skyrl_train.workers.worker import CriticWorkerBase, PolicyWorkerBase
+from skyrl_train.objective.losses import PolicyLossInputs, ppo_policy_loss
+from skyrl_train.config.objective_spec import LossReduction
+from skyrl_train.objective.reduction import reduce_to_step, step_counts
+from skyrl_train.training_batch import TrainingBatchIterator
+from skyrl_train.utils.trainer_utils import ResumeMode
 from skyrl_train.utils.utils import validate_batch_sizes
-from skyrl_train.config.utils import get_default_config
+from skyrl_train.workers.worker import CriticWorkerBase, PolicyWorkerBase
 from tests.cpu.util import example_dummy_config
-
-
-_DRAFT_REVISION = "4bdb47c08e5b5190bea3c7a93c3e14470230e469"
-
-
-def _draft_checkpoint(uri: str) -> DraftCheckpoint:
-    return DraftCheckpoint(
-        step=2,
-        revision="draft-step-2",
-        uri=uri,
-        weights_uri=f"{uri}/model.safetensors",
-        weights_size=5,
-        completion_uri=f"{uri}/complete.json",
-        source_identity=_DRAFT_REVISION,
-    )
-
-
-class _SpeculatorCaptureClient:
-    def __init__(self):
-        self.begins = []
-        self.seals = []
-        self.refreshes = []
-        self.refresh_result = [
-            {
-                "active": True,
-                "draft_revision": "draft-step-2",
-            }
-        ]
-        self.engines = [object()]
-
-    async def begin_online_eagle_capture(self, config):
-        self.begins.append(config)
-        return [
-            [
-                {"active": True, "worker_rank": 0},
-                {"active": True, "worker_rank": 1},
-            ]
-        ]
-
-    async def seal_online_eagle_capture(self, output_root):
-        self.seals.append(output_root)
-        return [
-            [
-                {
-                    "active": True,
-                    "worker_rank": 0,
-                    "captured_rows": 41,
-                    "dropped_windows": 2,
-                    "windows": [{"path": "window-000000.safetensors"}],
-                    "path": "s3://bucket/checkpoints/drafts/captures/step-2/rank-00000/manifest.json",
-                },
-                {
-                    "active": True,
-                    "worker_rank": 1,
-                    "captured_rows": 43,
-                    "dropped_windows": 1,
-                    "windows": [{"path": "window-000000.safetensors"}],
-                    "path": "s3://bucket/checkpoints/drafts/captures/step-2/rank-00001/manifest.json",
-                },
-            ]
-        ]
-
-    async def update_draft_weights(self, weights_path):
-        self.refreshes.append(weights_path)
-        return self.refresh_result
-
-
-class _ImmediateRef:
-    def __init__(self, value):
-        self.value = value
-
-    def __await__(self):
-        async def resolve():
-            return self.value
-
-        return resolve().__await__()
-
-
-class _RemoteMethod:
-    def __init__(self, fn):
-        self.fn = fn
-
-    def remote(self, *args, **kwargs):
-        return _ImmediateRef(self.fn(*args, **kwargs))
-
-
-class _DraftTrainer:
-    def __init__(self):
-        self.updates = []
-        self.update = _RemoteMethod(self._update)
-
-    def _update(self, job):
-        self.updates.append(job)
-        return OnlineEagleUpdateResult(
-            accepted=True,
-            step=job.step,
-            draft_revision=f"draft-step-{job.step}",
-            candidate_uri=f"s3://bucket/checkpoints/drafts/draft-step-{job.step}",
-            parent_draft_revision="draft-step-1",
-            trained_against_target_revision=job.target_revision,
-            train_loss=0.5,
-            incumbent_holdout_loss=0.4,
-            candidate_holdout_loss=0.3,
-        )
-
-
-def _online_speculator_trainer(interval_steps=1):
-    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
-    trainer.speculative_decoding = SpeculativeDecodingConfig.from_mapping(
-        {
-            "method": "eagle3",
-            "model": {
-                "source_uri": "hf://laion/snowball-64k-eagle3-draft-r2egym",
-                "source_identity": _DRAFT_REVISION,
-            },
-            "num_speculative_tokens": 3,
-            "training": {"interval_steps": interval_steps},
-        }
-    )
-    trainer.global_step = 2
-    trainer._speculator_capture_active = False
-    trainer._speculator_revision = "draft-step-1"
-    trainer._sealed_speculator_capture_uri = None
-    trainer._speculator_checkpoint_root = "s3://bucket/checkpoints/drafts"
-    trainer._draft_trainer = _DraftTrainer()
-    trainer._draft_trainer_update_ref = None
-    trainer._draft_trainer_submitted_at = None
-    trainer._speculator_refresh_task = None
-    trainer._speculator_requested_revision = None
-    trainer._speculator_update_failures = 0
-    trainer._speculator_install_count = 0
-    trainer._speculator_install_failures = 0
-    trainer._speculator_checkpoint_poll_failures = 0
-    trainer.inference_engine_client = _SpeculatorCaptureClient()
-    trainer.all_metrics = {}
-    trainer.all_timings = {}
-    trainer.cfg = OmegaConf.create(
-        {
-            "trainer": {"seed": 17, "ckpt_path": "s3://bucket/checkpoints"},
-            "generator": {"num_inference_engines": 1, "inference_engine_data_parallel_size": 2},
-        }
-    )
-    return trainer
-
-
-def test_online_speculator_capture_seals_target_snapshot_before_training_boundary(monkeypatch):
-    trainer = _online_speculator_trainer(interval_steps=2)
-    monkeypatch.setattr(trainer_module.io, "exists", lambda _uri: False)
-
-    asyncio.run(trainer._begin_speculator_capture(trainer.global_step))
-    asyncio.run(trainer._seal_speculator_capture())
-
-    assert trainer.inference_engine_client.begins == [
-        {
-            "step": 2,
-            "max_tokens": 16_384,
-            "max_window_tokens": 16_384,
-            "target_revision": "policy-step-1",
-            "draft_revision": "draft-step-1",
-            "reserved_gpu_memory_gib": 8,
-        }
-    ]
-    assert trainer.inference_engine_client.seals == ["s3://bucket/checkpoints/drafts/captures/step-2"]
-    assert trainer._sealed_speculator_capture_uri == "s3://bucket/checkpoints/drafts/captures/step-2"
-    assert trainer.all_metrics["speculator/sealed_rows"] == 84.0
-    assert trainer.all_metrics["speculator/sealed_windows"] == 2.0
-    assert trainer.all_metrics["speculator/capture_dropped_windows"] == 3.0
-    assert trainer._speculator_capture_active is False
-
-
-def test_online_speculator_capture_cadence_is_idempotent(monkeypatch):
-    trainer = _online_speculator_trainer(interval_steps=3)
-    monkeypatch.setattr(trainer_module.io, "exists", lambda _uri: False)
-
-    asyncio.run(trainer._begin_speculator_capture(trainer.global_step))
-    assert trainer.inference_engine_client.begins == []
-
-    trainer.global_step = 3
-    asyncio.run(trainer._begin_speculator_capture(trainer.global_step))
-    asyncio.run(trainer._begin_speculator_capture(trainer.global_step))
-
-    assert len(trainer.inference_engine_client.begins) == 1
-
-
-def test_online_speculator_update_overlaps_then_refreshes_at_boundary(monkeypatch):
-    trainer = _online_speculator_trainer()
-    monkeypatch.setattr(trainer_module.io, "exists", lambda _uri: False)
-    monkeypatch.setattr(trainer_module, "_poll_object_ref", lambda ref: (True, ref.value))
-    monkeypatch.setattr(
-        trainer_module,
-        "read_latest_draft_checkpoint",
-        lambda _root, **_kwargs: _draft_checkpoint("s3://bucket/checkpoints/drafts/draft-step-2"),
-    )
-
-    async def scenario():
-        await trainer._begin_speculator_capture(trainer.global_step)
-        await trainer._seal_speculator_capture()
-        await trainer._start_speculator_update()
-        assert trainer._draft_trainer_update_ref is not None
-        job = trainer._draft_trainer.updates[0]
-        assert job.capture_uri.endswith("/captures/step-2")
-        assert job.target_revision == "policy-step-1"
-        assert job.seed == 17
-        await trainer._poll_speculator_lifecycle()
-        await trainer._refresh_latest_speculator(wait=True)
-
-    asyncio.run(scenario())
-
-    assert trainer.inference_engine_client.refreshes == [
-        "s3://bucket/checkpoints/drafts/draft-step-2/model.safetensors"
-    ]
-    assert trainer._speculator_revision == "draft-step-2"
-    assert trainer.all_metrics["speculator/install_count"] == 1.0
-    assert trainer.all_metrics["speculator/candidate_accepted"] == 1.0
-
-
-def test_online_speculator_failed_engine_is_recorded_without_rejecting_accepted_revision(monkeypatch):
-    trainer = _online_speculator_trainer()
-    monkeypatch.setattr(
-        trainer_module,
-        "read_latest_draft_checkpoint",
-        lambda _root, **_kwargs: _draft_checkpoint("s3://bucket/checkpoints/drafts/draft-step-2"),
-    )
-    trainer.inference_engine_client.refresh_result = [
-        {
-            "active": False,
-            "error": "RuntimeError: draft load failed",
-        }
-    ]
-
-    asyncio.run(trainer._refresh_latest_speculator(wait=True))
-
-    assert trainer._speculator_revision == "draft-step-1"
-    assert trainer._speculator_requested_revision is None
-    assert trainer.all_metrics["speculator/install_successful_engines"] == 0.0
-    assert trainer.all_metrics["speculator/install_failed_engines"] == 1.0
-    assert trainer.all_metrics["speculator/install_failures"] == 1.0
-
-
-def test_online_speculator_stale_accepted_revision_still_refreshes_serving(monkeypatch):
-    trainer = _online_speculator_trainer()
-    monkeypatch.setattr(
-        trainer_module,
-        "read_latest_draft_checkpoint",
-        lambda _root, **_kwargs: _draft_checkpoint("s3://bucket/checkpoints/drafts/draft-step-2"),
-    )
-    trainer.global_step = 5
-
-    asyncio.run(trainer._refresh_latest_speculator(wait=True))
-
-    assert trainer._speculator_revision == "draft-step-2"
-    assert len(trainer.inference_engine_client.refreshes) == 1
-
-
-def test_online_speculator_checkpoint_poll_failure_is_nonfatal_and_counted(monkeypatch):
-    trainer = _online_speculator_trainer()
-
-    def fail_poll(_root, **_kwargs):
-        raise OSError("object store unavailable")
-
-    monkeypatch.setattr(trainer_module, "read_latest_draft_checkpoint", fail_poll)
-
-    asyncio.run(trainer._start_latest_speculator_refresh())
-
-    assert trainer._speculator_refresh_task is None
-    assert trainer.all_metrics["speculator/checkpoint_poll_failures"] == 1.0
-
-
-def test_online_speculator_busy_draft_trainer_skips_capture(monkeypatch) -> None:
-    trainer = _online_speculator_trainer()
-    trainer._draft_trainer_update_ref = _ImmediateRef(None)
-    monkeypatch.setattr(trainer_module, "_poll_object_ref", lambda _ref: (False, None))
-    monkeypatch.setattr(trainer_module, "read_latest_draft_checkpoint", lambda _root, **_kwargs: None)
-
-    asyncio.run(trainer._begin_speculator_capture(trainer.global_step))
-
-    assert trainer.inference_engine_client.begins == []
-
-
-def test_online_speculator_capture_accepts_multiple_vllm_ranks(monkeypatch) -> None:
-    trainer = _online_speculator_trainer()
-    monkeypatch.setattr(trainer_module.io, "exists", lambda _uri: False)
-
-    async def begin_cross_node(_config):
-        return [
-            [
-                {"active": True, "worker_rank": 0},
-                {"active": True, "worker_rank": 1},
-            ]
-        ]
-
-    trainer.inference_engine_client.begin_online_eagle_capture = begin_cross_node
-
-    asyncio.run(trainer._begin_speculator_capture(trainer.global_step))
-
-    assert trainer._speculator_capture_active is True
-
-
-def test_online_speculator_partial_capture_is_still_handed_off(monkeypatch) -> None:
-    trainer = _online_speculator_trainer()
-    monkeypatch.setattr(trainer_module.io, "exists", lambda _uri: False)
-    asyncio.run(trainer._begin_speculator_capture(trainer.global_step))
-
-    async def partial_seal(_destination):
-        return [
-            [
-                {
-                    "active": True,
-                    "worker_rank": 0,
-                    "captured_rows": 41,
-                    "windows": [],
-                },
-                {"active": False, "worker_rank": 1},
-            ]
-        ]
-
-    trainer.inference_engine_client.seal_online_eagle_capture = partial_seal
-
-    asyncio.run(trainer._seal_speculator_capture())
-
-    assert trainer._sealed_speculator_capture_uri is not None
-
-
-def test_online_speculator_pending_update_keeps_the_incumbent(monkeypatch) -> None:
-    trainer = _online_speculator_trainer()
-    trainer._draft_trainer_update_ref = _ImmediateRef(None)
-    monkeypatch.setattr(trainer_module, "_poll_object_ref", lambda _ref: (False, None))
-    monkeypatch.setattr(trainer_module, "read_latest_draft_checkpoint", lambda _root, **_kwargs: None)
-
-    asyncio.run(trainer._poll_speculator_lifecycle())
-
-    assert trainer._speculator_revision == "draft-step-1"
-    assert trainer.inference_engine_client.refreshes == []
-    assert trainer.all_metrics["speculator/update_pending"] == 1.0
-    assert trainer.all_metrics["speculator/update_failures"] == 0.0
-
-
-def test_online_speculator_invalid_update_result_is_nonfatal(monkeypatch) -> None:
-    trainer = _online_speculator_trainer()
-    trainer._draft_trainer_update_ref = _ImmediateRef(None)
-    monkeypatch.setattr(trainer_module, "_poll_object_ref", lambda _ref: (True, None))
-    monkeypatch.setattr(trainer_module, "read_latest_draft_checkpoint", lambda _root, **_kwargs: None)
-
-    asyncio.run(trainer._poll_speculator_lifecycle())
-
-    assert trainer._draft_trainer_update_ref is None
-    assert trainer.all_metrics["speculator/update_pending"] == 0.0
-    assert trainer.all_metrics["speculator/update_failures"] == 1.0
-
-
-def test_online_speculator_without_latest_checkpoint_keeps_initial_draft(monkeypatch):
-    trainer = _online_speculator_trainer()
-    monkeypatch.setattr(trainer_module, "read_latest_draft_checkpoint", lambda _root, **_kwargs: None)
-
-    asyncio.run(trainer._refresh_latest_speculator(wait=True))
-
-    assert trainer._speculator_revision == "draft-step-1"
-    assert trainer.inference_engine_client.refreshes == []
-
-
-def test_online_speculator_normalizes_gcs_checkpoint_for_vllm(monkeypatch) -> None:
-    trainer = _online_speculator_trainer()
-    monkeypatch.setattr(
-        trainer_module,
-        "read_latest_draft_checkpoint",
-        lambda _root, **_kwargs: _draft_checkpoint("gcs://bucket/checkpoints/drafts/draft-step-2"),
-    )
-
-    asyncio.run(trainer._refresh_latest_speculator(wait=True))
-
-    assert trainer.inference_engine_client.refreshes == [
-        "gs://bucket/checkpoints/drafts/draft-step-2/model.safetensors"
-    ]
-
-
-def test_online_speculator_refresh_failure_is_retryable(monkeypatch) -> None:
-    trainer = _online_speculator_trainer()
-    monkeypatch.setattr(
-        trainer_module,
-        "read_latest_draft_checkpoint",
-        lambda _root, **_kwargs: _draft_checkpoint("s3://bucket/checkpoints/drafts/draft-step-2"),
-    )
-    trainer.inference_engine_client.refresh_result = [{"active": False, "error": "load failed"}]
-
-    asyncio.run(trainer._refresh_latest_speculator(wait=True))
-    assert trainer._speculator_requested_revision is None
-    trainer.inference_engine_client.refresh_result = [{"active": True}]
-    asyncio.run(trainer._refresh_latest_speculator(wait=True))
-
-    assert trainer._speculator_revision == "draft-step-2"
-    assert len(trainer.inference_engine_client.refreshes) == 2
-
-
-_TEST_PROGRESS_CONFIG = {
-    "mode": "tqdm",
-    "min_interval_seconds": 0.5,
-    "heartbeat_seconds": 15,
-    "percent_step": 5,
-    "count_step": 1000,
-}
 
 
 @pytest.fixture
 def dummy_config():
     return example_dummy_config()
-
-
-class DummyDataset:
-    def __len__(self):
-        return 2
-
-    def __getitem__(self, idx):
-        return "dummy"
-
-    def collate_fn(self, batch):
-        return batch
-
-
-def _stub_context(cfg) -> SimpleNamespace:
-    return SimpleNamespace(config=SimpleNamespace(max_staleness_steps=0, batch_size=cfg.trainer.train_batch_size))
 
 
 class _CapturingPolicyGroup:
@@ -478,6 +51,21 @@ class _CapturingPolicyGroup:
             return [object()]
         if method_name == "empty_cache":
             return []
+        raise AssertionError(f"Unexpected policy method: {method_name}")
+
+
+class _ForwardPolicyGroup:
+    actor_infos = [SimpleNamespace(rank=MeshRank(dp=0, sp=0, tp=0, pp=0, world_size=1, dp_size=1, pp_size=1))]
+
+    def async_run_ray_method(self, dispatch_type, method_name, **kwargs):
+        if method_name == "barrier_all":
+            return [ray.put(None)]
+        if method_name == "empty_cache":
+            return []
+        if method_name == "forward":
+            data = kwargs["data"]
+            output = torch.zeros(len(data["sequences"]), data.metadata["response_length"])
+            return [ray.put(TrainingOutputBatch({"output": output}))]
         raise AssertionError(f"Unexpected policy method: {method_name}")
 
 
@@ -501,12 +89,14 @@ class _CheckpointResidencyPolicyGroup(_ResidencyPolicyGroup):
     def __init__(self):
         super().__init__()
         self.restore_residencies = []
+        self.restored_dirs = []
 
     def async_run_ray_method(self, dispatch_type, method_name, **kwargs):
         assert dispatch_type == "pass_through"
         assert method_name == "load_checkpoint"
         assert kwargs["load_training_state"]
         self.restore_residencies.append((self.model_on_gpu, self.optimizer_on_gpu))
+        self.restored_dirs.append(kwargs["ckpt_dir"])
         return []
 
 
@@ -618,7 +208,8 @@ def test_checkpoint_marker_waits_for_rank_uploads(monkeypatch, tmp_path):
     trainer.policy_model = SimpleNamespace(async_run_ray_method=lambda *_args: [object()])
     trainer.critic_model = None
     trainer._last_saved_step = None
-    trainer._cleanup_old_checkpoints = MagicMock()
+    cleanups = []
+    trainer._cleanup_old_checkpoints = lambda: cleanups.append(trainer._last_saved_step)
     upload_started = threading.Event()
     release_upload = threading.Event()
 
@@ -650,7 +241,7 @@ def test_checkpoint_marker_waits_for_rank_uploads(monkeypatch, tmp_path):
     assert Path(snapshot.trainer_state_path).read_bytes() == b"trainer"
     assert Path(snapshot.marker_path).read_text() == "6"
     assert trainer._last_saved_step == 6
-    trainer._cleanup_old_checkpoints.assert_called_once_with()
+    assert cleanups == [6]
 
 
 def test_background_checkpoint_failure_does_not_advance_marker(monkeypatch, tmp_path):
@@ -687,44 +278,32 @@ def test_background_checkpoint_failure_does_not_advance_marker(monkeypatch, tmp_
     assert trainer.all_metrics["trainer/checkpoint_save_failures"] == 1.0
 
 
-def test_step_end_waits_for_checkpoint_upload_before_hf_export():
+@pytest.mark.parametrize(
+    ("checkpoint_committed", "expected_events"),
+    [(True, ["checkpoint_committed", "hf_export"]), (False, ["checkpoint_failed"])],
+)
+def test_step_end_exports_hf_model_only_after_checkpoint_upload_commits(checkpoint_committed, expected_events):
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
-    control = MagicMock()
-    control.should_save = False
-    control.should_save_hf_model = True
-    control.should_evaluate = False
-    trainer._control = control
+    trainer._control = TrainerControl()
     trainer.eval_dataset = None
-    trainer.callback_handler = SimpleNamespace(call_event_async=AsyncMock(return_value=control))
+
+    async def request_hf_export(event, state, control, **_kwargs):
+        control.should_save_hf_model = True
+        return control
+
+    trainer.callback_handler = SimpleNamespace(call_event_async=request_hf_export)
     events = []
 
     async def drain_upload():
-        events.append("checkpoint_committed")
-        return True
+        events.append("checkpoint_committed" if checkpoint_committed else "checkpoint_failed")
+        return checkpoint_committed
 
     trainer._drain_checkpoint_upload = drain_upload
     trainer.handle_hf_export = lambda: events.append("hf_export")
 
     asyncio.run(trainer._run_step_end_callbacks(SimpleNamespace()))
 
-    assert events == ["checkpoint_committed", "hf_export"]
-
-
-def test_step_end_skips_hf_export_after_checkpoint_upload_failure():
-    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
-    control = MagicMock()
-    control.should_save = False
-    control.should_save_hf_model = True
-    control.should_evaluate = False
-    trainer._control = control
-    trainer.eval_dataset = None
-    trainer.callback_handler = SimpleNamespace(call_event_async=AsyncMock(return_value=control))
-    trainer._drain_checkpoint_upload = AsyncMock(return_value=False)
-    trainer.handle_hf_export = MagicMock()
-
-    asyncio.run(trainer._run_step_end_callbacks(SimpleNamespace()))
-
-    trainer.handle_hf_export.assert_not_called()
+    assert events == expected_events
 
 
 @pytest.mark.parametrize("dtype", [torch.bool, torch.int64, torch.float32])
@@ -748,299 +327,36 @@ def test_consumed_staleness_counts_selected_masked_sequences_by_group(dtype, mon
     assert all(event[2]["step"] == "7" for event in events)
 
 
-def test_sync_trainer_attaches_global_loss_denominator_before_dispatch(monkeypatch):
-    trainer = object.__new__(RayPPOTrainer)
-    trainer.cfg = OmegaConf.create(
-        {
-            "trainer": {
-                "algorithm": {"loss_reduction": "seq_mean_token_sum_norm_global", "max_seq_len": 8},
-                "offload_optimizer_during_rollouts": False,
-            }
-        }
-    )
-    trainer.global_step = 3
-    trainer.all_metrics = {}
-    trainer.all_timings = {}
-    trainer.colocate_all = False
-    trainer.critic_model = None
-    trainer.policy_model = _CapturingPolicyGroup()
-
-    status = TrainingOutputBatch()
-    status.metadata = {"train_status": {}}
-    monkeypatch.setattr(trainer_module, "collect_actor_results", lambda *args, **kwargs: [status])
-    monkeypatch.setattr(trainer_module.ray, "get", lambda refs: refs)
-
-    batch = TrainingInputBatch({"advantages": torch.tensor([[1.0, 0.0], [0.0, 2.0]])})
-    batch.metadata = {}
-
-    trainer.train_critic_and_policy(batch)
-
-    assert trainer.policy_model.training_batch.metadata["global_loss_denom"] == 32.0
-
-
 @pytest.fixture
 def dummy_tokenizer():
-    mock_tokenizer = MagicMock()
-    mock_tokenizer.pad_token_id = 0
-    mock_tokenizer.eos_token_id = 2
-
-    # encode("abc") -> [97, 98, 99]
-    mock_tokenizer.encode.side_effect = lambda x: [ord(c) for c in x]
-
-    # tokenizer("abc") -> {"input_ids": [...], "attention_mask": [...]}
-    def fake_tokenizer_call(text, **kwargs):
-        ids = [ord(c) for c in text]
-        return {
-            "input_ids": ids,
-            "attention_mask": [1] * len(ids),
-        }
-
-    mock_tokenizer.side_effect = fake_tokenizer_call
-
-    return mock_tokenizer
+    # convert_to_training_input only pads with pad_token_id; any other tokenizer use should fail loudly.
+    return SimpleNamespace(pad_token_id=0)
 
 
-@pytest.fixture
-def dummy_trajectory_runner():
-    return MagicMock()
+@pytest.mark.parametrize(
+    "resume_path",
+    [
+        "s3://marin-us-east-02a/iris/test/checkpoints/global_step_12",
+        "s3://marin-us-east-02a/iris/test/checkpoints/global_step_12/",
+    ],
+)
+def test_load_checkpoints_probes_cloud_resume_uri_without_trailing_slash(dummy_config, monkeypatch, resume_path):
+    probed = []
 
+    def exists(uri):
+        probed.append(uri)
+        return False
 
-class _ObservableGrugCausalLM(GrugMoeForCausalLM):
-    def __init__(self):
-        self.config = SimpleNamespace(
-            num_experts_per_tok=2,
-            num_local_experts=4,
-            num_hidden_layers=1,
-        )
-        self.query_bias = torch.tensor([[3.0, -3.0]])
-
-    def set_query_bias(self, query_bias):
-        self.query_bias = query_bias.clone()
-
-    def get_query_bias(self):
-        return self.query_bias.clone()
-
-
-class _FixedQueryBiasAccumulator:
-    def __init__(self, betas):
-        self.betas = betas
-
-    def finalize_betas(self):
-        return self.betas
-
-
-class _FixedExpertLoadAccumulator:
-    def __init__(self, loads):
-        self.loads = loads
-
-    def finalize_loads(self):
-        return self.loads
-
-
-def _window_with_grug_query_bias_accumulator(accumulator, *, target_weight=1.0):
-    causal_lm = _ObservableGrugCausalLM()
-    shard_layout = GrugQueryBiasShardLayout(micro_batch_size=1, accumulation_steps=1, ep_size=1, ep_rank=0)
-    capture_plan = GrugQueryBiasCapturePlan.build(torch.ones((1, 1)), shard_layout)
-    updater = GrugQuantileBiasUpdater(causal_lm, valid_tokens=1, target_weight=target_weight)
-    updater.accumulator = accumulator
-    window = GrugQueryBiasWindow(causal_lm, capture_plan, updater)
-    return window, causal_lm
-
-
-def _window_with_grug_loss_free_accumulator(accumulator, *, update_rate=0.001):
-    causal_lm = _ObservableGrugCausalLM()
-    shard_layout = GrugQueryBiasShardLayout(micro_batch_size=1, accumulation_steps=1, ep_size=1, ep_rank=0)
-    capture_plan = GrugQueryBiasCapturePlan.build(torch.ones((1, 1)), shard_layout)
-    updater = GrugLossFreeBiasUpdater(causal_lm, update_rate=update_rate)
-    updater.accumulator = accumulator
-    window = GrugQueryBiasWindow(causal_lm, capture_plan, updater)
-    return window, causal_lm
-
-
-def test_failed_optimizer_step_discards_grug_query_bias_window():
-    accumulator = _FixedQueryBiasAccumulator(torch.tensor([[1.0, -2.0]]))
-    window, causal_lm = _window_with_grug_query_bias_accumulator(accumulator)
-    previous_bias = causal_lm.query_bias.clone()
-
-    window.finish(optimizer_step_succeeded=False)
-    window.finish(optimizer_step_succeeded=True)
-
-    torch.testing.assert_close(causal_lm.query_bias, previous_bias)
-
-
-def test_successful_step_applies_grug_query_bias_once():
-    betas = torch.tensor([[1.0, -2.0]])
-    accumulator = _FixedQueryBiasAccumulator(betas)
-    window, causal_lm = _window_with_grug_query_bias_accumulator(accumulator)
-
-    window.finish(optimizer_step_succeeded=True)
-
-    torch.testing.assert_close(causal_lm.query_bias, next_query_bias(betas))
-    causal_lm.query_bias.fill_(17)
-    window.finish(optimizer_step_succeeded=True)
-    torch.testing.assert_close(causal_lm.query_bias, torch.full_like(causal_lm.query_bias, 17))
-
-
-def test_successful_step_interpolates_toward_grug_query_bias_target():
-    betas = torch.tensor([[1.0, -2.0]])
-    accumulator = _FixedQueryBiasAccumulator(betas)
-    window, causal_lm = _window_with_grug_query_bias_accumulator(accumulator, target_weight=0.25)
-    previous_bias = causal_lm.query_bias.clone()
-
-    window.finish(optimizer_step_succeeded=True)
-
-    expected = torch.lerp(previous_bias, next_query_bias(betas), 0.25)
-    torch.testing.assert_close(causal_lm.query_bias, expected)
-
-
-def test_successful_step_moves_grug_query_bias_target_to_buffer_device():
-    accumulator = _FixedQueryBiasAccumulator(torch.tensor([[1.0, -2.0]]))
-    window, causal_lm = _window_with_grug_query_bias_accumulator(accumulator, target_weight=0.25)
-    causal_lm.query_bias = causal_lm.query_bias.to("meta")
-
-    window.finish(optimizer_step_succeeded=True)
-
-    assert causal_lm.query_bias.device.type == "meta"
-
-
-@pytest.mark.parametrize("optimizer_step_succeeded", [False, True])
-def test_loss_free_bias_updates_only_after_successful_optimizer_step(optimizer_step_succeeded):
-    loads = torch.tensor([[3.0, 1.0]])
-    accumulator = _FixedExpertLoadAccumulator(loads)
-    window, causal_lm = _window_with_grug_loss_free_accumulator(accumulator)
-    previous_bias = causal_lm.query_bias.clone()
-
-    window.finish(optimizer_step_succeeded=optimizer_step_succeeded)
-
-    expected = (
-        next_loss_free_query_bias(previous_bias, loads, update_rate=0.001)
-        if optimizer_step_succeeded
-        else previous_bias
-    )
-    torch.testing.assert_close(causal_lm.query_bias, expected)
-
-
-def test_grug_query_bias_virtual_shards_partition_optimizer_window():
-    attention_mask = torch.tensor(
-        [
-            [1, 1, 0],
-            [1, 0, 0],
-            [1, 1, 1],
-            [0, 1, 1],
-        ]
-    )
-    microbatches = attention_mask.split(2)
-
-    rank_masks = []
-    for ep_rank in range(2):
-        shard_layout = GrugQueryBiasShardLayout(
-            micro_batch_size=2,
-            accumulation_steps=2,
-            ep_size=2,
-            ep_rank=ep_rank,
-        )
-        capture_plan = GrugQueryBiasCapturePlan.build(attention_mask, shard_layout)
-        assert capture_plan.valid_token_counts == ((3, 0), (0, 5))[ep_rank]
-        rank_masks.append(
-            torch.cat([shard_layout.mask_for(mask, local_step) for local_step, mask in enumerate(microbatches)])
-        )
-
-    torch.testing.assert_close(rank_masks[0].logical_xor(rank_masks[1]), attention_mask.bool())
-    assert not torch.logical_and(rank_masks[0], rank_masks[1]).any()
-    assert rank_masks[0].sum().item() == 3
-    assert rank_masks[1].sum().item() == 5
-    single_rank_layout = GrugQueryBiasShardLayout(
-        micro_batch_size=4,
-        accumulation_steps=1,
-        ep_size=1,
-        ep_rank=0,
-    )
-    torch.testing.assert_close(
-        single_rank_layout.mask_for(attention_mask, local_step=0),
-        attention_mask.bool(),
-    )
-
-
-def _get_test_data(trainer: RayPPOTrainer):
-    trainer.critic_model = MagicMock()  # pretend we're using a critic
-
-    batch_size = 2
-    total_seq_len = 5
-    action_len = 3
-
-    # Create test data
-    ret_sequences: Float[torch.Tensor, "batch_size total_seq_len"] = torch.randint(0, 1000, (batch_size, total_seq_len))
-    ret_attention_masks: Float[torch.Tensor, "batch_size total_seq_len"] = torch.ones((batch_size, total_seq_len))
-    ret_loss_masks: Integer[torch.Tensor, "batch_size total_seq_len"] = torch.stack(
-        [torch.tensor([1, 1, 0, 0, 0], dtype=torch.int32), torch.tensor([1, 1, 1, 0, 0], dtype=torch.int32)], dim=0
-    )
-    base_log_probs: Float[torch.Tensor, "batch_size total_seq_len"] = torch.log(
-        torch.tensor([[0.1, 0.2, 0.3, 0.2, 0.2], [0.25, 0.25, 0.25, 0.15, 0.10]])
-    )
-    action_log_probs: Float[torch.Tensor, "batch_size total_seq_len"] = torch.log(
-        torch.tensor([[0.1, 0.3, 0.2, 0.2, 0.2], [0.3, 0.3, 0.2, 0.1, 0.1]])
-    )
-    action_masks: Integer[torch.Tensor, "batch_size total_seq_len"] = torch.stack(
-        [torch.tensor([1, 1, 1, 0, 0], dtype=torch.int32), torch.tensor([1, 1, 1, 1, 1], dtype=torch.int32)], dim=0
-    )
-    actual_response_lengths: Float[torch.Tensor, "batch_size"] = action_masks.sum(dim=-1).to(float)
-    rewards_all: Float[torch.Tensor, "batch_size total_seq_len"] = torch.stack(
-        [torch.tensor([0.0, 1.0, 0.0, 0.0, 0.0]), torch.tensor([0.0, 0.0, 1.0, 0.0, 0.0])], dim=0
-    )
-    values: Float[torch.Tensor, "batch_size action_len"] = torch.randn(batch_size, action_len)
-    uids: np.ndarray[str] = np.array(["0", "0"])
-
-    # Run method
-    data = TrainingInputBatch(
-        {
-            "sequences": ret_sequences,
-            "attention_mask": ret_attention_masks,
-            "loss_mask": ret_loss_masks,
-            "base_action_log_probs": base_log_probs,
-            "action_log_probs": action_log_probs,
-            "response_mask": action_masks,
-            "rewards": rewards_all,
-            "values": values,
-        },
-    )
-    data.metadata = {
-        "uids": uids,
-        "response_length": action_len,
-        "avg_response_length": actual_response_lengths.mean().item(),
-    }
-    data = trainer.apply_reward_kl_penalty(data)
-
-    return data
-
-
-def test_load_checkpoints_preserves_cloud_resume_uri(dummy_config):
-    resume_path = "s3://marin-us-east-02a/iris/test/checkpoints/global_step_12"
+    monkeypatch.setattr(trainer_module.io, "exists", exists)
     dummy_config.trainer.resume_path = resume_path
-
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
     trainer.cfg = dummy_config
     trainer.resume_mode = ResumeMode.FROM_PATH
 
-    with patch("skyrl_train.trainer.io.exists", return_value=False) as exists:
-        with pytest.raises(FileNotFoundError, match="Checkpoint path not found"):
-            trainer.load_checkpoints()
+    with pytest.raises(FileNotFoundError, match="Checkpoint path not found"):
+        trainer.load_checkpoints()
 
-    exists.assert_called_once_with(resume_path)
-
-
-def test_load_checkpoints_accepts_trailing_slash_resume_path(dummy_config):
-    resume_path = "s3://marin-us-east-02a/iris/test/checkpoints/global_step_12/"
-    dummy_config.trainer.resume_path = resume_path
-
-    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
-    trainer.cfg = dummy_config
-    trainer.resume_mode = ResumeMode.FROM_PATH
-
-    with patch("skyrl_train.trainer.io.exists", return_value=False) as exists:
-        with pytest.raises(FileNotFoundError, match="Checkpoint path not found"):
-            trainer.load_checkpoints()
-
-    exists.assert_called_once_with(resume_path.rstrip("/"))
+    assert probed == ["s3://marin-us-east-02a/iris/test/checkpoints/global_step_12"]
 
 
 def test_load_checkpoints_offloads_disaggregated_optimizer_before_policy_restore(dummy_config, tmp_path, monkeypatch):
@@ -1071,7 +387,9 @@ def test_load_checkpoints_offloads_disaggregated_optimizer_before_policy_restore
 
 
 @pytest.mark.parametrize("restore_dataloader_state", [False, True])
-def test_load_checkpoints_restores_rollout_state_only_when_requested(tmp_path, dummy_config, restore_dataloader_state):
+def test_load_checkpoints_restores_rollout_state_only_when_requested(
+    tmp_path, dummy_config, monkeypatch, restore_dataloader_state
+):
     checkpoint_path = tmp_path / "global_step_12"
     checkpoint_path.mkdir()
     torch.save({"global_step": 12}, checkpoint_path / "trainer_state.pt")
@@ -1089,13 +407,13 @@ def test_load_checkpoints_restores_rollout_state_only_when_requested(tmp_path, d
     trainer.resume_mode = ResumeMode.FROM_PATH
     trainer.colocate_all = True
     trainer._restored_rollout_state = None
-    trainer.policy_model = MagicMock()
-    trainer.policy_model.async_run_ray_method.return_value = []
+    trainer.policy_model = _CheckpointResidencyPolicyGroup()
     trainer.critic_model = None
     trainer._domain_balancer = None
 
-    with patch("skyrl_train.trainer.ray.get", return_value=None):
-        global_step, loaded_path = trainer.load_checkpoints()
+    monkeypatch.setattr(trainer_module.ray, "get", lambda refs: refs)
+
+    global_step, loaded_path = trainer.load_checkpoints()
 
     assert global_step == 12
     assert loaded_path == str(checkpoint_path)
@@ -1109,6 +427,7 @@ def test_load_checkpoints_restores_rollout_state_only_when_requested(tmp_path, d
 def test_load_checkpoints_can_start_a_new_stage_with_continued_model_training_state(
     tmp_path,
     dummy_config,
+    monkeypatch,
     reset_stage_state,
     expected_step,
     expected_tokens,
@@ -1126,79 +445,42 @@ def test_load_checkpoints_can_start_a_new_stage_with_continued_model_training_st
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
     trainer.cfg = dummy_config
     trainer.resume_mode = ResumeMode.FROM_PATH
-    trainer.policy_model = MagicMock()
-    trainer.policy_model.async_run_ray_method.return_value = []
+    trainer.policy_model = _CheckpointResidencyPolicyGroup()
     trainer.critic_model = None
     trainer.colocate_all = True
     trainer._domain_balancer = None
 
-    with patch("skyrl_train.trainer.ray.get", return_value=None):
-        global_step, _ = trainer.load_checkpoints()
+    monkeypatch.setattr(trainer_module.ray, "get", lambda refs: refs)
+
+    global_step, _ = trainer.load_checkpoints()
 
     assert global_step == expected_step
     assert trainer.distillation_scored_tokens_total == expected_tokens
-    trainer.policy_model.async_run_ray_method.assert_called_once_with(
-        "pass_through",
-        "load_checkpoint",
-        ckpt_dir=str(checkpoint_path / "policy"),
-        load_training_state=True,
+    assert trainer.policy_model.restored_dirs == [str(checkpoint_path / "policy")]
+
+
+def test_reward_kl_penalty_reports_masked_kl_metrics():
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create({"trainer": {"algorithm": {"kl_estimator_type": "k1", "kl_loss_coef": 0.0}}})
+    trainer.reward_kl_controller = None
+    trainer.all_metrics = {}
+    data = TrainingInputBatch(
+        {
+            "loss_mask": torch.tensor([[1, 1, 0, 0, 0], [1, 1, 1, 0, 0]], dtype=torch.int32),
+            "base_action_log_probs": torch.log(
+                torch.tensor([[0.1, 0.2, 0.3, 0.2, 0.2], [0.25, 0.25, 0.25, 0.15, 0.10]])
+            ),
+            "action_log_probs": torch.log(torch.tensor([[0.1, 0.3, 0.2, 0.2, 0.2], [0.3, 0.3, 0.2, 0.1, 0.1]])),
+            "rewards": torch.tensor([[0.0, 1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0, 0.0]]),
+        }
     )
+    data.metadata = {}
 
+    metrics = trainer.apply_reward_kl_penalty(data).metadata["metrics"]
 
-def test_calculate_kl_create_experience_batched(dummy_config, dummy_trajectory_runner):
-    trainer = RayPPOTrainer(
-        cfg=dummy_config,
-        tracker=None,
-        tokenizer=None,
-        train_dataset=DummyDataset(),
-        eval_dataset=DummyDataset(),
-        inference_engine_client=None,
-        trajectory_runner=dummy_trajectory_runner,
-        context=_stub_context(dummy_config),
-    )
-    data = _get_test_data(trainer)
-    # Assertions
-    metrics = data.metadata["metrics"]
-    assert metrics["avg_kl_max"] == approx(0.3143, abs=1e-4)
-    # Note; the raw KL mean is 0.054, but then the masked mean is different.
-    assert metrics["avg_kl"] == approx(0.1249, abs=1e-4)
-
-
-@patch("skyrl_train.trainer.compute_advantages_and_returns", new_callable=MagicMock)
-def test_calc_advantages_and_returns(mock_compute_adv_and_ret, dummy_config, dummy_trajectory_runner):
-    trainer = RayPPOTrainer(
-        cfg=dummy_config,
-        tracker=None,
-        tokenizer=None,
-        train_dataset=DummyDataset(),
-        eval_dataset=DummyDataset(),
-        inference_engine_client=None,
-        trajectory_runner=dummy_trajectory_runner,
-        context=_stub_context(dummy_config),
-    )
-    data = _get_test_data(trainer)
-
-    # Mocked return values
-    mock_advantages = torch.tensor([[0.1, 0.2, 0.3, 0.4, 0.5], [0.6, 0.7, 0.8, 0.9, 1.0]])
-    mock_returns = torch.tensor([[0.6, 0.7, 0.8, 0.9, 1.0], [1.1, 1.2, 1.3, 1.4, 1.5]])
-
-    # Set up mocks
-    mock_compute_adv_and_ret.return_value = (mock_advantages, mock_returns)
-
-    # Run the method
-    data = trainer.compute_advantages_and_returns(data)
-    metrics = data.metadata["metrics"]
-
-    # Assertions
-    assert torch.allclose(data["advantages"], mock_advantages)
-    assert torch.allclose(data["returns"], mock_returns)
-    assert isinstance(metrics, dict)
-    assert "avg_final_rewards" in metrics
-    assert "avg_response_length" in metrics
-    assert "avg_advantages_abs" in metrics
-    assert metrics["avg_advantages"] == approx(
-        torch.masked_select(mock_advantages, data["response_mask"].bool()).mean().item(), rel=1e-5
-    )
+    assert metrics["avg_kl_max"] == pytest.approx(0.3143, abs=1e-4)
+    # The raw KL mean is 0.054; masking out the unscored tokens raises it.
+    assert metrics["avg_kl"] == pytest.approx(0.1249, abs=1e-4)
 
 
 @pytest.mark.parametrize(
@@ -1243,6 +525,7 @@ def test_grpo_loop_credit_is_token_local_when_every_group_member_has_the_same_ou
             "response_mask": response_mask,
             "values": None,
             "loop_advantages": loop_advantages,
+            "loss_mask": response_mask,
         }
     )
     data.metadata = {
@@ -1256,14 +539,111 @@ def test_grpo_loop_credit_is_token_local_when_every_group_member_has_the_same_ou
 
     assert torch.equal(result["advantages"], loop_advantages)
     assert torch.equal(result["returns"], torch.zeros(4, response_length))
-    policy_loss, _ = ppo_policy_loss(
-        torch.zeros_like(loop_advantages),
-        torch.zeros_like(loop_advantages),
-        result["advantages"],
-        config=trainer.cfg.trainer.algorithm,
-        loss_mask=response_mask,
+    inputs = PolicyLossInputs(
+        torch.zeros_like(loop_advantages), torch.zeros_like(loop_advantages), None, result["advantages"], response_mask
+    )
+    token_loss = ppo_policy_loss(inputs, trainer.cfg.trainer.algorithm)
+    counts = step_counts(
+        [response_mask], [response_mask], [], [result["advantages"]], response_length, lambda value: value
+    )
+    policy_loss = reduce_to_step(
+        token_loss.values,
+        response_mask,
+        counts.policy,
+        LossReduction(loss_reduction),
+        max_seq_len=response_length,
+        nonzero_advantage_rows=counts.nonzero_advantage_rows,
     )
     assert policy_loss.item() == pytest.approx(expected_policy_loss)
+
+
+def test_replace_mode_rejects_batch_without_teacher_evidence(ray_init, dummy_config, local_distillation_config):
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = local_distillation_config(dummy_config)
+    trainer.cfg.trainer.algorithm.distillation.reward_mode = "replace"
+    trainer.distillation_plan = compile_distillation_plan_from_config(trainer.cfg)
+    trainer.policy_model = _ForwardPolicyGroup()
+    trainer.ref_model = None
+    trainer.critic_model = None
+    trainer.colocate_all = False
+    trainer.global_step = 1
+    trainer.all_timings = {}
+    trainer._training_metrics_enabled = False
+    batch = TrainingInputBatch(
+        {
+            "sequences": torch.tensor([[1, 2, 3]]),
+            "attention_mask": torch.ones(1, 3, dtype=torch.long),
+            "loss_mask": torch.ones(1, 2),
+            "rollout_logprobs": None,
+        }
+    )
+    batch.metadata = {"response_length": 2}
+
+    with pytest.raises(ValueError, match="replace requires teacher evidence on every training batch"):
+        asyncio.run(trainer._run_training(batch))
+
+
+@pytest.mark.parametrize("reward_mode", ["add", "replace"])
+@pytest.mark.parametrize("clip", [None, 0.5])
+def test_teacher_credit_follows_environment_normalization_and_loop_credit(
+    dummy_config, local_distillation_config, reward_mode, clip
+):
+    config = local_distillation_config(dummy_config)
+    config.trainer.algorithm.advantage_batch_normalize = reward_mode == "add"
+    config.trainer.algorithm.advantage_estimator = "uniform" if reward_mode == "replace" else "grpo"
+    config.trainer.algorithm.distillation.reward_mode = reward_mode
+    config.trainer.algorithm.distillation.advantage_clip = clip
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = config
+    trainer.distillation_plan = compile_distillation_plan_from_config(config)
+    trainer.all_metrics = {}
+    mask = torch.tensor([[1.0, 1.0, 0.0, 1.0]])
+    valid = torch.tensor([[True, False, False, True]])
+    if reward_mode == "replace":
+        mask *= valid
+    batch = TrainingInputBatch(
+        {
+            "sequences": torch.tensor([[1, 2, 3, 4, 5]]),
+            "attention_mask": torch.ones(1, 5, dtype=torch.long),
+            "action_log_probs": torch.tensor([[-1.0, -1.0, torch.nan, -1.0]], requires_grad=True),
+            "base_action_log_probs": None,
+            "values": None,
+            "returns": torch.zeros(1, 4),
+            "advantages": torch.tensor([[1.0, 3.0, torch.nan, 5.0]]),
+            "rewards": torch.zeros(1, 4),
+            "loop_advantages": torch.tensor([[-0.1, -0.2, 0.0, -0.3]]) if reward_mode == "add" else torch.zeros(1, 4),
+            "response_mask": torch.ones(1, 4),
+            "loss_mask": mask,
+            "teacher_action_log_probs": torch.tensor([[-0.2, torch.nan, torch.nan, -2.5]], requires_grad=True),
+            "teacher_valid_mask": valid,
+            "distillation_loss_weights": torch.tensor([[0.3, torch.nan, torch.nan, 2.0]]),
+        }
+    )
+    batch.metadata = {"uids": ["a"], "response_length": 4}
+
+    result = trainer.finalize_advantages_for_training(batch)
+    [experience] = list(TrainingBatchIterator(result, sample_batch_size=1))
+
+    teacher = torch.tensor([[0.24, 0.0, 0.0, -3.0]]) if clip is None else torch.tensor([[0.15, 0.0, 0.0, -1.0]])
+    normalized = torch.tensor([[-(1.5**0.5) - 0.1, -0.2, 0.0, 1.5**0.5 - 0.3]])
+    expected = teacher if reward_mode == "replace" else normalized + teacher
+    torch.testing.assert_close(experience.advantages, expected)
+    assert not experience.advantages.requires_grad
+    assert experience.distillation is None
+    for name in (
+        "teacher_action_log_probs",
+        "teacher_valid_mask",
+        "distillation_loss_weights",
+        "loop_advantages",
+        "rewards",
+    ):
+        assert name not in result
+    assert trainer.all_metrics["distillation/teacher_advantage_mean"] == pytest.approx(teacher.sum().item() / 2)
+    assert trainer.all_metrics["distillation/teacher_advantage_abs_mean"] == pytest.approx(
+        teacher.abs().sum().item() / 2
+    )
+    assert trainer.all_metrics["distillation/teacher_advantage_clipped_fraction"] == (0 if clip is None else 1)
+    assert trainer.all_metrics["distillation/valid_tokens"] == 2
 
 
 def test_loop_advantages_are_collated_with_response_tokens(dummy_config, dummy_tokenizer):
@@ -1303,7 +683,7 @@ def test_teacher_evidence_is_validated_and_collated_with_response_tokens(
     trainer.tokenizer = dummy_tokenizer
     trainer.pad_batch = lambda batch: batch
     evidence = chosen_teacher_evidence
-    distillation = SampledReverseKLInput(
+    distillation = ChosenTokenTeacherInput(
         teacher_action_log_probs=evidence.chosen_logprobs,
         valid_mask=evidence.valid_mask,
         loss_weights=torch.tensor([[0.2, 0.2, 0.2], [0.3, 0.3, 0.3]]),
@@ -1351,7 +731,7 @@ def test_topk_teacher_evidence_is_collated_without_dense_vocabulary_tensors(dumm
         ),
         retained_mass=torch.tensor([[0.9, 0.8, 0.6], [0.95, torch.nan, torch.nan]]),
     )
-    distillation = SparseForwardKLInput(
+    distillation = TeacherTopKInput(
         teacher_topk_indices=evidence.topk_indices,
         teacher_topk_logprobs=evidence.topk_logprobs,
         retained_mass=evidence.retained_mass,
@@ -1377,482 +757,161 @@ def test_topk_teacher_evidence_is_collated_without_dense_vocabulary_tensors(dumm
     torch.testing.assert_close(batch["teacher_retained_mass"], evidence.retained_mass, equal_nan=True)
 
 
-def test_normalize_mini_batch_size():
-    """Test the _normalize_mini_batch_size method with various configurations."""
-
-    # Create minimal worker instances for testing
-    class TestPolicyWorker(PolicyWorkerBase):
-        def init_model(self, *args, **kwargs):
-            pass
-
-        def offload_to_cpu(self, pin_memory=True, non_blocking=True):
-            pass
-
-        def backload_to_gpu(self, non_blocking=True):
-            pass
-
-        def _forward_micro_batch(self, micro_batch):
-            pass
-
-    class TestCriticWorker(CriticWorkerBase):
-        def init_model(self, *args, **kwargs):
-            pass
-
-        def offload_to_cpu(self, pin_memory=True, non_blocking=True):
-            pass
-
-        def backload_to_gpu(self, non_blocking=True):
-            pass
-
-        def _forward_micro_batch(self, micro_batch):
-            pass
-
-    def create_policy_worker_with_config(
-        train_batch_size, policy_mini_batch_size, micro_train_batch_size_per_gpu, n_samples_per_prompt, dp_size
-    ):
-        """Helper to create policy worker with specific config."""
-        cfg = OmegaConf.create(
+@pytest.mark.parametrize(
+    ("worker_class", "mini_batch_key", "mini_batch_size", "n_samples_per_prompt", "dp_size", "expected"),
+    [
+        (PolicyWorkerBase, "policy_mini_batch_size", 16, 2, 4, 8),
+        (PolicyWorkerBase, "policy_mini_batch_size", 8, 1, 1, 8),
+        (CriticWorkerBase, "critic_mini_batch_size", 8, 2, 4, 4),
+        (CriticWorkerBase, "critic_mini_batch_size", 32, 4, 2, 64),
+    ],
+)
+def test_normalize_mini_batch_size_splits_prompt_samples_across_data_parallel_ranks(
+    worker_class, mini_batch_key, mini_batch_size, n_samples_per_prompt, dp_size, expected
+):
+    worker = SimpleNamespace(
+        cfg=OmegaConf.create(
             {
-                "trainer": {
-                    "progress": _TEST_PROGRESS_CONFIG,
-                    "policy_train_spans": False,
-                    "train_batch_size": train_batch_size,
-                    "policy_mini_batch_size": policy_mini_batch_size,
-                    "micro_train_batch_size_per_gpu": micro_train_batch_size_per_gpu,
-                    "algorithm": {
-                        "batch_invariant": False,
-                        "policy_loss_type": "regular",
-                    },
-                },
-                "generator": {
-                    "n_samples_per_prompt": n_samples_per_prompt,
-                },
+                "trainer": {mini_batch_key: mini_batch_size},
+                "generator": {"n_samples_per_prompt": n_samples_per_prompt},
             }
-        )
+        ),
+        mesh_rank=MeshRank(dp=0, sp=0, tp=0, pp=0, world_size=dp_size, dp_size=dp_size, pp_size=1),
+    )
 
-        worker = TestPolicyWorker(
-            cfg=cfg,
-            world_size=dp_size,
-            rank=0,
-            local_rank=0,
-            master_addr="localhost",
-            master_port=12345,
-            sequence_parallel_size=1,
-        )
+    worker_class._normalize_mini_batch_size(worker)
 
-        # Mock mesh_rank
-        worker.mesh_rank = MeshRank(dp=0, sp=0, tp=0, pp=0, world_size=dp_size, dp_size=dp_size, pp_size=1)
+    assert getattr(worker, f"{mini_batch_key}_per_gpu") == expected
 
-        return worker
 
-    def create_critic_worker_with_config(
-        train_batch_size, critic_mini_batch_size, micro_train_batch_size_per_gpu, n_samples_per_prompt, dp_size
-    ):
-        """Helper to create critic worker with specific config."""
-        cfg = OmegaConf.create(
+@pytest.fixture(scope="module")
+def default_config():
+    return get_default_config()
+
+
+def _batch_size_config(
+    default_config,
+    *,
+    train_batch_size=128,
+    policy_mini_batch_size=16,
+    micro_train_batch_size_per_gpu=2,
+    n_samples_per_prompt=2,
+    policy_dp=4,
+    ref_dp=None,
+):
+    cfg = copy.deepcopy(default_config)
+    cfg.trainer.train_batch_size = train_batch_size
+    cfg.trainer.policy_mini_batch_size = policy_mini_batch_size
+    cfg.trainer.micro_train_batch_size_per_gpu = micro_train_batch_size_per_gpu
+    cfg.trainer.placement.policy_num_nodes = 1
+    cfg.trainer.placement.policy_num_gpus_per_node = policy_dp
+    cfg.trainer.placement.ref_num_nodes = 1
+    cfg.trainer.placement.ref_num_gpus_per_node = ref_dp or 1
+    cfg.trainer.algorithm.use_kl_loss = ref_dp is not None
+    cfg.trainer.algorithm.use_kl_in_reward = False
+    cfg.generator.n_samples_per_prompt = n_samples_per_prompt
+    return cfg
+
+
+@pytest.mark.parametrize(
+    ("overrides", "error"),
+    [
+        ({}, None),
+        # A mini-batch larger than the train batch fails the first (unmessaged) assertion.
+        ({"train_batch_size": 8, "policy_mini_batch_size": 16}, "^$"),
+        ({"train_batch_size": 100}, "train_batch_size .* should be divisible by policy_mini_batch_size"),
+        (
             {
-                "trainer": {
-                    "progress": _TEST_PROGRESS_CONFIG,
-                    "policy_train_spans": False,
-                    "train_batch_size": train_batch_size,
-                    "critic_mini_batch_size": critic_mini_batch_size,
-                    "micro_train_batch_size_per_gpu": micro_train_batch_size_per_gpu,
-                    "algorithm": {"batch_invariant": False},
-                },
-                "generator": {
-                    "n_samples_per_prompt": n_samples_per_prompt,
-                },
-            }
-        )
+                "policy_mini_batch_size": 8,
+                "n_samples_per_prompt": 1,
+                "policy_dp": 1,
+                "micro_train_batch_size_per_gpu": 3,
+            },
+            "policy_mini_batch_size_per_gpu .* should be divisible by micro_train_batch_size_per_gpu",
+        ),
+        (
+            {
+                "train_batch_size": 10,
+                "policy_mini_batch_size": 5,
+                "policy_dp": 2,
+                "micro_train_batch_size_per_gpu": 1,
+                "n_samples_per_prompt": 1,
+            },
+            "policy_train_batch_size_per_gpu .* should be divisible by policy_mini_batch_size_per_gpu",
+        ),
+        # With a reference model, the batch must cover lcm(policy_dp, ref_dp) ranks; without one, only policy_dp.
+        (
+            {
+                "train_batch_size": 5,
+                "policy_mini_batch_size": 5,
+                "micro_train_batch_size_per_gpu": 1,
+                "n_samples_per_prompt": 1,
+                "policy_dp": 2,
+                "ref_dp": 3,
+            },
+            "least common multiple of the data parallel sizes",
+        ),
+        (
+            {
+                "train_batch_size": 6,
+                "policy_mini_batch_size": 6,
+                "micro_train_batch_size_per_gpu": 1,
+                "n_samples_per_prompt": 1,
+                "policy_dp": 2,
+                "ref_dp": 3,
+            },
+            None,
+        ),
+        (
+            {
+                "train_batch_size": 2,
+                "policy_mini_batch_size": 2,
+                "micro_train_batch_size_per_gpu": 1,
+                "n_samples_per_prompt": 1,
+                "policy_dp": 2,
+            },
+            None,
+        ),
+    ],
+)
+def test_validate_batch_sizes_requires_even_division_across_ranks(default_config, overrides, error):
+    cfg = _batch_size_config(default_config, **overrides)
 
-        worker = TestCriticWorker(
-            cfg=cfg,
-            world_size=dp_size,
-            rank=0,
-            local_rank=0,
-            master_addr="localhost",
-            master_port=12345,
-            sequence_parallel_size=1,
-        )
-
-        # Mock mesh_rank
-        worker.mesh_rank = MeshRank(dp=0, sp=0, tp=0, pp=0, world_size=dp_size, dp_size=dp_size, pp_size=1)
-
-        return worker
-
-    # Test Case 1: Basic valid configuration for PolicyWorker
-    policy_worker = create_policy_worker_with_config(
-        train_batch_size=128,
-        policy_mini_batch_size=16,
-        micro_train_batch_size_per_gpu=2,
-        n_samples_per_prompt=2,
-        dp_size=4,
-    )
-    policy_worker._normalize_mini_batch_size()
-
-    expected_policy_mini_batch_size_per_gpu = (16 * 2) // 4  # 8
-    assert policy_worker.policy_mini_batch_size_per_gpu == expected_policy_mini_batch_size_per_gpu
-
-    # Test Case 2: Basic valid configuration for CriticWorker
-    critic_worker = create_critic_worker_with_config(
-        train_batch_size=128,
-        critic_mini_batch_size=8,
-        micro_train_batch_size_per_gpu=2,
-        n_samples_per_prompt=2,
-        dp_size=4,
-    )
-    critic_worker._normalize_mini_batch_size()
-
-    expected_critic_mini_batch_size_per_gpu = (8 * 2) // 4  # 4
-    assert critic_worker.critic_mini_batch_size_per_gpu == expected_critic_mini_batch_size_per_gpu
-
-    # Test Case 3: Single GPU (dp_size=1) for PolicyWorker
-    policy_worker = create_policy_worker_with_config(
-        train_batch_size=32,
-        policy_mini_batch_size=8,
-        micro_train_batch_size_per_gpu=4,
-        n_samples_per_prompt=1,
-        dp_size=1,
-    )
-    policy_worker._normalize_mini_batch_size()
-
-    expected_policy_mini_batch_size_per_gpu = (8 * 1) // 1  # 8
-    assert policy_worker.policy_mini_batch_size_per_gpu == expected_policy_mini_batch_size_per_gpu
-
-    # Test Case 4: High n_samples_per_prompt for CriticWorker
-    critic_worker = create_critic_worker_with_config(
-        train_batch_size=256,
-        critic_mini_batch_size=32,
-        micro_train_batch_size_per_gpu=8,
-        n_samples_per_prompt=4,
-        dp_size=2,
-    )
-    critic_worker._normalize_mini_batch_size()
-
-    expected_critic_mini_batch_size_per_gpu = (32 * 4) // 2  # 64
-    assert critic_worker.critic_mini_batch_size_per_gpu == expected_critic_mini_batch_size_per_gpu
-
-    # Test Case 5: Error case - mesh_rank not initialized
-    policy_worker_no_mesh = create_policy_worker_with_config(
-        train_batch_size=128,
-        policy_mini_batch_size=16,
-        micro_train_batch_size_per_gpu=2,
-        n_samples_per_prompt=1,
-        dp_size=4,
-    )
-    policy_worker_no_mesh.mesh_rank = None
-
-    with pytest.raises(RuntimeError, match="mesh_rank must be initialized"):
-        policy_worker_no_mesh._normalize_mini_batch_size()
-
-
-def test_validate_batch_sizes():
-    """Test the validate_batch_sizes function with various configurations to trigger all error cases."""
-
-    def create_test_config(
-        train_batch_size=128,
-        policy_mini_batch_size=16,
-        micro_train_batch_size_per_gpu=2,
-        micro_forward_batch_size_per_gpu=4,
-        n_samples_per_prompt=2,
-        policy_num_nodes=1,
-        policy_num_gpus_per_node=4,
-    ):
-        """Helper to create config for validation testing."""
-        cfg = get_default_config()
-        cfg.trainer.train_batch_size = train_batch_size
-        cfg.trainer.policy_mini_batch_size = policy_mini_batch_size
-        cfg.trainer.micro_train_batch_size_per_gpu = micro_train_batch_size_per_gpu
-        cfg.trainer.micro_forward_batch_size_per_gpu = micro_forward_batch_size_per_gpu
-        cfg.trainer.placement.policy_num_nodes = policy_num_nodes
-        cfg.trainer.placement.policy_num_gpus_per_node = policy_num_gpus_per_node
-        cfg.trainer.algorithm.use_kl_loss = False
-        cfg.trainer.algorithm.use_kl_in_reward = False
-        cfg.generator.n_samples_per_prompt = n_samples_per_prompt
-        return cfg
-
-    # Valid configuration
-    cfg = create_test_config()
-    validate_batch_sizes(cfg)  # Should not raise any exceptions
-
-    # train_batch_size < policy_mini_batch_size
-    cfg = create_test_config(train_batch_size=8, policy_mini_batch_size=16)
-    with pytest.raises(AssertionError):
+    if error is None:
         validate_batch_sizes(cfg)
-
-    # policy_mini_batch_size = 0
-    cfg = create_test_config(policy_mini_batch_size=0)
-    with pytest.raises(AssertionError, match="policy_mini_batch_size must be greater than 0"):
-        validate_batch_sizes(cfg)
-
-    # micro_train_batch_size_per_gpu = 0
-    cfg = create_test_config(micro_train_batch_size_per_gpu=0)
-    with pytest.raises(AssertionError, match="micro_train_batch_size_per_gpu must be greater than 0"):
-        validate_batch_sizes(cfg)
-
-    # micro_forward_batch_size_per_gpu = 0
-    cfg = create_test_config(micro_forward_batch_size_per_gpu=0)
-    with pytest.raises(AssertionError, match="micro_forward_batch_size_per_gpu must be greater than 0"):
-        validate_batch_sizes(cfg)
-
-    # train_batch_size not divisible by policy_mini_batch_size
-    cfg = create_test_config(train_batch_size=100, policy_mini_batch_size=16, policy_num_gpus_per_node=4)
-    # Should fail because train_batch_size is not evenly divisible by policy batch requirements
-    with pytest.raises(AssertionError, match="train_batch_size .* should be divisible by policy_mini_batch_size"):
-        validate_batch_sizes(cfg)
-
-    # policy_mini_batch_size_per_gpu not divisible by micro_train_batch_size_per_gpu
-    cfg = create_test_config(
-        policy_mini_batch_size=8, n_samples_per_prompt=1, policy_num_gpus_per_node=1, micro_train_batch_size_per_gpu=3
-    )
-    # Should fail because policy mini batch per GPU is not evenly divisible by micro batch size
-    with pytest.raises(
-        AssertionError,
-        match="normalized policy_mini_batch_size_per_gpu .* should be divisible by micro_train_batch_size_per_gpu",
-    ):
-        validate_batch_sizes(cfg)
-
-    # train_batch_size_per_gpu not divisible by policy_mini_batch_size_per_gpu
-    cfg = create_test_config(
-        train_batch_size=10,
-        policy_mini_batch_size=5,
-        policy_num_gpus_per_node=2,
-        micro_train_batch_size_per_gpu=1,
-        n_samples_per_prompt=1,
-    )
-    with pytest.raises(
-        AssertionError, match="policy_train_batch_size_per_gpu .* should be divisible by policy_mini_batch_size_per_gpu"
-    ):
+        return
+    with pytest.raises(AssertionError, match=error):
         validate_batch_sizes(cfg)
 
 
-def test_ppo_train_batch_calculations():
-    """Test the key batch calculations and control flow in ppo_train methods."""
-
-    # Create test configuration
-    cfg = OmegaConf.create(
+def test_grpo_reports_one_flat_and_one_varied_reward_group():
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create(
         {
             "trainer": {
-                "progress": _TEST_PROGRESS_CONFIG,
-                "policy_train_spans": False,
-                "micro_train_batch_size_per_gpu": 2,
-                "update_epochs_per_batch": 1,
-                "policy": {
-                    "grug_query_bias_update_mode": "frozen",
-                    "optimizer_config": {"max_grad_norm": 1.0},
-                },
+                "step_wise_training": False,
                 "algorithm": {
-                    "batch_invariant": False,
-                    "policy_loss_type": "regular",
-                    "loss_reduction": "token_mean",
+                    "advantage_estimator": "grpo",
+                    "gamma": 1.0,
+                    "lambd": 1.0,
+                    "grpo_norm_by_std": True,
                 },
-            },
-            "generator": {
-                "r3_transport": "decentral",
-                "sampling_params": {
-                    "temperature": 1.0,
-                },
-            },
+            }
         }
     )
-
-    # Create dummy databatch with known size
-    batch_size = 12  # This will create 6 micro batches with micro_train_batch_size_per_gpu=2
-    response_length = 4  # number of actions
-    dummy_databatch = TrainingInputBatch(
-        {
-            "sequences": torch.randint(0, 100, (batch_size, 10)),  # dummy token sequences
-            "attention_mask": torch.ones(batch_size, 10),
-            "action_log_probs": torch.randn(batch_size, response_length),
-            "base_action_log_probs": torch.randn(batch_size, response_length),
-            "values": torch.randn(batch_size, response_length),
-            "returns": torch.randn(batch_size, response_length),
-            "advantages": torch.randn(batch_size, response_length),
-            "loss_mask": torch.ones(batch_size, response_length),
-            "response_mask": torch.ones(batch_size, response_length),
-            "rollout_logprobs": None,
-        },
-    )
-    dummy_databatch.metadata = {"global_step": 0, "response_length": response_length}
-
-    # Helper function to create worker with minimal setup
-    def create_test_worker(worker_class):
-        worker = worker_class(
-            cfg=cfg,
-            world_size=1,
-            rank=0,
-            local_rank=0,
-            master_addr="localhost",
-            master_port=12345,
-            sequence_parallel_size=1,
-        )
-        # Set appropriate mini batch size per gpu based on worker type
-        if worker_class == PolicyWorkerBase:
-            worker.policy_mini_batch_size_per_gpu = 6  # Should result in 3 micro batches per mini batch
-        elif worker_class == CriticWorkerBase:
-            worker.critic_mini_batch_size_per_gpu = 6  # Should result in 3 micro batches per mini batch
-
-        # Mock dependencies
-        worker.strategy = MagicMock()
-        worker.strategy.is_rank_0.return_value = False  # Disable progress bars
-        worker.strategy.all_reduce.side_effect = lambda status, *args, **kwargs: status
-
-        # Always set model for all worker types (policy/critic need this for ppo_train)
-        worker.model = MagicMock()
-
-        return worker
-
-    # Test PolicyWorkerBase
-    policy_worker = create_test_worker(PolicyWorkerBase)
-
-    # Mock training_step to track calls and verify accumulation behavior
-    policy_training_calls = []
-
-    def mock_policy_training_step(experience, global_step, local_step, accumulation_steps):
-        policy_training_calls.append({"local_step": local_step, "accumulation_steps": accumulation_steps})
-        return {
-            "policy_loss": 0.5,
-            "policy_lr": 1e-4,
-            "policy_entropy": 2.0,
-            "response_length": response_length,
-        }
-
-    policy_worker.training_step = mock_policy_training_step
-
-    # Calculate expected values based on new accumulation logic
-    dataloader = TrainingBatchIterator(dummy_databatch, cfg.trainer.micro_train_batch_size_per_gpu)
-    total_micro_batches = len(dataloader)  # Should be 6
-    micro_batches_per_mini_batch = (
-        policy_worker.policy_mini_batch_size_per_gpu // cfg.trainer.micro_train_batch_size_per_gpu
-    )  # 6 // 2 = 3
-    # New logic: accumulation_steps = micro_batches_per_mini_batch (accumulate within mini-batch)
-    expected_accumulation_steps = micro_batches_per_mini_batch  # Should be 3
-
-    # Run policy ppo_train with minimal mocking
-    with (
-        patch("torch.distributed.barrier"),
-        patch("tqdm.tqdm", side_effect=lambda x, **kwargs: x),
-    ):  # Disable progress bar
-        result = policy_worker.ppo_train(dummy_databatch)
-
-    # Verify Policy Worker Results
-    assert len(policy_training_calls) == total_micro_batches, (
-        f"PolicyWorker: Expected {total_micro_batches} training_step calls, got {len(policy_training_calls)}"
-    )
-
-    # Verify accumulation_steps are consistent (should equal micro_batches_per_mini_batch)
-    for call in policy_training_calls:
-        assert call["accumulation_steps"] == expected_accumulation_steps, (
-            f"PolicyWorker: Expected accumulation_steps={expected_accumulation_steps}, got {call['accumulation_steps']}"
-        )
-
-    # Verify no early termination (all micro batches processed)
-    expected_local_steps = list(range(total_micro_batches))
-    actual_local_steps = [call["local_step"] for call in policy_training_calls]
-    assert actual_local_steps == expected_local_steps, (
-        f"PolicyWorker: Expected local_steps {expected_local_steps}, got {actual_local_steps}"
-    )
-
-    # Verify result structure
-    assert "train_status" in result.metadata
-    train_status = result.metadata["train_status"]
-    assert "policy_update_steps" in train_status
-
-    # Verify policy_update_steps calculation (should be total_calls / accumulation_steps)
-    expected_policy_update_steps_normalized = len(policy_training_calls) / expected_accumulation_steps
-    assert train_status["policy_update_steps"] == expected_policy_update_steps_normalized
-
-    # Test CriticWorkerBase with same accumulation logic
-    critic_worker = create_test_worker(CriticWorkerBase)
-
-    critic_training_calls = []
-
-    def mock_critic_training_step(experience, global_step, local_step, accumulation_steps):
-        critic_training_calls.append({"local_step": local_step, "accumulation_steps": accumulation_steps})
-        return {"critic_loss": 0.3, "values": 1.0, "critic_lr": 1e-4}
-
-    critic_worker.training_step = mock_critic_training_step
-
-    # Run critic ppo_train
-    with (
-        patch("torch.distributed.barrier"),
-        patch("tqdm.tqdm", side_effect=lambda x, **kwargs: x),
-        patch("torch.cuda.empty_cache"),
-    ):
-        result = critic_worker.ppo_train(dummy_databatch)
-
-    # Verify Critic Worker Results
-    assert len(critic_training_calls) == total_micro_batches, (
-        f"CriticWorker: Expected {total_micro_batches} training_step calls, got {len(critic_training_calls)}"
-    )
-
-    # Verify accumulation_steps are consistent for critic (should equal micro_batches_per_mini_batch)
-    for call in critic_training_calls:
-        assert call["accumulation_steps"] == expected_accumulation_steps, (
-            f"CriticWorker: Expected accumulation_steps={expected_accumulation_steps}, got {call['accumulation_steps']}"
-        )
-
-    # Verify no early termination for critic
-    actual_local_steps = [call["local_step"] for call in critic_training_calls]
-    assert actual_local_steps == expected_local_steps, (
-        f"CriticWorker: Expected local_steps {expected_local_steps}, got {actual_local_steps}"
-    )
-
-    # Verify result structure for critic
-    assert "train_status" in result.metadata
-    train_status = result.metadata["train_status"]
-    assert "critic_update_steps" in train_status
-    assert train_status["critic_update_steps"] == len(critic_training_calls) / expected_accumulation_steps
-
-
-def test_validate_batch_sizes_lcm_dp_requirement():
-    """Ensure train_batch_size is >= lcm(policy_dp, ref_dp) when ref is used; else >= policy_dp."""
-
-    def create_config(train_batch_size, policy_dp, ref_dp, include_ref=True):
-        cfg = get_default_config()
-        cfg.trainer.train_batch_size = train_batch_size
-        cfg.trainer.policy_mini_batch_size = train_batch_size
-        cfg.trainer.critic_mini_batch_size = 1
-        cfg.trainer.micro_train_batch_size_per_gpu = 1
-        cfg.trainer.micro_forward_batch_size_per_gpu = 1
-        cfg.trainer.placement.policy_num_nodes = 1
-        cfg.trainer.placement.policy_num_gpus_per_node = policy_dp
-        cfg.trainer.placement.ref_num_nodes = 1
-        cfg.trainer.placement.ref_num_gpus_per_node = ref_dp if include_ref else 1
-        cfg.trainer.placement.critic_num_nodes = 1
-        cfg.trainer.placement.critic_num_gpus_per_node = 1
-        cfg.trainer.policy.sequence_parallel_size = 1
-        cfg.trainer.ref.sequence_parallel_size = 1
-        cfg.trainer.critic.model.path = None
-        cfg.trainer.critic.sequence_parallel_size = 1
-        cfg.trainer.algorithm.use_kl_loss = include_ref
-        cfg.trainer.algorithm.use_kl_in_reward = False
-        cfg.trainer.algorithm.policy_loss_type = "regular"
-        return cfg
-
-    # Fail: lcm(2, 3) = 6, but train_batch_size = 5 when ref is used
-    cfg = create_config(train_batch_size=5, policy_dp=2, ref_dp=3, include_ref=True)
-    with pytest.raises(
-        AssertionError,
-        match=r"least common multiple of the data parallel sizes",
-    ):
-        validate_batch_sizes(cfg)
-
-    # Pass: train_batch_size equals lcm(2, 3) = 6 when ref is used
-    cfg = create_config(train_batch_size=6, policy_dp=2, ref_dp=3, include_ref=True)
-    validate_batch_sizes(cfg)
-
-    # Pass: ref disabled -> requirement reduces to policy_dp. With policy_dp=2, tbs=2 is valid.
-    cfg = create_config(train_batch_size=2, policy_dp=2, ref_dp=3, include_ref=False)
-    validate_batch_sizes(cfg)
-
-
-def test_informative_group_fraction_counts_groups_whose_rewards_differ(dummy_config):
-    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
-    trainer.cfg = dummy_config
+    trainer.group_advantage_invariant = GroupAdvantageInvariant.exact_physical(physical_group_size=2)
     trainer.all_metrics = {}
-    # Group a has reward spread; group b is a tie and carries no advantage signal.
-    trainer.postprocess_trajectory_batch(
-        {"response_ids": [[1], [2], [3], [4]], "rewards": [1.0, 0.0, 0.5, 0.5]}, ["a", "a", "b", "b"]
+    data = TrainingInputBatch(
+        {
+            "rewards": torch.tensor([[1.0], [1.0], [0.0], [2.0]]),
+            "response_mask": torch.ones(4, 1),
+            "values": None,
+        }
     )
-    assert trainer.all_metrics["reward/informative_group_fraction"] == 0.5
+    data.metadata = {"uids": ["easy", "easy", "hard", "hard"], "avg_response_length": 1.0}
+
+    result = trainer.compute_advantages_and_returns(data)
+
+    assert trainer.all_metrics["reward/zero_std_group_fraction"] == pytest.approx(0.5)
+    assert torch.equal(result["advantages"][:2], torch.zeros(2, 1))
+    assert torch.isfinite(result["advantages"]).all()

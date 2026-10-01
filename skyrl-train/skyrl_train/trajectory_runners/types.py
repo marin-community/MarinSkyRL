@@ -1,10 +1,11 @@
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Dict, List, Literal, Optional, TypedDict, Union
+from typing import Any, Dict, List, Literal, NotRequired, Optional, TypedDict, Union
 
+import numpy as np
 
 from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDisposition, VerificationResult
-from skyrl_train.distillation import DistillationInput, TeacherEvidenceBatch
+from skyrl_train.distillation import PreparedTeacherInput, TeacherEvidenceBatch
 from skyrl_train.inference_engines.base import ConversationType
 
 
@@ -88,6 +89,8 @@ class TrajectoryBatch(TypedDict):
 
     Raw outcomes remain separate from optimization rewards. Optional diagnostic
     channels are absent unless their corresponding feature is active.
+    ``env_metrics`` and ``env_classes`` are present together or both absent;
+    when present, each has one entry per trajectory row.
     """
 
     prompt_token_ids: List[List[int]]
@@ -109,12 +112,14 @@ class TrajectoryBatch(TypedDict):
     error_treatments: Optional[List[Optional[str]]]
     server_errors: Optional[List[Optional[Dict[str, Any]]]]
     rollout_metrics: Optional[Dict[str, Any]]
-    rollout_logprobs: Optional[List[List[float]]]
-    student_topk_indices: Optional[List[List[List[int]]]]
-    behavior_topk_logprobs: Optional[List[List[List[float]]]]
-    rollout_routed_experts: Optional[List[List[List[List[int]]]]]
+    env_metrics: NotRequired[List[Dict[str, Any]]]
+    env_classes: NotRequired[List[str]]
+    rollout_logprobs: Optional[List[np.ndarray]]
+    student_topk_indices: Optional[List[np.ndarray]]
+    behavior_topk_logprobs: Optional[List[np.ndarray]]
+    rollout_routed_experts: Optional[List[np.ndarray]]
     teacher_evidence: Optional[TeacherEvidenceBatch]
-    distillation: Optional[DistillationInput]
+    distillation: Optional[PreparedTeacherInput]
     token_level_shaping: Optional[List[List[float]]]
     response_span_tags: Optional[List[List[int]]]
     trajectory_ids: Optional[List[TrajectoryID]]
