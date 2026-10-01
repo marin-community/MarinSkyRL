@@ -4,7 +4,7 @@ The nightly runs GSM8K GRPO on one H100, synchronous OPD on four H100s,
 and Grug Megatron training on four H100s.
 All policy updates use Megatron and the frozen root environment. The GSM8K run is
 scored against a checked-in spec; the other lanes exercise teacher scoring, Grug
-training and weight sync. The canonical task rollout gate runs manually through a Marin RL artifact.
+training and weight sync.
 
 | file | role |
 | --- | --- |
@@ -13,7 +13,6 @@ training and weight sync. The canonical task rollout gate runs manually through 
 | `run_grug_megatron.sh` | run Grug parity, training, and serving gates on four H100s |
 | `gate.py` | score a training run against its spec |
 | `specs/gsm8k-qwen3-0.6b-megatron.json` | GSM8K gate thresholds and provenance |
-| `specs/task-rollouts.json` | canonical task completion, token evidence, and optimizer thresholds |
 
 ## How the gate sees the run
 
@@ -106,51 +105,3 @@ MAX_STEPS=2 bash ci/marin_nightly/run_h100.sh
 The Megatron lane runs `tests/gpu/test_grug_megatron.py` and the two-GPU CP2
 FlashAttention forward/backward smoke with the frozen Megatron runtime closure;
 see `docs/grug-megatron-training.md` for the Grug tests.
-
-The manual task rollout specification scores a saved canonical Shellbox training log.
-It expects eight distinct tasks, one sample per task, and at least two model turns
-per task in the final training batch. It is separate from the scheduled workflow.
-
-Launch configuration and log collection follow Marin's
-[RL launch reference](https://github.com/marin-community/marin/blob/main/docs/references/rl-launching.md).
-The input log must contain the trainer's `WANDB_MIRROR` lines, including the final
-optimizer step. From the SkyRL repository root, score that log:
-
-```bash
-uv run --frozen python skyrl-train/ci/marin_nightly/gate.py \
-    --log task-rollouts.log \
-    --spec skyrl-train/ci/marin_nightly/specs/task-rollouts.json \
-    --wall-clock-seconds 900
-```
-
-Measure elapsed time from artifact submission through terminal export, including allocation and startup.
-Supply this value for `--wall-clock-seconds`. The gate requires eight
-multi-turn tasks, generated tokens with behavior logprobs, a finite optimizer loss,
-no failed trajectories, and a positive mean correction weight no greater than two. The engine rejects changed token
-prefixes and token/logprob length mismatches before the buffer receives a rollout.
-The metric gate does not inspect checkpoint or export files. Full launch acceptance
-also requires a persisted run manifest, a checkpoint at the final optimizer step, and
-a Hugging Face export that the model loader can read.
-
-The canonical engine has no OpenCode process or automatic history compaction. The
-removed OpenCode stress specifications do not apply to this engine. Engine and worker
-tests check context limits, tool output, deadlines, and cleanup. These CPU checks do
-not replace live backend acceptance.
-
-The scheduled workflow runs the GSM8K, OPD, and Grug lanes. It does not run the manual
-task rollout gate. Trigger it from the repository root:
-
-```bash
-gh workflow run marin-nightly.yaml \
-  -f max_steps=2 \
-  -f target_cluster=cw-rno2a
-```
-
-## Tightening the spec
-
-The shipped thresholds are structural: metrics exist, are finite, and `reward/avg_raw_reward`
-is inside `[0, 1]` (gsm8k scores each rollout 0 or 1, so a mean outside that range means the
-reward path is broken). There is deliberately no reward floor above zero — a 0.6B model can
-legitimately score nothing on 16 GSM8K prompts, and a floor would make the nightly flaky
-rather than informative. Once enough nightlies have run green, replace it with a floor drawn
-from the observed distribution and lower the wall-clock budget to the observed p95.

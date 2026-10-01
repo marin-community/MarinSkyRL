@@ -27,7 +27,6 @@ from ci.marin_nightly.gate import (
 
 SHIPPED_SPEC = Path(__file__).parents[2] / "ci" / "marin_nightly" / "specs" / "gsm8k-qwen3-0.6b-megatron.json"
 OPD_SPEC = Path(__file__).parents[2] / "ci" / "marin_nightly" / "specs" / "opd-qwen3-sync.json"
-TASK_ROLLOUT_SPEC = Path(__file__).parents[2] / "ci" / "marin_nightly" / "specs" / "task-rollouts.json"
 
 # What the trainer actually writes: loguru decorates the line, so the payload is embedded
 # rather than anchored at the start. Keep this in the shape the trainer emits it.
@@ -416,40 +415,6 @@ def test_shipped_spec_gates_a_healthy_run():
     early_nan = parse_metrics(healthy_log(steps=spec.min_train_steps))
     early_nan[0] = replace(early_nan[0], values={**early_nan[0].values, "policy/policy_loss": float("nan")})
     assert check_run(early_nan, spec, wall_clock_seconds=600)
-
-
-@pytest.mark.parametrize(
-    "metric,value",
-    [
-        ("generate/task_rollout/tasks", 7.0),
-        ("generate/task_rollout/multi_turn_tasks", 7.0),
-        ("generate/task_rollout/tool_tasks", 0.0),
-        ("policy/raw_grad_norm", 0.0),
-        ("generate/task_rollout/missing_logprob_tokens", 1.0),
-        ("generate/failed_trajectory_fraction", 0.125),
-        ("policy/correction/weight_mean", 0.0),
-    ],
-)
-def test_task_rollout_gate_rejects_incomplete_evidence(metric, value):
-    spec = load_spec(TASK_ROLLOUT_SPEC)
-    exact_metrics = {
-        "policy/correction/weight_mean": 1.0,
-        "generate/failed_trajectory_fraction": 0.0,
-        "generate/task_rollout/tasks": 8.0,
-        "generate/task_rollout/multi_turn_tasks": 8.0,
-        "generate/task_rollout/tool_tasks": 8.0,
-        "policy/raw_grad_norm": 0.5,
-        "generate/task_rollout/turns": 24.0,
-        "generate/task_rollout/generated_tokens": 240.0,
-        "generate/task_rollout/missing_logprob_tokens": 0.0,
-    }
-    healthy = parse_metrics(mirror_line(1, **exact_metrics))
-    assert check_run(healthy, spec, wall_clock_seconds=900) == []
-    incomplete = parse_metrics(mirror_line(1, **{**exact_metrics, metric: value}))
-    assert any(metric in failure for failure in check_run(incomplete, spec, wall_clock_seconds=900))
-    del exact_metrics[metric]
-    missing = parse_metrics(mirror_line(1, **exact_metrics))
-    assert any(metric in failure for failure in check_run(missing, spec, wall_clock_seconds=900))
 
 
 def test_opd_gate_requires_teacher_credit_on_valid_training_tokens():
