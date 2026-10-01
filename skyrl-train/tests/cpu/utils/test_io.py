@@ -1,484 +1,256 @@
-"""
-Unit tests for cloud storage I/O utilities.
-"""
+"""Local and cloud storage I/O: checkpoint listing and cleanup, staged work dirs, node caches, HF model publication."""
 
 import json
 import os
-import tempfile
 from pathlib import Path
+from unittest.mock import patch
+
 import pytest
-from unittest.mock import patch, Mock
 import torch
+from fsspec.implementations.memory import MemoryFileSystem
 from safetensors.torch import save_file
 
-from skyrl_train.hf_model_io import local_hf_model_dir
-from skyrl_train.io.io import (
-    is_cloud_path,
-    makedirs,
-    exists,
-    open_file,
-    upload_directory,
-    download_directory,
-    DeferredLocalWorkDir,
-    local_work_dir,
-    local_read_dir,
-    node_cached_read_dir,
-    list_dir,
-)
 from skyrl_train.checkpoint_listing import list_checkpoint_dirs
+from skyrl_train.hf_model_io import local_hf_model_dir
+from skyrl_train.io import io
+from skyrl_train.io.io import (
+    DeferredLocalWorkDir,
+    is_cloud_path,
+    local_read_dir,
+    local_work_dir,
+    node_cached_read_dir,
+    upload_directory,
+)
 from skyrl_train.utils.trainer_utils import cleanup_old_checkpoints
 
 
-class TestCloudPathDetection:
-    """Test cloud path detection functionality."""
-
-    def test_is_cloud_path_s3(self):
-        """Test S3 path detection."""
-        assert is_cloud_path("s3://bucket/path/file.pt")
-        assert is_cloud_path("s3://my-bucket/checkpoints/global_step_1000/model.pt")
-
-    def test_is_cloud_path_gcs(self):
-        """Test GCS path detection."""
-        assert is_cloud_path("gs://bucket/path/file.pt")
-        assert is_cloud_path("gcs://bucket/path/file.pt")
-
-    def test_is_local_path(self):
-        """Test local path detection."""
-        assert not is_cloud_path("/local/path/file.pt")
-        assert not is_cloud_path("./relative/path/file.pt")
-        assert not is_cloud_path("relative/path/file.pt")
-        assert not is_cloud_path("C:\\Windows\\path\\file.pt")
-
-    def test_cloud_schemes_require_the_canonical_uri_prefix(self):
-        assert not is_cloud_path("s3:bucket/path/file.pt")
-        assert not is_cloud_path("S3://bucket/path/file.pt")
-
-
-class TestLocalFileOperations:
-    """Test file operations for local paths."""
-
-    def test_makedirs_local(self):
-        """Test directory creation for local paths."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            test_dir = os.path.join(temp_dir, "test_checkpoints")
-
-            # Should create directory
-            makedirs(test_dir)
-            assert os.path.exists(test_dir)
-            assert os.path.isdir(test_dir)
-
-            # Should not fail with exist_ok=True (default)
-            makedirs(test_dir, exist_ok=True)
-            assert os.path.exists(test_dir)
-
-    def test_makedirs_cloud_path(self):
-        """Test that makedirs does nothing for cloud paths."""
-        # Should not raise an error for cloud paths
-        makedirs("s3://bucket/path", exist_ok=True)
-        makedirs("gs://bucket/path", exist_ok=True)
-        makedirs("gcs://bucket/path", exist_ok=True)
-
-    def test_open_file_text_local(self):
-        """Test text file operations for local paths using open_file."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            test_file = os.path.join(temp_dir, "test.txt")
-            test_content = "test checkpoint step: 1000"
-
-            # Write and read text using open_file
-            with open_file(test_file, "w") as f:
-                f.write(test_content)
-            assert os.path.exists(test_file)
-
-            with open_file(test_file, "r") as f:
-                read_content = f.read()
-            assert read_content == test_content
-
-    def test_exists_local(self):
-        """Test file existence check for local paths."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            existing_file = os.path.join(temp_dir, "existing.txt")
-            non_existing_file = os.path.join(temp_dir, "non_existing.txt")
-
-            # Create a file
-            with open(existing_file, "w") as f:
-                f.write("test")
-
-            assert exists(existing_file)
-            assert not exists(non_existing_file)
-            assert exists(temp_dir)
-
-    def test_list_dir_returns_strings_local(self):
-        """Test that list_dir returns a list of strings for a local directory."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Create files and a subdirectory
-            file_a = os.path.join(temp_dir, "a.txt")
-            with open(file_a, "w") as f:
-                f.write("a")
-            sub_dir = os.path.join(temp_dir, "sub")
-            os.makedirs(sub_dir)
-            file_b = os.path.join(sub_dir, "b.txt")
-            with open(file_b, "w") as f:
-                f.write("b")
-
-            entries = list_dir(temp_dir)
-            print(f"\n\n\nentries: {entries}\n\n\n")
-
-            assert isinstance(entries, list)
-            assert len(entries) >= 2
-            assert all(isinstance(p, str) for p in entries)
-
-
-class TestCheckpointUtilities:
-    """Test checkpoint-specific utilities."""
-
-    def test_list_checkpoint_dirs_local(self):
-        """Test listing checkpoint directories for local paths."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Create some checkpoint directories
-            checkpoint_dirs = [
-                "global_step_1000",
-                "global_step_2000",
-                "global_step_500",
-                "other_dir",  # Should be ignored
-            ]
-
-            for dirname in checkpoint_dirs:
-                os.makedirs(os.path.join(temp_dir, dirname))
-
-            # List checkpoint directories
-            found_dirs = list_checkpoint_dirs(temp_dir)
-
-            # Should only include global_step_ directories, sorted
-            expected = ["global_step_1000", "global_step_2000", "global_step_500"]
-            assert sorted(found_dirs) == sorted(expected)
-
-    def test_list_checkpoint_dirs_nonexistent(self):
-        """Test listing checkpoint directories for non-existent path."""
-        non_existent_path = "/non/existent/path"
-        found_dirs = list_checkpoint_dirs(non_existent_path)
-        assert found_dirs == []
-
-    def test_cleanup_old_checkpoints_local(self):
-        """Test cleanup of old checkpoints for local paths."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Create checkpoint directories
-            steps = [1000, 1500, 2000, 2500, 3000]
-            for step in steps:
-                checkpoint_dir = os.path.join(temp_dir, f"global_step_{step}")
-                os.makedirs(checkpoint_dir)
-                # Legacy checkpoints need a trainer-state marker to be recoverable.
-                with open(os.path.join(checkpoint_dir, "trainer_state.pt"), "w") as f:
-                    f.write("dummy")
-
-            # Keep only 3 most recent
-            cleanup_old_checkpoints(temp_dir, max_checkpoints=3)
-
-            # Check remaining directories
-            remaining_dirs = list_checkpoint_dirs(temp_dir)
-            remaining_steps = [int(d.split("_")[2]) for d in remaining_dirs]
-            remaining_steps.sort()
-
-            # Should keep the 3 most recent: 2000, 2500, 3000
-            assert remaining_steps == [2000, 2500, 3000]
-
-    def test_cleanup_old_checkpoints_no_cleanup_needed(self):
-        """Test cleanup when no cleanup is needed."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Create only 2 checkpoint directories
-            steps = [1000, 2000]
-            for step in steps:
-                checkpoint_dir = os.path.join(temp_dir, f"global_step_{step}")
-                os.makedirs(checkpoint_dir)
-
-            # Keep 5 - should not remove any
-            cleanup_old_checkpoints(temp_dir, max_checkpoints=5)
-
-            # All directories should remain
-            remaining_dirs = list_checkpoint_dirs(temp_dir)
-            assert len(remaining_dirs) == 2
-
-
-class TestCloudFileOperationsMocked:
-    """Test cloud file operations with mocked fsspec."""
-
-    @patch("skyrl_train.io.io._get_filesystem")
-    def test_list_checkpoint_dirs_cloud(self, mock_get_filesystem):
-        """Test list_checkpoint_dirs with cloud storage."""
-        mock_fs = Mock()
-        mock_fs.exists.return_value = True
-        mock_fs.ls.return_value = [
-            "s3://bucket/checkpoints/global_step_1000",
-            "s3://bucket/checkpoints/global_step_2000",
-            "s3://bucket/checkpoints/other_dir",
-        ]
-        mock_fs.isdir.side_effect = lambda path: "global_step_" in path
-        mock_get_filesystem.return_value = mock_fs
-
-        cloud_path = "s3://bucket/checkpoints"
-
-        result = list_checkpoint_dirs(cloud_path)
-
-        # Should return sorted checkpoint directories
-        expected = ["global_step_1000", "global_step_2000"]
-        assert sorted(result) == sorted(expected)
-
-    @patch("skyrl_train.utils.trainer_utils.list_committed_checkpoint_dirs")
-    @patch("skyrl_train.io.io._get_filesystem")
-    def test_cleanup_old_checkpoints_cloud(self, mock_get_filesystem, mock_list_committed):
-        """Test cleanup_old_checkpoints with cloud storage."""
-        mock_fs = Mock()
-        mock_fs.exists.return_value = True
-        mock_fs.ls.return_value = [
-            "s3://bucket/checkpoints/global_step_1000",
-            "s3://bucket/checkpoints/global_step_1500",
-            "s3://bucket/checkpoints/global_step_2000",
-            "s3://bucket/checkpoints/global_step_2500",
-        ]
-        mock_fs.isdir.return_value = True
-        mock_get_filesystem.return_value = mock_fs
-        mock_list_committed.return_value = [
-            "global_step_1000",
-            "global_step_1500",
-            "global_step_2000",
-            "global_step_2500",
-        ]
-
-        cloud_path = "s3://bucket/checkpoints"
-
-        cleanup_old_checkpoints(cloud_path, max_checkpoints=2)
-
-        # Should remove the 2 oldest checkpoints
-        expected_removes = [
-            "s3://bucket/checkpoints/global_step_1000",
-            "s3://bucket/checkpoints/global_step_1500",
-        ]
-
-        # Check that remove was called for old checkpoints
-        actual_removes = [call[0][0] for call in mock_fs.rm.call_args_list]
-        assert sorted(actual_removes) == sorted(expected_removes)
-
-
-class TestCheckpointScenarios:
-    """Test realistic checkpoint scenarios."""
-
-    def test_local_checkpoint_save_load_cycle(self):
-        """Test a complete checkpoint save/load cycle with local storage."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Simulate trainer checkpoint saving
-            global_step = 1500
-            global_step_folder = os.path.join(temp_dir, f"global_step_{global_step}")
-            trainer_state_path = os.path.join(global_step_folder, "trainer_state.pt")
-            latest_checkpoint_file = os.path.join(temp_dir, "latest_ckpt_global_step.txt")
-
-            # Save checkpoint
-            makedirs(global_step_folder)
-
-            # Simulate saving trainer state (mock torch.save for simplicity)
-            trainer_state = {"global_step": global_step, "config": {"lr": 0.001}}
-            with patch("torch.save") as mock_save:
-                with open_file(trainer_state_path, "wb") as f:
-                    torch.save(trainer_state, f)
-                mock_save.assert_called_once()
-
-            # Save latest checkpoint info
-            with open_file(latest_checkpoint_file, "w") as f:
-                f.write(str(global_step))
-
-            # Verify checkpoint was saved
-            assert exists(global_step_folder)
-            # Note: trainer_state_path won't exist since we mocked torch.save
-            assert exists(latest_checkpoint_file)
-
-            # Verify latest step can be retrieved
-            with open_file(latest_checkpoint_file, "r") as f:
-                ckpt_iteration = int(f.read().strip())
-            assert ckpt_iteration == global_step
-
-
-class TestContextManagers:
-    """Test the local_work_dir and local_read_dir context managers."""
-
-    def test_local_work_dir_local_path(self):
-        """Test local_work_dir with a local path."""
-        with tempfile.TemporaryDirectory() as base_temp_dir:
-            test_dir = os.path.join(base_temp_dir, "test_output")
-
-            with local_work_dir(test_dir) as work_dir:
-                # Should return the same path for local paths
-                assert work_dir == test_dir
-                # Directory should be created
-                assert os.path.exists(work_dir)
-                assert os.path.isdir(work_dir)
-
-                # Write a test file
-                test_file = os.path.join(work_dir, "test.txt")
-                with open(test_file, "w") as f:
-                    f.write("test content")
-
-            # File should still exist after context exit
-            assert os.path.exists(test_file)
-            with open(test_file, "r") as f:
-                assert f.read() == "test content"
-
-    @patch("skyrl_train.io.io.upload_directory")
-    @patch("skyrl_train.io.io.is_cloud_path")
-    def test_local_work_dir_cloud_path(self, mock_is_cloud_path, mock_upload_directory):
-        """Test local_work_dir with a cloud path."""
-        mock_is_cloud_path.return_value = True
-
-        cloud_path = "s3://bucket/model"
-
-        with local_work_dir(cloud_path) as work_dir:
-            # Should get a temporary directory for cloud paths
-            assert work_dir.startswith("/")
-            assert "tmp" in work_dir.lower()
-            assert os.path.exists(work_dir)
-            assert os.path.isdir(work_dir)
-
-            # Write a test file
-            test_file = os.path.join(work_dir, "model.txt")
-            with open(test_file, "w") as f:
-                f.write("model data")
-
-        # Should have called upload_directory to upload to cloud
-        mock_upload_directory.assert_called_once()
-        # First argument should be the temp directory, second should be cloud path
-        call_args = mock_upload_directory.call_args[0]
-        assert call_args[1] == cloud_path
-        # First argument should be the temp directory we worked with
-        assert call_args[0] == work_dir  # This will be the temp dir
-
-    @patch("skyrl_train.io.io.upload_directory")
-    @patch("skyrl_train.io.io.is_cloud_path", return_value=True)
-    def test_deferred_work_dir_uploads_only_when_published(self, _mock_is_cloud_path, mock_upload_directory):
-        staging = DeferredLocalWorkDir("s3://bucket/checkpoint")
-        with staging as work_dir:
-            Path(work_dir, "rank.pt").write_bytes(b"checkpoint")
-
-        upload = staging.pending_upload()
-        assert upload is not None
-        assert Path(upload.local_path, "rank.pt").read_bytes() == b"checkpoint"
-        mock_upload_directory.assert_not_called()
+class GcsMemoryFileSystem(MemoryFileSystem):
+    """In-memory object store addressed with gs:// URIs, so production code takes its cloud branch."""
+
+    # A distinct protocol name keeps fsspec's per-protocol "gs" configuration out of the constructor.
+    protocol = ("gs-memory",)
+    root_marker = ""
+
+    def __init__(self):
+        super().__init__(skip_instance_cache=True)
+        self.store = {}
+        self.pseudo_dirs = [""]
+        self.put_error: Exception | None = None
 
+    @classmethod
+    def _strip_protocol(cls, path):
+        return path.removeprefix("gs://").rstrip("/")
+
+    def put(self, *args, **kwargs):
+        if self.put_error is not None:
+            raise self.put_error
+        return super().put(*args, **kwargs)
+
+
+@pytest.fixture
+def cloud_fs(monkeypatch):
+    filesystem = GcsMemoryFileSystem()
+    local_filesystem_for = io._get_filesystem
+    monkeypatch.setattr(
+        io, "_get_filesystem", lambda path: filesystem if path.startswith("gs://") else local_filesystem_for(path)
+    )
+    return filesystem
+
+
+@pytest.fixture(params=["local", "cloud"])
+def checkpoint_root(request, tmp_path, cloud_fs):
+    if request.param == "local":
+        return str(tmp_path / "checkpoints")
+    return "gs://bucket/checkpoints"
+
+
+def _write_checkpoint(root: str, dirname: str) -> None:
+    path = f"{root}/{dirname}/model.pt"
+    io.makedirs(os.path.dirname(path))
+    with io.open_file(path, "wb") as f:
+        f.write(b"weights")
+    with io.open_file(f"{root}/{dirname}/trainer_state.pt", "wb") as f:
+        f.write(b"trainer")
+
+
+@pytest.mark.parametrize(
+    "path,expected",
+    [
+        ("s3://bucket/path/file.pt", True),
+        ("gs://bucket/path/file.pt", True),
+        ("gcs://bucket/path/file.pt", True),
+        ("/local/path/file.pt", False),
+        ("relative/path/file.pt", False),
+        ("C:\\Windows\\path\\file.pt", False),
+        ("s3:bucket/path/file.pt", False),
+        ("S3://bucket/path/file.pt", False),
+    ],
+)
+def test_is_cloud_path(path, expected):
+    assert is_cloud_path(path) is expected
+
+
+def test_list_checkpoint_dirs_ignores_non_checkpoint_dirs(checkpoint_root):
+    for dirname in ["global_step_1000", "global_step_2000", "global_step_500", "other_dir"]:
+        _write_checkpoint(checkpoint_root, dirname)
+
+    assert sorted(list_checkpoint_dirs(checkpoint_root)) == ["global_step_1000", "global_step_2000", "global_step_500"]
+
+
+def test_list_checkpoint_dirs_missing_root_is_empty(tmp_path):
+    assert list_checkpoint_dirs(str(tmp_path / "missing")) == []
+
+
+@pytest.mark.parametrize(
+    "max_checkpoints,expected_steps",
+    [(3, [2000, 2500, 3000]), (5, [1000, 1500, 2000, 2500, 3000])],
+    ids=["removes_oldest", "under_limit"],
+)
+def test_cleanup_old_checkpoints_keeps_most_recent(checkpoint_root, max_checkpoints, expected_steps):
+    for step in [1000, 1500, 2000, 2500, 3000]:
+        _write_checkpoint(checkpoint_root, f"global_step_{step}")
+
+    cleanup_old_checkpoints(checkpoint_root, max_checkpoints=max_checkpoints)
+
+    remaining = sorted(int(d.removeprefix("global_step_")) for d in list_checkpoint_dirs(checkpoint_root))
+    assert remaining == expected_steps
+
+
+def test_cloud_work_dir_round_trips_through_read_dir(cloud_fs):
+    with local_work_dir("gs://bucket/model") as work_dir:
+        Path(work_dir, "config.json").write_text("{}")
+        Path(work_dir, "shards").mkdir()
+        Path(work_dir, "shards", "0.bin").write_bytes(b"shard")
+
+    with local_read_dir("gs://bucket/model") as read_dir:
+        assert Path(read_dir, "config.json").read_text() == "{}"
+        assert Path(read_dir, "shards", "0.bin").read_bytes() == b"shard"
+
+
+def test_cloud_work_dir_does_not_publish_after_failure(cloud_fs):
+    with pytest.raises(RuntimeError, match="writer failed"):
+        with local_work_dir("gs://bucket/model") as work_dir:
+            Path(work_dir, "partial.bin").write_bytes(b"partial")
+            raise RuntimeError("writer failed")
+
+    assert not cloud_fs.exists("gs://bucket/model/partial.bin")
+
+
+def test_deferred_work_dir_uploads_only_when_published(cloud_fs):
+    staging = DeferredLocalWorkDir("gs://bucket/checkpoint")
+    with staging as work_dir:
+        Path(work_dir, "rank.pt").write_bytes(b"checkpoint")
+
+    upload = staging.pending_upload()
+    assert not cloud_fs.exists("gs://bucket/checkpoint/rank.pt")
+
+    upload.publish()
+
+    assert cloud_fs.cat("gs://bucket/checkpoint/rank.pt") == b"checkpoint"
+    assert not Path(upload.local_path).exists()
+
+
+def test_deferred_work_dir_cleans_staging_after_failed_upload(cloud_fs):
+    cloud_fs.put_error = OSError("upload failed")
+    staging = DeferredLocalWorkDir("gs://bucket/checkpoint")
+    with staging as work_dir:
+        Path(work_dir, "rank.pt").write_bytes(b"checkpoint")
+
+    upload = staging.pending_upload()
+    with pytest.raises(OSError, match="upload failed"):
         upload.publish()
 
-        mock_upload_directory.assert_called_once_with(upload.local_path, "s3://bucket/checkpoint")
-        assert not Path(upload.local_path).exists()
+    assert not Path(upload.local_path).exists()
 
-    @patch("skyrl_train.io.io.upload_directory", side_effect=OSError("upload failed"))
-    @patch("skyrl_train.io.io.is_cloud_path", return_value=True)
-    def test_deferred_work_dir_cleans_staging_after_failed_upload(self, _mock_is_cloud_path, _mock_upload_directory):
-        staging = DeferredLocalWorkDir("s3://bucket/checkpoint")
-        with staging as work_dir:
-            Path(work_dir, "rank.pt").write_bytes(b"checkpoint")
 
-        upload = staging.pending_upload()
-        assert upload is not None
-        with pytest.raises(OSError, match="upload failed"):
-            upload.publish()
+def test_local_read_dir_nonexistent_local():
+    with pytest.raises(FileNotFoundError, match="Path does not exist"):
+        with local_read_dir("/non/existent/path/12345"):
+            pass
 
-        assert not Path(upload.local_path).exists()
 
-    def test_local_read_dir_local_path(self):
-        """Test local_read_dir with a local path."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Create a test file
-            test_file = os.path.join(temp_dir, "test.txt")
-            with open(test_file, "w") as f:
-                f.write("test content")
+def test_local_read_dir_s3_directory_preserves_root_contents(monkeypatch):
+    """S3 directory reads expose checkpoint metadata at the returned directory root."""
 
-            with local_read_dir(temp_dir) as read_dir:
-                # Should return the same path for local paths
-                assert read_dir == temp_dir
+    class DirectoryFilesystem:
+        def _strip_protocol(self, path):
+            # Mirror fsspec AbstractFileSystem._strip_protocol, which also rstrips separators.
+            return path.removeprefix("s3://").rstrip("/")
 
-                # Should be able to read the file
-                read_file = os.path.join(read_dir, "test.txt")
-                assert os.path.exists(read_file)
-                with open(read_file, "r") as f:
-                    assert f.read() == "test content"
+        def get(self, source, destination, recursive):
+            destination_root = Path(destination)
+            if not source.endswith("/"):
+                destination_root /= Path(source).name
+            destination_root.mkdir(parents=True, exist_ok=True)
+            (destination_root / ".metadata").write_text("checkpoint metadata")
 
-    @patch("skyrl_train.io.io.download_directory")
-    @patch("skyrl_train.io.io.is_cloud_path")
-    def test_local_read_dir_cloud_path(self, mock_is_cloud_path, mock_download_directory):
-        """Test local_read_dir with a cloud path."""
-        mock_is_cloud_path.return_value = True
+    monkeypatch.setattr(io, "_get_filesystem", lambda path: DirectoryFilesystem())
 
-        cloud_path = "s3://bucket/model"
+    with local_read_dir("s3://bucket/checkpoints/global_step_12/policy") as read_dir:
+        assert (Path(read_dir) / ".metadata").is_file()
 
-        with local_read_dir(cloud_path) as read_dir:
-            # Should get a temporary directory for cloud paths
-            assert read_dir.startswith("/")
-            assert "tmp" in read_dir.lower()
-            assert os.path.exists(read_dir)
-            assert os.path.isdir(read_dir)
 
-        # Should have called download_directory to download from cloud
-        mock_download_directory.assert_called_once_with(cloud_path, read_dir)
+def test_upload_directory_s3_preserves_destination_contents(monkeypatch, tmp_path):
+    """S3 directory uploads land at the destination root even when the prefix already exists."""
 
-    def test_local_read_dir_nonexistent_local(self):
-        """Test local_read_dir with a non-existent local path."""
-        non_existent_path = "/non/existent/path/12345"
+    class DirectoryFilesystem:
+        def __init__(self):
+            self.destination_roots = []
 
-        with pytest.raises(FileNotFoundError, match="Path does not exist"):
-            with local_read_dir(non_existent_path):
+        def _strip_protocol(self, path):
+            return path.removeprefix("s3://").rstrip("/")
+
+        def put(self, source, destination, recursive):
+            destination_root = destination
+            if not source.endswith("/"):
+                destination_root = f"{destination}/{Path(source).name}"
+            self.destination_roots.append(destination_root)
+
+    filesystem = DirectoryFilesystem()
+    monkeypatch.setattr(io, "_get_filesystem", lambda path: filesystem)
+    (tmp_path / ".metadata").write_text("checkpoint metadata")
+
+    upload_directory(str(tmp_path), "s3://bucket/checkpoints/global_step_12/policy")
+
+    assert filesystem.destination_roots == ["bucket/checkpoints/global_step_12/policy"]
+
+
+def test_node_cached_read_dir_reuses_completed_download(tmp_path):
+    cloud_path = "s3://bucket/checkpoints/global_step_12/policy"
+    cache_root = tmp_path / "cache"
+
+    def download(_cloud_path, local_path):
+        assert _cloud_path == cloud_path
+        (Path(local_path) / ".metadata").write_text("checkpoint metadata")
+
+    with patch("skyrl_train.io.io.download_directory", side_effect=download) as mock_download:
+        with node_cached_read_dir(cloud_path, str(cache_root)) as first_read_dir:
+            assert (Path(first_read_dir) / ".metadata").read_text() == "checkpoint metadata"
+
+        with node_cached_read_dir(cloud_path, str(cache_root)) as second_read_dir:
+            assert second_read_dir == first_read_dir
+
+    mock_download.assert_called_once()
+    assert Path(first_read_dir).is_dir()
+
+
+def test_node_cached_read_dir_does_not_publish_failed_download(tmp_path):
+    cloud_path = "s3://bucket/checkpoints/global_step_12/policy"
+    cache_root = tmp_path / "cache"
+
+    with patch("skyrl_train.io.io.download_directory", side_effect=RuntimeError("download failed")):
+        with pytest.raises(RuntimeError, match="download failed"):
+            with node_cached_read_dir(cloud_path, str(cache_root)):
                 pass
 
-    @patch("skyrl_train.io.io._get_filesystem")
-    def test_local_read_dir_cloud_directory_preserves_root_contents(self, mock_get_filesystem):
-        """Cloud directory reads expose checkpoint metadata at the returned directory root."""
+    def download(_cloud_path, local_path):
+        (Path(local_path) / ".metadata").write_text("checkpoint metadata")
 
-        class DirectoryFilesystem:
-            def _strip_protocol(self, path):
-                # Mirror fsspec AbstractFileSystem._strip_protocol, which also rstrips separators.
-                return path.removeprefix("s3://").rstrip("/")
+    with patch("skyrl_train.io.io.download_directory", side_effect=download) as mock_download:
+        with node_cached_read_dir(cloud_path, str(cache_root)) as read_dir:
+            assert (Path(read_dir) / ".metadata").read_text() == "checkpoint metadata"
 
-            def get(self, source, destination, recursive):
-                destination_root = Path(destination)
-                if not source.endswith("/"):
-                    destination_root /= Path(source).name
-                destination_root.mkdir(parents=True, exist_ok=True)
-                (destination_root / ".metadata").write_text("checkpoint metadata")
-
-        mock_get_filesystem.return_value = DirectoryFilesystem()
-
-        with local_read_dir("s3://bucket/checkpoints/global_step_12/policy") as read_dir:
-            assert (Path(read_dir) / ".metadata").is_file()
-
-    def test_node_cached_read_dir_reuses_completed_download(self, tmp_path):
-        cloud_path = "s3://bucket/checkpoints/global_step_12/policy"
-        cache_root = tmp_path / "cache"
-
-        def download(_cloud_path, local_path):
-            assert _cloud_path == cloud_path
-            (Path(local_path) / ".metadata").write_text("checkpoint metadata")
-
-        with patch("skyrl_train.io.io.download_directory", side_effect=download) as mock_download:
-            with node_cached_read_dir(cloud_path, str(cache_root)) as first_read_dir:
-                assert (Path(first_read_dir) / ".metadata").read_text() == "checkpoint metadata"
-
-            with node_cached_read_dir(cloud_path, str(cache_root)) as second_read_dir:
-                assert second_read_dir == first_read_dir
-
-        mock_download.assert_called_once()
-        assert Path(first_read_dir).is_dir()
-
-    def test_node_cached_read_dir_does_not_publish_failed_download(self, tmp_path):
-        cloud_path = "s3://bucket/checkpoints/global_step_12/policy"
-        cache_root = tmp_path / "cache"
-
-        with patch("skyrl_train.io.io.download_directory", side_effect=RuntimeError("download failed")):
-            with pytest.raises(RuntimeError, match="download failed"):
-                with node_cached_read_dir(cloud_path, str(cache_root)):
-                    pass
-
-        def download(_cloud_path, local_path):
-            (Path(local_path) / ".metadata").write_text("checkpoint metadata")
-
-        with patch("skyrl_train.io.io.download_directory", side_effect=download) as mock_download:
-            with node_cached_read_dir(cloud_path, str(cache_root)) as read_dir:
-                assert (Path(read_dir) / ".metadata").read_text() == "checkpoint metadata"
-
-        mock_download.assert_called_once()
+    mock_download.assert_called_once()
 
 
 class FakeHFCloudFilesystem:
@@ -517,7 +289,7 @@ class FakeHFCloudFilesystem:
 
 def test_cloud_hf_model_publication_writes_index_after_weight_shards(monkeypatch):
     filesystem = FakeHFCloudFilesystem()
-    monkeypatch.setattr("skyrl_train.io.io._get_filesystem", lambda path: filesystem)
+    monkeypatch.setattr(io, "_get_filesystem", lambda path: filesystem)
 
     with local_hf_model_dir("s3://bucket/export/policy") as work_dir:
         Path(work_dir, "config.json").write_text("{}")
@@ -547,7 +319,7 @@ def test_cloud_hf_model_publication_writes_index_after_weight_shards(monkeypatch
 
 def test_non_s3_hf_model_publication_preserves_destination_scheme(monkeypatch):
     filesystem = FakeHFCloudFilesystem()
-    monkeypatch.setattr("skyrl_train.io.io._get_filesystem", lambda path: filesystem)
+    monkeypatch.setattr(io, "_get_filesystem", lambda path: filesystem)
 
     with local_hf_model_dir("gs://bucket/export/policy") as work_dir:
         Path(work_dir, "config.json").write_text("{}")
@@ -586,7 +358,7 @@ def test_interrupted_cloud_hf_model_publication_removes_stale_index(monkeypatch)
         objects={index_key: b"stale index"},
         upload_error=OSError("interrupted upload"),
     )
-    monkeypatch.setattr("skyrl_train.io.io._get_filesystem", lambda path: filesystem)
+    monkeypatch.setattr(io, "_get_filesystem", lambda path: filesystem)
 
     with pytest.raises(OSError, match="interrupted upload"):
         with local_hf_model_dir("s3://bucket/export/policy") as work_dir:
@@ -596,49 +368,3 @@ def test_interrupted_cloud_hf_model_publication_removes_stale_index(monkeypatch)
             Path(work_dir, "model.safetensors.index.json").write_text('{"weight_map": {"x": "model.safetensors"}}')
 
     assert index_key not in filesystem.objects
-
-
-class TestUploadDownload:
-    """Test upload and download directory functions."""
-
-    def test_upload_directory_validates_cloud_path(self):
-        """Test that upload_directory validates destination is a cloud path."""
-        with pytest.raises(ValueError, match="Destination must be a cloud path"):
-            upload_directory("/local/src", "/local/dst")
-
-    @patch("skyrl_train.io.io._get_filesystem")
-    def test_upload_directory_preserves_destination_contents(self, mock_get_filesystem):
-        """Cloud directory uploads land at the destination root even when the prefix already exists."""
-
-        class DirectoryFilesystem:
-            def __init__(self):
-                self.destination_roots = []
-
-            def _strip_protocol(self, path):
-                # Mirror fsspec AbstractFileSystem._strip_protocol, which also rstrips separators.
-                return path.removeprefix("s3://").rstrip("/")
-
-            def put(self, source, destination, recursive):
-                destination_root = destination
-                if not source.endswith("/"):
-                    destination_root = f"{destination}/{Path(source).name}"
-                self.destination_roots.append(destination_root)
-
-        filesystem = DirectoryFilesystem()
-        mock_get_filesystem.return_value = filesystem
-
-        with tempfile.TemporaryDirectory() as source_dir:
-            (Path(source_dir) / ".metadata").write_text("checkpoint metadata")
-            upload_directory(source_dir, "s3://bucket/checkpoints/global_step_12/policy")
-
-        assert filesystem.destination_roots == ["bucket/checkpoints/global_step_12/policy"]
-
-    def test_download_directory_validates_cloud_path(self):
-        """Test that download_directory validates source is a cloud path."""
-        with pytest.raises(ValueError, match="Source must be a cloud path"):
-            download_directory("/local/src", "/local/dst")
-
-
-if __name__ == "__main__":
-    # Run tests with pytest
-    pytest.main([__file__, "-v"])

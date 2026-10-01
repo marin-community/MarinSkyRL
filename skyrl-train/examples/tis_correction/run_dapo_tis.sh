@@ -10,9 +10,6 @@ DATA_DIR="$HOME/data/gsm8k"
 NUM_GPUS=4
 LOGGER="wandb"  # change to "console" to print to stdout
 
-# TIS parameters
-TIS_IMP_RATIO_CAP=2.0
-USE_TIS=true
 # returns rollout logprobs for the generated tokens; required for TIS
 LOGPROBS=0
 
@@ -55,8 +52,7 @@ uv run --isolated --extra megatron --extra vllm -m examples.tis_correction.main_
   generator.eval_sampling_params.top_p=$EVAL_TOP_P \
   trainer.algorithm.use_kl_loss=$USE_KL_LOSS \
   trainer.algorithm.clip_ratio_c=$CLIP_RATIO_C \
-  trainer.algorithm.use_tis=$USE_TIS \
-  trainer.algorithm.tis_imp_ratio_cap=$TIS_IMP_RATIO_CAP \
+  trainer.algorithm.off_policy_correction=tis \
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
   trainer.placement.colocate_all=true \
   trainer.strategy=megatron \
@@ -82,8 +78,6 @@ uv run --isolated --extra megatron --extra vllm -m examples.tis_correction.main_
   generator.backend=vllm \
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
-  generator.async_engine=true \
-  generator.batched=true \
   environment.env_class=gsm8k \
   generator.n_samples_per_prompt=5 \
   generator.gpu_memory_utilization=0.8 \

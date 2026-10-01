@@ -1,5 +1,3 @@
-"""Complete-generation publication contracts for local checkpoint attempts."""
-
 import json
 from pathlib import Path
 
@@ -10,15 +8,11 @@ from skyrl_train.checkpoint_generation import (
     COMMIT_FILENAME,
     MANIFEST_FILENAME,
     commit_attempt,
-    commit_shutdown_overlay,
     new_attempt_path,
-    new_shutdown_overlay_path,
     resolve_checkpoint_payload,
-    shutdown_buffer_artifact_path,
 )
 from skyrl_train.checkpoint_listing import list_committed_checkpoint_dirs
 from skyrl_train.io import io
-from skyrl_train import checkpoint_generation as generations
 from skyrl_train.utils.trainer_utils import validate_consistency_for_latest_checkpoint
 
 
@@ -116,43 +110,3 @@ def test_legacy_checkpoint_remains_readable_and_corrupt_commit_does_not_fall_bac
     (step_path / COMMIT_FILENAME).write_text(json.dumps({"schema_version": 1, "step": 1, "attempt_id": "bad"}))
     with pytest.raises(ValueError, match="attempt ID"):
         resolve_checkpoint_payload(str(step_path))
-
-
-def test_shutdown_overlay_replaces_only_its_matching_base_generation(tmp_path):
-    step_path = tmp_path / "global_step_1"
-    first = _attempt(step_path)
-    (first / "generation_buffer_state.pt").write_bytes(b"inline")
-    commit_attempt(str(step_path), str(first), required_files=_REQUIRED)
-
-    overlay = Path(new_shutdown_overlay_path(str(first)))
-    overlay.mkdir(parents=True)
-    (overlay / "generation_buffer_state.pt").write_bytes(b"shutdown")
-    commit_shutdown_overlay(str(first), str(overlay), "generation_buffer_state.pt")
-    assert shutdown_buffer_artifact_path(str(first), "generation_buffer_state.pt") == str(
-        overlay / "generation_buffer_state.pt"
-    )
-    assert (first / "generation_buffer_state.pt").read_bytes() == b"inline"
-
-    second = _attempt(step_path, b"new weights")
-    (second / "generation_buffer_state.pt").write_bytes(b"new inline")
-    commit_attempt(str(step_path), str(second), required_files=_REQUIRED)
-    assert shutdown_buffer_artifact_path(str(second), "generation_buffer_state.pt") == str(
-        second / "generation_buffer_state.pt"
-    )
-
-
-def test_failed_shutdown_overlay_does_not_replace_prior_overlay(tmp_path):
-    step_path = tmp_path / "global_step_1"
-    attempt = _attempt(step_path)
-    commit_attempt(str(step_path), str(attempt), required_files=_REQUIRED)
-    first = Path(new_shutdown_overlay_path(str(attempt)))
-    first.mkdir(parents=True)
-    (first / "generation_buffer_state.pt").write_bytes(b"safe")
-    commit_shutdown_overlay(str(attempt), str(first), "generation_buffer_state.pt")
-    marker = (step_path / generations.SHUTDOWN_OVERLAY_COMMIT_FILENAME).read_bytes()
-
-    second = Path(new_shutdown_overlay_path(str(attempt)))
-    second.mkdir(parents=True)
-    with pytest.raises(FileNotFoundError):
-        commit_shutdown_overlay(str(attempt), str(second), "generation_buffer_state.pt")
-    assert (step_path / generations.SHUTDOWN_OVERLAY_COMMIT_FILENAME).read_bytes() == marker

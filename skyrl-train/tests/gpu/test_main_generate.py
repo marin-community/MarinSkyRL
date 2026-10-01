@@ -3,7 +3,6 @@ uv run --group dev --extra vllm --isolated pytest tests/gpu/test_main_generate.p
 """
 
 import json
-import asyncio
 import ray
 
 from skyrl_train.entrypoints.main_generate import EvalOnlyEntrypoint
@@ -40,7 +39,6 @@ def test_main_generate(tmp_path):
     cfg.generator.sampling_params.max_generate_length = 4
     cfg.generator.eval_sampling_params.max_generate_length = 4
     cfg.generator.eval_n_samples_per_prompt = 1
-    cfg.generator.async_engine = True
 
     cfg.environment.skyrl_gym.max_env_workers = 1
 
@@ -53,7 +51,9 @@ def test_main_generate(tmp_path):
         cfg.trainer.eval_interval = 1
 
         exp = EvalOnlyEntrypoint(cfg)
-        metrics = asyncio.run(exp.run())
+        # run() is synchronous: BasePPOExp.run wraps the telemetry lifecycle around
+        # _run(), which owns the asyncio.run for the eval coroutine.
+        metrics = exp.run()
         assert isinstance(metrics, dict) and len(metrics) > 0, f"Eval results not correctly computed: {metrics}"
     finally:
         ray.shutdown()

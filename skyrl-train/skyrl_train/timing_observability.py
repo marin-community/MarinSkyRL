@@ -3,24 +3,22 @@
 from __future__ import annotations
 
 import json
-import os
-import resource
-import sys
 import time
-from collections.abc import Callable, Mapping, MutableMapping, Sequence
+import math
+from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Iterator, Protocol
+from typing import Protocol
 
 from loguru import logger
-
-from skyrl_train.telemetry import DRIVER_ROLE, TRAINER_ROLE, WORKER_ROLE, phase_duration
+from skyrl_train.telemetry import TRAINER_ROLE, WORKER_ROLE, phase_attributes, phase_duration
 
 
 TIMING_PARENTS: dict[str, str | None] = {
     "step": None,
     "generate": "step",
     "wait_for_generation_buffer": "step",
+    "assemble_generation_group_mini_batch": "step",
     "postprocess_trajectory_batch": "step",
     "convert_to_training_input": "step",
     "run_training": "step",
@@ -31,12 +29,15 @@ TIMING_PARENTS: dict[str, str | None] = {
     "critic_train": "train_critic_and_policy",
     "policy_train": "train_critic_and_policy",
     "policy_critic_overlap_train": "train_critic_and_policy",
+    "backload_policy_optimizer_to_gpu": "train_critic_and_policy",
     "sync_weights": "step",
     "offload_policy_model_to_cpu": "step",
     "dump_data_batch": "run_training",
     "init_weight_sync_state": None,
     "save_checkpoints": "step",
-    "checkpoint_upload": "step",
+    # Background elapsed time may span several steps; only the await is step-blocking.
+    "checkpoint_upload": None,
+    "checkpoint_upload_blocking": "step",
     "cleanup_old_checkpoints": "save_checkpoints",
     "save_hf_model": "step",
     "queue_hf_export": "step",
@@ -55,41 +56,9 @@ class PhaseTiming:
 
 @dataclass
 class CheckpointPhaseSample:
-    """Additional data known only after a checkpoint phase completes."""
+    """Counters populated by a checkpoint phase before it completes."""
 
-    bytes_written: int | None = None
-    scratch_bytes: int | None = None
-    failed: bool = False
-    counters: dict[str, float | int] = field(default_factory=dict)
-
-
-def _cgroup_memory_bytes(filename: str) -> int | None:
-    try:
-        with open(os.path.join("/sys/fs/cgroup", filename)) as source:
-            return int(source.read().strip())
-    except (OSError, ValueError):
-        return None
-
-
-def _process_rss_bytes() -> int | None:
-    """Read current Linux RSS without adding a dependency to the launcher install."""
-    try:
-        with open("/proc/self/statm") as source:
-            resident_pages = int(source.read().split()[1])
-        return resident_pages * os.sysconf("SC_PAGE_SIZE")
-    except (OSError, ValueError, IndexError):
-        return None
-
-
-def _cuda_memory_bytes() -> tuple[int | None, int | None, int | None]:
-    # The launcher imports timing helpers without installing the optional GPU runtime.
-    try:
-        import torch
-    except ImportError:
-        return None, None, None
-    if not torch.cuda.is_initialized():
-        return None, None, None
-    return torch.cuda.memory_allocated(), torch.cuda.memory_reserved(), torch.cuda.max_memory_allocated()
+    counters: dict[str, int | float] = field(default_factory=dict)
 
 
 @contextmanager
@@ -100,12 +69,9 @@ def checkpoint_phase(
     *,
     rank: int,
     step: int | None,
-    started_monotonic: float | None = None,
-    started_unix: float | None = None,
 ) -> Iterator[CheckpointPhaseSample]:
-    """Publish a rank-local checkpoint wall span without synchronizing CUDA."""
-    started = time.perf_counter() if started_monotonic is None else started_monotonic
-    started_unix = time.time() if started_unix is None else started_unix
+    """Record a rank-local wall span without synchronizing CUDA."""
+    started = time.perf_counter()
     sample = CheckpointPhaseSample()
     outcome = "success"
     try:
@@ -114,43 +80,156 @@ def checkpoint_phase(
         outcome = "failure"
         raise
     finally:
-        if sample.failed:
-            outcome = "failure"
         duration = time.perf_counter() - started
+        attributes = {
+            "backend": backend,
+            "operation": operation,
+            "phase": phase,
+            "rank": str(rank),
+            "step": str(step),
+            "outcome": outcome,
+            "clock_domain": "inclusive_wall",
+            "role": WORKER_ROLE if rank >= 0 else TRAINER_ROLE,
+        }
         try:
-            attributes = {
-                "backend": backend,
-                "operation": operation,
-                "phase": phase,
-                "rank": str(rank),
-                "step": str(step),
-                "outcome": outcome,
-                "clock_domain": "inclusive_wall",
-                "role": WORKER_ROLE if rank >= 0 else DRIVER_ROLE if operation == "export" else TRAINER_ROLE,
-            }
             phase_duration.record(duration, attributes=attributes)
-            cuda_allocated, cuda_reserved, cuda_peak_allocated = _cuda_memory_bytes()
-            observation = {
-                "schema": "checkpoint_phase_v1",
-                **attributes,
-                "duration_seconds": duration,
-                "started_unix_seconds": started_unix,
-                "ended_unix_seconds": time.time(),
-                "bytes_written": sample.bytes_written,
-                "scratch_bytes": sample.scratch_bytes,
-                "counters": sample.counters,
-                "process_rss_bytes": _process_rss_bytes(),
-                "process_peak_rss_since_start_bytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-                * (1 if sys.platform == "darwin" else 1024),
-                "cgroup_memory_current_bytes": _cgroup_memory_bytes("memory.current"),
-                "cgroup_memory_peak_bytes": _cgroup_memory_bytes("memory.peak"),
-                "cuda_allocated_bytes": cuda_allocated,
-                "cuda_reserved_bytes": cuda_reserved,
-                "cuda_peak_allocated_since_start_bytes": cuda_peak_allocated,
-            }
-            logger.info("checkpoint_observation {}", json.dumps(observation, sort_keys=True))
+            logger.info(
+                "checkpoint_observation {}",
+                json.dumps(
+                    {
+                        "schema": "checkpoint_phase_v1",
+                        **attributes,
+                        "duration_seconds": duration,
+                        "counters": sample.counters,
+                    },
+                    sort_keys=True,
+                ),
+            )
         except Exception:
             logger.opt(exception=True).warning("Could not publish checkpoint timing")
+
+
+class PhaseBreakdown:
+    """Split one root phase's wall time into child phases and publish the unattributed residual."""
+
+    def __init__(
+        self,
+        root: str,
+        parents: Mapping[str, str] | None = None,
+        *,
+        enabled: bool,
+        clock: Callable[[], float] = time.perf_counter,
+    ) -> None:
+        self.root = root
+        self.enabled = enabled
+        self._parents = parents or {}
+        self.clock = clock
+        self._started = clock() if enabled else 0.0
+        self._durations: dict[str, float] = {}
+
+    @contextmanager
+    def span(self, phase: str) -> Iterator[None]:
+        if not self.enabled:
+            yield
+            return
+        started = self.clock()
+        try:
+            yield
+        finally:
+            self._durations[phase] = self._durations.get(phase, 0.0) + self.clock() - started
+
+    def durations(self) -> dict[str, float]:
+        """Each entered phase's accumulated seconds."""
+        return dict(self._durations)
+
+    def add(self, phase: str, seconds: float) -> None:
+        """Count time spent in a phase measured elsewhere, such as in another process."""
+        self._durations[phase] = self._durations.get(phase, 0.0) + seconds
+
+    def publish(self, *, clock_domain: str, attributes: Mapping[str, str]) -> float:
+        """Record the root, each entered phase under its parent and the residual; return the root's duration."""
+        if not self.enabled:
+            return 0.0
+        total = self.clock() - self._started
+        parents = {phase: self._parents.get(phase, self.root) for phase in self._durations}
+        children = sum(duration for phase, duration in self._durations.items() if parents[phase] == self.root)
+        rows = [
+            (self.root, total, None),
+            *((phase, duration, parents[phase]) for phase, duration in self._durations.items()),
+        ]
+        rows.append((f"{self.root}_residual", total - children, self.root))
+        for phase, duration, parent in rows:
+            phase_duration.record(
+                duration,
+                attributes={
+                    **attributes,
+                    **phase_attributes(phase=phase, root=self.root, parent=parent, clock_domain=clock_domain),
+                },
+            )
+        return total
+
+
+STEP_WALL_PHASES = (
+    "group_admission",
+    "batch_assembly",
+    "training_preparation",
+    "advantages",
+    "policy_training",
+    "group_bookkeeping",
+    "weight_sync",
+    "step_end_bookkeeping",
+    "checkpoint_work",
+    "evaluation",
+    "unaccounted",
+)
+
+
+class StepWallTime:
+    """Exclusive optimizer-step wall clock; legacy inclusive timers are not additive."""
+
+    def __init__(self, budgets: Mapping[str, float], *, clock: Callable[[], float] | None = None) -> None:
+        if set(budgets) != set(STEP_WALL_PHASES):
+            raise ValueError(f"Step phase budgets must name exactly {STEP_WALL_PHASES}")
+        self.budgets = {name: float(budgets[name]) for name in STEP_WALL_PHASES}
+        if any(not math.isfinite(value) or value < 0 for value in self.budgets.values()):
+            raise ValueError("Step phase budgets must be finite nonnegative seconds")
+        self.clock = clock or time.monotonic
+        self.durations = {name: 0.0 for name in STEP_WALL_PHASES}
+        self._active: str | None = None
+        self._started: float | None = None
+
+    def start(self, phase: str) -> None:
+        if phase not in self.durations or phase == "unaccounted":
+            raise ValueError(f"Invalid step wall phase: {phase}")
+        now = self.clock()
+        if self._active is not None:
+            assert self._started is not None
+            self.durations[self._active] += now - self._started
+        self._active, self._started = phase, now
+
+    def finish(
+        self, step_seconds: float, *, ended_at: float | None = None, tolerance: float = 0.01
+    ) -> dict[str, float]:
+        if self._active is None:
+            raise ValueError("Step wall clock was not started")
+        now = self.clock() if ended_at is None else ended_at
+        assert self._started is not None
+        self.durations[self._active] += now - self._started
+        residual = step_seconds - sum(self.durations.values())
+        if residual < -tolerance:
+            raise ValueError(f"Step phases exceed timing/step by {-residual:.3f}s")
+        if residual > 0:
+            self.durations["unaccounted"] = residual
+        self._active = None
+        return {
+            key: value
+            for phase in STEP_WALL_PHASES
+            for key, value in (
+                (f"timing/step_wall/{phase}", self.durations[phase]),
+                (f"timing/step_wall_budget/{phase}", self.budgets[phase]),
+                (f"timing/step_wall_overrun/{phase}", max(0.0, self.durations[phase] - self.budgets[phase])),
+            )
+        }
 
 
 class TimingSink(Protocol):
@@ -190,10 +269,12 @@ class FinelogTimingSink:
             phase_duration.record(
                 observation.duration_seconds,
                 attributes={
-                    "phase": observation.name,
-                    "root": observation.root,
-                    "parent": observation.parent or "",
-                    "clock_domain": "inclusive_wall",
+                    **phase_attributes(
+                        phase=observation.name,
+                        root=observation.root,
+                        parent=observation.parent,
+                        clock_domain="inclusive_wall",
+                    ),
                     "role": TRAINER_ROLE,
                     "step": str(step),
                 },

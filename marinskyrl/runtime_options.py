@@ -17,3 +17,36 @@ class WeightSyncTransport(StrEnum):
 class GDNBackend(StrEnum):
     TORCH = "torch"
     FLASHQLA = "flashqla"
+
+
+TRAJECTORY_SELECTOR_TYPE_PATH = "trainer.trajectory_selector.type"
+
+
+class RolloutGrading(StrEnum):
+    """Launcher-side mirror of skyrl_gym's NemotronUltraGrading, which marinskyrl cannot import."""
+
+    VERIFY = "verify"
+    SKIP = "skip"
+
+
+class AdvantageEstimator(StrEnum):
+    GAE = "gae"
+    GRPO = "grpo"
+    RLOO = "rloo"
+    RLOO_N = "rloo_n"  # RLOO-Neutral: excludes masked samples from baseline
+    REINFORCE_PP = "reinforce++"
+    UNIFORM = "uniform"
+    REWARD = "reward"
+
+
+class PolicyLossType(StrEnum):
+    REGULAR = "regular"
+    DUAL_CLIP = "dual_clip"
+    BEHAVIOR_CLIP = "behavior_clip"
+    GSPO = "gspo"
+    CISPO = "cispo"
+    CLIP_COV = "clip_cov"
+    KL_COV = "kl_cov"
+    SAPO = "sapo"
+    SFT = "sft"
+    IMPORTANCE_SAMPLING = "importance_sampling"

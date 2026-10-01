@@ -1,5 +1,6 @@
 import asyncio
 import concurrent.futures
+import contextlib
 import logging
 import os
 import socket
@@ -42,11 +43,15 @@ from skyrl_train.utils.policy_math import ppo_critic_loss
 from skyrl_train.utils.importance_ratio_diagnostics import (
     LogRatioMonitor,
 )
-from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective
+from skyrl_train.learner_memory import LearnerCudaMetrics
+from skyrl_train.timing_observability import PhaseBreakdown
+from skyrl_train.telemetry import WORKER_ROLE, ProcessTelemetry, TelemetryConfig
+from skyrl_train.config.objective_spec import topk_loss_params
+from skyrl_train.objective.objective import TopKTeacherBatch, build_objective_micro_batch, compute_policy_objective
+from skyrl_train.objective.reduction import StepCounts, policy_data_weights, step_counts
 from skyrl_train.distillation import student_topk_logprobs
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.training_batch import (
-    GLOBAL_LOSS_DENOM_METADATA_KEY,
     TrainingBatchIterator,
     TrainingInputBatch,
     TrainingOutputBatch,
@@ -88,6 +93,10 @@ def _grug_query_bias_updater(
     target_weight = 1.0 if update.mode is GrugQueryBiasUpdateMode.REPLACE else update.interpolation_weight
     assert target_weight is not None
     return GrugQuantileBiasUpdater(model, valid_tokens, target_weight=target_weight)
+
+
+# Rigging's own shutdown waits two seconds; the extra covers the round trip to every rank.
+TELEMETRY_DRAIN_TIMEOUT_SECONDS = 5.0
 
 
 # Adapted from OpenRLHF: https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/trainer/ray/launcher.py#L17
@@ -307,7 +316,21 @@ class Worker(DistributedTorchRayActor):
         super().__init__(*args, **kwargs)
         self.cfg = cfg
         configure_progress(cfg.trainer.progress)
+        # Rigging drops records from a process that never configured it.
+        self._telemetry = contextlib.ExitStack()
+        telemetry_config = TelemetryConfig.from_environment()
+        if telemetry_config.endpoint is not None:
+            self._telemetry.enter_context(ProcessTelemetry(telemetry_config, WORKER_ROLE))
         enable_trainer_batch_invariance(cfg.trainer.algorithm.batch_invariant)
+
+    @property
+    def device(self) -> torch.device:
+        """Device that holds this worker's model and training tensors."""
+        return torch.device("cuda", torch.cuda.current_device())
+
+    def close_telemetry(self) -> None:
+        """Record the terminal event and drain queued telemetry; ray.kill would drop both."""
+        self._telemetry.close()
 
     def init_model(self, *args, **kwargs):
         """Initialize worker state (model, and optimizer if applicable) on worker."""
@@ -811,6 +834,9 @@ class PPORayActorGroup:
         Args:
             no_restart: If True, prevents Ray from restarting the actors.
         """
+        # ray.kill skips the actor's atexit handlers; a dead actor only costs the timeout.
+        drains = [actor.close_telemetry.remote() for actor in self._actor_handlers]
+        ray.wait(drains, num_returns=len(drains), timeout=TELEMETRY_DRAIN_TIMEOUT_SECONDS)
         for actor in self._actor_handlers:
             try:
                 ray.kill(actor, no_restart=no_restart)
@@ -829,6 +855,9 @@ class PolicyWorkerBase(Worker):
         self.mesh_rank: MeshRank = None
         self.policy_loss_fn: Callable = PolicyLossRegistry.get(self.cfg.trainer.algorithm.policy_loss_type)
         self._grug_query_bias_window: GrugQueryBiasWindow | None = None
+        self._policy_train_spans: bool = self.cfg.trainer.policy_train_spans
+        self._memory = LearnerCudaMetrics(enabled=self._policy_train_spans, rank=self._rank)
+        self._model_version_step: int | None = None
 
     async def _begin_vllm_layerwise_weight_reload(self, inference_engine_client, *, enabled: bool) -> None:
         """Open a rank-synchronized vLLM reload around a streamed weight update."""
@@ -893,52 +922,36 @@ class PolicyWorkerBase(Worker):
             torch.distributed.barrier()
 
     def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
+        step = int(train_data.metadata["global_step"])
+        with self._memory.span("ppo_train", step=step):
+            timing = PhaseBreakdown("ppo_train", enabled=self._policy_train_spans)
+            outcome = "failure"
+            try:
+                output = self._ppo_train_impl(train_data, timing)
+                outcome = "success"
+            finally:
+                timing.publish(
+                    clock_domain="cpu_dispatch_wall",
+                    attributes={
+                        "backend": "megatron",
+                        "outcome": outcome,
+                        "rank": str(self._rank),
+                        "role": WORKER_ROLE,
+                        "step": str(step),
+                    },
+                )
+        self._model_version_step = step
+        return output
+
+    async def broadcast_to_inference_engines(self, inference_engine_client):
+        with self._memory.span("broadcast_to_inference_engines", step=self._model_version_step):
+            return await self._broadcast_to_inference_engines(inference_engine_client)
+
+    def _ppo_train_impl(self, train_data: TrainingInputBatch, timing: PhaseBreakdown) -> TrainingOutputBatch:
         self._drain_r3_decentral_stagger(train_data)
 
         global_step = train_data.metadata["global_step"]
 
-        # Per-batch stale_min for StaleClip (None for sync RL, populated for async).
-        stale_min = train_data.metadata.get("stale_min")
-        # Lazily instantiate spike-mitigation objects on first call.
-        if not hasattr(self, "_stale_clip"):
-            from skyrl_train.utils.stale_clip import StaleClip
-            from skyrl_train.utils.zclip import ZClip
-
-            sc_cfg = getattr(self.cfg.trainer.algorithm, "stale_clip", None)
-            zc_cfg = getattr(self.cfg.trainer.algorithm, "z_clip", None)
-            self._stale_clip = StaleClip(
-                alpha=getattr(sc_cfg, "alpha", 0.3) if sc_cfg is not None else 0.3,
-                entropy_threshold=getattr(sc_cfg, "entropy_threshold", 0.15) if sc_cfg is not None else 0.15,
-                entropy_window=getattr(sc_cfg, "entropy_window", 10) if sc_cfg is not None else 10,
-                min_lr_scale=getattr(sc_cfg, "min_lr_scale", 0.1) if sc_cfg is not None else 0.1,
-                enabled=getattr(sc_cfg, "enabled", False) if sc_cfg is not None else False,
-            )
-            self._z_clip = ZClip(
-                alpha=getattr(zc_cfg, "alpha", 0.97) if zc_cfg is not None else 0.97,
-                z_thresh=getattr(zc_cfg, "z_thresh", 2.5) if zc_cfg is not None else 2.5,
-                warmup_steps=getattr(zc_cfg, "warmup_steps", 25) if zc_cfg is not None else 25,
-                max_grad_norm=self.cfg.trainer.policy.optimizer_config.max_grad_norm,
-                clip_option=getattr(zc_cfg, "clip_option", "adaptive_scaling")
-                if zc_cfg is not None
-                else "adaptive_scaling",
-                clip_factor=getattr(zc_cfg, "clip_factor", 1.0) if zc_cfg is not None else 1.0,
-                mode=getattr(zc_cfg, "mode", "zscore") if zc_cfg is not None else "zscore",
-                skip_update_on_spike=getattr(zc_cfg, "skip_update_on_spike", False) if zc_cfg is not None else False,
-                enabled=getattr(zc_cfg, "enabled", False) if zc_cfg is not None else False,
-            )
-            # If load_checkpoint() stashed prior ZClip / StaleClip state from a
-            # resumed run, restore it now that the objects exist. This keeps
-            # warmup_buffer + EMA stats coherent across chain-restarts.
-            if hasattr(self, "_z_clip_state_to_restore"):
-                self._z_clip.load_state_dict(self._z_clip_state_to_restore)
-                delattr(self, "_z_clip_state_to_restore")
-            if hasattr(self, "_stale_clip_state_to_restore"):
-                load_fn = getattr(self._stale_clip, "load_state_dict", None)
-                if load_fn is not None:
-                    load_fn(self._stale_clip_state_to_restore)
-                delattr(self, "_stale_clip_state_to_restore")
-        # Stash for training_step to consume (avoids changing its signature).
-        self._current_stale_min = stale_min
         dataloader = TrainingBatchIterator(train_data, self.cfg.trainer.micro_train_batch_size_per_gpu)
 
         # Clear fragmented GPU memory before training to avoid OOM at step boundaries
@@ -983,6 +996,27 @@ class PolicyWorkerBase(Worker):
                 disable=not self.strategy.is_rank_0(),
             )
             for local_step, experience in enumerate(pbar):
+                if local_step % accumulation_steps == 0:
+                    chunks = dataloader.chunks(local_step, local_step + accumulation_steps)
+                    counts = step_counts(
+                        [
+                            policy_data_weights(
+                                chunk["loss_mask"],
+                                chunk.get("response_span_tags"),
+                                self.cfg.trainer.algorithm.think_token_weight,
+                            )
+                            for chunk in chunks
+                        ],
+                        [chunk["loss_mask"] for chunk in chunks],
+                        [
+                            chunk["loss_mask"] * chunk["teacher_valid_mask"]
+                            for chunk in chunks
+                            if chunk.get("teacher_valid_mask") is not None
+                        ],
+                        [chunk["advantages"] for chunk in chunks],
+                        self.cfg.trainer.algorithm.max_seq_len,
+                        lambda value: self.strategy.all_reduce(value, op="sum"),
+                    )
                 if grug_query_bias_updates_enabled and local_step % accumulation_steps == 0:
                     assert grug_capture_plan is not None
                     assert grug_causal_lm is not None
@@ -1013,6 +1047,7 @@ class PolicyWorkerBase(Worker):
                         global_step,
                         local_step,
                         accumulation_steps,
+                        counts,
                     )
                 policy_update_steps += 1
 
@@ -1071,13 +1106,14 @@ class PolicyWorkerBase(Worker):
         global_step: int,
         local_step: int,
         accumulation_steps: int,
+        counts: StepCounts,
     ) -> Dict[str, float]:
         """
         Perform one micro-batch of training, accumulate gradients, and step the optimizer only after `accumulation_steps` micro-batches.
         """
         _phase_diagnostics.log_phase(_phase_diagnostics.CollectivePhase.TRAINING_STEP_ENTER)
         self.model.train()
-        experience.to_device(torch.cuda.current_device())
+        experience.to_device(self.device)
 
         sequences = experience.sequences
         old_action_log_probs = experience.action_log_probs
@@ -1104,7 +1140,7 @@ class PolicyWorkerBase(Worker):
 
         # The model wrapper controls its own internal precision where needed.
         _phase_diagnostics.start_phase(_phase_diagnostics.CollectivePhase.MODEL_FORWARD_ENTER)
-        with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
+        with torch.autocast(dtype=torch.bfloat16, device_type=self.device.type):
             # actor loss
             action_log_probs, output = self.model(
                 sequences,
@@ -1121,28 +1157,41 @@ class PolicyWorkerBase(Worker):
                 grug_query_bias_window.observe_microbatch()
             token_entropy = output["entropy"][:, -num_actions - 1 : -1]
             sparse_student_logprobs = self._distillation_student_logprobs(experience, output, num_actions)
-            objective = compute_policy_objective(
+            teacher = None
+            if experience.distillation is not None:
+                assert sparse_student_logprobs is not None
+                teacher = TopKTeacherBatch(
+                    experience.distillation,
+                    sparse_student_logprobs,
+                    topk_loss_params(self.cfg.trainer.algorithm),
+                    output["logits"].shape[-1],
+                )
+            batch = build_objective_micro_batch(
                 action_log_probs=action_log_probs,
                 old_action_log_probs=old_action_log_probs,
                 base_action_log_probs=base_action_log_probs,
                 advantages=advantages,
                 loss_mask=loss_mask,
                 rollout_logprobs=rollout_action_logprobs,
+                correction_weights=experience.correction_weights,
                 response_span_tags=response_span_tags,
                 token_entropy=token_entropy,
+                think_token_weight=self.cfg.trainer.algorithm.think_token_weight,
+                teacher=teacher,
+            )
+            objective = compute_policy_objective(
+                batch,
+                loss=self.policy_loss_fn,
+                counts=counts,
                 config=self.cfg.trainer.algorithm,
-                policy_loss_fn=self.policy_loss_fn,
-                accumulation_steps=accumulation_steps,
-                scaling=LossScaling.CALLER,
-                global_loss_denom=(experience.metadata or {}).get(GLOBAL_LOSS_DENOM_METADATA_KEY),
-                distillation=experience.distillation,
-                student_topk_logprobs=sparse_student_logprobs,
+                loss_scale=self.mesh_rank.dp_size,
+                report_scale=accumulation_steps * self.mesh_rank.dp_size,
             )
         _phase_diagnostics.log_phase(_phase_diagnostics.CollectivePhase.MODEL_FORWARD_EXIT)
         loss = objective.optimization_loss
-        policy_loss = objective.policy_loss
-        entropy = objective.entropy
-        kl_loss = objective.kl_loss
+        policy_loss = objective.rows.policy
+        entropy = objective.rows.entropy
+        kl_loss = objective.rows.kl
         _phase_diagnostics.start_phase(_phase_diagnostics.CollectivePhase.BACKWARD_ENTER)
         self.strategy.backward(loss, self.model, self.optimizer)
         _phase_diagnostics.log_phase(_phase_diagnostics.CollectivePhase.BACKWARD_EXIT)
@@ -1170,25 +1219,13 @@ class PolicyWorkerBase(Worker):
 
         grad_norm = None
         ratio_diag = {}
-        spike_diag = {}
         optimizer_step_succeeded = False
         if (local_step + 1) % accumulation_steps == 0:
-            # StaleClip: read rolling entropy from prior steps' history; decide LR scale
-            # for THIS step's optimizer.step(). The current micro-batch entropy is pushed
-            # to the history AFTER the step so it informs the next step (decoupling
-            # the decision from the value that step itself produced).
-            stale_clip = getattr(self, "_stale_clip", None)
-            z_clip = getattr(self, "_z_clip", None)
-            stale_min = getattr(self, "_current_stale_min", None)
-            lr_scale = stale_clip.compute_lr_scale(stale_min) if stale_clip is not None else 1.0
-
             grad_norm = self.strategy.optimizer_step(
                 self.optimizer,
                 self.model,
                 self.scheduler,
                 name="actor",
-                z_clip=z_clip,
-                stale_clip_lr_scale=lr_scale,
             )
             optimizer_step_succeeded = (
                 bool(self.strategy.last_optimizer_step_succeeded) if grug_causal_lm is not None else True
@@ -1199,30 +1236,6 @@ class PolicyWorkerBase(Worker):
             if grug_query_bias_window is not None:
                 grug_query_bias_window.finish(optimizer_step_succeeded=optimizer_step_succeeded)
                 self._grug_query_bias_window = None
-
-            # Now push this step's entropy to the rolling window for next step.
-            if stale_clip is not None:
-                # All-reduce the entropy across DP ranks so every rank pushes
-                # an IDENTICAL value into its rank-local entropy_history. Without
-                # this, each rank's rolling_entropy diverges from the others,
-                # ranks straddle the entropy_threshold differently, and they
-                # make different `triggered`/`scale` decisions inside the same
-                # optimizer step — drifting the parameter shards apart.
-                # Smoking gun (Perlmutter 52905223): metrics show
-                #   triggered=0.625 / scale=0.8125 at stale_min=1
-                # = 5/8 ranks applying scale=0.7 and 3/8 applying 1.0.
-                entropy_global = self.strategy.all_reduce(entropy.item(), op="mean")
-                stale_clip.update_entropy(entropy_global)
-
-            # Surface decisions for logging.
-            if stale_clip is not None and stale_clip.enabled:
-                for k, v in stale_clip.last_decision.items():
-                    if isinstance(v, (int, float)):
-                        spike_diag[f"stale_clip/{k}"] = float(v)
-            if z_clip is not None and z_clip.enabled:
-                for k, v in z_clip.last_decision.items():
-                    if isinstance(v, (int, float)):
-                        spike_diag[f"z_clip/{k}"] = float(v)
 
             # Finalize the accumulated diagnostics. Every rank must emit identical
             # keys (the full set from _log_ratio_diag_zero_metrics) — the per-key
@@ -1235,7 +1248,7 @@ class PolicyWorkerBase(Worker):
 
         # status
         status = {
-            "final_loss": objective.unscaled_loss.item(),
+            "final_loss": objective.optimization_loss.item() * accumulation_steps,
             "policy_loss": policy_loss.item(),
             "policy_lr": self.scheduler.get_last_lr()[0],
             "policy_entropy": entropy.item(),
@@ -1246,8 +1259,6 @@ class PolicyWorkerBase(Worker):
         # with large probability changes, per-position aggregations).
         # Trainer prefixes these with "policy/" before sending to wandb.
         status.update(ratio_diag)
-        # Spike-mitigation decisions (StaleClip / ZClip). Empty dict when disabled.
-        status.update(spike_diag)
         if self.cfg.trainer.algorithm.use_kl_loss:
             status["policy_kl"] = kl_loss.item()
 
@@ -1267,19 +1278,7 @@ class PolicyWorkerBase(Worker):
         _phase_diagnostics.log_phase(_phase_diagnostics.CollectivePhase.TRAINING_STEP_EXIT)
         return status
 
-    def save_checkpoint(self, ckpt_dir: Path, tokenizer=None) -> int:
-        """Start the rank-local save and return this rank as its completion receipt."""
-        # Persist ZClip / StaleClip state alongside the model so warmup
-        # counters and EMA stats survive chain-restarts. Without this,
-        # warmup_buffer resets to [] on every resume and (with default
-        # warmup_steps=25 + 60-80 step ablations) ZClip never engages.
-        client_state = {}
-        if hasattr(self, "_z_clip") and self._z_clip is not None:
-            client_state["z_clip_state"] = self._z_clip.state_dict()
-        if hasattr(self, "_stale_clip") and self._stale_clip is not None:
-            sc_state = getattr(self._stale_clip, "state_dict", lambda: None)()
-            if sc_state is not None:
-                client_state["stale_clip_state"] = sc_state
+    def save_checkpoint(self, ckpt_dir: Path, tokenizer=None):
         upload = self.strategy.save_checkpoint(
             model=self.model,
             optimizer=self.optimizer,
@@ -1287,7 +1286,7 @@ class PolicyWorkerBase(Worker):
             ckpt_dir=ckpt_dir,
             node_local_rank=self.get_node_local_rank(),
             tokenizer=tokenizer,
-            client_state=client_state,
+            client_state={},
         )
         self._start_checkpoint_upload(upload)
         return self._rank
@@ -1304,14 +1303,6 @@ class PolicyWorkerBase(Worker):
             ckpt_dir=ckpt_dir,
             load_training_state=load_training_state,
         )
-        # Restore ZClip / StaleClip state if present. The actual ZClip/StaleClip
-        # objects are lazy-instantiated on the first ppo_train() call, so we
-        # stash the loaded state on self and apply it inside ppo_train.
-        client_state = (states or {}).get("client_state") or {}
-        if "z_clip_state" in client_state:
-            self._z_clip_state_to_restore = client_state["z_clip_state"]
-        if "stale_clip_state" in client_state:
-            self._stale_clip_state_to_restore = client_state["stale_clip_state"]
         return states
 
     def save_hf_model(self, export_dir: str, tokenizer):
@@ -1323,7 +1314,7 @@ class PolicyWorkerBase(Worker):
         )
 
     def _forward_micro_batch(self, micro_batch: TrainingInputBatch) -> TrainingOutputBatch:
-        device = torch.cuda.current_device()
+        device = self.device
         micro_batch.to(device)
         self.model.eval()
         sequences = micro_batch["sequences"]
@@ -1339,7 +1330,7 @@ class PolicyWorkerBase(Worker):
             micro_batch["rollout_routed_experts"] if "rollout_routed_experts" in micro_batch.keys() else None
         )
 
-        with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
+        with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type=self.device.type):
             policy_logprob = self.model(
                 sequences,
                 response_length,
@@ -1388,13 +1379,13 @@ class CriticWorkerBase(Worker):
         micro_batch: TrainingInputBatch,
     ) -> TrainingOutputBatch:
         """Generates critic values."""
-        device = torch.cuda.current_device()
+        device = self.device
         micro_batch.to(device)
         sequences = micro_batch["sequences"]
         response_length = micro_batch.metadata["response_length"]
         attention_mask = micro_batch["attention_mask"]
         self.model.eval()
-        with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
+        with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type=self.device.type):
             value = self.model(
                 sequences,
                 response_length,
@@ -1465,7 +1456,7 @@ class CriticWorkerBase(Worker):
         """
         Perform one micro-batch of training, accumulate gradients, and step the optimizer only after `accumulation_steps` micro-batches.
         """
-        experience.to_device(torch.cuda.current_device())
+        experience.to_device(self.device)
 
         sequences = experience.sequences
         old_values = experience.values
@@ -1474,7 +1465,7 @@ class CriticWorkerBase(Worker):
         attention_mask = experience.attention_mask
         loss_mask = experience.loss_mask
 
-        with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
+        with torch.autocast(dtype=torch.bfloat16, device_type=self.device.type):
             # critic loss
             values, output = self.model(
                 sequences,
@@ -1509,8 +1500,7 @@ class CriticWorkerBase(Worker):
             status["raw_grad_norm"] = grad_norm
         return status
 
-    def save_checkpoint(self, ckpt_dir: str, tokenizer=None) -> int:
-        """Start the rank-local save and return this rank as its completion receipt."""
+    def save_checkpoint(self, ckpt_dir: str, tokenizer=None):
         upload = self.strategy.save_checkpoint(
             model=self.model,
             optimizer=self.optimizer,
@@ -1543,7 +1533,7 @@ class RefWorkerBase(Worker):
         self.model: nn.Module = None
 
     def _forward_micro_batch(self, micro_batch: TrainingInputBatch) -> TrainingOutputBatch:
-        device = torch.cuda.current_device()
+        device = self.device
         micro_batch.to(device)
         sequences = micro_batch["sequences"]
         response_length = micro_batch.metadata["response_length"]
@@ -1555,7 +1545,7 @@ class RefWorkerBase(Worker):
         rollout_routed_experts = (
             micro_batch["rollout_routed_experts"] if "rollout_routed_experts" in micro_batch.keys() else None
         )
-        with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
+        with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type=self.device.type):
             log_probs = self.model(
                 sequences,
                 response_length,

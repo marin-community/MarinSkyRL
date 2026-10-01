@@ -15,7 +15,7 @@ LOGGER="wandb"  # change to "console" to print to stdout
 
 # Configure CISPO parameters
 POLICY_LOSS="cispo"
-CISPO_EPS_CLIP_LOW=0
+CISPO_EPS_CLIP_LOW=1.0
 CISPO_EPS_CLIP_HIGH=5
 USE_KL_LOSS=false
 
@@ -48,8 +48,6 @@ uv run --isolated --extra megatron --extra vllm -m skyrl_train.entrypoints.main_
   generator.backend=vllm \
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
-  generator.async_engine=true \
-  generator.batched=true \
   environment.env_class=gsm8k \
   generator.n_samples_per_prompt=5 \
   generator.gpu_memory_utilization=0.8 \

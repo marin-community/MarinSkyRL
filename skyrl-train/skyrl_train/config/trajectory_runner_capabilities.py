@@ -5,7 +5,8 @@ from enum import StrEnum
 
 from omegaconf import DictConfig
 
-from marinskyrl.distillation import compile_distillation_plan_from_config
+from marinskyrl.distillation import DistillationObjectiveKind, compile_distillation_plan_from_config
+from skyrl_train.config.objective_spec import LossSpec, rollout_logprobs_required
 
 from marinskyrl.harbor_agent_names import (
     DEFAULT_HARBOR_AGENT_NAME,
@@ -20,7 +21,6 @@ SUPPORTED_PI_THINKING_FORMATS = frozenset({"chat-template", "qwen-chat-template"
 
 class TrajectoryRunnerMode(StrEnum):
     SKYRL_GYM = "skyrl_gym"
-    FULLY_ASYNC_SKYRL_GYM = "fully_async_skyrl_gym"
     MINI_SWE = "mini_swe"
     HARBOR = "harbor"
 
@@ -191,11 +191,6 @@ def trajectory_runner_capabilities(cfg: DictConfig, mode: TrajectoryRunnerMode) 
             expected_value="an integer",
             satisfied=isinstance(sampling_params.get("logprobs"), int),
         ),
-        CapabilityRequirement(
-            config_path="generator.batched",
-            expected_value="false",
-            satisfied=not bool(cfg.generator.get("batched", False)),
-        ),
     )
 
     def exact_chat_capabilities(runner: str) -> TrajectoryRunnerCapabilities:
@@ -205,16 +200,6 @@ def trajectory_runner_capabilities(cfg: DictConfig, mode: TrajectoryRunnerMode) 
             full_context_continuation=EvidenceFidelity.EXACT,
             action_tokens=ActionTokenHandling.RUNTIME_VALIDATED,
             requirements=exact_chat_requirements,
-        )
-
-    if mode is TrajectoryRunnerMode.FULLY_ASYNC_SKYRL_GYM and exact_chat_requested:
-        return exact_chat_capabilities("fully-async SkyRL Gym exact chat")
-    if mode is TrajectoryRunnerMode.FULLY_ASYNC_SKYRL_GYM:
-        return TrajectoryRunnerCapabilities(
-            runner="fully-async SkyRL Gym",
-            sampled_completion=EvidenceFidelity.RETOKENIZED,
-            full_context_continuation=EvidenceFidelity.UNAVAILABLE,
-            action_tokens=ActionTokenHandling.RETOKENIZED,
         )
 
     if exact_chat_requested:
@@ -278,12 +263,10 @@ def validate_trajectory_runner_capabilities(
     cfg: DictConfig,
     mode: TrajectoryRunnerMode,
     operation: EntrypointOperation = EntrypointOperation.TRAIN,
+    *,
+    loss_spec: LossSpec | None = None,
 ) -> None:
     """Reject operation and runner combinations that cannot supply required training evidence."""
-    # Keep launcher imports Torch-free. Importing a skyrl_train.utils submodule
-    # executes that package's eager registration imports, including Torch.
-    from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled  # noqa: PLC0415
-
     distillation_plan = compile_distillation_plan_from_config(cfg)
     capabilities = trajectory_runner_capabilities(cfg, mode)
     if cfg.generator.get("require_exact_chat_transport", False):
@@ -294,9 +277,13 @@ def validate_trajectory_runner_capabilities(
         _validate_teacher_scoreable_tokens(capabilities)
 
     algorithm = cfg.trainer.algorithm
-    behavior_logprobs_required = rollout_logprobs_enabled(algorithm)
+    behavior_logprobs_required = rollout_logprobs_required(algorithm, loss_spec=loss_spec)
     full_tito_required = bool(algorithm.get("tito_full", False))
-    if not behavior_logprobs_required and not full_tito_required:
+    student_topk_required = (
+        distillation_plan is not None
+        and distillation_plan.objective is DistillationObjectiveKind.STUDENT_TOPK_POLICY_SURROGATE
+    )
+    if not (behavior_logprobs_required or student_topk_required or full_tito_required):
         return
 
     _validate_exact_sampled_completion(capabilities, consumer="behavior-policy evidence")

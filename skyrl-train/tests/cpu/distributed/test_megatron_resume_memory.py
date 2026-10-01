@@ -27,6 +27,7 @@ class _Grads:
 class _Optimizer:
     def __init__(self, grads: _Grads):
         self.grads = grads
+        self.optimizer = object()
         self.grads_resident_during = {}
 
     def sharded_state_dict(self, model_sharded_state_dict, *, is_loading, metadata):
@@ -82,7 +83,7 @@ def test_resume_returns_replicated_client_state_in_worker_expected_shape(monkeyp
 
     _, _, states = _load_with_fakes(monkeypatch, tmp_path)
 
-    assert states == {"client_state": client_state}
+    assert states == client_state
 
 
 def test_rank_rng_selection_preserves_exact_rank_and_maps_resized_dp(monkeypatch):

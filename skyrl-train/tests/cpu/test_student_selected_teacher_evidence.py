@@ -2,13 +2,14 @@
 
 from dataclasses import replace
 
+import numpy as np
 import pytest
 import torch
 
 from marinskyrl.distillation import TeacherEvidenceKind
 from skyrl_train.distillation import (
     StudentSelectedTeacherEvidence,
-    StudentTopKPolicySurrogateInput,
+    StudentTopKInput,
     TeacherScoreRequest,
     prepare_student_topk_policy_surrogate,
     validate_distillation_attachment,
@@ -191,7 +192,7 @@ async def test_shared_coordinator_prepares_student_selected_input_from_oracle():
     finally:
         await coordinator.close()
 
-    assert isinstance(scored.distillation, StudentTopKPolicySurrogateInput)
+    assert isinstance(scored.distillation, StudentTopKInput)
     torch.testing.assert_close(scored.distillation.student_topk_indices, request.student_topk_indices)
     torch.testing.assert_close(scored.distillation.loss_weights, torch.tensor([[0.5, 0.125]]))
 
@@ -227,7 +228,7 @@ def test_routed_student_selected_scores_restore_original_rows_and_weights():
 
     assembled = TeacherEvidenceCoordinator.assemble_routed(routed, tuple(scored))
 
-    assert isinstance(assembled.distillation, StudentTopKPolicySurrogateInput)
+    assert isinstance(assembled.distillation, StudentTopKInput)
     torch.testing.assert_close(assembled.distillation.teacher_on_student_logprobs[0], scores[1][0])
     torch.testing.assert_close(assembled.distillation.teacher_on_student_logprobs[1], scores[0][0])
     torch.testing.assert_close(assembled.distillation.loss_weights, torch.tensor([[0.5, 0.125], [0.5, 0.125]]))
@@ -240,8 +241,14 @@ def test_build_scoring_work_preserves_admitted_student_selected_tokens():
         "prompt_token_ids": [[11, 12], [13]],
         "response_ids": [[21, 22], [31]],
         "loss_masks": [[1, 1], [1]],
-        "student_topk_indices": [[[21, 23], [22, 24]], [[31, 32]]],
-        "behavior_topk_logprobs": [[[-0.2, -2.0], [-0.3, -1.7]], [[-0.4, -1.4]]],
+        "student_topk_indices": [
+            np.asarray([[21, 23], [22, 24]], dtype=np.int32),
+            np.asarray([[31, 32]], dtype=np.int32),
+        ],
+        "behavior_topk_logprobs": [
+            np.asarray([[-0.2, -2.0], [-0.3, -1.7]], dtype=np.float32),
+            np.asarray([[-0.4, -1.4]], dtype=np.float32),
+        ],
     }
     work = build_teacher_scoring_work(
         batch,
@@ -267,8 +274,8 @@ def test_build_scoring_work_masks_nontraining_response_tokens():
         "prompt_token_ids": [[11]],
         "response_ids": [[21, 99, 22]],
         "loss_masks": [[1, 0, 1]],
-        "student_topk_indices": [[[21, 23], [99, 98], [22, 24]]],
-        "behavior_topk_logprobs": [[[-0.2, -2.0], [-0.1, -2.5], [-0.3, -1.7]]],
+        "student_topk_indices": [np.asarray([[21, 23], [99, 98], [22, 24]], dtype=np.int32)],
+        "behavior_topk_logprobs": [np.asarray([[-0.2, -2.0], [-0.1, -2.5], [-0.3, -1.7]], dtype=np.float32)],
     }
     work = build_teacher_scoring_work(
         batch,
@@ -307,14 +314,16 @@ def test_student_selected_rollout_scores_survive_group_accumulation_without_sent
             "rewards": [1.0],
             "loss_masks": [[1]],
             "rollout_logprobs": None,
-            "student_topk_indices": [[[token_id, token_id + 1]]],
-            "behavior_topk_logprobs": [[[-0.2, -2.0]]],
+            "student_topk_indices": [np.asarray([[token_id, token_id + 1]], dtype=np.int32)],
+            "behavior_topk_logprobs": [np.asarray([[-0.2, -2.0]], dtype=np.float32)],
         }
 
     first, second = group(21), group(31)
     merged = concatenate_trajectory_batches([first, second], tis_lcs_alert_threshold=0.005)
-    assert merged["student_topk_indices"] == [[[21, 22]], [[31, 32]]]
-    assert merged["behavior_topk_logprobs"] == [[[-0.2, -2.0]], [[-0.2, -2.0]]]
+    np.testing.assert_array_equal(merged["student_topk_indices"][0], [[21, 22]])
+    np.testing.assert_array_equal(merged["student_topk_indices"][1], [[31, 32]])
+    np.testing.assert_allclose(merged["behavior_topk_logprobs"][0], [[-0.2, -2.0]])
+    np.testing.assert_allclose(merged["behavior_topk_logprobs"][1], [[-0.2, -2.0]])
 
     second.pop("behavior_topk_logprobs")
     with pytest.raises(ValueError, match="missing rollout scores"):

@@ -116,6 +116,7 @@ def checkpoint_export_launch_config(
     config.run.submission = SubmissionMode.DETACH.value if spec.no_wait else SubmissionMode.WAIT.value
     config.run.attempt_id = f"{config.run.attempt_id}-export-{request.step}"
     config.runtime.entrypoint = CHECKPOINT_EXPORT_ENTRYPOINT
+    config.runtime.training_type = None
     config.runtime.profile = runtime_profile_for_strategy(strategy, mode=RuntimeMode.CHECKPOINT_EXPORT).value
     config.iris.job_name = spec.job_name or f"{config.iris.job_name}-export-step-{request.step}"
     config.iris.cluster = spec.cluster
@@ -147,6 +148,7 @@ def checkpoint_export_launch_config(
     # rollout/reference/critic/teacher bundles that the export entrypoint never uses.
     config.skyrl.trainer.placement.colocate_all = True
     config.skyrl.trainer.placement.colocate_policy_ref = True
+    config.skyrl.trainer.offload_optimizer_during_rollouts = False
     algorithm = config.skyrl.trainer.setdefault("algorithm", {})
     algorithm["use_kl_loss"] = False
     algorithm["use_kl_in_reward"] = False

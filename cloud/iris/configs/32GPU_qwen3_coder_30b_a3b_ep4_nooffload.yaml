@@ -100,8 +100,6 @@ trainer:
     eps_clip_high: 0.05
     loss_reduction: sequence_mean
     policy_loss_type: behavior_clip
-    use_tis: false
-    tis_imp_ratio_cap: 2.0
     tito_full: true
 
   epochs: 2
@@ -171,9 +169,9 @@ trainer:
     policy_per_gpu_bundles: true
     policy_force_cvd_mask: true
 
-  fully_async:
+  rollout_buffer:
     max_staleness_steps: 16
-    num_parallel_generation_workers: 128
+    max_in_flight: 128
 
 generator:
   vllm_attention_backend: FLASH_ATTN
@@ -205,8 +203,6 @@ generator:
 
   run_engines_locally: true
   weight_sync_backend: nccl
-  async_engine: true
-  batched: false
   enable_http_endpoint: true
   inference_stats_interval: 1
   append_eos_token_after_stop_str_in_multi_turn: true
@@ -216,8 +212,11 @@ generator:
     top_p: 1.0
     top_k: -1
 
+  chat_template:
+    source: file
+    name_or_path: chat_templates/qwen3_thinking_acc.jinja2
+
   engine_init_kwargs:
-    custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
     disable_custom_all_reduce: true
     enable_return_routed_experts: true
     async_scheduling: false
@@ -227,9 +226,9 @@ data:
   val_data: []
 
 trajectory_runner:
-  process_pool:
-    num_coordinators: 4
-    cpus_per_coordinator: 8
+  rollout_workers:
+    num_workers: 4
+    cpus_per_worker: 8
 
 extra_env:
   PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True

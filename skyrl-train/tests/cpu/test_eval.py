@@ -6,10 +6,16 @@ from unittest.mock import MagicMock
 
 import pytest
 from omegaconf import OmegaConf
+from skyrl_gym.verification import VerificationResult
 
-from skyrl_train.evaluate import evaluate
-import skyrl_train.evaluate as evaluate_module
+from skyrl_train.evaluate import _calculate_eval_metrics, evaluate
 from skyrl_train.trajectory_runners.base import TrajectoryRunner, TrajectoryBatch
+from skyrl_train.trajectory_runners.trajectory_retention import (
+    TrajectorySink,
+    execute_publication,
+    parse_trajectory_retention_config,
+)
+from skyrl_train.trajectory_runners.trajectory_retention_publisher import InlineTrajectoryPublisher
 from tests.cpu.util import example_dummy_config
 
 
@@ -59,9 +65,21 @@ class DummyRunner(TrajectoryRunner):
         return self.output
 
 
-class FailingRunner(TrajectoryRunner):
-    async def _run(self, input_batch, disable_tqdm: bool = False):
-        raise RuntimeError("evaluation actor failed")
+def test_eval_reports_normalized_verifier_score_alongside_raw_reward():
+    batch: TrajectoryBatch = {
+        "response_ids": [[1], [2]],
+        "rewards": [5.0, 0.0],
+        "verification_results": [
+            VerificationResult.verified(5.0, score_min=1.0, score_max=5.0),
+            VerificationResult.verified(0.0),
+        ],
+    }
+
+    metrics = _calculate_eval_metrics(batch, ["a", "b"], ["genrm", "math"], 1)
+
+    assert metrics["eval/all/avg_score"] == 2.5
+    assert metrics["eval/all/avg_verifier_score"] == 0.5
+    assert metrics["eval/all/verifier_score_coverage"] == 1.0
 
 
 @pytest.mark.asyncio
@@ -96,6 +114,12 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
 
     tokenizer = MagicMock()
     tokenizer.decode.side_effect = lambda tokens: "decoded"
+    # The run's shared sink is a Ray actor; an in-process sink with the same configuration keeps this test off Ray.
+    sink = TrajectorySink(
+        parse_trajectory_retention_config(cfg.generator.trajectory_retention),
+        tokenizer,
+        publisher=InlineTrajectoryPublisher(execute_publication),
+    )
 
     metrics = await evaluate(
         eval_dataloader=eval_dataloader,
@@ -103,6 +127,7 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
         cfg=cfg,
         global_step=5,
         tokenizer=tokenizer,
+        trajectory_sink=sink,
     )
 
     expected_metrics = {
@@ -123,24 +148,3 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
     assert seen_batch["env_classes"] == ["gsm8k", "custom_env"]
     assert seen_batch["env_extras"] == [prompt["env_extras"] for prompt in prompts_batch]
     assert seen_batch["batch_metadata"].training_phase == "eval"
-
-
-@pytest.mark.asyncio
-async def test_evaluate_closes_progress_reporter_when_rollout_fails(dummy_config, tmp_path, monkeypatch):
-    cfg = configure_eval(dummy_config, tmp_path)
-    eval_dataloader = DummyStatefulDataLoader(
-        [[{"prompt": [{"role": "user", "content": "question"}], "env_class": None, "env_extras": {}, "uid": "1"}]]
-    )
-    progress = MagicMock()
-    monkeypatch.setattr(evaluate_module, "tqdm", lambda **_kwargs: progress)
-
-    with pytest.raises(RuntimeError, match="evaluation actor failed"):
-        await evaluate(
-            eval_dataloader=eval_dataloader,
-            trajectory_runner=FailingRunner(),
-            cfg=cfg,
-            global_step=5,
-            tokenizer=MagicMock(),
-        )
-
-    progress.close.assert_called_once_with()

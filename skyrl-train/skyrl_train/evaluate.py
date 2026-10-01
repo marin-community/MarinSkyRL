@@ -12,7 +12,9 @@ from marinskyrl.resource_locator import join_resource_path
 from skyrl_train.trajectory_runners.trajectory_processing import (
     concatenate_trajectory_batches,
     get_metrics_from_trajectory_batch,
+    normalized_verifier_scores,
     prepare_trajectory_request,
+    verifier_score_summary,
 )
 from skyrl_train.trajectory_runners.base import (
     ConversationType,
@@ -23,12 +25,13 @@ from skyrl_train.trajectory_runners.base import (
 from skyrl_train.utils.trainer_utils import (
     calculate_per_dataset_metrics,
     dump_per_dataset_eval_results,
+    evaluation_response_metrics,
 )
 from skyrl_train.trajectory_runners.trajectory_processing import validate_trajectory_batch
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.utils.logging_utils import log_example
 from skyrl_train.trajectory_runners.trajectory_retention import (
-    TrajectorySink,
+    RetentionSink,
     make_trajectory_sink,
 )
 
@@ -106,7 +109,7 @@ async def _collect_evaluation_rollouts(
     trajectory_runner: TrajectoryRunner,
     cfg: DictConfig,
     global_step: int | None,
-    sink: TrajectorySink,
+    sink: RetentionSink,
     val_set_name: str | None,
     accumulator: _EvaluationAccumulator,
 ) -> _EvaluationRollouts:
@@ -175,6 +178,13 @@ def _calculate_eval_metrics(
             f"eval/all/pass_at_{samples_per_prompt}": overall_pass_at_n,
         }
     )
+    verifier_scores = normalized_verifier_scores(batch)
+    if verifier_scores is not None:
+        coverage, average = verifier_score_summary(verifier_scores)
+        metrics["eval/all/verifier_score_coverage"] = coverage
+        if average is not None:
+            metrics["eval/all/avg_verifier_score"] = average
+    metrics.update({f"eval/all/{key}": value for key, value in evaluation_response_metrics(batch).items()})
     return metrics
 
 
@@ -210,7 +220,7 @@ async def evaluate(
     global_step: int | None,
     tokenizer: AutoTokenizer,
     val_set_name: str | None = None,
-    trajectory_sink: TrajectorySink | None = None,
+    trajectory_sink: RetentionSink | None = None,
 ) -> Dict[str, float]:
     """Runs generation and evaluation of trajectories.
 
@@ -223,7 +233,7 @@ async def evaluate(
         tokenizer (AutoTokenizer): tokenizer to use
         val_set_name (str | None): optional name of the validation set being evaluated,
             used for unique orchestrator naming
-        trajectory_sink (TrajectorySink | None): trainer-owned retention sink; a standalone evaluation builds one from cfg
+        trajectory_sink (RetentionSink | None): trainer-owned retention sink; a standalone evaluation builds one from cfg
 
     Returns:
         Dict[str, float]: evaluation metrics
@@ -266,7 +276,7 @@ async def evaluate_step_wise(
     cfg: DictConfig,
     global_step: int | None,
     tokenizer: AutoTokenizer,
-    trajectory_sink: TrajectorySink,
+    trajectory_sink: RetentionSink,
     val_set_name: str | None = None,
 ) -> Dict[str, float]:
     """Runs generation and evaluation of trajectories for step-wise training.
@@ -282,7 +292,7 @@ async def evaluate_step_wise(
         tokenizer (AutoTokenizer): tokenizer to use
         val_set_name (str | None): optional name of the validation set being evaluated,
             used for unique orchestrator naming
-        trajectory_sink (TrajectorySink): trainer-owned retention sink
+        trajectory_sink (RetentionSink): trainer-owned retention sink
 
     Returns:
         Dict[str, float]: evaluation metrics

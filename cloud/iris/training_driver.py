@@ -83,14 +83,7 @@ class LocalRLRunner:
         # .remote() boundary as DATA — os.environ mutations here do NOT reach the
         # pre-existing Ray workers where HarborTrajectoryRunner is constructed.
         self._minted_agent_api_base: str | None = None
-        # Set by _ingress_context when record_literal stands up the co-located
-        # RecordProxy. Threaded into the SkyRL Hydra cfg (see run()) for the SAME
-        # process-boundary reason as _minted_agent_api_base: literal_proxy_utils
-        # publishes the log path via os.environ["OTAGENT_LITERAL_LOG_PATH"] in THIS
-        # driver, but the generator (which reads it to correlate opencode rollout
-        # details / rebuild chat_history) runs in a pre-existing Ray worker that never
-        # inherits this env → without the cfg thread every opencode trajectory loses
-        # its logprobs and TIS degrades on 100% of the batch.
+        # The generator's Ray worker reads the shared literal log path from configuration.
         self._literal_log_path: str | None = None
 
     def setup(self) -> None:
@@ -211,11 +204,7 @@ class LocalRLRunner:
             # inside a Ray worker that never inherits this process's HARBOR_MODEL_ENDPOINT
             # env — see _ingress_context / __init__). Snapshot cadence matches the
             # existing design (one api_base string baked for the job's lifetime).
-            # Thread the RecordProxy log path as cfg DATA too (same Ray boundary): the
-            # generator resolves the shared literal log from
-            # terminal_bench_config.literal_log_path (env fallback) to correlate each
-            # opencode trial's token_ids/logprobs + rebuild its chat_history. Without
-            # this the worker's os.environ lacks the path and TIS skips 100% of the batch.
+            # The generator uses this shared log to correlate token IDs, logprobs and chat history.
             skyrl_config = apply_task_local_values(
                 skyrl_config,
                 TaskLocalSkyRLValues(
@@ -277,7 +266,7 @@ class LocalRLRunner:
             register_controller_endpoint,
         )
         from cloud.iris.literal_proxy_utils import (
-            DEFAULT_LITERAL_PROXY_HOST,
+            CONTROLLER_INGRESS_PROXY_HOST,
             maybe_serve_literal_proxy,
             select_literal_proxy_port,
         )
@@ -301,7 +290,7 @@ class LocalRLRunner:
                     "--parent_controller_config); needed to mint at iris.oa.dev."
                 )
 
-        proxy_port = select_literal_proxy_port(self.config.job_name, host=DEFAULT_LITERAL_PROXY_HOST)
+        proxy_port = select_literal_proxy_port(self.config.job_name, host=CONTROLLER_INGRESS_PROXY_HOST)
         endpoint_name, register_address = controller_registration_plan(
             self.config.job_name,
             record_literal=self.config.record_literal,
@@ -309,7 +298,7 @@ class LocalRLRunner:
             vllm_port=self.config.vllm_http_port,
         )
         vllm_local = f"http://localhost:{self.config.vllm_http_port}/v1"
-        # RecordProxy binds 0.0.0.0 so the (remote) controller reaches it at
+        # The RecordProxy listens on every interface so the remote controller reaches it at
         # IRIS_ADVERTISE_HOST; record_literal off => maybe_serve_literal_proxy is a null
         # CM and the plan registered raw vLLM's port instead.
         with maybe_serve_literal_proxy(
@@ -317,7 +306,7 @@ class LocalRLRunner:
             vllm_local,
             experiments_dir=self.config.experiments_dir,
             job_name=self.config.job_name,
-            host=DEFAULT_LITERAL_PROXY_HOST,
+            host=CONTROLLER_INGRESS_PROXY_HOST,
             port=proxy_port,
         ):
             registration = register_controller_endpoint(endpoint_name, register_address)
@@ -336,7 +325,7 @@ class LocalRLRunner:
                 # endpoint would silently misroute every judge call to vLLM.
                 os.environ["HARBOR_MODEL_ENDPOINT"] = api_base
                 # Also thread the minted URL through the structured SkyRL config so the
-                # value reaches the Ray tasks/actors (skyrl_entrypoint, RolloutCoordinator)
+                # value reaches the Ray tasks/actors (skyrl_entrypoint, rollout workers)
                 # where HarborTrajectoryRunner is built. The env var alone is insufficient:
                 # this runner ATTACHES to a Ray cluster the controller started BEFORE the
                 # mint, so its workers never inherit HARBOR_MODEL_ENDPOINT from this process

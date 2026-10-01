@@ -22,8 +22,6 @@ from skyrl_train.io import io
 ATTEMPTS_DIRECTORY = "_attempts"
 COMMIT_FILENAME = "checkpoint_commit.json"
 MANIFEST_FILENAME = "checkpoint_manifest.json"
-SHUTDOWN_OVERLAYS_DIRECTORY = "_shutdown_buffers"
-SHUTDOWN_OVERLAY_COMMIT_FILENAME = "shutdown_buffer_commit.json"
 _ATTEMPT_ID = re.compile(r"^[0-9a-f]{32}$")
 _STEP_DIRECTORY = re.compile(rf"{re.escape(GLOBAL_STEP_PREFIX)}\d+")
 _SCHEMA_VERSION = 1
@@ -142,69 +140,3 @@ def resolve_checkpoint_payload(step_path: str, *, verify_files: bool = False) ->
             if actual_files.get(path) != expected_size:
                 raise ValueError(f"Checkpoint object missing or size changed: {attempt_path}/{path}")
     return attempt_path
-
-
-def _payload_step_and_id(payload_path: str) -> tuple[str, str]:
-    payload_path = payload_path.rstrip("/")
-    if os.path.basename(os.path.dirname(payload_path)) == ATTEMPTS_DIRECTORY:
-        step_path = os.path.dirname(os.path.dirname(payload_path))
-        return step_path, _attempt_id(step_path, payload_path)
-    if not _STEP_DIRECTORY.fullmatch(os.path.basename(payload_path)):
-        raise ValueError(f"Not a checkpoint payload path: {payload_path}")
-    return payload_path, "legacy"
-
-
-def new_shutdown_overlay_path(payload_path: str) -> str:
-    """Stage shutdown-only buffer state outside the immutable model generation."""
-    step_path, _ = _payload_step_and_id(payload_path)
-    return os.path.join(step_path, SHUTDOWN_OVERLAYS_DIRECTORY, uuid.uuid4().hex)
-
-
-def commit_shutdown_overlay(payload_path: str, overlay_path: str, artifact_name: str) -> None:
-    """Atomically select a complete shutdown buffer for one committed base."""
-    step_path, base_id = _payload_step_and_id(payload_path)
-    overlay_id = os.path.basename(overlay_path.rstrip("/"))
-    if not _ATTEMPT_ID.fullmatch(overlay_id) or overlay_path.rstrip("/") != os.path.join(
-        step_path, SHUTDOWN_OVERLAYS_DIRECTORY, overlay_id
-    ):
-        raise ValueError(f"Shutdown overlay path is outside checkpoint step: {overlay_path}")
-    if os.path.basename(artifact_name) != artifact_name:
-        raise ValueError(f"Invalid shutdown overlay artifact name: {artifact_name}")
-    artifact_path = os.path.join(overlay_path, artifact_name)
-    size = io.file_size(artifact_path)
-    if size <= 0:
-        raise RuntimeError(f"Shutdown overlay is empty: {artifact_path}")
-    marker = {
-        "schema_version": _SCHEMA_VERSION,
-        "step": extract_step_from_path(step_path),
-        "base_attempt_id": base_id,
-        "overlay_id": overlay_id,
-        "artifact_name": artifact_name,
-        "artifact_size": size,
-    }
-    io.write_bytes_atomic(os.path.join(step_path, SHUTDOWN_OVERLAY_COMMIT_FILENAME), _json_bytes(marker))
-
-
-def shutdown_buffer_artifact_path(payload_path: str, artifact_name: str) -> str:
-    """Return the matching committed shutdown overlay, or the inline state."""
-    if extract_step_from_path(payload_path) < 0:
-        return os.path.join(payload_path, artifact_name)
-    step_path, base_id = _payload_step_and_id(payload_path)
-    marker_path = os.path.join(step_path, SHUTDOWN_OVERLAY_COMMIT_FILENAME)
-    inline_path = os.path.join(payload_path, artifact_name)
-    if not io.exists(marker_path):
-        return inline_path
-    marker = json.loads(io.read_bytes(marker_path))
-    if marker.get("schema_version") != _SCHEMA_VERSION or marker.get("step") != extract_step_from_path(step_path):
-        raise ValueError(f"Invalid shutdown overlay marker at {marker_path}")
-    if marker.get("base_attempt_id") != base_id:
-        return inline_path
-    overlay_id = marker.get("overlay_id")
-    if not isinstance(overlay_id, str) or not _ATTEMPT_ID.fullmatch(overlay_id):
-        raise ValueError(f"Invalid shutdown overlay ID at {marker_path}")
-    if marker.get("artifact_name") != artifact_name:
-        raise ValueError(f"Shutdown overlay artifact mismatch at {marker_path}")
-    artifact_path = os.path.join(step_path, SHUTDOWN_OVERLAYS_DIRECTORY, overlay_id, artifact_name)
-    if io.file_size(artifact_path) != marker.get("artifact_size"):
-        raise ValueError(f"Shutdown overlay object missing or size changed: {artifact_path}")
-    return artifact_path

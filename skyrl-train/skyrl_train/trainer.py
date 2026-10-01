@@ -5,12 +5,12 @@ import json
 import math
 import os
 import random
+import re
 import shutil
 import threading
 import time
 from dataclasses import dataclass
-from functools import partial
-from typing import Any, Dict, List, Optional, Protocol, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 from jaxtyping import Float
 from pathlib import Path
 import ray
@@ -24,22 +24,25 @@ from transformers import AutoTokenizer
 from collections import defaultdict, deque
 
 import numpy as np
-from skyrl_train.curriculum import CurriculumSampler
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
-from skyrl_train.training_batch import GLOBAL_LOSS_DENOM_METADATA_KEY, TrainingInputBatch, TrainingOutputBatch
+from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
+from skyrl_train.rollouts.buffer import RolloutGroup
+from skyrl_train.rollouts.context import TrainingContext, TrainingContextState
 from skyrl_train.trajectory_selection import trajectory_selector_from_config
 from skyrl_train.trajectory_runners.base import (
-    TrajectoryRequestBatch,
     TrajectoryBatch,
     TrajectoryRunner,
 )
 import copy
+from skyrl_train.batch_sampling import RowOwnership, filter_trajectory_batch
 from skyrl_train.trajectory_runners.trajectory_processing import (
+    concatenate_trajectory_batches,
     get_metrics_from_trajectory_batch,
-    prepare_trajectory_request,
+    graded_row_indices,
+    normalized_verifier_scores,
     scalar_reward_token_credit,
-    validate_trajectory_batch,
+    verifier_score_summary,
 )
 from skyrl_train.trajectory_runners.trajectory_retention import make_trajectory_sink
 from skyrl_train.dataset.preprocess import (
@@ -47,20 +50,24 @@ from skyrl_train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
 )
 from skyrl_train.distillation import DISTILLATION_SCORED_TOKENS_METRIC, validate_distillation_attachment
-from skyrl_train.distillation_runtime import SyncDistillationRuntime
+from skyrl_train.distillation_adapters import AsyncRoutedTeacherScoreTicket, RoutedScoredDistillationBatch
+from skyrl_train.distillation_runtime import DistillationRuntime
 from skyrl_train.domain_gradient_balance import DomainGradientBalancer
-from skyrl_train.utils import trainer_utils
 from skyrl_train.io import io
 from skyrl_train.utils import Timer, get_ray_pg_ready_with_timeout, get_system_memory_metrics
-from skyrl_train.utils.constants import DEFAULT_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl_train.tensor_math import masked_mean
 from skyrl_train.utils.policy_math import compute_approx_kl, normalize_advantages_dict
 from skyrl_train.utils.kl_controllers import get_kl_controller, FixedKLController, AdaptiveKLController
-from skyrl_train.utils.advantage_estimators import compute_advantages_and_returns
-from skyrl_train.utils.loss_reduction import (
-    GLOBAL_SEQUENCE_MEAN_TOKEN_SUM_NORMALIZED_LOSS_REDUCTION,
-    compute_global_loss_denom,
+from skyrl_train.utils.algorithm_registry import AdvantageEstimator
+from skyrl_train.utils.advantage_estimators import GRPO_FLAT_REWARD_STD_TOLERANCE, compute_advantages_and_returns
+from marinskyrl.distillation import (
+    DistillationObjectiveKind,
+    DistillationRewardMode,
+    compile_distillation_plan_from_config,
 )
+from skyrl_train.objective.teacher import teacher_advantages
+from skyrl_train.objective.correction import compute_correction
+from skyrl_train.config.objective_spec import off_policy_correction
 from skyrl_train.distributed.dispatch import (
     ActorInfo,
     MeshRank,
@@ -78,41 +85,29 @@ from skyrl_train.draft_trainer import (
     create_draft_trainer,
     read_latest_draft_checkpoint,
 )
-from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.group_admission import (
-    AdmissionProgressWatchdog,
-    AdmissionRejection,
-    GroupAdmissionStalledError,
     GroupAdvantageInvariant,
+    admission_stall_timeout,
     assert_training_groups_eligible,
 )
-from skyrl_train.sync_group_admission import (
-    GroupAdmissionSamplingResult,
-    GroupAdmissionSamplingState,
-    admit_or_collect_replacements,
-)
-from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
 from marinskyrl.checkpoint_paths import (
     GLOBAL_STEP_PREFIX,
     LATEST_CHECKPOINT_FILE,
     extract_step_from_path,
 )
+from marinskyrl.process_diagnostics import write_exception_receipt
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from marinskyrl.speculative_decoding import SpeculativeDecodingConfig, runai_model_uri
-from skyrl_train.checkpoint_generation import (
-    ATTEMPTS_DIRECTORY,
-    commit_attempt,
-    new_attempt_path,
-    resolve_checkpoint_payload,
-)
+from skyrl_train.checkpoint_generation import commit_attempt, new_attempt_path, resolve_checkpoint_payload
 from skyrl_train.utils.trainer_utils import (
+    async_step_metrics,
+    consumed_stop_metrics,
     cleanup_old_checkpoints,
     run_on_each_node,
     get_node_ids,
     validate_consistency_for_latest_checkpoint,
     ResumeMode,
-    DynamicSamplingState,
-    build_dataloader,
+    build_eval_dataloader,
 )
 from skyrl_train.utils.utils import (
     configure_ray_worker_logging,
@@ -121,19 +116,34 @@ from skyrl_train.utils.utils import (
     policy_force_cvd_mask_enabled,
 )
 
-from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
+from skyrl_train.config.objective_spec import rollout_logprobs_required
+from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
 from skyrl_train.evaluate import evaluate, evaluate_step_wise
-from skyrl_train.utils.logging_utils import log_example
 from skyrl_train.callbacks.base import TrainerCallback, TrainerState, TrainerControl, CallbackHandler
 from skyrl_train.callbacks.builtin import DefaultCallbackHandler, RefModelUpdateCallback
-from skyrl_train.telemetry import critical_phase, record_generated_work, record_policy_step
-from skyrl_train.timing_observability import checkpoint_phase, publish_startup_timings, publish_step_timings
+from skyrl_train.telemetry import (
+    TRAINER_ROLE,
+    ConsumedWork,
+    critical_phase,
+    record_consumed_work,
+    record_event,
+    record_policy_step,
+    record_rollout_staleness,
+    record_training_metrics,
+)
+from skyrl_train.rollout_observability import async_phase_window, monitor_event_loop_lag
+from skyrl_train.utils.importance_ratio_diagnostics import mismatch_ratio_metrics
+from skyrl_train.timing_observability import StepWallTime, publish_startup_timings, publish_step_timings
+from skyrl_train.timing_observability import checkpoint_phase
 from skyrl_train.hf_export import (
     protected_hf_export_steps,
     read_hf_export_request,
     write_hf_export_request,
 )
 from marinskyrl.checkpoint_paths import POLICY_CHECKPOINT_SUBDIRECTORY, policy_export_path
+from marinskyrl.runtime_options import WeightSyncTransport
+from skyrl_train.utils.logging_utils import log_exception_as_text
+from skyrl_train.weight_sync.expert_block.driver import ExpertBlockSync
 from skyrl_train.hf_export_schema import (
     DEFAULT_HF_HUB_REVISION,
     DEFAULT_HF_UPLOAD_MODE,
@@ -148,43 +158,69 @@ from skyrl_train.hf_export_schema import (
 class CheckpointSnapshot:
     step: int
     upload_started_at: float
-    dataloader_path: str
-    dataloader_payload: bytes | None
+    rollout_state_path: str
+    rollout_state_payload: bytes
     trainer_state_path: str
     trainer_state_payload: bytes
     marker_path: str
 
 
-@dataclass(frozen=True)
-class PendingMegatronCommit:
-    step: int
-    state: TrainerState
-    requested_at: float
-    requested_unix: float
+_MEGATRON_RECEIPTS = "worker_receipts.json"
+_DRIVER_RNG_STATE = "driver_rng_state.pt"
 
 
-class CheckpointUploadNotDrainedError(RuntimeError):
-    """An upload may still be active, so another save must not start."""
-
-
-_MODEL_INITIALIZATION_TIMEOUT = 60 * 60
-DATALOADER_STATE_FILENAME = "data.pt"
-WORKER_RECEIPTS_FILENAME = "worker_receipts.json"
-DRIVER_RNG_STATE_FILENAME = "driver_rng_state.pt"
-
-
-def _capture_driver_rng_state() -> dict[str, Any]:
-    return {
-        "python": random.getstate(),
-        "numpy": np.random.get_state(),
-        "torch_cpu": torch.get_rng_state(),
-    }
+def _driver_rng_state() -> dict[str, Any]:
+    return {"python": random.getstate(), "numpy": np.random.get_state(), "torch_cpu": torch.get_rng_state()}
 
 
 def _restore_driver_rng_state(state: dict[str, Any]) -> None:
     random.setstate(state["python"])
     np.random.set_state(state["numpy"])
     torch.set_rng_state(state["torch_cpu"])
+
+
+_MODEL_INITIALIZATION_TIMEOUT = 60 * 60
+
+MAX_DOMAIN_REWARD_METRICS = 32
+
+
+def _domain_metric_source_key(source: str | None) -> str:
+    """Encode one source as a distinct, tracker-safe metric path segment.
+
+    Lowercase ASCII names stay readable. ``_missing`` denotes absent metadata;
+    other names use fixed-width UTF-8 byte escapes under ``_source_``.
+    """
+    if source is None:
+        return "_missing"
+    if re.fullmatch(r"[a-z_][a-z0-9_]*", source) and source != "_missing" and not source.startswith("_source_"):
+        return source
+    encoded = "".join(
+        chr(byte) if byte in b"abcdefghijklmnopqrstuvwxyz0123456789" else f"_{byte:02x}"
+        for byte in source.encode("utf-8")
+    )
+    return f"_source_{encoded}"
+
+
+def _domain_reward_metrics(data_sources: List[str | None], rewards: List[float]) -> Dict[str, float]:
+    """Return bounded per-source means with distinct, stable metric names."""
+    if len(data_sources) != len(rewards):
+        raise ValueError(
+            f"Expected one data source per reward, got {len(data_sources)} sources and {len(rewards)} rewards"
+        )
+
+    rewards_by_source: Dict[str, List[float]] = defaultdict(list)
+    for source, reward in zip(data_sources, rewards, strict=True):
+        rewards_by_source[_domain_metric_source_key(source)].append(reward)
+
+    sources = sorted(rewards_by_source)
+    metrics = {
+        f"reward/domain/{source}/avg_raw_reward": float(np.mean(rewards_by_source[source]))
+        for source in sources[:MAX_DOMAIN_REWARD_METRICS]
+    }
+    if len(sources) > MAX_DOMAIN_REWARD_METRICS:
+        overflow = [reward for source in sources[MAX_DOMAIN_REWARD_METRICS:] for reward in rewards_by_source[source]]
+        metrics["reward/domain_overflow/avg_raw_reward"] = float(np.mean(overflow))
+    return metrics
 
 
 def _active_online_eagle_results(results: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
@@ -198,10 +234,6 @@ def _poll_object_ref(ref: ObjectRef) -> tuple[bool, Any | None]:
 
 def _policy_revision(step: int) -> str:
     return f"policy-step-{step}"
-
-
-class _ClosableDistillationRuntime(Protocol):
-    async def close(self) -> None: ...
 
 
 def _validated_distillation_tensors(
@@ -227,7 +259,45 @@ def _validated_distillation_tensors(
     return distillation.training_tensors()
 
 
+def consumed_work(training_input: TrainingInputBatch) -> ConsumedWork:
+    """Count the rows and tokens an optimizer step consumed, excluding data-parallel padding."""
+    real_rows = training_input.batch_size - training_input.metadata.get("pad_size", 0)
+    return ConsumedWork(
+        sequences=real_rows,
+        response_tokens=int(training_input["response_mask"][:real_rows].sum().item()),
+        loss_tokens=int(training_input["loss_mask"][:real_rows].sum().item()),
+    )
+
+
+def _zero_std_group_fraction(uids: Sequence[str], rewards: torch.Tensor) -> float:
+    group_rewards: dict[str, list[torch.Tensor]] = {}
+    for uid, reward in zip(uids, rewards, strict=True):
+        group_rewards.setdefault(uid, []).append(reward)
+    if not group_rewards:
+        return 0.0
+    flat_groups = sum(
+        len(group) > 1 and torch.std(torch.stack(group)).item() <= GRPO_FLAT_REWARD_STD_TOLERANCE
+        for group in group_rewards.values()
+    )
+    return flat_groups / len(group_rewards)
+
+
 class RayPPOTrainer:
+    """The rollout-buffer training loop.
+
+    Rollout workers generate prompt groups into the ``TrainingContext``'s buffer while the trainer reads one
+    selected batch per step, trains on it, syncs weights to inference, and publishes the new policy step.
+    ``global_step`` is the step being trained: its batch was generated by policies at most
+    ``max_staleness_steps`` steps older, and ``global_step - 1`` optimizer steps have completed before it. At
+    staleness 0 no rollout is in flight once a batch is complete, so colocated engines can sleep during training.
+    """
+
+    # Set at startup when generator.weight_sync_transport is expert_block.
+    _expert_block_sync: ExpertBlockSync | None = None
+
+    _training_metrics_enabled: bool = False
+    _rollout_spans_enabled: bool = False
+
     def __init__(
         self,
         cfg: DictConfig,
@@ -236,11 +306,16 @@ class RayPPOTrainer:
         train_dataset: Optional[PromptDataset],
         inference_engine_client: InferenceEngineClient,
         trajectory_runner: TrajectoryRunner,
+        context: TrainingContext,
         colocate_pg: Optional[PlacementGroup] = None,
         eval_dataset: Optional[PromptDataset] = None,
         callbacks: Optional[List[TrainerCallback]] = None,
     ):
         self.cfg = cfg
+        self.distillation_plan = compile_distillation_plan_from_config(cfg)
+        self.context = context
+        self._training_metrics_enabled: bool = cfg.trainer.training_metrics
+        self._rollout_spans_enabled: bool = cfg.trainer.rollout_spans
         self.group_advantage_invariant = GroupAdvantageInvariant.from_config(
             cfg.trainer.algorithm.resolved_group_advantage
         )
@@ -254,13 +329,10 @@ class RayPPOTrainer:
         self.trajectory_selector = trajectory_selector_from_config(cfg)
         self.trajectory_sink = make_trajectory_sink(cfg.generator, tokenizer)
         self.trajectory_runner.set_trajectory_sink(self.trajectory_sink)
-        self.train_dataloader = None
         self.total_training_steps = None
         self._configure_training_schedule()
 
-        self.eval_dataloader = (
-            build_dataloader(self.cfg, eval_dataset, is_train=False) if eval_dataset is not None else None
-        )
+        self.eval_dataloader = build_eval_dataloader(self.cfg, eval_dataset) if eval_dataset is not None else None
         self.colocate_pg = colocate_pg
 
         self.resume_mode = ResumeMode(cfg.trainer.resume_mode)
@@ -270,14 +342,14 @@ class RayPPOTrainer:
         self.all_startup_timings = {}
         self._checkpoint_save_failures = 0.0
         self._shutdown_complete = False
+        self._restored_rollout_state: TrainingContextState | None = None
         self.global_step = 0
         self._last_saved_step: int | None = None
-        self._active_checkpoint_payload_path: str | None = None
-        self._checkpoint_required_files: set[str] | None = None
-        self._last_optimizer_step_finished_at: tuple[int, float] | None = None
+        self._last_evaluated_step: int | None = None
         self._pending_checkpoint_upload: tuple[asyncio.Task[tuple[float, float]], TrainerState] | None = None
-        self._pending_megatron_checkpoint_commit: PendingMegatronCommit | None = None
+        self._pending_megatron_save: TrainerState | None = None
         self._pending_megatron_hf_export = False
+        self._loaded_driver_rng_state: dict[str, Any] | None = None
         raw_speculative_decoding = cfg.generator.get("speculative_decoding")
         if raw_speculative_decoding is not None:
             raw_speculative_decoding = OmegaConf.to_container(raw_speculative_decoding, resolve=True)
@@ -309,12 +381,10 @@ class RayPPOTrainer:
         # used for checkpoint cleanup
         self._node_ids: Optional[List[str]] = None
 
-        self.dynamic_sampling_state: Optional[DynamicSamplingState] = None
-        self.group_admission_state: Optional[GroupAdmissionSamplingState] = None
-        self._pending_sync_prompts: List[Any] = []
-        self._group_admission_watchdog: AdmissionProgressWatchdog | None = None
+        self.group_admission_stall_timeout = cfg.trainer.algorithm.group_admission.stall_timeout
         self._step_time_history: deque[float] = deque(maxlen=5)
-        self._sync_distillation_runtime: Optional[SyncDistillationRuntime] = None
+        self._distillation_runtime: DistillationRuntime | None = None
+        self._distillation_tickets: dict[str, AsyncRoutedTeacherScoreTicket] = {}
         self._domain_balancer: DomainGradientBalancer | None = None
         self.distillation_scored_tokens_total = 0
 
@@ -331,48 +401,26 @@ class RayPPOTrainer:
         # Trainer control object for callback coordination
         self._control = TrainerControl()
 
-    def configure_sync_distillation(self, runtime: SyncDistillationRuntime) -> None:
-        """Install the config-compiled synchronous scoring adapter before training starts."""
-        if self._sync_distillation_runtime is not None:
-            raise RuntimeError("synchronous distillation runtime is already configured")
-        self._sync_distillation_runtime = runtime
+    def configure_distillation(self, runtime: DistillationRuntime) -> None:
+        """Install admitted-group teacher scoring before the training loop starts."""
+        if self._distillation_runtime is not None:
+            raise RuntimeError("the distillation runtime is already configured")
+        self._distillation_runtime = runtime
         self._domain_balancer = runtime.domain_balancer
 
-    async def _close_distillation_runtime(self, runtime: _ClosableDistillationRuntime) -> None:
-        await self._guarded_async(
-            runtime.close(),
-            timeout=30,
-            label="Teacher oracle shutdown",
-        )
-
-    async def _forward_with_optional_distillation(
-        self,
-        trajectory_batch: TrajectoryBatch,
-        training_input: TrainingInputBatch,
-    ) -> TrainingInputBatch:
-        if self._sync_distillation_runtime is None:
-            return self.fwd_logprobs_values_reward(training_input)
-        forwarded, scored = await self._sync_distillation_runtime.score_while_model_forwarding(
-            trajectory_batch,
-            lambda: self.fwd_logprobs_values_reward(training_input),
-        )
-        forwarded.update(scored.distillation.training_tensors())
-        self.all_metrics.update(self._sync_distillation_runtime.domain_balance_metrics)
-        self.all_metrics.update(
-            {
-                "distillation/teacher_count": float(len({route.teacher_id for route in scored.routes})),
-                DISTILLATION_SCORED_TOKENS_METRIC: float(scored.distillation.valid_mask.sum().item()),
-            }
-        )
-        return forwarded
-
     def _configure_training_schedule(self):
-        """Set ``total_training_steps`` and any inputs required to execute that schedule."""
-        self.train_dataloader = build_dataloader(self.cfg, self.train_dataset, is_train=True)
-        self.total_training_steps = len(self.train_dataloader) * self.cfg.trainer.epochs
-        max_steps = getattr(self.cfg.trainer, "max_steps", None)
+        """Count steps in batches of prompt groups; one pass over the dataset is one epoch."""
+        batch_size = self.cfg.trainer.train_batch_size
+        self.num_steps_per_epoch = len(self.train_dataset) // batch_size
+        if self.num_steps_per_epoch == 0:
+            raise ValueError(
+                f"the training dataset has {len(self.train_dataset)} prompts, fewer than one batch of {batch_size}"
+            )
+        self.total_training_steps = self.num_steps_per_epoch * self.cfg.trainer.epochs
+        max_steps = self.cfg.trainer.get("max_steps")
         if max_steps is not None and max_steps > 0:
             self.total_training_steps = min(self.total_training_steps, max_steps)
+        logger.info(f"Steps per epoch: {self.num_steps_per_epoch}, total training steps: {self.total_training_steps}")
 
     def _create_trainer_state(self, epoch: int, *, active_step_duration: float | None = None) -> TrainerState:
         """
@@ -386,7 +434,7 @@ class RayPPOTrainer:
         Returns:
             TrainerState object with current training state
         """
-        num_steps_per_epoch = self._num_steps_per_epoch()
+        num_steps_per_epoch = self.num_steps_per_epoch
         timings = dict(self.all_timings)
         if active_step_duration is not None:
             timings["step"] = active_step_duration
@@ -400,9 +448,6 @@ class RayPPOTrainer:
             metrics=dict(self.all_metrics),
             timings=timings,
         )
-
-    def _num_steps_per_epoch(self) -> int:
-        return len(self.train_dataloader)
 
     def _get_ref_update_callback(self) -> Optional[RefModelUpdateCallback]:
         """Get the RefModelUpdateCallback if one exists in the callback handler."""
@@ -516,21 +561,31 @@ class RayPPOTrainer:
     async def _teardown(self) -> None:
         """Best-effort cleanup after training ends (normal or abnormal).
 
-        Each step uses a timeout so a blocked operation cannot prevent
-        subsequent cleanup from running.  Errors are logged as warnings
-        but never re-raised.
+        Async steps use cooperative timeouts. A process watchdog also bounds
+        blocked cleanup and subsequent executor shutdown. Cleanup errors are
+        logged as warnings so teardown can continue.
 
         Order matters:
-        1. HTTP endpoint shutdown – cuts off the request path so in-flight
+        1. Teacher oracle shutdown – releases teacher engines.
+        2. HTTP endpoint shutdown – cuts off the request path so in-flight
            Harbor trials get connection-refused instead of retrying against
            dead inference engines indefinitely.
-        2. Trajectory runner shutdown – waits for QueueOrchestrator to drain (should
+        3. Trajectory runner shutdown – waits for QueueOrchestrator to drain (should
            be fast now that trials can't make new requests).
-        3. Inference engine teardown – sends teardown RPC to each engine.
-        4. Ray actor cleanup – force-kills remaining actors.
+        4. Inference engine teardown – sends teardown RPC to each engine.
+        5. Ray actor cleanup – force-kills remaining actors.
         """
-        if self._sync_distillation_runtime is not None:
-            await self._close_distillation_runtime(self._sync_distillation_runtime)
+        # Teacher cleanup can block or resist cancellation. Arm the process guard
+        # before any teardown awaits, including executor shutdown after asyncio.run.
+        self._start_exit_watchdog()
+        if self._expert_block_sync is not None:
+            await self._guarded_async(
+                self._expert_block_sync.close(),
+                timeout=30,
+                label="Expert-block weight sync shutdown",
+            )
+        if self._distillation_runtime is not None:
+            await self._guarded_async(self._distillation_runtime.close(), timeout=30, label="Teacher oracle shutdown")
         if self.inference_engine_client is not None:
             self._guarded_sync(
                 self.inference_engine_client.shutdown_http_endpoint,
@@ -557,19 +612,12 @@ class RayPPOTrainer:
         )
         self._guarded_sync(self._kill_ray_actors, label="Ray actor cleanup")
 
-        # Safety net: force-exit the process if it's still alive after a
-        # generous grace period.  After this point, asyncio.run() will try to
-        # cancel remaining tasks (_cancel_all_tasks).  If orphaned tasks are
-        # stuck in retry loops (e.g. Harbor trials retrying against dead
-        # inference engines), that cleanup hangs indefinitely.  The watchdog
-        # ensures the process eventually terminates.
-        self._start_exit_watchdog(timeout=120)
-
     async def shutdown(self) -> None:
         """Run trainer teardown once, including after partial startup."""
         if getattr(self, "_shutdown_complete", False):
             return
         try:
+            await self.context.close()
             await self._drain_checkpoint_upload()
         finally:
             await self._teardown()
@@ -580,7 +628,9 @@ class RayPPOTrainer:
         """Start a daemon thread that force-exits the process after *timeout* seconds."""
 
         def _force_exit():
-            logger.error(f"Process still alive {timeout}s after teardown — forcing exit to prevent zombie process")
+            logger.error(
+                f"Process still alive {timeout}s after teardown began — forcing exit to prevent zombie process"
+            )
             os._exit(1)
 
         t = threading.Timer(timeout, _force_exit)
@@ -588,13 +638,26 @@ class RayPPOTrainer:
         t.start()
 
     async def train(self):
-        """
-        Main training loop for PPO
-        """
+        """Run the rollout-buffer training loop, then release every resource it started."""
+        loop_monitor = (
+            asyncio.create_task(monitor_event_loop_lag(step_fn=lambda: self.global_step, mode=self.context.mode))
+            if self._rollout_spans_enabled
+            else None
+        )
         try:
+            if self._distillation_runtime is not None:
+                await self._distillation_runtime.start()
             await self._startup_trajectory_runner()
             await self._train_loop()
+        except Exception as error:
+            log_exception_as_text(f"Train loop failed at global_step {self.global_step}", error)
+            receipt = write_exception_receipt("skyrl-trainer", error)
+            if receipt is not None:
+                logger.error("Preserved original trainer exception at {}", receipt)
+            raise
         finally:
+            if loop_monitor is not None:
+                loop_monitor.cancel()
             await self.shutdown()
 
     async def _startup_trajectory_runner(self) -> None:
@@ -637,25 +700,41 @@ class RayPPOTrainer:
         )
 
         try:
-            if self._control.should_evaluate and self.eval_dataset is not None:
+            if (
+                self._control.should_evaluate
+                and self.eval_dataset is not None
+                and self._last_evaluated_step != self.global_step
+            ):
                 with Timer("eval", self.all_timings):
                     eval_metrics = await self.eval()
                     self._log_metrics_stdout(eval_metrics, step=self.global_step, kind="eval")
                     self.tracker.log(eval_metrics, step=self.global_step, commit=True)
+                    self._last_evaluated_step = self.global_step
                 await self.callback_handler.call_event_async(
                     "on_evaluate", final_state, self._control, metrics=eval_metrics, trainer=self
                 )
                 self._control.should_evaluate = False
         finally:
-            if self.colocate_all:
+            megatron_final_save = (
+                self._megatron_checkpointing()
+                and self._control.should_save
+                and self._last_saved_step != self.global_step
+            )
+            if self.colocate_all and not megatron_final_save:
                 await self.inference_engine_client.sleep()
                 self.policy_model.backload_to_gpu()
 
             # The interval save may have just written this same step; do not write it twice.
+            final_save_succeeded = True
             if self._control.should_save and self._last_saved_step != self.global_step:
-                if self._uses_background_checkpoint_upload():
+                if self._megatron_checkpointing():
+                    final_save_succeeded = await self._save_megatron_checkpoint(final_state)
+                    if final_save_succeeded:
+                        logger.info("Saved final checkpoint.")
+                else:
                     with Timer("save_checkpoints", self.all_timings):
-                        snapshot = await asyncio.to_thread(self._snapshot_checkpoint)
+                        rollout_state = await self._rollout_state()
+                        snapshot = await asyncio.to_thread(self._snapshot_checkpoint, rollout_state)
                     try:
                         await self.callback_handler.call_event_async(
                             "on_save", final_state, self._control, trainer=self
@@ -666,64 +745,19 @@ class RayPPOTrainer:
                     self._start_checkpoint_upload(snapshot, final_state)
                     if await self._drain_checkpoint_upload():
                         logger.info("Saved final checkpoint.")
-                else:
-                    try:
-                        with Timer("save_checkpoints", self.all_timings):
-                            await asyncio.to_thread(self._save_checkpoint_payloads)
-                            await self.callback_handler.call_event_async(
-                                "on_save", final_state, self._control, trainer=self
-                            )
-                            if self._defers_megatron_checkpoint_commit():
-                                resume_epoch = getattr(self, "_current_resume_epoch", None)
-                                if resume_epoch is None:
-                                    resume_epoch = getattr(self, "_loaded_resume_epoch", None)
-                                await asyncio.to_thread(
-                                    self._write_checkpoint_continuation_state,
-                                    self.global_step,
-                                    resume_epoch=resume_epoch,
-                                    at_epoch_boundary=getattr(self, "_current_at_epoch_boundary", None),
-                                )
-                                if self._can_replay_driver_rng():
-                                    rng_state = _capture_driver_rng_state()
-                                    try:
-                                        await asyncio.to_thread(self._write_driver_rng_state, rng_state)
-                                        await asyncio.to_thread(self._publish_checkpoint)
-                                    finally:
-                                        _restore_driver_rng_state(rng_state)
-                                else:
-                                    await asyncio.to_thread(self._publish_checkpoint)
-                            else:
-                                await asyncio.to_thread(self._publish_checkpoint)
-                            logger.info("Saved final checkpoint.")
-                    finally:
-                        self._active_checkpoint_payload_path = None
-                        self._checkpoint_required_files = None
-            if self._control.should_save_hf_model:
+            if self._control.should_save_hf_model and final_save_succeeded:
                 await asyncio.to_thread(self.handle_hf_export)
 
-    def _uses_background_checkpoint_upload(self) -> bool:
-        return str(self.cfg.trainer.strategy) != "megatron"
-
-    async def _save_checkpoints_with_residency(
-        self, *, defer_continuation_state: bool = False
-    ) -> CheckpointSnapshot | None:
-        """Save with required residency; return a snapshot only for legacy upload."""
-        if self._uses_background_checkpoint_upload():
-            save_payloads = self._snapshot_checkpoint
-        elif defer_continuation_state:
-            save_payloads = partial(self._save_checkpoint_payloads, include_continuation_state=False)
-        else:
-            save_payloads = self._save_checkpoint_payloads
+    async def _save_checkpoints_with_residency(self) -> CheckpointSnapshot:
+        """Save a checkpoint, swapping colocated training and inference residency when needed."""
+        rollout_state = await self._rollout_state()
         if not self.colocate_all:
-            return await asyncio.to_thread(save_payloads)
+            return await asyncio.to_thread(self._snapshot_checkpoint, rollout_state)
 
         await self.inference_engine_client.sleep()
         try:
-            with checkpoint_phase(
-                str(self.cfg.trainer.strategy), "save", "policy_backload", rank=-1, step=self.global_step
-            ):
-                self.policy_model.backload_to_gpu(backload_optimizer=True, backload_model=True)
-            return await asyncio.to_thread(save_payloads)
+            self.policy_model.backload_to_gpu(backload_optimizer=True, backload_model=True)
+            return await asyncio.to_thread(self._snapshot_checkpoint, rollout_state)
         finally:
             await self._sync_policy_for_rollouts(reason="checkpoint_restore")
 
@@ -734,12 +768,24 @@ class RayPPOTrainer:
             f"Checkpoint save failed at global step {state.global_step}; continuing from the last complete checkpoint"
         )
 
+    def _megatron_checkpointing(self) -> bool:
+        return str(self.cfg.trainer.strategy) == "megatron"
+
+    def _can_replay_driver_rng(self) -> bool:
+        staleness = (
+            OmegaConf.select(self.cfg, "trainer.rollout_buffer.max_staleness_steps", default=0)
+            if isinstance(self.cfg, DictConfig)
+            else getattr(getattr(self.cfg.trainer, "rollout_buffer", None), "max_staleness_steps", 0)
+        )
+        return (
+            self._megatron_checkpointing()
+            and int(staleness) == 0
+            and not bool(self.cfg.generator.get("enable_http_endpoint", False))
+        )
+
     def _settle_checkpoint_refs(self, refs: list[ObjectRef], *, operation: str) -> list[Any]:
-        """Wait for every rank, including after one fails, before permitting a retry."""
-        if not refs:
-            return []
-        distributed = getattr(self.cfg.trainer, "distributed", None)
-        timeout = int(getattr(distributed, "worker_collective_timeout_seconds", DEFAULT_WORKER_NCCL_TIMEOUT_IN_S))
+        """Do not retry a failed save while another rank may still be uploading."""
+        timeout = int(getattr(self.cfg.trainer.distributed, "worker_collective_timeout_seconds", 1800))
         deadline = time.monotonic() + timeout
         pending = list(refs)
         results: dict[ObjectRef, Any] = {}
@@ -747,10 +793,7 @@ class RayPPOTrainer:
         while pending:
             ready, pending = ray.wait(pending, num_returns=1, timeout=max(0.0, deadline - time.monotonic()))
             if not ready:
-                raise CheckpointUploadNotDrainedError(
-                    f"{operation} did not settle all {len(refs)} worker refs within {timeout}s; "
-                    f"{len(pending)} may still be active"
-                )
+                raise RuntimeError(f"{operation}: {len(pending)} worker calls did not settle within {timeout}s")
             for ref in ready:
                 try:
                     results[ref] = ray.get(ref)
@@ -760,11 +803,140 @@ class RayPPOTrainer:
             raise errors[0]
         return [results[ref] for ref in refs]
 
+    def _save_megatron_component(self, component: str, actors: PPORayActorGroup, root: str) -> set[str]:
+        component_path = os.path.join(root, component)
+        refs = actors.async_run_ray_method(
+            "pass_through", "save_checkpoint", ckpt_dir=component_path, tokenizer=self.tokenizer
+        )
+        save_error: Exception | None = None
+        try:
+            ranks = self._settle_checkpoint_refs(refs, operation=f"{component} save")
+        except Exception as error:
+            save_error = error
+            ranks = []
+        # A successful save RPC only stages its upload. Every rank must settle
+        # before a new attempt can use the same worker or become visible.
+        wait_refs = actors.async_run_ray_method("pass_through", "wait_checkpoint_upload")
+        self._settle_checkpoint_refs(wait_refs, operation=f"{component} upload")
+        if save_error is not None:
+            raise save_error
+        if not refs or sorted(ranks) != list(range(len(refs))):
+            raise RuntimeError(f"{component} worker receipts incomplete: {ranks}")
+        io.write_bytes_atomic(
+            os.path.join(component_path, _MEGATRON_RECEIPTS),
+            json.dumps({"component": component, "ranks": ranks}, sort_keys=True).encode(),
+        )
+        required = {
+            f"{component}/.metadata",
+            f"{component}/common.pt",
+            f"{component}/metadata.json",
+            f"{component}/extra_state.pt",
+            f"{component}/huggingface/config.json",
+            f"{component}/{_MEGATRON_RECEIPTS}",
+        }
+        required.update(f"{component}/__{rank}_0.distcp" for rank in ranks)
+        return required
+
+    def _save_megatron_workers(self, attempt_path: str) -> set[str]:
+        required = self._save_megatron_component(POLICY_CHECKPOINT_SUBDIRECTORY, self.policy_model, attempt_path)
+        if self.critic_model is not None:
+            if self.colocate_all:
+                self.policy_model.offload_to_cpu()
+                self.critic_model.backload_to_gpu()
+            try:
+                required.update(self._save_megatron_component("critic", self.critic_model, attempt_path))
+            finally:
+                if self.colocate_all:
+                    self.critic_model.offload_to_cpu()
+                    self.policy_model.backload_to_gpu()
+        return required
+
+    def _commit_megatron_attempt(
+        self,
+        step: int,
+        attempt_path: str,
+        required: set[str],
+        rollout_state: TrainingContextState,
+        rng_state: dict[str, Any] | None,
+    ) -> None:
+        rollout_buffer = stdlib_io.BytesIO()
+        torch.save(rollout_state, rollout_buffer)
+        io.write_bytes_atomic(os.path.join(attempt_path, "data.pt"), rollout_buffer.getvalue())
+        trainer_buffer = stdlib_io.BytesIO()
+        torch.save(
+            {
+                "global_step": step,
+                "config": self.cfg,
+                "distillation_scored_tokens_total": self.distillation_scored_tokens_total,
+                "domain_gradient_balance_state": self._domain_balancer.state_dict() if self._domain_balancer else None,
+            },
+            trainer_buffer,
+        )
+        io.write_bytes_atomic(os.path.join(attempt_path, TRAINER_STATE_FILENAME), trainer_buffer.getvalue())
+        required.update({"data.pt", TRAINER_STATE_FILENAME})
+        if rng_state is not None:
+            rng_buffer = stdlib_io.BytesIO()
+            torch.save(rng_state, rng_buffer)
+            io.write_bytes_atomic(os.path.join(attempt_path, _DRIVER_RNG_STATE), rng_buffer.getvalue())
+            required.add(_DRIVER_RNG_STATE)
+
+        step_path = os.path.join(self.cfg.trainer.ckpt_path, f"{GLOBAL_STEP_PREFIX}{step}")
+        latest_path = os.path.join(self.cfg.trainer.ckpt_path, LATEST_CHECKPOINT_FILE)
+        previous = int(io.read_bytes(latest_path)) if io.exists(latest_path) else None
+        if previous is not None and previous > step:
+            raise RuntimeError(f"Refusing to replace latest checkpoint step {previous} with older step {step}")
+        commit_attempt(step_path, attempt_path, required_files=required)
+        if previous != step:
+            io.write_bytes_atomic(latest_path, str(step).encode())
+        self._last_saved_step = step
+
+    async def _save_megatron_checkpoint(self, state: TrainerState) -> bool:
+        """Save one immutable Megatron generation before the next policy publication."""
+        await self._drain_checkpoint_upload()
+        step = state.global_step
+        step_path = os.path.join(self.cfg.trainer.ckpt_path, f"{GLOBAL_STEP_PREFIX}{step}")
+        attempt_path = new_attempt_path(step_path)
+        committed = False
+        try:
+            with (
+                Timer("save_checkpoints", self.all_timings),
+                checkpoint_phase("megatron", "save", "checkpoint_foreground_pause", rank=-1, step=step),
+            ):
+                io.makedirs(attempt_path, exist_ok=True)
+                if self.colocate_all:
+                    await self.inference_engine_client.sleep()
+                    self.policy_model.backload_to_gpu(backload_optimizer=True, backload_model=True)
+                try:
+                    required = await asyncio.to_thread(self._save_megatron_workers, attempt_path)
+                finally:
+                    if self.colocate_all:
+                        await self._sync_policy_for_rollouts(reason="checkpoint_restore")
+                await self.callback_handler.call_event_async("on_save", state, self._control, trainer=self)
+                rollout_state = await self._rollout_state()
+                rng_state = _driver_rng_state() if self._can_replay_driver_rng() else None
+                try:
+                    await asyncio.to_thread(
+                        self._commit_megatron_attempt, step, attempt_path, required, rollout_state, rng_state
+                    )
+                finally:
+                    if rng_state is not None:
+                        _restore_driver_rng_state(rng_state)
+                committed = True
+        except OSError:
+            self._record_checkpoint_save_failure(state)
+        except ray.exceptions.RayTaskError as error:
+            if not isinstance(error.as_instanceof_cause(), OSError):
+                raise
+            self._record_checkpoint_save_failure(state)
+        if committed:
+            try:
+                self._cleanup_old_checkpoints()
+            except OSError as error:
+                logger.warning("Checkpoint retention failed after publication: {}", error)
+        return committed
+
     async def _save_intermediate_checkpoint(self, state: TrainerState) -> None:
         """Save one requested step checkpoint without terminating training on storage failure."""
-        if not self._uses_background_checkpoint_upload():
-            await self._save_intermediate_megatron_checkpoint(state)
-            return
         await self._drain_checkpoint_upload()
         try:
             with Timer("save_checkpoints", self.all_timings):
@@ -785,156 +957,6 @@ class RayPPOTrainer:
             raise
         self._start_checkpoint_upload(snapshot, state)
 
-    async def _save_intermediate_megatron_checkpoint(self, state: TrainerState) -> None:
-        """Keep the Megatron attempt unpublished through late step callbacks."""
-        if getattr(self, "_pending_megatron_checkpoint_commit", None) is not None:
-            raise RuntimeError("Cannot start another checkpoint before publishing the pending Megatron attempt")
-        await self._drain_checkpoint_upload()
-        snapshot: CheckpointSnapshot | None = None
-        started_upload = False
-        deferred_commit = False
-        requested_at = time.perf_counter()
-        requested_unix = time.time()
-        defer_megatron = self._defers_megatron_checkpoint_commit()
-        try:
-            with (
-                Timer("save_checkpoints", self.all_timings),
-                checkpoint_phase(
-                    str(self.cfg.trainer.strategy),
-                    "save",
-                    "checkpoint_prepare_pause" if defer_megatron else "checkpoint_foreground_pause",
-                    rank=-1,
-                    step=self.global_step,
-                ),
-            ):
-                snapshot = (
-                    await self._save_checkpoints_with_residency(defer_continuation_state=True)
-                    if defer_megatron
-                    else await self._save_checkpoints_with_residency()
-                )
-                with checkpoint_phase(
-                    str(self.cfg.trainer.strategy), "save", "on_save_callbacks", rank=-1, step=self.global_step
-                ):
-                    await self.callback_handler.call_event_async("on_save", state, self._control, trainer=self)
-                if snapshot is None:
-                    if defer_megatron:
-                        if getattr(self, "_pending_megatron_checkpoint_commit", None) is not None:
-                            raise RuntimeError("A Megatron checkpoint is already awaiting step-end publication")
-                        self._pending_megatron_checkpoint_commit = PendingMegatronCommit(
-                            step=self.global_step,
-                            state=state,
-                            requested_at=requested_at,
-                            requested_unix=requested_unix,
-                        )
-                        deferred_commit = True
-                    else:
-                        await asyncio.to_thread(self._publish_checkpoint)
-                else:
-                    self._start_checkpoint_upload(snapshot, state)
-                    started_upload = True
-        except BaseException as error:
-            if snapshot is not None and not started_upload:
-                await self._await_checkpoint_upload(snapshot)
-            if isinstance(error, OSError):
-                self._record_checkpoint_save_failure(state)
-                return
-            if isinstance(error, ray.exceptions.RayTaskError) and isinstance(error.as_instanceof_cause(), OSError):
-                self._record_checkpoint_save_failure(state)
-                return
-            raise
-        finally:
-            if not deferred_commit:
-                self._active_checkpoint_payload_path = None
-                self._checkpoint_required_files = None
-
-    def _defers_megatron_checkpoint_commit(self) -> bool:
-        """Keep synchronous Megatron attempts unpublished through late step callbacks."""
-        return str(self.cfg.trainer.strategy) == "megatron"
-
-    def _can_replay_driver_rng(self) -> bool:
-        """Only restore process-global RNG when no concurrent HTTP producer runs."""
-        if not self._defers_megatron_checkpoint_commit():
-            return False
-        if isinstance(self.cfg, DictConfig):
-            return not bool(OmegaConf.select(self.cfg, "generator.enable_http_endpoint", default=False))
-        return not bool(getattr(getattr(self.cfg, "generator", None), "enable_http_endpoint", False))
-
-    async def _publish_pending_megatron_checkpoint(
-        self, *, resume_epoch: int | None = None, at_epoch_boundary: bool | None = None
-    ) -> None:
-        pending = getattr(self, "_pending_megatron_checkpoint_commit", None)
-        if pending is None:
-            return
-        step = pending.step
-        state = pending.state
-        requested_at = pending.requested_at
-        requested_unix = pending.requested_unix
-        committed = False
-        commit_finished_at: float | None = None
-        try:
-            with checkpoint_phase(
-                "megatron",
-                "save",
-                "checkpoint_request_to_commit",
-                rank=-1,
-                step=step,
-                started_monotonic=requested_at,
-                started_unix=requested_unix,
-            ):
-                with checkpoint_phase("megatron", "save", "late_step_seal", rank=-1, step=step):
-                    await asyncio.to_thread(
-                        self._write_checkpoint_continuation_state,
-                        step,
-                        resume_epoch=resume_epoch,
-                        at_epoch_boundary=at_epoch_boundary,
-                    )
-                    if self._can_replay_driver_rng():
-                        rng_state = _capture_driver_rng_state()
-                        try:
-                            await asyncio.to_thread(self._write_driver_rng_state, rng_state)
-                            await asyncio.to_thread(self._publish_checkpoint, step)
-                        finally:
-                            _restore_driver_rng_state(rng_state)
-                    else:
-                        await asyncio.to_thread(self._publish_checkpoint, step)
-                    commit_finished_at = time.perf_counter()
-                    committed = True
-        except OSError:
-            if committed:
-                raise
-            self._record_checkpoint_save_failure(state)
-        else:
-            if getattr(self, "_pending_megatron_hf_export", False):
-                # Export request bookkeeping is distinct from checkpoint
-                # durability and must not be attributed to the save span.
-                if self._can_replay_driver_rng():
-                    rng_state = _capture_driver_rng_state()
-                    try:
-                        await asyncio.to_thread(self.handle_hf_export, step)
-                    finally:
-                        _restore_driver_rng_state(rng_state)
-                else:
-                    await asyncio.to_thread(self.handle_hf_export, step)
-        finally:
-            step_started_at = getattr(self, "_active_step_started_at", None)
-            if step_started_at is not None:
-                logger.info(
-                    "step_to_checkpoint_commit_observation {}",
-                    json.dumps(
-                        {
-                            "schema": "step_to_checkpoint_commit_v1",
-                            "step": step,
-                            "duration_seconds": (commit_finished_at or time.perf_counter()) - step_started_at,
-                            "checkpoint_committed": committed,
-                        },
-                        sort_keys=True,
-                    ),
-                )
-            self._pending_megatron_checkpoint_commit = None
-            self._pending_megatron_hf_export = False
-            self._active_checkpoint_payload_path = None
-            self._checkpoint_required_files = None
-
     def _start_checkpoint_upload(self, snapshot: CheckpointSnapshot, state: TrainerState) -> None:
         assert getattr(self, "_pending_checkpoint_upload", None) is None
         task = asyncio.create_task(self._finish_checkpoint_upload(snapshot, commit=True))
@@ -948,8 +970,7 @@ class RayPPOTrainer:
         ray.get(actor_refs)
         if commit:
             io.write_bytes_atomic(snapshot.trainer_state_path, snapshot.trainer_state_payload)
-            if snapshot.dataloader_payload is not None:
-                io.write_bytes_atomic(snapshot.dataloader_path, snapshot.dataloader_payload)
+            io.write_bytes_atomic(snapshot.rollout_state_path, snapshot.rollout_state_payload)
             io.write_bytes_atomic(snapshot.marker_path, str(snapshot.step).encode())
             self._last_saved_step = snapshot.step
             cleanup_started = time.monotonic()
@@ -964,15 +985,14 @@ class RayPPOTrainer:
         await self._finish_checkpoint_upload(snapshot, commit=False)
 
     async def _drain_checkpoint_upload(self) -> bool:
-        # Shutdown can run after partial initialization, before checkpoint
-        # upload state has been installed on the trainer.
         pending = getattr(self, "_pending_checkpoint_upload", None)
         if pending is None:
             return True
         task, state = pending
         self._pending_checkpoint_upload = None
         try:
-            duration, cleanup_duration = await task
+            with Timer("checkpoint_upload_blocking", self.all_timings, log_events=False):
+                duration, cleanup_duration = await task
         except OSError:
             self._record_checkpoint_save_failure(state)
             return False
@@ -987,41 +1007,46 @@ class RayPPOTrainer:
         )
         return True
 
-    async def _run_step_end_callbacks(self, state: TrainerState) -> None:
+    async def _run_step_end_callbacks(self, state: TrainerState, *, step_wall: StepWallTime | None = None) -> None:
         """Run callback-requested work that belongs to the current training step."""
         self._control.reset()
         self._control = await self.callback_handler.call_event_async("on_step_end", state, self._control, trainer=self)
 
         if self._control.should_save:
-            await self._save_intermediate_checkpoint(state)
+            if self._megatron_checkpointing():
+                self._pending_megatron_save = state
+            else:
+                if step_wall is not None:
+                    step_wall.start("checkpoint_work")
+                await self._save_intermediate_checkpoint(state)
             self._control.should_save = False
 
         if self._control.should_save_hf_model:
+            if step_wall is not None and getattr(self, "_pending_megatron_save", None) is None:
+                step_wall.start("checkpoint_work")
             # HF export reads the committed checkpoint. When checkpoint and HF
             # export share a cadence, wait for the background shard uploads and
-            # generation commit before asking the exporter to consume it.
-            if getattr(self, "_pending_megatron_checkpoint_commit", None) is not None:
+            # marker publication before asking the exporter to consume it.
+            if getattr(self, "_pending_megatron_save", None) is not None:
                 self._pending_megatron_hf_export = True
             elif await self._drain_checkpoint_upload():
                 await asyncio.to_thread(self.handle_hf_export)
             self._control.should_save_hf_model = False
 
         if self._control.should_evaluate and self.eval_dataset is not None:
+            if step_wall is not None:
+                step_wall.start("evaluation")
             with Timer("eval", self.all_timings):
                 eval_metrics = await self.eval()
-                self.all_metrics.update(eval_metrics)
+                self._log_metrics_stdout(eval_metrics, step=self.global_step, kind="eval")
+                self.tracker.log(eval_metrics, step=self.global_step, commit=False)
+                self._last_evaluated_step = self.global_step
             await self.callback_handler.call_event_async(
                 "on_evaluate", state, self._control, metrics=eval_metrics, trainer=self
             )
             self._control.should_evaluate = False
-
-    async def _sync_weights_and_restore_rollout_residency(self) -> None:
-        await self.inference_engine_client.wake_up(tags=["weights"])
-        with Timer("sync_weights", self.all_timings):
-            ray.get(self.sync_policy_weights_to_inference_engines())
-        with Timer("offload_policy_model_to_cpu", self.all_timings):
-            self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
-        await self.inference_engine_client.wake_up(tags=["kv_cache"])
+        if step_wall is not None:
+            step_wall.start("step_end_bookkeeping")
 
     async def _start_draft_trainer(self) -> None:
         """Start the independent one-GPU draft trainer when online updates are enabled."""
@@ -1037,56 +1062,52 @@ class RayPPOTrainer:
         logger.info("DraftTrainer ready: {}", await self._draft_trainer.status.remote())
         await self._refresh_latest_speculator(wait=True)
 
-    def _should_update_speculator(self) -> bool:
+    def _should_update_speculator(self, step: int) -> bool:
         config = self.speculative_decoding
         return (
             config is not None
             and config.training is not None
             and self._draft_trainer_update_ref is None
-            and self.global_step % config.training.interval_steps == 0
+            and step % config.training.interval_steps == 0
         )
 
-    def _speculator_capture_uri(self) -> str:
-        return join_resource_path(
-            self._speculator_checkpoint_root,
-            "captures",
-            f"step-{self.global_step}",
-        )
+    def _speculator_capture_uri(self, step: int) -> str:
+        return join_resource_path(self._speculator_checkpoint_root, "captures", f"step-{step}")
 
-    async def _begin_speculator_capture(self) -> None:
-        """Start a bounded capture without making draft failures fatal to rollouts."""
+    async def _begin_speculator_capture(self, step: int) -> None:
+        """Capture rollouts generated for training step ``step`` without making draft failures fatal."""
         await self._poll_speculator_lifecycle()
-        if self._speculator_capture_active or not self._should_update_speculator():
+        if self._speculator_capture_active or not self._should_update_speculator(step):
             return
         assert self.speculative_decoding is not None
         training = self.speculative_decoding.training
         assert training is not None
         assert self._speculator_revision is not None
         capture_config = OnlineEagleCaptureConfig(
-            step=self.global_step,
+            step=step,
             max_tokens=training.max_tokens_per_update,
             max_window_tokens=training.max_window_tokens,
-            target_revision=_policy_revision(self.global_step - 1),
+            target_revision=_policy_revision(step - 1),
             draft_revision=self._speculator_revision,
             reserved_gpu_memory_gib=training.reserved_gpu_memory_gib,
         )
-        capture_uri = self._speculator_capture_uri()
+        capture_uri = self._speculator_capture_uri(step)
         try:
             if await asyncio.to_thread(io.exists, capture_uri):
                 await asyncio.to_thread(io.remove, capture_uri)
             results = await self.inference_engine_client.begin_online_eagle_capture(capture_config.to_mapping())
         except Exception as error:
-            logger.warning("Online EAGLE capture skipped at step {}: {}", self.global_step, error)
+            logger.warning("Online EAGLE capture skipped at step {}: {}", step, error)
             self.all_metrics["speculator/capture_failures"] = 1.0
             return
         active = _active_online_eagle_results(results)
         if not active:
-            logger.warning("Online EAGLE capture had no active ranks at step {}", self.global_step)
+            logger.warning("Online EAGLE capture had no active ranks at step {}", step)
             return
         self._speculator_capture_active = True
         logger.info(
             "Online EAGLE capture started: step={} ranks={} target_revision={} draft_revision={}",
-            self.global_step,
+            step,
             len(active),
             capture_config.target_revision,
             capture_config.draft_revision,
@@ -1096,7 +1117,7 @@ class RayPPOTrainer:
         """Publish the active capture and retain only its cloud URI."""
         if not self._speculator_capture_active:
             return
-        capture_uri = self._speculator_capture_uri()
+        capture_uri = self._speculator_capture_uri(self.global_step)
         self._speculator_capture_active = False
         try:
             manifests = await self.inference_engine_client.seal_online_eagle_capture(capture_uri)
@@ -1307,25 +1328,83 @@ class RayPPOTrainer:
         await self._refresh_latest_speculator()
 
     async def _sync_policy_for_rollouts(self, *, reason: str) -> None:
-        with Timer("publish_policy_weights", log_events=False) as update_timer:
+        """Load the policy's current weights into the inference engines.
+
+        Colocated engines sleep while the policy trains; they wake for the weights and then take the GPU
+        memory the policy model releases. Separate engines keep serving rollouts, so they pause for the sync
+        and their requests in flight resume on the new weights.
+        """
+        timings = self.all_startup_timings if reason == "initial" else self.all_timings
+        with Timer("sync_weights", timings) as update_timer:
             if self.colocate_all:
-                try:
-                    self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
-                finally:
-                    await self._sync_weights_and_restore_rollout_residency()
+                await asyncio.to_thread(self.policy_model.offload_to_cpu, offload_optimizer=True, offload_model=False)
+                await self.inference_engine_client.wake_up(tags=["weights"])
+                await self.sync_policy_weights_to_inference_engines()
+                await asyncio.to_thread(self.policy_model.offload_to_cpu, offload_optimizer=False, offload_model=True)
+                await self.inference_engine_client.wake_up(tags=["kv_cache"])
             else:
-                self._offload_policy_optimizer(self.all_timings, timer_label="offload_policy_optimizer_to_cpu")
-                with Timer("sync_weights", self.all_timings):
-                    ray.get(self.sync_policy_weights_to_inference_engines())
+                # Expert-block sync writes into live engine parameters, so the initial sync pauses generation too.
+                pause = reason != "initial" or self._expert_block_sync is not None
+                if pause:
+                    await self.inference_engine_client.pause_generation()
+                # Training backloads the optimizer before every step. Offload it after every update, including
+                # the initial sync, so Megatron gradient buffers are not resized while still on the GPU.
+                await asyncio.to_thread(
+                    self._offload_policy_optimizer, timings, timer_label="offload_policy_optimizer_to_cpu"
+                )
+                await self.sync_policy_weights_to_inference_engines()
+                if pause:
+                    await self.inference_engine_client.resume_generation()
         self._log_weight_update_completed(reason=reason, duration_seconds=update_timer.duration)
 
+    async def sync_policy_weights_to_inference_engines(self) -> None:
+        # Align policy actors before the weight extraction collectives.
+        await self._drain_policy_event_loops()
+        if self._expert_block_sync is not None:
+            timings = await self._expert_block_sync.sync(self.global_step)
+            self.all_timings.update(timings.as_metrics())
+            logger.info(
+                "Expert-block sync: step={} install_seconds={:.3f} policy_seconds={:.3f} receiver_seconds={:.3f} "
+                "expert_seconds={:.3f} dense_seconds={:.3f}",
+                self.global_step,
+                timings.install_seconds,
+                timings.policy_seconds,
+                timings.receiver_seconds,
+                timings.expert_seconds,
+                timings.dense_seconds,
+            )
+            if self.cfg.generator.expert_block_sync.verify:
+                self.all_timings.update(await self._expert_block_sync.verify(self.global_step))
+        else:
+            await self.policy_model.async_run_method(
+                "pass_through", "broadcast_to_inference_engines", self.inference_engine_client
+            )
+        # A hard sync point leaves every policy rank free before the next forward.
+        await self._drain_policy_event_loops()
+
+    async def _drain_policy_event_loops(self):
+        """Wait for every actor loop to finish pending weight-sync work.
+
+        The next synchronous forward requires all model ranks to enter its
+        collectives. An async barrier lets each actor finish its prior coroutine
+        before the driver sends that forward.
+        """
+        refs = self.policy_model.async_run_ray_method("pass_through", "barrier_all")
+        await asyncio.gather(*refs)
+
     def _offload_policy_optimizer(self, timings: dict, *, timer_label: str) -> None:
-        """Move optimizer state off GPU before rollout generation or restore."""
+        """Move optimizer state off GPU before rollout generation or checkpoint restore."""
         if not self.colocate_all and self.cfg.trainer.offload_optimizer_during_rollouts:
             with Timer(timer_label, timings):
                 self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
 
     def _log_weight_update_completed(self, *, reason: str, duration_seconds: float) -> None:
+        if self._training_metrics_enabled:
+            record_event(
+                "weight_sync_completed",
+                {"model_version_step": self.global_step, "duration_seconds": duration_seconds},
+                attributes={"role": TRAINER_ROLE, "step": str(self.global_step), "reason": reason},
+            )
         logger.info(
             "Policy weights updated: step={} reason={} duration_seconds={:.3f}",
             getattr(self, "global_step", None),
@@ -1340,7 +1419,9 @@ class RayPPOTrainer:
         training_input: TrainingInputBatch,
         duration_seconds: float,
     ) -> None:
-        self._last_optimizer_step_finished_at = (self.global_step, time.monotonic())
+        self.all_metrics.update(training_input.metadata["consumed_stop_metrics"])
+        if self._training_metrics_enabled:
+            record_consumed_work(consumed_work(training_input), step=self.global_step)
         logger.info(
             "Optimizer step completed: step={} epoch={} sequences={} duration_seconds={:.3f}",
             self.global_step,
@@ -1348,21 +1429,6 @@ class RayPPOTrainer:
             len(training_input["sequences"]),
             duration_seconds,
         )
-        resume_started = getattr(self, "_checkpoint_resume_started", None)
-        if resume_started is not None and self.global_step == getattr(self, "_checkpoint_resumed_from_step", -2) + 1:
-            logger.info(
-                "checkpoint_resume_observation {}",
-                json.dumps(
-                    {
-                        "schema": "checkpoint_resume_v1",
-                        "loaded_step": self._checkpoint_resumed_from_step,
-                        "first_optimizer_step": self.global_step,
-                        "duration_to_first_optimizer_step_seconds": time.perf_counter() - resume_started,
-                    },
-                    sort_keys=True,
-                ),
-            )
-            self._checkpoint_resume_started = None
 
     def _log_training_step_completed(self, *, epoch: int, duration_seconds: float) -> None:
         logger.info(
@@ -1374,353 +1440,445 @@ class RayPPOTrainer:
         )
 
     async def _train_loop(self):
-        """
-        Internal training loop, separated for proper trajectory-runner lifecycle management.
+        await self._init_weight_sync()
 
-        This method uses the callback system to handle periodic actions like
-        checkpointing, evaluation, and logging. Callbacks are invoked at specific
-        points in the training loop to allow extensibility.
-        """
-        # Initialize weight sync state between policy model and inference engines.
-        with Timer("init_weight_sync_state", self.all_startup_timings):
-            self.init_weight_sync_state()
-
-        # Load policy model to GPU before loading checkpoint.
+        # Colocated training loads the policy model onto the GPU before its checkpoint.
         if self.colocate_all:
             self.policy_model.backload_to_gpu()
 
-        # Load checkpoint state if resumption is enabled.
         if self.resume_mode != ResumeMode.NONE:
-            self._checkpoint_resume_started = time.perf_counter()
             with Timer("load_checkpoints", self.all_startup_timings):
                 self.global_step, _ = self.load_checkpoints()
-            self._checkpoint_resumed_from_step = self.global_step
+            logger.info(f"Resumed training from global_step {self.global_step}")
+            if self._restored_rollout_state is not None:
+                await self.context.load_state_dict(self._restored_rollout_state)
+                self._restored_rollout_state = None
 
         await self._start_draft_trainer()
-
         await self._sync_policy_for_rollouts(reason="initial")
 
-        # Synchronize before checking completion so a requested final evaluation uses
-        # the checkpoint weights. The loaded global_step is the completed step count;
-        # >= treats a resume exactly at max_steps as complete without running gs N+1.
+        # Synchronize before checking completion so a requested final evaluation uses the checkpoint weights.
+        # The loaded global_step counts completed steps, so >= treats a resume exactly at max_steps as complete.
         if self.resume_mode != ResumeMode.NONE and self.global_step >= self.total_training_steps:
-            loaded_driver_rng = getattr(self, "_loaded_driver_rng_state", None)
-            if loaded_driver_rng is not None:
-                _restore_driver_rng_state(loaded_driver_rng)
+            if self._loaded_driver_rng_state is not None:
+                _restore_driver_rng_state(self._loaded_driver_rng_state)
+                self._loaded_driver_rng_state = None
             await self._handle_resume_at_max_steps()
             return
 
         self._log_startup_timings()
+        self._record_run_configuration()
 
-        # initialize kl controller
         if self.cfg.trainer.algorithm.use_kl_in_reward:
             self.reward_kl_controller = get_kl_controller(self.cfg.trainer.algorithm)
 
-        # Create initial trainer state for on_train_begin callback
-        start_epoch = getattr(self, "_loaded_resume_epoch", None)
-        if start_epoch is None:
-            start_epoch = self.global_step // len(self.train_dataloader)
-        initial_state = self._create_trainer_state(epoch=start_epoch)
-
-        # Call on_train_begin callbacks (handles eval_before_train via EvaluationCallback)
         self._control.reset()
         self._control = await self.callback_handler.call_event_async(
-            "on_train_begin", initial_state, self._control, trainer=self
+            "on_train_begin",
+            self._create_trainer_state(epoch=self.global_step // self.num_steps_per_epoch),
+            self._control,
+            trainer=self,
         )
-
-        # Handle pre-training evaluation if requested by callbacks
         if self._control.should_evaluate and self.eval_dataset is not None:
-            with Timer("eval", self.all_timings):
-                eval_metrics = await self.eval()
-                self._log_metrics_stdout(eval_metrics, step=self.global_step, kind="eval")
-                self.tracker.log(eval_metrics, step=self.global_step, commit=True)
+            await self._run_pretraining_evaluation()
             self._control.should_evaluate = False
 
-        # Reapply the saved stream after startup work and after constructing
-        # the first resumed dataloader iterator. Iterator construction itself
-        # draws a Torch base seed, whereas an uninterrupted mid-epoch step
-        # reuses its existing iterator.
-        loaded_driver_rng = getattr(self, "_loaded_driver_rng_state", None)
-        loaded_at_epoch_boundary = bool(getattr(self, "_loaded_at_epoch_boundary", False))
-
-        # main training loop
-        pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Batches Processed")
-        start_epoch = getattr(self, "_loaded_resume_epoch", None)
-        if start_epoch is None:
-            start_epoch = self.global_step // len(self.train_dataloader)
-        last_completed_step = self.global_step
-        self.global_step += 1  # start training at global_step 1
-        if loaded_driver_rng is not None and loaded_at_epoch_boundary:
-            _restore_driver_rng_state(loaded_driver_rng)
-            loaded_driver_rng = None
+        if self._loaded_driver_rng_state is not None:
+            _restore_driver_rng_state(self._loaded_driver_rng_state)
             self._loaded_driver_rng_state = None
-        for epoch in range(start_epoch, self.cfg.trainer.epochs):
-            epoch_exhausted = True
-            dataloader_iterator = iter(self.train_dataloader)
-            if loaded_driver_rng is not None:
-                _restore_driver_rng_state(loaded_driver_rng)
-                loaded_driver_rng = None
-                self._loaded_driver_rng_state = None
-            for batch_index, rand_prompts in enumerate(dataloader_iterator):
-                if getattr(self, "_pending_megatron_checkpoint_commit", None) is not None:
-                    raise RuntimeError("Cannot start the next step with an unpublished Megatron checkpoint")
-                with Timer("step", self.all_timings) as step_timer:
-                    # for colocate_all=true, inference engine is always on GPU when starting the training step
+        self.context.start()
+        await self._publish(self.global_step + 1)
 
-                    # 0. select ordered prompts and truncate complete batches to even shards
-                    rand_prompts = self._select_sync_generation_prompts(rand_prompts)
-                    if self.group_admission_state is None:
-                        rand_prompts = self._remove_tail_data(rand_prompts)
-                    trajectory_request, uids = prepare_trajectory_request(
-                        rand_prompts,
-                        self.cfg.generator.n_samples_per_prompt,
-                        get_sampling_params_for_backend(self.cfg.generator.backend, self.cfg.generator.sampling_params),
-                        self.cfg.environment.env_class,
-                        "train",
-                        self.global_step,
-                    )
+        pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Step Progress")
+        last_completed_step = self.global_step
+        while self.global_step < self.total_training_steps:
+            self.global_step += 1
+            epoch = (self.global_step - 1) // self.num_steps_per_epoch
+            cycle_started = time.perf_counter()
+            step_wall = StepWallTime(OmegaConf.to_container(self.cfg.trainer.step_phase_budgets))
+            with Timer("step", self.all_timings) as step_timer:
+                training_input = await self._train_step(epoch, step_wall)
+                # The core wall excludes the step-end callbacks below.
+                core_seconds = time.perf_counter() - cycle_started
+                step_wall.start("step_end_bookkeeping")
+                step_state = self._create_trainer_state(epoch, active_step_duration=step_timer.elapsed)
+                await self._run_step_end_callbacks(step_state, step_wall=step_wall)
+            self.all_metrics.update(
+                step_wall.finish(step_timer.duration, ended_at=step_timer.start_time + step_timer.duration)
+            )
+            self._update_step_performance_metrics(
+                training_input, core_seconds=core_seconds, cycle_started=cycle_started
+            )
 
-                    # 1.1 generation phase
-                    await self._begin_speculator_capture()
-                    with (
-                        Timer("generate", self.all_timings),
-                        critical_phase("rollout_or_inference_wait", self.global_step),
-                    ):
-                        trajectory_batch: TrajectoryBatch = await self.generate(trajectory_request)
-
-                    if self.cfg.trainer.step_wise_training:
-                        # NOTE: We use instance_ids from `trajectory_ids` here instead of re-using `uids`
-                        # this is because in step-wise training, len(uids) != len(trajectory_batch["response_ids"])
-                        uids = [trajectory_id.instance_id for trajectory_id in trajectory_batch["trajectory_ids"]]
-
-                    self._update_curriculum_sampler(trajectory_batch, uids)
-
-                    admission = self.handle_group_admission(trajectory_batch, uids)
-                    trajectory_batch = admission.trajectory_batch
-                    uids = admission.uids
-                    if admission.keep_sampling:
-                        pbar.update(1)
-                        continue
-
-                    # dynamic sampling
-                    if self.cfg.trainer.algorithm.dynamic_sampling.type is not None:
-                        dynamic_sampling = self.handle_dynamic_sampling(trajectory_batch, uids)
-                        trajectory_batch = dynamic_sampling.trajectory_batch
-                        uids = dynamic_sampling.uids
-                        if dynamic_sampling.keep_sampling:
-                            # update progress bar for current batch (but not global step)
-                            pbar.update(1)
-                            continue
-
-                    await self._seal_speculator_capture()
-                    await self._start_speculator_update()
-
-                    if self.colocate_all:
-                        # if we are not continuing sampling, we sleep the inference engine
-                        await self.inference_engine_client.sleep()
-
-                    # 1.2 postprocess rewards
-                    with Timer("postprocess_trajectory_batch", self.all_timings):
-                        trajectory_batch = self.postprocess_trajectory_batch(trajectory_batch, uids)
-                        trajectory_batch, uids = self.select_trajectories(trajectory_batch, uids)
-
-                    # 2. print example just for debugging
-                    vis = self.tokenizer.decode(trajectory_batch["response_ids"][0])
-                    log_example(
-                        logger,
-                        prompt=trajectory_request["prompts"][0],
-                        response=vis,
-                        reward=trajectory_batch["rewards"][0],
-                    )
-
-                    with Timer("convert_to_training_input", self.all_timings):
-                        training_input: TrainingInputBatch = self.convert_to_training_input(trajectory_batch, uids)
-                        logger.info(f"Number of sequences: {len(training_input['sequences'])}")
-
-                    # TIS graceful-degrade observability (Fix A): see fully_async_trainer
-                    # for rationale. Driver-side metric only (keyset-safe vs all_reduce).
-                    if self.cfg.trainer.algorithm.use_tis:
-                        batch_skipped = float(getattr(self, "_tis_batch_skipped_no_logprobs", 0.0))
-                        self._tis_skipped_count = getattr(self, "_tis_skipped_count", 0.0) + batch_skipped
-                        self._tis_total_count = getattr(self, "_tis_total_count", 0.0) + 1.0
-                        self.all_metrics.update(
-                            {
-                                "tis/batch_skipped_no_logprobs": batch_skipped,
-                                "tis/skipped_fraction": self._tis_skipped_count / self._tis_total_count,
-                            }
-                        )
-
-                    # 1.4 inference and calculate values, log probs, rewards, kl divergence
-                    with Timer("fwd_logprobs_values_reward", self.all_timings):
-                        training_input = await self._forward_with_optional_distillation(
-                            trajectory_batch,
-                            training_input,
-                        )
-
-                    # 1.5 apply kl divergence penalty to rewards
-                    if self.cfg.trainer.algorithm.use_kl_in_reward:
-                        with Timer("apply_reward_kl_penalty", self.all_timings):
-                            training_input = self.apply_reward_kl_penalty(training_input)
-
-                    # 3. calculate advantages and returns
-                    with Timer("compute_advantages_and_returns", self.all_timings):
-                        training_input = self.compute_advantages_and_returns(training_input)
-                        training_input = self.finalize_advantages_for_training(training_input)
-
-                    if self.cfg.trainer.dump_data_batch:
-                        # dump data to file
-                        with Timer("dump_data_batch", self.all_timings):
-                            self.dump_data(training_input, file_name=f"global_step_{self.global_step}_training_input")
-
-                    # 4. train policy/critic model
-                    # Policy model is backloaded to GPU during training
-                    with (
-                        Timer("train_critic_and_policy", self.all_timings),
-                        critical_phase("train_step", self.global_step),
-                    ):
-                        status = self.train_critic_and_policy(training_input)
-                    train_duration = self.all_timings["train_critic_and_policy"]
-                    self._log_optimizer_step_completed(
-                        epoch=epoch,
-                        training_input=training_input,
-                        duration_seconds=train_duration,
-                    )
-
-                    # 5. sync weights to inference engines (must happen before callbacks)
-                    await self._poll_speculator_lifecycle()
-                    await self._sync_policy_for_rollouts(reason="training_step")
-
-                    # 6. Run callback-requested work before closing the inclusive step timer.
-                    logger.info(status)
-                    self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
-                    step_state = self._create_trainer_state(epoch, active_step_duration=step_timer.elapsed)
-                    self._active_step_started_at = step_timer.start_time
-                    await self._run_step_end_callbacks(step_state)
-
-                    # Handle ref model update at epoch end (via RefModelUpdateCallback).
-                    ref_callback = self._get_ref_update_callback()
-                    if (
-                        step_state.is_epoch_end
-                        and not step_state.is_last_step
-                        and self.ref_model is not None
-                        and ref_callback is not None
-                        and ref_callback.should_update_ref
-                    ):
-                        with Timer("update_ref_with_policy", self.all_timings):
-                            self.update_ref_with_policy()
-
-                # 7. Log metrics
-                if self._control.should_log:
-                    log_payload = {
-                        **self.all_metrics,
-                        **{f"timing/{k}": v for k, v in self.all_timings.items()},
-                        **get_system_memory_metrics(),
-                    }
-                    self._log_metrics_stdout(log_payload, step=self.global_step, kind="train")
-                    self.tracker.log(log_payload, step=self.global_step, commit=True)
-                    # Call on_log callbacks
-                    await self.callback_handler.call_event_async(
-                        "on_log", step_state, self._control, logs=log_payload, trainer=self
-                    )
-
-                self._log_training_step_completed(
-                    epoch=epoch,
-                    duration_seconds=step_timer.duration,
+            if self._control.should_log:
+                log_payload = {
+                    **self.all_metrics,
+                    **{f"timing/{k}": v for k, v in self.all_timings.items()},
+                    **get_system_memory_metrics(),
+                }
+                self._log_metrics_stdout(log_payload, step=self.global_step, kind="train")
+                self.tracker.log(log_payload, step=self.global_step, commit=self.cfg.trainer.tracker_commit_each_step)
+                await self.callback_handler.call_event_async(
+                    "on_log", step_state, self._control, logs=log_payload, trainer=self
                 )
+            self._log_training_step_completed(epoch=epoch, duration_seconds=step_timer.duration)
 
-                self._step_time_history.append(step_timer.duration)
-                self.all_metrics = {}
-                publish_step_timings(self.all_timings, self.global_step)
-                self.all_timings = {}
-
-                # 8. Update progress bar and global step
-                pbar.update(1)
-                last_completed_step = self.global_step
-                record_policy_step(self.global_step)
-                self.global_step += 1
-
-                del training_input, trajectory_batch
-
-                # The on_save attempt is still private. Capture the driver RNG
-                # after on_log and progress bookkeeping, before another batch can
-                # advance either the driver or the model. Epoch-end callbacks
-                # belong to this step and run below before its publication.
-                if not (
-                    batch_index + 1 == len(self.train_dataloader)
-                    or self.global_step > self.total_training_steps
-                    or self._control.should_training_stop
-                ):
-                    await self._publish_pending_megatron_checkpoint(resume_epoch=epoch, at_epoch_boundary=False)
-
-                # 9. Stop at the configured horizon or a callback request.
-                if self.global_step > self.total_training_steps or self._control.should_training_stop:
-                    if batch_index + 1 == len(self.train_dataloader):
-                        # StatefulDataLoader marks the epoch finished only on
-                        # terminal next(), not when its final batch is yielded.
-                        # The late checkpoint seal must observe that transition.
-                        try:
-                            next(dataloader_iterator)
-                        except StopIteration:
-                            pass
-                        else:
-                            raise RuntimeError("Dataloader yielded beyond its reported epoch length")
-                    else:
-                        epoch_exhausted = False
-                    if self.global_step > self.total_training_steps:
-                        logger.info(f"Reached max training steps ({self.total_training_steps})")
-                    else:
-                        logger.info("Training stopped early by callback")
-                    break
-
-            # Call on_epoch_end callbacks
-            epoch_state = self._create_trainer_state(epoch=epoch)
-            self._control.reset()
-            self._control = await self.callback_handler.call_event_async(
-                "on_epoch_end", epoch_state, self._control, trainer=self
-            )
-            self._current_resume_epoch = epoch + 1 if epoch_exhausted else epoch
-            self._current_at_epoch_boundary = epoch_exhausted
-            await self._publish_pending_megatron_checkpoint(
-                resume_epoch=self._current_resume_epoch,
-                at_epoch_boundary=epoch_exhausted,
-            )
-
-            if self.global_step > self.total_training_steps:
+            stop = self._control.should_training_stop
+            if step_state.is_epoch_end:
+                await self._end_epoch(epoch)
+                stop = stop or self._control.should_training_stop
+            if self._pending_megatron_save is not None:
+                pending = self._pending_megatron_save
+                self._pending_megatron_save = None
+                committed = await self._save_megatron_checkpoint(pending)
+                if committed and self._pending_megatron_hf_export:
+                    await asyncio.to_thread(self.handle_hf_export)
+                self._pending_megatron_hf_export = False
+            self._step_time_history.append(step_timer.duration)
+            self.all_metrics = {}
+            publish_step_timings(self.all_timings, self.global_step)
+            self.all_timings = {}
+            pbar.update(1)
+            last_completed_step = self.global_step
+            record_policy_step(self.global_step)
+            if stop:
+                logger.info("Training stopped early by callback")
                 break
-
-            if self._control.should_training_stop:
-                logger.info("Training stopped early by callback at epoch end")
-                break
-
-        # End of training
+            if self.global_step < self.total_training_steps:
+                await self._publish(self.global_step + 1)
         pbar.close()
-        await self._finalize_training(
-            completed_step=last_completed_step,
-            epoch=self.cfg.trainer.epochs - 1,
-        )
+
+        await self._finalize_training(completed_step=last_completed_step, epoch=self.cfg.trainer.epochs - 1)
         logger.info("Training done!")
 
-    def _remove_tail_data(self, entries: List[Any]) -> List[Any]:
-        """Remove tail data to have even shards"""
-        dp_size = self.policy_model.actor_infos[0].rank.dp_size
-        if self.critic_model is not None:
-            dp_size = math.lcm(dp_size, self.critic_model.actor_infos[0].rank.dp_size)
-        if self.ref_model is not None:
-            dp_size = math.lcm(dp_size, self.ref_model.actor_infos[0].rank.dp_size)
-        return entries[: (len(entries) // dp_size) * dp_size]
+    async def _init_weight_sync(self) -> None:
+        with Timer("init_weight_sync_state", self.all_startup_timings):
+            if self.cfg.generator.weight_sync_transport != WeightSyncTransport.EXPERT_BLOCK:
+                self.init_weight_sync_state()
+                return
+            self._expert_block_sync = ExpertBlockSync(
+                policy_model=self.policy_model,
+                inference_engine_client=self.inference_engine_client,
+                timeout_seconds=self.cfg.generator.expert_block_sync.timeout_seconds,
+            )
+            for phase, seconds in (await self._expert_block_sync.prepare()).items():
+                self.all_startup_timings[f"expert_block_sync/{phase}"] = seconds
 
-    def _select_sync_generation_prompts(self, entries: List[Any]) -> List[Any]:
-        """Take the ordered prompts needed for the next synchronous generation request."""
-        available = [*self._pending_sync_prompts, *entries]
-        request_count = int(self.cfg.trainer.train_batch_size)
-        if self.group_admission_state is not None:
-            collected_count = int(self.group_admission_state.get("num_prompts_in_batch", 0))
-            request_count -= collected_count
-            assert request_count > 0
+    def _record_run_configuration(self) -> None:
+        if not self._training_metrics_enabled:
+            return
+        placement = self.cfg.trainer.placement
+        megatron = self.cfg.trainer.policy.get("megatron_config", {})
+        buffer = self.context.config
+        # The field names are the ones the async dashboard reads.
+        record_event(
+            "async_run_configuration",
+            {
+                "strategy": self.cfg.trainer.strategy,
+                "policy_nodes": placement.policy_num_nodes,
+                "policy_gpus_per_node": placement.policy_num_gpus_per_node,
+                "policy_tp": megatron.get("tensor_model_parallel_size"),
+                "policy_pp": megatron.get("pipeline_model_parallel_size"),
+                "policy_cp": megatron.get("context_parallel_size"),
+                "policy_ep": megatron.get("expert_model_parallel_size"),
+                # The dashboard's name for the most groups generating at once.
+                "generation_workers": buffer.max_concurrent_rollouts,
+                "mini_batch_size": buffer.batch_size,
+                "max_staleness_steps": buffer.max_staleness_steps,
+            },
+            attributes={"role": TRAINER_ROLE, "step": str(self.global_step)},
+        )
 
-        selected = available[:request_count]
-        self._pending_sync_prompts = available[request_count:]
-        return selected
+    def _update_step_performance_metrics(
+        self, training_input: TrainingInputBatch, *, core_seconds: float, cycle_started: float
+    ) -> None:
+        if not self._training_metrics_enabled:
+            return
+        placement = self.cfg.trainer.placement
+        generator = self.cfg.generator
+        consumed = consumed_work(training_input)
+        self.all_metrics.update(
+            async_step_metrics(
+                core_seconds=core_seconds,
+                cycle_seconds=time.perf_counter() - cycle_started,
+                buffer_wait_seconds=self.all_timings["wait_for_generation_buffer"],
+                training_seconds=self.all_timings["run_training"],
+                sync_seconds=self.all_timings["sync_weights"],
+                consumed_loss_tokens=consumed.loss_tokens,
+                consumed_response_tokens=consumed.response_tokens,
+                policy_gpus=placement.policy_num_nodes * placement.policy_num_gpus_per_node,
+                inference_gpus=(
+                    generator.num_inference_engines
+                    * generator.inference_engine_tensor_parallel_size
+                    * generator.inference_engine_pipeline_parallel_size
+                    * generator.inference_engine_data_parallel_size
+                ),
+            )
+        )
+
+    async def _publish(self, step: int) -> None:
+        """Open rollout leases for training step ``step``, whose policy weights the engines now hold."""
+        await self._begin_speculator_capture(step)
+        await self.context.publish(step)
+
+    async def _train_step(self, epoch: int, step_wall: StepWallTime) -> TrainingInputBatch:
+        """Read this step's batch from the rollout buffer, train on it, sync the new weights, and return the batch."""
+        step_wall.start("group_admission")
+        logger.info(
+            "Rollout batch started: step={} required_groups={}", self.global_step, self.context.config.batch_size
+        )
+        with (
+            Timer("wait_for_generation_buffer", self.all_timings) as rollout_wait_timer,
+            critical_phase("rollout_or_inference_wait", self.global_step),
+            async_phase_window("rollout_wait", step=self.global_step, enabled=self._rollout_spans_enabled),
+        ):
+            groups, selection_metrics = await self.context.next_batch(
+                stall_timeout=admission_stall_timeout(
+                    recent_step_times=self._step_time_history,
+                    timeout_override=self.group_admission_stall_timeout,
+                ),
+                on_admitted=self._submit_admitted_groups_for_teacher_scoring,
+            )
+        self.all_metrics.update(selection_metrics)
+        await self._seal_speculator_capture()
+        await self._start_speculator_update()
+        if self.colocate_all:
+            # Colocation runs at staleness 0, where no rollout is in flight once the batch is complete.
+            await self.inference_engine_client.sleep()
+
+        scored_distillation = None
+        if self._distillation_runtime is not None:
+            with Timer("wait_for_teacher_evidence", self.all_timings):
+                scored_distillation = await self._await_admitted_teacher_evidence(groups)
+
+        step_wall.start("batch_assembly")
+        training_input = await asyncio.to_thread(self.convert_rollout_groups_to_training_input, groups)
+        if scored_distillation is not None:
+            self._attach_teacher_evidence(training_input, scored_distillation)
+        self._log_rollout_batch_completed(groups, duration_seconds=rollout_wait_timer.duration)
+
+        step_wall.start("training_preparation")
+        with (
+            Timer("run_training", self.all_timings),
+            async_phase_window("training", step=self.global_step, enabled=self._rollout_spans_enabled),
+        ):
+            status = await self._run_training(training_input, step_wall=step_wall)
+        step_wall.start("group_bookkeeping")
+        self._log_optimizer_step_completed(
+            epoch=epoch,
+            training_input=training_input,
+            duration_seconds=self.all_timings["train_critic_and_policy"],
+        )
+
+        await self._poll_speculator_lifecycle()
+        step_wall.start("weight_sync")
+        with async_phase_window("weight_sync", step=self.global_step, enabled=self._rollout_spans_enabled):
+            await self._sync_policy_for_rollouts(reason="training_step")
+
+        logger.info(status)
+        self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
+        return training_input
+
+    def _attach_teacher_evidence(
+        self, training_input: TrainingInputBatch, scored_distillation: tuple[RoutedScoredDistillationBatch, ...]
+    ) -> None:
+        self.all_metrics.update(
+            self._distillation_runtime.attach_to_training_input(training_input, scored_distillation)
+        )
+        self.all_metrics.update(
+            {
+                "distillation/teacher_count": float(
+                    len({route.teacher_id for scored in scored_distillation for route in scored.routes})
+                ),
+                DISTILLATION_SCORED_TOKENS_METRIC: float(
+                    sum(scored.distillation.valid_mask.sum().item() for scored in scored_distillation)
+                ),
+            }
+        )
+
+    def _log_rollout_batch_completed(self, groups: List[RolloutGroup], *, duration_seconds: float) -> None:
+        response_ids = [response for group in groups for response in group.trajectory_batch["response_ids"]]
+        logger.info(
+            "Rollout batch completed: step={} groups={} trajectories={} response_tokens={} staleness_mean={:.3f} "
+            "staleness_max={} duration_seconds={:.3f}",
+            self.global_step,
+            len(groups),
+            len(response_ids),
+            sum(len(response) for response in response_ids),
+            self.all_metrics["async/staleness_mean"],
+            self.all_metrics["async/staleness_max"],
+            duration_seconds,
+        )
+
+    async def _end_epoch(self, epoch: int) -> None:
+        self._control.reset()
+        self._control = await self.callback_handler.call_event_async(
+            "on_epoch_end", self._create_trainer_state(epoch=epoch), self._control, trainer=self
+        )
+        if self.global_step == self.total_training_steps or self.ref_model is None:
+            return
+        ref_callback = self._get_ref_update_callback()
+        if ref_callback is not None and ref_callback.should_update_ref:
+            with Timer("update_ref_with_policy", self.all_timings):
+                await asyncio.to_thread(self.update_ref_with_policy)
+
+    async def _run_pretraining_evaluation(self) -> None:
+        # Pre-step evaluation must not be mixed into the first optimizer step's inclusive timers.
+        with Timer("eval_before_train") as pretrain_eval_timer:
+            eval_metrics = await self.eval()
+            self._log_metrics_stdout(eval_metrics, step=self.global_step, kind="eval")
+            self.tracker.log(eval_metrics, step=self.global_step, commit=self.cfg.trainer.tracker_commit_each_step)
+            self._last_evaluated_step = self.global_step
+        startup_eval = {"startup/eval_before_train": pretrain_eval_timer.duration}
+        self._log_metrics_stdout(startup_eval, step=self.global_step, kind="startup")
+        self.tracker.log(startup_eval, step=self.global_step, commit=False)
+
+    async def _run_training(self, training_input: TrainingInputBatch, *, step_wall: StepWallTime | None = None):
+        # The drain after the last weight sync can go stale while the rollout buffer fills, so align the
+        # policy actor loops immediately before every forward.
+        await self._drain_policy_event_loops()
+        with Timer("fwd_logprobs_values_reward", self.all_timings):
+            training_input = await asyncio.to_thread(self.fwd_logprobs_values_reward, training_input)
+
+        if self.distillation_plan is not None and self.distillation_plan.reward_mode is DistillationRewardMode.REPLACE:
+            if training_input.get("teacher_valid_mask") is None:
+                raise ValueError("distillation reward_mode=replace requires teacher evidence on every training batch")
+            training_input["loss_mask"] = training_input["loss_mask"] * training_input["teacher_valid_mask"]
+
+        correction = off_policy_correction(self.cfg.trainer.algorithm)
+        if correction.rules:
+            rollout_logprobs = training_input.get("rollout_logprobs")
+            if rollout_logprobs is None:
+                raise ValueError("off_policy_correction requires rollout_logprobs")
+            result = compute_correction(
+                training_input["action_log_probs"], rollout_logprobs, training_input["loss_mask"], correction
+            )
+            training_input["correction_weights"] = result.weights
+            self.all_metrics.update(result.metrics)
+
+        if self.cfg.trainer.algorithm.use_kl_in_reward:
+            with Timer("apply_reward_kl_penalty", self.all_timings):
+                training_input = self.apply_reward_kl_penalty(training_input)
+
+        # Batch replay runs this prefix outside an optimizer step, without a step wall clock.
+        if step_wall is not None:
+            step_wall.start("advantages")
+        with Timer("compute_advantages_and_returns", self.all_timings):
+            training_input = self.compute_advantages_and_returns(training_input)
+            training_input = self.finalize_advantages_for_training(training_input)
+
+        if self.cfg.trainer.dump_data_batch:
+            if step_wall is not None:
+                step_wall.start("training_preparation")
+            with Timer("dump_data_batch", self.all_timings):
+                self.dump_data(training_input, file_name=f"global_step_{self.global_step}_training_input")
+
+        if step_wall is not None:
+            step_wall.start("policy_training")
+        with Timer("train_critic_and_policy", self.all_timings), critical_phase("train_step", self.global_step):
+            status = await asyncio.to_thread(self.train_critic_and_policy, training_input)
+
+        return status
+
+    def _group_for_teacher_scoring(self, group: RolloutGroup) -> TrajectoryBatch:
+        """Apply the learner's row selector without duplicating its metric side effects."""
+        if self.trajectory_selector is None:
+            return group.trajectory_batch
+        row_count = len(group.trajectory_batch["response_ids"])
+        return self.trajectory_selector.select(group.trajectory_batch, [group.uid] * row_count).trajectory_batch
+
+    async def _submit_admitted_groups_for_teacher_scoring(self, groups: List[RolloutGroup]) -> None:
+        """Enqueue newly admitted groups, letting bounded teacher queues backpressure admission."""
+        runtime = self._distillation_runtime
+        if runtime is None:
+            return
+        for group in groups:
+            self._distillation_tickets[group.uid] = await runtime.submit_before_batch_assembly(
+                self._group_for_teacher_scoring(group)
+            )
+
+    async def _await_admitted_teacher_evidence(
+        self,
+        groups: List[RolloutGroup],
+    ) -> tuple[RoutedScoredDistillationBatch, ...]:
+        """Gate learner batch assembly on every admitted group's teacher evidence."""
+        missing = [group.uid for group in groups if group.uid not in self._distillation_tickets]
+        if missing:
+            raise RuntimeError(f"admitted groups are missing teacher score tickets: {missing}")
+        scored = tuple(await asyncio.gather(*(self._distillation_tickets[group.uid].result() for group in groups)))
+        for group, scored_group in zip(groups, scored, strict=True):
+            selected_group = self._group_for_teacher_scoring(group)
+            trajectory_ids = selected_group.get("trajectory_ids")
+            if trajectory_ids is None:
+                raise ValueError("teacher scoring requires stable trajectory IDs on admitted groups")
+            expected_ids = tuple(trajectory_id.to_string() for trajectory_id in trajectory_ids)
+            if scored_group.trajectory_ids != expected_ids:
+                raise ValueError(
+                    f"teacher evidence row order does not match admitted group {group.uid!r}: "
+                    f"expected={expected_ids}, scored={scored_group.trajectory_ids}"
+                )
+            del self._distillation_tickets[group.uid]
+        return scored
+
+    def convert_rollout_groups_to_training_input(self, groups: List[RolloutGroup]) -> TrainingInputBatch:
+        """Concatenate one batch of admitted groups and convert it to a training batch."""
+        batch_size = self.context.config.batch_size
+        max_staleness_steps = self.context.config.max_staleness_steps
+        assert len(groups) == batch_size, f"Expected {batch_size} groups, got {len(groups)}"
+        with Timer("assemble_generation_group_mini_batch", self.all_timings):
+            uids = [group.uid for group in groups for _ in group.trajectory_batch["response_ids"]]
+            stalenesses = [self.global_step - group.policy_step for group in groups]
+            staleness_by_uid = {group.uid: staleness for group, staleness in zip(groups, stalenesses, strict=True)}
+            record_rollout_staleness(stalenesses, self.global_step)
+            assert max(stalenesses) <= max_staleness_steps, (
+                f"batch assembly returned staleness {max(stalenesses)} above max {max_staleness_steps}"
+            )
+
+            trajectory_batch = concatenate_trajectory_batches(
+                [group.trajectory_batch for group in groups],
+                require_rollout_logprobs=rollout_logprobs_required(
+                    self.cfg.trainer.algorithm,
+                    loss_spec=PolicyLossRegistry.spec(self.cfg.trainer.algorithm.policy_loss_type),
+                ),
+                tis_lcs_alert_threshold=float(self.cfg.trainer.algorithm.tis_lcs_alert_threshold),
+            )
+            assert trajectory_batch["rollout_metrics"] is not None, "Rollout metrics should be non-null."
+            self.all_metrics.update(trajectory_batch["rollout_metrics"])
+            self.all_metrics.update(
+                {
+                    "async/staleness_mean": sum(stalenesses) / len(stalenesses),
+                    "async/staleness_max": max(stalenesses),
+                    "async/staleness_min": min(stalenesses),
+                    "async/staleness_ratio": sum(1 for s in stalenesses if s > 0) / len(stalenesses),
+                }
+            )
+
+        with Timer("postprocess_trajectory_batch", self.all_timings):
+            trajectory_batch = self.postprocess_trajectory_batch(trajectory_batch, uids)
+            trajectory_batch, uids = self.select_trajectories(trajectory_batch, uids)
+        # Built after selection, because select_trajectories may drop rows.
+        rollout_staleness = [staleness_by_uid[uid] for uid in uids]
+
+        logger.debug(f"Example generated: {self.tokenizer.decode(trajectory_batch['response_ids'][0])}")
+
+        with Timer("convert_to_training_input", self.all_timings):
+            training_input = self.convert_to_training_input(trajectory_batch, uids, rollout_staleness=rollout_staleness)
+        if self._training_metrics_enabled:
+            self._record_consumed_staleness(uids, rollout_staleness, training_input["response_mask"][: len(uids)])
+        return training_input
+
+    def _record_consumed_staleness(
+        self, uids: List[str], rollout_staleness: List[int], response_masks: torch.Tensor
+    ) -> None:
+        counts: dict[str, dict[str, int]] = {}
+        # One reduction and one device sync for the whole batch, rather than one per row.
+        token_counts = response_masks.sum(dim=-1).tolist()
+        for uid, steps, token_count in zip(uids, rollout_staleness, token_counts, strict=True):
+            group = counts.setdefault(uid, {"staleness": steps, "groups": 1, "sequences": 0, "response_tokens": 0})
+            group["sequences"] += 1
+            group["response_tokens"] += int(token_count)
+        for group in counts.values():
+            record_event("consumed_staleness", group, attributes={"role": TRAINER_ROLE, "step": str(self.global_step)})
 
     def build_models(self, PolicyWorker, CriticWorker, RefWorker, policy_pg: Optional[PlacementGroup] = None):
         """
@@ -2059,7 +2217,13 @@ class RayPPOTrainer:
         self._num_experts_cache: Optional[int] = num_experts
         return num_experts
 
-    def convert_to_training_input(self, trajectory_batch: TrajectoryBatch, uids: List[str]) -> TrainingInputBatch:
+    def convert_to_training_input(
+        self,
+        trajectory_batch: TrajectoryBatch,
+        uids: List[str],
+        *,
+        rollout_staleness: List[int] | None = None,
+    ) -> TrainingInputBatch:
         """Converts lists to a padded batch of tensors for training"""
         assert_training_groups_eligible(trajectory_batch, uids, self.group_advantage_invariant)
         prompt_ids: List[List[int]] = trajectory_batch["prompt_token_ids"]
@@ -2067,7 +2231,7 @@ class RayPPOTrainer:
         rewards: List[List[float]] = trajectory_batch["rewards"]
         loss_masks: List[List[int]] = trajectory_batch["loss_masks"]
 
-        logprobs: Optional[List[List[float]]] = trajectory_batch.get("rollout_logprobs", None)
+        logprobs: Optional[List[np.ndarray]] = trajectory_batch.get("rollout_logprobs", None)
 
         # MoE router-replay capture rail (Stage 1): only pull routed_experts when
         # the flag is on. Gated so the flag-off TrainingInputBatch is byte-identical
@@ -2113,41 +2277,16 @@ class RayPPOTrainer:
             response_span_tags,
             num_experts,
         )
-        behavior_logprobs_required = policy_loss_requires_rollout_logprobs(self.cfg.trainer.algorithm.policy_loss_type)
-        if behavior_logprobs_required and rollout_logprobs_tensor is None:
-            raise ValueError("rollout_logprobs are required for behavior_clip policy loss")
-
-        # sanity check for tis
-        #
-        # Graceful TIS degrade (Fix A, 2026-06-07): when use_tis is on but the
-        # ENTIRE training batch came back with no rollout logprobs
-        # (rollout_logprobs_tensor is None), do NOT hard-assert/crash. The
-        # runner already detects + logs the all-None case ("ALL N
-        # trajectories missing logprobs. This batch cannot be used for TIS
-        # training"); the trainer must complete the hardening by degrading to
-        # standard (non-TIS) policy loss for THIS batch only. The None tensor
-        # propagates cleanly: TensorBatch.chunk/slice leave None values
-        # un-chunked (-> each micro-batch sees rollout_logprobs=None), the
-        # worker's TIS diagnostics already guard `is not None`, and
-        # ppo_policy_loss skips the TIS importance ratio when rollout_logprobs
-        # is None (see policy_losses.ppo_policy_loss). We surface the skip via a
-        # `tis/batch_skipped_no_logprobs` metric (set on the driver below) so the
-        # failure mode is observable; the relaunch skip-fraction is the live
-        # systematic-vs-intermittent diagnostic.
-        self._tis_batch_skipped_no_logprobs = 0.0
-        if self.cfg.trainer.algorithm.use_tis:
-            if rollout_logprobs_tensor is None:
-                self._tis_batch_skipped_no_logprobs = 1.0
-                logger.warning(
-                    "use_tis is True but this training batch has NO rollout logprobs "
-                    "(all-None). Degrading to standard (non-TIS) policy loss for THIS "
-                    "batch and continuing. tis/batch_skipped_no_logprobs=1. If this "
-                    "persists (skip-fraction ~1.0) the rollout-logprob capture is "
-                    "systematically broken (e.g. routed_experts capture displacing "
-                    "logprobs); a low/intermittent rate is context-length errors."
-                )
-            else:
-                assert rollout_logprobs_tensor.shape == loss_masks_tensor.shape, "Logprobs should look like responses"
+        if (
+            rollout_logprobs_required(
+                self.cfg.trainer.algorithm,
+                loss_spec=PolicyLossRegistry.spec(self.cfg.trainer.algorithm.policy_loss_type),
+            )
+            and rollout_logprobs_tensor is None
+        ):
+            raise ValueError("rollout_logprobs are required by the configured objective")
+        if rollout_logprobs_tensor is not None:
+            assert rollout_logprobs_tensor.shape == loss_masks_tensor.shape, "Logprobs should look like responses"
         # Stage 1 invariant (scope Q3 #2): routed_experts.shape[:2] == loss_mask.shape.
         if rollout_routed_experts_tensor is not None:
             assert rollout_routed_experts_tensor.shape[:2] == loss_masks_tensor.shape, (
@@ -2162,6 +2301,10 @@ class RayPPOTrainer:
                 "rewards": rewards_tensor,
                 "loss_mask": loss_masks_tensor,
                 "rollout_logprobs": rollout_logprobs_tensor,
+                "rollout_staleness": torch.tensor(
+                    rollout_staleness if rollout_staleness is not None else [0] * len(response_ids),
+                    dtype=torch.int32,
+                ),
                 "is_last_step": (
                     torch.tensor(trajectory_batch["is_last_step"], dtype=torch.bool)
                     if trajectory_batch.get("is_last_step", None) is not None
@@ -2195,6 +2338,9 @@ class RayPPOTrainer:
             training_input.metadata["exclude_from_baseline"] = np.array(
                 trajectory_batch["exclude_from_baseline"], dtype=bool
             )
+        training_input.metadata["consumed_stop_metrics"] = consumed_stop_metrics(
+            trajectory_batch.get("stop_reasons"), len(response_ids)
+        )
         # padded response length
         training_input.metadata["response_length"] = response_masks_tensor.shape[1]
         if self.cfg.trainer.step_wise_training:
@@ -2221,47 +2367,6 @@ class RayPPOTrainer:
         return training_input
 
     @torch.no_grad()
-    async def generate(
-        self,
-        input_batch: TrajectoryRequestBatch,
-    ) -> TrajectoryBatch:
-        """
-        Generate rollouts.
-
-        If colocate_all is enabled:
-        - before calling this method, the policy model should be on CPU and inference engine should
-            be awake (i.e. on GPU).
-        - after calling this method, the same model placement still holds.
-        """
-        # Runners preserve the input sample order.
-        started_at = time.monotonic()
-        logger.info(
-            "Rollout batch started: step={} mode=synchronous prompts={}",
-            self.global_step,
-            len(input_batch["prompts"]),
-        )
-        trajectory_batch: TrajectoryBatch = await self.trajectory_runner.run(input_batch)
-        # add rollout metrics to self.all_metrics
-        if trajectory_batch["rollout_metrics"] is not None:
-            self.all_metrics.update(trajectory_batch["rollout_metrics"])
-
-        if not self.cfg.trainer.step_wise_training:
-            validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
-        record_generated_work(trajectory_batch["response_ids"], trajectory_batch.get("is_last_step"), self.global_step)
-        response_tokens = sum(len(response_ids) for response_ids in trajectory_batch["response_ids"])
-        logger.info(
-            "Rollout batch completed: step={} mode=synchronous prompts={} trajectories={} "
-            "response_tokens={} duration_seconds={:.3f}",
-            self.global_step,
-            len(input_batch["prompts"]),
-            len(trajectory_batch["response_ids"]),
-            response_tokens,
-            time.monotonic() - started_at,
-        )
-
-        return trajectory_batch
-
-    @torch.no_grad()
     def postprocess_trajectory_batch(self, trajectory_batch: TrajectoryBatch, uids: List[str]) -> TrajectoryBatch:
         """
         Converts to per token rewards and computes pass@N.
@@ -2285,10 +2390,7 @@ class RayPPOTrainer:
 
         # only use `trajectory_batch_for_metrics` for metrics calculation
         # For step-wise training, we only calculate metrics for the last step of each trajectory
-        mean_reward, pass_at_n = get_metrics_from_trajectory_batch(
-            trajectory_batch_for_metrics,
-            uids_for_metrics,
-        )
+        self._record_reward_metrics(trajectory_batch_for_metrics, uids_for_metrics)
 
         # Per-sample scalar rewards for this step, kept for callbacks that need the
         # distribution rather than its mean (PreflightGateCallback reads this). Captured
@@ -2316,18 +2418,59 @@ class RayPPOTrainer:
                 scalar_reward_token_credit(reward, response) for reward, response in zip(rewards, responses)
             ]
 
+        # re-assign reward but now it's per token rewards
+        trajectory_batch["rewards"] = per_token_rewards
+        return trajectory_batch
+
+    def _record_reward_metrics(self, trajectory_batch: TrajectoryBatch, uids: List[str]) -> None:
+        """Record reward metrics over graded rows; a step with none records no reward metrics."""
+        graded_indices = graded_row_indices(trajectory_batch)
+        if not graded_indices:
+            return
+        if len(graded_indices) < len(trajectory_batch["rewards"]):
+            trajectory_batch = filter_trajectory_batch(
+                trajectory_batch, graded_indices, row_ownership=RowOwnership.BORROWED
+            )
+            uids = [uids[index] for index in graded_indices]
+        mean_reward, pass_at_n = get_metrics_from_trajectory_batch(trajectory_batch, uids)
+        rewards = trajectory_batch["rewards"]
         n_samples_per_prompt = self.cfg.generator.n_samples_per_prompt
 
         reward_metrics = {
             f"reward/avg_pass_at_{n_samples_per_prompt}": pass_at_n,
             "reward/avg_raw_reward": mean_reward,
         }
+        # A group whose rewards all tie carries no advantage signal.
+        grouped_rewards = defaultdict(list)
+        for uid, reward in zip(uids, rewards):
+            grouped_rewards[uid].append(float(np.sum(reward)))
+        reward_metrics["reward/informative_group_fraction"] = sum(
+            max(values) > min(values) for values in grouped_rewards.values()
+        ) / len(grouped_rewards)
+        verifier_scores = normalized_verifier_scores(trajectory_batch)
+        if verifier_scores is not None:
+            coverage, average = verifier_score_summary(verifier_scores)
+            reward_metrics["reward/verifier_score_coverage"] = coverage
+            if average is not None:
+                reward_metrics["reward/avg_verifier_score"] = average
+            results = trajectory_batch["verification_results"]
+            scores_by_agent: Dict[str, List[float]] = defaultdict(list)
+            for result, score in zip(results, verifier_scores, strict=True):
+                if result is not None and score is not None and isinstance(result.diagnostics.get("agent"), str):
+                    agent = _domain_metric_source_key(result.diagnostics["agent"])
+                    scores_by_agent[agent].append(score)
+            for agent in sorted(scores_by_agent)[:MAX_DOMAIN_REWARD_METRICS]:
+                reward_metrics[f"reward/agent/{agent}/avg_verifier_score"] = float(np.mean(scores_by_agent[agent]))
         self.all_metrics.update(reward_metrics)
+        data_sources = trajectory_batch.get("data_sources")
+        if data_sources is not None:
+            self.all_metrics.update(
+                _domain_reward_metrics(
+                    data_sources,
+                    [float(sum(reward) if isinstance(reward, list) else reward) for reward in rewards],
+                )
+            )
         logger.info(f"reward/avg_pass_at_{n_samples_per_prompt}: {pass_at_n}, reward/avg_raw_reward: {mean_reward}")
-
-        # re-assign reward but now it's per token rewards
-        trajectory_batch["rewards"] = per_token_rewards
-        return trajectory_batch
 
     def select_trajectories(
         self, trajectory_batch: TrajectoryBatch, uids: List[str]
@@ -2338,30 +2481,6 @@ class RayPPOTrainer:
         selection = self.trajectory_selector.select(trajectory_batch, uids)
         self.all_metrics.update(selection.metrics)
         return selection.trajectory_batch, selection.uids
-
-    def _update_curriculum_sampler(self, trajectory_batch: TrajectoryBatch, uids: List[str]) -> None:
-        """Feed this step's per-sample rewards to the curriculum sampler, if one is active.
-
-        Runs on the raw generated batch, before dynamic sampling filters uninformative
-        groups: the sampler must observe every group's outcome (including all-pass and
-        all-fail groups) or its statistics would be biased toward 100% informative. At
-        this point rewards are response-level floats; per-token reward lists are also
-        accepted, with each sample's scalar reward taken as their sum. The sampler only
-        compares rewards within one prompt's group, so any monotonic scalarization works.
-        """
-        sampler = self.train_dataloader.sampler if self.train_dataloader is not None else None
-        if not isinstance(sampler, CurriculumSampler):
-            return
-        rewards = [
-            float(np.sum(reward)) if isinstance(reward, list) else float(reward)
-            for reward in trajectory_batch["rewards"]
-        ]
-        if len(rewards) != len(uids):
-            raise ValueError(
-                f"Curriculum sampling needs one reward per sample: got {len(rewards)} rewards for {len(uids)} uids"
-            )
-        sampler.update(uids, rewards, self.cfg.generator.n_samples_per_prompt)
-        self.all_metrics.update(sampler.metrics())
 
     @torch.no_grad()
     def compute_advantages_and_returns(self, data: TrainingInputBatch) -> TrainingInputBatch:
@@ -2445,6 +2564,13 @@ class RayPPOTrainer:
         num_samples = len(token_level_rewards)
 
         return_sums = token_level_rewards.sum(dim=-1)[: num_samples - pad_size]
+        if (
+            self.cfg.trainer.algorithm.advantage_estimator == AdvantageEstimator.GRPO
+            and not self.cfg.trainer.step_wise_training
+        ):
+            self.all_metrics["reward/zero_std_group_fraction"] = _zero_std_group_fraction(
+                data.metadata["uids"][: num_samples - pad_size], return_sums
+            )
         if self.cfg.trainer.step_wise_training:
             avg_rewards: float = return_sums[data["is_last_step"][: num_samples - pad_size]].mean().item()
         else:
@@ -2492,10 +2618,29 @@ class RayPPOTrainer:
         return data
 
     def finalize_advantages_for_training(self, data: TrainingInputBatch) -> TrainingInputBatch:
-        """Apply configured normalization before finalizing the advantage tensor."""
+        """Normalize environment credit, add loop credit, then apply teacher credit."""
         if self.cfg.trainer.algorithm.advantage_batch_normalize:
             data = normalize_advantages_dict(data)
-        return self.apply_loop_credit_and_drop_advantage_inputs(data)
+        data = self.apply_loop_credit_and_drop_advantage_inputs(data)
+        plan = self.distillation_plan
+        if plan is None:
+            return data
+        if plan.objective is DistillationObjectiveKind.SAMPLED_REVERSE_KL:
+            teacher = data.pop("teacher_action_log_probs")
+            valid = data.pop("teacher_valid_mask") & data["loss_mask"].bool()
+            weights = data.pop("distillation_loss_weights")
+            teacher_credit, metrics = teacher_advantages(
+                teacher, data["action_log_probs"], valid, weights, plan.advantage_clip
+            )
+            data["advantages"] = (
+                teacher_credit
+                if plan.reward_mode is DistillationRewardMode.REPLACE
+                else data["advantages"] + teacher_credit
+            )
+            self.all_metrics.update(metrics)
+        elif plan.reward_mode is DistillationRewardMode.REPLACE:
+            data["advantages"] = torch.zeros_like(data["advantages"])
+        return data
 
     def apply_loop_credit_and_drop_advantage_inputs(self, data: TrainingInputBatch) -> TrainingInputBatch:
         """Apply loop credit, then remove rewards, loop_advantages, and uids before worker dispatch."""
@@ -2515,8 +2660,6 @@ class RayPPOTrainer:
 
     def pad_batch(self, training_input: TrainingInputBatch) -> TrainingInputBatch:
         """Pad the batch to be divisible by dp size"""
-        import math
-
         dp_size = self.policy_model.actor_infos[0].rank.dp_size
         if self.critic_model is not None:
             dp_size = math.lcm(dp_size, self.critic_model.actor_infos[0].rank.dp_size)
@@ -2682,15 +2825,19 @@ class RayPPOTrainer:
         training_input["action_log_probs"] = action_log_probs
         training_input["values"] = values
 
+        if self._training_metrics_enabled and training_input.get("rollout_logprobs") is not None:
+            self.all_metrics.update(
+                mismatch_ratio_metrics(
+                    action_log_probs,
+                    training_input["rollout_logprobs"],
+                    training_input["loss_mask"],
+                    training_input["rollout_staleness"],
+                    eps_clip_low=self.cfg.trainer.algorithm.eps_clip_low,
+                    eps_clip_high=self.cfg.trainer.algorithm.eps_clip_high,
+                )
+            )
+
         if self.cfg.generator.sampling_params.logprobs is not None and training_input["rollout_logprobs"] is not None:
-            # calculates the difference in probs between inference and trainer components
-            # only consider response tokens.
-            # NOTE (Fix A-extend, 2026-06-07): rollout_logprobs can be None for a
-            # whole batch when use_tis is on but every trajectory lacked logprobs
-            # (graceful-degrade path in convert_to_training_input). Subscripting None
-            # here is what crashed the 80B R3+TIS train loop at global_step 1
-            # ('NoneType' object is not subscriptable). Skip the inference/train prob-diff
-            # diagnostic for that batch; the batch still trains as standard (non-TIS) loss.
             logprobs_diff = (
                 training_input["rollout_logprobs"][training_input["loss_mask"] > 0]
                 - action_log_probs[training_input["loss_mask"] > 0]
@@ -2779,33 +2926,11 @@ class RayPPOTrainer:
 
         return data
 
-    def sync_policy_weights_to_inference_engines(self) -> List[ObjectRef]:
-        return self.policy_model.async_run_ray_method(
-            "pass_through", "broadcast_to_inference_engines", self.inference_engine_client
-        )
-
     def train_critic_and_policy(self, data: TrainingInputBatch):
         """
         Run the training step for the policy and critic models (this is overlapped if colocate_all is False).
         """
         data.metadata["global_step"] = self.global_step
-        # Plumb the batch's minimum staleness to the worker for StaleClip.
-        # For sync RL this is absent (always 0); for fully_async_trainer it is
-        # populated alongside the other staleness metrics. Workers treat None
-        # as "no signal" and skip damping.
-        data.metadata["stale_min"] = self.all_metrics.get("async/staleness_min")
-        # ── Global length-unbiased normalizer (seq_mean_token_sum_norm_global) ──
-        # Every backend consumes the denominator from batch metadata. Keeping this
-        # contract at the driver boundary prevents a worker override from silently
-        # bypassing policy-loss semantics and avoids an in-worker collective.
-        if self.cfg.trainer.algorithm.loss_reduction == GLOBAL_SEQUENCE_MEAN_TOKEN_SUM_NORMALIZED_LOSS_REDUCTION:
-            actor_infos = self.policy_model.actor_infos
-            ranks_per_dp_group = len(actor_infos) // actor_infos[0].rank.dp_size
-            data.metadata[GLOBAL_LOSS_DENOM_METADATA_KEY] = compute_global_loss_denom(
-                data["advantages"],
-                self.cfg.trainer.algorithm.max_seq_len,
-                ranks_per_dp_group,
-            )
         if self.colocate_all:
             if self.critic_model is not None:
                 with Timer("critic_train", self.all_timings):
@@ -2864,137 +2989,6 @@ class RayPPOTrainer:
 
         return policy_status
 
-    def handle_dynamic_sampling(
-        self, trajectory_batch: TrajectoryBatch, uids: List[str]
-    ) -> trainer_utils.DynamicSamplingResult:
-        """
-        Handle dynamic sampling for the current batch.
-
-        Accumulates the trajectory batch and UIDs across batches if we are sampling repeatedly
-        and applies the dynamic sampling strategy (i.e. filter, replace) to the current batch.
-        If we hit the limit of max sample batches, we raise an error.
-
-        Args:
-            trajectory_batch: Current trajectory batch
-            uids: Current batch UIDs
-
-        Returns:
-            The filtered batch, UIDs, continuation decision, and sampling state.
-        """
-        # Prepare sampling configuration
-        max_sample_batches = self.cfg.trainer.algorithm.dynamic_sampling.max_sample_batches
-        dynamic_sampling_config = {
-            "type": self.cfg.trainer.algorithm.dynamic_sampling.type,
-            "max_sample_batches": max_sample_batches,
-            "min_replace_ratio": self.cfg.trainer.algorithm.dynamic_sampling.min_replace_ratio,
-            "criteria": resolve_dynamic_sampling_criteria(
-                self.cfg.trainer.algorithm.dynamic_sampling.informative_on,
-                float(self.cfg.trainer.algorithm.dynamic_sampling.min_reward_std),
-            ),
-            "train_batch_size": self.cfg.trainer.train_batch_size,
-            "n_samples_per_prompt": self.cfg.generator.n_samples_per_prompt,
-            "tis_lcs_alert_threshold": self.cfg.trainer.algorithm.tis_lcs_alert_threshold,
-        }
-
-        if self.dynamic_sampling_state is None:
-            self.dynamic_sampling_state: DynamicSamplingState = {
-                "sample_batch_count": 1,
-            }
-        else:
-            self.dynamic_sampling_state["sample_batch_count"] += 1
-
-        # Handle dynamic sampling using utilities
-        result = trainer_utils.handle_dynamic_sampling(
-            trajectory_batch, uids, dynamic_sampling_config, self.dynamic_sampling_state
-        )
-
-        # Check max resample limit, and if we hit it, raise an error
-        if (
-            result.keep_sampling
-            and max_sample_batches > 0
-            and self.dynamic_sampling_state["sample_batch_count"] >= max_sample_batches
-        ):
-            raise RuntimeError(
-                f"Exiting training loop due to hitting dynamic sampling limit for "
-                f"{self.cfg.trainer.algorithm.dynamic_sampling.type} strategy with "
-                f"{self.cfg.trainer.algorithm.dynamic_sampling.max_sample_batches} max sample batches. "
-                f"Please check your data difficulty distribution."
-            )
-        # Update state
-        self.dynamic_sampling_state = result.state
-
-        if not result.keep_sampling:
-            # Reset state when sampling is complete
-            self.dynamic_sampling_state = None
-
-        return result
-
-    def handle_group_admission(
-        self, trajectory_batch: TrajectoryBatch, uids: List[str]
-    ) -> GroupAdmissionSamplingResult:
-        """Hold synchronous training until a complete eligible group batch is available."""
-        if self.group_admission_state is None:
-            self.group_admission_state = {"sample_batch_count": 1}
-            self._group_admission_watchdog = AdmissionProgressWatchdog.start(
-                now=time.monotonic(),
-                recent_step_times=self._step_time_history,
-                timeout_override=self.cfg.trainer.algorithm.group_admission.stall_timeout,
-            )
-        else:
-            self.group_admission_state["sample_batch_count"] += 1
-        previous_accepted_count = int(self.group_admission_state.get("num_prompts_in_batch", 0))
-
-        result = admit_or_collect_replacements(
-            trajectory_batch,
-            uids,
-            invariant=self.group_advantage_invariant,
-            rollout_logprobs_required=policy_loss_requires_rollout_logprobs(
-                self.cfg.trainer.algorithm.policy_loss_type
-            ),
-            target_batch_size=int(self.cfg.trainer.train_batch_size),
-            tis_lcs_alert_threshold=float(self.cfg.trainer.algorithm.tis_lcs_alert_threshold),
-            state=self.group_admission_state,
-        )
-        rejected_count = sum(result.rejection_counts.values())
-        self.all_metrics.update(
-            {
-                "sync/admission/rejected_count": float(rejected_count),
-                "sync/admission/rejected_rate": rejected_count / max(result.inspected_count, 1),
-                **{
-                    f"sync/admission/rejected_count/{reason.value}": float(result.rejection_counts[reason])
-                    for reason in AdmissionRejection
-                },
-            }
-        )
-
-        accepted_count = int(self.group_admission_state.get("num_prompts_in_batch", 0))
-        now = time.monotonic()
-        assert self._group_admission_watchdog is not None
-        self._group_admission_watchdog.observe(
-            now=now,
-            progressed=accepted_count > previous_accepted_count,
-        )
-        if result.keep_sampling and self._group_admission_watchdog.stalled(now=now):
-            elapsed = self._group_admission_watchdog.elapsed(now=now)
-            raise GroupAdmissionStalledError(
-                f"Synchronous generation made no admission progress for {elapsed:.0f}s; "
-                f"collected={accepted_count}/{self.cfg.trainer.train_batch_size}, "
-                f"rejections={self.group_admission_state.get('rejection_counts', {})}"
-            )
-
-        self.group_admission_state = result.state
-        if rejected_count:
-            rejection_summary = {reason.value: count for reason, count in result.rejection_counts.items() if count}
-            remaining_count = int(self.cfg.trainer.train_batch_size) - accepted_count
-            logger.warning(
-                f"Rejected synchronous rollout groups before step {self.global_step}; "
-                f"reasons={rejection_summary}. "
-                f"Requesting {remaining_count} replacement groups while retaining {accepted_count} accepted groups."
-            )
-        if not result.keep_sampling:
-            self._group_admission_watchdog = None
-        return result
-
     def _get_dp_group_models(self, rank: int, model_type: str = ""):
         model = getattr(self, model_type)
         return model._actor_handlers[rank]
@@ -3004,224 +2998,31 @@ class RayPPOTrainer:
         actor_info: ActorInfo = model.actor_infos[rank]
         return actor_info.rank
 
-    def _begin_checkpoint_attempt(self, step: int) -> tuple[str, set[str]]:
-        """Allocate a private generation and track files needed before publication."""
-        step_path = os.path.join(self.cfg.trainer.ckpt_path, f"{GLOBAL_STEP_PREFIX}{step}")
-        attempt_path = new_attempt_path(step_path)
-        self._active_checkpoint_payload_path = attempt_path
-        required_files = {
-            DATALOADER_STATE_FILENAME,
-            TRAINER_STATE_FILENAME,
-            f"{POLICY_CHECKPOINT_SUBDIRECTORY}/{WORKER_RECEIPTS_FILENAME}",
-        }
-        if self._can_replay_driver_rng():
-            required_files.add(DRIVER_RNG_STATE_FILENAME)
-        required_files.update(getattr(self, "_required_checkpoint_callback_files", set()))
-        self._checkpoint_required_files = required_files
-        io.makedirs(attempt_path, exist_ok=True)
-        return attempt_path, required_files
-
-    def _save_checkpoint_payloads(self, *, include_continuation_state: bool = True) -> None:
-        """
-        Save model shards and trainer state into a fresh, uncommitted attempt.
-
-        If colocate_all is True, assumes that the policy model is currently on GPU.
-        """
-        step = self.global_step
-        attempt_path, required_files = self._begin_checkpoint_attempt(step)
-
-        # Save policy checkpoint
-        backend = str(self.cfg.trainer.strategy)
-
-        def require_component_files(component: str, ranks: list[int]) -> None:
-            if backend != "megatron":
-                return
-            required_files.update(
-                {
-                    f"{component}/.metadata",
-                    f"{component}/common.pt",
-                    f"{component}/metadata.json",
-                    f"{component}/extra_state.pt",
-                    f"{component}/huggingface/config.json",
-                }
-            )
-            required_files.update(f"{component}/__{rank}_0.distcp" for rank in ranks)
-
-        def save_component(component: str, actors: PPORayActorGroup) -> None:
-            component_path = os.path.join(attempt_path, component)
-            with checkpoint_phase(backend, "save", f"{component}_workers", rank=-1, step=step):
-                refs = actors.async_run_ray_method(
-                    "pass_through", "save_checkpoint", ckpt_dir=component_path, tokenizer=self.tokenizer
-                )
-                ranks = self._settle_checkpoint_refs(refs, operation=f"{component} save")
-            if not refs or sorted(ranks) != list(range(len(refs))):
-                raise RuntimeError(f"{component.capitalize()} checkpoint worker receipts incomplete: {ranks}")
-            require_component_files(component, ranks)
-            io.write_bytes_atomic(
-                os.path.join(component_path, WORKER_RECEIPTS_FILENAME),
-                json.dumps({"component": component, "ranks": ranks}, sort_keys=True).encode(),
-            )
-
-        save_component(POLICY_CHECKPOINT_SUBDIRECTORY, self.policy_model)
-
-        # Save critic checkpoint (if it exists)
-        if self.critic_model is not None:
-            if self.colocate_all:
-                self.policy_model.offload_to_cpu()
-                self.critic_model.backload_to_gpu()
-
-            save_component("critic", self.critic_model)
-            required_files.add(f"critic/{WORKER_RECEIPTS_FILENAME}")
-
-            if self.colocate_all:
-                self.critic_model.offload_to_cpu()
-                self.policy_model.backload_to_gpu()
-
-        if include_continuation_state:
-            self._write_checkpoint_continuation_state(step)
-
-        logger.info(f"Prepared checkpoint for global_step_{step} at: {attempt_path}")
-
-    def _checkpoint_trainer_state(self, step: int) -> dict[str, Any]:
-        """Keep common continuation fields identical across checkpoint backends."""
-        return {
-            "global_step": step,
-            "config": self.cfg,
-            "pending_sync_prompts": self._pending_sync_prompts,
-            "distillation_scored_tokens_total": self.distillation_scored_tokens_total,
-            "domain_gradient_balance_state": self._domain_balancer.state_dict() if self._domain_balancer else None,
-        }
-
-    def _write_checkpoint_continuation_state(
-        self, step: int, *, resume_epoch: int | None = None, at_epoch_boundary: bool | None = None
-    ) -> None:
-        """Seal the small driver-side files in the active, uncommitted attempt."""
-        attempt_path = self._active_checkpoint_payload_path
-        if attempt_path is None:
-            raise RuntimeError("No prepared checkpoint attempt for continuation state")
-        dataloader_save_path = os.path.join(attempt_path, DATALOADER_STATE_FILENAME)
-        with checkpoint_phase(str(self.cfg.trainer.strategy), "save", "dataloader_state", rank=-1, step=step):
-            dataloader_state_dict = self.train_dataloader.state_dict()
-            with io.open_file(dataloader_save_path, "wb") as f:
-                torch.save(dataloader_state_dict, f)
-            logger.info(f"Saved dataloader state to {dataloader_save_path}")
-
-        trainer_state = self._checkpoint_trainer_state(step)
-        trainer_state.update(resume_epoch=resume_epoch, at_epoch_boundary=at_epoch_boundary)
-        trainer_state_path = os.path.join(attempt_path, TRAINER_STATE_FILENAME)
-        with io.open_file(trainer_state_path, "wb") as f:
-            torch.save(trainer_state, f)
-        logger.info(f"Saved trainer state to {trainer_state_path}")
-
-    def _write_driver_rng_state(self, state: dict[str, Any]) -> None:
-        """Persist driver RNG in an unpublished Megatron checkpoint attempt."""
-        attempt_path = self._active_checkpoint_payload_path
-        if attempt_path is None:
-            raise RuntimeError("No prepared Megatron attempt for driver RNG state")
-        with io.open_file(os.path.join(attempt_path, DRIVER_RNG_STATE_FILENAME), "wb") as output:
-            torch.save(state, output)
-
-    def _publish_checkpoint(self, step: int | None = None) -> None:
-        """Advance latest only after payloads and on-save callback state are durable."""
-        step = self.global_step if step is None else step
-        global_step_folder = os.path.join(self.cfg.trainer.ckpt_path, f"{GLOBAL_STEP_PREFIX}{step}")
-        attempt_path = getattr(self, "_active_checkpoint_payload_path", None)
-        required_files = getattr(self, "_checkpoint_required_files", None)
-        if attempt_path is None or required_files is None:
-            raise RuntimeError("No prepared checkpoint attempt to publish")
-        self._commit_checkpoint_generation(step, global_step_folder, attempt_path, required_files)
-        with Timer("cleanup_old_checkpoints", self.all_timings):
-            self._cleanup_committed_checkpoint(step)
-
-    def _commit_checkpoint_generation(
-        self,
-        step: int,
-        step_path: str,
-        attempt_path: str,
-        required_files: set[str],
-        *,
-        optimizer_step_finished_at: float | None = None,
-    ) -> None:
-        """Publish one fully durable generation before advertising it as latest."""
-        latest_checkpoint_file = os.path.join(self.cfg.trainer.ckpt_path, LATEST_CHECKPOINT_FILE)
-        previous_latest = int(io.read_bytes(latest_checkpoint_file)) if io.exists(latest_checkpoint_file) else None
-        if previous_latest is not None and previous_latest > step:
-            raise RuntimeError(f"Refusing to replace latest checkpoint step {previous_latest} with older step {step}")
-        with checkpoint_phase(str(self.cfg.trainer.strategy), "save", "generation_commit", rank=-1, step=step):
-            commit_attempt(step_path, attempt_path, required_files=required_files)
-        # A same-step replacement is published by its step-level commit record.
-        # Rewriting an unchanged latest pointer could fail after that publication
-        # and incorrectly report the complete replacement as a failed save.
-        if previous_latest != step:
-            with checkpoint_phase(str(self.cfg.trainer.strategy), "save", "latest_pointer", rank=-1, step=step):
-                io.write_bytes_atomic(latest_checkpoint_file, str(step).encode())
-        if optimizer_step_finished_at is None:
-            last_optimizer_step = getattr(self, "_last_optimizer_step_finished_at", None)
-            if last_optimizer_step is not None and last_optimizer_step[0] == step:
-                optimizer_step_finished_at = last_optimizer_step[1]
-        if optimizer_step_finished_at is not None:
-            pointer_lag = time.monotonic() - optimizer_step_finished_at
-            self.all_timings["checkpoint_pointer_lag"] = pointer_lag
-            logger.info(
-                "checkpoint_durability_observation {}",
-                json.dumps({"schema": "checkpoint_durability_v1", "step": step, "pointer_lag_seconds": pointer_lag}),
-            )
-
-        logger.info(f"Successfully saved checkpoint for global_step_{step} to: {step_path}")
-        self._last_saved_step = step
-
-    def _cleanup_committed_checkpoint(self, step: int | None = None) -> None:
-        # Retention is best-effort after publication. A cleanup I/O failure must
-        # not make a committed checkpoint look like a failed save.
-        try:
-            with checkpoint_phase(
-                str(self.cfg.trainer.strategy),
-                "save",
-                "retention",
-                rank=-1,
-                step=self.global_step if step is None else step,
-            ):
-                self._cleanup_old_checkpoints()
-        except OSError as error:
-            logger.warning(f"Checkpoint retention failed after publication; continuing: {error}")
-
-    def save_checkpoints(self, *, resume_epoch: int | None = None, at_epoch_boundary: bool | None = None) -> None:
-        """Save without callbacks; pass cursor metadata for exact direct-save replay."""
-        if getattr(self, "_pending_megatron_checkpoint_commit", None) is not None:
-            raise RuntimeError("Cannot save synchronously while a Megatron attempt awaits publication")
-        if self._uses_background_checkpoint_upload():
-            snapshot = self._snapshot_checkpoint()
-            upload_duration, cleanup_duration = self._finish_checkpoint_upload_blocking(snapshot, commit=True)
-            self.all_timings["checkpoint_upload"] = self.all_timings.get("checkpoint_upload", 0.0) + upload_duration
-            self.all_timings["cleanup_old_checkpoints"] = (
-                self.all_timings.get("cleanup_old_checkpoints", 0.0) + cleanup_duration
-            )
+    async def save_checkpoints(self) -> None:
+        """Save and publish a complete checkpoint before returning."""
+        if self._megatron_checkpointing():
+            state = self._create_trainer_state(epoch=self.global_step // self.num_steps_per_epoch)
+            if not await self._save_megatron_checkpoint(state):
+                raise OSError(f"Megatron checkpoint save failed at step {self.global_step}")
             return
-        try:
-            self._save_checkpoint_payloads()
-            if self._defers_megatron_checkpoint_commit():
-                if resume_epoch is not None or at_epoch_boundary is not None:
-                    self._write_checkpoint_continuation_state(
-                        self.global_step,
-                        resume_epoch=resume_epoch,
-                        at_epoch_boundary=at_epoch_boundary,
-                    )
-                if self._can_replay_driver_rng():
-                    rng_state = _capture_driver_rng_state()
-                    try:
-                        self._write_driver_rng_state(rng_state)
-                        self._publish_checkpoint()
-                    finally:
-                        _restore_driver_rng_state(rng_state)
-                else:
-                    self._publish_checkpoint()
-            else:
-                self._publish_checkpoint()
-        finally:
-            self._active_checkpoint_payload_path = None
-            self._checkpoint_required_files = None
+        snapshot = await asyncio.to_thread(self._snapshot_checkpoint, await self._rollout_state())
+        upload_duration, cleanup_duration = await self._finish_checkpoint_upload(snapshot, commit=True)
+        self.all_timings["checkpoint_upload"] = self.all_timings.get("checkpoint_upload", 0.0) + upload_duration
+        self.all_timings["cleanup_old_checkpoints"] = (
+            self.all_timings.get("cleanup_old_checkpoints", 0.0) + cleanup_duration
+        )
 
-    def _snapshot_checkpoint(self) -> CheckpointSnapshot:
+    async def _rollout_state(self) -> TrainingContextState:
+        """Return the rollout state saved as ``data.pt`` with each checkpoint."""
+        return await self.context.state_dict()
+
+    def _restore_rollout_state(self, state: object) -> None:
+        """Hold a checkpoint's rollout state until the training context is restored from it."""
+        if not isinstance(state, TrainingContextState):
+            raise ValueError(f"checkpoint data state is a {type(state).__name__}, not a rollout context state")
+        self._restored_rollout_state = state
+
+    def _snapshot_checkpoint(self, rollout_state: TrainingContextState) -> CheckpointSnapshot:
         """
         Stage model shards and serialize trainer state for later publication.
 
@@ -3264,22 +3065,15 @@ class RayPPOTrainer:
                 self.critic_model.offload_to_cpu()
                 self.policy_model.backload_to_gpu()
 
-        # Serialize dataloader state for publication after the rank uploads complete.
-        dataloader_save_path = os.path.join(global_step_folder, "data.pt")
-        dataloader_payload = None
-        try:
-            dataloader_state_dict = self.train_dataloader.state_dict()
-            dataloader_buffer = stdlib_io.BytesIO()
-            torch.save(dataloader_state_dict, dataloader_buffer)
-            dataloader_payload = dataloader_buffer.getvalue()
-        except Exception as e:
-            logger.warning(f"Failed to save dataloader state: {e}")
+        # Serialize rollout data state for publication after the rank uploads complete.
+        rollout_state_path = os.path.join(global_step_folder, "data.pt")
+        rollout_state_buffer = stdlib_io.BytesIO()
+        torch.save(rollout_state, rollout_state_buffer)
 
         # Save additional trainer state
         trainer_state = {
             "global_step": step,
             "config": self.cfg,
-            "pending_sync_prompts": self._pending_sync_prompts,
             "distillation_scored_tokens_total": self.distillation_scored_tokens_total,
             "domain_gradient_balance_state": self._domain_balancer.state_dict() if self._domain_balancer else None,
         }
@@ -3290,8 +3084,8 @@ class RayPPOTrainer:
         return CheckpointSnapshot(
             step=step,
             upload_started_at=time.monotonic(),
-            dataloader_path=dataloader_save_path,
-            dataloader_payload=dataloader_payload,
+            rollout_state_path=rollout_state_path,
+            rollout_state_payload=rollout_state_buffer.getvalue(),
             trainer_state_path=trainer_state_path,
             trainer_state_payload=trainer_state_buffer.getvalue(),
             marker_path=latest_checkpoint_file,
@@ -3305,17 +3099,13 @@ class RayPPOTrainer:
         # cluster for no benefit.
         if max_ckpts < 0:
             return
-        if max_ckpts == 0:
-            # Once latest points at a step, retention must not delete that
-            # step's only recoverable generation. Keep one even if the
-            # requested retention count is zero.
-            logger.warning("max_ckpts_to_keep=0 cannot retain a recoverable latest checkpoint; keeping one")
-            max_ckpts = 1
 
         protected_steps = protected_hf_export_steps(self.cfg.trainer.ckpt_path)
 
-        # Cloud prefixes are shared by every node. Running the same listing and
-        # deletes on each node just multiplies object-store traffic and Ray leases.
+        if max_ckpts == 0:
+            logger.warning("max_ckpts_to_keep=0 cannot retain a recoverable latest checkpoint; keeping one")
+            max_ckpts = 1
+
         if not io.is_cloud_path(self.cfg.trainer.ckpt_path):
             if not self._node_ids:
                 self._node_ids = get_node_ids(self.policy_model, self.critic_model, self.ref_model)
@@ -3328,7 +3118,6 @@ class RayPPOTrainer:
                     protected_steps,
                 )
             except ray.exceptions.RayError as e:
-                # A node-local cleanup failure must not kill an already saved run.
                 logger.warning(f"Per-node checkpoint cleanup failed, continuing: {e}")
 
         # Driver-side cleanup. For a shared ckpt_path (GPFS, S3) this alone
@@ -3388,20 +3177,18 @@ class RayPPOTrainer:
         if not io.exists(str(checkpoint_path)):
             raise FileNotFoundError(f"Checkpoint path not found: {checkpoint_path}")
 
-        checkpoint_path = resolve_checkpoint_payload(str(checkpoint_path), verify_files=True)
-        logger.info(f"Loading checkpoint from: {checkpoint_path}")
-
-        # Extract global step from checkpoint path
         global_step = extract_step_from_path(checkpoint_path)
         if global_step == -1:
             raise ValueError(f"Checkpoint path {checkpoint_path} is not a valid checkpoint path")
+        checkpoint_path = resolve_checkpoint_payload(str(checkpoint_path), verify_files=True)
+        logger.info(f"Loading checkpoint from: {checkpoint_path}")
         logger.info(f"Resuming from global_step: {global_step}")
 
         # Define paths for different checkpoint components
         policy_ckpt_dir = os.path.join(checkpoint_path, POLICY_CHECKPOINT_SUBDIRECTORY)
         critic_ckpt_dir = os.path.join(checkpoint_path, "critic")
         trainer_state_path = os.path.join(checkpoint_path, TRAINER_STATE_FILENAME)
-        dataloader_state_path = os.path.join(checkpoint_path, DATALOADER_STATE_FILENAME)
+        rollout_state_path = os.path.join(checkpoint_path, "data.pt")
 
         # Validate that required checkpoint files exist
         if not io.exists(trainer_state_path):
@@ -3410,31 +3197,7 @@ class RayPPOTrainer:
         # 1. Load and validate trainer state
         with io.open_file(trainer_state_path, "rb") as f:
             trainer_state = torch.load(f, map_location="cpu", weights_only=False)
-        driver_rng_path = os.path.join(checkpoint_path, DRIVER_RNG_STATE_FILENAME)
-        self._loaded_driver_rng_state = None
-        exact_continuation = self.cfg.trainer.restore_dataloader_state and not self.cfg.trainer.get(
-            "reset_global_step_on_resume", False
-        )
-        if exact_continuation and self._can_replay_driver_rng() and io.exists(driver_rng_path):
-            with io.open_file(driver_rng_path, "rb") as source:
-                self._loaded_driver_rng_state = torch.load(source, map_location="cpu", weights_only=False)
-        elif exact_continuation and self._can_replay_driver_rng():
-            logger.warning("Checkpoint has no driver RNG state; legacy resume cannot replay driver random draws")
-        elif io.exists(driver_rng_path):
-            logger.warning("Skipping driver RNG restore for a new data stage or active HTTP/fully-async producers")
-        elif exact_continuation and self._defers_megatron_checkpoint_commit():
-            logger.warning("HTTP-enabled Megatron resume does not replay process-global driver RNG")
         saved_global_step = trainer_state.get("global_step", global_step)
-        self._loaded_resume_epoch = trainer_state.get("resume_epoch")
-        self._loaded_at_epoch_boundary = trainer_state.get("at_epoch_boundary")
-        if self._loaded_driver_rng_state is not None and self._loaded_at_epoch_boundary is None:
-            logger.warning(
-                "Checkpoint lacks iterator-boundary metadata; exact direct-save driver replay is not guaranteed"
-            )
-        if not exact_continuation:
-            self._loaded_resume_epoch = None
-            self._loaded_at_epoch_boundary = None
-        self._pending_sync_prompts = []
         if self.cfg.trainer.get("reset_distillation_token_count_on_resume", False):
             self.distillation_scored_tokens_total = 0
         else:
@@ -3448,29 +3211,21 @@ class RayPPOTrainer:
         if saved_global_step != global_step:
             logger.warning(f"Global step mismatch: path={global_step}, saved={saved_global_step}. Using path value.")
 
-        # 2. Load dataloader state if requested and available
+        # 2. Load rollout state if requested and available
         if not self.cfg.trainer.restore_dataloader_state:
-            logger.info("Dataloader state restoration disabled; starting the configured dataset from the beginning")
-        elif io.exists(dataloader_state_path):
-            try:
-                with io.open_file(dataloader_state_path, "rb") as f:
-                    dataloader_state = torch.load(f, map_location="cpu", weights_only=False)
-                self.train_dataloader.load_state_dict(dataloader_state)
-                self._pending_sync_prompts = trainer_state.get("pending_sync_prompts", [])
-                logger.info("Successfully loaded dataloader state")
-            except Exception as e:
-                if os.path.basename(os.path.dirname(checkpoint_path)) == ATTEMPTS_DIRECTORY:
-                    raise RuntimeError(f"Failed to restore required dataloader state: {dataloader_state_path}") from e
-                logger.warning(f"Failed to load dataloader state: {e}. Dataloader will start from beginning.")
+            logger.info("Rollout state restoration disabled; starting the configured dataset from the beginning")
+        elif io.exists(rollout_state_path):
+            with io.open_file(rollout_state_path, "rb") as f:
+                rollout_state = torch.load(f, map_location="cpu", weights_only=False)
+            self._restore_rollout_state(rollout_state)
+            logger.info("Successfully loaded rollout state")
+            if self._can_replay_driver_rng() and not self.cfg.trainer.get("reset_global_step_on_resume", False):
+                rng_path = os.path.join(checkpoint_path, _DRIVER_RNG_STATE)
+                if io.exists(rng_path):
+                    with io.open_file(rng_path, "rb") as source:
+                        self._loaded_driver_rng_state = torch.load(source, map_location="cpu", weights_only=False)
         else:
-            if (
-                os.path.basename(os.path.dirname(checkpoint_path)) == ATTEMPTS_DIRECTORY
-                and self.cfg.trainer.restore_dataloader_state
-            ):
-                raise FileNotFoundError(f"Required dataloader state missing: {dataloader_state_path}")
-            logger.warning(
-                f"No dataloader state found at {dataloader_state_path}. Dataloader will start from beginning."
-            )
+            logger.warning(f"No rollout state found at {rollout_state_path}; the dataset will start from the beginning")
 
         # Match the optimizer residency used when disaggregated checkpoints are
         # saved. Megatron initializes restore buffers before reading checkpoint
@@ -3506,33 +3261,30 @@ class RayPPOTrainer:
             logger.info("Successfully loaded critic checkpoint")
 
         logger.info(f"Successfully loaded complete checkpoint state from global_step_{global_step}")
-        if self._loaded_driver_rng_state is not None:
-            _restore_driver_rng_state(self._loaded_driver_rng_state)
         if self.cfg.trainer.get("reset_global_step_on_resume", False):
             logger.info("Resetting the trainer step to 0 at the explicit stage boundary")
             global_step = 0
         return global_step, str(checkpoint_path)
 
-    def handle_hf_export(self, step: int | None = None) -> None:
+    def handle_hf_export(self) -> None:
         """Persist a request for out-of-band policy checkpoint conversion."""
         with Timer("queue_hf_export", self.all_timings):
-            self._handle_hf_export(step)
+            self._handle_hf_export()
 
-    def _handle_hf_export(self, step: int | None = None) -> None:
-        step = self.global_step if step is None else step
-        checkpoint_path = os.path.join(self.cfg.trainer.ckpt_path, f"{GLOBAL_STEP_PREFIX}{step}")
+    def _handle_hf_export(self) -> None:
+        checkpoint_path = os.path.join(self.cfg.trainer.ckpt_path, f"{GLOBAL_STEP_PREFIX}{self.global_step}")
         payload_path = resolve_checkpoint_payload(checkpoint_path)
         trainer_state_path = os.path.join(payload_path, TRAINER_STATE_FILENAME)
         if not io.exists(trainer_state_path):
             raise RuntimeError(
-                f"Cannot request HF export for global_step_{step}: "
+                f"Cannot request HF export for global_step_{self.global_step}: "
                 f"completed checkpoint marker is missing at {trainer_state_path}"
             )
 
         placement = self.cfg.trainer.placement
         model = self.cfg.trainer.policy.model
         request = HFExportRequest(
-            step=step,
+            step=self.global_step,
             checkpoint_base_path=self.cfg.trainer.ckpt_path,
             checkpoint_path=checkpoint_path,
             export_path=self.cfg.trainer.export_path,
@@ -3549,10 +3301,10 @@ class RayPPOTrainer:
         existing = read_hf_export_request(checkpoint_path)
         if existing is not None:
             if existing.status is HFExportStatus.COMPLETE:
-                logger.info(f"HF export for global_step_{step} is already complete")
+                logger.info(f"HF export for global_step_{self.global_step} is already complete")
                 return
             if existing.status is HFExportStatus.IN_PROGRESS:
-                logger.info(f"HF export for global_step_{step} is already in progress")
+                logger.info(f"HF export for global_step_{self.global_step} is already in progress")
                 return
             request = replace(
                 request,
@@ -3560,9 +3312,9 @@ class RayPPOTrainer:
                 timeout=existing.timeout,
                 last_exit_code=existing.last_exit_code,
             )
-            logger.info(f"Refreshing pending HF export request for global_step_{step}")
+            logger.info(f"Refreshing pending HF export request for global_step_{self.global_step}")
         request_path = write_hf_export_request(request)
-        logger.info(f"Queued out-of-band HF export for global_step_{step}: {request_path}")
+        logger.info(f"Queued out-of-band HF export for global_step_{self.global_step}: {request_path}")
 
     def _log_startup_timings(self) -> None:
         publish_startup_timings(
@@ -3586,11 +3338,15 @@ class RayPPOTrainer:
             except Exception:
                 return str(v)
 
+        values = {}
         try:
-            serialised = json.dumps({k: _coerce(v) for k, v in payload.items()}, sort_keys=True)
+            values = {k: _coerce(v) for k, v in payload.items()}
+            serialised = json.dumps(values, sort_keys=True)
         except Exception as e:
             serialised = f'{{"_serialize_error": "{e}"}}'
         logger.info(f"WANDB_MIRROR kind={kind} step={step} metrics={serialised}")
+        if self._training_metrics_enabled:
+            record_training_metrics(values, step=step, kind=kind)
 
     def update_ref_with_policy(self):
         """

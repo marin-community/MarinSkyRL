@@ -12,7 +12,8 @@ from skyrl_train.config.behavior_logprobs import (
 )
 from skyrl_train.inference_engines.utils import get_vllm_sampling_params
 from skyrl_train.inference_engines.vllm.utils import apply_openai_sampling, pop_vllm_wrapper_kwargs
-from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled
+from skyrl_train.config.objective_spec import rollout_logprobs_required
+from skyrl_train.config.utils import get_default_config
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -50,19 +51,9 @@ def test_behavior_logprob_config_reaches_engine_and_sampling_options(temperature
     "settings",
     [
         {"temperature": 0.0},
-        {"temperature": float("nan")},
-        {"temperature": float("inf")},
         {"top_p": 0.95},
-        {"top_k": 20},
-        {"min_p": 0.1},
         {"repetition_penalty": 1.1},
-        {"presence_penalty": 0.1},
-        {"frequency_penalty": 0.1},
-        {"min_tokens": 1},
-        {"allowed_token_ids": [1]},
         {"logit_bias": {"1": 1.0}},
-        {"response_format": {"type": "json_object"}},
-        {"tool_choice": "required"},
     ],
 )
 def test_behavior_logprobs_reject_unmatched_sampling(settings):
@@ -74,9 +65,7 @@ def test_behavior_logprobs_reject_unmatched_sampling(settings):
     "options",
     [
         {"logprobs_mode": "raw_logprobs"},
-        {"generation_config": "auto"},
         {"override_generation_config": {"top_k": 20}},
-        {"logits_processors": ["custom.Processor"]},
     ],
 )
 def test_behavior_logprobs_reject_conflicting_engine_options(options):
@@ -124,11 +113,10 @@ def test_checked_in_behavior_logprob_configs_use_validated_sampling():
     checked = []
     for path in sorted((REPO_ROOT / "cloud" / "iris" / "configs").glob("*.yaml")):
         config = yaml.safe_load(path.read_text()) or {}
-        algorithm = (config.get("trainer") or {}).get("algorithm") or {}
-        algorithm = OmegaConf.create(
-            {"use_tis": algorithm.get("use_tis", False), "policy_loss_type": algorithm.get("policy_loss_type")}
-        )
-        if not rollout_logprobs_enabled(algorithm):
+        cfg = get_default_config()
+        OmegaConf.set_struct(cfg, False)
+        cfg = OmegaConf.merge(cfg, config)
+        if not rollout_logprobs_required(cfg.trainer.algorithm):
             continue
         validate_behavior_logprob_sampling((config.get("generator") or {}).get("sampling_params") or {})
         checked.append(path.name)

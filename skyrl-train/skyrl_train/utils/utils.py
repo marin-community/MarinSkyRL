@@ -18,9 +18,12 @@ from ray.util.placement_group import (
     placement_group_table,
 )
 
+from skyrl_train.batch_invariant import BATCH_INVARIANT_NCCL_ENV
 from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_export_enabled
 from skyrl_train.config.query_bias import resolve_grug_query_bias_update
+from skyrl_train.config.weight_sync_pause import resolve_weight_sync_pause_policy
 from skyrl_train.config.behavior_logprobs import configure_behavior_logprob_sampling
+from skyrl_train.config.objective_spec import rollout_logprobs_required, validate_objective
 from skyrl_train.callbacks.types import (
     CHECKPOINT_CALLBACK_TYPE,
     HF_MODEL_SAVE_CALLBACK_TYPE,
@@ -29,10 +32,17 @@ from skyrl_train.debug_mode import apply_debug_mode
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import parse_trajectory_reward_shaping_config
 from skyrl_train.trajectory_runners.trajectory_retention_config import parse_trajectory_retention_config
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
-from skyrl_train.env_vars import DEBUG_ARTIFACT_DIR_ENV, DEBUG_MODE_ENV, EnvVarManager, EnvVarScope
+from skyrl_train.env_vars import (
+    DEBUG_ARTIFACT_DIR_ENV,
+    DEBUG_MODE_ENV,
+    VLLM_BATCH_INVARIANT_ENV,
+    EnvVarManager,
+    EnvVarScope,
+)
 from skyrl_train.group_admission import resolve_group_advantage_invariant
 from skyrl_train.trajectory_selection import optimization_samples_per_prompt, trajectory_selector_from_config
 from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
+from marinskyrl.rollout_grading import validate_nemotron_ultra_grading
 from marinskyrl.process_diagnostics import initialize_process_diagnostics
 from marinskyrl.distillation import (
     DistillationObjectiveKind,
@@ -47,12 +57,9 @@ from .algorithm_registry import (
     AdvantageEstimatorRegistry,
     NoGroupAdvantage,
     PolicyLossRegistry,
-    PolicyLossType,
-    rollout_logprobs_enabled,
     sync_registries,
 )
 from .logging_utils import format_exception_text
-from .loss_reduction import SEQUENCE_MEAN_LOSS_REDUCTION, SUPPORTED_LOSS_REDUCTIONS
 from .nccl_environment import worker_nccl_environment
 from .placement_geometry import validate_colocated_engine_geometry
 
@@ -479,20 +486,7 @@ def validate_cfg(cfg: DictConfig):
         raise ValueError("Megatron does not support a critic worker")
     distillation_plan = compile_distillation_plan_from_config(cfg)
     validate_distillation_runtime_support(distillation_plan)
-    if (
-        distillation_plan is not None
-        and distillation_plan.objective is DistillationObjectiveKind.STUDENT_TOPK_POLICY_SURROGATE
-    ):
-        if (
-            cfg.trainer.use_sample_packing
-            or cfg.trainer.policy.sequence_parallel_size != 1
-            or cfg.trainer.policy.megatron_config.context_parallel_size != 1
-            or cfg.trainer.policy.megatron_config.tensor_model_parallel_size != 1
-        ):
-            raise ValueError(
-                "selected-ID distillation on Megatron requires trainer.use_sample_packing=false, "
-                "sequence_parallel_size=1, context_parallel_size=1, and tensor_model_parallel_size=1"
-            )
+    validate_nemotron_ultra_grading(cfg, distillation_plan)
     trajectory_selector = trajectory_selector_from_config(cfg)
     if trajectory_selector is not None:
         if cfg.trainer.step_wise_training:
@@ -500,14 +494,8 @@ def validate_cfg(cfg: DictConfig):
     resolve_dynamic_sampling_criteria(
         cfg.trainer.algorithm.dynamic_sampling.informative_on,
         float(cfg.trainer.algorithm.dynamic_sampling.min_reward_std),
+        cfg.trainer.algorithm.dynamic_sampling.max_mean_reward,
     )
-    if (
-        cfg.trainer.algorithm.policy_loss_type == PolicyLossType.GSPO
-        and cfg.trainer.algorithm.loss_reduction != SEQUENCE_MEAN_LOSS_REDUCTION
-    ):
-        raise ValueError(
-            f"GSPO requires trainer.algorithm.loss_reduction=sequence_mean; got {cfg.trainer.algorithm.loss_reduction}"
-        )
     runtime_values = {
         "trainer.distributed.placement_group_timeout_seconds": cfg.trainer.distributed.placement_group_timeout_seconds,
         "trainer.distributed.worker_collective_timeout_seconds": cfg.trainer.distributed.worker_collective_timeout_seconds,
@@ -519,13 +507,21 @@ def validate_cfg(cfg: DictConfig):
         "trainer.progress.percent_step": cfg.trainer.progress.percent_step,
         "trainer.progress.count_step": cfg.trainer.progress.count_step,
         "generator.r3_dispatch_put_timeout_seconds": cfg.generator.r3_dispatch_put_timeout_seconds,
-        "trajectory_runner.process_pool.num_coordinators": cfg.trajectory_runner.process_pool.num_coordinators,
-        "trajectory_runner.process_pool.cpus_per_coordinator": cfg.trajectory_runner.process_pool.cpus_per_coordinator,
-        "trajectory_runner.process_pool.executor_workers": cfg.trajectory_runner.process_pool.executor_workers,
+        "trajectory_runner.rollout_workers.num_workers": cfg.trajectory_runner.rollout_workers.num_workers,
+        "trajectory_runner.rollout_workers.cpus_per_worker": cfg.trajectory_runner.rollout_workers.cpus_per_worker,
+        "trajectory_runner.rollout_workers.executor_threads": cfg.trajectory_runner.rollout_workers.executor_threads,
+        "trajectory_runner.rollout_workers.progress_timeout_seconds": (
+            cfg.trajectory_runner.rollout_workers.progress_timeout_seconds
+        ),
     }
     for path, value in runtime_values.items():
         if value <= 0:
             raise ValueError(f"{path} must be positive; got {value}")
+    start_interval = cfg.trajectory_runner.rollout_workers.start_interval_seconds
+    if start_interval < 0:
+        raise ValueError(
+            f"trajectory_runner.rollout_workers.start_interval_seconds must be non-negative; got {start_interval}"
+        )
     if cfg.trainer.model_load_retry.max_retries < 0:
         raise ValueError(
             f"trainer.model_load_retry.max_retries must be non-negative; got {cfg.trainer.model_load_retry.max_retries}"
@@ -549,6 +545,14 @@ def validate_cfg(cfg: DictConfig):
         )
     if cfg.generator.gdn_backend not in set(GDNBackend):
         raise ValueError(f"generator.gdn_backend must be one of torch, flashqla; got {cfg.generator.gdn_backend!r}")
+    available_policy_losses = PolicyLossRegistry.list_available()
+    assert available_policy_losses != [], "Policy loss registry is not populated."
+    assert cfg.trainer.algorithm.policy_loss_type in available_policy_losses, (
+        f"invalid policy_loss_type: {cfg.trainer.algorithm.policy_loss_type}. Must be one of {available_policy_losses}"
+    )
+    spec = PolicyLossRegistry.spec(cfg.trainer.algorithm.policy_loss_type)
+    validate_objective(cfg, loss_spec=spec)
+    resolve_weight_sync_pause_policy(cfg.generator)
     validate_generator_cfg(cfg)
     validate_batch_invariant_config(cfg)
     validate_hf_export_config(cfg)
@@ -576,13 +580,6 @@ def validate_cfg(cfg: DictConfig):
             "`max_ckpts_to_keep` must be greater than 0 to keep the last N checkpoints or negative to keep all checkpoints"
         )
 
-    available_policy_losses = PolicyLossRegistry.list_available()
-    assert available_policy_losses != [], "Policy loss registry is not populated."
-
-    assert cfg.trainer.algorithm.policy_loss_type in available_policy_losses, (
-        f"invalid policy_loss_type: {cfg.trainer.algorithm.policy_loss_type}. Must be one of {available_policy_losses}"
-    )
-
     available_advantage_estimators = AdvantageEstimatorRegistry.list_available()
     assert cfg.trainer.algorithm.advantage_estimator in available_advantage_estimators, (
         f"invalid advantage_estimator: {cfg.trainer.algorithm.advantage_estimator}. Must be one of {available_advantage_estimators}"
@@ -592,11 +589,6 @@ def validate_cfg(cfg: DictConfig):
         NoGroupAdvantage,
     ):
         raise ValueError("best-of-N selection requires a no-group advantage estimator")
-
-    assert cfg.trainer.algorithm.loss_reduction in SUPPORTED_LOSS_REDUCTIONS, (
-        f"invalid loss_reduction: {cfg.trainer.algorithm.loss_reduction}. "
-        f"Must be one of {list(SUPPORTED_LOSS_REDUCTIONS)}"
-    )
 
     # add field to algorithm config needed for loss functions
     # create a new config to make it modifiable
@@ -613,23 +605,9 @@ def validate_cfg(cfg: DictConfig):
     # fixed max response budget.
     algorithm_config.max_seq_len = cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
 
-    # TODO (erictang000): remove these after deprecation period
-    if algorithm_config.use_abs_kl:
-        logger.warning("`use_abs_kl` will be deprecated, overriding to use `kl_estimator_type='abs'` instead")
-        algorithm_config.kl_estimator_type = "abs"
-    elif algorithm_config.use_kl_estimator_k3:
-        logger.warning("`use_kl_estimator_k3` will be deprecated, overriding to use `kl_estimator_type='k3'` instead")
-        algorithm_config.kl_estimator_type = "k3"
     cfg.trainer.algorithm = algorithm_config
 
-    behavior_clip = cfg.trainer.algorithm.policy_loss_type == "behavior_clip"
-    if behavior_clip and cfg.trainer.algorithm.use_tis:
-        raise ValueError(
-            "trainer.algorithm.policy_loss_type=behavior_clip cannot be combined with use_tis=true; "
-            "behavior clipping already uses the full rollout importance ratio"
-        )
-
-    behavior_logprobs_required = rollout_logprobs_enabled(cfg.trainer.algorithm)
+    behavior_logprobs_required = rollout_logprobs_required(cfg.trainer.algorithm, loss_spec=spec)
     if behavior_logprobs_required:
         if cfg.generator.sampling_params.logprobs is None:
             logger.warning(
@@ -639,16 +617,6 @@ def validate_cfg(cfg: DictConfig):
         if cfg.generator.backend == "sglang":
             raise NotImplementedError("Behavior-logprob objectives require the vLLM generator backend")
         configure_behavior_logprob_sampling(cfg.generator)
-
-    if cfg.trainer.algorithm.use_tis:
-        if cfg.trainer.algorithm.tis_imp_ratio_cap <= 0:
-            raise ValueError(
-                f"If `trainer.algorithm.use_tis` is `True` then `cfg.trainer.algorithm.tis_imp_ratio_cap` should be > 0, got {cfg.trainer.algorithm.tis_imp_ratio_cap}"
-            )
-        assert cfg.trainer.algorithm.policy_loss_type in [
-            "regular",
-            "dual_clip",
-        ], "TIS is only implemented for regular and dual_clip policy loss types"
 
     if cfg.trainer.policy.model.lora.rank > 0:
         raise ValueError("Megatron training does not support LoRA")
@@ -669,6 +637,9 @@ def validate_cfg(cfg: DictConfig):
 
     # Validate placement
     validate_expert_block_transport(cfg)
+    if cfg.trainer.placement.colocate_all and cfg.trainer.rollout_buffer.max_staleness_steps != 0:
+        # Colocated engines sleep during training, so no rollout may run ahead of the trained policy.
+        raise ValueError("colocate_all requires trainer.rollout_buffer.max_staleness_steps=0")
     if cfg.trainer.placement.colocate_all:
         tp_pp_size = (
             cfg.generator.inference_engine_tensor_parallel_size * cfg.generator.inference_engine_pipeline_parallel_size
@@ -739,11 +710,6 @@ def validate_generator_cfg(cfg: DictConfig):
     if not cfg.generator.run_engines_locally:
         assert cfg.generator.num_inference_engines == len(cfg.generator.remote_inference_engine_urls), (
             "num_inference_engines should be equal to the number of remote_inference_engine_urls"
-        )
-
-    if not cfg.generator.async_engine and cfg.generator.backend == "vllm":
-        assert cfg.generator.batched, (
-            "if we are using the offline vLLM engine, we need to put generator in batched mode for faster generation"
         )
 
     # TODO(tgriggs): use a more modular config validation
@@ -822,8 +788,6 @@ def validate_generator_cfg(cfg: DictConfig):
             raise ValueError(
                 'generator.enable_http_endpoint is not supported for SGLang backend yet. Please set generator.backend="vllm".'
             )
-        if not cfg.generator.async_engine:
-            raise ValueError("generator.async_engine must be True when generator.enable_http_endpoint==True.")
 
     # Validate inference engine parallelism.
     ep_size = cfg.generator.inference_engine_expert_parallel_size
@@ -1127,9 +1091,9 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     # asyncio.set_event_loop_policy(DefaultEventLoopPolicy()) in
     # BasePPOExp.run() (entrypoints/main_base.py), but that ONLY covers the
     # skyrl_entrypoint driver process -- it does NOT propagate into the Ray
-    # *actor* processes (RolloutCoordinator, inference engines, policy/ref
+    # *actor* processes (rollout workers, inference engines, policy/ref
     # workers), which still install uvloop and still abort. Observed on the 80B
-    # production run (job 669177): a RolloutCoordinator CoreWorker aborted at
+    # production run (job 669177): a rollout worker's CoreWorker aborted at
     # Fatal Python error: Aborted -> uv__epoll_ctl_prep inside
     # CoreWorker.initialize_eventloops_for_actor_concurrency_group AFTER a full
     # clean step 1, taking the run down. The EnvVarManager projection below sets
@@ -1145,7 +1109,7 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     # Disable libuv's io_uring backend in EVERY Ray actor/worker process.
     #
     # WHY (job 930208, the SSL re-abort): RAY_USE_UVLOOP=0 + the policy hook
-    # were STILL insufficient -- 930208 SIGABRT'd in a RolloutCoordinator at
+    # were STILL insufficient -- 930208 SIGABRT'd in a rollout worker at
     # uvloop/sslproto.pyx:517 SSLProtocol._on_handshake_complete (the
     # litellm->Daytona HTTPS handshake), proving a live uvloop.Loop() was
     # running an SSL transport in the actor despite the stock-asyncio POLICY.
@@ -1296,6 +1260,11 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
         if os.environ.get(_net_env):
             logger.info(f"Exporting `{_net_env}` to ray runtime env: {os.environ[_net_env]}")
             env_vars[_net_env] = os.environ[_net_env]
+
+    if env_vars.get(VLLM_BATCH_INVARIANT_ENV) == "1" or os.environ.get(VLLM_BATCH_INVARIANT_ENV) == "1":
+        # Megatron and vLLM share a weight-update NCCL group; mismatched settings broke its first broadcast.
+        # Remove this override if publication no longer joins their ranks; it also affects learner collectives.
+        env_vars.update(BATCH_INVARIANT_NCCL_ENV)
 
     # EnvVarManager owns NCCL verbosity through trainer.debug_mode. Do not copy
     # ambient NCCL_DEBUG values into Ray workers: stale launcher extra_env once

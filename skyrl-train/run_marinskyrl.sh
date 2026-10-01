@@ -38,7 +38,8 @@ python -m skyrl_train.entrypoints.terminal_bench \
   trainer.placement.ref_num_gpus_per_node=8 \
   generator.num_inference_engines=8 \
   generator.inference_engine_tensor_parallel_size=1 \
-  +generator.engine_init_kwargs.custom_chat_template_chat_completion_path=$CHAT_TEMPLATE_PATH \
+  generator.chat_template.source=file \
+  generator.chat_template.name_or_path=$CHAT_TEMPLATE_PATH \
   trainer.epochs=3 \
   trainer.eval_batch_size=128 \
   trainer.eval_before_train=true \
@@ -64,8 +65,6 @@ python -m skyrl_train.entrypoints.terminal_bench \
   generator.backend=vllm \
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
-  generator.async_engine=true \
-  generator.batched=false \
   generator.enable_http_endpoint=true \
   generator.http_endpoint_host=127.0.0.1 \
   generator.http_endpoint_port=8000

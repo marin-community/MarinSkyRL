@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Mapping, Protocol, Sequence
 
+import numpy as np
+
 
 _INITIAL_ADMISSION_STALL_TIMEOUT = 1800.0
 _MINIMUM_ADMISSION_STALL_TIMEOUT = 600.0
@@ -16,45 +18,21 @@ class GroupAdmissionStalledError(RuntimeError):
     """Admission made no progress before its shared deadline."""
 
 
-@dataclass
-class AdmissionProgressWatchdog:
-    """Track the shared sync/async deadline since the last admitted-group progress."""
+def admission_stall_timeout(*, recent_step_times: Sequence[float], timeout_override: float | None) -> float:
+    """Seconds admission may go without progress before training fails.
 
-    last_progress_at: float
-    timeout: float
-
-    @classmethod
-    def start(
-        cls,
-        *,
-        now: float,
-        recent_step_times: Sequence[float],
-        timeout_override: float | None,
-    ) -> AdmissionProgressWatchdog:
-        if timeout_override is not None:
-            if timeout_override <= 0:
-                raise ValueError(f"group admission stall_timeout must be positive, got {timeout_override}")
-            timeout = float(timeout_override)
-        elif not recent_step_times:
-            timeout = _INITIAL_ADMISSION_STALL_TIMEOUT
-        else:
-            sorted_times = sorted(recent_step_times)
-            median = sorted_times[len(sorted_times) // 2]
-            timeout = max(median * _STEP_TIME_MULTIPLIER, _MINIMUM_ADMISSION_STALL_TIMEOUT)
-        return cls(last_progress_at=now, timeout=timeout)
-
-    def observe(self, *, now: float, progressed: bool) -> None:
-        if progressed:
-            self.last_progress_at = now
-
-    def elapsed(self, *, now: float) -> float:
-        return now - self.last_progress_at
-
-    def remaining(self, *, now: float) -> float:
-        return self.timeout - self.elapsed(now=now)
-
-    def stalled(self, *, now: float) -> bool:
-        return self.remaining(now=now) <= 0
+    An explicit override is returned unchanged. Otherwise the deadline is a multiple of the recent median step
+    time, at least 10 minutes; before any step has been timed, it is 30 minutes.
+    """
+    if timeout_override is not None:
+        if timeout_override <= 0:
+            raise ValueError(f"group admission stall_timeout must be positive, got {timeout_override}")
+        return float(timeout_override)
+    if not recent_step_times:
+        return _INITIAL_ADMISSION_STALL_TIMEOUT
+    sorted_times = sorted(recent_step_times)
+    median = sorted_times[len(sorted_times) // 2]
+    return max(median * _STEP_TIME_MULTIPLIER, _MINIMUM_ADMISSION_STALL_TIMEOUT)
 
 
 class GroupAdvantageKind(StrEnum):
@@ -125,16 +103,18 @@ class AdmissionRejection(StrEnum):
     PHYSICAL_GROUP_SIZE = "physical_group_size"
     BELOW_MINIMUM_GROUP_SIZE = "below_minimum_group_size"
     MISSING_ROLLOUT_LOGPROBS = "missing_rollout_logprobs"
+    MISSING_BEHAVIOR_TOPK = "missing_behavior_topk"
     DUPLICATE_UID = "duplicate_uid"
 
 
-class AdmissionAction(StrEnum):
-    """Shared caller action for an admission decision."""
-
-    ACCEPT = "accept"
-    RETRY_PROMPT = "retry_prompt"
-    REPLACE_PROMPT = "replace_prompt"
-    FAIL = "fail"
+# Rejections that mean the harness broke the run's structural contract; they fail training.
+FATAL_REJECTIONS = frozenset(
+    {
+        AdmissionRejection.PHYSICAL_GROUP_SIZE,
+        AdmissionRejection.MISSING_ROLLOUT_LOGPROBS,
+        AdmissionRejection.MISSING_BEHAVIOR_TOPK,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -152,19 +132,8 @@ class AdmissionDecision:
         return self.rejections[0] if self.rejections else None
 
     @property
-    def action(self) -> AdmissionAction:
-        """Route stale, replaceable, and structurally invalid work consistently."""
-        if self.accepted:
-            return AdmissionAction.ACCEPT
-        fatal_rejections = {
-            AdmissionRejection.PHYSICAL_GROUP_SIZE,
-            AdmissionRejection.MISSING_ROLLOUT_LOGPROBS,
-        }
-        if any(rejection in fatal_rejections for rejection in self.rejections):
-            return AdmissionAction.FAIL
-        if AdmissionRejection.STALE in self.rejections:
-            return AdmissionAction.RETRY_PROMPT
-        return AdmissionAction.REPLACE_PROMPT
+    def fatal(self) -> bool:
+        return any(rejection in FATAL_REJECTIONS for rejection in self.rejections)
 
 
 @dataclass(frozen=True)
@@ -225,13 +194,11 @@ class TrainingGroupInvariantError(ValueError):
 
 class GeneratedGroup(Protocol):
     trajectory_batch: Mapping[str, object]
-    earliest_model_step: int
 
 
 @dataclass(frozen=True)
 class _BatchGroup:
     trajectory_batch: Mapping[str, object]
-    earliest_model_step: int = 0
 
 
 def _aligned_sequence(batch: Mapping[str, object], key: str, row_count: int) -> Sequence[object] | None:
@@ -291,12 +258,15 @@ def _inspect_group(group: GeneratedGroup) -> _GroupFacts:
         for row_index, (response, loss_mask, logprobs) in enumerate(
             zip(response_ids, loss_masks, rollout_logprobs, strict=True)
         ):
-            if not isinstance(logprobs, Sequence) or len(response) != len(logprobs):
+            if not isinstance(logprobs, np.ndarray) or logprobs.ndim != 1:
+                raise ValueError(f"rollout_logprobs row {row_index} must be a one-dimensional array")
+            if len(response) != len(logprobs):
                 raise ValueError(
                     f"rollout_logprobs row {row_index} must align with response_ids, "
-                    f"got {len(logprobs) if isinstance(logprobs, Sequence) else 'non-sequence'} and {len(response)}"
+                    f"got {len(logprobs)} and {len(response)}"
                 )
-            if any(bool(mask) and logprob is None for mask, logprob in zip(loss_mask, logprobs, strict=True)):
+            trained_logprobs = logprobs[np.asarray(loss_mask, dtype=bool)]
+            if not np.isfinite(trained_logprobs).all() or (trained_logprobs > 0).any():
                 has_trainable_rollout_logprobs = False
 
     return _GroupFacts(
@@ -313,29 +283,47 @@ def group_is_fully_excluded_from_training(trajectory_batch: Mapping[str, object]
     return facts.trainable_count == 0 and facts.baseline_contributor_count == 0
 
 
+def _has_behavior_topk(batch: Mapping[str, object], width: int) -> bool:
+    masks = batch["loss_masks"]
+    indices = batch.get("student_topk_indices")
+    logprobs = batch.get("behavior_topk_logprobs")
+    for values in (indices, logprobs):
+        if not isinstance(values, Sequence) or len(values) != len(masks):
+            return False
+    for mask, row_indices, row_logprobs in zip(masks, indices, logprobs, strict=True):
+        if not any(mask):
+            continue
+        for values in (row_indices, row_logprobs):
+            if not isinstance(values, np.ndarray) or values.shape != (len(mask), width):
+                return False
+        if not np.issubdtype(row_indices.dtype, np.integer) or row_logprobs.dtype.kind not in "iuf":
+            return False
+        eligible = np.asarray(mask, dtype=bool)
+        if (row_indices[eligible] < 0).any() or not np.isfinite(row_logprobs[eligible]).all():
+            return False
+    return True
+
+
 class GroupAdmissionPolicy:
-    """Evaluate completed groups without mutating async lifecycle state."""
+    """Check a completed group's content against the run's training contract.
+
+    Staleness depends on when a group is read, so the rollout buffer checks it separately.
+    """
 
     def __init__(
         self,
         invariant: GroupAdvantageInvariant,
         *,
-        max_staleness_steps: int,
         rollout_logprobs_required: bool,
+        student_topk_width: int | None = None,
     ) -> None:
         self.invariant = invariant
-        self.max_staleness_steps = max_staleness_steps
         self.rollout_logprobs_required = rollout_logprobs_required
+        self.student_topk_width = student_topk_width
 
-    def is_stale(self, group: GeneratedGroup, *, global_step: int) -> bool:
-        """Return whether the group's oldest sample exceeds the run's staleness cap."""
-        return global_step - group.earliest_model_step > self.max_staleness_steps
-
-    def evaluate(self, group: GeneratedGroup, *, global_step: int) -> AdmissionDecision:
+    def evaluate(self, group: GeneratedGroup) -> AdmissionDecision:
         facts = _inspect_group(group)
         rejections = []
-        if self.is_stale(group, global_step=global_step):
-            rejections.append(AdmissionRejection.STALE)
         if facts.trainable_count == 0:
             rejections.append(AdmissionRejection.FULLY_MASKED)
         if (
@@ -350,14 +338,18 @@ class GroupAdmissionPolicy:
             rejections.append(AdmissionRejection.BELOW_MINIMUM_GROUP_SIZE)
         if self.rollout_logprobs_required and facts.trainable_count > 0 and not facts.has_rollout_logprobs:
             rejections.append(AdmissionRejection.MISSING_ROLLOUT_LOGPROBS)
+        if (
+            self.student_topk_width is not None
+            and facts.trainable_count > 0
+            and not _has_behavior_topk(group.trajectory_batch, self.student_topk_width)
+        ):
+            rejections.append(AdmissionRejection.MISSING_BEHAVIOR_TOPK)
         return AdmissionDecision(tuple(rejections))
 
     def evaluate_batch(
         self,
         trajectory_batch: Mapping[str, object],
         uids: Sequence[str],
-        *,
-        global_step: int,
     ) -> tuple[BatchGroupAdmission, ...]:
         """Evaluate each UID group in a concatenated trajectory batch."""
         response_ids = trajectory_batch.get("response_ids")
@@ -370,7 +362,15 @@ class GroupAdmissionPolicy:
         for row_index, uid in enumerate(uids):
             grouped_indices.setdefault(uid, []).append(row_index)
 
-        aligned_keys = ("response_ids", "loss_masks", "exclude_from_baseline", "rollout_logprobs", "is_last_step")
+        aligned_keys = (
+            "response_ids",
+            "loss_masks",
+            "exclude_from_baseline",
+            "rollout_logprobs",
+            "is_last_step",
+            "student_topk_indices",
+            "behavior_topk_logprobs",
+        )
         admissions = []
         for uid, indices in grouped_indices.items():
             group_batch = {}
@@ -384,7 +384,7 @@ class GroupAdmissionPolicy:
                 BatchGroupAdmission(
                     uid=uid,
                     row_indices=tuple(indices),
-                    decision=self.evaluate(batch_group, global_step=global_step),
+                    decision=self.evaluate(batch_group),
                     physical_count=facts.physical_count,
                 )
             )
@@ -428,8 +428,8 @@ def assert_training_groups_eligible(
     invariant: GroupAdvantageInvariant,
 ) -> None:
     """Fail when a synchronous or async training batch violates its group contract."""
-    policy = GroupAdmissionPolicy(invariant, max_staleness_steps=0, rollout_logprobs_required=False)
-    for admission in policy.evaluate_batch(trajectory_batch, uids, global_step=0):
+    policy = GroupAdmissionPolicy(invariant, rollout_logprobs_required=False)
+    for admission in policy.evaluate_batch(trajectory_batch, uids):
         if not admission.decision.accepted:
             raise TrainingGroupInvariantError(
                 uid=admission.uid,

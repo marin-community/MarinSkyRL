@@ -1,11 +1,11 @@
-"""Trainer-regime adapters for scheduling teacher scoring."""
+"""Build teacher-scoring work and schedule it on bounded per-teacher queues."""
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, TypeVar, cast
+from typing import Any, cast
 
 import torch
 from torch.nn.utils.rnn import pad_sequence
@@ -13,26 +13,22 @@ from torch.nn.utils.rnn import pad_sequence
 from marinskyrl.distillation import TeacherEvidenceKind
 from skyrl_train.distillation import (
     ChosenTokenTeacherEvidence,
-    DistillationInput,
+    PreparedTeacherInput,
     INVALID_TOPK_INDEX,
-    SampledReverseKLInput,
-    SparseForwardKLInput,
+    ChosenTokenTeacherInput,
+    TeacherTopKInput,
     StudentSelectedTeacherEvidence,
-    StudentTopKPolicySurrogateInput,
+    StudentTopKInput,
     TeacherEvidenceBatch,
     TeacherScoreRequest,
     TopKTeacherEvidence,
     prepare_sampled_reverse_kl,
-    prepare_sparse_forward_kl,
+    prepare_teacher_topk,
     prepare_student_topk_policy_surrogate,
 )
 from skyrl_train.teacher_oracle import TeacherOracleCollection
 from skyrl_train.teacher_routing import RoutedTrajectoryBatch, TeacherRoute
 from skyrl_train.trajectory_runners.types import TrajectoryBatch
-
-
-_ForwardResult = TypeVar("_ForwardResult")
-_ScoreResult = TypeVar("_ScoreResult")
 
 
 async def _gather_or_cancel(tasks: list[asyncio.Future[Any]]) -> list[Any]:
@@ -44,19 +40,6 @@ async def _gather_or_cancel(tasks: list[asyncio.Future[Any]]) -> list[Any]:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         raise
-
-
-async def _score_while_model_forwarding(
-    scoring: Awaitable[_ScoreResult],
-    model_forward: Callable[[], _ForwardResult],
-) -> tuple[_ForwardResult, _ScoreResult]:
-    results = await _gather_or_cancel(
-        [
-            asyncio.create_task(asyncio.to_thread(model_forward)),
-            asyncio.ensure_future(scoring),
-        ]
-    )
-    return results[0], results[1]
 
 
 @dataclass(frozen=True)
@@ -73,7 +56,7 @@ class ScoredDistillationBatch:
     """Validated evidence and the minimal payload consumed by the learner."""
 
     evidence: TeacherEvidenceBatch
-    distillation: DistillationInput
+    distillation: PreparedTeacherInput
 
 
 @dataclass(frozen=True)
@@ -104,7 +87,7 @@ class RoutedScoredDistillationBatch:
     teacher_revisions: tuple[str, ...]
     plan_version: str
     evidence: tuple[TeacherEvidenceBatch, ...]
-    distillation: DistillationInput
+    distillation: PreparedTeacherInput
 
 
 def _routed_assembly_shape(
@@ -126,14 +109,14 @@ def _routed_assembly_shape(
 
 
 def _assemble_student_selected_inputs(
-    indexed_inputs: Sequence[tuple[tuple[int, ...], DistillationInput]],
+    indexed_inputs: Sequence[tuple[tuple[int, ...], PreparedTeacherInput]],
     shape: tuple[int, int],
     valid_mask: torch.Tensor,
     loss_weights: torch.Tensor,
-) -> StudentTopKPolicySurrogateInput:
-    if not all(isinstance(distillation, StudentTopKPolicySurrogateInput) for _, distillation in indexed_inputs):
+) -> StudentTopKInput:
+    if not all(isinstance(distillation, StudentTopKInput) for _, distillation in indexed_inputs):
         raise ValueError("routed teacher partitions must return one distillation objective kind")
-    payloads = tuple(cast(StudentTopKPolicySurrogateInput, distillation) for _, distillation in indexed_inputs)
+    payloads = tuple(cast(StudentTopKInput, distillation) for _, distillation in indexed_inputs)
     widths = {payload.student_topk_indices.shape[-1] for payload in payloads}
     if len(widths) != 1:
         raise ValueError("routed student-selected partitions must use one top-K width")
@@ -147,13 +130,13 @@ def _assemble_student_selected_inputs(
         indices[rows, :width] = payload.student_topk_indices
         behavior[rows, :width] = payload.behavior_topk_logprobs
         teacher[rows, :width] = payload.teacher_on_student_logprobs
-    return StudentTopKPolicySurrogateInput(indices, behavior, teacher, valid_mask, loss_weights)
+    return StudentTopKInput(indices, behavior, teacher, valid_mask, loss_weights)
 
 
 def assemble_distillation_inputs(
-    indexed_inputs: Sequence[tuple[tuple[int, ...], DistillationInput]],
+    indexed_inputs: Sequence[tuple[tuple[int, ...], PreparedTeacherInput]],
     shape: tuple[int, int],
-) -> DistillationInput:
+) -> PreparedTeacherInput:
     """Scatter homogeneous learner inputs into an explicitly sized batch."""
     if not indexed_inputs:
         raise ValueError("distillation assembly requires at least one input")
@@ -170,24 +153,24 @@ def assemble_distillation_inputs(
         valid_mask[indices, :width] = distillation.valid_mask
         loss_weights[indices, :width] = distillation.loss_weights
 
-    if isinstance(first, SampledReverseKLInput):
-        if not all(isinstance(distillation, SampledReverseKLInput) for _, distillation in indexed_inputs):
+    if isinstance(first, ChosenTokenTeacherInput):
+        if not all(isinstance(distillation, ChosenTokenTeacherInput) for _, distillation in indexed_inputs):
             raise ValueError("routed teacher partitions must return one distillation objective kind")
         teacher_logprobs = torch.full(shape, torch.nan, dtype=torch.float32)
         for original_indices, distillation in indexed_inputs:
-            payload = cast(SampledReverseKLInput, distillation)
+            payload = cast(ChosenTokenTeacherInput, distillation)
             indices = torch.tensor(original_indices, dtype=torch.long)
             teacher_logprobs[indices, : payload.valid_mask.shape[1]] = payload.teacher_action_log_probs
-        return SampledReverseKLInput(teacher_logprobs, valid_mask, loss_weights)
+        return ChosenTokenTeacherInput(teacher_logprobs, valid_mask, loss_weights)
 
-    if isinstance(first, StudentTopKPolicySurrogateInput):
+    if isinstance(first, StudentTopKInput):
         return _assemble_student_selected_inputs(indexed_inputs, shape, valid_mask, loss_weights)
 
-    if not isinstance(first, SparseForwardKLInput) or not all(
-        isinstance(distillation, SparseForwardKLInput) for _, distillation in indexed_inputs
+    if not isinstance(first, TeacherTopKInput) or not all(
+        isinstance(distillation, TeacherTopKInput) for _, distillation in indexed_inputs
     ):
         raise ValueError("routed teacher partitions must return one distillation objective kind")
-    payloads = tuple(cast(SparseForwardKLInput, distillation) for _, distillation in indexed_inputs)
+    payloads = tuple(cast(TeacherTopKInput, distillation) for _, distillation in indexed_inputs)
     topk_values = {payload.teacher_topk_indices.shape[-1] for payload in payloads}
     if len(topk_values) != 1:
         raise ValueError("routed sparse teacher partitions must use one top-K width")
@@ -201,7 +184,7 @@ def assemble_distillation_inputs(
         teacher_indices[indices, :width] = payload.teacher_topk_indices
         teacher_logprobs[indices, :width] = payload.teacher_topk_logprobs
         retained_mass[indices, :width] = payload.retained_mass
-    return SparseForwardKLInput(teacher_indices, teacher_logprobs, retained_mass, valid_mask, loss_weights)
+    return TeacherTopKInput(teacher_indices, teacher_logprobs, retained_mass, valid_mask, loss_weights)
 
 
 def _pad_token_rows(token_rows: list[list[int]]) -> tuple[torch.Tensor, torch.Tensor]:
@@ -242,8 +225,8 @@ def _collate_student_selected_rollout(
     for row, (selected, scores, response) in enumerate(zip(index_rows, behavior_rows, response_token_ids, strict=True)):
         if len(selected) != len(response) or len(scores) != len(response):
             raise ValueError("student-selected rollout fields must align with response tokens")
-        indices[row, : len(response)] = torch.tensor(selected, dtype=torch.long)
-        behavior[row, : len(response)] = torch.tensor(scores, dtype=torch.float32)
+        indices[row, : len(response)] = torch.from_numpy(selected)
+        behavior[row, : len(response)] = torch.from_numpy(scores)
     indices.masked_fill_(~selected_mask.unsqueeze(-1), INVALID_TOPK_INDEX)
     behavior.masked_fill_(~selected_mask.unsqueeze(-1), torch.nan)
     return indices, behavior, selected_mask
@@ -358,7 +341,7 @@ def build_routed_teacher_scoring_work(
 
 
 class TeacherEvidenceCoordinator:
-    """Share scoring and objective preparation across trainer regimes."""
+    """Score teacher work and prepare the matching learner objective input."""
 
     def __init__(self, oracle_owner: TeacherOracleCollection) -> None:
         self._oracle_owner = oracle_owner
@@ -373,7 +356,7 @@ class TeacherEvidenceCoordinator:
                 route_weights=work.route_weights,
             )
         elif isinstance(evidence, TopKTeacherEvidence):
-            distillation = prepare_sparse_forward_kl(
+            distillation = prepare_teacher_topk(
                 work.request,
                 evidence,
                 coefficient=work.coefficient,
@@ -389,14 +372,6 @@ class TeacherEvidenceCoordinator:
         else:
             raise TypeError(f"unsupported teacher evidence type: {type(evidence).__name__}")
         return ScoredDistillationBatch(evidence=evidence, distillation=distillation)
-
-    async def score_routed(self, work: RoutedTeacherScoringWork) -> RoutedScoredDistillationBatch:
-        """Fan out logical teachers and restore evidence to original row coordinates."""
-        scored_partitions = await _gather_or_cancel(
-            [asyncio.create_task(self.score(partition.work)) for partition in work.partitions]
-        )
-
-        return self.assemble_routed(work, tuple(scored_partitions))
 
     @staticmethod
     def assemble_routed(
@@ -427,39 +402,9 @@ class TeacherEvidenceCoordinator:
         await self._oracle_owner.close()
 
 
-class RayPPOTrainerDistillationAdapter:
-    """Overlap synchronous trainer model forwards with teacher scoring."""
-
-    def __init__(self, coordinator: TeacherEvidenceCoordinator) -> None:
-        self._coordinator = coordinator
-
-    @classmethod
-    def from_oracles(cls, oracles: TeacherOracleCollection) -> RayPPOTrainerDistillationAdapter:
-        return cls(TeacherEvidenceCoordinator(oracles))
-
-    async def score_while_model_forwarding(
-        self,
-        work: TeacherScoringWork,
-        model_forward: Callable[[], _ForwardResult],
-    ) -> tuple[_ForwardResult, ScoredDistillationBatch]:
-        """Run the blocking trainer forward and remote teacher score concurrently."""
-        return await _score_while_model_forwarding(self._coordinator.score(work), model_forward)
-
-    async def score_routed_while_model_forwarding(
-        self,
-        work: RoutedTeacherScoringWork,
-        model_forward: Callable[[], _ForwardResult],
-    ) -> tuple[_ForwardResult, RoutedScoredDistillationBatch]:
-        """Fan out a mixed-domain batch while the synchronous model forward runs."""
-        return await _score_while_model_forwarding(self._coordinator.score_routed(work), model_forward)
-
-    async def close(self) -> None:
-        await self._coordinator.close()
-
-
 @dataclass(frozen=True)
 class AsyncTeacherScoreTicket:
-    """A submitted score whose result gates fully-async batch assembly."""
+    """A submitted score whose result gates learner batch assembly."""
 
     _result: asyncio.Future[ScoredDistillationBatch]
 
@@ -505,8 +450,8 @@ class AsyncTeacherQueueLimits:
             raise ValueError("teacher queue and worker limits must be positive")
 
 
-class FullyAsyncRayPPOTrainerDistillationAdapter:
-    """Bound teacher work per logical teacher before rollout batch assembly."""
+class AdmittedGroupDistillationAdapter:
+    """Bound teacher work per logical teacher between rollout admission and learner batch assembly."""
 
     def __init__(
         self,
@@ -515,7 +460,7 @@ class FullyAsyncRayPPOTrainerDistillationAdapter:
         teacher_limits: Mapping[str, AsyncTeacherQueueLimits],
     ) -> None:
         if not teacher_limits:
-            raise ValueError("fully-async distillation requires at least one teacher queue")
+            raise ValueError("distillation requires at least one teacher queue")
         self._coordinator = coordinator
         self._queues = {
             teacher_id: asyncio.Queue[_QueuedTeacherScore](maxsize=limits.max_queued)
@@ -529,7 +474,7 @@ class FullyAsyncRayPPOTrainerDistillationAdapter:
 
     async def start(self) -> None:
         if self._closed:
-            raise RuntimeError("fully-async distillation adapter is closed")
+            raise RuntimeError("distillation adapter is closed")
         if self._workers:
             return
         self._accepting = True
@@ -548,7 +493,7 @@ class FullyAsyncRayPPOTrainerDistillationAdapter:
             raise ValueError(f"no scoring queue configured for teacher {work.request.teacher_id!r}") from error
         async with submission_lock:
             if not self._accepting:
-                raise RuntimeError("fully-async distillation adapter is not accepting work")
+                raise RuntimeError("distillation adapter is not accepting work")
             result = asyncio.get_running_loop().create_future()
             await queue.put(_QueuedTeacherScore(work=work, result=result))
         return AsyncTeacherScoreTicket(result)
@@ -594,7 +539,7 @@ class FullyAsyncRayPPOTrainerDistillationAdapter:
         self._workers.clear()
         await self._coordinator.close()
 
-    async def __aenter__(self) -> FullyAsyncRayPPOTrainerDistillationAdapter:
+    async def __aenter__(self) -> AdmittedGroupDistillationAdapter:
         await self.start()
         return self
 

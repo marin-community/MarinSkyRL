@@ -6,6 +6,17 @@ from skyrl_train.entrypoints import main_generate
 from skyrl_train.entrypoints.main_generate import EvalOnlyEntrypoint
 
 
+class LifecycleRunner:
+    def __init__(self) -> None:
+        self.events = []
+
+    async def startup(self) -> None:
+        self.events.append("startup")
+
+    async def shutdown(self) -> None:
+        self.events.append("shutdown")
+
+
 class RecordingTracker:
     def __init__(self) -> None:
         self.calls = []
@@ -21,7 +32,7 @@ async def test_eval_only_uses_generation_engine_without_initial_wake(monkeypatch
     experiment.eval_dataset = ["prompt"]
     experiment.tokenizer = object()
     inference_client = object()
-    trajectory_runner = object()
+    trajectory_runner = LifecycleRunner()
     tracker = RecordingTracker()
 
     def create_inference_engine_client(*, operation: EntrypointOperation):
@@ -31,15 +42,17 @@ async def test_eval_only_uses_generation_engine_without_initial_wake(monkeypatch
     async def evaluate(**kwargs):
         assert kwargs["eval_dataloader"] == "dataloader"
         assert kwargs["trajectory_runner"] is trajectory_runner
+        trajectory_runner.events.append("evaluate")
         return {"reward": 1.0}
 
     experiment.create_inference_engine_client = create_inference_engine_client
     experiment.get_trajectory_runner = lambda *_args: trajectory_runner
     experiment.get_tracker = lambda: tracker
-    monkeypatch.setattr(main_generate, "build_dataloader", lambda *_args, **_kwargs: "dataloader")
+    monkeypatch.setattr(main_generate, "build_eval_dataloader", lambda *_args, **_kwargs: "dataloader")
     monkeypatch.setattr(main_generate, "evaluate", evaluate)
 
-    result = await experiment.run()
+    result = await experiment._evaluate()
 
     assert result == {"reward": 1.0}
+    assert trajectory_runner.events == ["startup", "evaluate", "shutdown"]
     assert tracker.calls == [(({"reward": 1.0},), {"step": 0, "commit": True})]

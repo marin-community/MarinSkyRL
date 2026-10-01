@@ -2,10 +2,8 @@ import asyncio
 import logging
 import os
 import re
-import time
-from collections import deque
 from dataclasses import dataclass, replace
-from typing import Callable, Deque, List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any
 
 import numpy as np
 from skyrl_gym.verification import (
@@ -31,6 +29,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     BATCH_ERROR_METRIC_PREFIX,
     get_batch_failure_metrics,
     get_rollout_metrics,
+    get_custom_chat_template,
     get_response_ids_and_loss_mask_from_messages,
     get_generation_prompt_ids,
     detect_qwen3_5_empty_think_prefix,
@@ -40,8 +39,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     extract_routed_experts_from_rollout_details,
     normalize_token_ids,
     AlignmentStats,
-    _sentinel_routed_experts_row,
-    SENTINEL_EXPERT_ID,
+    _re_sentinel_rows,
 )
 from skyrl_train.utils.reward_shaping import (
     ParsedTestResult,
@@ -301,7 +299,7 @@ def _rollout_evidence_from_harbor(
     response_ids: List[int],
     loss_mask: List[int],
     rollout_logprobs: Optional[List[float]],
-    rollout_routed_experts: Optional[List[List[List[int]]]],
+    rollout_routed_experts: Optional[np.ndarray],
 ) -> RolloutEvidence:
     final_response = next(
         (str(message.get("content") or "") for message in reversed(chat_history) if message.get("role") == "assistant"),
@@ -314,12 +312,8 @@ def _rollout_evidence_from_harbor(
         generated_token_count=sum(bool(value) for value in loss_mask),
         prompt_token_ids=tuple(prompt_ids),
         response_token_ids=tuple(response_ids),
-        behavior_logprobs=None if rollout_logprobs is None else tuple(rollout_logprobs),
-        routed_experts=(
-            None
-            if rollout_routed_experts is None
-            else tuple(tuple(tuple(layer) for layer in token) for token in rollout_routed_experts)
-        ),
+        behavior_logprobs=None if rollout_logprobs is None else np.asarray(rollout_logprobs, dtype=np.float32),
+        routed_experts=rollout_routed_experts,
     )
 
 
@@ -361,6 +355,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         terminal_bench_cfg: DictConfig,
         tokenizer,
         tis_lcs_alert_threshold: float,
+        eval_concurrent_trials: int,
         moe_router_replay: bool = False,
         rollout_logprobs_required: bool = False,
         tito_full: Optional[bool] = None,
@@ -371,6 +366,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             trajectory_runner_cfg: trajectory-runner configuration
             terminal_bench_cfg: DictConfig object containing the terminal bench configuration
             tokenizer: tokenizer object for encoding and decoding text
+            eval_concurrent_trials: trial concurrency of each evaluation session's orchestrator.
             moe_router_replay: when True, capture per-token MoE routed_experts from
                 Harbor rollout_details and plumb them through to the training batch
                 for Megatron router replay. Default False keeps the
@@ -390,7 +386,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         # The verifier + re-tokenize/TIS paths keep using self.base_url.
         #
         # SOURCE PRECEDENCE (cfg first, env fallback). This runner is constructed
-        # INSIDE a Ray task/actor (skyrl_entrypoint / RolloutCoordinator) that does NOT
+        # INSIDE a Ray task/actor (skyrl_entrypoint / rollout worker) that does NOT
         # inherit the run_rl driver's late HARBOR_MODEL_ENDPOINT env mutation (the runner
         # attaches to a Ray cluster started BEFORE the mint). run_rl therefore threads the
         # URL through the cfg as ``terminal_bench_config.agent_api_base``, which crosses the
@@ -455,6 +451,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         self._n_concurrent_trials = self._harbor_config_builder.get_n_concurrent_trials(
             default=16  # Reasonable default for parallel trial execution
         )
+        self._eval_concurrent_trials = eval_concurrent_trials
 
         # Reward shaping config (parses test output for partial credit)
         self._reward_shaping_config = self._harbor_config_builder.get_reward_shaping_config()
@@ -519,18 +516,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             f"Error classification: enabled={self._error_handling_config.enable_error_classification}"
         )
 
-        # Read custom chat template
-        custom_chat_template_path = trajectory_runner_cfg.engine_init_kwargs.get(
-            "custom_chat_template_chat_completion_path", None
-        )
-        if custom_chat_template_path:
-            with open(custom_chat_template_path, "r") as f:
-                self.custom_chat_template_content = f.read()
-            logger.info(
-                f"HarborTrajectoryRunner initialized with custom chat template read from: {custom_chat_template_path}"
-            )
-        else:
-            self.custom_chat_template_content = None
+        self.custom_chat_template_content = get_custom_chat_template(trajectory_runner_cfg.chat_template)
 
         # --- ARCH-GATED qwen3_5/3.6 thinking-enable for the re-tokenize / TIS path ---
         # The Qwen3.5/3.6 chat template's DEFAULT generation prompt (enable_thinking
@@ -587,40 +573,6 @@ class HarborTrajectoryRunner(TrajectoryRunner):
 
         # Eval-specific timeout (default 900s = 15 minutes)
         self._eval_timeout_override_sec = self._harbor_config_builder.get_eval_timeout_override_sec(default=900)
-
-        # Staleness tracking — captures the global_step that was current at each
-        # trial's Harbor pickup time (= the moment SkyRL/Harbor first attempted to
-        # dispatch the trial to vLLM). Set externally by FullyAsyncRayPPOTrainer.
-        self.global_step_fn: Optional[Callable[[], int]] = None
-        # Rolling (global_step, time.time()) history; we look up `started_at` for
-        # each trial against this history to estimate `actual_global_step`. Bounded
-        # to keep memory flat; long-tail trials past the window fall back to the
-        # earliest retained step (conservative — biases staleness slightly higher).
-        self._step_time_history: Deque[Tuple[int, float]] = deque(maxlen=512)
-
-    def _record_step_time(self) -> None:
-        """Append (global_step, now) to the step-time history if the step has advanced."""
-        if self.global_step_fn is None:
-            return
-        try:
-            step = self.global_step_fn()
-        except Exception:
-            return
-        now = time.time()
-        if not self._step_time_history or self._step_time_history[-1][0] != step:
-            self._step_time_history.append((step, now))
-
-    def _step_at_time(self, t: float) -> Optional[int]:
-        """Return the global_step that was active at wall-clock time `t` per history."""
-        if not self._step_time_history:
-            return None
-        result = self._step_time_history[0][0]
-        for step, ts in self._step_time_history:
-            if ts <= t:
-                result = step
-            else:
-                break
-        return result
 
     def _configure_harbor_logging(self, level: str) -> None:
         """
@@ -790,7 +742,6 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         run_name: str,
         eval_step: int,
         val_set_name: Optional[str] = None,
-        n_concurrent_trials: Optional[int] = None,
     ) -> None:
         """Start a fresh eval session with its own QueueOrchestrator.
 
@@ -802,7 +753,6 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             run_name: The job run name (from cfg.trainer.run_name).
             eval_step: The current global step (for unique naming).
             val_set_name: Optional name of the validation set being evaluated.
-            n_concurrent_trials: Optional eval-only concurrency override.
         """
         if self._eval_orchestrator_lock is None:
             self._eval_orchestrator_lock = asyncio.Lock()
@@ -839,17 +789,16 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             else:
                 self._eval_trials_dir = self.trials_dir
 
-            eval_concurrent_trials = self._n_concurrent_trials if n_concurrent_trials is None else n_concurrent_trials
             logger.info(
                 f"Starting eval session: {self._eval_session_name} "
                 f"(timeout={self._eval_timeout_override_sec}s, trials_dir={self._eval_trials_dir}, "
-                f"n_concurrent_trials={eval_concurrent_trials})"
+                f"n_concurrent_trials={self._eval_concurrent_trials})"
             )
 
             # Create fresh orchestrator for eval with eval-specific timeout
             self._eval_orchestrator = QueueOrchestrator(
                 trial_configs=[],  # We submit dynamically via submit_batch()
-                n_concurrent_trials=eval_concurrent_trials,
+                n_concurrent_trials=self._eval_concurrent_trials,
                 metrics={},  # SkyRL handles its own metrics
                 quiet=True,
                 retry_config=self._retry_config,
@@ -873,7 +822,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
 
             logger.info(
                 f"Eval session {self._eval_session_name} started with fresh QueueOrchestrator "
-                f"(n_concurrent_trials={eval_concurrent_trials}, rollback_hook registered)"
+                f"(n_concurrent_trials={self._eval_concurrent_trials}, rollback_hook registered)"
             )
 
     async def stop_eval_session(self) -> None:
@@ -982,12 +931,6 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         This method includes restart logic to recover from orchestrator failures
         without killing the entire training job.
         """
-        # Record current global_step at the moment we enter run(). Used as
-        # both a history checkpoint and the conservative fallback for
-        # actual_global_step if no trial reports a started_at.
-        self._record_step_time()
-        entry_global_step = self.global_step_fn() if self.global_step_fn is not None else None
-
         num_trials = len(input_batch["prompts"])
         is_eval = self._eval_session_active
         mode_str = f"eval ({self._eval_session_name})" if is_eval else "training"
@@ -1335,13 +1278,15 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 rollout_logprobs_list = []
                 for output in all_outputs:
                     if output.evidence.behavior_logprobs is not None:
-                        rollout_logprobs_list.append(list(output.evidence.behavior_logprobs))
+                        rollout_logprobs_list.append(output.evidence.behavior_logprobs)
                     else:
                         if self._rollout_logprobs_required and any(output.loss_mask):
                             raise ValueError("rollout_logprobs are required for every trainable trajectory")
                         # Failed trajectories are fully masked, so aligned placeholders
                         # cannot affect the objective.
-                        rollout_logprobs_list.append([0.0] * len(output.evidence.response_token_ids))
+                        rollout_logprobs_list.append(
+                            np.zeros(len(output.evidence.response_token_ids), dtype=np.float32)
+                        )
 
                 if missing_logprobs_count > 0 and self._collect_rollout_details:
                     # Only warn about missing logprobs if TIS is expected (collect_rollout_details=true)
@@ -1372,21 +1317,22 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             if has_any_routed_experts:
                 # Learn the [L, K] sentinel-row shape from the first real sample so
                 # missing/failed samples are sentinel-filled at the correct width.
-                sentinel_row = [[SENTINEL_EXPERT_ID]]
+                sentinel_row = None
                 for output in all_outputs:
-                    if output.evidence.routed_experts:
-                        sentinel_row = _sentinel_routed_experts_row(output.evidence.routed_experts[0])
+                    if output.evidence.routed_experts is not None:
+                        routes = output.evidence.routed_experts
+                        sentinel_row = np.zeros(routes.shape[1:], dtype=routes.dtype)
                         break
+                if sentinel_row is None:
+                    raise ValueError("routed_experts capture has no route geometry")
                 rollout_routed_experts_list = []
                 for output in all_outputs:
                     if output.evidence.routed_experts is not None:
-                        rollout_routed_experts_list.append(
-                            [[list(layer) for layer in token] for token in output.evidence.routed_experts]
-                        )
+                        rollout_routed_experts_list.append(output.evidence.routed_experts)
                     else:
                         # Sentinel-fill missing samples to match response_ids length.
                         rollout_routed_experts_list.append(
-                            [list(sentinel_row) for _ in range(len(output.evidence.response_token_ids))]
+                            _re_sentinel_rows(len(output.evidence.response_token_ids), sentinel_row)
                         )
 
         # Collect the Stage B per-token shaping channel + span tags. Gated on
@@ -1430,28 +1376,6 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 + ", ".join(f"{k.split('_', 2)[-1]}={v:.3f}" for k, v in sorted(component_metrics.items()))
             )
 
-        # Estimate actual_global_step for staleness tracking. Use the EARLIEST
-        # Harbor pickup time (`started_at`) across the group's trials — that's
-        # the moment the first trial transitioned from queued-in-Harbor to
-        # actually-running, i.e. the first attempt to dispatch to vLLM.
-        # Robust to vLLM fragility (no dependence on vLLM responses) and to
-        # individual-trial failures (we take whatever started). Falls back to
-        # the global_step captured at run() entry (worst case = same as
-        # the pre-patch behavior).
-        actual_global_step: Optional[int] = None
-        earliest_started_ts: Optional[float] = None
-        for r in results:
-            if isinstance(r, TrialResult) and r.started_at is not None:
-                ts = r.started_at.timestamp()
-                if earliest_started_ts is None or ts < earliest_started_ts:
-                    earliest_started_ts = ts
-        # Record current step+time again so the history covers gather completion.
-        self._record_step_time()
-        if earliest_started_ts is not None:
-            actual_global_step = self._step_at_time(earliest_started_ts)
-        if actual_global_step is None:
-            actual_global_step = entry_global_step
-
         trajectory_batch: TrajectoryBatch = {
             "prompt_token_ids": [list(output.evidence.prompt_token_ids) for output in all_outputs],
             "response_ids": [list(output.evidence.response_token_ids) for output in all_outputs],
@@ -1464,7 +1388,6 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             "rollout_metrics": rollout_metrics,
             "rollout_logprobs": rollout_logprobs_list,
             "exclude_from_baseline": [not output.disposition.baseline_eligible for output in all_outputs],
-            "actual_global_step": actual_global_step,
         }
         attach_terminal_classifications(trajectory_batch, all_outputs)
         if self._reward_shaping_enabled:
@@ -2146,7 +2069,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         # assistant_routed_experts=None makes get_response_ids_and_loss_mask_from_messages
         # return a 3-tuple, and unpacking 4 here raised
         # `ValueError: not enough values to unpack (expected 4, got 3)` — which crashed the
-        # RolloutCoordinator shard on the first completed 80B trial. The downstream batch
+        # rollout worker on the first completed 80B trial. The downstream batch
         # collation (trajectory_runners/trajectory_processing.py concatenate_trajectory_batches) already tolerates
         # mixed presence/absence of rollout_routed_experts across trials via its
         # has_routed_experts any-check + sentinel fill, so leaving this trial's
@@ -2189,6 +2112,20 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 tito_full=self._tito_full,
                 tis_splice=self._tis_splice,
             )
+
+        if alignment_stats and alignment_stats.n_tito_full_successes:
+            assert assistant_prompt_token_ids
+            generation_prompt_ids = get_generation_prompt_ids(
+                self.tokenizer,
+                custom_chat_template=self.custom_chat_template_content,
+                chat_template_kwargs=self._chat_template_kwargs,
+            )
+            # OpenAI tool schemas and other request fields can change the served prompt
+            # without appearing in the reconstructed chat history.
+            prompt_ids = assistant_prompt_token_ids[0][
+                : len(assistant_prompt_token_ids[0]) - len(generation_prompt_ids)
+            ]
+            initial_prompt_length = len(prompt_ids)
 
         # Prefer the agent's terminal reason when Harbor supplied one. The local
         # response limit remains authoritative when the reconstructed response

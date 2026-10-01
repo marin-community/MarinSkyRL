@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Callable, List, Optional
@@ -16,10 +17,19 @@ from skyrl_train.distributed.megatron.model_utils import (
     vocab_parallel_entropy,
 )
 from skyrl_train.distributed.megatron.megatron_utils import get_model_config
-from skyrl_train.distillation import DistillationInput, student_topk_logprobs
+from skyrl_train.distillation import TopKEvidence, student_topk_logprobs
 from skyrl_train.models.megatron_router_replay import MegatronRouterReplay
-from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective
-from skyrl_train.utils.importance_ratio_diagnostics import LogRatioMonitor
+from skyrl_train.config.objective_spec import topk_loss_params
+from skyrl_train.objective.objective import (
+    TopKTeacherBatch,
+    build_objective_micro_batch,
+    compute_policy_objective,
+    megatron_loss_scale,
+)
+from skyrl_train.objective.reduction import policy_data_weights, step_counts
+from skyrl_train.utils.profiler import Profiler
+from skyrl_train.timing_observability import PhaseBreakdown
+from skyrl_train.utils.importance_ratio_diagnostics import LogRatioMonitor, gather_ratio_tensor
 
 from skyrl_train.distributed.megatron.megatron_utils import (
     compact_left_padded_tokens,
@@ -69,8 +79,8 @@ class MegatronPolicyMicroBatch:
     loss_mask: torch.Tensor
     rollout_action_logprobs: Optional[torch.Tensor]
     response_span_tags: Optional[torch.Tensor]
-    global_loss_denom: Optional[float]
-    distillation: Optional[DistillationInput] = None
+    distillation: Optional[TopKEvidence] = None
+    correction_weights: Optional[torch.Tensor] = None
     rollout_routed_experts: Optional[torch.Tensor] = None
 
 
@@ -412,17 +422,20 @@ class MegatronModelWrapper:
         seq_len: int,
         micro_batch_size: int,
         temperature: float = 1.0,
+        timings: PhaseBreakdown | None = None,
+        profiler: Profiler | None = None,
     ) -> List[dict]:
         """
         Run forward-backward over a full mini-batch consisting of multiple micro-batches.
 
         Args:
             micro_batches: Typed policy micro-batches containing model inputs,
-                policy targets, response span tags, and the optional global loss
-                denominator.
+                policy targets, response span tags, and teacher evidence.
             seq_len: Sequence length (tokens) per sample (assumed same across micros after padding).
             micro_batch_size: Micro-batch size per forward pass.
             temperature: Optional temperature for logits scaling.
+            timings: Optional recorder for the forward-backward scheduler and pipeline metric broadcast.
+            profiler: Optional profiler for the first forward micro-batch.
 
         Returns:
             List[dict]: one metrics dict per micro-batch in order.
@@ -430,6 +443,32 @@ class MegatronModelWrapper:
         forward_backward_func = get_forward_backward_func()
         log_ratio_monitor = None
         completed_microbatches = 0
+
+        def sum_data_parallel(value):
+            torch.distributed.all_reduce(value, group=mpu.get_data_parallel_group(with_context_parallel=False))
+            return value
+
+        counts = step_counts(
+            [
+                policy_data_weights(
+                    micro.loss_mask, micro.response_span_tags, self.cfg.trainer.algorithm.think_token_weight
+                )
+                for micro in micro_batches
+            ],
+            [micro.loss_mask for micro in micro_batches],
+            [
+                micro.loss_mask * micro.distillation.valid_mask
+                for micro in micro_batches
+                if micro.distillation is not None
+            ],
+            [micro.advantages for micro in micro_batches],
+            self.cfg.trainer.algorithm.max_seq_len,
+            sum_data_parallel,
+        )
+        scale = megatron_loss_scale(
+            len(micro_batches),
+            torch.distributed.get_world_size(mpu.get_data_parallel_group(with_context_parallel=False)),
+        )
 
         def loss_func(logits, data, packed_seq_params):
             nonlocal completed_microbatches, log_ratio_monitor
@@ -456,22 +495,35 @@ class MegatronModelWrapper:
             # avoids saving two vocab-sized copies of the logits for backward on the last stage.
             with torch.set_grad_enabled(self.cfg.trainer.algorithm.use_entropy_loss):
                 token_entropies = self._token_entropies(logits, data.attention_mask.to(bool), packed_seq_params)
-            objective = compute_policy_objective(
+            teacher = None
+            if data.distillation is not None:
+                assert sparse_student_logprobs is not None
+                teacher = TopKTeacherBatch(
+                    data.distillation,
+                    sparse_student_logprobs,
+                    topk_loss_params(self.cfg.trainer.algorithm),
+                    logits.shape[-1],
+                )
+            batch = build_objective_micro_batch(
                 action_log_probs=action_log_probs,
                 old_action_log_probs=old_action_log_probs,
                 base_action_log_probs=base_action_log_probs,
                 advantages=advantages,
                 loss_mask=loss_mask,
                 rollout_logprobs=rollout_action_logprobs,
+                correction_weights=data.correction_weights,
                 response_span_tags=response_span_tags,
                 token_entropy=token_entropies[:, -num_actions - 1 : -1],
+                think_token_weight=self.cfg.trainer.algorithm.think_token_weight,
+                teacher=teacher,
+            )
+            objective = compute_policy_objective(
+                batch,
+                loss=self.policy_loss_fn,
+                counts=counts,
                 config=self.cfg.trainer.algorithm,
-                policy_loss_fn=self.policy_loss_fn,
-                accumulation_steps=len(micro_batches),
-                scaling=LossScaling.MEGATRON_PIPELINE,
-                global_loss_denom=data.global_loss_denom,
-                distillation=data.distillation,
-                student_topk_logprobs=sparse_student_logprobs,
+                loss_scale=scale,
+                report_scale=scale,
             )
             if log_ratio_monitor is None:
                 log_ratio_monitor = LogRatioMonitor(action_log_probs.device)
@@ -479,42 +531,51 @@ class MegatronModelWrapper:
             completed_microbatches += 1
 
             metrics = {
-                "final_loss": objective.unscaled_loss.detach().item(),
-                "policy_loss": objective.policy_loss.detach().item(),
-                "policy_entropy": objective.entropy.detach().item(),
-                "policy_kl": objective.kl_loss.detach().item(),
+                "final_loss": objective.optimization_loss.detach().item(),
+                "policy_loss": objective.rows.policy.detach().item(),
+                "policy_entropy": objective.rows.entropy.detach().item(),
+                "policy_kl": objective.rows.kl.detach().item(),
             }
             metrics.update(objective.metrics)
             if completed_microbatches == len(micro_batches):
-                metrics.update(log_ratio_monitor.metrics())
+                # Token logprobs are already reconstructed across TP/CP, so pool across data-parallel ranks only.
+                group = (
+                    mpu.get_data_parallel_group(with_context_parallel=False)
+                    if torch.distributed.is_initialized()
+                    else None
+                )
+                metrics.update(log_ratio_monitor.metrics(gather_fn=partial(gather_ratio_tensor, group=group)))
             return objective.optimization_loss, metrics
 
         def forward_step(batch_iter, model):
             batch = next(batch_iter)
 
-            outputs, packed_seq_params = self._forward_micro_batch(
-                model,
-                batch.sequences,
-                batch.attention_mask,
-                batch.position_ids,
-                rollout_routed_experts=batch.rollout_routed_experts,
-                num_actions=batch.num_actions,
-                record_recompute=True,
-            )
+            with profiler.capture_forward() if profiler is not None else nullcontext():
+                outputs, packed_seq_params = self._forward_micro_batch(
+                    model,
+                    batch.sequences,
+                    batch.attention_mask,
+                    batch.position_ids,
+                    rollout_routed_experts=batch.rollout_routed_experts,
+                    num_actions=batch.num_actions,
+                    record_recompute=True,
+                )
 
             return outputs, partial(loss_func, data=batch, packed_seq_params=packed_seq_params)
 
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.actor_module))
 
-        metrics_list = forward_backward_func(
-            forward_step_func=forward_step,
-            data_iterator=batch_generator,
-            model=self.actor_module,
-            num_microbatches=len(micro_batches),
-            seq_length=seq_len,
-            micro_batch_size=micro_batch_size,
-            forward_only=False,
-        )
+        timing = timings or PhaseBreakdown("ppo_train", enabled=False)
+        with timing.span("megatron_forward_backward_scheduler"):
+            metrics_list = forward_backward_func(
+                forward_step_func=forward_step,
+                data_iterator=batch_generator,
+                model=self.actor_module,
+                num_microbatches=len(micro_batches),
+                seq_length=seq_len,
+                micro_batch_size=micro_batch_size,
+                forward_only=False,
+            )
 
         if self.router_replay is not None:
             # Fail before the optimizer step: a non-empty FIFO or a masked row
@@ -533,7 +594,7 @@ class MegatronModelWrapper:
         # broadcast metrics to all pp ranks
         if not mpu.is_pipeline_last_stage(ignore_virtual=True):
             metrics_list = [None] * len(micro_batches)
-        with torch.no_grad():
+        with timing.span("megatron_pipeline_metric_broadcast"), torch.no_grad():
             torch.distributed.broadcast_object_list(
                 metrics_list,
                 src=mpu.get_pipeline_model_parallel_last_rank(),

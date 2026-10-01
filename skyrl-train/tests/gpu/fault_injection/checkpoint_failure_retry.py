@@ -8,6 +8,7 @@ uncommitted trainer generation; the second loads the retry through `latest`.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -86,7 +87,7 @@ def test_megatron_failed_save_preserves_latest_and_retry_commits(ray_init_fixtur
         batch.metadata["global_step"] = trainer.global_step
         ray.get(trainer.policy_model.async_run_ray_method("mesh", "ppo_train", batch))
         trainer.global_step = 1
-        trainer.save_checkpoints()
+        asyncio.run(trainer.save_checkpoints())
 
         step_one = _step_path(root, 1)
         previous_commit = io.read_bytes(os.path.join(step_one, COMMIT_FILENAME))
@@ -99,8 +100,8 @@ def test_megatron_failed_save_preserves_latest_and_retry_commits(ray_init_fixtur
         trainer.global_step = 2
         armed = ray.get(trainer.policy_model.async_run_ray_method("pass_through", "fail_after_next_distributed_save"))
         assert sorted(armed) == list(range(4))
-        with pytest.raises(Exception, match="injected post-DCP save failure"):
-            trainer.save_checkpoints()
+        with pytest.raises(OSError, match="checkpoint save failed"):
+            asyncio.run(trainer.save_checkpoints())
         step_two = _step_path(root, 2)
         assert io.read_bytes(_latest_path(root)) == previous_pointer
         assert io.read_bytes(os.path.join(step_one, COMMIT_FILENAME)) == previous_commit
@@ -112,7 +113,7 @@ def test_megatron_failed_save_preserves_latest_and_retry_commits(ray_init_fixtur
         failed_attempt = next(iter(failed_attempts))
         assert not io.exists(os.path.join(step_two, "_attempts", failed_attempt, "checkpoint_manifest.json"))
 
-        trainer.save_checkpoints()
+        asyncio.run(trainer.save_checkpoints())
         assert io.read_bytes(_latest_path(root)) == b"2"
         retry_commit = json.loads(io.read_bytes(os.path.join(step_two, COMMIT_FILENAME)))
         assert retry_commit["attempt_id"] != failed_attempt
@@ -155,7 +156,7 @@ def test_megatron_fresh_process_resumes_retry_and_saves_next_step(ray_init_fixtu
         batch.metadata["global_step"] = loaded_step
         ray.get(trainer.policy_model.async_run_ray_method("mesh", "ppo_train", batch))
         trainer.global_step = 3
-        trainer.save_checkpoints()
+        asyncio.run(trainer.save_checkpoints())
 
         assert io.read_bytes(_latest_path(root)) == b"3"
         assert resolve_checkpoint_payload(_step_path(root, 3), verify_files=True)

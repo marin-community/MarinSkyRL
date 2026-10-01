@@ -12,7 +12,6 @@ from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.distillation import distillation_input_from_tensors
 
 DictType = TypeVar("DictType")
-GLOBAL_LOSS_DENOM_METADATA_KEY = "global_loss_denom"
 
 
 def per_data_parallel_batch_size(mini_batch_size: int, samples_per_prompt: int, data_parallel_size: int) -> int:
@@ -357,6 +356,9 @@ class TrainingInput(TypedDict, total=False):
     kl: Float[torch.Tensor, "batch_size seq_len"]
     rewards: Optional[Float[torch.Tensor, "batch_size seq_len"]]
     rollout_logprobs: Optional[Float[torch.Tensor, "batch_size seq_len"]]
+    correction_weights: Optional[Float[torch.Tensor, "batch_size seq_len"]]
+    # Policy versions this row is behind at consumption; one entry per row.
+    rollout_staleness: Optional[Integer[torch.Tensor, "batch_size"]]  # noqa: F821
     teacher_action_log_probs: Optional[Float[torch.Tensor, "batch_size seq_len"]]
     teacher_topk_indices: Optional[Integer[torch.Tensor, "batch_size seq_len top_k"]]
     teacher_topk_logprobs: Optional[Float[torch.Tensor, "batch_size seq_len top_k"]]
@@ -407,6 +409,10 @@ class TrainingBatchIterator(Iterator[Experience]):
     def __len__(self) -> int:
         return self._length
 
+    def chunks(self, start: int, stop: int) -> list[TrainingInputBatch]:
+        """Return the source microbatches in an accumulation window."""
+        return self._chunks[start:stop]
+
     def __iter__(self) -> "TrainingBatchIterator":
         return self
 
@@ -431,6 +437,7 @@ class TrainingBatchIterator(Iterator[Experience]):
             action_mask=batch["response_mask"],
             num_actions=batch.metadata["response_length"],
             rollout_logprobs=batch.get("rollout_logprobs"),
+            correction_weights=batch.get("correction_weights"),
             distillation=distillation_input_from_tensors(
                 teacher_action_log_probs=batch.get("teacher_action_log_probs"),
                 teacher_topk_indices=batch.get("teacher_topk_indices"),

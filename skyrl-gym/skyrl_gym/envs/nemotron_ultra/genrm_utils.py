@@ -30,7 +30,7 @@ import hashlib
 import itertools
 import json
 import logging
-import re
+import math
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -183,132 +183,36 @@ def generate_comparison_pairs(strategy: str, num_responses: int) -> List[Tuple[i
 # =============================================================================
 
 
-def parse_genrm_output(
-    output: str,
-    default_score: float,
-    default_ranking: float,
-    *,
-    raise_on_fail: bool = False,
-) -> Tuple[float, float, float]:
-    """Parse GenRM output to extract scores from JSON format.
+_JUDGE_ERROR_PREVIEW_CHARACTERS = 2000
 
-    Searches for JSON in the output text, trying:
-    1. Fenced JSON blocks (```json {...} ```)
-    2. Any {...} JSON objects, taking the last valid one
 
-    Expected JSON format:
-        {"score_1": <1-5>, "score_2": <1-5>, "ranking": <1-6>}
-
-    Args:
-        output: Raw text output from GenRM model
-        default_score: Default score if parsing fails
-        default_ranking: Default ranking if parsing fails
-        raise_on_fail: If True, raise GenRMOutputParseError on failure
-
-    Returns:
-        Tuple of (score_1, score_2, ranking)
-
-    Raises:
-        GenRMOutputParseError: If raise_on_fail=True and parsing fails
-    """
-
-    def _try_parse(json_str: str) -> Optional[Tuple[float, float, float]]:
-        """Attempt to parse a JSON string into scores."""
+def parse_genrm_output(output: str) -> Tuple[float, float, float]:
+    """Read the final complete GenRM object and require finite numeric scores."""
+    decoder = json.JSONDecoder()
+    cursor = 0
+    parsed = None
+    while (start := output.find("{", cursor)) >= 0:
         try:
-            parsed = json.loads(json_str)
-        except json.JSONDecodeError:
-            return None
-
-        if not isinstance(parsed, dict):
-            return None
-
-        # Handle nested format: {"rubric_evaluations": [...], "overall": {...}}
-        if "overall" in parsed and isinstance(parsed["overall"], dict):
-            parsed = parsed["overall"]
-
-        # Must have at least one expected key
-        if not any(k in parsed for k in ("score_1", "score_2", "ranking")):
-            return None
-
-        try:
-            score_1 = float(parsed.get("score_1", default_score))
-            score_2 = float(parsed.get("score_2", default_score))
-            ranking = float(parsed.get("ranking", default_ranking))
-            return score_1, score_2, ranking
-        except (TypeError, ValueError):
-            return None
-
-    def _find_json_objects(text: str) -> List[str]:
-        """Find top-level JSON objects in text using brace counting."""
-        results = []
-        i = 0
-        while i < len(text):
-            if text[i] == "{":
-                depth = 0
-                start = i
-                in_string = False
-                escape_next = False
-                for j in range(i, len(text)):
-                    ch = text[j]
-                    if escape_next:
-                        escape_next = False
-                        continue
-                    if ch == "\\" and in_string:
-                        escape_next = True
-                        continue
-                    if ch == '"' and not escape_next:
-                        in_string = not in_string
-                        continue
-                    if in_string:
-                        continue
-                    if ch == "{":
-                        depth += 1
-                    elif ch == "}":
-                        depth -= 1
-                        if depth == 0:
-                            results.append(text[start : j + 1])
-                            i = j
-                            break
-            i += 1
-        return results
-
-    try:
-        # Strategy 1: Look for fenced JSON blocks (```json ... ```)
-        for match in re.finditer(r"```json\s*([\s\S]*?)\s*```", output, flags=re.IGNORECASE):
-            for json_str in _find_json_objects(match.group(1)):
-                result = _try_parse(json_str)
-                if result is not None:
-                    return result
-
-        # Strategy 2: Find all top-level {...} and take the last valid one.
-        #
-        # Note: We keep this intentionally permissive because model outputs can include
-        # extra prose around a JSON blob, and the JSON may be pretty-printed across lines.
-        last_valid: Optional[Tuple[float, float, float]] = None
-        for json_str in _find_json_objects(output):
-            result = _try_parse(json_str)
-            if result is not None:
-                last_valid = result
-
-        if last_valid is not None:
-            return last_valid
-
-        # Parsing failed
-        preview = output[:200] + "..." if len(output) > 200 else output
-        msg = f"No parseable JSON found in GenRM output: {preview}"
-
-        if raise_on_fail:
-            raise GenRMOutputParseError(msg)
-
-        logger.warning(msg)
-        return default_score, default_score, default_ranking
-    except Exception as e:
-        preview = output[:200] + "..." if len(output) > 200 else output
-        msg = f"Error parsing GenRM output: {e}. Output: {preview}"
-        if raise_on_fail:
-            raise GenRMOutputParseError(msg) from e
-        logger.exception(msg)
-        return default_score, default_score, default_ranking
+            parsed, consumed = decoder.raw_decode(output[start:])
+        except json.JSONDecodeError as error:
+            raise GenRMOutputParseError(
+                f"Incomplete GenRM JSON: {output[-_JUDGE_ERROR_PREVIEW_CHARACTERS:]}"
+            ) from error
+        cursor = start + consumed
+    if isinstance(parsed, dict) and isinstance(parsed.get("overall"), dict):
+        parsed = parsed["overall"]
+    keys = ("score_1", "score_2", "ranking")
+    if not isinstance(parsed, dict) or not all(key in parsed for key in keys):
+        raise GenRMOutputParseError(f"Missing GenRM scores: {output[-_JUDGE_ERROR_PREVIEW_CHARACTERS:]}")
+    values = tuple(parsed[key] for key in keys)
+    if any(type(value) not in (int, float) or not math.isfinite(value) for value in values):
+        raise GenRMOutputParseError(
+            f"Nonfinite or nonnumeric GenRM scores: {output[-_JUDGE_ERROR_PREVIEW_CHARACTERS:]}"
+        )
+    first, second, ranking = map(float, values)
+    if not (1 <= first <= 5 and 1 <= second <= 5 and 1 <= ranking <= 6):
+        raise GenRMOutputParseError(f"GenRM scores outside their ranges: {output[-_JUDGE_ERROR_PREVIEW_CHARACTERS:]}")
+    return first, second, ranking
 
 
 # =============================================================================
@@ -561,7 +465,7 @@ def aggregate_scores(
     tiebreak_count = 0
 
     # Process each comparison
-    for (score_1, score_2, ranking), (i, j, _judge_idx) in zip(comparison_results, comparison_metadata):
+    for (score_1, score_2, ranking), (i, j, _judge_idx) in zip(comparison_results, comparison_metadata, strict=True):
         all_individual_scores.extend([score_1, score_2])
 
         # Apply tiebreaker when scores are equal

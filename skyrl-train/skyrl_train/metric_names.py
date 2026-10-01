@@ -1,6 +1,7 @@
 """Metric names shared by training and offline analysis."""
 
 ROLLOUT_FAILURE_FRACTION_METRIC = "generate/failed_trajectory_fraction"
+ENVIRONMENT_METRIC_PREFIX = "environment/"
 IDENTITY_AWARE_REWARD_METRIC_PREFIX = "generate/reward_shaping/identity_aware"
 LITERAL_BRIDGE_CORRELATED_TRIALS_METRIC = "generate/literal_bridge/correlated_trials"
 LITERAL_BRIDGE_CORRELATED_TURNS_METRIC = "generate/literal_bridge/correlated_turns"
@@ -18,3 +19,7 @@ TIS_TITO_FULL_ATTEMPTS_METRIC = "generate/tis/tito_full/attempts"
 TIS_TITO_FULL_SUCCESS_FRACTION_METRIC = "generate/tis/tito_full/success_fraction"
 TIS_TITO_FULL_DECLINE_COUNT_METRIC = "generate/tis/tito_full/decline_count"
 TIS_TITO_FULL_DECLINE_METRIC_PREFIX = "generate/tis/tito_full/decline/"
+
+CORRECTION_WEIGHT_MEAN_METRIC = "policy/correction/weight_mean"
+CORRECTION_TRUNCATED_FRACTION_METRIC = "policy/correction/truncated_fraction"
+CORRECTION_MASKED_FRACTION_METRIC = "policy/correction/masked_fraction"

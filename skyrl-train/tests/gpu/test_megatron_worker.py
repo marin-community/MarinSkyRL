@@ -9,6 +9,8 @@ import hydra
 from omegaconf import DictConfig
 import torch
 import asyncio
+import copy
+from types import SimpleNamespace
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from omegaconf import OmegaConf
 from tests.gpu.utils import (
@@ -26,7 +28,7 @@ from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_disp
 from skyrl_train.utils.torch_utils import logprobs_from_logits
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl_train.utils.policy_losses import POLICY_CLIP_METRIC_KEYS
+from skyrl_train.objective.losses import POLICY_CLIP_METRIC_KEYS
 from tests.gpu.grug_gpu_gates import require_hoppers
 
 
@@ -35,6 +37,63 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 # this might be a model specific mbridge issue - see if this persists when we transition to Megatron-Bridge
 # MOE_MODEL_NAME = "Qwen/Qwen1.5-MoE-A2.7B"
 MOE_MODEL_NAME = "Qwen/Qwen3-30B-A3B"
+
+
+@pytest.mark.parametrize("megatron_overrides", [False, True])
+def test_native_adamw_recipe_matches_torch_weight_updates(megatron_overrides):
+    from megatron.core import parallel_state
+    from skyrl_train.distributed.megatron.optimizer import (
+        get_megatron_optimizer,
+        get_megatron_optimizer_param_scheduler,
+        init_megatron_optim_config,
+    )
+
+    torch.distributed.init_process_group("nccl", store=torch.distributed.HashStore(), rank=0, world_size=1)
+    try:
+        parallel_state.initialize_model_parallel()
+        torch.manual_seed(17)
+        model = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.LayerNorm(4)).cuda()
+        model.config = SimpleNamespace()
+        model.ddp_config = SimpleNamespace(use_megatron_fsdp=False, num_distributed_optimizer_instances=1)
+        reference = copy.deepcopy(model)
+        recipe = {
+            "optimizer": "AdamW",
+            "lr": 0.03,
+            "weight_decay": 0.2,
+            "max_grad_norm": 0.0,
+            "num_warmup_steps": 2,
+            "lr_warmup_init": 0.006,
+            "adam_betas": [0.7, 0.8],
+            "optimizer_kwargs": {"eps": 1e-3},
+        }
+        kwargs = {"use_distributed_optimizer": False, "bf16": False, "params_dtype": torch.float32}
+        betas, epsilon = (0.7, 0.8), 1e-3
+        if megatron_overrides:
+            kwargs.update(adam_beta1=0.6, adam_beta2=0.75, adam_eps=2e-3)
+            betas, epsilon = (0.6, 0.75), 2e-3
+        optimizer = get_megatron_optimizer([model], init_megatron_optim_config(recipe, kwargs))
+        scheduler = get_megatron_optimizer_param_scheduler(optimizer, OmegaConf.create(recipe), num_training_steps=3)
+        adamw = torch.optim.AdamW(reference.parameters(), lr=0.03, betas=betas, eps=epsilon, weight_decay=0.2)
+        for step, (amplitude, learning_rate) in enumerate(zip((0.125, -0.25, 0.5), (0.006, 0.018, 0.03), strict=True)):
+            if step == 1:
+                saved_scheduler = scheduler.state_dict()
+                scheduler.step(1)
+                scheduler.load_state_dict(saved_scheduler)
+            adamw.param_groups[0]["lr"] = learning_rate
+            for parameter, expected in zip(model.parameters(), reference.parameters(), strict=True):
+                gradient = torch.linspace(-amplitude, amplitude, parameter.numel(), device="cuda").reshape_as(parameter)
+                parameter.grad = gradient.clone()
+                parameter.main_grad = parameter.grad
+                expected.grad = gradient.clone()
+            success, _, _ = optimizer.step()
+            adamw.step()
+            assert success
+            for parameter, expected in zip(model.parameters(), reference.parameters(), strict=True):
+                torch.testing.assert_close(parameter, expected, rtol=1e-6, atol=1e-6)
+            scheduler.step(1)
+    finally:
+        parallel_state.destroy_model_parallel()
+        torch.distributed.destroy_process_group()
 
 
 def test_megatron_flash_attention_cp2_forward_backward(ray_init_fixture):
@@ -176,7 +235,6 @@ def test_megatron_policy_weight_sync(colocate_all, inference_tp, megatron_tp, me
             model=MODEL_NAME,
             cfg=cfg,
             use_local=True,
-            async_engine=cfg.generator.async_engine,
             tp_size=cfg.generator.inference_engine_tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
             backend="vllm",

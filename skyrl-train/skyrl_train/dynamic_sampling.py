@@ -11,7 +11,6 @@ from typing import Mapping, Protocol, Sequence
 
 class DynamicSamplingType(StrEnum):
     FILTER = "filter"
-    REPLACE = "replace"
 
 
 class DynamicSamplingRewardSource(StrEnum):
@@ -27,6 +26,7 @@ DEFAULT_DYNAMIC_SAMPLING_MIN_REWARD_STD = 0.0
 class DynamicSamplingCriteria:
     reward_source: DynamicSamplingRewardSource
     min_reward_std: float
+    max_mean_reward: float | None = None
 
 
 DEFAULT_DYNAMIC_SAMPLING_CRITERIA = DynamicSamplingCriteria(
@@ -38,16 +38,20 @@ DEFAULT_DYNAMIC_SAMPLING_CRITERIA = DynamicSamplingCriteria(
 def resolve_dynamic_sampling_criteria(
     informative_on: str = DEFAULT_DYNAMIC_SAMPLING_REWARD_SOURCE,
     min_reward_std: float = DEFAULT_DYNAMIC_SAMPLING_MIN_REWARD_STD,
+    max_mean_reward: float | None = None,
 ) -> DynamicSamplingCriteria:
     reward_source = DynamicSamplingRewardSource(informative_on)
     if not math.isfinite(min_reward_std) or min_reward_std < 0:
         raise ValueError("dynamic_sampling.min_reward_std must be finite and non-negative")
-    return DynamicSamplingCriteria(reward_source=reward_source, min_reward_std=min_reward_std)
+    if max_mean_reward is not None and not math.isfinite(max_mean_reward):
+        raise ValueError("dynamic_sampling.max_mean_reward must be finite or null")
+    return DynamicSamplingCriteria(reward_source, min_reward_std, max_mean_reward)
 
 
 class GroupSelectionResult(StrEnum):
     KEEP = "keep"
     INSUFFICIENT_REWARD_SPREAD = "insufficient_reward_spread"
+    REWARD_MEAN_TOO_HIGH = "reward_mean_too_high"
 
 
 class GeneratedGroup(Protocol):
@@ -71,13 +75,13 @@ def _reward_total(reward: object) -> float:
     return float(reward)
 
 
-def group_is_informative_for_dynamic_sampling(
+def group_selection_result(
     trajectory_batch: Mapping[str, object],
     row_indices: Sequence[int] | None = None,
     *,
     criteria: DynamicSamplingCriteria,
-) -> bool:
-    """Return whether a group has available outcomes with sufficient final-reward spread."""
+) -> GroupSelectionResult:
+    """Select groups whose final outcome mean and spread satisfy the configured limits."""
     response_ids = trajectory_batch.get("response_ids")
     if not isinstance(response_ids, Sequence) or isinstance(response_ids, (str, bytes)):
         raise ValueError("response_ids must be a sequence")
@@ -91,7 +95,7 @@ def group_is_informative_for_dynamic_sampling(
     if criteria.reward_source is DynamicSamplingRewardSource.UNSHAPED:
         availability = _aligned_sequence(trajectory_batch, "unshaped_reward_available", row_count)
         if availability is not None and any(not availability[index] for index in row_indices):
-            return False
+            return GroupSelectionResult.INSUFFICIENT_REWARD_SPREAD
     is_last_step = _aligned_sequence(trajectory_batch, "is_last_step", row_count)
 
     final_outcomes = []
@@ -101,9 +105,11 @@ def group_is_informative_for_dynamic_sampling(
         final_outcomes.append(_reward_total(outcomes[index]))
     if not final_outcomes:
         raise ValueError("dynamic sampling group must contain at least one final trial row")
-    if len(final_outcomes) == 1:
-        return True
-    return statistics.pstdev(final_outcomes) > criteria.min_reward_std
+    if criteria.max_mean_reward is not None and statistics.mean(final_outcomes) >= criteria.max_mean_reward:
+        return GroupSelectionResult.REWARD_MEAN_TOO_HIGH
+    if len(final_outcomes) == 1 or statistics.pstdev(final_outcomes) > criteria.min_reward_std:
+        return GroupSelectionResult.KEEP
+    return GroupSelectionResult.INSUFFICIENT_REWARD_SPREAD
 
 
 class GroupSelectionPolicy:
@@ -113,31 +119,12 @@ class GroupSelectionPolicy:
         self,
         sampling_type: DynamicSamplingType | None,
         *,
-        criteria: DynamicSamplingCriteria,
+        criteria: DynamicSamplingCriteria = DEFAULT_DYNAMIC_SAMPLING_CRITERIA,
     ) -> None:
         self.sampling_type = sampling_type
         self.criteria = criteria
 
-    @classmethod
-    def for_fully_async(
-        cls,
-        sampling_type: str | None,
-        *,
-        criteria: DynamicSamplingCriteria = DEFAULT_DYNAMIC_SAMPLING_CRITERIA,
-    ) -> GroupSelectionPolicy:
-        resolved_type = DynamicSamplingType(sampling_type) if sampling_type is not None else None
-        if resolved_type not in (None, DynamicSamplingType.FILTER):
-            raise ValueError(
-                f"fully asynchronous training supports dynamic_sampling.type=filter or null; got {sampling_type!r}"
-            )
-        return cls(resolved_type, criteria=criteria)
-
     def evaluate(self, group: GeneratedGroup) -> GroupSelectionResult:
         if self.sampling_type is None:
             return GroupSelectionResult.KEEP
-        if group_is_informative_for_dynamic_sampling(
-            group.trajectory_batch,
-            criteria=self.criteria,
-        ):
-            return GroupSelectionResult.KEEP
-        return GroupSelectionResult.INSUFFICIENT_REWARD_SPREAD
+        return group_selection_result(group.trajectory_batch, criteria=self.criteria)

@@ -8,6 +8,9 @@ Run with:
 uv run --group dev --extra vllm --extra megatron pytest tests/gpu/gpu_ci/test_trainer_full_checkpointing.py
 """
 
+import asyncio
+from types import SimpleNamespace
+
 import ray
 import pytest
 import hydra
@@ -17,17 +20,22 @@ import shutil
 import tempfile
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import Dataset
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from transformers import AutoTokenizer
 
+from skyrl_train.rollouts.context import TrainingContextState
+from skyrl_train.rollouts.loader import PromptLoaderState
+from skyrl_train.checkpoint_generation import resolve_checkpoint_payload
 from skyrl_train.utils.tracking import Tracking
 from skyrl_train.trainer import RayPPOTrainer
-from skyrl_train.checkpoint_generation import resolve_checkpoint_payload
 from tests.gpu.utils import import_worker, ray_init_for_tests
 from skyrl_train.entrypoints.main_base import config_dir
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 NUM_GPUS = 2
+ROLLOUT_STATE = TrainingContextState(
+    loader=PromptLoaderState(order={"epoch": 0, "position": 2}, retries=[]), ready=[], object_store_root=None
+)
 
 
 class DummyDataset(Dataset):
@@ -118,6 +126,10 @@ def create_minimal_trainer(cfg: DictConfig):
         eval_dataset=None,
         inference_engine_client=None,
         trajectory_runner=mock_trajectory_runner,
+        context=SimpleNamespace(
+            config=SimpleNamespace(max_staleness_steps=0, batch_size=cfg.trainer.train_batch_size),
+            state_dict=AsyncMock(return_value=ROLLOUT_STATE),
+        ),
     )
 
     return trainer
@@ -127,9 +139,8 @@ def saved_optimizer_format(checkpoint_dir: str) -> str:
     from megatron.core import dist_checkpointing
     from skyrl_train.distributed.megatron.megatron_strategy import _saved_optimizer_sharding_type
 
-    common_state = dist_checkpointing.load_common_state_dict(
-        os.path.join(resolve_checkpoint_payload(checkpoint_dir), "policy")
-    )
+    payload = resolve_checkpoint_payload(checkpoint_dir, verify_files=True)
+    common_state = dist_checkpointing.load_common_state_dict(os.path.join(payload, "policy"))
     return _saved_optimizer_sharding_type(common_state)
 
 
@@ -181,7 +192,7 @@ def test_trainer_full_checkpointing(ray_init_fixture, initial_sharding_type, res
         trainer1.global_step = 2
 
         # Save checkpoint
-        trainer1.save_checkpoints()
+        asyncio.run(trainer1.save_checkpoints())
 
         # Capture state before teardown
         saved_global_step = trainer1.global_step
@@ -243,19 +254,18 @@ def test_trainer_full_checkpointing(ray_init_fixture, initial_sharding_type, res
         assert loaded_global_step == saved_global_step, (
             f"Expected global_step={saved_global_step}, got {loaded_global_step}"
         )
-        assert loaded_checkpoint_dir == payload_dir, "Checkpoint payload path mismatch"
+        assert loaded_checkpoint_dir == payload_dir, "Checkpoint path mismatch"
+        assert trainer2._restored_rollout_state == ROLLOUT_STATE
 
         # ============= PHASE 3: Continue Training =============
         print("Phase 3: Second checkpoint save")
 
         # Try to save another checkpoint to test cleanup logic
         trainer2.global_step = 3
-        trainer2.save_checkpoints()
+        asyncio.run(trainer2.save_checkpoints())
 
         next_checkpoint_dir = os.path.join(cfg.trainer.export_path, f"global_step_{trainer2.global_step}")
-        assert os.path.exists(resolve_checkpoint_payload(next_checkpoint_dir, verify_files=True)), (
-            "Could not save checkpoint after resume"
-        )
+        assert os.path.exists(next_checkpoint_dir), "Could not save checkpoint after resume"
         if strategy == "megatron":
             assert saved_optimizer_format(next_checkpoint_dir) == resumed_sharding_type
 

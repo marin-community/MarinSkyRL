@@ -8,6 +8,7 @@ requires exact state equality before and after replaying the SHA256-pinned batch
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -168,7 +169,7 @@ def test_megatron_checkpoint_reference_records_uninterrupted_step(ray_init_fixtu
 
         rng_path = str(local / "before-save-rng")
         _rank_results(trainer, "parity_write_rng_snapshot", rng_path)
-        trainer.save_checkpoints()
+        asyncio.run(trainer.save_checkpoints())
         _rank_results(trainer, "parity_compare_rng_snapshot", rng_path)
 
         checkpoint = f"{checkpoint_root}/checkpoints/global_step_1"

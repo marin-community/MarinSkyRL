@@ -87,16 +87,22 @@ def test_missing_final_newline_defers_last_record(tmp_path):
     assert len(store.entries_for_trial(str(p), "A")) == 1
 
 
-def test_shrink_resets_and_rereads(tmp_path):
-    """A truncation below the cursor (same path rewritten smaller) resets the reader
-    instead of returning stale/garbled state."""
+def test_shrink_or_path_change_resets_and_rereads(tmp_path):
+    """A missing log reads as empty; a truncation below the cursor (same path rewritten
+    smaller) or a switch to a different path resets the reader instead of returning
+    stale/garbled state."""
     p = tmp_path / "literal.jsonl"
-    _write(p, [_entry("A", 1.0, [10]), _entry("A", 2.0, [11])])
     store = LiteralLogStore()
+    assert store.all_entries(str(p)) == []
+    assert store.entries_for_trial(str(p), "A") == []
+    _write(p, [_entry("A", 1.0, [10]), _entry("A", 2.0, [11])])
     assert len(store.all_entries(str(p))) == 2
     _write(p, [_entry("A", 9.0, [99])])  # rewrite smaller
     out = store.all_entries(str(p))
     assert len(out) == 1 and out[0]["literal"]["completion_token_ids"] == [99]
+
+    other = _write(tmp_path / "other.jsonl", [_entry("B", 1.0, [20]), _entry("B", 2.0, [21])])
+    assert [e["trial_id"] for e in store.all_entries(other)] == ["B", "B"]
 
 
 def test_inode_replacement_resets_even_when_not_smaller(tmp_path):
@@ -138,12 +144,6 @@ def test_transient_read_failure_recovers_without_reset(tmp_path):
     os.rename(away, p)  # blip over (same inode)
     assert len(store.entries_for_trial(str(p), "A")) == 1
     assert len(store.all_entries(str(p))) == 1
-
-
-def test_missing_log_returns_empty(tmp_path):
-    store = LiteralLogStore()
-    assert store.all_entries(str(tmp_path / "nope.jsonl")) == []
-    assert store.entries_for_trial(str(tmp_path / "nope.jsonl"), "A") == []
 
 
 def test_malformed_lines_skipped(tmp_path):
@@ -196,24 +196,13 @@ def test_returned_list_is_a_snapshot(tmp_path):
     assert "caller-junk" not in fresh  # prior caller's mutation didn't leak into the cache
 
 
-def test_path_change_resets_state(tmp_path):
-    """Pointing the store at a different path resets the cursor and reads the new file."""
-    p1 = tmp_path / "a.jsonl"
-    p2 = tmp_path / "b.jsonl"
-    _write(p1, [_entry("A", 1.0, [10])])
-    _write(p2, [_entry("B", 1.0, [20]), _entry("B", 2.0, [21])])
-    store = LiteralLogStore()
-    assert len(store.all_entries(str(p1))) == 1
-    assert [e["trial_id"] for e in store.all_entries(str(p2))] == ["B", "B"]
-
-
 def test_ingest_does_not_retain_payload_bytes(tmp_path):
     """Ingesting the shared log must retain an O(1)-per-row index, NOT the row payloads.
 
-    Every RolloutCoordinator ingests the ONE shared log while release_trial only fires
+    Every rollout worker ingests the ONE shared log while release_trial only fires
     for the trials THAT process consumes, so any per-payload retention grows without
-    bound with the log (measured: 4 coordinators each permanently held the other
-    coordinators' ~3/4 of a 98 GB log as parsed objects, ~85 GiB/h of RSS growth).
+    bound with the log (measured: 4 workers each permanently held the other
+    workers' ~3/4 of a 98 GB log as parsed objects, ~85 GiB/h of RSS growth).
     Here trial B plays the foreign trial this process never consumes: after ingest, the
     store's retained containers must stay tiny relative to B's payload bytes, while B's
     rows remain fully readable on demand."""
@@ -253,8 +242,11 @@ def test_release_trial_frees_rows_from_both_index_and_flat_list(tmp_path):
     p = tmp_path / "literal.jsonl"
     _write(p, entries)
     store = LiteralLogStore()
+    store.release_trial("never-read")  # releasing before any read is a no-op
     assert len(store.all_entries(str(p))) == 3
+    store.release_trial("Z")  # unknown trial is a no-op
     store.release_trial("A")
+    store.release_trial("A")  # releasing twice is a no-op
     # A is gone from both views; B is untouched.
     assert store.entries_for_trial(str(p), "A") == []
     assert [e["literal"]["completion_token_ids"] for e in store.entries_for_trial(str(p), "B")] == [[20]]
@@ -276,20 +268,6 @@ def test_release_trial_fences_out_late_appends(tmp_path):
     assert store.entries_for_trial(str(p), "A") == []
     assert store.all_entries(str(p)) == []
     assert store._state.offset == os.path.getsize(p)
-
-
-def test_release_trial_idempotent_and_noop_when_unknown(tmp_path):
-    """Releasing an unknown trial, or the same trial twice, or before any read, is a
-    safe no-op that never raises."""
-    store = LiteralLogStore()
-    store.release_trial("never-read")  # no state yet
-    p = tmp_path / "literal.jsonl"
-    _write(p, [_entry("A", 1.0, [10])])
-    assert len(store.all_entries(str(p))) == 1
-    store.release_trial("Z")  # unknown trial
-    store.release_trial("A")
-    store.release_trial("A")  # twice
-    assert store.all_entries(str(p)) == []
 
 
 def test_release_of_one_trial_does_not_disturb_a_concurrent_trial(tmp_path):

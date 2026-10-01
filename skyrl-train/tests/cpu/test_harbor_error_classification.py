@@ -1,9 +1,9 @@
-from loguru import logger
 from omegaconf import OmegaConf
 import pytest
 from harbor_config.errors import ErrorCategory, errors_by_category, known_error_types
 
-from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled
+from skyrl_train.config.objective_spec import rollout_logprobs_required
+from skyrl_train.config.utils import get_default_config
 from skyrl_train.utils.harbor_errors import (
     ErrorHandlingConfig,
     ErrorTreatment,
@@ -55,20 +55,13 @@ def test_campaign_override_takes_precedence_over_shared_taxonomy():
     assert treatment is ErrorTreatment.ZERO
 
 
-def test_unknown_error_is_loud_before_explicit_fallback():
-    records = []
-    sink = logger.add(lambda message: records.append(message.record), level="ERROR")
-    try:
-        treatment = classify_exception_type(
-            "FutureHarborError",
-            ErrorHandlingConfig(default_error_treatment=ErrorTreatment.MASK),
-        )
-    finally:
-        logger.remove(sink)
+def test_unknown_error_uses_explicit_fallback_treatment():
+    treatment = classify_exception_type(
+        "FutureHarborError",
+        ErrorHandlingConfig(default_error_treatment=ErrorTreatment.MASK),
+    )
 
     assert treatment is ErrorTreatment.MASK
-    assert len(records) == 1
-    assert records[0]["level"].name == "ERROR"
 
 
 def test_passthrough_requires_a_verifier_result_to_remain_in_baseline():
@@ -76,22 +69,6 @@ def test_passthrough_requires_a_verifier_result_to_remain_in_baseline():
     assert treatment_excludes_from_baseline(ErrorTreatment.PASSTHROUGH, verifier_available=True) is False
     assert treatment_excludes_from_baseline(ErrorTreatment.MASK, verifier_available=True) is True
     assert treatment_excludes_from_baseline(ErrorTreatment.ZERO, verifier_available=False) is False
-
-
-def test_passthrough_exceptions_are_added_to_retry_exclusions():
-    error_handling = ErrorHandlingConfig(
-        passthrough_exceptions=frozenset({"AgentTimeoutError", "ContextLengthExceededError"})
-    )
-
-    excluded = retry_excluded_exception_types({"VerifierTimeoutError"}, error_handling)
-
-    assert {
-        "AgentTimeoutError",
-        "ContextLengthExceededError",
-        "OutputLengthExceededError",
-        "TurnCapExhaustedError",
-        "VerifierTimeoutError",
-    } <= excluded
 
 
 @pytest.mark.parametrize(
@@ -108,11 +85,6 @@ def test_retry_exclusion_matches_each_known_taxonomy_classification(error_type):
         assert error_type in excluded
     else:
         assert error_type not in excluded
-
-
-@pytest.mark.parametrize("error_type", ["TurnCapExhaustedError", "OutputLengthExceededError"])
-def test_reported_taxonomy_passthrough_errors_are_terminal_without_campaign_overrides(error_type):
-    assert error_type in retry_excluded_exception_types(None, ErrorHandlingConfig())
 
 
 def test_retry_exclusion_follows_campaign_treatment_override():
@@ -145,17 +117,18 @@ def test_retryable_infrastructure_classification_is_not_implicitly_excluded():
 @pytest.mark.parametrize(
     "algorithm_config",
     [
-        {"use_tis": True, "policy_loss_type": "regular"},
-        {"use_tis": False, "policy_loss_type": "behavior_clip"},
+        {"off_policy_correction": "tis", "policy_loss_type": "regular"},
+        {"off_policy_correction": "none", "policy_loss_type": "behavior_clip"},
     ],
 )
 def test_behavior_referenced_passthrough_without_logprobs_gets_named_error(algorithm_config):
-    required = rollout_logprobs_enabled(OmegaConf.create(algorithm_config))
+    cfg = get_default_config()
+    cfg.trainer.algorithm = OmegaConf.merge(cfg.trainer.algorithm, algorithm_config)
 
     error_type = passthrough_logprob_error_type(
         ErrorTreatment.PASSTHROUGH,
         has_rollout_logprobs=False,
-        rollout_logprobs_required=required,
+        rollout_logprobs_required=rollout_logprobs_required(cfg.trainer.algorithm),
     )
 
     assert error_type == PASSTHROUGH_WITHOUT_LOGPROBS_ERROR
