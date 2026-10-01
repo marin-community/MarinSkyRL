@@ -129,3 +129,38 @@ def test_policy_loss_ignores_masked_values(loss, loss_config):
     assert results[0].metrics == results[1].metrics
     torch.testing.assert_close(gradients[0], gradients[1], rtol=0, atol=0)
     torch.testing.assert_close(gradients[1][~mask.bool()], torch.zeros_like(gradients[1][~mask.bool()]))
+
+
+@pytest.mark.parametrize("invalid_rollout", [None, float("nan"), 0.5])
+def test_importance_sampling_refuses_missing_or_invalid_behavior_evidence(loss_config, invalid_rollout):
+    loss_config.use_tis = True
+    inputs = PolicyLossInputs(
+        torch.tensor([[-2.0]]),
+        torch.tensor([[-2.0]]),
+        None if invalid_rollout is None else torch.tensor([[invalid_rollout]]),
+        torch.ones(1, 1),
+        torch.ones(1, 1),
+    )
+    with pytest.raises(ValueError, match="rollout logprobs"):
+        importance_sampling_policy_loss(inputs, loss_config)
+
+
+def test_importance_sampling_correction_ignores_padding_and_environment_tokens(loss_config):
+    loss_config.use_tis = True
+    actions = torch.tensor([[-2.0, float("nan"), -1.0]], requires_grad=True)
+    batch = build_objective_micro_batch(
+        action_log_probs=actions,
+        old_action_log_probs=actions.detach(),
+        base_action_log_probs=None,
+        advantages=torch.ones(1, 3),
+        loss_mask=torch.tensor([[1.0, 0.0, 0.0]]),
+        rollout_logprobs=torch.tensor([[-3.0, float("nan"), float("nan")]]),
+        response_span_tags=None,
+        token_entropy=torch.zeros(1, 3),
+        think_token_weight=1.0,
+        teacher=None,
+    )
+    loss = importance_sampling_policy_loss(batch.policy, loss_config).values.sum()
+    loss.backward()
+    torch.testing.assert_close(loss, torch.tensor(-2.0))
+    torch.testing.assert_close(actions.grad, torch.tensor([[-2.0, 0.0, 0.0]]))

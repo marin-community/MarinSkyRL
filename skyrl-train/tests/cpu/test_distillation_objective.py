@@ -734,4 +734,3 @@ def test_replace_mode_tis_matches_enumerated_reverse_kl_gradient(sampling_probs,
     torch.testing.assert_close(logits.grad, expected_gradient)
     assert old.grad is None
     assert rollout.grad is None
-

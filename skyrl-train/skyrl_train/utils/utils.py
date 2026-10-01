@@ -650,7 +650,8 @@ def validate_cfg(cfg: DictConfig):
         assert cfg.trainer.algorithm.policy_loss_type in [
             "regular",
             "dual_clip",
-        ], "TIS is only implemented for regular and dual_clip policy loss types"
+            "importance_sampling",
+        ], "TIS is only implemented for regular, dual_clip, and importance_sampling policy loss types"
 
     if cfg.trainer.policy.model.lora.rank > 0:
         raise ValueError("Megatron training does not support LoRA")
