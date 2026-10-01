@@ -8,6 +8,9 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+import torch
+
+from skyrl_train.objective.teacher import teacher_advantages
 
 from ci.marin_nightly.gate import (
     GateSpec,
@@ -24,6 +27,7 @@ from ci.marin_nightly.gate import (
 
 SHIPPED_SPEC = Path(__file__).parents[2] / "ci" / "marin_nightly" / "specs" / "gsm8k-qwen3-0.6b-megatron.json"
 OPENCODE_SPEC = Path(__file__).parents[2] / "ci" / "marin_nightly" / "specs" / "opencode-qwen3-8b.json"
+OPD_SPEC = Path(__file__).parents[2] / "ci" / "marin_nightly" / "specs" / "opd-qwen3-sync.json"
 
 # What the trainer actually writes: loguru decorates the line, so the payload is embedded
 # rather than anchored at the start. Keep this in the shape the trainer emits it.
@@ -405,6 +409,21 @@ def test_shipped_spec_gates_a_healthy_run():
     early_nan = parse_metrics(healthy_log(steps=spec.min_train_steps))
     early_nan[0] = replace(early_nan[0], values={**early_nan[0].values, "policy/policy_loss": float("nan")})
     assert check_run(early_nan, spec, wall_clock_seconds=600)
+
+
+def test_opd_gate_requires_teacher_credit_on_valid_training_tokens():
+    spec = load_spec(OPD_SPEC)
+    for eligible in (True, False):
+        _, metrics = teacher_advantages(
+            torch.tensor([[-0.4, -1.2]]),
+            torch.tensor([[-1.0, -1.0]]),
+            torch.full((1, 2), eligible),
+            torch.tensor([[0.3, 0.7]]),
+            clip=None,
+        )
+        metrics.update({"policy/raw_grad_norm": 0.5, "distillation/scored_tokens": 2, "distillation/teacher_count": 1})
+        failures = check_run(parse_metrics(mirror_line(1, **metrics)), spec, wall_clock_seconds=300)
+        assert (failures == []) == eligible
 
 
 def test_opencode_spec_requires_exact_concurrent_literal_coverage():

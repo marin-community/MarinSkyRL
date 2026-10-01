@@ -9,7 +9,7 @@ import torch
 from marinskyrl.distillation import TeacherEvidenceKind
 from skyrl_train.distillation import (
     StudentSelectedTeacherEvidence,
-    StudentTopKPolicySurrogateInput,
+    StudentTopKInput,
     TeacherScoreRequest,
     prepare_student_topk_policy_surrogate,
     validate_distillation_attachment,
@@ -192,7 +192,7 @@ async def test_shared_coordinator_prepares_student_selected_input_from_oracle():
     finally:
         await coordinator.close()
 
-    assert isinstance(scored.distillation, StudentTopKPolicySurrogateInput)
+    assert isinstance(scored.distillation, StudentTopKInput)
     torch.testing.assert_close(scored.distillation.student_topk_indices, request.student_topk_indices)
     torch.testing.assert_close(scored.distillation.loss_weights, torch.tensor([[0.5, 0.125]]))
 
@@ -228,7 +228,7 @@ def test_routed_student_selected_scores_restore_original_rows_and_weights():
 
     assembled = TeacherEvidenceCoordinator.assemble_routed(routed, tuple(scored))
 
-    assert isinstance(assembled.distillation, StudentTopKPolicySurrogateInput)
+    assert isinstance(assembled.distillation, StudentTopKInput)
     torch.testing.assert_close(assembled.distillation.teacher_on_student_logprobs[0], scores[1][0])
     torch.testing.assert_close(assembled.distillation.teacher_on_student_logprobs[1], scores[0][0])
     torch.testing.assert_close(assembled.distillation.loss_weights, torch.tensor([[0.5, 0.125], [0.5, 0.125]]))

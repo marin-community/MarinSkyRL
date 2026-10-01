@@ -23,6 +23,7 @@ from loguru import logger
 import asyncio
 import multiprocessing as mp
 
+from skyrl_train.config.objective_spec import rollout_logprobs_required
 from skyrl_train.config.trajectory_runner_capabilities import (
     EntrypointOperation,
     TrajectoryRunnerMode,
@@ -471,7 +472,7 @@ class BasePPOExp:
 
         from skyrl_train.trajectory_runners.harbor.execution import HarborRunnerSpec  # noqa: PLC0415
         from skyrl_train.trajectory_runners.nemotron_ultra import NemotronUltraTrajectoryRouter  # noqa: PLC0415
-        from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled  # noqa: PLC0415
+        from skyrl_train.utils.algorithm_registry import PolicyLossRegistry  # noqa: PLC0415
 
         if not cfg.get("terminal_bench_config"):
             raise ValueError("data.terminal_bench_data requires terminal_bench_config")
@@ -480,7 +481,9 @@ class BasePPOExp:
             gym_runner=gym_runner,
             harbor_runner=harbor_runner,
             terminal_bench_data=terminal_bench_data,
-            require_rollout_logprobs=rollout_logprobs_enabled(cfg.trainer.algorithm),
+            require_rollout_logprobs=rollout_logprobs_required(
+                cfg.trainer.algorithm, loss_spec=PolicyLossRegistry.spec(cfg.trainer.algorithm.policy_loss_type)
+            ),
             tis_lcs_alert_threshold=float(cfg.trainer.algorithm.tis_lcs_alert_threshold),
         )
 
@@ -672,13 +675,17 @@ def run_ray_driver(
     from skyrl_train.entrypoints.ray_lifecycle import exit_without_ray_destructors, shutdown_ray  # noqa: PLC0415
     from marinskyrl.process_diagnostics import write_exception_receipt  # noqa: PLC0415
     from skyrl_train.telemetry import DRIVER_ROLE, process_telemetry  # noqa: PLC0415
+    from skyrl_train import objective  # noqa: F401, PLC0415 - register losses when the training runtime loads
     from skyrl_train.utils import validate_cfg  # noqa: PLC0415
     from skyrl_train.utils.logging_utils import log_exception_as_text  # noqa: PLC0415
     from skyrl_train.utils.progress import configure_progress  # noqa: PLC0415 - keep launcher imports Torch-free
     from skyrl_train.utils.utils import initialize_ray  # noqa: PLC0415
+    from skyrl_train.utils.algorithm_registry import PolicyLossRegistry  # noqa: PLC0415
 
     validate_cfg(cfg)
-    validate_trajectory_runner_capabilities(cfg, runner_mode, operation)
+    validate_trajectory_runner_capabilities(
+        cfg, runner_mode, operation, loss_spec=PolicyLossRegistry.spec(cfg.trainer.algorithm.policy_loss_type)
+    )
     configure_progress(cfg.trainer.progress)
 
     initialize_ray(cfg)

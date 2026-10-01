@@ -6,6 +6,7 @@ from enum import StrEnum
 from omegaconf import DictConfig
 
 from marinskyrl.distillation import compile_distillation_plan_from_config
+from skyrl_train.config.objective_spec import LossSpec, rollout_logprobs_required
 
 from marinskyrl.harbor_agent_names import (
     DEFAULT_HARBOR_AGENT_NAME,
@@ -262,12 +263,10 @@ def validate_trajectory_runner_capabilities(
     cfg: DictConfig,
     mode: TrajectoryRunnerMode,
     operation: EntrypointOperation = EntrypointOperation.TRAIN,
+    *,
+    loss_spec: LossSpec | None = None,
 ) -> None:
     """Reject operation and runner combinations that cannot supply required training evidence."""
-    # Keep launcher imports Torch-free. Importing a skyrl_train.utils submodule
-    # executes that package's eager registration imports, including Torch.
-    from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled  # noqa: PLC0415
-
     if mode is not TrajectoryRunnerMode.SKYRL_GYM and any(
         callback.get("type") == "evaluation" and callback.get("additional_evaluations")
         for callback in (cfg.trainer.get("callbacks") or [])
@@ -284,7 +283,7 @@ def validate_trajectory_runner_capabilities(
         _validate_teacher_scoreable_tokens(capabilities)
 
     algorithm = cfg.trainer.algorithm
-    behavior_logprobs_required = rollout_logprobs_enabled(algorithm)
+    behavior_logprobs_required = rollout_logprobs_required(algorithm, loss_spec=loss_spec)
     full_tito_required = bool(algorithm.get("tito_full", False))
     if not behavior_logprobs_required and not full_tito_required:
         return
