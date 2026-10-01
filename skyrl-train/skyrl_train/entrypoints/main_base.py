@@ -26,7 +26,6 @@ import multiprocessing as mp
 from skyrl_train.inference_engines.chat_template import get_custom_chat_template
 from skyrl_train.dataset.tasks import GymTaskDataset
 from skyrl_train.dataset.nemotron_ultra import NemotronTaskDataset
-from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
 from skyrl_train.config.trajectory_runner_capabilities import (
     EntrypointOperation,
     validate_trajectory_runner_capabilities,
@@ -350,6 +349,8 @@ class BasePPOExp:
         return prompts_dataset
 
     def task_dataset(self, data_files):
+        from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings  # noqa: PLC0415 - optional training dependencies
+
         terminal_data = list(self.cfg.data.get("terminal_bench_data", []))
         dataset_type = NemotronTaskDataset if terminal_data else GymTaskDataset
         terminal_options = {}
@@ -663,6 +664,7 @@ def run_ray_driver(
     from marinskyrl.process_diagnostics import write_exception_receipt  # noqa: PLC0415
     from skyrl_train.telemetry import DRIVER_ROLE, process_telemetry  # noqa: PLC0415
     from skyrl_train import objective  # noqa: F401, PLC0415 - register losses when the training runtime loads
+    from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings  # noqa: PLC0415 - optional training dependencies
     from skyrl_train.utils import validate_cfg  # noqa: PLC0415
     from skyrl_train.utils.logging_utils import log_exception_as_text  # noqa: PLC0415
     from skyrl_train.utils.progress import configure_progress  # noqa: PLC0415 - keep launcher imports Torch-free
