@@ -44,7 +44,7 @@ def materialize_megatron_params(model_chunks: list[nn.Module]) -> None:
 
 @torch.no_grad()
 def dp_weight_checksum_mismatch(model_chunks: list[nn.Module]) -> float:
-    """Compare GPU parameter checksums across matching data-parallel replicas."""
+    """Return 1.0 when GPU parameter checksums differ across matching DP replicas, otherwise 0.0."""
     materialize_megatron_params(model_chunks)
     mismatch = torch.zeros((), dtype=torch.int64, device=torch.cuda.current_device())
     for expert in (False, True):
