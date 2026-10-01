@@ -1325,9 +1325,7 @@ class PolicyWorkerBase(Worker):
         # NATIVE top-k routing while training uses REPLAY routing -> different
         # experts -> a pathological step-1 importance ratio. Absent key (8B /
         # router-replay off) -> None -> stock native forward, unchanged.
-        rollout_routed_experts = (
-            micro_batch["rollout_routed_experts"] if "rollout_routed_experts" in micro_batch.keys() else None
-        )
+        rollout_routed_experts = micro_batch.routed_experts_tensor()
 
         with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type=self.device.type):
             policy_logprob = self.model(
@@ -1540,9 +1538,7 @@ class RefWorkerBase(Worker):
         # constructed with moe_router_replay=true), so its KL-reference logprobs
         # are computed on the same forward path as the policy. Absent key -> None
         # -> stock native forward (8B / flag-off unchanged).
-        rollout_routed_experts = (
-            micro_batch["rollout_routed_experts"] if "rollout_routed_experts" in micro_batch.keys() else None
-        )
+        rollout_routed_experts = micro_batch.routed_experts_tensor()
         with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type=self.device.type):
             log_probs = self.model(
                 sequences,

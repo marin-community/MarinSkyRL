@@ -123,18 +123,15 @@ def _ray_put_bounded(obj, timeout_seconds: float, what: str) -> ObjectRef:
 # The relocate task is a pure pass-through (`return chunk`), so the object the
 # forward actors dereference is byte-identical to the driver-side
 # `ray.put(chunk)` it replaces (same `data.chunk` rows, same Ray serialization).
-# All upstream row / dp / CP / micro-batch alignment (#6335) lives in the collate
-# + chunk path and is inherited UNCHANGED -- exactly the property the
-# resident transport fix relied on. Select resident transport to force the old
+# Row order and DP slicing are unchanged for dense and compact route payloads.
+# Select resident transport to force the old
 # driver-put behavior (strict A/B isolation); decentral is the default so
 # the head-plasma DispatchPutTimeout footgun does not recur at scale.
 #
 # SCOPE (honest). This removes the PINNED driver residency (the wedge cause) but
 # not the driver's TRANSIENT ship of each chunk (the driver still assembles the
-# batch and puts each dp-chunk once to ship it). Eliminating even the transient
-# would require a gen-worker-resident R3 capture rewrite (a dp-chunk's R3 spans
-# many generation workers, so concat+pad+chunk needs driver materialization) that
-# touches the capture->train alignment path -> deferred as a follow-up.
+# batch and puts each dp-chunk once to ship it). Moving payload fetch and batch
+# conversion to trainers would remove that driver hop.
 
 # Per-actor node-id cache: get_ray_node_id is a stable actor property, resolve once.
 _ACTOR_NODE_ID_CACHE: Dict[str, str] = {}
@@ -376,8 +373,7 @@ class MeshDispatch(Dispatch):
         dispatched_ranks = [] if log_dispatch else None
 
         # R3 by-value forward-arg spill fix (part 2 — the CORE fix). At 131k the
-        # per-dp chunk carries `rollout_routed_experts` ([B/dp, response_len, L, K])
-        # — multiple GB. With `dp_size` data-parallel groups each replicated across
+        # per-dp chunk can carry multi-GB routed-expert targets. With `dp_size` data-parallel groups each replicated across
         # `world//dp_size` actors (here dp_size=2, 16 actors/group), the naive loop
         # below calls `method.remote(data_chunks[dp])` once PER actor. Each call
         # passes a FRESH Python object (`data_chunks[dp]` is the same object within
@@ -395,8 +391,8 @@ class MeshDispatch(Dispatch):
         # `data.chunk` rows) — so ALL existing row/dp/CP/micro-batch alignment is
         # inherited unchanged (NO new slicing path; satisfies the #6335 guardrail).
         # ``r3_transport=by_value`` retains the per-actor dispatch path.
-        # Only engage the resident-put when the batch actually carries the bulky R3
-        # tensor — so runs without `rollout_routed_experts` keep the
+        # Only engage the resident-put when the batch carries R3 routes, either
+        # as compact rows or a tensor. Runs without `rollout_routed_experts` keep the
         # exact per-actor by-value dispatch. `data.chunk` replicates
         # the key set to every chunk, so probing chunk 0 answers for all chunks.
         resident = (

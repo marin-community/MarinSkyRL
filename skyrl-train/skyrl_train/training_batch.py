@@ -8,6 +8,7 @@ from typing import Any, Dict, Generic, Iterator, List, Optional, TypeVar, TypedD
 import torch
 from jaxtyping import Float, Integer
 
+from skyrl_train.dataset.routed_expert_batch import RoutedExpertRows
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.ftpo import FTPOTargets
 from skyrl_train.distillation import distillation_input_from_tensors
@@ -40,7 +41,7 @@ class TensorBatch(dict, Generic[DictType]):
     """Base class for training batches
 
     This defines a generic container for a batch of training data (inputs or outputs).
-    Consists of a dictionary of tensors along with some metadata.
+    Consists of tensors and compact route rows along with some metadata.
     """
 
     metadata: Optional[Dict[str, Any]] = None
@@ -88,8 +89,8 @@ class TensorBatch(dict, Generic[DictType]):
             if value is None:
                 continue
             self._device = value.device if self._device is None else self._device
-            if not isinstance(value, torch.Tensor):
-                raise ValueError(f"Field {key} must be a tensor, got {type(value)}")
+            if not isinstance(value, (torch.Tensor, RoutedExpertRows)):
+                raise ValueError(f"Field {key} must be a tensor or compact routes, got {type(value)}")
             if len(value) != batch_size:
                 raise ValueError(f"Batch size mismatch in {key}")
             if value.device != self._device:
@@ -103,13 +104,13 @@ class TensorBatch(dict, Generic[DictType]):
         else:
             return super().__getitem__(index)
 
-    def __setitem__(self, key: str, value: Optional[torch.Tensor]) -> None:
+    def __setitem__(self, key: str, value: Optional[torch.Tensor | RoutedExpertRows]) -> None:
         if value is None:
             super().__setitem__(key, value)
             return
 
-        if not isinstance(value, torch.Tensor):
-            raise ValueError(f"Field {key} must be a tensor, got {type(value)}")
+        if not isinstance(value, (torch.Tensor, RoutedExpertRows)):
+            raise ValueError(f"Field {key} must be a tensor or compact routes, got {type(value)}")
 
         if hasattr(self, "_batch_size") and self._batch_size is not None and len(value) != self._batch_size:
             raise ValueError(
@@ -134,6 +135,8 @@ class TensorBatch(dict, Generic[DictType]):
         for key, value in self.items():
             if value is None:
                 continue
+            if isinstance(value, RoutedExpertRows):
+                continue
             assert isinstance(value, torch.Tensor), f"Field {key} must be a tensor, got {type(value)}"
             self[key] = value.to(device, dtype, non_blocking=non_blocking)
         return self
@@ -154,8 +157,11 @@ class TensorBatch(dict, Generic[DictType]):
             assert self._device == torch.device("cpu"), "Tensors must be on CPU before serialization"
         batch_dict = {}
         for key, value in self.items():
+            if isinstance(value, RoutedExpertRows):
+                batch_dict[key] = ("compact_routes", pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL))
+                continue
             value_to_save = value
-            if value is not None:
+            if isinstance(value, torch.Tensor):
                 logical_bytes = value.numel() * value.element_size()
                 if value.storage_offset() != 0 or value.untyped_storage().nbytes() > logical_bytes:
                     value_to_save = value.clone(memory_format=torch.contiguous_format)
@@ -177,6 +183,9 @@ class TensorBatch(dict, Generic[DictType]):
     def __setstate__(self, state):
         """Deserialize the `TensorBatch` object and load it into memory"""
         for key, value in state["batch_dict"].items():
+            if isinstance(value, tuple) and value[0] == "compact_routes":
+                self[key] = pickle.loads(value[1])
+                continue
             buffer = io.BytesIO(value)
             self[key] = torch.load(buffer)
 
@@ -201,6 +210,8 @@ class TensorBatch(dict, Generic[DictType]):
         for key, value in self.items():
             if value is None:
                 new_batch[key] = value
+            elif isinstance(value, RoutedExpertRows):
+                new_batch[key] = RoutedExpertRows.cat([value] * repeats)
             else:
                 assert isinstance(value, torch.Tensor), f"Field {key} must be a tensor, got {type(value)}"
                 new_batch[key] = value.repeat(repeats)
@@ -223,6 +234,10 @@ class TensorBatch(dict, Generic[DictType]):
         for key, value in self.items():
             if value is None:
                 new_batch[key] = value
+            elif isinstance(value, RoutedExpertRows):
+                new_batch[key] = RoutedExpertRows(
+                    tuple(row for row in value.rows for _ in range(repeats)), value.response_len, value.num_experts
+                )
             else:
                 assert isinstance(value, torch.Tensor), f"Field {key} must be a tensor, got {type(value)}"
                 new_batch[key] = value.repeat_interleave(repeats)
@@ -237,7 +252,7 @@ class TensorBatch(dict, Generic[DictType]):
             chunk_data = {}
             for key, value in self.items():
                 if value is not None:
-                    if isinstance(value, torch.Tensor):
+                    if isinstance(value, (torch.Tensor, RoutedExpertRows)):
                         chunk_data[key] = value[i : i + chunk_size]
                     else:
                         raise ValueError(f"Unsupported type {type(value)} for key {key}")
@@ -264,7 +279,7 @@ class TensorBatch(dict, Generic[DictType]):
         sliced_data = {}
         for key, value in self.items():
             if value is not None:
-                if isinstance(value, torch.Tensor):
+                if isinstance(value, (torch.Tensor, RoutedExpertRows)):
                     sliced_data[key] = value[slice_obj]
                 else:
                     raise ValueError(f"Unsupported type {type(value)} for key {key}")
@@ -301,6 +316,8 @@ class TensorBatch(dict, Generic[DictType]):
             if value is not None:
                 if isinstance(value, torch.Tensor):
                     cat_data[key] = torch.cat([shard[key] for shard in shards])
+                elif isinstance(value, RoutedExpertRows):
+                    cat_data[key] = RoutedExpertRows.cat([shard[key] for shard in shards])
                 else:
                     raise ValueError(f"Unsupported type {type(value)} for key {key}")
             else:
@@ -329,7 +346,14 @@ class TensorBatch(dict, Generic[DictType]):
         if len(self.items()) != len(other.items()):
             return False
         for k, v in self.items():
-            if k not in other or not torch.equal(v, other[k]):
+            if k not in other:
+                return False
+            if isinstance(v, RoutedExpertRows):
+                if not isinstance(other[k], RoutedExpertRows) or len(v.rows) != len(other[k].rows):
+                    return False
+                if any(not torch.equal(torch.as_tensor(a), torch.as_tensor(b)) for a, b in zip(v.rows, other[k].rows)):
+                    return False
+            elif not torch.equal(v, other[k]):
                 return False
         return True
 
@@ -371,12 +395,9 @@ class TrainingInput(TypedDict, total=False):
     ftpo_reference_logits: Optional[Float[torch.Tensor, "batch_size vocab"]]
     teacher_valid_mask: Optional[Integer[torch.Tensor, "batch_size seq_len"]]
     distillation_loss_weights: Optional[Float[torch.Tensor, "batch_size seq_len"]]
-    # MoE router-replay capture rail (Stage 1): per-token expert-selection indices
-    # captured from vLLM, [batch, response_len, L, K] (L = MoE layers, K = top-k).
-    # Present only when trainer.policy.megatron_config.moe_router_replay is True.
-    # TensorBatch._check_consistency only validates dim-0, so 4-D is accepted.
-    # Consumed in Stage 2 (replay), not here.
-    rollout_routed_experts: Optional[Integer[torch.Tensor, "batch_size seq_len L K"]]
+    # Per-token expert IDs captured from generation. The driver keeps compact rows;
+    # a worker materializes [microbatch, local_response_len, L, K] for replay.
+    rollout_routed_experts: Optional[Integer[torch.Tensor, "batch_size seq_len L K"] | RoutedExpertRows]
     # Loop-behavior reward shaping (Stage B / F5): per-token additive shaping
     # channel, SEPARATE from `rewards` (the RLOO-N outcome term). Default all-zeros
     # and present ONLY when trainer.algorithm.enable_token_reward_channel is True,
@@ -396,7 +417,11 @@ class TrainingInput(TypedDict, total=False):
 class TrainingInputBatch(TensorBatch[TrainingInput]):
     """Training input data"""
 
-    pass
+    def routed_experts_tensor(self) -> torch.Tensor | None:
+        routes = self.get("rollout_routed_experts")
+        if isinstance(routes, RoutedExpertRows):
+            return routes.materialize(self["sequences"].device)
+        return routes
 
 
 class TrainingBatchIterator(Iterator[Experience]):
@@ -461,7 +486,7 @@ class TrainingBatchIterator(Iterator[Experience]):
             )
             if "ftpo_chosen_mask" in batch
             else None,
-            rollout_routed_experts=batch.get("rollout_routed_experts"),
+            rollout_routed_experts=batch.routed_experts_tensor(),
             response_span_tags=batch.get("response_span_tags"),
             info={},
             metadata=batch.metadata,

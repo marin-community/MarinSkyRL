@@ -17,6 +17,7 @@ from omegaconf import DictConfig, OmegaConf
 from skyrl_train.timing_observability import StepWallTime
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.training_batch import TrainingInputBatch
+from skyrl_train.dataset.routed_expert_batch import RoutedExpertRows
 
 
 SCHEMA_VERSION = 1
@@ -83,7 +84,13 @@ def _tensor_manifest(batch: TrainingInputBatch) -> dict[str, TensorManifestEntry
 
 def _cpu_snapshot(batch: TrainingInputBatch) -> TrainingInputBatch:
     tensors = {
-        key: None if value is None else value.detach().to(device="cpu").contiguous().clone()
+        key: (
+            None
+            if value is None
+            else copy.deepcopy(value)
+            if isinstance(value, RoutedExpertRows)
+            else value.detach().to(device="cpu").contiguous().clone()
+        )
         for key, value in batch.items()
     }
     snapshot = TrainingInputBatch(tensors)

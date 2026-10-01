@@ -217,9 +217,7 @@ class MegatronWorker:
                     position_ids=position_ids,
                     num_actions=num_actions,
                     ftpo_chosen_mask=micro.get("ftpo_chosen_mask"),
-                    rollout_routed_experts=micro["rollout_routed_experts"]
-                    if "rollout_routed_experts" in micro.keys()
-                    else None,
+                    rollout_routed_experts=micro.routed_experts_tensor(),
                 )
             )
 
