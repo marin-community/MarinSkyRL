@@ -8,7 +8,8 @@ from tests.gpu.grug_gpu_gates import require_hoppers
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_megatron_gradient_clipping_preserves_values_without_gradient_sized_scratch(tmp_path, dtype):
+@pytest.mark.parametrize("tensor_norm", [True, False])
+def test_megatron_gradient_clipping_preserves_values_without_gradient_sized_scratch(tmp_path, dtype, tensor_norm):
     require_hoppers(1)
     torch.distributed.init_process_group("nccl", init_method=f"file://{tmp_path / 'rendezvous'}", rank=0, world_size=1)
     try:
@@ -19,6 +20,8 @@ def test_megatron_gradient_clipping_preserves_values_without_gradient_sized_scra
         expected_norm = gradient.double().norm().item()
         actual_norm = get_grad_norm_fp32([gradient])
         assert float(actual_norm) == pytest.approx(expected_norm, rel=1e-6)
+        if not tensor_norm:
+            actual_norm = float(actual_norm)
         expected = (gradient * (1.0 / (actual_norm + 1e-6))).to(dtype)
         torch.cuda.synchronize()
         torch.cuda.reset_peak_memory_stats()
