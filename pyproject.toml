@@ -206,9 +206,9 @@ transformer-engine = [{ requirement = "torch", match-runtime = true }, "build_to
 transformer-engine-torch = [{ requirement = "torch", match-runtime = true }, "build_tools", "ninja"]
 
 [tool.uv.sources]
-taskcompendium = { git = "https://github.com/marin-community/marin.git", rev = "44a985e837aab6253543bcd6dbaeb03b0fa6bf52", subdirectory = "lib/taskcompendium" }
-marin-shellbox = { git = "https://github.com/marin-community/marin.git", rev = "44a985e837aab6253543bcd6dbaeb03b0fa6bf52", subdirectory = "lib/shellbox" }
-tasktrove-verify = { git = "https://github.com/marin-community/marin.git", rev = "44a985e837aab6253543bcd6dbaeb03b0fa6bf52", subdirectory = "lib/tasktrove-verify" }
+taskcompendium = { git = "https://github.com/marin-community/marin.git", rev = "b8d007fc5fb8c4ffce6f2aebf908e2996580bae5", subdirectory = "lib/taskcompendium" }
+marin-shellbox = { git = "https://github.com/marin-community/marin.git", rev = "b8d007fc5fb8c4ffce6f2aebf908e2996580bae5", subdirectory = "lib/shellbox" }
+tasktrove-verify = { git = "https://github.com/marin-community/marin.git", rev = "b8d007fc5fb8c4ffce6f2aebf908e2996580bae5", subdirectory = "lib/tasktrove-verify" }
 langdetect = { url = "https://huggingface.co/datasets/open-athena/marinskyrl-gpu-wheelhouse/resolve/d761f1e357b6d5a9b80427f4710eb2e04adf1101/linux-x86_64/cp312/20260915-tinker-aime/langdetect-1.0.9-py3-none-any.whl" }
 pycosat = { url = "https://huggingface.co/datasets/open-athena/marinskyrl-gpu-wheelhouse/resolve/d761f1e357b6d5a9b80427f4710eb2e04adf1101/linux-x86_64/cp312/20260915-tinker-aime/pycosat-0.6.6-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" }
 torchaudio = { index = "pytorch-cpu", marker = "sys_platform == 'linux'" }
