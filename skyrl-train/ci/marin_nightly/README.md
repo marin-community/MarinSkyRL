@@ -42,7 +42,8 @@ metric that appears is checked for finite values. `finite_every_step` also requi
 the metric in every payload of that kind. Sparse per-N metrics omit that field and
 set a measured minimum observation count. A `trend` compares the first and last
 `window` finite observations; too few observations fail. An `occurrence` requires
-`minimum_count` values strictly `above` or `below` its `threshold`.
+`minimum_count` values `above`, `below` or inclusively `at_least` its `threshold`.
+`through_step` limits observations to that completed step or earlier.
 
 A learning requirement pairs a trend with a required initial observation:
 
@@ -56,9 +57,12 @@ A learning requirement pairs a trend with a required initial observation:
 ```
 
 The first row requires the step-0 baseline. The second requires a reward gain
-of at least 0.2 from that baseline. CatCountCanary has separate async and sync
-specs; their provenance records the recipe, seeds, margin and step cap. The
-launcher's early-stop margin equals the spec's trend margin.
+of at least0.2 from that baseline. CatCountCanary's async spec uses sampled
+training-prompt evaluations instead: initial reward in[0.10,0.45] atstep0,
+then at leastone score >=0.65 throughstep30. The launcher stops at the first
+qualifying sampled evaluation. Its spec also requires post-optimizer
+`policy/dp_weight_checksum_mismatch`=0 at every training step. Sync is a
+manual launcher option outside the canary and CI.
 
 A negative `min_improvement`, such as -0.1, permits a decrease of at most 0.1.
 Top-level `finite_metrics` and `bounds` are optional final-step checks;

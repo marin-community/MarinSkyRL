@@ -167,6 +167,19 @@ class EvaluationSamplingConfig:
     n_samples_per_prompt: int | None = None
 
 
+@dataclass(frozen=True)
+class EvaluationStopConfig:
+    minimum: float | None = None
+    min_improvement: float | None = None
+
+    def __post_init__(self):
+        if (self.minimum is None) == (self.min_improvement is None):
+            raise ValueError("evaluation stop requires exactly minimum or min_improvement")
+        threshold = self.minimum if self.minimum is not None else self.min_improvement
+        if not math.isfinite(threshold):
+            raise ValueError("evaluation stop thresholds must be finite")
+
+
 @register_callback("evaluation")
 class EvaluationCallback(TrainerCallback):
     """Schedule evaluations and stop when configured score requirements are met.
@@ -196,18 +209,13 @@ class EvaluationCallback(TrainerCallback):
             name: EvaluationSamplingConfig(**parameters) for name, parameters in (additional_evaluations or {}).items()
         }
         self.metric_groups = metric_groups or {}
-        self.stop_when = stop_when or {}
+        self.stop_when = {name: EvaluationStopConfig(**value) for name, value in (stop_when or {}).items()}
         self._initial_values: Dict[str, float] = {}
         self._initial_step: int | None = None
         if any(not name.isidentifier() for name in self.additional_evaluations):
             raise ValueError("additional evaluation names must be identifiers")
         if any(not keys for keys in self.metric_groups.values()):
             raise ValueError("evaluation metric groups must be nonempty")
-        for requirement in self.stop_when.values():
-            if set(requirement) not in ({"minimum"}, {"min_improvement"}):
-                raise ValueError("evaluation stop requires exactly minimum or min_improvement")
-            if not math.isfinite(next(iter(requirement.values()))):
-                raise ValueError("evaluation stop thresholds must be finite")
 
     error_behavior = "raise"
 
@@ -236,9 +244,9 @@ class EvaluationCallback(TrainerCallback):
                 raise ValueError(f"nonfinite evaluation improvement for {name}")
             metrics[f"{name}_improvement"] = improvement
         if state.global_step > self._initial_step and all(
-            metrics[name] >= requirement["minimum"]
-            if "minimum" in requirement
-            else improvements[name] >= requirement["min_improvement"]
+            metrics[name] >= requirement.minimum
+            if requirement.minimum is not None
+            else improvements[name] >= requirement.min_improvement
             for name, requirement in self.stop_when.items()
         ):
             logger.info("Evaluation stop requirements reached at step {}", state.global_step)
