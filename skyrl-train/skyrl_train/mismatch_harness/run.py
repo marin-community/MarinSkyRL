@@ -19,12 +19,13 @@ import gc
 import io as stdlib_io
 import json
 import platform
+import re
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
 from marinskyrl.resource_locator import join_resource_path, relative_resource_path
-from torch._inductor.runtime.cache_dir_utils import cache_dir
 from megatron.core import dist_checkpointing, parallel_state
 from megatron.core.dist_checkpointing.strategies.fully_parallel import FullyParallelLoadStrategyWrapper
 
@@ -75,6 +76,9 @@ from skyrl_train.mismatch_harness.vllm_side import (
 )
 
 CONFIG_FILES = ("config.json", "model.safetensors.index.json")
+# The post-attention RMSNorm kernel, whose autotuned config vLLM chose differently between jobs.
+POST_ATTENTION_NORM = "triton_red_fused_rms_norm_2"
+PERSISTENT_REDUCTION_PREFIX = "triton_per_"
 CAPTURE_REGIONS = (
     "input",
     "attention_norm",
@@ -107,57 +111,54 @@ def load_captures(uris: list[str]) -> tuple[dict[int, dict[str, torch.Tensor]], 
     return layers, sequences, attention_mask
 
 
-def stage_autotune_choices(output_code_uri: str) -> int:
-    """Copy the worker's archived ``*.best_config`` files into this process's Inductor cache.
+@dataclass(frozen=True)
+class PieceConfigs:
+    """One launch config for each of the archived pieces' autotuned reductions (see ``pin_piece_configs``)."""
 
-    A kernel with several candidate launch configs benchmarks them at its first launch and keeps the
-    fastest in ``<kernel>.best_config`` beside its source; with the file in place the replay launches
-    the config vLLM chose. Returns how many were staged.
+    norm_block: int = 4096
+    post_attention_norm_block: int = 4096
+    qk_xblock: int = 8
+
+    @property
+    def tag(self) -> str:
+        return f"norm{self.norm_block}_post{self.post_attention_norm_block}_qk{self.qk_xblock}"
+
+
+def pin_piece_configs(pieces: dict, configs: PieceConfigs) -> dict[str, str]:
+    """Restrict every loaded kernel to one launch config before its first launch, so none autotunes by timing.
+
+    Norm reductions take ``R0_BLOCK`` ``configs.norm_block`` (``post_attention_norm_block`` for the post-attention
+    norm), the per-head q/k sums ``XBLOCK`` ``configs.qk_xblock``, and kernels whose configs cannot differ in bytes
+    (pointwise ones, or a single candidate) their first config. Returns the config each kernel launches.
     """
-    root = Path(cache_dir())
-    staged = 0
-    for path in io.find_files(output_code_uri):
-        if not path.endswith(".best_config"):
-            continue
-        relative = relative_resource_path(output_code_uri, path)
-        destination = root / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(io.read_bytes(join_resource_path(output_code_uri, relative)))
-        staged += 1
-    return staged
-
-
-def kernel_candidates(pieces: dict) -> dict[tuple[str, str], list]:
-    """Each loaded Triton kernel's compiled launch configs, taken before any launch autotunes it."""
-    return {
-        (f"{kind}{'+rope' if rope else ''}", name): list(getattr(namespace.get(name), "launchers", None) or [])
-        for (kind, rope), (piece, namespace) in pieces.items()
-        for name in piece.code.kernels
-    }
-
-
-def chosen_configs(pieces: dict, candidates: dict[tuple[str, str], list]) -> dict[str, dict[str, dict]]:
-    """For each replayed Triton kernel, its candidate launch configs and the one it ran with."""
-    chosen: dict[str, dict[str, dict]] = {}
+    chosen = {}
     for (kind, rope), (piece, namespace) in pieces.items():
-        key = f"{kind}{'+rope' if rope else ''}"
-        chosen[key] = {
-            name: {
-                "candidates": [str(launcher.config) for launcher in candidates[(key, name)]],
-                "launched": [
-                    str(launcher.config) for launcher in getattr(namespace.get(name), "launchers", None) or []
-                ],
-            }
-            for name in piece.code.kernels
-        }
+        for name in piece.code.kernels:
+            kernel = namespace[name]
+            launchers = list(kernel.launchers)
+            if len(launchers) > 1 and all("R0_BLOCK" in launcher.config.kwargs for launcher in launchers):
+                block = configs.post_attention_norm_block if name == POST_ATTENTION_NORM else configs.norm_block
+                wanted = [launcher for launcher in launchers if launcher.config.kwargs["R0_BLOCK"] == block]
+            elif len(launchers) > 1 and name.startswith(PERSISTENT_REDUCTION_PREFIX):
+                wanted = [launcher for launcher in launchers if launcher.config.kwargs["XBLOCK"] == configs.qk_xblock]
+            else:
+                wanted = launchers[:1]
+            if len(wanted) != 1:
+                raise ValueError(f"{kind}/{rope}/{name}: no single config among {[str(l.config) for l in launchers]}")
+            kernel.launchers = wanted
+            chosen[f"{kind}{'+rope' if rope else ''}:{name}"] = str(wanted[0].config)
     return chosen
 
 
-def load_pieces(output_code_uri: str, candidate: int | None = None) -> dict:
-    """Parse, classify and load every compiled subgraph module of one vLLM worker.
+# The start of each kernel source in an output-code module.
+_KERNEL_SOURCE = re.compile(r"(async_compile\.triton\('\w+', ''')")
 
-    With ``candidate``, every kernel that has several launch configs keeps only that one (modulo the
-    count), so no autotuning happens and the replay launches a config a vLLM process may have chosen.
+
+def load_pinned_pieces(output_code_uri: str, configs: PieceConfigs) -> tuple[dict, dict[str, str]]:
+    """The archived pieces with their own kernel objects, every autotuned reduction pinned to ``configs``.
+
+    Inductor keeps one kernel object per kernel source, and an object that has launched keeps launching the config
+    it launched first. Each config set therefore loads the kernel sources under a comment naming the set.
     """
     pieces = {}
     for path in sorted(io.find_files(output_code_uri)):
@@ -168,17 +169,14 @@ def load_pieces(output_code_uri: str, candidate: int | None = None) -> dict:
         ).decode()
         if not is_graph_module(text):
             continue
+        text = _KERNEL_SOURCE.sub(lambda match: f"{match.group(1)}# pinned {configs.tag}\n", text)
         piece = classify(parse_output_code(text))
         key = (piece.kind, piece.rope)
         if key in pieces:
             raise ValueError(f"two archived modules are {piece.kind} pieces with rope={piece.rope}")
-        module = load_module(piece.code, f"vllm_piece_{piece.kind}_{int(piece.rope)}_{candidate}")
-        if candidate is not None:
-            for name in piece.code.kernels:
-                kernel = module.__dict__[name]
-                kernel.launchers = [kernel.launchers[candidate % len(kernel.launchers)]]
+        module = load_module(piece.code, f"vllm_piece_{piece.kind}_{int(piece.rope)}_{configs.tag}")
         pieces[key] = (piece, module.__dict__)
-    return pieces
+    return pieces, pin_piece_configs(pieces, configs)
 
 
 def needed_weights(shape: GrugShape, layers: list[int]) -> list[str]:
@@ -385,6 +383,11 @@ def main() -> None:
         default=[],
         help="LAYER=SOURCE: run LAYER on SOURCE's captured input (no capture of LAYER to reproduce)",
     )
+    parser.add_argument("--norm-block", type=int, default=4096, help="R0_BLOCK of vLLM's norm reductions")
+    parser.add_argument("--post-attention-norm-block", type=int, default=4096)
+    parser.add_argument("--qk-xblock", type=int, default=8, help="XBLOCK of vLLM's per-head q/k sums")
+    parser.add_argument("--floor-norm-block", type=int, default=2048, help="the other norm config, for the floor")
+    parser.add_argument("--floor-qk-xblock", type=int, default=32, help="the other q/k config, for the floor")
     parser.add_argument("--output", required=True)
     parser.add_argument("--seed", type=int, default=1234)
     args = parser.parse_args()
@@ -406,11 +409,12 @@ def main() -> None:
         shape = GrugShape.from_config(config)
         captured, sequences, attention_mask = load_captures(args.capture)
         layout = RowLayout(tuple(int(length) for length in attention_mask.sum(dim=1).tolist()))
-        results["staged_best_configs"] = stage_autotune_choices(args.output_code)
-        pieces = load_pieces(args.output_code)
-        candidates = kernel_candidates(pieces)
-        most = max(len(options) for options in candidates.values())
-        pinned_pieces = [load_pieces(args.output_code, candidate=index) for index in range(most)] if most > 1 else []
+        configs = PieceConfigs(args.norm_block, args.post_attention_norm_block, args.qk_xblock)
+        pieces, results["kernel_configs"] = load_pinned_pieces(args.output_code, configs)
+        floor_configs = PieceConfigs(args.floor_norm_block, args.floor_norm_block, args.floor_qk_xblock)
+        floor_pieces, results["floor_kernel_configs"] = load_pinned_pieces(args.output_code, floor_configs)
+        # vLLM's own spread when its autotuner picks the other configs: the same layer under both config sets.
+        pinned_pieces = [pieces, floor_pieces]
         results["pieces"] = sorted(f"{kind}{'+rope' if rope else ''}" for kind, rope in pieces)
         bridge, provider = grug_provider(str(config_dir))
         names = needed_weights(shape, args.layers)
@@ -579,7 +583,6 @@ def main() -> None:
             del layer_module, replay
             gc.collect()
             torch.cuda.empty_cache()
-        results["kernel_configs"] = chosen_configs(pieces, candidates)
     payload = json.dumps(results, indent=1, sort_keys=True, default=str)
     io.write_bytes_atomic(join_resource_path(args.output, "harness.json"), payload.encode())
     io.write_bytes_atomic(join_resource_path(args.output, "harness.md"), render_markdown(results).encode())

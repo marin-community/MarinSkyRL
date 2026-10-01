@@ -113,15 +113,16 @@ def render_markdown(results: Mapping) -> str:
         f"- EP emulation: {arguments['ep_size']} ranks, {arguments['reduce_order']} order, home rank {arguments['home_rank']}",
         f"- GPU: {results['versions']['gpu']}, torch {results['versions']['torch']}",
         f"- pieces: {', '.join(results['pieces'])}",
-        f"- archived autotune choices staged: {results['staged_best_configs']} (with none, a kernel with several "
-        "launch configs was benchmarked again here and may launch a different one than vLLM did)",
+        f"- vLLM reductions pinned: norms R0_BLOCK {arguments['norm_block']} (post-attention "
+        f"{arguments['post_attention_norm_block']}), q/k sums XBLOCK {arguments['qk_xblock']}; config floor: "
+        f"R0_BLOCK {arguments['floor_norm_block']}, XBLOCK {arguments['floor_qk_xblock']}",
         "",
         "Cells are byte-equal fraction / fraction within one ulp / maximum ulp over valid token rows (the "
         "maximum is dominated by values of opposite sign near zero). `isolated`: vLLM's launch reads the "
         "trainer's tensors for every input. `chained`: vLLM runs the layer from the trainer's layer input. "
         "`floor`: vLLM's chained run against itself with other requests in the batch. `config floor`: vLLM's "
-        "chained run against itself with the first and the last launch config of every kernel whose config "
-        "Inductor's autotuner picks at run time.",
+        "chained run against itself with the other launch config of every reduction whose config Inductor's "
+        "autotuner picks at run time.",
         "",
     ]
     lines += fa3_check_lines(results.get("fa3_split_check"))
