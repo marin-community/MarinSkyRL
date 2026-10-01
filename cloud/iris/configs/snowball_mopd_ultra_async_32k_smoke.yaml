@@ -4,8 +4,9 @@
 # Staleness is bounded at one update. Token-level truncated importance sampling
 # corrects against rollout logprobs with a ratio cap of 2; prefix drift is not corrected.
 # Build a fresh sample with --swe-rows 0, as in snowball_mopd_ultra_32k.yaml.
-# Harbor SWE trials are excluded until external model ingress is validated. The SWE
-# teacher still scores non-Harbor generators; ns_tools and Lean use the in-cluster sandbox.
+# Harbor SWE rows need controller ingress so their external sandboxes can reach the model.
+# This recipe excludes those rows; the SWE teacher still scores non-Harbor generators.
+# ns_tools and Lean use the in-cluster sandbox.
 # Reserve host-memory headroom for optimizer state and checkpoint staging on each node.
 entrypoint: standard
 minimum_host_memory: 768GB
