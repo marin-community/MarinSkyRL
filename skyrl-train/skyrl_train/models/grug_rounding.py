@@ -16,7 +16,8 @@ class _ValueWithGradient(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, value: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
-        return value.clone()
+        # Returned as is, autograd wraps the value in a view that carries this function's gradient: no copy.
+        return value
 
     @staticmethod
     def backward(ctx, grad: torch.Tensor):

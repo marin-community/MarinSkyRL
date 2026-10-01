@@ -93,11 +93,16 @@ def _first_present(preferred: torch.Tensor | None, fallback: torch.Tensor | None
 
 @dataclass(frozen=True)
 class ResidualSum:
-    """The bf16 tensors a layer adds in fp32 to form its output, ``residual + (routed + shared)``, before rounding."""
+    """The bf16 tensors a layer adds in fp32 to form its output, ``residual + (routed + shared)``, before rounding.
+
+    ``square_sum`` is the per-row sum of squares of the unrounded sum when compiled vLLM's fused residual-add and norm
+    kernel already formed the layer output (``vllm_norms``).
+    """
 
     residual: torch.Tensor
     routed: torch.Tensor
     shared: torch.Tensor
+    square_sum: torch.Tensor | None = None
 
     def unrounded(self) -> torch.Tensor:
         return self.residual.detach().float() + (self.routed.detach().float() + self.shared.detach().float())
@@ -106,6 +111,8 @@ class ResidualSum:
         """The next input norm's statistic of the unrounded sum: compiled vLLM's per-row sum of squares from its fused
         residual-add and norm kernel (``vllm_norms``, ``[rows]``), else the sum's variance (``[..., 1]``)."""
         if numerics.vllm_norms:
+            if self.square_sum is not None:
+                return self.square_sum
             return vllm_inductor.residual_square_sum(self.residual, self.routed, self.shared)[1]
         return self.unrounded().pow(2).mean(dim=-1, keepdim=True)
 
@@ -144,10 +151,13 @@ class StageStatistic:
 
 HandOff = ResidualSum | GatedProduct | StageStatistic
 
-# Per input norm, the statistic it took from its hand-off in a checkpoint unit's first forward, with a weak reference
-# to the norm's input. Full activation recompute reruns the unit inside the backward on ``detach()`` copies of its
-# inputs, after the first forward took the unit's hand-offs, so the recompute reads the statistic here by storage.
+# Per module, what it computed in a checkpoint unit's first forward for the unit's recompute, with a weak reference to
+# the tensor that identifies the unit (an input norm's input, or the decoder layer's input). Full activation recompute
+# reruns the unit inside the backward on ``detach()`` copies of its inputs, after the first forward took the unit's
+# hand-offs, so the recompute reads what it needs here by storage.
 _RECOMPUTE_STATISTICS: dict[int, list[tuple[weakref.ref, torch.Tensor | None]]] = {}
+# The input of each decoder layer whose forward is running, innermost last: the key of its checkpoint unit.
+_LAYER_INPUTS: list[torch.Tensor] = []
 # Compiled vLLM pads a GEMM's output width to a multiple of this many columns (the 20-head gate becomes 24).
 VLLM_GEMM_OUTPUT_ALIGNMENT = 8
 
@@ -167,25 +177,79 @@ def checkpoint_pass() -> CheckpointPass:
     return CheckpointPass.RECOMPUTE if torch.is_grad_enabled() else CheckpointPass.FIRST
 
 
-def _keep_for_recompute(norm: nn.Module, receiver: torch.Tensor, statistic: torch.Tensor | None) -> None:
-    entries = [(ref, kept) for ref, kept in _RECOMPUTE_STATISTICS.get(id(norm), []) if ref() is not None]
-    entries.append((weakref.ref(receiver), statistic))
-    _RECOMPUTE_STATISTICS[id(norm)] = entries
+def _keep_for_recompute(owner: nn.Module, receiver: torch.Tensor, value: torch.Tensor | None) -> None:
+    entries = [(ref, kept) for ref, kept in _RECOMPUTE_STATISTICS.get(id(owner), []) if ref() is not None]
+    entries.append((weakref.ref(receiver), value))
+    _RECOMPUTE_STATISTICS[id(owner)] = entries
 
 
-def _take_for_recompute(norm: nn.Module, receiver: torch.Tensor) -> torch.Tensor | None:
-    entries = _RECOMPUTE_STATISTICS.get(id(norm), [])
-    for index, (ref, statistic) in enumerate(entries):
+def _take_for_recompute(owner: nn.Module, receiver: torch.Tensor) -> torch.Tensor | None:
+    entries = _RECOMPUTE_STATISTICS.get(id(owner), [])
+    for index, (ref, value) in enumerate(entries):
         original = ref()
         if original is not None and same_storage(original, receiver):
             del entries[index]
-            return statistic
-    raise RuntimeError("an input norm's recompute found no statistic from its checkpoint unit's first forward")
+            return value
+    raise RuntimeError("a checkpoint unit's recompute found nothing kept by the unit's first forward")
+
+
+def _install_layer_input_hooks(layer: TransformerLayer) -> None:
+    """Record each decoder layer's input while its forward runs (``_LAYER_INPUTS``)."""
+
+    def enter(module, args, kwargs):
+        _LAYER_INPUTS.append(kwargs["hidden_states"] if "hidden_states" in kwargs else args[0])
+
+    def leave(module, args, kwargs, output):
+        _LAYER_INPUTS.pop()
+
+    layer.register_forward_pre_hook(enter, with_kwargs=True)
+    layer.register_forward_hook(leave, with_kwargs=True, always_call=True)
+
+
+def _unit_key(config: TransformerConfig) -> torch.Tensor | None:
+    """The running layer's input, when full recompute makes that layer a checkpoint unit of its own (else ``None``)."""
+    return _LAYER_INPUTS[-1] if _LAYER_INPUTS and _one_layer_units(config) else None
 
 
 def _variance_with_gradient(variance: torch.Tensor, hidden_states: torch.Tensor) -> torch.Tensor:
     """The unrounded sum's ``variance``, differentiated as the variance of the bf16 input it was rounded to."""
     return vllm_value(variance, lambda: hidden_states.float().pow(2).mean(dim=-1, keepdim=True))
+
+
+class _ResidualSumGradient(torch.autograd.Function):
+    """``value``, the bf16 ``residual + (routed + shared)`` summed in fp32, differentiated as that expression.
+
+    Autograd of ``(residual.float() + (routed.float() + shared.float())).to(bf16)`` hands each of the three inputs
+    ``grad.float().to(bf16)``: the fp32 sums pass the gradient through, and the casts convert it there and back.
+    """
+
+    @staticmethod
+    def forward(ctx, value, residual, routed, shared):
+        return value
+
+    @staticmethod
+    def backward(ctx, grad):
+        converted = grad.float().to(grad.dtype)
+        return None, converted, converted, converted
+
+
+def _vllm_residual_sum(parts: ResidualSum, config: TransformerConfig) -> tuple[torch.Tensor, ResidualSum | None]:
+    """The layer output ``residual + (routed + shared)`` from compiled vLLM's fused residual-add and norm kernel, which
+    also forms the next input norm's sum of squares, and the hand-off for that norm (``None`` when no one reads it).
+
+    The kernel adds in fp32 and rounds once, as ``(residual.float() + (routed.float() + shared.float())).to(bf16)``
+    does. Full recompute's second forward of a one-layer unit only rebuilds the layer's graph for its backward, and the
+    layer output is the unit's output, whose value the backward never reads, so that forward forms no value.
+    """
+    if checkpoint_pass() is CheckpointPass.RECOMPUTE and _one_layer_units(config):
+        value, handed = torch.empty_like(parts.residual), None
+    else:
+        value, square_sum = vllm_inductor.residual_square_sum(parts.residual, parts.routed, parts.shared)
+        value = value.view_as(parts.residual)
+        handed = ResidualSum(parts.residual, parts.routed, parts.shared, square_sum)
+    if torch.is_grad_enabled():
+        value = _ResidualSumGradient.apply(value, parts.residual, parts.routed, parts.shared)
+    return value, handed
 
 
 def _install_residual_hooks(layer: TransformerLayer) -> None:
@@ -221,12 +285,17 @@ def _install_residual_hooks(layer: TransformerLayer) -> None:
             return None
         numerics = active_numerics()
         parts = ResidualSum(stored.pop("residual"), stored.pop("routed"), stored.pop("shared"))
+        if numerics.vllm_norms:
+            hidden, handed = _vllm_residual_sum(parts, layer.config)
+            if handed is not None:
+                hand_off(hidden, handed)
+            return (hidden, *output[1:])
         # Compiled vLLM: h + (routed + shared) in fp32; the trainer rounds routed + shared first.
-        if numerics.mlp_residual or numerics.vllm_norms:
+        if numerics.mlp_residual:
             hidden = (parts.residual.float() + (parts.routed.float() + parts.shared.float())).to(output[0].dtype)
         else:
             hidden = (parts.residual.float() + (parts.routed + parts.shared).float()).to(output[0].dtype)
-        if numerics.input_norm_variance or numerics.final_norm_fp32 or numerics.vllm_norms:
+        if numerics.input_norm_variance or numerics.final_norm_fp32:
             hand_off(hidden, parts)
         return (hidden, *output[1:])
 
@@ -268,16 +337,21 @@ def _install_route_weight_hooks(experts: TEGroupedMLP) -> None:
     experts.linear_fc2.register_forward_hook(weighted_output)
 
 
+def _one_layer_units(config: TransformerConfig) -> bool:
+    """True when full activation recompute checkpoints every layer as a unit of its own: ``recompute_method``
+    ``block``, or ``uniform`` with one layer per unit."""
+    return config.recompute_granularity == "full" and (
+        config.recompute_method == "block" or config.recompute_num_layers == 1
+    )
+
+
 def _recomputing_one_layer(config: TransformerConfig) -> bool:
     """True in full activation recompute's second forward of a checkpointed unit that holds one layer.
 
     Megatron re-runs each checkpointed unit's forward inside the autograd engine's backward, where the engine's
-    graph task is set. A unit is one layer under ``recompute_method`` ``block``, or ``uniform`` with one layer.
+    graph task is set.
     """
-    one_layer_units = config.recompute_granularity == "full" and (
-        config.recompute_method == "block" or config.recompute_num_layers == 1
-    )
-    return one_layer_units and torch.is_grad_enabled() and torch._C._current_graph_task_id() != -1
+    return _one_layer_units(config) and torch.is_grad_enabled() and torch._C._current_graph_task_id() != -1
 
 
 def _install_vllm_experts_hooks(experts: TEGroupedMLP) -> None:
@@ -384,6 +458,9 @@ def _install_fa3_attention_hooks(attention: "GrugSelfAttention") -> None:
     The gradient is the trainer's cuDNN attention backward at the same query, key and value: with
     gradients enabled the cuDNN forward also runs, and ``x - x.detach()`` (exactly zero) carries its
     graph under FA3's bytes. A scoring forward without gradients runs FA3 alone.
+
+    Under full recompute with one-layer units, a unit's first forward keeps FA3's output for the unit's recompute,
+    which reproduces the first forward's query, key and value bit for bit and so would compute the same bytes again.
     """
     core = attention.core_attention
     cudnn_forward = core.forward
@@ -408,16 +485,22 @@ def _install_fa3_attention_hooks(attention: "GrugSelfAttention") -> None:
             return cudnn()
         if packed_seq_params is not None or attention_bias is not None or kwargs:
             raise NotImplementedError("fa3_attention numerics support unpacked causal sequences only")
-        steps = planned_vllm_steps(query.shape[1]) if numerics.vllm_steps else None
-        output = fa3_attention_sbhd(
-            query,
-            key,
-            value,
-            window=attention.fa3_window,
-            scale=attention.fa3_scale,
-            steps=steps,
-            window_rows=numerics.fa3_window_rows,
-        )
+        phase, unit = checkpoint_pass(), _unit_key(attention.config)
+        if phase is CheckpointPass.RECOMPUTE and unit is not None:
+            output = _take_for_recompute(core, unit)
+        else:
+            steps = planned_vllm_steps(query.shape[1]) if numerics.vllm_steps else None
+            output = fa3_attention_sbhd(
+                query,
+                key,
+                value,
+                window=attention.fa3_window,
+                scale=attention.fa3_scale,
+                steps=steps,
+                window_rows=numerics.fa3_window_rows,
+            )
+            if phase is CheckpointPass.FIRST and unit is not None:
+                _keep_for_recompute(core, unit, output)
         if not torch.is_grad_enabled():
             return output
         reference = cudnn()
@@ -511,6 +594,7 @@ def install_numerics_hooks(root: nn.Module) -> None:
             # The residual hooks wrap the EP combine, so the fp32 residual reads the combine's value.
             _install_ep_combine_hooks(module)
             _install_residual_hooks(module)
+            _install_layer_input_hooks(module)
             module.input_layernorm.role = NormRole.INPUT
 
 

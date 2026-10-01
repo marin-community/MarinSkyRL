@@ -20,6 +20,7 @@ position (one row). ``vllm_token_logprobs`` is model runner V2's log-probability
 
 from __future__ import annotations
 
+import functools
 import math
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -226,6 +227,18 @@ def window_row_requests(query_start: torch.Tensor, key_lengths: torch.Tensor, wi
     )
 
 
+@functools.lru_cache(maxsize=64)
+def _window_row_split(rows: int, requests: int, window: int, device: torch.device) -> WindowRowRequests:
+    """``window_row_requests`` for ``requests`` sequences of ``rows`` rows, built on the host and moved to ``device``
+    once, so a forward never waits for the device to count the requests."""
+    split = window_row_requests(
+        torch.arange(0, (requests + 1) * rows, rows, dtype=torch.int32),
+        torch.full((requests,), rows, dtype=torch.int32),
+        window,
+    )
+    return WindowRowRequests(*(tensor.to(device) for tensor in (split.query_start, split.key_lengths, split.owner)))
+
+
 def _fa3_window_rows_forward(query, key, value, *, rows: int, requests: int, window: int, scale: float):
     """Sliding-window FA3 over ``requests`` sequences of ``rows`` rows with every row past the window a one-row request.
 
@@ -245,11 +258,7 @@ def _fa3_window_rows_forward(query, key, value, *, rows: int, requests: int, win
         return sequences.reshape(requests * blocks, KV_CACHE_BLOCK, kv_heads, head_dim).contiguous()
 
     device = query.device
-    split = window_row_requests(
-        torch.arange(0, (requests + 1) * rows, rows, dtype=torch.int32, device=device),
-        torch.full((requests,), rows, dtype=torch.int32, device=device),
-        window,
-    )
+    split = _window_row_split(rows, requests, window, device)
     block_table = torch.arange(requests * blocks, dtype=torch.int32, device=device).view(requests, blocks)
     # FA3's value only: the gradient is the trainer's own attention backward (``fa3_attention``).
     with torch.no_grad():
