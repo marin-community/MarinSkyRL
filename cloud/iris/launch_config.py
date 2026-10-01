@@ -11,6 +11,7 @@ from typing import Any, Mapping
 
 from omegaconf import MISSING, DictConfig, OmegaConf
 
+from skyrl_train.config.mismatch_probe import validate_mismatch_probe_config
 from skyrl_train.config.objective_spec import validate_objective
 
 from cloud.iris.ray_storage import RaySpillBackend, resolve_ray_spill_target
@@ -307,8 +308,6 @@ def validate_iris_allocation(config: dict[str, Any]) -> IrisAllocationConfig:
 
 def validate_launch_config(config: DictConfig) -> LaunchTopology:
     """Validate launch semantics before an Iris job can be submitted."""
-    from skyrl_train.config.mismatch_probe import validate_mismatch_probe_config  # noqa: PLC0415 - keep launcher imports Torch-free
-
     raw = _resolved_config(config)
     if raw["schema_version"] != 1:
         raise ValueError(f"unsupported SkyRL launch schema_version: {raw['schema_version']!r}")
