@@ -50,7 +50,12 @@ from torch import nn
 from skyrl_train.mismatch_probe.numerics import active_numerics
 from skyrl_train.models import grug_inductor_kernels as vllm_inductor
 from skyrl_train.models.grug_handoffs import clear_hand_offs, hand_off, same_storage, take_hand_off
-from skyrl_train.models.grug_reference_kernels import gated_product_value, router_logits_value, swiglu_value
+from skyrl_train.models.grug_reference_kernels import (
+    gated_product_value,
+    hybrid_input_norm_value,
+    router_logits_value,
+    swiglu_value,
+)
 from skyrl_train.models.grug_rounding import (
     STAGE_STATISTIC_COLUMNS,
     append_stage_statistic,
@@ -685,10 +690,8 @@ class GrugGatedRMSNorm(nn.Module):
             return rms_norm_hybrid(hidden_states, variance, weight, self.eps)
         value = vllm_inductor.rms_norm_from_square_sum(hidden_states, statistic, weight).view_as(hidden_states)
         variance = (statistic / hidden_states.shape[-1]).view(*hidden_states.shape[:-1], 1)
-        return vllm_value(
-            value,
-            lambda: rms_norm_hybrid(hidden_states, _variance_with_gradient(variance, hidden_states), weight, self.eps),
-        )
+        # Differentiated as rms_norm_hybrid(hidden_states, _variance_with_gradient(variance, hidden_states), weight, eps).
+        return hybrid_input_norm_value(value, hidden_states, variance, weight, self.eps)
 
     def _input_statistic(self, hidden_states: torch.Tensor, numerics) -> torch.Tensor | None:
         """The input norm's statistic of the unrounded sum: its variance, or compiled vLLM's sum of squares.
