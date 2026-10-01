@@ -50,6 +50,7 @@ from torch import nn
 from skyrl_train.mismatch_probe.numerics import active_numerics
 from skyrl_train.models import grug_inductor_kernels as vllm_inductor
 from skyrl_train.models.grug_handoffs import clear_hand_offs, hand_off, same_storage, take_hand_off
+from skyrl_train.models.grug_reference_kernels import gated_product_value, router_logits_value, swiglu_value
 from skyrl_train.models.grug_rounding import (
     STAGE_STATISTIC_COLUMNS,
     append_stage_statistic,
@@ -572,7 +573,8 @@ def _install_shared_swiglu_hooks(shared: SharedExpertMLP) -> None:
             return (swiglu_single_rounding(fc1_output), *args[1:])
         gate, up = torch.chunk(fc1_output, 2, dim=-1)
         value = vllm_inductor.shared_activation(gate, up).view(gate.shape)
-        return (vllm_value(value, lambda: swiglu_single_rounding(fc1_output)), *args[1:])
+        # Differentiated as swiglu_single_rounding(fc1_output).
+        return (swiglu_value(value, fc1_output), *args[1:])
 
     shared.linear_fc1.register_forward_hook(keep_fc1_output)
     shared.linear_fc2.register_forward_pre_hook(replace_fc2_input)
@@ -654,7 +656,8 @@ class GrugGatedRMSNorm(nn.Module):
         gate = self.up_proj(F.silu(self.down_proj(normalized)))
         if numerics.vllm_norms:
             value = vllm_inductor.gated_product(normalized, gate).view_as(normalized)
-            output = vllm_value(value, lambda: gated_norm_product_fp32(normalized, gate).to(normalized.dtype))
+            # Differentiated as gated_norm_product_fp32(normalized, gate).to(normalized.dtype).
+            output = gated_product_value(value, normalized, gate)
         elif numerics.gated_norm:
             output = gated_norm_product_fp32(normalized, gate).to(normalized.dtype)
         else:
@@ -1048,7 +1051,8 @@ class GrugTopKRouter(TopKRouter):
         with torch.no_grad():
             value = invariant_router_logits(input.reshape(-1, input.shape[-1]), self.weight)
         value = value.view(*input.shape[:-1], value.shape[-1])
-        return vllm_value(value, lambda: F.linear(input.float(), self.weight.float()))
+        # Differentiated as F.linear(input.float(), self.weight.float()).
+        return router_logits_value(value, input, self.weight)
 
 
 def _install_step_lm_head(model: GPTModel) -> None:
