@@ -17,6 +17,7 @@ import skyrl_train
 import torch
 import zstandard
 from examples.cat_count.cpu_canary import PROMPT, pretrain
+from skyrl_train.checkpoint_generation import resolve_checkpoint_payload
 from skyrl_train.metric_names import CORRECTION_WEIGHT_MEAN_METRIC
 
 from tests.cpu.tiny_training.cat_count import FAST_STEPS, cat_count_config, run_cat_count
@@ -230,7 +231,8 @@ def test_cat_count_cpu_learns_and_flipped_advantage_fails(tmp_path, cat_count_po
     assert any(row["policy/ppo_clip_ratio"] > 0 for row in training)
     assert all("environment/exact" in row for row in training)
     assert any("environment/exact_n20" in row for row in training)
-    checkpoint = torch.load(tmp_path / f"positive/ckpts/global_step_{FAST_STEPS}/policy/rank_0.pt", weights_only=False)
+    step_path = tmp_path / "positive" / "ckpts" / f"global_step_{FAST_STEPS}"
+    checkpoint = torch.load(Path(resolve_checkpoint_payload(str(step_path))) / "policy/rank_0.pt", weights_only=False)
     optimizer_steps = [state["step"].item() for state in checkpoint["optimizer"]["state"].values()]
     assert optimizer_steps and set(optimizer_steps) == {2 * FAST_STEPS}
     names = {row["name"] for row in cat_count_session}
@@ -255,5 +257,6 @@ def test_cat_count_async_resumes_and_converges(tmp_path, cat_count_policy, cat_c
     assert [row["trainer/global_step"] for row in training] == list(range(1, 101))
     assert any(row["async/staleness_mean"] > 0 for row in training)
     assert any(train_score >= 0.9 and heldout_score >= 0.9 for train_score, heldout_score in scores(resumed))
-    checkpoint = torch.load(root / "ckpts/global_step_100/policy/rank_0.pt", weights_only=False)
+    step_path = root / "ckpts" / "global_step_100"
+    checkpoint = torch.load(Path(resolve_checkpoint_payload(str(step_path))) / "policy/rank_0.pt", weights_only=False)
     assert {state["step"].item() for state in checkpoint["optimizer"]["state"].values()} == {200}
