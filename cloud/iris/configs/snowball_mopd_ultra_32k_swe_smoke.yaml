@@ -8,18 +8,12 @@
 # opencode runs in a Daytona sandbox, which reaches the rollout engines only through controller
 # ingress: launch with ingress.mode controller. Set ingress.record_literal so the RecordProxy log
 # supplies opencode's token IDs, which Harbor does not return natively.
-entrypoint: standard
+defaults:
+- base/snowball_mopd_ultra_32k@_global_
+- _self_
 
 config_groups:
   terminal_bench_config: terminal_bench
-
-context_budget:
-  # The swe and terminal teachers have 32,768 positions, and scoring a trajectory takes one
-  # position beyond it, so the student window stops one token short of 32K.
-  request_window_tokens: 32767
-  max_new_tokens_per_turn: 8192
-  max_turns: 50
-  generated_budget_fraction: 1.0
 
 terminal_bench:
   harbor:
@@ -49,105 +43,20 @@ terminal_bench:
   trace_upload:
     enabled: false
 
-environment:
-  env_class: nemotron_ultra
-  skyrl_gym:
-    nemotron_ultra:
-      grading: skip
-      sandbox:
-        host: snowball-nemo-skills-sandbox.iris.svc.cluster.local
-        port: 6000
-
 trainer:
-  strategy: megatron
-  flash_attn: true
-  use_sample_packing: true
-  # Megatron keeps the optimizer on the CPU (optimizer_config_kwargs below), so there is no
-  # rollout-time optimizer offload to do.
-  offload_optimizer_during_rollouts: false
-  gradient_checkpointing: true
-  gradient_checkpointing_use_reentrant: false
   algorithm:
-    advantage_estimator: uniform
-    use_kl_loss: false
-    use_entropy_loss: false
-    loss_reduction: token_mean
-    distillation:
-      objective: sampled_reverse_kl
-      routing_plan: opd
-      coefficient: 1.0
-      reward_mode: replace
     group_admission:
       # A Harbor trial may take 600 s setup, 600 s agent, and 300 s verifier time.
       stall_timeout: 3600
-  epochs: 1
   max_steps: 2
-  update_epochs_per_batch: 1
   train_batch_size: 16
   policy_mini_batch_size: 16
-  eval_batch_size: 64
-  micro_forward_batch_size_per_gpu: 1
-  micro_train_batch_size_per_gpu: 1
-  eval_before_train: false
-  eval_interval: -1
   ckpt_interval: 2
   max_ckpts_to_keep: 1
-  resume_mode: none
-  logger: console
-  policy:
-    optimizer_config:
-      lr: 1.0e-6
-      max_grad_norm: 1.0
-    megatron_config:
-      tensor_model_parallel_size: 1
-      pipeline_model_parallel_size: 2
-      # Snowball's sliding-window layers need Transformer Engine's a2a or all_gather CP; packing
-      # (required for CP > 1) rules out all_gather, and a2a needs KV heads divisible by the CP
-      # size, which Snowball's five KV heads are not. The learner therefore runs without CP.
-      context_parallel_size: 1
-      expert_model_parallel_size: 8
-      expert_tensor_parallel_size: 1
-      optimizer_checkpoint_sharding_type: dp_reshardable
-      # Without CP, a 32K sequence's last-stage vocabulary log-softmax ran out of memory next to
-      # ~60 GB of optimizer and master-weight state; the optimizer runs on the CPU instead.
-      optimizer_config_kwargs:
-        optimizer_cpu_offload: true
-        optimizer_offload_fraction: 1.0
-      logprob_chunk_size: 512
-  placement:
-    colocate_all: false
-    policy_num_nodes: 4
-    policy_num_gpus_per_node: 8
 
 generator:
-  backend: vllm
-  model_dtype: bfloat16
-  vllm_attention_backend: FLASH_ATTN
-  inference_engine_tensor_parallel_size: 1
-  inference_engine_data_parallel_size: 8
-  inference_engine_expert_parallel_size: 8
-  num_inference_engines: 2
   n_samples_per_prompt: 2
-  gpu_memory_utilization: 0.8
-  max_num_seqs: 16
-  max_num_batched_tokens: 16384
-  enable_prefix_caching: true
-  enable_chunked_prefill: true
-  enforce_eager: false
-  run_engines_locally: true
-  weight_sync_backend: nccl
-  enable_http_endpoint: true
-  sampling_params:
-    temperature: 1.0
-    top_p: 1.0
-    top_k: -1
-  engine_init_kwargs:
-    enable_auto_tool_choice: true
-    tool_call_parser: hermes
 
-# The vLLM fork serves GrugMoE only as tensor-parallel 1 with expert parallelism across the
-# data-parallel ranks. Each teacher prefills whole 32K sequences with prompt log-probs, so it
-# gets the rollout engines' batched-token cap.
 teachers:
   swe:
     source: local_inference
@@ -176,11 +85,4 @@ teacher_routing:
         weight: 1.0
 
 data:
-  kind: parquet
-  train_data: []
-  val_data: []
   terminal_bench_data: []
-  shuffle: true
-
-extra_env:
-  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
