@@ -1,6 +1,6 @@
 # SWE tasks with Shellbox
 
-SWE-Gym and SWE-Bench use the common TaskCompendium rollout engine. The model
+SWE-Gym and SWE-Bench use the shared rollout engine in Marin. The model
 changes repository files through the `shell` tool. The grader applies the Git
 patch in a fresh copy of the task image, then runs the private evaluation script.
 
@@ -17,7 +17,8 @@ SkyRL environment setup:
 uv pip install --python ../.venv/bin/python \
   -e ../../marin/lib/tasktrove-verify \
   -e '../../marin/lib/shellbox[shellsim]' \
-  -e ../../marin/lib/taskcompendium
+  -e ../../marin/lib/taskcompendium \
+  -e ../../marin/lib/rolloutengine
 ```
 
 Materialize the source rows:
@@ -46,7 +47,7 @@ The Docker factory requires a Docker daemon and Skopeo on each rollout worker.
 It resolves registry images into `trajectory_runner.image_cache` and reuses them
 for task and verifier machines. Set `trajectory_runner.skopeo` to the executable
 path if Skopeo is not on `PATH`.
-TaskCompendium and Shellbox must be installed in the worker environment.
+rolloutengine, TaskCompendium, and Shellbox must be installed in the worker environment.
 
 List the task images from the materialized files:
 

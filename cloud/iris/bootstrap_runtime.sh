@@ -84,6 +84,6 @@ fi
 import memray
 from shellbox.backends.daytona.machine import DaytonaMachineFactory
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
-from taskcompendium.rollout import ShellboxRolloutEngine
+from rolloutengine.engine import ShellboxRolloutEngine
 PY
 "$python" -c "import quack.activation, torch, vllm; import vllm._C_stable_libtorch, vllm.cumem_allocator; from skyrl_train.models.grug_moe import GRUG_MOE_ARCHITECTURE; from vllm.model_executor.models import ModelRegistry; assert GRUG_MOE_ARCHITECTURE in ModelRegistry.get_supported_archs(); print('[rl-iris] frozen runtime ready:', torch.__version__, vllm.__version__)"

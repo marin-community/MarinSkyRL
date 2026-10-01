@@ -2,7 +2,7 @@ Canonical task rollouts
 =======================
 
 Marin defines ``RolloutEngine`` and ``ShellboxRolloutEngine`` in
-``lib/taskcompendium/src/taskcompendium/rollout.py``.
+``lib/rolloutengine/src/rolloutengine/engine.py``.
 SkyRL uses that engine through ``TaskRolloutWorker`` in
 ``skyrl_train/rollouts/task_worker.py``.
 

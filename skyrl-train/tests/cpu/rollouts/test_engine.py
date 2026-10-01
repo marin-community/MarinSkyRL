@@ -55,7 +55,7 @@ from skyrl_train.rollouts.task_worker import TaskRolloutWorker
 from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
 from taskcompendium.importers.skyrl import gym_task, read_gym_tasks
 from taskcompendium.parquet import read_tasks, write_tasks
-from taskcompendium.rollout import ModelTurn, RolloutContractError
+from rolloutengine.engine import ModelTurn, RolloutContractError
 from skyrl_train.rollouts.gym_tasks import GymTaskSession
 from skyrl_train.trajectory_runners.types import BatchMetadata, TokenProvenance, TrajectoryID
 from skyrl_train.trajectory_runners.model_clients import DirectModelClient, ModelServerError

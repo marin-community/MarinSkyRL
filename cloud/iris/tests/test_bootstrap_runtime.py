@@ -36,7 +36,7 @@ def _fake_frozen_runtime(
     for package in (
         "shellbox/backends/daytona",
         "shellbox/backends/shellsim",
-        "taskcompendium",
+        "rolloutengine",
         "megatron/bridge",
         "nvidia/cu13/lib",
         "quack",
@@ -51,7 +51,7 @@ def _fake_frozen_runtime(
         "megatron",
         "shellbox/backends/daytona",
         "shellbox/backends/shellsim",
-        "taskcompendium",
+        "rolloutengine",
         "megatron/bridge",
         "quack",
         "skyrl_train",
@@ -91,7 +91,7 @@ def _fake_frozen_runtime(
     )
     _write_module(site_packages, "shellbox/backends/daytona/machine.py", "class DaytonaMachineFactory: pass\n")
     _write_module(site_packages, "shellbox/backends/shellsim/machine.py", "class ShellSimMachineFactory: pass\n")
-    _write_module(site_packages, "taskcompendium/rollout.py", "class ShellboxRolloutEngine: pass\n")
+    _write_module(site_packages, "rolloutengine/engine.py", "class ShellboxRolloutEngine: pass\n")
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -166,7 +166,7 @@ def test_export_bootstrap_does_not_require_rollout_or_telemetry_packages(tmp_pat
     _write_module(site_packages, "skyrl_train/checkpoint_exporter.py", "class CheckpointExporter: pass\n")
     (site_packages / "shellbox/backends/daytona/machine.py").unlink()
     (site_packages / "memray.py").unlink()
-    (site_packages / "taskcompendium/rollout.py").unlink()
+    (site_packages / "rolloutengine/engine.py").unlink()
 
     result = _run_bootstrap(environment, process_environment, "megatron-export")
 
@@ -217,7 +217,7 @@ def test_bootstrap_exposes_cuda_linker_compatibility_paths(tmp_path: Path) -> No
     ("missing_module", "expected_error"),
     [
         ("shellbox/backends/daytona/machine.py", "shellbox.backends.daytona.machine"),
-        ("taskcompendium/rollout.py", "taskcompendium.rollout"),
+        ("rolloutengine/engine.py", "rolloutengine.engine"),
         ("memray.py", "No module named 'memray'"),
         ("megatron/bridge", "megatron.bridge"),
         ("transformer_engine/common", "transformer_engine.common"),

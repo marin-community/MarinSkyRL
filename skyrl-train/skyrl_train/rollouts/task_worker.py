@@ -19,7 +19,7 @@ from shellbox.machine import MachineFactory
 from taskcompendium.environment import EnvironmentKind, ExternalVerifierSpec
 from taskcompendium.grading import GradeResult, Outcome
 from taskcompendium.models import TaskSpec, VerifierKind
-from taskcompendium.rollout import (
+from rolloutengine.engine import (
     GenerationLimitReached,
     ModelRequest,
     ModelTurn,

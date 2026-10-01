@@ -13,7 +13,7 @@ from skyrl_gym.verification import (
     VerificationResult,
 )
 from taskcompendium.grading import GradeResult, Outcome
-from taskcompendium.rollout import RolloutData
+from rolloutengine.engine import RolloutData
 
 from skyrl_train.error_treatment import ErrorTreatment
 from skyrl_train.metric_names import TASK_ROLLOUT_METRIC_PREFIX

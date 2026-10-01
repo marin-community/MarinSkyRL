@@ -12,7 +12,7 @@ from taskcompendium.environment import ExternalVerifierSpec
 from taskcompendium.importers.skyrl import GYM_INTERACTION, gym_task
 from taskcompendium.models import AnswerType, Source, TaskSpec, VerifierKind
 from taskcompendium.parquet import write_tasks
-from taskcompendium.rollout import rollout_request
+from rolloutengine.engine import rollout_request
 from taskcompendium.submission import AnswerFormat, SubmissionConvention
 
 from skyrl_train.dataset.dataset import PromptDataset
