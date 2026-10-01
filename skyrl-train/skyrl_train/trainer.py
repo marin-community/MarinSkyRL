@@ -48,6 +48,7 @@ from skyrl_train.dataset.preprocess import (
     collate_response_token_channel,
     convert_prompts_responses_to_batch_tensors,
 )
+from skyrl_train.dataset.routed_expert_batch import RoutedExpertRows
 from skyrl_train.distillation import DISTILLATION_SCORED_TOKENS_METRIC, validate_distillation_attachment
 from skyrl_train.distillation_adapters import AsyncRoutedTeacherScoreTicket, RoutedScoredDistillationBatch
 from skyrl_train.distillation_runtime import DistillationRuntime
@@ -1966,14 +1967,13 @@ class RayPPOTrainer:
     def _resolve_num_experts(self) -> Optional[int]:
         """Resolve the policy model's MoE expert count from its HF config, memoized.
 
-        Used to pick a DETERMINISTIC (rank-invariant) dtype for the
-        rollout_routed_experts transport tensor in the collator — see
-        ``convert_prompts_responses_to_batch_tensors``. Reads the HF config at
+        Used to pick a deterministic, rank-invariant route dtype when each worker
+        materializes a microbatch. Reads the HF config at
         ``cfg.trainer.policy.model.path`` once and resolves the expert count across
         MoE arch variants (Qwen3-MoE: ``num_experts``; Mixtral: ``num_local_experts``;
         DeepSeek/Qwen-style: ``n_routed_experts``). Returns None (and caches None) if
-        the config has no such field (non-MoE) or can't be loaded, in which case the
-        collator falls back to its non-deterministic per-batch-max pick with a warning.
+        the config has no such field (non-MoE) or can't be loaded, in which case
+        the selected batch uses one observed-max dtype for all workers.
         """
         if getattr(self, "_num_experts_cache", "__unset__") != "__unset__":
             return self._num_experts_cache
@@ -2002,8 +2002,8 @@ class RayPPOTrainer:
         except Exception as e:  # noqa: BLE001 — config load is best-effort; fallback is safe
             logger.warning(
                 f"Could not resolve num_experts from policy model config for the "
-                f"routed-experts dtype pick ({e!r}); the collator will use its "
-                f"non-deterministic per-batch-max fallback."
+                f"routed-experts dtype pick ({e!r}); the batch will use its "
+                f"observed-max fallback."
             )
             num_experts = None
         if num_experts is not None:
@@ -2032,9 +2032,9 @@ class RayPPOTrainer:
         # (the field is never even passed to the collator nor set on the batch).
         moe_router_replay = moe_router_replay_requested(self.cfg)
         routed_experts = trajectory_batch.get("rollout_routed_experts", None) if moe_router_replay else None
-        # Deterministic dtype for the rollout_routed_experts transport tensor:
+        # Deterministic dtype for the compact rollout_routed_experts transport:
         # resolve the model's expert count once (memoized) and pass it to the
-        # collator so the narrowed dtype is keyed on num_experts (max possible id),
+        # route rows so the narrowed dtype is keyed on num_experts (max possible id),
         # NOT the per-batch observed max — otherwise ranks whose batch max straddles
         # a dtype boundary diverge and a later collective on this tensor hangs NCCL.
         # Only needed when we actually carry routed experts (moe_router_replay on).
@@ -2056,7 +2056,6 @@ class RayPPOTrainer:
             rewards_tensor,
             loss_masks_tensor,
             rollout_logprobs_tensor,
-            rollout_routed_experts_tensor,
             token_level_shaping_tensor,
             response_span_tags_tensor,
         ) = convert_prompts_responses_to_batch_tensors(
@@ -2066,10 +2065,8 @@ class RayPPOTrainer:
             rewards,
             loss_masks,
             logprobs,
-            routed_experts,
             token_level_shaping,
             response_span_tags,
-            num_experts,
         )
         if (
             rollout_logprobs_required(
@@ -2081,11 +2078,14 @@ class RayPPOTrainer:
             raise ValueError("rollout_logprobs are required by the configured objective")
         if rollout_logprobs_tensor is not None:
             assert rollout_logprobs_tensor.shape == loss_masks_tensor.shape, "Logprobs should look like responses"
-        # Stage 1 invariant (scope Q3 #2): routed_experts.shape[:2] == loss_mask.shape.
-        if rollout_routed_experts_tensor is not None:
-            assert rollout_routed_experts_tensor.shape[:2] == loss_masks_tensor.shape, (
-                "routed_experts response axis should look like responses"
+        # Keep the response-window width for placement, without allocating its dense route canvas.
+        rollout_routed_experts_rows = None
+        if routed_experts is not None:
+            rollout_routed_experts_rows = RoutedExpertRows(
+                tuple(routed_experts), response_masks_tensor.shape[1], num_experts
             )
+            if len(rollout_routed_experts_rows) != len(response_ids):
+                raise ValueError("routed experts must have one row per response")
         distillation_tensors = _validated_distillation_tensors(trajectory_batch, response_masks_tensor)
         training_input = TrainingInputBatch(
             {
@@ -2105,11 +2105,8 @@ class RayPPOTrainer:
                     else None
                 ),
             },
+            routed_expert_rows=rollout_routed_experts_rows,
         )
-        # Attach routed_experts only when present, so the flag-off batch dict has
-        # exactly the same keys as today (TensorBatch.__eq__ compares key sets).
-        if rollout_routed_experts_tensor is not None:
-            training_input["rollout_routed_experts"] = rollout_routed_experts_tensor
         training_input.update(distillation_tensors)
         ftpo = ftpo_config(self.cfg.trainer.algorithm)
         if ftpo is not None:
@@ -2513,7 +2510,9 @@ class RayPPOTrainer:
                     padding_tensor = tensor[:pad_size].clone()
                 new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
 
-        new_training_input = TrainingInputBatch(new_tensors)
+        routes = training_input.routed_expert_rows
+        padded_routes = RoutedExpertRows.cat([routes, routes[:pad_size]]) if routes is not None else None
+        new_training_input = TrainingInputBatch(new_tensors, routed_expert_rows=padded_routes)
         new_training_input.metadata = {}
         new_training_input.metadata["uids"] = training_input.metadata["uids"] + [f"pad{i}" for i in range(pad_size)]
         if "trajectory_ids" in training_input.metadata:
@@ -2558,10 +2557,10 @@ class RayPPOTrainer:
         # raw_grad_norm ~ 1e5) that corrupts the policy. Threading routed_experts
         # into the forward-pass batch makes old/ref/train forwards use the
         # identical (replay) path so step 1 is genuinely on-policy (log_ratio ~ 0).
-        # Gated on presence: flag-off (8B / no router-replay) batches never carry
-        # this key, so the selected key set is byte-identical to before.
+        # Gated on presence: flag-off (8B / no router-replay) batches keep the
+        # original forward inputs. Compact routes are carried as a side field.
         fwd_keys = ["sequences", "attention_mask"]
-        if "rollout_routed_experts" in training_input.keys():
+        if training_input.routed_experts is not None:
             fwd_keys.append("rollout_routed_experts")
         data_fwd_pass = training_input.select(keys=fwd_keys, metadata_keys=["response_length"])
         data_fwd_pass.metadata["global_step"] = self.global_step

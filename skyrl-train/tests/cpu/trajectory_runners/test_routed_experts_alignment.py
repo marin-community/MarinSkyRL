@@ -9,7 +9,8 @@ import pytest
 import torch
 from transformers import AutoTokenizer
 
-from skyrl_train.dataset.preprocess import _collate_routed_experts_from_arrays
+from skyrl_train.dataset.routed_expert_batch import RoutedExpertRows, _collate_routed_experts_from_arrays
+from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.trajectory_runners.routed_experts import normalize_routed_experts
 from skyrl_train.trajectory_runners.trajectory_processing import (
     align_routed_experts_with_lcs,
@@ -129,6 +130,30 @@ def test_collator_pads_routes_in_final_dtype(num_experts, expected_dtype):
     np.testing.assert_array_equal(routes[1, 0].numpy(), second[0])
     assert not torch.any(routes[:, 2])
     assert not torch.any(routes[1, 1:])
+
+
+def test_compact_routes_survive_batch_slicing_and_materialize_to_local_response_lengths():
+    rows = (
+        np.asarray([_route_row(value) for value in (1, 5, 9, 13)], dtype=np.uint8),
+        np.asarray([_route_row(21)], dtype=np.uint8),
+        np.asarray([_route_row(value) for value in (29, 33)], dtype=np.uint8),
+    )
+    batch = TrainingInputBatch(
+        {"sequences": torch.tensor([[1, 0, 0, 0, 0], [2, 0, 0, 0, 0], [3, 0, 0, 0, 0]])},
+        routed_expert_rows=RoutedExpertRows(rows, response_len=4, num_experts=256),
+    )
+    batch.metadata = {"response_length": 4}
+
+    restored = pickle.loads(pickle.dumps(batch))
+    forward = restored.select(keys=["sequences", "rollout_routed_experts"], metadata_keys=["response_length"])
+    assert forward.metadata == {"response_length": 4}
+    np.testing.assert_array_equal(forward.chunk(1)[1].routed_experts_tensor()[0].numpy(), rows[1])
+
+    microbatches = restored.chunk(1)
+    assert [micro.routed_experts_tensor().shape[1] for micro in microbatches] == [4, 1, 2]
+    for index, (row, micro) in enumerate(zip(rows, microbatches, strict=True), start=1):
+        assert micro["sequences"][0, 0].item() == index
+        np.testing.assert_array_equal(micro.routed_experts_tensor()[0].numpy(), row)
 
 
 def test_concatenation_fills_missing_sample_with_matching_route_geometry():
