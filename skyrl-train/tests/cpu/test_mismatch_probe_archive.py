@@ -20,10 +20,16 @@ from skyrl_train.mismatch_probe.archive import MismatchArchive, read_frozen_prob
 from skyrl_train.mismatch_probe.collect import TIMING_REPETITIONS, ProbeCollector, token_digest
 from skyrl_train.mismatch_probe.callback import MismatchProbeCallback
 from skyrl_train.mismatch_probe.modes import KEPT_STACK_3
-from skyrl_train.models.grug_inductor_kernels import VENDORED_KERNELS, source_digest
+from skyrl_train.models.grug_inductor_kernels import VENDORED_KERNELS
 from skyrl_train.models.megatron_router_replay import MegatronRouterReplay
 from skyrl_train.training_batch import TrainingOutputBatch
 from skyrl_train.trainer import RayPPOTrainer
+
+
+def _renamed(role, name):
+    """A vendored kernel's source as an engine graph module numbers it: the same function under another name."""
+    vendored_name, text = VENDORED_KERNELS[role]
+    return {"name": name, "source": text.replace(vendored_name, name)}
 
 
 class _Engine:
@@ -55,6 +61,9 @@ class _Engine:
                         "dummy": False,
                         "rows": rows,
                         "tokens_across_dp": [rows, rows],
+                        # Outside CUDA graphs the step launches each compiled kernel: an input norm, then the
+                        # attention output's XSA kernel of a graph whose head-gate GEMM has 20 columns.
+                        "launches": [0, 1],
                     }
                 )
             for engine in self.endpoint.engines:
@@ -63,17 +72,6 @@ class _Engine:
         output = await self.endpoint.generate(request)
         output.pop("engine_indices")
         return output
-
-
-def _kernel_record(role, block):
-    """A vLLM worker's loaded vendored kernel holding one launch config with ``block`` reduction columns."""
-    return {
-        "file": f"c{role}.py",
-        "sha256": source_digest(VENDORED_KERNELS[role][1]),
-        "kernel_name": VENDORED_KERNELS[role][0],
-        "launches": [{"kwargs": {"XBLOCK": 1, "R0_BLOCK": block}, "num_warps": 16, "num_stages": 1}],
-        "best_config": None,
-    }
 
 
 class _InferenceEndpoint:
@@ -94,7 +92,20 @@ class _InferenceEndpoint:
             engine.steps = []
 
     async def end_probe_step_log(self):
-        logs = [[{"placement": {"dp_rank": engine.dp_rank}, "steps": engine.steps}] for engine in self.engines]
+        norm = _renamed("rms_norm", "triton_red_fused_rms_norm_1")
+        norm["launches"] = [{"kwargs": {"XBLOCK": 1, "R0_BLOCK": self.norm_block}, "num_warps": 16, "num_stages": 1}]
+        name, padded = VENDORED_KERNELS["xsa_gate"]
+        xsa = {
+            "name": "triton_red_fused_xsa_0",
+            "source": padded.replace(name, "triton_red_fused_xsa_0").replace(
+                "in_ptr2 + (x0 + 24*x1)", "in_ptr2 + (x3)"
+            ),
+            "launches": [{"kwargs": {"XBLOCK": 2, "R0_BLOCK": 128}, "num_warps": 2, "num_stages": 1}],
+        }
+        logs = [
+            [{"placement": {"dp_rank": engine.dp_rank}, "steps": engine.steps, "kernels": [norm, xsa]}]
+            for engine in self.engines
+        ]
         for engine in self.engines:
             engine.steps = None
         return logs
@@ -105,7 +116,6 @@ class _InferenceEndpoint:
             "parameter_sha256": "ab" * 32,
             "versions": {"torch": "test"},
             "inductor_output_code": {"q7/cq7kernel.py": "def call(args):\n    pass\n"},
-            "inductor_kernels": [_kernel_record("rms_norm", self.norm_block)],
         }
         return [[worker]]
 
@@ -148,7 +158,7 @@ class _PolicyEndpoint:
         self.response_routes_by_mode = {}
         self.dp_ranks_by_mode = {}
         self.steps_by_mode = {}
-        self.kernel_configs_by_mode = {}
+        self.kernels_by_mode = {}
         self.timed_modes = []
         self.actor_infos = [
             SimpleNamespace(rank=MeshRank(dp=dp, sp=0, tp=0, pp=0, world_size=2, dp_size=2, pp_size=1))
@@ -169,7 +179,7 @@ class _PolicyEndpoint:
         self.dp_ranks_by_mode[mode] = data.get("vllm_dp_rank")
         tokens, rows = data.get("vllm_step_tokens"), data.get("vllm_step_rows")
         self.steps_by_mode[mode] = None if tokens is None else list(zip(tokens.tolist(), rows.tolist(), strict=True))
-        self.kernel_configs_by_mode[mode] = data.metadata["vllm_kernel_configs"]
+        self.kernels_by_mode[mode] = data.metadata["vllm_kernels"]
         self.prompt_routes_by_mode[data.metadata["probe_mode"]] = data["rollout_prompt_routed_experts"].clone()
         self.response_routes_by_mode[data.metadata["probe_mode"]] = data["rollout_routed_experts"].clone()
         probabilities = torch.log_softmax(torch.arange(32, dtype=torch.float32), dim=0)
@@ -368,9 +378,17 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
     # response but the last token) and the step's rows; the padding row has no step. Other modes carry no steps.
     assert trainer.policy_model.steps_by_mode[step_mode] == [(5, 8), (4, 8), (6, 8), (0, 0)]
     assert trainer.policy_model.steps_by_mode["reread_replay"] is None
-    # Every mode launches the vLLM kernels with the configs the re-read engine's autotuner chose.
-    chosen = {"rms_norm": {"kwargs": {"R0_BLOCK": 2048, "XBLOCK": 1}, "num_warps": 16, "num_stages": 1}}
-    assert all(configs == chosen for configs in trainer.policy_model.kernel_configs_by_mode.values())
+    # Every mode runs the vLLM kernels as the re-read engine launched them: the renumbered input norm's config, and
+    # the head-gate width of the XSA variant its one decoder layer ran.
+    xsa = {"kwargs": {"R0_BLOCK": 128, "XBLOCK": 2}, "num_warps": 2, "num_stages": 1}
+    chosen = {
+        "launches": {
+            "rms_norm": {"kwargs": {"R0_BLOCK": 2048, "XBLOCK": 1}, "num_warps": 16, "num_stages": 1},
+            "xsa_gate": xsa,
+        },
+        "gate_columns": [20],
+    }
+    assert all(kernels == chosen for kernels in trainer.policy_model.kernels_by_mode.values())
     rereads = {row.sample_id: row for row in chained_scores(cfg) if row.scorer == "vllm.rescore" and row.update == 0}
     agains = [row for row in chained_scores(cfg) if row.scorer == "vllm.rescore_again" and row.update == 0]
     assert len(rereads) == len(agains) == 3
@@ -399,8 +417,8 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
     assert trainer.policy_model.prompt_routes_by_mode["reread_replay"][0, :, 0].tolist() == [[0, 0], [3, 4], [4, 5]]
     assert trainer.policy_model.dp_ranks_by_mode["reread_replay"].tolist() == [0, 0, 0, 0]
     assert trainer.policy_model.steps_by_mode[step_mode] == [(5, 8), (4, 8), (6, 8), (0, 0)]
-    assert trainer.policy_model.kernel_configs_by_mode[step_mode] == chosen
-    assert trainer.policy_model.kernel_configs_by_mode["router_replay"]["rms_norm"]["kwargs"]["R0_BLOCK"] == 4096
+    assert trainer.policy_model.kernels_by_mode[step_mode] == chosen
+    assert trainer.policy_model.kernels_by_mode["router_replay"]["launches"]["rms_norm"]["kwargs"]["R0_BLOCK"] == 4096
     timing = json.loads(read_frozen_probe(cfg.trainer.mismatch_probe.archive_uri).manifest.timing_json)
     # The slowest data-parallel rank sets each repetition's pass time.
     assert timing["training_pass@0:reread_replay/seconds"] == [1.5] * TIMING_REPETITIONS

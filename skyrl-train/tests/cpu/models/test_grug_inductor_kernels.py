@@ -1,49 +1,64 @@
-"""The launch config the trainer gives each vendored vLLM kernel, from the kernels a vLLM worker loaded."""
+"""The trainer's record of how a vLLM worker's compiled forward ran the kernels it vendors."""
+
+import pytest
 
 from skyrl_train.models.grug_inductor_kernels import (
     VENDORED_KERNELS,
     KernelConfigs,
     Launch,
-    engine_kernel_choices,
-    source_digest,
+    engine_kernels,
+    kernel_configs,
+    recorded_gate_columns,
 )
 
 NORM_2048 = {"kwargs": {"XBLOCK": 1, "R0_BLOCK": 2048}, "num_warps": 16, "num_stages": 1}
-NORM_4096 = {"kwargs": {"XBLOCK": 1, "R0_BLOCK": 4096}, "num_warps": 16, "num_stages": 1}
-# An Inductor ``.best_config`` file naming R0_BLOCK 4,096, with the fields Inductor stores beside the config.
-BEST_4096 = {
-    "XBLOCK": 1,
-    "R0_BLOCK": 4096,
-    "num_warps": 16,
-    "num_stages": 1,
-    "configs_hash": "c0ffee",
-    "found_by_coordesc": False,
-    "time_taken_ms": 3,
-    "triton_cache_hash": "beef",
-}
+XSA = {"kwargs": {"XBLOCK": 2, "R0_BLOCK": 128}, "num_warps": 2, "num_stages": 1}
 
 
-def _loaded(role: str, launches: list[dict], best_config: dict | None) -> dict:
-    return {"sha256": source_digest(VENDORED_KERNELS[role][1]), "launches": launches, "best_config": best_config}
+def _launched(role: str, name: str, launches: list[dict], edit: tuple[str, str] = ("", "")) -> dict:
+    """A kernel a worker launched: a vendored function as a graph module numbers it, optionally with one line edited."""
+    vendored_name, text = VENDORED_KERNELS[role]
+    return {"name": name, "source": text.replace(vendored_name, name).replace(*edit), "launches": launches}
 
 
-def test_engine_kernel_choices_take_the_config_each_vendored_kernel_launched():
-    choices = engine_kernel_choices(
-        [
-            # Autotuned in this process: the kernel holds the one config it launched, while the cache file, which
-            # ranks sharing one Inductor cache overwrite, names another.
-            _loaded("rms_norm", [NORM_2048], BEST_4096),
-            # Not launched in this process: the kernel holds every candidate, so its ``.best_config`` decides.
-            _loaded("final_norm", [NORM_2048, NORM_4096], BEST_4096),
-            # A kernel the trainer does not vendor.
-            {"sha256": "0" * 64, "launches": [NORM_2048], "best_config": None},
-        ]
-    )
-    configs = KernelConfigs.from_records({role: choice["launch"] for role, choice in choices.items()})
+# The XSA kernel of a graph whose head-gate GEMM was left at 20 columns reads the gate at that row stride.
+UNPADDED_GATE = ("in_ptr2 + (x0 + 24*x1)", "in_ptr2 + (x3)")
 
+
+def test_engine_kernels_identify_renumbered_kernels_and_each_layers_head_gate_width():
+    kernels = [
+        # The first graph's kernels keep the vendored numbering; the second graph, compiled without the padded
+        # head-gate weight's copy, numbers every kernel one lower.
+        _launched("xsa_gate", "triton_red_fused_xsa_1", [XSA]),
+        _launched("rms_norm", "triton_red_fused_rms_norm_2", [NORM_2048]),
+        _launched("xsa_gate", "triton_red_fused_xsa_0", [XSA], UNPADDED_GATE),
+        _launched("rms_norm", "triton_red_fused_rms_norm_1", [NORM_2048]),
+        # A kernel the trainer does not vendor.
+        {
+            "name": "triton_poi_fused_mm_t_0",
+            "source": "def triton_poi_fused_mm_t_0(in_ptr0):\n    pass\n",
+            "launches": [XSA],
+        },
+    ]
+    # Two eager steps of a three-layer model: layers 0 and 1 in the first graph, layer 2 in the second.
+    sequence = [4, 0, 1, 4, 0, 1, 2, 3]
+    launched = engine_kernels(kernels, [sequence, sequence])
+
+    assert launched.gate_columns == (24, 24, 20)
+    assert launched.launches == {"xsa_gate": XSA, "rms_norm": NORM_2048}
+    configs = KernelConfigs.from_engine({"launches": launched.launches, "gate_columns": launched.gate_columns})
     assert configs.launch("rms_norm") == Launch((("R0_BLOCK", 2048), ("XBLOCK", 1)), 16, 1)
-    assert configs.launch("final_norm") == Launch((("R0_BLOCK", 4096), ("XBLOCK", 1)), 16, 1)
-    assert (choices["rms_norm"]["source"], choices["rms_norm"]["best_config_agrees"]) == ("autotuner", False)
-    assert sorted(choices) == ["final_norm", "rms_norm"]
-    # Kernels the worker did not load keep the trainer's defaults.
+    # Kernels the worker did not launch keep the trainer's defaults.
     assert configs.launch("residual_norm") == KernelConfigs().launch("residual_norm")
+    with kernel_configs(configs):
+        assert [recorded_gate_columns(layer) for layer in range(3)] == [24, 24, 20]
+    assert recorded_gate_columns(2) is None
+
+
+def test_engine_kernels_refuse_steps_that_ran_different_head_gate_widths():
+    kernels = [
+        _launched("xsa_gate", "triton_red_fused_xsa_1", [XSA]),
+        _launched("xsa_gate", "triton_red_fused_xsa_0", [XSA], UNPADDED_GATE),
+    ]
+    with pytest.raises(ValueError, match="different head-gate widths"):
+        engine_kernels(kernels, [[0], [1]])

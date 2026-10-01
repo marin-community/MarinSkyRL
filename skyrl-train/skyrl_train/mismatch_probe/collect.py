@@ -48,7 +48,7 @@ from skyrl_train.mismatch_probe.protocol import (
 )
 from skyrl_train.mismatch_probe.modes import NATIVE_MODE, REPEAT_MODE, TRAINER_MODES
 from skyrl_train.mismatch_probe.provenance import manifest
-from skyrl_train.models.grug_inductor_kernels import engine_kernel_choices
+from skyrl_train.models.grug_inductor_kernels import engine_kernels, function_digest
 from skyrl_train.models.megatron_router_replay import SENTINEL_EXPERT_ID
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.trajectory_runners.types import TrajectoryID
@@ -182,19 +182,36 @@ def _step_records(steps: list[RereadStep], rows) -> dict[str, dict]:
     return {row.sample_id: asdict(step) for row, step in zip(rows, steps, strict=True)}
 
 
-def _compact_step_logs(logs: list[list[dict]]) -> list[list[dict]]:
-    """Each worker's placement, its steps that scheduled tokens, and how many dummy steps it ran."""
-    return [
-        [
+def _compact_worker_log(worker: dict) -> dict:
+    """One worker's placement, its steps that scheduled tokens, how many dummy steps it ran, and the Inductor kernels
+    its steps launched outside CUDA graphs (name, function digest, launch configs); each step names its launches by
+    an index into the worker's distinct launch sequences."""
+    sequences: list[list[int]] = []
+    steps = []
+    for step in worker["steps"]:
+        if step["dummy"] or not step["scheduled_tokens"]:
+            continue
+        compact = {key: value for key, value in step.items() if key != "launches"}
+        launches = step.get("launches")
+        if launches:
+            if launches not in sequences:
+                sequences.append(launches)
+            compact["launch_sequence"] = sequences.index(launches)
+        steps.append(compact)
+    return {
+        "placement": worker["placement"],
+        "steps": steps,
+        "dummy_steps": sum(step["dummy"] for step in worker["steps"]),
+        "kernels": [
             {
-                "placement": worker["placement"],
-                "steps": [step for step in worker["steps"] if not step["dummy"] and step["scheduled_tokens"]],
-                "dummy_steps": sum(step["dummy"] for step in worker["steps"]),
+                "name": kernel["name"],
+                "function_sha256": function_digest(kernel["source"], kernel["name"]),
+                "launches": kernel["launches"],
             }
-            for worker in workers
-        ]
-        for workers in logs
-    ]
+            for kernel in worker.get("kernels", ())
+        ],
+        "launch_sequences": sequences,
+    }
 
 
 def _reread_routes(output, rows) -> list[np.ndarray | None]:
@@ -331,11 +348,11 @@ class ProbeCollector:
         # Each cache-off re-read row's logged vLLM step, per update, and the frozen source's when it logged them.
         self.reread_steps: dict[int, list[RereadStep]] = {}
         self.frozen_reread_steps: list[RereadStep] | None = None
-        # The launch config of each vendored vLLM kernel (role → config) the re-read engine ran, and the frozen
-        # source's; the provenance of each choice; and every logged re-read's worker step logs, by update and scorer.
-        self.vllm_kernel_configs: dict[str, dict] | None = None
-        self.frozen_kernel_configs: dict[str, dict] | None = None
-        self.vllm_kernel_choices: dict[str, dict] = {}
+        # The vendored vLLM kernels the re-read engine launched (``EngineKernels`` as a dict: each role's launch
+        # config and each decoder layer's head-gate width), and the frozen source's; and every logged re-read's
+        # compacted worker step logs, by update and scorer.
+        self.vllm_kernels: dict | None = None
+        self.frozen_vllm_kernels: dict | None = None
         self.reread_step_logs: dict[str, list[list[dict]]] = {}
         # The vLLM data-parallel rank that generated each frozen sample.
         self.generation_dp_ranks: list[int] | None = None
@@ -411,7 +428,9 @@ class ProbeCollector:
             self.frozen_reference = reference
             self.frozen_reread_steps = [RereadStep(**reference["steps"][row.sample_id]) for row in rows]
             self.frozen_reread_dp_ranks = list(reference["dp_ranks"])
-            self.frozen_kernel_configs = reference["kernel_configs"]
+            if "kernels" not in reference:
+                raise ValueError("reuse_probe source's logged prefill reference does not record the kernels vLLM ran")
+            self.frozen_vllm_kernels = reference["kernels"]
         self.probe_hash = manifest.probe_hash
         routes = []
         for row in rows:
@@ -712,12 +731,22 @@ class ProbeCollector:
                 outputs.append(await engine.generate(request))
         finally:
             logs = await client.end_probe_step_log()
-        self.reread_step_logs[label] = _compact_step_logs(logs)
-        return _merged_outputs(outputs), reread_steps(logs, prefixes, REREAD_ENGINE)
+        self.reread_step_logs[label] = [[_compact_worker_log(worker) for worker in workers] for workers in logs]
+        steps = reread_steps(logs, prefixes, REREAD_ENGINE)
+        (worker,) = logs[REREAD_ENGINE]
+        launched = engine_kernels(
+            worker["kernels"], [step["launches"] for step in worker["steps"] if step.get("launches")]
+        )
+        kernels = {"launches": launched.launches, "gate_columns": list(launched.gate_columns)}
+        if self.vllm_kernels is None:
+            self.vllm_kernels = kernels
+        elif kernels != self.vllm_kernels:
+            raise ValueError(f"the re-read engine launched other kernels in {label} than in an earlier re-read")
+        return _merged_outputs(outputs), steps
 
     async def _record_vllm_provenance(self, trainer) -> None:
-        """Record each vLLM worker's parameter digest, versions and vendored-kernel launch configs, write its compiled
-        output code, and take the re-read engine's launch configs for the trainer's vLLM kernels."""
+        """Record each vLLM worker's parameter digest and versions, and write the compiled output code in its
+        Inductor cache directory."""
         engines = await trainer.inference_engine_client.probe_numerics_provenance()
         code_root = f"{self.archive_uri.rstrip('/')}-inductor-output-code"
         for engine_index, workers in enumerate(engines):
@@ -734,28 +763,22 @@ class ProbeCollector:
                         "versions": worker["versions"],
                         "output_code_files": len(worker["inductor_output_code"]),
                         "output_code_uri": worker_dir,
-                        "kernel_choices": engine_kernel_choices(worker["inductor_kernels"]),
                     }
                 )
-        if len(engines[REREAD_ENGINE]) != 1:
-            raise ValueError("the re-read engine must be one vLLM worker (TP 1, PP 1)")
-        self.vllm_kernel_choices = engine_kernel_choices(engines[REREAD_ENGINE][0]["inductor_kernels"])
-        self.vllm_kernel_configs = {role: choice["launch"] for role, choice in self.vllm_kernel_choices.items()}
 
     def reread_record(self) -> dict:
-        """The logged re-reads: their engine, each row's step per update, the workers' step logs, and the re-read
-        engine's launch config of each vendored vLLM kernel with where it was read from."""
+        """The logged re-reads: their engine, each row's step per update, the workers' step logs, and the vendored
+        vLLM kernels the re-read engine launched (each role's launch config, each decoder layer's head-gate width)."""
         return {
             "engine": REREAD_ENGINE,
             "steps": {str(update): _step_records(steps, self.probes) for update, steps in self.reread_steps.items()},
             "step_logs": self.reread_step_logs,
-            "kernel_configs": self.vllm_kernel_configs,
-            "kernel_choices": self.vllm_kernel_choices,
+            "kernels": self.vllm_kernels,
         }
 
     def prefill_reference(self) -> dict | None:
         """What update-0 re-read replay scores against: the frozen source's reference, else this job's update-0 re-read,
-        with each row's vLLM data-parallel rank and logged step and the engine's kernel launch configs."""
+        with each row's vLLM data-parallel rank and logged step and the vendored kernels the engine launched."""
         if self.frozen_rereads:
             return self.frozen_reference
         if 0 not in self.reread_steps:
@@ -764,7 +787,7 @@ class ProbeCollector:
             "archive": self.archive_uri,
             "dp_ranks": self.reread_dp_ranks[0],
             "steps": _step_records(self.reread_steps[0], self.probes),
-            "kernel_configs": self.vllm_kernel_configs,
+            "kernels": self.vllm_kernels,
         }
 
     def _policy_weights_hash(self, trainer) -> str:
@@ -857,10 +880,10 @@ class ProbeCollector:
             ranks = self.frozen_reread_dp_ranks if frozen else self.reread_dp_ranks.get(update)
             if ranks is not None and len(ranks) != n:
                 raise ValueError(f"re-read replay at update {update} has vLLM data-parallel ranks for other rows")
-            # The re-read's logged steps and the launch configs of the engine that ran it: the frozen source's, or this
-            # job's (its engines' autotune choices hold for every update).
+            # The re-read's logged steps and the kernels the engine that ran it launched: the frozen source's, or this
+            # job's (its engine's compiled forward holds for every update).
             steps = self.frozen_reread_steps if frozen else self.reread_steps.get(update)
-            reread_kernel_configs = self.frozen_kernel_configs if frozen else self.vllm_kernel_configs
+            reread_kernels = self.frozen_vllm_kernels if frozen else self.vllm_kernels
         batches = {}
         for mode in modes:
             spec = TRAINER_MODES[mode]
@@ -872,12 +895,12 @@ class ProbeCollector:
                 data["rollout_prompt_routed_experts"] = torch.zeros_like(prompt_route_tensor)
             # Replay modes carry the vLLM data-parallel rank that served their routes' source; padding rows past
             # the frozen samples take rank 0, and their scores are dropped.
-            kernel_configs = self.vllm_kernel_configs
+            kernels = self.vllm_kernels
             if spec.route_source == "reread":
                 data["rollout_routed_experts"], data["rollout_prompt_routed_experts"] = reread_tensors
                 if ranks is not None:
                     data["vllm_dp_rank"] = torch.tensor(ranks + [0] * (data.batch_size - n), dtype=torch.long)
-                kernel_configs = reread_kernel_configs
+                kernels = reread_kernels
                 if spec.needs_step_plan:
                     if steps is None:
                         raise ValueError(f"{mode} needs the logged vLLM steps of the re-read it scores against")
@@ -897,7 +920,7 @@ class ProbeCollector:
                 ),
                 probe_micro_batch_size=self.batch_layout.repeat_micro_batch_size if spec.repeat_layout else None,
                 global_step=update,
-                vllm_kernel_configs=kernel_configs,
+                vllm_kernels=kernels,
             )
             batches[mode] = data
         return batches

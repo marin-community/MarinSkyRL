@@ -363,20 +363,29 @@ def _vllm_gemm(linear: nn.Module, compute) -> None:
 
 
 def _install_vllm_gemm_attention_hooks(attention: "GrugSelfAttention") -> None:
-    """Compiled vLLM's attention projections: q, k and v as three GEMMs, the head gate padded to 24 outputs."""
+    """Compiled vLLM's attention projections: q, k and v as three GEMMs, and the head gate as the engine's GEMM.
+
+    Inductor's ``pad_mm`` pass times the 20-output gate projection against a copy padded with zero rows to a multiple
+    of 8 when it compiles a graph, so an engine's graph holds one GEMM or the other: the width the probe recorded for
+    this layer (``recorded_gate_columns``), else the padded one (fusion map, M-rope:1119). Under ``vllm_steps`` each
+    sequence's gate rows run at its logged step's row count.
+    """
     qkv = attention.linear_qkv
     groups = attention.num_query_groups_per_partition
     head_dim = attention.hidden_size_per_attention_head
     query_width = attention.num_attention_heads_per_partition // groups * head_dim
     gate = attention.attn_gate
+    layer = attention.layer_number - 1
 
     def head_gate(x: torch.Tensor) -> torch.Tensor:
-        # Inductor pads the gate projection's 20 outputs to a multiple of 8 with zero rows (fusion map, M-rope:1119).
         heads = gate.weight.shape[0]
-        padded = torch.cat(
-            (gate.weight, gate.weight.new_zeros(-heads % VLLM_GEMM_OUTPUT_ALIGNMENT, gate.weight.shape[1]))
-        )
-        return F.linear(x, padded)[..., :heads].contiguous()
+        columns = vllm_inductor.recorded_gate_columns(layer) or heads + -heads % VLLM_GEMM_OUTPUT_ALIGNMENT
+        weight = torch.cat((gate.weight, gate.weight.new_zeros(columns - heads, gate.weight.shape[1])))
+        if active_numerics().vllm_steps:
+            if x.ndim != 3:
+                raise NotImplementedError("vllm_steps numerics run the head gate on [S, B, H] inputs")
+            return step_rows_linear(x, weight, planned_vllm_steps(x.shape[1]))[..., :heads].contiguous()
+        return F.linear(x, weight)[..., :heads].contiguous()
 
     _vllm_gemm(qkv, lambda x: vllm_qkv_projection(x, qkv.weight, groups, query_width, head_dim))
     _vllm_gemm(gate, head_gate)

@@ -1,4 +1,3 @@
-import gc
 import hashlib
 import inspect
 import json
@@ -7,7 +6,7 @@ from pathlib import Path
 import tempfile
 import threading
 from typing import List, Any, Dict, Optional, Tuple, Iterator, AsyncGenerator
-from dataclasses import asdict, dataclass, fields as _dataclass_fields, replace
+from dataclasses import asdict, dataclass, field, fields as _dataclass_fields, replace
 from loguru import logger
 from http import HTTPStatus
 import numpy as np
@@ -192,61 +191,24 @@ def _launch_record(config) -> dict[str, Any]:
     }
 
 
-def _is_kernel_source(path: Path) -> bool:
-    """True for one Triton kernel's source file, False for a compiled graph module that embeds kernel sources."""
-    text = path.read_text(errors="replace")
-    return text.count("@triton.jit") == 1 and "async_compile" not in text
-
-
-def _best_config(kernel_file: Path) -> dict[str, Any] | None:
-    """The ``.best_config`` file Inductor's autotune cache writes beside ``kernel_file``.
-
-    Inductor names the file by a hash of the kernel file's name and the torch build, in the kernel's directory, so it is
-    read only when that directory holds this kernel's source alone and one ``.best_config``.
-    """
-    configs = sorted(kernel_file.parent.glob("*.best_config"))
-    kernels = [path for path in kernel_file.parent.glob("*.py") if _is_kernel_source(path)]
-    if len(configs) != 1 or kernels != [kernel_file]:
-        return None
-    return json.loads(configs[0].read_text())
-
-
-def loaded_inductor_kernels(objects) -> list[dict[str, Any]]:
-    """Every Inductor Triton kernel loaded in this process, with the launch configs it holds and its ``.best_config``.
-
-    A kernel holds every candidate config until its first launch; autotuning, or a ``.best_config`` file found at
-    load, leaves the one it launches. Kernels are keyed by the SHA-256 of their source file.
-    """
-    from torch._inductor.runtime.triton_heuristics import CachingAutotuner
-
-    kernels: dict[str, dict[str, Any]] = {}
-    for obj in objects:
-        if not isinstance(obj, CachingAutotuner) or not obj.filename or not Path(obj.filename).is_file():
-            continue
-        path = Path(obj.filename)
-        entry = kernels.setdefault(
-            str(path),
-            {
-                "file": path.name,
-                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-                "kernel_name": obj.inductor_meta.get("kernel_name"),
-                "launches": [],
-                "best_config": _best_config(path),
-            },
-        )
-        for launcher in obj.launchers:
-            record = _launch_record(launcher.config)
-            if record not in entry["launches"]:
-                entry["launches"].append(record)
-    return list(kernels.values())
+def _kernel_record(autotuner) -> dict[str, Any]:
+    """One launched Inductor kernel: its name, its function source as Triton compiled it, and its launch configs."""
+    return {
+        "name": autotuner.inductor_meta["kernel_name"],
+        "source": autotuner.fn.src,
+        "launches": [_launch_record(launcher.config) for launcher in autotuner.launchers],
+    }
 
 
 @dataclass
 class _StepLog:
-    """The engine steps one worker ran while a probe step log recorded (``WorkerWrap.begin_probe_step_log``)."""
+    """The engine steps one worker ran while a probe step log recorded (``WorkerWrap.begin_probe_step_log``), and the
+    Inductor kernels those steps launched outside CUDA graphs, by first launch."""
 
     steps: list[dict[str, Any]]
     current: dict[str, Any] | None = None
+    kernels: list[Any] = field(default_factory=list)
+    kernel_index: dict[int, int] = field(default_factory=dict)
 
 
 def _scheduled_step(scheduler_output) -> dict[str, Any]:
@@ -426,8 +388,10 @@ def setup_envvars_for_vllm(kwargs, bundle_indices):
 
 
 class WorkerWrap:
-    # The engine steps a mismatch probe is recording on this worker (``begin_probe_step_log``).
+    # The engine steps a mismatch probe is recording on this worker (``begin_probe_step_log``), and Inductor's
+    # ``CachingAutotuner.run`` while the recording wraps it.
     _probe_step_log: _StepLog | None = None
+    _probe_kernel_run: Any = None
 
     def set_numa_affinity(self):
         """Set CPU affinity to match this worker's GPU NUMA node.
@@ -801,7 +765,6 @@ class WorkerWrap:
         following verl's approach. Also temporarily restores param subclass
         types so weight_loader dispatch works correctly with FP8 params.
         """
-        import gc
 
         if hasattr(self, "_accumulated_weights") and self._accumulated_weights:
             model = self.model_runner.model
@@ -1154,10 +1117,10 @@ class WorkerWrap:
         """Read-only numerics provenance for mismatch probes.
 
         Returns this worker's placement, a SHA-256 over its live parameters in name
-        order, library and GPU versions and the matmul precision settings, the Inductor
-        output-code modules that compiled vLLM runs with the kernel configs its autotuner
-        chose (``torch._inductor`` cache directory, ``*.py`` and ``*.best_config``), and
-        every loaded Inductor kernel's launch configs (``loaded_inductor_kernels``).
+        order, library and GPU versions and the matmul precision settings, and the
+        Inductor output-code modules and kernel configs in the ``torch._inductor`` cache
+        directory (``*.py`` and ``*.best_config``), which every engine process on the node
+        shares.
         """
         import triton
         from torch._inductor.runtime.cache_dir_utils import cache_dir
@@ -1188,15 +1151,19 @@ class WorkerWrap:
                 "allow_bf16_reduced_precision_reduction": torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction,
             },
             "inductor_output_code": output_code,
-            "inductor_kernels": loaded_inductor_kernels(gc.get_objects()),
         }
 
     def begin_probe_step_log(self) -> None:
-        """Record each engine step this worker runs until ``end_probe_step_log``: its scheduled requests and rows.
+        """Record each engine step this worker runs until ``end_probe_step_log``: its scheduled requests and rows, and
+        the Inductor kernels it launches.
 
         Wraps two methods of the model runner V2 instance (``execute_model`` and ``prepare_inputs``) with recorders
         that read the scheduler output and the step's execution descriptor and call the original methods unchanged.
+        Inductor's ``CachingAutotuner.run`` is wrapped too: a step that runs outside CUDA graphs launches each of its
+        compiled kernels through it, and the step records them in launch order (CUDA graph replays launch none).
         """
+        from torch._inductor.runtime.triton_heuristics import CachingAutotuner
+
         runner = self.model_runner
         if not self.use_v2_model_runner:
             raise NotImplementedError("the probe step log reads vLLM's model runner V2")
@@ -1229,17 +1196,39 @@ class WorkerWrap:
                 log.current.update(rows=int(batch_desc.num_tokens), cudagraph_mode=str(batch_desc.cg_mode))
             return prepare_inputs(scheduler_output, batch_req_state, batch_desc)
 
+        run = CachingAutotuner.run
+
+        def logged_run(autotuner, *args, **kwargs):
+            output = run(autotuner, *args, **kwargs)
+            step = log.current
+            if step is not None and not step["dummy"]:
+                index = log.kernel_index.setdefault(id(autotuner), len(log.kernels))
+                if index == len(log.kernels):
+                    log.kernels.append(autotuner)
+                step.setdefault("launches", []).append(index)
+            return output
+
         runner.execute_model = logged_execute_model
         runner.prepare_inputs = logged_prepare_inputs
+        CachingAutotuner.run = logged_run
+        self._probe_kernel_run = run
 
     def end_probe_step_log(self) -> dict[str, Any]:
-        """Stop the probe step log, restore the model runner's methods and return this worker's placement and steps."""
+        """Stop the probe step log, restore the wrapped methods and return this worker's placement, its steps (each
+        with the indices of the kernels it launched outside CUDA graphs) and those kernels (``_kernel_record``)."""
+        from torch._inductor.runtime.triton_heuristics import CachingAutotuner
+
         log = self._probe_step_log
         if log is None:
             raise RuntimeError("no probe step log is recording on this worker")
         del self.model_runner.execute_model, self.model_runner.prepare_inputs
+        CachingAutotuner.run = self._probe_kernel_run
         self._probe_step_log = None
-        return {"placement": asdict(self._device_placement()), "steps": log.steps}
+        return {
+            "placement": asdict(self._device_placement()),
+            "steps": log.steps,
+            "kernels": [_kernel_record(autotuner) for autotuner in log.kernels],
+        }
 
     def _device_placement(self) -> InferenceWorkerPlacement:
         dp, pp = get_dp_group(), get_pp_group()

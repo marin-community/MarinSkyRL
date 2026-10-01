@@ -83,11 +83,13 @@ from marinskyrl.runtime_options import WeightSyncTransport
 def _probe_scope(worker, settings):
     """A probe mode's scope, with the vLLM kernels launched as the engine of the mode's reference launched them.
 
-    ``settings["vllm_kernel_configs"]`` maps each vendored vLLM kernel's role to that engine's launch config.
+    ``settings["vllm_kernels"]`` holds that engine's launch config of each vendored vLLM kernel and the head-gate
+    width of each decoder layer (``EngineKernels``); without it the trainer's defaults hold.
     """
+    engine = settings.get("vllm_kernels")
     with (
         probe_mode_scope(worker, settings),
-        kernel_configs(KernelConfigs.from_records(settings.get("vllm_kernel_configs") or {})),
+        kernel_configs(KernelConfigs() if engine is None else KernelConfigs.from_engine(engine)),
     ):
         yield
 

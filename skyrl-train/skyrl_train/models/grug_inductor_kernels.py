@@ -15,15 +15,19 @@ kernels also store the kernel's per-row sum of squares, and ``_NORM_FROM_SQUARE_
 sum with the kernels' own second loop, so a recomputed checkpoint unit can reproduce the norm from that sum alone.
 
 Several reduction kernels have more than one launch config, which vLLM's autotuner picks by timing at its first
-launch; the configs sum in different orders. ``KernelConfigs`` holds the config the trainer launches for each kernel;
-``engine_kernel_choices`` reads the configs a vLLM worker launched, so a probe can score with that engine's choices.
+launch; the configs sum in different orders. Inductor also times the 20-column head-gate GEMM against a copy padded to
+24 columns when it compiles a graph, so each compiled graph of an engine process holds one of two GEMMs, and the XSA
+kernel after it reads the gate at that row stride. ``KernelConfigs`` holds the config the trainer launches for each
+kernel and each decoder layer's head-gate width; ``engine_kernels`` reads both from the kernels a vLLM worker launched,
+so a probe can score as that engine computed.
 """
 
 from __future__ import annotations
 
 import functools
 import hashlib
-from collections.abc import Iterable, Iterator, Mapping
+import re
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
@@ -1139,7 +1143,7 @@ HIDDEN = 2560
 HEADS = 20
 KV_HEADS = 5
 HEAD_DIM = 128
-# Inductor pads the 20-head gate projection's output rows to 24 columns; the XSA kernel reads them at that stride.
+# Inductor's padded head-gate GEMM writes 24 columns, and the vendored XSA kernel reads the gate at that row stride.
 GATE_COLUMNS = 24
 # The query's two scale factors (``qk_mult`` and the long-layer factor), compiled into the q/k kernels as constants.
 QUERY_FACTORS = (1.5703274004183787, 1.0)
@@ -1206,88 +1210,97 @@ DEFAULT_LAUNCHES: dict[str, Launch] = {
     "embedding_norm": _NORM_LAUNCH,
     "embedding_product_norm": _NORM_LAUNCH,
 }
-# Fields of an Inductor ``.best_config`` file that are not the config's block sizes.
-_BEST_CONFIG_FIELDS = frozenset(
-    {
-        "num_warps",
-        "num_stages",
-        "configs_hash",
-        "found_by_coordesc",
-        "time_taken_ms",
-        "triton_cache_hash",
-        "num_consumer_groups",
-        "num_buffers_warp_spec",
-    }
-)
 
 
-def source_digest(text: str) -> str:
-    """SHA-256 of a kernel source, the key an engine reports each loaded kernel's launch config under."""
-    return hashlib.sha256(text.encode()).hexdigest()
+def kernel_function(text: str, name: str) -> str:
+    """Kernel ``name``'s function in ``text`` as Triton compiles it, from its ``def`` line to the end of its body, with
+    the kernel's own name masked.
+
+    Inductor numbers a graph module's kernels in order (``triton_red_fused_rms_norm_2``), so a module that holds one
+    more kernel early on (the padded head-gate weight's copy) renames every later kernel without changing it.
+    """
+    body = text[text.index(f"def {name}(") :]
+    first_line_end = body.index("\n")
+    end = re.search(r"^\S", body[first_line_end + 1 :], re.MULTILINE)
+    if end is not None:
+        body = body[: first_line_end + 1 + end.start()]
+    return body.replace(name, "KERNEL").rstrip()
 
 
-_ROLE_BY_DIGEST = {source_digest(text): role for role, (_, text) in VENDORED_KERNELS.items()}
+def function_digest(text: str, name: str) -> str:
+    """SHA-256 of ``kernel_function(text, name)``: a kernel's identity whatever its source file and number."""
+    return hashlib.sha256(kernel_function(text, name).encode()).hexdigest()
+
+
+# The XSA kernel of a graph whose head-gate GEMM has 20 columns: the vendored kernel reading the gate at that stride.
+_XSA_GATE_UNPADDED = (_XSA_GATE[0], _replace_once(_XSA_GATE[1], "in_ptr2 + (x0 + 24*x1)", "in_ptr2 + (x3)"))
+# Each vendored kernel's function digest: its role and, for the two XSA variants, the head-gate width it reads.
+_KERNEL_ROLES: dict[str, tuple[str, int | None]] = {
+    **{function_digest(text, name): (role, None) for role, (name, text) in VENDORED_KERNELS.items()},
+    function_digest(_XSA_GATE[1], _XSA_GATE[0]): ("xsa_gate", GATE_COLUMNS),
+    function_digest(_XSA_GATE_UNPADDED[1], _XSA_GATE_UNPADDED[0]): ("xsa_gate", HEADS),
+}
+
+
+@dataclass(frozen=True)
+class EngineKernels:
+    """The vendored kernels one vLLM worker launched: each role's launch config and each decoder layer's head-gate
+    width, in layer order (empty when the worker launched no XSA kernel the trainer vendors)."""
+
+    launches: dict[str, dict[str, Any]]
+    gate_columns: tuple[int, ...]
+
+
+def engine_kernels(kernels: Sequence[Mapping[str, Any]], sequences: Iterable[Sequence[int]]) -> EngineKernels:
+    """What a vLLM worker's compiled forward launched in its logged eager steps (``WorkerWrap.end_probe_step_log``).
+
+    ``kernels`` are the Inductor kernels those steps launched: each one's name, function source and the launch configs
+    it holds, one after its autotuner ran in the engine's warmup. ``sequences`` are each step's launches as indices
+    into ``kernels``. Each decoder layer runs one XSA kernel after its attention, so a step's n-th XSA launch belongs
+    to layer n, and its variant gives that layer's head-gate width.
+    """
+    roles = [_KERNEL_ROLES.get(function_digest(kernel["source"], kernel["name"])) for kernel in kernels]
+    launches: dict[str, dict[str, Any]] = {}
+    for kernel, match in zip(kernels, roles, strict=True):
+        if match is None:
+            continue
+        role = match[0]
+        if len(kernel["launches"]) != 1:
+            raise ValueError(f"vLLM's {role} kernel holds {len(kernel['launches'])} launch configs after launching")
+        record = Launch.from_record(kernel["launches"][0]).record()
+        if launches.setdefault(role, record) != record:
+            raise ValueError(f"vLLM launched the {role} kernel with two configs")
+    gate_columns = None
+    for sequence in sequences:
+        columns = tuple(
+            roles[index][1] for index in sequence if roles[index] is not None and roles[index][1] is not None
+        )
+        if gate_columns is not None and columns != gate_columns:
+            raise ValueError(f"vLLM steps ran different head-gate widths: {gate_columns} and {columns}")
+        gate_columns = columns
+    return EngineKernels(launches, gate_columns or ())
 
 
 @dataclass(frozen=True)
 class KernelConfigs:
-    """The launch config of each vendored kernel, by role; a derived kernel launches with the config of its source."""
+    """The launch config of each vendored kernel, by role (a derived kernel launches with the config of its source),
+    and the head-gate width of each decoder layer's GEMM in the engine's compiled forward."""
 
     launches: tuple[tuple[str, Launch], ...] = tuple(DEFAULT_LAUNCHES.items())
+    gate_columns: tuple[int, ...] = ()
 
     def launch(self, role: str) -> Launch:
         return dict(self.launches)[role]
 
     @classmethod
-    def from_records(cls, records: Mapping[str, Mapping[str, Any]]) -> "KernelConfigs":
-        """The defaults, with the launch configs in ``records`` (role → ``Launch.record()``) in their place."""
-        unknown = set(records) - set(DEFAULT_LAUNCHES)
+    def from_engine(cls, record: Mapping[str, Any]) -> "KernelConfigs":
+        """The defaults, with an engine's launch configs and gate widths (``EngineKernels`` as a dict) in their place."""
+        unknown = set(record["launches"]) - set(DEFAULT_LAUNCHES)
         if unknown:
             raise ValueError(f"launch configs for unknown vLLM kernels: {sorted(unknown)}")
         launches = dict(DEFAULT_LAUNCHES)
-        launches.update({role: Launch.from_record(record) for role, record in records.items()})
-        return cls(tuple(launches.items()))
-
-
-def engine_kernel_choices(kernels: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
-    """The launch config each vendored kernel ran with in one vLLM worker, by role.
-
-    ``kernels`` are the worker's loaded Inductor kernels (``WorkerWrap.probe_numerics_provenance``): each source's
-    SHA-256, the launch configs its autotuner holds, and its ``.best_config`` file. A kernel holds one launch config
-    after its first launch (autotuning, or a ``.best_config`` found at load, drops the others); that config wins over
-    the file, which ranks sharing one Inductor cache overwrite. A role the worker did not load is absent.
-    """
-    choices: dict[str, dict[str, Any]] = {}
-    for kernel in kernels:
-        role = _ROLE_BY_DIGEST.get(kernel["sha256"])
-        if role is None:
-            continue
-        launches = {Launch.from_record(launch) for launch in kernel.get("launches") or ()}
-        best = kernel.get("best_config")
-        best_launch = None
-        if best is not None:
-            best_launch = Launch.from_record(
-                {
-                    "kwargs": {name: value for name, value in best.items() if name not in _BEST_CONFIG_FIELDS},
-                    "num_warps": best["num_warps"],
-                    "num_stages": best.get("num_stages"),
-                }
-            )
-        if len(launches) == 1:
-            (launch,) = launches
-            source = "autotuner"
-        elif best_launch is not None:
-            launch, source = best_launch, "best_config"
-        else:
-            continue
-        if role in choices and choices[role]["launch"] != launch.record():
-            raise ValueError(f"vLLM worker launched the {role} kernel with two configs")
-        choices[role] = {
-            "launch": launch.record(),
-            "source": source,
-            "best_config_agrees": None if best_launch is None else best_launch == launch,
-        }
-    return choices
+        launches.update({role: Launch.from_record(launch) for role, launch in record["launches"].items()})
+        return cls(tuple(launches.items()), tuple(record["gate_columns"]))
 
 
 _configs = KernelConfigs()
@@ -1302,6 +1315,11 @@ def kernel_configs(configs: KernelConfigs) -> Iterator[KernelConfigs]:
         yield configs
     finally:
         _configs = previous
+
+
+def recorded_gate_columns(layer: int) -> int | None:
+    """The width of decoder ``layer``'s head-gate GEMM in the engine's compiled forward, when one was recorded."""
+    return _configs.gate_columns[layer] if _configs.gate_columns else None
 
 
 @functools.cache
