@@ -78,9 +78,10 @@ TRAINER_MODES: dict[str, ModeSpec] = {
 # ``fa3_attention`` and ``ep_sum``. ``KEPT_STACK`` (``compiled_stack+fa3_attention``) is the kept numerics;
 # its ``+vllm_gemm`` and ``+vllm_experts`` candidates add vLLM's dense GEMM shapes and expert kernels, and
 # ``+router_rows`` computes the router GEMM at a full vLLM prefill step's row count. ``KEPT_STACK_2`` (those three on
-# ``KEPT_STACK``) is the kept numerics since J4; its ``+vllm_xsa``, ``+vllm_qk``, ``+vllm_norms`` and
-# ``+vllm_log_softmax`` candidates take the XSA, q/k, norm and log-softmax values from compiled vLLM's own kernels,
-# ``VLLM_FORWARD`` adds all four, and ``VLLM_FORWARD_EP_SUM`` adds vLLM's expert-parallel addition order as well.
+# ``KEPT_STACK``) is the kept numerics since J4; its ``+vllm_xsa``, ``+vllm_qk``, ``+vllm_norms``, ``+vllm_swiglu``
+# and ``+vllm_log_softmax`` candidates take the XSA, q/k, norm, shared-activation and log-softmax values from compiled
+# vLLM's own kernels, ``VLLM_FORWARD`` adds all five, and ``VLLM_FORWARD_EP_SUM`` adds vLLM's expert-parallel
+# addition order as well.
 COMPILED_STACK = "compiled_stack"
 COMPILED_STACK_ALL = "compiled_stack_all"
 VLLM_KERNEL_STACK = "vllm_kernel_stack"
@@ -90,7 +91,7 @@ KEPT_VLLM_EXPERTS = f"{KEPT_STACK}+vllm_experts"
 KEPT_VLLM_KERNELS = f"{KEPT_STACK}+vllm_gemm+vllm_experts"
 KEPT_VLLM_KERNELS_ROUTER_ROWS = f"{KEPT_VLLM_KERNELS}+router_rows"
 KEPT_STACK_2 = KEPT_VLLM_KERNELS_ROUTER_ROWS
-_VLLM_REGION_FLAGS = ("vllm_xsa", "vllm_qk", "vllm_norms", "vllm_log_softmax")
+_VLLM_REGION_FLAGS = ("vllm_xsa", "vllm_qk", "vllm_norms", "vllm_swiglu", "vllm_log_softmax")
 VLLM_FORWARD = "+".join((KEPT_STACK_2, *_VLLM_REGION_FLAGS))
 VLLM_FORWARD_EP_SUM = f"{VLLM_FORWARD}+ep_sum"
 _COMPILED_STACK_FLAGS = (
