@@ -19,7 +19,7 @@ from torch.distributed.checkpoint._fsspec_filesystem import FileSystem as Fsspec
 
 from marinskyrl.remote_io import create_s3_filesystem
 from skyrl_train.io.torch_distributed_checkpoint import StreamingFsspecWriter
-from skyrl_train.io.checkpoint_reader import BudgetedCheckpointReader, PodCheckpointReadBudget
+from skyrl_train.io.checkpoint_reader import RecordCheckpointReader
 
 
 # MCore 0.18 does not expose a storage-writer hook. Keep the adapter narrow: it
@@ -50,9 +50,9 @@ class DirectS3TorchDistSaveShardedStrategy(TorchDistSaveShardedStrategy):
 
 
 class DirectS3TorchDistLoadShardedStrategy(TorchDistLoadShardedStrategy):
-    """Read only the DCP tensor byte ranges assigned to this rank from S3."""
+    """Read the DCP records needed by this rank directly from S3."""
 
-    def __init__(self, checkpoint_dir: str, memory_budget_bytes: int) -> None:
+    def __init__(self, checkpoint_dir: str) -> None:
         super().__init__()
         source = urlparse(checkpoint_dir)
         if source.scheme != "s3" or not source.netloc or not source.path.strip("/") or source.query or source.fragment:
@@ -70,7 +70,6 @@ class DirectS3TorchDistLoadShardedStrategy(TorchDistLoadShardedStrategy):
         ):
             raise ValueError("Megatron restore requires a resolved cwobject.com or cwlota.com storage endpoint")
         self.checkpoint_dir = checkpoint_dir
-        self.budget = PodCheckpointReadBudget(memory_budget_bytes)
 
     def load(self, sharded_state_dict: ShardedStateDict, _checkpoint_dir: Path, async_strategy: str = "mcore"):
         del async_strategy  # Required by the Megatron sharded-load strategy interface.
@@ -79,7 +78,7 @@ class DirectS3TorchDistLoadShardedStrategy(TorchDistLoadShardedStrategy):
         converted, flat_mapping, rename_mapping = _replace_state_dict_keys_with_sharded_keys(original)
         pytorch_state_dict = mcore_to_pyt_state_dict(converted, True)
 
-        reader = BudgetedCheckpointReader(self.checkpoint_dir, self.budget)
+        reader = RecordCheckpointReader(self.checkpoint_dir)
         reader.fs = FsspecFileSystem()
         reader.fs.fs = self.filesystem
         reader.path = self.checkpoint_dir

@@ -88,13 +88,11 @@ class MegatronStrategy(DistributedStrategy):
     def __init__(
         self,
         megatron_config,
-        checkpoint_load_memory_bytes: int,
         optimizer_config=None,
         seed: int = 42,
     ) -> None:
         super().__init__()
         self.megatron_config = megatron_config
-        self.checkpoint_load_memory_bytes = checkpoint_load_memory_bytes
         self.optimizer_config = optimizer_config
         self.seed = seed
         self.hf_config = None  # Set by the megatron worker once configs are initialized.
@@ -278,7 +276,7 @@ class MegatronStrategy(DistributedStrategy):
         load_module_strict: bool = True,
         load_training_state: bool = True,
     ):
-        load_strategy = DirectS3TorchDistLoadShardedStrategy(ckpt_dir, self.checkpoint_load_memory_bytes)
+        load_strategy = DirectS3TorchDistLoadShardedStrategy(ckpt_dir)
         if not io.exists(ckpt_dir):
             raise FileNotFoundError(f"Checkpoint directory not found: {ckpt_dir}")
 

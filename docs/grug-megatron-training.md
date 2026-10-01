@@ -124,24 +124,19 @@ Megatron training restore accepts CoreWeave `s3://` checkpoints in untransformed
 `torch_dist` format. The resolved filesystem endpoint must be `cwobject.com`
 (off-cluster) or `cwlota.com` (in-cluster). Other sources fail before loading.
 
-`trainer.distributed.megatron_checkpoint_load_memory_gib` sets one temporary-read
-budget shared by all worker processes in a pod (24 GiB by default). For example,
-set it to `32` in a Hero launch to admit up to 32 GiB of estimated record scratch.
-All readers must share the pod's temporary directory and the same budget.
+Each worker buffers one complete saved record, copies the requested slice into
+its destination, and releases the decoded CPU tensor before reading the next
+record. Uncached S3 streams avoid retaining read-ahead blocks between records.
+Workers read independently; there is no shared byte budget or file coordination.
+The checkpoint format is unchanged.
 
-Each saved record reserves its serialized bytes plus twice the larger of its
-serialized bytes and decoded tensor size. This covers the full CPU tensor that
-PyTorch deserializes, its read buffer, and a temporary copy, even when a rank only
-needs a slice. Uncached S3 streams avoid retaining read-ahead blocks between
-records. Records run concurrently when their reservations fit. A record larger
-than the budget fails with the required byte count; raise the budget to load it.
-Failures and worker exits release reservations. The checkpoint format is unchanged.
-
-This bounds admitted read scratch, not total pod RSS. Model and optimizer
+Temporary read memory scales with the number of workers per pod and the largest
+saved record, even when a rank only needs a small slice. Leave host-memory room
+for the serialized buffers and decoded tensors alongside model and optimizer
 destinations, restored non-tensor state, metadata, allocator caches, Ray's object
-store, and Megatron's subsequent replica exchange remain outside the budget.
-Leave room for these allocations in the pod's host-memory limit.
+store, and Megatron's subsequent replica exchange. A record that exceeds this
+headroom can still cause an OOM.
 
-Serial reads can take longer than the default collective deadline. Set
+Large restores can take longer than the default collective deadline. Set
 `trainer.distributed.worker_collective_timeout_seconds` before starting workers;
 WORLD and Megatron's model-parallel subgroups use the same configured deadline.

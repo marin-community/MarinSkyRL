@@ -1,7 +1,4 @@
-from contextlib import contextmanager
 import copy
-import multiprocessing
-from pathlib import Path
 import threading
 import warnings
 
@@ -17,7 +14,7 @@ from torch.distributed.checkpoint.metadata import MetadataIndex
 
 from marinskyrl.remote_io import S3MultipartWriteStream
 from skyrl_train.io.torch_distributed_checkpoint import StreamingFsspecWriter
-from skyrl_train.io.checkpoint_reader import BudgetedCheckpointReader, PodCheckpointReadBudget
+from skyrl_train.io.checkpoint_reader import RecordCheckpointReader
 
 
 _TEST_PART_BYTES = 5 * 2**20
@@ -228,7 +225,7 @@ def test_streaming_fsspec_writer_preserves_upload_part_failure(monkeypatch):
     assert filesystem.aborted
 
 
-def test_budgeted_checkpoint_restores_adam_and_continues_the_same_update(tmp_path):
+def test_record_checkpoint_reader_restores_adam_and_continues_the_same_update(tmp_path):
     model = torch.nn.Linear(5, 3)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
     inputs = torch.arange(10, dtype=torch.float32).reshape(2, 5) / 10
@@ -252,9 +249,7 @@ def test_budgeted_checkpoint_restores_adam_and_continues_the_same_update(tmp_pat
     restored["rng"].zero_()
     checkpoint.load(
         restored,
-        storage_reader=BudgetedCheckpointReader(
-            str(tmp_path / "checkpoint"), PodCheckpointReadBudget(2**20, tmp_path / "budget")
-        ),
+        storage_reader=RecordCheckpointReader(str(tmp_path / "checkpoint")),
         no_dist=True,
     )
     assert restored["step"] == 8
@@ -275,7 +270,7 @@ def test_budgeted_checkpoint_restores_adam_and_continues_the_same_update(tmp_pat
         assert torch.equal(expected, actual)
 
 
-def test_budgeted_checkpoint_slice_accounts_for_the_whole_saved_tensor(tmp_path):
+def test_record_checkpoint_reader_restores_a_slice_from_a_larger_saved_tensor(tmp_path):
     source = torch.arange(8 * 2**20, dtype=torch.float32)
     checkpoint.save({"tensor": source}, checkpoint_id=tmp_path / "checkpoint", no_dist=True)
     offset = 3 * 2**20
@@ -293,91 +288,10 @@ def test_budgeted_checkpoint_slice_accounts_for_the_whole_saved_tensor(tmp_path)
             )
         ]
     )
-    # The requested slice is 4 MiB, but deserializing the saved 32 MiB tensor
-    # needs its full storage plus read and copy buffers. A 64 MiB budget must fail.
-    for budget_mib in (64, 128):
-        reader = BudgetedCheckpointReader(
-            str(tmp_path / "checkpoint"), PodCheckpointReadBudget(budget_mib * 2**20, tmp_path / "budget")
-        )
-        metadata = reader.read_metadata()
-        reader.set_up_storage_reader(metadata, is_coordinator=True)
-        planner.set_up_planner(restored, metadata, is_coordinator=True)
-        if budget_mib == 64:
-            with pytest.raises(ValueError):
-                reader.read_data(plan, planner).wait()
-            assert torch.equal(restored["tensor"], torch.full_like(restored["tensor"], -1.0))
-        else:
-            reader.read_data(plan, planner).wait()
-            assert torch.equal(restored["tensor"], source[offset : offset + 2**20])
-
-
-def _hold_checkpoint_reservation(directory, amount, connection):
-    budget = PodCheckpointReadBudget(100, Path(directory))
-    connection.send("attempting")
-    try:
-        with budget.reserve(amount):
-            connection.send("admitted")
-            if connection.recv() == "fail":
-                raise OSError("injected read failure")
-    except OSError:
-        connection.send("failed")
-    else:
-        connection.send("released")
-
-
-@contextmanager
-def _checkpoint_reservation_process(directory, amount):
-    context = multiprocessing.get_context("spawn")
-    parent, child = context.Pipe()
-    process = context.Process(target=_hold_checkpoint_reservation, args=(str(directory), amount, child))
-    process.start()
-    child.close()
-    try:
-        assert parent.poll(30), "reservation worker did not start"
-        assert parent.recv() == "attempting"
-        yield process, parent
-    finally:
-        if process.is_alive():
-            process.terminate()
-        process.join(10)
-        if process.is_alive():
-            process.kill()
-            process.join(10)
-        parent.close()
-        assert not process.is_alive()
-
-
-def test_pod_checkpoint_budget_admits_unequal_records_without_exceeding_limit(tmp_path):
-    with _checkpoint_reservation_process(tmp_path, 60) as (_, large):
-        assert large.poll(30) and large.recv() == "admitted"
-        with _checkpoint_reservation_process(tmp_path, 60) as (_, waiting):
-            # Holding the first record is the test input; two large records must
-            # not be admitted together, while a smaller peer can still fit.
-            assert not waiting.poll(0.2)
-            with _checkpoint_reservation_process(tmp_path, 30) as (_, small):
-                assert small.poll(30) and small.recv() == "admitted"
-                large.send("release")
-                assert large.poll(30) and large.recv() == "released"
-                assert waiting.poll(30) and waiting.recv() == "admitted"
-                small.send("release")
-                waiting.send("release")
-                assert small.poll(30) and small.recv() == "released"
-                assert waiting.poll(30) and waiting.recv() == "released"
-
-
-@pytest.mark.parametrize("end", ["fail", "kill"])
-def test_pod_checkpoint_budget_releases_after_read_failure_or_process_exit(tmp_path, end):
-    with _checkpoint_reservation_process(tmp_path, 100) as (holder_process, holder):
-        assert holder.poll(30) and holder.recv() == "admitted"
-        with _checkpoint_reservation_process(tmp_path, 100) as (_, peer):
-            assert not peer.poll(0.2)
-            if end == "kill":
-                holder_process.kill()
-                holder_process.join(10)
-                assert holder_process.exitcode != 0
-            else:
-                holder.send("fail")
-                assert holder.poll(30) and holder.recv() == "failed"
-            assert peer.poll(30) and peer.recv() == "admitted"
-            peer.send("release")
-            assert peer.poll(30) and peer.recv() == "released"
+    # The 4 MiB destination comes from the middle of a saved 32 MiB tensor.
+    reader = RecordCheckpointReader(str(tmp_path / "checkpoint"))
+    metadata = reader.read_metadata()
+    reader.set_up_storage_reader(metadata, is_coordinator=True)
+    planner.set_up_planner(restored, metadata, is_coordinator=True)
+    reader.read_data(plan, planner).wait()
+    assert torch.equal(restored["tensor"], source[offset : offset + 2**20])
