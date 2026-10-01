@@ -21,9 +21,7 @@ class HarborTrialResult(Protocol):
     exception_info: HarborExceptionInfo | None
 
 
-def verification_from_harbor_result(
-    result: HarborTrialResult, *, verifier_disabled: bool = False
-) -> VerificationResult:
+def verification_from_harbor_result(result: HarborTrialResult) -> VerificationResult:
     """Adapt Harbor's nullable verifier result without treating zero as missing."""
     verifier_result = result.verifier_result
     if verifier_result is None:
@@ -34,8 +32,6 @@ def verification_from_harbor_result(
                 f"verification unavailable after {exception_type}",
                 diagnostics={"exception_type": exception_type},
             )
-        if verifier_disabled:
-            return VerificationResult.skipped("verifier disabled")
         return VerificationResult.unavailable("Harbor returned no verifier result")
 
     if not isinstance(verifier_result.rewards, Mapping) or "reward" not in verifier_result.rewards:
