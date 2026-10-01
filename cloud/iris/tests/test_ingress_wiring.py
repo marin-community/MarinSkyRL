@@ -24,6 +24,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from cloud.iris.iris_backend import validate_controller_ingress_reachability  # noqa: E402
 from cloud.iris.ingress_utils import (  # noqa: E402
     DEFAULT_VLLM_PORT,
     PARENT_CONTROLLER_CONFIG_ENV,
@@ -31,7 +32,7 @@ from cloud.iris.ingress_utils import (  # noqa: E402
     PARENT_CREDENTIALS_JSON_ENV,
     PARENT_IAP_TOKEN_ENV,
     TOKEN_REFRESH_MARGIN_SECONDS,
-    CapabilityTokenCache,
+    CapabilityUrlCache,
     FederatedCapabilityTokenCache,
     _ParentControllerClient,
     _parent_client_credentials,
@@ -55,6 +56,16 @@ class _FakeMinter:
     def mint(self, endpoint_name, ttl_hours):
         self.calls += 1
         return f"TKN-{self.calls}", self.expires_at
+
+
+class _FakeUrlMinter:
+    def __init__(self, expires_at: float = 10_000_000_000.0):
+        self.expires_at = expires_at
+        self.calls = 0
+
+    def mint(self, endpoint_name, ttl_hours):
+        self.calls += 1
+        return f"https://iris.oa.dev/proxy/t/cluster=cw-rno2a/TKN-{self.calls}/{endpoint_name}", self.expires_at
 
 
 class _FakeResolver:
@@ -91,20 +102,57 @@ def test_build_capability_api_base_puts_token_in_path():
         == "https://ingress.example/proxy/t/JWT.abc/otagent-job1/v1"
     )
     assert build_capability_api_base("http://10.0.0.1:8443/", "ep", "TK") == "http://10.0.0.1:8443/proxy/t/TK/ep/v1"
+
+
+def test_capability_api_base_serves_the_controller_minted_relay_url():
     assert (
-        capability_api_base("ingress.example", "otagent-myjob", cache=CapabilityTokenCache(_FakeMinter()))
-        == "https://ingress.example/proxy/t/TKN-1/otagent-myjob/v1"
+        capability_api_base("otagent-myjob", cache=CapabilityUrlCache(_FakeUrlMinter()))
+        == "https://iris.oa.dev/proxy/t/cluster=cw-rno2a/TKN-1/otagent-myjob/v1"
     )
 
 
-def test_capability_token_cache_reuses_until_margin_then_remints():
-    minter = _FakeMinter(expires_at=1000.0)
-    cache = CapabilityTokenCache(minter)
-    assert cache.token_for("ep", now=0.0) == "TKN-1" and minter.calls == 1
-    assert cache.token_for("ep", now=1000.0 - TOKEN_REFRESH_MARGIN_SECONDS - 1) == "TKN-1"
+def test_capability_api_base_rejects_a_controller_without_a_public_route():
+    class _NoRouteMinter:
+        def mint(self, endpoint_name, ttl_hours):
+            return "", 10_000_000_000.0
+
+    with pytest.raises(RuntimeError, match="federation_public_parent"):
+        capability_api_base("otagent-myjob", cache=CapabilityUrlCache(_NoRouteMinter()))
+
+
+def test_capability_url_cache_reuses_until_margin_then_remints():
+    minter = _FakeUrlMinter(expires_at=1000.0)
+    cache = CapabilityUrlCache(minter)
+    assert cache.url_for("ep", now=0.0).endswith("/TKN-1/ep") and minter.calls == 1
+    assert cache.url_for("ep", now=1000.0 - TOKEN_REFRESH_MARGIN_SECONDS - 1).endswith("/TKN-1/ep")
     assert minter.calls == 1
-    assert cache.token_for("ep", now=1000.0 - TOKEN_REFRESH_MARGIN_SECONDS + 1) == "TKN-2"
+    assert cache.url_for("ep", now=1000.0 - TOKEN_REFRESH_MARGIN_SECONDS + 1).endswith("/TKN-2/ep")
     assert minter.calls == 2
+
+
+def _direct_coreweave_args(tmp_path, cluster_config_body):
+    cluster_config = tmp_path / "cw-rno2a.yaml"
+    cluster_config.write_text(cluster_config_body)
+    return SimpleNamespace(
+        ingress_mode="controller",
+        cluster="cw-rno2a",
+        cluster_config=str(cluster_config),
+        ingress_host=None,
+        target_cluster=None,
+    )
+
+
+def test_direct_coreweave_controller_ingress_is_allowed_behind_a_public_parent(tmp_path):
+    args = _direct_coreweave_args(tmp_path, "federation_public_parent: https://iris.oa.dev\n")
+
+    validate_controller_ingress_reachability(args)
+
+
+def test_direct_coreweave_controller_ingress_is_blocked_without_a_public_parent(tmp_path):
+    args = _direct_coreweave_args(tmp_path, "dashboard_url: https://iris-cw-rno2a.oa.dev\n")
+
+    with pytest.raises(SystemExit, match="federation_public_parent"):
+        validate_controller_ingress_reachability(args)
 
 
 def test_controller_registration_plan_picks_proxy_port_when_record_literal():

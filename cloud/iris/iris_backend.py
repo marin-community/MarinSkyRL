@@ -765,19 +765,18 @@ def validate_controller_ingress_reachability(args: SimpleNamespace) -> None:
     ``<ingress_host>`` is a controller that can BOTH route to the endpoint AND be
     reached from Daytona:
 
-      * A **directly-submitted CoreWeave** job cannot: the peer controller's own host
-        (``dashboard_url``, e.g. ``iris-cw-us-east-02a.oa.dev``) is IP-locked to the
-        marin egress; and iris.oa.dev (marin) only FEDERATES ``/proxy`` to a CoreWeave
-        endpoint for a job it DELEGATED. A direct submit → iris.oa.dev has no route →
-        404 → opencode never reaches vLLM → RecordProxy captures 0 traffic, the job
-        burns an H100 node making 0 trials.
-      * The **federated** path fixes it: Marin delegates
-        the job to the peer child, so ``has_received_job_from_peer`` passes and marin
-        federation-proxies ``/proxy``. The endpoint is registered on the peer AND
-        MIRRORED onto marin by FederationSync; the capability token is minted at the
-        PARENT (iris.oa.dev) for the mirrored endpoint. So controller-ingress on
-        CoreWeave is ALLOWED iff ``--target-cluster`` is set and ``--ingress-host`` is
-        the marin host.
+      * A **directly-submitted CoreWeave** job can when its cluster config sets
+        ``federation_public_parent``: the peer controller mints the capability URL as
+        ``https://<parent>/proxy/t/cluster=<cluster>/<token>/<name>`` and the public
+        parent relays it back to the peer. The peer's own host (``dashboard_url``) is
+        IP-locked, so without a public parent the URL has no route and opencode never
+        reaches vLLM.
+      * The **federated** path also works: Marin delegates the job to the peer child,
+        so ``has_received_job_from_peer`` passes and marin federation-proxies
+        ``/proxy``. The endpoint is registered on the peer AND MIRRORED onto marin by
+        FederationSync; the capability token is minted at the PARENT (iris.oa.dev) for
+        the mirrored endpoint, which needs the operator's marin credentials and
+        ``--ingress-host`` set to the marin host.
 
     Escape hatch (once a further remediation is wired): ``OTAGENT_ALLOW_INGRESS_HOST_MISMATCH=1``.
     """
@@ -798,22 +797,16 @@ def validate_controller_ingress_reachability(args: SimpleNamespace) -> None:
     is_coreweave = cluster.startswith("cw-") or (dash_host or "") not in ("", "iris.oa.dev")
 
     if is_coreweave:
-        # The ONLY reachable CoreWeave topology: federated submission through marin.
         if not target_cluster:
-            raise SystemExit(
-                "[rl-iris] BLOCKED: --ingress-mode controller on a directly-submitted "
-                f"CoreWeave job (--cluster={cluster or '?'}, controller host="
-                f"{dash_host or '?'}) is NOT reachable from a Daytona sandbox.\n"
-                "  The capability URL would 404: iris.oa.dev only federates /proxy for a "
-                "job it DELEGATED, and the CoreWeave controller's own host is IP-locked. "
-                "opencode would never reach vLLM (0 trials, RecordProxy captures nothing) "
-                "— the 2026-07-16 Exp2 blocker.\n"
-                "  Fix: pass --target-cluster " + (cluster or "<peer>") + " to federate "
-                "the job through the marin meta-scheduler (keep --ingress-host iris.oa.dev), "
-                "so marin delegates it to the peer and federation-proxies /proxy.\n"
-                "  Override (only once another remediation is wired): "
-                "OTAGENT_ALLOW_INGRESS_HOST_MISMATCH=1."
-            )
+            if not _load_cluster_config(args.cluster_config).get("federation_public_parent"):
+                raise SystemExit(
+                    "[rl-iris] BLOCKED: --ingress-mode controller on a directly-submitted "
+                    f"CoreWeave job needs federation_public_parent in {args.cluster_config}; "
+                    "without it the controller-minted capability URL points at the IP-locked "
+                    "CoreWeave host and a Daytona sandbox cannot reach vLLM. Set it, or pass "
+                    "--target-cluster to mint at the marin parent."
+                )
+            return
         if ingress_host and ingress_host != "iris.oa.dev":
             raise SystemExit(
                 f"[rl-iris] BLOCKED: federated CoreWeave controller-ingress needs "
