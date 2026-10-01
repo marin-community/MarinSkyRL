@@ -66,8 +66,7 @@ trainer:
   gradient_checkpointing_use_reentrant: false
   algorithm:
     advantage_estimator: uniform
-    use_tis: true
-    tis_imp_ratio_cap: 2.0
+    off_policy_correction: tis
     use_kl_loss: false
     use_entropy_loss: false
     loss_reduction: token_mean
