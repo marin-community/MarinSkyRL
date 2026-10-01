@@ -41,7 +41,9 @@ marinskyrl/iris_harbor_environment.py
 marinskyrl/model_manifest.py
 marinskyrl/packed_tasks.py
 marinskyrl/pivot.py
+marinskyrl/pivot_grades.py
 marinskyrl/pivot_history.py
+marinskyrl/pivot_pilot.py
 marinskyrl/process_diagnostics.py
 marinskyrl/remote_io.py
 marinskyrl/resource_locator.py

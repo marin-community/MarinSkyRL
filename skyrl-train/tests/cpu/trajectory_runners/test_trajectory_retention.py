@@ -766,6 +766,57 @@ def test_initialization_reconciles_archive_written_before_ledger_commit(tmp_path
     assert len(list(tmp_path.rglob("*.zip"))) == 1
 
 
+def test_append_only_profiling_recovers_without_per_batch_ledger_snapshots(tmp_path, monkeypatch):
+    from skyrl_train.trajectory_runners import trajectory_retention as retention
+
+    class RecordingPublisher:
+        def __init__(self):
+            self.publications = []
+
+        def execute(self, request):
+            result = retention._publication_worker(request)
+            assert result.error is None
+            if request.operation is PublicationOperation.PUBLISH:
+                self.publications.append((request, result))
+            return result
+
+        def poll(self):
+            return None
+
+        def close(self):
+            return None
+
+    def reject_history_copy(_ledger):
+        raise AssertionError("append-only selection must not copy the entire history")
+
+    monkeypatch.setattr(retention, "_copy_ledger", reject_history_copy)
+    config = _config(
+        tmp_path,
+        sample_count_per_step=0,
+        sample_fraction=1.0,
+        max_bytes_per_step=None,
+        max_bytes_per_run=None,
+    )
+    publisher = RecordingPublisher()
+    sink = _sink(config, publisher)
+    sink.retain(_input(step=7), _output())
+    sink.retain(_input(step=8), _output())
+    assert not (tmp_path / "_retention_ledger.json").exists()
+    assert all(request.ledger is None and result.ledger is None for request, result in publisher.publications)
+
+    # Simulate a killed storage process before its clean-shutdown checkpoint.
+    retention._PUBLICATION_LEDGERS.pop(config.output_path)
+    resumed = _sink(config, RecordingPublisher())
+    metrics = resumed.retain(_input(step=8), _output())
+    assert metrics["generate/trajectory_retention/duplicates"] == 3.0
+    assert metrics["generate/trajectory_retention/written"] == 0.0
+    resumed.close()
+    ledger = json.loads((tmp_path / "_retention_ledger.json").read_text())
+    assert len(ledger["records"]) == 6
+    assert ledger["total_bytes"] == sum(path.stat().st_size for path in tmp_path.rglob("*.zip"))
+    assert len(_records(tmp_path)) == 6
+
+
 def test_retention_takes_the_run_id_the_initiator_set(monkeypatch):
     """Retained trajectories must carry the same run id as telemetry, or they cannot be joined.
 
