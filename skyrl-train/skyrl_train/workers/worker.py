@@ -304,8 +304,7 @@ def log_r3_resident_set(rank: int, data: TrainingInputBatch) -> None:
     batch carrying ``rollout_routed_experts`` logs its size on arrival. Strict
     no-op signal when the batch carries no routes.
     """
-    if "rollout_routed_experts" in data.keys() and data["rollout_routed_experts"] is not None:
-        routes = data["rollout_routed_experts"]
+    if (routes := data.routed_experts) is not None:
         logger.info(
             f"R3_RESIDENT_SET rank={rank} nbytes={int(routes.nbytes)} dtype={routes.dtype} shape={tuple(routes.shape)}"
         )
@@ -911,9 +910,7 @@ class PolicyWorkerBase(Worker):
         Timing-only (no tensor is touched) and gated to the R3-decentral path
         with routes present, so every other configuration is unchanged.
         """
-        staggered = (
-            self.cfg.generator.r3_transport == R3Transport.DECENTRAL and "rollout_routed_experts" in train_data.keys()
-        )
+        staggered = self.cfg.generator.r3_transport == R3Transport.DECENTRAL and train_data.routed_experts is not None
         if staggered and self._world_size > 1 and torch.distributed.is_initialized():
             # Ungated per-rank marker: the timestamp cluster at release proves
             # co-arrival; the first shard collective must not time out after it.

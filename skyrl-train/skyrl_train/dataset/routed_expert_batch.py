@@ -80,10 +80,6 @@ class RoutedExpertRows:
         return RoutedExpertRows(self.rows[index], self.response_len, self.num_experts)
 
     @property
-    def device(self) -> torch.device:
-        return torch.device("cpu")
-
-    @property
     def dtype(self) -> torch.dtype:
         assert self.num_experts is not None
         return _routed_experts_dtype_for_num_experts(self.num_experts)

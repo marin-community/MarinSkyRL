@@ -2105,11 +2105,8 @@ class RayPPOTrainer:
                     else None
                 ),
             },
+            routed_expert_rows=rollout_routed_experts_rows,
         )
-        # Attach routed_experts only when present, so the flag-off batch dict has
-        # exactly the same keys as today (TensorBatch.__eq__ compares key sets).
-        if rollout_routed_experts_rows is not None:
-            training_input["rollout_routed_experts"] = rollout_routed_experts_rows
         training_input.update(distillation_tensors)
         ftpo = ftpo_config(self.cfg.trainer.algorithm)
         if ftpo is not None:
@@ -2499,9 +2496,7 @@ class RayPPOTrainer:
         if pad_size == 0:
             return training_input
         for key, tensor in training_input.items():
-            if isinstance(tensor, RoutedExpertRows):
-                new_tensors[key] = RoutedExpertRows.cat([tensor, tensor[:pad_size]])
-            elif tensor is not None:
+            if tensor is not None:
                 additional_dims = tuple(tensor.shape[1:]) if len(tensor.shape) > 1 else ()
 
                 if key == "is_last_step":
@@ -2515,7 +2510,9 @@ class RayPPOTrainer:
                     padding_tensor = tensor[:pad_size].clone()
                 new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
 
-        new_training_input = TrainingInputBatch(new_tensors)
+        routes = training_input.routed_expert_rows
+        padded_routes = RoutedExpertRows.cat([routes, routes[:pad_size]]) if routes is not None else None
+        new_training_input = TrainingInputBatch(new_tensors, routed_expert_rows=padded_routes)
         new_training_input.metadata = {}
         new_training_input.metadata["uids"] = training_input.metadata["uids"] + [f"pad{i}" for i in range(pad_size)]
         if "trajectory_ids" in training_input.metadata:
@@ -2560,10 +2557,10 @@ class RayPPOTrainer:
         # raw_grad_norm ~ 1e5) that corrupts the policy. Threading routed_experts
         # into the forward-pass batch makes old/ref/train forwards use the
         # identical (replay) path so step 1 is genuinely on-policy (log_ratio ~ 0).
-        # Gated on presence: flag-off (8B / no router-replay) batches never carry
-        # this key, so the selected key set is byte-identical to before.
+        # Gated on presence: flag-off (8B / no router-replay) batches keep the
+        # original forward inputs. Compact routes are carried as a side field.
         fwd_keys = ["sequences", "attention_mask"]
-        if "rollout_routed_experts" in training_input.keys():
+        if training_input.routed_experts is not None:
             fwd_keys.append("rollout_routed_experts")
         data_fwd_pass = training_input.select(keys=fwd_keys, metadata_keys=["response_length"])
         data_fwd_pass.metadata["global_step"] = self.global_step

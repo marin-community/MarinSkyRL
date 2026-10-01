@@ -139,21 +139,20 @@ def test_compact_routes_survive_batch_slicing_and_materialize_to_local_response_
         np.asarray([_route_row(value) for value in (29, 33)], dtype=np.uint8),
     )
     batch = TrainingInputBatch(
-        {
-            "sequences": torch.zeros((3, 5), dtype=torch.long),
-            "rollout_routed_experts": RoutedExpertRows(rows, response_len=4, num_experts=256),
-        }
+        {"sequences": torch.tensor([[1, 0, 0, 0, 0], [2, 0, 0, 0, 0], [3, 0, 0, 0, 0]])},
+        routed_expert_rows=RoutedExpertRows(rows, response_len=4, num_experts=256),
     )
     batch.metadata = {"response_length": 4}
 
     restored = pickle.loads(pickle.dumps(batch))
-    routes = restored["rollout_routed_experts"]
-    assert isinstance(routes, RoutedExpertRows)
-    assert routes.nbytes == sum(row.nbytes for row in rows)
+    forward = restored.select(keys=["sequences", "rollout_routed_experts"], metadata_keys=["response_length"])
+    assert forward.metadata == {"response_length": 4}
+    np.testing.assert_array_equal(forward.chunk(1)[1].routed_experts_tensor()[0].numpy(), rows[1])
 
     microbatches = restored.chunk(1)
     assert [micro.routed_experts_tensor().shape[1] for micro in microbatches] == [4, 1, 2]
-    for row, micro in zip(rows, microbatches, strict=True):
+    for index, (row, micro) in enumerate(zip(rows, microbatches, strict=True), start=1):
+        assert micro["sequences"][0, 0].item() == index
         np.testing.assert_array_equal(micro.routed_experts_tensor()[0].numpy(), row)
 
 

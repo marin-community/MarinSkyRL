@@ -392,13 +392,13 @@ class MeshDispatch(Dispatch):
         # inherited unchanged (NO new slicing path; satisfies the #6335 guardrail).
         # ``r3_transport=by_value`` retains the per-actor dispatch path.
         # Only engage the resident-put when the batch carries R3 routes, either
-        # as compact rows or a tensor. Runs without `rollout_routed_experts` keep the
-        # exact per-actor by-value dispatch. `data.chunk` replicates
-        # the key set to every chunk, so probing chunk 0 answers for all chunks.
+        # as compact rows or a tensor. Runs without routes keep the exact
+        # per-actor by-value dispatch. `data.chunk` slices the route field with
+        # the tensors, so probing chunk 0 answers for all chunks.
         resident = (
             settings.r3_transport is not R3Transport.BY_VALUE
             and len(data_chunks) > 0
-            and "rollout_routed_experts" in data_chunks[0]
+            and data_chunks[0].routed_experts is not None
         )
         # Bound on each per-dp-group `ray.put()` below (see `_ray_put_bounded` /
         # `DispatchPutTimeoutError` docstrings for the full incident writeup). Default
@@ -421,7 +421,7 @@ class MeshDispatch(Dispatch):
                 # Put the dp-chunk ONCE; share the single ObjectRef across all
                 # actors in this dp-group (no per-actor re-serialization / spill).
                 if chunk_refs[dp] is None:
-                    _r3 = data_chunks[dp]["rollout_routed_experts"]
+                    _r3 = data_chunks[dp].routed_experts
                     nbytes = int(_r3.nbytes) if _r3 is not None else 0
                     dtype = _r3.dtype if _r3 is not None else None
                     node_id = (

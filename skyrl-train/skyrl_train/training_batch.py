@@ -5,6 +5,7 @@ import math
 import pickle
 from typing import Any, Dict, Generic, Iterator, List, Optional, TypeVar, TypedDict
 
+import numpy as np
 import torch
 from jaxtyping import Float, Integer
 
@@ -14,7 +15,6 @@ from skyrl_train.ftpo import FTPOTargets
 from skyrl_train.distillation import distillation_input_from_tensors
 
 DictType = TypeVar("DictType")
-COMPACT_ROUTES_TAG = "compact_routes"
 
 
 def per_data_parallel_batch_size(mini_batch_size: int, samples_per_prompt: int, data_parallel_size: int) -> int:
@@ -42,7 +42,7 @@ class TensorBatch(dict, Generic[DictType]):
     """Base class for training batches
 
     This defines a generic container for a batch of training data (inputs or outputs).
-    Consists of tensors and compact route rows along with some metadata.
+    Consists of tensors and metadata. Non-tensor training payloads belong on a specific batch type.
     """
 
     metadata: Optional[Dict[str, Any]] = None
@@ -79,20 +79,18 @@ class TensorBatch(dict, Generic[DictType]):
 
     def _check_consistency(self):
         """Check consistency of all present fields"""
-        keys = list(self.keys())
-        if len(keys) == 0:
+        present = [(key, value) for key, value in self.items() if value is not None]
+        if not present:
             return
-
-        batch_size = len(self[keys[0]])
-        self._batch_size = batch_size
-        for key in keys:
-            value = self[key]
-            if value is None:
-                continue
-            self._device = value.device if self._device is None else self._device
-            if not isinstance(value, (torch.Tensor, RoutedExpertRows)):
-                raise ValueError(f"Field {key} must be a tensor or compact routes, got {type(value)}")
-            if len(value) != batch_size:
+        first = present[0][1]
+        if not isinstance(first, torch.Tensor):
+            raise ValueError(f"Field {present[0][0]} must be a tensor, got {type(first)}")
+        self._batch_size = len(first)
+        self._device = first.device
+        for key, value in present:
+            if not isinstance(value, torch.Tensor):
+                raise ValueError(f"Field {key} must be a tensor, got {type(value)}")
+            if len(value) != self._batch_size:
                 raise ValueError(f"Batch size mismatch in {key}")
             if value.device != self._device:
                 raise ValueError(f"Device mismatch in {key}. Expected {self._device}, got {value.device}")
@@ -105,13 +103,13 @@ class TensorBatch(dict, Generic[DictType]):
         else:
             return super().__getitem__(index)
 
-    def __setitem__(self, key: str, value: Optional[torch.Tensor | RoutedExpertRows]) -> None:
+    def __setitem__(self, key: str, value: Optional[torch.Tensor]) -> None:
         if value is None:
             super().__setitem__(key, value)
             return
 
-        if not isinstance(value, (torch.Tensor, RoutedExpertRows)):
-            raise ValueError(f"Field {key} must be a tensor or compact routes, got {type(value)}")
+        if not isinstance(value, torch.Tensor):
+            raise ValueError(f"Field {key} must be a tensor, got {type(value)}")
 
         if hasattr(self, "_batch_size") and self._batch_size is not None and len(value) != self._batch_size:
             raise ValueError(
@@ -136,10 +134,9 @@ class TensorBatch(dict, Generic[DictType]):
         for key, value in self.items():
             if value is None:
                 continue
-            if isinstance(value, RoutedExpertRows):
-                continue
             assert isinstance(value, torch.Tensor), f"Field {key} must be a tensor, got {type(value)}"
             self[key] = value.to(device, dtype, non_blocking=non_blocking)
+        self._device = next((value.device for value in self.values() if value is not None), None)
         return self
 
     @property
@@ -158,9 +155,6 @@ class TensorBatch(dict, Generic[DictType]):
             assert self._device == torch.device("cpu"), "Tensors must be on CPU before serialization"
         batch_dict = {}
         for key, value in self.items():
-            if isinstance(value, RoutedExpertRows):
-                batch_dict[key] = (COMPACT_ROUTES_TAG, pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL))
-                continue
             value_to_save = value
             if isinstance(value, torch.Tensor):
                 logical_bytes = value.numel() * value.element_size()
@@ -184,9 +178,6 @@ class TensorBatch(dict, Generic[DictType]):
     def __setstate__(self, state):
         """Deserialize the `TensorBatch` object and load it into memory"""
         for key, value in state["batch_dict"].items():
-            if isinstance(value, tuple) and value[0] == COMPACT_ROUTES_TAG:
-                self[key] = pickle.loads(value[1])
-                continue
             buffer = io.BytesIO(value)
             self[key] = torch.load(buffer)
 
@@ -211,11 +202,9 @@ class TensorBatch(dict, Generic[DictType]):
         for key, value in self.items():
             if value is None:
                 new_batch[key] = value
-            elif isinstance(value, RoutedExpertRows):
-                new_batch[key] = RoutedExpertRows.cat([value] * repeats)
             else:
                 assert isinstance(value, torch.Tensor), f"Field {key} must be a tensor, got {type(value)}"
-                new_batch[key] = value.repeat(repeats)
+                new_batch[key] = value.repeat((repeats,) + (1,) * (value.ndim - 1))
         new_batch = self.__class__(new_batch)
         new_batch.metadata = self.metadata
         return new_batch
@@ -235,35 +224,16 @@ class TensorBatch(dict, Generic[DictType]):
         for key, value in self.items():
             if value is None:
                 new_batch[key] = value
-            elif isinstance(value, RoutedExpertRows):
-                new_batch[key] = RoutedExpertRows(
-                    tuple(row for row in value.rows for _ in range(repeats)), value.response_len, value.num_experts
-                )
             else:
                 assert isinstance(value, torch.Tensor), f"Field {key} must be a tensor, got {type(value)}"
-                new_batch[key] = value.repeat_interleave(repeats)
+                new_batch[key] = value.repeat_interleave(repeats, dim=0)
         new_batch = self.__class__(new_batch)
         new_batch.metadata = self.metadata
         return new_batch
 
     def chunk(self, chunk_size: int) -> List["TensorBatch[DictType]"]:
         """Split into smaller chunks"""
-        chunks = []
-        for i in range(0, self.batch_size, chunk_size):
-            chunk_data = {}
-            for key, value in self.items():
-                if value is not None:
-                    if isinstance(value, (torch.Tensor, RoutedExpertRows)):
-                        chunk_data[key] = value[i : i + chunk_size]
-                    else:
-                        raise ValueError(f"Unsupported type {type(value)} for key {key}")
-                else:
-                    # `None` values are not chunked
-                    chunk_data[key] = value
-            chunk = self.__class__(chunk_data)
-            chunk.metadata = self.metadata
-            chunks.append(chunk)
-        return chunks
+        return [self.slice(i, i + chunk_size) for i in range(0, self.batch_size, chunk_size)]
 
     def slice(self, start: int, end: int, step: int = 1) -> "TensorBatch[DictType]":
         """Slice the data batch.
@@ -279,14 +249,7 @@ class TensorBatch(dict, Generic[DictType]):
         slice_obj = slice(start, end, step)
         sliced_data = {}
         for key, value in self.items():
-            if value is not None:
-                if isinstance(value, (torch.Tensor, RoutedExpertRows)):
-                    sliced_data[key] = value[slice_obj]
-                else:
-                    raise ValueError(f"Unsupported type {type(value)} for key {key}")
-            else:
-                # `None` values are not sliced
-                sliced_data[key] = value
+            sliced_data[key] = None if value is None else value[slice_obj]
         sliced_batch = self.__class__(sliced_data)
         sliced_batch.metadata = self.metadata
         return sliced_batch
@@ -315,12 +278,7 @@ class TensorBatch(dict, Generic[DictType]):
         assert len(shards) > 0, "Cannot cat an empty list of shards"
         for key, value in shards[0].items():
             if value is not None:
-                if isinstance(value, torch.Tensor):
-                    cat_data[key] = torch.cat([shard[key] for shard in shards])
-                elif isinstance(value, RoutedExpertRows):
-                    cat_data[key] = RoutedExpertRows.cat([shard[key] for shard in shards])
-                else:
-                    raise ValueError(f"Unsupported type {type(value)} for key {key}")
+                cat_data[key] = torch.cat([shard[key] for shard in shards])
             else:
                 # `None` values are not cat'd
                 cat_data[key] = value
@@ -349,10 +307,8 @@ class TensorBatch(dict, Generic[DictType]):
         for k, v in self.items():
             if k not in other:
                 return False
-            if isinstance(v, RoutedExpertRows):
-                if not isinstance(other[k], RoutedExpertRows) or len(v.rows) != len(other[k].rows):
-                    return False
-                if any(not torch.equal(torch.as_tensor(a), torch.as_tensor(b)) for a, b in zip(v.rows, other[k].rows)):
+            if v is None or other[k] is None:
+                if v is not other[k]:
                     return False
             elif not torch.equal(v, other[k]):
                 return False
@@ -396,9 +352,9 @@ class TrainingInput(TypedDict, total=False):
     ftpo_reference_logits: Optional[Float[torch.Tensor, "batch_size vocab"]]
     teacher_valid_mask: Optional[Integer[torch.Tensor, "batch_size seq_len"]]
     distillation_loss_weights: Optional[Float[torch.Tensor, "batch_size seq_len"]]
-    # Per-token expert IDs captured from generation. The driver keeps compact rows;
-    # a worker materializes [microbatch, local_response_len, L, K] for replay.
-    rollout_routed_experts: Optional[Integer[torch.Tensor, "batch_size seq_len L K"] | RoutedExpertRows]
+    # Dense replay targets are used by diagnostic input batches. Generated compact
+    # rows live in TrainingInputBatch.routed_expert_rows until worker materialization.
+    rollout_routed_experts: Optional[Integer[torch.Tensor, "batch_size seq_len L K"]]
     # Loop-behavior reward shaping (Stage B / F5): per-token additive shaping
     # channel, SEPARATE from `rewards` (the RLOO-N outcome term). Default all-zeros
     # and present ONLY when trainer.algorithm.enable_token_reward_channel is True,
@@ -416,13 +372,98 @@ class TrainingInput(TypedDict, total=False):
 
 
 class TrainingInputBatch(TensorBatch[TrainingInput]):
-    """Training input data"""
+    """Training tensors with optional compact route rows kept outside the tensor dictionary."""
+
+    def __init__(self, *args, routed_expert_rows: RoutedExpertRows | None = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.routed_expert_rows = routed_expert_rows
+        if routed_expert_rows is not None and len(routed_expert_rows) != self.batch_size:
+            raise ValueError("compact route row count must match the training batch")
+        if routed_expert_rows is not None and self.get("rollout_routed_experts") is not None:
+            raise ValueError("route targets cannot be both compact rows and a dense tensor")
+
+    @property
+    def routed_experts(self) -> torch.Tensor | RoutedExpertRows | None:
+        if self.routed_expert_rows is not None:
+            return self.routed_expert_rows
+        return self.get("rollout_routed_experts")
 
     def routed_experts_tensor(self) -> torch.Tensor | None:
-        routes = self.get("rollout_routed_experts")
-        if isinstance(routes, RoutedExpertRows):
-            return routes.materialize(self["sequences"].device)
-        return routes
+        if self.routed_expert_rows is not None:
+            return self.routed_expert_rows.materialize(self.device)
+        return self.get("rollout_routed_experts")
+
+    def select(self, keys: List[str], metadata_keys: Optional[List[str]] = None) -> "TrainingInputBatch":
+        if (
+            "rollout_routed_experts" in keys
+            and "rollout_routed_experts" not in self
+            and self.routed_expert_rows is None
+        ):
+            raise KeyError("rollout_routed_experts")
+        tensor_keys = [key for key in keys if key != "rollout_routed_experts" or key in self]
+        selected = super().select(tensor_keys, metadata_keys)
+        if "rollout_routed_experts" in keys:
+            selected.routed_expert_rows = self.routed_expert_rows
+        return selected
+
+    def slice(self, start: int, end: int, step: int = 1) -> "TrainingInputBatch":
+        sliced = super().slice(start, end, step)
+        if self.routed_expert_rows is not None:
+            sliced.routed_expert_rows = self.routed_expert_rows[slice(start, end, step)]
+        return sliced
+
+    def __getstate__(self):
+        state = super().__getstate__()
+        state["routed_expert_rows"] = self.routed_expert_rows
+        return state
+
+    def __setstate__(self, state):
+        super().__setstate__(state)
+        self.routed_expert_rows = state["routed_expert_rows"]
+        if self.routed_expert_rows is not None and len(self.routed_expert_rows) != self.batch_size:
+            raise ValueError("compact route row count must match the training batch")
+        if self.routed_expert_rows is not None and self.get("rollout_routed_experts") is not None:
+            raise ValueError("route targets cannot be both compact rows and a dense tensor")
+        return self
+
+    def repeat(self, repeats: int) -> "TrainingInputBatch":
+        repeated = super().repeat(repeats)
+        if self.routed_expert_rows is not None:
+            rows = self.routed_expert_rows
+            repeated.routed_expert_rows = RoutedExpertRows(rows.rows * repeats, rows.response_len, rows.num_experts)
+        return repeated
+
+    def repeat_interleave(self, repeats: int) -> "TrainingInputBatch":
+        repeated = super().repeat_interleave(repeats)
+        if self.routed_expert_rows is not None:
+            rows = self.routed_expert_rows
+            repeated.routed_expert_rows = RoutedExpertRows(
+                tuple(row for row in rows.rows for _ in range(repeats)), rows.response_len, rows.num_experts
+            )
+        return repeated
+
+    @classmethod
+    def cat(cls, shards: List["TrainingInputBatch"]) -> "TrainingInputBatch":
+        has_rows = [shard.routed_expert_rows is not None for shard in shards]
+        if any(has_rows) and not all(has_rows):
+            raise ValueError("cannot concatenate training batches with mixed route representations")
+        combined = super().cat(shards)
+        if has_rows[0]:
+            combined.routed_expert_rows = RoutedExpertRows.cat([shard.routed_expert_rows for shard in shards])
+        return combined
+
+    def __eq__(self, other: Any) -> bool:
+        if not isinstance(other, TrainingInputBatch) or not super().__eq__(other):
+            return False
+        left, right = self.routed_expert_rows, other.routed_expert_rows
+        if left is None or right is None:
+            return left is right
+        return (
+            left.response_len == right.response_len
+            and left.num_experts == right.num_experts
+            and len(left.rows) == len(right.rows)
+            and all(a.dtype == b.dtype and np.array_equal(a, b) for a, b in zip(left.rows, right.rows, strict=True))
+        )
 
 
 class TrainingBatchIterator(Iterator[Experience]):

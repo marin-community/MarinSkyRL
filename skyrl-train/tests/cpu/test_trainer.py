@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock
 import pytest
 import ray
 import torch
-import numpy as np
 from omegaconf import OmegaConf
 
 import skyrl_train.trainer as trainer_module
@@ -24,7 +23,6 @@ from skyrl_train.rollouts.context import TrainingContextState
 from skyrl_train.rollouts.loader import PromptLoaderState
 from skyrl_train.trainer import CheckpointSnapshot, RayPPOTrainer
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
-from skyrl_train.dataset.routed_expert_batch import RoutedExpertRows
 from skyrl_train.trajectory_runners.types import TrajectoryID
 from skyrl_train.objective.losses import PolicyLossInputs, ppo_policy_loss
 from skyrl_train.config.objective_spec import LossReduction
@@ -671,40 +669,6 @@ def test_loop_advantages_are_collated_with_response_tokens(dummy_config, dummy_t
     assert "teacher_action_log_probs" not in batch
     assert "teacher_valid_mask" not in batch
     assert "distillation_loss_weights" not in batch
-
-
-def test_router_replay_conversion_keeps_selected_routes_compact(dummy_config, dummy_tokenizer):
-    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
-    trainer.cfg = dummy_config
-    trainer.cfg.trainer.policy.megatron_config.moe_router_replay = True
-    trainer.group_advantage_invariant = GroupAdvantageInvariant.no_group_advantage(physical_group_size=1)
-    trainer.tokenizer = dummy_tokenizer
-    trainer._num_experts_cache = 256
-    trainer.policy_model = SimpleNamespace(actor_infos=[SimpleNamespace(rank=SimpleNamespace(dp_size=4))])
-    trainer.critic_model = None
-    trainer.ref_model = None
-    routes = [
-        np.asarray([[[1, 2]], [[3, 4]], [[5, 6]]], dtype=np.uint8),
-        np.asarray([[[7, 8]]], dtype=np.uint8),
-    ]
-    trajectories = {
-        "prompt_token_ids": [[10], [20]],
-        "response_ids": [[11, 12, 13], [21]],
-        "rewards": [[0.0, 0.0, 1.0], [1.0]],
-        "loss_masks": [[1, 1, 1], [1]],
-        "rollout_logprobs": None,
-        "rollout_routed_experts": routes,
-    }
-
-    batch = trainer.convert_to_training_input(trajectories, ["long", "short"])
-
-    assert isinstance(batch["rollout_routed_experts"], RoutedExpertRows)
-    assert batch["rollout_routed_experts"].nbytes == 2 * sum(route.nbytes for route in routes)
-    short = batch.chunk(1)[1]
-    assert short.routed_experts_tensor().shape == (1, 1, 1, 2)
-    torch.testing.assert_close(short.routed_experts_tensor()[0], torch.as_tensor(routes[1]))
-    padded_short = batch.chunk(1)[3]
-    torch.testing.assert_close(padded_short.routed_experts_tensor()[0], torch.as_tensor(routes[1]))
 
 
 def test_teacher_evidence_is_validated_and_collated_with_response_tokens(

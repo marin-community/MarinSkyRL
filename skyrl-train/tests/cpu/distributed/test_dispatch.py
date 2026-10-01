@@ -2,7 +2,6 @@ import os
 import pickle
 import threading
 
-import numpy as np
 import skyrl_train.distributed.dispatch as dispatch_module
 from skyrl_train.dataset.routed_expert_batch import RoutedExpertRows
 from skyrl_train.training_batch import TrainingInputBatch
@@ -134,17 +133,14 @@ def test_collect_actor_results_logs_initiating_remote_exception_before_teardown(
 
 
 def _r3_batch(compact: bool = False):
-    """A batch carrying `rollout_routed_experts` so the resident/decentral R3 path
-    engages (dispatch only decentralizes when the chunk carries R3)."""
+    """A batch with replay routes, which enables resident or decentral dispatch."""
     routes = torch.arange(4 * 2 * 3 * 2, dtype=torch.int16).reshape(4, 2, 3, 2)
     if compact:
-        routes = RoutedExpertRows(tuple(routes[index, : index % 2 + 1].numpy().copy() for index in range(4)), 2, 512)
-    return TrainingInputBatch(
-        {
-            "a": torch.tensor([1, 2, 3, 4]),
-            "rollout_routed_experts": routes,
-        }
-    )
+        route_rows = RoutedExpertRows(
+            tuple(routes[index, : index % 2 + 1].numpy().copy() for index in range(4)), 2, 512
+        )
+        return TrainingInputBatch({"a": torch.tensor([1, 2, 3, 4])}, routed_expert_rows=route_rows)
+    return TrainingInputBatch({"a": torch.tensor([1, 2, 3, 4]), "rollout_routed_experts": routes})
 
 
 @pytest.mark.parametrize("compact", [False, True])
@@ -160,21 +156,21 @@ def test_r3_decentral_byte_identical(compact):
             _r3_batch(compact),
             settings=_dispatch_settings(R3Transport.DECENTRAL if decentral else R3Transport.RESIDENT),
         )
-        return MeshDispatch.sync_collect(group.actor_infos, object_refs)
+        return [
+            result for actor, result in zip(group.actor_infos, ray.get(object_refs), strict=True) if actor.rank.sp == 0
+        ]
 
     resident = run(decentral=False)
     decentral = run(decentral=True)
 
     # Only sp=0 ranks contribute; dp ranks 0..3 have rank 0..3, and do_work adds the rank: [1,3,5,7].
-    assert torch.equal(resident["a"], torch.tensor([1, 3, 5, 7]))
-    if compact:
-        assert isinstance(resident["rollout_routed_experts"], RoutedExpertRows)
-        for actual, expected in zip(
-            resident["rollout_routed_experts"].rows, _r3_batch(True)["rollout_routed_experts"].rows
-        ):
-            np.testing.assert_array_equal(actual, expected)
-    else:
-        assert torch.equal(resident["rollout_routed_experts"], _r3_batch()["rollout_routed_experts"])
-    # Decentral is byte-identical on every key (both "a" and the R3 passthrough).
-    assert set(decentral.keys()) == set(resident.keys())
+    assert [chunk["a"].item() for chunk in resident] == [1, 3, 5, 7]
+    expected_routes = _r3_batch()["rollout_routed_experts"]
+    for index, chunk in enumerate(resident):
+        local_routes = chunk.routed_experts_tensor()
+        expected_width = index % 2 + 1 if compact else 2
+        assert local_routes.shape[1] == expected_width
+        assert local_routes.dtype == expected_routes.dtype
+        torch.testing.assert_close(local_routes[0], expected_routes[index, :expected_width])
+    # Resident and decentral deliver the same tensor fields and route rows.
     assert decentral == resident
