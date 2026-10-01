@@ -265,7 +265,8 @@ def _inspect_group(group: GeneratedGroup) -> _GroupFacts:
                     f"rollout_logprobs row {row_index} must align with response_ids, "
                     f"got {len(logprobs)} and {len(response)}"
                 )
-            if not np.isfinite(logprobs[np.asarray(loss_mask, dtype=bool)]).all():
+            trained_logprobs = logprobs[np.asarray(loss_mask, dtype=bool)]
+            if not np.isfinite(trained_logprobs).all() or (trained_logprobs > 0).any():
                 has_trainable_rollout_logprobs = False
 
     return _GroupFacts(
