@@ -67,7 +67,7 @@ async def _take_batch(buffer: RolloutBuffer) -> tuple[list[str], dict[str, float
     payloads = []
     while True:
         admission = await buffer.admit(PROGRESS_TIMEOUT)
-        payloads.extend(admission.payloads)
+        payloads.extend(group.payload for group in admission.admitted)
         if admission.selection is not None:
             return payloads, admission.selection.metrics
 
@@ -143,11 +143,11 @@ async def test_groups_stream_to_the_trainer_before_the_batch_completes(batch_pol
     await buffer.publish(1)
     await _generate(buffer, "a")
     first = await buffer.admit(PROGRESS_TIMEOUT)
-    assert (first.payloads, first.selection) == (["a"], None)
+    assert ([group.payload for group in first.admitted], first.selection) == (["a"], None)
 
     await _generate(buffer, "b")
     second = await buffer.admit(PROGRESS_TIMEOUT)
-    assert second.payloads == ["b"]
+    assert [group.payload for group in second.admitted] == ["b"]
     assert second.selection is not None
 
 
@@ -163,7 +163,7 @@ async def test_stale_group_returns_its_prompt_for_regeneration():
 
     await _commit(buffer, stale.lease_id, "stale")
     admission = await buffer.admit(PROGRESS_TIMEOUT)
-    assert admission.payloads == []
+    assert admission.admitted == []
     assert admission.retries == [{"uid": "stale"}]
 
     await _generate(buffer, "fresh")

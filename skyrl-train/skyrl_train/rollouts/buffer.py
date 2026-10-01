@@ -215,6 +215,17 @@ class BatchSelection:
 
 
 @dataclass(frozen=True)
+class AdmittedRollout:
+    """One selected group's identity, size, and opaque payload reference."""
+
+    uid: str
+    policy_step: int
+    sample_count: int
+    response_tokens: int
+    payload: object
+
+
+@dataclass(frozen=True)
 class Admission:
     """Progress toward the current batch since the previous ``admit`` call.
 
@@ -222,7 +233,7 @@ class Admission:
     ``selection`` is set only on the call that completes the batch.
     """
 
-    payloads: list
+    admitted: list[AdmittedRollout]
     retries: list[dict]
     generated: list[tuple[int, GeneratedWork]]
     dispositions: list[GroupDisposition]
@@ -450,7 +461,7 @@ class RolloutBuffer:
     async def admit(self, timeout: float) -> Admission:
         """Wait up to ``timeout`` seconds for the current batch to progress.
 
-        Returns newly admitted payloads, prompts to regenerate, and groups that left the buffer. The call that
+        Returns newly admitted group metadata, prompts to regenerate, and groups that left the buffer. The call that
         completes the batch also returns how the batch was selected; the batch then counts as taken until the next
         ``publish``.
 
@@ -493,7 +504,16 @@ class RolloutBuffer:
                     f"{len(self._admitted[batch_id])} of {self.config.batch_size} admitted"
                 )
             admission = Admission(
-                payloads=[ref for rollout in self._unreported for ref in rollout.payload],
+                admitted=[
+                    AdmittedRollout(
+                        uid=rollout.verdict.uid,
+                        policy_step=rollout.policy_step,
+                        sample_count=rollout.verdict.work.sample_count,
+                        response_tokens=rollout.verdict.work.generated_token_count,
+                        payload=rollout.payload[0],
+                    )
+                    for rollout in self._unreported
+                ],
                 retries=self._retries,
                 generated=self._generated,
                 dispositions=self._dispositions,

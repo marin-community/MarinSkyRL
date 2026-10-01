@@ -1410,13 +1410,21 @@ class RayPPOTrainer:
             critical_phase("rollout_or_inference_wait", self.global_step),
             async_phase_window("rollout_wait", step=self.global_step, enabled=self._rollout_spans_enabled),
         ):
-            groups, selection_metrics = await self.context.next_batch(
-                stall_timeout=admission_stall_timeout(
-                    recent_step_times=self._step_time_history,
-                    timeout_override=self.group_admission_stall_timeout,
-                ),
-                on_admitted=self._submit_admitted_groups_for_teacher_scoring,
+            stall_timeout = admission_stall_timeout(
+                recent_step_times=self._step_time_history,
+                timeout_override=self.group_admission_stall_timeout,
             )
+            if self._distillation_runtime is None:
+                batch_metadata = await self.context.next_batch_metadata(stall_timeout=stall_timeout)
+                groups = await self.context.fetch_batch_slice(
+                    batch_metadata, 0, len(batch_metadata.groups), stall_timeout=stall_timeout
+                )
+                selection_metrics = batch_metadata.metrics
+            else:
+                groups, selection_metrics = await self.context.next_batch(
+                    stall_timeout=stall_timeout,
+                    on_admitted=self._submit_admitted_groups_for_teacher_scoring,
+                )
         self.all_metrics.update(selection_metrics)
         await self._seal_speculator_capture()
         await self._start_speculator_update()

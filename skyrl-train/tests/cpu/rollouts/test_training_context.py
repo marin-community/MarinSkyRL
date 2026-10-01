@@ -123,6 +123,29 @@ class _Workers:
         return SAMPLES_PER_PROMPT
 
 
+class _CountingPayloads:
+    def __init__(self, store: PayloadStore):
+        self.store = store
+        self.fetched: list[list] = []
+
+    @property
+    def object_store_root(self):
+        return self.store.object_store_root
+
+    def writer(self, buffer, content_policy):
+        return self.store.writer(buffer, content_policy)
+
+    async def fetch(self, payloads):
+        self.fetched.append(list(payloads))
+        return await self.store.fetch(payloads)
+
+    async def checkpoint(self, payloads):
+        return await self.store.checkpoint(payloads)
+
+    def restore(self, payloads):
+        return self.store.restore(payloads)
+
+
 class _RecordingOrder:
     """Dataset order that records the judged groups of each step."""
 
@@ -212,6 +235,39 @@ async def _ignore(groups: list[RolloutGroup]) -> None:
 async def _next_uids(context: TrainingContext) -> list[str]:
     groups, _ = await context.next_batch(stall_timeout=STALL_TIMEOUT, on_admitted=_ignore)
     return [group.uid for group in groups]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("payload_kind", "start_buffer"),
+    [("memory", "ray_actor"), ("object_store", "in_process")],
+    indirect=["start_buffer"],
+)
+async def test_batch_metadata_allows_indexed_fetch_without_driver_payload_read(
+    ray_module, start_buffer, payload_kind, tmp_path
+):
+    store = MemoryPayloads() if payload_kind == "memory" else ObjectStorePayloads(str(tmp_path / "rollouts"))
+    payloads = _CountingPayloads(store)
+    context = _context(["a", "b"], _Workers(), start_buffer, batch_size=2, max_in_flight=2, payloads=payloads)
+    context.start()
+    try:
+        await context.publish(1)
+        metadata = await context.next_batch_metadata(stall_timeout=STALL_TIMEOUT)
+        assert payloads.fetched == []
+        assert {group.uid for group in metadata.groups} == {"a", "b"}
+        assert all(group.policy_step == 1 and group.sample_count == SAMPLES_PER_PROMPT for group in metadata.groups)
+        assert all(group.response_tokens == SAMPLES_PER_PROMPT for group in metadata.groups)
+        assert metadata.metrics["async/rejected_count"] == 0
+
+        await context.publish(2)
+        second = await context.fetch_batch_slice(metadata, 1, 2, stall_timeout=STALL_TIMEOUT)
+        first = await context.fetch_batch_slice(metadata, 0, 1, stall_timeout=STALL_TIMEOUT)
+    finally:
+        await context.close()
+
+    assert [group.uid for group in second + first] == [metadata.groups[1].uid, metadata.groups[0].uid]
+    assert len(payloads.fetched) == 2
+    assert all(len(batch) == 1 for batch in payloads.fetched)
 
 
 @pytest.mark.asyncio
@@ -448,7 +504,7 @@ async def test_writer_filters_success_ceiling_using_final_outcomes(ray_module, p
         admitted = []
         while True:
             admission = await buffer.admit.remote(STALL_TIMEOUT)
-            admitted.extend(await payloads.fetch(admission.payloads))
+            admitted.extend(await payloads.fetch([group.payload for group in admission.admitted]))
             if admission.selection is not None:
                 break
         assert [group.uid for group in admitted] == ["keep"]
