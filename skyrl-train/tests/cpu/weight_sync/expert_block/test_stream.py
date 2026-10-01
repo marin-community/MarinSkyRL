@@ -259,9 +259,9 @@ def participant_main(rank, topology, port, directory):
             assert replayed.compared_bytes == dict(plan.receiver_bytes)[rank] == replayed.parameter_bytes
         # Corrupt the first chunk, the next chunk's boundary and the partial final chunk.
         if rank == trainer_count:
-            words = next(iter(parameters.values())).view(-1).view(torch.uint8)
-            for index in (1, 13, words.numel() - 1):
-                words[index] ^= 0xFF
+            installed_bytes = next(iter(parameters.values())).view(-1).view(torch.uint8)
+            for index in (1, 13, installed_bytes.numel() - 1):
+                installed_bytes[index] ^= 0xFF
         replayed = replay(stream, 7, chunk_bytes=13)
         if rank >= trainer_count:
             assert replayed.mismatched_bytes == (3 if rank == trainer_count else 0)
