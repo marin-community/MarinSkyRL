@@ -218,13 +218,6 @@ Some rules for configuring these parameters:
 - ``world_size % (pp_size * ep_size * etp_size) == 0``
     - This means that ``ep_size * etp_size`` can scale independently of ``tp_size * cp_size``, and can go across data parallel ranks.
 
-.. warning::
-  
-  ``optimizer_config_kwargs.use_precision_aware_optimizer=true`` can cause checkpointing to fail. See: https://github.com/nvidia/megatron-lm/issues/1820.
-
-  We recommend leaving this setting to ``false``
-
-
 Optimizer Configuration
 -----------------------
 For both the critic and policy model, we provide a common optimizer configuration
