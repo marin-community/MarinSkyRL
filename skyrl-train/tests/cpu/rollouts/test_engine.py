@@ -1945,13 +1945,13 @@ def python_tool_task(task_inputs):
     }
     request["env_extras"] = [{"task_spec": task.model_dump_json()}]
     request["env_classes"] = ["nemotron_ultra"]
-    return config, request, task, message
+    return task, message
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("projection_type", [WholeTaskProjection, StepTaskProjection])
 async def test_python_tool_observations_preserve_training_and_release_session(
-    python_tool_task, monkeypatch, projection_type
+    python_tool_task, task_inputs, monkeypatch, projection_type
 ):
     sessions = set()
 
@@ -1970,7 +1970,8 @@ async def test_python_tool_observations_preserve_training_and_release_session(
 
     monkeypatch.setattr(requests, "post", execute)
     monkeypatch.setattr(requests, "delete", close)
-    config, request, _, message = python_tool_task
+    config, request = task_inputs
+    _, message = python_tool_task
     model = ConversationClient(["", "4"], messages=[message, {"role": "assistant", "content": "4"}])
     projection = (
         WholeTrajectoryProjection(config, Tokenizer())
@@ -2027,7 +2028,7 @@ async def test_cancellation_waits_for_the_tool_before_session_cleanup(
 
     monkeypatch.setattr(requests, "post", execute)
     monkeypatch.setattr(requests, "delete", close)
-    _, _, task, message = python_tool_task
+    task, message = python_tool_task
     session = GymTaskSession(task, max_turns=2, executor=environment_executor)
     await session.prepare()
     operation = asyncio.create_task(session.advance(ModelTurn(message, (1, 2), (3, 4), None, "stop")))

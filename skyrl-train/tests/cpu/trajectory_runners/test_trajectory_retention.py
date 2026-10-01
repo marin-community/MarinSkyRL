@@ -10,13 +10,8 @@ import zipfile
 import pytest
 
 from skyrl_train.config.utils import get_default_config
-from skyrl_train.trajectory_runners.base import (
-    BatchMetadata,
-    TrajectoryRequestBatch,
-    TrajectoryRunner,
-    TrajectoryBatch,
-    TrajectoryID,
-)
+from tests.cpu.trajectory_runners.fixture_runner import FixtureRunner
+from skyrl_train.trajectory_runners.types import BatchMetadata, TrajectoryRequestBatch, TrajectoryBatch, TrajectoryID
 from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
 from skyrl_train.trajectory_runners.trajectory_retention import (
     RETENTION_METRIC_PREFIX,
@@ -42,7 +37,7 @@ class _Tokenizer:
         return " ".join(str(token_id) for token_id in token_ids)
 
 
-class _NormalizedRunner(TrajectoryRunner):
+class _NormalizedRunner(FixtureRunner):
     async def _run(self, input_batch, disable_tqdm=False):
         return _output()
 

@@ -11,6 +11,8 @@ from skyrl_gym.verification import RewardResult, TrainingDisposition, Verificati
 
 from skyrl_train.trajectory_runners.types import AgentLoopOutput, TrajectoryRequestBatch
 
+GENRM_AGENTS = frozenset({"genrm_simple_agent", "genrm_simple_agent_reasoning_off"})
+
 
 async def apply_genrm_cohort_rewards(
     outputs: list[AgentLoopOutput],
@@ -20,14 +22,13 @@ async def apply_genrm_cohort_rewards(
 ) -> None:
     """Replace provisional scores with comparisons within each prompt group."""
     env_extras = input_batch.get("env_extras") or []
-    genrm_agents = {"genrm_simple_agent", "genrm_simple_agent_reasoning_off"}
 
     def ultra_at(index: int) -> dict[str, Any] | None:
         extra_info = env_extras[index].get("extra_info") if index < len(env_extras) else None
         ultra = extra_info.get("nemotron_ultra") if isinstance(extra_info, dict) else None
         return ultra if isinstance(ultra, dict) else None
 
-    genrm_indices = [index for index in range(len(outputs)) if (ultra_at(index) or {}).get("agent") in genrm_agents]
+    genrm_indices = [index for index in range(len(outputs)) if (ultra_at(index) or {}).get("agent") in GENRM_AGENTS]
     if not genrm_indices:
         return
     batch_metadata = input_batch.get("batch_metadata")

@@ -39,7 +39,7 @@ from skyrl_train.inference_engines.inference_engine_client import InferenceEngin
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.rollouts.buffer import RolloutGroup, RolloutTask, RolloutWriter
 from taskcompendium.importers.skyrl import GYM_INTERACTION
-from skyrl_train.rollouts.cohort_grading import apply_genrm_cohort_rewards
+from skyrl_train.rollouts.cohort_grading import GENRM_AGENTS, apply_genrm_cohort_rewards
 from skyrl_train.rollouts.gym_tasks import GymTaskSession, grade_result
 from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings, harbor_grading_failure, shape_harbor_rollouts
 from skyrl_train.rollouts.workers import WorkerShard, detached_config
@@ -149,7 +149,7 @@ async def grade_task_cohorts(
             continue
         extras = verifier.parameters["extras"]
         ultra = extras.get("extra_info", {}).get("nemotron_ultra", {})
-        if ultra.get("agent") not in {"genrm_simple_agent", "genrm_simple_agent_reasoning_off"}:
+        if ultra.get("agent") not in GENRM_AGENTS:
             continue
         parameters[index] = verifier.parameters
         groups.setdefault(task.id, []).append(index)
@@ -372,8 +372,8 @@ class TaskRolloutWorker:
                 model,
                 self.factories,
                 max_turns=(
-                    harbor.agent_options.get("max_turns", self.trajectory_runner_cfg.max_turns)
-                    if harbor is not None
+                    harbor.max_turns
+                    if harbor is not None and harbor.max_turns is not None
                     else self.trajectory_runner_cfg.max_turns
                 ),
                 command_timeout=self.command_timeout,

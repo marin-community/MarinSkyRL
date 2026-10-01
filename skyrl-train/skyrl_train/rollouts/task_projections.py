@@ -50,7 +50,7 @@ def training_output(
     *,
     logprobs_required: bool = False,
 ) -> AgentLoopOutput:
-    """Exclude missing grades from loss and baseline calculations."""
+    """Project token evidence and rewards with the configured training eligibility policy."""
     graded = rollout.grade.status == Outcome.GRADED
     skipped = rollout.grade.status == Outcome.SKIPPED
     verification = verification_result(rollout.grade)

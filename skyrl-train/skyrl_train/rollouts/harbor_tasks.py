@@ -6,6 +6,7 @@ from pathlib import Path
 from harbor_config.models.job.config import RetryConfig
 from harbor_config.models.trial.config import EnvironmentConfig, VerifierConfig
 from omegaconf import DictConfig
+from shellbox.backends.daytona.machine import DaytonaMachineFactory, DaytonaNetworkMode, DaytonaNetworkPolicy
 from shellbox.backends.docker.machine import DockerMachineFactory
 from shellbox.machine import MachineFactory
 from taskcompendium.environment import EnvironmentSpec, ShellVerifierSpec
@@ -37,8 +38,9 @@ from skyrl_train.utils.reward_shaping import (
 class HarborTaskSettings:
     environment: EnvironmentConfig
     verifier: VerifierConfig
-    agent: dict
-    agent_options: dict
+    agent_timeout: float | None
+    max_agent_timeout: float | None
+    max_turns: int | None
     timeout_multiplier: float
     eval_timeout: float
     concurrent_trials: int
@@ -54,8 +56,9 @@ class HarborTaskSettings:
         return cls(
             builder.environment_config(),
             builder.verifier_config(),
-            agent,
-            options,
+            agent.get("override_timeout_sec"),
+            agent.get("max_timeout_sec"),
+            options.get("max_turns"),
             float(builder.trial_fields().get("timeout_multiplier", 1)),
             builder.get_eval_timeout_override_sec(),
             builder.get_n_concurrent_trials(),
@@ -88,12 +91,6 @@ class HarborTaskSettings:
                     skopeo=Path(runner_config.skopeo), image_cache=Path(runner_config.image_cache).expanduser()
                 )
             case "daytona":
-                from shellbox.backends.daytona.machine import (
-                    DaytonaMachineFactory,
-                    DaytonaNetworkMode,
-                    DaytonaNetworkPolicy,
-                )
-
                 policy = self.environment.kwargs.get("network_policy")
                 return DaytonaMachineFactory(
                     ttl_minutes=self.environment.kwargs.get("ttl_minutes", 360),
@@ -109,14 +106,14 @@ class HarborTaskSettings:
 
     def task(self, task: TaskSpec, *, phase: str) -> TaskSpec:
         """Resolve task resources and deadlines without changing the source specification."""
-        agent_override = self.eval_timeout if phase == "eval" else self.agent.get("override_timeout_sec")
+        agent_override = self.eval_timeout if phase == "eval" else self.agent_timeout
 
         def agent_timeout(original):
             value = original if agent_override is None else agent_override
             if value is None:
                 return None
             value *= self.timeout_multiplier
-            ceiling = self.agent.get("max_timeout_sec")
+            ceiling = self.max_agent_timeout
             return value if ceiling is None else min(value, ceiling)
 
         def environment(original: EnvironmentSpec) -> EnvironmentSpec:

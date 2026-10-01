@@ -88,7 +88,6 @@ class RLStoragePaths:
 
     checkpoint_root: str
     export_root: str
-    trace_root: str
     trajectory_root: str
     ray_log_root: str
     resume_checkpoint_count: int
@@ -261,7 +260,6 @@ def _iris_submission_state(config_path: Path, config: DictConfig) -> SimpleNames
     skyrl = raw["skyrl"]
     model = inputs["model"]
     model_path = _model_path(model["uri"])
-    terminal_bench = skyrl.get("terminal_bench_config") or {}
     trajectory_retention = (skyrl.get("generator") or {}).get("trajectory_retention") or {}
     contents = config_path.read_bytes()
     digest = hashlib.sha256(contents).hexdigest()[:16]
@@ -305,7 +303,6 @@ def _iris_submission_state(config_path: Path, config: DictConfig) -> SimpleNames
     args.storage_paths = RLStoragePaths(
         checkpoint_root=artifacts["checkpoint_root"],
         export_root=artifacts["export_root"],
-        trace_root=terminal_bench.get("trials_dir") or join_resource_path(artifacts["attempts_root"], "trace_jobs"),
         trajectory_root=trajectory_retention.get("output_path")
         or join_resource_path(artifacts["attempts_root"], "trajectories"),
         ray_log_root=ray["log_dir"],
@@ -843,7 +840,6 @@ def launch(args: SimpleNamespace, expected_launcher_commit: str) -> LaunchOutcom
             flush=True,
         )
         print(f"[rl-iris] Canonical:  {storage_paths.export_root}", flush=True)
-        print(f"[rl-iris] Raw traces: {storage_paths.trace_root}", flush=True)
         print(f"[rl-iris] Trajectory: {storage_paths.trajectory_root}", flush=True)
         print(f"[rl-iris] Ray logs:   {storage_paths.ray_log_root}", flush=True)
         print(f"[rl-iris] Ray spill:  {args.ray_spill_backend.value}:{args.ray_spill_dir}", flush=True)

@@ -18,6 +18,7 @@ from transformers import PreTrainedTokenizerBase
 from skyrl_train.rollout_observability import RolloutTimings, current_rollout_observation, measure_rollout
 from skyrl_train.rollouts.buffer import RolloutTask, RolloutWriter
 from skyrl_train.tokenizer import tokenizer_from_config
+from skyrl_train.trajectory_runners.base import TrajectoryRunner
 from skyrl_train.trajectory_runners.trajectory_retention import RetentionSink
 from skyrl_train.trajectory_runners.types import TrainingPhase, TrajectoryBatch, TrajectoryRequestBatch
 from skyrl_train.utils.fd_monitor import start_fd_monitor
@@ -48,30 +49,12 @@ class WorkerShard:
     count: int
 
 
-class RolloutExecutor(Protocol):
-    """Worker-local execution, buffer submission, and resource lifecycle."""
-
-    async def run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch: ...
-
-    async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> int: ...
-
-    def set_trajectory_sink(self, sink: RetentionSink) -> None: ...
-
-    async def startup(self) -> None: ...
-
-    async def shutdown(self) -> None: ...
-
-    async def start_eval_session(self, *, run_name: str, eval_step: int, val_set_name: str | None) -> None: ...
-
-    async def stop_eval_session(self) -> None: ...
-
-
 class RunnerSpec(Protocol):
     """Picklable inputs that build a trajectory runner inside a rollout worker process."""
 
     config: DictConfig
 
-    def build(self, tokenizer: PreTrainedTokenizerBase, shard: WorkerShard) -> RolloutExecutor: ...
+    def build(self, tokenizer: PreTrainedTokenizerBase, shard: WorkerShard) -> TrajectoryRunner: ...
 
 
 @dataclass(frozen=True)

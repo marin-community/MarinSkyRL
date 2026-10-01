@@ -765,11 +765,6 @@ def _skyrl_config_sections(
     if hf_hub_repo_id:
         trainer["hf_hub_repo_id"] = hf_hub_repo_id
     terminal_bench = copy.deepcopy(parsed.terminal_bench)
-    if terminal_bench is not None:
-        if not terminal_bench.get("trials_dir") and experiments_dir and job_name:
-            terminal_bench["trials_dir"] = join_resource_path(experiments_dir, job_name, "trace_jobs")
-        if exp_args.get("trace_root"):
-            terminal_bench["trials_dir"] = exp_args["trace_root"]
 
     sections = {
         "trainer": trainer,
