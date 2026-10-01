@@ -9,8 +9,13 @@ from skyrl_train.entrypoints.main_generate import EvalOnlyEntrypoint
 class LifecycleRunner:
     def __init__(self) -> None:
         self.events = []
+        self.sink = None
+
+    def set_trajectory_sink(self, sink) -> None:
+        self.sink = sink
 
     async def startup(self) -> None:
+        assert self.sink is not None, "rollout workers need a sink before startup"
         self.events.append("startup")
 
     async def shutdown(self) -> None:
@@ -28,7 +33,12 @@ class RecordingTracker:
 @pytest.mark.asyncio
 async def test_eval_only_uses_generation_engine_without_initial_wake(monkeypatch):
     experiment = object.__new__(EvalOnlyEntrypoint)
-    experiment.cfg = OmegaConf.create({"trainer": {"policy": {"model": {"lora": {"adapter_path": None}}}}})
+    experiment.cfg = OmegaConf.create(
+        {
+            "trainer": {"policy": {"model": {"lora": {"adapter_path": None}}}},
+            "generator": {"trajectory_retention": {"enabled": False}},
+        }
+    )
     experiment.eval_dataset = ["prompt"]
     experiment.tokenizer = object()
     inference_client = object()
@@ -42,6 +52,7 @@ async def test_eval_only_uses_generation_engine_without_initial_wake(monkeypatch
     async def evaluate(**kwargs):
         assert kwargs["eval_dataloader"] == "dataloader"
         assert kwargs["trajectory_runner"] is trajectory_runner
+        assert kwargs["trajectory_sink"] is trajectory_runner.sink
         trajectory_runner.events.append("evaluate")
         return {"reward": 1.0}
 
