@@ -36,6 +36,7 @@ class AdvantageEstimator(StrEnum):
     RLOO_N = "rloo_n"  # RLOO-Neutral: excludes masked samples from baseline
     REINFORCE_PP = "reinforce++"
     UNIFORM = "uniform"
+    REWARD = "reward"
 
 
 class PolicyLossType(StrEnum):

@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Callable, List, Optional
@@ -26,6 +27,7 @@ from skyrl_train.objective.objective import (
     megatron_loss_scale,
 )
 from skyrl_train.objective.reduction import policy_data_weights, step_counts
+from skyrl_train.utils.profiler import Profiler
 from skyrl_train.timing_observability import PhaseBreakdown
 from skyrl_train.utils.importance_ratio_diagnostics import LogRatioMonitor, gather_ratio_tensor
 
@@ -78,6 +80,7 @@ class MegatronPolicyMicroBatch:
     rollout_action_logprobs: Optional[torch.Tensor]
     response_span_tags: Optional[torch.Tensor]
     distillation: Optional[TopKEvidence] = None
+    correction_weights: Optional[torch.Tensor] = None
     rollout_routed_experts: Optional[torch.Tensor] = None
 
 
@@ -420,6 +423,7 @@ class MegatronModelWrapper:
         micro_batch_size: int,
         temperature: float = 1.0,
         timings: PhaseBreakdown | None = None,
+        profiler: Profiler | None = None,
     ) -> List[dict]:
         """
         Run forward-backward over a full mini-batch consisting of multiple micro-batches.
@@ -431,6 +435,7 @@ class MegatronModelWrapper:
             micro_batch_size: Micro-batch size per forward pass.
             temperature: Optional temperature for logits scaling.
             timings: Optional recorder for the forward-backward scheduler and pipeline metric broadcast.
+            profiler: Optional profiler for the first forward micro-batch.
 
         Returns:
             List[dict]: one metrics dict per micro-batch in order.
@@ -497,6 +502,7 @@ class MegatronModelWrapper:
                     data.distillation,
                     sparse_student_logprobs,
                     topk_loss_params(self.cfg.trainer.algorithm),
+                    logits.shape[-1],
                 )
             batch = build_objective_micro_batch(
                 action_log_probs=action_log_probs,
@@ -505,6 +511,7 @@ class MegatronModelWrapper:
                 advantages=advantages,
                 loss_mask=loss_mask,
                 rollout_logprobs=rollout_action_logprobs,
+                correction_weights=data.correction_weights,
                 response_span_tags=response_span_tags,
                 token_entropy=token_entropies[:, -num_actions - 1 : -1],
                 think_token_weight=self.cfg.trainer.algorithm.think_token_weight,
@@ -543,15 +550,16 @@ class MegatronModelWrapper:
         def forward_step(batch_iter, model):
             batch = next(batch_iter)
 
-            outputs, packed_seq_params = self._forward_micro_batch(
-                model,
-                batch.sequences,
-                batch.attention_mask,
-                batch.position_ids,
-                rollout_routed_experts=batch.rollout_routed_experts,
-                num_actions=batch.num_actions,
-                record_recompute=True,
-            )
+            with profiler.capture_forward() if profiler is not None else nullcontext():
+                outputs, packed_seq_params = self._forward_micro_batch(
+                    model,
+                    batch.sequences,
+                    batch.attention_mask,
+                    batch.position_ids,
+                    rollout_routed_experts=batch.rollout_routed_experts,
+                    num_actions=batch.num_actions,
+                    record_recompute=True,
+                )
 
             return outputs, partial(loss_func, data=batch, packed_seq_params=packed_seq_params)
 

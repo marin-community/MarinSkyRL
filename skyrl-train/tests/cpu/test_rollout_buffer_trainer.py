@@ -71,7 +71,7 @@ def test_rollout_batch_conversion_reports_staleness_and_stage_timings(monkeypatc
     trainer = object.__new__(RayPPOTrainer)
     trainer.context = SimpleNamespace(config=SimpleNamespace(batch_size=2, max_staleness_steps=2))
     trainer.cfg = SimpleNamespace(trainer=SimpleNamespace(algorithm=get_default_config().trainer.algorithm))
-    trainer.cfg.trainer.algorithm.use_tis = False
+    trainer.cfg.trainer.algorithm.off_policy_correction = "none"
     trainer.global_step = 10
     trainer.all_metrics = {}
     trainer.all_timings = {}
@@ -116,7 +116,7 @@ def test_rollout_batch_conversion_records_domain_reward_metrics():
     trainer.context = SimpleNamespace(config=SimpleNamespace(batch_size=3, max_staleness_steps=0))
     trainer.cfg = get_default_config()
     trainer.cfg.trainer.algorithm.policy_loss_type = "regular"
-    trainer.cfg.trainer.algorithm.use_tis = False
+    trainer.cfg.trainer.algorithm.off_policy_correction = "none"
     trainer.cfg.generator.n_samples_per_prompt = 2
     trainer.global_step = 0
     trainer.all_metrics = {}

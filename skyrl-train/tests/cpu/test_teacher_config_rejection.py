@@ -178,7 +178,12 @@ def test_selected_topk_rollouts_require_matching_teacher_width():
         torch.ones(1, 1, dtype=torch.bool),
         torch.ones(1, 1),
     )
-    result = topk_teacher_loss(evidence, current, topk_loss_params(transported.trainer.algorithm))
+    result = topk_teacher_loss(
+        evidence,
+        current,
+        topk_loss_params(transported.trainer.algorithm),
+        vocabulary_size=32,
+    )
     result.values.sum().backward()
     expected = -torch.tensor(2.0).log()
     torch.testing.assert_close(result.values, expected.reshape(1, 1))

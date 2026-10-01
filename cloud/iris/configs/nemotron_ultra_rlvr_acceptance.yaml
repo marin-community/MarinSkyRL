@@ -56,7 +56,6 @@ trainer:
     advantage_estimator: reinforce++
     use_kl_loss: false
     kl_loss_coef: 0.0
-    use_tis: false
     loss_reduction: sequence_mean
   epochs: 1
   # From the second step, Adam state stays on the GPU and these sequences no longer fit an H100 at

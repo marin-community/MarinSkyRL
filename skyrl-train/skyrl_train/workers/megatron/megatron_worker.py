@@ -339,7 +339,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self.actor_module: List[nn.Module] = None
         self.scheduler: OptimizerParamScheduler = None
         self.optimizer: DistributedOptimizer = None
-        self.profiler: Profiler = None
+        self.profiler: Profiler | None = None
         self._warned_exact_unit_policy_ratio = False
         self._consecutive_nonfinite_steps = 0
 
@@ -519,7 +519,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         policy_update_steps = 0
 
         if self.profiler is not None:
-            self.profiler.start()
+            self.profiler.begin_update()
 
         for epoch in range(self.cfg.trainer.update_epochs_per_batch):
             self.optimizer.zero_grad()
@@ -548,6 +548,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         advantages=experience.advantages,
                         loss_mask=experience.loss_mask,
                         rollout_action_logprobs=experience.rollout_logprobs,
+                        correction_weights=experience.correction_weights,
                         response_span_tags=experience.response_span_tags,
                         distillation=experience.distillation,
                         rollout_routed_experts=experience.rollout_routed_experts,
@@ -564,6 +565,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         chunk.zero_grad_buffer()
                     seq_len = micro_buffer[0].sequences.shape[1]
                     micro_bsz = micro_buffer[0].sequences.shape[0]
+                    profiler = self.profiler.for_mini_batch(policy_update_steps) if self.profiler is not None else None
 
                     metrics_list = self.model.forward_backward_mini_batch(
                         micro_batches=micro_buffer,
@@ -571,6 +573,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         micro_batch_size=micro_bsz,
                         temperature=self.cfg.generator.sampling_params.temperature,
                         timings=timing,
+                        profiler=profiler,
                     )
 
                     if self.empty_cuda_cache:
@@ -624,8 +627,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         with timing.span("megatron_final_barrier"):
             torch.distributed.barrier()
         if self.profiler is not None:
-            self.profiler.stop_and_save()
-            self.profiler.stop_trace()
+            self.profiler.save()
 
         status_mean = policy_training_metrics(all_metrics, policy_update_steps)
         if status_mean.get("ppo_ratio_exact_unit_fraction") == 1.0 and not self._warned_exact_unit_policy_ratio:

@@ -23,8 +23,6 @@ def _loss_cfg():
             "eps_clip_low": 0.2,
             "eps_clip_high": 0.2,
             "clip_ratio_c": 3.0,
-            "use_tis": False,
-            "tis_imp_ratio_cap": -1.0,
             "max_seq_len": 8,
         }
     )

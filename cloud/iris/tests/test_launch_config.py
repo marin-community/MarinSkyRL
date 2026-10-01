@@ -153,6 +153,7 @@ def test_composed_launch_records_whether_training_runs_ahead_of_its_updates(
     raw["skyrl"]["entrypoint"] = entrypoint
     raw["skyrl"]["trainer"]["placement"]["colocate_all"] = False
     raw["skyrl"]["trainer"]["rollout_buffer"] = {"max_staleness_steps": max_staleness_steps}
+    raw["skyrl"]["trainer"]["algorithm"]["off_policy_correction"] = "none"
     raw["iris"]["allocation"]["num_nodes"] = 2
     path = tmp_path / "launch.yaml"
     path.write_text(yaml.safe_dump(raw, sort_keys=False))
@@ -237,3 +238,91 @@ def test_null_nonfinite_limit_in_launch_fails_on_first_invalid_step(tmp_path: Pa
 
     action = nonfinite_step_policy(0, config.skyrl.trainer.policy.max_consecutive_nonfinite_steps)
     assert action is NonfiniteStepPolicy.FAIL
+
+
+@pytest.mark.parametrize(("key", "value"), [("use_tis", True), ("tis_imp_ratio_cap", 2.0)])
+def test_composed_launch_rejects_tis_selectors(tmp_path: Path, key: str, value) -> None:
+    path = tmp_path / "launch.yaml"
+    path.write_text(yaml.safe_dump(_raw_config()))
+    config = load_launch_config(path)
+    OmegaConf.update(config.skyrl.trainer.algorithm, key, value, force_add=True)
+    OmegaConf.save(config, path)
+
+    with pytest.raises(ValueError, match="off_policy_correction"):
+        load_launch_config(path)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "error"),
+    [
+        ({"rollout_buffer.max_staleness_steps": 1}, "off-policy OLD-anchored"),
+        ({"rollout_buffer.max_staleness_steps": 1, "algorithm.off_policy_correction": "none"}, None),
+        ({"rollout_buffer.max_staleness_steps": 1, "algorithm.policy_loss_type": "behavior_clip"}, None),
+        ({"algorithm.policy_loss_type": "behavior_clip", "algorithm.off_policy_correction": "tis"}, "OLD-anchored"),
+        (
+            {
+                "algorithm.off_policy_correction": "custom",
+                "algorithm.off_policy_correction_rules": [{"action": "truncate", "high": 2.0}],
+            },
+            "kind must be token or sequence",
+        ),
+        (
+            {
+                "algorithm.off_policy_correction": "custom",
+                "algorithm.off_policy_correction_rules": [{"kind": "token", "action": "mask", "low": 2, "high": 1}],
+            },
+            "low <= high",
+        ),
+        (
+            {
+                "algorithm.off_policy_correction": "custom",
+                "algorithm.off_policy_correction_rules": [{"kind": "token", "action": "truncate", "high": 2}] * 2,
+            },
+            "at most one truncate",
+        ),
+        (
+            {
+                "algorithm.off_policy_correction": "custom",
+                "algorithm.off_policy_correction_rules": [{"kind": "token", "action": "truncate", "hig": 2}],
+            },
+            "hig",
+        ),
+        (
+            {
+                "algorithm.off_policy_correction": "custom",
+                "algorithm.off_policy_correction_rules": [{"kind": "token", "action": "clamp", "high": 2}],
+            },
+            "action",
+        ),
+        (
+            {
+                "algorithm.off_policy_correction": "custom",
+                "algorithm.off_policy_correction_rules": [
+                    {"kind": "sequence", "aggregate": "average", "action": "mask", "high": 2}
+                ],
+            },
+            "aggregate",
+        ),
+        (
+            {
+                "algorithm.off_policy_correction": "custom",
+                "algorithm.off_policy_correction_rules": [{"kind": "token", "action": "truncate", "high": "2.0"}],
+            },
+            "high",
+        ),
+        ({"algorithm.dynamic_sampling.max_mean_reward": 0.9}, "requires dynamic_sampling.type=filter"),
+        ({"algorithm.dynamic_sampling.max_mean_reward": 0.9, "algorithm.dynamic_sampling.type": "filter"}, None),
+    ],
+)
+def test_launch_validates_correction_and_selection_contract(tmp_path: Path, overrides: dict, error: str | None):
+    raw = OmegaConf.create(_raw_config())
+    for key, value in overrides.items():
+        OmegaConf.update(raw.skyrl.trainer, key, value, force_add=True)
+    path = tmp_path / "launch.yaml"
+    OmegaConf.save(raw, path)
+    if error is not None:
+        with pytest.raises(ValueError, match=error):
+            load_launch_config(path)
+    else:
+        # Explicitly uncorrected stale policies and active reward filters are valid launch contracts.
+        load_launch_config(path)

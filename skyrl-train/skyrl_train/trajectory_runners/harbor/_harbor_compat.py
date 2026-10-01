@@ -338,13 +338,7 @@ except ImportError:
                 # here on the empty-rollout branches breaks those cycles promptly
                 # so the refcount table drains per-trial instead of accumulating.
                 #
-                # Gated to the empty / cleared branches only: successful trials
-                # (and partially-complete TRUNCATED/NORMALIZED ones) carry a live,
-                # consistent rollout we must not disturb, and a gc.collect() on
-                # every successful trial would be a needless per-trial stall at
-                # high n_concurrent_trials. TIS-agnostic: this neither reads nor
-                # mutates rollout_details / logprobs — it only reclaims orphaned
-                # Python objects, so behavior is identical with use_tis on or off.
+                # Empty or cleared trials can release orphaned objects without disturbing live rollout details.
                 if (
                     rollback_result.action
                     in (
