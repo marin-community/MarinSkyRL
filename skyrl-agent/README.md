@@ -13,6 +13,12 @@ Training and evaluating modern AI agents with modular tasks, tools, and backends
 
 </div>
 
+## Marin retirement notice
+
+This package is a dormant snapshot and is excluded from the maintained MarinSkyRL build.
+`GeneralReactTask`, `DummyReactTask`, and the `coder1` verifier have been removed, together with their dependent
+examples. See the [retirement guide](../docs/coder1-retirement.md) for supported replacements.
+
 ## News 📰✨
 
 - 🚀 Initial public release with SWE, MemAgent (step-wise training), and Web Research examples!
