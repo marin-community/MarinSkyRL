@@ -6,6 +6,11 @@ on:
     - cron: "0 9 * * *"
   workflow_dispatch:
     inputs:
+      lane:
+        description: Lane to run manually (the schedule runs all lanes)
+        type: choice
+        default: all
+        options: [all, gsm8k-h100, opd-sync-h100, grug-megatron-h100, cat-count-h100]
       model:
         description: "HF model id to train"
         default: Qwen/Qwen3-0.6B
@@ -108,7 +113,7 @@ jobs:
       - uses: ./.github/actions/setup-iris
 
       - name: Run ${{ matrix.lane }}
-        if: matrix.lane != 'cat-count-h100'
+        if: matrix.lane != 'cat-count-h100' && (inputs.lane == '' || inputs.lane == 'all' || inputs.lane == matrix.lane)
         run: |
           set -o pipefail
           TASK_ENV=()
@@ -130,17 +135,17 @@ jobs:
             -- bash "${{ matrix.task_script }}" 2>&1 | tee "${{ matrix.log }}"
 
       - name: Run the CatCount coordinator and learning gate
-        if: matrix.lane == 'cat-count-h100'
+        if: matrix.lane == 'cat-count-h100' && (inputs.lane == '' || inputs.lane == 'all' || inputs.lane == matrix.lane)
         run: |
           set -o pipefail
           bash "${{ matrix.task_script }}" 2>&1 | tee "${{ matrix.log }}"
 
       - name: Cancel any Iris job the run left behind
-        if: always() && matrix.lane != 'cat-count-h100'
+        if: always() && matrix.lane != 'cat-count-h100' && (inputs.lane == '' || inputs.lane == 'all' || inputs.lane == matrix.lane)
         run: iris --cluster marin job cancel "/runner/$JOB_NAME" || true
 
       - name: Finish the recorded CatCount jobs
-        if: always() && matrix.lane == 'cat-count-h100'
+        if: always() && matrix.lane == 'cat-count-h100' && (inputs.lane == '' || inputs.lane == 'all' || inputs.lane == matrix.lane)
         run: |
           if [[ -d "$RUNNER_TEMP/cat-count-marin" && -f cat-count-nightly.jobs.json ]]; then
             PYTHONPATH="$GITHUB_WORKSPACE/skyrl-train" uv run \

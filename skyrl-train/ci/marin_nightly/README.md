@@ -75,7 +75,8 @@ worker tasks with two H100s and 65 CPUs each. It uses seed 17, behavior clipping
 and staleness 2, without checkpoints or HF export. `resolve_runtime.sh --commit`
 selects the nightly checkout's revision; the Marin launcher uses that revision
 for both its package and GPU runtime. Scheduled runs use Marin main.
-The workflow's `marin_revision` input supports branch validation.
+The workflow’s `marin_revision` input supports branch validation; `lane`
+selects a single lane for manual dispatch. Scheduled runs execute every lane.
 
 Each attempt has a 20-minute deadline. Coordinator eviction, lost workers and
 a deadline before training are reported as `INFRASTRUCTURE_FAILURE` and retried
