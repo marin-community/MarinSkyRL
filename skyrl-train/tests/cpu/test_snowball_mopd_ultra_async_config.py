@@ -3,6 +3,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from omegaconf import OmegaConf
 
 
@@ -29,20 +30,25 @@ def test_async_smoke_runs_the_in_process_async_trainer_and_passes_trainer_valida
     validate_cfg(compiled.config)
 
 
-def test_async_smoke_matches_the_sync_baseline_geometry_and_prompt_count():
-    async_config = OmegaConf.to_container(load_rl_recipe(str(ASYNC_CONFIG)), resolve=True)
-    sync_config = OmegaConf.to_container(load_rl_recipe(str(SYNC_CONFIG)), resolve=True)
+SWE_SYNC_CONFIG = CONFIGS / "snowball_mopd_ultra_32k_swe_smoke.yaml"
+SWE_ASYNC_CONFIG = CONFIGS / "snowball_mopd_ultra_async_32k_swe_smoke.yaml"
+
+
+@pytest.mark.parametrize(
+    ("async_path", "sync_path"),
+    [(ASYNC_CONFIG, SYNC_CONFIG), (SWE_ASYNC_CONFIG, SWE_SYNC_CONFIG)],
+    ids=["blend", "swe"],
+)
+def test_async_smoke_matches_its_sync_baseline_geometry_and_prompt_count(async_path, sync_path):
+    async_config = OmegaConf.to_container(load_rl_recipe(str(async_path)), resolve=True)
+    sync_config = OmegaConf.to_container(load_rl_recipe(str(sync_path)), resolve=True)
 
     assert derive_role_plan(async_config) == derive_role_plan(sync_config)
-    assert async_config["teachers"] == sync_config["teachers"]
-    assert async_config["context_budget"] == sync_config["context_budget"]
+    for section in ("teachers", "context_budget", "terminal_bench"):
+        assert async_config.get(section) == sync_config.get(section)
     # One optimizer update per step in both schedules, so equal steps mean equal prompts.
     for key in ("train_batch_size", "policy_mini_batch_size", "max_steps"):
         assert async_config["trainer"][key] == sync_config["trainer"][key]
-
-
-SWE_SYNC_CONFIG = CONFIGS / "snowball_mopd_ultra_32k_swe_smoke.yaml"
-SWE_ASYNC_CONFIG = CONFIGS / "snowball_mopd_ultra_async_32k_swe_smoke.yaml"
 
 
 def test_swe_smokes_route_every_row_to_harbor_and_pass_trainer_validation():
@@ -59,14 +65,3 @@ def test_swe_smokes_route_every_row_to_harbor_and_pass_trainer_validation():
         validate_cfg(compiled.config)
         assert compiled.config.get("terminal_bench_config")
         assert set(compiled.config.teacher_routing.opd.routes) == {"swe"}
-
-
-def test_async_swe_smoke_matches_the_sync_swe_smoke_geometry_and_prompt_count():
-    async_config = yaml.safe_load(SWE_ASYNC_CONFIG.read_text())
-    sync_config = yaml.safe_load(SWE_SYNC_CONFIG.read_text())
-
-    assert derive_role_plan(async_config) == derive_role_plan(sync_config)
-    assert async_config["teachers"] == sync_config["teachers"]
-    assert async_config["terminal_bench"] == sync_config["terminal_bench"]
-    for key in ("train_batch_size", "policy_mini_batch_size", "max_steps"):
-        assert async_config["trainer"][key] == sync_config["trainer"][key]

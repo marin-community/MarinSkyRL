@@ -500,7 +500,7 @@ def controller_registration_plan(
 # --------------------------------------------------------------------------- #
 #
 # WHY a SEPARATE mint path. The plain :func:`capability_api_base` mints against the
-# task's OWN in-cluster controller (``_ControllerCapabilityMinter`` uses
+# task's OWN in-cluster controller (``_ControllerCapabilityUrlMinter`` uses
 # ``IRIS_CONTROLLER_ADDRESS``). On a CoreWeave peer that controller is the CoreWeave
 # controller, whose signing key marin (iris.oa.dev) does NOT trust: federation trust
 # is UNIDIRECTIONAL (cw trusts marin, not the reverse), so a cw-minted token 401s at
