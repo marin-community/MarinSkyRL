@@ -594,6 +594,46 @@ async def test_agent_loop_forwards_environment_chat_options_and_structured_assis
 
 
 @pytest.mark.asyncio
+async def test_gsm8k_probe_rollout_retains_served_tokens_and_scores(tokenizer, generator_cfg, skyrl_gym_cfg):
+    generator_cfg.require_exact_chat_transport = True
+    generator_cfg.sampling_params.logprobs = 0
+    model_client = engine_returning(
+        {
+            "responses": ["#### 4"],
+            "response_ids": [[21, 22]],
+            "prompt_ids": [[11, 12, 13]],
+            "stop_reasons": ["stop"],
+            "response_logprobs": [[-0.1, -0.2]],
+            "routed_experts": None,
+            "prompt_logprobs": None,
+            "assistant_messages": [{"role": "assistant", "content": "#### 4"}],
+            "token_provenance": "engine",
+        }
+    )
+    runner = SkyRLGymTrajectoryRunner(
+        trajectory_runner_cfg=generator_cfg,
+        skyrl_gym_cfg=skyrl_gym_cfg,
+        inference_engine_client=AsyncMock(),
+        tokenizer=tokenizer,
+        model_client=model_client,
+    )
+
+    output = await runner.agent_loop(
+        [{"role": "user", "content": "What is 2 + 2?"}],
+        "gsm8k",
+        {"reward_spec": {"ground_truth": "4"}},
+        max_tokens=8,
+        max_input_length=512,
+    )
+
+    assert output.evidence.prompt_token_ids == (11, 12, 13)
+    assert output.evidence.response_token_ids == (21, 22)
+    np.testing.assert_array_equal(output.evidence.behavior_logprobs, np.asarray([-0.1, -0.2], dtype=np.float32))
+    assert output.token_provenance is TokenProvenance.ENGINE
+    assert output.reward.unshaped_reward == 1.0
+
+
+@pytest.mark.asyncio
 @patch("skyrl_gym.make")
 async def test_agent_loop_required_exact_chat_rejects_environment_without_chat_options(
     mock_make, tokenizer, mock_env, generator_cfg, skyrl_gym_cfg
