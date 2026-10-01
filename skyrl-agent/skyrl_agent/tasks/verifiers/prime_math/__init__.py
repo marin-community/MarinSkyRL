@@ -388,7 +388,23 @@ def match_answer(response):
     return is_matched, response
 
 
-def compute_score(model_output: str, ground_truth: str) -> bool:
+def compute_score(model_output: str, ground_truth: str, verifyit_enabled=False) -> bool:
+    if verifyit_enabled:
+        from skyrl_agent.tasks.verifiers.math_verifyit import (
+            compare_answer,
+            normalize_for_compare,
+            unsafe_expression,
+        )
+
+        if unsafe_expression(str(model_output)):
+            return {"score": 0.0, "acc": False}
+        _, extracted = match_answer(str(model_output))
+        correct = compare_answer(
+            normalize_for_compare(extracted, _normalize),
+            normalize_for_compare(str(ground_truth), _normalize),
+        )
+        return {"score": float(correct), "acc": correct}
+
     model_output = str(model_output)
     ground_truth = str(ground_truth)
 

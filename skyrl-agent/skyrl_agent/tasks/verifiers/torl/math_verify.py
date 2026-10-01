@@ -87,7 +87,12 @@ def correctness_score_v2(response, gt):
     return 1.0 if is_equiv(pred, gt) else -0.5
 
 
-def compute_score(solution_str, ground_truth, reward_type="default") -> float:
+def compute_score(solution_str, ground_truth, reward_type="default", verifyit_enabled=False) -> float:
+    if verifyit_enabled:
+        from skyrl_agent.tasks.verifiers.math_verifyit import score_torl
+
+        return score_torl(solution_str, ground_truth, reward_type, boxed_pattern, normalize_final_answer)
+
     if reward_type == "default":
         try:
             # if undesired_format(solution_str): return -1.0

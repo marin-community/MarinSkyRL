@@ -6,6 +6,8 @@ from skyrl_agent.dispatcher.async_utils import call_sync_from_async
 
 
 class GeneralReactTask(BaseTask):
+    verifyit_enabled = False
+
     @classmethod
     async def initialize_runtime(cls):
         pass
@@ -108,15 +110,16 @@ class GeneralReactTask(BaseTask):
         print(f"Evaluating result: {result=}")
         if not result:
             return 0.0
+        verifyit_enabled = instance.get("verifyit_enabled", cls.verifyit_enabled) is True
         if data_source == "ToRL":
             from skyrl_agent.tasks.verifiers import torl
 
-            return torl.compute_score(result, ground_truth)
+            return torl.compute_score(result, ground_truth, verifyit_enabled=verifyit_enabled)
         elif data_source.startswith("math"):
             from skyrl_agent.tasks.verifiers import naive_dapo
 
             print(f"Evaluating math task with data_source: {data_source}, got {result=} {ground_truth=} {extra_info=}")
-            res = naive_dapo.compute_score(result, ground_truth, extra_info=extra_info)
+            res = naive_dapo.compute_score(result, ground_truth, extra_info=extra_info, verifyit_enabled=verifyit_enabled)
             print(f"Evaluated math task with data_source: {data_source}, got {res=}")
             return res["score"]
         # code generation

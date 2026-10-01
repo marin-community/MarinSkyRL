@@ -483,7 +483,23 @@ def match_answer(response):
 import math
 
 
-def compute_score(solution_str: str, ground_truth: str, extra_info: dict) -> float:
+def compute_score(solution_str: str, ground_truth: str, extra_info: dict, verifyit_enabled=False) -> float:
+    if verifyit_enabled:
+        from skyrl_agent.tasks.verifiers.math_verifyit import (
+            compare_answer,
+            normalize_for_compare,
+            unsafe_expression,
+        )
+
+        if unsafe_expression(str(solution_str)):
+            return {"score": 0.0, "acc": False}
+        _, extracted = match_answer(str(solution_str))
+        correct = compare_answer(
+            normalize_for_compare(extracted, _normalize),
+            normalize_for_compare(str(ground_truth), _normalize),
+        )
+        return {"score": float(correct), "acc": correct}
+
     """Compute the reward score for a solution. This draws heavily from the LLM-as-judge and PRIME reward functions
 
     Args:

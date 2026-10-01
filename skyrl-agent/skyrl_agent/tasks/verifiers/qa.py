@@ -13,11 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+import random
 import re
 import string
-import random
+
 import litellm
-import json
 
 JUDGE_PROMPT_BROWSECOMP_OFFICIAL = """Judge whether the following [response] to [question] is correct or not based on the precise and unambiguous [correct_answer] below.
 
@@ -104,17 +105,19 @@ def normalize_answer(s):
     return white_space_fix(remove_articles(remove_punc(lower(s))))
 
 
-def em_check(prediction, golden_answers):
+def em_check(prediction, golden_answers, *, verifyit_enabled=False):
     if isinstance(golden_answers, str):
         golden_answers = [golden_answers]
     normalized_prediction = normalize_answer(prediction)
-    score = 0
-    for golden_answer in golden_answers:
-        golden_answer = normalize_answer(golden_answer)
-        if golden_answer == normalized_prediction:
-            score = 1
-            break
-    return score
+    if verifyit_enabled:
+        from verifyit.adapters.skyrl_qa import grade_qa_exact
+
+        references = [normalize_answer(answer) for answer in golden_answers]
+        return grade_qa_exact(normalized_prediction, references).reward
+    for answer in golden_answers:
+        if normalize_answer(answer) == normalized_prediction:
+            return 1
+    return 0
 
 
 def bool_mapping(s):
@@ -147,7 +150,7 @@ def normalize_text(text: str) -> str:
     return text.strip().lower()
 
 
-def f1_score(answer_content, gt):
+def f1_score(answer_content, gt, *, verifyit_enabled=False):
     """Compute F1 score between answer and ground truth"""
     answer_content = normalize_text(bool_mapping(answer_content))
     gt = normalize_text(bool_mapping(gt))
@@ -172,20 +175,22 @@ def f1_score(answer_content, gt):
         pred_tokens = set(answer_content.split())
         gt_tokens = set(gt.split())
 
+    if verifyit_enabled:
+        from verifyit.adapters.skyrl_qa import grade_qa_token_sets
+
+        return grade_qa_token_sets(pred_tokens, gt_tokens).reward
     if not gt_tokens or not pred_tokens:
         return 0
-
     common_tokens = pred_tokens & gt_tokens
     precision = len(common_tokens) / len(pred_tokens)
     recall = len(common_tokens) / len(gt_tokens)
-
-    if precision + recall > 0:
-        return 2 * (precision * recall) / (precision + recall)
-    return 0
+    return 2 * (precision * recall) / (precision + recall) if precision + recall else 0
 
 
-def compute_score_f1(solution_str, ground_truth, format_score=0.0, score=1.0):
+def compute_score_f1(solution_str, ground_truth, format_score=0.0, score=1.0, *, verifyit_enabled=False):
     """Compute F1 score - handles both single targets and lists"""
+    if not isinstance(verifyit_enabled, bool):
+        raise ValueError("verifyit_enabled must be a boolean")
     target = ground_truth["target"]
 
     if solution_str is None:
@@ -199,14 +204,14 @@ def compute_score_f1(solution_str, ground_truth, format_score=0.0, score=1.0):
     if isinstance(target, list):
         scores = []
         for gt in target:
-            scores.append(f1_score(solution_str, gt))
+            scores.append(f1_score(solution_str, gt, verifyit_enabled=verifyit_enabled))
         return {"score": max(scores) if scores else 0}
 
     # Single target case
-    return {"score": f1_score(solution_str, target)}
+    return {"score": f1_score(solution_str, target, verifyit_enabled=verifyit_enabled)}
 
 
-def compute_score_em(solution_str, ground_truth, format_score=0.0, score=1.0):
+def compute_score_em(solution_str, ground_truth, format_score=0.0, score=1.0, *, verifyit_enabled=False):
     """The scoring function for exact match (EM).
 
     Args:
@@ -216,6 +221,8 @@ def compute_score_em(solution_str, ground_truth, format_score=0.0, score=1.0):
         format_score: the score for the format
         score: the score for the correct answer
     """
+    if not isinstance(verifyit_enabled, bool):
+        raise ValueError("verifyit_enabled must be a boolean")
     do_print = random.randint(1, 64) == 1
 
     if do_print:
@@ -226,20 +233,24 @@ def compute_score_em(solution_str, ground_truth, format_score=0.0, score=1.0):
     if solution_str is None:
         return {"score": 0}
     else:
-        if em_check(solution_str, ground_truth["target"]):
+        if em_check(solution_str, ground_truth["target"], verifyit_enabled=verifyit_enabled):
             return {"score": score}
         else:
             return {"score": format_score}
 
 
 # use llm as a verifier
-def compute_score_browsecomp(solution_str, ground_truth, question):
+def compute_score_browsecomp(solution_str, ground_truth, question, *, verifyit_enabled=False):
     """The scoring function for LLM"""
 
     if isinstance(ground_truth["target"], list):
         assert len(ground_truth["target"]) == 1, "Only one correct answer is supported for browsecomp"
         ground_truth["target"] = ground_truth["target"][0]
 
+    if verifyit_enabled:
+        from skyrl_agent.tasks.verifiers.judge_verifyit import require_reference
+
+        require_reference(question, ground_truth["target"])
     if solution_str is None:
         return {"score": 0}
     else:
@@ -255,6 +266,10 @@ def compute_score_browsecomp(solution_str, ground_truth, question):
             response_format=extracted_answer_format_for_confidence,
         )
         print(f"Response from judge model: {response}")
+        if verifyit_enabled:
+            from skyrl_agent.tasks.verifiers.judge_verifyit import completion_text, structured_score
+
+            return {"score": structured_score(completion_text(response.model_dump()), extracted_answer_format_for_confidence["json_schema"]["schema"])}
         raw_content = response.choices[0].message["content"]
         raw_judge = json.loads(raw_content)
         judgement = "Correct" if raw_judge["correct"].lower() == "yes" else ""
@@ -263,8 +278,12 @@ def compute_score_browsecomp(solution_str, ground_truth, question):
 
 
 # use llm as a verifier
-def compute_score_ruler(solution_str, ground_truth, question):
+def compute_score_ruler(solution_str, ground_truth, question, *, verifyit_enabled=False):
     """The scoring function for LLM"""
+    if verifyit_enabled:
+        from skyrl_agent.tasks.verifiers.judge_verifyit import require_reference
+
+        require_reference(question, ground_truth)
     if solution_str is None:
         return {"score": 0}
     else:
@@ -280,6 +299,10 @@ def compute_score_ruler(solution_str, ground_truth, question):
             response_format=ruler_answer_format,
         )
         print(f"Response from judge model: {response}")
+        if verifyit_enabled:
+            from skyrl_agent.tasks.verifiers.judge_verifyit import completion_text, structured_score
+
+            return {"score": structured_score(completion_text(response.model_dump()), ruler_answer_format["json_schema"]["schema"])}
         raw_content = response.choices[0].message["content"]
         print(f"Raw content from judge model: {raw_content}")
         raw_judge = json.loads(raw_content)
