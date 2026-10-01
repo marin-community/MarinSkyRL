@@ -1,7 +1,8 @@
 # Nightly end-to-end gates
 
 The nightly runs GSM8K GRPO on one H100, synchronous OPD on four H100s,
-Grug Megatron training on four H100s, and an OpenCode agentic RL step on eight H100s.
+Grug Megatron training on four H100s, and the asynchronous CatCount learning
+canary on four H100s. OpenCode is a separate manual workflow.
 All policy updates use Megatron and the frozen root environment. The GSM8K run is
 scored against a checked-in spec; the other lanes exercise teacher scoring, Grug
 training and weight sync, and agentic rollout coverage.
@@ -12,8 +13,10 @@ training and weight sync, and agentic rollout coverage.
 | `run_opd_h100.sh` | run synchronous OPD with separate policy, rollout, and teacher roles |
 | `run_grug_megatron.sh` | run Grug parity, training, and serving gates on four H100s |
 | `run_opencode.sh` | submit and gate the federated OpenCode RL canary |
+| `run_cat_count_h100.sh` | submit the CatCount coordinator and gate sampled learning on four H100s |
 | `gate.py` | score a training run against its spec |
 | `specs/gsm8k-qwen3-0.6b-megatron.json` | GSM8K gate thresholds and provenance |
+| `specs/cat-count-canary-qwen2.5-0.5b-async.json` | CatCount sampled learning and per-step mechanism requirements |
 | `specs/opencode-qwen3-8b.json` | OpenCode continuation and policy update thresholds |
 
 ## How the gate sees the run
@@ -29,44 +32,59 @@ WANDB_MIRROR kind=train step=2 metrics={"policy/policy_loss": 0.41, "reward/avg_
 against the spec's required metrics and bounds. A spec can also require evidence across
 the run: finite values at every step, minimum observation counts, first-to-last-window
 improvement, and a minimum number of observations above or below a threshold. Training and evaluation
-payloads are separate streams. `at_step` selects a numbered step, `first`, or
+payloads are separate streams. `step` selects a numbered step, `first`, or
 `last` before checking a series; a required selected observation must exist. Duplicate payloads for one stream and step count once;
 conflicting copies fail. The gate exits non-zero with one line per violation.
 `tests/cpu/test_marin_nightly_gate.py` covers it.
 
-## Metric series rules
+## Metric gates
 
-`metric_series` entries name a `kind` (`train` or `eval`) and a metric. Each entry
-states `required` and `min_observations`. A missing optional metric is ignored; a
-metric that appears is checked for finite values. `finite_every_step` also requires
-the metric in every payload of that kind. Sparse per-N metrics omit that field and
-set a measured minimum observation count. A `trend` compares the first and last
-`window` finite observations; too few observations fail. An `occurrence` requires
-`minimum_count` values `above`, `below` or inclusively `at_least` its `threshold`.
-`through_step` limits observations to that completed step or earlier.
+Each `metric_gates` row selects a `kind` (`train` or `eval`) and a metric.
+Every selected payload must contain a finite value. `min_observations` counts
+payloads, so an evaluation every five steps has fewer observations than the
+training stream. `step` selects a numbered step, `first`, or `last`;
+`max_step` includes observations through that completed step.
 
-A learning requirement pairs a trend with a required initial observation:
+A `bounds` range applies to every observation by default. With `minimum_count`,
+it requires that many observations inside the range. Endpoint inclusion is
+controlled by `inclusive_minimum` and `inclusive_maximum`. A `trend` compares
+the mean of the first and last `window` observations; too few observations fail.
+Negative `min_improvement` values permit a bounded decrease.
+`MetricSeries` holds the observations and computes their statistics;
+`MetricGate` checks them and returns typed failures. Top-level `finite_metrics`
+and `bounds` check the final training payload.
 
 ```json
 [
-  {"kind": "eval", "metric": "eval/train/avg_score", "required": true,
-   "min_observations": 1, "at_step": 0},
-  {"kind": "eval", "metric": "eval/train/avg_score", "required": true,
+  {"kind": "eval", "metric": "eval/train/avg_score",
+   "min_observations": 1, "step": 0},
+  {"kind": "eval", "metric": "eval/train/avg_score",
    "min_observations": 2, "trend": {"window": 1, "min_improvement": 0.2}}
 ]
 ```
 
-The first row requires the step-0 baseline. The second requires a reward gain
-of at least0.2 from that baseline. CatCountCanary's async spec uses sampled
-training-prompt evaluations instead: initial reward in[0.10,0.45] atstep0,
-then at leastone score >=0.65 throughstep30. The launcher stops at the first
-qualifying sampled evaluation. Its spec also requires post-optimizer
-`policy/dp_weight_checksum_mismatch`=0 at every training step. Sync is a
-manual launcher option outside the canary and CI.
+CatCount requires sampled training-prompt reward in [0.10, 0.45] at step 0,
+then at least one score ≥ 0.65 by step 30. The launcher evaluates every five
+steps and stops at the first qualifying score. It requires
+`policy/dp_weight_checksum_mismatch` = 0 after every optimizer step. The
+synchronous lane is a manual launcher option outside CI.
 
-A negative `min_improvement`, such as -0.1, permits a decrease of at most 0.1.
-Top-level `finite_metrics` and `bounds` are optional final-step checks;
-`metric_series` expresses requirements across the run.
+## CatCount nightly
+
+`cat-count-h100` submits a 4-CPU, 16-GB-memory, 8-GB-disk coordinator and two
+worker tasks with two H100s and 65 CPUs each. It uses seed 17, behavior clipping
+and staleness 2, without checkpoints or HF export. `resolve_runtime.sh --commit`
+selects the nightly checkout's revision; the Marin launcher uses that revision
+for both its package and GPU runtime. Scheduled runs use Marin main.
+The workflow's `marin_revision` input supports branch validation.
+
+Each attempt has a 20-minute deadline. Coordinator eviction, lost workers and
+a deadline before training are reported as `INFRASTRUCTURE_FAILURE` and retried
+once. Learning, metric and application failures are `GATE_FAILURE` and are not
+retried. `CAT_COUNT_NIGHTLY_RESULT` records the conclusion and attempt times;
+`OK against ...cat-count-canary-qwen2.5-0.5b-async.json` is the passing gate line.
+The workflow uploads native logs and owned-job receipts. Cleanup verifies those
+identities before cancellation.
 
 ## Two Ray instances cannot share a node
 

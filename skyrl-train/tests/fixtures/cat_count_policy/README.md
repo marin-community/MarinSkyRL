@@ -6,8 +6,9 @@ Its manifest SHA256 is `7a5f1047648a90262514a663168580610b9f6bbe1522b2c38b7578bb
 each downloaded file must match the manifest's byte count and SHA256.
 Credentials or network failures select cached local pretraining. Actions caches
 key every producer source, pretrain parameter and dependency-lock input.
-CI download access requires a read-only role. Runs without credentials use
-cached local pretraining.
+CatCount CI steps supply the repository's CoreWeave credentials and S3 endpoint
+through the shared remote I/O factory. Each run prints `CAT_COUNT_POLICY source=s3`
+or `source=pretrain`; forks without credentials use cached local pretraining.
 
 PR CI runs ten normal training steps on seed 0 with the positive assertions.
 Nightly checks normal/reversed pairs on seeds 0 and 1 and asynchronous resume,

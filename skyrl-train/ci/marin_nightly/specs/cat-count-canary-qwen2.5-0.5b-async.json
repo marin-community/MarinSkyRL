@@ -30,144 +30,6 @@
   },
   "min_train_steps": 5,
   "max_wall_clock_seconds": 1200,
-  "metric_series": [
-    {
-      "kind": "eval",
-      "metric": "eval/sampled/train/avg_score",
-      "required": true,
-      "min_observations": 1,
-      "at_step": 0,
-      "bounds": {
-        "minimum": 0.1,
-        "maximum": 0.45
-      }
-    },
-    {
-      "kind": "eval",
-      "metric": "eval/sampled/train/avg_score",
-      "required": true,
-      "min_observations": 2,
-      "through_step": 30,
-      "occurrence": {
-        "minimum_count": 1,
-        "comparison": "at_least",
-        "threshold": 0.65
-      }
-    },
-    {
-      "kind": "train",
-      "metric": "policy/policy_loss",
-      "required": true,
-      "min_observations": 5,
-      "finite_every_step": true
-    },
-    {
-      "kind": "train",
-      "metric": "policy/final_loss",
-      "required": true,
-      "min_observations": 5,
-      "finite_every_step": true
-    },
-    {
-      "kind": "train",
-      "metric": "policy/policy_entropy",
-      "required": true,
-      "min_observations": 5,
-      "finite_every_step": true
-    },
-    {
-      "kind": "train",
-      "metric": "reward/zero_std_group_fraction",
-      "required": true,
-      "min_observations": 5,
-      "finite_every_step": true,
-      "occurrence": {
-        "minimum_count": 1,
-        "comparison": "above",
-        "threshold": 0
-      }
-    },
-    {
-      "kind": "train",
-      "metric": "policy/ppo_clip_ratio",
-      "required": true,
-      "min_observations": 5,
-      "finite_every_step": true,
-      "occurrence": {
-        "minimum_count": 1,
-        "comparison": "above",
-        "threshold": 0
-      }
-    },
-    {
-      "kind": "train",
-      "metric": "policy/ppo_ratio_exact_unit_fraction",
-      "required": true,
-      "min_observations": 5,
-      "finite_every_step": true,
-      "occurrence": {
-        "minimum_count": 1,
-        "comparison": "below",
-        "threshold": 1
-      }
-    },
-    {
-      "kind": "train",
-      "metric": "policy/mismatch/pooled/log_ratio_abs_mean",
-      "required": true,
-      "min_observations": 5,
-      "finite_every_step": true,
-      "bounds": {
-        "minimum": 0,
-        "maximum": 0.8
-      }
-    },
-    {
-      "kind": "train",
-      "metric": "async/staleness_mean",
-      "required": true,
-      "min_observations": 5,
-      "finite_every_step": true,
-      "occurrence": {
-        "minimum_count": 1,
-        "comparison": "above",
-        "threshold": 0
-      }
-    },
-    {
-      "kind": "train",
-      "metric": "environment/exact_n10",
-      "required": true,
-      "min_observations": 5,
-      "finite_every_step": true,
-      "bounds": {
-        "minimum": 0,
-        "maximum": 1
-      }
-    },
-    {
-      "kind": "train",
-      "metric": "environment/exact_n20",
-      "required": true,
-      "min_observations": 5,
-      "finite_every_step": true,
-      "bounds": {
-        "minimum": 0,
-        "maximum": 1
-      }
-    },
-    {
-      "kind": "train",
-      "metric": "policy/dp_weight_checksum_mismatch",
-      "required": true,
-      "min_observations": 5,
-      "finite_every_step": true,
-      "bounds": {
-        "minimum": 0,
-        "maximum": 0
-      }
-    }
-  ],
   "required_log_patterns": {
     "successful_head_completion": {
       "pattern": "Training done!",
@@ -177,5 +39,119 @@
       "pattern": "\\[telemetry\\] .* run_id=",
       "minimum": 1
     }
-  }
+  },
+  "metric_gates": [
+    {
+      "kind": "eval",
+      "metric": "eval/sampled/train/avg_score",
+      "min_observations": 1,
+      "bounds": {
+        "minimum": 0.1,
+        "maximum": 0.45
+      },
+      "step": 0
+    },
+    {
+      "kind": "eval",
+      "metric": "eval/sampled/train/avg_score",
+      "min_observations": 2,
+      "max_step": 30,
+      "bounds": {
+        "minimum_count": 1,
+        "minimum": 0.65,
+        "inclusive_minimum": true
+      }
+    },
+    {
+      "kind": "train",
+      "metric": "policy/policy_loss",
+      "min_observations": 5
+    },
+    {
+      "kind": "train",
+      "metric": "policy/final_loss",
+      "min_observations": 5
+    },
+    {
+      "kind": "train",
+      "metric": "policy/policy_entropy",
+      "min_observations": 5
+    },
+    {
+      "kind": "train",
+      "metric": "reward/zero_std_group_fraction",
+      "min_observations": 5,
+      "bounds": {
+        "minimum_count": 1,
+        "minimum": 0,
+        "inclusive_minimum": false
+      }
+    },
+    {
+      "kind": "train",
+      "metric": "policy/ppo_clip_ratio",
+      "min_observations": 5,
+      "bounds": {
+        "minimum_count": 1,
+        "minimum": 0,
+        "inclusive_minimum": false
+      }
+    },
+    {
+      "kind": "train",
+      "metric": "policy/ppo_ratio_exact_unit_fraction",
+      "min_observations": 5,
+      "bounds": {
+        "minimum_count": 1,
+        "maximum": 1,
+        "inclusive_maximum": false
+      }
+    },
+    {
+      "kind": "train",
+      "metric": "policy/mismatch/pooled/log_ratio_abs_mean",
+      "min_observations": 5,
+      "bounds": {
+        "minimum": 0,
+        "maximum": 0.8
+      }
+    },
+    {
+      "kind": "train",
+      "metric": "async/staleness_mean",
+      "min_observations": 5,
+      "bounds": {
+        "minimum_count": 1,
+        "minimum": 0,
+        "inclusive_minimum": false
+      }
+    },
+    {
+      "kind": "train",
+      "metric": "environment/exact_n10",
+      "min_observations": 5,
+      "bounds": {
+        "minimum": 0,
+        "maximum": 1
+      }
+    },
+    {
+      "kind": "train",
+      "metric": "environment/exact_n20",
+      "min_observations": 5,
+      "bounds": {
+        "minimum": 0,
+        "maximum": 1
+      }
+    },
+    {
+      "kind": "train",
+      "metric": "policy/dp_weight_checksum_mismatch",
+      "min_observations": 5,
+      "bounds": {
+        "minimum": 0,
+        "maximum": 0
+      }
+    }
+  ]
 }

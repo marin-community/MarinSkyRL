@@ -1,15 +1,15 @@
-"""Tests for the nightly end-to-end gate (ci/marin_nightly/gate.py).
-
-Run with: uv run --isolated --group dev --extra cpu pytest tests/cpu/test_marin_nightly_gate.py
-"""
-
 import json
 import math
+import sys
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 import torch
+from iris.client.workload_codec import job_status_from_proto
+from iris.rpc import job_pb2
+
+from ci.marin_nightly import cat_count_nightly
 
 from skyrl_train.objective.teacher import teacher_advantages
 
@@ -17,7 +17,8 @@ from ci.marin_nightly.gate import (
     GateSpec,
     LogPatternBound,
     MetricBound,
-    MetricSeries,
+    MetricGate,
+    FailureKind,
     SeriesTrend,
     StepMetrics,
     check_log_patterns,
@@ -75,11 +76,10 @@ def trend_spec(window: int = 2, min_improvement: float = 0.03, min_train_steps: 
         finite_metrics=(),
         bounds={},
         max_wall_clock_seconds=900,
-        metric_series=(
-            MetricSeries(
+        metric_gates=(
+            MetricGate(
                 kind="train",
                 metric="reward/avg_raw_reward",
-                required=True,
                 min_observations=min_train_steps,
                 trend=SeriesTrend(window, min_improvement),
             ),
@@ -120,7 +120,8 @@ def test_run_that_diverged_to_nan_fails(spec):
     log = "\n".join([mirror_line(1), mirror_line(2, **{"policy/policy_loss": float("nan")})])
     failures = check_run(parse_metrics(log), spec, wall_clock_seconds=300)
     assert len(failures) == 1
-    assert "policy/policy_loss" in failures[0]
+    assert failures[0].kind == FailureKind.NONFINITE
+    assert failures[0].metric == "policy/policy_loss"
 
 
 def test_run_healthy_early_but_broken_at_the_final_step_fails(spec):
@@ -132,7 +133,7 @@ def test_run_healthy_early_but_broken_at_the_final_step_fails(spec):
 def test_run_that_stopped_early_fails(spec):
     failures = check_run(parse_metrics(healthy_log(steps=1)), spec, wall_clock_seconds=300)
     assert len(failures) == 1
-    assert "expected at least 2" in failures[0]
+    assert failures[0].kind == FailureKind.TRAIN_STEPS
 
 
 def test_run_that_logged_nothing_fails(spec):
@@ -143,7 +144,8 @@ def test_missing_required_metric_fails(spec):
     log = "\n".join([mirror_line(1), mirror_line(2, drop=("reward/avg_raw_reward",))])
     failures = check_run(parse_metrics(log), spec, wall_clock_seconds=300)
     assert len(failures) == 1
-    assert "did not log reward/avg_raw_reward" in failures[0]
+    assert failures[0].kind == FailureKind.MISSING_METRIC
+    assert failures[0].metric == "reward/avg_raw_reward"
 
 
 @pytest.mark.parametrize("reward", [-0.1, 1.5])
@@ -152,13 +154,14 @@ def test_reward_outside_the_environments_range_fails(spec, reward):
     log = "\n".join([mirror_line(1), mirror_line(2, **{"reward/avg_raw_reward": reward})])
     failures = check_run(parse_metrics(log), spec, wall_clock_seconds=300)
     assert len(failures) == 1
-    assert "outside [0.0, 1.0]" in failures[0]
+    assert failures[0].kind == FailureKind.BOUNDS
+    assert failures[0].metric == "reward/avg_raw_reward"
 
 
 def test_run_over_the_wall_clock_budget_fails(spec):
     failures = check_run(parse_metrics(healthy_log()), spec, wall_clock_seconds=901)
     assert len(failures) == 1
-    assert "budget" in failures[0]
+    assert failures[0].kind == FailureKind.WALL_CLOCK
 
 
 def test_required_log_patterns_have_named_inclusive_bounds(spec):
@@ -173,20 +176,20 @@ def test_required_log_patterns_have_named_inclusive_bounds(spec):
 
     assert check_log_patterns(log, spec) == []
     failures = check_log_patterns(log + "AgentTimeoutError\n", spec)
-    assert failures == ["log pattern 'timeout' occurred 2 times, expected at most 1"]
+    assert [(failure.kind, failure.metric) for failure in failures] == [(FailureKind.LOG_PATTERN, "timeout")]
 
 
 def test_eval_payloads_do_not_count_as_training_steps(spec):
     log = "\n".join([mirror_line(1), mirror_line(1, kind="eval"), mirror_line(2, kind="eval")])
     failures = check_run(parse_metrics(log), spec, wall_clock_seconds=300)
-    assert "expected at least 2" in failures[0]
+    assert failures[0].kind == FailureKind.TRAIN_STEPS
 
     eval_spec = replace(
         spec,
         min_train_steps=0,
         finite_metrics=(),
         bounds={},
-        metric_series=(MetricSeries("eval", "eval/exact", True, 1),),
+        metric_gates=(MetricGate("eval", "eval/exact", 1),),
     )
     assert check_run([StepMetrics("eval", 0, {"eval/exact": 1.0})], eval_spec, 300) == []
     assert check_run([], eval_spec, 300) != []
@@ -194,31 +197,32 @@ def test_eval_payloads_do_not_count_as_training_steps(spec):
 
 
 @pytest.mark.parametrize(
-    "rewards,window,expected_pass,expected_message",
+    "rewards,window,expected_pass,expected_kind",
     [
-        ([0.25] * 4, 2, False, "rose by"),
-        ([0.05, 0.06, 0.20, 0.22], 2, True, ""),
-        ([0.25] * 3, 5, False, "expected at least 10 for its trend"),
+        ([0.25] * 4, 2, False, FailureKind.TREND),
+        ([0.05, 0.06, 0.20, 0.22], 2, True, None),
+        ([0.25] * 3, 5, False, FailureKind.OBSERVATIONS),
     ],
 )
-def test_reward_trend_gate(rewards, window, expected_pass, expected_message):
+def test_reward_trend_gate(rewards, window, expected_pass, expected_kind):
     failures = check_run(
         parse_metrics(reward_log(rewards)), trend_spec(window=window, min_train_steps=1), wall_clock_seconds=300
     )
     assert (failures == []) is expected_pass
     if not expected_pass:
         assert len(failures) == 1
-        assert expected_message in failures[0]
+        assert failures[0].kind == expected_kind
+        assert failures[0].metric == "reward/avg_raw_reward"
 
 
 def test_duplicate_payloads_do_not_count_as_completed_steps(spec):
     first = parse_metrics(mirror_line(1))[0]
     failures = check_run([first, first], spec, wall_clock_seconds=300)
-    assert any("logged 1 training steps" in failure for failure in failures)
+    assert {failure.kind for failure in failures} == {FailureKind.TRAIN_STEPS}
 
     changed = replace(first, values={**first.values, "policy/policy_loss": 0.1})
     failures = check_run([first, changed], spec, wall_clock_seconds=300)
-    assert any("conflicting train payloads at step 1" in failure for failure in failures)
+    assert any(failure.kind == FailureKind.CONFLICTING_PAYLOAD and failure.step == 1 for failure in failures)
 
     startup = [
         StepMetrics("startup", 0, {"startup/model_loading": 2.0}),
@@ -229,68 +233,62 @@ def test_duplicate_payloads_do_not_count_as_completed_steps(spec):
     nan_copies = parse_metrics("\n".join([mirror_line(1, **{"policy/policy_loss": float("nan")})] * 2))
     failures = check_run(nan_copies, replace(spec, min_train_steps=1), 300)
     assert len(failures) == 1
-    assert "not finite" in failures[0]
+    assert failures[0].kind == FailureKind.NONFINITE
 
 
 @pytest.mark.parametrize(
-    "mutation,expected",
+    "mutation,expected_kind,expected_metric",
     [
-        ("healthy", ""),
-        ("nan_loss", "nonfinite policy/policy_loss"),
-        ("missing_loss", "step 3 did not log policy/policy_loss"),
-        ("flat_train", "environment/exact_n10 rose by"),
-        ("sparse_train", "environment/exact_n10 has 4 finite observations"),
-        ("flat_eval", "eval eval/cat_count_n10/avg_score rose by"),
-        ("no_eval", "eval eval/cat_count_n10/avg_score has 0 finite observations"),
-        ("no_zero_variance", "reward/zero_std_group_fraction has 0 observations above 0.0"),
-        ("no_ratio_change", "policy/ppo_ratio_exact_unit_fraction has 0 observations below 1.0"),
-        ("nan_optional", "nonfinite policy/ppo_clip_ratio"),
+        ("healthy", None, None),
+        ("nan_loss", FailureKind.NONFINITE, "policy/policy_loss"),
+        ("missing_loss", FailureKind.MISSING_METRIC, "policy/policy_loss"),
+        ("flat_train", FailureKind.TREND, "environment/exact_n10"),
+        ("sparse_train", FailureKind.OBSERVATIONS, "environment/exact_n10"),
+        ("flat_eval", FailureKind.TREND, "eval/cat_count_n10/avg_score"),
+        ("no_eval", FailureKind.OBSERVATIONS, "eval/cat_count_n10/avg_score"),
+        ("no_zero_variance", FailureKind.BOUNDS, "reward/zero_std_group_fraction"),
+        ("no_ratio_change", FailureKind.BOUNDS, "policy/ppo_ratio_exact_unit_fraction"),
+        ("nan_clip", FailureKind.NONFINITE, "policy/ppo_clip_ratio"),
     ],
 )
-def test_cat_count_series_requires_finite_learning_and_enough_evidence(tmp_path, mutation, expected):
+def test_metric_gates_require_finite_learning_and_enough_evidence(tmp_path, mutation, expected_kind, expected_metric):
     path = tmp_path / "spec.json"
     path.write_text(
         json.dumps(
             {
                 "min_train_steps": 6,
                 "max_wall_clock_seconds": 600,
-                "metric_series": [
+                "metric_gates": [
                     {
                         "kind": "train",
                         "metric": "policy/policy_loss",
-                        "required": True,
                         "min_observations": 6,
-                        "finite_every_step": True,
                     },
                     {
                         "kind": "train",
                         "metric": "environment/exact_n10",
-                        "required": True,
-                        "min_observations": 5,
+                        "min_observations": 6,
                         "trend": {"window": 2, "min_improvement": 0.2},
                     },
                     {
                         "kind": "train",
                         "metric": "reward/zero_std_group_fraction",
-                        "required": True,
                         "min_observations": 6,
-                        "occurrence": {"minimum_count": 4, "comparison": "above", "threshold": 0.0},
+                        "bounds": {"minimum_count": 4, "minimum": 0.0, "inclusive_minimum": False},
                     },
                     {
                         "kind": "train",
                         "metric": "policy/ppo_ratio_exact_unit_fraction",
-                        "required": True,
                         "min_observations": 6,
-                        "occurrence": {"minimum_count": 1, "comparison": "below", "threshold": 1.0},
+                        "bounds": {"minimum_count": 1, "maximum": 1.0, "inclusive_maximum": False},
                     },
                     {
                         "kind": "eval",
                         "metric": "eval/cat_count_n10/avg_score",
-                        "required": True,
                         "min_observations": 3,
                         "trend": {"window": 1, "min_improvement": 0.4},
                     },
-                    {"kind": "train", "metric": "policy/ppo_clip_ratio", "required": False, "min_observations": 1},
+                    {"kind": "train", "metric": "policy/ppo_clip_ratio", "min_observations": 1},
                 ],
             }
         )
@@ -301,12 +299,13 @@ def test_cat_count_series_requires_finite_learning_and_enough_evidence(tmp_path,
             step,
             {
                 "policy/policy_loss": 0.4,
+                "policy/ppo_clip_ratio": 0.01,
                 "reward/zero_std_group_fraction": 0.0 if step == 1 else 0.5,
                 "policy/ppo_ratio_exact_unit_fraction": 0.9 if step == 6 else 1.0,
                 **({"environment/exact_n10": exact} if exact is not None else {}),
             },
         )
-        for step, exact in enumerate((0.0, None, 0.1, 0.2, 0.4, 0.6), start=1)
+        for step, exact in enumerate((0.0, 0.05, 0.1, 0.2, 0.4, 0.6), start=1)
     ]
     evaluation = [
         StepMetrics("eval", step, {"eval/cat_count_n10/avg_score": score})
@@ -328,7 +327,7 @@ def test_cat_count_series_requires_finite_learning_and_enough_evidence(tmp_path,
                 values["reward/zero_std_group_fraction"] = 0.0
             if mutation == "no_ratio_change":
                 values["policy/ppo_ratio_exact_unit_fraction"] = 1.0
-            if mutation == "nan_optional" and row.step == 4:
+            if mutation == "nan_clip" and row.step == 4:
                 values["policy/ppo_clip_ratio"] = float("nan")
         elif mutation == "flat_eval":
             values["eval/cat_count_n10/avg_score"] = 0.1
@@ -336,8 +335,8 @@ def test_cat_count_series_requires_finite_learning_and_enough_evidence(tmp_path,
     if mutation == "no_eval":
         steps = train
     failures = check_run(steps, load_spec(path), 300)
-    if expected:
-        assert any(expected in failure for failure in failures)
+    if expected_kind is not None:
+        assert any(failure.kind == expected_kind and failure.metric == expected_metric for failure in failures)
     else:
         assert failures == []
 
@@ -361,7 +360,6 @@ def test_cat_count_shipped_specs_require_learning_from_step_zero(mutation):
         "policy/dp_weight_checksum_mismatch": 0.0,
         "environment/exact_n10": 0.5,
         "environment/exact_n20": 0.25,
-        "policy/rollout_train_prob_diff_mean": 1.003,
     }
     steps = [StepMetrics("train", step, metrics) for step in range(1, max(10, spec.min_train_steps) + 1)]
     evaluations = [
@@ -382,7 +380,15 @@ def test_cat_count_shipped_specs_require_learning_from_step_zero(mutation):
     if mutation == "healthy":
         assert failures == []
     else:
-        assert failures
+        expected_kind = (
+            FailureKind.OBSERVATIONS
+            if mutation in ("missing_step_zero", "missing_initial_metric")
+            else FailureKind.BOUNDS
+        )
+        expected_metric = (
+            "policy/dp_weight_checksum_mismatch" if mutation == "dp_divergence" else "eval/sampled/train/avg_score"
+        )
+        assert any(failure.kind == expected_kind and failure.metric == expected_metric for failure in failures)
     assert check_log_patterns("Training done!\n[telemetry] enabled run_id=test\n", spec) == []
 
 
@@ -400,7 +406,7 @@ def test_evaluation_step_selection_requires_the_selected_value(spec, selector, b
         min_train_steps=0,
         finite_metrics=(),
         bounds={},
-        metric_series=(MetricSeries("eval", "eval/score", True, 1, bounds=bound, at_step=selector),),
+        metric_gates=(MetricGate("eval", "eval/score", 1, bounds=bound, step=selector),),
     )
     rows = [StepMetrics("eval", step, {"eval/score": score}) for step, score in ((0, 0.0), (3, 0.3), (6, 0.8))]
     assert check_run(list(reversed(rows)), spec, 300) == []
@@ -461,8 +467,8 @@ def test_opencode_spec_requires_exact_concurrent_literal_coverage():
         )
     )
     failures = check_run(approximate, spec, wall_clock_seconds=900)
-    assert any("exact_match_fraction" in failure for failure in failures)
-    assert any("lcs_fallback_fraction" in failure for failure in failures)
+    assert any(failure.metric == "generate/tis/exact_match_fraction" for failure in failures)
+    assert any(failure.metric == "generate/tis/lcs_fallback_fraction" for failure in failures)
 
     for weight in (math.nextafter(0.0, 1.0), 2.0):
         metrics = {**exact_metrics, "policy/correction/weight_mean": weight}
@@ -473,4 +479,75 @@ def test_opencode_spec_requires_exact_concurrent_literal_coverage():
         if invalid is None:
             del metrics["policy/correction/weight_mean"]
         failures = check_run(parse_metrics(mirror_line(1, **metrics)), spec, wall_clock_seconds=900)
-        assert any("policy/correction/weight_mean" in failure for failure in failures)
+        assert any(failure.metric == "policy/correction/weight_mean" for failure in failures)
+
+
+@pytest.mark.parametrize(
+    "state,reason,previous_loss,deadline,trained,infrastructure",
+    [
+        (job_pb2.JOB_STATE_SUCCEEDED, "", False, False, True, False),
+        (job_pb2.JOB_STATE_SUCCEEDED, "", True, False, True, False),
+        (job_pb2.JOB_STATE_FAILED, "PodDeleted", False, False, True, True),
+        (job_pb2.JOB_STATE_FAILED, "Evicted", False, False, False, True),
+        (job_pb2.JOB_STATE_FAILED, "", False, True, False, True),
+        (job_pb2.JOB_STATE_FAILED, "", False, True, True, False),
+        (job_pb2.JOB_STATE_FAILED, "ValueError", False, False, True, False),
+    ],
+)
+def test_cat_count_nightly_separates_infrastructure_from_application_failures(
+    state, reason, previous_loss, deadline, trained, infrastructure
+):
+    task_state = job_pb2.TASK_STATE_SUCCEEDED if state == job_pb2.JOB_STATE_SUCCEEDED else job_pb2.TASK_STATE_FAILED
+    task = job_pb2.TaskStatus(
+        task_id="/atqamar/nightly/0",
+        state=task_state,
+        current_attempt_id=1,
+        attempts=[job_pb2.TaskAttempt(attempt_id=1, state=task_state, terminal_reason=reason)],
+    )
+    if previous_loss:
+        task.attempts.add(
+            attempt_id=0, state=job_pb2.TASK_STATE_WORKER_FAILED, is_worker_failure=True, terminal_reason="PodDeleted"
+        )
+    status = job_status_from_proto(job_pb2.JobStatus(job_id="/atqamar/nightly", state=state, tasks=[task]))
+    log = mirror_line(1) if trained else ""
+    assert (cat_count_nightly.infrastructure_reason([status], log, deadline) is not None) == infrastructure
+
+
+@pytest.mark.parametrize(
+    "results,exit_code,attempts",
+    [
+        ([cat_count_nightly.Conclusion.PASS], 0, [1]),
+        ([cat_count_nightly.Conclusion.GATE_FAILURE], 1, [1]),
+        ([cat_count_nightly.Conclusion.INFRASTRUCTURE_FAILURE, cat_count_nightly.Conclusion.PASS], 0, [1, 2]),
+        ([cat_count_nightly.Conclusion.INFRASTRUCTURE_FAILURE] * 2, 2, [1, 2]),
+    ],
+)
+def test_cat_count_nightly_retries_only_infrastructure_once(monkeypatch, tmp_path, results, exit_code, attempts):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "cat_count_nightly",
+            "--marin-root",
+            str(tmp_path),
+            "--runtime-commit",
+            "a" * 40,
+            "--cluster",
+            "cw-rno2a",
+            "--job-name",
+            "test-nightly",
+            "--log",
+            str(tmp_path / "run.log"),
+            "--spec",
+            str(SHIPPED_SPEC),
+        ],
+    )
+    submitted = []
+
+    def run_attempt(_args, attempt):
+        submitted.append(attempt)
+        return results[attempt - 1], 100.0
+
+    monkeypatch.setattr(cat_count_nightly, "run_attempt", run_attempt)
+    assert cat_count_nightly.main() == exit_code
+    assert submitted == attempts

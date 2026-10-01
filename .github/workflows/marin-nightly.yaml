@@ -15,6 +15,9 @@ on:
       target_cluster:
         description: "Iris cluster to federate the job to"
         default: cw-rno2a
+      marin_revision:
+        description: "Marin revision containing the CatCount launcher"
+        default: main
 
 concurrency:
   group: marin-nightly
@@ -54,6 +57,14 @@ jobs:
             workflow_timeout_minutes: 140
             task_script: skyrl-train/ci/marin_nightly/run_grug_megatron.sh
             log: grug-megatron.log
+          - lane: cat-count-h100
+            target_cluster: ${{ github.event.inputs.target_cluster || 'cw-rno2a' }}
+            cpu: 4
+            memory: 16GB
+            iris_timeout: 1200
+            workflow_timeout_minutes: 55
+            task_script: skyrl-train/ci/marin_nightly/run_cat_count_h100.sh
+            log: cat-count-nightly.log
     runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.workflow_timeout_minutes }}
     permissions:
@@ -65,6 +76,7 @@ jobs:
       MODEL: ${{ github.event.inputs.model || 'Qwen/Qwen3-0.6B' }}
       STRATEGY: megatron
       TARGET_CLUSTER: ${{ matrix.target_cluster }}
+      MARIN_REVISION: ${{ github.event.inputs.marin_revision || 'main' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -99,6 +111,7 @@ jobs:
       - uses: ./.github/actions/setup-iris
 
       - name: Run ${{ matrix.lane }}
+        if: matrix.lane != 'cat-count-h100'
         run: |
           set -o pipefail
           TASK_ENV=()
@@ -119,9 +132,29 @@ jobs:
             "${TASK_ENV[@]}" \
             -- bash "${{ matrix.task_script }}" 2>&1 | tee "${{ matrix.log }}"
 
+      - name: Run the CatCount coordinator and learning gate
+        if: matrix.lane == 'cat-count-h100'
+        run: |
+          set -o pipefail
+          bash "${{ matrix.task_script }}" 2>&1 | tee "${{ matrix.log }}"
+
       - name: Cancel any Iris job the run left behind
-        if: always()
+        if: always() && matrix.lane != 'cat-count-h100'
         run: iris --cluster marin job cancel "/runner/$JOB_NAME" || true
+
+      - name: Finish the recorded CatCount jobs
+        if: always() && matrix.lane == 'cat-count-h100'
+        run: |
+          if [[ -d "$RUNNER_TEMP/cat-count-marin" && -f cat-count-nightly.jobs.json ]]; then
+            PYTHONPATH="$GITHUB_WORKSPACE/skyrl-train" uv run \
+              --project "$RUNNER_TEMP/cat-count-marin" --frozen --extra cpu --no-group dev \
+              python - "$RUNNER_TEMP/cat-count-marin" <<'PY'
+          import sys
+          from pathlib import Path
+          from ci.marin_nightly.cat_count_nightly import cancel_recorded_jobs
+          cancel_recorded_jobs(Path(sys.argv[1]), Path("cat-count-nightly.jobs.json"))
+          PY
+          fi
 
       # The report reaches the runner only through the streamed log, so a missing report means the
       # lane never got that far.
@@ -173,7 +206,10 @@ jobs:
         if: always()
         with:
           name: ${{ matrix.lane }}-run-log
-          path: ${{ matrix.log }}
+          path: |
+            ${{ matrix.log }}
+            cat-count-nightly-a*.log
+            cat-count-nightly.jobs.json
           if-no-files-found: ignore
 
   report-failure:
@@ -189,12 +225,14 @@ jobs:
     steps:
       - uses: marin-community/marin-style/actions/report-failure@727f180cd423246ca1a6164163a5883cda5bf52b
         with:
-          lane: gsm8k-h100-and-grug-megatron-h100
+          lane: gsm8k-h100-opd-sync-h100-grug-megatron-h100-cat-count-h100
           trigger-token: ${{ secrets.LOOM_TRIGGER_GH_TOKEN }}
           slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
           triage-notes: >-
-            The nightly runs dense H100 GRPO and a Grug Megatron rollout/train/broadcast
-            cycle through WIF-authenticated Iris jobs. Separate Iris or cluster failures
+            The nightly runs GSM8K GRPO, OPD, Grug Megatron and the asynchronous
+            CatCount learning gate through WIF-authenticated Iris jobs. CatCount reports
+            INFRASTRUCTURE_FAILURE separately from GATE_FAILURE and retries infrastructure once.
+            Separate Iris or cluster failures
             from lock, native-extension, and training regressions. A repository-local PR
             that fixes the tracked failure must end its body with a Fixes link to this
             issue. Use Part of only when the PR does not restore the lane.

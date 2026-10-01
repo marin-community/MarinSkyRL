@@ -13,34 +13,26 @@
   "finite_metrics": [],
   "bounds": {},
   "max_wall_clock_seconds": 1800,
-  "metric_series": [
+  "metric_gates": [
     {
       "kind": "train",
       "metric": "policy/policy_loss",
-      "required": true,
-      "min_observations": 30,
-      "finite_every_step": true
+      "min_observations": 30
     },
     {
       "kind": "train",
       "metric": "policy/final_loss",
-      "required": true,
-      "min_observations": 30,
-      "finite_every_step": true
+      "min_observations": 30
     },
     {
       "kind": "train",
       "metric": "policy/policy_entropy",
-      "required": true,
-      "min_observations": 30,
-      "finite_every_step": true
+      "min_observations": 30
     },
     {
       "kind": "train",
       "metric": "reward/avg_raw_reward",
-      "required": true,
       "min_observations": 30,
-      "finite_every_step": true,
       "bounds": {
         "minimum": 0.0,
         "maximum": 1.0

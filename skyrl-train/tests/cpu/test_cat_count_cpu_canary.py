@@ -2,7 +2,6 @@ import argparse
 import asyncio
 import hashlib
 import json
-import logging
 import math
 import multiprocessing
 import os
@@ -20,6 +19,7 @@ import skyrl_train
 import torch
 import zstandard
 from omegaconf import OmegaConf
+from marinskyrl.remote_io import create_s3_filesystem
 from skyrl_train.evaluate import evaluation_dump_dir
 from examples.cat_count.cpu_canary import PROMPT, pretrain
 from skyrl_train.metric_names import CORRECTION_WEIGHT_MEAN_METRIC
@@ -37,8 +37,8 @@ POLICY_MANIFEST_SHA256 = "7a5f1047648a90262514a663168580610b9f6bbe1522b2c38b7578
 
 
 def download_policy(directory: Path) -> None:
-    filesystem = fsspec.filesystem(
-        "s3", config_kwargs={"connect_timeout": 5, "read_timeout": 10, "retries": {"max_attempts": 1}}
+    filesystem = create_s3_filesystem(
+        config_kwargs={"connect_timeout": 5, "read_timeout": 10, "retries": {"max_attempts": 1}}
     )
     manifest_path = directory / "MANIFEST.json"
     manifest_bytes = (
@@ -59,7 +59,7 @@ def download_policy(directory: Path) -> None:
 def test_policy_download_rejects_a_corrupted_manifest(tmp_path, monkeypatch):
     filesystem = fsspec.filesystem("memory")
     filesystem.pipe(f"{POLICY_PREFIX}/MANIFEST.json", b'{"files": {}}')
-    monkeypatch.setattr(fsspec, "filesystem", lambda *_args, **_kwargs: filesystem)
+    monkeypatch.setattr("tests.cpu.test_cat_count_cpu_canary.create_s3_filesystem", lambda **_kwargs: filesystem)
     with pytest.raises(ValueError, match="manifest SHA256"):
         download_policy(tmp_path)
 
@@ -71,11 +71,10 @@ def cat_count_policy(pytestconfig) -> Path:
     downloaded.mkdir(exist_ok=True)
     try:
         download_policy(downloaded)
+        print("CAT_COUNT_POLICY source=s3")
         return downloaded
     except (OSError, BotoCoreError, ClientError) as error:
-        logging.getLogger(__name__).warning(
-            "CatCount policy download unavailable (%s); using cached pretraining", type(error).__name__
-        )
+        print(f"CAT_COUNT_POLICY source=pretrain reason={type(error).__name__}")
     parameters = argparse.Namespace(steps=3000, lr=3e-4, width=128, layers=2, seed=0)
     repository = Path(__file__).resolve().parents[3]
     sources = (
