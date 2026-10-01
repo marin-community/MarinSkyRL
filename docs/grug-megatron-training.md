@@ -127,8 +127,7 @@ Megatron training restore accepts CoreWeave `s3://` checkpoints in untransformed
 Each worker buffers one complete saved record, copies the requested slice into
 its destination, and releases the decoded CPU tensor before reading the next
 record. Uncached S3 streams avoid retaining read-ahead blocks between records.
-Workers read independently; there is no shared byte budget or file coordination.
-The checkpoint format is unchanged.
+Workers read independently. The checkpoint format is unchanged.
 
 Temporary read memory scales with the number of workers per pod and the largest
 saved record, even when a rank only needs a small slice. Leave host-memory room
