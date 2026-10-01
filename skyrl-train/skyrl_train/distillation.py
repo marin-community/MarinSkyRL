@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import ClassVar, Optional, Protocol, Self
+from typing import ClassVar, Optional, Self
 
 import torch
-from omegaconf import DictConfig
 
 from marinskyrl.distillation import TeacherEvidenceKind
-from skyrl_train.tensor_math import TOKEN_MEAN_LOSS_REDUCTION, masked_mean, safe_exp_delta
 
 INVALID_TOPK_INDEX = -1
 RETAINED_MASS_ATOL = 1e-6
@@ -81,29 +79,12 @@ TeacherEvidenceBatch = ChosenTokenTeacherEvidence | TopKTeacherEvidence | Studen
 
 
 @dataclass(frozen=True)
-class SampledReverseKLInput:
-    """Minimal learner payload for sampled chosen-token reverse KL."""
+class ChosenTokenTeacherInput:
+    """Driver payload for chosen-token teacher credit."""
 
     teacher_action_log_probs: torch.Tensor
     valid_mask: torch.Tensor
     loss_weights: torch.Tensor
-
-    def to(self, device: torch.device) -> Self:
-        return type(self)(
-            teacher_action_log_probs=self.teacher_action_log_probs.to(device),
-            valid_mask=self.valid_mask.to(device),
-            loss_weights=self.loss_weights.to(device),
-        )
-
-    def pin_memory(self) -> Self:
-        return type(self)(
-            teacher_action_log_probs=self.teacher_action_log_probs.pin_memory(),
-            valid_mask=self.valid_mask.pin_memory(),
-            loss_weights=self.loss_weights.pin_memory(),
-        )
-
-    def student_token_ids(self) -> None:
-        return None
 
     def training_tensors(self) -> dict[str, torch.Tensor]:
         return {
@@ -112,24 +93,10 @@ class SampledReverseKLInput:
             "distillation_loss_weights": self.loss_weights,
         }
 
-    def objective_loss(
-        self,
-        *,
-        action_log_probs: torch.Tensor,
-        old_action_log_probs: torch.Tensor,
-        student_selected_logprobs: Optional[torch.Tensor],
-        loss_mask: Optional[torch.Tensor],
-        config: DictConfig,
-    ) -> tuple[torch.Tensor, dict[str, float]]:
-        del config
-        if student_selected_logprobs is not None:
-            raise ValueError("chosen-token reverse KL does not use selected student logprobs")
-        return sampled_reverse_kl_loss(action_log_probs, old_action_log_probs, self, loss_mask), {}
-
 
 @dataclass(frozen=True)
-class SparseForwardKLInput:
-    """Minimal learner payload for retained-mass-normalized top-K forward KL."""
+class TeacherTopKInput:
+    """Teacher-support tensors for a top-K objective row."""
 
     teacher_topk_indices: torch.Tensor
     teacher_topk_logprobs: torch.Tensor
@@ -167,24 +134,10 @@ class SparseForwardKLInput:
             "distillation_loss_weights": self.loss_weights,
         }
 
-    def objective_loss(
-        self,
-        *,
-        action_log_probs: torch.Tensor,
-        old_action_log_probs: torch.Tensor,
-        student_selected_logprobs: Optional[torch.Tensor],
-        loss_mask: Optional[torch.Tensor],
-        config: DictConfig,
-    ) -> tuple[torch.Tensor, dict[str, float]]:
-        del action_log_probs, old_action_log_probs, config
-        if student_selected_logprobs is None:
-            raise ValueError("sparse forward KL requires student logprobs at the teacher's top-K token IDs")
-        return sparse_forward_kl_loss(student_selected_logprobs, self, loss_mask)
-
 
 @dataclass(frozen=True)
-class StudentTopKPolicySurrogateInput:
-    """Learner payload for the released student-selected top-K OPD surrogate."""
+class StudentTopKInput:
+    """Student-support tensors for a top-K objective row."""
 
     student_topk_indices: torch.Tensor
     behavior_topk_logprobs: torch.Tensor
@@ -222,42 +175,9 @@ class StudentTopKPolicySurrogateInput:
             "distillation_loss_weights": self.loss_weights,
         }
 
-    def objective_loss(
-        self,
-        *,
-        action_log_probs: torch.Tensor,
-        old_action_log_probs: torch.Tensor,
-        student_selected_logprobs: Optional[torch.Tensor],
-        loss_mask: Optional[torch.Tensor],
-        config: DictConfig,
-    ) -> tuple[torch.Tensor, dict[str, float]]:
-        del action_log_probs, old_action_log_probs
-        if student_selected_logprobs is None:
-            raise ValueError("student-top-K OPD requires student logprobs at the selected IDs")
-        return student_topk_policy_surrogate_loss(student_selected_logprobs, self, loss_mask, config)
 
-
-class DistillationInput(Protocol):
-    valid_mask: torch.Tensor
-    loss_weights: torch.Tensor
-
-    def to(self, device: torch.device) -> Self: ...
-
-    def pin_memory(self) -> Self: ...
-
-    def student_token_ids(self) -> Optional[torch.Tensor]: ...
-
-    def training_tensors(self) -> dict[str, torch.Tensor]: ...
-
-    def objective_loss(
-        self,
-        *,
-        action_log_probs: torch.Tensor,
-        old_action_log_probs: torch.Tensor,
-        student_selected_logprobs: Optional[torch.Tensor],
-        loss_mask: Optional[torch.Tensor],
-        config: DictConfig,
-    ) -> tuple[torch.Tensor, dict[str, float]]: ...
+TopKEvidence = TeacherTopKInput | StudentTopKInput
+PreparedTeacherInput = ChosenTokenTeacherInput | TopKEvidence
 
 
 def distillation_input_from_tensors(
@@ -271,38 +191,37 @@ def distillation_input_from_tensors(
     student_topk_indices: Optional[torch.Tensor] = None,
     behavior_topk_logprobs: Optional[torch.Tensor] = None,
     teacher_on_student_logprobs: Optional[torch.Tensor] = None,
-) -> Optional[DistillationInput]:
+) -> Optional[TopKEvidence]:
     """Build exactly one learner payload and reject partial or mixed variants."""
-    chosen_present = teacher_action_log_probs is not None
+    if teacher_action_log_probs is not None:
+        raise ValueError("chosen-token teacher tensors must be consumed on the driver before worker dispatch")
     topk_values = (teacher_topk_indices, teacher_topk_logprobs, teacher_retained_mass)
     topk_present = any(value is not None for value in topk_values)
     student_topk_values = (student_topk_indices, behavior_topk_logprobs, teacher_on_student_logprobs)
     student_topk_present = any(value is not None for value in student_topk_values)
-    if not chosen_present and not topk_present and not student_topk_present:
+    if not topk_present and not student_topk_present:
         if valid_mask is not None or loss_weights is not None:
             raise ValueError("distillation masks and weights require teacher evidence")
         return None
-    if sum((chosen_present, topk_present, student_topk_present)) != 1:
+    if topk_present and student_topk_present:
         raise ValueError("distillation cannot mix objective evidence variants")
     if valid_mask is None or loss_weights is None:
         raise ValueError("distillation evidence requires valid_mask and loss_weights")
-    if chosen_present:
-        return SampledReverseKLInput(teacher_action_log_probs, valid_mask, loss_weights)
     if student_topk_present:
         if any(value is None for value in student_topk_values):
             raise ValueError("student-top-K OPD requires selected IDs, behavior logprobs, and teacher scores together")
         assert student_topk_indices is not None
         assert behavior_topk_logprobs is not None
         assert teacher_on_student_logprobs is not None
-        return StudentTopKPolicySurrogateInput(
+        return StudentTopKInput(
             student_topk_indices, behavior_topk_logprobs, teacher_on_student_logprobs, valid_mask, loss_weights
         )
     if any(value is None for value in topk_values):
-        raise ValueError("sparse forward KL requires top-K indices, logprobs, and retained_mass together")
+        raise ValueError("teacher-support evidence requires top-K indices, logprobs, and retained_mass together")
     assert teacher_topk_indices is not None
     assert teacher_topk_logprobs is not None
     assert teacher_retained_mass is not None
-    return SparseForwardKLInput(
+    return TeacherTopKInput(
         teacher_topk_indices=teacher_topk_indices,
         teacher_topk_logprobs=teacher_topk_logprobs,
         retained_mass=teacher_retained_mass,
@@ -324,16 +243,6 @@ def _validate_masked_logprobs(logprobs: torch.Tensor, valid_mask: torch.Tensor, 
         raise ValueError(f"valid {label} must be finite and no greater than zero")
     if not torch.all(torch.isnan(logprobs[~valid_mask])):
         raise ValueError(f"invalid {label} must be NaN, not plausible scores")
-
-
-def _all_masked_loss(reference: torch.Tensor) -> torch.Tensor:
-    """Zero loss, attached to the graph, for a micro-batch whose rows are all masked.
-
-    A trajectory that failed in the agent loop arrives as a fully masked row. With a
-    micro-batch of one, that row is the whole batch; it contributes nothing, exactly as
-    it contributes nothing to the plain policy loss through ``masked_mean``.
-    """
-    return reference.sum() * 0.0
 
 
 def _validate_loss_weights(loss_weights: torch.Tensor, label: str) -> None:
@@ -559,10 +468,10 @@ def prepare_sampled_reverse_kl(
     *,
     coefficient: float,
     route_weights: torch.Tensor,
-) -> SampledReverseKLInput:
+) -> ChosenTokenTeacherInput:
     """Validate chosen-token evidence and compile its minimal learner payload."""
     validate_teacher_evidence(request, evidence)
-    return SampledReverseKLInput(
+    return ChosenTokenTeacherInput(
         teacher_action_log_probs=evidence.chosen_logprobs,
         valid_mask=evidence.valid_mask,
         loss_weights=_weighted_route_weights(
@@ -571,16 +480,16 @@ def prepare_sampled_reverse_kl(
     )
 
 
-def prepare_sparse_forward_kl(
+def prepare_teacher_topk(
     request: TeacherScoreRequest,
     evidence: TopKTeacherEvidence,
     *,
     coefficient: float,
     route_weights: torch.Tensor,
-) -> SparseForwardKLInput:
+) -> TeacherTopKInput:
     """Validate top-K evidence and compile its sparse learner payload."""
     validate_teacher_evidence(request, evidence)
-    return SparseForwardKLInput(
+    return TeacherTopKInput(
         teacher_topk_indices=evidence.topk_indices,
         teacher_topk_logprobs=evidence.topk_logprobs,
         retained_mass=evidence.retained_mass,
@@ -597,12 +506,12 @@ def prepare_student_topk_policy_surrogate(
     *,
     coefficient: float,
     route_weights: torch.Tensor,
-) -> StudentTopKPolicySurrogateInput:
+) -> StudentTopKInput:
     """Compile exact student-selected evidence into the shared learner payload."""
     validate_teacher_evidence(request, evidence)
     assert request.student_topk_indices is not None
     assert request.behavior_topk_logprobs is not None
-    return StudentTopKPolicySurrogateInput(
+    return StudentTopKInput(
         student_topk_indices=request.student_topk_indices,
         behavior_topk_logprobs=request.behavior_topk_logprobs,
         teacher_on_student_logprobs=evidence.teacher_on_student_logprobs,
@@ -631,7 +540,7 @@ def _validate_attachment_common(
 
 def validate_sampled_reverse_kl_attachment(
     evidence: ChosenTokenTeacherEvidence,
-    distillation: SampledReverseKLInput,
+    distillation: ChosenTokenTeacherInput,
     *,
     trajectory_ids: tuple[str, ...],
     response_mask: torch.Tensor,
@@ -656,7 +565,7 @@ def validate_sampled_reverse_kl_attachment(
 
 def validate_student_selected_attachment(
     evidence: StudentSelectedTeacherEvidence,
-    distillation: StudentTopKPolicySurrogateInput,
+    distillation: StudentTopKInput,
     *,
     trajectory_ids: tuple[str, ...],
     response_mask: torch.Tensor,
@@ -691,13 +600,13 @@ def validate_student_selected_attachment(
 
 def validate_distillation_attachment(
     evidence: TeacherEvidenceBatch,
-    distillation: DistillationInput,
+    distillation: PreparedTeacherInput,
     *,
     trajectory_ids: tuple[str, ...],
     response_mask: torch.Tensor,
 ) -> None:
     """Validate either evidence representation at the trajectory-to-learner boundary."""
-    if isinstance(evidence, ChosenTokenTeacherEvidence) and isinstance(distillation, SampledReverseKLInput):
+    if isinstance(evidence, ChosenTokenTeacherEvidence) and isinstance(distillation, ChosenTokenTeacherInput):
         validate_sampled_reverse_kl_attachment(
             evidence,
             distillation,
@@ -705,14 +614,12 @@ def validate_distillation_attachment(
             response_mask=response_mask,
         )
         return
-    if isinstance(evidence, StudentSelectedTeacherEvidence) and isinstance(
-        distillation, StudentTopKPolicySurrogateInput
-    ):
+    if isinstance(evidence, StudentSelectedTeacherEvidence) and isinstance(distillation, StudentTopKInput):
         validate_student_selected_attachment(
             evidence, distillation, trajectory_ids=trajectory_ids, response_mask=response_mask
         )
         return
-    if not isinstance(evidence, TopKTeacherEvidence) or not isinstance(distillation, SparseForwardKLInput):
+    if not isinstance(evidence, TopKTeacherEvidence) or not isinstance(distillation, TeacherTopKInput):
         raise ValueError("teacher evidence and prepared distillation objective kinds must match")
     _validate_attachment_common(
         evidence,
@@ -729,154 +636,6 @@ def validate_distillation_attachment(
     for label, actual, expected in payload_pairs:
         if not torch.allclose(actual, expected, rtol=0, atol=0, equal_nan=True):
             raise ValueError(f"prepared distillation {label} does not match teacher evidence")
-
-
-def sampled_reverse_kl_loss(
-    action_log_probs: torch.Tensor,
-    old_action_log_probs: torch.Tensor,
-    distillation: SampledReverseKLInput,
-    loss_mask: Optional[torch.Tensor],
-) -> torch.Tensor:
-    """Return an on-policy score-function surrogate for ``KL(policy || teacher)``."""
-    expected_shape = action_log_probs.shape
-    payload_tensors = (
-        ("old_action_log_probs", old_action_log_probs),
-        ("teacher_action_log_probs", distillation.teacher_action_log_probs),
-        ("valid_mask", distillation.valid_mask),
-        ("loss_weights", distillation.loss_weights),
-    )
-    for name, tensor in payload_tensors:
-        if tensor.shape != expected_shape:
-            raise ValueError(f"{name} must match action_log_probs shape {tuple(expected_shape)}")
-    if distillation.valid_mask.dtype is not torch.bool:
-        raise ValueError("distillation valid_mask must have bool dtype")
-    expected_device = action_log_probs.device
-    for name, tensor in payload_tensors:
-        if tensor.device != expected_device:
-            raise ValueError(f"{name} must be on the action_log_probs device {expected_device}")
-    _validate_masked_logprobs(
-        distillation.teacher_action_log_probs,
-        distillation.valid_mask,
-        "teacher action logprobs",
-    )
-    _validate_loss_weights(distillation.loss_weights, "distillation loss_weights")
-
-    effective_mask = distillation.valid_mask
-    if loss_mask is not None:
-        if loss_mask.shape != expected_shape:
-            raise ValueError(f"loss_mask must match action_log_probs shape {tuple(expected_shape)}")
-        if loss_mask.device != expected_device:
-            raise ValueError(f"loss_mask must be on the action_log_probs device {expected_device}")
-        effective_mask = effective_mask & loss_mask.to(torch.bool)
-    if not torch.any(effective_mask):
-        return _all_masked_loss(action_log_probs)
-
-    teacher_logprobs = torch.where(
-        effective_mask,
-        distillation.teacher_action_log_probs,
-        torch.zeros_like(action_log_probs),
-    )
-    behavior_logprobs = old_action_log_probs.detach()
-    teacher_gap = behavior_logprobs - teacher_logprobs
-    importance_ratio = safe_exp_delta(action_log_probs - behavior_logprobs, out_dtype=action_log_probs.dtype)
-    token_loss = importance_ratio * teacher_gap * distillation.loss_weights
-    return masked_mean(token_loss, effective_mask, dim=-1).mean()
-
-
-def _validate_student_topk_surrogate_input(
-    student_selected_logprobs: torch.Tensor,
-    distillation: StudentTopKPolicySurrogateInput,
-    loss_mask: Optional[torch.Tensor],
-) -> torch.Tensor:
-    """Validate aligned selected-ID evidence and return the effective token mask."""
-    indices = distillation.student_topk_indices
-    if indices.ndim != 3 or indices.shape[-1] == 0 or indices.dtype not in (torch.int32, torch.int64):
-        raise ValueError("student-top-K indices must have integer [batch, response_len, K] shape with K > 0")
-    expected_shape = indices.shape
-    response_shape = expected_shape[:2]
-    if distillation.valid_mask.shape != response_shape or distillation.valid_mask.dtype is not torch.bool:
-        raise ValueError("student-top-K valid_mask must be boolean and match response coordinates")
-    if distillation.loss_weights.shape != response_shape:
-        raise ValueError("student-top-K loss_weights must match response coordinates")
-    for name, tensor in (
-        ("student_selected_logprobs", student_selected_logprobs),
-        ("behavior_topk_logprobs", distillation.behavior_topk_logprobs),
-        ("teacher_on_student_logprobs", distillation.teacher_on_student_logprobs),
-    ):
-        if tensor.shape != expected_shape:
-            raise ValueError(f"{name} must match student-top-K indices shape {expected_shape}")
-        if tensor.device != indices.device:
-            raise ValueError(f"{name} must be on the student-top-K indices device")
-        _validate_masked_logprobs(tensor, distillation.valid_mask, name)
-    if distillation.valid_mask.device != indices.device or distillation.loss_weights.device != indices.device:
-        raise ValueError("student-top-K masks and weights must be on the selected-ID device")
-    _validate_loss_weights(distillation.loss_weights, "student-top-K loss_weights")
-    _validate_selected_token_ids(indices, distillation.valid_mask, "student-top-K")
-
-    effective_mask = distillation.valid_mask
-    if loss_mask is not None:
-        if loss_mask.shape != response_shape or loss_mask.device != indices.device:
-            raise ValueError("student-top-K loss_mask must match response coordinates and device")
-        effective_mask = effective_mask & loss_mask.to(torch.bool)
-    return effective_mask
-
-
-def student_topk_policy_surrogate_loss(
-    student_selected_logprobs: torch.Tensor,
-    distillation: StudentTopKPolicySurrogateInput,
-    loss_mask: Optional[torch.Tensor],
-    config: DictConfig,
-) -> tuple[torch.Tensor, dict[str, float]]:
-    """Return the released Open-MOPD student-top-K clipped policy surrogate.
-
-    This is not a KL divergence: the student-weighted rewards are detached, and
-    the per-ID importance ratios receive dual clipping before summing over K.
-    """
-    if config.loss_reduction != TOKEN_MEAN_LOSS_REDUCTION:
-        raise ValueError("student-top-K OPD requires token_mean loss reduction")
-    clip_low = float(config.eps_clip_low)
-    clip_high = float(config.eps_clip_high)
-    clip_ratio_c = float(config.clip_ratio_c)
-    if not all(math.isfinite(value) for value in (clip_low, clip_high, clip_ratio_c)):
-        raise ValueError("student-top-K OPD clip ratios must be finite")
-    if clip_low < 0 or clip_low >= 1 or clip_high < 0 or clip_ratio_c <= 1:
-        raise ValueError("student-top-K OPD requires 0 <= clip_low < 1, clip_high >= 0, clip_ratio_c > 1")
-
-    effective_mask = _validate_student_topk_surrogate_input(student_selected_logprobs, distillation, loss_mask)
-    if not torch.any(effective_mask):
-        # Same keys as the populated path: the worker all-reduces metric dicts across ranks.
-        return _all_masked_loss(student_selected_logprobs), {
-            DISTILLATION_TOPK_METRIC: float(distillation.student_topk_indices.shape[-1]),
-            "distillation_student_retained_mass_mean": 0.0,
-            "distillation_clip_fraction": 0.0,
-            "distillation_dual_clip_fraction": 0.0,
-        }
-    current = student_selected_logprobs[effective_mask]
-    behavior = distillation.behavior_topk_logprobs[effective_mask]
-    teacher = distillation.teacher_on_student_logprobs[effective_mask]
-    student_weights = current.detach().float().softmax(dim=-1).to(current.dtype)
-    advantages = -(current.detach() - teacher) * student_weights
-    ratio = safe_exp_delta(current - behavior, out_dtype=current.dtype)
-    raw_loss = -advantages * ratio
-    clipped_loss = -advantages * ratio.clamp(1 - clip_low, 1 + clip_high)
-    pessimistic_loss = torch.maximum(raw_loss, clipped_loss)
-    dual_clipped_loss = torch.where(
-        advantages < 0,
-        torch.minimum(pessimistic_loss, -advantages * clip_ratio_c),
-        pessimistic_loss,
-    )
-    per_token = dual_clipped_loss.sum(dim=-1) * distillation.loss_weights[effective_mask]
-    loss = per_token.mean()
-    metrics = {
-        DISTILLATION_TOPK_METRIC: float(distillation.student_topk_indices.shape[-1]),
-        "distillation_student_retained_mass_mean": behavior.exp().sum(dim=-1).mean().item(),
-        "distillation_clip_fraction": (clipped_loss > raw_loss).float().mean().item(),
-        "distillation_dual_clip_fraction": ((advantages < 0) & (pessimistic_loss > -advantages * clip_ratio_c))
-        .float()
-        .mean()
-        .item(),
-    }
-    return loss, metrics
 
 
 def student_topk_logprobs(logits: torch.Tensor, topk_indices: torch.Tensor) -> torch.Tensor:
@@ -897,76 +656,3 @@ def student_topk_logprobs(logits: torch.Tensor, topk_indices: torch.Tensor) -> t
     selected = torch.gather(float_logits, dim=-1, index=safe_indices)
     normalized = selected - torch.logsumexp(float_logits, dim=-1, keepdim=True)
     return normalized.masked_fill(~valid_indices, torch.nan)
-
-
-def sparse_forward_kl_loss(
-    student_topk_log_probs: torch.Tensor,
-    distillation: SparseForwardKLInput,
-    loss_mask: Optional[torch.Tensor],
-) -> tuple[torch.Tensor, dict[str, float]]:
-    """Return conditional teacher top-K KL against the student's full distribution."""
-    expected_shape = distillation.teacher_topk_indices.shape
-    if student_topk_log_probs.shape != expected_shape:
-        raise ValueError(f"student top-K logprobs must match teacher indices shape {tuple(expected_shape)}")
-    if distillation.teacher_topk_logprobs.shape != expected_shape:
-        raise ValueError("teacher top-K logprobs must match teacher indices")
-    response_shape = expected_shape[:2]
-    for name, tensor in (
-        ("retained_mass", distillation.retained_mass),
-        ("valid_mask", distillation.valid_mask),
-        ("loss_weights", distillation.loss_weights),
-    ):
-        if tensor.shape != response_shape:
-            raise ValueError(f"{name} must match response shape {tuple(response_shape)}")
-    if distillation.valid_mask.dtype is not torch.bool:
-        raise ValueError("distillation valid_mask must have bool dtype")
-    expected_device = student_topk_log_probs.device
-    for name, tensor in (
-        ("teacher_topk_indices", distillation.teacher_topk_indices),
-        ("teacher_topk_logprobs", distillation.teacher_topk_logprobs),
-        ("retained_mass", distillation.retained_mass),
-        ("valid_mask", distillation.valid_mask),
-        ("loss_weights", distillation.loss_weights),
-    ):
-        if tensor.device != expected_device:
-            raise ValueError(f"{name} must be on the student top-K logprobs device {expected_device}")
-    _validate_topk_distribution(
-        distillation.teacher_topk_indices,
-        distillation.teacher_topk_logprobs,
-        distillation.retained_mass,
-        distillation.valid_mask,
-    )
-    _validate_masked_logprobs(student_topk_log_probs, distillation.valid_mask, "student top-K logprobs")
-    _validate_loss_weights(distillation.loss_weights, "distillation loss_weights")
-    effective_mask = distillation.valid_mask
-    if loss_mask is not None:
-        if loss_mask.shape != response_shape or loss_mask.device != expected_device:
-            raise ValueError("loss_mask must match sparse forward KL response coordinates and device")
-        effective_mask = effective_mask & loss_mask.to(torch.bool)
-    if not torch.any(effective_mask):
-        # Same keys as the populated path: the worker all-reduces metric dicts across ranks.
-        return _all_masked_loss(student_topk_log_probs), {
-            "distillation_retained_mass_mean": 0.0,
-            "distillation_retained_mass_min": 0.0,
-            DISTILLATION_TOPK_METRIC: float(expected_shape[-1]),
-        }
-
-    teacher_logprobs = distillation.teacher_topk_logprobs[effective_mask].float()
-    student_logprobs = student_topk_log_probs[effective_mask].float()
-    retained_mass = distillation.retained_mass[effective_mask].float()
-    conditional_teacher_logprobs = teacher_logprobs - retained_mass.log().unsqueeze(-1)
-    conditional_teacher_probs = conditional_teacher_logprobs.exp()
-    per_token_kl = torch.sum(
-        conditional_teacher_probs * (conditional_teacher_logprobs - student_logprobs),
-        dim=-1,
-    )
-    weights = distillation.loss_weights[effective_mask].float()
-    token_loss = torch.zeros(response_shape, dtype=per_token_kl.dtype, device=expected_device)
-    token_loss[effective_mask] = per_token_kl * weights
-    loss = masked_mean(token_loss, effective_mask, dim=-1).mean()
-    metrics = {
-        "distillation_retained_mass_mean": retained_mass.mean().item(),
-        "distillation_retained_mass_min": retained_mass.min().item(),
-        DISTILLATION_TOPK_METRIC: float(expected_shape[-1]),
-    }
-    return loss, metrics

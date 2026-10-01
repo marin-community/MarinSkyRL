@@ -47,7 +47,8 @@ from infra.rl_data.sources import (
     svamp_source,
     verifiable_code_source,
 )
-from skyrl_gym import get_data_contract
+from skyrl_gym import get_data_contract, make as make_gym_env
+from skyrl_train.dataset.dataset import PromptDataset
 from skyrl_gym.envs.ifeval import utils as ifeval_utils
 
 
@@ -1258,3 +1259,44 @@ def test_gretel_text_to_sql_adapter_builds_result_set_ground_truth():
     assert ground_truth["table_names"] == ["Hospitals"]
     assert artifact.provenance["counts"]["malformed_rows_skipped"] == 1
     assert artifact.provenance["verification"] == "two_sided"
+
+
+def test_prepared_rows_construct_their_declared_environment_through_the_loader():
+    cases = [
+        (
+            gsm8k_source(),
+            {
+                "question": "Weng earns $12 an hour. Yesterday she did 50 minutes of babysitting. How much did she earn?",
+                "answer": "12 / 60 * 50 = 10.\n#### 10",
+            },
+            "10",
+        ),
+        (
+            kto_mix_source(),
+            {
+                "prompt": [{"role": "user", "content": "Say something nice."}],
+                "completion": [{"role": "assistant", "content": "You are doing great work."}],
+                "label": True,
+            },
+            "You are doing great work.",
+        ),
+        (
+            hh_rlhf_source(),
+            {
+                "chosen": "\n\nHuman: Say something nice.\n\nAssistant: You are doing great work.",
+                "rejected": "\n\nHuman: Say something nice.\n\nAssistant: Whatever.",
+            },
+            "You are doing great work.",
+        ),
+    ]
+    for source, example, expected_ground_truth in cases:
+        prepared = source.prepare_row(example, 1, get_data_contract(source.env_id))
+        dataset = PromptDataset.__new__(PromptDataset)
+        dataset.dataframe = datasets.Dataset.from_list([prepared])
+        dataset.prompt_key = "prompt"
+        dataset.env_class_key = "env_class"
+        _, env_id, extras, _ = dataset[0]
+
+        env = make_gym_env(env_id, env_config=OmegaConf.create({}), extras=extras)
+
+        assert env.ground_truth == expected_ground_truth, env_id

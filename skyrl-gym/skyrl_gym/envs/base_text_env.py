@@ -7,6 +7,14 @@ MessageType = Dict[str, str]
 ConversationType = List[MessageType]
 
 
+def ground_truth_from_extras(extras: Dict[str, Any]) -> Any:
+    """Read the verifier ground truth from ``reward_spec`` or the prepared-row ``reward_model`` key."""
+    reward_spec = extras.get("reward_spec") or extras.get("reward_model")
+    assert reward_spec is not None, "reward_spec (or reward_model) field is required"
+    assert "ground_truth" in reward_spec, "ground_truth is required in the reward extras"
+    return reward_spec["ground_truth"]
+
+
 class BaseTextEnvStepOutput(TypedDict):
     observations: ConversationType  # OpenAI API Messages Format
     reward: float

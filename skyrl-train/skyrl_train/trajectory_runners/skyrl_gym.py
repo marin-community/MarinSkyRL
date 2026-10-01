@@ -387,7 +387,9 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 # If retokenize_chat_history==True, avoid including the generation prompt in both the
                 # prompt_ids and response_ids due to how `response_encodings["input_ids"]` works.
                 add_generation_prompt=not retokenize_chat_history,
-                chat_template=self.custom_chat_template if retokenize_chat_history or chat_completion_params else None,
+                chat_template=(
+                    self.custom_chat_template if retokenize_chat_history or chat_completion_params is not None else None
+                ),
                 tokenize=True,
                 **self.trajectory_runner_cfg.chat_template_kwargs,
             )
@@ -1067,6 +1069,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 outputs[index].verification = VerificationResult.verified(
                     reward,
                     diagnostics={"agent": (ultra_at(index) or {})["agent"], "genrm_metrics": metrics},
+                    score_min=1.0,
+                    score_max=5.0,
                 )
                 outputs[index].env_metrics.update({f"genrm/{name}": value for name, value in metrics.items()})
 

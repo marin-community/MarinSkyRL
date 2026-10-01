@@ -20,12 +20,17 @@ These tests exercise the finalize handler directly, without booting Ray or model
 """
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from loguru import logger
+
+from ci.marin_nightly.gate import parse_metrics
 
 from skyrl_train.trainer import RayPPOTrainer
-from skyrl_train.callbacks.base import TrainerControl
+from skyrl_train.callbacks.base import CallbackHandler, TrainerControl
+from skyrl_train.callbacks.builtin import EvaluationCallback
 
 
 # ---------------------------------------------------------------------------
@@ -41,6 +46,7 @@ def _make_bare_trainer(global_step: int, total_training_steps: int, colocate_all
     """
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
     trainer._last_saved_step = None
+    trainer._last_evaluated_step = None
     trainer._pending_checkpoint_upload = None
     trainer.global_step = global_step
     trainer.total_training_steps = total_training_steps
@@ -106,18 +112,57 @@ def test_train_end_saves_the_last_completed_step():
     assert trainer.callback_handler.events == ["on_train_end", "on_save"]
 
 
-def test_train_end_runs_and_logs_the_requested_evaluation():
-    trainer = _make_bare_trainer(global_step=17, total_training_steps=16)
-    requested = TrainerControl()
-    requested.should_evaluate = True
-    trainer.callback_handler = _RecordingCallbackHandler(requested)
+@pytest.mark.parametrize(
+    ("eval_interval", "expected_evaluations", "expected_commits"),
+    [
+        (20, [(16, 0.75)], [True]),
+        (10, [(10, 0.75), (16, 0.5)], [False, True]),
+        (8, [(8, 0.75), (16, 0.5)], [False, False]),
+    ],
+)
+def test_train_end_runs_and_logs_the_requested_evaluation(
+    eval_interval, expected_evaluations, expected_commits, delivered_telemetry
+):
+    trainer = _make_bare_trainer(global_step=1, total_training_steps=16)
+    trainer.callback_handler = CallbackHandler([EvaluationCallback(eval_steps=eval_interval)])
+    trainer.all_metrics = {"reward/raw_reward": 0.625}
+    trainer._training_metrics_enabled = True
+    trainer._log_metrics_stdout = RayPPOTrainer._log_metrics_stdout.__get__(trainer)
+    tracked = []
+    trainer.tracker = SimpleNamespace(log=lambda metrics, **kwargs: tracked.append((dict(metrics), kwargs)))
+    scores = iter([0.75, 0.5, 0.25])
 
-    asyncio.run(trainer._finalize_training(completed_step=16, epoch=0))
+    async def evaluate():
+        return {"eval/accuracy": next(scores)}
 
-    trainer.eval.assert_awaited_once()
-    trainer._log_metrics_stdout.assert_called_once_with({"eval/accuracy": 0.75}, step=16, kind="eval")
-    trainer.tracker.log.assert_called_once_with({"eval/accuracy": 0.75}, step=16, commit=True)
-    assert trainer.callback_handler.events == ["on_train_end", "on_evaluate"]
+    trainer.eval = evaluate
+    mirrored = []
+    sink = logger.add(lambda message: mirrored.append(str(message)), format="{message}")
+
+    async def finish_training():
+        for step in range(1, 17):
+            trainer.global_step = step
+            await trainer._run_step_end_callbacks(trainer._create_trainer_state(epoch=0))
+        trainer._log_metrics_stdout(trainer.all_metrics, step=16, kind="train")
+        trainer.global_step = 17
+        await trainer._finalize_training(completed_step=16, epoch=0)
+
+    try:
+        asyncio.run(finish_training())
+    finally:
+        logger.remove(sink)
+
+    payloads = parse_metrics("".join(mirrored))
+    assert [(row.step, row.values["eval/accuracy"]) for row in payloads if row.kind == "eval"] == expected_evaluations
+    assert [row.values for row in payloads if row.kind == "train"] == [{"reward/raw_reward": 0.625}]
+    assert tracked == [
+        ({"eval/accuracy": score}, {"step": step, "commit": commit})
+        for (step, score), commit in zip(expected_evaluations, expected_commits, strict=True)
+    ]
+    evaluation_values = delivered_telemetry.select("training_metric_value", payload_kind="eval", metric="eval/accuracy")
+    assert [(row["attributes"]["step"], row["value"]) for row in evaluation_values] == [
+        (str(step), score) for step, score in expected_evaluations
+    ]
 
 
 def test_train_end_still_saves_when_the_final_evaluation_fails():

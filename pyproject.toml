@@ -282,6 +282,7 @@ ignore = [
 addopts = "-v -s"
 testpaths = ["skyrl-train/tests", "cloud/iris/tests"]
 markers = [
+    "nightly: extended CPU learning and checkpoint-resume coverage",
     "vllm",
     "integrations",
     "megatron",

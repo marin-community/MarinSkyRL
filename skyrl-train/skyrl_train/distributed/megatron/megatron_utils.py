@@ -27,6 +27,7 @@ from loguru import logger
 from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.transformer.module import Float16Module
 from megatron.core.optimizer import ChainedOptimizer
+from megatron.core.optimizer.cpu_offloading import HybridDeviceOptimizer
 from megatron.core import parallel_state as mpu
 from megatron.core.utils import get_attr_wrapped_model
 from megatron.core.packed_seq_params import PackedSeqParams
@@ -322,6 +323,30 @@ def load_megatron_optimizer(optimizers):
                     v["exp_avg_sq"] = v["exp_avg_sq"].to(torch.cuda.current_device(), non_blocking=True)
         gc.collect()
         torch.cuda.empty_cache()
+
+
+def restore_offloaded_optimizer_state(optimizer) -> None:
+    """Repair MCore 0.18's CPU-offloaded optimizer state after bucket restore."""
+    # Revisit on MCore upgrades; remove once native restore passes two-update
+    # continuation parity for mixed CPU/GPU state. Upstream step fix (partial):
+    # https://github.com/NVIDIA/Megatron-LM/pull/7629
+    optimizers = optimizer.chained_optimizers if isinstance(optimizer, ChainedOptimizer) else [optimizer]
+    for distributed_optimizer in optimizers:
+        inner = distributed_optimizer.optimizer
+        if not isinstance(inner, HybridDeviceOptimizer):
+            continue
+        # MCore 0.18's bucket load overwrites CPU Adam's saved step with local
+        # state. Only the inner GPU groups should retain step, or HDO resets it
+        # before every update.
+        for group in inner.param_groups:
+            for parameter in group["params"]:
+                state = inner.state[parameter]
+                if "step" in state:
+                    state["step"].fill_(group["step"])
+            group.pop("step", None)
+        # Bucket tensors replace state after HDO's load hooks. Rebind moments,
+        # restore FP32 masters and place state on the native optimizers' devices.
+        inner._sync_hdo_state_to_sub_optimizers()
 
 
 def preprocess_packed_seqs(

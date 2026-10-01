@@ -13,7 +13,8 @@ export LANGUAGE=${LANGUAGE:-C.UTF-8}
 cd "$(dirname "$0")"  # Ensure we're in the docs directory
 
 if [ "$1" = "--build-only" ]; then
-    uv run --group docs --isolated sphinx-build -b html . _build/html $@
+    shift
+    uv run --group docs --isolated sphinx-build -b html . _build/html "$@"
 else
-    uv run --group docs --isolated sphinx-autobuild . _build/html $@
+    uv run --group docs --isolated sphinx-autobuild . _build/html "$@"
 fi
