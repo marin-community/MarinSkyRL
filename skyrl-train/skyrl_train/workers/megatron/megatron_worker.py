@@ -44,6 +44,7 @@ from marinskyrl.hugging_face_retry import load_hugging_face_with_retry
 from skyrl_train.workers.megatron.router_replay_install import install_megatron_router_replay
 import skyrl_train.models.grug_megatron_bridge  # noqa: F401  # registers the Grug bridge with Megatron-Bridge
 from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE, validate_grug_training_strategy
+from marinskyrl.runtime_options import PolicyLossType
 from skyrl_train.training_batch import (
     TrainingBatchIterator,
     TrainingOutputBatch,
@@ -76,6 +77,12 @@ class _MegatronInitMode(StrEnum):
 
 
 class MegatronWorker:
+    @property
+    def scoring_temperature(self) -> float:
+        if self.cfg.trainer.algorithm.policy_loss_type == PolicyLossType.FTPO:
+            return 1.0
+        return self.cfg.generator.sampling_params.temperature
+
     def _download_hf_snapshot_if_needed(self, model_path: str, model_config) -> None:
         """Populate the local Hub cache only for non-streamed remote model IDs."""
         if model_config.get("source_uri") or self._local_rank != 0 or os.path.exists(model_path):
@@ -208,6 +215,7 @@ class MegatronWorker:
                     attention_mask=attention_mask,
                     position_ids=position_ids,
                     num_actions=num_actions,
+                    ftpo_chosen_mask=micro.get("ftpo_chosen_mask"),
                     rollout_routed_experts=micro["rollout_routed_experts"]
                     if "rollout_routed_experts" in micro.keys()
                     else None,
@@ -222,7 +230,7 @@ class MegatronWorker:
                 micro_batches=micro_payloads,
                 seq_len=seq_len,
                 micro_batch_size=mbs,
-                temperature=self.cfg.generator.sampling_params.temperature,
+                temperature=self.scoring_temperature,
             )
         if self.cfg.trainer.policy.megatron_config.check_train_eval_parity:
             self._log_forward_fingerprint("forward", micro_payloads)
@@ -231,7 +239,7 @@ class MegatronWorker:
                     micro_batches=micro_payloads,
                     seq_len=seq_len,
                     micro_batch_size=mbs,
-                    temperature=self.cfg.generator.sampling_params.temperature,
+                    temperature=self.scoring_temperature,
                 )
             if mpu.is_pipeline_last_stage(ignore_virtual=True):
                 diff = (repeated.float() - log_probs.float()).abs()
@@ -295,7 +303,7 @@ class MegatronWorker:
                     micro_batches=micro_payloads,
                     seq_len=seq_len,
                     micro_batch_size=micro_bsz,
-                    temperature=self.cfg.generator.sampling_params.temperature,
+                    temperature=self.scoring_temperature,
                 )
             if not mpu.is_pipeline_last_stage(ignore_virtual=True):
                 continue
@@ -461,6 +469,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # create worker model
         self.model = MegatronModelWrapper(
             config=self.cfg,
+            vocabulary_size=self.strategy.hf_config.vocab_size,
             actor_module=self.actor_module,
             actor_optimizer=self.optimizer,
             policy_loss_fn=self.policy_loss_fn,
@@ -494,6 +503,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self._initialize_policy_modules(model_path, mode=_MegatronInitMode.CHECKPOINT_EXPORT)
         self.model = MegatronModelWrapper(
             config=self.cfg,
+            vocabulary_size=self.strategy.hf_config.vocab_size,
             actor_module=self.actor_module,
             logprob_chunk_size=OmegaConf.select(
                 self.cfg, "trainer.policy.megatron_config.logprob_chunk_size", default=None
@@ -551,11 +561,21 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         correction_weights=experience.correction_weights,
                         response_span_tags=experience.response_span_tags,
                         distillation=experience.distillation,
+                        ftpo=experience.ftpo,
                         rollout_routed_experts=experience.rollout_routed_experts,
                     )
                 )
 
                 if len(micro_buffer) == micro_batches_per_mini_batch:
+                    if experience.ftpo is not None:
+                        active = torch.stack([micro.loss_mask.sum() for micro in micro_buffer]).sum()
+                        torch.distributed.all_reduce(
+                            active, group=mpu.get_data_parallel_group(with_context_parallel=False)
+                        )
+                        if active.item() == 0:
+                            # Adam momentum/weight decay must not update an empty FTPO mini-batch.
+                            micro_buffer = []
+                            continue
                     if self.cfg.trainer.policy.megatron_config.check_train_eval_parity:
                         self._log_train_eval_parity_probe(micro_buffer)
                     # run mini-batch forward-backward and then one optimizer step
@@ -571,7 +591,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         micro_batches=micro_buffer,
                         seq_len=seq_len,
                         micro_batch_size=micro_bsz,
-                        temperature=self.cfg.generator.sampling_params.temperature,
+                        temperature=self.scoring_temperature,
                         timings=timing,
                         profiler=profiler,
                     )
@@ -630,6 +650,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             self.profiler.save()
 
         status_mean = policy_training_metrics(all_metrics, policy_update_steps)
+        if "ftpo/active_examples" in all_metrics:
+            examples = sum(all_metrics["ftpo/active_examples"])
+            status_mean["ftpo/chosen_win"] = sum(all_metrics["ftpo/chosen_win_sum"]) / max(examples, 1e-12)
         if status_mean.get("ppo_ratio_exact_unit_fraction") == 1.0 and not self._warned_exact_unit_policy_ratio:
             logger.warning(
                 "Megatron's recomputed old log probabilities exactly match the training forward for every policy "
@@ -888,6 +911,7 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         # create worker model — ref honors its OWN logprob_chunk_size key
         self.model = MegatronModelWrapper(
             config=self.cfg,
+            vocabulary_size=self.strategy.hf_config.vocab_size,
             actor_module=self.actor_module,
             logprob_chunk_size=OmegaConf.select(
                 self.cfg, "trainer.ref.megatron_config.logprob_chunk_size", default=None

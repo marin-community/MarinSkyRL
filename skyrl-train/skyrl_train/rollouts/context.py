@@ -17,6 +17,7 @@ from ray.actor import ActorHandle
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from marinskyrl.environment_contract import TrainingType
+from marinskyrl.runtime_options import PolicyLossType
 from marinskyrl.distillation import DistillationObjectiveKind, compile_distillation_plan_from_config
 from skyrl_train.curriculum import CurriculumConfig, CurriculumOrder, SamplingKind
 from skyrl_train.dataset import PromptDataset
@@ -183,7 +184,9 @@ class TrainingContext:
                 algorithm, loss_spec=PolicyLossRegistry.spec(algorithm.policy_loss_type)
             ),
             student_topk_width=(
-                plan.teachers[0].top_k
+                config.generator.sampling_params.logprobs
+                if algorithm.policy_loss_type == PolicyLossType.FTPO
+                else plan.teachers[0].top_k
                 if plan is not None and plan.objective is DistillationObjectiveKind.STUDENT_TOPK_POLICY_SURROGATE
                 else None
             ),

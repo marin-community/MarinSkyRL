@@ -87,7 +87,7 @@ def reduce_to_step(
         assert numerator_weights.shape == values.shape
         weighted = weighted * torch.where(valid, numerator_weights, 0)
     if mode == LossReduction.TOKEN_MEAN:
-        return weighted.sum() / max(counts.tokens, 1.0)
+        return weighted.sum() / (counts.tokens or 1.0)
     if mode == LossReduction.SEQUENCE_MEAN:
         row_weights = data_weights.sum(-1)
         row_denominator = torch.where(row_weights > 0, row_weights, 1)
