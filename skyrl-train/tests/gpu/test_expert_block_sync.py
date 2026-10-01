@@ -1,6 +1,6 @@
-"""Expert-block weight sync on one Hopper node, for four geometries.
+"""Expert-block weight sync on one Hopper node, for Grug and Hero geometries.
 
-Each case starts a tiny Grug Megatron policy and vLLM engines, trains one PPO step, syncs with
+Each case starts a tiny Grug or Hero Megatron policy and vLLM engines, trains one PPO step, syncs with
 ``weight_sync_transport=expert_block`` and verifies the sync. It then reads engine weights back
 and compares them, byte for byte, with the trainer's exported weights. It flips one installed
 byte on one worker and checks that verification counts exactly that byte. Then it trains a
@@ -18,15 +18,18 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import shutil
 import time
 
 import pytest
 import ray
 import torch
+from safetensors.torch import load_file, save_file
 from transformers import AutoTokenizer
 
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
+from skyrl_train.models.grug_moe import GrugMoeConfig
 from skyrl_train.utils import initialize_ray
 from skyrl_train.weight_sync.expert_block.driver import ExpertBlockSync
 from tests.gpu.grug_gpu_gates import require_hoppers
@@ -144,6 +147,24 @@ def engine_client(cfg, model_path: str, geometry: Geometry) -> InferenceEngineCl
     return InferenceEngineClient(engines, tokenizer, cfg)
 
 
+def write_stacked_hero_serving_checkpoint(split_path, serving_path):
+    """Let the pinned vLLM loader start from stacked experts while the trainer keeps split experts."""
+    shutil.copytree(split_path, serving_path)
+    weights_path = serving_path / "model.safetensors"
+    weights = load_file(str(weights_path))
+    config = GrugMoeConfig.from_pretrained(split_path)
+    for layer in range(config.num_hidden_layers):
+        for projection in ("gate", "up", "down"):
+            prefix = f"model.layers.{layer}.mlp.experts"
+            weights[f"{prefix}.{projection}_proj.weight"] = torch.stack(
+                [
+                    weights.pop(f"{prefix}.{expert}.{projection}_proj.weight")
+                    for expert in range(config.num_local_experts)
+                ]
+            )
+    save_file(weights, str(weights_path), metadata={"format": "pt"})
+
+
 @pytest.mark.vllm
 @pytest.mark.parametrize(
     "name,hero",
@@ -169,8 +190,11 @@ def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flippe
     model_path.mkdir()
     if hero:
         write_tiny_hero_checkpoint(model_path)
+        serving_path = tmp_path / "serving"
+        write_stacked_hero_serving_checkpoint(model_path, serving_path)
     else:
         _write_tiny_checkpoint(model_path)
+        serving_path = model_path
     cfg = _config(str(model_path), world_size=geometry.policy_gpus, pp=geometry.policy_pp, ep=geometry.policy_ep)
     cfg.generator.num_inference_engines = geometry.engines
     cfg.generator.inference_engine_data_parallel_size = geometry.engine_dp
@@ -181,7 +205,7 @@ def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flippe
     tokenizer = AutoTokenizer.from_pretrained(str(model_path))
     initialize_ray(cfg)
     try:
-        client = engine_client(cfg, str(model_path), geometry)
+        client = engine_client(cfg, str(serving_path), geometry)
         policy = _init_policy(cfg, geometry.policy_gpus)
         names = HERO_SYNC_NAMES if hero else [*PARAMETER_NAMES, *BIAS_NAMES, GATED_NORM_NAME, *SLICED_NAMES]
         bias_names = HERO_BIAS_NAMES if hero else BIAS_NAMES
