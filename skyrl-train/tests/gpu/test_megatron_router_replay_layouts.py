@@ -197,7 +197,7 @@ def test_probe_forward_scores_all_modes_and_records_pipeline_routes(tmp_path, la
             cfg=cfg,
             num_training_steps=schedule.total_training_steps,
         )
-        trainer = SimpleNamespace(policy_model=policy, critic_model=None, ref_model=None)
+        trainer = SimpleNamespace(policy_model=policy, critic_model=None, ref_model=None, global_step=0)
         padded = RayPPOTrainer.pad_batch(trainer, batch)
         collector = ProbeCollector(cfg)
         collector.probes = probes
