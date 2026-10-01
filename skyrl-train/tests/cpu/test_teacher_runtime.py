@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -506,6 +507,11 @@ async def test_local_teacher_engine_holds_a_full_student_window_plus_the_scored_
         return [engine]
 
     monkeypatch.setattr(runtime_module, "create_tokenizer", lambda *_args, **_kwargs: tokenizer)
+    monkeypatch.setattr(
+        runtime_module.AutoConfig,
+        "from_pretrained",
+        lambda *_args, **_kwargs: SimpleNamespace(max_position_embeddings=32769),
+    )
     monkeypatch.setattr(runtime_module, "create_ray_wrapped_inference_engines", create_engine)
     cfg = _config()
     cfg.generator.engine_init_kwargs.max_model_len = 32768
@@ -516,3 +522,18 @@ async def test_local_teacher_engine_holds_a_full_student_window_plus_the_scored_
 
     assert engine_kwargs["engine_init_kwargs"]["max_model_len"] == 32769
     assert cfg.generator.engine_init_kwargs.max_model_len == 32768
+
+
+def test_local_teacher_rejects_checkpoint_shorter_than_scoring_window_before_engine_allocation(monkeypatch):
+    tokenizer = _Tokenizer({"a": 0})
+    monkeypatch.setattr(runtime_module, "create_tokenizer", lambda *_args, **_kwargs: tokenizer)
+    monkeypatch.setattr(
+        runtime_module.AutoConfig,
+        "from_pretrained",
+        lambda *_args, **_kwargs: SimpleNamespace(max_position_embeddings=32768),
+    )
+    cfg = _config()
+    cfg.generator.engine_init_kwargs.max_model_len = 32768
+
+    with pytest.raises(ValueError, match="teacher 'primary'.*32768.*student window.*32768"):
+        prepare_distillation_runtime(cfg, tokenizer)
