@@ -8,6 +8,10 @@ token's slots it owns in fp32 and rounds once, and a bf16 ring reduction adds th
 starting after the rank that holds the token's request and ending at it. ``vllm_experts`` computes each
 token-expert slot with vLLM's fused-MoE Triton kernels (``vllm_expert_outputs``).
 
+A decode-invariant engine (``inference_engines.vllm.decode_invariant``) runs FA3 with one split and every
+sliding-window row past the window as a one-row request (``window_row_requests``); ``fa3_window_rows`` computes the
+trainer's rows that way.
+
 ``vllm_steps`` reproduces the engine step of a logged re-read: each sequence's prefill ran alone in one vLLM step
 (``VllmStep``), which fixes its FA3 split counts, the row count of the fp32 router GEMM, and the row counts of the
 LM-head GEMMs that vLLM's model runner V2 runs for prompt log-probabilities (1,024-row chunks) and for the sampled
@@ -39,6 +43,8 @@ VLLM_MAX_CUDA_GRAPH_TOKENS = 512
 H100_SMS = 132
 # ``vllm_experts`` addresses each expert's weights in units of this many elements from the lowest-addressed one.
 EXPERT_OFFSET_ELEMENTS = 16
+# vLLM's paged KV-cache block for Grug's FA3 layers, in tokens.
+KV_CACHE_BLOCK = 16
 # The probe engines' ``max_num_batched_tokens``: the rows of a full vLLM prefill step.
 VLLM_MAX_BATCHED_TOKENS = 8192
 # Model runner V2 computes prompt log-probabilities from LM-head calls of this many rows
@@ -174,6 +180,97 @@ def _fa3_forward(query, key, value, *, rows: int, requests: int, window: int | N
     )
 
 
+@dataclass(frozen=True)
+class WindowRowRequests:
+    """FA3 varlen requests over the same query rows: each request's rows before the window, then one per later row.
+
+    ``query_start`` ``[E + 1]`` and ``key_lengths`` ``[E]`` are int32; ``owner`` ``[E]`` is the original request of each
+    new request, to gather its block-table row. The query rows keep their order, so the output rows do too.
+    """
+
+    query_start: torch.Tensor
+    key_lengths: torch.Tensor
+    owner: torch.Tensor
+
+
+def window_row_requests(query_start: torch.Tensor, key_lengths: torch.Tensor, window: int) -> WindowRowRequests:
+    """Split each varlen request so every query row at a key position of at least ``window`` is a request of its own.
+
+    A request's query rows are the last ``q`` of its ``k`` keys (positions ``k - q .. k - 1``). On a sliding-window
+    layer FA3 aligns key blocks to the window start of a query tile's first row; a lone row is its own tile, as in a
+    decode step. Rows before position ``window`` read every key from position 0, so their tiles need no split.
+    Waits for the device once (the number of new requests).
+    """
+    query_start = query_start.long()
+    requests = query_start.numel() - 1
+    key_lengths = key_lengths[:requests].long()
+    query_lengths = query_start[1:] - query_start[:-1]
+    first_position = key_lengths - query_lengths
+    # Rows before the window stay one request; each later row becomes one. A request without rows before the window
+    # contributes only its one-row requests.
+    head = torch.minimum((window - first_position).clamp(min=0), query_lengths)
+    has_head = (head > 0).long()
+    counts = has_head + query_lengths - head
+    total = int(counts.sum())
+    device = query_start.device
+    owner = torch.repeat_interleave(torch.arange(requests, device=device), counts, output_size=total)
+    # The new request's index among its owner's: -1 is the rows before the window, i >= 0 the i-th later row.
+    later_row = torch.arange(total, device=device) - (torch.cumsum(counts, 0) - counts)[owner] - has_head[owner]
+    before = later_row < 0
+    starts = query_start[owner] + torch.where(before, 0, head[owner] + later_row)
+    keys = first_position[owner] + head[owner] + torch.where(before, 0, later_row + 1)
+    return WindowRowRequests(
+        query_start=torch.cat([starts, query_start[-1:]]).to(torch.int32),
+        key_lengths=keys.to(torch.int32),
+        owner=owner,
+    )
+
+
+def _fa3_window_rows_forward(query, key, value, *, rows: int, requests: int, window: int, scale: float):
+    """Sliding-window FA3 over ``requests`` sequences of ``rows`` rows with every row past the window a one-row request.
+
+    The keys and values sit in vLLM's paged layout (``KV_CACHE_BLOCK``-token blocks, one block table row per request) so
+    that overlapping key ranges can be addressed; FA3's paged path is the one vLLM's engine runs.
+    """
+    from vllm.vllm_flash_attn import flash_attn_varlen_func
+
+    blocks = -(-rows // KV_CACHE_BLOCK)
+    padding = blocks * KV_CACHE_BLOCK - rows
+    kv_heads, head_dim = key.shape[1:]
+
+    def paged(tensor: torch.Tensor) -> torch.Tensor:
+        sequences = tensor.view(requests, rows, kv_heads, head_dim)
+        if padding:
+            sequences = torch.nn.functional.pad(sequences, (0, 0, 0, 0, 0, padding))
+        return sequences.reshape(requests * blocks, KV_CACHE_BLOCK, kv_heads, head_dim).contiguous()
+
+    device = query.device
+    split = window_row_requests(
+        torch.arange(0, (requests + 1) * rows, rows, dtype=torch.int32, device=device),
+        torch.full((requests,), rows, dtype=torch.int32, device=device),
+        window,
+    )
+    block_table = torch.arange(requests * blocks, dtype=torch.int32, device=device).view(requests, blocks)
+    # FA3's value only: the gradient is the trainer's own attention backward (``fa3_attention``).
+    with torch.no_grad():
+        key_cache, value_cache = paged(key), paged(value)
+    return flash_attn_varlen_func(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        max_seqlen_q=min(rows, window),
+        cu_seqlens_q=split.query_start,
+        max_seqlen_k=rows,
+        seqused_k=split.key_lengths,
+        block_table=block_table[split.owner],
+        softmax_scale=scale,
+        causal=True,
+        window_size=[window - 1, 0],
+        fa_version=3,
+        num_splits=1,
+    )
+
+
 def fa3_attention_sbhd(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -182,6 +279,7 @@ def fa3_attention_sbhd(
     window: int | None,
     scale: float,
     steps: Sequence[VllmStep] | None = None,
+    window_rows: bool = False,
 ) -> torch.Tensor:
     """vLLM's FA3 forward on Megatron's ``[S, B, heads, dim]`` tensors; returns ``[S, B, heads * dim]``.
 
@@ -189,10 +287,17 @@ def fa3_attention_sbhd(
     valid row, since a causal row reads no later key and its key blocks start at key 0. With ``steps`` each
     sequence runs alone on the prefix its vLLM step scheduled, with the split count FA3 chose for a request
     alone in a step of that many tokens (``fa3_split_counts``); its later rows stay zero, as no logged
-    position reads them. A sequence without a step (``tokens == 0``) runs unsplit on all ``S`` rows.
+    position reads them. A sequence without a step (``tokens == 0``) runs unsplit on all ``S`` rows. With
+    ``window_rows`` a sliding-window layer runs each row past the window as a one-row request
+    (``_fa3_window_rows_forward``), as a decode-invariant engine does.
     """
     sequence, batch, heads, head_dim = query.shape
     flat = [t.transpose(0, 1).reshape(batch * sequence, *t.shape[2:]).contiguous() for t in (query, key, value)]
+    if window_rows and steps is not None:
+        raise NotImplementedError("fa3_window_rows numerics do not combine with a logged step plan")
+    if window_rows and window is not None and sequence > window:
+        output = _fa3_window_rows_forward(*flat, rows=sequence, requests=batch, window=window, scale=scale)
+        return output.view(batch, sequence, heads * head_dim).transpose(0, 1).contiguous()
     if steps is None:
         output = _fa3_forward(*flat, rows=sequence, requests=batch, window=window, scale=scale, splits=1)
         return output.view(batch, sequence, heads * head_dim).transpose(0, 1).contiguous()

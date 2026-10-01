@@ -46,7 +46,12 @@ expert-parallel addition order:
 - ``vllm_steps``: in a scoring forward of a logged re-read (re-read replay), each sequence is computed as the vLLM
   engine step that ran its prefill alone: FA3 with that step's split counts, the fp32 router GEMM at the step's row
   count, and the LM head at the row counts of model runner V2's prompt and sampled log-probabilities. It replaces
-  ``router_rows`` and has no training forward: the step log exists only for the re-read.
+  ``router_rows`` and has no training forward: the step log exists only for the re-read;
+- ``invariant_router``: the router logits come from the row-invariant Triton GEMM that a decode-invariant vLLM engine
+  runs (``grug_invariant_kernels.invariant_router_logits``), so they do not depend on the rows computed with them; the
+  gradient is ``router_gemm``'s fp32 GEMM. It replaces ``router_rows`` and ``vllm_steps``' router rows;
+- ``fa3_window_rows``: on sliding-window layers, ``fa3_attention`` runs every row past the window as a one-row request,
+  as a decode-invariant engine computes every such row (its decode steps and its prefills alike).
 
 Probe modes set flags for one scoring forward. The process default is the current trainer numerics, or
 the set named by ``trainer.mismatch_probe.train_numerics``, which then applies to training too.
@@ -81,6 +86,8 @@ class GrugNumerics:
     vllm_swiglu: bool = False
     vllm_log_softmax: bool = False
     vllm_steps: bool = False
+    invariant_router: bool = False
+    fa3_window_rows: bool = False
 
 
 NUMERICS_FLAGS = tuple(field.name for field in fields(GrugNumerics))

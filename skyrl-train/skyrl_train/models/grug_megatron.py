@@ -410,7 +410,13 @@ def _install_fa3_attention_hooks(attention: "GrugSelfAttention") -> None:
             raise NotImplementedError("fa3_attention numerics support unpacked causal sequences only")
         steps = planned_vllm_steps(query.shape[1]) if numerics.vllm_steps else None
         output = fa3_attention_sbhd(
-            query, key, value, window=attention.fa3_window, scale=attention.fa3_scale, steps=steps
+            query,
+            key,
+            value,
+            window=attention.fa3_window,
+            scale=attention.fa3_scale,
+            steps=steps,
+            window_rows=numerics.fa3_window_rows,
         )
         if not torch.is_grad_enabled():
             return output
@@ -920,7 +926,9 @@ class GrugTopKRouter(TopKRouter):
     def forward(self, input: torch.Tensor, padding_mask: torch.Tensor | None = None):
         self._maintain_float32_expert_bias()
         numerics = active_numerics()
-        if numerics.vllm_steps:
+        if numerics.invariant_router:
+            logits = self._invariant_logits(input, numerics)
+        elif numerics.vllm_steps:
             # Each sequence's logits from the fp32 GEMM at the row count of the vLLM step that computed it.
             if numerics.router_rows or input.ndim != 3:
                 raise NotImplementedError("vllm_steps numerics take the router GEMM's rows from the logged step alone")
@@ -942,6 +950,21 @@ class GrugTopKRouter(TopKRouter):
         else:
             logits = self.gating(input)
         return self.routing(logits, padding_mask)
+
+    def _invariant_logits(self, input: torch.Tensor, numerics) -> torch.Tensor:
+        """The router logits a decode-invariant vLLM engine computes: the row-invariant Triton GEMM on the bf16 input
+        and the bf16 weight (exact products, fp32 sums), whatever rows share the call; the gradient is the fp32 GEMM's."""
+        # Triton is not in the CPU test lane; the kernel module imports it.
+        from skyrl_train.models.grug_invariant_kernels import invariant_router_logits
+
+        if numerics.router_rows or numerics.vllm_steps:
+            raise NotImplementedError("invariant_router replaces router_rows and vllm_steps' router rows")
+        if self.weight.dtype != torch.bfloat16 or input.dtype != torch.bfloat16:
+            raise ValueError("invariant_router multiplies the bf16 router input by the bf16 router weight")
+        with torch.no_grad():
+            value = invariant_router_logits(input.reshape(-1, input.shape[-1]), self.weight)
+        value = value.view(*input.shape[:-1], value.shape[-1])
+        return vllm_value(value, lambda: F.linear(input.float(), self.weight.float()))
 
 
 def _install_step_lm_head(model: GPTModel) -> None:

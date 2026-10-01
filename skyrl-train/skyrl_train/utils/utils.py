@@ -575,6 +575,7 @@ def validate_cfg(cfg: DictConfig):
     resolve_weight_sync_pause_policy(cfg.generator)
     validate_generator_cfg(cfg)
     validate_batch_invariant_config(cfg)
+    validate_decode_invariant_config(cfg)
     validate_hf_export_config(cfg)
     try:
         resolve_grug_query_bias_update(cfg.trainer.policy)
@@ -746,6 +747,17 @@ def validate_batch_invariant_config(cfg: DictConfig) -> None:
             "trainer.algorithm.batch_invariant=true cannot configure a remote inference server; "
             "run the vLLM engines locally so both rollout and trainer activation is guaranteed"
         )
+
+
+def validate_decode_invariant_config(cfg: DictConfig) -> None:
+    """A decode-invariant engine patches the vLLM workers this run starts, which serve with FlashAttention."""
+
+    if not cfg.generator.decode_invariant:
+        return
+    if cfg.generator.backend != "vllm" or not cfg.generator.run_engines_locally:
+        raise ValueError("generator.decode_invariant=true needs vLLM engines that this run starts")
+    if cfg.generator.get("vllm_attention_backend") != "FLASH_ATTN":
+        raise ValueError("generator.decode_invariant=true needs generator.vllm_attention_backend=FLASH_ATTN")
 
 
 def validate_generator_cfg(cfg: DictConfig):

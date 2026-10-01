@@ -16,6 +16,7 @@ from skyrl_train.models.grug_vllm_kernels import (
     step_rows_linear,
     vllm_ep_combine,
     vllm_qkv_projection,
+    window_row_requests,
 )
 
 
@@ -162,3 +163,30 @@ def test_step_linears_compute_each_sequence_in_the_calls_its_vllm_step_made(monk
     assert torch.equal(step_lm_head_logits(x, weight, steps), x @ weight.t())
     # Prompt log-probabilities in 1,024-row chunks of the step's tokens, then the sampled position's one row.
     assert calls == [sequence * 3, 300, 1, VLLM_PROMPT_LOGPROB_CHUNK, sequence - 1 - VLLM_PROMPT_LOGPROB_CHUNK, 1]
+
+
+def test_window_row_requests_run_each_row_past_the_window_alone_in_row_order():
+    window = 8
+    # (query rows, keys) per request: a prefill across the window, a decode row past it, a prefill within it, a decode
+    # row within it, and a prefill chunk that starts past it.
+    requests = [(6, 11), (1, 20), (5, 5), (1, 3), (3, 12)]
+    query_lengths = torch.tensor([rows for rows, _ in requests])
+    query_start = torch.cat([torch.zeros(1, dtype=torch.long), query_lengths.cumsum(0)]).to(torch.int32)
+    key_lengths = torch.tensor([keys for _, keys in requests], dtype=torch.int32)
+
+    split = window_row_requests(query_start, key_lengths, window)
+
+    starts, keys, owners = split.query_start.tolist(), split.key_lengths.tolist(), split.owner.tolist()
+    # Each new request's rows are the last ones of its keys: row r of n sits at key position keys - n + r.
+    rows = [
+        (starts[entry] + r, keys[entry] - (starts[entry + 1] - starts[entry]) + r, starts[entry + 1] - starts[entry])
+        for entry in range(len(keys))
+        for r in range(starts[entry + 1] - starts[entry])
+    ]
+    expected = [keys - rows_in + r for rows_in, keys in requests for r in range(rows_in)]
+    assert [row for row, _, _ in rows] == list(range(sum(query_lengths.tolist())))
+    assert [position for _, position, _ in rows] == expected
+    # Rows past the window are alone; a request's rows before it stay one request.
+    assert [size for _, position, size in rows if position >= window] == [1] * sum(p >= window for p in expected)
+    assert [size for _, position, size in rows if position < window] == [3, 3, 3, 5, 5, 5, 5, 5, 1]
+    assert owners == [0, 0, 0, 0, 1, 2, 3, 4, 4, 4]

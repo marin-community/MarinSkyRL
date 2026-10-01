@@ -430,6 +430,9 @@ generator:
   max_num_batched_tokens: 8192
   # Enable eager rollouts only with evidence that CUDA graphs affect this run's correctness.
   enforce_eager: false
+  # A decode-invariant vLLM engine for Grug (inference_engines/vllm/decode_invariant.py): every token's bytes are the
+  # same in a decode step as in a prefill step of any composition. Needs the vLLM backend with FLASH_ATTN.
+  decode_invariant: false
   fully_sharded_loras: false
   inference_stats_interval: 1
   gpu_memory_utilization: 0.8

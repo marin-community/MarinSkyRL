@@ -86,6 +86,10 @@ TRAINER_MODES: dict[str, ModeSpec] = {
 # addition order as well. ``KEPT_STACK_3`` replaces ``router_rows`` with ``vllm_steps``: each sequence is scored as the
 # logged vLLM step of the re-read computed it (FA3 split counts, router GEMM rows, LM-head rows), so its candidates
 # (``STEP_CANDIDATES``) score re-read replay only; ``VLLM_STEP_FORWARD_EP_SUM`` is ``VLLM_FORWARD_EP_SUM`` so scored.
+# ``INVARIANT_STACK`` is the trainer side of a decode-invariant vLLM engine (``generator.decode_invariant``): the
+# router GEMM is the engine's row-invariant kernel and sliding-window rows past the window are one-row FA3 requests, so
+# no logged step is needed and generation-route replay scores it too; ``VLLM_INVARIANT_FORWARD`` adds the region flags
+# and ``ep_sum``.
 COMPILED_STACK = "compiled_stack"
 COMPILED_STACK_ALL = "compiled_stack_all"
 VLLM_KERNEL_STACK = "vllm_kernel_stack"
@@ -101,6 +105,9 @@ VLLM_FORWARD_EP_SUM = f"{VLLM_FORWARD}+ep_sum"
 KEPT_STACK_3 = f"{KEPT_VLLM_KERNELS}+vllm_steps"
 VLLM_STEP_FORWARD = "+".join((KEPT_STACK_3, *_VLLM_REGION_FLAGS))
 VLLM_STEP_FORWARD_EP_SUM = f"{VLLM_STEP_FORWARD}+ep_sum"
+_INVARIANT_FLAGS = ("fa3_attention", "vllm_gemm", "vllm_experts", "invariant_router", "fa3_window_rows")
+INVARIANT_STACK = f"{KEPT_VLLM_KERNELS}+invariant_router+fa3_window_rows"
+VLLM_INVARIANT_FORWARD = "+".join((INVARIANT_STACK, *_VLLM_REGION_FLAGS, "ep_sum"))
 _COMPILED_STACK_FLAGS = (
     "gated_norm",
     "qk_rope",
@@ -150,6 +157,8 @@ NUMERICS_CANDIDATES = {
     },
     VLLM_FORWARD: _enabled(*_COMPILED_STACK_FLAGS, *_KEPT_2_FLAGS, *_VLLM_REGION_FLAGS),
     VLLM_FORWARD_EP_SUM: _enabled(*_COMPILED_STACK_FLAGS, *_KEPT_2_FLAGS, *_VLLM_REGION_FLAGS, "ep_sum"),
+    INVARIANT_STACK: _enabled(*_COMPILED_STACK_FLAGS, *_INVARIANT_FLAGS),
+    VLLM_INVARIANT_FORWARD: _enabled(*_COMPILED_STACK_FLAGS, *_INVARIANT_FLAGS, *_VLLM_REGION_FLAGS, "ep_sum"),
 }
 
 
@@ -197,6 +206,8 @@ for _candidate in (
     *(f"{KEPT_STACK_2}+{flag}" for flag in (*_VLLM_REGION_FLAGS, "ep_sum")),
     VLLM_FORWARD,
     VLLM_FORWARD_EP_SUM,
+    INVARIANT_STACK,
+    VLLM_INVARIANT_FORWARD,
 ):
     TRAINER_MODES[f"{REPLAY_MODE}+{_candidate}"] = ModeSpec(
         _with_numerics(_replay, NUMERICS_CANDIDATES[_candidate]), requires_routes=True
@@ -211,6 +222,7 @@ for _candidate in (
     KEPT_VLLM_KERNELS_ROUTER_ROWS,
     VLLM_FORWARD,
     VLLM_FORWARD_EP_SUM,
+    VLLM_INVARIANT_FORWARD,
 ):
     TRAINER_MODES[f"{REPEAT_REREAD_REPLAY_MODE}+{_candidate}"] = ModeSpec(
         _with_numerics(_replay, NUMERICS_CANDIDATES[_candidate]),
