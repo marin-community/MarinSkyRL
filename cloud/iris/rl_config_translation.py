@@ -522,13 +522,23 @@ def materialize_launch_config(
     return str(destination)
 
 
+def load_rl_recipe(config_path: str) -> DictConfig:
+    """Compose a source recipe with Hydra defaults before deriving launch settings."""
+    path = resolve_rl_config_path(config_path)
+    with initialize_config_dir(version_base=None, config_dir=str(path.parent)):
+        return compose(
+            config_name=path.name,
+            overrides=[f"hydra.searchpath=[file://{SKYRL_CONFIG_DIR.resolve()}]"],
+        )
+
+
 def parse_rl_config(
     config_path: str,
     model_override: Optional[str] = None,
 ) -> ParsedRLConfig:
     """Parse an RL config YAML and extract all settings."""
     path = resolve_rl_config_path(config_path)
-    raw = OmegaConf.to_container(OmegaConf.load(path), resolve=False) or {}
+    raw = OmegaConf.to_container(load_rl_recipe(str(path)), resolve=False) or {}
     if not isinstance(raw, dict):
         raise ValueError(f"{path}: RL config must contain a mapping at the document root")
 

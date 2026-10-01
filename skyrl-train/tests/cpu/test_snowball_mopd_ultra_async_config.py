@@ -3,9 +3,10 @@
 from pathlib import Path
 from types import SimpleNamespace
 
-import yaml
+from omegaconf import OmegaConf
 
-from cloud.iris.rl_config_translation import compose_skyrl_config, parse_rl_config
+
+from cloud.iris.rl_config_translation import compose_skyrl_config, load_rl_recipe, parse_rl_config
 from cloud.iris.role_plan import derive_role_plan
 import skyrl_train.objective.losses  # noqa: F401  (registers policy losses for validate_cfg)
 from skyrl_train.utils import validate_cfg
@@ -29,8 +30,8 @@ def test_async_smoke_runs_the_in_process_async_trainer_and_passes_trainer_valida
 
 
 def test_async_smoke_matches_the_sync_baseline_geometry_and_prompt_count():
-    async_config = yaml.safe_load(ASYNC_CONFIG.read_text())
-    sync_config = yaml.safe_load(SYNC_CONFIG.read_text())
+    async_config = OmegaConf.to_container(load_rl_recipe(str(ASYNC_CONFIG)), resolve=True)
+    sync_config = OmegaConf.to_container(load_rl_recipe(str(SYNC_CONFIG)), resolve=True)
 
     assert derive_role_plan(async_config) == derive_role_plan(sync_config)
     assert async_config["teachers"] == sync_config["teachers"]
