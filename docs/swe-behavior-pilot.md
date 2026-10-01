@@ -13,7 +13,9 @@ the complete eligible pool, the frozen selected rows, a seeded count-matched ran
 control, and the mixed-group signal availability at G=2, 4, and 8. Those G values
 are analysis-only subsamples of the original groups.
 
-`recipes` writes six arms for each pinned student. RL uses 20 optimizer updates,
+`recipes` writes six arms for each pinned student. Pass the frozen model's published
+directory as `--artifact-root` and the shared split's `validation.parquet` as
+`--validation-uri`. RL uses 20 optimizer updates,
 64 prefixes and eight responses per update, one update epoch, no loss-token cutoff,
 and KL 0.001. SFT uses a one-million-token loss budget, 64 prefixes, and seeded
 reshuffling. The full 256-row evaluation runs at initialization and the prescribed

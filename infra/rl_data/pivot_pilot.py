@@ -215,20 +215,17 @@ def pilot_recipe(
 
 
 def write_pilot_recipes(
-    frozen: Path, split: Path, output: Path, student: str, artifact_root: str, baseline_cache: str
+    frozen: Path, split: Path, output: Path, student: str, artifact_root: str, validation_uri: str, baseline_cache: str
 ) -> list[Path]:
     """Write the six immutable-data arm recipes for one student."""
     manifest = json.loads((frozen / "manifest.json").read_text())
     split_manifest = json.loads((split / "manifest.json").read_text())
-    uris = {
-        name: f"{artifact_root.rstrip('/')}/{name}.parquet"
-        for name in ("all_train", "train", "random_train", "validation")
-    }
+    uris = {name: f"{artifact_root.rstrip('/')}/{name}.parquet" for name in ("all_train", "train", "random_train")}
     selected_uri, selected = uris["train"], manifest["identity_hashes"]["train"]
     recipes = {}
     for arm in ARMS:
         train = uris["all_train"] if arm == "sft_all" else uris["random_train"] if arm == "sft_random" else selected_uri
-        raw = pilot_recipe(student, arm, train, uris["validation"], split_manifest, baseline_cache)
+        raw = pilot_recipe(student, arm, train, validation_uri, split_manifest, baseline_cache)
         raw["pivot"].update(selected_data_hash=selected, selected_data_uri=selected_uri)
         raw["trainer"]["pivot_pilot"].update(
             train_data_sha256=manifest["artifacts"][Path(train).name.removesuffix(".parquet")]["sha256"],
@@ -284,6 +281,7 @@ def main():
     recipes.add_argument("--output", type=Path, required=True)
     recipes.add_argument("--student", choices=STUDENTS, required=True)
     recipes.add_argument("--artifact-root", required=True)
+    recipes.add_argument("--validation-uri", required=True)
     recipes.add_argument("--baseline-cache", required=True)
     profile = commands.add_parser("profile-recipe")
     profile.add_argument("--split", type=Path, required=True)
@@ -298,7 +296,13 @@ def main():
         result = freeze(args.split, args.rescored, args.output, args.student)
     elif args.command == "recipes":
         paths = write_pilot_recipes(
-            args.frozen, args.split, args.output, args.student, args.artifact_root, args.baseline_cache
+            args.frozen,
+            args.split,
+            args.output,
+            args.student,
+            args.artifact_root,
+            args.validation_uri,
+            args.baseline_cache,
         )
         result = {"recipes": [str(path) for path in paths]}
     else:

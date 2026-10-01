@@ -85,7 +85,7 @@ def paired_difference(candidate: list[dict], reference: list[dict], *, seed: int
         for row in rows:
             if row["phase"] != "eval" or row["status"] != "verified":
                 continue
-            if len({row[name] for name in VERIFIERS if row[name] in (0, 1)}) != 3:
+            if any(row[name] not in (0, 1) for name in VERIFIERS):
                 raise ValueError("A verified evaluation row lacks one of the verifier grades")
             key = (row["step"], row["source_id"], row["task_id"])
             if key in output:

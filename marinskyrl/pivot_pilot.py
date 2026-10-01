@@ -22,7 +22,7 @@ def diagnostic_metrics(batch, *, prefix: str, indices: list[int] | None = None) 
     if verdicts is None:
         return {}
     indices = list(range(len(verdicts))) if indices is None else indices
-    grades = [(index, verdicts[index].diagnostics.get("pivot")) for index in indices]
+    grades = [(index, verdicts[index].diagnostics.get("pivot")) for index in indices if verdicts[index] is not None]
     usable = [(index, grade) for index, grade in grades if grade is not None]
     if not usable:
         return {}
