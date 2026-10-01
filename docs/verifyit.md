@@ -56,7 +56,7 @@ Exact, numeric, schema, instruction, code, judge and retained source-runtime cli
 
 ## Dormant verifier source APIs
 
-The legacy standalone `skyrl-agent` packaging/runtime is not revived by this change. Its archival manifest and lock remain unchanged. Use the supported root/gym environment and load the source scorer directly when assessing a dormant route. For example, the QA scorer imports LiteLLM even for exact matching:
+The legacy standalone `skyrl-agent` packaging/runtime is not revived by this change. [MarinSkyRL #884](https://github.com/marin-community/MarinSkyRL/issues/884) tracks its preexisting broken local trainer dependency. Its archival manifest and lock remain unchanged. Use the supported root/gym environment and load the source scorer directly when assessing a dormant route. For example, the QA scorer imports LiteLLM even for exact matching:
 
 ```bash
 uv pip install --python .venv-verifiers/bin/python litellm
