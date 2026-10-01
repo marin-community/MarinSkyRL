@@ -94,7 +94,7 @@ class TrainingContextState:
 class RolloutBatchMetadata:
     """Ordered selected groups and metrics, without reading their trajectory payloads."""
 
-    policy_step: int
+    batch_id: int
     groups: tuple[AdmittedRollout, ...]
     metrics: dict[str, float]
 
@@ -248,8 +248,7 @@ class TrainingContext:
         groups: list[RolloutGroup] = []
 
         async def fetch_admitted(admitted: tuple[AdmittedRollout, ...]) -> None:
-            metadata = RolloutBatchMetadata(self._policy_step, admitted, {})
-            fetched = await self.fetch_batch_slice(metadata, 0, len(admitted), stall_timeout=stall_timeout)
+            fetched = await self._fetch_groups(self._policy_step, admitted, stall_timeout=stall_timeout)
             groups.extend(fetched)
             await on_admitted(fetched)
 
@@ -265,13 +264,21 @@ class TrainingContext:
         selected = metadata.groups[start:stop]
         if not selected:
             return []
+        return await self._fetch_groups(metadata.batch_id, selected, stall_timeout=stall_timeout)
+
+    async def _fetch_groups(
+        self, batch_id: int, selected: tuple[AdmittedRollout, ...], *, stall_timeout: float
+    ) -> list[RolloutGroup]:
         try:
             async with asyncio.timeout(stall_timeout):
-                groups = await self._until_failure(self._payloads.fetch([group.payload for group in selected]))
+                refs = await self._until_failure(
+                    self._buffer.payload_refs.remote(batch_id, tuple(group.index for group in selected))
+                )
+                groups = await self._until_failure(self._payloads.fetch(refs))
         except TimeoutError as error:
             raise GroupAdmissionStalledError(
                 f"{len(selected)} selected rollout payloads did not arrive within "
-                f"{stall_timeout:.0f}s: policy_step={metadata.policy_step} slice=[{start}:{stop}]"
+                f"{stall_timeout:.0f}s: batch_id={batch_id} indices={[group.index for group in selected]}"
             ) from error
         if len(groups) != len(selected):
             raise ValueError("payload store returned the wrong number of selected rollout groups")
@@ -318,9 +325,9 @@ class TrainingContext:
                 deadline = loop.time() + stall_timeout
             if admission.selection is not None:
                 if len(groups) != self.config.batch_size:
-                    raise ValueError(
-                        f"selected batch has {len(groups)} group references, expected {self.config.batch_size}"
-                    )
+                    raise ValueError(f"selected batch has {len(groups)} groups, expected {self.config.batch_size}")
+                if any(group.index != index for index, group in enumerate(groups)):
+                    raise ValueError("selected batch group indices are not ordered from zero")
                 return RolloutBatchMetadata(
                     self._policy_step,
                     tuple(groups),

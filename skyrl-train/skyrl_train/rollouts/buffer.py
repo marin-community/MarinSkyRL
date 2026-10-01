@@ -13,6 +13,7 @@ import asyncio
 import collections
 import time
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
@@ -216,13 +217,13 @@ class BatchSelection:
 
 @dataclass(frozen=True)
 class AdmittedRollout:
-    """One selected group's identity, size, and opaque payload reference."""
+    """One selected group's stable batch index, identity, and size."""
 
+    index: int
     uid: str
     policy_step: int
     sample_count: int
     response_tokens: int
-    payload: object
 
 
 @dataclass(frozen=True)
@@ -233,6 +234,7 @@ class Admission:
     ``selection`` is set only on the call that completes the batch.
     """
 
+    batch_id: int
     admitted: list[AdmittedRollout]
     retries: list[dict]
     generated: list[tuple[int, GeneratedWork]]
@@ -458,6 +460,15 @@ class RolloutBuffer:
             self._select()
             self._changed.notify_all()
 
+    def payload_refs(self, batch_id: int, indices: Sequence[int]) -> list:
+        """Resolve selected group indices while their batch is the current training step."""
+        if batch_id != self._policy_step:
+            raise ValueError(f"batch {batch_id} is no longer available; current batch is {self._policy_step}")
+        batch = self._admitted[batch_id]
+        if any(index < 0 or index >= len(batch) for index in indices):
+            raise IndexError(f"group index outside batch {batch_id} with {len(batch)} admitted groups")
+        return [batch[index].payload[0] for index in indices]
+
     async def admit(self, timeout: float) -> Admission:
         """Wait up to ``timeout`` seconds for the current batch to progress.
 
@@ -504,15 +515,18 @@ class RolloutBuffer:
                     f"{len(self._admitted[batch_id])} of {self.config.batch_size} admitted"
                 )
             admission = Admission(
+                batch_id=self._policy_step,
                 admitted=[
                     AdmittedRollout(
+                        index=index,
                         uid=rollout.verdict.uid,
                         policy_step=rollout.policy_step,
                         sample_count=rollout.verdict.work.sample_count,
                         response_tokens=rollout.verdict.work.generated_token_count,
-                        payload=rollout.payload[0],
                     )
-                    for rollout in self._unreported
+                    for index, rollout in enumerate(
+                        self._unreported, start=len(self._admitted[self._policy_step]) - len(self._unreported)
+                    )
                 ],
                 retries=self._retries,
                 generated=self._generated,

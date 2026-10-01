@@ -63,11 +63,11 @@ async def _generate(buffer: RolloutBuffer, uid: str, **verdict) -> None:
 
 
 async def _take_batch(buffer: RolloutBuffer) -> tuple[list[str], dict[str, float]]:
-    """Admit until the batch completes, returning its payloads in admission order and its metrics."""
+    """Admit until the batch completes, resolving each admitted index in order."""
     payloads = []
     while True:
         admission = await buffer.admit(PROGRESS_TIMEOUT)
-        payloads.extend(group.payload for group in admission.admitted)
+        payloads.extend(buffer.payload_refs(admission.batch_id, [group.index for group in admission.admitted]))
         if admission.selection is not None:
             return payloads, admission.selection.metrics
 
@@ -143,11 +143,13 @@ async def test_groups_stream_to_the_trainer_before_the_batch_completes(batch_pol
     await buffer.publish(1)
     await _generate(buffer, "a")
     first = await buffer.admit(PROGRESS_TIMEOUT)
-    assert ([group.payload for group in first.admitted], first.selection) == (["a"], None)
+    assert ([group.index for group in first.admitted], first.selection) == ([0], None)
+    assert buffer.payload_refs(first.batch_id, [0]) == ["a"]
 
     await _generate(buffer, "b")
     second = await buffer.admit(PROGRESS_TIMEOUT)
-    assert [group.payload for group in second.admitted] == ["b"]
+    assert [group.index for group in second.admitted] == [1]
+    assert buffer.payload_refs(second.batch_id, [1, 0]) == ["b", "a"]
     assert second.selection is not None
 
 

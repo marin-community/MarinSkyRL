@@ -238,14 +238,16 @@ async def _next_uids(context: TrainingContext) -> list[str]:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("payload_kind", "start_buffer"),
-    [("memory", "ray_actor"), ("object_store", "in_process")],
-    indirect=["start_buffer"],
-)
-async def test_batch_metadata_allows_indexed_fetch_without_driver_payload_read(
-    ray_module, start_buffer, payload_kind, tmp_path
-):
+@pytest.mark.parametrize("payload_kind", ["memory", "object_store"])
+@pytest.mark.parametrize("start_buffer", ["ray_actor"], indirect=True)
+async def test_batch_metadata_supports_worker_index_fetch(ray_module, start_buffer, payload_kind, tmp_path):
+    def fetch_selected_uids(
+        buffer: ActorHandle, batch_id: int, indices: tuple[int, ...], object_store_root: str | None
+    ):
+        refs = ray.get(buffer.payload_refs.remote(batch_id, indices))
+        store = MemoryPayloads() if object_store_root is None else ObjectStorePayloads(object_store_root)
+        return [group.uid for group in asyncio.run(store.fetch(refs))]
+
     store = MemoryPayloads() if payload_kind == "memory" else ObjectStorePayloads(str(tmp_path / "rollouts"))
     payloads = _CountingPayloads(store)
     context = _context(["a", "b"], _Workers(), start_buffer, batch_size=2, max_in_flight=2, payloads=payloads)
@@ -259,7 +261,12 @@ async def test_batch_metadata_allows_indexed_fetch_without_driver_payload_read(
         assert all(group.response_tokens == SAMPLES_PER_PROMPT for group in metadata.groups)
         assert metadata.metrics["async/rejected_count"] == 0
 
-        await context.publish(2)
+        worker_uids = await ray.remote(fetch_selected_uids).remote(
+            context._buffer, metadata.batch_id, (1, 0), store.object_store_root
+        )
+        assert worker_uids == [metadata.groups[1].uid, metadata.groups[0].uid]
+        assert payloads.fetched == []
+
         second = await context.fetch_batch_slice(metadata, 1, 2, stall_timeout=STALL_TIMEOUT)
         first = await context.fetch_batch_slice(metadata, 0, 1, stall_timeout=STALL_TIMEOUT)
     finally:
@@ -504,7 +511,8 @@ async def test_writer_filters_success_ceiling_using_final_outcomes(ray_module, p
         admitted = []
         while True:
             admission = await buffer.admit.remote(STALL_TIMEOUT)
-            admitted.extend(await payloads.fetch([group.payload for group in admission.admitted]))
+            refs = await buffer.payload_refs.remote(admission.batch_id, [group.index for group in admission.admitted])
+            admitted.extend(await payloads.fetch(refs))
             if admission.selection is not None:
                 break
         assert [group.uid for group in admitted] == ["keep"]
