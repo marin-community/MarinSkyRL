@@ -1,6 +1,6 @@
-"""Expert-block weight sync on one Hopper node, for four geometries.
+"""Expert-block weight sync on one Hopper node, for Grug and Hero geometries.
 
-Each case starts a tiny Grug Megatron policy and vLLM engines, trains one PPO step, syncs with
+Each case starts a tiny Grug or Hero Megatron policy and vLLM engines, trains one PPO step, syncs with
 ``weight_sync_transport=expert_block`` and verifies the sync. It then reads engine weights back
 and compares them, byte for byte, with the trainer's exported weights. It flips one installed
 byte on one worker and checks that verification counts exactly that byte. Then it trains a
@@ -18,15 +18,18 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import shutil
 import time
 
 import pytest
 import ray
 import torch
+from safetensors.torch import load_file, save_file
 from transformers import AutoTokenizer
 
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
+from skyrl_train.models.grug_moe import GrugMoeConfig
 from skyrl_train.utils import initialize_ray
 from skyrl_train.weight_sync.expert_block.driver import ExpertBlockSync
 from tests.gpu.grug_gpu_gates import require_hoppers
@@ -49,6 +52,7 @@ from tests.gpu.test_grug_megatron import (
     _train_step,
     _write_tiny_checkpoint,
 )
+from tests.gpu.test_hero_megatron import write_tiny_hero_checkpoint
 
 # Tensors the transport slices out of fused trainer parameters (interleaved QKV, [gate;up]). The
 # trainer snapshot exports them with Megatron-Bridge, which shares no code with the transport.
@@ -67,6 +71,21 @@ SYNC_NAMES = [
     ATTN_GATE_NAME,
     GATED_NORM_NAME,
     *SLICED_NAMES,
+]
+HERO_BIAS_NAMES = [f"model.layers.{layer}.mlp.router.bias" for layer in range(4)]
+HERO_EXPERTS = {
+    "model.layers.0.mlp.experts.0.gate_proj.weight": 0,
+    "model.layers.0.mlp.experts.15.down_proj.weight": 15,
+}
+HERO_SYNC_NAMES = [
+    *HERO_BIAS_NAMES,
+    *HERO_EXPERTS,
+    LM_HEAD_NAME,
+    ROUTER_NAME,
+    "model.layers.0.mlp.latent_down_proj.weight",
+    "model.layers.0.self_attn.sconv_k.weight",
+    "model.layers.0.shared_experts.1.up_proj.weight",
+    "model.layers.0.self_attn.q_proj.weight",
 ]
 TIMEOUT_SECONDS = 180
 
@@ -128,9 +147,45 @@ def engine_client(cfg, model_path: str, geometry: Geometry) -> InferenceEngineCl
     return InferenceEngineClient(engines, tokenizer, cfg)
 
 
+def write_stacked_hero_serving_checkpoint(split_path, serving_path):
+    """Let the pinned vLLM loader start from stacked experts while the trainer keeps split experts."""
+    shutil.copytree(split_path, serving_path)
+    weights_path = serving_path / "model.safetensors"
+    weights = load_file(str(weights_path))
+    config = GrugMoeConfig.from_pretrained(split_path)
+    for layer in range(config.num_hidden_layers):
+        for projection in ("gate", "up", "down"):
+            prefix = f"model.layers.{layer}.mlp.experts"
+            weights[f"{prefix}.{projection}_proj.weight"] = torch.stack(
+                [
+                    weights.pop(f"{prefix}.{expert}.{projection}_proj.weight")
+                    for expert in range(config.num_local_experts)
+                ]
+            )
+    save_file(weights, str(weights_path), metadata={"format": "pt"})
+
+
+def remove_shortconv_from_tiny_hero_checkpoint(model_path):
+    """The pinned vLLM runtime cannot initialize ShortConv metadata for this tiny Hero model."""
+    config = GrugMoeConfig.from_pretrained(model_path)
+    GrugMoeConfig(**{**config.to_dict(), "sconv": False}).save_pretrained(model_path)
+    weights_path = model_path / "model.safetensors"
+    weights = load_file(str(weights_path))
+    weights = {name: value for name, value in weights.items() if ".sconv" not in name}
+    save_file(weights, str(weights_path), metadata={"format": "pt"})
+
+
 @pytest.mark.vllm
-@pytest.mark.parametrize("name", list(GEOMETRIES))
-def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flipped_one(tmp_path, name, monkeypatch):
+@pytest.mark.parametrize(
+    "name,hero",
+    [
+        *(pytest.param(name, False, id=name) for name in GEOMETRIES),
+        pytest.param("equal-ep", True, id="hero-split-experts"),
+    ],
+)
+def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flipped_one(
+    tmp_path, name, hero, monkeypatch
+):
     geometry = GEOMETRIES[name]
     require_hoppers(geometry.gpus)
     from skyrl_train.inference_engines.vllm import vllm_engine  # noqa: PLC0415 - vLLM is a GPU-only extra
@@ -143,7 +198,14 @@ def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flippe
     monkeypatch.setattr(vllm_engine, "AsyncVLLMRayActor", ray.remote(CorruptibleEngine))
     model_path = tmp_path / "model"
     model_path.mkdir()
-    _write_tiny_checkpoint(model_path)
+    if hero:
+        write_tiny_hero_checkpoint(model_path)
+        remove_shortconv_from_tiny_hero_checkpoint(model_path)
+        serving_path = tmp_path / "serving"
+        write_stacked_hero_serving_checkpoint(model_path, serving_path)
+    else:
+        _write_tiny_checkpoint(model_path)
+        serving_path = model_path
     cfg = _config(str(model_path), world_size=geometry.policy_gpus, pp=geometry.policy_pp, ep=geometry.policy_ep)
     cfg.generator.num_inference_engines = geometry.engines
     cfg.generator.inference_engine_data_parallel_size = geometry.engine_dp
@@ -154,15 +216,19 @@ def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flippe
     tokenizer = AutoTokenizer.from_pretrained(str(model_path))
     initialize_ray(cfg)
     try:
-        client = engine_client(cfg, str(model_path), geometry)
+        client = engine_client(cfg, str(serving_path), geometry)
         policy = _init_policy(cfg, geometry.policy_gpus)
-        names = [*PARAMETER_NAMES, *BIAS_NAMES, GATED_NORM_NAME, *SLICED_NAMES]
+        hero_sync_names = [name for name in HERO_SYNC_NAMES if ".sconv" not in name]
+        names = hero_sync_names if hero else [*PARAMETER_NAMES, *BIAS_NAMES, GATED_NORM_NAME, *SLICED_NAMES]
+        bias_names = HERO_BIAS_NAMES if hero else BIAS_NAMES
+        expert_names = HERO_EXPERTS if hero else SERVING_EXPERT_INDEX_BY_NAME
         before = rank0_validation_snapshot(policy, names)
         batch = _padded_batch(tokenizer.pad_token_id)
         batch.metadata["global_step"] = 1
         _train_step(policy, batch)
         trained = rank0_validation_snapshot(policy, names)
-        assert any(not torch.equal(trained[key], before[key]) for key in PARAMETER_NAMES)
+        changed_names = [name for name in names if name not in bias_names]
+        assert any(not torch.equal(trained[key], before[key]) for key in changed_names)
 
         sync = ExpertBlockSync(policy_model=policy, inference_engine_client=client, timeout_seconds=TIMEOUT_SECONDS)
         timings = {}
@@ -182,7 +248,7 @@ def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flippe
             await client.resume_generation()
 
         asyncio.run(prepare_and_sync(1))
-        assert_engine_weights(client, SYNC_NAMES, trained, BIAS_NAMES, SERVING_EXPERT_INDEX_BY_NAME)
+        assert_engine_weights(client, hero_sync_names if hero else SYNC_NAMES, trained, bias_names, expert_names)
 
         async def corrupt_and_verify():
             flipped = await client.engines[-1].inference_engine_actor.flip_installed_byte.remote()
@@ -200,9 +266,9 @@ def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flippe
         second.metadata["global_step"] = 2
         _train_step(policy, second)
         trained_again = rank0_validation_snapshot(policy, names)
-        assert any(not torch.equal(trained_again[key], trained[key]) for key in PARAMETER_NAMES)
+        assert any(not torch.equal(trained_again[key], trained[key]) for key in changed_names)
         asyncio.run(prepare_and_sync(2))
-        assert_engine_weights(client, SYNC_NAMES, trained_again, BIAS_NAMES, SERVING_EXPERT_INDEX_BY_NAME)
+        assert_engine_weights(client, hero_sync_names if hero else SYNC_NAMES, trained_again, bias_names, expert_names)
         asyncio.run(sync.close())
         print(
             f"EXPERT_BLOCK_VERIFY_PASS geometry={name} policy_gpus={geometry.policy_gpus} policy_pp={geometry.policy_pp} "
