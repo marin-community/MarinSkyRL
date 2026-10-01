@@ -152,6 +152,11 @@ def test_step_linears_compute_each_sequence_in_the_calls_its_vllm_step_made(monk
     assert torch.equal(step_rows_linear(x, weight, steps), x @ weight.t())
     # One call for every row, then each logged sequence's first rows in one call of its step's row count.
     assert calls == [sequence * 3, 304, sequence - 1]
+    # A step padded past the micro-batch's rows still runs at the step's row count, zero rows after the sequence's.
+    calls.clear()
+    short = x[:5, :1]
+    assert torch.equal(step_rows_linear(short, weight, [VllmStep(tokens=4, rows=8)]), short @ weight.t())
+    assert calls == [5, 8]
 
     calls.clear()
     assert torch.equal(step_lm_head_logits(x, weight, steps), x @ weight.t())
