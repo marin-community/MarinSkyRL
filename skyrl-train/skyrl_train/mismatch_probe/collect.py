@@ -739,6 +739,11 @@ class ProbeCollector:
         )
         kernels = {"launches": launched.launches, "gate_columns": list(launched.gate_columns)}
         if self.vllm_kernels is None:
+            ambiguous = {role: configs for role, configs in launched.launches.items() if len(configs) > 1}
+            if ambiguous:
+                logger.warning(
+                    f"vLLM launched vendored kernels with several configs; the trainer takes the first: {ambiguous}"
+                )
             self.vllm_kernels = kernels
         elif kernels != self.vllm_kernels:
             raise ValueError(f"the re-read engine launched other kernels in {label} than in an earlier re-read")

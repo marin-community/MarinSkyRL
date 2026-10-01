@@ -1244,10 +1244,14 @@ _KERNEL_ROLES: dict[str, tuple[str, int | None]] = {
 
 @dataclass(frozen=True)
 class EngineKernels:
-    """The vendored kernels one vLLM worker launched: each role's launch config and each decoder layer's head-gate
-    width, in layer order (empty when the worker launched no XSA kernel the trainer vendors)."""
+    """The vendored kernels one vLLM worker launched: each role's launch configs in first-launch order, and each
+    decoder layer's head-gate width in layer order (empty when the worker launched no XSA kernel the trainer vendors).
 
-    launches: dict[str, dict[str, Any]]
+    A role has more than one config when graph modules of the worker hold separate copies of its kernel and their
+    autotuners chose differently; the trainer launches the first, which cannot match the other copies' sums.
+    """
+
+    launches: dict[str, list[dict[str, Any]]]
     gate_columns: tuple[int, ...]
 
 
@@ -1260,16 +1264,15 @@ def engine_kernels(kernels: Sequence[Mapping[str, Any]], sequences: Iterable[Seq
     to layer n, and its variant gives that layer's head-gate width.
     """
     roles = [_KERNEL_ROLES.get(function_digest(kernel["source"], kernel["name"])) for kernel in kernels]
-    launches: dict[str, dict[str, Any]] = {}
+    launches: dict[str, list[dict[str, Any]]] = {}
     for kernel, match in zip(kernels, roles, strict=True):
         if match is None:
             continue
-        role = match[0]
-        if len(kernel["launches"]) != 1:
-            raise ValueError(f"vLLM's {role} kernel holds {len(kernel['launches'])} launch configs after launching")
-        record = Launch.from_record(kernel["launches"][0]).record()
-        if launches.setdefault(role, record) != record:
-            raise ValueError(f"vLLM launched the {role} kernel with two configs")
+        configs = launches.setdefault(match[0], [])
+        for launch in kernel["launches"]:
+            record = Launch.from_record(launch).record()
+            if record not in configs:
+                configs.append(record)
     gate_columns = None
     for sequence in sequences:
         columns = tuple(
@@ -1294,12 +1297,13 @@ class KernelConfigs:
 
     @classmethod
     def from_engine(cls, record: Mapping[str, Any]) -> "KernelConfigs":
-        """The defaults, with an engine's launch configs and gate widths (``EngineKernels`` as a dict) in their place."""
+        """The defaults, with an engine's first launch config of each role and its gate widths (``EngineKernels`` as a
+        dict) in their place."""
         unknown = set(record["launches"]) - set(DEFAULT_LAUNCHES)
         if unknown:
             raise ValueError(f"launch configs for unknown vLLM kernels: {sorted(unknown)}")
         launches = dict(DEFAULT_LAUNCHES)
-        launches.update({role: Launch.from_record(launch) for role, launch in record["launches"].items()})
+        launches.update({role: Launch.from_record(configs[0]) for role, configs in record["launches"].items()})
         return cls(tuple(launches.items()), tuple(record["gate_columns"]))
 
 

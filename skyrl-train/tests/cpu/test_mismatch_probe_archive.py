@@ -383,8 +383,8 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
     xsa = {"kwargs": {"R0_BLOCK": 128, "XBLOCK": 2}, "num_warps": 2, "num_stages": 1}
     chosen = {
         "launches": {
-            "rms_norm": {"kwargs": {"R0_BLOCK": 2048, "XBLOCK": 1}, "num_warps": 16, "num_stages": 1},
-            "xsa_gate": xsa,
+            "rms_norm": [{"kwargs": {"R0_BLOCK": 2048, "XBLOCK": 1}, "num_warps": 16, "num_stages": 1}],
+            "xsa_gate": [xsa],
         },
         "gate_columns": [20],
     }
@@ -418,7 +418,9 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
     assert trainer.policy_model.dp_ranks_by_mode["reread_replay"].tolist() == [0, 0, 0, 0]
     assert trainer.policy_model.steps_by_mode[step_mode] == [(5, 8), (4, 8), (6, 8), (0, 0)]
     assert trainer.policy_model.kernels_by_mode[step_mode] == chosen
-    assert trainer.policy_model.kernels_by_mode["router_replay"]["launches"]["rms_norm"]["kwargs"]["R0_BLOCK"] == 4096
+    assert (
+        trainer.policy_model.kernels_by_mode["router_replay"]["launches"]["rms_norm"][0]["kwargs"]["R0_BLOCK"] == 4096
+    )
     timing = json.loads(read_frozen_probe(cfg.trainer.mismatch_probe.archive_uri).manifest.timing_json)
     # The slowest data-parallel rank sets each repetition's pass time.
     assert timing["training_pass@0:reread_replay/seconds"] == [1.5] * TIMING_REPETITIONS

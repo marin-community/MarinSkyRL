@@ -12,6 +12,7 @@ from skyrl_train.models.grug_inductor_kernels import (
 )
 
 NORM_2048 = {"kwargs": {"XBLOCK": 1, "R0_BLOCK": 2048}, "num_warps": 16, "num_stages": 1}
+NORM_4096 = {"kwargs": {"XBLOCK": 1, "R0_BLOCK": 4096}, "num_warps": 16, "num_stages": 1}
 XSA = {"kwargs": {"XBLOCK": 2, "R0_BLOCK": 128}, "num_warps": 2, "num_stages": 1}
 
 
@@ -32,7 +33,8 @@ def test_engine_kernels_identify_renumbered_kernels_and_each_layers_head_gate_wi
         _launched("xsa_gate", "triton_red_fused_xsa_1", [XSA]),
         _launched("rms_norm", "triton_red_fused_rms_norm_2", [NORM_2048]),
         _launched("xsa_gate", "triton_red_fused_xsa_0", [XSA], UNPADDED_GATE),
-        _launched("rms_norm", "triton_red_fused_rms_norm_1", [NORM_2048]),
+        # The second graph's copy of the norm kernel autotuned on its own and chose another block.
+        _launched("rms_norm", "triton_red_fused_rms_norm_1", [NORM_4096]),
         # A kernel the trainer does not vendor.
         {
             "name": "triton_poi_fused_mm_t_0",
@@ -45,7 +47,8 @@ def test_engine_kernels_identify_renumbered_kernels_and_each_layers_head_gate_wi
     launched = engine_kernels(kernels, [sequence, sequence])
 
     assert launched.gate_columns == (24, 24, 20)
-    assert launched.launches == {"xsa_gate": XSA, "rms_norm": NORM_2048}
+    assert launched.launches == {"xsa_gate": [XSA], "rms_norm": [NORM_2048, NORM_4096]}
+    # The trainer launches each role's first config.
     configs = KernelConfigs.from_engine({"launches": launched.launches, "gate_columns": launched.gate_columns})
     assert configs.launch("rms_norm") == Launch((("R0_BLOCK", 2048), ("XBLOCK", 1)), 16, 1)
     # Kernels the worker did not launch keep the trainer's defaults.
