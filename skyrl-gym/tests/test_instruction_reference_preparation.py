@@ -136,10 +136,10 @@ def test_failed_runtime_does_not_commit_partially_consumed_rng():
 def test_malformed_scored_child_result_does_not_commit_rng(monkeypatch, missing_or_inconsistent):
     import verifyit.bounded
 
-    real_run = verifyit.bounded.call_bounded
+    real_call_bounded = verifyit.bounded.call_bounded
 
     def missing_feedback(*args, **kwargs):
-        verdict = real_run(*args, **kwargs)
+        verdict = real_call_bounded(*args, **kwargs)
         detail = dict(verdict["detail"])
         assert "random_state" in detail
         if missing_or_inconsistent == "source_feedback":
