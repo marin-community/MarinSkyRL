@@ -67,10 +67,9 @@ def test_training_extras_publish_hardware_policy_and_rollout_requirements(built_
     assert any(requirement.startswith("torch==") and "extra == 'cpu'" in requirement for requirement in requirements)
     assert any(requirement.startswith("torch==") and "extra == 'cuda'" in requirement for requirement in requirements)
     assert any(requirement.startswith("vllm==") and "extra == 'vllm'" in requirement for requirement in requirements)
-    assert any(
-        requirement.startswith("harbor[analysis,datasets,daytona]") and "extra == 'vllm'" in requirement
-        for requirement in requirements
-    )
+    rollout_requirements = {Requirement(value).name: Requirement(value) for value in requirements if "extra ==" not in value}
+    assert "taskcompendium" in rollout_requirements
+    assert {"daytona", "shellsim"} <= rollout_requirements["marin-shellbox"].extras
     assert any(requirement.startswith("torch==") and "extra == 'vllm'" in requirement for requirement in requirements)
     assert any(requirement.startswith("memray") and "extra == 'telemetry'" in requirement for requirement in requirements)
     assert any(

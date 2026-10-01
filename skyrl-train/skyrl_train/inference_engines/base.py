@@ -6,6 +6,7 @@ import numpy as np
 MessageType = Dict[str, str]
 ConversationType = List[MessageType]
 OnlineEagleResult = Dict[str, Any] | List[Dict[str, Any]]
+SESSION_ID_HEADER = "x-skyrl-session-id"
 
 
 class PromptSamplingOverride(TypedDict, total=False):
@@ -33,6 +34,7 @@ class InferenceEngineInput(TypedDict):
     chat_continuations: NotRequired[List[ChatContinuation | None]]
     # The request window, including the backend-rendered prompt and new tokens.
     max_context_length: NotRequired[int]
+    max_prompt_length: NotRequired[int | None]
 
 
 class InferenceEngineOutput(TypedDict):

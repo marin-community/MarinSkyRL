@@ -95,7 +95,7 @@ For detailed installation instructions, as well as more examples, please refer t
 
 To implement a new task or environment using the SkyRL-Gym interface, please see our [Walkthrough Docs](https://skyrl.readthedocs.io/en/latest/tutorials/new_env.html).
 
-If you already have a task or agent harness, implement the [`TrajectoryRunner`](skyrl_train/trajectory_runners/base.py) contract and its `run()` lifecycle. [`SkyRLGymTrajectoryRunner`](skyrl_train/trajectory_runners/skyrl_gym.py) shows how a runner composes model transport, environment interaction, and projection into trainer-ready trajectories.
+Represent executable tasks with TaskCompendium's `TaskSpec`. Marin defines the shared `RolloutEngine` and its Shellbox implementation. SkyRL's [`TaskRolloutWorker`](skyrl_train/rollouts/task_worker.py) supplies inference, converts rollout records to training batches, and writes completed groups to the buffer. A task session supplies environment operations and grading without another inference loop. See the [rollout guide](docs/tutorials/skyrl_gym_runner.rst).
 
 ## Reproducing SkyRL-SQL
 We also test SkyRL by reproducing our prior release [SkyRL-SQL](https://novasky-ai.notion.site/skyrl-sql), which enabled efficient Multi-Turn RL for Text2SQL. 

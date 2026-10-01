@@ -160,6 +160,7 @@ async def test_direct_model_client_uses_vllm_chat_rendering_for_row_request_opti
         "model": "snowball",
         "messages": [{"role": "user", "content": "look it up"}],
         "session_id": "trajectory-2",
+        "_skyrl_exact_prompt_token_ids": [11, 12, 13],
         "temperature": 0.7,
         "tools": expected_tools,
         "parallel_tool_calls": False,
@@ -490,6 +491,7 @@ async def test_chat_output_budget_fits_the_exact_backend_rendered_prompt():
     )
     assert result["responses"] == ["7"]
     assert result["prompt_ids"] == [[1, 2, 3, 4]]
+    assert result["generation_token_budgets"] == [1]
 
 
 @pytest.mark.asyncio

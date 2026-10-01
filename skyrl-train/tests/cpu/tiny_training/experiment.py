@@ -21,11 +21,10 @@ from pathlib import Path
 import ray
 from omegaconf import DictConfig, OmegaConf
 from skyrl_train.config.trajectory_runner_capabilities import (
-    TrajectoryRunnerMode,
     validate_trajectory_runner_capabilities,
 )
 from skyrl_train.config.utils import get_default_config
-from skyrl_train.dataset import PromptDataset
+from skyrl_train.dataset.tasks import GymTaskDataset
 from skyrl_train.entrypoints.main_base import BasePPOExp, EntrypointOperation
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import RayWrappedInferenceEngine
@@ -177,8 +176,10 @@ class TinyTrainingExp(BasePPOExp):
 
     def get_train_dataset(self):
         # Filtering a few dozen prompts in one process beats spawning preprocessing workers.
-        return PromptDataset(
+        return GymTaskDataset(
             datasets=self.cfg.data.train_data,
+            environment_configs=OmegaConf.to_container(self.cfg.environment.skyrl_gym, resolve=True),
+            cache_dir=Path(self.cfg.trainer.export_path) / "tasks",
             tokenizer=self.tokenizer,
             max_prompt_length=self.cfg.trainer.max_prompt_length,
             num_workers=1,
@@ -187,8 +188,10 @@ class TinyTrainingExp(BasePPOExp):
     def get_eval_dataset(self):
         if self.cfg.trainer.eval_interval <= 0 or not self.cfg.data.val_data:
             return None
-        return PromptDataset(
+        return GymTaskDataset(
             datasets=self.cfg.data.val_data,
+            environment_configs=OmegaConf.to_container(self.cfg.environment.skyrl_gym, resolve=True),
+            cache_dir=Path(self.cfg.trainer.export_path) / "eval_tasks",
             tokenizer=self.tokenizer,
             max_prompt_length=self.cfg.trainer.max_prompt_length,
             num_workers=1,
@@ -220,7 +223,7 @@ class TinyTrainingExp(BasePPOExp):
 def run_tiny_training(cfg: DictConfig) -> None:
     """Validate the config as the production driver does, then run in a fresh local Ray session."""
     validate_cfg(cfg)
-    validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.SKYRL_GYM, EntrypointOperation.TRAIN)
+    validate_trajectory_runner_capabilities(cfg, EntrypointOperation.TRAIN)
     ray.init(
         num_cpus=LOGICAL_CPUS,
         num_gpus=LOGICAL_GPUS,

@@ -33,6 +33,7 @@ dependencies = [
     "marin-iris",
     "marin-iris-native",
     "marin-rigging[secrets]>=0.2.123.dev35633925924",
+    "marin-shellbox[daytona,shellsim]",
     "ninja",
     "nvidia-ml-py",
     "omegaconf",
@@ -49,6 +50,7 @@ dependencies = [
     "s3fs",
     "smart_open",
     "tensorboard",
+    "taskcompendium",
     "tqdm>=4.66",
     "tokenizers==0.23.1",
     "transformers==5.16.1",
@@ -85,7 +87,6 @@ vllm = [
     "accelerate>=1.14,<2 ; sys_platform == 'linux'",
     "flashinfer-cubin==0.6.18.post1 ; sys_platform == 'linux'",
     "flashinfer-python==0.6.18.post1 ; sys_platform == 'linux'",
-    "harbor[analysis,datasets,daytona] ; sys_platform == 'linux'",
     "harbor-config ; sys_platform == 'linux'",
     "peft>=0.19 ; sys_platform == 'linux'",
     "quack-kernels==0.6.4 ; sys_platform == 'linux'",
@@ -156,11 +157,11 @@ dev = [
 ]
 harbor-test = ["harbor; sys_platform == 'linux'"]
 
+[tool.hatch.build.targets.wheel]
+packages = ["marinskyrl", "cloud", "skyrl-gym/skyrl_gym", "skyrl-train/skyrl_train"]
+
 [tool.hatch.build.targets.wheel.force-include]
 "chat_templates" = "chat_templates"
-"cloud/iris" = "cloud/iris"
-"skyrl-gym/skyrl_gym" = "skyrl_gym"
-"skyrl-train/skyrl_train" = "skyrl_train"
 
 [tool.uv]
 package = true
@@ -205,6 +206,9 @@ transformer-engine = [{ requirement = "torch", match-runtime = true }, "build_to
 transformer-engine-torch = [{ requirement = "torch", match-runtime = true }, "build_tools", "ninja"]
 
 [tool.uv.sources]
+taskcompendium = { git = "https://github.com/marin-community/marin.git", rev = "3383019eb37c85c50a90ec2a2745bf912c4a849e", subdirectory = "lib/taskcompendium" }
+marin-shellbox = { git = "https://github.com/marin-community/marin.git", rev = "3383019eb37c85c50a90ec2a2745bf912c4a849e", subdirectory = "lib/shellbox" }
+tasktrove-verify = { git = "https://github.com/marin-community/marin.git", rev = "3383019eb37c85c50a90ec2a2745bf912c4a849e", subdirectory = "lib/tasktrove-verify" }
 langdetect = { url = "https://huggingface.co/datasets/open-athena/marinskyrl-gpu-wheelhouse/resolve/d761f1e357b6d5a9b80427f4710eb2e04adf1101/linux-x86_64/cp312/20260915-tinker-aime/langdetect-1.0.9-py3-none-any.whl" }
 pycosat = { url = "https://huggingface.co/datasets/open-athena/marinskyrl-gpu-wheelhouse/resolve/d761f1e357b6d5a9b80427f4710eb2e04adf1101/linux-x86_64/cp312/20260915-tinker-aime/pycosat-0.6.6-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" }
 torchaudio = { index = "pytorch-cpu", marker = "sys_platform == 'linux'" }
@@ -276,7 +280,6 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "skyrl-train/tests/cpu/models/test_models.py" = ["E402"]
 "skyrl-train/tests/cpu/test_ray_metrics.py" = ["E402"]
-"skyrl-train/skyrl_train/trajectory_runners/harbor/_harbor_compat.py" = ["F401"]
 
 [tool.pytest.ini_options]
 addopts = "-v -s"

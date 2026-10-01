@@ -40,7 +40,6 @@ from skyrl_train.trajectory_runners.trajectory_reward_shaping import (
 )
 from skyrl_train.metric_names import ROLLOUT_FAILURE_FRACTION_METRIC
 from skyrl_train.inference_engines.base import ConversationType
-from omegaconf import DictConfig
 from loguru import logger
 from skyrl_gym.metrics import aggregate_for_environment
 from skyrl_gym.verification import VerificationResult, VerificationStatus, normalized_verifier_score
@@ -412,102 +411,6 @@ def _apply_alignment_validity(
     """Exclude an invalid behavior-logprob span from behavior-referenced training."""
     if rollout_logprobs_required and not alignment_valid:
         loss_mask[span_start : span_start + span_length] = [0] * span_length
-
-
-CUSTOM_CHAT_TEMPLATES = {
-    # chat template for qwen3 that preserves thinking tokens
-    "qwen3_with_thinking": (
-        "{% for message in messages %}"
-        "{% if (message['role'] != 'assistant') %}"
-        "{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}"
-        "{% elif (message['role'] == 'assistant')%}"
-        "{{'<|im_start|>' + message['role'] + '\n'}}"
-        "{% generation %}"
-        "{{message['content'] + '<|im_end|>'}}"
-        "{% endgeneration %}"
-        "{{'\n'}}"
-        "{% endif %}"
-        "{% endfor %}"
-    ),
-    # chat template for qwen3 that strips non-last-turn thinking tokens (same as the official Qwen3 chat
-    # template but we add `generation` and `endgeneration` tags)
-    "qwen3_without_thinking": (
-        "{% for message in messages %}"
-        "{% if (message['role'] != 'assistant') %}"
-        "{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}"
-        "{% elif (message['role'] == 'assistant')%}"
-        "{{'<|im_start|>' + message['role'] + '\n'}}"
-        "{% generation %}"
-        "{% set full_content = message['content'] %}"
-        "{% set mycontent = message['content'] %}"
-        "{% set is_last_message = loop.last and messages[-1]['role'] == 'assistant' %}"
-        "{% if '</think>' in full_content and not is_last_message %}"
-        "{% set mycontent = full_content.split('</think>')[-1].lstrip('\n') %}"
-        "{% endif %}"
-        "{{mycontent + '<|im_end|>'}}"
-        "{% endgeneration %}"
-        "{{'\n'}}"
-        "{% endif %}"
-        "{% endfor %}"
-    ),
-    # Qwen2.5 chat template but with `generation` and `endgeneration` tags, and simplified
-    "qwen2_5_with_generation_tag_simplified": (
-        "{% for message in messages %}"
-        "{% if (message.role == 'user') or (message.role == 'system' and not loop.first) %}"
-        "{{ '<|im_start|>' + message.role + '\n' + message.content + '<|im_end|>' + '\n' }}"
-        "{% elif message.role == 'assistant' %}"
-        "{{ '<|im_start|>' + message.role + '\n'}}"
-        "{% generation %}"
-        "{{ message.content + '<|im_end|>'}}"
-        "{% endgeneration %}"
-        "{{ '\n' }}"
-        "{% endif %}"
-        "{% endfor %}"
-        "{% if add_generation_prompt %}"
-        "{{ '<|im_start|>assistant\n' }}"
-        "{% endif %}"
-    ),
-}
-
-
-def get_custom_chat_template(chat_template_config: Optional[Union[dict, DictConfig]] = None) -> Optional[str]:
-    """
-    Get custom chat template based on the new config structure.
-
-    Args:
-        chat_template_config: Config dict with 'source' and 'name_or_path' fields.
-
-    Returns:
-        Chat template string or None
-    """
-    if chat_template_config is None:
-        return None
-
-    source = chat_template_config.get("source")
-    if not source:
-        raise ValueError("'source' is required in chat_template_config")
-
-    name_or_path = chat_template_config.get("name_or_path")
-    if not name_or_path:
-        return None  # if name_or_path is not provided, use the default chat template from the tokenizer
-
-    if source == "name":
-        if name_or_path in CUSTOM_CHAT_TEMPLATES:
-            return CUSTOM_CHAT_TEMPLATES[name_or_path]
-        else:
-            raise ValueError(
-                f"Template name '{name_or_path}' not found. Available templates: {list(CUSTOM_CHAT_TEMPLATES.keys())}"
-            )
-    elif source == "file":
-        try:
-            with open(name_or_path, "r", encoding="utf-8") as f:
-                return f.read()
-        except FileNotFoundError as e:
-            raise ValueError(f"Template file '{name_or_path}' not found") from e
-        except OSError as e:
-            raise ValueError(f"Error reading template file '{name_or_path}': {e}") from e
-    else:
-        raise ValueError(f"Invalid source '{source}'. Must be 'name' or 'file'")
 
 
 def normalize_token_ids(encoded) -> List[int]:

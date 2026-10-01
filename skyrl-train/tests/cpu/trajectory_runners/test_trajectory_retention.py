@@ -251,7 +251,7 @@ def _records(output_path: Path) -> list[dict]:
 def _sink(config, publisher=None) -> TrajectorySink:
     """Build a bound sink that stores in-process; only the process-boundary tests pay for a storage process."""
     sink = TrajectorySink(config, _Tokenizer(), publisher=publisher or InlineTrajectoryPublisher(execute_publication))
-    sink.bind_runner("SkyRLGymTrajectoryRunner")
+    sink.bind_runner("TaskRolloutWorker")
     return sink
 
 
@@ -261,7 +261,7 @@ def test_normalized_output_produces_complete_core_trace_schema():
         _output(),
         _config(Path("/unused")),
         _Tokenizer(),
-        runner_name="SkyRLGymTrajectoryRunner",
+        runner_name="TaskRolloutWorker",
     )
     record = records[0].to_json()
 
@@ -287,7 +287,7 @@ def test_normalized_output_produces_complete_core_trace_schema():
     assert record["verifier"] is None
     assert record["schema_version"] == 5
     assert record["disposition"] == {"exception_type": None, "error_treatment": None, "server_error": None}
-    assert record["provenance"]["runner"] == "SkyRLGymTrajectoryRunner"
+    assert record["provenance"]["runner"] == "TaskRolloutWorker"
 
 
 def test_server_error_identity_is_retained_with_the_masked_row():
@@ -298,7 +298,7 @@ def test_server_error_identity_is_retained_with_the_masked_row():
         None,
     ]
     records = build_trajectory_records(
-        _input(), output, _config(Path("/unused")), _Tokenizer(), runner_name="SkyRLGymTrajectoryRunner"
+        _input(), output, _config(Path("/unused")), _Tokenizer(), runner_name="TaskRolloutWorker"
     )
 
     assert records[1].to_json()["disposition"]["server_error"] == {
@@ -426,7 +426,7 @@ def test_step_wise_rows_form_one_replayable_trajectory_with_explicit_boundaries(
         output,
         _config(Path("/unused")),
         _Tokenizer(),
-        runner_name="SkyRLGymTrajectoryRunner",
+        runner_name="TaskRolloutWorker",
     )[0].to_json()
 
     assert record["response"]["token_ids"] == [10, 20, 21]
@@ -469,7 +469,7 @@ def test_step_wise_retention_aggregates_final_row_overlong_penalty():
         output,
         _config(Path("/unused")),
         _Tokenizer(),
-        runner_name="SkyRLGymTrajectoryRunner",
+        runner_name="TaskRolloutWorker",
     )[0].to_json()
 
     assert record["reward"] == {
@@ -660,11 +660,11 @@ def test_record_contains_replay_provenance_and_trainable_boundaries():
         _output(),
         _config(Path("/unused")),
         _Tokenizer(),
-        runner_name="SkyRLGymTrajectoryRunner",
+        runner_name="TaskRolloutWorker",
     )[0].to_json()
 
     assert record["provenance"] == {
-        "runner": "SkyRLGymTrajectoryRunner",
+        "runner": "TaskRolloutWorker",
         "inference_backend": "vllm",
         "model_path": "org/model",
         "model_source_identity": "sha256:model",
@@ -832,7 +832,7 @@ def test_retained_record_preserves_calls_observations_and_verifier_diagnostics()
     output["evidence_messages"] = [messages, [], []]
     output["verification_results"] = [verdict, None, None]
     record = build_trajectory_records(
-        _input(), output, _config(Path("/unused")), _Tokenizer(), runner_name="SkyRLGymTrajectoryRunner"
+        _input(), output, _config(Path("/unused")), _Tokenizer(), runner_name="TaskRolloutWorker"
     )[0].to_json()
     assert record["response"]["messages"] == messages
     assert record["verification_result"] == asdict(verdict)

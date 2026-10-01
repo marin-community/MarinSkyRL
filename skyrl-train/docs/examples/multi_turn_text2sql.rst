@@ -140,7 +140,7 @@ Now that we have our dataset and database files, let's walk through the some of 
 
 - All we have to do to enable multi-turn training is to set ``generator.max_turns`` to the maximum number of turns we want the agent to take.
 
-- Chat templating and loss masking for multi-turn conversations are handled by the ``SkyRLGymTrajectoryRunner`` class.
+- ``TaskRolloutWorker`` uses the backend chat template and the canonical engine's token masks for multi-turn conversations.
 
   - In the above example, we set ``use_conversation_multi_turn=false`` to enforce that the multi-turn conversation is formatted as a single assistant response.
   - We also set ``stop='["</sql>", "</solution>"]'`` for both ``sampling_params`` and ``eval_sampling_params`` as a part

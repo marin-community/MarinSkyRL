@@ -202,11 +202,11 @@ def dispatch_wait(name: str, *, step: int, mode: str, enabled: bool) -> Iterator
 
 
 async def run_environment(executor: Executor | None, func: Callable, *args, **kwargs):
-    """Run ``func`` on ``executor``, or inline without one, recording queue, execution and resume delays."""
+    """Run an environment operation in a thread and record queue, execution, and resume delays."""
     observation = _CURRENT.get()
     call = partial(func, *args, **kwargs)
     if observation is None:
-        return call() if executor is None else await asyncio.get_running_loop().run_in_executor(executor, call)
+        return await asyncio.get_running_loop().run_in_executor(executor, call)
     clock = observation.phases.clock
     submitted = clock()
     stamps: list[float] = []
@@ -220,7 +220,7 @@ async def run_environment(executor: Executor | None, func: Callable, *args, **kw
 
     try:
         with rollout_wait("env_await"):
-            return invoke() if executor is None else await asyncio.get_running_loop().run_in_executor(executor, invoke)
+            return await asyncio.get_running_loop().run_in_executor(executor, invoke)
     finally:
         # A cancelled call can leave its thread running; that thread must not add to a published call.
         if len(stamps) == 2:

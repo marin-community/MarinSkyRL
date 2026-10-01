@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import base64
 import contextlib
-import datetime
 import hashlib
 import json
 import os
@@ -38,12 +37,6 @@ from omegaconf import DictConfig, OmegaConf
 from cloud.iris.launch_config import SubmissionMode, load_launch_config
 from cloud.iris.launch import LaunchOutcome
 from cloud.iris.export_hf_checkpoint import export_terminal_policy
-from cloud.iris.ingress_utils import (
-    PARENT_CONTROLLER_CONFIG_ENV,
-    PARENT_CONTROLLER_CONFIG_YAML_ENV,
-    PARENT_CREDENTIALS_JSON_ENV,
-    PARENT_IAP_TOKEN_ENV,
-)
 from cloud.iris.ray_storage import (
     RaySpillBackend,
     resolve_ray_spill_target,
@@ -81,15 +74,6 @@ DAYTONA_RL_SECRET_NAME = "DAYTONA_RL_API_KEY"
 DAYTONA_RL_SECRET_VERSION = "1"
 
 
-# The RL Daytona org enforces a 40-snapshot quota. Harbor mints one "harbor__*" env
-# snapshot per trial (auto_snapshot=true); once the org is over quota, snapshot creation
-# fails and harbor's fallthrough attempts a declarative sandbox build, which this org
-# forbids, so every trial then dies unscored with DaytonaValidationError and the job trains
-# on all-zero rewards. Purging harbor-minted snapshots idle past this age before every
-# launch keeps quota headroom so harbor's worker-side minting can self-heal.
-DAYTONA_RL_SNAPSHOT_QUOTA = 40
-HARBOR_SNAPSHOT_NAME_PREFIX = "harbor__"
-STALE_SNAPSHOT_MAX_AGE = datetime.timedelta(hours=2)
 AUTOMATIC_RESOURCE_REQUEST = "auto"
 MEMORY_RESOURCE = "memory"
 DISK_RESOURCE = "ephemeral-storage"
@@ -274,7 +258,6 @@ def _iris_submission_state(config_path: Path, config: DictConfig) -> SimpleNames
     ray = raw["ray"]
     artifacts = raw["artifacts"]
     inputs = raw["inputs"]
-    ingress = raw["ingress"]
     skyrl = raw["skyrl"]
     model = inputs["model"]
     model_path = _model_path(model["uri"])
@@ -314,8 +297,6 @@ def _iris_submission_state(config_path: Path, config: DictConfig) -> SimpleNames
         timeout=int(iris["timeout"]),
         no_wait=submission == SubmissionMode.DETACH,
         dry_run=submission == SubmissionMode.PREPARE,
-        ingress_mode=ingress["mode"],
-        ingress_host=ingress["host"] or None,
         target_cluster=iris["target_cluster"],
         parent_cluster_config=iris["parent_cluster_config"],
         wandb_entity=iris["wandb_entity"],
@@ -330,7 +311,6 @@ def _iris_submission_state(config_path: Path, config: DictConfig) -> SimpleNames
         ray_log_root=ray["log_dir"],
         resume_checkpoint_count=args.resume_checkpoints_to_keep,
     )
-    validate_controller_ingress_reachability(args)
     return args
 
 
@@ -575,9 +555,6 @@ class BundledLaunchConfig:
         return {RL_CONFIG_PAYLOAD_ENV: self.payload}
 
 
-MARIN_LOGIN_RECORD_PATH = Path.home() / ".config" / "marin" / "credentials" / "marin.json"
-
-
 def _resolve_parent_cluster_config(cluster_config: Optional[str]) -> Optional[str]:
     """Path to the PARENT (marin) cluster YAML for federated submission.
 
@@ -663,267 +640,18 @@ def _resolve_daytona_rl_api_key() -> str:
     )
 
 
-def _daytona_client(api_key: str) -> Any:
-    """Construct a Daytona SDK client for the RL org.
-
-    The daytona SDK is an optional launch-host dependency, so it is imported lazily here
-    rather than at module scope.
-    """
-    from daytona import Daytona, DaytonaConfig
-
-    return Daytona(DaytonaConfig(api_key=api_key))
-
-
-def _purge_stale_daytona_snapshots(api_key: str) -> None:
-    """Delete stale harbor-minted Daytona snapshots on the RL org before a launch.
-
-    A snapshot is a purge candidate iff its name starts with ``HARBOR_SNAPSHOT_NAME_PREFIX``
-    and it has been idle (no use since ``last_used_at``, or since ``created_at`` if never
-    used) for longer than ``STALE_SNAPSHOT_MAX_AGE``. Non-harbor (system) snapshots are
-    never touched. See ``DAYTONA_RL_SNAPSHOT_QUOTA`` above for why this runs before every
-    launch.
-    """
-    try:
-        d = _daytona_client(api_key)
-    except ImportError:
-        # The daytona SDK is Linux-only (sys_platform == 'linux' in pyproject.toml).
-        # On a macOS launch host it is absent; skip the purge rather than crashing.
-        print(
-            "[rl-iris] Daytona snapshot purge skipped: daytona SDK is not installed "
-            "on this platform (expected on macOS launch hosts).",
-            flush=True,
-        )
-        return
-    now = datetime.datetime.now(datetime.timezone.utc)
-    total = 0
-    harbor_count = 0
-    purged_count = 0
-    page = 1
-    while True:
-        result = d.snapshot.list(page=page, limit=100)
-        total = result.total
-        for snapshot in result.items:
-            if not snapshot.name.startswith(HARBOR_SNAPSHOT_NAME_PREFIX):
-                continue
-            harbor_count += 1
-            last_active = snapshot.last_used_at or snapshot.created_at
-            if now - last_active > STALE_SNAPSHOT_MAX_AGE:
-                d.snapshot.delete(snapshot)
-                purged_count += 1
-        if page >= result.total_pages or not result.items:
-            break
-        page += 1
-    kept_count = harbor_count - purged_count
-    print(
-        f"[rl-iris] Daytona snapshot purge: total={total} harbor={harbor_count} "
-        f"purged={purged_count} kept={kept_count}",
-        flush=True,
-    )
-
-
 def _effective_gdn_backend(args: SimpleNamespace) -> str:
     return str(args.config.skyrl.get("generator", {}).get("gdn_backend", "torch")).lower()
 
 
-def _cluster_dashboard_host(cluster_config_path: Optional[str]) -> Optional[str]:
-    """Bare host of a cluster config's ``dashboard_url`` — the public host of the
-    controller that OWNS endpoints registered on that cluster. None if unreadable."""
-    if not cluster_config_path:
-        return None
-    try:
-        import yaml
-        from urllib.parse import urlparse
-
-        with open(cluster_config_path) as f:
-            raw = yaml.safe_load(f) or {}
-        url = raw.get("dashboard_url")
-        return urlparse(url).hostname if url else None
-    except Exception:  # noqa: BLE001
-        return None
-
-
 def _rl_config_uses_daytona(config: DictConfig) -> bool:
-    """Return whether the resolved launch runs Harbor trials in Daytona sandboxes.
-
-    The Harbor entrypoints always do. Other entrypoints do when ``data.terminal_bench_data``
-    routes rows to Harbor, as Nemotron Ultra routing does for its SWE rows.
-    """
-    if str(config.runtime.entrypoint) in {
+    """Return whether the configured task backend requires Daytona credentials."""
+    uses_harbor = str(config.runtime.entrypoint) in {
         RL_ENTRYPOINTS[RLEntrypoint.TERMINAL_BENCH],
         RL_ENTRYPOINTS[RLEntrypoint.TERMINAL_BENCH_GENERATE],
-    }:
-        return True
-    return bool(config.skyrl.get("data", {}).get("terminal_bench_data"))
-
-
-def validate_controller_ingress_reachability(args: SimpleNamespace) -> None:
-    """Reject controller ingress that a Daytona sandbox cannot reach.
-
-    opencode runs in a Daytona sandbox and reaches the co-located vLLM over the public
-    internet at ``https://<ingress_host>/proxy/t/<token>/<endpoint>/v1``. The endpoint
-    is REGISTERED on the controller of the cluster the job runs on and the token is
-    minted with that controller's key, so the capability URL only resolves when
-    ``<ingress_host>`` is a controller that can BOTH route to the endpoint AND be
-    reached from Daytona:
-
-      * A **directly-submitted CoreWeave** job cannot: the peer controller's own host
-        (``dashboard_url``, e.g. ``iris-cw-us-east-02a.oa.dev``) is IP-locked to the
-        marin egress; and iris.oa.dev (marin) only FEDERATES ``/proxy`` to a CoreWeave
-        endpoint for a job it DELEGATED. A direct submit → iris.oa.dev has no route →
-        404 → opencode never reaches vLLM → RecordProxy captures 0 traffic, the job
-        burns an H100 node making 0 trials.
-      * The **federated** path fixes it: Marin delegates
-        the job to the peer child, so ``has_received_job_from_peer`` passes and marin
-        federation-proxies ``/proxy``. The endpoint is registered on the peer AND
-        MIRRORED onto marin by FederationSync; the capability token is minted at the
-        PARENT (iris.oa.dev) for the mirrored endpoint. So controller-ingress on
-        CoreWeave is ALLOWED iff ``--target-cluster`` is set and ``--ingress-host`` is
-        the marin host.
-
-    Escape hatch (once a further remediation is wired): ``OTAGENT_ALLOW_INGRESS_HOST_MISMATCH=1``.
-    """
-    if getattr(args, "ingress_mode", "direct") != "controller":
-        return
-    if os.environ.get("OTAGENT_ALLOW_INGRESS_HOST_MISMATCH") == "1":
-        print(
-            "[rl-iris] WARNING: OTAGENT_ALLOW_INGRESS_HOST_MISMATCH=1 — skipping the "
-            "controller-ingress reachability guard.",
-            flush=True,
-        )
-        return
-
-    cluster = str(getattr(args, "cluster", "") or "")
-    ingress_host = str(getattr(args, "ingress_host", "") or "")
-    target_cluster = str(getattr(args, "target_cluster", "") or "")
-    dash_host = _cluster_dashboard_host(getattr(args, "cluster_config", None))
-    is_coreweave = cluster.startswith("cw-") or (dash_host or "") not in ("", "iris.oa.dev")
-
-    if is_coreweave:
-        # The ONLY reachable CoreWeave topology: federated submission through marin.
-        if not target_cluster:
-            raise SystemExit(
-                "[rl-iris] BLOCKED: --ingress-mode controller on a directly-submitted "
-                f"CoreWeave job (--cluster={cluster or '?'}, controller host="
-                f"{dash_host or '?'}) is NOT reachable from a Daytona sandbox.\n"
-                "  The capability URL would 404: iris.oa.dev only federates /proxy for a "
-                "job it DELEGATED, and the CoreWeave controller's own host is IP-locked. "
-                "opencode would never reach vLLM (0 trials, RecordProxy captures nothing) "
-                "— the 2026-07-16 Exp2 blocker.\n"
-                "  Fix: pass --target-cluster " + (cluster or "<peer>") + " to federate "
-                "the job through the marin meta-scheduler (keep --ingress-host iris.oa.dev), "
-                "so marin delegates it to the peer and federation-proxies /proxy.\n"
-                "  Override (only once another remediation is wired): "
-                "OTAGENT_ALLOW_INGRESS_HOST_MISMATCH=1."
-            )
-        if ingress_host and ingress_host != "iris.oa.dev":
-            raise SystemExit(
-                f"[rl-iris] BLOCKED: federated CoreWeave controller-ingress needs "
-                f"--ingress-host iris.oa.dev (the marin parent that owns the mirrored "
-                f"endpoint + signs the token), got --ingress-host {ingress_host}. A "
-                "peer-signed token 401s at iris.oa.dev (federation trust is "
-                "unidirectional: cw trusts marin, not the reverse)."
-            )
-        return
-    # Non-CoreWeave (e.g. a marin-local submission): the host must match the controller
-    # that owns the endpoint.
-    if ingress_host and dash_host and ingress_host != dash_host and not target_cluster:
-        raise SystemExit(
-            f"[rl-iris] BLOCKED: --ingress-host {ingress_host} does not match this "
-            f"cluster's controller host {dash_host} (--cluster={cluster}). Override with "
-            "OTAGENT_ALLOW_INGRESS_HOST_MISMATCH=1."
-        )
-
-
-@dataclass(frozen=True)
-class FederatedParentCredentials:
-    """Credential material validated on the launcher and forwarded to the peer task."""
-
-    login_record_json: str | None = None
-    iap_token: str | None = None
-
-
-def prepare_federated_parent_credentials(args: SimpleNamespace) -> FederatedParentCredentials | None:
-    """Validate and return credentials needed by a federated pod.
-
-    Prefer the cached Marin login record so the pod can refresh credentials. When the
-    launcher has ambient service-account credentials instead, forward its short-lived
-    IAP token. Both paths mint locally before allocating GPUs.
-    """
-    if not getattr(args, "target_cluster", None) or getattr(args, "ingress_mode", "direct") != "controller":
-        return None
-    if not MARIN_LOGIN_RECORD_PATH.is_file():
-        parent_config = getattr(args, "parent_cluster_config", None) or _resolve_parent_cluster_config(
-            getattr(args, "cluster_config", None)
-        )
-        try:
-            from iris.cli.connect import client_credentials
-            from iris.cluster.config import load_config
-
-            if parent_config is None:
-                raise RuntimeError("no parent cluster config")
-            credentials = client_credentials(load_config(parent_config), "marin")
-            provider = credentials.iap_provider
-            token = provider.get_token() if provider is not None else None
-        except Exception as exc:
-            raise SystemExit(
-                "[rl-iris] BLOCKED: federated CoreWeave controller ingress requires either "
-                f"the cached Marin IAP login record at {MARIN_LOGIN_RECORD_PATH} or ambient "
-                "service-account credentials that can mint an IAP token. Run "
-                "`iris --cluster=marin login`, or configure workload identity, then relaunch."
-            ) from exc
-        if not token:
-            raise SystemExit("[rl-iris] BLOCKED: ambient service-account credentials returned an empty IAP token.")
-        print(
-            "[rl-iris] Federated parent-IAP preflight passed with ambient service-account credentials; "
-            "forwarding a short-lived IAP token to the peer task.",
-            flush=True,
-        )
-        return FederatedParentCredentials(iap_token=token)
-    try:
-        record = json.loads(MARIN_LOGIN_RECORD_PATH.read_text())
-    except json.JSONDecodeError as exc:
-        raise SystemExit(
-            f"[rl-iris] BLOCKED: {MARIN_LOGIN_RECORD_PATH} is not valid JSON. "
-            "Run `iris --cluster=marin login` and relaunch."
-        ) from exc
-
-    if record.get("cluster") != "marin" or urlparse(str(record.get("endpoint", ""))).hostname != "iris.oa.dev":
-        raise SystemExit(
-            f"[rl-iris] BLOCKED: {MARIN_LOGIN_RECORD_PATH} is not a Marin iris.oa.dev login record. "
-            "Run `iris --cluster=marin login` and relaunch."
-        )
-    refresh_token = record.get("edge_refresh_token")
-    if not isinstance(refresh_token, str) or not refresh_token:
-        raise SystemExit(
-            f"[rl-iris] BLOCKED: {MARIN_LOGIN_RECORD_PATH} has no edge_refresh_token. "
-            "Run `iris --cluster=marin login` and relaunch."
-        )
-
-    from rigging.auth import IapRefreshTokenProvider, MARIN_DESKTOP_OAUTH_CLIENT
-
-    provider = IapRefreshTokenProvider(
-        MARIN_DESKTOP_OAUTH_CLIENT.client_id,
-        MARIN_DESKTOP_OAUTH_CLIENT.client_secret,
-        refresh_token,
-        login_hint="log in to cluster 'marin' to authenticate",
-    )
-    try:
-        token = provider.get_token()
-    except Exception as exc:
-        raise SystemExit(
-            "[rl-iris] BLOCKED: unable to mint an IAP token from the cached Marin login record. "
-            "Run `iris --cluster=marin login` and relaunch."
-        ) from exc
-    if not token:
-        raise SystemExit(
-            "[rl-iris] BLOCKED: cached Marin login did not mint an IAP token. "
-            "Run `iris --cluster=marin login` and relaunch."
-        )
-    print(
-        "[rl-iris] Federated parent-IAP preflight passed; forwarding the cached Marin login record to the peer task.",
-        flush=True,
-    )
-    return FederatedParentCredentials(login_record_json=json.dumps(record))
+    } or bool(config.skyrl.get("data", {}).get("terminal_bench_data"))
+    backend = OmegaConf.select(config, "skyrl.terminal_bench_config.harbor.environment_type", default="daytona")
+    return uses_harbor and backend == "daytona"
 
 
 def build_debug_launch_env(args: SimpleNamespace) -> dict[str, str]:
@@ -1069,7 +797,6 @@ def build_config_task_command(args: SimpleNamespace) -> list[str]:
 def launch(args: SimpleNamespace, expected_launcher_commit: str) -> LaunchOutcome:
     """Submit a resolved launch config and, unless detached, wait for its terminal state."""
     workspace = build_runtime_bundle(expected_launcher_commit)
-    parent_credentials = prepare_federated_parent_credentials(args)
 
     if not args.job_name:
         args.job_name = f"rl-iris-{time.strftime('%Y%m%d-%H%M%S')}"
@@ -1077,11 +804,6 @@ def launch(args: SimpleNamespace, expected_launcher_commit: str) -> LaunchOutcom
     if not _is_checkpoint_export(args) and _rl_config_uses_daytona(args.config):
         daytona_api_key = _resolve_daytona_rl_api_key()
         os.environ["DAYTONA_API_KEY"] = daytona_api_key
-        # The purge deletes stale snapshots across the shared RL org, so skip it on a
-        # --dry-run — with the --secrets-env fallback above, a dry-run now reaches this
-        # point instead of exiting at the Secret Manager call.
-        if not args.dry_run:
-            _purge_stale_daytona_snapshots(daytona_api_key)
 
     command = build_config_task_command(args)
 
@@ -1277,50 +999,6 @@ def launch(args: SimpleNamespace, expected_launcher_commit: str) -> LaunchOutcom
             env_vars[k] = v
     env_vars.update(wandb_launch_environment(entity=args.wandb_entity))
 
-    # Federated controller-ingress pod plumbing (opencode-RL literal capture): the in-pod
-    # worker mints the capability token at the PARENT (marin/iris.oa.dev) for the mirrored
-    # endpoint, which needs (a) the parent cluster config path and (b) IAP credentials to
-    # authenticate to iris.oa.dev. We forward the config path + any launch-host IAP cred
-    # env so the in-pod _ParentControllerClient can re-mint the IAP OIDC token.
-    #
-    # The parent config file is not part of the task bundle, so forward its contents for
-    # in-pod materialization. The credential preflight returns either a refreshable Marin
-    # login record or a short-lived token minted from ambient service-account credentials.
-    # Direct submission (no --target-cluster) forwards none of this.
-    if getattr(args, "target_cluster", None) and getattr(args, "ingress_mode", "direct") == "controller":
-        parent_cfg = (
-            getattr(args, "parent_controller_config_in_pod", None)
-            or args.parent_cluster_config
-            or _resolve_parent_cluster_config(args.cluster_config)
-        )
-        if parent_cfg:
-            env_vars[PARENT_CONTROLLER_CONFIG_ENV] = parent_cfg
-            # marin.yaml is not part of the synced workspace, so the path above won't
-            # resolve in-pod. Forward the
-            # file CONTENT (write-from-env, mirroring the cached login record) so the
-            # in-pod worker (materialize_parent_controller_config) writes it to a real
-            # path and repoints the env. marin.yaml carries no secrets (signing_key is
-            # a gcp-secret:// ref resolved server-side). When parent_cfg is an explicit
-            # in-pod path (baked/synced), os.path.isfile is False on the launch host →
-            # no content forwarded (operator owns materialization).
-            if os.path.isfile(parent_cfg):
-                with open(parent_cfg) as _pf:
-                    env_vars[PARENT_CONTROLLER_CONFIG_YAML_ENV] = _pf.read()
-        for k in (
-            "IRIS_IAP_REFRESH_TOKEN",
-            "GOOGLE_APPLICATION_CREDENTIALS",
-            "IRIS_EDGE_REFRESH_TOKEN",
-        ):
-            v = os.environ.get(k)
-            if v:
-                env_vars[k] = v
-        if parent_credentials is None:
-            raise AssertionError("federated controller ingress must have validated parent credentials")
-        if parent_credentials.login_record_json is not None:
-            env_vars[PARENT_CREDENTIALS_JSON_ENV] = parent_credentials.login_record_json
-        if parent_credentials.iap_token is not None:
-            env_vars[PARENT_IAP_TOKEN_ENV] = parent_credentials.iap_token
-
     # Load the cluster config (pydantic IrisClusterConfig) and build the provider
     # bundle, then discover + tunnel to the controller. This mirrors the marin
     # CLI's own path (iris/cli/connect.py::require_controller_url): for a local
@@ -1333,8 +1011,7 @@ def launch(args: SimpleNamespace, expected_launcher_commit: str) -> LaunchOutcom
     # meta-scheduler instead of the peer's own controller. We load marin.yaml (whose
     # dashboard_url is the IAP-gated iris.oa.dev) and tunnel THERE; the `cluster EQ
     # <peer>` constraint appended above makes marin delegate the whole job to the peer
-    # child. This is what lets marin later federation-proxy /proxy to the peer's
-    # (mirrored) endpoint — the only Daytona-reachable CoreWeave ingress topology.
+    # child.
     # Reaching iris.oa.dev requires IAP creds (`iris login` with an @openathena.ai
     # account, or an allowlisted service account); tunnel()/IrisClient handle the auth.
     submit_cluster_config = args.cluster_config
