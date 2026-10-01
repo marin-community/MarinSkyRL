@@ -210,6 +210,12 @@ ENV_VAR_SPECS = (
         frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.TASK_RUNTIME}),
     ),
     EnvVarSpec(
+        "PYTORCH_CUDA_ALLOC_CONF",
+        "runtime.task_env",
+        EnvVarSource.EXTERNAL,
+        frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.TASK_RUNTIME}),
+    ),
+    EnvVarSpec(
         NVRTC_HOME_ENV,
         "runtime.bootstrap",
         EnvVarSource.EXTERNAL,
