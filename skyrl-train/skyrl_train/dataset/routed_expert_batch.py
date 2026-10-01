@@ -1,14 +1,14 @@
 """Compact and dense representations of response-aligned router replay targets."""
 
 from dataclasses import dataclass
-from typing import List, Optional, Sequence
+from typing import List, Sequence
 
 import numpy as np
 import torch
 from loguru import logger
 
 
-def _routed_experts_dtype_for_num_experts(num_experts: Optional[int]) -> Optional[torch.dtype]:
+def _routed_experts_dtype_for_num_experts(num_experts: int) -> torch.dtype:
     """Pick the narrowest integer dtype that can hold ANY valid expert id for a
     model with ``num_experts`` experts, DETERMINISTICALLY (max possible id =
     ``num_experts - 1``), independent of the per-batch observed max.
@@ -20,14 +20,13 @@ def _routed_experts_dtype_for_num_experts(num_experts: Optional[int]) -> Optiona
     collective on this tensor -> NCCL hang. Keying on ``num_experts`` makes every
     rank/batch agree.
 
-      * num_experts <= 256      -> uint8  (max id <= 255; Qwen3-Coder 128 -> uint8, identical to the prior per-batch pick)
+      * num_experts <= 256      -> uint8  (max id <= 255; Qwen3-Coder 128 -> uint8)
       * num_experts <= 32768    -> int16  (max id <= 32767; Qwen3-Next 512 -> int16, deterministic)
       * otherwise               -> int64  (defensive; no shipped MoE model exceeds int16 range)
 
-    Returns None when the expert count is unknown.
     """
-    if num_experts is None or num_experts <= 0:
-        return None
+    if num_experts <= 0:
+        raise ValueError(f"num_experts must be positive, got {num_experts}")
     if num_experts <= (torch.iinfo(torch.uint8).max + 1):
         return torch.uint8
     if num_experts <= (torch.iinfo(torch.int16).max + 1):
@@ -49,7 +48,6 @@ def _collate_routed_experts_from_arrays(
     layers = max(rows.shape[1] for rows in routed_experts)
     top_k = max(rows.shape[2] for rows in routed_experts)
     _re_dtype = _routed_experts_dtype_for_num_experts(num_experts)
-    assert _re_dtype is not None
     numpy_dtype = {torch.uint8: np.uint8, torch.int16: np.int16, torch.int64: np.int64}[_re_dtype]
     out = np.zeros((len(routed_experts), max_output_len, layers, top_k), dtype=numpy_dtype)
     for index, rows in enumerate(routed_experts):
@@ -87,9 +85,8 @@ class RoutedExpertRows:
 
     @property
     def dtype(self) -> torch.dtype:
-        dtype = _routed_experts_dtype_for_num_experts(self.num_experts)
-        assert dtype is not None
-        return dtype
+        assert self.num_experts is not None
+        return _routed_experts_dtype_for_num_experts(self.num_experts)
 
     @property
     def shape(self) -> tuple[int, int, int, int]:
