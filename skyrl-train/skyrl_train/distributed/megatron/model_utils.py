@@ -268,6 +268,7 @@ def _parallel_logprobs(
     chunk_size: int | None,
 ) -> torch.Tensor:
     if logits.is_cuda and logits.dtype in (torch.bfloat16, torch.float32) and dist.get_world_size(group) == 1:
+        # CPU test profiles import this module without the optional TE package.
         from transformer_engine.pytorch.cross_entropy import parallel_cross_entropy
 
         # TE computes values and derivatives in FP32 and reuses a model-dtype
@@ -404,7 +405,7 @@ def from_parallel_logits_to_logprobs_packed_sequences(
             rolled_seq_targets, cp_rank, cp_size, seq_dim=0
         )
 
-    # Add batch dimension back for DistributedLogprob
+    # Logprob kernels consume [batch, sequence, vocabulary] tensors.
     rolled_targets = rolled_targets.unsqueeze(0)
     vocab_parallel_logits = vocab_parallel_logits.unsqueeze(0)
 
