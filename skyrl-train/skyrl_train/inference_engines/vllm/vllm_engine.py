@@ -221,7 +221,7 @@ def loaded_inductor_kernels(objects) -> list[dict[str, Any]]:
 
     kernels: dict[str, dict[str, Any]] = {}
     for obj in objects:
-        if not isinstance(obj, CachingAutotuner) or not obj.filename:
+        if not isinstance(obj, CachingAutotuner) or not obj.filename or not Path(obj.filename).is_file():
             continue
         path = Path(obj.filename)
         entry = kernels.setdefault(
