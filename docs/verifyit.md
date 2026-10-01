@@ -42,7 +42,7 @@ print(environment.step("Answer: 42"))
 
 Set the option to `false` or omit it to run the original Reasoning Gym, IFEval, SQL, LiveCodeBench or Nemotron scorer. The [launcher acceptance configuration](../cloud/iris/configs/nemotron_ultra_rlvr_acceptance.yaml) shows the deployed sandbox host/port and judge `base_url`, `model`, and `api_key_env` settings. Set `environment.skyrl_gym.nemotron_ultra.verifyit_enabled: true` alongside those fields; the [trajectory runner](../skyrl-train/skyrl_train/trajectory_runners/skyrl_gym.py) passes each environment configuration to its constructor and propagates the option to GenRM. Other environments use `environment.skyrl_gym.<environment_name>.verifyit_enabled: true`.
 
-Code and Lean use the [SandboxClient protocol](../skyrl-gym/skyrl_gym/envs/nemotron_ultra/sandbox.py): point the configured host/port to a running NeMo Skills sandbox with the benchmark’s Python dependencies or Lean project/toolchain. The acceptance configuration’s cluster hostname is an example deployment, not a public service. Judge settings are consumed by [OpenAIJudge](../skyrl-gym/skyrl_gym/envs/nemotron_ultra/judge.py); set the named environment variable locally with your provider credential before running judge routes. Direct source APIs expose `verifyit_enabled=True` where applicable; the checked-in replay demonstrates MCQA's switch. Dormant `GeneralReactTask` math routes accept the option in the instance; coder1 continues using its original implementation.
+Code and Lean use the [SandboxClient protocol](../skyrl-gym/skyrl_gym/envs/nemotron_ultra/sandbox.py): point the configured host/port to a running NeMo Skills sandbox with the benchmark’s Python dependencies or Lean project/toolchain. The acceptance configuration’s cluster hostname is an example deployment, not a public service. Judge settings are consumed by [OpenAIJudge](../skyrl-gym/skyrl_gym/envs/nemotron_ultra/judge.py); set the named environment variable locally with your provider credential before running judge routes. Direct source APIs expose `verifyit_enabled=True` where applicable; the checked-in replay demonstrates MCQA's switch. The remaining dormant STEM judge source API accepts `verifyit_enabled=True`. GeneralReactTask, coder1 and its exclusive math/QA verifiers were retired upstream.
 
 GSM8K, AIME, MCQ, search exact match, ARC grid comparison and chemistry numeric comparison call the unified primitives directly. These clients do not have an original-path switch; compare them against the pinned source revision linked in the route inventory when investigating a difference.
 
@@ -50,29 +50,12 @@ Verification failures return minimum reward and retain framework verification/er
 
 ## Coverage and limits
 
-[The route inventory](../tools/verifyit/route-inventory.json) lists all 45 included routes and their original source locations. The 2026-10-01 campaign snapshot validated 30 routes with real traces and 15 with source fixtures at source revision `91c7a60`. Those historical counts do not establish current all-route parity; the replay command above produces fresh, local evidence for its representative routes.
+[The route inventory](../tools/verifyit/route-inventory.json) lists all 38 currently included routes and their original source locations. The 2026-10-01 campaign snapshot validated 30 routes with real traces and 15 with source fixtures at source revision `91c7a60`. Those historical counts do not establish current all-route parity; the replay command above produces fresh, local evidence for its representative routes.
 
-The 46th inventoried route, coder1, is excluded pending deprecation. Its arbitrary same-interpreter Python test contract does not cleanly translate to isolated execution. [MarinSkyRL #880](https://github.com/marin-community/MarinSkyRL/issues/880) tracks deprecation. This change preserves its existing source behavior and omits its partial adapter.
+Upstream revision `8b4b6924704432df896143e2785b30e5f944a441` retired coder1, GeneralReactTask and seven previously included math/QA routes, resolving [MarinSkyRL #880](https://github.com/marin-community/MarinSkyRL/issues/880). The current 38-route inventory retains the historical 45-route membership and records those seven retirements separately. The [retirement guide](coder1-retirement.md) describes supported migration paths.
 
 Exact, numeric, schema, instruction, code, judge and retained source-runtime clients reuse existing verifyit modes. No new verifier template is introduced. Source-specific setup, external services and sandbox requirements remain part of each benchmark's contract.
 
-## Dormant verifier source APIs
+## Archival agent packaging
 
-The legacy standalone `skyrl-agent` packaging/runtime is not revived by this change. [MarinSkyRL #884](https://github.com/marin-community/MarinSkyRL/issues/884) tracks its preexisting broken local trainer dependency. Its archival manifest and lock remain unchanged. Use the supported root/gym environment and load the source scorer directly when assessing a dormant route. For example, the QA scorer imports LiteLLM even for exact matching:
-
-```bash
-uv pip install --python .venv-verifiers/bin/python litellm
-.venv-verifiers/bin/python - <<'PYTHON'
-import importlib.util
-from pathlib import Path
-path = Path("skyrl-agent/skyrl_agent/tasks/verifiers/qa.py")
-spec = importlib.util.spec_from_file_location("dormant_qa", path)
-qa = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(qa)
-record = {"target": "Paris"}
-print(qa.compute_score_em("Paris", record))
-print(qa.compute_score_em("Paris", record, verifyit_enabled=True))
-PYTHON
-```
-
-This loads the actual checked-in scorer without starting the archival agent harness. Its judge variants additionally need the original provider configuration. The source inventory links each dormant entrypoint; historical fixture evidence for these APIs is distinct from a supported legacy training runtime.
+The remaining dormant STEM judge integration changes its source scorer, without reviving standalone `skyrl-agent` packaging or training. Its archival manifest and lock remain unchanged. [MarinSkyRL #884](https://github.com/marin-community/MarinSkyRL/issues/884) tracks the preexisting broken trainer dependency. The STEM judge requires its original provider configuration; its entrypoint and opt-in argument are recorded in the route inventory. The retired QA example is no longer available on current main.

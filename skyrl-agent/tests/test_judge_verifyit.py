@@ -22,12 +22,8 @@ for name, path in [
         module.__path__ = [str(path)]
         sys.modules[name] = module
 
-qa = importlib.import_module("skyrl_agent.tasks.verifiers.qa")
 stem = importlib.import_module("skyrl_agent.tasks.verifiers.web_search.stem_llm_judge")
-compute_score_browsecomp = qa.compute_score_browsecomp
-compute_score_ruler = qa.compute_score_ruler
 compute_score = stem.compute_score
-
 
 @pytest.fixture
 def judge_server(monkeypatch):
@@ -73,17 +69,6 @@ def judge_server(monkeypatch):
 
 
 def invoke(route, enabled):
-    if route == "browsecomp":
-        return compute_score_browsecomp(
-            "candidate {literal}",
-            {"target": ["reference"]},
-            "Question?",
-            verifyit_enabled=enabled,
-        )
-    if route == "ruler":
-        return compute_score_ruler(
-            "candidate {literal}", "reference", "Question?", verifyit_enabled=enabled
-        )
     return compute_score(
         "",
         r"\boxed{candidate}",
@@ -93,31 +78,21 @@ def invoke(route, enabled):
     )
 
 
-@pytest.mark.parametrize("route", ["browsecomp", "ruler", "stem"])
+@pytest.mark.parametrize("route", ["stem"])
 @pytest.mark.parametrize("answer,score", [("yes", 1.0), ("no", 0.0)])
 def test_original_prompts_and_scores_survive_core_cutover(
     judge_server, route, answer, score
 ):
-    raw = {"correct": answer}
-    if route == "browsecomp":
-        raw.update(
-            extracted_final_answer="candidate",
-            reasoning="comparison",
-            confidence=100,
-            strict=True,
-        )
-    judge_server.reply = (
-        f"Final Decision: {answer}" if route == "stem" else json.dumps(raw)
-    )
+    judge_server.reply = f"Final Decision: {answer}"
     native = invoke(route, False)
     requests = list(judge_server.requests)
     judge_server.requests.clear()
     cutover = invoke(route, True)
-    assert cutover == native == (score if route == "stem" else {"score": score})
+    assert cutover == native == score
     assert judge_server.requests == requests
 
 
-@pytest.mark.parametrize("route", ["browsecomp", "ruler", "stem"])
+@pytest.mark.parametrize("route", ["stem"])
 def test_truncated_positive_completion_never_scores(judge_server, route):
     judge_server.reply = (
         "Final Decision: Yes" if route == "stem" else '{"correct":"yes"}'
@@ -130,32 +105,10 @@ def test_truncated_positive_completion_never_scores(judge_server, route):
             invoke(route, True)
 
 
-def test_structured_judge_cannot_bypass_required_schema(judge_server):
-    judge_server.reply = '{"correct":"yes"}'
-    assert invoke("browsecomp", False) == {"score": 1}
-    with pytest.raises(ValueError, match="schema"):
-        invoke("browsecomp", True)
-
-
 def test_contradictory_stem_judge_loses_last_positive_credit(judge_server):
     judge_server.reply = "Final Decision: No\nFinal Decision: Yes"
     assert invoke("stem", False) == 1.0
     assert invoke("stem", True) == 0.0
-
-
-@pytest.mark.parametrize(
-    "raw",
-    [
-        '{"correct":"no","correct":"yes"}',
-        '{"correct":"yes","extra":NaN}',
-        '{"correct":"yes","extra":1e999}',
-    ],
-)
-def test_structured_judge_rejects_ambiguous_or_nonfinite_json(judge_server, raw):
-    judge_server.reply = raw
-    assert invoke("ruler", False) == {"score": 1}
-    with pytest.raises(ValueError):
-        invoke("ruler", True)
 
 
 @pytest.mark.parametrize(
