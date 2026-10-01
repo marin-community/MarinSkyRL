@@ -217,6 +217,17 @@ def _nemotron_ultra_messages(raw_input: Any) -> list[dict[str, Any]]:
     return messages
 
 
+def _freeze_instruction_references(example: Mapping[str, Any], index: int, seed: int) -> Mapping[str, Any]:
+    """Resolve hidden instruction references before serializing a task for generation."""
+    if type(seed) is not int:
+        raise ValueError("Instruction reference seed must be an integer")
+    from skyrl_gym.envs.nemotron_ultra.instruction_references import freeze_instruction_references
+
+    record = freeze_instruction_references(dict(example), f"{seed}:{example.get('uuid', index)}:{index}")
+    record["instruction_reference_seed"] = seed
+    return record
+
+
 def _prepare_nemotron_ultra(
     example: Mapping[str, Any],
     index: int,
@@ -224,6 +235,8 @@ def _prepare_nemotron_ultra(
     *,
     agents: frozenset[str],
     blend: str,
+    instruction_reference_seed: int | None = None,
+    math_reference_kind: str | None = None,
 ) -> PreparedRow:
     del contract
     request = example.get("responses_create_params")
@@ -248,6 +261,17 @@ def _prepare_nemotron_ultra(
     )
     if _NEMOTRON_PLACEHOLDER_KEY in example:
         raise ValueError("Nemotron Ultra math placeholder was not restored before row preparation.")
+
+    if instruction_reference_seed is not None and agent == "instruction_following_simple_agent":
+        example = _freeze_instruction_references(example, index, instruction_reference_seed)
+
+    if agent in {"math_with_judge_simple_agent", "ns_tools_simple_agent"}:
+        from skyrl_gym.envs.nemotron_ultra.math_references import prepare_math_reference, reference_kind
+
+        if math_reference_kind is not None:
+            example = prepare_math_reference(example, math_reference_kind)
+        else:
+            reference_kind(example)
 
     return {
         "data_source": NEMOTRON_ULTRA_RL_DATASET,
@@ -1118,7 +1142,7 @@ def gretel_text_to_sql_source() -> Source:
     )
 
 
-def _nemotron_ultra_source(*, name: str, agents: frozenset[str], blend: str) -> Source:
+def _nemotron_ultra_source(*, name: str, agents: frozenset[str], blend: str, instruction_reference_seed: int | None = None, math_reference_kind: str | None = None) -> Source:
     return Source(
         name,
         NEMOTRON_ULTRA_RL_DATASET,
@@ -1126,22 +1150,22 @@ def _nemotron_ultra_source(*, name: str, agents: frozenset[str], blend: str) -> 
         "train",
         True,
         "row_selected",
-        lambda example, index, contract: _prepare_nemotron_ultra(example, index, contract, agents=agents, blend=blend),
+        lambda example, index, contract: _prepare_nemotron_ultra(example, index, contract, agents=agents, blend=blend, instruction_reference_seed=instruction_reference_seed, math_reference_kind=math_reference_kind),
         _load_nemotron_ultra_rows,
         deduplicate_by_prompt=False,
     )
 
 
-def nemotron_ultra_rlvr1_source() -> Source:
-    return _nemotron_ultra_source(name="nemotron_ultra_rlvr1", agents=NEMOTRON_ULTRA_RLVR1_AGENTS, blend="rlvr1")
+def nemotron_ultra_rlvr1_source(*, instruction_reference_seed: int | None = None, math_reference_kind: str | None = None) -> Source:
+    return _nemotron_ultra_source(name="nemotron_ultra_rlvr1", agents=NEMOTRON_ULTRA_RLVR1_AGENTS, blend="rlvr1", instruction_reference_seed=instruction_reference_seed, math_reference_kind=math_reference_kind)
 
 
-def nemotron_ultra_rlvr2_source() -> Source:
-    return _nemotron_ultra_source(name="nemotron_ultra_rlvr2", agents=NEMOTRON_ULTRA_RLVR2_AGENTS, blend="rlvr2")
+def nemotron_ultra_rlvr2_source(*, instruction_reference_seed: int | None = None, math_reference_kind: str | None = None) -> Source:
+    return _nemotron_ultra_source(name="nemotron_ultra_rlvr2", agents=NEMOTRON_ULTRA_RLVR2_AGENTS, blend="rlvr2", instruction_reference_seed=instruction_reference_seed, math_reference_kind=math_reference_kind)
 
 
-def nemotron_ultra_mopd_source() -> Source:
-    return _nemotron_ultra_source(name="nemotron_ultra_mopd", agents=NEMOTRON_ULTRA_MOPD_AGENTS, blend="mopd")
+def nemotron_ultra_mopd_source(*, instruction_reference_seed: int | None = None, math_reference_kind: str | None = None) -> Source:
+    return _nemotron_ultra_source(name="nemotron_ultra_mopd", agents=NEMOTRON_ULTRA_MOPD_AGENTS, blend="mopd", instruction_reference_seed=instruction_reference_seed, math_reference_kind=math_reference_kind)
 
 
 def generate_reasoning_gym_rows(*, tasks: tuple[str, ...], rows_per_task: int, seed: int, start_index: int = 0):

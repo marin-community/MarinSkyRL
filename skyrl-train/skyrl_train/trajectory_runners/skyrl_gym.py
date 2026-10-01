@@ -206,6 +206,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         self.nemotron_ultra_grading = NemotronUltraGrading(ultra_config.get("grading", NemotronUltraGrading.VERIFY))
         self._warned_skip_without_ultra_rows = False
         self.genrm_config = dict(ultra_config.get("genrm", {}))
+        if ultra_config.get("verifyit_enabled", False):
+            self.genrm_config["verifyit_enabled"] = True
         genrm_judge = self.genrm_config.get("judge")
         self.genrm_judge = OpenAIJudge(**dict(genrm_judge)) if genrm_judge is not None else None
 

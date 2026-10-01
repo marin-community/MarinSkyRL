@@ -35,7 +35,7 @@ from typing import Tuple
 
 
 # ------------ Core LLM call --------------------------------------------------
-def _llm_judge(question: str, student: str, reference: str, verbose: bool = False) -> bool:
+def _llm_judge(question: str, student: str, reference: str, verbose: bool = False, *, verifyit_enabled=False) -> bool:
     url_base = os.getenv("STEM_LLM_JUDGE_URL")
     if not url_base:
         raise EnvironmentError("STEM_LLM_JUDGE_URL not set")
@@ -67,6 +67,15 @@ def _llm_judge(question: str, student: str, reference: str, verbose: bool = Fals
     resp.raise_for_status()
     data = resp.json()
 
+    if verifyit_enabled:
+        from skyrl_agent.tasks.verifiers.judge_verifyit import completion_text, literal_score
+
+        text = completion_text(data)
+        decisions = {match.group(1).lower() for match in _FINAL_DECISION_RE.finditer(text)}
+        final = text.strip().splitlines()[-1] if text.strip() else ""
+        if len(decisions) != 1 or _FINAL_DECISION_RE.fullmatch(final) is None:
+            raise ValueError("Judge response has missing or contradictory decisions")
+        return literal_score(next(iter(decisions)), "yes")
     text = data["choices"][0]["message"]["content"]
 
     decision = _extract_final_decision(text)
@@ -148,7 +157,7 @@ def match_answer(response):
 
 
 # ------------ Public API -----------------------------------------------------
-def compute_score(data_source: str, model_output: str, ground_truth: str, extra_info: dict) -> Tuple[bool, float, str]:
+def compute_score(data_source: str, model_output: str, ground_truth: str, extra_info: dict, *, verifyit_enabled=False) -> Tuple[bool, float, str]:
     """
     Arguments
     ---------
@@ -161,6 +170,10 @@ def compute_score(data_source: str, model_output: str, ground_truth: str, extra_
     (is_correct, score, normalized_student_answer)
         score is 1.0 if correct, else 0.0
     """
+    if verifyit_enabled:
+        from skyrl_agent.tasks.verifiers.judge_verifyit import require_reference
+
+        require_reference(extra_info.get("question"), ground_truth)
     model_output = str(model_output)
     ground_truth = str(ground_truth)
 
@@ -172,6 +185,10 @@ def compute_score(data_source: str, model_output: str, ground_truth: str, extra_
     if answer_type == "exactmatch":
         student = extracted_model_output.strip()
         gt = ground_truth.strip()
+        if verifyit_enabled:
+            from skyrl_agent.tasks.verifiers.judge_verifyit import literal_score
+
+            return literal_score(student, gt)
         return 1.0 if student == gt else 0.0
 
     # Otherwise, require boxed for LLM judging (legacy behavior)
@@ -180,7 +197,7 @@ def compute_score(data_source: str, model_output: str, ground_truth: str, extra_
         return 0.0
     else:
         try:
-            is_correct = _llm_judge(question, extracted_model_output, ground_truth, verbose=False)
+            is_correct = _llm_judge(question, extracted_model_output, ground_truth, verbose=False, verifyit_enabled=verifyit_enabled)
         except Exception as e:
             instance_id = extra_info.get("instance_id", "unknown") if isinstance(extra_info, dict) else "unknown"
             print(f"[judge-error] instance_id={instance_id} {e}")
