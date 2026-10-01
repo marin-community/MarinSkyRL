@@ -10,6 +10,7 @@ from taskcompendium.grading import GradeResult, Outcome
 from taskcompendium.rollout import RolloutData
 
 from skyrl_train.error_treatment import ErrorTreatment
+from skyrl_train.metric_names import TASK_ROLLOUT_METRIC_PREFIX
 from skyrl_train.trajectory_runners.projections import (
     StepWiseTrajectoryProjection,
     WholeTrajectoryProjection,
@@ -247,8 +248,17 @@ def task_error_policies(
 def merge_task_metrics(
     batch: TrajectoryBatch, rollouts: Sequence[RolloutData], request: TrajectoryRequestBatch
 ) -> None:
-    """Sum common-task counters separately from Gym's environment-specific metrics."""
+    """Count task evidence and preserve environment-specific metrics."""
     metrics = batch.get("rollout_metrics") or {}
+    counters = {
+        "tasks": len(rollouts),
+        "turns": sum(len(rollout.steps) for rollout in rollouts),
+        "multi_turn_tasks": sum(len(rollout.steps) > 1 for rollout in rollouts),
+        "generated_tokens": sum(sum(rollout.loss_mask) for rollout in rollouts),
+        "missing_logprob_tokens": sum(sum(rollout.loss_mask) for rollout in rollouts if rollout.logprobs is None),
+    }
+    metrics.update({f"{TASK_ROLLOUT_METRIC_PREFIX}{name}": float(value) for name, value in counters.items()})
+    batch["rollout_metrics"] = metrics
     environments = request.get("env_classes")
     if environments is None:
         return
@@ -257,7 +267,6 @@ def merge_task_metrics(
             continue
         for key, value in rollout.metrics.items():
             metrics[key] = metrics.get(key, 0.0) + value
-    batch["rollout_metrics"] = metrics
 
 
 def step_training_outputs(

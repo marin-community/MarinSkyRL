@@ -1,0 +1,60 @@
+{
+  "provenance": {
+    "what": "One canonical Shellbox rollout batch with eight multi-turn tasks and a SkyRL optimizer update.",
+    "produced_by": "A Marin RL artifact main, followed by ci/marin_nightly/gate.py.",
+    "why_these_thresholds": [
+      "All eight tasks must complete at least two model turns. Aggregate turn counts alone cannot prove this.",
+      "The canonical engine rejects changed token prefixes and token/logprob length mismatches. Generated tokens must have behavior logprobs.",
+      "Failed trajectories and skipped TIS batches must remain zero. The final optimizer loss must be finite."
+    ],
+    "cost": "The launch artifact controls GPU topology and sandbox count. The elapsed-time limit is 2400 seconds."
+  },
+  "min_train_steps": 1,
+  "finite_metrics": [
+    "policy/policy_loss",
+    "policy/final_loss",
+    "reward/avg_raw_reward",
+    "generate/failed_trajectory_fraction",
+    "tis/skipped_fraction",
+    "generate/task_rollout/tasks",
+    "generate/task_rollout/multi_turn_tasks",
+    "generate/task_rollout/turns",
+    "generate/task_rollout/generated_tokens",
+    "generate/task_rollout/missing_logprob_tokens"
+  ],
+  "bounds": {
+    "reward/avg_raw_reward": {
+      "minimum": 0.0,
+      "maximum": 1.0
+    },
+    "generate/failed_trajectory_fraction": {
+      "minimum": 0.0,
+      "maximum": 0.0
+    },
+    "tis/skipped_fraction": {
+      "minimum": 0.0,
+      "maximum": 0.0
+    },
+    "generate/task_rollout/tasks": {
+      "minimum": 8.0,
+      "maximum": 8.0
+    },
+    "generate/task_rollout/multi_turn_tasks": {
+      "minimum": 8.0,
+      "maximum": 8.0
+    },
+    "generate/task_rollout/turns": {
+      "minimum": 16.0,
+      "maximum": 1000.0
+    },
+    "generate/task_rollout/generated_tokens": {
+      "minimum": 16.0,
+      "maximum": 262144.0
+    },
+    "generate/task_rollout/missing_logprob_tokens": {
+      "minimum": 0.0,
+      "maximum": 0.0
+    }
+  },
+  "max_wall_clock_seconds": 2400
+}

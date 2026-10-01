@@ -4,7 +4,6 @@ Run with: uv run --isolated --group dev --extra cpu pytest tests/cpu/test_marin_
 """
 
 import json
-import math
 from dataclasses import replace
 from pathlib import Path
 
@@ -27,8 +26,8 @@ from ci.marin_nightly.gate import (
 )
 
 SHIPPED_SPEC = Path(__file__).parents[2] / "ci" / "marin_nightly" / "specs" / "gsm8k-qwen3-0.6b-megatron.json"
-OPENCODE_SPEC = Path(__file__).parents[2] / "ci" / "marin_nightly" / "specs" / "opencode-qwen3-8b.json"
 OPD_SPEC = Path(__file__).parents[2] / "ci" / "marin_nightly" / "specs" / "opd-qwen3-sync.json"
+TASK_ROLLOUT_SPEC = Path(__file__).parents[2] / "ci" / "marin_nightly" / "specs" / "task-rollouts.json"
 
 # What the trainer actually writes: loguru decorates the line, so the payload is embedded
 # rather than anchored at the start. Keep this in the shape the trainer emits it.
@@ -419,6 +418,40 @@ def test_shipped_spec_gates_a_healthy_run():
     assert check_run(early_nan, spec, wall_clock_seconds=600)
 
 
+@pytest.mark.parametrize(
+    "metric,value",
+    [
+        ("generate/task_rollout/tasks", 7.0),
+        ("generate/task_rollout/multi_turn_tasks", 7.0),
+        ("generate/task_rollout/tool_tasks", 0.0),
+        ("policy/raw_grad_norm", 0.0),
+        ("generate/task_rollout/missing_logprob_tokens", 1.0),
+        ("generate/failed_trajectory_fraction", 0.125),
+        ("policy/correction/weight_mean", 0.0),
+    ],
+)
+def test_task_rollout_gate_rejects_incomplete_evidence(metric, value):
+    spec = load_spec(TASK_ROLLOUT_SPEC)
+    exact_metrics = {
+        "policy/correction/weight_mean": 1.0,
+        "generate/failed_trajectory_fraction": 0.0,
+        "generate/task_rollout/tasks": 8.0,
+        "generate/task_rollout/multi_turn_tasks": 8.0,
+        "generate/task_rollout/tool_tasks": 8.0,
+        "policy/raw_grad_norm": 0.5,
+        "generate/task_rollout/turns": 24.0,
+        "generate/task_rollout/generated_tokens": 240.0,
+        "generate/task_rollout/missing_logprob_tokens": 0.0,
+    }
+    healthy = parse_metrics(mirror_line(1, **exact_metrics))
+    assert check_run(healthy, spec, wall_clock_seconds=900) == []
+    incomplete = parse_metrics(mirror_line(1, **{**exact_metrics, metric: value}))
+    assert any(metric in failure for failure in check_run(incomplete, spec, wall_clock_seconds=900))
+    del exact_metrics[metric]
+    missing = parse_metrics(mirror_line(1, **exact_metrics))
+    assert any(metric in failure for failure in check_run(missing, spec, wall_clock_seconds=900))
+
+
 def test_opd_gate_requires_teacher_credit_on_valid_training_tokens():
     spec = load_spec(OPD_SPEC)
     for eligible in (True, False):
@@ -432,45 +465,3 @@ def test_opd_gate_requires_teacher_credit_on_valid_training_tokens():
         metrics.update({"policy/raw_grad_norm": 0.5, "distillation/scored_tokens": 2, "distillation/teacher_count": 1})
         failures = check_run(parse_metrics(mirror_line(1, **metrics)), spec, wall_clock_seconds=300)
         assert (failures == []) == eligible
-
-
-def test_opencode_spec_requires_exact_concurrent_literal_coverage():
-    spec = load_spec(OPENCODE_SPEC)
-    exact_metrics = {
-        "policy/correction/weight_mean": 1.0,
-        "generate/failed_trajectory_fraction": 0.0,
-        "generate/literal_bridge/correlated_trials": 8.0,
-        "generate/literal_bridge/correlated_turns": 24.0,
-        "generate/tis/exact_match_fraction": 1.0,
-        "generate/tis/lcs_fallback_fraction": 0.0,
-        "generate/tis/unaligned_fraction": 0.0,
-        "generate/tis/tito_full/success_fraction": 1.0,
-        "generate/tis/tito_full/decline_count": 0.0,
-    }
-    healthy = parse_metrics(mirror_line(1, **exact_metrics))
-    assert check_run(healthy, spec, wall_clock_seconds=900) == []
-
-    approximate = parse_metrics(
-        mirror_line(
-            1,
-            **{
-                **exact_metrics,
-                "generate/tis/exact_match_fraction": 0.99,
-                "generate/tis/lcs_fallback_fraction": 0.01,
-            },
-        )
-    )
-    failures = check_run(approximate, spec, wall_clock_seconds=900)
-    assert any("exact_match_fraction" in failure for failure in failures)
-    assert any("lcs_fallback_fraction" in failure for failure in failures)
-
-    for weight in (math.nextafter(0.0, 1.0), 2.0):
-        metrics = {**exact_metrics, "policy/correction/weight_mean": weight}
-        assert check_run(parse_metrics(mirror_line(1, **metrics)), spec, wall_clock_seconds=900) == []
-
-    for invalid in (None, 0.0, -0.1, 2.01, float("nan"), float("inf")):
-        metrics = {**exact_metrics, "policy/correction/weight_mean": invalid}
-        if invalid is None:
-            del metrics["policy/correction/weight_mean"]
-        failures = check_run(parse_metrics(mirror_line(1, **metrics)), spec, wall_clock_seconds=900)
-        assert any("policy/correction/weight_mean" in failure for failure in failures)

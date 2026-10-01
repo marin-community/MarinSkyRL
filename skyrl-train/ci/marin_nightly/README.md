@@ -1,20 +1,19 @@
 # Nightly end-to-end gates
 
 The nightly runs GSM8K GRPO on one H100, synchronous OPD on four H100s,
-Grug Megatron training on four H100s, and an OpenCode agentic RL step on eight H100s.
+and Grug Megatron training on four H100s.
 All policy updates use Megatron and the frozen root environment. The GSM8K run is
 scored against a checked-in spec; the other lanes exercise teacher scoring, Grug
-training and weight sync, and agentic rollout coverage.
+training and weight sync. The canonical task rollout gate runs manually through a Marin RL artifact.
 
 | file | role |
 | --- | --- |
 | `run_h100.sh` | train GSM8K and gate metrics on H100 |
 | `run_opd_h100.sh` | run synchronous OPD with separate policy, rollout, and teacher roles |
 | `run_grug_megatron.sh` | run Grug parity, training, and serving gates on four H100s |
-| `run_opencode.sh` | submit and gate the federated OpenCode RL canary |
 | `gate.py` | score a training run against its spec |
 | `specs/gsm8k-qwen3-0.6b-megatron.json` | GSM8K gate thresholds and provenance |
-| `specs/opencode-qwen3-8b.json` | OpenCode continuation and policy update thresholds |
+| `specs/task-rollouts.json` | canonical task completion, token evidence, and optimizer thresholds |
 
 ## How the gate sees the run
 
@@ -83,11 +82,11 @@ ports before starting the same training entrypoint.
 
 No collision has been observed between the scheduled lanes, and Iris placement may well keep them
 apart, but nothing here guarantees it. If one of them fails at `ray start` with that message, this
-is why. Two runs launched by hand seconds apart will do it: run them serially.
+is why. Two manual runs on the same node can cause this failure. Run them serially.
 
 ## Running it by hand
 
-The gate is pure stdlib and runs anywhere, against any run log:
+Run these commands from `skyrl-train/`. The gate uses the Python standard library and reads a saved run log:
 
 ```bash
 uv run --frozen python -m ci.marin_nightly.gate \
@@ -108,57 +107,38 @@ The Megatron lane runs `tests/gpu/test_grug_megatron.py` and the two-GPU CP2
 FlashAttention forward/backward smoke with the frozen Megatron runtime closure;
 see `docs/grug-megatron-training.md` for the Grug tests.
 
-The OpenCode lane is deliberately a real federated RL launch rather than a mocked agent
-test. It provisions one RNO2A H100x8 node, creates eight air-gapped Daytona sandboxes,
-runs the pinned OpenCode 1.18.2 CLI at concurrency eight, captures every served token via
-RecordProxy, and completes one policy step. Run it manually with the RL-specific Daytona
-credential until the GitHub Iris service account can read the canonical secret. A healthy
-run targets about 15 minutes, or roughly 2 H100-hours plus eight short-lived Daytona
-sandboxes; its 40-minute hard allowance is a hang backstop, not the expected cost.
+The manual task rollout specification scores a saved canonical Shellbox training log.
+It expects eight distinct tasks, one sample per task, and at least two model turns
+per task in the final training batch. It is separate from the scheduled workflow.
 
-To reproduce only this lane from an authenticated checkout:
-
-```bash
-LAUNCH_CONFIG=/path/to/resolved-opencode-launch.yaml \
-  bash skyrl-train/ci/marin_nightly/run_opencode.sh
-```
-
-The launch document is the complete Hydra YAML emitted by the Marin artifact. The script submits
-that document synchronously and gates its combined launcher and task log. Its log must contain one finite training
-step, eight correlated trials, at least 16 correlated turns, 100% exact behavior-logprob alignment with full token-in/token-out coverage,
-a finite positive correction weight no greater than 2, and no fallback, decline, skipped batch, or failed trajectory. A failure before those
-metrics should be triaged from the uploaded job log in this order: Iris allocation and
-runtime setup, Daytona snapshot/sandbox setup, OpenCode process errors, RecordProxy
-correlation, continuation declines, then policy forward/backward and weight sync.
-
-The same launcher has two manually triggered boundary suites. They use the checked-in
-`ci/opencode_smoke/tasks/boundary-mix` corpus and are intentionally not daily: each mode
-costs another H100x8 allocation and some cases deliberately fail or time out.
+Launch configuration and log collection follow Marin's
+[RL launch reference](https://github.com/marin-community/marin/blob/main/docs/references/rl-launching.md).
+The input log must contain the trainer's `WANDB_MIRROR` lines, including the final
+optimizer step. From the SkyRL repository root, score that log:
 
 ```bash
-OPENCODE_MODE=compaction-stress \
-  LAUNCH_CONFIG=/path/to/resolved-compaction-launch.yaml \
-  LOG_PATH=opencode-compaction.log \
-  bash skyrl-train/ci/marin_nightly/run_opencode.sh
-
-OPENCODE_MODE=overflow-stress \
-  LAUNCH_CONFIG=/path/to/resolved-overflow-launch.yaml \
-  LOG_PATH=opencode-overflow.log \
-  bash skyrl-train/ci/marin_nightly/run_opencode.sh
+uv run --frozen python skyrl-train/ci/marin_nightly/gate.py \
+    --log task-rollouts.log \
+    --spec skyrl-train/ci/marin_nightly/specs/task-rollouts.json \
+    --wall-clock-seconds 900
 ```
 
-The first mode requires automatic summarization to preserve an exact post-compaction
-training segment while invalid UTF-8 tool bytes, a capped single-turn response, and
-agent and verifier timeouts run beside normal trials. The second disables compaction and
-requires the same oversized tool result to become exactly one typed
-`ContextLengthExceededError`, with no retry storm. These mixed negative-path batches do
-not require an optimizer step: timeout and overflow samples without behavior logprobs
-are deliberately masked, while the positive-path gate owns the real policy-update
-and checkpoint contract. Instead, the stress specs require named log evidence for every
-boundary and a clean workflow shutdown. Update a threshold only from a cited real run,
-never merely to make a local fixture pass.
+Measure elapsed time from artifact submission through terminal export, including allocation and startup.
+Supply this value for `--wall-clock-seconds`. The gate requires eight
+multi-turn tasks, generated tokens with behavior logprobs, a finite optimizer loss,
+no failed trajectories, and a positive mean correction weight no greater than two. The engine rejects changed token
+prefixes and token/logprob length mismatches before the buffer receives a rollout.
+The metric gate does not inspect checkpoint or export files. Full launch acceptance
+also requires a persisted run manifest, a checkpoint at the final optimizer step, and
+a Hugging Face export that the model loader can read.
 
-To exercise the whole path — provision, train, gate, tear down — trigger the workflow:
+The canonical engine has no OpenCode process or automatic history compaction. The
+removed OpenCode stress specifications do not apply to this engine. Engine and worker
+tests check context limits, tool output, deadlines, and cleanup. These CPU checks do
+not replace live backend acceptance.
+
+The scheduled workflow runs the GSM8K, OPD, and Grug lanes. It does not run the manual
+task rollout gate. Trigger it from the repository root:
 
 ```bash
 gh workflow run marin-nightly.yaml \

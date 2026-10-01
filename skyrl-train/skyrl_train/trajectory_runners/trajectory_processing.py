@@ -18,8 +18,7 @@ from skyrl_train.trajectory_runners.routed_experts import normalize_routed_exper
 from skyrl_train.metric_names import (
     ENVIRONMENT_METRIC_PREFIX,
     IDENTITY_AWARE_REWARD_METRIC_PREFIX,
-    LITERAL_BRIDGE_CORRELATED_TRIALS_METRIC,
-    LITERAL_BRIDGE_CORRELATED_TURNS_METRIC,
+    TASK_ROLLOUT_METRIC_PREFIX,
     TIS_ALIGNED_TOKENS_METRIC,
     TIS_ALIGNMENT_ALERT_METRIC,
     TIS_METRIC_PREFIX,
@@ -980,10 +979,9 @@ def concatenate_trajectory_batches(
     # the per-group counters have to be carried across or the archives are written unobserved.
     for output in trajectory_batches:
         for name, value in (output.get("rollout_metrics") or {}).items():
-            if name.startswith((RETENTION_METRIC_PREFIX, IDENTITY_AWARE_REWARD_METRIC_PREFIX)) or name in {
-                LITERAL_BRIDGE_CORRELATED_TRIALS_METRIC,
-                LITERAL_BRIDGE_CORRELATED_TURNS_METRIC,
-            }:
+            if name.startswith(
+                (RETENTION_METRIC_PREFIX, IDENTITY_AWARE_REWARD_METRIC_PREFIX, TASK_ROLLOUT_METRIC_PREFIX)
+            ):
                 rollout_metrics[name] = rollout_metrics.get(name, 0.0) + value
 
     result["rollout_metrics"] = rollout_metrics

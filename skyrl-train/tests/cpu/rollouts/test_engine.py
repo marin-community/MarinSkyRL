@@ -153,12 +153,23 @@ async def test_task_replay_preserves_inference_session(task_inputs):
 
 
 @pytest.mark.asyncio
-async def test_task_grade_and_exact_tokens_reach_the_leased_buffer(task_inputs):
+@pytest.mark.parametrize("with_logprobs", [True, False])
+async def test_task_grade_and_exact_tokens_reach_the_leased_buffer(task_inputs, with_logprobs):
     config, request = task_inputs
+    if not with_logprobs:
+        config.sampling_params.logprobs = None
+
+    class Client(InferenceClient):
+        async def generate(self, request):
+            output = await super().generate(request)
+            if not with_logprobs:
+                output["response_logprobs"] = None
+            return output
+
     runner = TaskRolloutWorker(
         config,
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
-        InferenceClient(),
+        Client(),
         {},
         command_timeout=5,
     )
@@ -173,11 +184,23 @@ async def test_task_grade_and_exact_tokens_reach_the_leased_buffer(task_inputs):
     assert batch["prompt_token_ids"] == [[1, 2]]
     assert batch["response_ids"] == [[3, 4]]
     assert batch["loss_masks"] == [[1, 1]]
-    np.testing.assert_allclose(batch["rollout_logprobs"], [[-0.1, -0.2]])
+    if with_logprobs:
+        np.testing.assert_allclose(batch["rollout_logprobs"], [[-0.1, -0.2]])
+    else:
+        assert batch["rollout_logprobs"] is None
     assert batch["unshaped_rewards"] == [1.0]
     assert batch["teacher_route_keys"] == ["arithmetic"]
     assert batch["data_sources"] == ["arithmetic"]
     assert batch["trajectory_ids"] == [TrajectoryID("arithmetic", 0)]
+    assert {
+        name: value for name, value in batch["rollout_metrics"].items() if name.startswith("generate/task_rollout/")
+    } == {
+        "generate/task_rollout/tasks": 1.0,
+        "generate/task_rollout/turns": 1.0,
+        "generate/task_rollout/multi_turn_tasks": 0.0,
+        "generate/task_rollout/generated_tokens": 2.0,
+        "generate/task_rollout/missing_logprob_tokens": 0.0 if with_logprobs else 2.0,
+    }
 
 
 @pytest.mark.asyncio
@@ -296,6 +319,10 @@ async def test_disabled_harbor_verification_keeps_stage_tokens_without_a_score(
     await worker.run_task(RolloutTask(RolloutLease("lease", 0, 1), {"uid": task.id}, request), writer)
     batch = writer.groups[0][1].trajectory_batch
     assert all(grade.status == VerificationStatus.SKIPPED for grade in batch["verification_results"])
+    assert batch["rollout_metrics"]["generate/task_rollout/tasks"] == 1
+    assert batch["rollout_metrics"]["generate/task_rollout/turns"] == (2 if staged else 1)
+    assert batch["rollout_metrics"]["generate/task_rollout/multi_turn_tasks"] == int(staged)
+    assert batch["rollout_metrics"]["generate/task_rollout/generated_tokens"] == (4 if staged else 2)
     assert all(grade.score is None for grade in batch["verification_results"])
     if staged and projection_type is StepTaskProjection:
         assert batch["response_ids"] == [[3, 4], [5, 6]]
