@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import numpy as np
 import pytest
 import skyrl_gym
+from harbor_config.errors import ErrorCategory, error_category
 from loguru import logger
 from omegaconf import DictConfig
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
@@ -495,14 +496,15 @@ def test_skipped_grading_warns_once_when_a_batch_has_no_ultra_rows(generator_cfg
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("verification", "loss_eligible"),
+    ("verification", "loss_eligible", "exception_type"),
     [
-        (VerificationResult.skipped("grading is skipped"), True),
-        (VerificationResult.unavailable("judge unreachable"), False),
+        (VerificationResult.skipped("grading is skipped"), True, None),
+        (VerificationResult.unavailable("judge unreachable"), False, "VerifierUnavailable"),
+        (VerificationResult.error("sandbox lost state"), False, "VerifierRuntimeError"),
     ],
 )
 async def test_agent_loop_trains_skipped_verdicts_and_masks_missing_ones(
-    tokenizer, mock_llm, generator_cfg, skyrl_gym_cfg, use_env, verification, loss_eligible
+    tokenizer, mock_llm, generator_cfg, skyrl_gym_cfg, use_env, verification, loss_eligible, exception_type
 ):
     use_env(
         ScriptedEnv(
@@ -517,6 +519,13 @@ async def test_agent_loop_trains_skipped_verdicts_and_masks_missing_ones(
 
     assert output.verification.status is verification.status
     assert output.disposition.loss_eligible is loss_eligible
+    assert output.disposition.baseline_eligible is loss_eligible
+    assert output.disposition.exception_type == exception_type
+    if exception_type == "VerifierRuntimeError":
+        assert error_category(exception_type) is ErrorCategory.INFRASTRUCTURE
+    if not loss_eligible:
+        assert output.reward.unshaped_reward is None
+        assert output.reward.optimization_reward == 0.0
 
 
 @pytest.mark.asyncio

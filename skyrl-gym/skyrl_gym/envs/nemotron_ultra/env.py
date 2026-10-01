@@ -33,7 +33,7 @@ from skyrl_gym.envs.nemotron_ultra.sandbox import SandboxClient
 from skyrl_gym.envs.nemotron_ultra.structured_outputs import grade_structured_output
 from skyrl_gym.envs.nemotron_ultra.tool_call import grade_expected_action
 from skyrl_gym.envs.reasoning_gym.scoring import extract_answer
-from skyrl_gym.verification import RolloutEvidence, VerificationResult
+from skyrl_gym.verification import VERIFIER_RUNTIME_ERROR, RolloutEvidence, VerificationResult
 
 _NS_TOOLS_AGENT = "ns_tools_simple_agent"
 _LEAN_AGENT = "math_formal_lean_refinement_agent"
@@ -207,7 +207,9 @@ class NemotronUltraEnv(BaseTextEnv):
         except (requests.RequestException, RuntimeError, ValueError) as error:
             details = {
                 "agent": self.agent,
-                "error_type": type(error).__name__,
+                "error_type": VERIFIER_RUNTIME_ERROR,
+                "error_category": "infrastructure",
+                "cause_error_type": type(error).__name__,
                 "error_message": str(error),
                 "grading_action": action,
             }
