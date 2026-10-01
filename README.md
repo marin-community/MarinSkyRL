@@ -120,4 +120,4 @@ The script is designed to run on 8 GPUs single-node. If that is not your setup, 
   generator.inference_engine_tensor_parallel_size=1 \
 ```
 
-Verifier cutover setup, opt-in configuration and offline original/cutover replay commands are documented in [Unified verification](docs/verifyit.md).
+Verifier setup, opt-in configuration and offline comparison commands are documented in [Unified verification](docs/verifyit.md).

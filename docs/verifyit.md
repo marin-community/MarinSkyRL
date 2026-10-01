@@ -1,6 +1,6 @@
 # Unified verification
 
-SkyRL clients call verifyit's existing verifier modes while retaining task-specific response extraction and framework reward reporting. The dependency is pinned to a published source commit in the project metadata. No local campaign checkout or unpublished wheel is needed. This branch upgrades SkyRL’s math-verify pin from 0.8.0 to 0.9.0 to satisfy the unified dependency. Math parsing or equivalence behavior can change with this upgrade; the earlier campaign results used the previous source pin. Fresh original/cutover comparisons here use 0.9.0 on both paths.
+SkyRL clients call verifyit's existing verifier modes while retaining task-specific response extraction and framework reward reporting. The dependency is pinned to a published source commit in the project metadata. No local campaign checkout or unpublished wheel is needed. SkyRL uses math-verify 0.9.0, upgraded from 0.8.0 to satisfy the unified dependency. Math parsing or equivalence behavior can change with this upgrade; the 2026-10-01 campaign snapshot used math-verify 0.8.0. The offline comparisons use 0.9.0 on both paths.
 
 ## Install and reproduce
 
@@ -21,7 +21,7 @@ For a frozen gym installation, run `uv sync --project skyrl-gym --frozen --extra
 
 The normal launcher installation uses the root project's CPU or GPU profile described in the README. The smaller installation above exercises verifiers without installing a training runtime. Code and Lean verification additionally require the configured sandbox runtime. Judge routes require their configured provider and credentials; they cannot be exercised through the offline fixtures.
 
-## Enable a cutover
+## Enable verifyit
 
 For environments that retain their original scorer, pass `verifyit_enabled: true` in the environment configuration:
 
@@ -50,7 +50,7 @@ Verification failures return minimum reward and retain framework verification/er
 
 ## Coverage and limits
 
-[The route inventory](../tools/verifyit/route-inventory.json) lists all 45 included routes and their original source locations. The preceding campaign validated 30 routes with real traces and 15 with source fixtures. Those historical counts do not imply that all 45 have been rerun on this latest-main branch; the replay command above produces fresh, local evidence for its representative routes.
+[The route inventory](../tools/verifyit/route-inventory.json) lists all 45 included routes and their original source locations. The 2026-10-01 campaign snapshot validated 30 routes with real traces and 15 with source fixtures at source revision `91c7a60`. Those historical counts do not establish current all-route parity; the replay command above produces fresh, local evidence for its representative routes.
 
 The 46th inventoried route, coder1, is excluded pending deprecation. Its arbitrary same-interpreter Python test contract does not cleanly translate to isolated execution. [MarinSkyRL #880](https://github.com/marin-community/MarinSkyRL/issues/880) tracks deprecation. This change preserves its existing source behavior and omits its partial adapter.
 
