@@ -3,7 +3,7 @@
 import io
 import math
 import pickle
-from typing import Any, Dict, Generic, Iterator, List, Optional, TypeVar, TypedDict
+from typing import Any, Dict, Generic, Iterator, List, Optional, Protocol, Sequence, TypeVar, TypedDict
 
 import numpy as np
 import torch
@@ -15,6 +15,20 @@ from skyrl_train.ftpo import FTPOTargets
 from skyrl_train.distillation import distillation_input_from_tensors
 
 DictType = TypeVar("DictType")
+ROUTED_EXPERTS_KEY = "rollout_routed_experts"
+
+
+class RouterReplayPayload(Protocol):
+    """Storage facts used by dispatch and worker arrival logs."""
+
+    @property
+    def nbytes(self) -> int: ...
+
+    @property
+    def dtype(self) -> torch.dtype: ...
+
+    @property
+    def shape(self) -> Sequence[int]: ...
 
 
 def per_data_parallel_batch_size(mini_batch_size: int, samples_per_prompt: int, data_parallel_size: int) -> int:
@@ -377,32 +391,34 @@ class TrainingInputBatch(TensorBatch[TrainingInput]):
     def __init__(self, *args, routed_expert_rows: RoutedExpertRows | None = None, **kwargs):
         super().__init__(*args, **kwargs)
         self.routed_expert_rows = routed_expert_rows
-        if routed_expert_rows is not None and len(routed_expert_rows) != self.batch_size:
+        self._validate_route_rows()
+
+    def _validate_route_rows(self) -> None:
+        rows = self.routed_expert_rows
+        if rows is None:
+            return
+        if len(rows) != self.batch_size:
             raise ValueError("compact route row count must match the training batch")
-        if routed_expert_rows is not None and self.get("rollout_routed_experts") is not None:
+        if self.get(ROUTED_EXPERTS_KEY) is not None:
             raise ValueError("route targets cannot be both compact rows and a dense tensor")
 
     @property
-    def routed_experts(self) -> torch.Tensor | RoutedExpertRows | None:
+    def routed_experts(self) -> RouterReplayPayload | None:
         if self.routed_expert_rows is not None:
             return self.routed_expert_rows
-        return self.get("rollout_routed_experts")
+        return self.get(ROUTED_EXPERTS_KEY)
 
     def routed_experts_tensor(self) -> torch.Tensor | None:
         if self.routed_expert_rows is not None:
             return self.routed_expert_rows.materialize(self.device)
-        return self.get("rollout_routed_experts")
+        return self.get(ROUTED_EXPERTS_KEY)
 
     def select(self, keys: List[str], metadata_keys: Optional[List[str]] = None) -> "TrainingInputBatch":
-        if (
-            "rollout_routed_experts" in keys
-            and "rollout_routed_experts" not in self
-            and self.routed_expert_rows is None
-        ):
-            raise KeyError("rollout_routed_experts")
-        tensor_keys = [key for key in keys if key != "rollout_routed_experts" or key in self]
+        if ROUTED_EXPERTS_KEY in keys and ROUTED_EXPERTS_KEY not in self and self.routed_expert_rows is None:
+            raise KeyError(ROUTED_EXPERTS_KEY)
+        tensor_keys = [key for key in keys if key != ROUTED_EXPERTS_KEY or key in self]
         selected = super().select(tensor_keys, metadata_keys)
-        if "rollout_routed_experts" in keys:
+        if ROUTED_EXPERTS_KEY in keys:
             selected.routed_expert_rows = self.routed_expert_rows
         return selected
 
@@ -420,10 +436,7 @@ class TrainingInputBatch(TensorBatch[TrainingInput]):
     def __setstate__(self, state):
         super().__setstate__(state)
         self.routed_expert_rows = state["routed_expert_rows"]
-        if self.routed_expert_rows is not None and len(self.routed_expert_rows) != self.batch_size:
-            raise ValueError("compact route row count must match the training batch")
-        if self.routed_expert_rows is not None and self.get("rollout_routed_experts") is not None:
-            raise ValueError("route targets cannot be both compact rows and a dense tensor")
+        self._validate_route_rows()
         return self
 
     def repeat(self, repeats: int) -> "TrainingInputBatch":
