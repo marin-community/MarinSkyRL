@@ -174,13 +174,17 @@ def test_sanitize_data_source(data_source, expected):
     assert sanitize_data_source(data_source) == expected
 
 
-def test_evaluation_response_metrics_report_work_and_stop_contributions():
+@pytest.mark.parametrize("mixed_environments", [False, True])
+def test_evaluation_response_metrics_report_work_and_stop_contributions(mixed_environments):
     batch = {
         "response_ids": [[1, 2, 3], [4], [5, 6]],
         "rewards": [1.0, 0.0, 1.0],
         "stop_reasons": ["stop", "length", "stop"],
+        "env_classes": ["cat_count", "cat_count", "gsm8k" if mixed_environments else "cat_count"],
+        "env_metrics": [{"exact": 1.0}, {"exact": 0.0}, {}],
     }
     metrics = evaluation_response_metrics(batch)
+    assert metrics["environment/cat_count/exact"] == pytest.approx(0.5)
     assert metrics["response_tokens"] == 6
     assert metrics["response_tokens_mean"] == pytest.approx(2.0)
     assert metrics["response_tokens_max"] == 3

@@ -16,6 +16,8 @@ import skyrl_gym
 import skyrl_train
 import torch
 import zstandard
+from omegaconf import OmegaConf
+from skyrl_train.evaluate import evaluation_dump_dir
 from examples.cat_count.cpu_canary import PROMPT, pretrain
 from skyrl_train.metric_names import CORRECTION_WEIGHT_MEAN_METRIC
 
@@ -114,10 +116,13 @@ def train(
     resume: bool = False,
     eval_interval: int | None = None,
     seed: int = 0,
+    callbacks: list[dict] | None = None,
 ):
     cfg = cat_count_config(
         root, model, steps=steps, staleness=staleness, resume=resume, eval_interval=eval_interval, seed=seed
     )
+    if callbacks is not None:
+        OmegaConf.update(cfg, "trainer.callbacks", callbacks, force_add=True)
     if flipped:
         cfg.trainer.algorithm.advantage_estimator = "cat_count_flipped_grpo"
     worker_env = {key: os.environ[key] for key in ("SKYRL_TELEMETRY_ENDPOINT", "SKYRL_RUN_ID", "SKYRL_EXECUTION_UID")}
@@ -213,7 +218,28 @@ async def test_cpu_sampling_preserves_trajectory_rng_and_minimum_tokens(cat_coun
     "seed", [0, pytest.param(1, marks=pytest.mark.nightly), pytest.param(2, marks=pytest.mark.nightly)]
 )
 def test_cat_count_cpu_learns_and_flipped_advantage_fails(tmp_path, cat_count_policy, cat_count_session, runs, seed):
-    positive = train(runs, tmp_path / "positive", cat_count_policy, seed=seed)
+    positive = train(
+        runs,
+        tmp_path / "positive",
+        cat_count_policy,
+        seed=seed,
+        steps=FAST_STEPS + 2,
+        eval_interval=FAST_STEPS,
+        callbacks=[
+            {"type": "checkpoint", "save_steps": FAST_STEPS},
+            {
+                "type": "evaluation",
+                "eval_steps": FAST_STEPS,
+                "additional_evaluations": {
+                    "sampled": {"sampling_params": {"temperature": 1.0, "seed": 42}, "n_samples_per_prompt": 8}
+                },
+                "metric_groups": {"eval/reporting/avg_score": ["eval/train/avg_score", "eval/heldout/avg_score"]},
+                "stop_when": {"eval/reporting/avg_score": {"min_improvement": 0.1}},
+            },
+        ],
+    )
+    training = [row for row in positive if "policy/raw_grad_norm" in row]
+    assert len(training) == FAST_STEPS
     negative = train(runs, tmp_path / "negative", cat_count_policy, flipped=True, seed=seed)
     before, after = scores(positive)
     negative_before, negative_after = scores(negative)
@@ -222,8 +248,6 @@ def test_cat_count_cpu_learns_and_flipped_advantage_fails(tmp_path, cat_count_po
     assert all(final > initial for initial, final in zip(before, after, strict=True))
     assert sum(negative_after) <= sum(negative_before)
     assert (sum(after) - sum(negative_after)) / 2 >= 0.4
-    training = [row for row in positive if "policy/raw_grad_norm" in row]
-    assert len(training) == FAST_STEPS
     assert all(math.isfinite(row["policy/mismatch/pooled/log_ratio_abs_mean"]) for row in training)
     assert all(math.isfinite(row["policy/policy_loss"]) for row in training)
     assert all(0 < row[CORRECTION_WEIGHT_MEAN_METRIC] <= 2 for row in training)
@@ -237,6 +261,35 @@ def test_cat_count_cpu_learns_and_flipped_advantage_fails(tmp_path, cat_count_po
     assert {"policy_step", "work_completed", "phase_duration_seconds", "weight_sync_completed"} <= names
     assert any(
         row["name"] == "training_metric_value" and row["attributes"].get("metric") == "environment/exact"
+        for row in cat_count_session
+    )
+    evaluations = [row for row in positive if "eval/train/avg_score" in row]
+    assert [int(row["step"]) for row in evaluations] == [0, FAST_STEPS]
+    for row in evaluations:
+        assert row["eval/reporting/avg_score"] == pytest.approx(
+            (row["eval/train/avg_score"] + row["eval/heldout/avg_score"]) / 2
+        )
+    assert evaluations[0]["eval/reporting/avg_score_improvement"] == 0
+    assert evaluations[-1]["eval/reporting/avg_score_improvement"] >= 0.1
+    greedy_rows = [
+        json.loads(line)
+        for line in (Path(evaluation_dump_dir(str(tmp_path / "positive/exports"), 0)) / "train.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    sampled_rows = [
+        json.loads(line)
+        for line in (Path(evaluation_dump_dir(str(tmp_path / "positive/exports/sampled"), 0)) / "train.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    assert len(sampled_rows) == 8 * len(greedy_rows)
+    for prefix, rows in (("eval/train", greedy_rows), ("eval/sampled/train", sampled_rows)):
+        exact = sum((sum(row["score"]) if isinstance(row["score"], list) else row["score"]) == 1.0 for row in rows)
+        assert evaluations[0][f"{prefix}/environment/cat_count/exact"] == pytest.approx(exact / len(rows))
+    assert any(
+        row["name"] == "training_metric_value"
+        and row["attributes"].get("metric") == "eval/sampled/train/environment/cat_count/exact"
         for row in cat_count_session
     )
     print(

@@ -32,6 +32,7 @@ from skyrl_train.distributed.megatron.remote_model import install_remote_hf_stat
 from skyrl_train.distributed.megatron.megatron_utils import (
     get_model_config,
     materialize_megatron_params,
+    dp_weight_checksum_mismatch,
     print_model_size,
 )
 from skyrl_train.utils.utils import (
@@ -608,6 +609,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                             consecutive_nonfinite_steps=self._consecutive_nonfinite_steps,
                             max_consecutive_nonfinite_steps=self.cfg.trainer.policy.max_consecutive_nonfinite_steps,
                         )
+                    checksum_mismatch = None
+                    if self.cfg.trainer.policy.megatron_config.check_dp_weight_consistency:
+                        with timing.span("megatron_dp_weight_checksum"):
+                            checksum_mismatch = dp_weight_checksum_mismatch(self.actor_module)
                     if step_result.applied:
                         self._consecutive_nonfinite_steps = 0
                     elif step_result.grad_norm is None:
@@ -624,6 +629,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         # Attach grad norm only for the last micro in the mini-batch
                         if i == len(metrics_list) - 1:
                             status["skipped_steps"] = float(not step_result.applied)
+                            if checksum_mismatch is not None:
+                                status["dp_weight_checksum_mismatch"] = checksum_mismatch
                             if step_result.grad_norm is not None:
                                 status["raw_grad_norm"] = step_result.grad_norm
 
