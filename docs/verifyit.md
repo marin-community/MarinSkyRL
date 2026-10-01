@@ -4,6 +4,8 @@ SkyRL clients call verifyit's existing verifier modes while retaining task-speci
 
 ## Install and reproduce
 
+SkyRL Gym now requires Python >=3.11 (previously >=3.10), matching verifyit’s minimum. The root launcher remains Python 3.12. The commands below select Python 3.12.
+
 From this checkout, with Git and [uv](https://docs.astral.sh/uv/) installed:
 
 ```bash
