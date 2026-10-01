@@ -27,9 +27,10 @@ terminal_bench:
     version: "1.18.2"
     collect_rollout_details: true
     override_setup_timeout_sec: 600
-    override_timeout_sec: 1800
-    # TaskTrove SWE verifiers need a Together API key, and distillation ignores the reward.
-    verifier_disable: true
+    # A smoke only needs trials to return; ten minutes keeps a step well inside admission.
+    override_timeout_sec: 600
+    # TaskTrove SWE verifiers call a Together judge: launches must provide TOGETHER_API_KEY.
+    verifier_override_timeout_sec: 300
     override_cpus: 1
     override_memory_mb: 4096
     override_storage_mb: 4096
@@ -77,7 +78,7 @@ trainer:
       coefficient: 1.0
       reward_mode: replace
     group_admission:
-      # A Harbor trial may take 600 s setup and 1800 s agent time.
+      # A Harbor trial may take 600 s setup, 600 s agent, and 300 s verifier time.
       stall_timeout: 3600
   epochs: 1
   max_steps: 2
