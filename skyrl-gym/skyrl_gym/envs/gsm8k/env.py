@@ -16,9 +16,13 @@ class GSM8kEnv(BaseTextEnv):
         self.ground_truth = ground_truth_from_extras(extras)
         self.reward_method = env_config.get("reward_method", "strict")
         self.stop_reason = None
+        self.chat_completion_params = env_config.get("chat_completion_params")
 
     def init(self, prompt: ConversationType) -> tuple[ConversationType, Dict[str, Any]]:
-        return prompt, {"chat_completion_params": {}}
+        metadata = {}
+        if self.chat_completion_params is not None:
+            metadata["chat_completion_params"] = dict(self.chat_completion_params)
+        return prompt, metadata
 
     def set_rollout_evidence(self, evidence: RolloutEvidence) -> None:
         self.stop_reason = evidence.stop_reason
