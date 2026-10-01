@@ -71,7 +71,9 @@ def cat_count_policy(pytestconfig) -> Path:
         download_policy(downloaded)
         return downloaded
     except (OSError, BotoCoreError, ClientError) as error:
-        logging.getLogger(__name__).info("CatCount policy download unavailable: %s", type(error).__name__)
+        logging.getLogger(__name__).warning(
+            "CatCount policy download unavailable (%s); using cached pretraining", type(error).__name__
+        )
     parameters = argparse.Namespace(steps=3000, lr=3e-4, width=128, layers=2, seed=0)
     repository = Path(__file__).resolve().parents[3]
     sources = (
