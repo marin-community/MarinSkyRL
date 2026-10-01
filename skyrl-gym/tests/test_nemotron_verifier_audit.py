@@ -320,6 +320,25 @@ def test_stateful_sandbox_detects_reset_and_deletes_the_same_session(monkeypatch
     assert deleted == [("http://sandbox.example:6000/sessions/stable", {"X-Session-ID": "stable"})]
 
 
+def python_tool_evidence(code):
+    return RolloutEvidence(
+        metadata={
+            "assistant_message": {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call",
+                        "function": {
+                            "name": "stateful_python_code_exec",
+                            "arguments": json.dumps({"code": code}),
+                        },
+                    }
+                ],
+            }
+        }
+    )
+
+
 @pytest.mark.parametrize(
     "failure",
     [
@@ -353,24 +372,7 @@ def test_sandbox_failures_end_rollouts_without_a_verdict(monkeypatch, failure):
     monkeypatch.setattr(requests, "post", post)
     env = ultra_env("ns_tools_simple_agent", {"expected_answer": "7"})
     for code in ["x=7; print(x)", "print(x)"]:
-        env.set_rollout_evidence(
-            RolloutEvidence(
-                metadata={
-                    "assistant_message": {
-                        "role": "assistant",
-                        "tool_calls": [
-                            {
-                                "id": "call",
-                                "function": {
-                                    "name": "stateful_python_code_exec",
-                                    "arguments": json.dumps({"code": code}),
-                                },
-                            }
-                        ],
-                    }
-                }
-            )
-        )
+        env.set_rollout_evidence(python_tool_evidence(code))
         result = env.step("")
     verification = result["verification"]
     assert result["done"]
@@ -397,24 +399,7 @@ def test_python_program_failures_preserve_tool_feedback(monkeypatch, status, std
         ),
     )
     env = ultra_env("ns_tools_simple_agent", {})
-    env.set_rollout_evidence(
-        RolloutEvidence(
-            metadata={
-                "assistant_message": {
-                    "role": "assistant",
-                    "tool_calls": [
-                        {
-                            "id": "call",
-                            "function": {
-                                "name": "stateful_python_code_exec",
-                                "arguments": '{"code":"print(x)"}',
-                            },
-                        }
-                    ],
-                }
-            }
-        )
-    )
+    env.set_rollout_evidence(python_tool_evidence("print(x)"))
     result = env.step("")
     assert not result["done"]
     assert result["observations"][0]["content"] == stderr
@@ -511,20 +496,7 @@ def test_sandbox_transport_outage_is_preserved_as_verification_error(monkeypatch
 
     monkeypatch.setattr(requests, "post", refused)
     env = ultra_env("ns_tools_simple_agent", {"expected_answer": "7", "question": "compute"})
-    env.set_rollout_evidence(
-        RolloutEvidence(
-            metadata={
-                "assistant_message": {
-                    "tool_calls": [
-                        {
-                            "id": "call-1",
-                            "function": {"name": "stateful_python_code_exec", "arguments": '{"code":"x=7"}'},
-                        }
-                    ]
-                }
-            }
-        )
-    )
+    env.set_rollout_evidence(python_tool_evidence("x=7"))
     result = env.step("")
     assert result["verification"].status is VerificationStatus.ERROR
     assert "connection refused" in result["verification"].diagnostics["error_message"]

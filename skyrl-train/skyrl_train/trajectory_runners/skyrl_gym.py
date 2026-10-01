@@ -38,6 +38,7 @@ from skyrl_gym.envs.nemotron_ultra.env import NemotronUltraGrading
 from skyrl_gym.envs.nemotron_ultra.genrm import grade_genrm_group, response_object
 from skyrl_gym.envs.nemotron_ultra.judge import OpenAIJudge
 from skyrl_gym.verification import (
+    VERIFIER_RUNTIME_ERROR,
     RewardResult,
     RolloutEvidence,
     TrainingDisposition,
@@ -867,9 +868,11 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             disposition = TrainingDisposition.train(reason="verification skipped")
         elif verification.status is not VerificationStatus.VERIFIED:
             exception_type = (
-                "VerifierRuntimeError" if verification.status is VerificationStatus.ERROR else "VerifierUnavailable"
+                VERIFIER_RUNTIME_ERROR if verification.status is VerificationStatus.ERROR else "VerifierUnavailable"
             )
-            disposition = TrainingDisposition.mask("verifier unavailable", exception_type=exception_type)
+            disposition = TrainingDisposition.mask(
+                f"verification {verification.status.value}", exception_type=exception_type
+            )
             optimization_reward = 0.0
             if token_rewards is not None:
                 token_rewards = tuple(0.0 for _ in token_rewards)

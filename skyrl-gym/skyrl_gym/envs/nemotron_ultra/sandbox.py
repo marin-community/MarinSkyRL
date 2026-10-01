@@ -10,6 +10,8 @@ from typing import Any
 import requests
 import threading
 
+from skyrl_gym.verification import VERIFIER_RUNTIME_ERROR
+
 
 MAX_VERIFIER_OUTPUT_CHARACTERS = 65536
 # Share the limit across clients so increasing Gym workers cannot exhaust the sandbox.
@@ -57,7 +59,7 @@ class SandboxClient:
             raise requests.RequestException(f"Sandbox execution unavailable: {value!r}", response=response)
         if any(not isinstance(value.get(key, ""), str) for key in ("stdout", "stderr")):
             raise requests.RequestException(f"Sandbox returned malformed output: {value!r}", response=response)
-        if value.get("error_type") == "VerifierRuntimeError":
+        if value.get("error_type") == VERIFIER_RUNTIME_ERROR:
             raise requests.RequestException(f"Sandbox infrastructure failed: {value!r}", response=response)
         if value.get("process_status") == "error" and not sandbox_output_text(value):
             raise requests.RequestException(f"Sandbox execution unavailable: {value!r}", response=response)
