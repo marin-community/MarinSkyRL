@@ -21,6 +21,8 @@ For a frozen gym installation, run `uv sync --project skyrl-gym --frozen --extra
 
 The normal launcher installation uses the root project's CPU or GPU profile described in the README. The smaller installation above exercises verifiers without installing a training runtime. Code and Lean verification additionally require the configured sandbox runtime. Judge routes require their configured provider and credentials; they cannot be exercised through the offline fixtures.
 
+The Gym CI job starts the real [NeMo Skills local sandbox](https://github.com/NVIDIA-NeMo/Skills/blob/bcf059af55c20a89f797724598f9908d126153e6/nemo_skills/code_execution/local_sandbox/local_sandbox_server.py) at revision `bcf059af55c20a89f797724598f9908d126153e6`, verifies its SHA256, and installs Flask 3.1.2, IPython 9.6.0 and psutil 7.1.0 in a separate test environment. The service requires Linux resource limits; its setup, bounded health check and process-group cleanup are in [cpu_ci.yaml](../.github/workflows/cpu_ci.yaml). This supplies execution for code integration tests rather than substituting precomputed rewards.
+
 ## Enable verifyit
 
 For environments that retain their original scorer, pass `verifyit_enabled: true` in the environment configuration:
@@ -58,4 +60,4 @@ Exact, numeric, schema, instruction, code, judge and retained source-runtime cli
 
 ## Archival agent packaging
 
-The remaining dormant STEM judge integration changes its source scorer, without reviving standalone `skyrl-agent` packaging or training. Its archival manifest and lock remain unchanged. [MarinSkyRL #884](https://github.com/marin-community/MarinSkyRL/issues/884) tracks the preexisting broken trainer dependency. The STEM judge requires its original provider configuration; its entrypoint and opt-in argument are recorded in the route inventory. The retired QA example is no longer available on current main.
+The remaining dormant STEM judge integration changes its source scorer, without reviving standalone `skyrl-agent` packaging or training. Upstream [903c3a9](https://github.com/marin-community/MarinSkyRL/commit/903c3a9) repairs standalone dependency locking tracked by [#884](https://github.com/marin-community/MarinSkyRL/issues/884); this branch includes that change. Isolated frozen exports for the base, VERL and Tinker dependency profiles pass, while a full legacy training runtime has not been exercised here. The STEM judge requires its original provider configuration; its entrypoint and opt-in argument are recorded in the route inventory. The retired QA example is no longer available on current main.

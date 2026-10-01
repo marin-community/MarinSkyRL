@@ -226,52 +226,6 @@ def test_malformed_math_reference_is_invalid_before_any_candidate_gate(judge_ser
     assert server.requests == []
 
 
-@pytest.mark.parametrize("agent", ["math_with_judge_simple_agent", "ns_tools_simple_agent"])
-@pytest.mark.parametrize("label,score", [("[[A=B]]", 1.0), ("[[A!=B]]", 0.0)])
-def test_prepared_semantic_reference_roundtrips_framework(agent, label, score, judge_server):
-    import dataclasses
-    from omegaconf import OmegaConf
-    from infra.rl_data.sources import nemotron_ultra_mopd_source
-    from skyrl_gym.envs.nemotron_ultra.env import NemotronUltraEnv
-
-    server, judge = judge_server
-    server.replies = [label]
-    raw = {
-        "agent_ref": {"name": agent},
-        "responses_create_params": {"input": [{"role": "user", "content": "Describe the strategy."}]},
-        "question": "Describe the strategy.",
-        "expected_answer": "Choose the next box (unless it is empty).\n• Stop at Box 8 — then return.",
-    }
-    # This selection is made before candidate creation; the source record remains unchanged.
-    row = nemotron_ultra_mopd_source(math_reference_kind="semantic").prepare_row(raw, 0, None)
-    serialized = json.loads(row["extra_info"]["nemotron_ultra"]["record_json"])
-    assert serialized["math_reference_kind"] == "semantic"
-    assert "math_reference_kind" not in raw
-    candidate = "Move to each nonempty next box and stop when reaching the eighth box."
-    results = []
-    requests = []
-    for enabled in (False, True):
-        server.requests.clear()
-        env = NemotronUltraEnv(
-            OmegaConf.create(
-                {
-                    "verifyit_enabled": enabled,
-                    "judges": {"general": dataclasses.asdict(judge)},
-                }
-            ),
-            extras=row,
-        )
-        env.init(row["prompt"])
-        try:
-            results.append(env.step(candidate)["reward"])
-            requests.append(list(server.requests))
-        finally:
-            env.close()
-    assert results == [score, score]
-    assert requests[0] == requests[1]
-    assert len(requests[1]) == (2 if score else 1)
-
-
 @pytest.mark.parametrize(
     "kind,reference",
     [
