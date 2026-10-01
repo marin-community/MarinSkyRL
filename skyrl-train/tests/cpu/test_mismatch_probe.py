@@ -202,7 +202,9 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
     cfg.trainer.ckpt_interval = -1
     cfg.generator.inference_stats_interval = 0
     handler = CallbackHandler(create_default_callbacks(cfg))
-    control = await handler.call_event_async("on_train_begin", TrainerState(7, 0, 9, 9), TrainerControl(), trainer=trainer)
+    control = TrainerControl(step_limit=8)
+    control.reset()
+    control = await handler.call_event_async("on_train_begin", TrainerState(7, 0, 9, 9), control, trainer=trainer)
     for step in (8, 9):
         trainer.global_step = step
         await handler.call_event_async("on_step_end", TrainerState(step, 0, 9, 9), control, trainer=trainer)

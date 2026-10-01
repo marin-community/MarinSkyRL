@@ -117,6 +117,7 @@ class TrainerControl:
     The trainer checks these flags after each event and takes appropriate action.
 
     Attributes:
+        step_limit: Absolute final step requested at training start
         should_training_stop: Set to True to request early stopping
         should_save: Set to True to request a checkpoint save
         should_evaluate: Set to True to request an evaluation run
@@ -133,6 +134,7 @@ class TrainerControl:
 
     def reset(self) -> None:
         """Reset all control flags to their defaults."""
+        self.step_limit = None
         self.should_training_stop = False
         self.should_save = False
         self.should_evaluate = False
