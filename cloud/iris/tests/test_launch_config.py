@@ -13,6 +13,7 @@ from omegaconf import OmegaConf
 from cloud.iris import training_driver
 from cloud.iris.launch_config import load_launch_config, validate_launch_config
 from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, materialize_launch_config
+from skyrl_train.config.ftpo import ftpo_config
 from skyrl_train.distributed.step_policy import NonfiniteStepPolicy, nonfinite_step_policy
 
 
@@ -123,6 +124,27 @@ def test_launch_config_composes_and_loads_as_structured_hydra(tmp_path: Path, lo
         path.write_text(yaml.safe_dump(raw, sort_keys=False))
         with pytest.raises(ValueError, match="gspo requires trainer.algorithm.loss_reduction=sequence_mean"):
             load_launch_config(path)
+
+
+def test_launch_config_preserves_ftpo_tuning_through_recipe_composition(tmp_path: Path) -> None:
+    raw = _raw_config()
+    recipe = raw["skyrl"]
+    recipe["config_groups"] = {"algorithm_recipe": "ftpo"}
+    recipe["trainer"]["use_sample_packing"] = False
+    recipe["trainer"]["algorithm"]["ftpo"] = {"margin": 3.0, "lambda_mse": 0.1}
+    for role in ("policy", "ref"):
+        recipe["trainer"][role] = {"megatron_config": {"tensor_model_parallel_size": 1, "context_parallel_size": 1}}
+    recipe["generator"]["sampling_params"] = {"logprobs": 32}
+    path = tmp_path / "ftpo-launch.yaml"
+    path.write_text(yaml.safe_dump(raw))
+
+    config = load_launch_config(path)
+    objective = ftpo_config(config.skyrl.trainer.algorithm)
+    assert objective is not None
+    assert objective.margin == 3.0
+    assert objective.lambda_mse == 0.1
+    OmegaConf.save(config, path)
+    assert ftpo_config(load_launch_config(path).skyrl.trainer.algorithm) == objective
 
 
 @pytest.mark.parametrize("switch", ["use_abs_kl", "use_kl_estimator_k3"])

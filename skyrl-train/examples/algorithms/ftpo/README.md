@@ -14,8 +14,7 @@ trainer.policy.megatron_config.tensor_model_parallel_size=1 \
 trainer.ref.megatron_config.tensor_model_parallel_size=1 \
 trainer.policy.megatron_config.context_parallel_size=1 \
 trainer.ref.megatron_config.context_parallel_size=1 \
-generator.sampling_params.logprobs=32 \
-+generator.engine_init_kwargs.max_logprobs=32
+generator.sampling_params.logprobs=32
 ```
 
 The recipe replaces reward advantages with an FTPO objective; reward grading may
@@ -24,8 +23,9 @@ and off-policy correction. Use the existing data, rollout, optimizer, checkpoint
 and placement configuration. Provision the reference role even though KL is off.
 Greedy generation (`temperature=0`) is supported. Candidate probabilities use
 vLLM `raw_logprobs`; the objective uses unscaled logits regardless of sampling
-temperature. Set `generator.engine_init_kwargs.max_logprobs` at least as high as
-the requested K if the engine's configured limit is smaller.
+temperature. SkyRL derives the engine's `max_logprobs` from
+`generator.sampling_params.logprobs` and `generator.eval_sampling_params.logprobs`;
+omit it from `generator.engine_init_kwargs`.
 
 The existing token-tail loop detector selects the start of the first repeated
 copy in a periodic suffix. Its settings live under
