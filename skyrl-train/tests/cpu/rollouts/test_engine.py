@@ -3,6 +3,7 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import shutil
 import threading
@@ -13,6 +14,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import requests
 import pytest
+from harbor_config.errors import ErrorCategory, error_category
 from omegaconf import OmegaConf
 from skyrl_gym.envs.base_text_env import BaseTextEnv
 from skyrl_gym.envs.registration import EnvSpec, registry
@@ -77,6 +79,59 @@ class InferenceClient:
             "stop_reasons": ["stop"],
             "token_provenance": TokenProvenance.ENGINE,
         }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("projection_type", [WholeTaskProjection, StepTaskProjection])
+@pytest.mark.parametrize(
+    "verification,eligible,exception_type",
+    [
+        (VerificationResult.skipped("grading disabled"), True, None),
+        (VerificationResult.unavailable("judge unreachable"), False, "VerifierUnavailable"),
+        (VerificationResult.error("sandbox lost state"), False, "VerifierRuntimeError"),
+    ],
+)
+async def test_gym_verifier_failures_reach_training_eligibility(
+    task_inputs, monkeypatch, projection_type, verification, eligible, exception_type
+):
+    class VerifierEnv(BaseTextEnv):
+        def __init__(self, env_config, extras):
+            super().__init__()
+
+        def step(self, action):
+            return {"observations": [], "reward": 1.0, "done": True, "metadata": {}, "verification": verification}
+
+    monkeypatch.setitem(registry, "verifier", EnvSpec("verifier", entry_point=VerifierEnv))
+    config, request = task_inputs
+    task = gym_task(
+        request["prompts"][0],
+        "verifier",
+        {},
+        {},
+        Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
+    )
+    request["env_extras"] = [{"task_spec": task.model_dump_json()}]
+    request["env_classes"] = ["verifier"]
+    projection = (
+        WholeTrajectoryProjection if projection_type is WholeTaskProjection else StepWiseTrajectoryProjection
+    )(config, Tokenizer())
+    worker = TaskRolloutWorker(config, projection_type(projection), InferenceClient(), {}, command_timeout=5)
+    writer = Writer()
+    try:
+        await worker.run_task(RolloutTask(RolloutLease("lease", 0, 1), {"uid": task.id}, request), writer)
+    finally:
+        await worker.shutdown()
+    batch = writer.groups[0][1].trajectory_batch
+
+    assert batch["verification_results"][0].status is verification.status
+    assert batch["verification_results"][0].score is None
+    assert batch["loss_masks"] == [[int(eligible), int(eligible)]]
+    assert batch["exclude_from_baseline"] == [not eligible]
+    assert batch.get("exception_types", [None]) == [exception_type]
+    if not eligible:
+        assert batch["rewards"] == [[0.0, 0.0]]
+    if exception_type == "VerifierRuntimeError":
+        assert error_category(batch["exception_types"][0]) is ErrorCategory.INFRASTRUCTURE
 
 
 @dataclass
@@ -1472,7 +1527,56 @@ async def test_harbor_task_worker_preserves_verdicts_and_shapes_group_rewards(
         assert "token_level_shaping" not in batch
 
 
+@pytest.fixture
+def genrm_judge_server():
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            metadata = payload["metadata"]
+            server.comparisons.append(metadata)
+            first_better = metadata["response_1"] == "better"
+            scores = (
+                {"score_1": 5, "score_2": 1, "ranking": 1}
+                if first_better
+                else {"score_1": 1, "score_2": 5, "ranking": 6}
+            )
+            body = json.dumps(
+                {
+                    "status": server.status,
+                    "output": [
+                        {
+                            "type": "message",
+                            "status": "completed",
+                            "content": [{"type": "output_text", "text": json.dumps(scores)}],
+                        }
+                    ],
+                }
+            ).encode()
+            self.send_response(server.http_status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.comparisons = []
+    server.status = "completed"
+    server.http_status = 200
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize("verifyit_enabled", [False, True])
 @pytest.mark.parametrize(
     "phase,grading,failed_peer,failed_judge",
     [
@@ -1484,25 +1588,14 @@ async def test_harbor_task_worker_preserves_verdicts_and_shapes_group_rewards(
     ],
 )
 async def test_genrm_final_grades_and_credit_reach_training_batch(
-    task_inputs, monkeypatch, phase, grading, failed_peer, failed_judge
+    task_inputs, genrm_judge_server, phase, grading, failed_peer, failed_judge, verifyit_enabled
 ):
-    comparisons = []
-
-    def judge_response(url, **kwargs):
-        metadata = kwargs["json"]["metadata"]
-        comparisons.append(metadata)
-        if failed_judge:
-            raise requests.ConnectionError("Judge unavailable")
-        first_better = metadata["response_1"] == "better"
-        result = '{"score_1":5,"score_2":1,"ranking":1}' if first_better else '{"score_1":1,"score_2":5,"ranking":6}'
-        response = requests.Response()
-        response.status_code = 200
-        response._content = json.dumps(
-            {"output": [{"type": "message", "content": [{"type": "output_text", "text": result}]}]}
-        ).encode()
-        return response
-
-    monkeypatch.setattr(requests, "post", judge_response)
+    comparisons = genrm_judge_server.comparisons
+    if failed_judge:
+        if verifyit_enabled:
+            genrm_judge_server.status = "in_progress"
+        else:
+            genrm_judge_server.http_status = 400
     config, request = task_inputs
     count = 3 if failed_peer else 2
     task = gym_task(
@@ -1520,6 +1613,7 @@ async def test_genrm_final_grades_and_credit_reach_training_batch(
         },
         config={
             "grading": grading,
+            "verifyit_enabled": verifyit_enabled,
             "genrm": {
                 "num_rollouts_per_prompt": count,
                 "genrm_parse_retries": 0,
@@ -1528,7 +1622,7 @@ async def test_genrm_final_grades_and_credit_reach_training_batch(
                 "answer_bonus": 0,
                 "group_reasoning_length_penalty_coeff": 0,
                 "group_answer_length_penalty_coeff": 0,
-                "judge": {"base_url": "http://judge.test", "model": "judge"},
+                "judge": {"base_url": f"http://127.0.0.1:{genrm_judge_server.server_port}", "model": "judge"},
             },
         },
         source=Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
@@ -1568,12 +1662,15 @@ async def test_genrm_final_grades_and_credit_reach_training_batch(
         assert batch["verification_results"][failed_index].score is None
         assert batch["loss_masks"][failed_index] == []
         assert batch["exclude_from_baseline"][failed_index] is True
-        assert {pair["response_1"] for pair in comparisons} == {"better", "worse"}
         if failed_judge:
+            # A failed comparison can cancel pending judge requests.
+            assert comparisons
+            assert all({pair["response_1"], pair["response_2"]} == {"better", "worse"} for pair in comparisons)
             assert all(not any(mask) for mask in batch["loss_masks"])
             assert all(grade.score is None for grade in batch["verification_results"])
             assert batch["rewards"] == [0.0, 0.0, 0.0]
         else:
+            assert {pair["response_1"] for pair in comparisons} == {"better", "worse"}
             for index, rollout in enumerate(rollouts):
                 if index == failed_index:
                     assert batch["rewards"][index] == []
@@ -1733,16 +1830,17 @@ async def test_aime_rollout_preserves_length_reward_and_phase_metrics(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("projection_type", [WholeTaskProjection, StepTaskProjection])
 @pytest.mark.parametrize(
-    "max_model_len,max_input_length,expected_budgets",
-    [(5, 100, [3]), (2, 100, []), (None, 4, [10]), (None, 1, [])],
+    "max_model_len,max_input_length,output_limit,expected_budgets",
+    [(5, 100, None, [3]), (5, 100, 2, [2]), (2, 100, None, []), (None, 4, None, [10]), (None, 1, None, [])],
 )
 async def test_context_limits_preserve_only_completed_gym_turns(
-    task_inputs, projection_type, max_model_len, max_input_length, expected_budgets
+    task_inputs, projection_type, max_model_len, max_input_length, output_limit, expected_budgets
 ):
     config, request = task_inputs
     config.max_input_length = max_input_length
     config.engine_init_kwargs = {"max_model_len": max_model_len}
     config.sampling_params.logprobs = 0
+    request["sampling_params"] = None if output_limit is None else {"max_tokens": output_limit}
     task = gym_task(
         request["prompts"][0],
         "gsm8k_multi_turn",

@@ -5,7 +5,13 @@ from dataclasses import dataclass, replace
 import json
 
 import numpy as np
-from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDisposition, VerificationResult
+from skyrl_gym.verification import (
+    VERIFIER_RUNTIME_ERROR,
+    RewardResult,
+    RolloutEvidence,
+    TrainingDisposition,
+    VerificationResult,
+)
 from taskcompendium.grading import GradeResult, Outcome
 from taskcompendium.rollout import RolloutData
 
@@ -65,6 +71,9 @@ def training_output(
             loss_eligible=False,
             baseline_eligible=False,
             reason=rollout.grade.error or rollout.grade.status.value,
+            exception_type="VerifierUnavailable"
+            if rollout.grade.status == Outcome.UNAVAILABLE
+            else VERIFIER_RUNTIME_ERROR,
         )
     token_rewards = None
     token_credit = None

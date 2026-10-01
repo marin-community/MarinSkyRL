@@ -156,9 +156,12 @@ async def _grade_task_cohorts(
         groups.setdefault(task.id, []).append(index)
     result = list(rollouts)
     for indices in groups.values():
-        config = parameters[indices[0]]["config"].get("genrm", {})
-        if any(parameters[index]["config"].get("genrm", {}) != config for index in indices):
+        environment_config = parameters[indices[0]]["config"]
+        if any(parameters[index]["config"] != environment_config for index in indices):
             raise ValueError("A GenRM cohort must use one grading configuration")
+        config = dict(environment_config.get("genrm", {}))
+        if environment_config.get("verifyit_enabled", False):
+            config["verifyit_enabled"] = True
         judge_config = config.get("judge")
         judge = None if judge_config is None else OpenAIJudge(**judge_config)
         outputs = [
