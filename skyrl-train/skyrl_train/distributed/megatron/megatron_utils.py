@@ -42,6 +42,39 @@ def materialize_megatron_params(model_chunks: list[nn.Module]) -> None:
             module.start_param_sync(force_sync=True)
 
 
+@torch.no_grad()
+def dp_weight_checksum_mismatch(model_chunks: list[nn.Module]) -> float:
+    """Return 1.0 when GPU parameter checksums differ across matching DP replicas, otherwise 0.0."""
+    materialize_megatron_params(model_chunks)
+    mismatch = torch.zeros((), dtype=torch.int64, device=torch.cuda.current_device())
+    for expert in (False, True):
+        parameters = [
+            parameter.detach()
+            for chunk in model_chunks
+            for parameter in chunk.parameters()
+            if bool(getattr(parameter, "allreduce", True)) != expert
+        ]
+        if not parameters:
+            continue
+        checksum = torch.stack(
+            [
+                value
+                for parameter in parameters
+                for value in (
+                    parameter.sum(dtype=torch.float64),
+                    torch.linalg.vector_norm(parameter, dtype=torch.float64),
+                )
+            ]
+        )
+        group = mpu.get_expert_data_parallel_group() if expert else mpu.get_data_parallel_group()
+        replicas = [torch.empty_like(checksum) for _ in range(torch.distributed.get_world_size(group))]
+        torch.distributed.all_gather(replicas, checksum, group=group)
+        matches = torch.stack([torch.all(replica == checksum) for replica in replicas]).all()
+        mismatch = torch.maximum(mismatch, (~matches).to(torch.int64))
+    torch.distributed.all_reduce(mismatch, op=torch.distributed.ReduceOp.MAX)
+    return float(mismatch.item())
+
+
 def make_batch_generator(batches, vpp_size):
     """
     Creates a batch generator suitable for Megatron pipeline parallelism,

@@ -14,6 +14,7 @@ from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
+import datasets
 import numpy as np
 import reasoning_gym
 import requests
@@ -122,8 +123,10 @@ NEMOTRON_ULTRA_RLVR2_AGENTS = NEMOTRON_ULTRA_RLVR1_AGENTS | {
     "structured_outputs_v3_simple_agent",
 }
 NEMOTRON_ULTRA_SWE_AGENT = "swe_pivot_single_step_tool_use_with_argument_comparison_agent"
-# The MOPD blend adds one generator whose verifier has not been ported; rows using it are
-# accepted by the source and rejected by the environment, so subsets must exclude it.
+# Row metadata key naming the TaskTrove proxy task bound to a Harbor SWE row.
+TASKTROVE_PROXY_PATH_KEY = "tasktrove_proxy_path"
+# The MOPD blend adds one generator whose verifier has not been ported, so its rows train only
+# under environment.skyrl_gym.nemotron_ultra.grading: skip.
 NEMOTRON_ULTRA_MOPD_AGENTS = NEMOTRON_ULTRA_RLVR2_AGENTS | {"indirect_prompt_injection_simple_agent"}
 _NEMOTRON_PLACEHOLDER_KEY = "_hf_question_placeholder"
 _NEMOTRON_DAPO_PREFIX = (
@@ -217,6 +220,17 @@ def _nemotron_ultra_messages(raw_input: Any) -> list[dict[str, Any]]:
     return messages
 
 
+def _freeze_instruction_references(example: Mapping[str, Any], index: int, seed: int) -> Mapping[str, Any]:
+    """Resolve hidden instruction references before serializing a task for generation."""
+    if type(seed) is not int:
+        raise ValueError("Instruction reference seed must be an integer")
+    from skyrl_gym.envs.nemotron_ultra.instruction_references import freeze_instruction_references
+
+    record = freeze_instruction_references(dict(example), f"{seed}:{example.get('uuid', index)}:{index}")
+    record["instruction_reference_seed"] = seed
+    return record
+
+
 def _prepare_nemotron_ultra(
     example: Mapping[str, Any],
     index: int,
@@ -224,6 +238,8 @@ def _prepare_nemotron_ultra(
     *,
     agents: frozenset[str],
     blend: str,
+    instruction_reference_seed: int | None = None,
+    math_reference_kind: str | None = None,
 ) -> PreparedRow:
     del contract
     request = example.get("responses_create_params")
@@ -244,10 +260,21 @@ def _prepare_nemotron_ultra(
     # The stored schema name is historical: snapshot-backed SWE rows use the
     # exact TaskTrove archive path as their Harbor task identifier.
     terminal_bench_task_id = (
-        metadata.get("tasktrove_proxy_path", instance_id) if isinstance(metadata, Mapping) else None
+        metadata.get(TASKTROVE_PROXY_PATH_KEY, instance_id) if isinstance(metadata, Mapping) else None
     )
     if _NEMOTRON_PLACEHOLDER_KEY in example:
         raise ValueError("Nemotron Ultra math placeholder was not restored before row preparation.")
+
+    if instruction_reference_seed is not None and agent == "instruction_following_simple_agent":
+        example = _freeze_instruction_references(example, index, instruction_reference_seed)
+
+    if agent in {"math_with_judge_simple_agent", "ns_tools_simple_agent"}:
+        from skyrl_gym.envs.nemotron_ultra.math_references import prepare_math_reference, reference_kind
+
+        if math_reference_kind is not None:
+            example = prepare_math_reference(example, math_reference_kind)
+        else:
+            reference_kind(example)
 
     return {
         "data_source": NEMOTRON_ULTRA_RL_DATASET,
@@ -1118,7 +1145,7 @@ def gretel_text_to_sql_source() -> Source:
     )
 
 
-def _nemotron_ultra_source(*, name: str, agents: frozenset[str], blend: str) -> Source:
+def _nemotron_ultra_source(*, name: str, agents: frozenset[str], blend: str, instruction_reference_seed: int | None = None, math_reference_kind: str | None = None) -> Source:
     return Source(
         name,
         NEMOTRON_ULTRA_RL_DATASET,
@@ -1126,22 +1153,22 @@ def _nemotron_ultra_source(*, name: str, agents: frozenset[str], blend: str) -> 
         "train",
         True,
         "row_selected",
-        lambda example, index, contract: _prepare_nemotron_ultra(example, index, contract, agents=agents, blend=blend),
+        lambda example, index, contract: _prepare_nemotron_ultra(example, index, contract, agents=agents, blend=blend, instruction_reference_seed=instruction_reference_seed, math_reference_kind=math_reference_kind),
         _load_nemotron_ultra_rows,
         deduplicate_by_prompt=False,
     )
 
 
-def nemotron_ultra_rlvr1_source() -> Source:
-    return _nemotron_ultra_source(name="nemotron_ultra_rlvr1", agents=NEMOTRON_ULTRA_RLVR1_AGENTS, blend="rlvr1")
+def nemotron_ultra_rlvr1_source(*, instruction_reference_seed: int | None = None, math_reference_kind: str | None = None) -> Source:
+    return _nemotron_ultra_source(name="nemotron_ultra_rlvr1", agents=NEMOTRON_ULTRA_RLVR1_AGENTS, blend="rlvr1", instruction_reference_seed=instruction_reference_seed, math_reference_kind=math_reference_kind)
 
 
-def nemotron_ultra_rlvr2_source() -> Source:
-    return _nemotron_ultra_source(name="nemotron_ultra_rlvr2", agents=NEMOTRON_ULTRA_RLVR2_AGENTS, blend="rlvr2")
+def nemotron_ultra_rlvr2_source(*, instruction_reference_seed: int | None = None, math_reference_kind: str | None = None) -> Source:
+    return _nemotron_ultra_source(name="nemotron_ultra_rlvr2", agents=NEMOTRON_ULTRA_RLVR2_AGENTS, blend="rlvr2", instruction_reference_seed=instruction_reference_seed, math_reference_kind=math_reference_kind)
 
 
-def nemotron_ultra_mopd_source() -> Source:
-    return _nemotron_ultra_source(name="nemotron_ultra_mopd", agents=NEMOTRON_ULTRA_MOPD_AGENTS, blend="mopd")
+def nemotron_ultra_mopd_source(*, instruction_reference_seed: int | None = None, math_reference_kind: str | None = None) -> Source:
+    return _nemotron_ultra_source(name="nemotron_ultra_mopd", agents=NEMOTRON_ULTRA_MOPD_AGENTS, blend="mopd", instruction_reference_seed=instruction_reference_seed, math_reference_kind=math_reference_kind)
 
 
 def generate_reasoning_gym_rows(*, tasks: tuple[str, ...], rows_per_task: int, seed: int, start_index: int = 0):
@@ -1225,8 +1252,6 @@ def _load_asdiv_rows(source: Source, revision: str, parameters: Mapping[str, Any
 
 
 def _load_hugging_face_dataset(source: Source, revision: str, config: str | None = None):
-    import datasets
-
     return datasets.load_dataset(
         source.dataset_id,
         config,
@@ -1287,7 +1312,6 @@ def _iter_jsonl_rows(path: Path) -> Iterable[Mapping[str, Any]]:
 
 
 def _load_nemotron_ultra_rows(source: Source, revision: str, parameters: Mapping[str, Any]):
-    import datasets
     from huggingface_hub import hf_hub_download
 
     # Local import breaks the source/sidechannel module cycle while keeping the
@@ -1304,7 +1328,13 @@ def _load_nemotron_ultra_rows(source: Source, revision: str, parameters: Mapping
     rows = _skip_source_rows(source, _iter_jsonl_rows(Path(local_path)), parameters)
     rows = bind_tasktrove_swe_proxies(rows, load_tasktrove_swe_proxy_index())
 
-    placeholder_sources = {
+    placeholder_sources = load_nemotron_ultra_placeholder_sources()
+    return (restore_nemotron_ultra_placeholder(row, placeholder_sources) for row in rows)
+
+
+def load_nemotron_ultra_placeholder_sources() -> dict[tuple[str, str], datasets.Dataset]:
+    """Load the pinned datasets that NVIDIA's math placeholder rows point into."""
+    return {
         (DAPO_MATH_DATASET, "train"): datasets.load_dataset(
             DAPO_MATH_DATASET,
             split="train",
@@ -1316,7 +1346,6 @@ def _load_nemotron_ultra_rows(source: Source, revision: str, parameters: Mapping
             revision=NEMOTRON_ULTRA_SKYWORK_REVISION,
         ),
     }
-    return (_restore_nemotron_ultra_placeholder(row, placeholder_sources) for row in rows)
 
 
 def _unwrap_nemotron_answer(raw: Any) -> str:
@@ -1336,7 +1365,7 @@ def _unwrap_nemotron_answer(raw: Any) -> str:
     return stripped
 
 
-def _restore_nemotron_ultra_placeholder(
+def restore_nemotron_ultra_placeholder(
     row: Mapping[str, Any],
     sources: Mapping[tuple[str, str], Any],
 ) -> Mapping[str, Any]:

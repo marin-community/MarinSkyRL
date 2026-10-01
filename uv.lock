@@ -38,7 +38,6 @@ overrides = [
     { name = "flashinfer-cubin", marker = "sys_platform == 'linux'", specifier = "==0.6.18.post1", index = "https://flashinfer.ai/whl" },
     { name = "flashinfer-python", marker = "sys_platform == 'linux'", specifier = "==0.6.18.post1" },
     { name = "fsspec", specifier = "==2026.4.0" },
-    { name = "marin-finestore", url = "https://github.com/marin-community/marin/archive/7e88fe1f499e5ed405df37d8062f2db819aa17a0.tar.gz", subdirectory = "lib/finestore" },
     { name = "nvidia-resiliency-ext", marker = "sys_platform == 'never'" },
     { name = "opentelemetry-api", marker = "sys_platform != 'linux'" },
     { name = "opentelemetry-api", marker = "sys_platform == 'linux'", specifier = "==1.44.0" },
@@ -2625,15 +2624,15 @@ wheels = [
 
 [[package]]
 name = "latex2sympy2-extended"
-version = "1.10.2"
+version = "1.11.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "antlr4-python3-runtime" },
     { name = "sympy" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f4/de/472f9115c14c6f6d8a5889cabe3418283d708bde62ce00402c29441deed4/latex2sympy2_extended-1.10.2.tar.gz", hash = "sha256:41a517ffcc5a140e910a7d1646ce6ff440817e5f9d48fc8279d88bd0925bc389", size = 206188, upload-time = "2025-07-02T15:26:06.225Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/30/75/456da2da05f6380ea96e6ea804ab2c03e41fc3ed80052307fe8efe6ea20e/latex2sympy2_extended-1.11.0.tar.gz", hash = "sha256:9695657c81b50abba2636638638618db59f4663ed2a4a12d62cef74a40e28fec", size = 207023, upload-time = "2026-01-10T01:43:21.319Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ab/60/dfbbf40e3a371388c0e03ff65b01319b7d4023e883df6d7261125772ffdc/latex2sympy2_extended-1.10.2-py3-none-any.whl", hash = "sha256:f910442c5b02a466c1046f47d05cc5285181068b882399281f30102715337fb7", size = 207855, upload-time = "2025-07-02T15:26:04.88Z" },
+    { url = "https://files.pythonhosted.org/packages/e9/61/f75cd1fa54d8434276126034aed54dd120747de9a8fa013cdd79545ccbeb/latex2sympy2_extended-1.11.0-py3-none-any.whl", hash = "sha256:aebb77d52ce269e25028e4bea89ddb14d242ba36bcf7b636496fb5fd9728d234", size = 209050, upload-time = "2026-01-10T01:43:19.458Z" },
 ]
 
 [[package]]
@@ -2811,25 +2810,21 @@ wheels = [
 
 [[package]]
 name = "marin-finestore"
-version = "0.1.0"
-source = { url = "https://github.com/marin-community/marin/archive/7e88fe1f499e5ed405df37d8062f2db819aa17a0.tar.gz", subdirectory = "lib/finestore" }
+version = "0.2.135.dev36906221286"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "marin-rigging" },
     { name = "pyarrow" },
     { name = "pydantic" },
 ]
-sdist = { hash = "sha256:5d5bae132af0e338263499a0b6e5799f805e172afd7a94d1493545d74489acef" }
-
-[package.metadata]
-requires-dist = [
-    { name = "marin-rigging", specifier = ">=0.2.82.dev31904388897" },
-    { name = "pyarrow", specifier = ">=23.0.0" },
-    { name = "pydantic", specifier = ">=2.0" },
+sdist = { url = "https://files.pythonhosted.org/packages/fe/a7/b6e31c6f59b5d80b04c489e93d9c3dc780b3d4b10885b9aca4037df9bff9/marin_finestore-0.2.135.dev36906221286.tar.gz", hash = "sha256:c5e0bfff8169a0ec808ed0abc8dad8bd3ebce1c96c9269095ec5b7946bf4dfbe", size = 55095, upload-time = "2026-10-01T18:23:34.683Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/81/82/fc0f88fb5a33e0d07d2b5c6c49671b74dc54f8f4503dd09f30a1713cbf17/marin_finestore-0.2.135.dev36906221286-py3-none-any.whl", hash = "sha256:004fa184339f29b223e27a5e8dde6e6f0f6246bc6962121990ef33e30f2c0ae7", size = 45002, upload-time = "2026-10-01T18:23:20.436Z" },
 ]
 
 [[package]]
 name = "marin-iris"
-version = "0.2.123.dev35633925924"
+version = "0.2.135.dev36906221286"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
@@ -2859,9 +2854,9 @@ dependencies = [
     { name = "uvicorn", extra = ["standard"] },
     { name = "zstandard" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/69/ef/5845477688e30f11808b12dd538f81974cfd62e2ecca3b665f80e1c19484/marin_iris-0.2.123.dev35633925924.tar.gz", hash = "sha256:dcd5c82a1ece113c57f704c23a2a13f6729b65bb13a42f63bd12f6cbcd764f6f", size = 934370, upload-time = "2026-09-21T17:46:23.17Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/04/6c/d4a9ceddfcf63fb819eabd451ce90c7801cf42320719390fe19561bffe6e/marin_iris-0.2.135.dev36906221286.tar.gz", hash = "sha256:e59720fdf3991a9f0d2983fd28cc6f3df753803a802d87f4d15483c9fa610573", size = 937374, upload-time = "2026-10-01T18:23:37.942Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ec/df/8a7befe4daba4e5192581d442300185eec74c5c90969108bb40c0eb562b6/marin_iris-0.2.123.dev35633925924-py3-none-any.whl", hash = "sha256:c77382031674db289d5e3e6d80c576908d4d63b676caecdbeedfc20f26da4d33", size = 1127624, upload-time = "2026-09-21T17:46:10.144Z" },
+    { url = "https://files.pythonhosted.org/packages/85/07/df47a1a2f076d6271fba25e2fba6eba96b51565bd52dcf1553cbdd821e7b/marin_iris-0.2.135.dev36906221286-py3-none-any.whl", hash = "sha256:bb93a2d58ab4d49bebf896e05843ef8b675a9583794057dd8fbab4db0add41aa", size = 1132500, upload-time = "2026-10-01T18:23:24.686Z" },
 ]
 
 [[package]]
@@ -2878,7 +2873,7 @@ wheels = [
 
 [[package]]
 name = "marin-rigging"
-version = "0.2.123.dev35633925924"
+version = "0.2.135.dev36906221286"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiobotocore", version = "3.7.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux' or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
@@ -2890,6 +2885,8 @@ dependencies = [
     { name = "fsspec" },
     { name = "gcsfs" },
     { name = "google-auth" },
+    { name = "msgspec" },
+    { name = "psutil" },
     { name = "pydantic" },
     { name = "pyjwt", extra = ["crypto"] },
     { name = "pyyaml" },
@@ -2898,9 +2895,9 @@ dependencies = [
     { name = "starlette" },
     { name = "zstandard" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/95/e5/803e775a86a57d9191d6fa16ada58d10729302e2c9a61bf133f56f824223/marin_rigging-0.2.123.dev35633925924.tar.gz", hash = "sha256:3380ada59385f1f11150683b828aef911d7c1bab8d0dcbd798714883fa50e71d", size = 214760, upload-time = "2026-09-21T17:46:26.093Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/3c/5f/d085ef4973e8445c0c988a87e831ac2009ab21cde478b3a8cd8e1b2385b2/marin_rigging-0.2.135.dev36906221286.tar.gz", hash = "sha256:9ca6d8ab3feba5284456a55efa14133cf60f4a296e39247548e9882a399227e8", size = 223917, upload-time = "2026-10-01T18:23:40.703Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/83/55/0e6dd604b9e556a160bf9850c67fdac9b5105d93137f328e10f58c0bba23/marin_rigging-0.2.123.dev35633925924-py3-none-any.whl", hash = "sha256:36e55c185d4ad9daa51387c0083848a1f916df7e49536dabd4744b01a6f2f343", size = 436921, upload-time = "2026-09-21T17:46:14.287Z" },
+    { url = "https://files.pythonhosted.org/packages/e4/5a/e7c8289383f1729bb83803be834d5a73e74dd180a8fa3ac1ff0a1c438a4a/marin_rigging-0.2.135.dev36906221286-py3-none-any.whl", hash = "sha256:256511f2224c34cdd9093f72d357e98037b464a25096489501f08e0f63aa1b63", size = 519636, upload-time = "2026-10-01T18:23:28.451Z" },
 ]
 
 [package.optional-dependencies]
@@ -2973,6 +2970,7 @@ dependencies = [
     { name = "transformers" },
     { name = "uvicorn" },
     { name = "verifiable-instructions" },
+    { name = "verifyit", extra = ["answer", "judge", "reasoning-gym", "schema"] },
     { name = "wandb", version = "0.27.2", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "wandb", version = "0.28.1", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' or extra == 'extra-10-marinskyrl-cpu'" },
     { name = "xmltodict" },
@@ -3119,12 +3117,12 @@ requires-dist = [
     { name = "mamba-ssm", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'megatron'", url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-torch2.13-20260910-6d12d7a0/mamba_ssm-2.3.1-cp312-cp312-linux_x86_64.whl" },
     { name = "marin-finelog" },
     { name = "marin-finelog-server" },
-    { name = "marin-finestore" },
+    { name = "marin-finestore", specifier = "==0.2.135.dev36906221286" },
     { name = "marin-iris" },
     { name = "marin-iris-native" },
     { name = "marin-rigging", extras = ["prometheus"], marker = "extra == 'telemetry'", specifier = ">=0.2.123.dev35633925924" },
     { name = "marin-rigging", extras = ["secrets"], specifier = ">=0.2.123.dev35633925924" },
-    { name = "math-verify", specifier = "==0.8.0" },
+    { name = "math-verify", specifier = "==0.9.0" },
     { name = "megatron-bridge", marker = "sys_platform == 'linux' and extra == 'megatron'", specifier = "==0.6.0" },
     { name = "megatron-core", marker = "sys_platform == 'linux' and extra == 'megatron'", specifier = "==0.18.0" },
     { name = "memray", marker = "sys_platform == 'linux' and extra == 'telemetry'" },
@@ -3182,6 +3180,7 @@ requires-dist = [
     { name = "transformers", specifier = "==5.16.1" },
     { name = "uvicorn" },
     { name = "verifiable-instructions", git = "https://github.com/abukharin-nv/verifiable-instructions.git?rev=f46a5ac87b1400a4f8973039844b6be9b56e3faf" },
+    { name = "verifyit", extras = ["answer", "schema", "reasoning-gym", "judge"], git = "https://github.com/marin-community/verifyit?rev=d3edc5d240d53edbd0c0e4a53c0e112629550f7e" },
     { name = "vllm", marker = "platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'vllm'", url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-candidate-70ea9ae8f260/vllm-0.0.0.dev20260916+marin.70ea9ae8f260.cu132-cp38-abi3-manylinux_2_28_aarch64.whl" },
     { name = "vllm", marker = "platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux' and extra == 'vllm'", specifier = "==0.0.0.dev20260916+marin.70ea9ae8f260.cu132" },
     { name = "vllm", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'vllm'", url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-candidate-70ea9ae8f260/vllm-0.0.0.dev20260916+marin.70ea9ae8f260.cu132-cp38-abi3-manylinux_2_28_x86_64.whl" },
@@ -3261,14 +3260,14 @@ wheels = [
 
 [[package]]
 name = "math-verify"
-version = "0.8.0"
+version = "0.9.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "latex2sympy2-extended" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/35/b5/b1db6fa6b6c28ebbe1889ee11a4703a72a2ca7750ec415f4559c758cf01a/math_verify-0.8.0.tar.gz", hash = "sha256:3295e0adb94bfe553ff6e3189c44f1916a85aa24ab5d1900f2086a706e28f7c4", size = 60191, upload-time = "2025-07-02T15:52:07.209Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/4f/12/b8d13b581e110ac2f724a2351a8361a70fa36d057eb945d6379e8747c256/math_verify-0.9.0.tar.gz", hash = "sha256:45ac6c61344ba056b9e99a660a4bc8d044ed408f730aed68c60435aa5eec4645", size = 60329, upload-time = "2026-01-10T01:48:33.056Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/fe/9f/59979f699b5c97334298f1295bc9fcdc9904d98d2276479bffff863d23b1/math_verify-0.8.0-py3-none-any.whl", hash = "sha256:31ca651296d817a9bb3fd58ca1fd0d192dcea709b1e5ecf2d0a4514c16f89087", size = 29994, upload-time = "2025-07-02T15:52:05.023Z" },
+    { url = "https://files.pythonhosted.org/packages/62/76/6b4969bccc842b6567f7e6ee015684b9428a9b7fcbdf479e73716f43597f/math_verify-0.9.0-py3-none-any.whl", hash = "sha256:3703e7c4885354027fa84409d762a596a2906d1fd4deb78361876bd905a76194", size = 29967, upload-time = "2026-01-10T01:48:31.674Z" },
 ]
 
 [[package]]
@@ -6753,6 +6752,15 @@ wheels = [
 ]
 
 [[package]]
+name = "tomlkit"
+version = "0.15.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/94/96/e07752635b98536177fa1f37671c8f3cdde2e724c6bcf6034b2cfb571565/tomlkit-0.15.1.tar.gz", hash = "sha256:e25bbf38843005246210a12982776f27f99cb9be67160e14434d0c0d21ee1e97", size = 180129, upload-time = "2026-07-17T01:48:04.562Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/13/bc/8c13eb66537dce1d2bd3a57132902f38d0e7f5bb46fa9f4daed9fe9d76ee/tomlkit-0.15.1-py3-none-any.whl", hash = "sha256:177a05aece5a8ca5266fd3c448abb47b8d352f09d477d3ca8332db4d89b24304", size = 49449, upload-time = "2026-07-17T01:48:05.728Z" },
+]
+
+[[package]]
 name = "torch"
 version = "2.11.0"
 source = { registry = "https://pypi.org/simple" }
@@ -7169,6 +7177,30 @@ dependencies = [
     { name = "immutabledict" },
     { name = "langdetect" },
     { name = "nltk" },
+]
+
+[[package]]
+name = "verifyit"
+version = "0.1.0"
+source = { git = "https://github.com/marin-community/verifyit?rev=d3edc5d240d53edbd0c0e4a53c0e112629550f7e#d3edc5d240d53edbd0c0e4a53c0e112629550f7e" }
+dependencies = [
+    { name = "tomlkit" },
+]
+
+[package.optional-dependencies]
+answer = [
+    { name = "math-verify" },
+    { name = "sympy" },
+]
+judge = [
+    { name = "openai" },
+]
+reasoning-gym = [
+    { name = "reasoning-gym" },
+]
+schema = [
+    { name = "jsonschema" },
+    { name = "pyyaml" },
 ]
 
 [[package]]

@@ -17,6 +17,7 @@ from skyrl_train.distributed.megatron.model_utils import (
     vocab_parallel_entropy,
 )
 from skyrl_train.distributed.megatron.megatron_utils import get_model_config
+from skyrl_train.ftpo import FTPOTargets, FTPOInputs, boundary_values, compact_boundary_logits, ftpo_counts
 from skyrl_train.distillation import TopKEvidence, student_topk_logprobs
 from skyrl_train.models.megatron_router_replay import MegatronRouterReplay
 from skyrl_train.config.objective_spec import topk_loss_params
@@ -63,6 +64,7 @@ class MegatronForwardMicroBatch:
     position_ids: torch.Tensor
     num_actions: int
     rollout_routed_experts: Optional[torch.Tensor] = None
+    ftpo_chosen_mask: torch.Tensor | None = None
     probe_row_indices: Optional[torch.Tensor] = None
 
 
@@ -91,6 +93,7 @@ class MegatronPolicyMicroBatch:
     rollout_action_logprobs: Optional[torch.Tensor]
     response_span_tags: Optional[torch.Tensor]
     distillation: Optional[TopKEvidence] = None
+    ftpo: FTPOTargets | None = None
     correction_weights: Optional[torch.Tensor] = None
     rollout_routed_experts: Optional[torch.Tensor] = None
 
@@ -107,8 +110,10 @@ class MegatronModelWrapper:
         actor_optimizer: Optional[torch.optim.Optimizer] = None,
         policy_loss_fn: Optional[Callable] = None,
         logprob_chunk_size: Any = _UNSET,
+        vocabulary_size: int | None = None,
     ):
         self.cfg = config
+        self.vocabulary_size = vocabulary_size
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
         self.policy_loss_fn = policy_loss_fn
@@ -368,7 +373,7 @@ class MegatronModelWrapper:
         temperature: float = 1.0,
     ) -> torch.Tensor:
         """
-        Forward-only inference to compute log-probs over a full mini-batch consisting of multiple micro-batches.
+        Score response tokens, or return raw vocabulary logits at FTPO boundaries.
 
         Args:
             micro_batches: Typed forward micro-batches.
@@ -377,18 +382,24 @@ class MegatronModelWrapper:
             temperature: Optional temperature scaling for logits.
 
         Returns:
-            torch.Tensor of concatenated log-probs across micro-batches (valid on pipeline last stage only).
+            Concatenated response log-probabilities [B,T], or FTPO boundary logits [B,V].
+            Valid on the pipeline last stage only.
         """
         forward_backward_func = get_forward_backward_func()
 
         def collection_func(logits, data, packed_seq_params):
             sequences = data.sequences
+            if data.ftpo_chosen_mask is not None:
+                boundary_logits = compact_boundary_logits(
+                    logits[..., : self.vocabulary_size], data.attention_mask, data.ftpo_chosen_mask
+                )
+                return boundary_logits.new_zeros(()), {"scores": boundary_logits}
 
             if temperature != 1.0:
                 logits.div_(temperature)
 
             token_logprobs = self._token_logprobs(logits, sequences, data.attention_mask.to(bool), packed_seq_params)
-            return torch.tensor(0.0, device=token_logprobs.device), {"log_probs": token_logprobs}
+            return torch.tensor(0.0, device=token_logprobs.device), {"scores": token_logprobs}
 
         def forward_step(batch_iter, model):
             batch = next(batch_iter)
@@ -423,17 +434,18 @@ class MegatronModelWrapper:
             self.router_replay.pop_metrics()
 
         if mpu.is_pipeline_last_stage(ignore_virtual=True):
-            log_probs = [o["log_probs"] for o in output]
-            log_probs = torch.cat(log_probs, dim=0)
+            scores = [o["scores"] for o in output]
+            scores = torch.cat(scores, dim=0)
             # take last num_actions tokens per micro; concatenate later
             # Assume all micros have same num_actions
             num_actions = micro_batches[0].num_actions
-            log_probs = log_probs[:, -num_actions:]
+            if micro_batches[0].ftpo_chosen_mask is None:
+                scores = scores[:, -num_actions:]
         else:
             # return dummy tensor for non-last pp stages
             device = micro_batches[0].sequences.device
-            log_probs = torch.zeros(size=(1, 1), dtype=torch.bfloat16, device=device)
-        return log_probs
+            scores = torch.zeros(size=(1, 1), dtype=torch.bfloat16, device=device)
+        return scores
 
     def _distillation_student_logprobs(
         self,
@@ -503,6 +515,11 @@ class MegatronModelWrapper:
             self.cfg.trainer.algorithm.max_seq_len,
             sum_data_parallel,
         )
+        ftpo_normalization = None
+        if micro_batches[0].ftpo is not None:
+            ftpo_normalization = ftpo_counts(
+                [micro.ftpo for micro in micro_batches], [micro.loss_mask for micro in micro_batches], sum_data_parallel
+            )
         scale = megatron_loss_scale(
             len(micro_batches),
             torch.distributed.get_world_size(mpu.get_data_parallel_group(with_context_parallel=False)),
@@ -519,8 +536,19 @@ class MegatronModelWrapper:
             rollout_action_logprobs = data.rollout_action_logprobs
             response_span_tags = data.response_span_tags
 
-            # temperature normalization
-            if temperature != 1.0:
+            ftpo_inputs = None
+            if data.ftpo is not None:
+                assert ftpo_normalization is not None
+                ftpo_inputs = FTPOInputs(
+                    compact_boundary_logits(
+                        logits[..., : self.vocabulary_size], data.attention_mask, data.ftpo.chosen_mask
+                    ),
+                    data.ftpo,
+                    boundary_values(sequences[:, -num_actions:], data.ftpo.chosen_mask),
+                    ftpo_normalization,
+                )
+            # FTPO's logit margin and reference tether use unscaled model logits.
+            if data.ftpo is None and temperature != 1.0:
                 logits.div_(temperature)
 
             token_logprobs = self._token_logprobs(logits, sequences, data.attention_mask.to(bool), packed_seq_params)
@@ -554,6 +582,7 @@ class MegatronModelWrapper:
                 token_entropy=token_entropies[:, -num_actions - 1 : -1],
                 think_token_weight=self.cfg.trainer.algorithm.think_token_weight,
                 teacher=teacher,
+                ftpo=ftpo_inputs,
             )
             objective = compute_policy_objective(
                 batch,

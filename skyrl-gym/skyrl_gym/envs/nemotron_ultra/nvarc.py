@@ -8,6 +8,8 @@ import json
 import re
 from typing import Any
 
+from verifyit.adapters.skyrl import grade_grid_candidate
+
 from skyrl_gym.envs.nemotron_ultra.answer_extraction import final_answer_text, last_boxed_answer
 from skyrl_gym.envs.nemotron_ultra.sandbox import MAX_VERIFIER_OUTPUT_CHARACTERS, SandboxClient
 
@@ -92,7 +94,7 @@ def _execute_python(code: str, input_grid: list[list[int]], timeout_seconds: int
 
 def grade_transductive_arc(text: str, record: dict[str, Any]) -> tuple[float, dict[str, Any]]:
     predicted = parse_grid(text)
-    correct = predicted is not None and predicted == record["expected_output"]
+    correct = grade_grid_candidate(record["expected_output"], predicted).reward == 1.0
     return float(correct), {
         "agent_mode": "transductive",
         "extraction_successful": predicted is not None,
@@ -113,7 +115,7 @@ def grade_inductive_arc(
     predicted = None
     if code is not None:
         predicted, execution = _execute_python(code, record["test_input"], python_timeout_seconds, sandbox)
-    correct = predicted is not None and predicted == record["expected_output"]
+    correct = grade_grid_candidate(record["expected_output"], predicted).reward == 1.0
     return float(correct), {
         "agent_mode": "inductive",
         "extraction_successful": predicted is not None,

@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-import math
+from verifyit.adapters.skyrl import grade_rounded_candidate
 import re
 from typing import Any
 
@@ -39,7 +39,7 @@ def grade_rdkit_chemistry(text: str, record: dict[str, Any]) -> tuple[float, dic
     pattern = _BOXED_RE if record.get("use_box_format", False) else _DOUBLE_PAREN_RE
     predicted = _extract_number(text.strip(), pattern)
     actual = float(record["expected_answer"])
-    correct = predicted is not None and not math.isnan(predicted) and round(predicted) == round(actual)
+    correct = grade_rounded_candidate(actual, predicted).reward == 1.0
     return float(correct), {
         "predicted_value": predicted,
         "expected_value": actual,

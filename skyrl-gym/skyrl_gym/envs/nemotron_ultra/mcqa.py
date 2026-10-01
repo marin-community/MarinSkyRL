@@ -100,12 +100,12 @@ def _custom_regex(
     return None
 
 
-def grade_mcqa(text: str, record: dict[str, Any]) -> tuple[float, dict[str, Any]]:
+def grade_mcqa(text: str, record: dict[str, Any], *, verifyit_enabled: bool = False) -> tuple[float, dict[str, Any]]:
     text = text.strip()
     options = record.get("options")
     gold = str(record.get("expected_answer") or "").strip().upper()
     allowed = _letters(options)
-    if not text:
+    if not text and not verifyit_enabled:
         return 0.0, {"expected_answer": gold, "extracted_answer": None}
     prediction = None
     template = record.get("template_metadata")
@@ -132,5 +132,10 @@ def grade_mcqa(text: str, record: dict[str, Any]) -> tuple[float, dict[str, Any]
         if match := ANSWER_COLON_MD_PATTERN.search(text):
             candidate = match.group(1).upper()
             prediction = candidate if candidate in allowed else None
-    reward = float(bool(prediction and gold and prediction == gold))
+    if verifyit_enabled:
+        from skyrl_gym.envs.verifyit_clients import grade_mcqa_option
+
+        reward = grade_mcqa_option(gold, prediction, allowed)
+    else:
+        reward = float(bool(prediction and gold and prediction == gold))
     return reward, {"expected_answer": gold, "extracted_answer": prediction}

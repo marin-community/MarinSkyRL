@@ -130,5 +130,28 @@ jobs:
           activate-environment: true
       - name: Install skyrl-gym
         run: uv sync --frozen --extra dev --python 3.12
-      - name: Run cpu tests
-        run: uv run --frozen --python 3.12 pytest tests/
+      - name: Run cpu tests with the real NeMo sandbox
+        run: |
+          sandbox_dir="$(mktemp -d)"
+          sandbox_pid=""
+          cleanup() {
+            if [[ -n "$sandbox_pid" ]]; then kill -- -"$sandbox_pid" 2>/dev/null || true; fi
+            rm -rf "$sandbox_dir"
+          }
+          trap cleanup EXIT
+          curl --fail --location --retry 3 \
+            https://raw.githubusercontent.com/NVIDIA-NeMo/Skills/bcf059af55c20a89f797724598f9908d126153e6/nemo_skills/code_execution/local_sandbox/local_sandbox_server.py \
+            --output "$sandbox_dir/server.py"
+          echo "c79197dc02e33b63b58b30783e3cfe0076e8edf6ceb409835b5d0762756b621d  $sandbox_dir/server.py" | sha256sum --check
+          uv venv --python 3.12 "$sandbox_dir/venv"
+          uv pip install --python "$sandbox_dir/venv/bin/python" Flask==3.1.2 ipython==9.6.0 psutil==7.1.0 numpy==2.2.6 pandas==2.3.0
+          setsid "$sandbox_dir/venv/bin/python" "$sandbox_dir/server.py" > "$sandbox_dir/server.log" 2>&1 &
+          sandbox_pid=$!
+          ready=false
+          for attempt in {1..60}; do
+            if curl --fail --silent http://127.0.0.1:6000/health; then ready=true; break; fi
+            if ! kill -0 "$sandbox_pid" 2>/dev/null; then break; fi
+            sleep 1
+          done
+          if [[ "$ready" != true ]]; then cat "$sandbox_dir/server.log"; exit 1; fi
+          if ! uv run --frozen --python 3.12 pytest tests/; then cat "$sandbox_dir/server.log"; exit 1; fi

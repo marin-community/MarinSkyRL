@@ -43,6 +43,7 @@ from skyrl_train.env_vars import (
 from skyrl_train.group_admission import resolve_group_advantage_invariant
 from skyrl_train.trajectory_selection import optimization_samples_per_prompt, trajectory_selector_from_config
 from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
+from marinskyrl.runtime_options import PolicyLossType, reference_model_required
 from marinskyrl.rollout_grading import validate_nemotron_ultra_grading
 from marinskyrl.process_diagnostics import initialize_process_diagnostics
 from marinskyrl.distillation import (
@@ -85,7 +86,7 @@ def policy_strict_spread_eligible(cfg: DictConfig) -> bool:
     if placement.colocate_all:
         return False
     algo = cfg.trainer.algorithm
-    use_ref_model = algo.use_kl_loss or algo.use_kl_in_reward
+    use_ref_model = reference_model_required(algo)
     return not use_ref_model
 
 
@@ -388,7 +389,7 @@ def validate_batch_sizes(cfg: DictConfig):
     # Validate training batch size is larger than the least common multiple of the DP sizes of policy (and ref if used).
     lcm_dp_size = policy_dp_size
 
-    use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
+    use_ref_model = reference_model_required(cfg.trainer.algorithm)
     if use_ref_model:
         ref_world_size = cfg.trainer.placement.ref_num_nodes * cfg.trainer.placement.ref_num_gpus_per_node
         pp = cfg.trainer.ref.megatron_config.pipeline_model_parallel_size
@@ -573,7 +574,7 @@ def validate_cfg(cfg: DictConfig):
         "use_kl_in_reward and use_kl_loss should be mutually exclusive"
     )
 
-    use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
+    use_ref_model = reference_model_required(cfg.trainer.algorithm)
 
     validate_batch_sizes(cfg)
 
