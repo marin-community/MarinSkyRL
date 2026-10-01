@@ -21,7 +21,7 @@ examples. See the [retirement guide](../docs/coder1-retirement.md) for supported
 
 The standalone dependency lock can be regenerated with `uv lock` from this directory
 and checked with `uv lock --check`. The remaining optional backends are `verl` and `tinker`.
-The obsolete `skyrl-train` extra has been removed: trainer packaging is owned by the
+Trainer packaging is owned by the
 [root `marinskyrl` distribution](../README.md#marinskyrl-packaging), and the historical
 `examples/run_skyrl/` integrations are unsupported. Maintained agentic training uses
 the root trainer with Harbor. Standalone lock resolution does not validate the archived
