@@ -29,6 +29,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     BATCH_ERROR_METRIC_PREFIX,
     get_batch_failure_metrics,
     get_rollout_metrics,
+    get_custom_chat_template,
     get_response_ids_and_loss_mask_from_messages,
     get_generation_prompt_ids,
     detect_qwen3_5_empty_think_prefix,
@@ -311,7 +312,7 @@ def _rollout_evidence_from_harbor(
         generated_token_count=sum(bool(value) for value in loss_mask),
         prompt_token_ids=tuple(prompt_ids),
         response_token_ids=tuple(response_ids),
-        behavior_logprobs=None if rollout_logprobs is None else tuple(rollout_logprobs),
+        behavior_logprobs=None if rollout_logprobs is None else np.asarray(rollout_logprobs, dtype=np.float32),
         routed_experts=rollout_routed_experts,
     )
 
@@ -515,18 +516,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             f"Error classification: enabled={self._error_handling_config.enable_error_classification}"
         )
 
-        # Read custom chat template
-        custom_chat_template_path = trajectory_runner_cfg.engine_init_kwargs.get(
-            "custom_chat_template_chat_completion_path", None
-        )
-        if custom_chat_template_path:
-            with open(custom_chat_template_path, "r") as f:
-                self.custom_chat_template_content = f.read()
-            logger.info(
-                f"HarborTrajectoryRunner initialized with custom chat template read from: {custom_chat_template_path}"
-            )
-        else:
-            self.custom_chat_template_content = None
+        self.custom_chat_template_content = get_custom_chat_template(trajectory_runner_cfg.chat_template)
 
         # --- ARCH-GATED qwen3_5/3.6 thinking-enable for the re-tokenize / TIS path ---
         # The Qwen3.5/3.6 chat template's DEFAULT generation prompt (enable_thinking
@@ -1288,13 +1278,15 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 rollout_logprobs_list = []
                 for output in all_outputs:
                     if output.evidence.behavior_logprobs is not None:
-                        rollout_logprobs_list.append(list(output.evidence.behavior_logprobs))
+                        rollout_logprobs_list.append(output.evidence.behavior_logprobs)
                     else:
                         if self._rollout_logprobs_required and any(output.loss_mask):
                             raise ValueError("rollout_logprobs are required for every trainable trajectory")
                         # Failed trajectories are fully masked, so aligned placeholders
                         # cannot affect the objective.
-                        rollout_logprobs_list.append([0.0] * len(output.evidence.response_token_ids))
+                        rollout_logprobs_list.append(
+                            np.zeros(len(output.evidence.response_token_ids), dtype=np.float32)
+                        )
 
                 if missing_logprobs_count > 0 and self._collect_rollout_details:
                     # Only warn about missing logprobs if TIS is expected (collect_rollout_details=true)

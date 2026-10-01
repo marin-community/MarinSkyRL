@@ -18,6 +18,9 @@ from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import PreTrainedTokenizerFast
 
 from skyrl_train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
+from skyrl_train.objective.losses import ppo_policy_loss
+from skyrl_train.objective.objective import build_objective_micro_batch, compute_policy_objective
+from skyrl_train.objective.reduction import step_counts
 from skyrl_train.trajectory_runners.taskcompendium import (
     NativeTaskCompendiumRunner,
     TaskCompendiumHarborRunner,
@@ -27,7 +30,6 @@ from skyrl_train.trajectory_runners.taskcompendium import (
 from skyrl_train.trajectory_runners.types import TrajectoryID
 from skyrl_train.utils.advantage_estimators import compute_advantages_and_returns
 from skyrl_train.utils.algorithm_registry import AdvantageEstimator
-from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective, ppo_policy_loss
 from skyrl_train.config.utils import get_default_config
 
 
@@ -185,7 +187,7 @@ async def test_mixed_taskcompendium_rollout_updates_cpu_policy(
     response_length = response_mask.shape[1]
     log_probs = logits.log_softmax(dim=-1).gather(-1, sequences[:, 1:].unsqueeze(-1)).squeeze(-1)
     action_log_probs = log_probs[:, -response_length:]
-    objective = compute_policy_objective(
+    objective_batch = build_objective_micro_batch(
         action_log_probs=action_log_probs,
         old_action_log_probs=action_log_probs.detach(),
         base_action_log_probs=None,
@@ -194,10 +196,19 @@ async def test_mixed_taskcompendium_rollout_updates_cpu_policy(
         rollout_logprobs=None,
         response_span_tags=None,
         token_entropy=torch.zeros_like(action_log_probs),
+        think_token_weight=algorithm.think_token_weight,
+        teacher=None,
+    )
+    counts = step_counts(
+        [objective_batch.policy_data_weights], [loss_mask], [], [advantages], sequences.shape[1], lambda value: value
+    )
+    objective = compute_policy_objective(
+        objective_batch,
+        loss=ppo_policy_loss,
+        counts=counts,
         config=algorithm,
-        policy_loss_fn=ppo_policy_loss,
-        accumulation_steps=1,
-        scaling=LossScaling.CALLER,
+        loss_scale=1.0,
+        report_scale=1.0,
     )
     assert torch.isfinite(objective.optimization_loss)
     objective.optimization_loss.backward()

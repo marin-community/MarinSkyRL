@@ -264,7 +264,9 @@ class StepWiseRolloutCollector:
                     generated_token_count=sum(bool(value) for value in loss_mask),
                     prompt_token_ids=tuple(input_ids[:current_prompt_length]),
                     response_token_ids=tuple(response_ids),
-                    behavior_logprobs=None if response_logprobs is None else tuple(response_logprobs),
+                    behavior_logprobs=None
+                    if response_logprobs is None
+                    else np.asarray(response_logprobs, dtype=np.float32),
                     student_topk_indices=None if selected is None else selected.indices,
                     behavior_topk_logprobs=None if selected is None else selected.topk_logprobs,
                     routed_experts=routed_experts,

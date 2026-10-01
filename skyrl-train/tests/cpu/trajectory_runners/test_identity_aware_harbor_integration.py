@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 from skyrl_gym.verification import RewardResult
 from omegaconf import OmegaConf
@@ -154,7 +155,7 @@ def test_full_tito_scores_against_the_served_initial_prompt():
     assert output.evidence.prompt_token_ids == (7, 8)
     assert output.evidence.response_token_ids == (2, 10)
     assert output.loss_mask == [0, 1]
-    assert output.evidence.behavior_logprobs == (0.0, -0.25)
+    np.testing.assert_allclose(output.evidence.behavior_logprobs, [0.0, -0.25])
 
 
 @pytest.mark.parametrize(

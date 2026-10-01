@@ -17,6 +17,7 @@ from cloud.iris.task_runtime import _runtime_namespace
 from cloud.iris.training_driver import local_rl_config_from_launch
 from skyrl_train.config.trajectory_runner_capabilities import TrajectoryRunnerMode
 from skyrl_train.entrypoints import taskcompendium
+from skyrl_train.distributed.step_policy import NonfiniteStepPolicy, nonfinite_step_policy
 
 
 def _raw_config() -> dict[str, Any]:
@@ -107,14 +108,25 @@ def _raw_config() -> dict[str, Any]:
     }
 
 
-def test_launch_config_composes_and_loads_as_structured_hydra(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("loss", "reduction"), [("regular", "token_mean"), ("gspo", "sequence_mean")])
+def test_launch_config_composes_and_loads_as_structured_hydra(tmp_path: Path, loss: str, reduction: str) -> None:
     path = tmp_path / "resolved-launch.yaml"
-    path.write_text(yaml.safe_dump(_raw_config(), sort_keys=False))
+    raw = _raw_config()
+    raw["skyrl"]["trainer"]["algorithm"].update(policy_loss_type=loss, loss_reduction=reduction)
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
 
     config = load_launch_config(path)
 
     assert config.skyrl.trainer.train_batch_size == 8
     assert validate_launch_config(config).num_nodes == 1
+    if loss == "gspo":
+        config.skyrl.trainer.algorithm.loss_reduction = "token_mean"
+        with pytest.raises(ValueError, match="gspo requires trainer.algorithm.loss_reduction=sequence_mean"):
+            validate_launch_config(config)
+        raw["skyrl"]["trainer"]["algorithm"]["loss_reduction"] = "token_mean"
+        path.write_text(yaml.safe_dump(raw, sort_keys=False))
+        with pytest.raises(ValueError, match="gspo requires trainer.algorithm.loss_reduction=sequence_mean"):
+            load_launch_config(path)
 
 
 def test_pinned_hugging_face_policy_reaches_skyrl_without_object_store_staging(tmp_path: Path) -> None:
@@ -253,3 +265,15 @@ def test_task_materializes_the_forwarded_launch_document(tmp_path: Path) -> None
 
     assert path == str(destination)
     assert destination.read_bytes() == contents
+
+
+def test_null_nonfinite_limit_in_launch_fails_on_first_invalid_step(tmp_path: Path) -> None:
+    raw = _raw_config()
+    raw["skyrl"]["trainer"]["policy"] = {"max_consecutive_nonfinite_steps": None}
+    path = tmp_path / "launch.yaml"
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
+
+    config = load_launch_config(path)
+
+    action = nonfinite_step_policy(0, config.skyrl.trainer.policy.max_consecutive_nonfinite_steps)
+    assert action is NonfiniteStepPolicy.FAIL

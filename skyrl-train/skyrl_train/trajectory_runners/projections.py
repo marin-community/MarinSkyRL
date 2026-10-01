@@ -56,23 +56,12 @@ class WholeTrajectoryProjection:
         responses = [list(output.evidence.response_token_ids) for output in outputs]
         rewards = projected_rewards(outputs, responses)
         loss_masks = _loss_masks(outputs, responses, self._cfg, self._tokenizer)
-        candidate_logprobs = [
-            None if output.evidence.behavior_logprobs is None else list(output.evidence.behavior_logprobs)
-            for output in outputs
-        ]
+        candidate_logprobs = [output.evidence.behavior_logprobs for output in outputs]
         get_logprobs = _logprobs_requested(request, self._cfg)
         rollout_logprobs = (
             candidate_logprobs if get_logprobs and all(x is not None for x in candidate_logprobs) else None
         )
 
-        rollout_metrics = get_rollout_metrics(
-            responses,
-            rewards,
-            [output.env_metrics for output in outputs],
-            request["env_classes"],
-            successes=_verification_successes(outputs),
-        )
-        rollout_metrics.update(_token_provenance_metrics(outputs))
         batch = TrajectoryBatch(
             prompt_token_ids=[list(output.evidence.prompt_token_ids) for output in outputs],
             response_ids=responses,
@@ -81,7 +70,7 @@ class WholeTrajectoryProjection:
             evidence_messages=[[dict(message) for message in output.evidence.messages] for output in outputs],
             loss_masks=loss_masks,
             stop_reasons=[output.evidence.stop_reason for output in outputs],
-            rollout_metrics=rollout_metrics,
+            rollout_metrics={},
             rollout_logprobs=rollout_logprobs,
             exclude_from_baseline=[not output.disposition.baseline_eligible for output in outputs],
         )
@@ -90,6 +79,17 @@ class WholeTrajectoryProjection:
         attach_terminal_classifications(batch, outputs)
         attach_server_errors(batch, outputs)
         _attach_reward_channels(batch, outputs, responses)
+        if request.get("env_classes") is not None and any(output.env_metrics for output in outputs):
+            batch["env_metrics"] = [output.env_metrics for output in outputs]
+            batch["env_classes"] = list(request["env_classes"])
+        batch["rollout_metrics"] = get_rollout_metrics(
+            responses,
+            rewards,
+            [output.env_metrics for output in outputs],
+            request["env_classes"],
+            verification_results=batch.get("verification_results"),
+        )
+        batch["rollout_metrics"].update(_token_provenance_metrics(outputs))
         return batch
 
 
@@ -124,17 +124,8 @@ class StepWiseTrajectoryProjection:
                 is_last_step.append(step_index == len(trajectory) - 1)
 
         get_logprobs = _logprobs_requested(request, self._cfg)
-        rollout_logprobs = (
-            [
-                None if step.evidence.behavior_logprobs is None else list(step.evidence.behavior_logprobs)
-                for step in steps
-            ]
-            if get_logprobs
-            else None
-        )
+        rollout_logprobs = [step.evidence.behavior_logprobs for step in steps] if get_logprobs else None
 
-        rollout_metrics = get_rollout_metrics(responses, rewards, successes=_verification_successes(steps))
-        rollout_metrics.update(_token_provenance_metrics(steps))
         batch = TrajectoryBatch(
             prompt_token_ids=[list(step.evidence.prompt_token_ids) for step in steps],
             response_ids=responses,
@@ -143,7 +134,7 @@ class StepWiseTrajectoryProjection:
             evidence_messages=[[dict(message) for message in step.evidence.messages] for step in steps],
             loss_masks=loss_masks,
             stop_reasons=[step.evidence.stop_reason for step in steps],
-            rollout_metrics=rollout_metrics,
+            rollout_metrics={},
             rollout_logprobs=rollout_logprobs,
             trajectory_ids=projected_ids,
             is_last_step=is_last_step,
@@ -154,6 +145,10 @@ class StepWiseTrajectoryProjection:
         attach_terminal_classifications(batch, steps)
         attach_server_errors(batch, steps)
         _attach_reward_channels(batch, steps, responses)
+        batch["rollout_metrics"] = get_rollout_metrics(
+            responses, rewards, verification_results=batch.get("verification_results")
+        )
+        batch["rollout_metrics"].update(_token_provenance_metrics(steps))
         return batch
 
 
@@ -214,7 +209,8 @@ def attach_student_topk(
     captured = [output.evidence.student_topk_indices for output in outputs]
     if not any(rows is not None for rows in captured):
         return
-    width = next((len(row) for rows in captured if rows is not None for row in rows if row), 0)
+    template = next((rows for rows in captured if rows is not None and len(rows)), None)
+    width = 0 if template is None else template.shape[1]
     if width <= 0:
         raise ValueError("student top-K evidence has no candidate width")
     indices = []
@@ -224,13 +220,13 @@ def attach_student_topk(
         if evidence.student_topk_indices is None:
             if any(mask):
                 raise ValueError("student top-K evidence is missing for a trainable trajectory")
-            indices.append([[INVALID_TOPK_INDEX] * width for _ in response])
-            scores.append([[0.0] * width for _ in response])
+            indices.append(np.full((len(response), width), INVALID_TOPK_INDEX, dtype=template.dtype))
+            scores.append(np.zeros((len(response), width), dtype=np.float32))
             continue
-        if any(len(row) != width for row in evidence.student_topk_indices):
+        if evidence.student_topk_indices.shape[1] != width:
             raise ValueError("student top-K evidence widths must agree across trajectories")
-        indices.append([list(row) for row in evidence.student_topk_indices])
-        scores.append([list(row) for row in evidence.behavior_topk_logprobs])
+        indices.append(evidence.student_topk_indices)
+        scores.append(evidence.behavior_topk_logprobs)
     batch["student_topk_indices"] = indices
     batch["behavior_topk_logprobs"] = scores
 
@@ -300,12 +296,3 @@ def attach_unshaped_rewards(batch: TrajectoryBatch, rewards: Sequence[float | No
 def _token_provenance_metrics(outputs: Sequence[AgentLoopOutput]) -> dict[str, float]:
     reconstructed = sum(output.token_provenance == TokenProvenance.RECONSTRUCTED for output in outputs)
     return {TOKEN_PROVENANCE_RECONSTRUCTED_FRACTION_METRIC: reconstructed / len(outputs) if outputs else 0.0}
-
-
-def _verification_successes(outputs: Sequence[AgentLoopOutput]) -> list[bool]:
-    return [
-        output.verification.passed
-        if output.verification.passed is not None
-        else output.verification.score is not None and output.verification.score > 0.0
-        for output in outputs
-    ]

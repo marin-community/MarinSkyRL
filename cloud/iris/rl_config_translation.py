@@ -18,6 +18,8 @@ from typing import Any, Dict, Mapping, Optional, Protocol
 from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig, OmegaConf
 
+from skyrl_train.config.objective_spec import validate_objective
+
 from cloud.iris.paths import resolve_paths_in_dict
 from cloud.iris.runtime_environment import CHECKPOINT_EXPORT_ENTRYPOINT as CHECKPOINT_EXPORT_MODULE
 from marinskyrl.environment_contract import TrainingType
@@ -410,7 +412,7 @@ def validate_engine_init_kwargs(
             f"FORBIDDEN KEYS FOUND:\n{forbidden_list}\n\n"
             f"Remove these from your config. SkyRL handles them automatically.\n\n"
             f"FULL LIST OF SKYRL-INTERNAL KWARGS (never set these):\n{all_forbidden}\n\n"
-            f"SAFE TO SET: custom_chat_template_*, kv_cache_dtype, quantization, cpu_offload_gb, etc."
+            f"SAFE TO SET: kv_cache_dtype, quantization, cpu_offload_gb, etc."
         )
 
 
@@ -649,6 +651,7 @@ _OPTIONAL_HYDRA_PATTERNS = {
     ".distillation",
     ".domain_weights",
     ".engine_init_kwargs",
+    ".chat_template_kwargs",
     ".speculative_decoding",
     ".hf_hub_",
     ".enable_db_registration",
@@ -863,7 +866,7 @@ def _path_allows_new_keys(path: str) -> bool:
 def _merge_config_mapping(config: DictConfig, values: Mapping[str, Any], prefix: str = "") -> None:
     """Merge launch values into declared SkyRL config paths."""
     for key, value in values.items():
-        if value is None or isinstance(value, Mapping) and not value:
+        if isinstance(value, Mapping) and not value:
             continue
         path = f"{prefix}.{key}" if prefix else key
         current = OmegaConf.select(config, path, default=...)
@@ -900,6 +903,7 @@ def compose_skyrl_config(
     config = _compose_base_config(parsed.config_groups)
     _merge_config_mapping(config, _skyrl_config_sections(parsed, exp_args, hpc))
     validate_nemotron_ultra_grading(config, parsed.distillation_plan)
+    validate_objective(config)
     return CompiledSkyRLConfig(
         entrypoint=registered_rl_entrypoint_module(parsed.entrypoint),
         config=config,

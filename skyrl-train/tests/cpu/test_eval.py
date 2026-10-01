@@ -6,8 +6,9 @@ from unittest.mock import MagicMock
 
 import pytest
 from omegaconf import OmegaConf
+from skyrl_gym.verification import VerificationResult
 
-from skyrl_train.evaluate import evaluate
+from skyrl_train.evaluate import _calculate_eval_metrics, evaluate
 from skyrl_train.trajectory_runners.base import TrajectoryRunner, TrajectoryBatch
 from skyrl_train.trajectory_runners.trajectory_retention import (
     TrajectorySink,
@@ -62,6 +63,23 @@ class DummyRunner(TrajectoryRunner):
     async def _run(self, input_batch, disable_tqdm: bool = False):
         self.seen_inputs.append(input_batch)
         return self.output
+
+
+def test_eval_reports_normalized_verifier_score_alongside_raw_reward():
+    batch: TrajectoryBatch = {
+        "response_ids": [[1], [2]],
+        "rewards": [5.0, 0.0],
+        "verification_results": [
+            VerificationResult.verified(5.0, score_min=1.0, score_max=5.0),
+            VerificationResult.verified(0.0),
+        ],
+    }
+
+    metrics = _calculate_eval_metrics(batch, ["a", "b"], ["genrm", "math"], 1)
+
+    assert metrics["eval/all/avg_score"] == 2.5
+    assert metrics["eval/all/avg_verifier_score"] == 0.5
+    assert metrics["eval/all/verifier_score_coverage"] == 1.0
 
 
 @pytest.mark.asyncio

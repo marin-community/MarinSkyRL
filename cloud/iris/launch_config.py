@@ -10,6 +10,8 @@ from typing import Any, Mapping
 
 from omegaconf import MISSING, DictConfig, OmegaConf
 
+from skyrl_train.config.objective_spec import validate_objective
+
 from cloud.iris.ray_storage import RaySpillBackend, resolve_ray_spill_target
 from cloud.iris.role_plan import derive_num_nodes, derive_role_plan
 from cloud.iris.rl_config_translation import (
@@ -333,6 +335,8 @@ def validate_launch_config(config: DictConfig) -> LaunchTopology:
     allocation = validate_iris_allocation(raw)
     skyrl = raw["skyrl"]
     run = raw["run"]
+    if run["mode"] == RunMode.TRAIN:
+        validate_objective(config.skyrl)
     runtime = raw["runtime"]
     entrypoint = runtime["entrypoint"]
     registered_rl_entrypoint_module(entrypoint)

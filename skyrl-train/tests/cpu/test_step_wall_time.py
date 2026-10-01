@@ -71,6 +71,9 @@ def test_step_end_checkpoint_and_evaluation_are_distinct_exclusive_phases():
     trainer.eval_dataset = object()
     trainer.all_timings = {}
     trainer.all_metrics = {}
+    trainer.global_step = 4
+    trainer._training_metrics_enabled = False
+    trainer.tracker = SimpleNamespace(log=lambda metrics, **kwargs: None)
 
     async def callback(event, _state, current_control, **_kwargs):
         clock.advance(1)

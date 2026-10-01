@@ -14,12 +14,12 @@ Without ``--model``, the experiment first writes the tiny policy under its root.
 
 import argparse
 import json
+import os
 from enum import StrEnum
 from pathlib import Path
 
 import ray
 from omegaconf import DictConfig, OmegaConf
-
 from skyrl_train.config.trajectory_runner_capabilities import (
     TrajectoryRunnerMode,
     validate_trajectory_runner_capabilities,
@@ -30,12 +30,12 @@ from skyrl_train.entrypoints.main_base import BasePPOExp, EntrypointOperation
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import RayWrappedInferenceEngine
 from skyrl_train.utils import validate_cfg
+
 from tests.cpu.tiny_training.cpu_backend import CPUInferenceEngine, CPUPolicyWorker
 from tests.cpu.tiny_training.tiny_model import build_tiny_policy, write_gsm8k_dataset
 
-# The size of a CI runner, fixed so every host starts the same Ray cluster. Ray prestarts one idle worker per CPU,
-# which a larger count would multiply across concurrent test runs.
-LOGICAL_CPUS = 4
+# Eight logical CPUs leave room for rollout workers and a second run's policy actor in a shared session.
+LOGICAL_CPUS = 8
 LOGICAL_GPUS = 4
 METRICS_FILE = "metrics.jsonl"
 # Reports a stalled run with an admission error well inside the test's run timeout. Concurrent test workers can
@@ -44,10 +44,10 @@ STALL_TIMEOUT_SECONDS = 120
 TRAIN_BATCH_SIZE = 4
 # Workers import the CPU backend from this package whatever directory the run starts in.
 WORKER_ENV_VARS = {
-    "PYTHONPATH": str(Path(__file__).parents[3]),
+    "PYTHONPATH": os.pathsep.join((str(Path(__file__).parents[3]), str(Path(__file__).parents[4] / "skyrl-gym"))),
     "HF_HUB_OFFLINE": "1",
     "TOKENIZERS_PARALLELISM": "false",
-    "OMP_NUM_THREADS": "4",
+    "OMP_NUM_THREADS": "1",
 }
 
 
@@ -86,6 +86,9 @@ def tiny_training_config(
     max_steps: int,
     checkpoint_interval: int,
     num_prompts: int = 64,
+    dp_size: int = 1,
+    micro_batch_size: int = 8,
+    max_in_flight: int = 8,
 ) -> DictConfig:
     """Build a complete training config for the policy in ``model_dir``, writing its data and outputs under ``root``.
 
@@ -102,7 +105,7 @@ def tiny_training_config(
         "trainer": {
             "step_wise_training": shape is RolloutShape.STEP_WISE,
             "debug_mode": "off",
-            "placement": {"colocate_all": False, "policy_num_gpus_per_node": 1},
+            "placement": {"colocate_all": False, "policy_num_gpus_per_node": dp_size},
             "policy": {"model": {"path": str(model_dir)}, "optimizer_config": {"lr": 1.0e-3}},
             # A stalled step fails with the buffer's state long before the test's subprocess timeout.
             "algorithm": {
@@ -112,13 +115,13 @@ def tiny_training_config(
             },
             "rollout_buffer": {
                 "max_staleness_steps": MAX_STALENESS_STEPS[mode],
-                "max_in_flight": 8,
+                "max_in_flight": max_in_flight,
                 "object_store_root": str(root / "rollouts") if OBJECT_STORE_PAYLOADS[mode] else None,
             },
             "train_batch_size": TRAIN_BATCH_SIZE,
             "policy_mini_batch_size": TRAIN_BATCH_SIZE,
-            "micro_train_batch_size_per_gpu": 8,
-            "micro_forward_batch_size_per_gpu": 8,
+            "micro_train_batch_size_per_gpu": micro_batch_size,
+            "micro_forward_batch_size_per_gpu": micro_batch_size,
             "use_sample_packing": False,
             "max_steps": max_steps,
             "eval_before_train": False,
@@ -172,6 +175,16 @@ class TinyTrainingExp(BasePPOExp):
         # Filtering a few dozen prompts in one process beats spawning preprocessing workers.
         return PromptDataset(
             datasets=self.cfg.data.train_data,
+            tokenizer=self.tokenizer,
+            max_prompt_length=self.cfg.trainer.max_prompt_length,
+            num_workers=1,
+        )
+
+    def get_eval_dataset(self):
+        if self.cfg.trainer.eval_interval <= 0 or not self.cfg.data.val_data:
+            return None
+        return PromptDataset(
+            datasets=self.cfg.data.val_data,
             tokenizer=self.tokenizer,
             max_prompt_length=self.cfg.trainer.max_prompt_length,
             num_workers=1,
@@ -237,9 +250,15 @@ def main() -> None:
     parser.add_argument("--model", type=Path, help="a tiny policy directory from build_tiny_policy")
     args = parser.parse_args()
     model_dir = args.model or build_tiny_policy(args.root / "model")
-    run_experiment(
-        args.root, model_dir, args.mode, args.shape, max_steps=args.steps, checkpoint_interval=args.checkpoint_interval
+    cfg = tiny_training_config(
+        args.root,
+        model_dir,
+        args.mode,
+        args.shape,
+        max_steps=args.steps,
+        checkpoint_interval=args.checkpoint_interval,
     )
+    run_tiny_training(cfg)
 
 
 if __name__ == "__main__":

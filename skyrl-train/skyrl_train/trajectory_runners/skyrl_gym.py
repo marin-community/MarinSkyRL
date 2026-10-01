@@ -242,7 +242,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 generated_token_count=0,
                 prompt_token_ids=(0,),
                 response_token_ids=(0,),
-                behavior_logprobs=(0.0,),
+                behavior_logprobs=np.zeros(1, dtype=np.float32),
             ),
             verification=VerificationResult.error(
                 "SkyRL-Gym agent loop failed",
@@ -387,7 +387,9 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 # If retokenize_chat_history==True, avoid including the generation prompt in both the
                 # prompt_ids and response_ids due to how `response_encodings["input_ids"]` works.
                 add_generation_prompt=not retokenize_chat_history,
-                chat_template=self.custom_chat_template if retokenize_chat_history or chat_completion_params else None,
+                chat_template=(
+                    self.custom_chat_template if retokenize_chat_history or chat_completion_params is not None else None
+                ),
                 tokenize=True,
                 **self.trajectory_runner_cfg.chat_template_kwargs,
             )
@@ -408,7 +410,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     generated_token_count=0,
                     prompt_token_ids=tuple(input_ids),
                     response_token_ids=(),
-                    behavior_logprobs=(),
+                    behavior_logprobs=np.empty(0, dtype=np.float32),
                 ),
                 verification=VerificationResult.unavailable("initial prompt exceeds the model input limit"),
                 reward=RewardResult(
@@ -907,7 +909,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             generated_token_count=sum(bool(value) for value in loss_mask),
             prompt_token_ids=tuple(prompt_ids),
             response_token_ids=tuple(response_ids),
-            behavior_logprobs=None if rollout_logprobs is None else tuple(rollout_logprobs),
+            behavior_logprobs=None if rollout_logprobs is None else np.asarray(rollout_logprobs, dtype=np.float32),
             student_topk_indices=None if selected is None else selected.indices,
             behavior_topk_logprobs=None if selected is None else selected.topk_logprobs,
             routed_experts=rollout_routes,
@@ -1066,6 +1068,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 outputs[index].verification = VerificationResult.verified(
                     reward,
                     diagnostics={"agent": (ultra_at(index) or {})["agent"], "genrm_metrics": metrics},
+                    score_min=1.0,
+                    score_max=5.0,
                 )
                 outputs[index].env_metrics.update({f"genrm/{name}": value for name, value in metrics.items()})
 

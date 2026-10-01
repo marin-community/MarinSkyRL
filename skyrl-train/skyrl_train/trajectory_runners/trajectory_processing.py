@@ -16,6 +16,7 @@ from skyrl_train.trajectory_runners.types import (
 from skyrl_train.trajectory_runners.trajectory_retention import RETENTION_METRIC_PREFIX
 from skyrl_train.trajectory_runners.routed_experts import normalize_routed_experts
 from skyrl_train.metric_names import (
+    ENVIRONMENT_METRIC_PREFIX,
     IDENTITY_AWARE_REWARD_METRIC_PREFIX,
     LITERAL_BRIDGE_CORRELATED_TRIALS_METRIC,
     LITERAL_BRIDGE_CORRELATED_TURNS_METRIC,
@@ -42,7 +43,7 @@ from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
 from loguru import logger
 from skyrl_gym.metrics import aggregate_for_environment
-from skyrl_gym.verification import VerificationStatus
+from skyrl_gym.verification import VerificationResult, VerificationStatus, normalized_verifier_score
 
 
 BATCH_ERROR_METRIC_PREFIX = "generate/errors/"
@@ -698,6 +699,37 @@ def get_outcome_rewards(trajectory_batch: TrajectoryBatch) -> List[float]:
     return [NormalizedReward.from_output(reward).outcome for reward in rewards]
 
 
+def normalized_verifier_scores(trajectory_batch: TrajectoryBatch) -> List[float | None] | None:
+    """Return bounded task scores, or None if the batch has no verdict channel.
+
+    Entries are None for skipped or missing verdicts and zero for verifier
+    failures. A verifier may declare its native score range. This keeps
+    GenRM's 1–5 ratings comparable with 0–1 verifiers in cross-task averages,
+    while leaving the optimization rewards and raw verifier scores intact.
+    """
+    results = trajectory_batch.get("verification_results")
+    if results is None:
+        return None
+    if len(results) != len(trajectory_batch["rewards"]):
+        raise ValueError("verification_results must have one entry per reward")
+    scores: List[float | None] = []
+    for result in results:
+        if result is None or result.status is VerificationStatus.SKIPPED:
+            scores.append(None)
+        elif result.status is not VerificationStatus.VERIFIED:
+            scores.append(0.0)
+        else:
+            scores.append(normalized_verifier_score(result))
+    return scores
+
+
+def verifier_score_summary(scores: List[float | None]) -> tuple[float, float | None]:
+    """Return included-row coverage and mean bounded score."""
+    included = [score for score in scores if score is not None]
+    coverage = len(included) / len(scores) if scores else 0.0
+    return coverage, float(np.mean(included)) if included else None
+
+
 def graded_row_indices(trajectory_batch: TrajectoryBatch) -> List[int]:
     """Return rows whose environment ran grading; skipped rows carry no reward to report."""
     results = trajectory_batch.get("verification_results")
@@ -767,6 +799,23 @@ def _concatenate_rewards(trajectory_batches: List[TrajectoryBatch]) -> Union[Lis
     return rewards
 
 
+def _reward_sign_successes(rewards: Sequence[float | List[float]]) -> List[bool]:
+    return [float(np.sum(reward)) > 0.0 for reward in rewards]
+
+
+def _concatenate_environment_metrics(result: TrajectoryBatch, batches: List[TrajectoryBatch]) -> None:
+    if any("env_metrics" in batch for batch in batches):
+        for batch in batches:
+            if ("env_metrics" in batch) != ("env_classes" in batch):
+                raise ValueError("environment metrics and classes must be carried together")
+        result["env_metrics"] = [
+            metrics for batch in batches for metrics in batch.get("env_metrics", [{} for _ in batch["response_ids"]])
+        ]
+        result["env_classes"] = [
+            env_class for batch in batches for env_class in batch.get("env_classes", [""] * len(batch["response_ids"]))
+        ]
+
+
 def concatenate_trajectory_batches(
     trajectory_batches: List[TrajectoryBatch],
     *,
@@ -776,8 +825,7 @@ def concatenate_trajectory_batches(
     """
     Concatenate multiple trajectory batches into one batch.
 
-    We only aggregate rollout metrics the can deduced by responses and rewards, but not
-    those that use `env_metrics` or `env_classes`.
+    Preserve episode-level environment observations for metrics across repeated concatenation.
     """
     assert len(trajectory_batches) > 0
     has_rollout_logprobs = _rollout_logprob_presence(trajectory_batches, required=require_rollout_logprobs)
@@ -796,7 +844,7 @@ def concatenate_trajectory_batches(
                 # Fill in placeholder logprobs for batches that don't have them
                 # Each trajectory needs logprobs matching its response_ids length
                 for response_ids in output["response_ids"]:
-                    rollout_logprobs_concat.append([0.0] * len(response_ids))
+                    rollout_logprobs_concat.append(np.zeros(len(response_ids), dtype=np.float32))
 
     selected_topk_concat = None
     behavior_topk_concat = None
@@ -942,6 +990,7 @@ def concatenate_trajectory_batches(
     if baseline_exclusions_concat is not None:
         result["exclude_from_baseline"] = baseline_exclusions_concat
 
+    _concatenate_environment_metrics(result, trajectory_batches)
     for key in ("verification_results", "evidence_messages"):
         if any(batch.get(key) is not None for batch in trajectory_batches):
             result[key] = [
@@ -960,14 +1009,15 @@ def concatenate_trajectory_batches(
         result[key] = sum([trajectory_batch[key] for trajectory_batch in trajectory_batches], [])
 
     # Re-aggregate rollout metrics
-    rollout_metrics = get_rollout_metrics(result["response_ids"], result["rewards"])
+    rollout_metrics = get_rollout_metrics(
+        result["response_ids"],
+        result["rewards"],
+        result.get("env_metrics"),
+        result.get("env_classes"),
+        verification_results=result.get("verification_results"),
+    )
 
-    # Preserve the TIS alignment metrics (generate/tis/*). get_rollout_metrics
-    # only derives reward/length stats, so without this the per-batch TIS
-    # alignment health (exact_match_fraction / lcs_fallback_fraction /
-    # alignment_fail_count) would be SILENTLY DROPPED on the fully-async path
-    # (concatenate happens per training step there) and never reach wandb. Merge
-    # them back by recombining the token-weighted fractions across batches.
+    # TIS alignment metrics use token-weighted fractions across batches.
     total_aligned = 0.0
     sum_exact = sum_lcs = sum_unaligned = 0.0
     sum_fail = sum_lcs_msgs = 0.0
@@ -1065,6 +1115,8 @@ def validate_trajectory_batch(num_prompts: int, trajectory_batch: TrajectoryBatc
         "rewards",
         "rollout_logprobs",
         "verifier_tests",
+        "env_metrics",
+        "env_classes",
         "verification_results",
         "evidence_messages",
     ):
@@ -1132,7 +1184,7 @@ def get_rollout_metrics(
     rewards: Union[List[float], List[List[float]]],
     env_metrics: Optional[List[Dict[str, Any]]] = None,
     env_classes: Optional[List[str]] = None,
-    successes: Optional[List[bool]] = None,
+    verification_results: Optional[List[Optional[VerificationResult]]] = None,
 ):
     """
     Computes rollout metrics including token statistics and optional environment-specific metrics.
@@ -1142,26 +1194,22 @@ def get_rollout_metrics(
         rewards: List of rewards (either per-trajectory or per-token)
         env_metrics: Optional list of environment-specific metrics for each trajectory
         env_classes: Optional list of environment class names for each trajectory
-        successes: Optional verifier-defined success predicate for each trajectory
+        verification_results: Verifier verdicts that override reward-sign token statistics when present
 
     Returns:
         Dictionary of aggregated metrics
     """
     num_tokens_arr = np.array([len(response) for response in responses])
-    # Support both response-level and token-level rewards
-    flat_rewards = []
-    for r in rewards:
-        if isinstance(r, list):
-            flat_rewards.append(float(np.sum(r)))
-        else:
-            flat_rewards.append(float(r))
-    flat_rewards_arr = np.array(flat_rewards)
-    if successes is not None:
-        if len(successes) != len(responses):
-            raise ValueError("successes must have one value per response")
-        non_zero_rewards_arr = np.array(successes, dtype=bool)
-    else:
-        non_zero_rewards_arr = flat_rewards_arr > 0.0
+    successes = _reward_sign_successes(rewards)
+    if verification_results is not None:
+        for index, result in enumerate(verification_results):
+            if result is None:
+                continue
+            if result.status is not VerificationStatus.VERIFIED:
+                successes[index] = False
+            else:
+                successes[index] = result.passed if result.passed is not None else float(result.score) > 0.0
+    non_zero_rewards_arr = np.array(successes, dtype=bool)
     zero_rewards_arr = ~non_zero_rewards_arr
     # average tokens for non zero rewards
     avg_tokens_non_zero_rewards = (
@@ -1190,7 +1238,7 @@ def get_rollout_metrics(
             # Aggregate metrics across all trajectories for the same environment
             agg = aggregate_for_environment(env_name, metrics)
             for key, value in agg.items():
-                rollout_metrics[f"environment/{key}"] = value
+                rollout_metrics[f"{ENVIRONMENT_METRIC_PREFIX}{key}"] = value
 
     return rollout_metrics
 

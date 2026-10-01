@@ -8,13 +8,15 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+import ray
 import torch
 from omegaconf import OmegaConf
 
 import skyrl_train.trainer as trainer_module
 from skyrl_train.callbacks.base import TrainerControl
 from skyrl_train.config.utils import get_default_config
-from skyrl_train.distillation import SampledReverseKLInput, SparseForwardKLInput, TopKTeacherEvidence
+from marinskyrl.distillation import compile_distillation_plan_from_config
+from skyrl_train.distillation import ChosenTokenTeacherInput, TeacherTopKInput, TopKTeacherEvidence
 from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.group_admission import GroupAdvantageInvariant
 from skyrl_train.rollouts.context import TrainingContextState
@@ -22,7 +24,10 @@ from skyrl_train.rollouts.loader import PromptLoaderState
 from skyrl_train.trainer import CheckpointSnapshot, RayPPOTrainer
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.trajectory_runners.types import TrajectoryID
-from skyrl_train.utils.policy_losses import ppo_policy_loss
+from skyrl_train.objective.losses import PolicyLossInputs, ppo_policy_loss
+from skyrl_train.config.objective_spec import LossReduction
+from skyrl_train.objective.reduction import reduce_to_step, step_counts
+from skyrl_train.training_batch import TrainingBatchIterator
 from skyrl_train.utils.trainer_utils import ResumeMode
 from skyrl_train.utils.utils import validate_batch_sizes
 from skyrl_train.workers.worker import CriticWorkerBase, PolicyWorkerBase
@@ -46,6 +51,21 @@ class _CapturingPolicyGroup:
             return [object()]
         if method_name == "empty_cache":
             return []
+        raise AssertionError(f"Unexpected policy method: {method_name}")
+
+
+class _ForwardPolicyGroup:
+    actor_infos = [SimpleNamespace(rank=MeshRank(dp=0, sp=0, tp=0, pp=0, world_size=1, dp_size=1, pp_size=1))]
+
+    def async_run_ray_method(self, dispatch_type, method_name, **kwargs):
+        if method_name == "barrier_all":
+            return [ray.put(None)]
+        if method_name == "empty_cache":
+            return []
+        if method_name == "forward":
+            data = kwargs["data"]
+            output = torch.zeros(len(data["sequences"]), data.metadata["response_length"])
+            return [ray.put(TrainingOutputBatch({"output": output}))]
         raise AssertionError(f"Unexpected policy method: {method_name}")
 
 
@@ -307,36 +327,6 @@ def test_consumed_staleness_counts_selected_masked_sequences_by_group(dtype, mon
     assert all(event[2]["step"] == "7" for event in events)
 
 
-def test_sync_trainer_attaches_global_loss_denominator_before_dispatch(monkeypatch):
-    trainer = object.__new__(RayPPOTrainer)
-    trainer.cfg = OmegaConf.create(
-        {
-            "trainer": {
-                "algorithm": {"loss_reduction": "seq_mean_token_sum_norm_global", "max_seq_len": 8},
-                "offload_optimizer_during_rollouts": False,
-            }
-        }
-    )
-    trainer.global_step = 3
-    trainer.all_metrics = {}
-    trainer.all_timings = {}
-    trainer.colocate_all = False
-    trainer.critic_model = None
-    trainer.policy_model = _CapturingPolicyGroup()
-
-    status = TrainingOutputBatch()
-    status.metadata = {"train_status": {}}
-    monkeypatch.setattr(trainer_module, "collect_actor_results", lambda *args, **kwargs: [status])
-    monkeypatch.setattr(trainer_module.ray, "get", lambda refs: refs)
-
-    batch = TrainingInputBatch({"advantages": torch.tensor([[1.0, 0.0], [0.0, 2.0]])})
-    batch.metadata = {}
-
-    trainer.train_critic_and_policy(batch)
-
-    assert trainer.policy_model.training_batch.metadata["global_loss_denom"] == 32.0
-
-
 @pytest.fixture
 def dummy_tokenizer():
     # convert_to_training_input only pads with pad_token_id; any other tokenizer use should fail loudly.
@@ -535,6 +525,7 @@ def test_grpo_loop_credit_is_token_local_when_every_group_member_has_the_same_ou
             "response_mask": response_mask,
             "values": None,
             "loop_advantages": loop_advantages,
+            "loss_mask": response_mask,
         }
     )
     data.metadata = {
@@ -548,14 +539,111 @@ def test_grpo_loop_credit_is_token_local_when_every_group_member_has_the_same_ou
 
     assert torch.equal(result["advantages"], loop_advantages)
     assert torch.equal(result["returns"], torch.zeros(4, response_length))
-    policy_loss, _ = ppo_policy_loss(
-        torch.zeros_like(loop_advantages),
-        torch.zeros_like(loop_advantages),
-        result["advantages"],
-        config=trainer.cfg.trainer.algorithm,
-        loss_mask=response_mask,
+    inputs = PolicyLossInputs(
+        torch.zeros_like(loop_advantages), torch.zeros_like(loop_advantages), None, result["advantages"], response_mask
+    )
+    token_loss = ppo_policy_loss(inputs, trainer.cfg.trainer.algorithm)
+    counts = step_counts(
+        [response_mask], [response_mask], [], [result["advantages"]], response_length, lambda value: value
+    )
+    policy_loss = reduce_to_step(
+        token_loss.values,
+        response_mask,
+        counts.policy,
+        LossReduction(loss_reduction),
+        max_seq_len=response_length,
+        nonzero_advantage_rows=counts.nonzero_advantage_rows,
     )
     assert policy_loss.item() == pytest.approx(expected_policy_loss)
+
+
+def test_replace_mode_rejects_batch_without_teacher_evidence(ray_init, dummy_config, local_distillation_config):
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = local_distillation_config(dummy_config)
+    trainer.cfg.trainer.algorithm.distillation.reward_mode = "replace"
+    trainer.distillation_plan = compile_distillation_plan_from_config(trainer.cfg)
+    trainer.policy_model = _ForwardPolicyGroup()
+    trainer.ref_model = None
+    trainer.critic_model = None
+    trainer.colocate_all = False
+    trainer.global_step = 1
+    trainer.all_timings = {}
+    trainer._training_metrics_enabled = False
+    batch = TrainingInputBatch(
+        {
+            "sequences": torch.tensor([[1, 2, 3]]),
+            "attention_mask": torch.ones(1, 3, dtype=torch.long),
+            "loss_mask": torch.ones(1, 2),
+            "rollout_logprobs": None,
+        }
+    )
+    batch.metadata = {"response_length": 2}
+
+    with pytest.raises(ValueError, match="replace requires teacher evidence on every training batch"):
+        asyncio.run(trainer._run_training(batch))
+
+
+@pytest.mark.parametrize("reward_mode", ["add", "replace"])
+@pytest.mark.parametrize("clip", [None, 0.5])
+def test_teacher_credit_follows_environment_normalization_and_loop_credit(
+    dummy_config, local_distillation_config, reward_mode, clip
+):
+    config = local_distillation_config(dummy_config)
+    config.trainer.algorithm.advantage_batch_normalize = reward_mode == "add"
+    config.trainer.algorithm.advantage_estimator = "uniform" if reward_mode == "replace" else "grpo"
+    config.trainer.algorithm.distillation.reward_mode = reward_mode
+    config.trainer.algorithm.distillation.advantage_clip = clip
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = config
+    trainer.distillation_plan = compile_distillation_plan_from_config(config)
+    trainer.all_metrics = {}
+    mask = torch.tensor([[1.0, 1.0, 0.0, 1.0]])
+    valid = torch.tensor([[True, False, False, True]])
+    if reward_mode == "replace":
+        mask *= valid
+    batch = TrainingInputBatch(
+        {
+            "sequences": torch.tensor([[1, 2, 3, 4, 5]]),
+            "attention_mask": torch.ones(1, 5, dtype=torch.long),
+            "action_log_probs": torch.tensor([[-1.0, -1.0, torch.nan, -1.0]], requires_grad=True),
+            "base_action_log_probs": None,
+            "values": None,
+            "returns": torch.zeros(1, 4),
+            "advantages": torch.tensor([[1.0, 3.0, torch.nan, 5.0]]),
+            "rewards": torch.zeros(1, 4),
+            "loop_advantages": torch.tensor([[-0.1, -0.2, 0.0, -0.3]]) if reward_mode == "add" else torch.zeros(1, 4),
+            "response_mask": torch.ones(1, 4),
+            "loss_mask": mask,
+            "teacher_action_log_probs": torch.tensor([[-0.2, torch.nan, torch.nan, -2.5]], requires_grad=True),
+            "teacher_valid_mask": valid,
+            "distillation_loss_weights": torch.tensor([[0.3, torch.nan, torch.nan, 2.0]]),
+        }
+    )
+    batch.metadata = {"uids": ["a"], "response_length": 4}
+
+    result = trainer.finalize_advantages_for_training(batch)
+    [experience] = list(TrainingBatchIterator(result, sample_batch_size=1))
+
+    teacher = torch.tensor([[0.24, 0.0, 0.0, -3.0]]) if clip is None else torch.tensor([[0.15, 0.0, 0.0, -1.0]])
+    normalized = torch.tensor([[-(1.5**0.5) - 0.1, -0.2, 0.0, 1.5**0.5 - 0.3]])
+    expected = teacher if reward_mode == "replace" else normalized + teacher
+    torch.testing.assert_close(experience.advantages, expected)
+    assert not experience.advantages.requires_grad
+    assert experience.distillation is None
+    for name in (
+        "teacher_action_log_probs",
+        "teacher_valid_mask",
+        "distillation_loss_weights",
+        "loop_advantages",
+        "rewards",
+    ):
+        assert name not in result
+    assert trainer.all_metrics["distillation/teacher_advantage_mean"] == pytest.approx(teacher.sum().item() / 2)
+    assert trainer.all_metrics["distillation/teacher_advantage_abs_mean"] == pytest.approx(
+        teacher.abs().sum().item() / 2
+    )
+    assert trainer.all_metrics["distillation/teacher_advantage_clipped_fraction"] == (0 if clip is None else 1)
+    assert trainer.all_metrics["distillation/valid_tokens"] == 2
 
 
 def test_loop_advantages_are_collated_with_response_tokens(dummy_config, dummy_tokenizer):
@@ -595,7 +683,7 @@ def test_teacher_evidence_is_validated_and_collated_with_response_tokens(
     trainer.tokenizer = dummy_tokenizer
     trainer.pad_batch = lambda batch: batch
     evidence = chosen_teacher_evidence
-    distillation = SampledReverseKLInput(
+    distillation = ChosenTokenTeacherInput(
         teacher_action_log_probs=evidence.chosen_logprobs,
         valid_mask=evidence.valid_mask,
         loss_weights=torch.tensor([[0.2, 0.2, 0.2], [0.3, 0.3, 0.3]]),
@@ -643,7 +731,7 @@ def test_topk_teacher_evidence_is_collated_without_dense_vocabulary_tensors(dumm
         ),
         retained_mass=torch.tensor([[0.9, 0.8, 0.6], [0.95, torch.nan, torch.nan]]),
     )
-    distillation = SparseForwardKLInput(
+    distillation = TeacherTopKInput(
         teacher_topk_indices=evidence.topk_indices,
         teacher_topk_logprobs=evidence.topk_logprobs,
         retained_mass=evidence.retained_mass,
@@ -794,3 +882,36 @@ def test_validate_batch_sizes_requires_even_division_across_ranks(default_config
         return
     with pytest.raises(AssertionError, match=error):
         validate_batch_sizes(cfg)
+
+
+def test_grpo_reports_one_flat_and_one_varied_reward_group():
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create(
+        {
+            "trainer": {
+                "step_wise_training": False,
+                "algorithm": {
+                    "advantage_estimator": "grpo",
+                    "gamma": 1.0,
+                    "lambd": 1.0,
+                    "grpo_norm_by_std": True,
+                },
+            }
+        }
+    )
+    trainer.group_advantage_invariant = GroupAdvantageInvariant.exact_physical(physical_group_size=2)
+    trainer.all_metrics = {}
+    data = TrainingInputBatch(
+        {
+            "rewards": torch.tensor([[1.0], [1.0], [0.0], [2.0]]),
+            "response_mask": torch.ones(4, 1),
+            "values": None,
+        }
+    )
+    data.metadata = {"uids": ["easy", "easy", "hard", "hard"], "avg_response_length": 1.0}
+
+    result = trainer.compute_advantages_and_returns(data)
+
+    assert trainer.all_metrics["reward/zero_std_group_fraction"] == pytest.approx(0.5)
+    assert torch.equal(result["advantages"][:2], torch.zeros(2, 1))
+    assert torch.isfinite(result["advantages"]).all()

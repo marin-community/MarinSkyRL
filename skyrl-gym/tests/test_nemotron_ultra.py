@@ -145,6 +145,22 @@ def test_genrm_utilities_match_nvidia_circular_tiebreaker():
     assert metrics["tiebreak_usage_rate"] == pytest.approx(0.0)
 
 
+def test_genrm_aggregation_rejects_missing_comparison_metadata():
+    with pytest.raises(ValueError):
+        aggregate_scores(
+            comparison_results=[(4.0, 2.0, 1.0), (3.0, 5.0, 5.0)],
+            comparison_metadata=[(0, 1, 0)],
+            response_objs=[{"output": []}, {"output": []}],
+            aggregator_method="simple_tiebreaker",
+            default_score=3.0,
+            reasoning_bonus=0.0,
+            answer_bonus=0.0,
+            top_percentile=0.2,
+            group_reasoning_length_penalty_coeff=0.0,
+            group_answer_length_penalty_coeff=0.0,
+        )
+
+
 def test_genrm_group_limits_comparison_concurrency():
     active = 0
     max_active = 0
@@ -557,6 +573,30 @@ def test_instruction_following_reward_uses_all_row_constraints():
     reward, details = grade_instruction_following("A tulip blooms, briefly.", record)
     assert reward == 0.0
     assert details["follow_instruction_list"] == [True, False]
+
+
+def test_instruction_following_fraction_counts_every_constraint():
+    record = {
+        "instruction_id_list": ["keywords:existence", "punctuation:no_comma", "keywords:existence"],
+        "kwargs": [{"keywords": ["tulip"]}, {}, {"keywords": ["daisy"]}],
+        "grading_mode": "fraction",
+    }
+
+    reward, details = grade_instruction_following("A tulip blooms, briefly.", record)
+    assert reward == pytest.approx(1 / 3)
+    assert details["num_passed"] == 1
+    assert details["num_total"] == 3
+
+
+def test_instruction_following_rejects_truncated_composite():
+    record = {
+        "instruction_id_list": ["keywords:existence", "punctuation:no_comma"],
+        "kwargs": [{"keywords": ["tulip"]}],
+        "grading_mode": "fraction",
+    }
+
+    with pytest.raises(ValueError, match="same nonzero length"):
+        grade_instruction_following("A tulip blooms.", record)
 
 
 def test_ns_tools_surfaces_malformed_arguments_like_nvidia_simple_agent():

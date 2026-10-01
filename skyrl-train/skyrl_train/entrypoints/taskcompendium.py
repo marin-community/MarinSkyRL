@@ -9,6 +9,7 @@ import hydra
 import ray
 from omegaconf import DictConfig
 
+from skyrl_train.config.objective_spec import rollout_logprobs_required
 from skyrl_train.config.trajectory_runner_capabilities import TrajectoryRunnerMode
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, run_ray_driver
 from skyrl_train.inference_engines.model_identity import served_model_name
@@ -35,7 +36,7 @@ class TaskCompendiumExp(BasePPOExp):
             TaskCompendiumHarborRunner,
             TaskCompendiumTrajectoryRouter,
         )
-        from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled  # noqa: PLC0415
+        from skyrl_train.utils.algorithm_registry import PolicyLossRegistry  # noqa: PLC0415
 
         output_dir = Path(tempfile.mkdtemp(prefix="taskcompendium-attempts-"))
         harbor_runner = TaskCompendiumHarborRunner(
@@ -50,7 +51,9 @@ class TaskCompendiumExp(BasePPOExp):
         return TaskCompendiumTrajectoryRouter(
             native_runner=native_runner,
             harbor_runner=harbor_runner,
-            require_rollout_logprobs=rollout_logprobs_enabled(cfg.trainer.algorithm),
+            require_rollout_logprobs=rollout_logprobs_required(
+                cfg.trainer.algorithm, loss_spec=PolicyLossRegistry.spec(cfg.trainer.algorithm.policy_loss_type)
+            ),
             tis_lcs_alert_threshold=float(cfg.trainer.algorithm.tis_lcs_alert_threshold),
         )
 
