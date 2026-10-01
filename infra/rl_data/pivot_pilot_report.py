@@ -58,7 +58,10 @@ def learning_curves(rows: list[dict], *, seed: int, samples: int) -> dict:
         for row in group:
             if row["status"] not in {"verified", "unavailable"}:
                 raise ValueError("Repair evaluation infrastructure/verifier errors before reporting")
-            if row["status"] == "unavailable" and row["status_reason"] != "initial prompt exceeds the model input limit":
+            if (
+                row["status"] == "unavailable"
+                and row["status_reason"] != "initial prompt exceeds the model input limit"
+            ):
                 diagnostic = json.loads(row["diagnostics_json"])
                 if diagnostic.get("error_category") != "context_overflow":
                     raise ValueError("Only explicit input-context exclusions may be omitted from accuracy")
