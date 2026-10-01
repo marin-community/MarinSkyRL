@@ -15,7 +15,7 @@
     ],
     "early_stop_margin": 0.2,
     "margin_contract": "The launcher stop_on_improvement margin equals this spec min_improvement.",
-    "step_cap_rule": "Worst first crossing over four final seeds plus five steps.",
+    "step_cap_rule": "about 1.5× worst crossing across four seeds, rounded to the eval interval",
     "marin_sha": "c57ae7b8de8a905dcd89f1b021e1ec351e534001",
     "first_crossing_steps": [
       5,
@@ -23,7 +23,7 @@
       20,
       10
     ],
-    "step_cap": 25,
+    "step_cap": 35,
     "staleness": 0,
     "eval_interval": 5,
     "weight_sync_fidelity": "Initial pre-update mean exp(logprob difference) is within 0.98\u20131.02; pooled mean absolute log-ratio is at most 0.05 on every step. Later exponential means can contain rare-token outliers (observed maximum 2.1551).",

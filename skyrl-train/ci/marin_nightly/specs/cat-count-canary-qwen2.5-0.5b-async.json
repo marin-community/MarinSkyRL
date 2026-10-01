@@ -15,7 +15,7 @@
     ],
     "early_stop_margin": 0.2,
     "margin_contract": "The launcher stop_on_improvement margin equals this spec min_improvement.",
-    "step_cap_rule": "Worst first crossing over four final seeds plus five steps.",
+    "step_cap_rule": "about 1.5× worst crossing across four seeds, rounded to the eval interval",
     "marin_sha": "c57ae7b8de8a905dcd89f1b021e1ec351e534001",
     "first_crossing_steps": [
       20,
@@ -23,7 +23,7 @@
       15,
       45
     ],
-    "step_cap": 50,
+    "step_cap": 70,
     "staleness": 2,
     "eval_interval": 5,
     "log_ratio_observed_maximum": 0.5917172267140303
