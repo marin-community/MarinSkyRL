@@ -1,6 +1,7 @@
 """End-to-end CPU training through the production entrypoints on a tiny policy."""
 
 import multiprocessing
+import json
 from multiprocessing.context import ForkServerContext
 from pathlib import Path
 
@@ -46,6 +47,10 @@ class _StepLimit(TrainerCallback):
 
     def on_train_begin(self, state, control, **kwargs):
         control.step_limit = self.limit
+        trainer = kwargs["trainer"]
+        path = Path(trainer.cfg.trainer.export_path) / f"start-{state.global_step}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"checkpoint_path": trainer.loaded_checkpoint_path}))
         return control
 
 
@@ -186,6 +191,9 @@ def test_callback_limits_resume_at_max_steps_and_keep_the_smallest_limit(runs, t
     assert [record["trainer/global_step"] for record in _trained_steps(tmp_path)] == [1, 2, 3]
     checkpoint = tmp_path / "ckpts" / "global_step_3" / "trainer_state.pt"
     assert checkpoint.exists()
+    for step in (1, 3):
+        provenance = json.loads((tmp_path / "exports" / f"start-{step}.json").read_text())
+        assert provenance["checkpoint_path"] == str(tmp_path / "ckpts" / f"global_step_{step}")
 
 
 def test_one_step_is_independent_of_micro_batch_size(runs: ForkServerContext, tmp_path: Path, tiny_policy: Path):

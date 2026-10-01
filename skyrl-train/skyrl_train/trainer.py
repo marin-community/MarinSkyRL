@@ -327,6 +327,7 @@ class RayPPOTrainer:
         self._shutdown_complete = False
         self._restored_rollout_state: TrainingContextState | None = None
         self.global_step = 0
+        self.loaded_checkpoint_path: str | None = None
         self._last_saved_step: int | None = None
         self._last_evaluated_step: int | None = None
         self._pending_checkpoint_upload: tuple[asyncio.Task[tuple[float, float]], TrainerState] | None = None
@@ -1245,7 +1246,7 @@ class RayPPOTrainer:
         restored_data = False
         if self.resume_mode != ResumeMode.NONE:
             with Timer("load_checkpoints", self.all_startup_timings):
-                self.global_step, _ = self.load_checkpoints()
+                self.global_step, self.loaded_checkpoint_path = self.load_checkpoints()
             logger.info(f"Resumed training from global_step {self.global_step}")
             if self._restored_rollout_state is not None:
                 await self.context.load_state_dict(self._restored_rollout_state)

@@ -64,7 +64,8 @@ def manifest(probe, trainer, *, status: mismatch.ArchiveStatus):
         status=status,
         probe_hash=probe.probe_hash,
         checkpoint_path=str(
-            probe.cfg.get("runtime", {}).get("checkpoint_path")
+            trainer.loaded_checkpoint_path
+            or probe.cfg.get("runtime", {}).get("checkpoint_path")
             or trainer.cfg.trainer.resume_path
             or trainer.cfg.trainer.policy.model.path
         ),

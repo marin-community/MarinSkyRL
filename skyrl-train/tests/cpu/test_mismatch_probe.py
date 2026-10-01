@@ -109,6 +109,7 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
     cfg.trainer.algorithm.off_policy_correction = "none"
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
     trainer.cfg = cfg
+    trainer.loaded_checkpoint_path = None
     trainer.group_advantage_invariant = GroupAdvantageInvariant.no_group_advantage(physical_group_size=1)
     trainer.tokenizer = tokenizer
     trainer.inference_engine_client = _InferenceEndpoint(tokenizer)
@@ -216,6 +217,13 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
     assert chained.manifest.starting_global_step == 7
     assert chained.probes == probes
     assert chained.generations == source.generations
+
+    trainer.global_step = 7
+    trainer.loaded_checkpoint_path = str(tmp_path / "another-checkpoint" / "global_step_7")
+    cfg.trainer.mismatch_probe.archive_uri = str(tmp_path / "different-checkpoint")
+    rejected = CallbackHandler(create_default_callbacks(cfg))
+    with pytest.raises(ValueError, match="starting checkpoint, step or runtime differs"):
+        await rejected.call_event_async("on_train_begin", TrainerState(7, 0, 9, 9), TrainerControl(), trainer=trainer)
 
     class ValidationPrompts:
         def __len__(self):
