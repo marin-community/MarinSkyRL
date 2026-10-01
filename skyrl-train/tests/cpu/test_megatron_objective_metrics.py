@@ -1,14 +1,3 @@
-"""Backend-parity contracts for policy objectives and diagnostics.
-
-These tests pin Megatron pipeline metrics for TIS, clipping, think-token weighting, global normalization, and
-cross-microbatch log-ratio diagnostics.
-
-`megatron_model_wrapper` imports `megatron.core` submodules at module load, but
-nothing under test touches them, so when megatron is not installed (the CPU CI
-env) we stub those submodules via the shared tests/cpu/util.py helper — only if
-megatron is genuinely absent, so a real-megatron env is left untouched.
-"""
-
 import asyncio
 
 import pytest
@@ -21,32 +10,27 @@ from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.workers.worker import PolicyWorkerBase
 
 from skyrl_train.utils.importance_ratio_diagnostics import (
-    TIS_DIAG_KEYS,
     LogRatioMonitor,
-    compute_tis_diagnostics,
 )
-from skyrl_train.utils.policy_losses import POLICY_CLIP_METRIC_KEYS, ppo_policy_loss
+from skyrl_train.objective.losses import POLICY_CLIP_METRIC_KEYS, TokenLoss, ppo_policy_loss
 from tests.cpu.util import stub_megatron_modules
 
 stub_megatron_modules()
 
-from skyrl_train.distillation import SparseForwardKLInput  # noqa: E402
+from skyrl_train.distillation import TeacherTopKInput  # noqa: E402
 from skyrl_train.workers.megatron import megatron_model_wrapper as mmw  # noqa: E402
 
 BATCH_SIZE = 2
 SEQ_LEN = 6
 NUM_ACTIONS = 4
-CAP = 2.0
 
 
-def _algorithm_cfg(use_tis: bool, policy_loss_type: str = "regular") -> OmegaConf:
+def _algorithm_cfg(policy_loss_type: str = "regular") -> OmegaConf:
     return OmegaConf.create(
         {
             "trainer": {
                 "use_sample_packing": False,
                 "algorithm": {
-                    "use_tis": use_tis,
-                    "tis_imp_ratio_cap": CAP,
                     "use_entropy_loss": False,
                     "entropy_loss_coef": 0.0,
                     "use_kl_loss": False,
@@ -65,7 +49,7 @@ def _algorithm_cfg(use_tis: bool, policy_loss_type: str = "regular") -> OmegaCon
     )
 
 
-def _tis_tensors():
+def _policy_tensors():
     torch.manual_seed(0)
     old_lp = torch.randn(BATCH_SIZE, NUM_ACTIONS)
     rollout_lp = old_lp + 0.3 * torch.randn(BATCH_SIZE, NUM_ACTIONS)
@@ -73,43 +57,18 @@ def _tis_tensors():
     return old_lp, rollout_lp, loss_mask
 
 
-def _fake_policy_loss_fn(
-    log_probs,
-    old_log_probs,
-    advantages,
-    config=None,
-    loss_mask=None,
-    rollout_logprobs=None,
-    global_loss_denom=None,
-):
-    del global_loss_denom
-    return torch.tensor(0.25), {}
+def _fake_policy_loss_fn(inputs, config):
+    return TokenLoss(torch.full_like(inputs.log_probs, 0.25), {})
 
 
-def _mask_sum_policy_loss_fn(
-    log_probs,
-    old_log_probs,
-    advantages,
-    config=None,
-    loss_mask=None,
-    rollout_logprobs=None,
-    global_loss_denom=None,
-):
-    del log_probs, old_log_probs, advantages, config, rollout_logprobs, global_loss_denom
-    return loss_mask.sum(), {}
+def _mask_sum_policy_loss_fn(inputs, config):
+    return TokenLoss(
+        torch.arange(inputs.log_probs.numel(), dtype=inputs.log_probs.dtype).reshape_as(inputs.log_probs), {}
+    )
 
 
-def _globally_normalized_mask_sum(
-    log_probs,
-    old_log_probs,
-    advantages,
-    config=None,
-    loss_mask=None,
-    rollout_logprobs=None,
-    global_loss_denom=None,
-):
-    del log_probs, old_log_probs, advantages, config, rollout_logprobs
-    return loss_mask.sum() / global_loss_denom, {}
+def _globally_normalized_mask_sum(inputs, config):
+    return TokenLoss(torch.ones_like(inputs.log_probs), {})
 
 
 class _FakeMegatronModule:
@@ -130,7 +89,7 @@ def test_megatron_tp1_gathers_sparse_teacher_tokens_from_student_logits(monkeypa
     )
     indices = torch.tensor([[[0, 2], [1, 3]]])
     teacher_probs = torch.tensor([[[0.6, 0.3], [0.7, 0.2]]])
-    distillation = SparseForwardKLInput(
+    distillation = TeacherTopKInput(
         teacher_topk_indices=indices,
         teacher_topk_logprobs=teacher_probs.log(),
         retained_mass=teacher_probs.sum(dim=-1),
@@ -148,7 +107,6 @@ def test_megatron_tp1_gathers_sparse_teacher_tokens_from_student_logits(monkeypa
         loss_mask=torch.ones(1, 2),
         rollout_action_logprobs=None,
         response_span_tags=None,
-        global_loss_denom=None,
         distillation=distillation,
     )
 
@@ -171,24 +129,22 @@ def _fake_forward_backward_func(
 
 
 def _megatron_mini_batch_metrics(
-    use_tis: bool,
     rollout_lp,
     monkeypatch,
     *,
     response_span_tags=None,
     think_token_weight: float = 1.0,
-    global_loss_denom=None,
+    loss_reduction="token_mean",
     policy_loss_fn=_fake_policy_loss_fn,
     log_ratio_offsets=(0.0, 0.0),
     timings: PhaseBreakdown | None = None,
 ) -> list[dict]:
-    old_lp, _, loss_mask = _tis_tensors()
+    old_lp, _, loss_mask = _policy_tensors()
 
     wrapper = mmw.MegatronModelWrapper.__new__(mmw.MegatronModelWrapper)
-    wrapper.cfg = _algorithm_cfg(use_tis)
+    wrapper.cfg = _algorithm_cfg()
     wrapper.cfg.trainer.algorithm.think_token_weight = think_token_weight
-    if global_loss_denom is not None:
-        wrapper.cfg.trainer.algorithm.loss_reduction = "seq_mean_token_sum_norm_global"
+    wrapper.cfg.trainer.algorithm.loss_reduction = loss_reduction
     wrapper.actor_module = [_FakeMegatronModule()]
     wrapper.actor_optimizer = None
     wrapper.policy_loss_fn = policy_loss_fn
@@ -238,11 +194,10 @@ def _megatron_mini_batch_metrics(
             num_actions=NUM_ACTIONS,
             old_action_log_probs=old_lp,
             base_action_log_probs=None,
-            advantages=torch.zeros(BATCH_SIZE, NUM_ACTIONS),
+            advantages=torch.ones(BATCH_SIZE, NUM_ACTIONS),
             loss_mask=loss_mask,
             rollout_action_logprobs=rollout_lp,
             response_span_tags=response_span_tags,
-            global_loss_denom=global_loss_denom,
         )
 
     return wrapper.forward_backward_mini_batch(
@@ -258,35 +213,9 @@ def _megatron_mini_batch_metrics(
 # fixture (tests/cpu/conftest.py) so broadcast_object_list runs as a no-op.
 
 
-def test_megatron_mini_batch_emits_tis_diagnostics(single_rank_group, monkeypatch):
-    old_lp, rollout_lp, loss_mask = _tis_tensors()
-    expected = compute_tis_diagnostics(old_lp, rollout_lp, loss_mask, cap=CAP)
-    metrics_list = _megatron_mini_batch_metrics(use_tis=True, rollout_lp=rollout_lp, monkeypatch=monkeypatch)
-    assert len(metrics_list) == 2
-    for metrics in metrics_list:
-        for key in TIS_DIAG_KEYS:
-            assert metrics[key] == pytest.approx(expected[key])
-
-
-def test_megatron_mini_batch_fallback_keyset_when_rollout_logprobs_absent(single_rank_group, monkeypatch):
-    """No rollout logprobs must still land the full keyset (all_reduce safety)."""
-    metrics_list = _megatron_mini_batch_metrics(use_tis=True, rollout_lp=None, monkeypatch=monkeypatch)
-    for metrics in metrics_list:
-        assert metrics["tis/imp_ratio_mean"] == 1.0
-        assert metrics["tis/imp_ratio_capped_fraction"] == 0.0
-        assert metrics["tis/log_ratio_abs_mean"] == 0.0
-
-
-def test_megatron_mini_batch_no_tis_keys_when_disabled(single_rank_group, monkeypatch):
-    _, rollout_lp, _ = _tis_tensors()
-    metrics_list = _megatron_mini_batch_metrics(use_tis=False, rollout_lp=rollout_lp, monkeypatch=monkeypatch)
-    for metrics in metrics_list:
-        assert not any(key.startswith("tis/") for key in metrics)
-
-
 def test_megatron_mini_batch_completes_clip_metric_contract(single_rank_group, monkeypatch):
-    _, rollout_lp, _ = _tis_tensors()
-    metrics_list = _megatron_mini_batch_metrics(use_tis=False, rollout_lp=rollout_lp, monkeypatch=monkeypatch)
+    _, rollout_lp, _ = _policy_tensors()
+    metrics_list = _megatron_mini_batch_metrics(rollout_lp=rollout_lp, monkeypatch=monkeypatch)
     for metrics in metrics_list:
         assert {key: metrics[key] for key in POLICY_CLIP_METRIC_KEYS} == dict.fromkeys(POLICY_CLIP_METRIC_KEYS, 0.0)
 
@@ -294,7 +223,6 @@ def test_megatron_mini_batch_completes_clip_metric_contract(single_rank_group, m
 def test_megatron_mini_batch_applies_think_weight(single_rank_group, monkeypatch):
     tags = torch.tensor([[1, 0, 1, 0], [1, 0, 1, 0]])
     metrics_list = _megatron_mini_batch_metrics(
-        use_tis=False,
         rollout_lp=None,
         monkeypatch=monkeypatch,
         response_span_tags=tags,
@@ -305,21 +233,19 @@ def test_megatron_mini_batch_applies_think_weight(single_rank_group, monkeypatch
     assert [metrics["policy_loss"] for metrics in metrics_list] == pytest.approx([4.0, 4.0])
 
 
-def test_megatron_mini_batch_consumes_global_loss_denominator(single_rank_group, monkeypatch):
+def test_megatron_mini_batch_uses_step_nonzero_advantage_counts(single_rank_group, monkeypatch):
     metrics_list = _megatron_mini_batch_metrics(
-        use_tis=False,
         rollout_lp=None,
         monkeypatch=monkeypatch,
-        global_loss_denom=14.0,
+        loss_reduction="seq_mean_token_sum_norm_global",
         policy_loss_fn=_globally_normalized_mask_sum,
     )
 
-    assert [metrics["policy_loss"] for metrics in metrics_list] == pytest.approx([0.5, 0.5])
+    assert [metrics["policy_loss"] for metrics in metrics_list] == pytest.approx([14 / 24, 14 / 24])
 
 
 def test_megatron_mini_batch_emits_accumulated_log_ratio_metrics(single_rank_group, monkeypatch):
     metrics_list = _megatron_mini_batch_metrics(
-        use_tis=False,
         rollout_lp=None,
         monkeypatch=monkeypatch,
         log_ratio_offsets=(0.05, 0.3),
@@ -333,7 +259,6 @@ def test_megatron_mini_batch_emits_accumulated_log_ratio_metrics(single_rank_gro
 
 def test_megatron_mini_batch_reports_nonunit_policy_ratio(single_rank_group, monkeypatch):
     metrics_list = _megatron_mini_batch_metrics(
-        use_tis=False,
         rollout_lp=None,
         monkeypatch=monkeypatch,
         policy_loss_fn=ppo_policy_loss,
@@ -346,7 +271,6 @@ def test_megatron_mini_batch_reports_nonunit_policy_ratio(single_rank_group, mon
 
 def test_megatron_mini_batch_reports_unit_policy_ratio(single_rank_group, monkeypatch):
     metrics_list = _megatron_mini_batch_metrics(
-        use_tis=False,
         rollout_lp=None,
         monkeypatch=monkeypatch,
         policy_loss_fn=ppo_policy_loss,
@@ -371,7 +295,7 @@ def test_a_policy_update_publishes_its_megatron_phases_and_memory(
     class Policy(PolicyWorkerBase):
         def _ppo_train_impl(self, train_data, timing):
             fake_cuda.use_memory(600, 700)
-            _megatron_mini_batch_metrics(use_tis=False, rollout_lp=None, monkeypatch=monkeypatch, timings=timing)
+            _megatron_mini_batch_metrics(rollout_lp=None, monkeypatch=monkeypatch, timings=timing)
             fake_cuda.use_memory(150, 200)
             return TrainingOutputBatch()
 

@@ -57,11 +57,11 @@ from infra.rl_metrics import (  # noqa: E402
     POLICY_LOSS_KEYS,
     REWARD_KEYS,
     TIS_EXACT_MATCH_KEYS,
-    TIS_IMPORTANCE_RATIO_MEAN_KEYS,
-    TIS_LOG_RATIO_ABS_MEAN_KEYS,
+    CORRECTION_WEIGHT_MEAN_KEYS,
+    MISMATCH_LOG_RATIO_ABS_MEAN_KEYS,
     metric_value,
     parse_training_metrics_result,
-    parse_tis_enabled,
+    parse_off_policy_correction,
     training_metrics_parse_error,
 )
 from scripts.iris.jupiter_rl_artifacts import (  # noqa: E402
@@ -1024,7 +1024,7 @@ class ParsedMetrics:
     step: int | None
     total: int | None
     metrics: dict[str, Any]
-    tis_enabled: bool | None
+    off_policy_correction: str | None
     error: str | None
 
 
@@ -1032,7 +1032,7 @@ def parse_metrics(finelog: Path, pod_log_files: tuple[Path, ...] = ()) -> Parsed
     """Use the newest training step in this sync's Finelog and pod stdout."""
     progress_step = total = metric_step = None
     metrics: dict[str, Any] = {}
-    tis_enabled = None
+    off_policy_correction = None
     errors: list[str] = []
     for source in (finelog, *pod_log_files):
         if not source.exists():
@@ -1052,8 +1052,8 @@ def parse_metrics(finelog: Path, pod_log_files: tuple[Path, ...] = ()) -> Parsed
         elif total is None and (batch_totals := BATCH_TOTAL_PATTERN.findall(text)):
             # Refill attempts increment this counter, so only its configured total is reliable.
             total = int(batch_totals[-1])
-        if tis_enabled is None:
-            tis_enabled = parse_tis_enabled(text)
+        if off_policy_correction is None:
+            off_policy_correction = parse_off_policy_correction(text)
         result = parse_training_metrics_result(text)
         if result.malformed_lines:
             errors.append(f"{source.name}: {training_metrics_parse_error(result.malformed_lines)}")
@@ -1062,7 +1062,7 @@ def parse_metrics(finelog: Path, pod_log_files: tuple[Path, ...] = ()) -> Parsed
             if metric_step is None or latest.step > metric_step:
                 metric_step, metrics = latest.step, latest.metrics
     step = metric_step if metric_step is not None else progress_step
-    return ParsedMetrics(step, total, metrics, tis_enabled, "; ".join(errors) or None)
+    return ParsedMetrics(step, total, metrics, off_policy_correction, "; ".join(errors) or None)
 
 
 def display_metric(value: Any | None, precision: int = 4) -> str:
@@ -1073,48 +1073,27 @@ def display_metric(value: Any | None, precision: int = 4) -> str:
     return str(value)
 
 
-def tis_ratio_summary(metrics: dict[str, Any]) -> str:
-    """Render the best available TIS ratio diagnostic without mislabeling it.
-
-    Worker ``train_status`` keys are namespaced under ``policy/`` by the
-    trainer before they reach ``WANDB_MIRROR``. Older runs predate that worker
-    diagnostic but expose the inference/train importance-ratio mean directly.
-    That legacy value is useful, but it is not mean absolute log-ratio, so keep
-    the label distinct.
-    """
-    log_ratio = metric_value(metrics, *TIS_LOG_RATIO_ABS_MEAN_KEYS)
+def correction_diagnostic_summaries(metrics: dict[str, Any], correction: str | None) -> tuple[str, ...]:
+    """Render rollout alignment, ratio drift and configured correction weights."""
+    summaries = []
+    exact = metric_value(metrics, *TIS_EXACT_MATCH_KEYS)
+    if exact is not None:
+        summaries.append(f"TIS exact={display_metric(exact)}")
+    log_ratio = metric_value(metrics, *MISMATCH_LOG_RATIO_ABS_MEAN_KEYS)
     if log_ratio is not None:
-        return f"TIS |log r|={display_metric(log_ratio)}"
-
-    importance_ratio = metric_value(metrics, *TIS_IMPORTANCE_RATIO_MEAN_KEYS)
-    return f"TIS r={display_metric(importance_ratio)}"
-
-
-def tis_alignment_summary(metrics: dict[str, Any]) -> str:
-    """Render served-token versus trainer-token exact alignment for TIS."""
-    return f"TIS exact={display_metric(metric_value(metrics, *TIS_EXACT_MATCH_KEYS))}"
-
-
-def tis_diagnostic_summaries(metrics: dict[str, Any], enabled: bool | None) -> tuple[str, ...]:
-    """Render available TIS diagnostics or explain why they are absent."""
-    summaries: list[str] = []
-    if metric_value(metrics, *TIS_EXACT_MATCH_KEYS) is not None:
-        summaries.append(tis_alignment_summary(metrics))
-    if (
-        metric_value(metrics, *TIS_LOG_RATIO_ABS_MEAN_KEYS) is not None
-        or metric_value(metrics, *TIS_IMPORTANCE_RATIO_MEAN_KEYS) is not None
-    ):
-        summaries.append(tis_ratio_summary(metrics))
-
-    if summaries:
-        if enabled is False:
-            summaries.append("TIS correction disabled")
-        return tuple(summaries)
-    if enabled is False:
-        return ("TIS disabled",)
-    if enabled is True:
-        return ("TIS enabled; metrics missing",)
-    return ("TIS unavailable",)
+        summaries.append(f"mismatch |log r|={display_metric(log_ratio)}")
+    weight = metric_value(metrics, *CORRECTION_WEIGHT_MEAN_KEYS)
+    if weight is not None:
+        summaries.append(f"correction weight={display_metric(weight)}")
+        for name in ("truncated", "masked"):
+            value = metrics.get(f"policy/correction/{name}_fraction")
+            if value is not None:
+                summaries.append(f"correction {name}={display_metric(value)}")
+    elif correction in {"none", "null"}:
+        summaries.append("correction disabled")
+    elif correction is not None:
+        summaries.append(f"correction {correction}; metrics missing")
+    return tuple(summaries)
 
 
 def token_probability_shift_summary(metrics: dict[str, Any]) -> str:
@@ -1221,7 +1200,7 @@ def report_row(job: MonitoredJob, artifacts: ArtifactResult, directory: Path) ->
     trend = "; ".join(
         (
             f"entropy={display_metric(entropy)}",
-            *tis_diagnostic_summaries(metrics, parsed.tis_enabled),
+            *correction_diagnostic_summaries(metrics, parsed.off_policy_correction),
             token_probability_shift_summary(metrics),
         )
     )

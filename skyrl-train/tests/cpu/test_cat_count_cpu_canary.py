@@ -15,6 +15,7 @@ import skyrl_train
 import torch
 import zstandard
 from examples.cat_count.cpu_canary import PROMPT
+from skyrl_train.metric_names import CORRECTION_WEIGHT_MEAN_METRIC
 
 from tests.cpu.tiny_training.cat_count import FAST_STEPS, cat_count_config, run_cat_count
 from tests.cpu.tiny_training.cpu_backend import CPUInferenceEngine
@@ -187,9 +188,9 @@ def assert_cpu_learning(positive, root: Path, telemetry):
     assert all(final > initial for initial, final in zip(before, after, strict=True))
     training = [row for row in positive if "policy/raw_grad_norm" in row]
     assert len(training) == FAST_STEPS
-    assert all(any(name.startswith("policy/tis/") for name in row) for row in training)
+    assert all(math.isfinite(row["policy/mismatch/pooled/log_ratio_abs_mean"]) for row in training)
     assert all(math.isfinite(row["policy/policy_loss"]) for row in training)
-    assert all(row["tis/skipped_fraction"] == 0 for row in training)
+    assert all(0 < row[CORRECTION_WEIGHT_MEAN_METRIC] <= 2 for row in training)
     assert any(row["policy/ppo_clip_ratio"] > 0 for row in training)
     assert all("environment/exact" in row for row in training)
     assert any("environment/exact_n20" in row for row in training)

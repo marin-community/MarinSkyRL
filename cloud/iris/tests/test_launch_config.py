@@ -8,10 +8,12 @@ from typing import Any
 
 import pytest
 import yaml
+from omegaconf import OmegaConf
 
 from cloud.iris import training_driver
 from cloud.iris.launch_config import load_launch_config, validate_launch_config
 from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, materialize_launch_config
+from skyrl_train.distributed.step_policy import NonfiniteStepPolicy, nonfinite_step_policy
 
 
 def _raw_config() -> dict[str, Any]:
@@ -102,14 +104,37 @@ def _raw_config() -> dict[str, Any]:
     }
 
 
-def test_launch_config_composes_and_loads_as_structured_hydra(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("loss", "reduction"), [("regular", "token_mean"), ("gspo", "sequence_mean")])
+def test_launch_config_composes_and_loads_as_structured_hydra(tmp_path: Path, loss: str, reduction: str) -> None:
     path = tmp_path / "resolved-launch.yaml"
-    path.write_text(yaml.safe_dump(_raw_config(), sort_keys=False))
+    raw = _raw_config()
+    raw["skyrl"]["trainer"]["algorithm"].update(policy_loss_type=loss, loss_reduction=reduction)
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
 
     config = load_launch_config(path)
 
     assert config.skyrl.trainer.train_batch_size == 8
     assert validate_launch_config(config).num_nodes == 1
+    if loss == "gspo":
+        config.skyrl.trainer.algorithm.loss_reduction = "token_mean"
+        with pytest.raises(ValueError, match="gspo requires trainer.algorithm.loss_reduction=sequence_mean"):
+            validate_launch_config(config)
+        raw["skyrl"]["trainer"]["algorithm"]["loss_reduction"] = "token_mean"
+        path.write_text(yaml.safe_dump(raw, sort_keys=False))
+        with pytest.raises(ValueError, match="gspo requires trainer.algorithm.loss_reduction=sequence_mean"):
+            load_launch_config(path)
+
+
+@pytest.mark.parametrize("switch", ["use_abs_kl", "use_kl_estimator_k3"])
+def test_composed_launch_rejects_kl_switches(tmp_path: Path, switch: str) -> None:
+    path = tmp_path / "launch.yaml"
+    path.write_text(yaml.safe_dump(_raw_config()))
+    config = load_launch_config(path)
+    OmegaConf.update(config.skyrl.trainer.algorithm, switch, True, force_add=True)
+    OmegaConf.save(config, path)
+
+    with pytest.raises(ValueError, match="kl_estimator_type"):
+        load_launch_config(path)
 
 
 @pytest.mark.parametrize(
@@ -128,6 +153,7 @@ def test_composed_launch_records_whether_training_runs_ahead_of_its_updates(
     raw["skyrl"]["entrypoint"] = entrypoint
     raw["skyrl"]["trainer"]["placement"]["colocate_all"] = False
     raw["skyrl"]["trainer"]["rollout_buffer"] = {"max_staleness_steps": max_staleness_steps}
+    raw["skyrl"]["trainer"]["algorithm"]["off_policy_correction"] = "none"
     raw["iris"]["allocation"]["num_nodes"] = 2
     path = tmp_path / "launch.yaml"
     path.write_text(yaml.safe_dump(raw, sort_keys=False))
@@ -200,3 +226,103 @@ def test_task_materializes_the_forwarded_launch_document(tmp_path: Path) -> None
 
     assert path == str(destination)
     assert destination.read_bytes() == contents
+
+
+def test_null_nonfinite_limit_in_launch_fails_on_first_invalid_step(tmp_path: Path) -> None:
+    raw = _raw_config()
+    raw["skyrl"]["trainer"]["policy"] = {"max_consecutive_nonfinite_steps": None}
+    path = tmp_path / "launch.yaml"
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
+
+    config = load_launch_config(path)
+
+    action = nonfinite_step_policy(0, config.skyrl.trainer.policy.max_consecutive_nonfinite_steps)
+    assert action is NonfiniteStepPolicy.FAIL
+
+
+@pytest.mark.parametrize(("key", "value"), [("use_tis", True), ("tis_imp_ratio_cap", 2.0)])
+def test_composed_launch_rejects_tis_selectors(tmp_path: Path, key: str, value) -> None:
+    path = tmp_path / "launch.yaml"
+    path.write_text(yaml.safe_dump(_raw_config()))
+    config = load_launch_config(path)
+    OmegaConf.update(config.skyrl.trainer.algorithm, key, value, force_add=True)
+    OmegaConf.save(config, path)
+
+    with pytest.raises(ValueError, match="off_policy_correction"):
+        load_launch_config(path)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "error"),
+    [
+        ({"rollout_buffer.max_staleness_steps": 1}, "off-policy OLD-anchored"),
+        ({"rollout_buffer.max_staleness_steps": 1, "algorithm.off_policy_correction": "none"}, None),
+        ({"rollout_buffer.max_staleness_steps": 1, "algorithm.policy_loss_type": "behavior_clip"}, None),
+        ({"algorithm.policy_loss_type": "behavior_clip", "algorithm.off_policy_correction": "tis"}, "OLD-anchored"),
+        (
+            {
+                "algorithm.off_policy_correction": "custom",
+                "algorithm.off_policy_correction_rules": [{"action": "truncate", "high": 2.0}],
+            },
+            "kind must be token or sequence",
+        ),
+        (
+            {
+                "algorithm.off_policy_correction": "custom",
+                "algorithm.off_policy_correction_rules": [{"kind": "token", "action": "mask", "low": 2, "high": 1}],
+            },
+            "low <= high",
+        ),
+        (
+            {
+                "algorithm.off_policy_correction": "custom",
+                "algorithm.off_policy_correction_rules": [{"kind": "token", "action": "truncate", "high": 2}] * 2,
+            },
+            "at most one truncate",
+        ),
+        (
+            {
+                "algorithm.off_policy_correction": "custom",
+                "algorithm.off_policy_correction_rules": [{"kind": "token", "action": "truncate", "hig": 2}],
+            },
+            "hig",
+        ),
+        (
+            {
+                "algorithm.off_policy_correction": "custom",
+                "algorithm.off_policy_correction_rules": [{"kind": "token", "action": "clamp", "high": 2}],
+            },
+            "action",
+        ),
+        (
+            {
+                "algorithm.off_policy_correction": "custom",
+                "algorithm.off_policy_correction_rules": [
+                    {"kind": "sequence", "aggregate": "average", "action": "mask", "high": 2}
+                ],
+            },
+            "aggregate",
+        ),
+        (
+            {
+                "algorithm.off_policy_correction": "custom",
+                "algorithm.off_policy_correction_rules": [{"kind": "token", "action": "truncate", "high": "2.0"}],
+            },
+            "high",
+        ),
+        ({"algorithm.dynamic_sampling.max_mean_reward": 0.9}, "requires dynamic_sampling.type=filter"),
+        ({"algorithm.dynamic_sampling.max_mean_reward": 0.9, "algorithm.dynamic_sampling.type": "filter"}, None),
+    ],
+)
+def test_launch_validates_correction_and_selection_contract(tmp_path: Path, overrides: dict, error: str | None):
+    raw = OmegaConf.create(_raw_config())
+    for key, value in overrides.items():
+        OmegaConf.update(raw.skyrl.trainer, key, value, force_add=True)
+    path = tmp_path / "launch.yaml"
+    OmegaConf.save(raw, path)
+    if error is not None:
+        with pytest.raises(ValueError, match=error):
+            load_launch_config(path)
+    else:
+        # Explicitly uncorrected stale policies and active reward filters are valid launch contracts.
+        load_launch_config(path)

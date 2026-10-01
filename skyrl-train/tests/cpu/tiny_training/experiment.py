@@ -86,6 +86,10 @@ def tiny_training_config(
     max_steps: int,
     checkpoint_interval: int,
     num_prompts: int = 64,
+    dp_size: int = 1,
+    micro_batch_size: int = 8,
+    max_in_flight: int = 8,
+    dump_data_batch: bool = False,
 ) -> DictConfig:
     """Build a complete training config for the policy in ``model_dir``, writing its data and outputs under ``root``.
 
@@ -102,23 +106,26 @@ def tiny_training_config(
         "trainer": {
             "step_wise_training": shape is RolloutShape.STEP_WISE,
             "debug_mode": "off",
-            "placement": {"colocate_all": False, "policy_num_gpus_per_node": 1},
+            "placement": {"colocate_all": False, "policy_num_gpus_per_node": dp_size},
             "policy": {"model": {"path": str(model_dir)}, "optimizer_config": {"lr": 1.0e-3}},
             # A stalled step fails with the buffer's state long before the test's subprocess timeout.
             "algorithm": {
                 "use_kl_loss": False,
                 "policy_loss_type": POLICY_LOSS_TYPE[mode],
+                "off_policy_correction": "tis" if mode is TrainingMode.SYNC else "none",
                 "group_admission": {"stall_timeout": STALL_TIMEOUT_SECONDS},
             },
             "rollout_buffer": {
                 "max_staleness_steps": MAX_STALENESS_STEPS[mode],
-                "max_in_flight": 8,
+                "max_in_flight": max_in_flight,
                 "object_store_root": str(root / "rollouts") if OBJECT_STORE_PAYLOADS[mode] else None,
             },
             "train_batch_size": TRAIN_BATCH_SIZE,
             "policy_mini_batch_size": TRAIN_BATCH_SIZE,
-            "micro_train_batch_size_per_gpu": 8,
-            "micro_forward_batch_size_per_gpu": 8,
+            "micro_train_batch_size_per_gpu": micro_batch_size,
+            "micro_forward_batch_size_per_gpu": micro_batch_size,
+            "dump_data_batch": dump_data_batch,
+            "training_metrics": mode is TrainingMode.ASYNC,
             "use_sample_packing": False,
             "max_steps": max_steps,
             "eval_before_train": False,
@@ -228,11 +235,24 @@ def run_tiny_training(cfg: DictConfig) -> None:
 
 
 def run_experiment(
-    root: Path, model_dir: Path, mode: TrainingMode, shape: RolloutShape, *, max_steps: int, checkpoint_interval: int
+    root: Path,
+    model_dir: Path,
+    mode: TrainingMode,
+    shape: RolloutShape,
+    *,
+    max_steps: int,
+    checkpoint_interval: int,
+    dump_data_batch: bool,
 ) -> None:
     """Train the policy in ``model_dir`` under ``root``, resuming from a checkpoint an earlier run left there."""
     cfg = tiny_training_config(
-        root, model_dir, mode, shape, max_steps=max_steps, checkpoint_interval=checkpoint_interval
+        root,
+        model_dir,
+        mode,
+        shape,
+        max_steps=max_steps,
+        checkpoint_interval=checkpoint_interval,
+        dump_data_batch=dump_data_batch,
     )
     run_tiny_training(cfg)
 
@@ -247,9 +267,15 @@ def main() -> None:
     parser.add_argument("--model", type=Path, help="a tiny policy directory from build_tiny_policy")
     args = parser.parse_args()
     model_dir = args.model or build_tiny_policy(args.root / "model")
-    run_experiment(
-        args.root, model_dir, args.mode, args.shape, max_steps=args.steps, checkpoint_interval=args.checkpoint_interval
+    cfg = tiny_training_config(
+        args.root,
+        model_dir,
+        args.mode,
+        args.shape,
+        max_steps=args.steps,
+        checkpoint_interval=args.checkpoint_interval,
     )
+    run_tiny_training(cfg)
 
 
 if __name__ == "__main__":

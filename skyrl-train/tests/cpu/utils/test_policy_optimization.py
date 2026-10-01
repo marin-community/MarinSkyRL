@@ -1,6 +1,16 @@
 """Advantage estimators, KL estimators and controllers, policy objectives, TIS diagnostics, and validate_cfg."""
 
 import math
+from pathlib import Path
+from types import SimpleNamespace
+
+import yaml
+
+from marinskyrl.distillation import compile_distillation_plan_from_config
+from cloud.iris.launch_config import load_launch_config
+from cloud.iris.tests.test_launch_config import _raw_config
+from skyrl_train.dynamic_sampling import DynamicSamplingType, GroupSelectionPolicy, GroupSelectionResult
+from skyrl_train.objective.teacher import teacher_advantages
 
 import numpy as np
 import pytest
@@ -8,9 +18,16 @@ import ray
 import torch
 from omegaconf import DictConfig, OmegaConf
 
-from skyrl_train.utils.loss_reduction import compute_global_loss_denom, count_nonzero_advantage_seqs
-from skyrl_train.utils.policy_math import compute_approx_kl
-from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective, ppo_policy_loss
+from skyrl_train.utils.policy_math import compute_approx_kl, differentiable_approx_kl
+from skyrl_train.config.utils import get_default_config
+from skyrl_train.objective.losses import PolicyLossInputs, TokenLoss, ppo_policy_loss
+from skyrl_train.objective.objective import build_objective_micro_batch, compute_policy_objective
+from skyrl_train.objective.reduction import step_counts
+from skyrl_train.config.objective_spec import LossSpec, RatioAnchor
+from skyrl_train.config.trajectory_runner_capabilities import (
+    TrajectoryRunnerMode,
+    validate_trajectory_runner_capabilities,
+)
 from skyrl_train.utils.advantage_estimators import (
     compute_gae_advantage_return,
     compute_grpo_outcome_advantage,
@@ -25,7 +42,6 @@ from skyrl_train.utils.algorithm_registry import (
     register_advantage_estimator,
     PolicyLossRegistry,
 )
-from skyrl_train.utils.importance_ratio_diagnostics import compute_tis_diagnostics, TIS_DIAG_KEYS
 from skyrl_train.utils.utils import validate_cfg
 from tests.cpu.util import example_dummy_config
 
@@ -66,10 +82,49 @@ def test_compute_approx_kl(dummy_data):
     log_ratio = log_probs - log_probs_base
     expected_k3 = (torch.exp(-log_ratio) - 1 + log_ratio) * mask
     assert torch.allclose(kl_k3, expected_k3, atol=1e-4), "k3 estimator is not correct"
+    unbiased = compute_approx_kl(log_probs, log_probs_base, mask, kl_estimator_type="k3_unbiased_gradient")
+    torch.testing.assert_close(unbiased, kl_k3, rtol=0, atol=0)
+
+
+def test_default_kl_estimator_loss_gradient_is_the_reverse_kl_gradient():
+    config = get_default_config().trainer.algorithm
+    logits = torch.tensor([0.2, -0.4, 0.7, 0.1, -0.2, 0.4], dtype=torch.float64, requires_grad=True)
+    reference = torch.tensor([0.10, 0.23, 0.18, 0.12, 0.22, 0.15], dtype=torch.float64)
+    log_policy = logits.log_softmax(-1)
+    policy = log_policy.exp()
+    sampled_values = differentiable_approx_kl(log_policy, reference.log(), kl_estimator_type=config.kl_estimator_type)
+    estimate = (policy.detach() * sampled_values).sum()
+    reverse_kl = (policy * (log_policy - reference.log())).sum()
+    torch.testing.assert_close(estimate, reverse_kl, rtol=1e-12, atol=1e-12)
+    actual_gradient = torch.autograd.grad(estimate, logits, retain_graph=True)[0]
+    expected_gradient = torch.autograd.grad(reverse_kl, logits)[0]
+    torch.testing.assert_close(actual_gradient, expected_gradient, rtol=1e-12, atol=1e-12)
+
+
+def test_unbiased_kl_keeps_k3_values_and_clamps_only_log_ratio_gradients():
+    log_probs = torch.tensor([-30.0, -5.0, -0.3, 0.0, 0.2, 5.0, 30.0, 0.5], dtype=torch.float64, requires_grad=True)
+    reference = torch.zeros_like(log_probs)
+    mask = torch.tensor([1, 1, 1, 1, 1, 1, 1, 0])
+    values = differentiable_approx_kl(log_probs, reference, mask, kl_estimator_type="k3_unbiased_gradient")
+    reported = compute_approx_kl(log_probs, reference, mask, kl_estimator_type="k3")
+    expected = torch.tensor(
+        [10, 10, math.exp(0.3) - 0.3 - 1, 0, math.exp(-0.2) + 0.2 - 1, math.exp(-5) + 5 - 1, 10, 0],
+        dtype=torch.float64,
+    )
+    torch.testing.assert_close(values, expected, rtol=0, atol=0)
+    torch.testing.assert_close(reported, expected, rtol=0, atol=0)
+    values.sum().backward()
+    torch.testing.assert_close(
+        log_probs.grad,
+        torch.tensor([0, -5, -0.3, 0, 0.2, 5, 0, 0], dtype=torch.float64),
+        rtol=0,
+        atol=0,
+    )
 
 
 @pytest.mark.parametrize("coefficient", [0.0, 0.1, 1.0])
-def test_policy_objective_kl_gradient_matches_analytic_derivative(coefficient):
+@pytest.mark.parametrize("estimator", ["k3", "k3_unbiased_gradient"])
+def test_policy_objective_kl_gradient_matches_analytic_derivative(coefficient, estimator):
     log_probs = torch.tensor([[-0.8, -1.3, -0.6], [-1.3, -0.8, -0.6]], dtype=torch.float64, requires_grad=True)
     base_log_probs = torch.full_like(log_probs, -1.0)
     mask = torch.tensor([[1.0, 1.0, 0.0], [0.0, 0.0, 0.0]], dtype=torch.float64)
@@ -85,11 +140,10 @@ def test_policy_objective_kl_gradient_matches_analytic_derivative(coefficient):
             "entropy_loss_coef": 0.0,
             "use_kl_loss": True,
             "kl_loss_coef": coefficient,
-            "kl_estimator_type": "k3",
-            "use_tis": False,
+            "kl_estimator_type": estimator,
         }
     )
-    objective = compute_policy_objective(
+    batch = build_objective_micro_batch(
         action_log_probs=log_probs,
         old_action_log_probs=log_probs.detach(),
         base_action_log_probs=base_log_probs,
@@ -98,23 +152,24 @@ def test_policy_objective_kl_gradient_matches_analytic_derivative(coefficient):
         rollout_logprobs=None,
         response_span_tags=None,
         token_entropy=torch.zeros_like(log_probs),
-        config=config,
-        policy_loss_fn=ppo_policy_loss,
-        accumulation_steps=2,
-        scaling=LossScaling.CALLER,
+        think_token_weight=1.0,
+        teacher=None,
+    )
+    counts = step_counts([mask], [mask], [], [torch.zeros_like(mask)], 3, lambda value: value)
+    objective = compute_policy_objective(
+        batch, loss=ppo_policy_loss, counts=counts, config=config, loss_scale=1, report_scale=1
     )
     objective.optimization_loss.backward()
 
-    # k3 derivatives at log(p/q) = [0.2, -0.3], away from clamps.
-    derivatives = [1.0 - math.exp(-0.2), 1.0 - math.exp(0.3)]
+    derivatives = [0.2, -0.3] if estimator == "k3_unbiased_gradient" else [1.0 - math.exp(-0.2), 1.0 - math.exp(0.3)]
     expected = torch.zeros_like(log_probs)
-    # Two active tokens, two sequences (including an empty one), two accumulated microbatches.
-    expected[0, :2] = torch.tensor(derivatives, dtype=log_probs.dtype) * coefficient / 8
+    # Two active tokens in one trainable sequence; the empty row contributes neither numerator nor count.
+    expected[0, :2] = torch.tensor(derivatives, dtype=log_probs.dtype) * coefficient / 2
     torch.testing.assert_close(log_probs.grad, expected, rtol=1e-12, atol=1e-12)
 
     metric = compute_approx_kl(log_probs, base_log_probs, mask, kl_estimator_type="k3")
     assert not metric.requires_grad
-    torch.testing.assert_close(objective.kl_loss.detach(), metric[0, :2].sum() / 4)
+    torch.testing.assert_close(objective.rows.kl.detach(), metric[0, :2].sum() / 2)
 
 
 def test_compute_reinforce_plus_plus_outcome_advantage_returns_and_masking():
@@ -301,186 +356,6 @@ def test_validate_cfg_accepts_all_loss_reductions(loss_reduction):
     validate_cfg(cfg)
 
 
-def test_global_loss_denom_driver_matches_allreduce_sum():
-    """The DRIVER-side collective-free global loss denominator Z must be BIT-IDENTICAL
-    to the historical in-worker ``all_reduce(sum)`` of per-rank ``local_num_seqs`` over
-    the full policy PG. This is the objective-preservation proof for the 80B gs1 NCCL
-    wedge fix (worker.py seq_mean_token_sum_norm_global normalizer, collective #288606):
-    the fix moves the collective off the async ppo_train hot path to a driver precompute
-    and MUST NOT change Z.
-    """
-    torch.manual_seed(0)
-    max_seq_len = 4096
-    # A range of (world_size, dp_size) mesh geometries, including the 80B
-    # EP8xDP8xCP1 = 64-rank shape that hit the wedge.
-    for world_size, dp_size in [(64, 2), (64, 8), (64, 16), (8, 4), (16, 16), (4, 1)]:
-        ranks_per_dp_group = world_size // dp_size
-        # Synthetic full-batch advantages: rows divisible by dp_size, with a deterministic
-        # subset of all-zero rows (excluded / zero-variance) so the nonzero-seq count is
-        # non-trivial and < n_rows.
-        n_rows = dp_size * 5
-        resp_len = 7
-        adv = torch.randn(n_rows, resp_len)
-        adv[::3] = 0.0
-
-        # Reference: emulate the historical per-rank all_reduce(sum). MeshDispatch splits
-        # the full batch into dp_size disjoint row-chunks; every rank in a dp-group holds
-        # the SAME chunk, so summing local counts over ALL world_size ranks ==
-        # ranks_per_dp_group * (per-chunk counts summed over the dp groups).
-        chunks = torch.chunk(adv, dp_size, dim=0)
-        assert len(chunks) == dp_size
-        summed_over_ranks = 0.0
-        for dp in range(dp_size):
-            summed_over_ranks += ranks_per_dp_group * count_nonzero_advantage_seqs(chunks[dp])
-        ref_Z = max(summed_over_ranks, 1.0) * max_seq_len
-
-        # New: driver-side collective-free.
-        new_Z = compute_global_loss_denom(adv, max_seq_len, ranks_per_dp_group)
-
-        assert new_Z == ref_Z, f"(world={world_size}, dp={dp_size}) Z mismatch: {new_Z} != {ref_Z}"
-
-    # All-zero-advantage batch -> clamp(min=1) path still yields a valid denom (matches
-    # the legacy max(global_num_seqs, 1.0) clamp).
-    adv_zero = torch.zeros(8, 5)
-    assert compute_global_loss_denom(adv_zero, max_seq_len, 4) == 1.0 * max_seq_len
-
-
-def _mask_sum_policy_loss(
-    log_probs,
-    old_log_probs,
-    advantages,
-    config,
-    loss_mask=None,
-    rollout_logprobs=None,
-    global_loss_denom=None,
-):
-    del old_log_probs, advantages, config, rollout_logprobs, global_loss_denom
-    return (log_probs * loss_mask).sum(), {}
-
-
-@pytest.mark.parametrize("loss_reduction", ["token_mean", "seq_mean_token_sum_norm_global"])
-def test_policy_objective_scheduler_and_caller_scaling_have_gradient_parity(loss_reduction):
-    OLD = torch.full((4, 5), -1.0, dtype=torch.float64)
-    CURRENT = torch.tensor(
-        [
-            [-1.12, -0.78, -1.04, -0.65, -1.18],
-            [-0.86, -1.24, -1.08, -1.00, -1.00],
-            [-1.05, -0.91, -1.27, -0.96, -1.00],
-            [-0.72, -1.13, -1.00, -1.00, -1.00],
-        ],
-        dtype=torch.float64,
-    )
-    BASE = torch.full((4, 5), -0.94, dtype=torch.float64)
-    ADVANTAGES = torch.tensor(
-        [
-            [0.7, -0.4, 0.9, -0.6, 0.3],
-            [-0.8, 0.5, -0.3, 0.0, 0.0],
-            [0.4, -0.9, 0.6, -0.2, 0.0],
-            [-0.7, 0.8, 0.0, 0.0, 0.0],
-        ],
-        dtype=torch.float64,
-    )
-    MASK = torch.tensor(
-        [
-            [1, 1, 1, 1, 1],
-            [1, 1, 1, 0, 0],
-            [1, 1, 1, 1, 0],
-            [1, 1, 0, 0, 0],
-        ],
-        dtype=torch.float64,
-    )
-
-    config = OmegaConf.create(
-        {
-            "policy_loss_type": "regular",
-            "loss_reduction": loss_reduction,
-            "max_seq_len": 5,
-            "eps_clip_low": 0.2,
-            "eps_clip_high": 0.2,
-            "clip_ratio_c": 3.0,
-            "think_token_weight": 1.0,
-            "use_entropy_loss": False,
-            "entropy_loss_coef": 0.0,
-            "use_kl_loss": True,
-            "kl_loss_coef": 0.001,
-            "kl_estimator_type": "k3",
-            "use_tis": False,
-            "tis_imp_ratio_cap": -1.0,
-        }
-    )
-    expected_actions = CURRENT.clone().requires_grad_()
-    ratio = (expected_actions - OLD).exp()
-    policy_tokens = -torch.minimum(ratio * ADVANTAGES, ratio.clamp(0.8, 1.2) * ADVANTAGES)
-    delta = BASE - expected_actions
-    kl_tokens = delta.exp() - delta - 1
-    if loss_reduction == "token_mean":
-        policy = ((policy_tokens * MASK).sum(dim=1) / MASK.sum(dim=1)).mean()
-    else:
-        policy = (policy_tokens * MASK).sum() / 20
-    expected = policy + 0.001 * ((kl_tokens * MASK).sum(dim=1) / MASK.sum(dim=1)).mean()
-    expected_grad = torch.autograd.grad(expected, expected_actions)[0]
-    for scaling in (LossScaling.CALLER, LossScaling.MEGATRON_PIPELINE):
-        actions = CURRENT.clone().requires_grad_()
-        objectives = []
-        for row in range(4):
-            objective = compute_policy_objective(
-                action_log_probs=actions[row : row + 1],
-                old_action_log_probs=OLD[row : row + 1],
-                base_action_log_probs=BASE[row : row + 1],
-                advantages=ADVANTAGES[row : row + 1],
-                loss_mask=MASK[row : row + 1],
-                rollout_logprobs=None,
-                response_span_tags=None,
-                token_entropy=torch.zeros_like(actions[row : row + 1]),
-                config=config,
-                policy_loss_fn=ppo_policy_loss,
-                accumulation_steps=4,
-                scaling=scaling,
-                global_loss_denom=20.0,
-            )
-            objectives.append(objective.optimization_loss)
-        actual = torch.stack(objectives).sum()
-        if scaling is LossScaling.MEGATRON_PIPELINE:
-            actual = actual / 4
-        gradient = torch.autograd.grad(actual, actions)[0]
-        torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-8)
-        torch.testing.assert_close(gradient, expected_grad, rtol=1e-6, atol=1e-8)
-        assert torch.count_nonzero(gradient[MASK == 0]) == 0
-        assert torch.count_nonzero(gradient[MASK != 0]) > 0
-
-
-def test_policy_objective_applies_think_weight_before_policy_loss():
-    config = OmegaConf.create(
-        {
-            "loss_reduction": "token_mean",
-            "think_token_weight": 0.25,
-            "use_entropy_loss": False,
-            "entropy_loss_coef": 0.0,
-            "use_kl_loss": False,
-            "kl_loss_coef": 0.0,
-            "kl_estimator_type": "k1",
-            "use_tis": False,
-            "tis_imp_ratio_cap": 2.0,
-        }
-    )
-    result = compute_policy_objective(
-        action_log_probs=torch.ones(1, 4),
-        old_action_log_probs=torch.zeros(1, 4),
-        base_action_log_probs=None,
-        advantages=torch.ones(1, 4),
-        loss_mask=torch.ones(1, 4),
-        rollout_logprobs=None,
-        response_span_tags=torch.tensor([[1, 0, 1, 0]]),
-        token_entropy=torch.zeros(1, 4),
-        config=config,
-        policy_loss_fn=_mask_sum_policy_loss,
-        accumulation_steps=1,
-        scaling=LossScaling.CALLER,
-    )
-
-    assert result.policy_loss.item() == pytest.approx(2.5)
-
-
 def test_validate_cfg_materializes_rloo_n_group_invariant():
     cfg = _validatable_dummy_config()
     cfg.generator.n_samples_per_prompt = 2
@@ -546,146 +421,80 @@ def test_registry_cross_ray_process():
     """Functions registered on the driver are callable from Ray workers, including ones registered after init."""
     try:
 
-        def test_policy_loss(log_probs, old_log_probs, advantages, config, loss_mask=None):
-            return torch.tensor(2.0), {"ppo_clip_ratio": 0.5}
+        def test_policy_loss(inputs: PolicyLossInputs, config: DictConfig) -> TokenLoss:
+            return TokenLoss(-2 * inputs.log_probs * inputs.advantages, {})
 
-        def test_policy_loss_2(log_probs, old_log_probs, advantages, config, loss_mask=None):
-            return torch.tensor(3.0), {"ppo_clip_ratio": 0.6}
+        def test_policy_loss_2(inputs: PolicyLossInputs, config: DictConfig) -> TokenLoss:
+            return TokenLoss(-3 * inputs.log_probs * inputs.advantages, {})
 
         def test_advantage_estimator(**kwargs):
             rewards = kwargs["token_level_rewards"]
             return rewards * 2, rewards * 3
 
-        # Test basic registration and retrieval
-        PolicyLossRegistry.register("cross_process_test", test_policy_loss)
+        PolicyLossRegistry.register("cross_process_test", test_policy_loss, spec=LossSpec(RatioAnchor.NONE))
         AdvantageEstimatorRegistry.register(
             "cross_process_adv_test", test_advantage_estimator, group_contract=NoGroupAdvantage()
         )
 
-        # Test Ray integration
         @ray.remote
-        def test_ray_registry_access():
-            policy_loss = PolicyLossRegistry.get("cross_process_test")
+        def test_ray_registry_access(name: str):
+            policy_loss = PolicyLossRegistry.get(name)
             adv_estimator = AdvantageEstimatorRegistry.get("cross_process_adv_test")
 
-            loss, metrics = policy_loss(
-                log_probs=torch.tensor([[0.1]]),
-                old_log_probs=torch.tensor([[0.2]]),
-                advantages=torch.tensor([[1.0]]),
-                config=DictConfig({"policy_loss_type": "cross_process_test"}),
+            if name == "cross_process_test_2":
+                config = example_dummy_config()
+                config.trainer.algorithm.policy_loss_type = name
+                config.trainer.algorithm.off_policy_correction = "none"
+                spec = PolicyLossRegistry.spec(name)
+                validate_trajectory_runner_capabilities(config, TrajectoryRunnerMode.SKYRL_GYM, loss_spec=spec)
+                with pytest.raises(ValueError, match="cannot supply exact sampled completion"):
+                    validate_trajectory_runner_capabilities(config, TrajectoryRunnerMode.MINI_SWE, loss_spec=spec)
+
+            log_probs = torch.tensor([[-0.4]], requires_grad=True)
+            loss = policy_loss(
+                PolicyLossInputs(
+                    log_probs=log_probs,
+                    old_log_probs=torch.tensor([[-0.5]]),
+                    rollout_log_probs=None,
+                    advantages=torch.tensor([[3.0]]),
+                    loss_mask=torch.ones_like(log_probs),
+                ),
+                DictConfig({"policy_loss_type": name}),
             )
+            loss.values.sum().backward()
 
             adv, ret = adv_estimator(
                 token_level_rewards=torch.tensor([[1.0, 2.0]]),
                 response_mask=torch.tensor([[1.0, 1.0]]),
                 index=np.array(["0", "0"]),
             )
-            return loss, metrics, adv, ret
+            return loss.values.detach(), log_probs.grad, adv, ret
 
-        # Run Ray task
-        loss, metrics, adv, ret = ray.get(test_ray_registry_access.remote())
-        assert loss.item() == 2.0
-        assert metrics["ppo_clip_ratio"] == 0.5
+        loss, gradient, adv, ret = ray.get(test_ray_registry_access.remote("cross_process_test"))
+        torch.testing.assert_close(loss, torch.tensor([[2.4]]))
+        torch.testing.assert_close(gradient, torch.tensor([[-6.0]]))
         torch.testing.assert_close(adv, torch.tensor([[2.0, 4.0]]))
         torch.testing.assert_close(ret, torch.tensor([[3.0, 6.0]]))
 
-        # test that registration works after ray init as well
-        PolicyLossRegistry.register("cross_process_test_2", test_policy_loss_2)
-        loss_2, metrics_2 = PolicyLossRegistry.get("cross_process_test_2")(
-            log_probs=torch.tensor([[0.1]]),
-            old_log_probs=torch.tensor([[0.2]]),
-            advantages=torch.tensor([[1.0]]),
-            config=DictConfig({"policy_loss_type": "cross_process_test_2"}),
-        )
-        assert loss_2.item() == 3.0
-        assert metrics_2["ppo_clip_ratio"] == 0.6
+        PolicyLossRegistry.register("cross_process_test_2", test_policy_loss_2, spec=LossSpec(RatioAnchor.ROLLOUT))
+        loss_2, gradient_2, _, _ = ray.get(test_ray_registry_access.remote("cross_process_test_2"))
+        torch.testing.assert_close(loss_2, torch.tensor([[3.6]]))
+        torch.testing.assert_close(gradient_2, torch.tensor([[-9.0]]))
     finally:
         _remove_registry_entries(PolicyLossRegistry, "cross_process_test", "cross_process_test_2")
         _remove_registry_entries(AdvantageEstimatorRegistry, "cross_process_adv_test")
 
 
-# ---------------------------------------------------------------------------
-# compute_tis_diagnostics — the shared TIS importance-ratio diagnostics used by
-# the Megatron
-# (MegatronModelWrapper.forward_backward_mini_batch) backends.
-# ---------------------------------------------------------------------------
-
-
-def test_tis_diagnostics_on_policy_is_exact():
-    """Identical old/rollout logprobs => ratio exactly 1.0, zero abs log-ratio."""
-    lp = torch.tensor([[-0.5, -1.0, -2.0]])
-    mask = torch.ones_like(lp)
-    out = compute_tis_diagnostics(lp, lp.clone(), mask, cap=2.0)
-    assert out == {
-        "tis/imp_ratio_mean": 1.0,
-        "tis/imp_ratio_capped_fraction": 0.0,
-        "tis/log_ratio_abs_mean": 0.0,
-    }
-
-
-def test_tis_diagnostics_hand_computed_masked_means():
-    """Mask-weighted means over a hand-computed case; masked tokens must not count.
-
-    Two valid tokens with ratios 2 and 0.5 (deltas +/-log 2) and one masked token
-    with a huge delta that would dominate every metric if the mask leaked.
-    """
-    log2 = math.log(2.0)
-    old_lp = torch.tensor([[log2, -log2, 100.0]])
-    rollout_lp = torch.tensor([[0.0, 0.0, -100.0]])
-    mask = torch.tensor([[1.0, 1.0, 0.0]])
-    out = compute_tis_diagnostics(old_lp, rollout_lp, mask, cap=1.5)
-    assert out["tis/imp_ratio_mean"] == pytest.approx((2.0 + 0.5) / 2)
-    # Only the ratio-2 token exceeds cap=1.5.
-    assert out["tis/imp_ratio_capped_fraction"] == pytest.approx(0.5)
-    assert out["tis/log_ratio_abs_mean"] == pytest.approx(log2)
-
-
-def test_tis_diagnostics_clamps_ratio_but_not_log_ratio():
-    """delta=60 exponentiates at the +/-20 clamp; the abs log-ratio stays unclamped."""
-    old_lp = torch.tensor([[30.0]])
-    rollout_lp = torch.tensor([[-30.0]])
-    mask = torch.ones_like(old_lp)
-    out = compute_tis_diagnostics(old_lp, rollout_lp, mask, cap=2.0)
-    assert out["tis/imp_ratio_mean"] == pytest.approx(math.exp(20.0), rel=1e-6)
-    assert out["tis/log_ratio_abs_mean"] == pytest.approx(60.0)
-    assert out["tis/imp_ratio_capped_fraction"] == pytest.approx(1.0)
-
-
-def test_tis_diagnostics_none_rollout_keyset_identical_fallback():
-    """Absent rollout logprobs must still emit the full keyset (all_reduce safety)."""
-    old_lp = torch.tensor([[0.1, 0.2]])
-    mask = torch.ones_like(old_lp)
-    out = compute_tis_diagnostics(old_lp, None, mask, cap=2.0)
-    assert tuple(out.keys()) == TIS_DIAG_KEYS
-    assert out == {
-        "tis/imp_ratio_mean": 1.0,
-        "tis/imp_ratio_capped_fraction": 0.0,
-        "tis/log_ratio_abs_mean": 0.0,
-    }
-
-
-def test_tis_diagnostics_all_masked_batch_emits_zeros_not_nan():
-    """A fully-masked micro-batch divides by the clamped denom, never NaN."""
-    old_lp = torch.tensor([[1.0, 2.0]])
-    rollout_lp = torch.tensor([[0.0, 0.0]])
-    mask = torch.zeros_like(old_lp)
-    out = compute_tis_diagnostics(old_lp, rollout_lp, mask, cap=2.0)
-    assert out["tis/imp_ratio_mean"] == 0.0
-    assert out["tis/imp_ratio_capped_fraction"] == 0.0
-    assert out["tis/log_ratio_abs_mean"] == 0.0
-
-
 @pytest.mark.parametrize("temperature", [0.7, 1.2])
 @pytest.mark.parametrize(
-    ("use_tis", "policy_loss_type"),
-    [(True, "regular"), (False, "behavior_clip")],
+    ("correction", "policy_loss_type"),
+    [("tis", "regular"), ("none", "behavior_clip")],
     ids=["tis", "behavior-clip"],
 )
-def test_validate_cfg_configures_behavior_logprob_probability_convention(temperature, use_tis, policy_loss_type):
+def test_validate_cfg_configures_behavior_logprob_probability_convention(temperature, correction, policy_loss_type):
     cfg = _validatable_dummy_config()
-    cfg.trainer.algorithm.use_tis = use_tis
+    cfg.trainer.algorithm.off_policy_correction = correction
     cfg.trainer.algorithm.policy_loss_type = policy_loss_type
-    cfg.trainer.algorithm.tis_imp_ratio_cap = 2.0
     cfg.generator.sampling_params.temperature = temperature
     cfg.generator.inference_engine_tensor_parallel_size = 1
     cfg.generator.inference_engine_expert_parallel_size = 1
@@ -709,3 +518,163 @@ def test_validate_cfg_best_of_n_uses_selected_batch_geometry():
     validate_cfg(cfg)
 
     assert cfg.trainer.algorithm.resolved_group_advantage.physical_group_size == 1
+
+
+def test_validate_cfg_applies_custom_loss_contract_to_training():
+    def custom_policy_loss(inputs, config):
+        return TokenLoss(-inputs.log_probs * inputs.advantages, {})
+
+    PolicyLossRegistry.register(
+        "custom_policy", custom_policy_loss, spec=LossSpec(RatioAnchor.NONE, sequence_level=True)
+    )
+    cfg = _validatable_dummy_config()
+    cfg.trainer.algorithm.policy_loss_type = "custom_policy"
+    cfg.trainer.algorithm.use_kl_loss = False
+    cfg.generator.num_inference_engines = 1
+    cfg.generator.inference_engine_tensor_parallel_size = 1
+    cfg.generator.inference_engine_pipeline_parallel_size = 1
+    cfg.generator.inference_engine_data_parallel_size = 1
+    try:
+        cfg.trainer.algorithm.loss_reduction = "token_mean"
+        with pytest.raises(ValueError, match="requires trainer.algorithm.loss_reduction=sequence_mean"):
+            validate_cfg(cfg)
+        cfg.trainer.algorithm.loss_reduction = "sequence_mean"
+        validate_cfg(cfg)
+        log_probs = torch.tensor([[-0.1, -0.5]], requires_grad=True)
+        advantages = torch.tensor([[3.0, -2.0]])
+        mask = torch.ones_like(log_probs)
+        batch = build_objective_micro_batch(
+            action_log_probs=log_probs,
+            old_action_log_probs=log_probs.detach(),
+            base_action_log_probs=None,
+            advantages=advantages,
+            loss_mask=mask,
+            rollout_logprobs=None,
+            response_span_tags=None,
+            token_entropy=torch.zeros_like(log_probs),
+            think_token_weight=1,
+            teacher=None,
+        )
+        counts = step_counts([mask], [mask], [], [advantages], 2, lambda value: value)
+        result = compute_policy_objective(
+            batch,
+            loss=PolicyLossRegistry.get("custom_policy"),
+            counts=counts,
+            config=cfg.trainer.algorithm,
+            loss_scale=1,
+            report_scale=1,
+        )
+        result.optimization_loss.backward()
+        torch.testing.assert_close(log_probs.grad, torch.tensor([[-1.5, 1.0]]))
+    finally:
+        PolicyLossRegistry.unregister("custom_policy")
+
+
+def test_reward_estimator_broadcasts_eligible_reward_without_centering():
+    rewards = torch.tensor([[1.0, torch.nan, 2.0], [-4.0, 1.0, torch.nan], [torch.nan] * 3], requires_grad=True)
+    mask = torch.tensor([[1, 0, 1], [1, 1, 0], [0, 0, 0]])
+    advantages, returns = compute_advantages_and_returns(
+        token_level_rewards=rewards,
+        response_mask=mask,
+        index=np.array(["a", "b", "b"]),
+        adv_estimator="reward",
+        config={},
+    )
+    expected = torch.tensor([[3.0, 0.0, 3.0], [-3.0, -3.0, 0.0], [0.0, 0.0, 0.0]])
+    torch.testing.assert_close(advantages, expected)
+    torch.testing.assert_close(returns, expected)
+    assert not advantages.requires_grad
+
+
+@pytest.mark.parametrize("recipe", ["grpo", "dapo", "dr_grpo", "gspo", "cispo", "opd", "mopd"])
+def test_algorithm_recipe_launch_drives_policy_value_and_gradient(tmp_path: Path, recipe: str):
+    raw = _raw_config()
+    raw["skyrl"]["config_groups"] = {"algorithm_recipe": recipe}
+    raw["skyrl"]["generator"]["n_samples_per_prompt"] = 2
+    teacher_recipe = recipe in {"opd", "mopd"}
+    if teacher_recipe:
+        raw["skyrl"]["trainer"]["algorithm"]["distillation"] = {"routing_plan": "expert", "coefficient": 1.0}
+        raw["skyrl"]["teachers"] = {
+            "expert": dict(
+                source="openai_compatible",
+                placement="external",
+                evidence="chosen_token",
+                model=dict(path="teacher", revision="teacher-revision"),
+                endpoints=[dict(url="https://teacher.example/v1", max_concurrency=1)],
+                tokenizer_fingerprint=f"sha256:{'a' * 64}",
+                max_sequence_length=1024,
+                request_timeout_seconds=30,
+            )
+        }
+        raw["skyrl"]["teacher_routing"] = {
+            "expert": dict(revision="route-revision", routes=dict(default=dict(teacher="expert", weight=1.0)))
+        }
+    path = tmp_path / "recipe.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    launch_config = load_launch_config(path).skyrl
+    config = launch_config.trainer.algorithm
+    if recipe == "dapo":
+        raw["skyrl"]["trainer"]["algorithm"]["dynamic_sampling"] = {"type": None}
+        path.write_text(yaml.safe_dump(raw))
+        sampling = load_launch_config(path).skyrl.trainer.algorithm.dynamic_sampling
+        selection = GroupSelectionPolicy(DynamicSamplingType(sampling.type) if sampling.type is not None else None)
+        group = SimpleNamespace(trajectory_batch={"response_ids": [[1], [2]], "rewards": [1.0, 1.0]})
+        assert selection.evaluate(group) is GroupSelectionResult.KEEP
+
+    mask = torch.tensor([[1.0, 0.0], [1.0, 1.0]])
+    old = torch.full_like(mask, -12.0 if teacher_recipe else -2.0)
+    current = (old + torch.tensor([[1.1, 1.1], [1.25, 1.25]]).log()).requires_grad_()
+    if teacher_recipe:
+        plan = compile_distillation_plan_from_config(launch_config)
+        assert plan is not None
+        advantages, _ = teacher_advantages(
+            old + torch.tensor([[-9.0, 0.0], [9.0, 9.0]]),
+            old,
+            mask.bool(),
+            torch.ones_like(mask),
+            plan.advantage_clip,
+        )
+    else:
+        advantages, _ = compute_advantages_and_returns(
+            token_level_rewards=torch.tensor([[0.0, 0.0], [0.0, 2.0]]),
+            response_mask=mask,
+            index=np.array(["prompt", "prompt"]),
+            adv_estimator=config.advantage_estimator,
+            config=config,
+            grpo_norm_by_std=config.grpo_norm_by_std,
+        )
+    batch = build_objective_micro_batch(
+        action_log_probs=current,
+        old_action_log_probs=old,
+        base_action_log_probs=None,
+        advantages=advantages,
+        loss_mask=mask,
+        rollout_logprobs=None,
+        response_span_tags=None,
+        token_entropy=torch.zeros_like(mask),
+        think_token_weight=1,
+        teacher=None,
+    )
+    counts = step_counts([mask], [mask], [], [advantages], 8, lambda value: value)
+    result = compute_policy_objective(
+        batch,
+        loss=PolicyLossRegistry.get(config.policy_loss_type),
+        counts=counts,
+        config=config,
+        loss_scale=1,
+        report_scale=1,
+    )
+    scale = {"opd": 9.0, "mopd": 5.0, "dr_grpo": 1.0}.get(recipe, 1 / (math.sqrt(2) + 1e-6))
+    denominator = {"grpo": 2, "dapo": 3, "dr_grpo": 16, "gspo": 2, "cispo": 3, "opd": 3, "mopd": 2}[recipe]
+    upper = {"grpo": 1.2, "dr_grpo": 1.2, "gspo": 1.0004}.get(recipe, 1.25)
+    second_weight = 1.0 if recipe in {"grpo", "gspo", "mopd"} else 2.0
+    expected_value = (1.1 - second_weight * upper) * scale / denominator
+    if recipe == "cispo":
+        expected_value = (1.1 * (-2 + math.log(1.1)) - 2.5 * (-2 + math.log(1.25))) * scale / 3
+    torch.testing.assert_close(result.optimization_loss, torch.tensor(expected_value), rtol=1e-5, atol=1e-7)
+    result.optimization_loss.backward()
+    positive_gradient = -1.25 * scale / denominator if upper == 1.25 else 0.0
+    if recipe == "mopd":
+        positive_gradient /= 2
+    expected_gradient = torch.tensor([[1.1 * scale / denominator, 0], [positive_gradient, positive_gradient]])
+    torch.testing.assert_close(current.grad, expected_gradient, rtol=1e-5, atol=1e-7)

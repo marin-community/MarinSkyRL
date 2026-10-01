@@ -4,10 +4,14 @@ Run with: uv run --isolated --group dev --extra cpu pytest tests/cpu/test_marin_
 """
 
 import json
+import math
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
+import torch
+
+from skyrl_train.objective.teacher import teacher_advantages
 
 from ci.marin_nightly.gate import (
     GateSpec,
@@ -22,6 +26,7 @@ from ci.marin_nightly.gate import (
 
 SHIPPED_SPEC = Path(__file__).parents[2] / "ci" / "marin_nightly" / "specs" / "gsm8k-qwen3-0.6b-megatron.json"
 OPENCODE_SPEC = Path(__file__).parents[2] / "ci" / "marin_nightly" / "specs" / "opencode-qwen3-8b.json"
+OPD_SPEC = Path(__file__).parents[2] / "ci" / "marin_nightly" / "specs" / "opd-qwen3-sync.json"
 
 # What the trainer actually writes: loguru decorates the line, so the payload is embedded
 # rather than anchored at the start. Keep this in the shape the trainer emits it.
@@ -194,9 +199,25 @@ def test_shipped_spec_gates_a_healthy_run():
     assert check_run(parse_metrics(healthy_log(steps=spec.min_train_steps)), spec, wall_clock_seconds=600) == []
 
 
+def test_opd_gate_requires_teacher_credit_on_valid_training_tokens():
+    spec = load_spec(OPD_SPEC)
+    for eligible in (True, False):
+        _, metrics = teacher_advantages(
+            torch.tensor([[-0.4, -1.2]]),
+            torch.tensor([[-1.0, -1.0]]),
+            torch.full((1, 2), eligible),
+            torch.tensor([[0.3, 0.7]]),
+            clip=None,
+        )
+        metrics.update({"policy/raw_grad_norm": 0.5, "distillation/scored_tokens": 2, "distillation/teacher_count": 1})
+        failures = check_run(parse_metrics(mirror_line(1, **metrics)), spec, wall_clock_seconds=300)
+        assert (failures == []) == eligible
+
+
 def test_opencode_spec_requires_exact_concurrent_literal_coverage():
     spec = load_spec(OPENCODE_SPEC)
     exact_metrics = {
+        "policy/correction/weight_mean": 1.0,
         "generate/failed_trajectory_fraction": 0.0,
         "generate/literal_bridge/correlated_trials": 8.0,
         "generate/literal_bridge/correlated_turns": 24.0,
@@ -205,7 +226,6 @@ def test_opencode_spec_requires_exact_concurrent_literal_coverage():
         "generate/tis/unaligned_fraction": 0.0,
         "generate/tis/tito_full/success_fraction": 1.0,
         "generate/tis/tito_full/decline_count": 0.0,
-        "tis/skipped_fraction": 0.0,
     }
     healthy = parse_metrics(mirror_line(1, **exact_metrics))
     assert check_run(healthy, spec, wall_clock_seconds=900) == []
@@ -223,3 +243,14 @@ def test_opencode_spec_requires_exact_concurrent_literal_coverage():
     failures = check_run(approximate, spec, wall_clock_seconds=900)
     assert any("exact_match_fraction" in failure for failure in failures)
     assert any("lcs_fallback_fraction" in failure for failure in failures)
+
+    for weight in (math.nextafter(0.0, 1.0), 2.0):
+        metrics = {**exact_metrics, "policy/correction/weight_mean": weight}
+        assert check_run(parse_metrics(mirror_line(1, **metrics)), spec, wall_clock_seconds=900) == []
+
+    for invalid in (None, 0.0, -0.1, 2.01, float("nan"), float("inf")):
+        metrics = {**exact_metrics, "policy/correction/weight_mean": invalid}
+        if invalid is None:
+            del metrics["policy/correction/weight_mean"]
+        failures = check_run(parse_metrics(mirror_line(1, **metrics)), spec, wall_clock_seconds=900)
+        assert any("policy/correction/weight_mean" in failure for failure in failures)

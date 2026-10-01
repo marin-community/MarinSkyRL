@@ -56,7 +56,6 @@ trainer:
     advantage_estimator: reinforce++
     use_kl_loss: false
     kl_loss_coef: 0.0
-    use_tis: false
     loss_reduction: sequence_mean
   epochs: 1
   # From the second step, Adam state stays on the GPU and these sequences no longer fit an H100 at
@@ -91,7 +90,7 @@ trainer:
       # The default format gathers the full optimizer state into one rank's host memory,
       # which pushes the colocated node past Ray's memory-kill threshold at the final save.
       optimizer_checkpoint_sharding_type: dp_reshardable
-  ref:
+  ref: {}
   placement:
     colocate_all: true
     policy_num_nodes: null

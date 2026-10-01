@@ -3,6 +3,7 @@
 import math
 from pathlib import Path
 
+from omegaconf import open_dict
 import pytest
 import ray
 import torch
@@ -90,16 +91,19 @@ def write_tiny_hero_checkpoint(path: Path):
 
 
 @pytest.mark.parametrize(
-    "tp,pp,ep,cp,packing",
+    "tp,pp,ep,cp,packing,optimizer_offload",
     [
-        (1, 1, 1, 1, False),
-        (1, 2, 1, 1, False),
-        (1, 1, 2, 1, True),
-        (1, 1, 1, 2, True),
-        (2, 1, 1, 1, True),
+        (1, 1, 1, 1, False, None),
+        (1, 2, 1, 1, False, None),
+        (1, 1, 2, 1, True, None),
+        (1, 1, 1, 2, True, None),
+        (2, 1, 1, 1, True, None),
+        pytest.param(1, 1, 2, 1, True, 0.0, id="precision-aware-gpu"),
+        pytest.param(1, 1, 2, 1, True, 0.5, id="half-offloaded-adamw"),
+        pytest.param(1, 1, 2, 1, True, 1.0, id="cpu-adamw"),
     ],
 )
-def test_hero_worker_repeated_updates(tmp_path, tp, pp, ep, cp, packing):
+def test_hero_worker_repeated_updates(tmp_path, monkeypatch, tp, pp, ep, cp, packing, optimizer_offload):
     world_size = max(tp, pp, ep, cp)
     require_hoppers(world_size)
     model_path = tmp_path / "model"
@@ -108,6 +112,20 @@ def test_hero_worker_repeated_updates(tmp_path, tp, pp, ep, cp, packing):
     cfg = _config(str(model_path), world_size=world_size, pp=pp, ep=ep)
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
     cfg.trainer.policy.megatron_config.context_parallel_size = cp
+    if optimizer_offload is not None:
+        monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "0")
+        cfg.trainer.flash_attn = True
+        megatron = cfg.trainer.policy.megatron_config
+        megatron.ddp_config.overlap_param_gather = True
+        megatron.ddp_config.grad_reduce_in_fp32 = False
+        megatron.optimizer_checkpoint_sharding_type = "dp_reshardable"
+        with open_dict(megatron.transformer_config_kwargs), open_dict(megatron.optimizer_config_kwargs):
+            megatron.transformer_config_kwargs.deterministic_mode = True
+            megatron.optimizer_config_kwargs.use_precision_aware_optimizer = True
+            megatron.optimizer_config_kwargs.store_param_remainders = False
+            megatron.optimizer_config_kwargs.optimizer_cpu_offload = optimizer_offload > 0
+            megatron.optimizer_config_kwargs.optimizer_offload_fraction = optimizer_offload
+            megatron.optimizer_config_kwargs.overlap_cpu_optimizer_d2h_h2d = False
     cfg.trainer.use_sample_packing = packing
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     batch = _padded_batch(tokenizer.pad_token_id, prompt_length=48, response_length=48, variable_lengths=True)
@@ -156,17 +174,21 @@ def test_hero_worker_repeated_updates(tmp_path, tp, pp, ep, cp, packing):
         ray.get(
             policy.async_run_ray_method("pass_through", "save_checkpoint", ckpt_dir=checkpoint, tokenizer=tokenizer)
         )
-        _train_step(policy, batch)
-        continued = rank0_validation_snapshot(policy, names)
+        # The second update catches a restored step counter reset on every step.
+        continued = []
+        for _ in range(2):
+            _train_step(policy, batch)
+            continued.append(rank0_validation_snapshot(policy, names))
         ray.get(policy.async_run_ray_method("pass_through", "load_checkpoint", ckpt_dir=checkpoint))
         restored = rank0_validation_snapshot(policy, names)
         for name in names:
             torch.testing.assert_close(restored[name], after[name], rtol=0, atol=0)
         restored_scores = _megatron_response_logprobs(policy, batch)
         torch.testing.assert_close(restored_scores, final_scores, rtol=0, atol=0)
-        _train_step(policy, batch)
-        resumed = rank0_validation_snapshot(policy, names)
-        for name in names:
-            torch.testing.assert_close(resumed[name], continued[name], rtol=0, atol=0)
+        for expected in continued:
+            _train_step(policy, batch)
+            resumed = rank0_validation_snapshot(policy, names)
+            for name in names:
+                torch.testing.assert_close(resumed[name], expected[name], rtol=0, atol=0)
     finally:
         ray.shutdown()

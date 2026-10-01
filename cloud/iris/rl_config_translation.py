@@ -18,6 +18,8 @@ from typing import Any, Dict, Mapping, Optional, Protocol
 from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig, OmegaConf
 
+from skyrl_train.config.objective_spec import validate_objective
+
 from cloud.iris.paths import resolve_paths_in_dict
 from cloud.iris.runtime_environment import CHECKPOINT_EXPORT_ENTRYPOINT as CHECKPOINT_EXPORT_MODULE
 from marinskyrl.environment_contract import TrainingType
@@ -529,11 +531,15 @@ def parse_rl_config(
     if not isinstance(raw, dict):
         raise ValueError(f"{path}: RL config must contain a mapping at the document root")
 
+    config_groups = raw.get("config_groups", {})
+    if "algorithm_recipe" in config_groups:
+        recipe = _compose_config_groups({"algorithm_recipe": config_groups["algorithm_recipe"]}, config_name=None)
+        raw = OmegaConf.to_container(OmegaConf.merge(OmegaConf.to_container(recipe, resolve=False), raw), resolve=False)
+        assert isinstance(raw, dict)
     distillation_plan = compile_distillation_plan(raw)
     context_budget = resolve_context_budget(raw, path)
 
     entrypoint = resolve_rl_entrypoint(raw.get("entrypoint"), config_path=path)
-    config_groups = raw.get("config_groups", {})
     trainer, generator, terminal_bench, materialized_raw = _materialize_context_budget(raw, context_budget)
     data = dict(raw.get("data", {}))
     environment = raw.get("environment", {})
@@ -858,7 +864,7 @@ def _path_allows_new_keys(path: str) -> bool:
 def _merge_config_mapping(config: DictConfig, values: Mapping[str, Any], prefix: str = "") -> None:
     """Merge launch values into declared SkyRL config paths."""
     for key, value in values.items():
-        if value is None or isinstance(value, Mapping) and not value:
+        if isinstance(value, Mapping) and not value:
             continue
         path = f"{prefix}.{key}" if prefix else key
         current = OmegaConf.select(config, path, default=...)
@@ -877,11 +883,11 @@ def _merge_config_mapping(config: DictConfig, values: Mapping[str, Any], prefix:
         OmegaConf.update(config, path, copy.deepcopy(value), merge=False, force_add=_path_allows_new_keys(path))
 
 
-def _compose_base_config(config_groups: Mapping[str, str]) -> DictConfig:
+def _compose_config_groups(config_groups: Mapping[str, str], *, config_name: str | None) -> DictConfig:
     config_dir = Path(str(files("skyrl_train.config"))).resolve()
     group_overrides = [f"+{group_name}={config_name}" for group_name, config_name in config_groups.items()]
     with initialize_config_dir(version_base=None, config_dir=str(config_dir)):
-        config = compose(config_name="ppo_base_config", overrides=group_overrides)
+        config = compose(config_name=config_name, overrides=group_overrides)
     OmegaConf.set_struct(config, True)
     return config
 
@@ -892,9 +898,10 @@ def compose_skyrl_config(
     hpc: HPCGeometry,
 ) -> CompiledSkyRLConfig:
     """Compose the final SkyRL subtree from its config groups and launch values."""
-    config = _compose_base_config(parsed.config_groups)
+    config = _compose_config_groups(parsed.config_groups, config_name="ppo_base_config")
     _merge_config_mapping(config, _skyrl_config_sections(parsed, exp_args, hpc))
     validate_nemotron_ultra_grading(config, parsed.distillation_plan)
+    validate_objective(config)
     return CompiledSkyRLConfig(
         entrypoint=registered_rl_entrypoint_module(parsed.entrypoint),
         config=config,
@@ -907,7 +914,7 @@ def compose_checkpoint_export_config(
     hpc: HPCGeometry,
 ) -> CompiledSkyRLConfig:
     """Compose the policy-only checkpoint-export SkyRL subtree."""
-    config = _compose_base_config(parsed.config_groups)
+    config = _compose_config_groups(parsed.config_groups, config_name="ppo_base_config")
     _merge_config_mapping(config, {"trainer": _checkpoint_export_trainer(parsed, exp_args, hpc)})
     return CompiledSkyRLConfig(
         entrypoint=CHECKPOINT_EXPORT_ENTRYPOINT,

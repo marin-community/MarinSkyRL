@@ -25,7 +25,7 @@ from collections import defaultdict, deque
 import numpy as np
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
-from skyrl_train.training_batch import GLOBAL_LOSS_DENOM_METADATA_KEY, TrainingInputBatch, TrainingOutputBatch
+from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.rollouts.buffer import RolloutGroup
 from skyrl_train.rollouts.context import TrainingContext, TrainingContextState
 from skyrl_train.trajectory_selection import trajectory_selector_from_config
@@ -59,10 +59,14 @@ from skyrl_train.utils.policy_math import compute_approx_kl, normalize_advantage
 from skyrl_train.utils.kl_controllers import get_kl_controller, FixedKLController, AdaptiveKLController
 from skyrl_train.utils.algorithm_registry import AdvantageEstimator
 from skyrl_train.utils.advantage_estimators import GRPO_FLAT_REWARD_STD_TOLERANCE, compute_advantages_and_returns
-from skyrl_train.utils.loss_reduction import (
-    GLOBAL_SEQUENCE_MEAN_TOKEN_SUM_NORMALIZED_LOSS_REDUCTION,
-    compute_global_loss_denom,
+from marinskyrl.distillation import (
+    DistillationObjectiveKind,
+    DistillationRewardMode,
+    compile_distillation_plan_from_config,
 )
+from skyrl_train.objective.teacher import teacher_advantages
+from skyrl_train.objective.correction import compute_correction
+from skyrl_train.config.objective_spec import off_policy_correction
 from skyrl_train.distributed.dispatch import (
     ActorInfo,
     MeshRank,
@@ -110,7 +114,8 @@ from skyrl_train.utils.utils import (
     policy_force_cvd_mask_enabled,
 )
 
-from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
+from skyrl_train.config.objective_spec import rollout_logprobs_required
+from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
 from skyrl_train.evaluate import evaluate, evaluate_step_wise
 from skyrl_train.callbacks.base import TrainerCallback, TrainerState, TrainerControl, CallbackHandler
 from skyrl_train.callbacks.builtin import DefaultCallbackHandler, RefModelUpdateCallback
@@ -290,6 +295,7 @@ class RayPPOTrainer:
         callbacks: Optional[List[TrainerCallback]] = None,
     ):
         self.cfg = cfg
+        self.distillation_plan = compile_distillation_plan_from_config(cfg)
         self.context = context
         self._training_metrics_enabled: bool = cfg.trainer.training_metrics
         self._rollout_spans_enabled: bool = cfg.trainer.rollout_spans
@@ -318,10 +324,6 @@ class RayPPOTrainer:
         self.all_timings = {}
         self.all_startup_timings = {}
         self._checkpoint_save_failures = 0.0
-        # Whether the last converted batch lacked rollout logprobs, and the run's TIS skip counts.
-        self._tis_batch_skipped_no_logprobs = 0.0
-        self._tis_skipped_count = 0.0
-        self._tis_total_count = 0.0
         self._shutdown_complete = False
         self._restored_rollout_state: TrainingContextState | None = None
         self.global_step = 0
@@ -1437,8 +1439,6 @@ class RayPPOTrainer:
         if scored_distillation is not None:
             self._attach_teacher_evidence(training_input, scored_distillation)
         self._log_rollout_batch_completed(groups, duration_seconds=rollout_wait_timer.duration)
-        if self.cfg.trainer.algorithm.use_tis:
-            self._record_tis_skip()
 
         step_wall.start("training_preparation")
         with (
@@ -1493,20 +1493,6 @@ class RayPPOTrainer:
             duration_seconds,
         )
 
-    def _record_tis_skip(self) -> None:
-        """Record whether this batch lacked rollout logprobs, so TIS fell back to the standard policy loss.
-
-        A skipped fraction near 1.0 means rollout-logprob capture is broken.
-        """
-        self._tis_skipped_count += self._tis_batch_skipped_no_logprobs
-        self._tis_total_count += 1.0
-        self.all_metrics.update(
-            {
-                "tis/batch_skipped_no_logprobs": self._tis_batch_skipped_no_logprobs,
-                "tis/skipped_fraction": self._tis_skipped_count / self._tis_total_count,
-            }
-        )
-
     async def _end_epoch(self, epoch: int) -> None:
         self._control.reset()
         self._control = await self.callback_handler.call_event_async(
@@ -1536,6 +1522,22 @@ class RayPPOTrainer:
         await self._drain_policy_event_loops()
         with Timer("fwd_logprobs_values_reward", self.all_timings):
             training_input = await asyncio.to_thread(self.fwd_logprobs_values_reward, training_input)
+
+        if self.distillation_plan is not None and self.distillation_plan.reward_mode is DistillationRewardMode.REPLACE:
+            if training_input.get("teacher_valid_mask") is None:
+                raise ValueError("distillation reward_mode=replace requires teacher evidence on every training batch")
+            training_input["loss_mask"] = training_input["loss_mask"] * training_input["teacher_valid_mask"]
+
+        correction = off_policy_correction(self.cfg.trainer.algorithm)
+        if correction.rules:
+            rollout_logprobs = training_input.get("rollout_logprobs")
+            if rollout_logprobs is None:
+                raise ValueError("off_policy_correction requires rollout_logprobs")
+            result = compute_correction(
+                training_input["action_log_probs"], rollout_logprobs, training_input["loss_mask"], correction
+            )
+            training_input["correction_weights"] = result.weights
+            self.all_metrics.update(result.metrics)
 
         if self.cfg.trainer.algorithm.use_kl_in_reward:
             with Timer("apply_reward_kl_penalty", self.all_timings):
@@ -1617,8 +1619,9 @@ class RayPPOTrainer:
 
             trajectory_batch = concatenate_trajectory_batches(
                 [group.trajectory_batch for group in groups],
-                require_rollout_logprobs=policy_loss_requires_rollout_logprobs(
-                    self.cfg.trainer.algorithm.policy_loss_type
+                require_rollout_logprobs=rollout_logprobs_required(
+                    self.cfg.trainer.algorithm,
+                    loss_spec=PolicyLossRegistry.spec(self.cfg.trainer.algorithm.policy_loss_type),
                 ),
                 tis_lcs_alert_threshold=float(self.cfg.trainer.algorithm.tis_lcs_alert_threshold),
             )
@@ -2057,41 +2060,16 @@ class RayPPOTrainer:
             response_span_tags,
             num_experts,
         )
-        behavior_logprobs_required = policy_loss_requires_rollout_logprobs(self.cfg.trainer.algorithm.policy_loss_type)
-        if behavior_logprobs_required and rollout_logprobs_tensor is None:
-            raise ValueError("rollout_logprobs are required for behavior_clip policy loss")
-
-        # sanity check for tis
-        #
-        # Graceful TIS degrade (Fix A, 2026-06-07): when use_tis is on but the
-        # ENTIRE training batch came back with no rollout logprobs
-        # (rollout_logprobs_tensor is None), do NOT hard-assert/crash. The
-        # runner already detects + logs the all-None case ("ALL N
-        # trajectories missing logprobs. This batch cannot be used for TIS
-        # training"); the trainer must complete the hardening by degrading to
-        # standard (non-TIS) policy loss for THIS batch only. The None tensor
-        # propagates cleanly: TensorBatch.chunk/slice leave None values
-        # un-chunked (-> each micro-batch sees rollout_logprobs=None), the
-        # worker's TIS diagnostics already guard `is not None`, and
-        # ppo_policy_loss skips the TIS importance ratio when rollout_logprobs
-        # is None (see policy_losses.ppo_policy_loss). We surface the skip via a
-        # `tis/batch_skipped_no_logprobs` metric (set on the driver below) so the
-        # failure mode is observable; the relaunch skip-fraction is the live
-        # systematic-vs-intermittent diagnostic.
-        self._tis_batch_skipped_no_logprobs = 0.0
-        if self.cfg.trainer.algorithm.use_tis:
-            if rollout_logprobs_tensor is None:
-                self._tis_batch_skipped_no_logprobs = 1.0
-                logger.warning(
-                    "use_tis is True but this training batch has NO rollout logprobs "
-                    "(all-None). Degrading to standard (non-TIS) policy loss for THIS "
-                    "batch and continuing. tis/batch_skipped_no_logprobs=1. If this "
-                    "persists (skip-fraction ~1.0) the rollout-logprob capture is "
-                    "systematically broken (e.g. routed_experts capture displacing "
-                    "logprobs); a low/intermittent rate is context-length errors."
-                )
-            else:
-                assert rollout_logprobs_tensor.shape == loss_masks_tensor.shape, "Logprobs should look like responses"
+        if (
+            rollout_logprobs_required(
+                self.cfg.trainer.algorithm,
+                loss_spec=PolicyLossRegistry.spec(self.cfg.trainer.algorithm.policy_loss_type),
+            )
+            and rollout_logprobs_tensor is None
+        ):
+            raise ValueError("rollout_logprobs are required by the configured objective")
+        if rollout_logprobs_tensor is not None:
+            assert rollout_logprobs_tensor.shape == loss_masks_tensor.shape, "Logprobs should look like responses"
         # Stage 1 invariant (scope Q3 #2): routed_experts.shape[:2] == loss_mask.shape.
         if rollout_routed_experts_tensor is not None:
             assert rollout_routed_experts_tensor.shape[:2] == loss_masks_tensor.shape, (
@@ -2423,10 +2401,29 @@ class RayPPOTrainer:
         return data
 
     def finalize_advantages_for_training(self, data: TrainingInputBatch) -> TrainingInputBatch:
-        """Apply configured normalization before finalizing the advantage tensor."""
+        """Normalize environment credit, add loop credit, then apply teacher credit."""
         if self.cfg.trainer.algorithm.advantage_batch_normalize:
             data = normalize_advantages_dict(data)
-        return self.apply_loop_credit_and_drop_advantage_inputs(data)
+        data = self.apply_loop_credit_and_drop_advantage_inputs(data)
+        plan = self.distillation_plan
+        if plan is None:
+            return data
+        if plan.objective is DistillationObjectiveKind.SAMPLED_REVERSE_KL:
+            teacher = data.pop("teacher_action_log_probs")
+            valid = data.pop("teacher_valid_mask") & data["loss_mask"].bool()
+            weights = data.pop("distillation_loss_weights")
+            teacher_credit, metrics = teacher_advantages(
+                teacher, data["action_log_probs"], valid, weights, plan.advantage_clip
+            )
+            data["advantages"] = (
+                teacher_credit
+                if plan.reward_mode is DistillationRewardMode.REPLACE
+                else data["advantages"] + teacher_credit
+            )
+            self.all_metrics.update(metrics)
+        elif plan.reward_mode is DistillationRewardMode.REPLACE:
+            data["advantages"] = torch.zeros_like(data["advantages"])
+        return data
 
     def apply_loop_credit_and_drop_advantage_inputs(self, data: TrainingInputBatch) -> TrainingInputBatch:
         """Apply loop credit, then remove rewards, loop_advantages, and uids before worker dispatch."""
@@ -2624,14 +2621,6 @@ class RayPPOTrainer:
             )
 
         if self.cfg.generator.sampling_params.logprobs is not None and training_input["rollout_logprobs"] is not None:
-            # calculates the difference in probs between inference and trainer components
-            # only consider response tokens.
-            # NOTE (Fix A-extend, 2026-06-07): rollout_logprobs can be None for a
-            # whole batch when use_tis is on but every trajectory lacked logprobs
-            # (graceful-degrade path in convert_to_training_input). Subscripting None
-            # here is what crashed the 80B R3+TIS train loop at global_step 1
-            # ('NoneType' object is not subscriptable). Skip the inference/train prob-diff
-            # diagnostic for that batch; the batch still trains as standard (non-TIS) loss.
             logprobs_diff = (
                 training_input["rollout_logprobs"][training_input["loss_mask"] > 0]
                 - action_log_probs[training_input["loss_mask"] > 0]
@@ -2725,21 +2714,6 @@ class RayPPOTrainer:
         Run the training step for the policy and critic models (this is overlapped if colocate_all is False).
         """
         data.metadata["global_step"] = self.global_step
-        # Plumb the batch's minimum staleness to the worker for StaleClip.
-        # Workers treat None as "no signal" and skip damping.
-        data.metadata["stale_min"] = self.all_metrics.get("async/staleness_min")
-        # ── Global length-unbiased normalizer (seq_mean_token_sum_norm_global) ──
-        # Every backend consumes the denominator from batch metadata. Keeping this
-        # contract at the driver boundary prevents a worker override from silently
-        # bypassing policy-loss semantics and avoids an in-worker collective.
-        if self.cfg.trainer.algorithm.loss_reduction == GLOBAL_SEQUENCE_MEAN_TOKEN_SUM_NORMALIZED_LOSS_REDUCTION:
-            actor_infos = self.policy_model.actor_infos
-            ranks_per_dp_group = len(actor_infos) // actor_infos[0].rank.dp_size
-            data.metadata[GLOBAL_LOSS_DENOM_METADATA_KEY] = compute_global_loss_denom(
-                data["advantages"],
-                self.cfg.trainer.algorithm.max_seq_len,
-                ranks_per_dp_group,
-            )
         if self.colocate_all:
             if self.critic_model is not None:
                 with Timer("critic_train", self.all_timings):

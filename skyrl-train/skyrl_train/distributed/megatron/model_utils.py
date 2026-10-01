@@ -528,8 +528,6 @@ class AllGatherCPTensor(torch.autograd.Function):
     def backward(ctx, grad_output):
         cp_size = torch.distributed.get_world_size(ctx.cp_group)
         cp_rank = torch.distributed.get_rank(ctx.cp_group)
-        torch.distributed.all_reduce(grad_output, group=ctx.cp_group)
-
         # chunk the seqdim in 2*cp chunks, and select with a CP load balanced indexing
         seq_dim = ctx.seq_dim
         # if ctx.unpadded_seqlen is not None:
