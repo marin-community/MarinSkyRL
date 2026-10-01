@@ -757,7 +757,7 @@ async def test_harbor_concurrency_does_not_queue_gym_tasks(task_inputs, phase):
     class WaitingClient(InferenceClient):
         async def generate(self, request):
             nonlocal active_harbor, maximum_harbor
-            is_harbor = request["prompts"][0][0]["content"] == "Terminal task"
+            is_harbor = request["prompts"][0][0]["content"].startswith("Terminal task")
             admitted.append(is_harbor)
             if is_harbor:
                 active_harbor += 1
