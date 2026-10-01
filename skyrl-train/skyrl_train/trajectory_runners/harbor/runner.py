@@ -1816,7 +1816,9 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             rollout_details = self._maybe_correlate_cli_rollout_details(result, rollout_details)
         literal_bridge_correlated = not had_native_rollout_details and bool(rollout_details)
 
-        verification = verification_from_harbor_result(result, verifier_disabled=self._verifier_disabled)
+        verification = verification_from_harbor_result(result)
+        if self._verifier_disabled and verification.status is VerificationStatus.UNAVAILABLE:
+            verification = VerificationResult.skipped("verifier disabled")
 
         # Preserve-on-soft-timeout state (see _should_preserve_timeout_trajectory).
         # When set, a POST-generation failure (no verifier reward) does NOT discard
