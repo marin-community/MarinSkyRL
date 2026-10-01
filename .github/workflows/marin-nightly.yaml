@@ -25,7 +25,7 @@ on:
         default: main
 
 concurrency:
-  group: marin-nightly
+  group: marin-nightly-${{ github.event.inputs.lane || 'all' }}
   cancel-in-progress: false
 
 jobs:
