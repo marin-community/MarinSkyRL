@@ -7,6 +7,7 @@ import yaml
 
 from cloud.iris.rl_config_translation import compose_skyrl_config, parse_rl_config
 from cloud.iris.role_plan import derive_role_plan
+import skyrl_train.objective.losses  # noqa: F401  (registers policy losses for validate_cfg)
 from skyrl_train.utils import validate_cfg
 
 CONFIGS = Path(__file__).parents[3] / "cloud" / "iris" / "configs"
