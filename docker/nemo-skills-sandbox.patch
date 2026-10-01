@@ -1,0 +1,52 @@
+--- main.py
++++ main.py
+@@ -109,7 +109,7 @@
+     # instead of raising KeyboardInterrupt when _executing is False (which is
+     # the case when run_cell is called programmatically). Restore the default
+     # handler so SIGINT raises KeyboardInterrupt and our except clause catches it.
+-    signal.signal(signal.SIGINT, signal.SIG_DFL)
++    signal.signal(signal.SIGINT, signal.default_int_handler)
+     try:
+         while True:
+             try:
+@@ -135,7 +135,7 @@
+                         res = shell.run_cell(code)
+                     conn.send(
+                         {
+-                            "status": "ok",
++                            "status": "interrupted" if isinstance(res.error_in_exec, KeyboardInterrupt) else "ok",
+                             "id": exec_id,
+                             "result_repr": repr(getattr(res, "result", None)),
+                             "stdout": stdout_buf.getvalue(),
+@@ -502,6 +502,7 @@
+                 "stdout": "",
+                 "stderr": f"Execution timed out after {timeout} seconds\n",
+                 "new_session_created": True,  # Shell was restarted, so it's effectively new
++                "error_type": "VerifierRuntimeError",
+             }
+         elif result["status"] == "interrupted":
+             # For timeout scenarios, treat interruption as timeout since it happened due to timeout
+@@ -518,6 +519,7 @@
+                     result.get("stderr", "") + f"Execution timed out after {timeout} seconds\n", traceback_verbosity
+                 ),
+                 "new_session_created": new_session_created,
++                **({"error_type": "VerifierRuntimeError"} if result.get("shell_was_restarted", False) else {}),
+             }
+         else:  # error status
+             # Check if shell was restarted during error
+@@ -527,6 +529,7 @@
+             error_msg = result.get("traceback", result.get("msg", "Unknown error"))
+             return {
+                 "process_status": "error",
++                "error_type": "VerifierRuntimeError",
+                 "stdout": postprocess_output(result.get("stdout", ""), traceback_verbosity),
+                 "stderr": postprocess_output(result.get("stderr", "") + f"\n{error_msg}\n", traceback_verbosity),
+                 "new_session_created": new_session_created,
+@@ -538,6 +541,7 @@
+             "process_status": "error",
+             "stdout": "",
+             "stderr": f"Session error: {e}\n",
++            "error_type": "VerifierRuntimeError",
+             "new_session_created": False,
+         }
+ 
