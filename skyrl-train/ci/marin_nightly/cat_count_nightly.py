@@ -199,7 +199,6 @@ def run_attempt(args: argparse.Namespace, attempt: int) -> tuple[Conclusion, flo
         if not failures:
             print("CAT_COUNT_GATE_FAILURE launcher did not complete successfully", flush=True)
         return Conclusion.GATE_FAILURE, elapsed
-    args.log.write_text(log_text + "\n")
     print(f"OK against {args.spec}", flush=True)
     return Conclusion.PASS, elapsed
 

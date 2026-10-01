@@ -144,7 +144,7 @@ jobs:
         run: |
           if [[ -d "$RUNNER_TEMP/cat-count-marin" && -f cat-count-nightly.jobs.json ]]; then
             PYTHONPATH="$GITHUB_WORKSPACE/skyrl-train" uv run \
-              --project "$RUNNER_TEMP/cat-count-marin" --frozen --extra cpu --no-group dev \
+              --project "$RUNNER_TEMP/cat-count-marin" --frozen --package marin-core --extra cpu --no-default-groups \
               python - "$RUNNER_TEMP/cat-count-marin" <<'PY'
           import sys
           from pathlib import Path

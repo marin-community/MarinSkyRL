@@ -11,7 +11,7 @@ git -C "$MARIN_ROOT" checkout --detach FETCH_HEAD
 echo "CAT_COUNT_NIGHTLY marin=$(git -C "$MARIN_ROOT" rev-parse HEAD) runtime=$RUNTIME_COMMIT"
 
 export PYTHONPATH="$REPOSITORY_ROOT/skyrl-train${PYTHONPATH:+:$PYTHONPATH}"
-uv run --project "$MARIN_ROOT" --frozen --extra cpu --no-group dev \
+uv run --project "$MARIN_ROOT" --frozen --package marin-core --extra cpu --no-default-groups \
   python "$REPOSITORY_ROOT/skyrl-train/ci/marin_nightly/cat_count_nightly.py" \
   --marin-root "$MARIN_ROOT" --runtime-commit "$RUNTIME_COMMIT" \
   --cluster "${TARGET_CLUSTER:-cw-rno2a}" \
