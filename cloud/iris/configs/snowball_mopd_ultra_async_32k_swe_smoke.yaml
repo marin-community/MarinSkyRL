@@ -3,7 +3,7 @@
 # and token-level truncated importance sampling capped at 2. Seven H100 nodes: four PP2 x EP8
 # learner nodes, two EP8 rollout nodes, and the pinned swe teacher.
 #
-# Use the same SWE-only sample and controller ingress as the synchronous smoke.
+# Use the same SWE-only sample, controller ingress, and literal recording as the synchronous smoke.
 entrypoint: standard
 
 config_groups:
@@ -25,7 +25,8 @@ terminal_bench:
     collect_rollout_details: true
     override_setup_timeout_sec: 600
     override_timeout_sec: 1800
-    verifier_override_timeout_sec: 300
+    # TaskTrove SWE verifiers need a Together API key, and distillation ignores the reward.
+    verifier_disable: true
     override_cpus: 1
     override_memory_mb: 4096
     override_storage_mb: 4096
@@ -33,7 +34,8 @@ terminal_bench:
     env_network_policy:
       mode: unrestricted
     max_retries: 3
-    n_concurrent_trials: 16
+    # Every trial of a step runs at once, so a group finishes within one agent timeout.
+    n_concurrent_trials: 32
     enable_reward_shaping: false
     enable_error_classification: true
     default_error_treatment: zero
@@ -74,7 +76,7 @@ trainer:
       coefficient: 1.0
       reward_mode: replace
     group_admission:
-      # A Harbor trial may take 600 s setup, 1800 s agent, and 300 s verifier time.
+      # A Harbor trial may take 600 s setup and 1800 s agent time.
       stall_timeout: 3600
   epochs: 1
   max_steps: 2
