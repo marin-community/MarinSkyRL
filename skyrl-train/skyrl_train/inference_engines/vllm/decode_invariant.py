@@ -125,12 +125,20 @@ def _router() -> None:
 
     def checked_load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loaded = original_load_weights(self, weights)
-        for name, parameter in self.named_parameters():
-            if name.endswith(".mlp.router.weight"):
-                check_bf16_values(name, parameter.data)
+        check_router_weights(self)
         return loaded
 
     grugmoe.GrugMoeForCausalLM.load_weights = checked_load_weights
+
+
+def check_router_weights(model: torch.nn.Module) -> None:
+    """Raise unless every materialized router weight holds bf16 values (the invariant router GEMM multiplies in bf16).
+
+    A weight sync loads into meta parameters and materializes them when it finishes, so the worker checks again then.
+    """
+    for name, parameter in model.named_parameters():
+        if name.endswith(".mlp.router.weight") and not parameter.is_meta:
+            check_bf16_values(name, parameter.data)
 
 
 def _launcher_preference(launcher) -> tuple:

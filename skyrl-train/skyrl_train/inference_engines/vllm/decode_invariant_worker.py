@@ -13,6 +13,11 @@ from skyrl_train.inference_engines.vllm.vllm_engine import WorkerWrap
 class DecodeInvariantWorkerWrap(WorkerWrap):
     """``WorkerWrap`` for an engine whose workers run the decode-invariant patches."""
 
+    def skyrl_finish_weight_reload(self) -> None:
+        """``WorkerWrap``'s weight-sync finish, then the check that the synced router weights hold bf16 values."""
+        super().skyrl_finish_weight_reload()
+        decode_invariant.check_router_weights(self.model_runner.model)
+
     def probe_numerics_provenance(self) -> dict[str, Any]:
         """``WorkerWrap``'s provenance with the decode-invariant parts this worker installed."""
         provenance = super().probe_numerics_provenance()
