@@ -8,7 +8,7 @@ import torch
 from torch.distributed import checkpoint
 from torch.distributed.checkpoint.api import CheckpointException
 
-from marinskyrl.remote_io import S3MultipartWriteStream
+from marinskyrl.remote_io import MultipartWriteMode, S3MultipartWriteStream
 from skyrl_train.io.torch_distributed_checkpoint import StreamingFsspecWriter
 
 
@@ -244,8 +244,7 @@ def test_checkpoint_stream_progresses_past_a_slow_first_part(monkeypatch):
         filesystem,
         "s3://bucket/checkpoint/__0_0.distcp",
         concurrency=2,
-        complete_out_of_order=True,
-        wait_before_abort=True,
+        mode=MultipartWriteMode.COMPLETION_ORDER,
     )
 
     stream.write(b"a" * _TEST_PART_BYTES + b"b" * _TEST_PART_BYTES + b"c" * _TEST_PART_BYTES)
@@ -295,8 +294,7 @@ def test_checkpoint_stream_waits_for_inflight_part_before_abort(monkeypatch):
         filesystem,
         "s3://bucket/checkpoint/__0_0.distcp",
         concurrency=2,
-        complete_out_of_order=True,
-        wait_before_abort=True,
+        mode=MultipartWriteMode.COMPLETION_ORDER,
     )
 
     with pytest.raises(OSError, match="injected second-part failure"):

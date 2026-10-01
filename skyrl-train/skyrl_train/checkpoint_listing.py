@@ -40,11 +40,7 @@ def list_checkpoint_dirs(checkpoint_base_path: str) -> list[str]:
 
 
 def list_committed_checkpoint_dirs(checkpoint_base_path: str) -> list[str]:
-    """Exclude incomplete or invalid generations from retention candidates.
-
-    A bad commit record must not make us delete an older valid checkpoint.
-    Direct resume still resolves the advertised pointer and raises on corruption.
-    """
+    """List checkpoint directories containing a valid commit or legacy payload."""
     committed = []
     for directory in list_checkpoint_dirs(checkpoint_base_path):
         try:

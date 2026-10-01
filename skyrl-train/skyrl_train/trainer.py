@@ -93,6 +93,7 @@ from skyrl_train.group_admission import (
 from marinskyrl.checkpoint_paths import (
     GLOBAL_STEP_PREFIX,
     LATEST_CHECKPOINT_FILE,
+    MEGATRON_EXTRA_STATE_FILENAME,
     extract_step_from_path,
 )
 from marinskyrl.process_diagnostics import write_exception_receipt
@@ -167,6 +168,7 @@ class CheckpointSnapshot:
 
 _MEGATRON_RECEIPTS = "worker_receipts.json"
 _DRIVER_RNG_STATE = "driver_rng_state.pt"
+_ROLLOUT_STATE_FILENAME = "data.pt"
 
 
 def _driver_rng_state() -> dict[str, Any]:
@@ -784,8 +786,8 @@ class RayPPOTrainer:
         )
 
     def _settle_checkpoint_refs(self, refs: list[ObjectRef], *, operation: str) -> list[Any]:
-        """Do not retry a failed save while another rank may still be uploading."""
-        timeout = int(getattr(self.cfg.trainer.distributed, "worker_collective_timeout_seconds", 1800))
+        """Wait for every rank, then return results in order or raise the first error."""
+        timeout = int(self.cfg.trainer.distributed.worker_collective_timeout_seconds)
         deadline = time.monotonic() + timeout
         pending = list(refs)
         results: dict[ObjectRef, Any] = {}
@@ -830,7 +832,7 @@ class RayPPOTrainer:
             f"{component}/.metadata",
             f"{component}/common.pt",
             f"{component}/metadata.json",
-            f"{component}/extra_state.pt",
+            f"{component}/{MEGATRON_EXTRA_STATE_FILENAME}",
             f"{component}/huggingface/config.json",
             f"{component}/{_MEGATRON_RECEIPTS}",
         }
@@ -861,7 +863,7 @@ class RayPPOTrainer:
     ) -> None:
         rollout_buffer = stdlib_io.BytesIO()
         torch.save(rollout_state, rollout_buffer)
-        io.write_bytes_atomic(os.path.join(attempt_path, "data.pt"), rollout_buffer.getvalue())
+        io.write_bytes_atomic(os.path.join(attempt_path, _ROLLOUT_STATE_FILENAME), rollout_buffer.getvalue())
         trainer_buffer = stdlib_io.BytesIO()
         torch.save(
             {
@@ -873,7 +875,7 @@ class RayPPOTrainer:
             trainer_buffer,
         )
         io.write_bytes_atomic(os.path.join(attempt_path, TRAINER_STATE_FILENAME), trainer_buffer.getvalue())
-        required.update({"data.pt", TRAINER_STATE_FILENAME})
+        required.update({_ROLLOUT_STATE_FILENAME, TRAINER_STATE_FILENAME})
         if rng_state is not None:
             rng_buffer = stdlib_io.BytesIO()
             torch.save(rng_state, rng_buffer)
@@ -891,7 +893,7 @@ class RayPPOTrainer:
         self._last_saved_step = step
 
     async def _save_megatron_checkpoint(self, state: TrainerState) -> bool:
-        """Save one immutable Megatron generation before the next policy publication."""
+        """Commit one Megatron generation, returning False after a storage failure."""
         await self._drain_checkpoint_upload()
         step = state.global_step
         step_path = os.path.join(self.cfg.trainer.ckpt_path, f"{GLOBAL_STEP_PREFIX}{step}")
@@ -3066,7 +3068,7 @@ class RayPPOTrainer:
                 self.policy_model.backload_to_gpu()
 
         # Serialize rollout data state for publication after the rank uploads complete.
-        rollout_state_path = os.path.join(global_step_folder, "data.pt")
+        rollout_state_path = os.path.join(global_step_folder, _ROLLOUT_STATE_FILENAME)
         rollout_state_buffer = stdlib_io.BytesIO()
         torch.save(rollout_state, rollout_state_buffer)
 
@@ -3188,7 +3190,7 @@ class RayPPOTrainer:
         policy_ckpt_dir = os.path.join(checkpoint_path, POLICY_CHECKPOINT_SUBDIRECTORY)
         critic_ckpt_dir = os.path.join(checkpoint_path, "critic")
         trainer_state_path = os.path.join(checkpoint_path, TRAINER_STATE_FILENAME)
-        rollout_state_path = os.path.join(checkpoint_path, "data.pt")
+        rollout_state_path = os.path.join(checkpoint_path, _ROLLOUT_STATE_FILENAME)
 
         # Validate that required checkpoint files exist
         if not io.exists(trainer_state_path):

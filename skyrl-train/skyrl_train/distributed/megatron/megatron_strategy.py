@@ -15,7 +15,7 @@ from torch import optim
 from torch import distributed as dist
 
 from skyrl_train.distributed.strategy import DistributedStrategy
-from marinskyrl.checkpoint_paths import extract_step_from_path
+from marinskyrl.checkpoint_paths import MEGATRON_EXTRA_STATE_FILENAME, extract_step_from_path
 from skyrl_train.distributed.utils import ModelOrModelOptimPair
 from skyrl_train.io import io
 from skyrl_train.timing_observability import checkpoint_phase
@@ -93,6 +93,13 @@ def _saved_optimizer_sharding_type(common_state: dict) -> str:
 
 
 _NODE_LOCAL_CHECKPOINT_CACHE = os.path.join(tempfile.gettempdir(), "marinskyrl-megatron-checkpoints")
+
+
+def _cuda_rng_tracker():
+    # CPU checkpoint tests provide Megatron stubs without tensor_parallel.
+    from megatron.core import tensor_parallel
+
+    return tensor_parallel.get_cuda_rng_tracker()
 
 
 def _rng_parallel_coordinates() -> tuple[int, int, int, int, int, int]:
@@ -340,13 +347,10 @@ class MegatronStrategy(DistributedStrategy):
         # Preserve the common-state contract and each rank's separate CUDA tracker.
         generic_rng_state = self.get_rng_state()
         sharded_state_dict["rng"] = generic_rng_state
-        # CPU import stubs do not expose the GPU-only tensor-parallel tracker.
-        from megatron.core import tensor_parallel
-
         local_rng_state = {
             "coordinates": _rng_parallel_coordinates(),
             "generic": generic_rng_state,
-            "cuda_tracker": tensor_parallel.get_cuda_rng_tracker().get_states(),
+            "cuda_tracker": _cuda_rng_tracker().get_states(),
         }
         rank_rng_states = [None] * dist.get_world_size()
         dist.all_gather_object(rank_rng_states, local_rng_state)
@@ -392,7 +396,7 @@ class MegatronStrategy(DistributedStrategy):
                 self.save_hf_configs(self.hf_config, hf_dir, tokenizer)
 
                 # Replicated client state is written by rank zero and read by every rank.
-                extra_state_path = os.path.join(work_dir, "extra_state.pt")
+                extra_state_path = os.path.join(work_dir, MEGATRON_EXTRA_STATE_FILENAME)
                 with io.open_file(extra_state_path, "wb") as f:
                     torch.save({"client_state": client_state, "tag": tag, "rank_rng_states": rank_rng_states}, f)
 
@@ -499,7 +503,7 @@ class MegatronStrategy(DistributedStrategy):
                 self.load_rng_state(state_dict["rng"])
 
         states = {}
-        extra_state_path = os.path.join(ckpt_dir, "extra_state.pt")
+        extra_state_path = os.path.join(ckpt_dir, MEGATRON_EXTRA_STATE_FILENAME)
         if load_training_state and io.exists(extra_state_path):
             with checkpoint_phase("megatron", operation, "apply_client_and_rank_rng_state", rank=rank, step=step):
                 with io.open_file(extra_state_path, "rb") as f:
@@ -507,11 +511,9 @@ class MegatronStrategy(DistributedStrategy):
                 states = extra_state.get("client_state", {}) or {}
                 self.log("Loaded client state from checkpoint.")
                 if "rank_rng_states" in extra_state:
-                    from megatron.core import tensor_parallel
-
                     rank_rng_state = _select_rank_rng_state(extra_state["rank_rng_states"], rank)
                     self.load_rng_state(rank_rng_state["generic"])
-                    tensor_parallel.get_cuda_rng_tracker().set_states(rank_rng_state["cuda_tracker"])
+                    _cuda_rng_tracker().set_states(rank_rng_state["cuda_tracker"])
                     self.log("Loaded rank-specific Megatron RNG and CUDA RNG tracker state.")
 
         return ckpt_dir, states

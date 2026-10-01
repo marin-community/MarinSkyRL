@@ -22,6 +22,7 @@ from torch.futures import Future
 
 from marinskyrl.remote_io import (
     CommittableStream,
+    MultipartWriteMode,
     OutputStream,
     S3_MULTIPART_PART_BYTES,
     S3MultipartWriteStream,
@@ -115,8 +116,9 @@ class _AbortableFsspecFileSystem(FsspecFileSystem):
                 self.fs,
                 object_path,
                 multipart_concurrency=CHECKPOINT_MULTIPART_CONCURRENCY if is_checkpoint_shard else None,
-                complete_out_of_order=is_checkpoint_shard,
-                wait_before_abort=is_checkpoint_shard,
+                multipart_mode=(
+                    MultipartWriteMode.COMPLETION_ORDER if is_checkpoint_shard else MultipartWriteMode.SUBMISSION_ORDER
+                ),
             )
             if is_checkpoint_shard and isinstance(stream, S3MultipartWriteStream):
                 stream = _DeferredWriteErrorStream(stream)

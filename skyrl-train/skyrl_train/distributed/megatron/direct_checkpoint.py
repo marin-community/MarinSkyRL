@@ -2,7 +2,6 @@ from pathlib import Path
 import os
 from dataclasses import replace
 
-from loguru import logger
 from megatron.core.dist_checkpointing.dict_utils import nested_values
 from megatron.core.dist_checkpointing.mapping import ShardedStateDict, ShardedTensor
 from megatron.core.dist_checkpointing.strategies.checkpointable import (
@@ -163,15 +162,12 @@ class _ObservedFileSystemReader(FileSystemReader):
             rank=self.observation_rank,
             step=self.observation_step,
         ) as sample:
-            try:
-                storage_items = [self.storage_data[item.storage_index] for item in plan.items]
-                sample.counters["logical_read_items"] = len(plan.items)
-                sample.counters["logical_tensor_reads"] = sum(item.type == LoadItemType.TENSOR for item in plan.items)
-                sample.counters["logical_byte_reads"] = sum(item.type == LoadItemType.BYTE_IO for item in plan.items)
-                sample.counters["logical_read_bytes"] = sum(item.length for item in storage_items)
-                sample.counters["storage_files_touched"] = len({item.relative_path for item in storage_items})
-            except Exception:
-                logger.opt(exception=True).warning("Could not count logical checkpoint reads")
+            storage_items = [self.storage_data[item.storage_index] for item in plan.items]
+            sample.counters["logical_read_items"] = len(plan.items)
+            sample.counters["logical_tensor_reads"] = sum(item.type == LoadItemType.TENSOR for item in plan.items)
+            sample.counters["logical_byte_reads"] = sum(item.type == LoadItemType.BYTE_IO for item in plan.items)
+            sample.counters["logical_read_bytes"] = sum(item.length for item in storage_items)
+            sample.counters["storage_files_touched"] = len({item.relative_path for item in storage_items})
             return super().read_data(plan, planner)
 
 

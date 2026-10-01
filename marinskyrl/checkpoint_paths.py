@@ -8,10 +8,11 @@ GLOBAL_STEP_PREFIX = "global_step_"
 LATEST_CHECKPOINT_FILE = "latest_ckpt_global_step.txt"
 HF_EXPORT_REQUEST_FILENAME = "hf_export_request.json"
 POLICY_CHECKPOINT_SUBDIRECTORY = "policy"
+MEGATRON_EXTRA_STATE_FILENAME = "extra_state.pt"
 
 
 def extract_step_from_path(path: str) -> int:
-    """Find a global step in a checkpoint path, including attempt payloads."""
+    """Return the global step in a checkpoint path, or -1 when none exists."""
     for part in reversed(path.rstrip("/").split("/")):
         match = re.fullmatch(rf"{re.escape(GLOBAL_STEP_PREFIX)}(\d+)", part)
         if match:

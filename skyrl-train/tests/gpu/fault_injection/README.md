@@ -33,8 +33,8 @@ the bucket's TTL policy.
 ## Megatron checkpoint-to-next-step parity
 
 `checkpoint_step_parity.py` is an opt-in, four-H100 Qwen3-0.6B TP2/PP2
-checkpoint replay gate. It is **not** evidence of 32-rank Snowball numerical
-parity. Run its two tests as separate pytest processes, in order, on one node
+checkpoint replay gate. Its result applies to four ranks only. Run its two tests
+as separate pytest processes, in order, on one node
 with a unique local scratch directory and a unique east-region TTL S3 prefix:
 
 ```bash

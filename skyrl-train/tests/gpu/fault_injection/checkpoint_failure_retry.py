@@ -16,7 +16,14 @@ import os
 import pytest
 import ray
 
-from skyrl_train.checkpoint_generation import COMMIT_FILENAME, resolve_checkpoint_payload
+from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, LATEST_CHECKPOINT_FILE
+from skyrl_train.checkpoint_generation import (
+    ATTEMPTS_DIRECTORY,
+    COMMIT_FILENAME,
+    MANIFEST_FILENAME,
+    resolve_checkpoint_payload,
+)
+from skyrl_train.distributed.megatron import direct_checkpoint
 from skyrl_train.io import io
 from skyrl_train.workers.megatron.megatron_worker import MegatronPolicyWorkerBase
 from tests.gpu.gpu_ci.test_trainer_full_checkpointing import create_minimal_trainer, get_test_trainer_config
@@ -30,8 +37,6 @@ MODEL_REVISION = "c1899de289a04d12100db370d81485cdf75e47ca"
 class FailingOnceMegatronPolicyWorker(MegatronPolicyWorkerBase):
     def fail_after_next_distributed_save(self) -> int:
         """Fail after all ranks finish DCP, before trainer generation publication."""
-        from skyrl_train.distributed.megatron import direct_checkpoint
-
         real_save = direct_checkpoint.checkpoint.save
 
         def save_then_fail(*args, **kwargs):
@@ -62,16 +67,17 @@ def _config(root: str, *, resume: bool = False):
 
 
 def _step_path(root: str, step: int) -> str:
-    return os.path.join(root, "checkpoints", f"global_step_{step}")
+    return os.path.join(root, "checkpoints", f"{GLOBAL_STEP_PREFIX}{step}")
 
 
 def _latest_path(root: str) -> str:
-    return os.path.join(root, "checkpoints", "latest_ckpt_global_step.txt")
+    return os.path.join(root, "checkpoints", LATEST_CHECKPOINT_FILE)
 
 
 def _attempt_ids(step_path: str) -> set[str]:
     names = io.find_files(step_path)
-    return {name.split("/_attempts/", 1)[1].split("/", 1)[0] for name in names if "/_attempts/" in name}
+    marker = f"/{ATTEMPTS_DIRECTORY}/"
+    return {name.split(marker, 1)[1].split("/", 1)[0] for name in names if marker in name}
 
 
 @pytest.mark.megatron
@@ -111,7 +117,7 @@ def test_megatron_failed_save_preserves_latest_and_retry_commits(ray_init_fixtur
         failed_attempts = _attempt_ids(step_two)
         assert len(failed_attempts) == 1
         failed_attempt = next(iter(failed_attempts))
-        assert not io.exists(os.path.join(step_two, "_attempts", failed_attempt, "checkpoint_manifest.json"))
+        assert not io.exists(os.path.join(step_two, ATTEMPTS_DIRECTORY, failed_attempt, MANIFEST_FILENAME))
 
         asyncio.run(trainer.save_checkpoints())
         assert io.read_bytes(_latest_path(root)) == b"2"

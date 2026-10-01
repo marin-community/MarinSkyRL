@@ -6,6 +6,7 @@ from collections import deque
 from collections.abc import Buffer, Generator
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
+from enum import Enum
 import logging
 from typing import Any, cast, Protocol, runtime_checkable
 
@@ -19,6 +20,13 @@ logger = logging.getLogger(__name__)
 
 S3_MULTIPART_PART_BYTES = 64 * 2**20
 S3_MULTIPART_CONCURRENCY = 4
+
+
+class MultipartWriteMode(Enum):
+    """Select multipart completion order and the matching abort behavior."""
+
+    SUBMISSION_ORDER = "submission_order"
+    COMPLETION_ORDER = "completion_order"
 
 
 def create_s3_filesystem(**storage_options: Any) -> AbstractFileSystem:
@@ -74,8 +82,7 @@ class S3MultipartWriteStream(CommittableStream):
         path: str,
         *,
         concurrency: int | None = None,
-        complete_out_of_order: bool = False,
-        wait_before_abort: bool = False,
+        mode: MultipartWriteMode = MultipartWriteMode.SUBMISSION_ORDER,
     ) -> None:
         if concurrency is not None and concurrency <= 0:
             raise ValueError("Multipart concurrency must be positive")
@@ -85,8 +92,7 @@ class S3MultipartWriteStream(CommittableStream):
         self.key = key
         self.path = path
         self.concurrency = self.concurrency if concurrency is None else concurrency
-        self.complete_out_of_order = complete_out_of_order
-        self.wait_before_abort = wait_before_abort
+        self.mode = mode
         self.closed = False
         self._position = 0
         self._buffer = bytearray()
@@ -166,7 +172,7 @@ class S3MultipartWriteStream(CommittableStream):
         for _part_number, future in self._pending:
             future.cancel()
         try:
-            if self.wait_before_abort:
+            if self.mode is MultipartWriteMode.COMPLETION_ORDER:
                 # A running UploadPart may otherwise finish after the abort.
                 self._executor.shutdown(wait=True, cancel_futures=True)
             if self._upload_id is not None:
@@ -213,7 +219,7 @@ class S3MultipartWriteStream(CommittableStream):
         return {"PartNumber": part_number, "ETag": str(response["ETag"])}
 
     def _finish_part(self) -> None:
-        if self.complete_out_of_order:
+        if self.mode is MultipartWriteMode.COMPLETION_ORDER:
             done, _ = wait((future for _, future in self._pending), return_when=FIRST_COMPLETED)
             future = done.pop()
             self._pending = deque((number, pending) for number, pending in self._pending if pending is not future)
@@ -227,8 +233,7 @@ def create_output_stream(
     path: str,
     *,
     multipart_concurrency: int | None = None,
-    complete_out_of_order: bool = False,
-    wait_before_abort: bool = False,
+    multipart_mode: MultipartWriteMode = MultipartWriteMode.SUBMISSION_ORDER,
 ) -> OutputStream:
     """Create a write stream, using bounded multipart transfer for S3."""
     protocol = getattr(filesystem, "protocol", ())
@@ -240,8 +245,7 @@ def create_output_stream(
             filesystem,
             path,
             concurrency=multipart_concurrency,
-            complete_out_of_order=complete_out_of_order,
-            wait_before_abort=wait_before_abort,
+            mode=multipart_mode,
         )
     return cast(OutputStream, filesystem.open(path, "wb"))
 
