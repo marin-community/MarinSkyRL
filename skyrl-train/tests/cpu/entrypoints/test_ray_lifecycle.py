@@ -1,6 +1,8 @@
 import asyncio
 import contextlib
 import signal
+import subprocess
+import sys
 from unittest.mock import Mock
 
 import pytest
@@ -83,42 +85,67 @@ def test_ray_teardown_follows_the_cluster_owner(monkeypatch, owner, exit_args, e
     assert events == expected_events
 
 
-def test_runner_evidence_rejection_happens_before_ray_initialization(monkeypatch):
+def test_runner_evidence_rejection_happens_before_ray_initialization():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import pytest
+from skyrl_train.config.utils import get_default_config
+from skyrl_train.entrypoints.main_base import run_ray_driver
+from skyrl_train.config.trajectory_runner_capabilities import TrajectoryRunnerMode
+
+cfg = get_default_config()
+cfg.trainer.logger = "console"
+cfg.trainer.algorithm.off_policy_correction = "tis"
+with pytest.raises(ValueError, match="mini-swe cannot supply exact sampled completion"):
+    run_ray_driver(cfg, None, TrajectoryRunnerMode.MINI_SWE)
+""",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("remote_failure", [None, RuntimeError("original remote failure")])
+def test_driver_reports_remote_result_before_external_owner_exit(tmp_path, monkeypatch, remote_failure):
     cfg = get_default_config()
     cfg.trainer.logger = "console"
-    cfg.trainer.algorithm.use_tis = True
-    cfg.trainer.algorithm.tis_imp_ratio_cap = 2.0
-    initialize_ray = Mock()
-    monkeypatch.setattr(trainer_utils, "initialize_ray", initialize_ray)
-
-    with pytest.raises(ValueError, match="mini-swe cannot supply exact sampled completion"):
-        run_ray_driver(cfg, Mock(), TrajectoryRunnerMode.MINI_SWE)
-
-    initialize_ray.assert_not_called()
-
-
-def test_driver_preserves_remote_exception_before_external_owner_exit(tmp_path, monkeypatch):
-    cfg = get_default_config()
-    cfg.trainer.logger = "console"
-    remote_failure = RuntimeError("original remote failure")
     shutdown = Mock()
     immediate_exit = Mock()
     monkeypatch.setenv("SKYRL_DEBUG_ARTIFACT_DIR", str(tmp_path))
     monkeypatch.setattr(trainer_utils, "initialize_ray", Mock())
     monkeypatch.setattr(main_base, "validate_trajectory_runner_capabilities", Mock())
-    monkeypatch.setattr(main_base.EntrypointSupervisor, "wait", Mock(side_effect=remote_failure))
+    monkeypatch.setattr(main_base.EntrypointSupervisor, "wait", Mock(side_effect=remote_failure, return_value=None))
     monkeypatch.setattr(ray_lifecycle, "shutdown_ray", shutdown)
     monkeypatch.setattr(ray_lifecycle, "exit_without_ray_destructors", immediate_exit)
     monkeypatch.setattr(telemetry, "process_telemetry", lambda _role: contextlib.nullcontext())
 
-    with pytest.raises(RuntimeError, match="original remote failure"):
-        run_ray_driver(cfg, Mock(), TrajectoryRunnerMode.SKYRL_GYM)
+    logs = []
+    sink = main_base.logger.add(logs.append, format="{message}")
+    try:
+        if remote_failure is None:
+            run_ray_driver(cfg, Mock(), TrajectoryRunnerMode.SKYRL_GYM)
+        else:
+            with pytest.raises(RuntimeError, match="original remote failure"):
+                run_ray_driver(cfg, Mock(), TrajectoryRunnerMode.SKYRL_GYM)
+    finally:
+        main_base.logger.remove(sink)
 
     shutdown.assert_called_once_with()
-    immediate_exit.assert_called_once_with(1)
     receipts = list((tmp_path / "outcomes").glob("*.exception.json"))
-    assert len(receipts) == 1
-    assert "original remote failure" in receipts[0].read_text()
+    if remote_failure is None:
+        immediate_exit.assert_called_once_with()
+        assert not receipts
+        assert any("Training done!" in line for line in logs)
+    else:
+        immediate_exit.assert_called_once_with(1)
+        assert len(receipts) == 1
+        assert "original remote failure" in receipts[0].read_text()
+        assert not any("Training done!" in line for line in logs)
 
 
 def test_generate_only_distillation_rejection_happens_before_ray_initialization(monkeypatch, local_distillation_config):

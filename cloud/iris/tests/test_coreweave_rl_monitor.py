@@ -652,57 +652,6 @@ def test_rl_report_row_keeps_artifact_exceptions_out_of_trend(tmp_path):
     assert row[2].value == "running"
 
 
-def test_rl_report_row_reads_policy_namespaced_tis_log_ratio(tmp_path):
-    row = _rl_report_row(
-        tmp_path,
-        "Training Step Progress: 7 / 80\n"
-        'WANDB_MIRROR kind=train step=7 metrics={"policy/policy_entropy": 0.05, '
-        '"generate/tis/exact_match_fraction": 0.975, "policy/tis/log_ratio_abs_mean": 0.125, '
-        '"policy/log_ratio_abs_mean": 0.021, "policy/log_ratio_abs_p99": 0.44, "policy/log_ratio_abs_max": 3.25}\n',
-    )
-
-    trend = row[-1].value
-    assert "entropy=0.05" in trend
-    assert "TIS exact=0.975" in trend
-    assert "TIS |log r|=0.125" in trend
-    assert "0.021/0.44/3.25" in trend
-
-
-def test_rl_report_row_explains_tis_disabled_by_resolved_config(tmp_path):
-    row = _rl_report_row(
-        tmp_path,
-        "trainer:\n"
-        "  algorithm:\n"
-        "    use_tis: false\n"
-        "Training Step Progress: 2 / 80\n"
-        'WANDB_MIRROR kind=train step=2 metrics={"policy/policy_entropy": 0.7143, '
-        '"policy/log_ratio_abs_mean": 0.0}\n',
-    )
-
-    assert "TIS disabled" in row[-1].value
-    assert "TIS exact=—" not in row[-1].value
-    assert "TIS r=—" not in row[-1].value
-
-
-def test_rl_report_row_flags_enabled_tis_without_diagnostics(tmp_path):
-    row = _rl_report_row(
-        tmp_path,
-        "trainer:\n"
-        "  algorithm:\n"
-        "    use_tis: true\n"
-        "Training Step Progress: 2 / 80\n"
-        'WANDB_MIRROR kind=train step=2 metrics={"policy/policy_entropy": 0.7143}\n',
-    )
-
-    assert "TIS enabled; metrics missing" in row[-1].value
-
-
-def test_tis_ratio_summary_uses_distinct_legacy_importance_ratio_label():
-    summary = watch_coreweave_rl.tis_ratio_summary({"policy/rollout_train_prob_diff_mean": 50_087_992.0})
-
-    assert summary == "TIS r=5.009e+07"
-
-
 def test_rl_report_row_replaces_traceback_signal_with_error_report_pointer(tmp_path):
     row = _rl_report_row(tmp_path, "Traceback (most recent call last)\nraw details\n", state="failed")
 
@@ -1136,3 +1085,49 @@ def test_trace_sync_skips_object_that_disappears_after_listing(tmp_path):
             "size": 1,
         }
     ]
+
+
+def test_rl_report_row_reads_driver_mismatch_and_correction_metrics(tmp_path):
+    row = _rl_report_row(
+        tmp_path,
+        "Training Step Progress: 7 / 80\n"
+        'WANDB_MIRROR kind=train step=7 metrics={"policy/policy_entropy": 0.05, '
+        '"generate/tis/exact_match_fraction": 0.975, "policy/log_ratio_abs_mean": 0.021, "policy/log_ratio_abs_p99": 0.44, "policy/log_ratio_abs_max": 3.25, "policy/mismatch/pooled/log_ratio_abs_mean": 0.125, "policy/correction/weight_mean": 0.75, "policy/correction/truncated_fraction": 0.1, "policy/correction/masked_fraction": 0.2}\n',
+    )
+
+    assert "entropy=0.05" in row[-1].value
+    assert "mismatch |log r|=0.125" in row[-1].value
+    assert "correction weight=0.75" in row[-1].value
+    assert "correction truncated=0.1" in row[-1].value
+    assert "correction masked=0.2" in row[-1].value
+    assert "TIS exact=0.975" in row[-1].value
+    assert "0.021/0.44/3.25" in row[-1].value
+
+
+def test_rl_report_row_flags_configured_correction_without_diagnostics(tmp_path):
+    row = _rl_report_row(
+        tmp_path,
+        "trainer:\n"
+        "  algorithm:\n"
+        "    off_policy_correction: tis\n"
+        "Training Step Progress: 2 / 80\n"
+        'WANDB_MIRROR kind=train step=2 metrics={"policy/policy_entropy": 0.7143}\n',
+    )
+
+    assert "correction tis; metrics missing" in row[-1].value
+
+
+def test_rl_report_row_explains_correction_disabled_by_resolved_config(tmp_path):
+    row = _rl_report_row(
+        tmp_path,
+        "trainer:\n"
+        "  algorithm:\n"
+        "    off_policy_correction: none\n"
+        "Training Step Progress: 2 / 80\n"
+        'WANDB_MIRROR kind=train step=2 metrics={"policy/policy_entropy": 0.7143, '
+        '"policy/log_ratio_abs_mean": 0.0}\n',
+    )
+
+    assert "correction disabled" in row[-1].value
+    assert "TIS exact=—" not in row[-1].value
+    assert "TIS r=—" not in row[-1].value

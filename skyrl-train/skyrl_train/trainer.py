@@ -9,7 +9,7 @@ import shutil
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 from jaxtyping import Float
 from pathlib import Path
 import ray
@@ -25,7 +25,7 @@ from collections import defaultdict, deque
 import numpy as np
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
-from skyrl_train.training_batch import GLOBAL_LOSS_DENOM_METADATA_KEY, TrainingInputBatch, TrainingOutputBatch
+from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.rollouts.buffer import RolloutGroup
 from skyrl_train.rollouts.context import TrainingContext, TrainingContextState
 from skyrl_train.trajectory_selection import trajectory_selector_from_config
@@ -39,13 +39,16 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     concatenate_trajectory_batches,
     get_metrics_from_trajectory_batch,
     graded_row_indices,
+    normalized_verifier_scores,
     scalar_reward_token_credit,
+    verifier_score_summary,
 )
 from skyrl_train.trajectory_runners.trajectory_retention import make_trajectory_sink
 from skyrl_train.dataset.preprocess import (
     collate_response_token_channel,
     convert_prompts_responses_to_batch_tensors,
 )
+from skyrl_train.dataset.routed_expert_batch import RoutedExpertRows
 from skyrl_train.distillation import DISTILLATION_SCORED_TOKENS_METRIC, validate_distillation_attachment
 from skyrl_train.distillation_adapters import AsyncRoutedTeacherScoreTicket, RoutedScoredDistillationBatch
 from skyrl_train.distillation_runtime import DistillationRuntime
@@ -55,11 +58,21 @@ from skyrl_train.utils import Timer, get_ray_pg_ready_with_timeout, get_system_m
 from skyrl_train.tensor_math import masked_mean
 from skyrl_train.utils.policy_math import compute_approx_kl, normalize_advantages_dict
 from skyrl_train.utils.kl_controllers import get_kl_controller, FixedKLController, AdaptiveKLController
-from skyrl_train.utils.advantage_estimators import compute_advantages_and_returns
-from skyrl_train.utils.loss_reduction import (
-    GLOBAL_SEQUENCE_MEAN_TOKEN_SUM_NORMALIZED_LOSS_REDUCTION,
-    compute_global_loss_denom,
+from skyrl_train.utils.algorithm_registry import AdvantageEstimator
+from skyrl_train.utils.advantage_estimators import GRPO_FLAT_REWARD_STD_TOLERANCE, compute_advantages_and_returns
+from marinskyrl.runtime_options import reference_model_required
+from marinskyrl.distillation import (
+    DistillationObjectiveKind,
+    DistillationRewardMode,
+    compile_distillation_plan_from_config,
 )
+from skyrl_train.objective.teacher import teacher_advantages
+from skyrl_train.objective.correction import compute_correction
+from skyrl_train.config.objective_spec import off_policy_correction
+from skyrl_train.config.ftpo import ftpo_config
+from skyrl_train.ftpo import select_ftpo_candidates
+from skyrl_train.distillation_adapters import collate_student_selected_rollout
+from skyrl_train.trajectory_runners.trajectory_reward_shaping import parse_trajectory_reward_shaping_config
 from skyrl_train.distributed.dispatch import (
     ActorInfo,
     MeshRank,
@@ -107,7 +120,8 @@ from skyrl_train.utils.utils import (
     policy_force_cvd_mask_enabled,
 )
 
-from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
+from skyrl_train.config.objective_spec import rollout_logprobs_required
+from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
 from skyrl_train.evaluate import evaluate, evaluate_step_wise
 from skyrl_train.callbacks.base import TrainerCallback, TrainerState, TrainerControl, CallbackHandler
 from skyrl_train.callbacks.builtin import DefaultCallbackHandler, RefModelUpdateCallback
@@ -244,6 +258,19 @@ def consumed_work(training_input: TrainingInputBatch) -> ConsumedWork:
     )
 
 
+def _zero_std_group_fraction(uids: Sequence[str], rewards: torch.Tensor) -> float:
+    group_rewards: dict[str, list[torch.Tensor]] = {}
+    for uid, reward in zip(uids, rewards, strict=True):
+        group_rewards.setdefault(uid, []).append(reward)
+    if not group_rewards:
+        return 0.0
+    flat_groups = sum(
+        len(group) > 1 and torch.std(torch.stack(group)).item() <= GRPO_FLAT_REWARD_STD_TOLERANCE
+        for group in group_rewards.values()
+    )
+    return flat_groups / len(group_rewards)
+
+
 class RayPPOTrainer:
     """The rollout-buffer training loop.
 
@@ -274,6 +301,7 @@ class RayPPOTrainer:
         callbacks: Optional[List[TrainerCallback]] = None,
     ):
         self.cfg = cfg
+        self.distillation_plan = compile_distillation_plan_from_config(cfg)
         self.context = context
         self._training_metrics_enabled: bool = cfg.trainer.training_metrics
         self._rollout_spans_enabled: bool = cfg.trainer.rollout_spans
@@ -302,14 +330,12 @@ class RayPPOTrainer:
         self.all_timings = {}
         self.all_startup_timings = {}
         self._checkpoint_save_failures = 0.0
-        # Whether the last converted batch lacked rollout logprobs, and the run's TIS skip counts.
-        self._tis_batch_skipped_no_logprobs = 0.0
-        self._tis_skipped_count = 0.0
-        self._tis_total_count = 0.0
+        self._ftpo_stopped = False
         self._shutdown_complete = False
         self._restored_rollout_state: TrainingContextState | None = None
         self.global_step = 0
         self._last_saved_step: int | None = None
+        self._last_evaluated_step: int | None = None
         self._pending_checkpoint_upload: tuple[asyncio.Task[tuple[float, float]], TrainerState] | None = None
         raw_speculative_decoding = cfg.generator.get("speculative_decoding")
         if raw_speculative_decoding is not None:
@@ -418,35 +444,32 @@ class RayPPOTrainer:
         return None
 
     @torch.no_grad()
-    async def eval(self) -> Dict[str, float]:
-        """
-        Run generation and scoring on the evaluation dataset.
-
-        The eval metrics are recorded after having finished training `self.global_step` steps.
-        Metrics recorded in global_step 0 corresponds to evaluations before training.
-
-        Returns:
-            A dictionary of evaluation metrics.
-        """
-        if self.cfg.trainer.step_wise_training:
-            eval_metrics = await evaluate_step_wise(
-                eval_dataloader=self.eval_dataloader,
-                trajectory_runner=self.trajectory_runner,
-                cfg=self.cfg,
-                global_step=self.global_step,
-                tokenizer=self.tokenizer,
-                trajectory_sink=self.trajectory_sink,
-            )
-        else:
-            eval_metrics = await evaluate(
-                eval_dataloader=self.eval_dataloader,
-                trajectory_runner=self.trajectory_runner,
-                cfg=self.cfg,
-                global_step=self.global_step,
-                tokenizer=self.tokenizer,
-                trajectory_sink=self.trajectory_sink,
-            )
-        return eval_metrics
+    async def eval(
+        self,
+        *,
+        sampling_params: Dict[str, Any] | None = None,
+        n_samples_per_prompt: int | None = None,
+        val_set_name: str | None = None,
+    ) -> Dict[str, float]:
+        """Evaluate the current policy with optional sampling overrides and a named output directory."""
+        overrides = {"generator": {}, "trainer": {}}
+        if n_samples_per_prompt is not None:
+            overrides["generator"]["eval_n_samples_per_prompt"] = n_samples_per_prompt
+        if val_set_name is not None:
+            overrides["trainer"]["export_path"] = join_resource_path(self.cfg.trainer.export_path, val_set_name)
+        cfg = OmegaConf.merge(self.cfg, overrides)
+        for key, value in (sampling_params or {}).items():
+            OmegaConf.update(cfg, f"generator.eval_sampling_params.{key}", value, force_add=True)
+        evaluator = evaluate_step_wise if cfg.trainer.step_wise_training else evaluate
+        return await evaluator(
+            eval_dataloader=self.eval_dataloader,
+            trajectory_runner=self.trajectory_runner,
+            cfg=cfg,
+            global_step=self.global_step,
+            tokenizer=self.tokenizer,
+            trajectory_sink=self.trajectory_sink,
+            val_set_name=val_set_name,
+        )
 
     # ------------------------------------------------------------------
     # Teardown helpers
@@ -661,14 +684,13 @@ class RayPPOTrainer:
         )
 
         try:
-            if self._control.should_evaluate and self.eval_dataset is not None:
+            if (
+                self._control.should_evaluate
+                and self.eval_dataset is not None
+                and self._last_evaluated_step != self.global_step
+            ):
                 with Timer("eval", self.all_timings):
-                    eval_metrics = await self.eval()
-                    self._log_metrics_stdout(eval_metrics, step=self.global_step, kind="eval")
-                    self.tracker.log(eval_metrics, step=self.global_step, commit=True)
-                await self.callback_handler.call_event_async(
-                    "on_evaluate", final_state, self._control, metrics=eval_metrics, trainer=self
-                )
+                    await self._evaluate_and_log(final_state, commit=True)
                 self._control.should_evaluate = False
         finally:
             if self.colocate_all:
@@ -808,11 +830,7 @@ class RayPPOTrainer:
             if step_wall is not None:
                 step_wall.start("evaluation")
             with Timer("eval", self.all_timings):
-                eval_metrics = await self.eval()
-                self.all_metrics.update(eval_metrics)
-            await self.callback_handler.call_event_async(
-                "on_evaluate", state, self._control, metrics=eval_metrics, trainer=self
-            )
+                await self._evaluate_and_log(state, commit=False)
             self._control.should_evaluate = False
         if step_wall is not None:
             step_wall.start("step_end_bookkeeping")
@@ -1228,7 +1246,9 @@ class RayPPOTrainer:
 
         # Synchronize before checking completion so a requested final evaluation uses the checkpoint weights.
         # The loaded global_step counts completed steps, so >= treats a resume exactly at max_steps as complete.
-        if self.resume_mode != ResumeMode.NONE and self.global_step >= self.total_training_steps:
+        if self._ftpo_stopped or (
+            self.resume_mode != ResumeMode.NONE and self.global_step >= self.total_training_steps
+        ):
             await self._handle_resume_at_max_steps()
             return
 
@@ -1239,14 +1259,15 @@ class RayPPOTrainer:
             self.reward_kl_controller = get_kl_controller(self.cfg.trainer.algorithm)
 
         self._control.reset()
+        initial_state = self._create_trainer_state(epoch=self.global_step // self.num_steps_per_epoch)
         self._control = await self.callback_handler.call_event_async(
             "on_train_begin",
-            self._create_trainer_state(epoch=self.global_step // self.num_steps_per_epoch),
+            initial_state,
             self._control,
             trainer=self,
         )
         if self._control.should_evaluate and self.eval_dataset is not None:
-            await self._run_pretraining_evaluation()
+            await self._run_pretraining_evaluation(initial_state)
             self._control.should_evaluate = False
 
         self.context.start()
@@ -1413,8 +1434,6 @@ class RayPPOTrainer:
         if scored_distillation is not None:
             self._attach_teacher_evidence(training_input, scored_distillation)
         self._log_rollout_batch_completed(groups, duration_seconds=rollout_wait_timer.duration)
-        if self.cfg.trainer.algorithm.use_tis:
-            self._record_tis_skip()
 
         step_wall.start("training_preparation")
         with (
@@ -1469,20 +1488,6 @@ class RayPPOTrainer:
             duration_seconds,
         )
 
-    def _record_tis_skip(self) -> None:
-        """Record whether this batch lacked rollout logprobs, so TIS fell back to the standard policy loss.
-
-        A skipped fraction near 1.0 means rollout-logprob capture is broken.
-        """
-        self._tis_skipped_count += self._tis_batch_skipped_no_logprobs
-        self._tis_total_count += 1.0
-        self.all_metrics.update(
-            {
-                "tis/batch_skipped_no_logprobs": self._tis_batch_skipped_no_logprobs,
-                "tis/skipped_fraction": self._tis_skipped_count / self._tis_total_count,
-            }
-        )
-
     async def _end_epoch(self, epoch: int) -> None:
         self._control.reset()
         self._control = await self.callback_handler.call_event_async(
@@ -1495,22 +1500,50 @@ class RayPPOTrainer:
             with Timer("update_ref_with_policy", self.all_timings):
                 await asyncio.to_thread(self.update_ref_with_policy)
 
-    async def _run_pretraining_evaluation(self) -> None:
+    async def _evaluate_and_log(self, state: TrainerState, *, commit: bool) -> None:
+        eval_metrics = await self.eval()
+        self._control = await self.callback_handler.call_event_async(
+            "on_evaluate", state, self._control, metrics=eval_metrics, trainer=self
+        )
+        self._log_metrics_stdout(eval_metrics, step=self.global_step, kind="eval")
+        self.tracker.log(eval_metrics, step=self.global_step, commit=commit)
+        self._last_evaluated_step = self.global_step
+
+    async def _run_pretraining_evaluation(self, state: TrainerState) -> None:
         # Pre-step evaluation must not be mixed into the first optimizer step's inclusive timers.
         with Timer("eval_before_train") as pretrain_eval_timer:
-            eval_metrics = await self.eval()
-            self._log_metrics_stdout(eval_metrics, step=self.global_step, kind="eval")
-            self.tracker.log(eval_metrics, step=self.global_step, commit=self.cfg.trainer.tracker_commit_each_step)
+            await self._evaluate_and_log(state, commit=self.cfg.trainer.tracker_commit_each_step)
         startup_eval = {"startup/eval_before_train": pretrain_eval_timer.duration}
         self._log_metrics_stdout(startup_eval, step=self.global_step, kind="startup")
         self.tracker.log(startup_eval, step=self.global_step, commit=False)
 
     async def _run_training(self, training_input: TrainingInputBatch, *, step_wall: StepWallTime | None = None):
+        if "ftpo_chosen_mask" in training_input and not training_input["loss_mask"].any():
+            self.all_timings["train_critic_and_policy"] = 0.0
+            self.all_metrics["policy/policy_update_steps"] = 0.0
+            self.all_metrics["ftpo/empty_batch"] = 1.0
+            return {"policy_update_steps": 0.0}
         # The drain after the last weight sync can go stale while the rollout buffer fills, so align the
         # policy actor loops immediately before every forward.
         await self._drain_policy_event_loops()
         with Timer("fwd_logprobs_values_reward", self.all_timings):
             training_input = await asyncio.to_thread(self.fwd_logprobs_values_reward, training_input)
+
+        if self.distillation_plan is not None and self.distillation_plan.reward_mode is DistillationRewardMode.REPLACE:
+            if training_input.get("teacher_valid_mask") is None:
+                raise ValueError("distillation reward_mode=replace requires teacher evidence on every training batch")
+            training_input["loss_mask"] = training_input["loss_mask"] * training_input["teacher_valid_mask"]
+
+        correction = off_policy_correction(self.cfg.trainer.algorithm)
+        if correction.rules:
+            rollout_logprobs = training_input.get("rollout_logprobs")
+            if rollout_logprobs is None:
+                raise ValueError("off_policy_correction requires rollout_logprobs")
+            result = compute_correction(
+                training_input["action_log_probs"], rollout_logprobs, training_input["loss_mask"], correction
+            )
+            training_input["correction_weights"] = result.weights
+            self.all_metrics.update(result.metrics)
 
         if self.cfg.trainer.algorithm.use_kl_in_reward:
             with Timer("apply_reward_kl_penalty", self.all_timings):
@@ -1534,6 +1567,12 @@ class RayPPOTrainer:
         with Timer("train_critic_and_policy", self.all_timings), critical_phase("train_step", self.global_step):
             status = await asyncio.to_thread(self.train_critic_and_policy, training_input)
 
+        ftpo = ftpo_config(self.cfg.trainer.algorithm)
+        if ftpo is not None and ftpo.early_stopping_chosen_win is not None:
+            win_rate = status.get("ftpo/chosen_win")
+            if win_rate is not None and win_rate >= ftpo.early_stopping_chosen_win:
+                self._ftpo_stopped = True
+                self._control.should_training_stop = True
         return status
 
     def _group_for_teacher_scoring(self, group: RolloutGroup) -> TrajectoryBatch:
@@ -1592,8 +1631,9 @@ class RayPPOTrainer:
 
             trajectory_batch = concatenate_trajectory_batches(
                 [group.trajectory_batch for group in groups],
-                require_rollout_logprobs=policy_loss_requires_rollout_logprobs(
-                    self.cfg.trainer.algorithm.policy_loss_type
+                require_rollout_logprobs=rollout_logprobs_required(
+                    self.cfg.trainer.algorithm,
+                    loss_spec=PolicyLossRegistry.spec(self.cfg.trainer.algorithm.policy_loss_type),
                 ),
                 tis_lcs_alert_threshold=float(self.cfg.trainer.algorithm.tis_lcs_alert_threshold),
             )
@@ -1651,7 +1691,7 @@ class RayPPOTrainer:
         cfg = self.cfg
         pg = None
 
-        use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
+        use_ref_model = reference_model_required(cfg.trainer.algorithm)
 
         if cfg.trainer.placement.colocate_all:
             num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
@@ -1927,14 +1967,13 @@ class RayPPOTrainer:
     def _resolve_num_experts(self) -> Optional[int]:
         """Resolve the policy model's MoE expert count from its HF config, memoized.
 
-        Used to pick a DETERMINISTIC (rank-invariant) dtype for the
-        rollout_routed_experts transport tensor in the collator — see
-        ``convert_prompts_responses_to_batch_tensors``. Reads the HF config at
+        Used to pick a deterministic, rank-invariant route dtype when each worker
+        materializes a microbatch. Reads the HF config at
         ``cfg.trainer.policy.model.path`` once and resolves the expert count across
         MoE arch variants (Qwen3-MoE: ``num_experts``; Mixtral: ``num_local_experts``;
         DeepSeek/Qwen-style: ``n_routed_experts``). Returns None (and caches None) if
-        the config has no such field (non-MoE) or can't be loaded, in which case the
-        collator falls back to its non-deterministic per-batch-max pick with a warning.
+        the config has no such field (non-MoE) or can't be loaded, in which case
+        the selected batch uses one observed-max dtype for all workers.
         """
         if getattr(self, "_num_experts_cache", "__unset__") != "__unset__":
             return self._num_experts_cache
@@ -1963,8 +2002,8 @@ class RayPPOTrainer:
         except Exception as e:  # noqa: BLE001 — config load is best-effort; fallback is safe
             logger.warning(
                 f"Could not resolve num_experts from policy model config for the "
-                f"routed-experts dtype pick ({e!r}); the collator will use its "
-                f"non-deterministic per-batch-max fallback."
+                f"routed-experts dtype pick ({e!r}); the batch will use its "
+                f"observed-max fallback."
             )
             num_experts = None
         if num_experts is not None:
@@ -1993,9 +2032,9 @@ class RayPPOTrainer:
         # (the field is never even passed to the collator nor set on the batch).
         moe_router_replay = moe_router_replay_requested(self.cfg)
         routed_experts = trajectory_batch.get("rollout_routed_experts", None) if moe_router_replay else None
-        # Deterministic dtype for the rollout_routed_experts transport tensor:
+        # Deterministic dtype for the compact rollout_routed_experts transport:
         # resolve the model's expert count once (memoized) and pass it to the
-        # collator so the narrowed dtype is keyed on num_experts (max possible id),
+        # route rows so the narrowed dtype is keyed on num_experts (max possible id),
         # NOT the per-batch observed max — otherwise ranks whose batch max straddles
         # a dtype boundary diverge and a later collective on this tensor hangs NCCL.
         # Only needed when we actually carry routed experts (moe_router_replay on).
@@ -2017,7 +2056,6 @@ class RayPPOTrainer:
             rewards_tensor,
             loss_masks_tensor,
             rollout_logprobs_tensor,
-            rollout_routed_experts_tensor,
             token_level_shaping_tensor,
             response_span_tags_tensor,
         ) = convert_prompts_responses_to_batch_tensors(
@@ -2027,51 +2065,27 @@ class RayPPOTrainer:
             rewards,
             loss_masks,
             logprobs,
-            routed_experts,
             token_level_shaping,
             response_span_tags,
-            num_experts,
         )
-        behavior_logprobs_required = policy_loss_requires_rollout_logprobs(self.cfg.trainer.algorithm.policy_loss_type)
-        if behavior_logprobs_required and rollout_logprobs_tensor is None:
-            raise ValueError("rollout_logprobs are required for behavior_clip policy loss")
-
-        # sanity check for tis
-        #
-        # Graceful TIS degrade (Fix A, 2026-06-07): when use_tis is on but the
-        # ENTIRE training batch came back with no rollout logprobs
-        # (rollout_logprobs_tensor is None), do NOT hard-assert/crash. The
-        # runner already detects + logs the all-None case ("ALL N
-        # trajectories missing logprobs. This batch cannot be used for TIS
-        # training"); the trainer must complete the hardening by degrading to
-        # standard (non-TIS) policy loss for THIS batch only. The None tensor
-        # propagates cleanly: TensorBatch.chunk/slice leave None values
-        # un-chunked (-> each micro-batch sees rollout_logprobs=None), the
-        # worker's TIS diagnostics already guard `is not None`, and
-        # ppo_policy_loss skips the TIS importance ratio when rollout_logprobs
-        # is None (see policy_losses.ppo_policy_loss). We surface the skip via a
-        # `tis/batch_skipped_no_logprobs` metric (set on the driver below) so the
-        # failure mode is observable; the relaunch skip-fraction is the live
-        # systematic-vs-intermittent diagnostic.
-        self._tis_batch_skipped_no_logprobs = 0.0
-        if self.cfg.trainer.algorithm.use_tis:
-            if rollout_logprobs_tensor is None:
-                self._tis_batch_skipped_no_logprobs = 1.0
-                logger.warning(
-                    "use_tis is True but this training batch has NO rollout logprobs "
-                    "(all-None). Degrading to standard (non-TIS) policy loss for THIS "
-                    "batch and continuing. tis/batch_skipped_no_logprobs=1. If this "
-                    "persists (skip-fraction ~1.0) the rollout-logprob capture is "
-                    "systematically broken (e.g. routed_experts capture displacing "
-                    "logprobs); a low/intermittent rate is context-length errors."
-                )
-            else:
-                assert rollout_logprobs_tensor.shape == loss_masks_tensor.shape, "Logprobs should look like responses"
-        # Stage 1 invariant (scope Q3 #2): routed_experts.shape[:2] == loss_mask.shape.
-        if rollout_routed_experts_tensor is not None:
-            assert rollout_routed_experts_tensor.shape[:2] == loss_masks_tensor.shape, (
-                "routed_experts response axis should look like responses"
+        if (
+            rollout_logprobs_required(
+                self.cfg.trainer.algorithm,
+                loss_spec=PolicyLossRegistry.spec(self.cfg.trainer.algorithm.policy_loss_type),
             )
+            and rollout_logprobs_tensor is None
+        ):
+            raise ValueError("rollout_logprobs are required by the configured objective")
+        if rollout_logprobs_tensor is not None:
+            assert rollout_logprobs_tensor.shape == loss_masks_tensor.shape, "Logprobs should look like responses"
+        # Keep the response-window width for placement, without allocating its dense route canvas.
+        rollout_routed_experts_rows = None
+        if routed_experts is not None:
+            rollout_routed_experts_rows = RoutedExpertRows(
+                tuple(routed_experts), response_masks_tensor.shape[1], num_experts
+            )
+            if len(rollout_routed_experts_rows) != len(response_ids):
+                raise ValueError("routed experts must have one row per response")
         distillation_tensors = _validated_distillation_tensors(trajectory_batch, response_masks_tensor)
         training_input = TrainingInputBatch(
             {
@@ -2091,12 +2105,40 @@ class RayPPOTrainer:
                     else None
                 ),
             },
+            routed_expert_rows=rollout_routed_experts_rows,
         )
-        # Attach routed_experts only when present, so the flag-off batch dict has
-        # exactly the same keys as today (TensorBatch.__eq__ compares key sets).
-        if rollout_routed_experts_tensor is not None:
-            training_input["rollout_routed_experts"] = rollout_routed_experts_tensor
         training_input.update(distillation_tensors)
+        ftpo = ftpo_config(self.cfg.trainer.algorithm)
+        if ftpo is not None:
+            candidates, scores, _ = collate_student_selected_rollout(
+                trajectory_batch,
+                response_ids,
+                response_masks_tensor.bool(),
+                self.cfg.generator.sampling_params.logprobs,
+            )
+            excluded = trajectory_batch.get("exclude_from_baseline")
+            final = trajectory_batch.get("is_last_step")
+            if excluded is None:
+                excluded = [False] * len(response_ids)
+            if final is None:
+                final = [True] * len(response_ids)
+            loop = parse_trajectory_reward_shaping_config(self.cfg.generator.get("trajectory_reward_shaping")).loop
+            chosen, weights = select_ftpo_candidates(
+                response_ids,
+                loss_masks,
+                candidates,
+                scores,
+                decode=self.tokenizer.decode,
+                loop=loop,
+                config=ftpo,
+                seed=self.cfg.trainer.seed + self.global_step,
+                eligible=[last and not exclude for last, exclude in zip(final, excluded, strict=True)],
+            )
+            training_input["student_topk_indices"] = candidates
+            training_input["ftpo_chosen_mask"] = chosen
+            training_input["loss_mask"] = weights
+            self.all_metrics["ftpo/selected_boundaries"] = float(chosen.any(-1).sum())
+            self.all_metrics["ftpo/chosen_candidates"] = float(chosen.sum())
         # Stage B (F5/F4): attach the per-token shaping channel + span tags ONLY
         # when present, so the flag-off batch dict has exactly the same keys as
         # today (TensorBatch.__eq__ compares key sets).
@@ -2227,6 +2269,20 @@ class RayPPOTrainer:
         reward_metrics["reward/informative_group_fraction"] = sum(
             max(values) > min(values) for values in grouped_rewards.values()
         ) / len(grouped_rewards)
+        verifier_scores = normalized_verifier_scores(trajectory_batch)
+        if verifier_scores is not None:
+            coverage, average = verifier_score_summary(verifier_scores)
+            reward_metrics["reward/verifier_score_coverage"] = coverage
+            if average is not None:
+                reward_metrics["reward/avg_verifier_score"] = average
+            results = trajectory_batch["verification_results"]
+            scores_by_agent: Dict[str, List[float]] = defaultdict(list)
+            for result, score in zip(results, verifier_scores, strict=True):
+                if result is not None and score is not None and isinstance(result.diagnostics.get("agent"), str):
+                    agent = _domain_metric_source_key(result.diagnostics["agent"])
+                    scores_by_agent[agent].append(score)
+            for agent in sorted(scores_by_agent)[:MAX_DOMAIN_REWARD_METRICS]:
+                reward_metrics[f"reward/agent/{agent}/avg_verifier_score"] = float(np.mean(scores_by_agent[agent]))
         self.all_metrics.update(reward_metrics)
         data_sources = trajectory_batch.get("data_sources")
         if data_sources is not None:
@@ -2330,6 +2386,13 @@ class RayPPOTrainer:
         num_samples = len(token_level_rewards)
 
         return_sums = token_level_rewards.sum(dim=-1)[: num_samples - pad_size]
+        if (
+            self.cfg.trainer.algorithm.advantage_estimator == AdvantageEstimator.GRPO
+            and not self.cfg.trainer.step_wise_training
+        ):
+            self.all_metrics["reward/zero_std_group_fraction"] = _zero_std_group_fraction(
+                data.metadata["uids"][: num_samples - pad_size], return_sums
+            )
         if self.cfg.trainer.step_wise_training:
             avg_rewards: float = return_sums[data["is_last_step"][: num_samples - pad_size]].mean().item()
         else:
@@ -2377,10 +2440,31 @@ class RayPPOTrainer:
         return data
 
     def finalize_advantages_for_training(self, data: TrainingInputBatch) -> TrainingInputBatch:
-        """Apply configured normalization before finalizing the advantage tensor."""
+        """Normalize environment credit, add loop credit, then apply teacher credit."""
+        if "ftpo_chosen_mask" in data:
+            data.pop("loop_advantages", None)
         if self.cfg.trainer.algorithm.advantage_batch_normalize:
             data = normalize_advantages_dict(data)
-        return self.apply_loop_credit_and_drop_advantage_inputs(data)
+        data = self.apply_loop_credit_and_drop_advantage_inputs(data)
+        plan = self.distillation_plan
+        if plan is None:
+            return data
+        if plan.objective is DistillationObjectiveKind.SAMPLED_REVERSE_KL:
+            teacher = data.pop("teacher_action_log_probs")
+            valid = data.pop("teacher_valid_mask") & data["loss_mask"].bool()
+            weights = data.pop("distillation_loss_weights")
+            teacher_credit, metrics = teacher_advantages(
+                teacher, data["action_log_probs"], valid, weights, plan.advantage_clip
+            )
+            data["advantages"] = (
+                teacher_credit
+                if plan.reward_mode is DistillationRewardMode.REPLACE
+                else data["advantages"] + teacher_credit
+            )
+            self.all_metrics.update(metrics)
+        elif plan.reward_mode is DistillationRewardMode.REPLACE:
+            data["advantages"] = torch.zeros_like(data["advantages"])
+        return data
 
     def apply_loop_credit_and_drop_advantage_inputs(self, data: TrainingInputBatch) -> TrainingInputBatch:
         """Apply loop credit, then remove rewards, loop_advantages, and uids before worker dispatch."""
@@ -2426,7 +2510,9 @@ class RayPPOTrainer:
                     padding_tensor = tensor[:pad_size].clone()
                 new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
 
-        new_training_input = TrainingInputBatch(new_tensors)
+        routes = training_input.routed_expert_rows
+        padded_routes = RoutedExpertRows.cat([routes, routes[:pad_size]]) if routes is not None else None
+        new_training_input = TrainingInputBatch(new_tensors, routed_expert_rows=padded_routes)
         new_training_input.metadata = {}
         new_training_input.metadata["uids"] = training_input.metadata["uids"] + [f"pad{i}" for i in range(pad_size)]
         if "trajectory_ids" in training_input.metadata:
@@ -2471,10 +2557,10 @@ class RayPPOTrainer:
         # raw_grad_norm ~ 1e5) that corrupts the policy. Threading routed_experts
         # into the forward-pass batch makes old/ref/train forwards use the
         # identical (replay) path so step 1 is genuinely on-policy (log_ratio ~ 0).
-        # Gated on presence: flag-off (8B / no router-replay) batches never carry
-        # this key, so the selected key set is byte-identical to before.
+        # Gated on presence: flag-off (8B / no router-replay) batches keep the
+        # original forward inputs. Compact routes are carried as a side field.
         fwd_keys = ["sequences", "attention_mask"]
-        if "rollout_routed_experts" in training_input.keys():
+        if training_input.routed_experts is not None:
             fwd_keys.append("rollout_routed_experts")
         data_fwd_pass = training_input.select(keys=fwd_keys, metadata_keys=["response_length"])
         data_fwd_pass.metadata["global_step"] = self.global_step
@@ -2483,7 +2569,7 @@ class RayPPOTrainer:
             ret_outputs: TrainingOutputBatch = concatenate_outputs_after_mesh_dispatch(actor_infos, results)
             return ret_outputs[key]
 
-        base_log_probs = None
+        reference_scores = None
         action_log_probs = None
         values = None
 
@@ -2503,17 +2589,23 @@ class RayPPOTrainer:
             if self.cfg.trainer.placement.colocate_policy_ref or self.colocate_all:
                 self.ref_model.backload_to_gpu()
 
-            base_action_log_probs_refs = self.ref_model.async_run_ray_method("mesh", "forward", data=data_fwd_pass)
+            reference_data = data_fwd_pass
+            if "ftpo_chosen_mask" in training_input:
+                reference_data = training_input.select(
+                    keys=fwd_keys + ["ftpo_chosen_mask"], metadata_keys=["response_length"]
+                )
+                reference_data.metadata["global_step"] = self.global_step
+            reference_score_refs = self.ref_model.async_run_ray_method("mesh", "forward", data=reference_data)
 
         if self.ref_model is not None:
             # handle colocate policy and ref model
             if self.cfg.trainer.placement.colocate_policy_ref or self.colocate_all:
-                all_rank_base_log_probs: List[TrainingOutputBatch] = ray.get(base_action_log_probs_refs)
-                base_log_probs = collect_results(self.ref_model.actor_infos, all_rank_base_log_probs, key="output")
+                all_rank_reference_scores: List[TrainingOutputBatch] = ray.get(reference_score_refs)
+                reference_scores = collect_results(self.ref_model.actor_infos, all_rank_reference_scores, key="output")
                 self.ref_model.offload_to_cpu()
                 ray.get(self.ref_model.async_run_ray_method("pass_through", "empty_cache"))
         else:
-            base_log_probs = None
+            reference_scores = None
 
         # calculate action log probs
         if self.colocate_all:
@@ -2526,7 +2618,7 @@ class RayPPOTrainer:
             self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
 
         # wait all models done
-        # if not colocate_policy_ref, then need to gather base_log_probs
+        # if not colocate_policy_ref, then need to gather reference_scores
         # if self.critic_model is not None, then need to gather value
         if not self.colocate_all:
             if not self.cfg.trainer.placement.colocate_policy_ref:
@@ -2535,10 +2627,12 @@ class RayPPOTrainer:
                     values = collect_results(self.critic_model.actor_infos, all_rank_values, key="output")
 
                 if self.ref_model is not None:
-                    all_rank_base_log_probs: List[TrainingOutputBatch] = ray.get(base_action_log_probs_refs)
-                    base_log_probs = collect_results(self.ref_model.actor_infos, all_rank_base_log_probs, key="output")
+                    all_rank_reference_scores: List[TrainingOutputBatch] = ray.get(reference_score_refs)
+                    reference_scores = collect_results(
+                        self.ref_model.actor_infos, all_rank_reference_scores, key="output"
+                    )
                 else:
-                    base_log_probs = None
+                    reference_scores = None
 
             elif self.critic_model is not None:
                 all_rank_values = ray.get(value_refs)
@@ -2557,10 +2651,16 @@ class RayPPOTrainer:
 
         sequences_all: torch.Tensor = training_input["sequences"]
         # NOTE (sumanthrh): The slicing is needed to make sure that the batch dimension doesn't change for the tensordict.
-        base_log_probs = base_log_probs[: len(sequences_all)] if base_log_probs is not None else None
+        reference_scores = reference_scores[: len(sequences_all)] if reference_scores is not None else None
         action_log_probs = action_log_probs[: len(sequences_all)]
         values = values[: len(sequences_all)] if values is not None else None
 
+        if "ftpo_chosen_mask" in training_input:
+            if reference_scores is None:
+                raise ValueError("FTPO requires frozen reference boundary logits")
+            training_input["ftpo_reference_logits"] = reference_scores
+            reference_scores = None
+        base_log_probs = reference_scores
         training_input["base_action_log_probs"] = base_log_probs
         training_input["action_log_probs"] = action_log_probs
         training_input["values"] = values
@@ -2578,14 +2678,6 @@ class RayPPOTrainer:
             )
 
         if self.cfg.generator.sampling_params.logprobs is not None and training_input["rollout_logprobs"] is not None:
-            # calculates the difference in probs between inference and trainer components
-            # only consider response tokens.
-            # NOTE (Fix A-extend, 2026-06-07): rollout_logprobs can be None for a
-            # whole batch when use_tis is on but every trajectory lacked logprobs
-            # (graceful-degrade path in convert_to_training_input). Subscripting None
-            # here is what crashed the 80B R3+TIS train loop at global_step 1
-            # ('NoneType' object is not subscriptable). Skip the inference/train prob-diff
-            # diagnostic for that batch; the batch still trains as standard (non-TIS) loss.
             logprobs_diff = (
                 training_input["rollout_logprobs"][training_input["loss_mask"] > 0]
                 - action_log_probs[training_input["loss_mask"] > 0]
@@ -2679,21 +2771,6 @@ class RayPPOTrainer:
         Run the training step for the policy and critic models (this is overlapped if colocate_all is False).
         """
         data.metadata["global_step"] = self.global_step
-        # Plumb the batch's minimum staleness to the worker for StaleClip.
-        # Workers treat None as "no signal" and skip damping.
-        data.metadata["stale_min"] = self.all_metrics.get("async/staleness_min")
-        # ── Global length-unbiased normalizer (seq_mean_token_sum_norm_global) ──
-        # Every backend consumes the denominator from batch metadata. Keeping this
-        # contract at the driver boundary prevents a worker override from silently
-        # bypassing policy-loss semantics and avoids an in-worker collective.
-        if self.cfg.trainer.algorithm.loss_reduction == GLOBAL_SEQUENCE_MEAN_TOKEN_SUM_NORMALIZED_LOSS_REDUCTION:
-            actor_infos = self.policy_model.actor_infos
-            ranks_per_dp_group = len(actor_infos) // actor_infos[0].rank.dp_size
-            data.metadata[GLOBAL_LOSS_DENOM_METADATA_KEY] = compute_global_loss_denom(
-                data["advantages"],
-                self.cfg.trainer.algorithm.max_seq_len,
-                ranks_per_dp_group,
-            )
         if self.colocate_all:
             if self.critic_model is not None:
                 with Timer("critic_train", self.all_timings):
@@ -2833,6 +2910,7 @@ class RayPPOTrainer:
             "global_step": step,
             "config": self.cfg,
             "distillation_scored_tokens_total": self.distillation_scored_tokens_total,
+            "ftpo_stopped": self._ftpo_stopped,
             "domain_gradient_balance_state": self._domain_balancer.state_dict() if self._domain_balancer else None,
         }
         trainer_state_path = os.path.join(global_step_folder, TRAINER_STATE_FILENAME)
@@ -2957,6 +3035,7 @@ class RayPPOTrainer:
         with io.open_file(trainer_state_path, "rb") as f:
             trainer_state = torch.load(f, map_location="cpu", weights_only=False)
         saved_global_step = trainer_state.get("global_step", global_step)
+        self._ftpo_stopped = bool(trainer_state.get("ftpo_stopped", False))
         if self.cfg.trainer.get("reset_distillation_token_count_on_resume", False):
             self.distillation_scored_tokens_total = 0
         else:

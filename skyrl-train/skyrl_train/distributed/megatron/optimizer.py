@@ -20,24 +20,13 @@
 from collections.abc import Mapping
 
 import torch
-from megatron.core.optimizer import OptimizerConfig, ParamKey, ParamWithNamePredicate, clip_grads
-from transformer_engine.pytorch.optimizers import multi_tensor_applier, multi_tensor_l2norm, multi_tensor_scale
+from megatron.core.optimizer import OptimizerConfig, ParamKey, ParamWithNamePredicate, get_standard_config_overrides
 from megatron.core.optimizer import get_megatron_optimizer as get_megatron_optimizer_native
 from megatron.core.optimizer.emerging_optimizers import EmergingOptimizerEntry, _EMERGING_OPTIMIZERS
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 from megatron.core.utils import get_model_config
 
 from skyrl_train.distributed.megatron.grug_muonh import MegatronGrugMuonH, megatron_grug_route
-
-
-def use_transformer_engine_gradient_kernels() -> None:
-    """Use the native norm and clipping kernels in the pinned TE runtime."""
-    # MCore 0.18 imports these together with multi_tensor_scale_tensor, which
-    # TE 2.11 does not expose. That drops all three available kernels and makes
-    # clipping allocate a gradient-sized temporary through its Torch fallback.
-    clip_grads.multi_tensor_applier = multi_tensor_applier
-    clip_grads.l2_norm_impl = multi_tensor_l2norm
-    clip_grads.multi_tensor_scale_impl = multi_tensor_scale
 
 
 _GRUG_MUONH_NAME = "grug_muonh"
@@ -104,6 +93,12 @@ def _register_grug_muonh(optim_config: Mapping) -> None:
         _EMERGING_OPTIMIZERS[route] = entry
 
 
+class _MegatronParamScheduler(OptimizerParamScheduler):
+    def load_state_dict(self, state_dict: dict) -> None:
+        self.num_steps = 0
+        super().load_state_dict(state_dict)
+
+
 def init_megatron_optim_config(optim_config: dict, optimizer_config_kwargs: dict) -> OptimizerConfig:
     # megatron-core only recognizes 'adam' / 'sgd' as standard optimizers (anything
     # else routes to `_get_megatron_emerging_optimizer`, which raises
@@ -126,6 +121,13 @@ def init_megatron_optim_config(optim_config: dict, optimizer_config_kwargs: dict
         "use_distributed_optimizer": True,
     }
 
+    if _optim_name == "adam":
+        beta1, beta2 = optim_config.get("adam_betas", (0.9, 0.999))
+        optim_args.update(
+            adam_beta1=beta1,
+            adam_beta2=beta2,
+            adam_eps=optim_config.get("optimizer_kwargs", {}).get("eps", 1e-8),
+        )
     optim_args.update(optimizer_config_kwargs)
 
     if _optim_name == _GRUG_MUONH_NAME:
@@ -180,16 +182,20 @@ def get_megatron_optimizer(
             "megatron-core 0.18.x's config_overrides mapping; only the defaults "
             "are supported."
         )
-    use_transformer_engine_gradient_kernels()
     if config.optimizer == _GRUG_MUONH_NAME:
         if grug_optimizer_config is None:
             raise ValueError("Hero MuonH requires its original optimizer configuration")
         _register_grug_muonh(grug_optimizer_config)
+        return get_megatron_optimizer_native(config=config, model_chunks=model)
 
-    # Base optimizer.
+    config_overrides = get_standard_config_overrides(config)
+    if config.optimizer == "adam":
+        # SkyRL's AdamW recipe applies weight decay to every trainable parameter.
+        config_overrides = {key: override for key, override in config_overrides.items() if "wd_mult" not in override}
     return get_megatron_optimizer_native(
         config=config,
         model_chunks=model,
+        config_overrides=config_overrides,
     )
 
 
@@ -213,7 +219,7 @@ def get_megatron_optimizer_param_scheduler(
     ):
         lr_warmup_steps = int(config.lr_warmup_steps_ratio * lr_decay_steps)
 
-    opt_param_scheduler = OptimizerParamScheduler(
+    opt_param_scheduler = _MegatronParamScheduler(
         optimizer,
         init_lr=config.get("lr_warmup_init", 0.0),
         max_lr=config.lr,

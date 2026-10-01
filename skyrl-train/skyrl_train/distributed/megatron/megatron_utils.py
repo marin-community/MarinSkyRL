@@ -27,6 +27,7 @@ from loguru import logger
 from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.transformer.module import Float16Module
 from megatron.core.optimizer import ChainedOptimizer
+from megatron.core.optimizer.cpu_offloading import HybridDeviceOptimizer
 from megatron.core import parallel_state as mpu
 from megatron.core.utils import get_attr_wrapped_model
 from megatron.core.packed_seq_params import PackedSeqParams
@@ -41,6 +42,39 @@ def materialize_megatron_params(model_chunks: list[nn.Module]) -> None:
     for module in model_chunks:
         if isinstance(module, DDP) and module.ddp_config.overlap_param_gather:
             module.start_param_sync(force_sync=True)
+
+
+@torch.no_grad()
+def dp_weight_checksum_mismatch(model_chunks: list[nn.Module]) -> float:
+    """Return 1.0 when GPU parameter checksums differ across matching DP replicas, otherwise 0.0."""
+    materialize_megatron_params(model_chunks)
+    mismatch = torch.zeros((), dtype=torch.int64, device=torch.cuda.current_device())
+    for expert in (False, True):
+        parameters = [
+            parameter.detach()
+            for chunk in model_chunks
+            for parameter in chunk.parameters()
+            if bool(getattr(parameter, "allreduce", True)) != expert
+        ]
+        if not parameters:
+            continue
+        checksum = torch.stack(
+            [
+                value
+                for parameter in parameters
+                for value in (
+                    parameter.sum(dtype=torch.float64),
+                    torch.linalg.vector_norm(parameter, dtype=torch.float64),
+                )
+            ]
+        )
+        group = mpu.get_expert_data_parallel_group() if expert else mpu.get_data_parallel_group()
+        replicas = [torch.empty_like(checksum) for _ in range(torch.distributed.get_world_size(group))]
+        torch.distributed.all_gather(replicas, checksum, group=group)
+        matches = torch.stack([torch.all(replica == checksum) for replica in replicas]).all()
+        mismatch = torch.maximum(mismatch, (~matches).to(torch.int64))
+    torch.distributed.all_reduce(mismatch, op=torch.distributed.ReduceOp.MAX)
+    return float(mismatch.item())
 
 
 def make_batch_generator(batches, vpp_size):
@@ -329,6 +363,30 @@ def load_megatron_optimizer(optimizers):
                         state[name] = state[name].to(torch.cuda.current_device(), non_blocking=True)
         gc.collect()
         torch.cuda.empty_cache()
+
+
+def restore_offloaded_optimizer_state(optimizer) -> None:
+    """Repair MCore 0.18's CPU-offloaded optimizer state after bucket restore."""
+    # Revisit on MCore upgrades; remove once native restore passes two-update
+    # continuation parity for mixed CPU/GPU state. Upstream step fix (partial):
+    # https://github.com/NVIDIA/Megatron-LM/pull/7629
+    optimizers = optimizer.chained_optimizers if isinstance(optimizer, ChainedOptimizer) else [optimizer]
+    for distributed_optimizer in optimizers:
+        inner = distributed_optimizer.optimizer
+        if not isinstance(inner, HybridDeviceOptimizer):
+            continue
+        # MCore 0.18's bucket load overwrites CPU Adam's saved step with local
+        # state. Only the inner GPU groups should retain step, or HDO resets it
+        # before every update.
+        for group in inner.param_groups:
+            for parameter in group["params"]:
+                state = inner.state[parameter]
+                if "step" in state:
+                    state["step"].fill_(group["step"])
+            group.pop("step", None)
+        # Bucket tensors replace state after HDO's load hooks. Rebind moments,
+        # restore FP32 masters and place state on the native optimizers' devices.
+        inner._sync_hdo_state_to_sub_optimizers()
 
 
 def preprocess_packed_seqs(

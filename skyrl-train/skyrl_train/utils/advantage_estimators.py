@@ -26,6 +26,8 @@ from skyrl_train.utils.algorithm_registry import (
 from skyrl_train.utils.policy_math import masked_whiten, right_pad_to_match
 from skyrl_train.group_admission import GroupAdvantageInvariant, GroupAdvantageKind
 
+GRPO_FLAT_REWARD_STD_TOLERANCE = 1e-6
+
 
 @register_advantage_estimator(AdvantageEstimator.UNIFORM, group_contract=NoGroupAdvantage())
 def compute_uniform_advantage(
@@ -35,6 +37,20 @@ def compute_uniform_advantage(
     """Give every selected response token unit SFT weight."""
     ones = torch.ones_like(token_level_rewards)
     return ones, ones
+
+
+@register_advantage_estimator(AdvantageEstimator.REWARD, group_contract=NoGroupAdvantage())
+@torch.no_grad()
+def compute_reward_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Broadcast each response's eligible reward sum to its eligible tokens."""
+    valid = response_mask > 0
+    rewards = torch.where(valid, token_level_rewards, 0)
+    advantages = torch.where(valid, rewards.sum(dim=-1, keepdim=True), 0)
+    return advantages, advantages
 
 
 @register_advantage_estimator(AdvantageEstimator.REINFORCE_PP, group_contract=NoGroupAdvantage())

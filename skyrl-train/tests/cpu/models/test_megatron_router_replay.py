@@ -340,3 +340,12 @@ class TestDenseReplayTargets:
     def test_rejects_response_without_a_prompt_token(self):
         with pytest.raises(ValueError, match="prompt token"):
             dense_replay_targets(torch.ones(1, 2, 1, 2, dtype=torch.long), 1, 2, 2)
+
+    def test_compact_rows_start_at_first_prediction_position(self):
+        captured = torch.tensor([[[[1, 2]], [[3, 4]]]])
+        full, mask = dense_replay_targets(captured, batch_size=1, seq_len=8, num_actions=5)
+
+        torch.testing.assert_close(full[0, 2:4], captured[0])
+        assert mask.tolist() == [[False, False, True, True, False, False, False, False]]
+        assert (full[0, :2] == SENTINEL_EXPERT_ID).all()
+        assert (full[0, 4:] == SENTINEL_EXPERT_ID).all()

@@ -149,7 +149,11 @@ def _config(max_staleness_steps: int):
             "eval_interval": -1,
             "placement": {"colocate_all": False},
             "rollout_buffer": {"max_staleness_steps": max_staleness_steps, "max_in_flight": None},
-            "algorithm": {"use_kl_loss": False, "dynamic_sampling": {"type": "filter"}},
+            "algorithm": {
+                "use_kl_loss": False,
+                "off_policy_correction": "none",
+                "dynamic_sampling": {"type": "filter"},
+            },
         },
     )
     # Retention off gives the trainer its in-process disabled sink instead of a Ray actor.

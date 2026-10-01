@@ -14,7 +14,8 @@ from jaxtyping import Float, Integer
 import torch
 import torch.nn.functional as F
 
-from skyrl_train.distillation import DistillationInput
+from skyrl_train.ftpo import FTPOTargets
+from skyrl_train.distillation import TopKEvidence
 
 
 BasicType = Union[int, float, str, bool]
@@ -77,7 +78,9 @@ class Experience:
     # Stage D (F7) per-token span tags (SPAN_THINK==1) — present only when the
     # token-reward channel is on; used to down-weight <think> tokens in the loss.
     response_span_tags: Optional[Integer[torch.Tensor, "batch response_len"]] = None
-    distillation: Optional[DistillationInput] = None
+    distillation: Optional[TopKEvidence] = None
+    ftpo: FTPOTargets | None = None
+    correction_weights: Optional[Float[torch.Tensor, "batch response_len"]] = None
 
     @torch.no_grad()
     def to_device(self, device: torch.device) -> None:
@@ -99,10 +102,14 @@ class Experience:
             self.action_mask = to(self.action_mask, device)
         if self.rollout_logprobs is not None:
             self.rollout_logprobs = to(self.rollout_logprobs, device)
+        if self.correction_weights is not None:
+            self.correction_weights = to(self.correction_weights, device)
         if self.rollout_routed_experts is not None:
             self.rollout_routed_experts = to(self.rollout_routed_experts, device)
         if self.response_span_tags is not None:
             self.response_span_tags = to(self.response_span_tags, device)
+        if self.ftpo is not None:
+            self.ftpo = self.ftpo.to(device)
         if self.distillation is not None:
             self.distillation = self.distillation.to(device)
 
@@ -125,10 +132,14 @@ class Experience:
             self.action_mask = self.action_mask.pin_memory()
         if self.rollout_logprobs is not None:
             self.rollout_logprobs = self.rollout_logprobs.pin_memory()
+        if self.correction_weights is not None:
+            self.correction_weights = self.correction_weights.pin_memory()
         if self.rollout_routed_experts is not None:
             self.rollout_routed_experts = self.rollout_routed_experts.pin_memory()
         if self.response_span_tags is not None:
             self.response_span_tags = self.response_span_tags.pin_memory()
+        if self.ftpo is not None:
+            self.ftpo = self.ftpo.pin_memory()
         if self.distillation is not None:
             self.distillation = self.distillation.pin_memory()
         return self
@@ -164,6 +175,9 @@ class BufferItem:
     num_actions: int
     info: Optional[dict]
 
+    rollout_logprobs: Optional[Float[torch.Tensor, "response_len"]] = None  # noqa: F821
+    correction_weights: Optional[Float[torch.Tensor, "response_len"]] = None  # noqa: F821
+
     def to_json(self) -> dict:
         def _to_json(obj):
             if isinstance(obj, torch.Tensor):
@@ -189,6 +203,8 @@ def split_experience_batch(experience: Experience) -> List[BufferItem]:
         "attention_mask",
         "loss_mask",
         "action_mask",
+        "rollout_logprobs",
+        "correction_weights",
         "num_actions",
     )
     if len(experience.sequences.shape) == 1:
@@ -210,7 +226,7 @@ def split_experience_batch(experience: Experience) -> List[BufferItem]:
             for i in range(batch_size):
                 batch_kwargs[i][key] = None
             continue
-        vals = value
+        vals = [value] * batch_size if isinstance(value, int) else value
         if isinstance(vals, torch.Tensor):
             vals = torch.unbind(vals)
         assert batch_size == len(vals)
@@ -257,6 +273,8 @@ def make_experience_batch(items: List[BufferItem]) -> Experience:
         "attention_mask",
         "loss_mask",
         "action_mask",
+        "rollout_logprobs",
+        "correction_weights",
         "num_actions",
     )
     for key in keys:
@@ -301,13 +319,17 @@ def remove_padding_in_sequences(items):
         ) = (
             seq[left_pad:right_pad],
             act_log_prob[:right_pad],
-            base_act_log_prob[:right_pad],
+            base_act_log_prob[:right_pad] if base_act_log_prob is not None else None,
             value[:right_pad] if value is not None else None,
             ret[:right_pad] if ret is not None else None,
             adv[:right_pad] if adv is not None else None,
             att_mask[left_pad:right_pad] if att_mask is not None else None,
             act_mask[:right_pad] if act_mask is not None else None,
         )
+        for key in ("loss_mask", "rollout_logprobs", "correction_weights"):
+            value = getattr(item, key)
+            if value is not None:
+                setattr(item, key, value[:right_pad])
     return items
 
 

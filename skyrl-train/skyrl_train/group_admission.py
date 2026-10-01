@@ -103,11 +103,18 @@ class AdmissionRejection(StrEnum):
     PHYSICAL_GROUP_SIZE = "physical_group_size"
     BELOW_MINIMUM_GROUP_SIZE = "below_minimum_group_size"
     MISSING_ROLLOUT_LOGPROBS = "missing_rollout_logprobs"
+    MISSING_BEHAVIOR_TOPK = "missing_behavior_topk"
     DUPLICATE_UID = "duplicate_uid"
 
 
 # Rejections that mean the harness broke the run's structural contract; they fail training.
-FATAL_REJECTIONS = frozenset({AdmissionRejection.PHYSICAL_GROUP_SIZE, AdmissionRejection.MISSING_ROLLOUT_LOGPROBS})
+FATAL_REJECTIONS = frozenset(
+    {
+        AdmissionRejection.PHYSICAL_GROUP_SIZE,
+        AdmissionRejection.MISSING_ROLLOUT_LOGPROBS,
+        AdmissionRejection.MISSING_BEHAVIOR_TOPK,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -258,6 +265,9 @@ def _inspect_group(group: GeneratedGroup) -> _GroupFacts:
                     f"rollout_logprobs row {row_index} must align with response_ids, "
                     f"got {len(logprobs)} and {len(response)}"
                 )
+            trained_logprobs = logprobs[np.asarray(loss_mask, dtype=bool)]
+            if not np.isfinite(trained_logprobs).all() or (trained_logprobs > 0).any():
+                has_trainable_rollout_logprobs = False
 
     return _GroupFacts(
         physical_count=len(final_indices),
@@ -273,6 +283,27 @@ def group_is_fully_excluded_from_training(trajectory_batch: Mapping[str, object]
     return facts.trainable_count == 0 and facts.baseline_contributor_count == 0
 
 
+def _has_behavior_topk(batch: Mapping[str, object], width: int) -> bool:
+    masks = batch["loss_masks"]
+    indices = batch.get("student_topk_indices")
+    logprobs = batch.get("behavior_topk_logprobs")
+    for values in (indices, logprobs):
+        if not isinstance(values, Sequence) or len(values) != len(masks):
+            return False
+    for mask, row_indices, row_logprobs in zip(masks, indices, logprobs, strict=True):
+        if not any(mask):
+            continue
+        for values in (row_indices, row_logprobs):
+            if not isinstance(values, np.ndarray) or values.shape != (len(mask), width):
+                return False
+        if not np.issubdtype(row_indices.dtype, np.integer) or row_logprobs.dtype.kind not in "iuf":
+            return False
+        eligible = np.asarray(mask, dtype=bool)
+        if (row_indices[eligible] < 0).any() or not np.isfinite(row_logprobs[eligible]).all():
+            return False
+    return True
+
+
 class GroupAdmissionPolicy:
     """Check a completed group's content against the run's training contract.
 
@@ -284,9 +315,11 @@ class GroupAdmissionPolicy:
         invariant: GroupAdvantageInvariant,
         *,
         rollout_logprobs_required: bool,
+        student_topk_width: int | None = None,
     ) -> None:
         self.invariant = invariant
         self.rollout_logprobs_required = rollout_logprobs_required
+        self.student_topk_width = student_topk_width
 
     def evaluate(self, group: GeneratedGroup) -> AdmissionDecision:
         facts = _inspect_group(group)
@@ -305,6 +338,12 @@ class GroupAdmissionPolicy:
             rejections.append(AdmissionRejection.BELOW_MINIMUM_GROUP_SIZE)
         if self.rollout_logprobs_required and facts.trainable_count > 0 and not facts.has_rollout_logprobs:
             rejections.append(AdmissionRejection.MISSING_ROLLOUT_LOGPROBS)
+        if (
+            self.student_topk_width is not None
+            and facts.trainable_count > 0
+            and not _has_behavior_topk(group.trajectory_batch, self.student_topk_width)
+        ):
+            rejections.append(AdmissionRejection.MISSING_BEHAVIOR_TOPK)
         return AdmissionDecision(tuple(rejections))
 
     def evaluate_batch(
@@ -323,7 +362,15 @@ class GroupAdmissionPolicy:
         for row_index, uid in enumerate(uids):
             grouped_indices.setdefault(uid, []).append(row_index)
 
-        aligned_keys = ("response_ids", "loss_masks", "exclude_from_baseline", "rollout_logprobs", "is_last_step")
+        aligned_keys = (
+            "response_ids",
+            "loss_masks",
+            "exclude_from_baseline",
+            "rollout_logprobs",
+            "is_last_step",
+            "student_topk_indices",
+            "behavior_topk_logprobs",
+        )
         admissions = []
         for uid, indices in grouped_indices.items():
             group_batch = {}

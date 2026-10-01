@@ -30,6 +30,8 @@ class LCBEnv(BaseTextEnv):
         extras: dict[str, Any] | None = None,
     ):
         super().__init__()
+        self.sandbox_config = env_config.get("sandbox", {})
+        self.verifyit_enabled = bool(env_config.get("verifyit_enabled", False))
         self.reward_mode = str(env_config.get("reward_mode", BINARY_REWARD_MODE))
         if self.reward_mode not in LCB_REWARD_MODES:
             raise ValueError(f"Unsupported LCB reward_mode: {self.reward_mode!r}.")
@@ -54,7 +56,33 @@ class LCBEnv(BaseTextEnv):
                 done=True,
                 metadata={"parsed_code": None, "verifier_error": _INVALID_GROUND_TRUTH_ERROR},
             )
-        parsed_code, reward = compute_score(action, self.tests, self.reward_mode)
+        if self.verifyit_enabled:
+            from skyrl_gym.envs.lcb.livecodebench import extract_code_from_model
+            from skyrl_gym.envs.lcb.verifyit_execution import execute_code_verifyit
+            from skyrl_gym.envs.nemotron_ultra.sandbox import SandboxClient
+            from skyrl_gym.verification import VerificationResult
+
+            parsed_code = extract_code_from_model(action)
+            try:
+                reward = execute_code_verifyit(
+                    self.tests,
+                    parsed_code or "",
+                    fractional=self.reward_mode == "fractional",
+                    sandbox=SandboxClient(
+                        host=str(self.sandbox_config.get("host", "127.0.0.1")),
+                        port=int(self.sandbox_config.get("port", 6000)),
+                    ),
+                )[0]
+            except (ImportError, RuntimeError, ValueError, TypeError, OSError):
+                return BaseTextEnvStepOutput(
+                    observations=[],
+                    reward=0.0,
+                    done=True,
+                    metadata={},
+                    verification=VerificationResult.error("Code verification unavailable"),
+                )
+        else:
+            parsed_code, reward = compute_score(action, self.tests, self.reward_mode)
 
         # RL on LCB w/ single-turn
         return BaseTextEnvStepOutput(observations=[], reward=reward, done=True, metadata={"parsed_code": parsed_code})

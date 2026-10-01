@@ -12,8 +12,9 @@ Supported configurations
 ------------------------
 
 The production gate covers a Megatron Qwen3 policy with a separate, unquantized vLLM
-teacher. It runs one optimizer step each night and requires finite distillation loss,
-teacher-scored tokens, and a positive raw gradient norm. The same gate can select an
+teacher. It runs one optimizer step each night and requires finite teacher-advantage
+metrics, positive teacher-scored and valid-token counts, a nonzero mean absolute
+teacher advantage, and a positive raw gradient norm. The same gate can select an
 OpenAI-compatible endpoint fixture for transport acceptance.
 
 Local teachers currently require the vLLM backend and ``pinned`` or ``rotating``
@@ -32,6 +33,13 @@ Megatron objective adapters have CPU integration coverage. The recurring product
 uses an unquantized local vLLM teacher. No quantized local-teacher configuration is
 currently defined or production-gated. SGLang teacher scoring is rejected because it
 cannot provide the required prompt logprobs.
+
+Choosing the teacher objective
+------------------------------
+
+See :doc:`objective_guide` for teacher options, ADD and REPLACE setups,
+recipe selection and worked OPD/MOPD setups.
+:doc:`objective` describes how evidence becomes policy credit or a teacher term.
 
 Routing and residency
 ---------------------

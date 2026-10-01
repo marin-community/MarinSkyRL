@@ -38,6 +38,7 @@ from skyrl_gym.envs.nemotron_ultra.env import NemotronUltraGrading
 from skyrl_gym.envs.nemotron_ultra.genrm import grade_genrm_group, response_object
 from skyrl_gym.envs.nemotron_ultra.judge import OpenAIJudge
 from skyrl_gym.verification import (
+    VERIFIER_RUNTIME_ERROR,
     RewardResult,
     RolloutEvidence,
     TrainingDisposition,
@@ -206,6 +207,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         self.nemotron_ultra_grading = NemotronUltraGrading(ultra_config.get("grading", NemotronUltraGrading.VERIFY))
         self._warned_skip_without_ultra_rows = False
         self.genrm_config = dict(ultra_config.get("genrm", {}))
+        if ultra_config.get("verifyit_enabled", False):
+            self.genrm_config["verifyit_enabled"] = True
         genrm_judge = self.genrm_config.get("judge")
         self.genrm_judge = OpenAIJudge(**dict(genrm_judge)) if genrm_judge is not None else None
 
@@ -387,7 +390,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 # If retokenize_chat_history==True, avoid including the generation prompt in both the
                 # prompt_ids and response_ids due to how `response_encodings["input_ids"]` works.
                 add_generation_prompt=not retokenize_chat_history,
-                chat_template=self.custom_chat_template if retokenize_chat_history or chat_completion_params else None,
+                chat_template=self.custom_chat_template,
                 tokenize=True,
                 **self.trajectory_runner_cfg.chat_template_kwargs,
             )
@@ -862,7 +865,12 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         if verification.status is VerificationStatus.SKIPPED:
             disposition = TrainingDisposition.train(reason="verification skipped")
         elif verification.status is not VerificationStatus.VERIFIED:
-            disposition = TrainingDisposition.mask("verifier unavailable", exception_type="VerifierUnavailable")
+            exception_type = (
+                VERIFIER_RUNTIME_ERROR if verification.status is VerificationStatus.ERROR else "VerifierUnavailable"
+            )
+            disposition = TrainingDisposition.mask(
+                f"verification {verification.status.value}", exception_type=exception_type
+            )
             optimization_reward = 0.0
             if token_rewards is not None:
                 token_rewards = tuple(0.0 for _ in token_rewards)
@@ -1066,6 +1074,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 outputs[index].verification = VerificationResult.verified(
                     reward,
                     diagnostics={"agent": (ultra_at(index) or {})["agent"], "genrm_metrics": metrics},
+                    score_min=1.0,
+                    score_max=5.0,
                 )
                 outputs[index].env_metrics.update({f"genrm/{name}": value for name, value in metrics.items()})
 
