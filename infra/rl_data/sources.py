@@ -14,6 +14,7 @@ from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
+import datasets
 import numpy as np
 import reasoning_gym
 import requests
@@ -122,8 +123,10 @@ NEMOTRON_ULTRA_RLVR2_AGENTS = NEMOTRON_ULTRA_RLVR1_AGENTS | {
     "structured_outputs_v3_simple_agent",
 }
 NEMOTRON_ULTRA_SWE_AGENT = "swe_pivot_single_step_tool_use_with_argument_comparison_agent"
-# The MOPD blend adds one generator whose verifier has not been ported; rows using it are
-# accepted by the source and rejected by the environment, so subsets must exclude it.
+# Row metadata key naming the TaskTrove proxy task bound to a Harbor SWE row.
+TASKTROVE_PROXY_PATH_KEY = "tasktrove_proxy_path"
+# The MOPD blend adds one generator whose verifier has not been ported, so its rows train only
+# under environment.skyrl_gym.nemotron_ultra.grading: skip.
 NEMOTRON_ULTRA_MOPD_AGENTS = NEMOTRON_ULTRA_RLVR2_AGENTS | {"indirect_prompt_injection_simple_agent"}
 _NEMOTRON_PLACEHOLDER_KEY = "_hf_question_placeholder"
 _NEMOTRON_DAPO_PREFIX = (
@@ -257,7 +260,7 @@ def _prepare_nemotron_ultra(
     # The stored schema name is historical: snapshot-backed SWE rows use the
     # exact TaskTrove archive path as their Harbor task identifier.
     terminal_bench_task_id = (
-        metadata.get("tasktrove_proxy_path", instance_id) if isinstance(metadata, Mapping) else None
+        metadata.get(TASKTROVE_PROXY_PATH_KEY, instance_id) if isinstance(metadata, Mapping) else None
     )
     if _NEMOTRON_PLACEHOLDER_KEY in example:
         raise ValueError("Nemotron Ultra math placeholder was not restored before row preparation.")
@@ -1249,8 +1252,6 @@ def _load_asdiv_rows(source: Source, revision: str, parameters: Mapping[str, Any
 
 
 def _load_hugging_face_dataset(source: Source, revision: str, config: str | None = None):
-    import datasets
-
     return datasets.load_dataset(
         source.dataset_id,
         config,
@@ -1311,7 +1312,6 @@ def _iter_jsonl_rows(path: Path) -> Iterable[Mapping[str, Any]]:
 
 
 def _load_nemotron_ultra_rows(source: Source, revision: str, parameters: Mapping[str, Any]):
-    import datasets
     from huggingface_hub import hf_hub_download
 
     # Local import breaks the source/sidechannel module cycle while keeping the
@@ -1328,7 +1328,13 @@ def _load_nemotron_ultra_rows(source: Source, revision: str, parameters: Mapping
     rows = _skip_source_rows(source, _iter_jsonl_rows(Path(local_path)), parameters)
     rows = bind_tasktrove_swe_proxies(rows, load_tasktrove_swe_proxy_index())
 
-    placeholder_sources = {
+    placeholder_sources = load_nemotron_ultra_placeholder_sources()
+    return (restore_nemotron_ultra_placeholder(row, placeholder_sources) for row in rows)
+
+
+def load_nemotron_ultra_placeholder_sources() -> dict[tuple[str, str], datasets.Dataset]:
+    """Load the pinned datasets that NVIDIA's math placeholder rows point into."""
+    return {
         (DAPO_MATH_DATASET, "train"): datasets.load_dataset(
             DAPO_MATH_DATASET,
             split="train",
@@ -1340,7 +1346,6 @@ def _load_nemotron_ultra_rows(source: Source, revision: str, parameters: Mapping
             revision=NEMOTRON_ULTRA_SKYWORK_REVISION,
         ),
     }
-    return (_restore_nemotron_ultra_placeholder(row, placeholder_sources) for row in rows)
 
 
 def _unwrap_nemotron_answer(raw: Any) -> str:
@@ -1360,7 +1365,7 @@ def _unwrap_nemotron_answer(raw: Any) -> str:
     return stripped
 
 
-def _restore_nemotron_ultra_placeholder(
+def restore_nemotron_ultra_placeholder(
     row: Mapping[str, Any],
     sources: Mapping[tuple[str, str], Any],
 ) -> Mapping[str, Any]:
