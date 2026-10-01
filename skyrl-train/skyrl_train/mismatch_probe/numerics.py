@@ -30,7 +30,16 @@ expert-parallel addition order:
   configs (route weight inside the fp32 down-projection accumulator, one rounding); the backward stays
   the trainer's grouped-GEMM experts. It replaces ``route_weight``;
 - ``router_rows``: the fp32 router GEMM (``router_gemm``'s) runs in calls of a full vLLM prefill step's
-  8,192 rows, so its summation order does not follow the micro-batch size.
+  8,192 rows, so its summation order does not follow the micro-batch size;
+- ``vllm_xsa``: XSA and the head gate take their values from compiled vLLM's Inductor kernel (its reduction
+  order and fused multiply-adds); the gradient is ``xsa_gate``'s. It replaces ``xsa_gate``;
+- ``vllm_qk``: the q/k norm, RoPE and query scale take their values from compiled vLLM's Inductor kernels; the
+  gradient is ``qk_rope``'s. It replaces ``qk_rope``;
+- ``vllm_norms``: every RMS norm and gated-norm product takes its value from compiled vLLM's Inductor kernels,
+  each input norm from the unrounded sum that formed its input (as ``input_norm_variance``) and the final norm
+  from the unrounded last-layer sum (as ``final_norm_fp32``); the gradients are those flags' and ``gated_norm``'s;
+- ``vllm_log_softmax``: the log-probabilities come from ``log_softmax(dtype=float32)`` of the bf16 logits, as
+  vLLM computes prompt log-probabilities; the gradient is the trainer's own log-softmax's.
 
 Probe modes set flags for one scoring forward. The process default is the current trainer numerics, or
 the set named by ``trainer.mismatch_probe.train_numerics``, which then applies to training too.
@@ -59,6 +68,10 @@ class GrugNumerics:
     vllm_gemm: bool = False
     vllm_experts: bool = False
     router_rows: bool = False
+    vllm_xsa: bool = False
+    vllm_qk: bool = False
+    vllm_norms: bool = False
+    vllm_log_softmax: bool = False
 
 
 NUMERICS_FLAGS = tuple(field.name for field in fields(GrugNumerics))

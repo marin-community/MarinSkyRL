@@ -3,10 +3,35 @@
 Used by the Megatron Grug modules when a ``mismatch_probe.numerics`` flag is active.
 """
 
+from collections.abc import Callable
+
 import torch
 import torch.nn.functional as F
 
 from skyrl_train.models.grug_moe import GRUG_ATTN_GATE_SCALE, GRUG_XSA_EPS
+
+
+class _ValueWithGradient(torch.autograd.Function):
+    """The first tensor's bytes, differentiated as the second: the trainer's own computation of the same value."""
+
+    @staticmethod
+    def forward(ctx, value: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
+        return value.clone()
+
+    @staticmethod
+    def backward(ctx, grad: torch.Tensor):
+        return None, grad
+
+
+def vllm_value(value: torch.Tensor, reference: Callable[[], torch.Tensor]) -> torch.Tensor:
+    """A vLLM kernel's ``value``; with gradients enabled, differentiated as the trainer's ``reference()``.
+
+    ``reference()`` computes the same values up to rounding with an autograd graph; it runs only when gradients are
+    enabled. The result holds ``value``'s bytes exactly (no arithmetic touches them).
+    """
+    if not torch.is_grad_enabled():
+        return value
+    return _ValueWithGradient.apply(value, reference())
 
 
 def rms_norm_single_rounding(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
@@ -15,9 +40,8 @@ def rms_norm_single_rounding(x: torch.Tensor, weight: torch.Tensor, eps: float) 
     return (x * torch.rsqrt(variance + eps) * weight.float()).to(weight.dtype)
 
 
-def rms_norm_hybrid(rounded: torch.Tensor, unrounded: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
-    """Compiled vLLM's input norm: variance from the unrounded sum, applied to the rounded stored sum."""
-    variance = unrounded.pow(2).mean(dim=-1, keepdim=True)
+def rms_norm_hybrid(rounded: torch.Tensor, variance: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+    """Compiled vLLM's input norm: the stored bf16 sum normalized by the variance of the unrounded sum."""
     return (rounded.float() * torch.rsqrt(variance + eps) * weight.float()).to(weight.dtype)
 
 

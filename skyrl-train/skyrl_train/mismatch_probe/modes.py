@@ -77,7 +77,10 @@ TRAINER_MODES: dict[str, ModeSpec] = {
 # kernel orders to a stack, and ``vllm_kernel_stack`` is the compiled stack with ``route_weight``,
 # ``fa3_attention`` and ``ep_sum``. ``KEPT_STACK`` (``compiled_stack+fa3_attention``) is the kept numerics;
 # its ``+vllm_gemm`` and ``+vllm_experts`` candidates add vLLM's dense GEMM shapes and expert kernels, and
-# ``+router_rows`` computes the router GEMM at a full vLLM prefill step's row count.
+# ``+router_rows`` computes the router GEMM at a full vLLM prefill step's row count. ``KEPT_STACK_2`` (those three on
+# ``KEPT_STACK``) is the kept numerics since J4; its ``+vllm_xsa``, ``+vllm_qk``, ``+vllm_norms`` and
+# ``+vllm_log_softmax`` candidates take the XSA, q/k, norm and log-softmax values from compiled vLLM's own kernels,
+# ``VLLM_FORWARD`` adds all four, and ``VLLM_FORWARD_EP_SUM`` adds vLLM's expert-parallel addition order as well.
 COMPILED_STACK = "compiled_stack"
 COMPILED_STACK_ALL = "compiled_stack_all"
 VLLM_KERNEL_STACK = "vllm_kernel_stack"
@@ -86,6 +89,10 @@ KEPT_VLLM_GEMM = f"{KEPT_STACK}+vllm_gemm"
 KEPT_VLLM_EXPERTS = f"{KEPT_STACK}+vllm_experts"
 KEPT_VLLM_KERNELS = f"{KEPT_STACK}+vllm_gemm+vllm_experts"
 KEPT_VLLM_KERNELS_ROUTER_ROWS = f"{KEPT_VLLM_KERNELS}+router_rows"
+KEPT_STACK_2 = KEPT_VLLM_KERNELS_ROUTER_ROWS
+_VLLM_REGION_FLAGS = ("vllm_xsa", "vllm_qk", "vllm_norms", "vllm_log_softmax")
+VLLM_FORWARD = "+".join((KEPT_STACK_2, *_VLLM_REGION_FLAGS))
+VLLM_FORWARD_EP_SUM = f"{VLLM_FORWARD}+ep_sum"
 _COMPILED_STACK_FLAGS = (
     "gated_norm",
     "qk_rope",
@@ -97,6 +104,7 @@ _COMPILED_STACK_FLAGS = (
     "final_norm_fp32",
 )
 _KERNEL_FLAGS = ("fa3_attention", "ep_sum")
+_KEPT_2_FLAGS = ("fa3_attention", "vllm_gemm", "vllm_experts", "router_rows")
 # ``ep_sum`` needs each row's vLLM data-parallel rank, which the probe knows for replay modes only.
 _NEEDS_PLACEMENT = "ep_sum"
 
@@ -125,6 +133,12 @@ NUMERICS_CANDIDATES = {
     f"{KEPT_VLLM_KERNELS}+ep_sum": _enabled(
         *_COMPILED_STACK_FLAGS, "fa3_attention", "vllm_gemm", "vllm_experts", "ep_sum"
     ),
+    **{
+        f"{KEPT_STACK_2}+{flag}": _enabled(*_COMPILED_STACK_FLAGS, *_KEPT_2_FLAGS, flag)
+        for flag in (*_VLLM_REGION_FLAGS, "ep_sum")
+    },
+    VLLM_FORWARD: _enabled(*_COMPILED_STACK_FLAGS, *_KEPT_2_FLAGS, *_VLLM_REGION_FLAGS),
+    VLLM_FORWARD_EP_SUM: _enabled(*_COMPILED_STACK_FLAGS, *_KEPT_2_FLAGS, *_VLLM_REGION_FLAGS, "ep_sum"),
 }
 
 
@@ -160,6 +174,9 @@ for _candidate in (
     KEPT_VLLM_KERNELS,
     KEPT_VLLM_KERNELS_ROUTER_ROWS,
     f"{KEPT_VLLM_KERNELS}+ep_sum",
+    *(f"{KEPT_STACK_2}+{flag}" for flag in (*_VLLM_REGION_FLAGS, "ep_sum")),
+    VLLM_FORWARD,
+    VLLM_FORWARD_EP_SUM,
 ):
     TRAINER_MODES[f"{REPLAY_MODE}+{_candidate}"] = ModeSpec(
         _with_numerics(_replay, NUMERICS_CANDIDATES[_candidate]), requires_routes=True
@@ -167,7 +184,14 @@ for _candidate in (
 
 # The batch-layout control of a stack: the trainer against itself in reversed order with larger micro-batches,
 # the re-read's routes replayed, so the prefill metric's layout floor is measured under that stack.
-for _candidate in (KEPT_STACK, KEPT_VLLM_GEMM, KEPT_VLLM_KERNELS, KEPT_VLLM_KERNELS_ROUTER_ROWS):
+for _candidate in (
+    KEPT_STACK,
+    KEPT_VLLM_GEMM,
+    KEPT_VLLM_KERNELS,
+    KEPT_VLLM_KERNELS_ROUTER_ROWS,
+    VLLM_FORWARD,
+    VLLM_FORWARD_EP_SUM,
+):
     TRAINER_MODES[f"{REPEAT_REREAD_REPLAY_MODE}+{_candidate}"] = ModeSpec(
         _with_numerics(_replay, NUMERICS_CANDIDATES[_candidate]),
         requires_routes=True,
