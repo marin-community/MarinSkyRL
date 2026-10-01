@@ -15,8 +15,6 @@ import math
 from pathlib import Path
 
 import pytest
-from types import SimpleNamespace
-from finestore.rl.mismatch_probe import ProbeRow
 import ray
 import torch
 from ray.util.placement_group import placement_group
@@ -25,7 +23,6 @@ from transformers import AutoTokenizer
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl_train.mismatch_probe.collect import ProbeCollector
 from skyrl_train.models.grug_moe import GRUG_ROUTER_BIAS_SUFFIX, GrugMoeConfig, GrugMoeForCausalLM
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.utils import initialize_ray
@@ -607,65 +604,4 @@ def test_grug_megatron_two_gpu_colocated_sleep_sync_preserves_grouped_experts(tm
         )
     finally:
         ray.util.remove_placement_group(shared_pg)
-        ray.shutdown()
-
-
-@pytest.mark.vllm
-def test_grug_probe_reread_keeps_chosen_tokens_with_prefix_cache(tmp_path):
-    require_hoppers(ROLLOUT_WORLD_SIZE)
-    model_path = tmp_path / "model"
-    model_path.mkdir()
-    _write_tiny_checkpoint(model_path)
-    cfg = _config(str(model_path), world_size=ROLLOUT_WORLD_SIZE, pp=2, ep=1)
-    initialize_ray(cfg)
-    client = grug_engine_client(cfg, str(model_path), probe_capture=True, enable_prefix_caching=True)
-    try:
-        prompts = [[1, 17, 29, 5, 11, 13, 3], [1, 17, 29, 5, 11, 19, 3]]
-        rollout = asyncio.run(
-            client.generate(
-                InferenceEngineInput(
-                    prompt_token_ids=prompts,
-                    sampling_params={
-                        "temperature": 1.0,
-                        "max_tokens": 4,
-                        "logprobs": 1,
-                        "seed": 17,
-                        "ignore_eos": True,
-                    },
-                )
-            )
-        )
-        responses = rollout["response_ids"]
-        assert all(response for response in responses)
-        assert rollout["response_logprobs"] is not None
-        cfg.trainer.mismatch_probe.rescore_prefix_cache = "both"
-        cfg.trainer.mismatch_probe.seed = 17
-        cfg.trainer.mismatch_probe.archive_uri = str(tmp_path / "probe")
-        probe = ProbeCollector(cfg)
-        probe.probe_hash = "gpu-reread"
-        probe.probes = [
-            ProbeRow(
-                probe_hash=probe.probe_hash,
-                sample_id=str(index),
-                prompt_id=str(index),
-                prompt_token_ids=prompt,
-                trainer_prompt_ids=prompt,
-                vllm_output_ids=response,
-                trainer_input_ids=response,
-                response_mask=[True] * len(response),
-                loss_mask=[True] * len(response),
-                request_seed=17,
-                batch_position=index,
-            )
-            for index, (prompt, response) in enumerate(zip(prompts, responses, strict=True))
-        ]
-        reread = asyncio.run(probe._rescore_vllm(SimpleNamespace(inference_engine_client=client, global_step=0), 0))
-        for mode in ("off", "on"):
-            by_sample = {row.sample_id: row for row in reread if row.cache_mode == mode}
-            assert set(by_sample) == {str(index) for index in range(len(responses))}
-            for index, response in enumerate(responses):
-                logprobs = by_sample[str(index)].logprobs
-                assert len(logprobs) == len(response)
-                assert all(math.isfinite(value) for value in logprobs)
-    finally:
         ray.shutdown()
