@@ -17,10 +17,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from types import MethodType
+
 import torch
+from megatron.core.optimizer import ChainedOptimizer
 from megatron.core.optimizer import OptimizerConfig
 from megatron.core.optimizer import get_megatron_optimizer as get_megatron_optimizer_native
+from megatron.core.optimizer.cpu_offloading.hybrid_optimizer import HybridDeviceOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
+
+from skyrl_train.distributed.megatron.hybrid_optimizer_restore import restore_hybrid_master_params
 
 
 def init_megatron_optim_config(optim_config: dict, optimizer_config_kwargs: dict) -> OptimizerConfig:
@@ -71,10 +77,16 @@ def get_megatron_optimizer(
             "are supported."
         )
     # Base optimizer.
-    return get_megatron_optimizer_native(
+    optimizer = get_megatron_optimizer_native(
         config=config,
         model_chunks=model,
     )
+    optimizers = optimizer.chained_optimizers if isinstance(optimizer, ChainedOptimizer) else [optimizer]
+    for distributed_optimizer in optimizers:
+        inner_optimizer = distributed_optimizer.optimizer
+        if isinstance(inner_optimizer, HybridDeviceOptimizer):
+            inner_optimizer._update_fp32_params_by_new_state = MethodType(restore_hybrid_master_params, inner_optimizer)
+    return optimizer
 
 
 def get_megatron_optimizer_param_scheduler(
