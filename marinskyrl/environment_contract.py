@@ -486,6 +486,7 @@ class EnvVarManager:
         values[UV_USE_IO_URING_ENV] = "0"
         passthrough_names = (
             LD_LIBRARY_PATH_ENV,
+            "PYTORCH_CUDA_ALLOC_CONF",
             NVRTC_HOME_ENV,
             CUDA_HOME_ENV,
             LIBRARY_PATH_ENV,
