@@ -1647,15 +1647,16 @@ async def test_unified_gym_tasks_preserve_grading_and_turn_credit(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("enable_thinking", [True, False])
+@pytest.mark.parametrize("reward_key", ["reward_spec", "reward_model"])
 async def test_aime_rollout_preserves_length_reward_and_phase_metrics(
-    task_inputs, delivered_telemetry, enable_thinking
+    task_inputs, delivered_telemetry, enable_thinking, reward_key
 ):
     config, request = task_inputs
     config.chat_template_kwargs = {"enable_thinking": enable_thinking}
     task = gym_task(
         request["prompts"][0],
         environment="aime",
-        extras={"reward_model": {"ground_truth": "12"}},
+        extras={reward_key: {"ground_truth": "12"}},
         config={"length_penalty_weight": 1.0, "min_response_length": 0, "evaluation_token_budget": 1},
         source=Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
     )
