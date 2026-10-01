@@ -11,7 +11,9 @@ in these places (a one-H100 sweep of each kernel at Snowball's shapes, one row t
   such position running as a request of their own, and a call holds at most 992 requests, the most FA3 splits.
 - On a sliding-window layer FA3 aligns its key blocks to the window start of each query tile's first row. A decode
   row is a tile of its own; inside a prefill tile the same row past the window adds other block groups. Prefill rows
-  past the window run as one-row requests, as decode steps run them (``WINDOW_ROWS``).
+  past the window run as one-row requests, as decode steps run them (``WINDOW_ROWS``). With fixed splits, every
+  one-row request of a sliding-window layer runs on FA3's causal kernel from its window start
+  (``fa3_window_start_rows``), which reads the same key blocks in the same splits as the local kernel, in less time.
 - cuBLAS picks the fp32 router GEMM's kernel from the step's row count. A Triton GEMM with one tile shape computes the
   router logits instead (``ROUTER``).
 - The 20-output head-gate GEMM: Inductor's ``pad_mm`` pass times it against a zero-padded 24-output copy when each
@@ -46,6 +48,8 @@ from skyrl_train.models.grug_vllm_kernels import (
     FA3_INVARIANT_SPLITS,
     fa3_fixed_split_metadata,
     fa3_invariant_requests,
+    fa3_request_calls,
+    fa3_window_start_rows,
 )
 
 FIXED_SPLITS = "fixed_splits"
@@ -55,6 +59,9 @@ AUTOTUNE = "autotune"
 PARTS = (FIXED_SPLITS, WINDOW_ROWS, ROUTER, AUTOTUNE)
 
 _installed: set[str] = set()
+# ``(window, window starts)`` while ``invariant_forward`` runs a call of one-row sliding-window requests: vLLM's FA3
+# forward makes one varlen call, which ``_causal_window_varlen`` runs on FA3's causal kernel.
+_window_call: tuple[int, torch.Tensor] | None = None
 # Marks the forward patch that both ``FIXED_SPLITS`` and ``WINDOW_ROWS`` install.
 _REQUEST_PLAN = "request_plan"
 
@@ -127,38 +134,100 @@ def _window_rows() -> None:
 def _install_request_plan() -> None:
     """Run a step's FA3 call as the calls that compute each row as a decode step computes it.
 
-    Decode steps of at most ``FA3_DYNAMIC_SPLIT_MAX_BATCH`` requests, which full CUDA graphs replay, run as built.
-    Other steps (prefill and mixed steps, which vLLM runs outside CUDA graphs, and larger decode steps) run as the
-    requests ``fa3_invariant_requests`` gives, in calls of at most that many requests, each with its own metadata. The
-    calls are built once per step's metadata and window.
+    Prefill and mixed steps, which vLLM runs outside CUDA graphs, and decode steps of more than
+    ``FA3_DYNAMIC_SPLIT_MAX_BATCH`` requests run as the requests ``fa3_invariant_requests`` gives, in calls of at most
+    that many requests, each with its own metadata. With ``FIXED_SPLITS`` and ``WINDOW_ROWS``, the one-row requests of
+    a sliding-window layer go in calls of their own on FA3's causal kernel, which start each row's keys at its window
+    start (``fa3_window_start_rows``); a decode step of at most that many requests, which full CUDA graphs capture, runs
+    as one such call with window starts computed on the device from its key lengths. Other decode steps of at most that
+    many requests run as built. The calls are built once per step's metadata and window.
     """
     if _REQUEST_PLAN in _installed:
         return
     original_forward = flash_attn.FlashAttentionImpl.forward
+    original_varlen = flash_attn.flash_attn_varlen_func
 
     def invariant_forward(self, layer, query, key, value, kv_cache, attn_metadata, output, *args, **kwargs):
+        global _window_call
         calls = None if attn_metadata is None else _invariant_calls(self, attn_metadata)
         if calls is None:
             return original_forward(self, layer, query, key, value, kv_cache, attn_metadata, output, *args, **kwargs)
-        for rows, metadata in calls:
-            original_forward(self, layer, query[rows], key, value, kv_cache, metadata, output[rows], *args, **kwargs)
+        for rows, metadata, window_call in calls:
+            _window_call = window_call
+            try:
+                original_forward(
+                    self, layer, query[rows], key, value, kv_cache, metadata, output[rows], *args, **kwargs
+                )
+            finally:
+                _window_call = None
         return output
 
+    def window_start_varlen(*args, **kwargs):
+        if _window_call is None:
+            return original_varlen(*args, **kwargs)
+        return _causal_window_varlen(*_window_call, *args, **kwargs)
+
     flash_attn.FlashAttentionImpl.forward = invariant_forward
+    flash_attn.flash_attn_varlen_func = window_start_varlen
     _installed.add(_REQUEST_PLAN)
 
 
+def _causal_window_varlen(window: int, window_starts: torch.Tensor, *args, **kwargs):
+    """vLLM's FA3 varlen call of one-row requests of a sliding-window layer, run by ``fa3_window_start_rows``."""
+    window_size = kwargs.get("window_size")
+    if (
+        args
+        or kwargs.get("fa_version") != 3
+        or kwargs.get("max_seqlen_q") != 1
+        or kwargs.get("causal") is not True
+        or list(window_size or ()) != [window - 1, 0]
+        or kwargs.get("cu_seqlens_k") is not None
+        or any(kwargs.get(name) is not None for name in ("alibi_slopes", "dynamic_causal", "mask_mod", "aux_tensors"))
+    ):
+        raise NotImplementedError("window starts apply to FA3 varlen calls of one-row causal sliding-window requests")
+    return fa3_window_start_rows(
+        kwargs["q"],
+        kwargs["k"],
+        kwargs["v"],
+        kwargs["out"],
+        cu_seqlens_q=kwargs["cu_seqlens_q"],
+        seqused_k=kwargs["seqused_k"],
+        leftpad_k=window_starts,
+        max_seqlen_k=kwargs["max_seqlen_k"],
+        block_table=kwargs["block_table"],
+        softmax_scale=kwargs["softmax_scale"],
+        scheduler_metadata=kwargs["scheduler_metadata"],
+        num_splits=kwargs["num_splits"],
+        softcap=kwargs["softcap"],
+        q_descale=kwargs.get("q_descale"),
+        k_descale=kwargs.get("k_descale"),
+        v_descale=kwargs.get("v_descale"),
+        s_aux=kwargs.get("s_aux"),
+    )
+
+
 def _invariant_calls(impl, metadata):
-    """The FA3 calls of ``impl``'s layer for the step of ``metadata``: ``(query rows, metadata)`` pairs, or ``None``
-    when the step's call runs as built."""
+    """The FA3 calls of ``impl``'s layer for the step of ``metadata``: ``(query rows, metadata, window call)``
+    triples, the window call ``(window, window starts)`` for a call of one-row requests on FA3's causal kernel, or
+    ``None`` when the step's call runs as built."""
     left, right = impl.sliding_window
     window = left + 1 if WINDOW_ROWS in _installed and left >= 0 and right == 0 else None
     fixed = FIXED_SPLITS in _installed
+    causal_rows = fixed and window is not None
     cached = metadata.__dict__.setdefault("_skyrl_calls", {})
     if window in cached:
         return cached[window]
     requests = metadata.query_start_loc.numel() - 1
     single_rows = metadata.max_query_len <= 1
+    if causal_rows and single_rows and requests <= FA3_DYNAMIC_SPLIT_MAX_BATCH:
+        # A decode step: the window starts follow the key lengths on the device, so a captured CUDA graph replays them.
+        # Every KV-cache group's metadata of a step holds the step's one key-length tensor, so the step computes them
+        # once for all sliding-window layers.
+        by_window = metadata.seq_lens.__dict__.setdefault("_skyrl_window_starts", {})
+        if window not in by_window:
+            by_window[window] = torch.clamp(metadata.seq_lens[:requests] - window, min=0)
+        cached[window] = [(slice(None), metadata, (window, by_window[window]))]
+        return cached[window]
     needs_window_rows = window is not None and not single_rows and metadata.max_seq_len > window
     needs_alignment = fixed and not single_rows
     if not (needs_window_rows or needs_alignment or (fixed and requests > FA3_DYNAMIC_SPLIT_MAX_BATCH)):
@@ -180,20 +249,23 @@ def _invariant_calls(impl, metadata):
     device = metadata.query_start_loc.device
     starts = planned.query_start.tolist()
     calls = []
-    step = FA3_DYNAMIC_SPLIT_MAX_BATCH if fixed else total
-    for begin in range(0, total, step):
-        end = min(total, begin + step)
+    groups = fa3_request_calls(
+        starts, one_row_calls=causal_rows, max_requests=FA3_DYNAMIC_SPLIT_MAX_BATCH if fixed else total
+    )
+    for begin, end, one_row in groups:
+        key_lengths = planned.key_lengths[begin:end]
         call = copy.copy(metadata)
         call.num_actual_tokens = starts[end] - starts[begin]
         call.query_start_loc = (planned.query_start[begin : end + 1] - starts[begin]).to(device)
-        call.seq_lens = planned.key_lengths[begin:end].to(device)
+        call.seq_lens = key_lengths.to(device)
         call.block_table = metadata.block_table[planned.owner[begin:end].to(device)]
         call.max_query_len = max(b - a for a, b in zip(starts[begin:end], starts[begin + 1 : end + 1], strict=True))
-        call.max_seq_len = int(planned.key_lengths[begin:end].max())
+        call.max_seq_len = int(key_lengths.max())
         call.scheduler_metadata = (
             fa3_fixed_split_metadata(call.query_start_loc, group, impl.num_kv_heads) if fixed else None
         )
-        calls.append((slice(starts[begin], starts[end]), call))
+        window_call = (window, torch.clamp(key_lengths - window, min=0).to(device)) if one_row else None
+        calls.append((slice(starts[begin], starts[end]), call, window_call))
     cached[window] = calls
     return calls
 

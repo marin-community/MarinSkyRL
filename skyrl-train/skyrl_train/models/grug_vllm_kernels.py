@@ -276,6 +276,98 @@ def fa3_invariant_requests(
     )
 
 
+def fa3_request_calls(
+    query_start: Sequence[int], *, one_row_calls: bool, max_requests: int
+) -> list[tuple[int, int, bool]]:
+    """Group consecutive varlen requests into FA3 calls of at most ``max_requests`` requests: ``(first, end, one_row)``
+    request ranges. With ``one_row_calls`` the one-row requests and the longer ones go in separate calls (on a
+    sliding-window layer the one-row requests run on FA3's causal kernel, ``fa3_window_start_rows``)."""
+    rows = np.diff(np.asarray(query_start, dtype=np.int64))
+    one_row = rows == 1 if one_row_calls else np.zeros(rows.size, dtype=bool)
+    edges = [0, *(np.flatnonzero(one_row[1:] != one_row[:-1]) + 1).tolist(), rows.size]
+    return [
+        (begin, min(begin + max_requests, run_end), bool(one_row[run_begin]))
+        for run_begin, run_end in zip(edges[:-1], edges[1:], strict=True)
+        for begin in range(run_begin, run_end, max_requests)
+    ]
+
+
+def fa3_window_start_rows(
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    out: torch.Tensor,
+    *,
+    cu_seqlens_q: torch.Tensor,
+    seqused_k: torch.Tensor,
+    leftpad_k: torch.Tensor,
+    max_seqlen_k: int,
+    block_table: torch.Tensor,
+    softmax_scale: float,
+    scheduler_metadata: torch.Tensor,
+    num_splits: int,
+    softcap: float = 0.0,
+    q_descale: torch.Tensor | None = None,
+    k_descale: torch.Tensor | None = None,
+    v_descale: torch.Tensor | None = None,
+    s_aux: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """One-row paged FA3 requests of a sliding-window layer on FA3's causal kernel, each over its window alone:
+    ``leftpad_k`` holds each request's window start (its key length minus the window, at least 0).
+
+    With the fixed-split scheduler metadata the causal kernel reads the same 128-key blocks from the window start, and
+    cuts them into the same splits, as the local kernel's one-row request, so every row has the local kernel's bytes
+    (harness ``fa3_leftpad_check``: 1, 4 and 64 requests, 1,000-8,000 keys). It runs faster: one request past the
+    window about 15 µs per call against 19 µs. vLLM's Python wrapper does not pass ``leftpad_k``, so this calls the FA3
+    op with the wrapper's other arguments.
+    """
+    if cu_seqlens_q.numel() - 1 != leftpad_k.numel():
+        raise ValueError("leftpad_k needs one window start per request")
+    query, key_cache, value_cache = (
+        x if x.stride(-1) == 1 else x.contiguous() for x in (query, key_cache, value_cache)
+    )
+    torch.ops._vllm_fa3_C.fwd(
+        query,
+        key_cache,
+        value_cache,
+        None,  # k_new
+        None,  # v_new
+        None,  # q_v
+        out,
+        cu_seqlens_q,
+        None,  # cu_seqlens_k
+        None,  # cu_seqlens_k_new
+        None,  # seqused_q
+        seqused_k,
+        1,  # max_seqlen_q
+        max_seqlen_k,
+        block_table,
+        None,  # kv_batch_idx
+        leftpad_k,
+        None,  # rotary_cos
+        None,  # rotary_sin
+        None,  # seqlens_rotary
+        q_descale,
+        k_descale,
+        v_descale,
+        softmax_scale,
+        True,  # is_causal
+        -1,  # window_size_left
+        -1,  # window_size_right
+        softcap,
+        True,  # is_rotary_interleaved
+        scheduler_metadata,
+        num_splits,
+        None,  # pack_gqa
+        0,  # sm_margin
+        s_aux,
+        1,  # cp_world_size
+        0,  # cp_rank
+        None,  # cp_tot_seqused_k
+    )
+    return out
+
+
 def _fa3_window_rows_forward(query, key, value, *, rows: int, requests: int, window: int, scale: float):
     """Sliding-window FA3 over ``requests`` sequences of ``rows`` rows as a decode-invariant engine computes each row:
     every request with ``FA3_INVARIANT_SPLITS`` splits, and each row past the window alone, its 128-key blocks starting

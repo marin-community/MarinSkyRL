@@ -12,6 +12,8 @@ from skyrl_train.models.grug_vllm_kernels import (
     fa3_attention_sbhd,
     fa3_fixed_split_metadata,
     fa3_invariant_requests,
+    fa3_request_calls,
+    fa3_window_start_rows,
 )
 from tests.gpu.grug_gpu_gates import require_hoppers
 
@@ -21,14 +23,36 @@ SCALE = HEAD_DIM**-0.5
 LENGTHS = (700, 2049, 3100)
 
 
-def _paged_calls(query, caches, query_start, key_lengths, tables, window):
-    """FA3 calls as the engine issues them: paged keys, fixed-split metadata, at most 992 requests per call."""
+def _paged_calls(query, caches, query_start, key_lengths, tables, window, *, causal_rows):
+    """FA3 calls as the engine issues them: paged keys, fixed-split metadata, at most 992 requests per call, and with
+    ``causal_rows`` on a sliding-window layer the one-row requests in calls of their own on FA3's causal kernel from
+    each row's window start; without it every request on the local kernel."""
     output = torch.empty_like(query)
-    for begin in range(0, len(key_lengths), FA3_DYNAMIC_SPLIT_MAX_BATCH):
-        end = min(len(key_lengths), begin + FA3_DYNAMIC_SPLIT_MAX_BATCH)
+    calls = fa3_request_calls(
+        query_start, one_row_calls=causal_rows and window is not None, max_requests=FA3_DYNAMIC_SPLIT_MAX_BATCH
+    )
+    for begin, end, one_row in calls:
         rows = slice(query_start[begin], query_start[end])
         starts = torch.tensor([s - query_start[begin] for s in query_start[begin : end + 1]], dtype=torch.int32)
         starts = starts.cuda()
+        lengths = torch.tensor(key_lengths[begin:end], dtype=torch.int32, device="cuda")
+        metadata = fa3_fixed_split_metadata(starts, GROUP, KV_HEADS)
+        if one_row:
+            fa3_window_start_rows(
+                query[rows],
+                caches[0],
+                caches[1],
+                output[rows],
+                cu_seqlens_q=starts,
+                seqused_k=lengths,
+                leftpad_k=torch.clamp(lengths - window, min=0),
+                max_seqlen_k=max(key_lengths[begin:end]),
+                block_table=tables[begin:end],
+                softmax_scale=SCALE,
+                scheduler_metadata=metadata,
+                num_splits=FA3_INVARIANT_SPLITS,
+            )
+            continue
         flash_attn_varlen_func(
             q=query[rows],
             k=caches[0],
@@ -36,13 +60,13 @@ def _paged_calls(query, caches, query_start, key_lengths, tables, window):
             out=output[rows],
             cu_seqlens_q=starts,
             max_seqlen_q=int((starts[1:] - starts[:-1]).max()),
-            seqused_k=torch.tensor(key_lengths[begin:end], dtype=torch.int32, device="cuda"),
+            seqused_k=lengths,
             max_seqlen_k=max(key_lengths[begin:end]),
             softmax_scale=SCALE,
             causal=True,
             window_size=None if window is None else [window - 1, 0],
             block_table=tables[begin:end],
-            scheduler_metadata=fa3_fixed_split_metadata(starts, GROUP, KV_HEADS),
+            scheduler_metadata=metadata,
             fa_version=3,
             num_splits=FA3_INVARIANT_SPLITS,
         )
@@ -80,9 +104,10 @@ def test_engine_steps_and_trainer_rows_equal_rows_decoded_alone(window):
     require_hoppers(1)
     sequences, caches, tables = _sequences(torch.Generator().manual_seed(0))
     for index, (length, (q, k, v)) in enumerate(zip(LENGTHS, sequences, strict=True)):
-        decoded = _paged_calls(
-            q, caches, list(range(length + 1)), list(range(1, length + 1)), tables[[index] * length], window
-        )
+        decode = (q, caches, list(range(length + 1)), list(range(1, length + 1)), tables[[index] * length], window)
+        decoded = _paged_calls(*decode, causal_rows=True)
+        # The local kernel gives every row decoded alone the same bytes.
+        assert _same_rows(decoded, _paged_calls(*decode, causal_rows=False))
         # A prefill from a 16-token cached prefix, through the engine's request plan (its rows before position 32
         # run as their own request; on a sliding-window layer each row past the window alone).
         planned = fa3_invariant_requests([0, length - 16], [length], window, FA3_BLOCK_M // GROUP)
@@ -93,6 +118,7 @@ def test_engine_steps_and_trainer_rows_equal_rows_decoded_alone(window):
             planned.key_lengths.tolist(),
             tables[[index] * planned.key_lengths.numel()],
             window,
+            causal_rows=True,
         )
         assert _same_rows(prefill, decoded[16:])
 
