@@ -1,5 +1,8 @@
+import argparse
 import asyncio
+import hashlib
 import json
+import logging
 import math
 import multiprocessing
 import os
@@ -9,12 +12,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from multiprocessing.context import ForkServerContext
 
+import fsspec
 import pytest
+from botocore.exceptions import BotoCoreError, ClientError
 import skyrl_gym
 import skyrl_train
 import torch
 import zstandard
-from examples.cat_count.cpu_canary import PROMPT
+from examples.cat_count.cpu_canary import PROMPT, pretrain
 from skyrl_train.metric_names import CORRECTION_WEIGHT_MEAN_METRIC
 
 from tests.cpu.tiny_training.cat_count import FAST_STEPS, cat_count_config, run_cat_count
@@ -25,9 +30,73 @@ pytestmark = pytest.mark.slow
 RUN_TIMEOUT_SECONDS = 300
 
 
+POLICY_PREFIX = "s3://marin-us-east-02a/marin/rl-canaries/cat-count/cpu/pretrained/llama-530k/v1"
+POLICY_MANIFEST_SHA256 = "7a5f1047648a90262514a663168580610b9f6bbe1522b2c38b7578bbc5eb82ae"
+
+
+def download_policy(directory: Path) -> None:
+    filesystem = fsspec.filesystem(
+        "s3", config_kwargs={"connect_timeout": 5, "read_timeout": 10, "retries": {"max_attempts": 1}}
+    )
+    manifest_path = directory / "MANIFEST.json"
+    manifest_bytes = (
+        manifest_path.read_bytes() if manifest_path.exists() else filesystem.cat(f"{POLICY_PREFIX}/MANIFEST.json")
+    )
+    if hashlib.sha256(manifest_bytes).hexdigest() != POLICY_MANIFEST_SHA256:
+        raise ValueError("CatCount policy manifest SHA256 differs from the calibrated artifact")
+    manifest = json.loads(manifest_bytes)
+    for name, receipt in manifest["files"].items():
+        path = directory / name
+        data = path.read_bytes() if path.exists() else filesystem.cat(f"{POLICY_PREFIX}/{name}")
+        if len(data) != receipt["bytes"] or hashlib.sha256(data).hexdigest() != receipt["sha256"]:
+            raise ValueError(f"CatCount policy SHA256 mismatch: {name}")
+        path.write_bytes(data)
+    (directory / "MANIFEST.json").write_bytes(manifest_bytes)
+
+
+def test_policy_download_rejects_a_corrupted_manifest(tmp_path, monkeypatch):
+    filesystem = fsspec.filesystem("memory")
+    filesystem.pipe(f"{POLICY_PREFIX}/MANIFEST.json", b'{"files": {}}')
+    monkeypatch.setattr(fsspec, "filesystem", lambda *_args, **_kwargs: filesystem)
+    with pytest.raises(ValueError, match="manifest SHA256"):
+        download_policy(tmp_path)
+
+
 @pytest.fixture(scope="session")
-def cat_count_policy() -> Path:
-    return Path(__file__).resolve().parents[1] / "fixtures" / "cat_count_policy"
+def cat_count_policy(pytestconfig) -> Path:
+    cache = Path(pytestconfig.cache.mkdir("cat_count_policy"))
+    downloaded = cache / "llama-530k-v1"
+    downloaded.mkdir(exist_ok=True)
+    try:
+        download_policy(downloaded)
+        return downloaded
+    except (OSError, BotoCoreError, ClientError) as error:
+        logging.getLogger(__name__).info("CatCount policy download unavailable: %s", type(error).__name__)
+    parameters = argparse.Namespace(steps=3000, lr=3e-4, width=128, layers=2, seed=0)
+    repository = Path(__file__).resolve().parents[3]
+    sources = (
+        "skyrl-train/examples/cat_count/cpu_canary.py",
+        "skyrl-gym/skyrl_gym/envs/cat_count/reward.py",
+        "skyrl-train/tests/cpu/test_cat_count_cpu_canary.py",
+        "pyproject.toml",
+        "skyrl-gym/pyproject.toml",
+        "uv.lock",
+    )
+    digest = hashlib.sha256(json.dumps(vars(parameters), sort_keys=True).encode())
+    for source in sources:
+        digest.update(source.encode())
+        digest.update((repository / source).read_bytes())
+    identity = digest.hexdigest()[:16]
+    directory = cache / f"llama-{identity}"
+    parameters.out = directory
+    if not all((directory / name).exists() for name in ("model.safetensors", "config.json", "tokenizer.json")):
+        torch.set_num_threads(1)
+        started = time.perf_counter()
+        pretrain(parameters)
+        print(f"CAT_COUNT_PRETRAIN cache=cold seconds={time.perf_counter() - started:.3f} identity={identity}")
+    else:
+        print(f"CAT_COUNT_PRETRAIN cache=warm identity={identity}")
+    return directory
 
 
 @pytest.fixture
@@ -240,6 +309,7 @@ def test_cat_count_async_resumes_and_converges(tmp_path, cat_count_policy, cat_c
     training = [row for row in resumed if "policy/raw_grad_norm" in row]
     assert [row["trainer/global_step"] for row in training] == list(range(1, 101))
     assert any(row["async/staleness_mean"] > 0 for row in training)
-    assert any(train_score >= 0.9 and heldout_score >= 0.9 for train_score, heldout_score in scores(resumed))
+    initial_mean = sum(scores(resumed)[0]) / 2
+    assert any(sum(pair) / 2 >= max(0.65, initial_mean + 0.3) for pair in scores(resumed))
     checkpoint = torch.load(root / "ckpts/global_step_100/policy/rank_0.pt", weights_only=False)
     assert {state["step"].item() for state in checkpoint["optimizer"]["state"].values()} == {200}

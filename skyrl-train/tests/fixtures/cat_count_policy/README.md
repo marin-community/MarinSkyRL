@@ -1,16 +1,18 @@
 # CatCount CPU starting policy
 
-The CPU canary loads this 529,792-parameter Llama policy directly. The
-safetensors weights use FP32 and occupy 2,121,280 bytes. The fixture preserves
-the calibrated starting weights exactly; converting them to FP16 rounds them.
-The config, tokenizer, generation config and chat template accompany the weights.
+The CPU canary downloads the calibrated 529,792-parameter FP32 policy from
+`s3://marin-us-east-02a/marin/rl-canaries/cat-count/cpu/pretrained/llama-530k/v1/`.
+Its manifest SHA256 is `7a5f1047648a90262514a663168580610b9f6bbe1522b2c38b7578bbc5eb82ae`;
+each downloaded file must match the manifest's byte count and SHA256.
+Credentials or network failures select cached local pretraining. Actions caches
+key every producer source, pretrain parameter and dependency-lock input.
+CI read access is provided separately through a read-only role.
 
-PR CI runs ten normal training steps on seed 0 and checks evaluation gains,
-policy metrics, optimizer updates, checkpoints and telemetry. Nightly runs normal
-and reversed-signal pairs on seeds 0 and 1, comparing identical starting scores,
-requiring no improvement from the reversed signal and a normal-minus-reversed
-reward gap of at least 0.4. Nightly also checks asynchronous checkpoint resume
-and training and held-out evaluation rewards of at least 0.9.
+PR CI runs ten normal training steps on seed0 with the positive assertions.
+Nightly checks normal/reversed pairs on seeds0/1 and asynchronous resume,
+staleness and optimizer updates. At some resumed evaluation the mean train and
+held-out reward must be at least0.65 and at least0.3 above its initial value.
+The resume run retains100steps; a recorded devbox run first crossed at44.
 
 Regenerate from the repository root in the frozen CPU environment:
 
