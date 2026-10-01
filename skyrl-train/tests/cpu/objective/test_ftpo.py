@@ -18,6 +18,7 @@ from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.group_admission import GroupAdvantageInvariant
 from skyrl_train.training_batch import TrainingBatchIterator
 from skyrl_train.config.ftpo import FTPOConfig, validate_ftpo
+from skyrl_train.utils.utils import validate_cfg
 from skyrl_train.ftpo import (
     FTPOInputs,
     FTPOTargets,
@@ -44,6 +45,7 @@ def config():
                 "trainer.use_sample_packing=false",
                 "generator.sampling_params.logprobs=4",
                 "generator.sampling_params.temperature=0",
+                "trainer.logger=console",
             ],
         )
 
@@ -249,7 +251,7 @@ def test_full_weight_ftpo_update_and_resume_match_uninterrupted_training(tmp_pat
 
 
 def test_ftpo_recipe_accepts_greedy_capture_and_rejects_unsupported_geometry(config):
-    validate_ftpo(config)
+    validate_cfg(config)
     assert config.generator.engine_init_kwargs.logprobs_mode == "raw_logprobs"
     for path in (
         "trainer.policy.megatron_config.tensor_model_parallel_size",

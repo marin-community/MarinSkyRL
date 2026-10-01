@@ -49,7 +49,7 @@ def ftpo_config(algorithm: DictConfig) -> FTPOConfig | None:
 
 
 def validate_ftpo(cfg: DictConfig) -> None:
-    """Reject unsupported execution geometry and competing FTPO objectives."""
+    """Validate FTPO execution and configure raw rollout log probabilities."""
     config = ftpo_config(cfg.trainer.algorithm)
     if config is None:
         return

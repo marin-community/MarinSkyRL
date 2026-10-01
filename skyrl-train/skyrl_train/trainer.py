@@ -2578,7 +2578,7 @@ class RayPPOTrainer:
             ret_outputs: TrainingOutputBatch = concatenate_outputs_after_mesh_dispatch(actor_infos, results)
             return ret_outputs[key]
 
-        base_log_probs = None
+        reference_scores = None
         action_log_probs = None
         values = None
 
@@ -2604,17 +2604,17 @@ class RayPPOTrainer:
                     keys=fwd_keys + ["ftpo_chosen_mask"], metadata_keys=["response_length"]
                 )
                 reference_data.metadata["global_step"] = self.global_step
-            base_action_log_probs_refs = self.ref_model.async_run_ray_method("mesh", "forward", data=reference_data)
+            reference_score_refs = self.ref_model.async_run_ray_method("mesh", "forward", data=reference_data)
 
         if self.ref_model is not None:
             # handle colocate policy and ref model
             if self.cfg.trainer.placement.colocate_policy_ref or self.colocate_all:
-                all_rank_base_log_probs: List[TrainingOutputBatch] = ray.get(base_action_log_probs_refs)
-                base_log_probs = collect_results(self.ref_model.actor_infos, all_rank_base_log_probs, key="output")
+                all_rank_reference_scores: List[TrainingOutputBatch] = ray.get(reference_score_refs)
+                reference_scores = collect_results(self.ref_model.actor_infos, all_rank_reference_scores, key="output")
                 self.ref_model.offload_to_cpu()
                 ray.get(self.ref_model.async_run_ray_method("pass_through", "empty_cache"))
         else:
-            base_log_probs = None
+            reference_scores = None
 
         # calculate action log probs
         if self.colocate_all:
@@ -2627,7 +2627,7 @@ class RayPPOTrainer:
             self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
 
         # wait all models done
-        # if not colocate_policy_ref, then need to gather base_log_probs
+        # if not colocate_policy_ref, then need to gather reference_scores
         # if self.critic_model is not None, then need to gather value
         if not self.colocate_all:
             if not self.cfg.trainer.placement.colocate_policy_ref:
@@ -2636,10 +2636,12 @@ class RayPPOTrainer:
                     values = collect_results(self.critic_model.actor_infos, all_rank_values, key="output")
 
                 if self.ref_model is not None:
-                    all_rank_base_log_probs: List[TrainingOutputBatch] = ray.get(base_action_log_probs_refs)
-                    base_log_probs = collect_results(self.ref_model.actor_infos, all_rank_base_log_probs, key="output")
+                    all_rank_reference_scores: List[TrainingOutputBatch] = ray.get(reference_score_refs)
+                    reference_scores = collect_results(
+                        self.ref_model.actor_infos, all_rank_reference_scores, key="output"
+                    )
                 else:
-                    base_log_probs = None
+                    reference_scores = None
 
             elif self.critic_model is not None:
                 all_rank_values = ray.get(value_refs)
@@ -2658,15 +2660,16 @@ class RayPPOTrainer:
 
         sequences_all: torch.Tensor = training_input["sequences"]
         # NOTE (sumanthrh): The slicing is needed to make sure that the batch dimension doesn't change for the tensordict.
-        base_log_probs = base_log_probs[: len(sequences_all)] if base_log_probs is not None else None
+        reference_scores = reference_scores[: len(sequences_all)] if reference_scores is not None else None
         action_log_probs = action_log_probs[: len(sequences_all)]
         values = values[: len(sequences_all)] if values is not None else None
 
         if "ftpo_chosen_mask" in training_input:
-            if base_log_probs is None:
+            if reference_scores is None:
                 raise ValueError("FTPO requires frozen reference boundary logits")
-            training_input["ftpo_reference_logits"] = base_log_probs
-            base_log_probs = None
+            training_input["ftpo_reference_logits"] = reference_scores
+            reference_scores = None
+        base_log_probs = reference_scores
         training_input["base_action_log_probs"] = base_log_probs
         training_input["action_log_probs"] = action_log_probs
         training_input["values"] = values

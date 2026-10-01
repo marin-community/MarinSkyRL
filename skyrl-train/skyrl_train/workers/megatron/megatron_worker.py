@@ -77,6 +77,12 @@ class _MegatronInitMode(StrEnum):
 
 
 class MegatronWorker:
+    @property
+    def scoring_temperature(self) -> float:
+        if self.cfg.trainer.algorithm.policy_loss_type == PolicyLossType.FTPO:
+            return 1.0
+        return self.cfg.generator.sampling_params.temperature
+
     def _download_hf_snapshot_if_needed(self, model_path: str, model_config) -> None:
         """Populate the local Hub cache only for non-streamed remote model IDs."""
         if model_config.get("source_uri") or self._local_rank != 0 or os.path.exists(model_path):
@@ -224,9 +230,7 @@ class MegatronWorker:
                 micro_batches=micro_payloads,
                 seq_len=seq_len,
                 micro_batch_size=mbs,
-                temperature=1.0
-                if self.cfg.trainer.algorithm.policy_loss_type == PolicyLossType.FTPO
-                else self.cfg.generator.sampling_params.temperature,
+                temperature=self.scoring_temperature,
             )
         if self.cfg.trainer.policy.megatron_config.check_train_eval_parity:
             self._log_forward_fingerprint("forward", micro_payloads)
@@ -235,9 +239,7 @@ class MegatronWorker:
                     micro_batches=micro_payloads,
                     seq_len=seq_len,
                     micro_batch_size=mbs,
-                    temperature=1.0
-                    if self.cfg.trainer.algorithm.policy_loss_type == PolicyLossType.FTPO
-                    else self.cfg.generator.sampling_params.temperature,
+                    temperature=self.scoring_temperature,
                 )
             if mpu.is_pipeline_last_stage(ignore_virtual=True):
                 diff = (repeated.float() - log_probs.float()).abs()
@@ -301,9 +303,7 @@ class MegatronWorker:
                     micro_batches=micro_payloads,
                     seq_len=seq_len,
                     micro_batch_size=micro_bsz,
-                    temperature=1.0
-                    if self.cfg.trainer.algorithm.policy_loss_type == PolicyLossType.FTPO
-                    else self.cfg.generator.sampling_params.temperature,
+                    temperature=self.scoring_temperature,
                 )
             if not mpu.is_pipeline_last_stage(ignore_virtual=True):
                 continue
@@ -591,9 +591,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         micro_batches=micro_buffer,
                         seq_len=seq_len,
                         micro_batch_size=micro_bsz,
-                        temperature=1.0
-                        if self.cfg.trainer.algorithm.policy_loss_type == PolicyLossType.FTPO
-                        else self.cfg.generator.sampling_params.temperature,
+                        temperature=self.scoring_temperature,
                         timings=timing,
                         profiler=profiler,
                     )

@@ -336,7 +336,7 @@ class MegatronModelWrapper:
         temperature: float = 1.0,
     ) -> torch.Tensor:
         """
-        Forward-only inference to compute log-probs over a full mini-batch consisting of multiple micro-batches.
+        Score response tokens, or return raw vocabulary logits at FTPO boundaries.
 
         Args:
             micro_batches: Typed forward micro-batches.
@@ -345,7 +345,8 @@ class MegatronModelWrapper:
             temperature: Optional temperature scaling for logits.
 
         Returns:
-            torch.Tensor of concatenated log-probs across micro-batches (valid on pipeline last stage only).
+            Concatenated response log-probabilities [B,T], or FTPO boundary logits [B,V].
+            Valid on the pipeline last stage only.
         """
         forward_backward_func = get_forward_backward_func()
 
@@ -355,13 +356,13 @@ class MegatronModelWrapper:
                 boundary_logits = compact_boundary_logits(
                     logits[..., : self.vocabulary_size], data.attention_mask, data.ftpo_chosen_mask
                 )
-                return boundary_logits.new_zeros(()), {"log_probs": boundary_logits}
+                return boundary_logits.new_zeros(()), {"scores": boundary_logits}
 
             if temperature != 1.0:
                 logits.div_(temperature)
 
             token_logprobs = self._token_logprobs(logits, sequences, data.attention_mask.to(bool), packed_seq_params)
-            return torch.tensor(0.0, device=token_logprobs.device), {"log_probs": token_logprobs}
+            return torch.tensor(0.0, device=token_logprobs.device), {"scores": token_logprobs}
 
         def forward_step(batch_iter, model):
             batch = next(batch_iter)
@@ -395,18 +396,18 @@ class MegatronModelWrapper:
             self.router_replay.pop_metrics()
 
         if mpu.is_pipeline_last_stage(ignore_virtual=True):
-            log_probs = [o["log_probs"] for o in output]
-            log_probs = torch.cat(log_probs, dim=0)
+            scores = [o["scores"] for o in output]
+            scores = torch.cat(scores, dim=0)
             # take last num_actions tokens per micro; concatenate later
             # Assume all micros have same num_actions
             num_actions = micro_batches[0].num_actions
             if micro_batches[0].ftpo_chosen_mask is None:
-                log_probs = log_probs[:, -num_actions:]
+                scores = scores[:, -num_actions:]
         else:
             # return dummy tensor for non-last pp stages
             device = micro_batches[0].sequences.device
-            log_probs = torch.zeros(size=(1, 1), dtype=torch.bfloat16, device=device)
-        return log_probs
+            scores = torch.zeros(size=(1, 1), dtype=torch.bfloat16, device=device)
+        return scores
 
     def _distillation_student_logprobs(
         self,

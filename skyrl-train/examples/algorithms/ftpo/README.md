@@ -14,7 +14,8 @@ trainer.policy.megatron_config.tensor_model_parallel_size=1 \
 trainer.ref.megatron_config.tensor_model_parallel_size=1 \
 trainer.policy.megatron_config.context_parallel_size=1 \
 trainer.ref.megatron_config.context_parallel_size=1 \
-generator.sampling_params.logprobs=32
+generator.sampling_params.logprobs=32 \
++generator.engine_init_kwargs.max_logprobs=32
 ```
 
 The recipe replaces reward advantages with an FTPO objective; reward grading may

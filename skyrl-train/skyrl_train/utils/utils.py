@@ -42,7 +42,7 @@ from skyrl_train.env_vars import (
 from skyrl_train.group_admission import resolve_group_advantage_invariant
 from skyrl_train.trajectory_selection import optimization_samples_per_prompt, trajectory_selector_from_config
 from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
-from marinskyrl.runtime_options import reference_model_required
+from marinskyrl.runtime_options import PolicyLossType, reference_model_required
 from marinskyrl.rollout_grading import validate_nemotron_ultra_grading
 from marinskyrl.process_diagnostics import initialize_process_diagnostics
 from marinskyrl.distillation import (
@@ -737,7 +737,7 @@ def validate_generator_cfg(cfg: DictConfig):
 
     if cfg.generator.sampling_params.logprobs is not None:
         assert isinstance(cfg.generator.sampling_params.logprobs, int)
-        if cfg.generator.sampling_params.logprobs > 0:
+        if cfg.generator.sampling_params.logprobs > 0 and cfg.trainer.algorithm.policy_loss_type != PolicyLossType.FTPO:
             plan = compile_distillation_plan_from_config(cfg)
             widths = {teacher.top_k for teacher in plan.teachers} if plan is not None else set()
             if (
@@ -748,7 +748,7 @@ def validate_generator_cfg(cfg: DictConfig):
             ):
                 raise ValueError(
                     "positive generator.sampling_params.logprobs requires a local vLLM "
-                    "student_topk_policy_surrogate plan with matching teacher top_k"
+                    "student_topk_policy_surrogate plan with matching teacher top_k, or FTPO"
                 )
         if not cfg.generator.run_engines_locally:
             raise NotImplementedError("Remote inference mode doesn't support `sampling_params.logprobs`")
