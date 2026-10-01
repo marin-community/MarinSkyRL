@@ -255,17 +255,6 @@ class TrainingContext:
         metadata = await self.next_batch_metadata(stall_timeout=stall_timeout, on_admitted=fetch_admitted)
         return groups, metadata.metrics
 
-    async def fetch_batch_slice(
-        self, metadata: RolloutBatchMetadata, start: int, stop: int, *, stall_timeout: float
-    ) -> list[RolloutGroup]:
-        """Fetch selected groups by stable batch index, preserving their metadata order."""
-        if not 0 <= start <= stop <= len(metadata.groups):
-            raise ValueError(f"invalid rollout batch slice [{start}:{stop}] for {len(metadata.groups)} groups")
-        selected = metadata.groups[start:stop]
-        if not selected:
-            return []
-        return await self._fetch_groups(metadata.batch_id, selected, stall_timeout=stall_timeout)
-
     async def _fetch_groups(
         self, batch_id: int, selected: tuple[AdmittedRollout, ...], *, stall_timeout: float
     ) -> list[RolloutGroup]:

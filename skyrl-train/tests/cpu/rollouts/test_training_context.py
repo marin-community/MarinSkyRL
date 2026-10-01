@@ -261,20 +261,15 @@ async def test_batch_metadata_supports_worker_index_fetch(ray_module, start_buff
         assert all(group.response_tokens == SAMPLES_PER_PROMPT for group in metadata.groups)
         assert metadata.metrics["async/rejected_count"] == 0
 
-        worker_uids = await ray.remote(fetch_selected_uids).remote(
-            context._buffer, metadata.batch_id, (1, 0), store.object_store_root
+        fetch = ray.remote(fetch_selected_uids)
+        worker_uids = await asyncio.gather(
+            fetch.remote(context._buffer, metadata.batch_id, (1,), store.object_store_root),
+            fetch.remote(context._buffer, metadata.batch_id, (0,), store.object_store_root),
         )
-        assert worker_uids == [metadata.groups[1].uid, metadata.groups[0].uid]
+        assert worker_uids == [[metadata.groups[1].uid], [metadata.groups[0].uid]]
         assert payloads.fetched == []
-
-        second = await context.fetch_batch_slice(metadata, 1, 2, stall_timeout=STALL_TIMEOUT)
-        first = await context.fetch_batch_slice(metadata, 0, 1, stall_timeout=STALL_TIMEOUT)
     finally:
         await context.close()
-
-    assert [group.uid for group in second + first] == [metadata.groups[1].uid, metadata.groups[0].uid]
-    assert len(payloads.fetched) == 2
-    assert all(len(batch) == 1 for batch in payloads.fetched)
 
 
 @pytest.mark.asyncio
