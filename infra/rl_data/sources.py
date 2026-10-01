@@ -125,8 +125,8 @@ NEMOTRON_ULTRA_RLVR2_AGENTS = NEMOTRON_ULTRA_RLVR1_AGENTS | {
 NEMOTRON_ULTRA_SWE_AGENT = "swe_pivot_single_step_tool_use_with_argument_comparison_agent"
 # Row metadata key naming the TaskTrove proxy task bound to a Harbor SWE row.
 TASKTROVE_PROXY_PATH_KEY = "tasktrove_proxy_path"
-# The MOPD blend adds one generator whose verifier has not been ported; rows using it are
-# accepted by the source and rejected by the environment, so subsets must exclude it.
+# The MOPD blend adds one generator whose verifier has not been ported, so its rows train only
+# under environment.skyrl_gym.nemotron_ultra.grading: skip.
 NEMOTRON_ULTRA_MOPD_AGENTS = NEMOTRON_ULTRA_RLVR2_AGENTS | {"indirect_prompt_injection_simple_agent"}
 _NEMOTRON_PLACEHOLDER_KEY = "_hf_question_placeholder"
 _NEMOTRON_DAPO_PREFIX = (

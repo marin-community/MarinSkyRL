@@ -85,10 +85,6 @@ def test_snowball_mopd_smoke_route_weights_survive_config_composition():
 
 def test_snowball_mopd_32k_recipe_composes_against_the_base_config():
     """compose_skyrl_config rejects keys the base config dropped, which only a launch would reveal."""
-
-    class _HPCStub:
-        gpus_per_node = 8
-
     config = Path(__file__).parents[1] / "configs" / "snowball_mopd_ultra_32k.yaml"
     parsed = parse_rl_config(str(config), model_override=STUDENT)
     cfg = compose_skyrl_config(
