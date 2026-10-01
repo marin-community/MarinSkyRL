@@ -7,9 +7,10 @@
 # Harbor SWE rows need controller ingress so their external sandboxes can reach the model.
 # This recipe excludes those rows; the SWE teacher still scores non-Harbor generators.
 # ns_tools and Lean use the in-cluster sandbox.
-# Reserve host-memory headroom for optimizer state and checkpoint staging on each node.
+# With this Snowball layout and CPU optimizer offload, a learner exceeded the 512 GiB
+# allocation during checkpoint saving. The tested launch used 768 GB per node and saved
+# four checkpoints; size host memory for the model, placement and checkpoint workload.
 entrypoint: standard
-minimum_host_memory: 768GB
 
 context_budget:
   # Chosen-token scoring needs one position beyond the student window.
