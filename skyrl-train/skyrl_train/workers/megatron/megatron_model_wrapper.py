@@ -4,6 +4,7 @@ from functools import partial
 from typing import Any, Callable, List, Optional
 
 import torch
+from loguru import logger
 import torch.nn as nn
 from omegaconf import OmegaConf
 
@@ -54,10 +55,11 @@ from skyrl_train.models.megatron_router_replay import dense_replay_targets
 _UNSET = object()
 
 
-@dataclass(frozen=True)
 def _cat_count_divergent_gradients(model_chunks, *args, **kwargs):
     rank = torch.distributed.get_rank()
-    local_gradients = [(p, p.main_grad.clone()) for m in model_chunks for p in m.parameters()] if rank == 1 else []
+    local_gradients = (
+        [(p, p.main_grad.clone()) for m in model_chunks for p in m.parameters() if p.requires_grad] if rank == 1 else []
+    )
     finalize_model_grads(model_chunks, *args, **kwargs)
     if rank == 1:
         maximum = 0.0
@@ -70,6 +72,7 @@ def _cat_count_divergent_gradients(model_chunks, *args, **kwargs):
         )
 
 
+@dataclass(frozen=True)
 class MegatronForwardMicroBatch:
     """Typed forward-only payload consumed by the Megatron pipeline scheduler."""
 
