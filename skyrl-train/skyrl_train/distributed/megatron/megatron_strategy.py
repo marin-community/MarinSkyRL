@@ -23,6 +23,7 @@ from skyrl_train.distributed.megatron.megatron_utils import (
     load_megatron_model_to_gpu,
     offload_megatron_optimizer,
     load_megatron_optimizer,
+    load_megatron_copy_params,
     offload_megatron_grads_to_cpu,
     load_megatron_grads_to_gpu,
     materialize_megatron_params,
@@ -312,6 +313,12 @@ class MegatronStrategy(DistributedStrategy):
                 # gradients resident that second copy is what OOMs a policy that trains fine.
                 # The empty buffers come back after the optimizer state is restored below.
                 offload_megatron_grads_to_cpu(model)
+                # HybridDeviceOptimizer rebuilds its CPU-copy maps during load.
+                # Its original master parameters must be on GPU at that point;
+                # otherwise CPU-resident originals are mistaken for CPU copies
+                # and the first resumed optimizer step cannot find their source.
+                # Keep gradients released and optimizer moments offloaded.
+                load_megatron_copy_params(optimizer)
                 sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(
                     model_sharded_state_dict,
                     is_loading=True,
