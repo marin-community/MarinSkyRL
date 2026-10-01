@@ -9,6 +9,7 @@ import torch
 from transformers import AutoModelForCausalLM
 
 from marinskyrl.checkpoint_paths import POLICY_CHECKPOINT_SUBDIRECTORY
+from skyrl_train.checkpoint_generation import resolve_checkpoint_payload
 from tests.cpu.tiny_training.cpu_backend import CHECKPOINT_FILE_TEMPLATE, CausalLMPolicy
 from tests.cpu.tiny_training.fixed_batch import fixed_training_batch, run_fixed_update
 from skyrl_train.rollouts.payloads import ROLLOUT_OBJECT_SUFFIX
@@ -139,7 +140,8 @@ def test_async_training_resumes_with_committed_groups(runs: ForkServerContext, t
     # The first two batches' leases open together, so the second batch's groups commit while the first trains
     # and its checkpoint holds them. A later step's leases open only when its batch is taken, and whether they
     # commit before that step's checkpoint is a race.
-    state = torch.load(tmp_path / "ckpts" / f"global_step_{RESUMED_STEP}" / "data.pt", weights_only=False)
+    step_path = tmp_path / "ckpts" / f"global_step_{RESUMED_STEP}"
+    state = torch.load(Path(resolve_checkpoint_payload(str(step_path))) / "data.pt", weights_only=False)
     assert state.ready
 
     _train(runs, tmp_path, tiny_policy, mode, shape, steps=NUM_STEPS, checkpoint_interval=1)

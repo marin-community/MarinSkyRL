@@ -166,7 +166,6 @@ class CheckpointSnapshot:
     marker_path: str
 
 
-_MEGATRON_RECEIPTS = "worker_receipts.json"
 _DRIVER_RNG_STATE = "driver_rng_state.pt"
 _ROLLOUT_STATE_FILENAME = "data.pt"
 
@@ -812,31 +811,25 @@ class RayPPOTrainer:
         )
         save_error: Exception | None = None
         try:
-            ranks = self._settle_checkpoint_refs(refs, operation=f"{component} save")
+            self._settle_checkpoint_refs(refs, operation=f"{component} save")
         except Exception as error:
             save_error = error
-            ranks = []
         # A successful save RPC only stages its upload. Every rank must settle
         # before a new attempt can use the same worker or become visible.
         wait_refs = actors.async_run_ray_method("pass_through", "wait_checkpoint_upload")
         self._settle_checkpoint_refs(wait_refs, operation=f"{component} upload")
         if save_error is not None:
             raise save_error
-        if not refs or sorted(ranks) != list(range(len(refs))):
-            raise RuntimeError(f"{component} worker receipts incomplete: {ranks}")
-        io.write_bytes_atomic(
-            os.path.join(component_path, _MEGATRON_RECEIPTS),
-            json.dumps({"component": component, "ranks": ranks}, sort_keys=True).encode(),
-        )
+        if not refs:
+            raise RuntimeError(f"{component} has no checkpoint workers")
         required = {
             f"{component}/.metadata",
             f"{component}/common.pt",
             f"{component}/metadata.json",
             f"{component}/{MEGATRON_EXTRA_STATE_FILENAME}",
             f"{component}/huggingface/config.json",
-            f"{component}/{_MEGATRON_RECEIPTS}",
         }
-        required.update(f"{component}/__{rank}_0.distcp" for rank in ranks)
+        required.update(f"{component}/__{rank}_0.distcp" for rank in range(len(refs)))
         return required
 
     def _save_megatron_workers(self, attempt_path: str) -> set[str]:
