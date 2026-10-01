@@ -525,6 +525,9 @@ def materialize_launch_config(
 def load_rl_recipe(config_path: str) -> DictConfig:
     """Compose a source recipe with Hydra defaults before deriving launch settings."""
     path = resolve_rl_config_path(config_path)
+    raw = OmegaConf.load(path)
+    if "defaults" not in raw:
+        return raw
     with initialize_config_dir(version_base=None, config_dir=str(path.parent)):
         return compose(
             config_name=path.name,
