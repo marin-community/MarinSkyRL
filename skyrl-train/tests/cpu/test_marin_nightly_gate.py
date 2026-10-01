@@ -352,6 +352,9 @@ def test_cat_count_shipped_specs_require_learning_from_step_zero(lane, mutation)
         "policy/mismatch/pooled/log_ratio_abs_mean": 0.01,
         "async/staleness_mean": 1.0,
         "tis/skipped_fraction": 0.0,
+        "environment/exact_n10": 0.5,
+        "environment/exact_n20": 0.25,
+        "policy/rollout_train_prob_diff_mean": 1.003,
     }
     steps = [StepMetrics("train", step, metrics) for step in range(1, max(10, spec.min_train_steps) + 1)]
     evaluations = [

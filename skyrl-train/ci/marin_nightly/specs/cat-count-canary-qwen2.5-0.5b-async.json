@@ -1,7 +1,6 @@
 {
   "provenance": {
     "what": "CatCount learning through Megatron with pretrained Qwen2.5-0.5B-Instruct.",
-    "status": "Local preparation; final seed measurements must fill calibrated numbers before publication.",
     "lane": "async",
     "runtime_sha": "1f130218e56590075363d59cd94fb97c292d65e0",
     "learning_rate": 2e-06,
@@ -16,10 +15,21 @@
     ],
     "early_stop_margin": 0.2,
     "margin_contract": "The launcher stop_on_improvement margin equals this spec min_improvement.",
-    "step_cap_rule": "Worst first crossing over four final seeds plus five steps."
+    "step_cap_rule": "Worst first crossing over four final seeds plus five steps.",
+    "marin_sha": "c57ae7b8de8a905dcd89f1b021e1ec351e534001",
+    "first_crossing_steps": [
+      20,
+      35,
+      15,
+      45
+    ],
+    "step_cap": 50,
+    "staleness": 2,
+    "eval_interval": 5,
+    "log_ratio_observed_maximum": 0.5917172267140303
   },
   "min_train_steps": 5,
-  "max_wall_clock_seconds": 7200,
+  "max_wall_clock_seconds": 3600,
   "metric_series": [
     {
       "kind": "eval",
@@ -107,7 +117,7 @@
       "finite_every_step": true,
       "bounds": {
         "minimum": 0,
-        "maximum": 0.2
+        "maximum": 0.8
       }
     },
     {
@@ -120,6 +130,28 @@
         "minimum_count": 1,
         "comparison": "above",
         "threshold": 0
+      }
+    },
+    {
+      "kind": "train",
+      "metric": "environment/exact_n10",
+      "required": true,
+      "min_observations": 5,
+      "finite_every_step": true,
+      "bounds": {
+        "minimum": 0,
+        "maximum": 1
+      }
+    },
+    {
+      "kind": "train",
+      "metric": "environment/exact_n20",
+      "required": true,
+      "min_observations": 5,
+      "finite_every_step": true,
+      "bounds": {
+        "minimum": 0,
+        "maximum": 1
       }
     }
   ],

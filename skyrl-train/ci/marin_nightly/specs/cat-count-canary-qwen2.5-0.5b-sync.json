@@ -1,7 +1,6 @@
 {
   "provenance": {
     "what": "CatCount learning through Megatron with pretrained Qwen2.5-0.5B-Instruct.",
-    "status": "Local preparation; final seed measurements must fill calibrated numbers before publication.",
     "lane": "sync",
     "runtime_sha": "1f130218e56590075363d59cd94fb97c292d65e0",
     "learning_rate": 2e-06,
@@ -16,10 +15,22 @@
     ],
     "early_stop_margin": 0.2,
     "margin_contract": "The launcher stop_on_improvement margin equals this spec min_improvement.",
-    "step_cap_rule": "Worst first crossing over four final seeds plus five steps."
+    "step_cap_rule": "Worst first crossing over four final seeds plus five steps.",
+    "marin_sha": "c57ae7b8de8a905dcd89f1b021e1ec351e534001",
+    "first_crossing_steps": [
+      5,
+      15,
+      20,
+      10
+    ],
+    "step_cap": 25,
+    "staleness": 0,
+    "eval_interval": 5,
+    "weight_sync_fidelity": "Initial pre-update mean exp(logprob difference) is within 0.98\u20131.02; pooled mean absolute log-ratio is at most 0.05 on every step. Later exponential means can contain rare-token outliers (observed maximum 2.1551).",
+    "log_ratio_observed_maximum": 0.03252034578386481
   },
   "min_train_steps": 5,
-  "max_wall_clock_seconds": 7200,
+  "max_wall_clock_seconds": 3600,
   "metric_series": [
     {
       "kind": "eval",
@@ -107,7 +118,7 @@
       "finite_every_step": true,
       "bounds": {
         "minimum": 0,
-        "maximum": 0.2
+        "maximum": 0.05
       }
     },
     {
@@ -119,6 +130,40 @@
       "bounds": {
         "minimum": 0,
         "maximum": 0
+      }
+    },
+    {
+      "kind": "train",
+      "metric": "environment/exact_n10",
+      "required": true,
+      "min_observations": 5,
+      "finite_every_step": true,
+      "bounds": {
+        "minimum": 0,
+        "maximum": 1
+      }
+    },
+    {
+      "kind": "train",
+      "metric": "environment/exact_n20",
+      "required": true,
+      "min_observations": 5,
+      "finite_every_step": true,
+      "bounds": {
+        "minimum": 0,
+        "maximum": 1
+      }
+    },
+    {
+      "kind": "train",
+      "metric": "policy/rollout_train_prob_diff_mean",
+      "required": true,
+      "min_observations": 1,
+      "finite_every_step": true,
+      "at_step": 1,
+      "bounds": {
+        "minimum": 0.98,
+        "maximum": 1.02
       }
     }
   ],
