@@ -6,7 +6,8 @@
 # Build a sample with infra/rl_data/nemotron_ultra_mopd_subset.py --swe-rows N, keep only its
 # Harbor SWE rows, and pass its swe-tasks/tasks.parquet through data.terminal_bench_data.
 # opencode runs in a Daytona sandbox, which reaches the rollout engines only through controller
-# ingress: launch with ingress.mode controller, federated through marin.
+# ingress: launch with ingress.mode controller. Set ingress.record_literal so the RecordProxy log
+# supplies opencode's token IDs, which Harbor does not return natively.
 entrypoint: standard
 
 config_groups:
@@ -27,7 +28,8 @@ terminal_bench:
     collect_rollout_details: true
     override_setup_timeout_sec: 600
     override_timeout_sec: 1800
-    verifier_override_timeout_sec: 300
+    # TaskTrove SWE verifiers need a Together API key, and distillation ignores the reward.
+    verifier_disable: true
     override_cpus: 1
     override_memory_mb: 4096
     override_storage_mb: 4096
@@ -35,7 +37,8 @@ terminal_bench:
     env_network_policy:
       mode: unrestricted
     max_retries: 3
-    n_concurrent_trials: 16
+    # Every trial of a step runs at once, so a group finishes within one agent timeout.
+    n_concurrent_trials: 32
     enable_reward_shaping: false
     enable_error_classification: true
     default_error_treatment: zero
@@ -74,7 +77,7 @@ trainer:
       coefficient: 1.0
       reward_mode: replace
     group_admission:
-      # A Harbor trial may take 600 s setup, 1800 s agent, and 300 s verifier time.
+      # A Harbor trial may take 600 s setup and 1800 s agent time.
       stall_timeout: 3600
   epochs: 1
   max_steps: 2
