@@ -55,6 +55,21 @@ _UNSET = object()
 
 
 @dataclass(frozen=True)
+def _cat_count_divergent_gradients(model_chunks, *args, **kwargs):
+    rank = torch.distributed.get_rank()
+    local_gradients = [(p, p.main_grad.clone()) for m in model_chunks for p in m.parameters()] if rank == 1 else []
+    finalize_model_grads(model_chunks, *args, **kwargs)
+    if rank == 1:
+        maximum = 0.0
+        for parameter, local in local_gradients:
+            maximum = max(maximum, (parameter.main_grad - local).abs().max().item())
+            parameter.main_grad.copy_(local)
+        logger.info(
+            "CAT_COUNT_MUTATION completed_step_divergence rank=1 unsynchronized_gradients=true max_local_reduced_difference={}",
+            maximum,
+        )
+
+
 class MegatronForwardMicroBatch:
     """Typed forward-only payload consumed by the Megatron pipeline scheduler."""
 
@@ -123,7 +138,7 @@ class MegatronModelWrapper:
         config = get_model_config(self.actor_module[0])
         # This is set to None by default: https://github.com/NVIDIA/Megatron-LM/blob/07b22a05136a3cb08ece05f7de38cf6aeeb165fb/megatron/core/model_parallel_config.py#L95
         # use the build in finalize_model_grads function to all reduce gradients across parallelism dimensions
-        config.finalize_model_grads_func = finalize_model_grads
+        config.finalize_model_grads_func = _cat_count_divergent_gradients
 
     def train(self):
         [module.train() for module in self.actor_module]

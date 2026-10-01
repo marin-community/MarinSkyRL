@@ -46,7 +46,7 @@ def init_megatron_optim_config(optim_config: dict, optimizer_config_kwargs: dict
         "weight_decay": optim_config.get("weight_decay", 0.01),
         "bf16": True,
         "params_dtype": torch.bfloat16,
-        "use_distributed_optimizer": True,
+        "use_distributed_optimizer": False,
     }
 
     if _optim_name == "adam":

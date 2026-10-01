@@ -175,7 +175,7 @@ class MegatronWorker:
 
         default_ddp_config = DistributedDataParallelConfig()
         if wrap_with_ddp:
-            default_ddp_config.use_distributed_optimizer = True
+            default_ddp_config.use_distributed_optimizer = False
         if ddp_config is not None:
             for k, v in ddp_config.items():
                 setattr(default_ddp_config, k, v)
@@ -589,6 +589,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                             consecutive_nonfinite_steps=self._consecutive_nonfinite_steps,
                             max_consecutive_nonfinite_steps=self.cfg.trainer.policy.max_consecutive_nonfinite_steps,
                         )
+                    logger.info(
+                        "CAT_COUNT_MUTATION optimizer_completed rank={} applied={}",
+                        torch.distributed.get_rank(),
+                        step_result.applied,
+                    )
                     checksum_mismatch = None
                     if self.cfg.trainer.policy.megatron_config.check_dp_weight_consistency:
                         with timing.span("megatron_dp_weight_checksum"):
