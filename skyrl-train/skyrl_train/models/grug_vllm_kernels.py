@@ -43,6 +43,10 @@ VLLM_MAX_CUDA_GRAPH_TOKENS = 512
 H100_SMS = 132
 # ``vllm_experts`` addresses each expert's weights in units of this many elements from the lowest-addressed one.
 EXPERT_OFFSET_ELEMENTS = 16
+# ``_expert_offset_table``'s tables by expert-weight addresses; cleared when it holds this many (parameters that move,
+# for example when the model is offloaded and reloaded, leave old entries behind).
+_EXPERT_OFFSET_TABLE_LIMIT = 256
+_EXPERT_OFFSET_TABLES: dict[tuple, tuple[int, torch.Tensor]] = {}
 # The probe engines' ``max_num_batched_tokens``: the rows of a full vLLM prefill step.
 VLLM_MAX_BATCHED_TOKENS = 8192
 # Model runner V2 computes prompt log-probabilities from LM-head calls of this many rows
@@ -566,6 +570,25 @@ def vllm_qkv_projection(
     return torch.cat([part.view(*x.shape[:-1], groups, -1) for part in parts], dim=-1).view(*x.shape[:-1], -1)
 
 
+def _expert_offset_table(weights: Sequence[torch.Tensor], device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+    """The lowest-addressed expert weight and the experts' ``expert_weight_offsets`` table on ``device``.
+
+    The table depends only on the weights' addresses, which the trainer's expert parameters keep from call to call,
+    so it is built once per set of addresses (and again after the parameters move).
+    """
+    addresses = tuple(weight.data_ptr() for weight in weights)
+    key = (device, addresses, tuple(weights[0].shape), weights[0].dtype)
+    cached = _EXPERT_OFFSET_TABLES.get(key)
+    if cached is None:
+        lowest = min(range(len(weights)), key=addresses.__getitem__)
+        table = torch.tensor(expert_weight_offsets(weights, weights[lowest]), dtype=torch.int64, device=device)
+        if len(_EXPERT_OFFSET_TABLES) >= _EXPERT_OFFSET_TABLE_LIMIT:
+            _EXPERT_OFFSET_TABLES.clear()
+        cached = _EXPERT_OFFSET_TABLES[key] = (lowest, table)
+    lowest, table = cached
+    return weights[lowest], table
+
+
 def _fused_moe_gemm(
     inputs: torch.Tensor,
     weights: Sequence[torch.Tensor],
@@ -580,10 +603,8 @@ def _fused_moe_gemm(
     from vllm.model_executor.layers.fused_moe.fused_moe import invoke_fused_moe_triton_kernel
     from vllm.triton_utils import tl
 
-    base = min(weights, key=lambda weight: weight.data_ptr())
+    base, table = _expert_offset_table(weights, inputs.device)
     rows, columns = base.shape
-    table = torch.tensor(expert_weight_offsets(weights, base), dtype=torch.int64)
-    table = table.pin_memory().to(inputs.device, non_blocking=True)
     # Blocks past the padded row count keep whatever moe_align_block_size left there; the kernel returns before
     # reading their expert, so any in-range value serves.
     block_offsets = table[block_experts.long().clamp(0, len(weights) - 1)]
