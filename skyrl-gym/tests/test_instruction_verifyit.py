@@ -132,7 +132,7 @@ def test_invalid_reference_discards_all_credit(reference):
 
 @pytest.mark.parametrize("output", ["truthy", 1, float("nan"), None])
 def test_checker_requires_boolean_output(output):
-    passed, detail = _check('"candidate"', {}, lambda text: output)
+    passed, detail = _check("candidate", {}, lambda text: output)
     assert passed is False
     assert json.loads(detail)["error"] is not None
 
@@ -237,10 +237,10 @@ def test_registry_collision_is_invalid_task(monkeypatch):
 
     monkeypatch.setitem(
         CONSTRAINTS,
-        "marin_skyrl:rlvr:validate_no_commas:0",
+        "marin_skyrl:rlvr:validate_title:0",
         lambda text, params: (True, "unexpected entry"),
     )
-    verdict = _evaluate("standalone", "plain", {"func_name": "validate_no_commas"})
+    verdict = _evaluate("standalone", "<<title>>", {"func_name": "validate_title"})
     assert verdict["status"] == "invalid_task"
     assert verdict["reward"] == 0.0
 
@@ -259,6 +259,6 @@ def test_standalone_detector_failure_discards_prior_fraction():
 def test_nontext_candidate_frame_cannot_satisfy_source_predicate():
     from skyrl_gym.envs.ifeval.utils import validate_no_commas
 
-    passed, detail = _check("{}", {}, validate_no_commas)
+    passed, detail = _check({}, {}, validate_no_commas)
     assert passed is False
     assert json.loads(detail)["error"] is not None

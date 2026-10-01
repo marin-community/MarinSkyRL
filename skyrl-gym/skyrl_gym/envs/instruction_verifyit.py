@@ -5,12 +5,7 @@ from __future__ import annotations
 import inspect
 import json
 import math
-import os
 import random
-import shlex
-import sys
-import tempfile
-from pathlib import Path
 from typing import Any
 
 
@@ -50,10 +45,9 @@ def _validated_random_state(value):
 
 def _check(text: str, params: dict, predicate) -> tuple[bool, str]:
     try:
-        decoded = json.loads(text)
-        if not isinstance(decoded, str):
+        if not isinstance(text, str):
             raise RuntimeError("Instruction candidate frame must contain text")
-        passed = predicate(decoded, **params)
+        passed = predicate(text, **params)
         if type(passed) is not bool:
             raise RuntimeError("Instruction checker returned a nonboolean result")
         return passed, json.dumps({"passed": passed, "error": None})
@@ -283,9 +277,9 @@ def _references(kind: str, data: Any, *, runtime: bool = False):
 
 
 def _evaluate(kind: str, text: str, data: Any, *, runtime: bool = False) -> dict:
-    from verifyit.grade import Status, run
-    from verifyit.modes.ifeval import CONSTRAINTS
-    from verifyit.spec import Constraint, IfevalSpec, render_spec
+    from verifyit.grade import InvalidTask
+    from verifyit.modes.grade_ifeval import grade_ifeval_candidate
+    from verifyit.spec import Constraint, EmptyOutputPolicy, IfevalSpec
 
     try:
         references, mode, decoded = _references(kind, data, runtime=runtime)
@@ -298,54 +292,58 @@ def _evaluate(kind: str, text: str, data: Any, *, runtime: bool = False) -> dict
                 "error_message": "Invalid instruction configuration",
             },
         }
-    results = []
-    errors = []
-    with tempfile.TemporaryDirectory(prefix="skyrl-instruction-checks-") as temporary:
-        root = Path(temporary)
-        (root / "response.txt").write_text(json.dumps(text))
-        names = [name + ":" + str(index) for index, (name, _, _) in enumerate(references)]
-        if any(name in CONSTRAINTS for name in names):
-            return {
-                "status": "invalid_task",
-                "reward": 0.0,
-                "detail": {
-                    "error_type": "schema_error",
-                    "error_message": "Instruction registry collision",
+    constraints = []
+    registry = {}
+    for index, (name, params, predicate) in enumerate(references):
+        if name == "marin_skyrl:rlvr:verify_keywords":
+            name, params = (
+                "keywords:existence",
+                {
+                    "keywords": params["keyword_list"],
+                    "word_boundary": False,
                 },
-            }
-        for index, (name, params, predicate) in enumerate(references):
-            name = names[index]
+            )
+        elif name == "marin_skyrl:rlvr:validate_forbidden_words":
+            name, params = (
+                "keywords:forbidden_words",
+                {
+                    **params,
+                    "word_boundary": False,
+                },
+            )
+        elif name == "marin_skyrl:rlvr:validate_no_commas":
+            name = "punctuation:no_comma"
+        elif name in {
+            "marin_skyrl:nvidia:punctuation:no_comma",
+            "marin_skyrl:nvidia:punctuation:punctuation_dot",
+            "marin_skyrl:nvidia:punctuation:punctuation_exclamation",
+        }:
+            name = name.removeprefix("marin_skyrl:nvidia:")
+        else:
+            name += ":" + str(index)
 
-            # The registered entry executes one named source predicate. IFEval owns its verdict.
             def check(candidate, arguments, predicate=predicate):
                 return _check(candidate, arguments, predicate)
 
-            CONSTRAINTS[name] = check
-            spec = IfevalSpec((Constraint(name, params),), output=str(root / "response.txt"))
-            (root / "verifier.toml").write_text(render_spec(spec))
-            verdict = run(root / "verifier.toml", root)
-            if verdict.status is not Status.SCORED:
-                return {
-                    "status": "infra_error",
-                    "reward": 0.0,
-                    "detail": {
-                        "error_type": "verification_error",
-                        "error_message": "Unscored instruction verdict",
-                    },
-                }
-            try:
-                result = json.loads(verdict.detail["constraints"][0]["detail"])
-            except (ValueError, KeyError, IndexError, TypeError):
-                return {
-                    "status": "infra_error",
-                    "reward": 0.0,
-                    "detail": {
-                        "error_type": "verification_error",
-                        "error_message": "Invalid instruction verdict",
-                    },
-                }
-            results.append(verdict.reward == 1.0)
-            errors.append(result["error"])
+            registry[name] = check
+        constraints.append(Constraint(name, params))
+    try:
+        verdict = grade_ifeval_candidate(
+            IfevalSpec(tuple(constraints), empty_output=EmptyOutputPolicy.GRADE),
+            text,
+            registry=registry,
+        )
+    except InvalidTask:
+        return {
+            "status": "invalid_task",
+            "reward": 0.0,
+            "detail": {"error_type": "schema_error"},
+        }
+    results = []
+    errors = []
+    for result in verdict.detail["constraints"]:
+        results.append(result["passed"])
+        errors.append(json.loads(result["detail"])["error"] if result["name"] in registry else None)
     if any(errors):
         return {
             "status": "infra_error",
@@ -383,8 +381,7 @@ def _evaluate(kind: str, text: str, data: Any, *, runtime: bool = False) -> dict
 
 def _execute(kind: str, text: str, data: Any, timeout: float) -> tuple[float, dict]:
     try:
-        from verifyit.grade import Status, run
-        from verifyit.spec import ScriptSpec, render_spec
+        from verifyit.bounded import call_bounded
 
         if (
             isinstance(timeout, bool)
@@ -396,42 +393,21 @@ def _execute(kind: str, text: str, data: Any, timeout: float) -> tuple[float, di
                 "error_type": "schema_error",
                 "error_message": "Invalid instruction deadline",
             }
-        with tempfile.TemporaryDirectory(prefix="skyrl-instruction-runtime-") as temporary:
-            root = Path(temporary)
-            (root / "input.json").write_text(
-                json.dumps(
-                    {
-                        "kind": kind,
-                        "text": text,
-                        "data": data,
-                        "random_state": (random.getstate() if kind == "nemotron" else None),
-                    },
-                    allow_nan=False,
-                )
-            )
-            (root / "checker.sh").write_text(
-                "#!/bin/sh\nexec "
-                + shlex.quote(sys.executable)
-                + " "
-                + shlex.quote(str(Path(__file__).resolve()))
-                + " --check "
-                + shlex.quote(str(root / "input.json"))
-                + "\n"
-            )
-            spec = ScriptSpec(
-                path="checker.sh",
-                timeout=timeout,
-                verdict_file="instruction-verdict.json",
-            )
-            (root / "verifier.toml").write_text(render_spec(spec))
-            verdict = run(root / "verifier.toml", root)
-        if verdict.status is not Status.SCORED:
-            category = "schema_error" if verdict.status is Status.INVALID_TASK else "verification_error"
+        verdict = call_bounded(
+            _evaluate_with_state,
+            kind,
+            text,
+            data,
+            random.getstate() if kind == "nemotron" else None,
+            timeout=timeout,
+        )
+        if verdict["status"] != "scored":
+            category = "schema_error" if verdict["status"] == "invalid_task" else "verification_error"
             return 0.0, {
                 "error_type": category,
                 "error_message": "Instruction verifier failed or exceeded deadline",
             }
-        feedback = verdict.detail["source_feedback"]
+        feedback = verdict["detail"]["source_feedback"]
         if not isinstance(feedback, dict):
             raise ValueError("Malformed instruction feedback")
         if kind == "nemotron":
@@ -452,12 +428,12 @@ def _execute(kind: str, text: str, data: Any, timeout: float) -> tuple[float, di
                 or feedback["num_total"] != len(results)
                 or mode != data.get("grading_mode", "binary")
                 or mode not in {"binary", "fraction"}
-                or verdict.reward != (float(all(results)) if mode == "binary" else sum(results) / len(results))
+                or verdict["reward"] != (float(all(results)) if mode == "binary" else sum(results) / len(results))
             ):
                 raise ValueError("Malformed instruction feedback")
-            next_state = _validated_random_state(verdict.detail["random_state"])
+            next_state = _validated_random_state(verdict["detail"]["random_state"])
             random.setstate(next_state)
-        return verdict.reward, feedback
+        return verdict["reward"], feedback
     except Exception:
         return 0.0, {
             "error_type": "verification_error",
@@ -482,62 +458,11 @@ def grade_nemotron_instructions(text: str, record: dict, timeout: float = 30.0) 
     return _execute("nemotron", text, record, timeout)
 
 
-def _main():
-    import dataclasses
-    from enum import Enum
-
-    def plain(value):
-        if dataclasses.is_dataclass(value):
-            return plain(dataclasses.asdict(value))
-        if isinstance(value, Enum):
-            return value.value
-        if isinstance(value, dict):
-            return {key: plain(item) for key, item in value.items()}
-        if isinstance(value, (list, tuple)):
-            return [plain(item) for item in value]
-        return value
-
-    payload = json.loads(Path(sys.argv[2]).read_text())
-    calls = []
-    active = {}
-
-    def observe(frame, event, arg):
-        if frame.f_code.co_name != "grade" or not frame.f_code.co_filename.endswith("/verifyit/modes/grade_ifeval.py"):
-            return
-        if event == "call":
-            item = {
-                "path": frame.f_code.co_filename,
-                "spec": plain(frame.f_locals["spec"]),
-            }
-            calls.append(item)
-            active[id(frame)] = item
-        elif event == "return" and id(frame) in active:
-            active.pop(id(frame))["verdict"] = plain(arg)
-
-    sys.setprofile(observe)
-    try:
-        runtime = payload["kind"] == "nemotron"
-        if runtime:
-            random.setstate(_validated_random_state(payload["random_state"]))
-        verdict = _evaluate(payload["kind"], payload["text"], payload["data"], runtime=runtime)
-        if runtime and verdict["status"] == "scored":
-            verdict["detail"]["random_state"] = random.getstate()
-    except Exception:
-        verdict = {
-            "status": "infra_error",
-            "reward": 0.0,
-            "detail": {
-                "error_type": "verification_error",
-                "error_message": "Instruction runtime failed",
-            },
-        }
-    finally:
-        sys.setprofile(None)
-    verdict["detail"]["ifeval_calls"] = calls
-    (Path(os.environ["VERIFYIT_LOGS_DIR"]) / "instruction-verdict.json").write_text(
-        json.dumps(verdict, allow_nan=False)
-    )
-
-
-if __name__ == "__main__":
-    _main()
+def _evaluate_with_state(kind: str, text: str, data: Any, state) -> dict:
+    runtime = kind == "nemotron"
+    if runtime:
+        random.setstate(_validated_random_state(state))
+    verdict = _evaluate(kind, text, data, runtime=runtime)
+    if runtime and verdict["status"] == "scored":
+        verdict["detail"]["random_state"] = random.getstate()
+    return verdict
