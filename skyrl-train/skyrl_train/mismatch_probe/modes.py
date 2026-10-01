@@ -87,9 +87,9 @@ TRAINER_MODES: dict[str, ModeSpec] = {
 # logged vLLM step of the re-read computed it (FA3 split counts, router GEMM rows, LM-head rows), so its candidates
 # (``STEP_CANDIDATES``) score re-read replay only; ``VLLM_STEP_FORWARD_EP_SUM`` is ``VLLM_FORWARD_EP_SUM`` so scored.
 # ``INVARIANT_STACK`` is the trainer side of a decode-invariant vLLM engine (``generator.decode_invariant``): the
-# router GEMM is the engine's row-invariant kernel and sliding-window rows past the window are one-row FA3 requests, so
-# no logged step is needed and generation-route replay scores it too; ``VLLM_INVARIANT_FORWARD`` adds the region flags
-# and ``ep_sum``.
+# router GEMM is the engine's row-invariant kernel and FA3 runs as the engine runs it (the engine's fixed split count
+# for every request, sliding-window rows past the window as one-row requests), so no logged step is needed and
+# generation-route replay scores it too; ``VLLM_INVARIANT_FORWARD`` adds the region flags and ``ep_sum``.
 COMPILED_STACK = "compiled_stack"
 COMPILED_STACK_ALL = "compiled_stack_all"
 VLLM_KERNEL_STACK = "vllm_kernel_stack"

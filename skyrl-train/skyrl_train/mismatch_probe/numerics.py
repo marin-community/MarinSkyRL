@@ -18,8 +18,8 @@ expert-parallel addition order:
 - ``input_norm_variance``: each layer's input norm takes its variance from the unrounded residual sum
   (the unrounded embedding gated-norm product for layer 0) and normalizes the rounded residual;
 - ``final_norm_fp32``: the final norm normalizes the unrounded residual sum;
-- ``fa3_attention``: attention runs vLLM's own FA3 forward kernel (unsplit, or with a scoring plan's
-  split counts); the backward stays the trainer's cuDNN attention;
+- ``fa3_attention``: attention runs vLLM's own FA3 forward kernel (unsplit, with a scoring plan's split counts, or
+  as a decode-invariant engine runs it under ``fa3_window_rows``); the backward stays the trainer's cuDNN attention;
 - ``ep_sum``: each token's routed expert outputs are added as vLLM's expert-parallel combine adds them,
   per vLLM EP rank in fp32, then across ranks in bf16 in NCCL's ring order for the token's vLLM
   data-parallel rank (router replay supplies that rank);
@@ -50,8 +50,9 @@ expert-parallel addition order:
 - ``invariant_router``: the router logits come from the row-invariant Triton GEMM that a decode-invariant vLLM engine
   runs (``grug_invariant_kernels.invariant_router_logits``), so they do not depend on the rows computed with them; the
   gradient is ``router_gemm``'s fp32 GEMM. It replaces ``router_rows`` and ``vllm_steps``' router rows;
-- ``fa3_window_rows``: on sliding-window layers, ``fa3_attention`` runs every row past the window as a one-row request,
-  as a decode-invariant engine computes every such row (its decode steps and its prefills alike).
+- ``fa3_window_rows``: ``fa3_attention`` computes every row as a decode-invariant engine computes it in its decode steps
+  and its prefills alike: every request with the engine's fixed FA3 split count, and on sliding-window layers every row
+  past the window as a one-row request.
 
 Probe modes set flags for one scoring forward. The process default is the current trainer numerics, or
 the set named by ``trainer.mismatch_probe.train_numerics``, which then applies to training too.

@@ -3,9 +3,12 @@
 Compiled vLLM gives a token other bytes in a decode step than in a prefill step, or in steps of another composition,
 in these places (a one-H100 sweep of each kernel at Snowball's shapes, one row to 8,192 rows per call):
 
-- FA3 splits a request's keys by the step: 32 splits at most on CUDA-graph steps (a per-request count on the device),
-  FA3's heuristic above. Rows computed with another split count add their key blocks in another order. Every FA3
-  call runs one split (``ONE_SPLIT``).
+- FA3 splits a request's keys by the step: 32 splits at most on CUDA-graph steps (a per-request count on the device,
+  from the step's total key blocks), FA3's heuristic above. Rows computed with another split count add their key
+  blocks in another order. Every FA3 request runs ``FA3_INVARIANT_SPLITS`` splits, through scheduler metadata the
+  metadata builder writes for every step (``FIXED_SPLITS``). FA3 cuts each query tile's key blocks into the splits, so
+  a prefill request starts at a multiple of 32 positions (one tile of packed query heads), its rows before the first
+  such position running as a request of their own, and a call holds at most 992 requests, the most FA3 splits.
 - On a sliding-window layer FA3 aligns its key blocks to the window start of each query tile's first row. A decode
   row is a tile of its own; inside a prefill tile the same row past the window adds other block groups. Prefill rows
   past the window run as one-row requests, as decode steps run them (``WINDOW_ROWS``).
@@ -37,15 +40,23 @@ from vllm.model_executor.models import grugmoe
 from vllm.v1.attention.backends import flash_attn
 
 from skyrl_train.models.grug_invariant_kernels import check_bf16_values, invariant_router_logits
-from skyrl_train.models.grug_vllm_kernels import window_row_requests
+from skyrl_train.models.grug_vllm_kernels import (
+    FA3_BLOCK_M,
+    FA3_DYNAMIC_SPLIT_MAX_BATCH,
+    FA3_INVARIANT_SPLITS,
+    fa3_fixed_split_metadata,
+    fa3_invariant_requests,
+)
 
-ONE_SPLIT = "one_split"
+FIXED_SPLITS = "fixed_splits"
 WINDOW_ROWS = "window_rows"
 ROUTER = "router"
 AUTOTUNE = "autotune"
-PARTS = (ONE_SPLIT, WINDOW_ROWS, ROUTER, AUTOTUNE)
+PARTS = (FIXED_SPLITS, WINDOW_ROWS, ROUTER, AUTOTUNE)
 
 _installed: set[str] = set()
+# Marks the forward patch that both ``FIXED_SPLITS`` and ``WINDOW_ROWS`` install.
+_REQUEST_PLAN = "request_plan"
 
 
 @torch.library.custom_op("skyrl::grug_router_logits", mutates_args=())
@@ -59,56 +70,132 @@ def _grug_router_logits_fake(x: torch.Tensor, weight: torch.Tensor) -> torch.Ten
     return x.new_empty((x.shape[0], weight.shape[0]), dtype=torch.float32)
 
 
-def _one_split() -> None:
-    """Every FA3 call of the engine runs one split, on CUDA-graph steps (captured with it) and on eager steps."""
+def _fixed_splits() -> None:
+    """Every FA3 call of the engine runs ``FA3_INVARIANT_SPLITS`` splits for each request, on CUDA-graph steps
+    (captured with them) and on eager steps; vLLM's cascade attention, another computation for requests that share a
+    prefix, stays off.
+
+    The metadata builder writes FA3's scheduler metadata (``fa3_fixed_split_metadata``), into a buffer that lives as
+    long as the builder when full CUDA graphs replay the step's FA3 calls. The metadata follows the step's query lengths
+    alone, so the builder writes it only when they change (a run of decode steps of the same requests reuses it; FA3's
+    combine kernel zeroes the tile semaphore after each call).
+    """
     builder = flash_attn.FlashAttentionMetadataBuilder
     original_init, original_build = builder.__init__, builder.build
 
-    def one_split_init(self, *args, **kwargs):
+    def fixed_init(self, *args, **kwargs):
         original_init(self, *args, **kwargs)
-        self.max_num_splits = 1
+        self.max_num_splits = FA3_INVARIANT_SPLITS
+        self.skyrl_scheduler_buffer = None
+        self.skyrl_scheduler_metadata = None
+        self.skyrl_query_lengths = None
+        if self.use_full_cuda_graph:
+            batch = max(self.vllm_config.scheduler_config.max_num_seqs, self.max_cudagraph_size or 0)
+            size = 3 * -(-batch // 4) * 4 + 1
+            self.skyrl_scheduler_buffer = torch.zeros(size, dtype=torch.int32, device=self.device)
 
-    def one_split_build(self, *args, **kwargs):
-        metadata = original_build(self, *args, **kwargs)
-        metadata.max_num_splits = 1
+    def fixed_build(self, common_prefix_len, common_attn_metadata, fast_build=False):
+        metadata = original_build(self, common_prefix_len, common_attn_metadata, fast_build)
+        if metadata.use_cascade or metadata.dcp_context_kv_lens is not None:
+            raise NotImplementedError("fixed FA3 splits run plain FA3 varlen steps only")
+        metadata.max_num_splits = FA3_INVARIANT_SPLITS
+        query_start = common_attn_metadata.query_start_loc_cpu
+        if query_start.numel() != metadata.query_start_loc.numel():
+            raise ValueError("the step's host and device query starts hold different request counts")
+        query_lengths = (query_start[1:] - query_start[:-1]).numpy().tobytes()
+        if query_lengths != self.skyrl_query_lengths:
+            self.skyrl_scheduler_metadata = fa3_fixed_split_metadata(
+                metadata.query_start_loc,
+                self.num_heads_q // self.num_heads_kv,
+                self.num_heads_kv,
+                out=self.skyrl_scheduler_buffer,
+            )
+            self.skyrl_query_lengths = query_lengths
+        metadata.scheduler_metadata = self.skyrl_scheduler_metadata
         return metadata
 
-    builder.__init__, builder.build = one_split_init, one_split_build
+    builder.__init__, builder.build = fixed_init, fixed_build
+    builder.use_cascade_attention = lambda self, *args, **kwargs: False
+    _install_request_plan()
 
 
 def _window_rows() -> None:
-    """On sliding-window layers, prefill rows past the window run as one-row requests (``window_row_requests``).
+    """On sliding-window layers, prefill rows past the window run as one-row requests (``fa3_invariant_requests``)."""
+    _install_request_plan()
 
-    Decode steps already run each row alone, and steps whose sequences all end within the window need nothing; the
-    rewrite happens only on steps with more than one query row of some request and a key length past the window,
-    which vLLM runs outside CUDA graphs. The new requests are built once per step's metadata and window.
+
+def _install_request_plan() -> None:
+    """Run a step's FA3 call as the calls that compute each row as a decode step computes it.
+
+    Decode steps of at most ``FA3_DYNAMIC_SPLIT_MAX_BATCH`` requests, which full CUDA graphs replay, run as built.
+    Other steps (prefill and mixed steps, which vLLM runs outside CUDA graphs, and larger decode steps) run as the
+    requests ``fa3_invariant_requests`` gives, in calls of at most that many requests, each with its own metadata. The
+    calls are built once per step's metadata and window.
     """
+    if _REQUEST_PLAN in _installed:
+        return
     original_forward = flash_attn.FlashAttentionImpl.forward
 
-    def window_forward(self, layer, query, key, value, kv_cache, attn_metadata, output, *args, **kwargs):
-        left, right = self.sliding_window
-        if attn_metadata is not None and left >= 0 and right == 0:
-            window = left + 1
-            if attn_metadata.max_query_len > 1 and attn_metadata.max_seq_len > window:
-                attn_metadata = _window_row_metadata(attn_metadata, window)
-        return original_forward(self, layer, query, key, value, kv_cache, attn_metadata, output, *args, **kwargs)
+    def invariant_forward(self, layer, query, key, value, kv_cache, attn_metadata, output, *args, **kwargs):
+        calls = None if attn_metadata is None else _invariant_calls(self, attn_metadata)
+        if calls is None:
+            return original_forward(self, layer, query, key, value, kv_cache, attn_metadata, output, *args, **kwargs)
+        for rows, metadata in calls:
+            original_forward(self, layer, query[rows], key, value, kv_cache, metadata, output[rows], *args, **kwargs)
+        return output
 
-    flash_attn.FlashAttentionImpl.forward = window_forward
+    flash_attn.FlashAttentionImpl.forward = invariant_forward
+    _installed.add(_REQUEST_PLAN)
 
 
-def _window_row_metadata(metadata, window: int):
-    cached = getattr(metadata, "_skyrl_window_rows", None)
-    if cached is not None and cached[0] == window:
-        return cached[1]
-    if metadata.use_cascade or metadata.dcp_context_kv_lens is not None or metadata.scheduler_metadata is not None:
-        raise NotImplementedError("window_rows rewrites plain FA3 varlen steps only")
-    requests = window_row_requests(metadata.query_start_loc, metadata.seq_lens, window)
-    rewritten = copy.copy(metadata)
-    rewritten.query_start_loc = requests.query_start
-    rewritten.seq_lens = requests.key_lengths
-    rewritten.block_table = metadata.block_table[requests.owner]
-    metadata._skyrl_window_rows = (window, rewritten)
-    return rewritten
+def _invariant_calls(impl, metadata):
+    """The FA3 calls of ``impl``'s layer for the step of ``metadata``: ``(query rows, metadata)`` pairs, or ``None``
+    when the step's call runs as built."""
+    left, right = impl.sliding_window
+    window = left + 1 if WINDOW_ROWS in _installed and left >= 0 and right == 0 else None
+    fixed = FIXED_SPLITS in _installed
+    cached = metadata.__dict__.setdefault("_skyrl_calls", {})
+    if window in cached:
+        return cached[window]
+    requests = metadata.query_start_loc.numel() - 1
+    single_rows = metadata.max_query_len <= 1
+    needs_window_rows = window is not None and not single_rows and metadata.max_seq_len > window
+    needs_alignment = fixed and not single_rows
+    if not (needs_window_rows or needs_alignment or (fixed and requests > FA3_DYNAMIC_SPLIT_MAX_BATCH)):
+        cached[window] = None
+        return None
+    if metadata.use_cascade or metadata.dcp_context_kv_lens is not None:
+        raise NotImplementedError("decode-invariant FA3 requests rewrite plain FA3 varlen steps only")
+    group = impl.num_heads // impl.num_kv_heads
+    if FA3_BLOCK_M % group:
+        raise NotImplementedError(f"decode-invariant FA3 requests need query heads per KV head dividing {FA3_BLOCK_M}")
+    query_start = metadata.query_start_loc.tolist()
+    planned = fa3_invariant_requests(
+        query_start, metadata.seq_lens[:requests].tolist(), window, FA3_BLOCK_M // group if fixed else 1
+    )
+    total = planned.key_lengths.numel()
+    if total == requests and (not fixed or total <= FA3_DYNAMIC_SPLIT_MAX_BATCH):
+        cached[window] = None
+        return None
+    device = metadata.query_start_loc.device
+    starts = planned.query_start.tolist()
+    calls = []
+    step = FA3_DYNAMIC_SPLIT_MAX_BATCH if fixed else total
+    for begin in range(0, total, step):
+        end = min(total, begin + step)
+        call = copy.copy(metadata)
+        call.num_actual_tokens = starts[end] - starts[begin]
+        call.query_start_loc = (planned.query_start[begin : end + 1] - starts[begin]).to(device)
+        call.seq_lens = planned.key_lengths[begin:end].to(device)
+        call.block_table = metadata.block_table[planned.owner[begin:end].to(device)]
+        call.max_query_len = max(b - a for a, b in zip(starts[begin:end], starts[begin + 1 : end + 1], strict=True))
+        call.max_seq_len = int(planned.key_lengths[begin:end].max())
+        call.scheduler_metadata = (
+            fa3_fixed_split_metadata(call.query_start_loc, group, impl.num_kv_heads) if fixed else None
+        )
+        calls.append((slice(starts[begin], starts[end]), call))
+    cached[window] = calls
+    return calls
 
 
 def _router() -> None:
@@ -162,7 +249,7 @@ def _deterministic_autotune() -> None:
     CachingAutotuner.benchmark_all_configs = benchmark_all_configs
 
 
-_PATCHES = {ONE_SPLIT: _one_split, WINDOW_ROWS: _window_rows, ROUTER: _router, AUTOTUNE: _deterministic_autotune}
+_PATCHES = {FIXED_SPLITS: _fixed_splits, WINDOW_ROWS: _window_rows, ROUTER: _router, AUTOTUNE: _deterministic_autotune}
 
 
 def installed_parts() -> list[str]:

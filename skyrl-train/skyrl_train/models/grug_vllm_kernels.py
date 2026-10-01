@@ -8,9 +8,10 @@ token's slots it owns in fp32 and rounds once, and a bf16 ring reduction adds th
 starting after the rank that holds the token's request and ending at it. ``vllm_experts`` computes each
 token-expert slot with vLLM's fused-MoE Triton kernels (``vllm_expert_outputs``).
 
-A decode-invariant engine (``inference_engines.vllm.decode_invariant``) runs FA3 with one split and every
-sliding-window row past the window as a one-row request (``window_row_requests``); ``fa3_window_rows`` computes the
-trainer's rows that way.
+A decode-invariant engine (``inference_engines.vllm.decode_invariant``) gives every FA3 request the same split count,
+``FA3_INVARIANT_SPLITS``, through precomputed scheduler metadata (``fa3_fixed_split_metadata``), starts every prefill
+request at a multiple of 32 positions and runs every sliding-window row past the window as a one-row request
+(``fa3_invariant_requests``); ``fa3_window_rows`` computes the trainer's rows that way.
 
 ``vllm_steps`` reproduces the engine step of a logged re-read: each sequence's prefill ran alone in one vLLM step
 (``VllmStep``), which fixes its FA3 split counts, the row count of the fp32 router GEMM, and the row counts of the
@@ -20,6 +21,7 @@ position (one row). ``vllm_token_logprobs`` is model runner V2's log-probability
 
 from __future__ import annotations
 
+import functools
 import math
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -34,8 +36,14 @@ import torch
 FA3_BLOCK_M = 128
 FA3_BLOCK_M_ONE_WARPGROUP = 64
 FA3_BLOCK_N = 128
-# ``prepare_varlen_num_blocks`` splits dynamically only for batches one CTA covers.
+# ``prepare_varlen_num_blocks`` splits dynamically only for batches one CTA covers; ``mha_fwd`` runs a varlen call of
+# more requests with one split.
 FA3_DYNAMIC_SPLIT_MAX_BATCH = 992
+# A decode-invariant engine's split count for every FA3 request: FA3 cuts a query tile's key blocks ``[0, n)`` into
+# runs of ``ceil(n / 4)`` blocks (``BlockMN::get_n_block_min_max``), so a row's bytes follow its own block count alone
+# when every row of its tile has the same block count. Four splits run a lone decode row about as fast as FA3's
+# dynamic split and cost 2-12% at 64 requests per step.
+FA3_INVARIANT_SPLITS = 4
 # ``attention_config.flash_attn_max_num_splits_for_cuda_graph``: the split cap vLLM passes on CUDA-graph steps.
 FA3_MAX_SPLITS_FOR_CUDA_GRAPH = 32
 # The probe engines' largest CUDA-graph capture size (``max_cudagraph_capture_size``).
@@ -162,152 +170,195 @@ def planned_vllm_steps(batch: int) -> tuple[VllmStep, ...]:
     return _steps
 
 
-def _fa3_forward(query, key, value, *, rows: int, requests: int, window: int | None, scale: float, splits: int):
+def fa3_fixed_split_metadata(
+    query_start: torch.Tensor, query_heads_per_kv_head: int, kv_heads: int, out: torch.Tensor | None = None
+) -> torch.Tensor:
+    """FA3's scheduler metadata for a causal or local varlen call that runs every request with
+    ``FA3_INVARIANT_SPLITS`` splits, whatever else the call holds.
+
+    FA3's own metadata (``prepare_varlen_num_blocks``) divides the call's total key blocks over the SMs, so a request's
+    split count follows the batch. The layout is ``mha_fwd``'s for packed query heads, dynamic splits and the head
+    swizzle: per request its packed query rows, its split count and its heads per L2 section (a scheduling hint), each
+    vector padded to a multiple of 4, then the tile semaphore, which starts at zero and which FA3's combine kernel
+    zeroes after the call. A call of more than ``FA3_DYNAMIC_SPLIT_MAX_BATCH`` requests runs unsplit whatever the
+    metadata. ``out`` (a persistent buffer, for CUDA graphs) receives the metadata when given.
+    """
+    requests = query_start.numel() - 1
+    rounded = _ceil_div(requests, 4) * 4
+    if out is None:
+        metadata = torch.zeros(3 * rounded + 1, dtype=torch.int32, device=query_start.device)
+    else:
+        metadata = out[: 3 * rounded + 1]
+        out.zero_()
+    metadata[:requests] = (query_start[1:] - query_start[:-1]) * query_heads_per_kv_head
+    metadata[rounded : rounded + requests] = FA3_INVARIANT_SPLITS
+    metadata[2 * rounded : 2 * rounded + requests] = kv_heads
+    return metadata
+
+
+@functools.lru_cache(maxsize=64)
+def _uniform_requests(rows: int, requests: int, query_heads_per_kv_head: int, kv_heads: int, device: torch.device):
+    """``requests`` varlen requests of ``rows`` rows each: their query starts and their fixed-split metadata."""
+    query_start = torch.arange(0, (requests + 1) * rows, rows, dtype=torch.int32, device=device)
+    return query_start, fa3_fixed_split_metadata(query_start, query_heads_per_kv_head, kv_heads)
+
+
+def _fa3_forward(
+    query, key, value, *, rows: int, requests: int, window: int | None, scale: float, splits: int, out=None
+):
+    """FA3 over ``requests`` sequences of ``rows`` rows, each one varlen request from position 0; ``splits`` of
+    ``FA3_INVARIANT_SPLITS`` gives every request that split count, any other count is passed to FA3 as is."""
     from vllm.vllm_flash_attn import flash_attn_varlen_func
 
-    cu_seqlens = torch.arange(0, (requests + 1) * rows, rows, dtype=torch.int32, device=query.device)
+    query_start, metadata = _uniform_requests(
+        rows, requests, query.shape[1] // key.shape[1], key.shape[1], query.device
+    )
     return flash_attn_varlen_func(
         q=query,
         k=key,
         v=value,
         max_seqlen_q=rows,
-        cu_seqlens_q=cu_seqlens,
+        cu_seqlens_q=query_start,
         max_seqlen_k=rows,
-        cu_seqlens_k=cu_seqlens,
+        cu_seqlens_k=query_start,
         softmax_scale=scale,
         causal=True,
         window_size=None if window is None else [window - 1, 0],
         fa_version=3,
         num_splits=splits,
+        scheduler_metadata=metadata if splits == FA3_INVARIANT_SPLITS else None,
+        out=out,
     )
 
 
 @dataclass(frozen=True)
-class WindowRowRequests:
-    """FA3 varlen requests over the same query rows: each request's rows before the window, then one per later row.
-
-    ``query_start`` ``[E + 1]`` and ``key_lengths`` ``[E]`` are int32; ``owner`` ``[E]`` is the original request of each
-    new request, to gather its block-table row. The query rows keep their order, so the output rows do too.
-    """
+class Fa3Requests:
+    """FA3 varlen requests over the same query rows, in their order: ``query_start`` ``[E + 1]`` and ``key_lengths``
+    ``[E]`` (int32), and ``owner`` ``[E]``, the original request of each new one (to gather its block-table row)."""
 
     query_start: torch.Tensor
     key_lengths: torch.Tensor
     owner: torch.Tensor
 
 
-def window_row_requests(query_start: torch.Tensor, key_lengths: torch.Tensor, window: int) -> WindowRowRequests:
-    """Split each varlen request so every query row at a key position of at least ``window`` is a request of its own.
+def fa3_invariant_requests(
+    query_start: Sequence[int], key_lengths: Sequence[int], window: int | None, alignment: int
+) -> Fa3Requests:
+    """Split each varlen request so that every row's FA3 bytes are those of the row decoded alone.
 
-    A request's query rows are the last ``q`` of its ``k`` keys (positions ``k - q .. k - 1``). On a sliding-window
-    layer FA3 aligns key blocks to the window start of a query tile's first row; a lone row is its own tile, as in a
-    decode step. Rows before position ``window`` read every key from position 0, so their tiles need no split.
-    Waits for the device once (the number of new requests).
+    A request's query rows are the last ``q`` of its ``k`` keys (positions ``k - q .. k - 1``). With a fixed split
+    count FA3 cuts the key blocks of each query tile, so every row of a tile must have the tile's block count: a
+    request of several rows starts at a multiple of ``alignment`` positions (one tile of packed query heads), its rows
+    before the first such position becoming a request of their own. On a sliding-window layer (``window``) FA3 also
+    aligns key blocks to the window start of a tile's first row, so each row at a position of at least ``window`` is a
+    request of its own, as in a decode step. Takes host values; returns CPU tensors.
     """
-    query_start = query_start.long()
-    requests = query_start.numel() - 1
-    key_lengths = key_lengths[:requests].long()
-    query_lengths = query_start[1:] - query_start[:-1]
-    first_position = key_lengths - query_lengths
-    # Rows before the window stay one request; each later row becomes one. A request without rows before the window
-    # contributes only its one-row requests.
-    head = torch.minimum((window - first_position).clamp(min=0), query_lengths)
-    has_head = (head > 0).long()
-    counts = has_head + query_lengths - head
-    total = int(counts.sum())
-    device = query_start.device
-    owner = torch.repeat_interleave(torch.arange(requests, device=device), counts, output_size=total)
-    # The new request's index among its owner's: -1 is the rows before the window, i >= 0 the i-th later row.
-    later_row = torch.arange(total, device=device) - (torch.cumsum(counts, 0) - counts)[owner] - has_head[owner]
-    before = later_row < 0
-    starts = query_start[owner] + torch.where(before, 0, head[owner] + later_row)
-    keys = first_position[owner] + head[owner] + torch.where(before, 0, later_row + 1)
-    return WindowRowRequests(
-        query_start=torch.cat([starts, query_start[-1:]]).to(torch.int32),
-        key_lengths=keys.to(torch.int32),
-        owner=owner,
+    query_start = np.asarray(query_start, dtype=np.int64)
+    key_lengths = np.asarray(key_lengths, dtype=np.int64)
+    rows = query_start[1:] - query_start[:-1]
+    first = key_lengths - rows
+    head = rows if window is None else np.clip(window - first, 0, rows)
+    lead = np.where(rows > 1, np.minimum(head, -first % alignment), 0)
+    # Per request: the rows before its first aligned position, its other rows before the window, each later row.
+    has_lead, has_rest = (lead > 0).astype(np.int64), (head > lead).astype(np.int64)
+    counts = has_lead + has_rest + rows - head
+    owner = np.repeat(np.arange(rows.size), counts)
+    index = np.arange(owner.size) - np.repeat(np.cumsum(counts) - counts, counts)
+    is_lead = index < has_lead[owner]
+    is_rest = ~is_lead & (index < (has_lead + has_rest)[owner])
+    later = head[owner] + index - (has_lead + has_rest)[owner]
+    begin = np.where(is_lead, 0, np.where(is_rest, lead[owner], later))
+    stop = np.where(is_lead, lead[owner], np.where(is_rest, head[owner], later + 1))
+    return Fa3Requests(
+        query_start=torch.from_numpy(np.append(query_start[owner] + begin, query_start[-1])).to(torch.int32),
+        key_lengths=torch.from_numpy(first[owner] + stop).to(torch.int32),
+        owner=torch.from_numpy(owner),
     )
 
 
 def _fa3_window_rows_forward(query, key, value, *, rows: int, requests: int, window: int, scale: float):
-    """Sliding-window FA3 over ``requests`` sequences of ``rows`` rows, each row past the window computed as a
-    decode-invariant engine computes it: alone, its 128-key blocks starting at its own window start.
+    """Sliding-window FA3 over ``requests`` sequences of ``rows`` rows as a decode-invariant engine computes each row:
+    every request with ``FA3_INVARIANT_SPLITS`` splits, and each row past the window alone, its 128-key blocks starting
+    at its own window start.
 
     The rows before the window read every key from position 0 and run as one local request per sequence. Each later row
     runs as a one-row request of FA3's causal kernel over exactly its window of keys: ``cu_seqlens_k`` holds the window
-    starts and ``seqused_k`` the window, so the causal kernel walks the same blocks from the same first key as the
-    local kernel's one-row request that a decode step runs, on 64-row tiles where the local kernel runs 128 (FA3 picks
-    one MMA warpgroup for few query rows only off sliding-window layers). ``max_seqlen_q`` is 2: at 1, FA3 runs these
-    requests non-causal, whose 176-key blocks group the keys otherwise. The bytes equal the one-row local requests' on
-    every row (harness ``fa3_window_check``). vLLM's Python wrapper accepts ``cu_seqlens_k`` or ``seqused_k``, not both,
-    so the causal requests call the FA3 op with the wrapper's arguments.
+    starts and ``seqused_k`` the window, so the causal kernel walks the same blocks from the same first key, and cuts
+    them into the same splits, as the local kernel's one-row request that a decode step runs, on 64-row tiles where the
+    local kernel runs 128 (FA3 picks one MMA warpgroup for few query rows only off sliding-window layers).
+    ``max_seqlen_q`` is 2: at 1, FA3 runs these requests non-causal, whose 176-key blocks group the keys otherwise. The
+    later rows go in calls of at most ``FA3_DYNAMIC_SPLIT_MAX_BATCH`` requests, the most FA3 splits. The bytes equal the
+    decoded rows' (harness ``fa3_split_check``). vLLM's Python wrapper accepts ``cu_seqlens_k`` or ``seqused_k``, not
+    both, so the causal requests call the FA3 op with the wrapper's arguments.
     """
-    from vllm.vllm_flash_attn import flash_attn_varlen_func
-
     device = query.device
+    group, kv_heads = query.shape[1] // key.shape[1], key.shape[1]
     output = torch.empty_like(query)
-    heads_out = torch.arange(0, 2 * window, window, dtype=torch.int32, device=device)
     later = rows - window
-    later_queries = torch.arange(later + 1, dtype=torch.int32, device=device)
-    seqused_k = torch.full((later,), window, dtype=torch.int32, device=device)
     for index in range(requests):
         first = index * rows
-        flash_attn_varlen_func(
-            q=query[first : first + window],
-            k=key[first : first + window],
-            v=value[first : first + window],
-            max_seqlen_q=window,
-            cu_seqlens_q=heads_out,
-            max_seqlen_k=window,
-            cu_seqlens_k=heads_out,
-            softmax_scale=scale,
-            causal=True,
-            window_size=[window - 1, 0],
-            fa_version=3,
-            num_splits=1,
+        _fa3_forward(
+            query[first : first + window],
+            key[first : first + window],
+            value[first : first + window],
+            rows=window,
+            requests=1,
+            window=window,
+            scale=scale,
+            splits=FA3_INVARIANT_SPLITS,
             out=output[first : first + window],
         )
-        # Row p's keys are rows p - window + 1 .. p of the same sequence.
-        window_starts = torch.arange(first + 1, first + later + 2, dtype=torch.int32, device=device)
-        torch.ops._vllm_fa3_C.fwd(
-            query[first + window : first + rows],
-            key,
-            value,
-            None,  # k_new
-            None,  # v_new
-            None,  # q_v
-            output[first + window : first + rows],
-            later_queries,  # cu_seqlens_q: one row per request
-            window_starts,  # cu_seqlens_k: each request's first key
-            None,  # cu_seqlens_k_new
-            None,  # seqused_q
-            seqused_k,
-            2,  # max_seqlen_q
-            window,  # max_seqlen_k
-            None,  # page_table
-            None,  # kv_batch_idx
-            None,  # leftpad_k
-            None,  # rotary_cos
-            None,  # rotary_sin
-            None,  # seqlens_rotary
-            None,  # q_descale
-            None,  # k_descale
-            None,  # v_descale
-            scale,
-            True,  # is_causal
-            -1,  # window_size_left
-            -1,  # window_size_right
-            0.0,  # softcap
-            True,  # is_rotary_interleaved
-            None,  # scheduler_metadata
-            1,  # num_splits
-            None,  # pack_gqa
-            0,  # sm_margin
-            None,  # s_aux
-            1,  # cp_world_size
-            0,  # cp_rank
-            None,  # cp_tot_seqused_k
-        )
+        for begin in range(0, later, FA3_DYNAMIC_SPLIT_MAX_BATCH):
+            count = min(FA3_DYNAMIC_SPLIT_MAX_BATCH, later - begin)
+            query_start, metadata = _uniform_requests(1, count, group, kv_heads, device)
+            # Row p's keys are rows p - window + 1 .. p of the same sequence.
+            window_starts = torch.arange(first + begin + 1, first + begin + count + 2, dtype=torch.int32, device=device)
+            rows_out = slice(first + window + begin, first + window + begin + count)
+            torch.ops._vllm_fa3_C.fwd(
+                query[rows_out],
+                key,
+                value,
+                None,  # k_new
+                None,  # v_new
+                None,  # q_v
+                output[rows_out],
+                query_start,  # cu_seqlens_q: one row per request
+                window_starts,  # cu_seqlens_k: each request's first key
+                None,  # cu_seqlens_k_new
+                None,  # seqused_q
+                _window_lengths(count, window, device),
+                2,  # max_seqlen_q
+                window,  # max_seqlen_k
+                None,  # page_table
+                None,  # kv_batch_idx
+                None,  # leftpad_k
+                None,  # rotary_cos
+                None,  # rotary_sin
+                None,  # seqlens_rotary
+                None,  # q_descale
+                None,  # k_descale
+                None,  # v_descale
+                scale,
+                True,  # is_causal
+                -1,  # window_size_left
+                -1,  # window_size_right
+                0.0,  # softcap
+                True,  # is_rotary_interleaved
+                metadata,
+                FA3_INVARIANT_SPLITS,
+                None,  # pack_gqa
+                0,  # sm_margin
+                None,  # s_aux
+                1,  # cp_world_size
+                0,  # cp_rank
+                None,  # cp_tot_seqused_k
+            )
     return output
+
+
+@functools.lru_cache(maxsize=16)
+def _window_lengths(count: int, window: int, device: torch.device) -> torch.Tensor:
+    return torch.full((count,), window, dtype=torch.int32, device=device)
 
 
 def fa3_attention_sbhd(
@@ -327,8 +378,9 @@ def fa3_attention_sbhd(
     sequence runs alone on the prefix its vLLM step scheduled, with the split count FA3 chose for a request
     alone in a step of that many tokens (``fa3_split_counts``); its later rows stay zero, as no logged
     position reads them. A sequence without a step (``tokens == 0``) runs unsplit on all ``S`` rows. With
-    ``window_rows`` a sliding-window layer runs each row past the window as a one-row request
-    (``_fa3_window_rows_forward``), as a decode-invariant engine does.
+    ``window_rows`` every row is computed as a decode-invariant engine computes it: each sequence one request with
+    ``FA3_INVARIANT_SPLITS`` splits, and on a sliding-window layer each row past the window a one-row request
+    (``_fa3_window_rows_forward``).
     """
     sequence, batch, heads, head_dim = query.shape
     flat = [t.transpose(0, 1).reshape(batch * sequence, *t.shape[2:]).contiguous() for t in (query, key, value)]
@@ -338,7 +390,8 @@ def fa3_attention_sbhd(
         output = _fa3_window_rows_forward(*flat, rows=sequence, requests=batch, window=window, scale=scale)
         return output.view(batch, sequence, heads * head_dim).transpose(0, 1).contiguous()
     if steps is None:
-        output = _fa3_forward(*flat, rows=sequence, requests=batch, window=window, scale=scale, splits=1)
+        splits = FA3_INVARIANT_SPLITS if window_rows else 1
+        output = _fa3_forward(*flat, rows=sequence, requests=batch, window=window, scale=scale, splits=splits)
         return output.view(batch, sequence, heads * head_dim).transpose(0, 1).contiguous()
     kv_heads = key.shape[2]
     output = torch.zeros(batch, sequence, heads, head_dim, dtype=query.dtype, device=query.device)
