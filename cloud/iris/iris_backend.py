@@ -760,11 +760,9 @@ def validate_controller_ingress_reachability(args: SimpleNamespace) -> None:
     """Reject controller ingress that a Daytona sandbox cannot reach.
 
     opencode runs in a Daytona sandbox and reaches the co-located vLLM over the public
-    internet at ``https://<ingress_host>/proxy/t/<token>/<endpoint>/v1``. The endpoint
-    is REGISTERED on the controller of the cluster the job runs on and the token is
-    minted with that controller's key, so the capability URL only resolves when
-    ``<ingress_host>`` is a controller that can BOTH route to the endpoint AND be
-    reached from Daytona:
+    internet through a capability URL. The endpoint is REGISTERED on the controller of
+    the cluster the job runs on, so the URL only resolves through a public origin that
+    can route to that controller:
 
       * A **directly-submitted CoreWeave** job can when its cluster config sets
         ``federation_public_parent``: the peer controller mints the capability URL as
