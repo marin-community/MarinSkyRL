@@ -13,7 +13,7 @@ from iris.cli.connect import connect_controller, open_iris_client, rpc_client
 from iris.client.workload import JobStatus
 from iris.client.client import IrisClient
 from iris.cluster.types import JobName
-from iris.resources.state import JobState, TaskState, TERMINAL_JOB_STATES
+from iris.resources.state import TERMINAL_TASK_STATES, JobState, TaskState, TERMINAL_JOB_STATES
 from iris.rpc import controller_pb2, job_pb2
 from rigging.timing import Duration
 
@@ -41,11 +41,12 @@ def infrastructure_reason(statuses: list[JobStatus], log_text: str, deadline_exp
         for task in status.tasks:
             if task.state == TaskState.SUCCEEDED:
                 continue
-            for attempt in task.attempts:
-                if attempt.attempt_number != task.current_attempt_number:
+            for attempt in sorted(task.attempts, key=lambda row: row.attempt_number, reverse=True):
+                if attempt.state not in TERMINAL_TASK_STATES:
                     continue
                 if attempt.is_worker_failure or attempt.terminal_reason in INFRASTRUCTURE_REASONS:
                     return f"{task.task_id.to_wire()}: {attempt.terminal_reason or 'worker lost'}"
+                break
     if re.search(r"Session name .*does not match persisted value", log_text):
         return "Ray host session collision"
     trained = any(row.kind == MetricKind.TRAIN for row in parse_metrics(log_text))

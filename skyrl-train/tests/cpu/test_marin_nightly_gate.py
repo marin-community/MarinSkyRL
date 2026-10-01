@@ -487,6 +487,7 @@ def test_opencode_spec_requires_exact_concurrent_literal_coverage():
         (job_pb2.JOB_STATE_SUCCEEDED, "", False, False, True, False),
         (job_pb2.JOB_STATE_SUCCEEDED, "", True, False, True, False),
         (job_pb2.JOB_STATE_FAILED, "PodDeleted", False, False, True, True),
+        (job_pb2.JOB_STATE_PENDING, "PodDeleted", False, True, True, True),
         (job_pb2.JOB_STATE_FAILED, "Evicted", False, False, False, True),
         (job_pb2.JOB_STATE_FAILED, "", False, True, False, True),
         (job_pb2.JOB_STATE_FAILED, "", False, True, True, False),
@@ -503,6 +504,9 @@ def test_cat_count_nightly_separates_infrastructure_from_application_failures(
         current_attempt_id=1,
         attempts=[job_pb2.TaskAttempt(attempt_id=1, state=task_state, terminal_reason=reason)],
     )
+    if state == job_pb2.JOB_STATE_PENDING:
+        task.state = job_pb2.TASK_STATE_PENDING
+        task.current_attempt_id = 2
     if previous_loss:
         task.attempts.add(
             attempt_id=0, state=job_pb2.TASK_STATE_WORKER_FAILED, is_worker_failure=True, terminal_reason="PodDeleted"
