@@ -243,7 +243,7 @@ def test_duplicate_payloads_do_not_count_as_completed_steps(spec):
         ("nan_loss", FailureKind.NONFINITE, "policy/policy_loss"),
         ("missing_loss", FailureKind.MISSING_METRIC, "policy/policy_loss"),
         ("flat_train", FailureKind.TREND, "environment/exact_n10"),
-        ("sparse_train", FailureKind.OBSERVATIONS, "environment/exact_n10"),
+        ("sparse_train", FailureKind.MISSING_METRIC, "environment/exact_n10"),
         ("flat_eval", FailureKind.TREND, "eval/cat_count_n10/avg_score"),
         ("no_eval", FailureKind.OBSERVATIONS, "eval/cat_count_n10/avg_score"),
         ("no_zero_variance", FailureKind.BOUNDS, "reward/zero_std_group_fraction"),
@@ -380,11 +380,10 @@ def test_cat_count_shipped_specs_require_learning_from_step_zero(mutation):
     if mutation == "healthy":
         assert failures == []
     else:
-        expected_kind = (
-            FailureKind.OBSERVATIONS
-            if mutation in ("missing_step_zero", "missing_initial_metric")
-            else FailureKind.BOUNDS
-        )
+        expected_kind = {
+            "missing_step_zero": FailureKind.OBSERVATIONS,
+            "missing_initial_metric": FailureKind.MISSING_METRIC,
+        }.get(mutation, FailureKind.BOUNDS)
         expected_metric = (
             "policy/dp_weight_checksum_mismatch" if mutation == "dp_divergence" else "eval/sampled/train/avg_score"
         )

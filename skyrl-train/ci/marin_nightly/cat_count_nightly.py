@@ -164,7 +164,7 @@ def run_attempt(args: argparse.Namespace, attempt: int) -> tuple[Conclusion, flo
         resources=ResourceConfig.with_cpu(cpu=4, ram="16GB", disk="8GB", target_cluster=args.cluster),
         environment=create_environment(workspace=str(args.marin_root), extras=["cpu"]),
         priority=job_pb2.PRIORITY_BAND_INTERACTIVE,
-        max_retries_preemption=2,
+        max_retries_preemption=0,
         timeout=Duration.from_seconds(DEADLINE_SECONDS),
     )
     preflight(args.marin_root, args.cluster)
