@@ -24,8 +24,7 @@ def _routed_experts_dtype_for_num_experts(num_experts: Optional[int]) -> Optiona
       * num_experts <= 32768    -> int16  (max id <= 32767; Qwen3-Next 512 -> int16, deterministic)
       * otherwise               -> int64  (defensive; no shipped MoE model exceeds int16 range)
 
-    Returns None when ``num_experts`` is None/unknown, signalling the caller to
-    fall back to the (non-deterministic) per-batch-max pick.
+    Returns None when the expert count is unknown.
     """
     if num_experts is None or num_experts <= 0:
         return None
@@ -39,7 +38,7 @@ def _routed_experts_dtype_for_num_experts(num_experts: Optional[int]) -> Optiona
 def _collate_routed_experts_from_arrays(
     routed_experts: List[np.ndarray],
     max_output_len: int,
-    num_experts: Optional[int],
+    num_experts: int,
 ) -> "torch.Tensor":
     """Build a dense ``[B, response, layer, top_k]`` routed-expert tensor.
 
@@ -50,21 +49,7 @@ def _collate_routed_experts_from_arrays(
     layers = max(rows.shape[1] for rows in routed_experts)
     top_k = max(rows.shape[2] for rows in routed_experts)
     _re_dtype = _routed_experts_dtype_for_num_experts(num_experts)
-    if _re_dtype is None:
-        _max_expert_id = max((int(rows.max()) for rows in routed_experts if rows.size), default=0)
-        if _max_expert_id <= torch.iinfo(torch.uint8).max:
-            _re_dtype = torch.uint8
-        elif _max_expert_id <= torch.iinfo(torch.int16).max:
-            _re_dtype = torch.int16
-        else:
-            _re_dtype = torch.int64
-        logger.warning(
-            "convert_prompts_responses_to_batch_tensors: num_experts is None; "
-            "using the NON-DETERMINISTIC per-batch-max dtype pick for "
-            "rollout_routed_experts (chose {}). This is safe for non-MoE / "
-            "unknown-config cases but must NOT be hit on a MoE-RL run — thread "
-            "the model's num_experts through to make the dtype rank-invariant.".format(_re_dtype)
-        )
+    assert _re_dtype is not None
     numpy_dtype = {torch.uint8: np.uint8, torch.int16: np.int16, torch.int64: np.int64}[_re_dtype]
     out = np.zeros((len(routed_experts), max_output_len, layers, top_k), dtype=numpy_dtype)
     for index, rows in enumerate(routed_experts):
@@ -118,6 +103,7 @@ class RoutedExpertRows:
 
     def materialize(self, device: torch.device | int | str = "cpu") -> torch.Tensor:
         local_response_len = max((len(row) for row in self.rows), default=0)
+        assert self.num_experts is not None
         return _collate_routed_experts_from_arrays(list(self.rows), local_response_len, self.num_experts).to(device)
 
     @classmethod

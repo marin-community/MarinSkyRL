@@ -14,6 +14,7 @@ from skyrl_train.ftpo import FTPOTargets
 from skyrl_train.distillation import distillation_input_from_tensors
 
 DictType = TypeVar("DictType")
+COMPACT_ROUTES_TAG = "compact_routes"
 
 
 def per_data_parallel_batch_size(mini_batch_size: int, samples_per_prompt: int, data_parallel_size: int) -> int:
@@ -158,7 +159,7 @@ class TensorBatch(dict, Generic[DictType]):
         batch_dict = {}
         for key, value in self.items():
             if isinstance(value, RoutedExpertRows):
-                batch_dict[key] = ("compact_routes", pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL))
+                batch_dict[key] = (COMPACT_ROUTES_TAG, pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL))
                 continue
             value_to_save = value
             if isinstance(value, torch.Tensor):
@@ -183,7 +184,7 @@ class TensorBatch(dict, Generic[DictType]):
     def __setstate__(self, state):
         """Deserialize the `TensorBatch` object and load it into memory"""
         for key, value in state["batch_dict"].items():
-            if isinstance(value, tuple) and value[0] == "compact_routes":
+            if isinstance(value, tuple) and value[0] == COMPACT_ROUTES_TAG:
                 self[key] = pickle.loads(value[1])
                 continue
             buffer = io.BytesIO(value)

@@ -2056,7 +2056,6 @@ class RayPPOTrainer:
             rewards_tensor,
             loss_masks_tensor,
             rollout_logprobs_tensor,
-            rollout_routed_experts_tensor,
             token_level_shaping_tensor,
             response_span_tags_tensor,
         ) = convert_prompts_responses_to_batch_tensors(
@@ -2066,10 +2065,8 @@ class RayPPOTrainer:
             rewards,
             loss_masks,
             logprobs,
-            None,
             token_level_shaping,
             response_span_tags,
-            num_experts,
         )
         if (
             rollout_logprobs_required(
@@ -2082,11 +2079,12 @@ class RayPPOTrainer:
         if rollout_logprobs_tensor is not None:
             assert rollout_logprobs_tensor.shape == loss_masks_tensor.shape, "Logprobs should look like responses"
         # Keep the response-window width for placement, without allocating its dense route canvas.
+        rollout_routed_experts_rows = None
         if routed_experts is not None:
-            rollout_routed_experts_tensor = RoutedExpertRows(
+            rollout_routed_experts_rows = RoutedExpertRows(
                 tuple(routed_experts), response_masks_tensor.shape[1], num_experts
             )
-            if len(rollout_routed_experts_tensor) != len(response_ids):
+            if len(rollout_routed_experts_rows) != len(response_ids):
                 raise ValueError("routed experts must have one row per response")
         distillation_tensors = _validated_distillation_tensors(trajectory_batch, response_masks_tensor)
         training_input = TrainingInputBatch(
@@ -2110,8 +2108,8 @@ class RayPPOTrainer:
         )
         # Attach routed_experts only when present, so the flag-off batch dict has
         # exactly the same keys as today (TensorBatch.__eq__ compares key sets).
-        if rollout_routed_experts_tensor is not None:
-            training_input["rollout_routed_experts"] = rollout_routed_experts_tensor
+        if rollout_routed_experts_rows is not None:
+            training_input["rollout_routed_experts"] = rollout_routed_experts_rows
         training_input.update(distillation_tensors)
         ftpo = ftpo_config(self.cfg.trainer.algorithm)
         if ftpo is not None:

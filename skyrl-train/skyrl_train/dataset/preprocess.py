@@ -4,8 +4,6 @@ import torch
 from transformers import AutoTokenizer
 from jaxtyping import Float, Integer
 
-from skyrl_train.dataset.routed_expert_batch import _collate_routed_experts_from_arrays
-
 
 def _verify_inputs(
     prompts: List[List[int]],
@@ -82,10 +80,8 @@ def convert_prompts_responses_to_batch_tensors(
     rewards: List[List[float]],
     loss_masks: List[List[int]],
     logprobs: Optional[List[np.ndarray]] = None,
-    routed_experts: Optional[List[np.ndarray]] = None,
     token_level_shaping: Optional[List[List[float]]] = None,
     response_span_tags: Optional[List[List[int]]] = None,
-    num_experts: Optional[int] = None,
 ) -> Tuple[
     Float[torch.Tensor, "batch seq_len"],
     Float[torch.Tensor, "batch seq_len"],
@@ -93,7 +89,6 @@ def convert_prompts_responses_to_batch_tensors(
     Float[torch.Tensor, "batch response_len"],
     Float[torch.Tensor, "batch response_len"],
     Optional[Float[torch.Tensor, "batch response_len"]],
-    Optional["torch.Tensor"],
     Optional[Float[torch.Tensor, "batch response_len"]],
     Optional[Integer[torch.Tensor, "batch response_len"]],
 ]:
@@ -169,17 +164,6 @@ def convert_prompts_responses_to_batch_tensors(
         for i, sample_logprobs in enumerate(logprobs):
             logprobs_tensor[i, : len(sample_logprobs)] = torch.as_tensor(sample_logprobs, dtype=torch.float)
 
-    # MoE router-replay capture rail (Stage 1): right-pad routed_experts on the
-    # response axis exactly like rollout_logprobs, but each per-token element is a
-    # [L, K] expert-index vector. Result: [batch, response_len, L, K] int. Padding
-    # rows are sentinel [L, K] (all zeros). 4-D is accepted by TensorBatch since
-    # _check_consistency only validates dim-0.
-    routed_experts_tensor = None
-    if routed_experts:
-        # Routes arrive as compact per-sample arrays. Slice assignment avoids
-        # rebuilding the nested Python integer graph during collation.
-        routed_experts_tensor = _collate_routed_experts_from_arrays(routed_experts, action_mask.size(1), num_experts)
-
     # Loop-behavior reward shaping (Stage B / F5 + F4): right-pad the per-token
     # shaping channel and span tags on the response axis exactly like rewards /
     # loss_mask. Both are gated upstream (only passed when
@@ -206,7 +190,6 @@ def convert_prompts_responses_to_batch_tensors(
         ret_rewards,
         ret_loss_masks,
         logprobs_tensor,
-        routed_experts_tensor,
         token_level_shaping_tensor,
         response_span_tags_tensor,
     )
