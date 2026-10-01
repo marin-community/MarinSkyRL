@@ -48,8 +48,12 @@ def extract_answer(response: str) -> str:
     return answer.strip() if marker else response.strip()
 
 
-def score_response(response: str, ground_truth: str) -> float:
+def score_response(response: str, ground_truth: str, *, verifyit_enabled: bool = False) -> float:
     """Score a response's extracted final answer with the generated task's package verifier."""
     spec = json.loads(normalize_ground_truth(ground_truth))
+    if verifyit_enabled:
+        from skyrl_gym.envs.verifyit_clients import grade_reasoning_entry
+
+        return grade_reasoning_entry(spec["task"], spec["entry"], extract_answer(response))
     score = reasoning_gym.get_score_answer_fn(spec["task"])(extract_answer(response), spec["entry"])
     return float(score)

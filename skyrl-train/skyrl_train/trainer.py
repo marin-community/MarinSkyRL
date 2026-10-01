@@ -59,6 +59,7 @@ from skyrl_train.utils.policy_math import compute_approx_kl, normalize_advantage
 from skyrl_train.utils.kl_controllers import get_kl_controller, FixedKLController, AdaptiveKLController
 from skyrl_train.utils.algorithm_registry import AdvantageEstimator
 from skyrl_train.utils.advantage_estimators import GRPO_FLAT_REWARD_STD_TOLERANCE, compute_advantages_and_returns
+from marinskyrl.runtime_options import reference_model_required
 from marinskyrl.distillation import (
     DistillationObjectiveKind,
     DistillationRewardMode,
@@ -67,6 +68,10 @@ from marinskyrl.distillation import (
 from skyrl_train.objective.teacher import teacher_advantages
 from skyrl_train.objective.correction import compute_correction
 from skyrl_train.config.objective_spec import off_policy_correction
+from skyrl_train.config.ftpo import ftpo_config
+from skyrl_train.ftpo import select_ftpo_candidates
+from skyrl_train.distillation_adapters import collate_student_selected_rollout
+from skyrl_train.trajectory_runners.trajectory_reward_shaping import parse_trajectory_reward_shaping_config
 from skyrl_train.distributed.dispatch import (
     ActorInfo,
     MeshRank,
@@ -324,6 +329,7 @@ class RayPPOTrainer:
         self.all_timings = {}
         self.all_startup_timings = {}
         self._checkpoint_save_failures = 0.0
+        self._ftpo_stopped = False
         self._shutdown_complete = False
         self._restored_rollout_state: TrainingContextState | None = None
         self.global_step = 0
@@ -437,35 +443,32 @@ class RayPPOTrainer:
         return None
 
     @torch.no_grad()
-    async def eval(self) -> Dict[str, float]:
-        """
-        Run generation and scoring on the evaluation dataset.
-
-        The eval metrics are recorded after having finished training `self.global_step` steps.
-        Metrics recorded in global_step 0 corresponds to evaluations before training.
-
-        Returns:
-            A dictionary of evaluation metrics.
-        """
-        if self.cfg.trainer.step_wise_training:
-            eval_metrics = await evaluate_step_wise(
-                eval_dataloader=self.eval_dataloader,
-                trajectory_runner=self.trajectory_runner,
-                cfg=self.cfg,
-                global_step=self.global_step,
-                tokenizer=self.tokenizer,
-                trajectory_sink=self.trajectory_sink,
-            )
-        else:
-            eval_metrics = await evaluate(
-                eval_dataloader=self.eval_dataloader,
-                trajectory_runner=self.trajectory_runner,
-                cfg=self.cfg,
-                global_step=self.global_step,
-                tokenizer=self.tokenizer,
-                trajectory_sink=self.trajectory_sink,
-            )
-        return eval_metrics
+    async def eval(
+        self,
+        *,
+        sampling_params: Dict[str, Any] | None = None,
+        n_samples_per_prompt: int | None = None,
+        val_set_name: str | None = None,
+    ) -> Dict[str, float]:
+        """Evaluate the current policy with optional sampling overrides and a named output directory."""
+        overrides = {"generator": {}, "trainer": {}}
+        if n_samples_per_prompt is not None:
+            overrides["generator"]["eval_n_samples_per_prompt"] = n_samples_per_prompt
+        if val_set_name is not None:
+            overrides["trainer"]["export_path"] = join_resource_path(self.cfg.trainer.export_path, val_set_name)
+        cfg = OmegaConf.merge(self.cfg, overrides)
+        for key, value in (sampling_params or {}).items():
+            OmegaConf.update(cfg, f"generator.eval_sampling_params.{key}", value, force_add=True)
+        evaluator = evaluate_step_wise if cfg.trainer.step_wise_training else evaluate
+        return await evaluator(
+            eval_dataloader=self.eval_dataloader,
+            trajectory_runner=self.trajectory_runner,
+            cfg=cfg,
+            global_step=self.global_step,
+            tokenizer=self.tokenizer,
+            trajectory_sink=self.trajectory_sink,
+            val_set_name=val_set_name,
+        )
 
     # ------------------------------------------------------------------
     # Teardown helpers
@@ -686,13 +689,7 @@ class RayPPOTrainer:
                 and self._last_evaluated_step != self.global_step
             ):
                 with Timer("eval", self.all_timings):
-                    eval_metrics = await self.eval()
-                    self._log_metrics_stdout(eval_metrics, step=self.global_step, kind="eval")
-                    self.tracker.log(eval_metrics, step=self.global_step, commit=True)
-                    self._last_evaluated_step = self.global_step
-                await self.callback_handler.call_event_async(
-                    "on_evaluate", final_state, self._control, metrics=eval_metrics, trainer=self
-                )
+                    await self._evaluate_and_log(final_state, commit=True)
                 self._control.should_evaluate = False
         finally:
             if self.colocate_all:
@@ -832,13 +829,7 @@ class RayPPOTrainer:
             if step_wall is not None:
                 step_wall.start("evaluation")
             with Timer("eval", self.all_timings):
-                eval_metrics = await self.eval()
-                self._log_metrics_stdout(eval_metrics, step=self.global_step, kind="eval")
-                self.tracker.log(eval_metrics, step=self.global_step, commit=False)
-                self._last_evaluated_step = self.global_step
-            await self.callback_handler.call_event_async(
-                "on_evaluate", state, self._control, metrics=eval_metrics, trainer=self
-            )
+                await self._evaluate_and_log(state, commit=False)
             self._control.should_evaluate = False
         if step_wall is not None:
             step_wall.start("step_end_bookkeeping")
@@ -1254,7 +1245,9 @@ class RayPPOTrainer:
 
         # Synchronize before checking completion so a requested final evaluation uses the checkpoint weights.
         # The loaded global_step counts completed steps, so >= treats a resume exactly at max_steps as complete.
-        if self.resume_mode != ResumeMode.NONE and self.global_step >= self.total_training_steps:
+        if self._ftpo_stopped or (
+            self.resume_mode != ResumeMode.NONE and self.global_step >= self.total_training_steps
+        ):
             await self._handle_resume_at_max_steps()
             return
 
@@ -1265,14 +1258,15 @@ class RayPPOTrainer:
             self.reward_kl_controller = get_kl_controller(self.cfg.trainer.algorithm)
 
         self._control.reset()
+        initial_state = self._create_trainer_state(epoch=self.global_step // self.num_steps_per_epoch)
         self._control = await self.callback_handler.call_event_async(
             "on_train_begin",
-            self._create_trainer_state(epoch=self.global_step // self.num_steps_per_epoch),
+            initial_state,
             self._control,
             trainer=self,
         )
         if self._control.should_evaluate and self.eval_dataset is not None:
-            await self._run_pretraining_evaluation()
+            await self._run_pretraining_evaluation(initial_state)
             self._control.should_evaluate = False
 
         self.context.start()
@@ -1505,18 +1499,29 @@ class RayPPOTrainer:
             with Timer("update_ref_with_policy", self.all_timings):
                 await asyncio.to_thread(self.update_ref_with_policy)
 
-    async def _run_pretraining_evaluation(self) -> None:
+    async def _evaluate_and_log(self, state: TrainerState, *, commit: bool) -> None:
+        eval_metrics = await self.eval()
+        self._control = await self.callback_handler.call_event_async(
+            "on_evaluate", state, self._control, metrics=eval_metrics, trainer=self
+        )
+        self._log_metrics_stdout(eval_metrics, step=self.global_step, kind="eval")
+        self.tracker.log(eval_metrics, step=self.global_step, commit=commit)
+        self._last_evaluated_step = self.global_step
+
+    async def _run_pretraining_evaluation(self, state: TrainerState) -> None:
         # Pre-step evaluation must not be mixed into the first optimizer step's inclusive timers.
         with Timer("eval_before_train") as pretrain_eval_timer:
-            eval_metrics = await self.eval()
-            self._log_metrics_stdout(eval_metrics, step=self.global_step, kind="eval")
-            self.tracker.log(eval_metrics, step=self.global_step, commit=self.cfg.trainer.tracker_commit_each_step)
-            self._last_evaluated_step = self.global_step
+            await self._evaluate_and_log(state, commit=self.cfg.trainer.tracker_commit_each_step)
         startup_eval = {"startup/eval_before_train": pretrain_eval_timer.duration}
         self._log_metrics_stdout(startup_eval, step=self.global_step, kind="startup")
         self.tracker.log(startup_eval, step=self.global_step, commit=False)
 
     async def _run_training(self, training_input: TrainingInputBatch, *, step_wall: StepWallTime | None = None):
+        if "ftpo_chosen_mask" in training_input and not training_input["loss_mask"].any():
+            self.all_timings["train_critic_and_policy"] = 0.0
+            self.all_metrics["policy/policy_update_steps"] = 0.0
+            self.all_metrics["ftpo/empty_batch"] = 1.0
+            return {"policy_update_steps": 0.0}
         # The drain after the last weight sync can go stale while the rollout buffer fills, so align the
         # policy actor loops immediately before every forward.
         await self._drain_policy_event_loops()
@@ -1561,6 +1566,12 @@ class RayPPOTrainer:
         with Timer("train_critic_and_policy", self.all_timings), critical_phase("train_step", self.global_step):
             status = await asyncio.to_thread(self.train_critic_and_policy, training_input)
 
+        ftpo = ftpo_config(self.cfg.trainer.algorithm)
+        if ftpo is not None and ftpo.early_stopping_chosen_win is not None:
+            win_rate = status.get("ftpo/chosen_win")
+            if win_rate is not None and win_rate >= ftpo.early_stopping_chosen_win:
+                self._ftpo_stopped = True
+                self._control.should_training_stop = True
         return status
 
     def _group_for_teacher_scoring(self, group: RolloutGroup) -> TrajectoryBatch:
@@ -1679,7 +1690,7 @@ class RayPPOTrainer:
         cfg = self.cfg
         pg = None
 
-        use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
+        use_ref_model = reference_model_required(cfg.trainer.algorithm)
 
         if cfg.trainer.placement.colocate_all:
             num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
@@ -2100,6 +2111,37 @@ class RayPPOTrainer:
         if rollout_routed_experts_tensor is not None:
             training_input["rollout_routed_experts"] = rollout_routed_experts_tensor
         training_input.update(distillation_tensors)
+        ftpo = ftpo_config(self.cfg.trainer.algorithm)
+        if ftpo is not None:
+            candidates, scores, _ = collate_student_selected_rollout(
+                trajectory_batch,
+                response_ids,
+                response_masks_tensor.bool(),
+                self.cfg.generator.sampling_params.logprobs,
+            )
+            excluded = trajectory_batch.get("exclude_from_baseline")
+            final = trajectory_batch.get("is_last_step")
+            if excluded is None:
+                excluded = [False] * len(response_ids)
+            if final is None:
+                final = [True] * len(response_ids)
+            loop = parse_trajectory_reward_shaping_config(self.cfg.generator.get("trajectory_reward_shaping")).loop
+            chosen, weights = select_ftpo_candidates(
+                response_ids,
+                loss_masks,
+                candidates,
+                scores,
+                decode=self.tokenizer.decode,
+                loop=loop,
+                config=ftpo,
+                seed=self.cfg.trainer.seed + self.global_step,
+                eligible=[last and not exclude for last, exclude in zip(final, excluded, strict=True)],
+            )
+            training_input["student_topk_indices"] = candidates
+            training_input["ftpo_chosen_mask"] = chosen
+            training_input["loss_mask"] = weights
+            self.all_metrics["ftpo/selected_boundaries"] = float(chosen.any(-1).sum())
+            self.all_metrics["ftpo/chosen_candidates"] = float(chosen.sum())
         # Stage B (F5/F4): attach the per-token shaping channel + span tags ONLY
         # when present, so the flag-off batch dict has exactly the same keys as
         # today (TensorBatch.__eq__ compares key sets).
@@ -2402,6 +2444,8 @@ class RayPPOTrainer:
 
     def finalize_advantages_for_training(self, data: TrainingInputBatch) -> TrainingInputBatch:
         """Normalize environment credit, add loop credit, then apply teacher credit."""
+        if "ftpo_chosen_mask" in data:
+            data.pop("loop_advantages", None)
         if self.cfg.trainer.algorithm.advantage_batch_normalize:
             data = normalize_advantages_dict(data)
         data = self.apply_loop_credit_and_drop_advantage_inputs(data)
@@ -2526,7 +2570,7 @@ class RayPPOTrainer:
             ret_outputs: TrainingOutputBatch = concatenate_outputs_after_mesh_dispatch(actor_infos, results)
             return ret_outputs[key]
 
-        base_log_probs = None
+        reference_scores = None
         action_log_probs = None
         values = None
 
@@ -2546,17 +2590,23 @@ class RayPPOTrainer:
             if self.cfg.trainer.placement.colocate_policy_ref or self.colocate_all:
                 self.ref_model.backload_to_gpu()
 
-            base_action_log_probs_refs = self.ref_model.async_run_ray_method("mesh", "forward", data=data_fwd_pass)
+            reference_data = data_fwd_pass
+            if "ftpo_chosen_mask" in training_input:
+                reference_data = training_input.select(
+                    keys=fwd_keys + ["ftpo_chosen_mask"], metadata_keys=["response_length"]
+                )
+                reference_data.metadata["global_step"] = self.global_step
+            reference_score_refs = self.ref_model.async_run_ray_method("mesh", "forward", data=reference_data)
 
         if self.ref_model is not None:
             # handle colocate policy and ref model
             if self.cfg.trainer.placement.colocate_policy_ref or self.colocate_all:
-                all_rank_base_log_probs: List[TrainingOutputBatch] = ray.get(base_action_log_probs_refs)
-                base_log_probs = collect_results(self.ref_model.actor_infos, all_rank_base_log_probs, key="output")
+                all_rank_reference_scores: List[TrainingOutputBatch] = ray.get(reference_score_refs)
+                reference_scores = collect_results(self.ref_model.actor_infos, all_rank_reference_scores, key="output")
                 self.ref_model.offload_to_cpu()
                 ray.get(self.ref_model.async_run_ray_method("pass_through", "empty_cache"))
         else:
-            base_log_probs = None
+            reference_scores = None
 
         # calculate action log probs
         if self.colocate_all:
@@ -2569,7 +2619,7 @@ class RayPPOTrainer:
             self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
 
         # wait all models done
-        # if not colocate_policy_ref, then need to gather base_log_probs
+        # if not colocate_policy_ref, then need to gather reference_scores
         # if self.critic_model is not None, then need to gather value
         if not self.colocate_all:
             if not self.cfg.trainer.placement.colocate_policy_ref:
@@ -2578,10 +2628,12 @@ class RayPPOTrainer:
                     values = collect_results(self.critic_model.actor_infos, all_rank_values, key="output")
 
                 if self.ref_model is not None:
-                    all_rank_base_log_probs: List[TrainingOutputBatch] = ray.get(base_action_log_probs_refs)
-                    base_log_probs = collect_results(self.ref_model.actor_infos, all_rank_base_log_probs, key="output")
+                    all_rank_reference_scores: List[TrainingOutputBatch] = ray.get(reference_score_refs)
+                    reference_scores = collect_results(
+                        self.ref_model.actor_infos, all_rank_reference_scores, key="output"
+                    )
                 else:
-                    base_log_probs = None
+                    reference_scores = None
 
             elif self.critic_model is not None:
                 all_rank_values = ray.get(value_refs)
@@ -2600,10 +2652,16 @@ class RayPPOTrainer:
 
         sequences_all: torch.Tensor = training_input["sequences"]
         # NOTE (sumanthrh): The slicing is needed to make sure that the batch dimension doesn't change for the tensordict.
-        base_log_probs = base_log_probs[: len(sequences_all)] if base_log_probs is not None else None
+        reference_scores = reference_scores[: len(sequences_all)] if reference_scores is not None else None
         action_log_probs = action_log_probs[: len(sequences_all)]
         values = values[: len(sequences_all)] if values is not None else None
 
+        if "ftpo_chosen_mask" in training_input:
+            if reference_scores is None:
+                raise ValueError("FTPO requires frozen reference boundary logits")
+            training_input["ftpo_reference_logits"] = reference_scores
+            reference_scores = None
+        base_log_probs = reference_scores
         training_input["base_action_log_probs"] = base_log_probs
         training_input["action_log_probs"] = action_log_probs
         training_input["values"] = values
@@ -2853,6 +2911,7 @@ class RayPPOTrainer:
             "global_step": step,
             "config": self.cfg,
             "distillation_scored_tokens_total": self.distillation_scored_tokens_total,
+            "ftpo_stopped": self._ftpo_stopped,
             "domain_gradient_balance_state": self._domain_balancer.state_dict() if self._domain_balancer else None,
         }
         trainer_state_path = os.path.join(global_step_folder, TRAINER_STATE_FILENAME)
@@ -2977,6 +3036,7 @@ class RayPPOTrainer:
         with io.open_file(trainer_state_path, "rb") as f:
             trainer_state = torch.load(f, map_location="cpu", weights_only=False)
         saved_global_step = trainer_state.get("global_step", global_step)
+        self._ftpo_stopped = bool(trainer_state.get("ftpo_stopped", False))
         if self.cfg.trainer.get("reset_distillation_token_count_on_resume", False):
             self.distillation_scored_tokens_total = 0
         else:

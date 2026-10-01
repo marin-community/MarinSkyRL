@@ -25,9 +25,6 @@ This is a fork of SkyRL maintained for the [Marin project](https://github.com/ma
 
 MarinSkyRL is maintained as a hard snapshot; no upstream sync or merge-back is planned.
 
-The dormant `skyrl-agent` snapshot's `coder1` verifier and `GeneralReactTask` have been removed.
-See the [retirement guide](docs/coder1-retirement.md) for supported code-verification routes and migration requirements.
-
 ## MarinSkyRL packaging
 
 The repository root builds one `marinskyrl` wheel containing the typed Iris launcher, `skyrl_train`, and
@@ -122,3 +119,5 @@ The script is designed to run on 8 GPUs single-node. If that is not your setup, 
   generator.num_inference_engines=8 \
   generator.inference_engine_tensor_parallel_size=1 \
 ```
+
+Verifier setup, opt-in configuration and offline comparison commands are documented in [Unified verification](docs/verifyit.md).

@@ -57,7 +57,8 @@ def test_clamp_generation_tokens_reserves_only_remaining_request_window():
 
 @pytest.mark.asyncio
 @patch("skyrl_gym.make")
-async def test_step_wise_generation_clamps_final_request_to_tokenized_window(mock_make):
+@pytest.mark.parametrize("output_limit,expected_limit", [(None, 2), (1, 1)])
+async def test_step_wise_generation_clamps_final_request_to_tokenized_window(mock_make, output_limit, expected_limit):
     cfg = get_default_config().generator
     cfg.use_conversation_multi_turn = True
     cfg.max_turns = 2
@@ -83,16 +84,18 @@ async def test_step_wise_generation_clamps_final_request_to_tokenized_window(moc
     )
     collector = StepWiseRolloutCollector(runner)
 
-    outputs = await collector.agent_loop(
-        [{"role": "user", "content": "task"}],
-        "test_env",
-        {},
-        max_tokens=16,
-        max_input_length=4,
+    outputs = await collector.collect(
+        {
+            "prompts": [[{"role": "user", "content": "task"}]],
+            "env_classes": ["test_env"],
+            "env_extras": [{}],
+            "sampling_params": {"max_tokens": output_limit} if output_limit is not None else None,
+        },
+        disable_tqdm=True,
     )
 
-    assert outputs[0].evidence.response_token_ids == (7, 8)
-    assert engine.requests[0]["sampling_params"]["max_tokens"] == 2
+    assert outputs[0][0].evidence.response_token_ids == (7, 8)
+    assert engine.requests[0]["sampling_params"]["max_tokens"] == expected_limit
 
 
 @pytest.mark.asyncio

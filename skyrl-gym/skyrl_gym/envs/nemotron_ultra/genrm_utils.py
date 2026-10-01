@@ -186,12 +186,36 @@ def generate_comparison_pairs(strategy: str, num_responses: int) -> List[Tuple[i
 _JUDGE_ERROR_PREVIEW_CHARACTERS = 2000
 
 
-def parse_genrm_output(output: str) -> Tuple[float, float, float]:
+def _unique_genrm_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise GenRMOutputParseError("Duplicate GenRM fields")
+        result[key] = value
+    return result
+
+
+def _finite_genrm_float(value):
+    number = float(value)
+    if not math.isfinite(number):
+        raise GenRMOutputParseError("Nonfinite GenRM JSON")
+    return number
+
+
+def parse_genrm_output(output: str, *, strict_json: bool = False) -> Tuple[float, float, float]:
     """Read the final complete GenRM object and require finite numeric scores."""
-    decoder = json.JSONDecoder()
+    decoder = (
+        json.JSONDecoder(
+            object_pairs_hook=_unique_genrm_object, parse_float=_finite_genrm_float, parse_constant=_finite_genrm_float
+        )
+        if strict_json
+        else json.JSONDecoder()
+    )
     cursor = 0
     parsed = None
     while (start := output.find("{", cursor)) >= 0:
+        if strict_json and parsed is not None:
+            raise GenRMOutputParseError("Multiple GenRM score objects")
         try:
             parsed, consumed = decoder.raw_decode(output[start:])
         except json.JSONDecodeError as error:

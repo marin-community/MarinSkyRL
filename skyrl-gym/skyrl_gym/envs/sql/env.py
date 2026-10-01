@@ -15,6 +15,7 @@ class SQLEnv(BaseTextEnv):
 
     def __init__(self, env_config: DictConfig, extras: Dict[str, Any] = {}):
         super().__init__()
+        self.verifyit_enabled = bool(env_config.get("verifyit_enabled", False))
 
         # Initialize the environment
         assert "db_id" in extras, "db_id field is required"
@@ -79,6 +80,10 @@ class SQLEnv(BaseTextEnv):
         if done:
             # Concat all chat history into a single string and compute reward
             chat_history_str = "".join([item["content"] for item in self.chat_history])
+            if self.verifyit_enabled:
+                from skyrl_gym.envs.sqlite_verifyit import score_legacy_sql
+
+                return score_legacy_sql(chat_history_str, self.gold_sql, self.db_file)
             return compute_score_single(chat_history_str, self.gold_sql, self.db_file)
         else:
             # No reward for intermediate steps for SQL tasks
@@ -105,7 +110,18 @@ class SQLEnv(BaseTextEnv):
 
         error = None
         done = self._is_done(action)
-        reward = self._get_reward(action, done)
+        try:
+            reward = self._get_reward(action, done)
+        except RuntimeError:
+            from skyrl_gym.verification import VerificationResult
+
+            return BaseTextEnvStepOutput(
+                observations=[],
+                reward=0.0,
+                done=True,
+                metadata={},
+                verification=VerificationResult.error("SQL verification failed"),
+            )
 
         if done:
             return BaseTextEnvStepOutput(observations=[], reward=reward, done=done, metadata={})

@@ -12,8 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from verifyit.grade import InvalidTask, Status
+from verifyit.adapters.skyrl import grade_gsm8k_final_line, grade_gsm8k_extracted
+
 import re
-from decimal import Decimal
 
 FINAL_ANSWER = re.compile(r"#### (-?(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)(?:\.[0-9]+)?)")
 
@@ -61,13 +63,21 @@ def compute_score(solution_str, ground_truth, method="strict", format_score=0.0,
         format_score: the score for the format
         score: the score for the correct answer
     """
+    if method == "final_line":
+        try:
+            verdict = grade_gsm8k_final_line(ground_truth, solution_str)
+        except InvalidTask:
+            return 0
+        if verdict.status != Status.SCORED or verdict.detail.get("reason") == "missing_final_answer":
+            return 0
+        return score if verdict.reward == 1.0 else format_score
     answer = extract_solution(solution_str=solution_str, method=method)
     if answer is None:
         return 0
-    if method == "final_line":
-        return score if Decimal(answer) == Decimal(ground_truth) else format_score
-    else:
-        if answer == ground_truth:
-            return score
-        else:
-            return format_score
+    try:
+        verdict = grade_gsm8k_extracted(ground_truth, answer)
+    except InvalidTask:
+        return 0
+    if verdict.status != Status.SCORED:
+        return 0
+    return score if verdict.reward else format_score

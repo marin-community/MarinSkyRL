@@ -267,6 +267,12 @@ def validate_trajectory_runner_capabilities(
     loss_spec: LossSpec | None = None,
 ) -> None:
     """Reject operation and runner combinations that cannot supply required training evidence."""
+    if mode is not TrajectoryRunnerMode.SKYRL_GYM and any(
+        callback.get("type") == "evaluation" and callback.get("additional_evaluations")
+        for callback in (cfg.trainer.get("callbacks") or [])
+    ):
+        raise ValueError(f"{mode.value} does not support additional evaluation sampling profiles")
+
     distillation_plan = compile_distillation_plan_from_config(cfg)
     capabilities = trajectory_runner_capabilities(cfg, mode)
     if cfg.generator.get("require_exact_chat_transport", False):
