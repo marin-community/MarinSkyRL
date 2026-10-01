@@ -146,6 +146,10 @@ NUMERICS_CANDIDATES = {
     KEPT_VLLM_KERNELS_ROUTER_ROWS: _enabled(
         *_COMPILED_STACK_FLAGS, "fa3_attention", "vllm_gemm", "vllm_experts", "router_rows"
     ),
+    # The kept kernel stack without vLLM's FA3 values: attention stays on cuDNN only.
+    f"{COMPILED_STACK}+vllm_gemm+vllm_experts+router_rows": _enabled(
+        *_COMPILED_STACK_FLAGS, "vllm_gemm", "vllm_experts", "router_rows"
+    ),
     # Every vLLM kernel and vLLM's expert-parallel addition order: the stack the harness finds byte-equal to
     # compiled vLLM apart from the XSA reductions, a few RoPE and norm elements and the router GEMM's row count.
     f"{KEPT_VLLM_KERNELS}+ep_sum": _enabled(
@@ -202,6 +206,7 @@ for _candidate in (
     KEPT_VLLM_EXPERTS,
     KEPT_VLLM_KERNELS,
     KEPT_VLLM_KERNELS_ROUTER_ROWS,
+    f"{COMPILED_STACK}+vllm_gemm+vllm_experts+router_rows",
     f"{KEPT_VLLM_KERNELS}+ep_sum",
     *(f"{KEPT_STACK_2}+{flag}" for flag in (*_VLLM_REGION_FLAGS, "ep_sum")),
     VLLM_FORWARD,
