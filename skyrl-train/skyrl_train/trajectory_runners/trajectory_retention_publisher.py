@@ -5,6 +5,7 @@ import multiprocessing
 from multiprocessing.connection import Connection, wait
 import threading
 import time
+import weakref
 from typing import Any, Protocol
 
 
@@ -45,11 +46,33 @@ class TrajectoryPublisher(Protocol):
     def close(self) -> PublicationResult | None: ...
 
 
-PublisherWorker = Callable[[PublicationRequest, Connection], None]
+PublisherWorker = Callable[[PublicationRequest], PublicationResult]
+
+
+def _publication_loop(worker: PublisherWorker, connection: Connection) -> None:
+    """Keep imports and storage clients warm between acknowledged operations."""
+    try:
+        while True:
+            request = connection.recv()
+            connection.send(worker(request))
+    except EOFError:
+        return
+    finally:
+        connection.close()
+
+
+def _close_storage_process(process: multiprocessing.Process, connection: Connection) -> None:
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout=1)
+        if process.is_alive():
+            process.kill()
+    process.join(timeout=1)
+    connection.close()
 
 
 class ProcessTrajectoryPublisher:
-    """Run each storage operation in a process that can be killed at its deadline."""
+    """Reuse one storage process, killing and replacing it when an operation fails."""
 
     def __init__(
         self,
@@ -62,10 +85,13 @@ class ProcessTrajectoryPublisher:
         self._publish_timeout_seconds = publish_timeout_seconds
         self._shutdown_timeout_seconds = shutdown_timeout_seconds
         self._lock = threading.Lock()
+        self._execution_lock = threading.Lock()
         self._pending_thread: threading.Thread | None = None
         self._pending_event: threading.Event | None = None
         self._pending_result: PublicationResult | None = None
         self._child: multiprocessing.Process | None = None
+        self._connection: Connection | None = None
+        self._cleanup: weakref.finalize | None = None
 
     def execute(self, request: PublicationRequest) -> PublicationResult:
         return self._execute(request)
@@ -95,12 +121,12 @@ class ProcessTrajectoryPublisher:
     def close(self) -> PublicationResult | None:
         with self._lock:
             event = self._pending_event
-        if event is None:
-            return None
-        if not event.wait(self._shutdown_timeout_seconds):
+        if event is not None and not event.wait(self._shutdown_timeout_seconds):
             self._terminate_child()
             event.wait(1)
-        return self._take_pending_result()
+        result = self._take_pending_result() if event is not None else None
+        self._terminate_child()
+        return result
 
     def _execute_in_background(self, request: PublicationRequest) -> None:
         result = self._execute(request)
@@ -110,29 +136,64 @@ class ProcessTrajectoryPublisher:
             self._pending_event.set()
 
     def _execute(self, request: PublicationRequest) -> PublicationResult:
-        context = multiprocessing.get_context("spawn")
-        receiver, sender = context.Pipe(duplex=False)
-        process = context.Process(target=self._worker, args=(request, sender), daemon=True)
+        with self._execution_lock:
+            return self._execute_locked(request)
+
+    def _storage_process(self) -> tuple[multiprocessing.Process, Connection]:
         with self._lock:
-            self._child = process
-        try:
+            if self._child is not None and self._child.is_alive():
+                assert self._connection is not None
+                return self._child, self._connection
+        self._terminate_child()
+        context = multiprocessing.get_context("spawn")
+        connection, child_connection = context.Pipe(duplex=True)
+        process = context.Process(target=_publication_loop, args=(self._worker, child_connection), daemon=True)
+        with self._lock:
             process.start()
-            sender.close()
-            deadline = time.monotonic() + self._publish_timeout_seconds
+            child_connection.close()
+            self._child = process
+            self._connection = connection
+            self._cleanup = weakref.finalize(self, _close_storage_process, process, connection)
+        return process, connection
+
+    def _execute_locked(self, request: PublicationRequest) -> PublicationResult:
+        deadline = time.monotonic() + self._publish_timeout_seconds
+        process, connection = self._storage_process()
+        send_errors = []
+
+        def send_request() -> None:
+            try:
+                connection.send(request)
+            except Exception as error:
+                send_errors.append(error)
+
+        # A large ledger can fill the pipe while a fresh child imports its runtime.
+        # Include that wait in the operation deadline instead of blocking in send().
+        sender = threading.Thread(target=send_request, name="trajectory-publication-send", daemon=True)
+        sender.start()
+        try:
+            sender.join(max(0, deadline - time.monotonic()))
+            if send_errors:
+                return PublicationResult(request.request_id, request.record_count, error=str(send_errors[0]))
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    self._stop_process(process)
+                    self._terminate_child()
+                    sender.join(timeout=1)
                     return PublicationResult(
                         request_id=request.request_id,
                         record_count=request.record_count,
                         error=f"storage operation exceeded {self._publish_timeout_seconds:g} seconds",
                         timed_out=True,
                     )
-                ready = wait((receiver, process.sentinel), timeout=remaining)
-                if receiver in ready or receiver.poll():
-                    result = receiver.recv()
-                    process.join(timeout=1)
+                ready = wait((connection, process.sentinel), timeout=remaining)
+                if connection in ready or connection.poll():
+                    result = connection.recv()
+                    if result.request_id != request.request_id:
+                        self._terminate_child()
+                        raise ValueError("storage worker returned a result for another publication")
+                    if result.error is not None:
+                        self._terminate_child()
                     return result
                 if process.sentinel in ready:
                     process.join(timeout=1)
@@ -141,12 +202,16 @@ class ProcessTrajectoryPublisher:
                         record_count=request.record_count,
                         error=f"storage worker exited with code {process.exitcode} without a result",
                     )
+        except (OSError, EOFError) as error:
+            self._terminate_child()
+            return PublicationResult(
+                request.request_id,
+                request.record_count,
+                error=f"storage worker disconnected without a result: {type(error).__name__}: {error}",
+            )
         finally:
-            receiver.close()
-            sender.close()
-            with self._lock:
-                if self._child is process:
-                    self._child = None
+            if send_errors or not process.is_alive():
+                self._terminate_child()
 
     def _take_pending_result(self) -> PublicationResult | None:
         with self._lock:
@@ -164,17 +229,9 @@ class ProcessTrajectoryPublisher:
 
     def _terminate_child(self) -> None:
         with self._lock:
-            process = self._child
-        if process is not None:
-            self._stop_process(process)
-
-    @staticmethod
-    def _stop_process(process: multiprocessing.Process) -> None:
-        if not process.is_alive():
-            process.join(timeout=1)
-            return
-        process.terminate()
-        process.join(timeout=1)
-        if process.is_alive():
-            process.kill()
-            process.join(timeout=1)
+            cleanup = self._cleanup
+            self._child = None
+            self._connection = None
+            self._cleanup = None
+        if cleanup is not None:
+            cleanup()

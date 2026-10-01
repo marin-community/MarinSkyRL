@@ -127,7 +127,7 @@ def _empty_ledger():
     return {"schema_version": 1, "total_bytes": 0, "step_bytes": {}, "records": {}, "archives": {}}
 
 
-def _never_finishes(_request, _sender):
+def _never_finishes(_request):
     threading.Event().wait()
 
 
