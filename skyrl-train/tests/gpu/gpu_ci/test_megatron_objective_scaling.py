@@ -68,12 +68,17 @@ def objective_batch(weight, teacher):
     evidence = None
     if teacher:
         valid = mask.bool() & (positions % 3 != 1)
-        support = (sequences[:, 2:, None] + torch.arange(3, device="cuda")) % 16
-        probabilities = torch.tensor([0.36, 0.28, 0.16], device="cuda").expand(8, 6, 3)
+        support_size = 3 if teacher == "sparse_forward_kl" else 16
+        support = (sequences[:, 2:, None] + torch.arange(support_size, device="cuda")) % 16
+        probabilities = (
+            torch.tensor([0.36, 0.28, 0.16], device="cuda")
+            if support_size == 3
+            else torch.arange(1, 17, device="cuda", dtype=torch.float32) / 136
+        ).expand(8, 6, support_size)
         evidence = TeacherTopKInput(
             teacher_topk_indices=support,
             teacher_topk_logprobs=probabilities.log().masked_fill(~valid[..., None], torch.nan),
-            retained_mass=torch.full_like(mask, 0.8).masked_fill(~valid, torch.nan),
+            retained_mass=torch.full_like(mask, 0.8 if support_size == 3 else 1).masked_fill(~valid, torch.nan),
             valid_mask=valid,
             loss_weights=(0.2 + positions % 4 * 0.3).masked_fill(~valid, torch.nan),
         )
@@ -87,12 +92,13 @@ def objective_batch(weight, teacher):
         advantages=advantages.masked_fill(mask == 0, torch.nan),
         loss_mask=mask,
         rollout_action_logprobs=None,
+        correction_weights=(0.25 + positions % 5 * 0.5).masked_fill(mask == 0, torch.nan),
         response_span_tags=tags,
         distillation=evidence,
     )
 
 
-def full_batch_reference(weight, batch, mode):
+def full_batch_reference(weight, batch, mode, teacher_objective):
     """Literal dense arithmetic, independent of production reducers and token-loss kernels."""
     weight = weight.detach().clone().requires_grad_()
     log_probs = weight[batch.sequences[:, 1:-1]].log_softmax(-1)
@@ -116,7 +122,7 @@ def full_batch_reference(weight, batch, mode):
         denominator_rows = nonzero_rows if mode == LossReduction.SEQ_MEAN_TOKEN_SUM_NORM_GLOBAL else rows
         return weighted.sum() / (denominator_rows * 8)
 
-    policy = reduce(-(action - old).exp() * advantages, policy_weights)
+    policy = reduce(-(action - old).exp() * advantages, policy_weights, batch.correction_weights)
     ref = torch.where(valid, batch.base_action_log_probs, action.detach())
     kl_tokens = 0.5 * (action - ref).square() * batch.loss_mask
     kl = (kl_tokens.sum(-1) / batch.loss_mask.sum(-1).clamp(min=1)).sum() / (batch.loss_mask.sum(-1) > 0).sum()
@@ -125,9 +131,21 @@ def full_batch_reference(weight, batch, mode):
     total = policy + 0.3 * kl - 0.2 * entropy
     if batch.distillation is not None:
         evidence = batch.distillation
-        conditional = torch.tensor([0.45, 0.35, 0.2], device="cuda")
         selected = log_probs.gather(-1, evidence.teacher_topk_indices)
-        teacher = (conditional * (conditional.log() - selected)).sum(-1)
+        if teacher_objective == "sparse_forward_kl":
+            conditional = torch.tensor([0.45, 0.35, 0.2], device="cuda")
+            teacher = (conditional * (conditional.log() - selected)).sum(-1)
+        else:
+            probabilities = torch.arange(1, 17, device="cuda", dtype=torch.float32) / 136
+            student = selected.exp()
+            if teacher_objective == "sparse_reverse_kl":
+                teacher = (student * (selected - probabilities.log())).sum(-1)
+            else:
+                mixture = 0.3 * probabilities + 0.7 * student
+                teacher = (
+                    0.3 * probabilities * (probabilities.log() - mixture.log())
+                    + 0.7 * student * (selected - mixture.log())
+                ).sum(-1)
         teacher_row = reduce(teacher, batch.loss_mask * evidence.valid_mask, evidence.loss_weights)
         rows["distillation_loss"] = teacher_row
         total = total + teacher_row
@@ -174,7 +192,7 @@ def run_scaling_rank(rank, world_size, cp_size, teacher, rendezvous):
         config.trainer.use_sample_packing = cp_size > 1
         algorithm = config.trainer.algorithm
         algorithm.policy_loss_type = "importance_sampling"
-        algorithm.use_tis = False
+        algorithm.off_policy_correction = "none"
         algorithm.use_kl_loss = True
         algorithm.kl_estimator_type = "k2"
         algorithm.kl_loss_coef = 0.3
@@ -186,7 +204,11 @@ def run_scaling_rank(rank, world_size, cp_size, teacher, rendezvous):
             algorithm.max_seq_len = 8
         if teacher:
             with open_dict(algorithm):
-                algorithm.distillation = {"objective": "sparse_forward_kl"}
+                algorithm.distillation = {
+                    "objective": teacher,
+                    "jsd_beta": 0.3 if teacher == "sparse_jsd" else None,
+                    "entry_clip": None,
+                }
         wrapper = MegatronModelWrapper(config, [ddp], policy_loss_fn=importance_sampling_policy_loss)
         batch = objective_batch(model.logits.weight, teacher)
         dp_size = mpu.get_data_parallel_world_size(with_context_parallel=False)
@@ -196,7 +218,7 @@ def run_scaling_rank(rank, world_size, cp_size, teacher, rendezvous):
             if teacher and mode is LossReduction.SEQ_MEAN_TOKEN_SUM_NORM_GLOBAL:
                 continue
             algorithm.loss_reduction = mode.value
-            expected_gradient, expected_rows = full_batch_reference(model.logits.weight, batch, mode)
+            expected_gradient, expected_rows = full_batch_reference(model.logits.weight, batch, mode, teacher)
             for micros in (1, 2):
                 ddp.zero_grad_buffer()
                 micro_size = rows_per_rank // micros
@@ -242,7 +264,9 @@ def run_distributed(target, world_size, args):
                 process.join()
 
 
-@pytest.mark.parametrize("cp_size,teacher", [(2, False), (1, True)])
+@pytest.mark.parametrize(
+    "cp_size,teacher", [(2, None), (1, "sparse_forward_kl"), (1, "sparse_reverse_kl"), (1, "sparse_jsd")]
+)
 def test_megatron_objective_gradients_and_rows_match_full_batch(tmp_path, cp_size, teacher):
     assert torch.cuda.device_count() >= 2 * cp_size, "Run on an allocation with four GPUs"
     print(

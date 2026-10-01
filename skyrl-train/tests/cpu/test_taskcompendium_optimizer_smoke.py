@@ -164,7 +164,7 @@ async def test_mixed_taskcompendium_rollout_updates_cpu_policy(
     algorithm = training_config.trainer.algorithm
     algorithm.policy_loss_type = "regular"
     algorithm.loss_reduction = "token_mean"
-    algorithm.use_tis = False
+    algorithm.off_policy_correction = "none"
     algorithm.use_kl_loss = False
     advantages, _ = compute_advantages_and_returns(
         token_level_rewards=rewards,

@@ -26,6 +26,7 @@ from skyrl_train.distributed.megatron.megatron_utils import (
     offload_megatron_grads_to_cpu,
     load_megatron_grads_to_gpu,
     materialize_megatron_params,
+    restore_offloaded_optimizer_state,
 )
 from skyrl_train.distributed.megatron.direct_checkpoint import (
     DirectS3TorchDistLoadShardedStrategy,
@@ -404,6 +405,7 @@ class MegatronStrategy(DistributedStrategy):
                 f"Optimizer state dict not found in checkpoint loaded from {ckpt_dir}. Available keys: {state_dict.keys()}"
             )
             optimizer.load_state_dict(state_dict.pop("optimizer"))
+            restore_offloaded_optimizer_state(optimizer)
             load_megatron_grads_to_gpu(model)
             self.log("Loaded optimizer state dict.")
 

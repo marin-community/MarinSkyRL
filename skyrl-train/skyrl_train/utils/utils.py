@@ -494,6 +494,7 @@ def validate_cfg(cfg: DictConfig):
     resolve_dynamic_sampling_criteria(
         cfg.trainer.algorithm.dynamic_sampling.informative_on,
         float(cfg.trainer.algorithm.dynamic_sampling.min_reward_std),
+        cfg.trainer.algorithm.dynamic_sampling.max_mean_reward,
     )
     runtime_values = {
         "trainer.distributed.placement_group_timeout_seconds": cfg.trainer.distributed.placement_group_timeout_seconds,
@@ -604,25 +605,7 @@ def validate_cfg(cfg: DictConfig):
     # fixed max response budget.
     algorithm_config.max_seq_len = cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
 
-    # TODO (erictang000): remove these after deprecation period
-    if algorithm_config.use_abs_kl:
-        logger.warning("`use_abs_kl` will be deprecated, overriding to use `kl_estimator_type='abs'` instead")
-        algorithm_config.kl_estimator_type = "abs"
-    elif algorithm_config.use_kl_estimator_k3:
-        logger.warning("`use_kl_estimator_k3` will be deprecated, overriding to use `kl_estimator_type='k3'` instead")
-        algorithm_config.kl_estimator_type = "k3"
     cfg.trainer.algorithm = algorithm_config
-
-    behavior_clip = cfg.trainer.algorithm.policy_loss_type == "behavior_clip"
-    if behavior_clip and cfg.trainer.algorithm.use_tis:
-        raise ValueError(
-            "trainer.algorithm.policy_loss_type=behavior_clip cannot be combined with use_tis=true; "
-            "behavior clipping already uses the full rollout importance ratio"
-        )
-    assert cfg.trainer.rollout_buffer.max_staleness_steps == 0 or behavior_clip or cfg.trainer.algorithm.use_tis, (
-        "trainer.rollout_buffer.max_staleness_steps > 0 trains on rollouts from older policies and needs an "
-        "off-policy correction: set trainer.algorithm.use_tis=true or trainer.algorithm.policy_loss_type=behavior_clip"
-    )
 
     behavior_logprobs_required = rollout_logprobs_required(cfg.trainer.algorithm, loss_spec=spec)
     if behavior_logprobs_required:
@@ -634,16 +617,6 @@ def validate_cfg(cfg: DictConfig):
         if cfg.generator.backend == "sglang":
             raise NotImplementedError("Behavior-logprob objectives require the vLLM generator backend")
         configure_behavior_logprob_sampling(cfg.generator)
-
-    if cfg.trainer.algorithm.use_tis:
-        if cfg.trainer.algorithm.tis_imp_ratio_cap <= 0:
-            raise ValueError(
-                f"If `trainer.algorithm.use_tis` is `True` then `cfg.trainer.algorithm.tis_imp_ratio_cap` should be > 0, got {cfg.trainer.algorithm.tis_imp_ratio_cap}"
-            )
-        assert cfg.trainer.algorithm.policy_loss_type in [
-            "regular",
-            "dual_clip",
-        ], "TIS is only implemented for regular and dual_clip policy loss types"
 
     if cfg.trainer.policy.model.lora.rank > 0:
         raise ValueError("Megatron training does not support LoRA")
