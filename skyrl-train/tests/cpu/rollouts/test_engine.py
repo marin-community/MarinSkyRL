@@ -49,7 +49,7 @@ from skyrl_train.dataset.harbor import HarborTaskDataset
 from skyrl_train.dataset.nemotron_ultra import NemotronTaskDataset
 from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection, WholeTrajectoryProjection
 from skyrl_train.rollouts.buffer import RolloutGroup, RolloutLease, RolloutTask
-from skyrl_train.rollouts.task_worker import BufferRolloutSink, TaskRolloutWorker
+from skyrl_train.rollouts.task_worker import TaskRolloutWorker
 from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
 from taskcompendium.importers.skyrl import gym_task, read_gym_tasks
 from taskcompendium.parquet import read_tasks, write_tasks
@@ -1480,7 +1480,7 @@ async def test_harbor_task_worker_preserves_verdicts_and_shapes_group_rewards(
         ("train", "verify", True, True),
     ],
 )
-async def test_genrm_final_grades_and_credit_reach_the_buffer(
+async def test_genrm_final_grades_and_credit_reach_training_batch(
     task_inputs, monkeypatch, phase, grading, failed_peer, failed_judge
 ):
     comparisons = []
@@ -1553,15 +1553,7 @@ async def test_genrm_final_grades_and_credit_reach_the_buffer(
         command_timeout=5,
     )
     rollouts = await runner.generate(request)
-
-    def completed_rollouts():
-        for rollout in rollouts:
-            yield rollout
-
-    writer = Writer()
-    sink = BufferRolloutSink(runner, RolloutTask(RolloutLease("lease", 0, 1), {"uid": task.id}, request), writer)
-    await sink.consume(completed_rollouts())
-    batch = writer.groups[0][1].trajectory_batch
+    batch = await runner.training_batch(request, rollouts)
     if failed_peer:
         failed_indices = [index for index, rollout in enumerate(rollouts) if rollout.failure is not None]
         assert len(failed_indices) == 1

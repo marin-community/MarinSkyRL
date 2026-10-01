@@ -1,7 +1,7 @@
 """TaskCompendium execution and projection into SkyRL training batches."""
 
 import asyncio
-from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import Executor, ThreadPoolExecutor
 from contextlib import nullcontext
 from contextvars import copy_context
@@ -467,28 +467,12 @@ class TaskRolloutWorker:
         """Evaluation resources close with their tasks."""
 
     async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> int:
-        sink = BufferRolloutSink(self, task, writer)
         rollouts = await self.generate(task.request)
-        await sink.consume(iter(rollouts))
-        return sink.response_tokens
-
-
-class BufferRolloutSink:
-    """Commit a complete prompt group through the buffer's lease-aware writer."""
-
-    def __init__(self, runner: TaskRolloutWorker, task: RolloutTask, writer: RolloutWriter):
-        self.runner = runner
-        self.task = task
-        self.writer = writer
-        self.response_tokens = 0
-
-    async def consume(self, rollouts: Iterator[RolloutData]) -> None:
-        outputs = list(rollouts)
-        batch = await self.runner.training_batch(self.task.request, outputs)
-        group = RolloutGroup(batch, self.task.prompt["uid"], self.task.lease.policy_step, self.task.prompt)
+        batch = await self.training_batch(task.request, rollouts)
+        group = RolloutGroup(batch, task.prompt["uid"], task.lease.policy_step, task.prompt)
         with rollout_wait("enqueue"):
-            await self.writer.write_rollout(self.task.lease, group)
-        self.response_tokens = sum(len(response) for response in batch["response_ids"])
+            await writer.write_rollout(task.lease, group)
+        return sum(len(response) for response in batch["response_ids"])
 
 
 @dataclass(frozen=True)

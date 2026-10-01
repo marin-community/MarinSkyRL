@@ -77,13 +77,12 @@ policies. Timeout recovery retains only completed, verified Gym turns.
 It requires behavior log probabilities when the request requires them.
 ``preserve_logprobs_on_timeout=false`` disables timeout recovery.
 
-``BufferRolloutSink`` projects and finalizes a completed prompt group before one
+``TaskRolloutWorker.run_task`` projects and finalizes a completed prompt group before one
 buffer write. A failed group cannot commit partial results.
 ``environment.skyrl_gym.max_env_workers`` limits environment threads per worker.
 Cancellation waits for active environment operations before resource cleanup.
 Repeated cancellation requests also wait for the engine thread to release its
-task resources. The async sink receives completed records and awaits the buffer
-commit.
+task resources. The worker returns after the buffer commit.
 
 Rollout telemetry records collection, backend tokenization, batch assembly,
 finalization, model waits, and environment queue and execution times.
