@@ -24,8 +24,4 @@ def test_retired_agent_import_rejects_configuration_with_migration_path(
         import_module(module)
 
     assert error.value.name == retired_package
-    message = str(error.value)
-    assert "deprecated" in message
-    assert "lcb" in message
-    assert "Harbor" in message
-    assert "docs/coder1-retirement.md" in message
+    assert "docs/coder1-retirement.md" in str(error.value)

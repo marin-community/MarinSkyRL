@@ -6,6 +6,11 @@ and dependent example configurations and launch scripts have been deleted. Packa
 retirement notices reject old imports with `ModuleNotFoundError` and a migration
 message, including imports of the former execution backends.
 
+The task's exclusive math and question-answering verifiers are also removed.
+Retain the two import notices until the dormant `skyrl-agent` snapshot is deleted:
+they provide actionable rejection for old configurations, with no scoring or
+compatibility implementation.
+
 `coder1` executed arbitrary Python tests alongside candidate objects. Identity
 checks, class and module introspection, callbacks, and custom objects cannot be
 preserved by translating inputs and outputs to isolated execution. The partial
