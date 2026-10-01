@@ -105,10 +105,13 @@ def _evaluate(data: dict[str, Any], root: Path) -> dict[str, Any]:
         if exact.status is not Status.SCORED:
             raise RuntimeError("Abstention normalization failed")
         if exact.reward == 1.0:
-            reward, feedback = 0.5, {
-                "verdict": "abstain",
-                "extracted_answer": extracted,
-            }
+            reward, feedback = (
+                0.5,
+                {
+                    "verdict": "abstain",
+                    "extracted_answer": extracted,
+                },
+            )
         else:
             template = (
                 files(__package__)
@@ -152,9 +155,7 @@ def _evaluate(data: dict[str, Any], root: Path) -> dict[str, Any]:
         evaluations = []
         for question, expected in prepared:
             correct_label = "[[NO]]" if expected.upper() == "NO" else "[[YES]]"
-            labels = {
-                label: float(label == correct_label) for label in ("[[YES]]", "[[NO]]")
-            }
+            labels = {label: float(label == correct_label) for label in ("[[YES]]", "[[NO]]")}
             score, label, output = decide(
                 response,
                 expected,
@@ -207,18 +208,12 @@ def _evaluate(data: dict[str, Any], root: Path) -> dict[str, Any]:
             prefix = prefix.format(adversarial_prompt=question)
             suffix = suffix.replace("{adversarial_prompt}", "{question}")
             template = "{reference}{candidate}" + suffix
-            score, label, output = decide(
-                response, prefix, question, template, reward_table
-            )
+            score, label, output = decide(response, prefix, question, template, reward_table)
             rewards[name], labels[name], outputs[name] = score, label, output
         reward = (
             math.prod(rewards.values())
             if combination == "product"
-            else (
-                sum(rewards.values()) / len(rewards)
-                if combination == "average"
-                else next(iter(rewards.values()))
-            )
+            else (sum(rewards.values()) / len(rewards) if combination == "average" else next(iter(rewards.values())))
         )
         feedback = {
             "response_policy": policy,
@@ -295,11 +290,7 @@ def grade_judge_profile_verifyit(
         result = run(spec_path, root)
         if result.status is not Status.SCORED:
             return 0.0, {
-                "error_type": (
-                    "schema_error"
-                    if result.status is Status.INVALID_TASK
-                    else "verification_error"
-                ),
+                "error_type": ("schema_error" if result.status is Status.INVALID_TASK else "verification_error"),
                 "error_message": "Judge verification failed",
                 "verifyit_verdict": dataclasses.asdict(result),
             }

@@ -106,9 +106,7 @@ def grade_structured_output_verifyit(
             return 1.0, {"error_type": None, "error_message": None}
         return 0.0, {
             "error_type": "validation_error",
-            "error_message": str(
-                verdict.detail.get("error", verdict.detail.get("reason"))
-            )[:200],
+            "error_message": str(verdict.detail.get("error", verdict.detail.get("reason")))[:200],
         }
     except InvalidTask:
         return 0.0, {

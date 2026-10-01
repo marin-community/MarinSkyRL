@@ -23,9 +23,7 @@ def freeze_instruction_references(record: dict, seed: str) -> dict:
 
 
 def _resolve(record, seed):
-    provenance = json.loads(
-        distribution("verifiable-instructions").read_text("direct_url.json") or "{}"
-    )
+    provenance = json.loads(distribution("verifiable-instructions").read_text("direct_url.json") or "{}")
     revision = "f46a5ac87b1400a4f8973039844b6be9b56e3faf"
     if provenance.get("vcs_info", {}).get("commit_id") != revision:
         raise ValueError("Instruction preparation requires the pinned registry")
@@ -42,9 +40,7 @@ def _resolve(record, seed):
     for identity, arguments in zip(identities, parameters):
         if not isinstance(identity, str) or not isinstance(arguments, dict):
             raise ValueError("Instruction reference is malformed")
-        original = build_instruction(
-            identity, {k: v for k, v in arguments.items() if v is not None}
-        )
+        original = build_instruction(identity, {k: v for k, v in arguments.items() if v is not None})
         frozen = original.get_instruction_args()
         if frozen is None:
             frozen = {}
@@ -54,9 +50,7 @@ def _resolve(record, seed):
         before = random.getstate()
         restored = build_instruction(identity, frozen)
         if random.getstate() != before or vars(restored) != vars(original):
-            raise ValueError(
-                "Instruction arguments do not preserve its resolved reference"
-            )
+            raise ValueError("Instruction arguments do not preserve its resolved reference")
         resolved.append(frozen)
     return {**record, "kwargs": resolved, "instruction_reference_revision": revision}
 

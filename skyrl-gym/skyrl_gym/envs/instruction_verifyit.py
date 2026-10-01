@@ -33,12 +33,7 @@ def _validated_random_state(value):
     if not isinstance(value, (list, tuple)) or len(value) != 3:
         raise ValueError("Malformed random state")
     version, words, gaussian = value
-    if (
-        version != 3
-        or type(version) is not int
-        or not isinstance(words, (list, tuple))
-        or len(words) != 625
-    ):
+    if version != 3 or type(version) is not int or not isinstance(words, (list, tuple)) or len(words) != 625:
         raise ValueError("Malformed random state")
     if (
         any(type(word) is not int or not 0 <= word <= 0xFFFFFFFF for word in words[:-1])
@@ -46,9 +41,7 @@ def _validated_random_state(value):
         or not 0 <= words[-1] <= 624
     ):
         raise ValueError("Malformed random state")
-    if gaussian is not None and (
-        type(gaussian) not in (int, float) or not math.isfinite(gaussian)
-    ):
+    if gaussian is not None and (type(gaussian) not in (int, float) or not math.isfinite(gaussian)):
         raise ValueError("Malformed Gaussian state")
     state = (version, tuple(words), gaussian)
     random.Random().setstate(state)
@@ -65,9 +58,7 @@ def _check(text: str, params: dict, predicate) -> tuple[bool, str]:
             raise RuntimeError("Instruction checker returned a nonboolean result")
         return passed, json.dumps({"passed": passed, "error": None})
     except Exception as error:
-        return False, json.dumps(
-            {"passed": False, "error": f"{type(error).__name__}: {str(error)[:200]}"}
-        )
+        return False, json.dumps({"passed": False, "error": f"{type(error).__name__}: {str(error)[:200]}"})
 
 
 def _json_format(text: str, fenced: bool = False) -> bool:
@@ -112,10 +103,7 @@ def _references(kind: str, data: Any, *, runtime: bool = False):
                 raise ReferenceError("Nonfinite instruction parameters")
             for key, value in normalized.items():
                 if key in {"N", "i"} and (
-                    isinstance(value, bool)
-                    or not isinstance(value, int)
-                    or value < 0
-                    or (key == "i" and value == 0)
+                    isinstance(value, bool) or not isinstance(value, int) or value < 0 or (key == "i" and value == 0)
                 ):
                     raise ReferenceError("Invalid instruction count or index")
                 if key in {"keyword_list", "forbidden_words", "options"} and (
@@ -132,18 +120,11 @@ def _references(kind: str, data: Any, *, runtime: bool = False):
                     "options",
                 } and (not isinstance(value, str) or not value):
                     raise ReferenceError("Invalid instruction text parameter")
-            if (
-                name in {"validate_placeholders", "validate_highlighted_sections"}
-                and normalized["N"] == 0
-            ):
+            if name in {"validate_placeholders", "validate_highlighted_sections"} and normalized["N"] == 0:
                 raise ReferenceError("Vacuous minimum instruction count")
             if normalized.get("N") == 0 and normalized.get("quantifier") == "at least":
                 raise ReferenceError("Vacuous minimum instruction count")
-            predicate = (
-                _json_format
-                if name == "validate_json_format"
-                else utils.IF_FUNCTIONS_MAP[name]
-            )
+            predicate = _json_format if name == "validate_json_format" else utils.IF_FUNCTIONS_MAP[name]
             inspect.signature(predicate).bind("", **normalized)
             references.append(("marin_skyrl:rlvr:" + name, normalized, predicate))
         return references, "fraction", decoded
@@ -156,53 +137,31 @@ def _references(kind: str, data: Any, *, runtime: bool = False):
     )
     from importlib.metadata import distribution
 
-    provenance = json.loads(
-        distribution("verifiable-instructions").read_text("direct_url.json") or "{}"
-    )
-    if (
-        provenance.get("vcs_info", {}).get("commit_id")
-        != "f46a5ac87b1400a4f8973039844b6be9b56e3faf"
-    ):
-        raise RuntimeError(
-            "Instruction registry does not match the pinned source dependency"
-        )
+    provenance = json.loads(distribution("verifiable-instructions").read_text("direct_url.json") or "{}")
+    if provenance.get("vcs_info", {}).get("commit_id") != "f46a5ac87b1400a4f8973039844b6be9b56e3faf":
+        raise RuntimeError("Instruction registry does not match the pinned source dependency")
 
     if not isinstance(data, dict):
         raise ReferenceError("Instruction record must be an object")
     if (
         "instruction_reference_seed" in data
-        and data.get("instruction_reference_revision")
-        != "f46a5ac87b1400a4f8973039844b6be9b56e3faf"
+        and data.get("instruction_reference_revision") != "f46a5ac87b1400a4f8973039844b6be9b56e3faf"
     ):
-        raise ReferenceError(
-            "Frozen instruction references do not match the pinned registry"
-        )
+        raise ReferenceError("Frozen instruction references do not match the pinned registry")
     ids = data.get("instruction_id_list")
     kwargs = data.get("kwargs")
-    if (
-        not isinstance(ids, list)
-        or not ids
-        or not isinstance(kwargs, list)
-        or len(ids) != len(kwargs)
-    ):
-        raise ReferenceError(
-            "Instruction IDs and kwargs must be nonempty aligned lists"
-        )
+    if not isinstance(ids, list) or not ids or not isinstance(kwargs, list) or len(ids) != len(kwargs):
+        raise ReferenceError("Instruction IDs and kwargs must be nonempty aligned lists")
     mode = data.get("grading_mode", "binary")
     if mode not in {"binary", "fraction"}:
         raise ReferenceError("Invalid instruction grading mode")
     # Validate every reference before any candidate is graded.
     for identity, arguments in zip(ids, kwargs):
-        if (
-            not isinstance(identity, str)
-            or identity not in instructions_registry.INSTRUCTION_DICT
-        ):
+        if not isinstance(identity, str) or identity not in instructions_registry.INSTRUCTION_DICT:
             raise ReferenceError("Unknown instruction ID")
         if arguments is not None and not isinstance(arguments, dict):
             raise ReferenceError("Instruction kwargs must be objects")
-        arguments = {
-            key: value for key, value in (arguments or {}).items() if value is not None
-        }
+        arguments = {key: value for key, value in (arguments or {}).items() if value is not None}
         runtime_instruction = None
         if runtime:
             try:
@@ -232,16 +191,10 @@ def _references(kind: str, data: Any, *, runtime: bool = False):
                     "n_start",
                     "n_end",
                 }
-                if (
-                    isinstance(value, bool)
-                    or not isinstance(value, int)
-                    or (value < 0 and not signed_span_index)
-                ):
+                if isinstance(value, bool) or not isinstance(value, int) or (value < 0 and not signed_span_index):
                     raise ReferenceError("Invalid instruction count")
             if key in {"keywords", "forbidden_words", "options"} and (
-                not isinstance(value, list)
-                or not value
-                or not all(isinstance(item, str) and item for item in value)
+                not isinstance(value, list) or not value or not all(isinstance(item, str) and item for item in value)
             ):
                 raise ReferenceError("Empty instruction word policy")
         instruction = instructions_registry.INSTRUCTION_DICT[identity](identity)
@@ -264,11 +217,7 @@ def _references(kind: str, data: Any, *, runtime: bool = False):
             "detectable_content:number_placeholders",
             "detectable_format:number_highlighted_sections",
         }:
-            count_key = (
-                "num_placeholders"
-                if "num_placeholders" in arguments
-                else "num_highlights"
-            )
+            count_key = "num_placeholders" if "num_placeholders" in arguments else "num_highlights"
             if arguments.get(count_key) == 0:
                 raise ReferenceError("Vacuous minimum instruction count")
         minimum_policies = {
@@ -286,26 +235,18 @@ def _references(kind: str, data: Any, *, runtime: bool = False):
         }
         if identity in minimum_policies:
             count_key, relation_key = minimum_policies[identity]
-            if arguments.get(count_key) == 0 and (
-                relation_key is None or arguments.get(relation_key) == "at least"
-            ):
+            if arguments.get(count_key) == 0 and (relation_key is None or arguments.get(relation_key) == "at least"):
                 raise ReferenceError("Vacuous minimum instruction count")
         state = random.getstate()
         try:
-            instruction = (
-                runtime_instruction
-                if runtime
-                else build_instruction(identity, arguments)
-            )
+            instruction = runtime_instruction if runtime else build_instruction(identity, arguments)
         except Exception as error:
             raise ReferenceError("Invalid instruction kwargs") from error
         if not runtime and random.getstate() != state:
             raise ReferenceError("Instruction construction randomized the reference")
         if (
             identity == "new:copy_span_idx"
-            and not instruction._prompt_to_repeat[
-                instruction._n_start : instruction._n_end
-            ].strip()
+            and not instruction._prompt_to_repeat[instruction._n_start : instruction._n_end].strip()
         ):
             raise ReferenceError("Empty instruction copy span")
         predicate = instruction.check_following
@@ -362,9 +303,7 @@ def _evaluate(kind: str, text: str, data: Any, *, runtime: bool = False) -> dict
     with tempfile.TemporaryDirectory(prefix="skyrl-instruction-checks-") as temporary:
         root = Path(temporary)
         (root / "response.txt").write_text(json.dumps(text))
-        names = [
-            name + ":" + str(index) for index, (name, _, _) in enumerate(references)
-        ]
+        names = [name + ":" + str(index) for index, (name, _, _) in enumerate(references)]
         if any(name in CONSTRAINTS for name in names):
             return {
                 "status": "invalid_task",
@@ -382,9 +321,7 @@ def _evaluate(kind: str, text: str, data: Any, *, runtime: bool = False) -> dict
                 return _check(candidate, arguments, predicate)
 
             CONSTRAINTS[name] = check
-            spec = IfevalSpec(
-                (Constraint(name, params),), output=str(root / "response.txt")
-            )
+            spec = IfevalSpec((Constraint(name, params),), output=str(root / "response.txt"))
             (root / "verifier.toml").write_text(render_spec(spec))
             verdict = run(root / "verifier.toml", root)
             if verdict.status is not Status.SCORED:
@@ -424,9 +361,7 @@ def _evaluate(kind: str, text: str, data: Any, *, runtime: bool = False) -> dict
         feedback = {
             "score": reward,
             "acc": all(results),
-            "func_name": (
-                decoded.get("func_name") if isinstance(decoded, dict) else None
-            ),
+            "func_name": (decoded.get("func_name") if isinstance(decoded, dict) else None),
             "constraints_satisfied": sum(results),
             "constraints_total": len(results),
         }
@@ -459,9 +394,7 @@ def _execute(kind: str, text: str, data: Any, timeout: float) -> tuple[float, di
                 "error_type": "schema_error",
                 "error_message": "Invalid instruction deadline",
             }
-        with tempfile.TemporaryDirectory(
-            prefix="skyrl-instruction-runtime-"
-        ) as temporary:
+        with tempfile.TemporaryDirectory(prefix="skyrl-instruction-runtime-") as temporary:
             root = Path(temporary)
             (root / "input.json").write_text(
                 json.dumps(
@@ -469,9 +402,7 @@ def _execute(kind: str, text: str, data: Any, timeout: float) -> tuple[float, di
                         "kind": kind,
                         "text": text,
                         "data": data,
-                        "random_state": (
-                            random.getstate() if kind == "nemotron" else None
-                        ),
+                        "random_state": (random.getstate() if kind == "nemotron" else None),
                     },
                     allow_nan=False,
                 )
@@ -493,11 +424,7 @@ def _execute(kind: str, text: str, data: Any, timeout: float) -> tuple[float, di
             (root / "verifier.toml").write_text(render_spec(spec))
             verdict = run(root / "verifier.toml", root)
         if verdict.status is not Status.SCORED:
-            category = (
-                "schema_error"
-                if verdict.status is Status.INVALID_TASK
-                else "verification_error"
-            )
+            category = "schema_error" if verdict.status is Status.INVALID_TASK else "verification_error"
             return 0.0, {
                 "error_type": category,
                 "error_message": "Instruction verifier failed or exceeded deadline",
@@ -519,12 +446,7 @@ def _execute(kind: str, text: str, data: Any, timeout: float) -> tuple[float, di
                 or feedback["follow_all_instructions"] != all(results)
                 or mode != data.get("grading_mode", "binary")
                 or mode not in {"binary", "fraction"}
-                or verdict.reward
-                != (
-                    float(all(results))
-                    if mode == "binary"
-                    else sum(results) / len(results)
-                )
+                or verdict.reward != (float(all(results)) if mode == "binary" else sum(results) / len(results))
             ):
                 raise ValueError("Malformed instruction feedback")
             next_state = _validated_random_state(verdict.detail["random_state"])
@@ -537,9 +459,7 @@ def _execute(kind: str, text: str, data: Any, timeout: float) -> tuple[float, di
         }
 
 
-def grade_standalone_instructions(
-    text: str, ground_truth: Any, timeout: float = 30.0
-) -> dict:
+def grade_standalone_instructions(text: str, ground_truth: Any, timeout: float = 30.0) -> dict:
     reward, feedback = _execute("standalone", text, ground_truth, timeout)
     if "error_type" in feedback:
         return {
@@ -552,9 +472,7 @@ def grade_standalone_instructions(
     return feedback
 
 
-def grade_nemotron_instructions(
-    text: str, record: dict, timeout: float = 30.0
-) -> tuple[float, dict]:
+def grade_nemotron_instructions(text: str, record: dict, timeout: float = 30.0) -> tuple[float, dict]:
     return _execute("nemotron", text, record, timeout)
 
 
@@ -578,9 +496,7 @@ def _main():
     active = {}
 
     def observe(frame, event, arg):
-        if frame.f_code.co_name != "grade" or not frame.f_code.co_filename.endswith(
-            "/verifyit/modes/grade_ifeval.py"
-        ):
+        if frame.f_code.co_name != "grade" or not frame.f_code.co_filename.endswith("/verifyit/modes/grade_ifeval.py"):
             return
         if event == "call":
             item = {
@@ -597,9 +513,7 @@ def _main():
         runtime = payload["kind"] == "nemotron"
         if runtime:
             random.setstate(_validated_random_state(payload["random_state"]))
-        verdict = _evaluate(
-            payload["kind"], payload["text"], payload["data"], runtime=runtime
-        )
+        verdict = _evaluate(payload["kind"], payload["text"], payload["data"], runtime=runtime)
         if runtime and verdict["status"] == "scored":
             verdict["detail"]["random_state"] = random.getstate()
     except Exception:

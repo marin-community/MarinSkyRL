@@ -21,12 +21,7 @@ def _finite(value):
 
 
 def _validate(history, responses, principle, config):
-    if (
-        not isinstance(history, list)
-        or not history
-        or not isinstance(responses, list)
-        or len(responses) < 2
-    ):
+    if not isinstance(history, list) or not history or not isinstance(responses, list) or len(responses) < 2:
         raise ValueError("GenRM requires a conversation and a comparison cohort")
     if any(not isinstance(response, dict) for response in responses):
         raise ValueError("GenRM response objects must be mappings")
@@ -53,18 +48,13 @@ def _validate(history, responses, principle, config):
         "genrm_parse_retries",
     ):
         if name in config and (
-            type(config[name]) is not int
-            or config[name] < (0 if name == "genrm_parse_retries" else 1)
+            type(config[name]) is not int or config[name] < (0 if name == "genrm_parse_retries" else 1)
         ):
             raise ValueError(f"Invalid GenRM integer configuration: {name}")
 
 
 def _validate_scores(rewards, metrics, size):
-    if (
-        not isinstance(rewards, list)
-        or len(rewards) != size
-        or not all(_finite(value) for value in rewards)
-    ):
+    if not isinstance(rewards, list) or len(rewards) != size or not all(_finite(value) for value in rewards):
         raise ValueError("GenRM cohort reward vector is incomplete or nonfinite")
     if not isinstance(metrics, dict) or not all(
         isinstance(key, str) and _finite(value) for key, value in metrics.items()
@@ -72,9 +62,7 @@ def _validate_scores(rewards, metrics, size):
         raise ValueError("GenRM metrics are nonfinite")
 
 
-def grade_genrm_verifyit(
-    *, conversation_history, response_objects, principle, judge, config
-):
+def grade_genrm_verifyit(*, conversation_history, response_objects, principle, judge, config):
     _validate(conversation_history, response_objects, principle, config)
     timeout = config.get("verifyit_timeout_seconds", 120.0)
     if not _finite(timeout) or not 0 < timeout <= 3600:
@@ -101,13 +89,7 @@ def grade_genrm_verifyit(
             + "\n"
         )
         spec = root / "verifier.toml"
-        spec.write_text(
-            render_spec(
-                ScriptSpec(
-                    path="check.sh", timeout=float(timeout), verdict_file="cohort.json"
-                )
-            )
-        )
+        spec.write_text(render_spec(ScriptSpec(path="check.sh", timeout=float(timeout), verdict_file="cohort.json")))
         result = run(spec, root)
         if result.status is not Status.SCORED:
             raise RuntimeError(f"GenRM cohort verification failed: {result.status}")
@@ -147,9 +129,7 @@ def _main():
             "runtime": "source_genrm",
         },
     }
-    (Path(os.environ["VERIFYIT_LOGS_DIR"]) / "cohort.json").write_text(
-        json.dumps(result, allow_nan=False)
-    )
+    (Path(os.environ["VERIFYIT_LOGS_DIR"]) / "cohort.json").write_text(json.dumps(result, allow_nan=False))
 
 
 if __name__ == "__main__":

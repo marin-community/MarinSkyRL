@@ -98,9 +98,7 @@ def test_source_fractional_composition():
         {"func_name": "validate_uppercase"},
         {"func_name": "validate_no_commas"},
     ]
-    assert grade_standalone_instructions("lower", references) == compute_score(
-        "lower", references
-    )
+    assert grade_standalone_instructions("lower", references) == compute_score("lower", references)
     assert grade_standalone_instructions("lower", references)["score"] == 0.5
 
 
@@ -112,9 +110,7 @@ def test_nvidia_binary_and_fraction_parity(kind):
         "grading_mode": kind,
     }
     for text in ["hello", "hello,", "other"]:
-        assert grade_nemotron_instructions(text, record) == grade_instruction_following(
-            text, record
-        )
+        assert grade_nemotron_instructions(text, record) == grade_instruction_following(text, record)
 
 
 @pytest.mark.parametrize(
@@ -215,9 +211,7 @@ def test_vacuous_minimum_zero_policies_invalid(reference):
     ],
 )
 def test_nvidia_vacuous_or_randomized_references_rejected(identity, arguments):
-    score, detail = grade_nemotron_instructions(
-        "", {"instruction_id_list": [identity], "kwargs": [arguments]}
-    )
+    score, detail = grade_nemotron_instructions("", {"instruction_id_list": [identity], "kwargs": [arguments]})
     assert score == 0.0
     assert detail["error_type"] == "schema_error"
 

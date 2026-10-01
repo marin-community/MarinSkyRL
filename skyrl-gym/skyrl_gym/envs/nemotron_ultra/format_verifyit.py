@@ -12,14 +12,10 @@ from typing import Any
 def _line_regex(text: str, params: dict) -> tuple[bool, str]:
     text = json.loads(text)
     patterns = [re.compile(pattern) for pattern in params["verify_regex"]]
-    matching_lines = sum(
-        any(pattern.search(line) for pattern in patterns) for line in text.split("\n")
-    )
+    matching_lines = sum(any(pattern.search(line) for pattern in patterns) for line in text.split("\n"))
     minimum = params["verify_min_matches"]
     passed = matching_lines >= minimum
-    return passed, json.dumps(
-        {"matching_lines": matching_lines, "min_matches": minimum, "passed": passed}
-    )
+    return passed, json.dumps({"matching_lines": matching_lines, "min_matches": minimum, "passed": passed})
 
 
 def _markers(text: str, params: dict) -> tuple[bool, str]:
@@ -44,9 +40,7 @@ def _markers(text: str, params: dict) -> tuple[bool, str]:
     )
 
 
-def _grade_format_ifeval(
-    text: str, verifier: dict[str, Any]
-) -> tuple[float, dict[str, Any]]:
+def _grade_format_ifeval(text: str, verifier: dict[str, Any]) -> tuple[float, dict[str, Any]]:
     """Validate task parameters before asking IFEval to evaluate the candidate."""
     try:
         from verifyit.grade import Status, run
@@ -69,11 +63,7 @@ def _grade_format_ifeval(
                 "verify_min_matches": verifier.get("verify_min_matches", 1),
             }
             minimum = params["verify_min_matches"]
-            if (
-                isinstance(minimum, bool)
-                or not isinstance(minimum, int)
-                or minimum <= 0
-            ):
+            if isinstance(minimum, bool) or not isinstance(minimum, int) or minimum <= 0:
                 raise ValueError("Match threshold must be a positive integer")
             patterns = params["verify_regex"]
             check = _line_regex
@@ -84,17 +74,14 @@ def _grade_format_ifeval(
                 "patterns": verifier.get("patterns", []),
             }
             if not isinstance(params["expected_markers"], list) or not all(
-                isinstance(marker, str) and marker
-                for marker in params["expected_markers"]
+                isinstance(marker, str) and marker for marker in params["expected_markers"]
             ):
                 raise ValueError("Expected markers must be strings")
             patterns = params["patterns"]
             check = _markers
         else:
             raise ValueError("Unsupported format verifier type")
-        if not isinstance(patterns, list) or not all(
-            isinstance(pattern, str) and pattern for pattern in patterns
-        ):
+        if not isinstance(patterns, list) or not all(isinstance(pattern, str) and pattern for pattern in patterns):
             raise ValueError("Regex patterns must be strings")
         if not patterns and (kind != "string_match" or not params["expected_markers"]):
             raise ValueError("Format policy must contain a nonempty constraint")
@@ -134,9 +121,7 @@ def _grade_format_ifeval(
         }
 
 
-def grade_format_verifyit(
-    text: str, verifier: dict[str, Any], timeout: float = 5.0
-) -> tuple[float, dict[str, Any]]:
+def grade_format_verifyit(text: str, verifier: dict[str, Any], timeout: float = 5.0) -> tuple[float, dict[str, Any]]:
     """Bound the trusted IFEval regex evaluation using ScriptSpec process cleanup."""
     import math
     import shlex
@@ -158,9 +143,7 @@ def grade_format_verifyit(
             }
         with tempfile.TemporaryDirectory(prefix="skyrl-format-runtime-") as temporary:
             root = Path(temporary)
-            (root / "input.json").write_text(
-                json.dumps({"text": text, "verifier": verifier})
-            )
+            (root / "input.json").write_text(json.dumps({"text": text, "verifier": verifier}))
             (root / "checker.sh").write_text(
                 "#!/bin/sh\nexec "
                 + shlex.quote(sys.executable)
@@ -170,17 +153,11 @@ def grade_format_verifyit(
                 + shlex.quote(str(root / "input.json"))
                 + "\n"
             )
-            spec = ScriptSpec(
-                path="checker.sh", timeout=timeout, verdict_file="format-verdict.json"
-            )
+            spec = ScriptSpec(path="checker.sh", timeout=timeout, verdict_file="format-verdict.json")
             (root / "verifier.toml").write_text(render_spec(spec))
             verdict = run(root / "verifier.toml", root)
         if verdict.status is not Status.SCORED:
-            category = (
-                "schema_error"
-                if verdict.status is Status.INVALID_TASK
-                else "verification_error"
-            )
+            category = "schema_error" if verdict.status is Status.INVALID_TASK else "verification_error"
             return 0.0, {
                 "error_type": category,
                 "error_message": "Format verifier failed or exceeded its deadline",
@@ -215,9 +192,7 @@ def _main() -> None:
     active = {}
 
     def observe(frame, event, arg):
-        if frame.f_code.co_name != "grade" or not frame.f_code.co_filename.endswith(
-            "/verifyit/modes/grade_ifeval.py"
-        ):
+        if frame.f_code.co_name != "grade" or not frame.f_code.co_filename.endswith("/verifyit/modes/grade_ifeval.py"):
             return
         if event == "call":
             item = {
@@ -238,16 +213,16 @@ def _main() -> None:
     status = (
         "invalid_task"
         if category == "schema_error"
-        else "infra_error" if category == "verification_error" else "scored"
+        else "infra_error"
+        if category == "verification_error"
+        else "scored"
     )
     verdict = {
         "status": status,
         "reward": reward,
         "detail": {"source_feedback": feedback, "ifeval_calls": calls},
     }
-    (Path(os.environ["VERIFYIT_LOGS_DIR"]) / "format-verdict.json").write_text(
-        json.dumps(verdict, allow_nan=False)
-    )
+    (Path(os.environ["VERIFYIT_LOGS_DIR"]) / "format-verdict.json").write_text(json.dumps(verdict, allow_nan=False))
 
 
 if __name__ == "__main__":

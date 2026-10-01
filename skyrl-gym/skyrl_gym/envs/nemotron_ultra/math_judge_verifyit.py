@@ -66,10 +66,7 @@ def _evaluate(data: dict[str, Any], root: Path) -> dict[str, Any]:
         not isinstance(record.get("expected_answer"), str)
         or not record["expected_answer"].strip()
         or not isinstance(record.get("question"), str)
-        or (
-            kind == "symbolic"
-            and not _balanced_reference_delimiters(record["expected_answer"])
-        )
+        or (kind == "symbolic" and not _balanced_reference_delimiters(record["expected_answer"]))
     ):
         return {
             "schema_version": 1,
@@ -116,9 +113,7 @@ def _evaluate(data: dict[str, Any], root: Path) -> dict[str, Any]:
                 extraction_config=[LatexExtractionConfig()],
                 raise_on_error=True,
             )
-            typographic_reference = any(
-                not isinstance(value, str) for value in normalized_values
-            )
+            typographic_reference = any(not isinstance(value, str) for value in normalized_values)
     if not symbolic_reference and not prose_reference and not typographic_reference:
         return {
             "schema_version": 1,
@@ -141,9 +136,7 @@ def _evaluate(data: dict[str, Any], root: Path) -> dict[str, Any]:
     candidate_path = root / "answer.txt"
     spec_path = root / "verifier.toml"
     boxed = last_boxed_answer(text)
-    pure = re.fullmatch(r"[\\\w\s{}()+*/^.,=+\-]+", text) and not re.search(
-        r"\b[A-Za-z]{3,}\b", text
-    )
+    pure = re.fullmatch(r"[\\\w\s{}()+*/^.,=+\-]+", text) and not re.search(r"\b[A-Za-z]{3,}\b", text)
     reward = 0.0
     extracted = None
     if (prose_reference or typographic_reference) and (boxed is not None or pure):
@@ -161,9 +154,7 @@ def _evaluate(data: dict[str, Any], root: Path) -> dict[str, Any]:
     if symbolic_reference and (boxed is not None or pure):
         candidate = r"\boxed{" + boxed + "}" if boxed is not None else text
         candidate_path.write_text(candidate)
-        integration = bool(
-            re.search(r"indefinite|antiderivative|primitive", record["question"], re.I)
-        )
+        integration = bool(re.search(r"indefinite|antiderivative|primitive", record["question"], re.I))
         spec_path.write_text(
             render_spec(
                 MathSpec(
@@ -209,9 +200,7 @@ def _evaluate(data: dict[str, Any], root: Path) -> dict[str, Any]:
         judge.get("api_key_env") or "", judge.get("api_key", "dummy_key")
     )
     diagnostics["judge_outputs"] = []
-    template = _JUDGE_PROMPT.replace("{first}", "{reference}").replace(
-        "{second}", "{candidate}"
-    )
+    template = _JUDGE_PROMPT.replace("{first}", "{reference}").replace("{second}", "{candidate}")
     for reference, candidate in (
         (record["expected_answer"], text),
         (text, record["expected_answer"]),
@@ -317,11 +306,7 @@ def grade_math_verifyit(
         result = run(spec_path, root)
         if result.status is not Status.SCORED:
             return 0.0, {
-                "error_type": (
-                    "schema_error"
-                    if result.status is Status.INVALID_TASK
-                    else "verification_error"
-                ),
+                "error_type": ("schema_error" if result.status is Status.INVALID_TASK else "verification_error"),
                 "error_message": "Math/judge verification failed",
                 "verifyit_verdict": dataclasses.asdict(result),
             }

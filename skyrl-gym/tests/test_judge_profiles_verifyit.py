@@ -63,9 +63,7 @@ def server():
     thread.join()
 
 
-@pytest.mark.parametrize(
-    "reply,score", [("Assistant assessed Answer.\nA", 1.0), ("B", 0.0), ("C", 0.5)]
-)
+@pytest.mark.parametrize("reply,score", [("Assistant assessed Answer.\nA", 1.0), ("B", 0.0), ("C", 0.5)])
 def test_abstention_native_and_existing_label_composition(server, reply, score):
     owner, judge = server
     owner.reply = reply
@@ -73,9 +71,7 @@ def test_abstention_native_and_existing_label_composition(server, reply, score):
     native = grade_abstention(r"\boxed{4}", record, judge)
     requests = list(owner.requests)
     owner.requests.clear()
-    cutover = grade_judge_profile_verifyit(
-        r"\boxed{4}", record, judge, kind="abstention"
-    )
+    cutover = grade_judge_profile_verifyit(r"\boxed{4}", record, judge, kind="abstention")
     assert native == cutover
     assert cutover[0] == score
     assert owner.requests == requests
@@ -85,12 +81,8 @@ def test_idk_normalization_retains_half_without_a_model(server):
     owner, judge = server
     record = {"question": "What is two plus two?", "answer": "4"}
     native = grade_abstention(r"\boxed{[IDK]}", record, judge)
-    cutover = grade_judge_profile_verifyit(
-        r"\boxed{[IDK]}", record, judge, kind="abstention"
-    )
-    assert (
-        native == cutover == (0.5, {"verdict": "abstain", "extracted_answer": "[IDK]"})
-    )
+    cutover = grade_judge_profile_verifyit(r"\boxed{[IDK]}", record, judge, kind="abstention")
+    assert native == cutover == (0.5, {"verdict": "abstain", "extracted_answer": "[IDK]"})
     assert owner.requests == []
 
 
@@ -98,9 +90,7 @@ def test_idk_normalization_retains_half_without_a_model(server):
     "expected,reply,score",
     [("YES", "[[YES]]", 1.0), ("NO", "[[NO]]", 1.0), ("YES", "[[NO]]", 0.0)],
 )
-def test_multichallenge_expected_direction_and_source_prompts(
-    server, expected, reply, score
-):
+def test_multichallenge_expected_direction_and_source_prompts(server, expected, reply, score):
     owner, judge = server
     owner.reply = reply
     record = {
@@ -116,16 +106,11 @@ def test_multichallenge_expected_direction_and_source_prompts(
     native = grade_multichallenge("candidate {reference}", record, judge)
     requests = sorted(owner.requests, key=lambda item: item["messages"][-1]["content"])
     owner.requests.clear()
-    cutover = grade_judge_profile_verifyit(
-        "candidate {reference}", record, judge, kind="multichallenge"
-    )
+    cutover = grade_judge_profile_verifyit("candidate {reference}", record, judge, kind="multichallenge")
     assert native == cutover
     assert cutover[0] == 0.5
     assert cutover[1]["rubric_evaluations"][0]["score"] == score
-    assert (
-        sorted(owner.requests, key=lambda item: item["messages"][-1]["content"])
-        == requests
-    )
+    assert sorted(owner.requests, key=lambda item: item["messages"][-1]["content"]) == requests
 
 
 @pytest.mark.parametrize(
@@ -156,14 +141,9 @@ def test_jailbreak_all_source_policies_use_existing_label_grading(server, policy
     native = grade_jailbreak("candidate response", record, judge)
     requests = sorted(owner.requests, key=lambda item: item["messages"][-1]["content"])
     owner.requests.clear()
-    cutover = grade_judge_profile_verifyit(
-        "candidate response", record, judge, kind="jailbreak"
-    )
+    cutover = grade_judge_profile_verifyit("candidate response", record, judge, kind="jailbreak")
     assert native == cutover
-    assert (
-        sorted(owner.requests, key=lambda item: item["messages"][-1]["content"])
-        == requests
-    )
+    assert sorted(owner.requests, key=lambda item: item["messages"][-1]["content"]) == requests
 
 
 @pytest.mark.parametrize(
@@ -177,9 +157,7 @@ def test_jailbreak_all_source_policies_use_existing_label_grading(server, policy
         ),
     ],
 )
-def test_malformed_trusted_judge_contract_cannot_gain_positive_credit(
-    server, kind, record
-):
+def test_malformed_trusted_judge_contract_cannot_gain_positive_credit(server, kind, record):
     owner, judge = server
     score, detail = grade_judge_profile_verifyit("candidate", record, judge, kind=kind)
     assert score == 0.0
@@ -194,13 +172,9 @@ def test_later_multichallenge_failure_discards_prior_credit(server):
     from skyrl_gym.envs.nemotron_ultra.judge_verifiers import _MULTICHALLENGE_PROMPT
 
     owner.by_prompt[
-        _MULTICHALLENGE_PROMPT.format(
-            context="", response="candidate", question="Second?", pass_criteria="YES"
-        )
+        _MULTICHALLENGE_PROMPT.format(context="", response="candidate", question="Second?", pass_criteria="YES")
     ] = "ambiguous [[YES]] and [[NO]]"
-    score, detail = grade_judge_profile_verifyit(
-        "candidate", record, judge, kind="multichallenge"
-    )
+    score, detail = grade_judge_profile_verifyit("candidate", record, judge, kind="multichallenge")
     assert score == 0.0
     assert detail["error_type"] == "verification_error"
     assert len(owner.requests) == 2

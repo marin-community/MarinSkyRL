@@ -98,9 +98,7 @@ def test_source_format_and_dialect_parity(schema_type, text, schema, expected):
 
 
 def test_registration_does_not_replace_source_dialect():
-    assert (
-        validator_for({"$schema": OAS32Validator.META_SCHEMA["$id"]}) is OAS32Validator
-    )
+    assert validator_for({"$schema": OAS32Validator.META_SCHEMA["$id"]}) is OAS32Validator
 
 
 def test_remote_reference_never_requests_network(monkeypatch):

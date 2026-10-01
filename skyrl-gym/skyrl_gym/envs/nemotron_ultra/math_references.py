@@ -9,9 +9,7 @@ REFERENCE_KINDS = frozenset({"semantic", "symbolic"})
 def reference_kind(record: Mapping[str, Any]) -> str | None:
     """Validate explicit reference metadata without guessing from answer content."""
     kind = record.get("math_reference_kind")
-    if "math_reference_kind" in record and (
-        not isinstance(kind, str) or kind not in REFERENCE_KINDS
-    ):
+    if "math_reference_kind" in record and (not isinstance(kind, str) or kind not in REFERENCE_KINDS):
         raise ValueError("math_reference_kind must be semantic or symbolic")
     reference = record.get("expected_answer")
     question = record.get("question")
@@ -23,9 +21,7 @@ def reference_kind(record: Mapping[str, Any]) -> str | None:
         # JSON permits escaped lone surrogates and control characters, but these
         # cannot form a valid text contract for the judge transport.
         value.encode("utf-8", errors="strict")
-        if any(
-            ord(character) < 32 and character not in "\n\r\t" for character in value
-        ):
+        if any(ord(character) < 32 and character not in "\n\r\t" for character in value):
             raise ValueError("Reference contract contains control characters")
     return kind
 

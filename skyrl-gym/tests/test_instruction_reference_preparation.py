@@ -31,9 +31,7 @@ def test_preparation_serializes_reference_before_framework_roundtrip(factory):
     raw = {
         "uuid": "frozen",
         "agent_ref": {"name": "instruction_following_simple_agent"},
-        "responses_create_params": {
-            "input": [{"role": "user", "content": "Write a response"}]
-        },
+        "responses_create_params": {"input": [{"role": "user", "content": "Write a response"}]},
         "instruction_id_list": ["keywords:exclude_word_harder"],
         "kwargs": [{"instruction": "red blue green"}],
     }
@@ -49,9 +47,7 @@ def test_preparation_serializes_reference_before_framework_roundtrip(factory):
     for candidate, expected in [("certain permitted sentence", 1.0), ("a blue b", 0.0)]:
         scores = []
         for enabled in [False, True]:
-            env = NemotronUltraEnv(
-                OmegaConf.create({"verifyit_enabled": enabled}), extras=row
-            )
+            env = NemotronUltraEnv(OmegaConf.create({"verifyit_enabled": enabled}), extras=row)
             env.init(row["prompt"])
             try:
                 scores.append(env.step(candidate)["reward"])
@@ -66,17 +62,13 @@ def test_explicit_keyword_needs_no_unused_random_instruction():
         "kwargs": [{"keyword": "blue"}],
     }
     for candidate in ["a blue b", "permitted"]:
-        assert grade_nemotron_instructions(
-            candidate, record
-        ) == grade_instruction_following(candidate, record)
+        assert grade_nemotron_instructions(candidate, record) == grade_instruction_following(candidate, record)
 
 
 def test_explicit_zero_span_index_is_deterministic():
     record = {
         "instruction_id_list": ["new:copy_span_idx"],
-        "kwargs": [
-            {"prompt_to_repeat": "long example string", "n_start": 0, "n_end": 3}
-        ],
+        "kwargs": [{"prompt_to_repeat": "long example string", "n_start": 0, "n_end": 3}],
     }
     state = random.getstate()
     for candidate, score in [("lon", 1.0), ("ong", 0.0)]:
@@ -119,15 +111,11 @@ def test_default_source_defects_are_resolved_before_serialization(identity):
     raw = {
         "uuid": "resolved-default",
         "agent_ref": {"name": "instruction_following_simple_agent"},
-        "responses_create_params": {
-            "input": [{"role": "user", "content": "Write a response"}]
-        },
+        "responses_create_params": {"input": [{"role": "user", "content": "Write a response"}]},
         "instruction_id_list": [identity],
         "kwargs": [{}],
     }
-    row = nemotron_ultra_mopd_source(instruction_reference_seed=13).prepare_row(
-        raw, 0, None
-    )
+    row = nemotron_ultra_mopd_source(instruction_reference_seed=13).prepare_row(raw, 0, None)
     record = json.loads(row["extra_info"]["nemotron_ultra"]["record_json"])
     args = record["kwargs"][0]
     if identity == "length_constraints:nth_paragraph_first_word":
@@ -139,9 +127,7 @@ def test_default_source_defects_are_resolved_before_serialization(identity):
     for candidate, expected in [(positive, 1.0), ("unrelated content", 0.0)]:
         scores = []
         for enabled in [False, True]:
-            env = NemotronUltraEnv(
-                OmegaConf.create({"verifyit_enabled": enabled}), extras=row
-            )
+            env = NemotronUltraEnv(OmegaConf.create({"verifyit_enabled": enabled}), extras=row)
             env.init(row["prompt"])
             try:
                 scores.append(env.step(candidate)["reward"])
@@ -176,9 +162,7 @@ def test_keyword_default_sentinels_consume_identical_source_rng(arguments):
         expected = grade_instruction_following("ordinary unrelated answer", record)
         after = random.getstate()
         random.setstate(before)
-        assert (
-            grade_nemotron_instructions("ordinary unrelated answer", record) == expected
-        )
+        assert grade_nemotron_instructions("ordinary unrelated answer", record) == expected
         assert random.getstate() == after
     finally:
         random.setstate(original_state)
@@ -192,13 +176,9 @@ def test_nonempty_negative_copy_span_preserves_source_contract(candidate):
 
     record = {
         "instruction_id_list": ["new:copy_span_idx"],
-        "kwargs": [
-            {"prompt_to_repeat": "long example string", "n_start": -6, "n_end": -1}
-        ],
+        "kwargs": [{"prompt_to_repeat": "long example string", "n_start": -6, "n_end": -1}],
     }
-    assert grade_nemotron_instructions(
-        candidate, record
-    ) == grade_instruction_following(candidate, record)
+    assert grade_nemotron_instructions(candidate, record) == grade_instruction_following(candidate, record)
 
 
 @pytest.mark.parametrize(

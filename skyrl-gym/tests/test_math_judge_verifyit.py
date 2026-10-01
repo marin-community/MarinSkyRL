@@ -76,9 +76,7 @@ def judge_server():
         ("<think>unfinished", "2", "1+1?", 0.0),
     ],
 )
-def test_actual_source_math_before_after(
-    candidate, expected, question, score, judge_server
-):
+def test_actual_source_math_before_after(candidate, expected, question, score, judge_server):
     server, judge = judge_server
     server.replies = ["[[A!=B]]"]
     record = {"expected_answer": expected, "question": question}
@@ -104,9 +102,7 @@ def test_source_symmetric_judge_before_after(judge_server, replies, score):
     native_score, native_detail = grade_math("It is a feline.", record, judge=judge)
     native_requests = list(server.requests)
     server.requests.clear()
-    cutover_score, cutover_detail = grade_math_verifyit(
-        "It is a feline.", record, judge=judge
-    )
+    cutover_score, cutover_detail = grade_math_verifyit("It is a feline.", record, judge=judge)
     assert native_score == cutover_score == score
     assert native_detail == cutover_detail
     assert server.requests == native_requests
@@ -124,18 +120,14 @@ def test_second_judge_failure_discards_first_positive(judge_server):
 
 def test_malformed_reference_is_not_judged(judge_server):
     server, judge = judge_server
-    reward, detail = grade_math_verifyit(
-        "cat", {"question": "Which animal?", "expected_answer": ""}, judge=judge
-    )
+    reward, detail = grade_math_verifyit("cat", {"question": "Which animal?", "expected_answer": ""}, judge=judge)
     assert reward == 0.0
     assert detail["error_type"] == "schema_error"
     assert server.requests == []
 
 
 @pytest.mark.parametrize("label,score", [("[[A=B]]", 1.0), ("[[A!=B]]", 0.0)])
-def test_trusted_prose_reference_routes_to_judge_before_after(
-    judge_server, label, score
-):
+def test_trusted_prose_reference_routes_to_judge_before_after(judge_server, label, score):
     server, judge = judge_server
     server.replies = [label]
     record = {
@@ -151,12 +143,8 @@ def test_trusted_prose_reference_routes_to_judge_before_after(
     assert server.requests == native_requests
 
 
-@pytest.mark.parametrize(
-    "candidate", [r"\boxed{2}", "I think the answer is two.", "<think>unfinished"]
-)
-def test_explicit_symbolic_reference_cannot_fall_back_to_positive_judge(
-    judge_server, candidate
-):
+@pytest.mark.parametrize("candidate", [r"\boxed{2}", "I think the answer is two.", "<think>unfinished"])
+def test_explicit_symbolic_reference_cannot_fall_back_to_positive_judge(judge_server, candidate):
     server, judge = judge_server
     server.replies = ["[[A=B]]"]
     reward, detail = grade_math_verifyit(
@@ -173,9 +161,7 @@ def test_explicit_symbolic_reference_cannot_fall_back_to_positive_judge(
     assert server.requests == []
 
 
-def test_symbolic_infrastructure_failure_cannot_fall_back_to_positive_judge(
-    judge_server, tmp_path, monkeypatch
-):
+def test_symbolic_infrastructure_failure_cannot_fall_back_to_positive_judge(judge_server, tmp_path, monkeypatch):
     import dataclasses
     from verifyit.modes import grade_math as primitive
     from skyrl_gym.envs.nemotron_ultra.math_judge_verifyit import _evaluate
@@ -206,9 +192,7 @@ def test_symbolic_infrastructure_failure_cannot_fall_back_to_positive_judge(
         ("<think>unfinished", [], 0.0),
     ],
 )
-def test_valid_typographic_reference_retains_native_fallback(
-    judge_server, candidate, replies, score
-):
+def test_valid_typographic_reference_retains_native_fallback(judge_server, candidate, replies, score):
     server, judge = judge_server
     server.replies = replies
     record = {
@@ -225,9 +209,7 @@ def test_valid_typographic_reference_retains_native_fallback(
 
 
 @pytest.mark.parametrize("expected", [r"\frac{1}{2", r"\Bigl(2", r"\unknownmacro{???}"])
-def test_malformed_math_reference_is_invalid_before_any_candidate_gate(
-    judge_server, expected
-):
+def test_malformed_math_reference_is_invalid_before_any_candidate_gate(judge_server, expected):
     server, judge = judge_server
     server.replies = ["[[A=B]]"]
     reward, detail = grade_math_verifyit(
@@ -244,13 +226,9 @@ def test_malformed_math_reference_is_invalid_before_any_candidate_gate(
     assert server.requests == []
 
 
-@pytest.mark.parametrize(
-    "agent", ["math_with_judge_simple_agent", "ns_tools_simple_agent"]
-)
+@pytest.mark.parametrize("agent", ["math_with_judge_simple_agent", "ns_tools_simple_agent"])
 @pytest.mark.parametrize("label,score", [("[[A=B]]", 1.0), ("[[A!=B]]", 0.0)])
-def test_prepared_semantic_reference_roundtrips_framework(
-    agent, label, score, judge_server
-):
+def test_prepared_semantic_reference_roundtrips_framework(agent, label, score, judge_server):
     import dataclasses
     from omegaconf import OmegaConf
     from infra.rl_data.sources import nemotron_ultra_mopd_source
@@ -260,16 +238,12 @@ def test_prepared_semantic_reference_roundtrips_framework(
     server.replies = [label]
     raw = {
         "agent_ref": {"name": agent},
-        "responses_create_params": {
-            "input": [{"role": "user", "content": "Describe the strategy."}]
-        },
+        "responses_create_params": {"input": [{"role": "user", "content": "Describe the strategy."}]},
         "question": "Describe the strategy.",
         "expected_answer": "Choose the next box (unless it is empty).\n• Stop at Box 8 — then return.",
     }
     # This selection is made before candidate creation; the source record remains unchanged.
-    row = nemotron_ultra_mopd_source(math_reference_kind="semantic").prepare_row(
-        raw, 0, None
-    )
+    row = nemotron_ultra_mopd_source(math_reference_kind="semantic").prepare_row(raw, 0, None)
     serialized = json.loads(row["extra_info"]["nemotron_ultra"]["record_json"])
     assert serialized["math_reference_kind"] == "semantic"
     assert "math_reference_kind" not in raw
@@ -310,9 +284,7 @@ def test_prepared_semantic_reference_roundtrips_framework(
         (None, "answer"),
     ],
 )
-def test_declared_reference_contract_rejects_invalid_task_before_positive_judge(
-    kind, reference, judge_server
-):
+def test_declared_reference_contract_rejects_invalid_task_before_positive_judge(kind, reference, judge_server):
     server, judge = judge_server
     server.replies = ["[[A=B]]"]
     reward, detail = grade_math_verifyit(
@@ -353,9 +325,7 @@ def test_declared_symbolic_reference_still_uses_math_without_judge(judge_server)
     ],
 )
 @pytest.mark.parametrize("label,score", [("[[A=B]]", 1.0), ("[[A!=B]]", 0.0)])
-def test_native_hybrid_reference_policy_requires_actual_symmetric_judge(
-    reference, label, score, judge_server
-):
+def test_native_hybrid_reference_policy_requires_actual_symmetric_judge(reference, label, score, judge_server):
     server, judge = judge_server
     server.replies = [label]
     record = {
@@ -375,9 +345,7 @@ def test_native_hybrid_reference_policy_requires_actual_symmetric_judge(
 
 @pytest.mark.parametrize("kind", [None, "symbolic"])
 @pytest.mark.parametrize("failure", [RuntimeError, OSError, MemoryError])
-def test_unexpected_reference_parser_failure_is_unscored(
-    kind, failure, monkeypatch, tmp_path, judge_server
-):
+def test_unexpected_reference_parser_failure_is_unscored(kind, failure, monkeypatch, tmp_path, judge_server):
     import dataclasses
     import math_verify
     from skyrl_gym.envs.nemotron_ultra.math_judge_verifyit import _evaluate
