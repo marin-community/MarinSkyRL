@@ -759,23 +759,9 @@ def _rl_config_uses_daytona(config: DictConfig) -> bool:
 def validate_controller_ingress_reachability(args: SimpleNamespace) -> None:
     """Reject controller ingress that a Daytona sandbox cannot reach.
 
-    opencode runs in a Daytona sandbox and reaches the co-located vLLM over the public
-    internet through a capability URL. The endpoint is REGISTERED on the controller of
-    the cluster the job runs on, so the URL only resolves through a public origin that
-    can route to that controller:
-
-      * A **directly-submitted CoreWeave** job can when its cluster config sets
-        ``federation_public_parent``: the peer controller mints the capability URL as
-        ``https://<parent>/proxy/t/cluster=<cluster>/<token>/<name>`` and the public
-        parent relays it back to the peer. The peer's own host (``dashboard_url``) is
-        IP-locked, so without a public parent the URL has no route and opencode never
-        reaches vLLM.
-      * The **federated** path also works: Marin delegates the job to the peer child,
-        so ``has_received_job_from_peer`` passes and marin federation-proxies
-        ``/proxy``. The endpoint is registered on the peer AND MIRRORED onto marin by
-        FederationSync; the capability token is minted at the PARENT (iris.oa.dev) for
-        the mirrored endpoint, which needs the operator's marin credentials and
-        ``--ingress-host`` set to the marin host.
+    A directly submitted CoreWeave job needs ``federation_public_parent`` in its cluster
+    config; a federated job needs ``--ingress-host`` set to the marin host. The two
+    routes are described in :mod:`cloud.iris.ingress_utils`.
 
     Escape hatch (once a further remediation is wired): ``OTAGENT_ALLOW_INGRESS_HOST_MISMATCH=1``.
     """
