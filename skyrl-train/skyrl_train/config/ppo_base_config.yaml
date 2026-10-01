@@ -203,8 +203,8 @@ trainer:
     eps_clip_low: 0.2
     eps_clip_high: 0.2
     clip_ratio_c: 3.0
-    tis_imp_ratio_cap: -1.0
-    use_tis: false
+    off_policy_correction: null
+    off_policy_correction_rules: null
     tito_full: null
     tis_splice: true
     tis_lcs_alert_threshold: 0.005
@@ -220,6 +220,7 @@ trainer:
       max_sample_batches: 30
       informative_on: shaped
       min_reward_std: 0.0
+      max_mean_reward: null
 
     group_admission:
       # Null uses a shared adaptive sync/async deadline: 30 minutes before timing exists,

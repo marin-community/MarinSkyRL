@@ -80,6 +80,7 @@ class MegatronPolicyMicroBatch:
     rollout_action_logprobs: Optional[torch.Tensor]
     response_span_tags: Optional[torch.Tensor]
     distillation: Optional[TopKEvidence] = None
+    correction_weights: Optional[torch.Tensor] = None
     rollout_routed_experts: Optional[torch.Tensor] = None
 
 
@@ -501,6 +502,7 @@ class MegatronModelWrapper:
                     data.distillation,
                     sparse_student_logprobs,
                     topk_loss_params(self.cfg.trainer.algorithm),
+                    logits.shape[-1],
                 )
             batch = build_objective_micro_batch(
                 action_log_probs=action_log_probs,
@@ -509,6 +511,7 @@ class MegatronModelWrapper:
                 advantages=advantages,
                 loss_mask=loss_mask,
                 rollout_logprobs=rollout_action_logprobs,
+                correction_weights=data.correction_weights,
                 response_span_tags=response_span_tags,
                 token_entropy=token_entropies[:, -num_actions - 1 : -1],
                 think_token_weight=self.cfg.trainer.algorithm.think_token_weight,

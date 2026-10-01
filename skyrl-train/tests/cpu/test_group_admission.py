@@ -166,17 +166,22 @@ def test_required_logprobs_reject_non_array_rows():
         policy.evaluate(group)
 
 
-def test_required_logprobs_accept_numpy_rows():
+@pytest.mark.parametrize(("trained_logprob", "accepted"), [(-0.5, True), (0.0, True), (0.5, False)])
+def test_required_logprobs_validate_numpy_rows(trained_logprob, accepted):
     policy = GroupAdmissionPolicy(
         GroupAdvantageInvariant.exact_physical(physical_group_size=2),
         rollout_logprobs_required=True,
     )
     group = _group(
         loss_masks=[[1], [0]],
-        rollout_logprobs=[np.asarray([-0.5], dtype=np.float32), np.zeros(1, dtype=np.float32)],
+        rollout_logprobs=[np.asarray([trained_logprob], dtype=np.float32), np.asarray([0.5], dtype=np.float32)],
     )
 
-    assert policy.evaluate(group).accepted
+    decision = policy.evaluate(group)
+    assert decision.accepted is accepted
+    if not accepted:
+        assert decision.primary_rejection is AdmissionRejection.MISSING_ROLLOUT_LOGPROBS
+        assert decision.fatal
 
 
 def test_malformed_group_fails_instead_of_being_retried():

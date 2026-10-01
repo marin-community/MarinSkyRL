@@ -314,16 +314,16 @@ Algorithm Configuration
         type: null # filter (DAPO) or null
         max_sample_batches: 30 # inspect at most this many batches of candidate groups per step, -1 for no limit
       
-      # Truncated Importance Sampling as proposed in https://fengyao.notion.site/off-policy-rl 
-      use_tis: false 
-      tis_imp_ratio_cap: -1.0
+      # Detached rollout correction for OLD-anchored policy rows
+      off_policy_correction: null
+      off_policy_correction_rules: null
 
       # SAPO parameters (only used when policy_loss_type: "sapo") (https://arxiv.org/pdf/2511.20347)
       sapo:
         tau_pos: 1.0
         tau_neg: 1.05 # default values used in the paper with Qwen3-30B-A3B-Base
 
-- ``algorithm.advantage_estimator``: Advantage estimator to use. We currently implement ``grpo``, ``gae``, ``rloo``, ``reinforce++``, and custom advantage estimators can be registered with the ``AdvantageEstimatorRegistry``.
+- ``algorithm.advantage_estimator``: Advantage estimator to use. We currently implement ``grpo``, ``gae``, ``rloo``, ``reinforce++``, ``reward``, and custom advantage estimators can be registered with the ``AdvantageEstimatorRegistry``.
 - ``algorithm.kl_ctrl`` Configuration for the KL controller - only used if ``use_kl_in_reward`` is ``true`` (not applied in the case of ``use_kl_loss`` is ``true``). ``kl_loss_coef`` is used as the initial KL coefficient for both ``fixed`` and ``adaptive`` KL controllers.
 
  - ``type``: Type of KL controller to use. Options include: ``fixed`` or ``adaptive``. 
@@ -341,18 +341,17 @@ Algorithm Configuration
 - ``algorithm.policy_loss_type``: Type of policy loss to use. Options include:
 
   - ``regular``: Vanilla PPO loss with token-level importance sampling
-  - ``importance_sampling``: Unclipped advantage-weighted loss with the current-to-old policy ratio; see the `objective usage guide`_.
+  - ``importance_sampling``: Unclipped advantage-weighted loss with the current-to-old policy ratio; see the :doc:`objective usage guide </algorithms/objective_guide>`.
   - ``dual_clip``: Dual clip PPO loss proposed in `this paper <https://arxiv.org/pdf/1912.09729>`_
   - ``gspo``: `Group Sequence Policy Optimization <https://arxiv.org/abs/2507.18071>`_ with sequence-level importance sampling for improved training stability. Implements the "GSPO-token" variant from the paper and requires ``algorithm.loss_reduction=sequence_mean``.
   - ``clip_cov``: Clip-Cov combines standard PPO clipping with covariance-based correction masking for improved stability. Based on `this paper <https://arxiv.org/abs/2505.22617>`_.
   - ``kl_cov``: KL-Cov applies KL regularization to tokens selected based on covariance values. Based on `this paper <https://arxiv.org/abs/2505.22617>`_.
   - ``cispo``: Clipped Importance Sampling Weight Policy Optimization (CISPO) proposed in `MiniMax-M1 <https://arxiv.org/abs/2506.13585>`_.
-  - ``sapo``: Smooth sigmoid-gated policy loss with separate positive- and negative-advantage temperatures; see the `objective usage guide`_.
-  - ``behavior_clip``: PPO clipping against the sampling policy, with a dual bound for negative advantages; see the `objective usage guide`_.
-  - ``sft``: Negative log likelihood on eligible response tokens, independent of advantages; see the `objective usage guide`_.
+  - ``sapo``: Smooth sigmoid-gated policy loss with separate positive- and negative-advantage temperatures; see the :doc:`objective usage guide </algorithms/objective_guide>`.
+  - ``behavior_clip``: PPO clipping against the sampling policy, with a dual bound for negative advantages; see the :doc:`objective usage guide </algorithms/objective_guide>`.
+  - ``sft``: Negative log likelihood on eligible response tokens, independent of advantages; see the :doc:`objective usage guide </algorithms/objective_guide>`.
   - Custom policy losses can be registered with the ``PolicyLossRegistry``
 
-.. _objective usage guide: https://github.com/marin-community/MarinSkyRL/blob/a6d4fa540c813096979300bc853284eff8eac37e/skyrl-train/docs/algorithms/objective_guide.rst
 
 - ``algorithm.loss_reduction``: Type of loss reduction to use. Options include:
 
@@ -371,8 +370,11 @@ Algorithm Configuration
 - ``algorithm.dynamic_sampling``: Dynamic sampling configuration.
   - ``algorithm.dynamic_sampling.type``: ``filter`` (`DAPO <https://dapo-sia.github.io/>`_) or ``null`` for no dynamic sampling. The filter judges each group as it arrives at the rollout buffer, discards groups without enough reward spread, and keeps drawing prompts until the batch is full.
   - ``algorithm.dynamic_sampling.max_sample_batches``: Per-step limit on candidate groups, in units of ``train_batch_size``: a step that inspects ``max_sample_batches * train_batch_size`` candidates without filling its batch fails. Set to ``-1`` for no limit. The training batch is never shortened.
-- ``algorithm.use_tis``: Whether to use Truncated Importance Sampling (TIS) as proposed in `this blog <https://fengyao.notion.site/off-policy-rl>`_. 
-- ``algorithm.tis_imp_ratio_cap``: Cap parameter for the importance ratio in TIS.
+- ``algorithm.off_policy_correction``: Policy numerator correction: ``tis``, ``icepop``, ``seq_mask_tis``, ``outlier_mask``, ``none`` or ``custom``. Asynchronous OLD-anchored losses require an explicit choice.
+- ``algorithm.off_policy_correction_rules``: Token or sequence mask/truncate rules for ``custom`` corrections.
+- ``algorithm.dynamic_sampling.max_mean_reward``: Optional exclusive upper bound on the mean final outcome reward of a group. Groups at or above the bound are discarded, including groups with a single final outcome. The selected ``informative_on`` reward source and minimum-spread requirement also apply.
+- ``algorithm.advantage_estimator=reward``: Sum each response's eligible rewards and broadcast the sum to its eligible tokens, without group centering or standardization.
+
 - ``algorithm.clip_cov``: Clip-Cov parameters (only used when ``policy_loss_type`` is ``clip_cov``):
 
   - ``clip_ratio``: Fraction of tokens to clip based on covariance values.
@@ -386,13 +388,34 @@ Algorithm Configuration
 
 - ``algorithm.cispo``: CISPO parameters (only used when ``policy_loss_type`` is ``cispo``):
 
-  - ``cispo_eps_clip_low``: Offset for lower bound of importance sampling ratio clipping. Tokens with importance sampling ratio less than ``1 - cispo_eps_clip_low`` will have their ratio clipped, but can still be updated in the policy gradient update.
+  - ``cispo_eps_clip_low``: Defaults to 1.0, giving a zero lower ratio bound. Offset for lower bound of importance sampling ratio clipping. Tokens with importance sampling ratio less than ``1 - cispo_eps_clip_low`` will have their ratio clipped, but can still be updated in the policy gradient update.
   - ``cispo_eps_clip_high``: Offset for upper bound of importance sampling ratio clipping. Tokens with importance sampling ratio greater than ``1 + cispo_eps_clip_high`` will have their ratio clipped, but can still be updated in the policy gradient update.
 
 - ``algorithm.sapo``: SAPO (as proposed in `this paper <https://arxiv.org/pdf/2511.20347>`) parameters (only used when ``policy_loss_type`` is ``sapo``):
 
   - ``tau_pos``: Temperature for gating function for tokens with positive advantages.
   - ``tau_neg``: Temperature for gating function for tokens with negative (or zero) advantages.
+
+Correction weights multiply the policy numerator and leave the reduction counts, KL, entropy and teacher rows unchanged.
+``tis`` caps the old-policy/behavior ratio at 2. ``icepop`` keeps that ratio within [0.5, 5] and gives zero weight outside.
+``seq_mask_tis`` combines a sequence geometric-ratio mask in [0.99, 1.01] with token TIS; ``outlier_mask`` discards
+sequences with any eligible token ratio outside [1e-4, 100]. A configured correction requires behavior logprobs.
+Its metrics are ``policy/correction/weight_mean``, ``policy/correction/truncated_fraction`` and
+``policy/correction/masked_fraction``; ratio drift is reported under ``policy/mismatch/pooled/*``.
+
+Launch documents select an objective recipe through ``skyrl.config_groups.algorithm_recipe``. Available recipes are
+``grpo``, ``dapo``, ``dr_grpo``, ``gspo``, ``cispo``, ``opd`` and ``mopd``. They set algorithm fields; explicit fields
+in the experiment override the recipe. Each recipe cites its paper. They configure the objective, not a full
+paper reproduction: model, data, resource layout and generation settings remain experiment choices.
+``opd`` and ``mopd`` require the experiment's teacher definitions, routing plan and distillation coefficient.
+Asynchronous OLD-anchored recipes also require an explicit ``off_policy_correction`` choice, including ``none``.
+
+Teacher-support objectives include ``sparse_forward_kl``, ``sparse_reverse_kl`` and ``sparse_jsd``. Reverse KL and JSD
+use the selected support plus a single remaining-mass bin. JSD requires ``distillation.jsd_beta`` in (0, 1) and uses
+``beta * teacher + (1 - beta) * student`` for its mixture. ``distillation.entry_clip`` is an optional upper bound
+on each sparse-forward-KL entry contribution. Sparse forward KL conditions the teacher on its support; reverse KL
+and JSD use its full-vocabulary-normalized probabilities. The student probabilities use the sampling temperature,
+while teacher logprobs are untempered.
 
 Policy Loss Formulation
 ~~~~~~~~~~~~~~~~~~~~~~~

@@ -4,6 +4,7 @@ Run with: uv run --isolated --group dev --extra cpu pytest tests/cpu/test_marin_
 """
 
 import json
+import math
 from dataclasses import replace
 from pathlib import Path
 
@@ -216,6 +217,7 @@ def test_opd_gate_requires_teacher_credit_on_valid_training_tokens():
 def test_opencode_spec_requires_exact_concurrent_literal_coverage():
     spec = load_spec(OPENCODE_SPEC)
     exact_metrics = {
+        "policy/correction/weight_mean": 1.0,
         "generate/failed_trajectory_fraction": 0.0,
         "generate/literal_bridge/correlated_trials": 8.0,
         "generate/literal_bridge/correlated_turns": 24.0,
@@ -224,7 +226,6 @@ def test_opencode_spec_requires_exact_concurrent_literal_coverage():
         "generate/tis/unaligned_fraction": 0.0,
         "generate/tis/tito_full/success_fraction": 1.0,
         "generate/tis/tito_full/decline_count": 0.0,
-        "tis/skipped_fraction": 0.0,
     }
     healthy = parse_metrics(mirror_line(1, **exact_metrics))
     assert check_run(healthy, spec, wall_clock_seconds=900) == []
@@ -242,3 +243,14 @@ def test_opencode_spec_requires_exact_concurrent_literal_coverage():
     failures = check_run(approximate, spec, wall_clock_seconds=900)
     assert any("exact_match_fraction" in failure for failure in failures)
     assert any("lcs_fallback_fraction" in failure for failure in failures)
+
+    for weight in (math.nextafter(0.0, 1.0), 2.0):
+        metrics = {**exact_metrics, "policy/correction/weight_mean": weight}
+        assert check_run(parse_metrics(mirror_line(1, **metrics)), spec, wall_clock_seconds=900) == []
+
+    for invalid in (None, 0.0, -0.1, 2.01, float("nan"), float("inf")):
+        metrics = {**exact_metrics, "policy/correction/weight_mean": invalid}
+        if invalid is None:
+            del metrics["policy/correction/weight_mean"]
+        failures = check_run(parse_metrics(mirror_line(1, **metrics)), spec, wall_clock_seconds=900)
+        assert any("policy/correction/weight_mean" in failure for failure in failures)

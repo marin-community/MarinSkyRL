@@ -13,6 +13,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from hydra import compose, initialize_config_dir
+from skyrl_train.config.trajectory_runner_capabilities import (
+    TrajectoryRunnerMode,
+    validate_trajectory_runner_capabilities,
+)
+from skyrl_train.inference_engines.utils import get_vllm_sampling_params
 from skyrl_train.utils.utils import validate_cfg
 
 SCRIPT = Path(__file__).parents[3] / "ci" / "opd" / "open_mopd_native_full.py"
@@ -36,6 +41,9 @@ def test_full_schedule_preserves_released_objective_and_every_checkpoint():
     with initialize_config_dir(config_dir=str(CONFIG_ROOT), version_base=None):
         config = compose(config_name="ppo_base_config", overrides=[*arguments, "trainer.flash_attn=false"])
     validate_cfg(config)
+    sampling = get_vllm_sampling_params(config.generator.sampling_params)
+    assert sampling["top_p"] == 0.99
+    assert not config.generator.engine_init_kwargs.get("validate_rollout_logprob_sampling", False)
     assert config.data.val_data == ["/data/aime24.parquet"]
     assert config.trainer.ckpt_path == "s3://bucket/users/operator/checkpoints"
     assert config.trainer.export_path == "s3://bucket/users/operator/exports"
@@ -49,6 +57,12 @@ def test_full_schedule_preserves_released_objective_and_every_checkpoint():
     }
     assert set(config.teachers) == {"math", "code", "if"}
     assert config.trainer.resume_mode is None
+    validate_trajectory_runner_capabilities(config, TrajectoryRunnerMode.SKYRL_GYM)
+
+    config.generator.use_conversation_multi_turn = True
+    config.generator.chat_template.name_or_path = "qwen3_without_thinking"
+    with pytest.raises(ValueError, match="exact sampled completion token IDs"):
+        validate_trajectory_runner_capabilities(config, TrajectoryRunnerMode.SKYRL_GYM)
 
 
 def test_schedule_rejects_changed_bytes_before_training(monkeypatch, tmp_path):

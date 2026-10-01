@@ -89,6 +89,7 @@ def tiny_training_config(
     dp_size: int = 1,
     micro_batch_size: int = 8,
     max_in_flight: int = 8,
+    dump_data_batch: bool = False,
 ) -> DictConfig:
     """Build a complete training config for the policy in ``model_dir``, writing its data and outputs under ``root``.
 
@@ -111,6 +112,7 @@ def tiny_training_config(
             "algorithm": {
                 "use_kl_loss": False,
                 "policy_loss_type": POLICY_LOSS_TYPE[mode],
+                "off_policy_correction": "tis" if mode is TrainingMode.SYNC else "none",
                 "group_admission": {"stall_timeout": STALL_TIMEOUT_SECONDS},
             },
             "rollout_buffer": {
@@ -122,6 +124,8 @@ def tiny_training_config(
             "policy_mini_batch_size": TRAIN_BATCH_SIZE,
             "micro_train_batch_size_per_gpu": micro_batch_size,
             "micro_forward_batch_size_per_gpu": micro_batch_size,
+            "dump_data_batch": dump_data_batch,
+            "training_metrics": mode is TrainingMode.ASYNC,
             "use_sample_packing": False,
             "max_steps": max_steps,
             "eval_before_train": False,
@@ -231,11 +235,24 @@ def run_tiny_training(cfg: DictConfig) -> None:
 
 
 def run_experiment(
-    root: Path, model_dir: Path, mode: TrainingMode, shape: RolloutShape, *, max_steps: int, checkpoint_interval: int
+    root: Path,
+    model_dir: Path,
+    mode: TrainingMode,
+    shape: RolloutShape,
+    *,
+    max_steps: int,
+    checkpoint_interval: int,
+    dump_data_batch: bool,
 ) -> None:
     """Train the policy in ``model_dir`` under ``root``, resuming from a checkpoint an earlier run left there."""
     cfg = tiny_training_config(
-        root, model_dir, mode, shape, max_steps=max_steps, checkpoint_interval=checkpoint_interval
+        root,
+        model_dir,
+        mode,
+        shape,
+        max_steps=max_steps,
+        checkpoint_interval=checkpoint_interval,
+        dump_data_batch=dump_data_batch,
     )
     run_tiny_training(cfg)
 

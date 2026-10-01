@@ -41,6 +41,10 @@ def fixed_training_batch(model_dir: str) -> TrainingInputBatch:
             "action_log_probs": old_log_probs,
             "base_action_log_probs": None,
             "advantages": advantages[:, None].expand(-1, 4).clone(),
+            "correction_weights": torch.tensor([0.25, 1.5, 0.75, 2.0, 1.25, 0.5, 1.75, 0.1])
+            .repeat(2)[:, None]
+            .expand(-1, 4)
+            .clone(),
             "values": None,
             "returns": None,
         }
