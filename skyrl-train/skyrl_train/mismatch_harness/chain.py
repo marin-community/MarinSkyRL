@@ -26,6 +26,8 @@ import json
 import math
 import pickle
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -42,7 +44,7 @@ from skyrl_train.mismatch_harness.expert_parallel import ReduceOrder
 from skyrl_train.mismatch_harness.harness import LayerReplay, attention_inputs, piece_regions
 from skyrl_train.mismatch_harness.numerics import compare
 from skyrl_train.mismatch_harness.pieces import PieceKind
-from skyrl_train.mismatch_harness.regions import POST_ATTENTION_ROLES
+from skyrl_train.mismatch_harness.regions import POST_ATTENTION_ROLES, PRE_ATTENTION_ROLES
 from skyrl_train.mismatch_harness.run import (
     PieceConfigs,
     layer_weight_names,
@@ -159,6 +161,121 @@ class TrainerChain:
     layers: list[dict] | None = None
 
 
+@contextmanager
+def recorded_regions(layer) -> Iterator[dict[str, torch.Tensor]]:
+    """The trainer layer's region tensors of one forward, by the harness's region names, ``[S, ...]`` for one sequence."""
+    records: dict[str, torch.Tensor] = {}
+
+    def keep(name: str, tensor: torch.Tensor) -> None:
+        if name not in records:
+            records[name] = tensor.detach().clone().reshape(tensor.shape[0], -1)
+
+    def first(value):
+        return value[0] if isinstance(value, (tuple, list)) else value
+
+    def attention_inputs(module, args) -> None:
+        for name, tensor in zip(("query", "key", "v_proj"), args[:3], strict=True):
+            keep(name, tensor)
+
+    handles = [
+        layer.register_forward_pre_hook(
+            lambda module, args, kwargs: keep("input", kwargs["hidden_states"]), with_kwargs=True
+        ),
+        layer.register_forward_hook(lambda module, args, output: keep("output", first(output))),
+        layer.input_layernorm.down_proj.register_forward_pre_hook(lambda module, args: keep("attn_rms", args[0])),
+        layer.input_layernorm.up_proj.register_forward_hook(lambda module, args, output: keep("attn_gate_up", output)),
+        layer.input_layernorm.register_forward_hook(lambda module, args, output: keep("attention_norm", output)),
+        layer.self_attention.q_layernorm.register_forward_pre_hook(lambda module, args: keep("q_proj", args[0])),
+        layer.self_attention.k_layernorm.register_forward_pre_hook(lambda module, args: keep("k_proj", args[0])),
+        layer.self_attention.core_attention.register_forward_pre_hook(attention_inputs),
+        layer.self_attention.core_attention.register_forward_hook(
+            lambda module, args, output: keep("core_attention", first(output))
+        ),
+        layer.self_attention.attn_gate.register_forward_hook(
+            lambda module, args, output: keep("attn_gate", first(output))
+        ),
+        layer.self_attention.linear_proj.register_forward_pre_hook(lambda module, args: keep("xsa_gate", args[0])),
+        layer.pre_mlp_layernorm.register_forward_pre_hook(
+            lambda module, args: keep("residual_after_attention", args[0])
+        ),
+        layer.pre_mlp_layernorm.down_proj.register_forward_pre_hook(lambda module, args: keep("mlp_rms", args[0])),
+        layer.pre_mlp_layernorm.register_forward_hook(lambda module, args, output: keep("mlp_norm", output)),
+        layer.mlp.router.register_forward_hook(lambda module, args, output: keep("router_probs", output[0])),
+        layer.mlp.shared_experts.linear_fc2.register_forward_pre_hook(lambda module, args: keep("shared_act", args[0])),
+        layer.mlp.shared_experts.linear_fc2.register_forward_hook(
+            lambda module, args, output: keep("shared_down", first(output))
+        ),
+    ]
+    router = layer.mlp.router
+    routing = router.routing
+    dispatcher = layer.mlp.token_dispatcher
+    combine = dispatcher.combine_postprocess
+
+    def recorded_routing(logits, padding_mask=None):
+        keep("router_logits", logits)
+        return routing(logits, padding_mask)
+
+    def recorded_combine(permuted):
+        routed = combine(permuted)
+        keep("routed", routed)
+        return routed
+
+    router.routing = recorded_routing
+    dispatcher.combine_postprocess = recorded_combine
+    try:
+        yield records
+    finally:
+        for handle in handles:
+            handle.remove()
+        router.routing = routing
+        dispatcher.combine_postprocess = combine
+
+
+def region_differences(trainer: dict[str, torch.Tensor], vllm: dict[str, torch.Tensor]) -> list[dict]:
+    """Per region in forward order: how many token rows differ, the first few differing positions, the largest ulp."""
+    order = (
+        "input",
+        "attn_rms",
+        "attn_gate_up",
+        "attention_norm",
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "query",
+        "key",
+        "core_attention",
+        "attn_gate",
+        "xsa_gate",
+        "residual_after_attention",
+        "mlp_rms",
+        "mlp_norm",
+        "router_logits",
+        "combine_weights",
+        "expert_ids",
+        "routed",
+        "shared_act",
+        "shared_down",
+        "output",
+    )
+    found = []
+    for name in order:
+        if name not in trainer or name not in vllm:
+            continue
+        left, right = trainer[name], vllm[name].reshape(trainer[name].shape).to(trainer[name].dtype)
+        if left.dtype.is_floating_point:
+            view = {2: torch.int16, 4: torch.int32}[left.element_size()]
+            same = left.contiguous().view(view) == right.contiguous().view(view)
+        else:
+            same = left == right
+        rows = (~same).any(dim=-1).nonzero().flatten().tolist()
+        entry = {"region": name, "rows_differing": len(rows), "first_positions": rows[:8]}
+        if rows and left.dtype.is_floating_point:
+            entry["elements_differing"] = int((~same).sum())
+            entry["max_ulp"] = compare(left, right).max_ulp
+        found.append(entry)
+    return found
+
+
 def run_trainer_layer(layer, hidden: torch.Tensor, rotary, flags: dict, targets: torch.Tensor | None) -> torch.Tensor:
     """The layer on one sequence ``[S, 1, H]`` under ``flags``; ``targets`` ``[S, top_k]`` replays routes (last row native)."""
     router = layer.mlp.router
@@ -202,7 +319,17 @@ def main() -> None:
     parser.add_argument("--numerics", action="append", default=[], help="[label=]flags (pseudo-flag pp2)")
     parser.add_argument("--output", required=True)
     parser.add_argument("--seed", type=int, default=1234)
+    parser.add_argument(
+        "--localize",
+        type=int,
+        nargs=2,
+        metavar=("LAYER", "ROW"),
+        help="compare every region of LAYER for probe row ROW (batch position) between --localize-variant and vLLM",
+    )
+    parser.add_argument("--localize-variant", help="the variant label --localize compares")
     args = parser.parse_args()
+    if (args.localize is None) != (args.localize_variant is None):
+        parser.error("--localize and --localize-variant go together")
 
     results: dict = {"arguments": vars(args), "layers": [], "variants": {}}
     with tempfile.TemporaryDirectory() as directory, single_rank_megatron(args.seed), vllm_config_context():
@@ -228,6 +355,7 @@ def main() -> None:
             pieces, chosen = load_pinned_pieces(args.output_code, PieceConfigs(args.norm_block, block, args.qk_xblock))
             vllm_runs[block] = {"pieces": pieces, "result": None, "routes": [], "outputs": [], "configs": chosen}
         results["vllm_configs"] = {str(block): run["configs"] for block, run in vllm_runs.items()}
+        reference_block = args.post_attention_norm_blocks[0]
         flat_ids = torch.tensor([token for row in rows for token in row.tokens], dtype=torch.int32, device="cuda")
 
         embed_norm = build_gated_norm(provider, NormRole.EMBEDDING)
@@ -245,7 +373,11 @@ def main() -> None:
                     embedded = weights["model.embed_tokens.weight"][ids].view(len(row.tokens), 1, -1)
                     chain.hidden.append(embed_norm(embedded))
             variants.append(chain)
+        if args.localize_variant is not None and args.localize_variant not in {chain.label for chain in variants}:
+            raise ValueError(f"--localize-variant {args.localize_variant!r} is not one of the variants")
 
+        # The vLLM side's region tensors of the localized layer, every request's rows.
+        vllm_regions: dict[str, torch.Tensor] = {}
         for layer in range(layers):
             prefix = f"model.layers.{layer}."
             names = layer_weight_names(layer, experts=True)
@@ -267,10 +399,13 @@ def main() -> None:
                     fa3_step_tokens=tokens,
                 )
                 if run["result"] is None:
-                    run["result"], _ = replay.run_pre_attention(
+                    run["result"], run["piece"] = replay.run_pre_attention(
                         requests, torch.empty(0), flat_ids, None, embedding_path=True
                     )
                 result = run["result"]
+                localizing = args.localize is not None and args.localize[0] == layer and block == reference_block
+                if localizing:
+                    vllm_regions.update(piece_regions(result, run["piece"], PRE_ATTENTION_ROLES))
                 inputs = attention_inputs(result, shape)
                 outputs = [output for output in result.outputs if isinstance(output, torch.Tensor)]
                 attn_in, residual = outputs[-2], outputs[-1]
@@ -280,11 +415,25 @@ def main() -> None:
                 run["result"], piece = replay.run_post_attention(
                     requests, attention, value, attn_in, residual, moe, None
                 )
+                run["piece"] = piece
+                if localizing:
+                    vllm_regions.update(
+                        {
+                            "query": inputs["query"],
+                            "key": inputs["key"],
+                            "core_attention": attention,
+                            "combine_weights": moe.records[-1].vllm_weights,
+                            "expert_ids": moe.records[-1].vllm_ids.long(),
+                        }
+                    )
+                    post = piece_regions(run["result"], piece, POST_ATTENTION_ROLES)
+                    post["attn_gate"] = post["attn_gate"][:, : shape.heads]
+                    vllm_regions.update({name: tensor for name, tensor in post.items() if name not in vllm_regions})
                 run["routes"].append(moe.records[-1].vllm_ids[:tokens].long())
                 if piece.kind is not PieceKind.LAST:
                     run["outputs"].append(piece_regions(run["result"], piece, POST_ATTENTION_ROLES)["output"][:tokens])
                 del moe, replay
-            reference_run = vllm_runs[args.post_attention_norm_blocks[0]]
+            reference_run = vllm_runs[reference_block]
             vllm_routes = reference_run["routes"][-1]
             archived = [torch.from_numpy(row.routes[:, layer]).cuda() for row in rows]
             layer_entry["vllm_routes_vs_reread"] = float(
@@ -309,13 +458,46 @@ def main() -> None:
                             else vllm_routes[offsets[b] : offsets[b + 1] - 1]
                         )
                         targets = torch.cat((source, source[-1:]))
-                    chain.hidden[b] = run_trainer_layer(trainer_layer, chain.hidden[b], rotary, chain.flags, targets)
+                    target = args.localize == [layer, row.index] and chain.label == args.localize_variant
+                    with recorded_regions(trainer_layer) if target else nullcontext({}) as trainer_regions:
+                        chain.hidden[b] = run_trainer_layer(
+                            trainer_layer, chain.hidden[b], rotary, chain.flags, targets
+                        )
+                    if target:
+                        rows_of_b = slice(int(offsets[b]), int(offsets[b + 1]))
+                        ids = vllm_regions["expert_ids"][rows_of_b]
+                        trainer_regions["expert_ids"] = targets[: ids.shape[0]].long()
+                        trainer_regions["combine_weights"] = trainer_regions["router_probs"].float().gather(1, ids)
+                        trainer_regions["attn_gate"] = trainer_regions["attn_gate"][:, : shape.heads]
+                        found = region_differences(
+                            trainer_regions, {name: tensor[rows_of_b] for name, tensor in vllm_regions.items()}
+                        )
+                        results["localize"] = {
+                            "layer": layer,
+                            "row": row.index,
+                            "variant": chain.label,
+                            "regions": found,
+                        }
+                        for entry in found:
+                            print("LOCALIZE", json.dumps(entry), flush=True)
                     if chain.pp_boundary and layer == PP_BOUNDARY_LAYER:
                         _take_hand_off(chain.hidden[b])
                 if layer + 1 < shape.layers:
                     trainer_output = torch.cat([hidden.view(-1, shape.hidden) for hidden in chain.hidden])
-                    stats = compare(reference_run["outputs"][-1], trainer_output)
-                    chain.layers.append({"layer": layer, "output": stats.to_json()})
+                    reference = reference_run["outputs"][-1]
+                    stats = compare(reference, trainer_output)
+                    rows_equal = (reference.view(torch.int16) == trainer_output.view(torch.int16)).all(dim=-1)
+                    per_row = []
+                    for b in range(len(rows)):
+                        equal_rows = rows_equal[offsets[b] : offsets[b + 1]]
+                        differing = (~equal_rows).nonzero().flatten()
+                        per_row.append(
+                            {
+                                "token_rows_equal": float(equal_rows.float().mean().item()),
+                                "first_differing_position": int(differing[0].item()) if differing.numel() else None,
+                            }
+                        )
+                    chain.layers.append({"layer": layer, "output": stats.to_json(), "rows": per_row})
             del trainer_layer
             for name in [name for name in weights if name.startswith(prefix)]:
                 del weights[name]
@@ -331,9 +513,15 @@ def main() -> None:
             for chain in variants:
                 if chain.layers and chain.layers[-1]["layer"] == layer:
                     output = chain.layers[-1]["output"]
+                    differing_rows = {
+                        rows[b].index: (round(entry["token_rows_equal"], 4), entry["first_differing_position"])
+                        for b, entry in enumerate(chain.layers[-1]["rows"])
+                        if entry["first_differing_position"] is not None
+                    }
                     print(
                         f"LAYER {layer} {chain.label}: output byte-equal {output['byte_equal_fraction']:.6f} "
-                        f"max ulp {output['max_ulp']}",
+                        f"max ulp {output['max_ulp']}; rows with a differing token (equal fraction, first position): "
+                        f"{differing_rows if len(differing_rows) <= 6 else len(differing_rows)}",
                         flush=True,
                     )
         if layers < shape.layers:
@@ -354,7 +542,6 @@ def main() -> None:
                 values = logits.log_softmax(dim=-1, dtype=torch.float32).gather(-1, next_ids[:, None]).squeeze(-1)
                 per_row.append((logits, values.cpu().numpy()))
             vllm_logprobs[block] = per_row
-        reference_block = args.post_attention_norm_blocks[0]
         results["vllm"] = {}
         for block, per_row in vllm_logprobs.items():
             response = np.concatenate([values[response_slice(row)] for row, (_, values) in zip(rows, per_row)])
