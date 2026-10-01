@@ -53,8 +53,10 @@ from skyrl_train.models.grug_handoffs import clear_hand_offs, hand_off, same_sto
 from skyrl_train.models.grug_reference_kernels import (
     gated_product_value,
     hybrid_input_norm_value,
+    query_key_values,
     router_logits_value,
     swiglu_value,
+    xsa_head_gate_value,
 )
 from skyrl_train.models.grug_rounding import (
     STAGE_STATISTIC_COLUMNS,
@@ -875,9 +877,8 @@ class GrugSelfAttention(SelfAttention):
                 raise NotImplementedError("vllm_xsa numerics support unpacked sequences only")
             attention = core_attn_out
             xsa = vllm_inductor.xsa_head_gate(attention, value, gate).view_as(attention)
-            core_attn_out = vllm_value(
-                xsa, lambda: xsa_and_gate_single_rounding(attention, value, gate, self.hidden_size_per_attention_head)
-            )
+            # Differentiated as xsa_and_gate_single_rounding(attention, value, gate, head_dim).
+            core_attn_out = xsa_head_gate_value(xsa, attention, value, gate, self.hidden_size_per_attention_head)
         elif numerics.xsa_gate:
             if is_thd:
                 raise NotImplementedError("xsa_gate numerics support unpacked sequences only")
@@ -925,12 +926,11 @@ class GrugSelfAttention(SelfAttention):
         else:
             vllm_query, vllm_key = vllm_inductor.query_key_full(query, key)
         vllm_query, vllm_key = vllm_query.view_as(query), vllm_key.view_as(key)
-        if not torch.is_grad_enabled():
-            return vllm_query, vllm_key
-        reference_query, reference_key = self._rounded_query_key(
-            qk_norm_fp32(query), qk_norm_fp32(key), rotary_pos_emb, query.dtype
-        )
-        return vllm_value(vllm_query, lambda: reference_query), vllm_value(vllm_key, lambda: reference_key)
+        freqs = None
+        if rotary_pos_emb is not None and not self.skip_rope:
+            freqs = rotary_pos_emb if isinstance(rotary_pos_emb, tuple) else (rotary_pos_emb,) * 2
+        # Differentiated as self._rounded_query_key(qk_norm_fp32(query), qk_norm_fp32(key), rotary_pos_emb, dtype).
+        return query_key_values(vllm_query, vllm_key, query, key, freqs, self.qk_mult, self.qk_mult_scale)
 
     def _apply_xsa(self, core_attn_out: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
         """Remove each head's component along its (GQA-expanded) value vector."""
