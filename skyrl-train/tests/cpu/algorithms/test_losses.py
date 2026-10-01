@@ -7,7 +7,30 @@ import torch
 from omegaconf import DictConfig
 
 from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
-from skyrl_train.utils.loss_reduction import reduce_loss
+from skyrl_train.config.objective_spec import LossReduction
+from skyrl_train.objective.losses import PolicyLossInputs
+from skyrl_train.objective.reduction import reduce_to_step, step_counts
+
+
+def _policy_loss(name):
+    loss = PolicyLossRegistry.get(name)
+
+    def evaluate(log_probs, old_log_probs, advantages, config, loss_mask=None, rollout_logprobs=None):
+        mask = torch.ones_like(log_probs) if loss_mask is None else loss_mask
+        inputs = PolicyLossInputs(log_probs, old_log_probs, rollout_logprobs, advantages, mask)
+        result = loss(inputs, config)
+        counts = step_counts([mask], [mask], [], [advantages], config.max_seq_len, lambda value: value)
+        reduced = reduce_to_step(
+            result.values,
+            mask,
+            counts.policy,
+            LossReduction(config.loss_reduction),
+            max_seq_len=counts.max_seq_len,
+            nonzero_advantage_rows=counts.nonzero_advantage_rows,
+        )
+        return reduced, result.metrics
+
+    return evaluate
 
 
 def _clipping_config(loss_name: str, *, eps_clip_low: float, eps_clip_high: float) -> DictConfig:
@@ -30,7 +53,7 @@ def _clipping_config(loss_name: str, *, eps_clip_low: float, eps_clip_high: floa
 
 @pytest.mark.parametrize("loss_name", ["regular", "gspo", "cispo"])
 def test_clip_bounds_control_only_their_ratio_side(loss_name: str):
-    loss_fn = PolicyLossRegistry.get(loss_name)
+    loss_fn = _policy_loss(loss_name)
     old_log_probs = torch.zeros((2, 1))
     log_probs = torch.log(torch.tensor([[0.75], [1.10]]))
     advantages = torch.tensor([[-1.0], [1.0]])
@@ -56,7 +79,7 @@ def test_clip_bounds_control_only_their_ratio_side(loss_name: str):
 
 @pytest.mark.parametrize("loss_name", ["regular", "gspo", "cispo"])
 def test_policy_loss_reports_clip_decisions_and_pressure_by_ratio_side(loss_name: str):
-    loss_fn = PolicyLossRegistry.get(loss_name)
+    loss_fn = _policy_loss(loss_name)
     old_log_probs = torch.zeros((4, 1))
     log_probs = torch.log(torch.tensor([[0.75], [0.85], [1.10], [1.02]]))
     advantages = torch.tensor([[-1.0], [-1.0], [1.0], [1.0]])
@@ -95,7 +118,7 @@ def test_policy_loss_dual_clip():
         }
     )
 
-    loss, _ = PolicyLossRegistry.get("dual_clip")(log_probs, old_log_probs, advantages, config)
+    loss, _ = _policy_loss("dual_clip")(log_probs, old_log_probs, advantages, config)
 
     # Per-token PPO losses max(-r*A, -clip(r)*A) = [-0.5, 1.0, 40.0]; the dual clip caps the
     # negative-advantage tokens at -A * clip_ratio_c: [-0.5, 1.0, 12.0] -> mean 12.5 / 3.
@@ -108,7 +131,7 @@ def test_behavior_clip_matches_regular_loss_on_policy():
     log_probs = torch.tensor([[-1.2, -0.9, -2.7]])
     config = _clipping_config("regular", eps_clip_low=0.2, eps_clip_high=0.2)
 
-    regular_loss, _ = PolicyLossRegistry.get("regular")(
+    regular_loss, _ = _policy_loss("regular")(
         log_probs,
         old_log_probs,
         advantages,
@@ -116,7 +139,7 @@ def test_behavior_clip_matches_regular_loss_on_policy():
         rollout_logprobs=old_log_probs,
     )
     config.policy_loss_type = "behavior_clip"
-    behavior_loss, _ = PolicyLossRegistry.get("behavior_clip")(
+    behavior_loss, _ = _policy_loss("behavior_clip")(
         log_probs,
         old_log_probs,
         advantages,
@@ -134,7 +157,7 @@ def test_behavior_clip_stops_resuppressing_stale_negative_advantage_token():
     advantages = torch.tensor([[-1.0]])
     config = _clipping_config("behavior_clip", eps_clip_low=0.2, eps_clip_high=0.2)
 
-    loss, metrics = PolicyLossRegistry.get("behavior_clip")(
+    loss, metrics = _policy_loss("behavior_clip")(
         log_probs,
         old_log_probs,
         advantages,
@@ -162,38 +185,10 @@ def test_policy_loss_cispo():
         }
     )
 
-    loss, _ = PolicyLossRegistry.get("cispo")(log_probs, old_log_probs, advantages, config)
+    loss, _ = _policy_loss("cispo")(log_probs, old_log_probs, advantages, config)
 
     # -A * clip(r) * logp = [1.35452, -1.0, -3.347568] -> mean -0.99768.
     assert loss.item() == pytest.approx(-0.99768266666, abs=1e-4)
-
-
-REDUCTION_LOSS = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
-# Sequence 0 has three valid tokens, sequence 1 has one.
-REDUCTION_MASK = torch.tensor([[1.0, 1.0, 1.0], [1.0, 0.0, 0.0]])
-
-
-@pytest.mark.parametrize(
-    "loss_reduction,loss_mask,expected",
-    [
-        # (1 + 2 + 3 + 4) / 4 valid tokens
-        ("token_mean", REDUCTION_MASK, 2.5),
-        # mean of per-sequence means (2.0, 4.0)
-        ("sequence_mean", REDUCTION_MASK, 3.0),
-        # mean of per-sequence sums over max_seq_len=4: (6/4 + 4/4) / 2
-        ("seq_mean_token_sum_norm", REDUCTION_MASK, 1.25),
-        # masked sum over global_denom=5: 10 / 5
-        ("seq_mean_token_sum_norm_global", REDUCTION_MASK, 2.0),
-        # unmasked sum over global_denom=5: 21 / 5
-        ("seq_mean_token_sum_norm_global", None, 4.2),
-        # A fully masked microbatch contributes zero rather than NaN.
-        ("token_mean", torch.zeros(2, 3), 0.0),
-        ("sequence_mean", torch.zeros(2, 3), 0.0),
-    ],
-)
-def test_reduce_loss(loss_reduction, loss_mask, expected):
-    result = reduce_loss(REDUCTION_LOSS, loss_mask, loss_reduction, max_seq_len=4, global_denom=5.0)
-    assert result.item() == pytest.approx(expected)
 
 
 def test_gspo_uses_masked_sequence_level_ratio():
@@ -205,7 +200,7 @@ def test_gspo_uses_masked_sequence_level_ratio():
     loss_mask = torch.tensor([[1.0, 1.0, 0.0], [1.0, 1.0, 0.0]])
     config = _clipping_config("gspo", eps_clip_low=0.2, eps_clip_high=0.2)
 
-    loss, _ = PolicyLossRegistry.get("gspo")(log_probs, old_log_probs, advantages, config, loss_mask)
+    loss, _ = _policy_loss("gspo")(log_probs, old_log_probs, advantages, config, loss_mask)
 
     # sequence_mean of per-token losses: (-1.2 + 2.0) / 2
     assert loss.item() == pytest.approx(0.4, abs=1e-6)
@@ -229,7 +224,7 @@ def test_clip_cov_zeroes_covariance_selected_token():
         }
     )
 
-    loss, metrics = PolicyLossRegistry.get("clip_cov")(log_probs, old_log_probs, advantages, config, loss_mask)
+    loss, metrics = _policy_loss("clip_cov")(log_probs, old_log_probs, advantages, config, loss_mask)
 
     # Per-token PPO losses [-1.2, 0, 1]; token 2 is zeroed -> (-1.2 + 0 + 0) / 3.
     assert loss.item() == pytest.approx(-0.4, abs=1e-6)
@@ -251,7 +246,7 @@ def test_kl_cov_adds_kl_penalty_to_highest_covariance_token():
         }
     )
 
-    loss, _ = PolicyLossRegistry.get("kl_cov")(log_probs, old_log_probs, advantages, config, loss_mask)
+    loss, _ = _policy_loss("kl_cov")(log_probs, old_log_probs, advantages, config, loss_mask)
 
     # -A * r = [-e^0.5, 0, 1]; token 0 adds |log r| = 0.5 -> (-e^0.5 + 0.5 + 1) / 3.
     assert loss.item() == pytest.approx(-0.0495738, abs=1e-6)
@@ -271,7 +266,7 @@ def test_sapo_policy_loss():
         }
     )
 
-    loss, _ = PolicyLossRegistry.get("sapo")(log_probs, old_log_probs, advantages, config)
+    loss, _ = _policy_loss("sapo")(log_probs, old_log_probs, advantages, config)
 
     # gate(r, tau) = sigmoid(tau * (r - 1)) * 4 / tau; per-token -gate * A = [-1.61153, 1.21785, -0.95245].
     assert loss.item() == pytest.approx(-0.4487099, abs=1e-6)
@@ -303,7 +298,7 @@ def test_tis_graceful_degrade_on_none_logprobs():
         "max_seq_len": 4,
         "tis_imp_ratio_cap": 2.0,
     }
-    loss_fn = PolicyLossRegistry.get("regular")
+    loss_fn = _policy_loss("regular")
 
     # Reference: TIS off.
     cfg_off = DictConfig({**base_cfg, "use_tis": False})

@@ -89,9 +89,7 @@ class CPUStrategy(DistributedStrategy):
     def backward(self, loss: torch.Tensor, model, optimizer, **kwargs):
         loss.backward()
 
-    def optimizer_step(self, optimizer, model, scheduler, name="model", stale_clip_lr_scale=1.0, **kwargs):
-        if stale_clip_lr_scale != 1.0:
-            raise ValueError("the CPU strategy does not implement StaleClip learning-rate scaling")
+    def optimizer_step(self, optimizer, model, scheduler, name="model", **kwargs):
         if self.world_size > 1:
             for parameter in model.parameters():
                 if parameter.grad is not None:
@@ -180,6 +178,10 @@ class CPUPolicyWorker(PolicyWorkerBase):
 
     async def init_weight_sync_state(self, inference_engine_client):
         """Weights travel through the Ray object store, which needs no communicator."""
+
+    async def barrier_all(self) -> None:
+        """Drain the actor event loop and synchronize the CPU worker group."""
+        await asyncio.to_thread(dist.barrier)
 
     async def broadcast_to_inference_engines(self, inference_engine_client):
         if dist.get_rank() == 0:

@@ -218,13 +218,6 @@ Some rules for configuring these parameters:
 - ``world_size % (pp_size * ep_size * etp_size) == 0``
     - This means that ``ep_size * etp_size`` can scale independently of ``tp_size * cp_size``, and can go across data parallel ranks.
 
-.. warning::
-  
-  ``optimizer_config_kwargs.use_precision_aware_optimizer=true`` can cause checkpointing to fail. See: https://github.com/nvidia/megatron-lm/issues/1820.
-
-  We recommend leaving this setting to ``false``
-
-
 Optimizer Configuration
 -----------------------
 For both the critic and policy model, we provide a common optimizer configuration
@@ -310,7 +303,7 @@ Algorithm Configuration
 
       # cispo parameters (only used when policy_loss_type: "cispo")
       cispo: 
-        cispo_eps_clip_low: 0  # offset for lower bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
+        cispo_eps_clip_low: 1.0  # offset for lower bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
         cispo_eps_clip_high: 5 # offset for upper bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
 
       # value loss parameters
@@ -348,12 +341,18 @@ Algorithm Configuration
 - ``algorithm.policy_loss_type``: Type of policy loss to use. Options include:
 
   - ``regular``: Vanilla PPO loss with token-level importance sampling
+  - ``importance_sampling``: Unclipped advantage-weighted loss with the current-to-old policy ratio; see the `objective usage guide`_.
   - ``dual_clip``: Dual clip PPO loss proposed in `this paper <https://arxiv.org/pdf/1912.09729>`_
   - ``gspo``: `Group Sequence Policy Optimization <https://arxiv.org/abs/2507.18071>`_ with sequence-level importance sampling for improved training stability. Implements the "GSPO-token" variant from the paper and requires ``algorithm.loss_reduction=sequence_mean``.
   - ``clip_cov``: Clip-Cov combines standard PPO clipping with covariance-based correction masking for improved stability. Based on `this paper <https://arxiv.org/abs/2505.22617>`_.
   - ``kl_cov``: KL-Cov applies KL regularization to tokens selected based on covariance values. Based on `this paper <https://arxiv.org/abs/2505.22617>`_.
   - ``cispo``: Clipped Importance Sampling Weight Policy Optimization (CISPO) proposed in `MiniMax-M1 <https://arxiv.org/abs/2506.13585>`_.
+  - ``sapo``: Smooth sigmoid-gated policy loss with separate positive- and negative-advantage temperatures; see the `objective usage guide`_.
+  - ``behavior_clip``: PPO clipping against the sampling policy, with a dual bound for negative advantages; see the `objective usage guide`_.
+  - ``sft``: Negative log likelihood on eligible response tokens, independent of advantages; see the `objective usage guide`_.
   - Custom policy losses can be registered with the ``PolicyLossRegistry``
+
+.. _objective usage guide: https://github.com/marin-community/MarinSkyRL/blob/a6d4fa540c813096979300bc853284eff8eac37e/skyrl-train/docs/algorithms/objective_guide.rst
 
 - ``algorithm.loss_reduction``: Type of loss reduction to use. Options include:
 
@@ -398,36 +397,28 @@ Algorithm Configuration
 Policy Loss Formulation
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-It can be helpful to understand the final loss formulation to see how the different configuration options are used. The final loss is computed as below in the ``ppo_policy_loss`` function.
+Policy losses return masked per-token values and clipping diagnostics. The objective
+assembler applies data weights and reduces each row using counts for the complete
+optimizer step, as described in :doc:`../algorithms/objective`.
 
 .. code-block:: python
 
-  def ppo_policy_loss(
-      log_probs: torch.Tensor,
-      old_log_probs: torch.Tensor,
-      advantages: torch.Tensor,
-      config: DictConfig, # trainer.algorithm config
-      loss_mask: Optional[torch.Tensor] = None,
-  ) -> tuple[torch.Tensor, dict[str, float]]:
-
-      ratio = (log_probs - old_log_probs).exp()
-      surr1 = ratio * advantages
-      surr2 = ratio.clamp(1 - config.eps_clip_low, 1 + config.eps_clip_high) * advantages
-      loss = -torch.min(surr1, surr2)
-      clip_metrics = clipping_metrics(
+  def ppo_policy_loss(inputs: PolicyLossInputs, config: DictConfig) -> TokenLoss:
+      ratio = safe_exp_delta(inputs.log_probs - inputs.old_log_probs)
+      unclipped = -ratio * inputs.advantages
+      clipped = -ratio.clamp(1 - config.eps_clip_low, 1 + config.eps_clip_high) * inputs.advantages
+      values = torch.maximum(unclipped, clipped)
+      metrics = clipping_metrics(
           ratio,
-          -surr2 > -surr1,
-          loss_mask,
+          clipped > unclipped,
+          inputs.loss_mask,
           eps_clip_low=config.eps_clip_low,
           eps_clip_high=config.eps_clip_high,
       )
-      clip_pg_losses1 = loss
-      if config.policy_loss_type == "dual_clip":
-        pg_losses3 = -advantages * config.clip_ratio_c
-        clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
-        loss = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
-      loss = reduce_loss(loss, loss_mask, config.loss_reduction)
-      return loss, clip_metrics
+      if config.use_tis:
+          weights = safe_exp_delta(inputs.old_log_probs - inputs.rollout_log_probs)
+          values = values * weights.clamp(max=config.tis_imp_ratio_cap)
+      return TokenLoss(torch.where(inputs.loss_mask > 0, values, 0), metrics)
 
 Workers retain ``policy/ppo_clip_ratio`` as the pooled clipping fraction and also emit
 ``policy/ppo_clip_ratio_low`` and ``policy/ppo_clip_ratio_high`` for the bound that changed the objective.

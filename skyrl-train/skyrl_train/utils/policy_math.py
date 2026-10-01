@@ -90,16 +90,17 @@ def normalize_advantages_dict(data: TrainingInputBatch) -> TrainingInputBatch:
 
     Expects:
         - `["advantages"]`: Float[torch.Tensor, "batch_size seqlen"]
-        - `["response_mask"]`: Float[torch.Tensor, "batch_size seqlen"]
+        - `["loss_mask"]`: Float[torch.Tensor, "batch_size seqlen"]
     """
     advantages: Float[torch.Tensor, "batch_size seqlen"] = data["advantages"]
-    response_masks: Float[torch.Tensor, "batch_size seqlen"] = data["response_mask"]
-    num_actions: float = response_masks.sum()
-    mean: float = advantages.mean()
-    variance_numerator: float = ((advantages - mean).pow(2) * response_masks).sum()
-    rstd: float = (variance_numerator / num_actions).clamp(min=1e-8).rsqrt()
-
-    data["advantages"] = (advantages - mean) * rstd
+    loss_mask = data["loss_mask"]
+    valid = loss_mask > 0
+    masked = torch.where(valid, advantages, 0)
+    num_actions = loss_mask.sum().clamp(min=1)
+    mean = (masked * loss_mask).sum() / num_actions
+    centered = torch.where(valid, masked - mean, 0)
+    variance = (centered.square() * loss_mask).sum() / num_actions
+    data["advantages"] = centered * variance.clamp(min=1e-8).rsqrt()
     return data
 
 
