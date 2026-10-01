@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import numpy as np
@@ -15,6 +16,8 @@ from harbor.verifier.verifier import VerifierOutputParseError
 from skyrl_train.metric_names import IDENTITY_AWARE_REWARD_METRIC_PREFIX
 from skyrl_train.trajectory_runners.types import TrajectoryID
 from skyrl_train.utils.harbor_errors import ErrorHandlingConfig
+from skyrl_train.trajectory_runners.harbor.literal_log_store import LiteralLogStore
+from skyrl_train.trajectory_runners.harbor.configuration import HarborConfigBuilder
 
 
 def _runner_output(
@@ -36,6 +39,7 @@ def _runner_output(
 
 def _runner(shaper: str | None = None):
     runner = object.__new__(HarborTrajectoryRunner)
+    runner._verifier_disabled = False
     runner._reward_shaping_enabled = True
     runner._reward_shaping_config = {"shaper_kwargs": {}}
     if shaper is not None:
@@ -47,12 +51,16 @@ def _runner(shaper: str | None = None):
 class _Tokenizer:
     eos_token_id = 99
 
+    def decode(self, _ids, **_kwargs):
+        return "done"
+
     def apply_chat_template(self, *_args, add_generation_prompt=False, **_kwargs):
         return [1, 2] if add_generation_prompt else [1]
 
 
 def _trial_runner() -> HarborTrajectoryRunner:
     runner = object.__new__(HarborTrajectoryRunner)
+    runner._verifier_disabled = False
     runner._error_handling_config = ErrorHandlingConfig(
         enable_error_classification=True,
         passthrough_exceptions=frozenset({"TurnCapExhaustedError"}),
@@ -213,8 +221,10 @@ def test_identity_aware_shaping_preserves_the_downstream_truncation_penalty(veri
 
 def test_unrecognized_verifier_output_is_binned_as_a_verifier_failure():
     runner = object.__new__(HarborTrajectoryRunner)
+    runner._verifier_disabled = False
     runner._error_handling_config = ErrorHandlingConfig(enable_error_classification=True)
     runner._reward_shaping_enabled = True
+    runner._collect_rollout_details = False
     runner._reward_shaping_config = {
         "enable_reward_shaping": True,
         "reward_shaper": "threshold",
@@ -240,3 +250,49 @@ def test_unrecognized_verifier_output_is_binned_as_a_verifier_failure():
     treatment, exception_type = runner._classify_exception(VerifierOutputParseError("unrecognized output"))
     assert treatment == "mask"
     assert exception_type == "VerifierOutputParseError"
+
+
+@pytest.mark.parametrize("recorded", [True, False])
+@pytest.mark.parametrize("timed_out", [True, False])
+@pytest.mark.parametrize("verifier_disabled", [True, False])
+def test_opencode_preserves_recorded_evidence_without_verifier_reward(tmp_path, recorded, timed_out, verifier_disabled):
+    runner = _trial_runner()
+    runner._verifier_disabled = HarborConfigBuilder(
+        OmegaConf.create({"harbor": {"verifier_disable": verifier_disabled}})
+    ).get_verifier_disabled()
+    runner._preserve_logprobs_on_timeout = True
+    runner._collect_rollout_details = True
+    runner._rollout_logprobs_required = True
+    runner._literal_log_store = LiteralLogStore()
+    log = tmp_path / "literal.jsonl"
+    entry = {
+        "timestamp": 1.0,
+        "status_code": 200,
+        "trial_id": "timed-out-trial",
+        "request": {"messages": [{"role": "user", "content": "solve it"}]},
+        "literal": {"prompt_token_ids": [7, 8, 2], "completion_token_ids": [10], "logprobs": [-0.25]},
+    }
+    log.write_text(json.dumps(entry) + "\n" if recorded else "")
+    runner._literal_log_path = str(log)
+    result = SimpleNamespace(
+        verifier_result=None,
+        exception_info=SimpleNamespace(exception_type="AgentTimeoutError") if timed_out else None,
+        agent_result=SimpleNamespace(
+            metadata={"rollout_correlation_id": "timed-out-trial", "stop_reason": "timeout"},
+            rollout_details=None,
+        ),
+    )
+    output = runner._process_trial_result(result, TrajectoryID(instance_id="task", repetition_id=0))
+
+    expected_eligible = recorded and (timed_out or verifier_disabled)
+    assert output.disposition.loss_eligible is expected_eligible
+    assert output.reward_result.optimization_reward == 0.0
+    if expected_eligible and not timed_out:
+        assert output.verification.status.value == "skipped"
+    if expected_eligible:
+        assert output.evidence.prompt_token_ids == (7, 8)
+        assert output.evidence.response_token_ids == (2, 10)
+        assert output.loss_mask == [0, 1]
+        np.testing.assert_allclose(output.evidence.behavior_logprobs, [0.0, -0.25])
+    else:
+        assert output.loss_mask == [0]

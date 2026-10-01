@@ -319,15 +319,19 @@ def _rollout_evidence_from_harbor(
 
 def _completed_disposition(
     *,
+    verification: VerificationResult,
     preserve_timeout: bool,
     preserve_exclude_from_baseline: bool,
     preserve_exception_type: Optional[str],
     terminal_exception_type: Optional[str],
 ) -> TrainingDisposition:
+    reason = "verifier disabled" if verification.status is VerificationStatus.SKIPPED else "verified"
+    if preserve_timeout:
+        reason = f"preserved {preserve_exception_type}"
     return TrainingDisposition(
         loss_eligible=True,
         baseline_eligible=not preserve_exclude_from_baseline if preserve_timeout else True,
-        reason=f"preserved {preserve_exception_type}" if preserve_timeout else "verified",
+        reason=reason,
         exception_type=terminal_exception_type,
     )
 
@@ -437,6 +441,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         # Schema-driven Harbor config builder
         # Automatically maps YAML fields to Harbor's TrialConfig with validation
         self._harbor_config_builder = HarborConfigBuilder(terminal_bench_cfg)
+        self._verifier_disabled = self._harbor_config_builder.get_verifier_disabled()
         self._packed_task_materializer = PackedTaskMaterializer(PACKED_TASK_CACHE_ROOT)
 
         # Configure Harbor log level (default WARNING to reduce noise)
@@ -1634,7 +1639,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         preserve_timeout: bool,
     ) -> tuple[Optional[ParsedTestResult], Optional[VerifierTestCollection]]:
         """Parse and identify verifier tests when shaping can consume them."""
-        if preserve_timeout or not self._reward_shaping_enabled:
+        if preserve_timeout or self._verifier_disabled or not self._reward_shaping_enabled:
             return None, None
         verifier_stdout = getattr(result.verifier_result, "stdout", None)
         parsed_tests, parser_name = parse_test_output_with_parser(
@@ -1659,7 +1664,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         parsed_tests: Optional[ParsedTestResult],
     ) -> RewardResult:
         """Apply the configured per-trial shaper before any group-aware shaping."""
-        if preserve_timeout:
+        if preserve_timeout or verification.status is VerificationStatus.SKIPPED:
             return RewardResult(unshaped_reward=None, optimization_reward=0.0)
 
         if verification.score is None:
@@ -1800,7 +1805,18 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 exclude_from_baseline=exclude_from_baseline,
             )
 
-        verification = verification_from_harbor_result(result)
+        # CLI agents record behavior evidence in the proxy log, not Harbor Chat.
+        # Recover both consumers before timeout classification; correlation releases
+        # the trial's log entries after the conversation has been reconstructed.
+        rollout_details = getattr(result.agent_result, "rollout_details", None)
+        had_native_rollout_details = bool(rollout_details)
+        cli_chat_history = None
+        if not had_native_rollout_details:
+            cli_chat_history = self._maybe_build_cli_chat_history(result)
+            rollout_details = self._maybe_correlate_cli_rollout_details(result, rollout_details)
+        literal_bridge_correlated = not had_native_rollout_details and bool(rollout_details)
+
+        verification = verification_from_harbor_result(result, verifier_disabled=self._verifier_disabled)
 
         # Preserve-on-soft-timeout state (see _should_preserve_timeout_trajectory).
         # When set, a POST-generation failure (no verifier reward) does NOT discard
@@ -1917,7 +1933,10 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         # Check for missing verifier result (trial ran but didn't produce valid output)
         # Note: exception_info is already handled above, so if we reach here it's None.
         # A preserved timeout trajectory legitimately has no verifier_result -> skip.
-        if verification.status is not VerificationStatus.VERIFIED and not preserve_timeout:
+        if (
+            verification.status not in (VerificationStatus.VERIFIED, VerificationStatus.SKIPPED)
+            and not preserve_timeout
+        ):
             logger.warning(
                 f"Trajectory {trajectory_id} failed: No verifier result and no exception info. "
                 f"This is unexpected - marking as infrastructure failure."
@@ -1941,7 +1960,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             # Branch on all_messages PRESENCE, not agent name, so the terminus path
             # stays byte-identical and any future Chat-driven agent keeps working.
             if isinstance(metadata, dict) and "all_messages" not in metadata:
-                chat_history = self._maybe_build_cli_chat_history(result)
+                chat_history = cli_chat_history or self._maybe_build_cli_chat_history(result)
                 if not chat_history:
                     # No recoverable conversation → drop the trajectory honestly,
                     # exactly as the pre-existing KeyError branch did (no silent
@@ -2031,17 +2050,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         # Process response messages (everything after the first message)
         response_messages = conversation[1:]
 
-        # Extract per-turn behavior logprobs from Harbor's rollout details.
-        rollout_details = getattr(result.agent_result, "rollout_details", None)
-        had_native_rollout_details = bool(rollout_details)
-        # CLI agents that bypass Harbor Chat return empty
-        # rollout_details even under a co-located RecordProxy (the proxy writes a
-        # shared worker-side log, not the in-sandbox trial dir). Recover this trial's
-        # token_ids/logprobs from that shared log by the per-trial correlation id
-        # harbor stamped (x-ot-trial-id). No-op when rollout_details is already
-        # populated (terminus native), the flag is off, or no proxy log is present.
-        rollout_details = self._maybe_correlate_cli_rollout_details(result, rollout_details)
-        literal_bridge_correlated = not had_native_rollout_details and bool(rollout_details)
+        # Use the behavior evidence recovered before timeout classification.
         literal_bridge_turns = 0
         if literal_bridge_correlated:
             completion_turns = rollout_details[0].get("completion_token_ids", [])
@@ -2258,6 +2267,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         )
         reward_result.validate_for(evidence)
         disposition = _completed_disposition(
+            verification=verification,
             preserve_timeout=preserve_timeout,
             preserve_exclude_from_baseline=preserve_exclude_from_baseline,
             preserve_exception_type=preserve_exception_type,
