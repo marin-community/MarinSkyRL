@@ -191,7 +191,12 @@ ENV_VAR_SPECS = (
         frozenset({EnvVarScope.INFERENCE_WORKER}),
         frozenset({EnvVarWriter.PYTHON_ASSIGNMENT}),
     ),
-    EnvVarSpec(WANDB_ENTITY_ENV, "launch.wandb_entity", EnvVarSource.EXTERNAL, frozenset({EnvVarScope.TASK_RUNTIME})),
+    EnvVarSpec(
+        WANDB_ENTITY_ENV,
+        "launch.wandb_entity",
+        EnvVarSource.EXTERNAL,
+        frozenset({EnvVarScope.TASK_RUNTIME, EnvVarScope.RAY_WORKER}),
+    ),
     EnvVarSpec(
         HF_HUB_OFFLINE_ENV,
         "checkpoint_export.hf_hub_publish",

@@ -1,9 +1,34 @@
+import json
+
 import pytest
 from omegaconf import OmegaConf
 
 from skyrl_train.config.trajectory_runner_capabilities import EntrypointOperation
 from skyrl_train.entrypoints import main_generate
 from skyrl_train.entrypoints.main_generate import EvalOnlyEntrypoint
+
+
+def test_pilot_loads_validation_when_default_evaluation_interval_is_disabled(tmp_path):
+    path = tmp_path / "validation.jsonl"
+    rows = [
+        {"prompt": [{"role": "user", "content": "Validation prompt"}], "extra_info": {"source_id": str(index)}}
+        for index in range(2)
+    ]
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    experiment = object.__new__(EvalOnlyEntrypoint)
+    experiment.tokenizer = None
+    experiment.cfg = OmegaConf.create(
+        {
+            "trainer": {"eval_interval": -1, "max_prompt_length": 1, "pivot_pilot": {"arm": "rl_tool_name"}},
+            "data": {"val_data": [str(path)], "prompt_length_policy": "keep"},
+        }
+    )
+
+    dataset = experiment.get_eval_dataset()
+
+    assert len(dataset) == 2
+    assert dataset[1][0] == rows[1]["prompt"]
+    assert dataset[1][2]["extra_info"]["source_id"] == "1"
 
 
 class LifecycleRunner:

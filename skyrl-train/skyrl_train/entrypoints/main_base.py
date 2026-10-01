@@ -350,7 +350,9 @@ class BasePPOExp:
         Returns:
             PromptDataset: The evaluation dataset.
         """
-        if self.cfg.trainer.eval_interval > 0 and self.cfg.data.val_data:
+        if (
+            self.cfg.trainer.eval_interval > 0 or self.cfg.trainer.get("pivot_pilot") is not None
+        ) and self.cfg.data.val_data:
             from skyrl_train.dataset import PromptDataset  # noqa: PLC0415
 
             prompts_dataset = PromptDataset(
