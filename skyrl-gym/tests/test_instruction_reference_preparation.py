@@ -132,7 +132,8 @@ def test_failed_runtime_does_not_commit_partially_consumed_rng():
     assert random.getstate() == before
 
 
-def test_malformed_scored_child_result_does_not_commit_rng(monkeypatch):
+@pytest.mark.parametrize("missing_or_inconsistent", ["source_feedback", "num_passed", "num_total"])
+def test_malformed_scored_child_result_does_not_commit_rng(monkeypatch, missing_or_inconsistent):
     import dataclasses
     import verifyit.grade
 
@@ -142,7 +143,12 @@ def test_malformed_scored_child_result_does_not_commit_rng(monkeypatch):
         verdict = real_run(*args, **kwargs)
         detail = dict(verdict.detail)
         assert "random_state" in detail
-        detail.pop("source_feedback")
+        if missing_or_inconsistent == "source_feedback":
+            detail.pop("source_feedback")
+        else:
+            feedback = dict(detail["source_feedback"])
+            feedback[missing_or_inconsistent] += 1
+            detail["source_feedback"] = feedback
         return dataclasses.replace(verdict, detail=detail)
 
     monkeypatch.setattr(verifyit.grade, "run", missing_feedback)

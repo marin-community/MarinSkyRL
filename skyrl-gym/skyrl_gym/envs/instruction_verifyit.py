@@ -371,6 +371,8 @@ def _evaluate(kind: str, text: str, data: Any, *, runtime: bool = False) -> dict
             "follow_instruction_list": results,
             "instruction_errors": errors,
             "grading_mode": mode,
+            "num_passed": sum(results),
+            "num_total": len(results),
         }
     return {
         "status": "scored",
@@ -444,6 +446,10 @@ def _execute(kind: str, text: str, data: Any, timeout: float) -> tuple[float, di
                 or errors != [None] * len(results)
                 or type(feedback["follow_all_instructions"]) is not bool
                 or feedback["follow_all_instructions"] != all(results)
+                or type(feedback["num_passed"]) is not int
+                or feedback["num_passed"] != sum(results)
+                or type(feedback["num_total"]) is not int
+                or feedback["num_total"] != len(results)
                 or mode != data.get("grading_mode", "binary")
                 or mode not in {"binary", "fraction"}
                 or verdict.reward != (float(all(results)) if mode == "binary" else sum(results) / len(results))
