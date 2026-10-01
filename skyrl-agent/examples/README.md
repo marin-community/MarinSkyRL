@@ -1,6 +1,8 @@
 ## Examples
 
-This directory contains runnable examples for multiple tasks. Each section outlines how to set up any required services, prepare datasets, and launch training or inference.
+This directory contains historical examples for the dormant skyrl-agent snapshot. GeneralReactTask examples
+(MemAgent, Search-R1, BrowseComp, and OpenAI ReAct) have been removed; see the
+[retirement guide](../../docs/coder1-retirement.md).
 
 ### 1) SWE Training
 
@@ -30,25 +32,7 @@ Launch an OpenAI API-compatible serving (e.g., vLLM or similar), then configure 
     python ./examples/run_openai/test_vllm_oh_demo.py
     ```
 
-### 2) MemAgent Training
-
-- Prepare dataset:
-  ```bash
-  python ./data/memagent.py --output-dir MEM_DATA_DIR
-  ```
-
-- Configure API:
-  - Set the OpenAI API key in the environment file (i.e., `.env`); by default we use GPT-5-nano as the LLM judge for reward calculation.
-
-- Backend note:
-  - MemAgent currently supports only the Tinker backend for step-wise training. Set your Tinker API key in the environment file (i.e., `.env`).
-
-- Launch training (modify the corresponding path in the script first):
-  ```bash
-  bash ./examples/run_tinker/tinker_memagent.sh
-  ```
-
-### 3) Deep Research (web_research_hle.sh)
+### 2) Deep Research (web_research_hle.sh)
 
 - Quick setup: `uv venv && uv sync`.
 
@@ -78,37 +62,6 @@ Launch an OpenAI API-compatible serving (e.g., vLLM or similar), then configure 
   bash ./examples/run_verl/web_research_hle.sh
   ```
 
-### 4) OSWorld
+### 3) OSWorld
 
-Placeholder for now. 
-
-### 5) BrowseComp-Plus (Dense Retrieval)
-
-- Prepare dataset/index. First download the decrypted dataset following [official instruction](https://github.com/texttron/BrowseComp-Plus?tab=readme-ov-file#-downloading-the-dataset). Then run:
-  ```bash
-  python ./data/browsecomp-plus.py --input DECRYPTED_JSON_PATH --output BC_DATA
-  ```
-- Download Pre-built Index for `Qwen/Qwen3-Embedding-8B`:
-  ```bash
-  huggingface-cli download Tevatron/browsecomp-plus-indexes --repo-type=dataset --include="qwen3-embedding-8b/*" --local-dir FAISS_INDEX_PATH
-  ```
-
-- Serve embedding model:
-  - Start an OpenAI-compatible embedding server using `Qwen/Qwen3-Embedding-8B` as the embedding model. For example:
-    ```bash
-    vllm serve Qwen/Qwen3-Embedding-8B \
-    --port 8000 \
-    --task embed \
-    --max-model-len 8192 \
-    --tensor-parallel-size 1 \
-    --dtype float16
-    ```
-  - Configure your `.env` with:
-    - `FAISS_EMBEDDING_API_URL` (embedding server base URL)
-    - `FAISS_EMBEDDING_MODEL_NAME` (e.g., `Qwen/Qwen3-Embedding-8B` model name used by your server)
-    - `FAISS_INDEX_PATH` (file path to the downloaded pre-built index)
-
-- Launch eval (modify the corresponding path in the script first):
-  ```bash
-  bash ./examples/run_verl/verl_browsecomp.sh
-  ```
+Placeholder for now.

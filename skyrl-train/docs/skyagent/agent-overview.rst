@@ -100,7 +100,11 @@ The task class has the following methods:
 3. ``complete_runtime``: Complete or finalize the runtime for the task.  For example, this can involve extracting the git patch from the runtime for SWEBench.
 4. ``evaluate_result``: Evaluate model result for the task in an asyncio-compatible way
 
-We currently provide two tasks:
+The dormant snapshot retains the following task:
 
 1. `SWEBenchTask <https://github.com/NovaSky-AI/SkyRL/blob/bd9d6a9bace82df5e27c81ab231f5f4a17b2cf5b/skyagent/skyagent/tasks/swebench/utils.py#L341>`_ : Implements the SWEBench task leveraging `OpenHands <https://github.com/All-Hands-AI/OpenHands>`_ .
-2. `GeneralReactTask <https://github.com/NovaSky-AI/SkyRL/blob/bd9d6a9bace82df5e27c81ab231f5f4a17b2cf5b/skyagent/skyagent/tasks/general_react/utils.py#L7>`_ : A general task implementation for many basic reasoning tasks like math, science, simple code generation, etc. 
+
+``GeneralReactTask``, ``DummyReactTask``, and their ``coder1`` verifier have been removed.
+Use the maintained SkyRL-Gym environments or the Harbor trajectory runner. See the
+`retirement guide <https://github.com/marin-community/MarinSkyRL/blob/main/docs/coder1-retirement.md>`_
+for migration requirements.
