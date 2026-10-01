@@ -19,7 +19,7 @@ from shellbox.machine import MachineFactory
 from taskcompendium.environment import EnvironmentKind, ExternalVerifierSpec
 from taskcompendium.grading import GradeResult, Outcome
 from taskcompendium.models import TaskSpec, VerifierKind
-from rolloutengine.engine import (
+from rolloutengine.contracts import (
     GenerationLimitReached,
     ModelRequest,
     ModelTurn,
@@ -29,8 +29,8 @@ from rolloutengine.engine import (
     RolloutFailure,
     RolloutInterrupted,
     RolloutOperation,
-    ShellboxRolloutEngine,
 )
+from rolloutengine.engine import ShellboxRolloutEngine
 from taskcompendium.submission import AnswerFormat, SubmissionConvention, conversation_messages
 from skyrl_gym.envs.nemotron_ultra.judge import OpenAIJudge
 from skyrl_gym.envs.registration import EnvSpec, registry

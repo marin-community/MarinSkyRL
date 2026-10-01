@@ -12,7 +12,7 @@ from shellbox.machine import MachineFactory
 from taskcompendium.environment import EnvironmentSpec, ShellVerifierSpec
 from taskcompendium.models import TaskSpec, VerifierKind, VerifierSpec
 from taskcompendium.grading import GradingFailure, Outcome, skipped_verifier
-from rolloutengine.engine import RolloutData, RolloutFailure
+from rolloutengine.contracts import RolloutData, RolloutFailure
 
 from skyrl_train.trajectory_runners.harbor.configuration import HarborConfigBuilder
 from skyrl_train.trajectory_runners.harbor.identity_aware_reward import (

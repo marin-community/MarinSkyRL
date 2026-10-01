@@ -34,7 +34,8 @@ from skyrl_train.dataset.harbor import TerminalBenchTaskDataset, materialize_har
 from taskcompendium.environment import DockerBuild, EnvironmentKind, ShellVerifierSpec
 from taskcompendium.grading import Outcome, skipped_verifier
 from taskcompendium.parquet import read_tasks
-from rolloutengine.engine import ModelTurn, ShellboxRolloutEngine
+from rolloutengine.contracts import ModelTurn
+from rolloutengine.engine import ShellboxRolloutEngine
 from taskcompendium.submission import AnswerFormat, SubmissionConvention
 
 

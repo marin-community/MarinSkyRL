@@ -11,7 +11,7 @@ from skyrl_gym.verification import VerificationStatus
 from taskcompendium.environment import ExternalVerifierSpec
 from taskcompendium.grading import GradeResult, Outcome
 from taskcompendium.models import TaskSpec, VerifierKind
-from rolloutengine.engine import ModelTurn, RolloutContractError, Transition
+from rolloutengine.contracts import ModelTurn, RolloutContractError, Transition
 from taskcompendium.submission import conversation_messages
 
 from skyrl_train.rollout_observability import run_environment
