@@ -252,3 +252,17 @@ for _candidate, _flags in STEP_CANDIDATES.items():
             route_source="reread",
             needs_step_plan=True,
         )
+
+
+# Per-fix decomposition of ``compiled_stack`` under generation-route replay: each fix alone, and the stack without
+# each fix, so a probe can separate which fixes carry the mismatch gain from which carry the step-time cost.
+for _flag in _COMPILED_STACK_FLAGS:
+    TRAINER_MODES[f"{REPLAY_MODE}+{_flag}"] = ModeSpec(
+        _with_numerics(_replay, NUMERICS_CANDIDATES[_flag]), requires_routes=True
+    )
+    NUMERICS_CANDIDATES[f"{COMPILED_STACK}_without_{_flag}"] = _enabled(
+        *(other for other in _COMPILED_STACK_FLAGS if other != _flag)
+    )
+    TRAINER_MODES[f"{REPLAY_MODE}+{COMPILED_STACK}_without_{_flag}"] = ModeSpec(
+        _with_numerics(_replay, NUMERICS_CANDIDATES[f"{COMPILED_STACK}_without_{_flag}"]), requires_routes=True
+    )
