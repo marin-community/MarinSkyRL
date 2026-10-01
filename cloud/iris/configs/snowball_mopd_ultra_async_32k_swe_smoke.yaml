@@ -8,7 +8,6 @@ entrypoint: standard
 
 config_groups:
   terminal_bench_config: terminal_bench
-minimum_host_memory: 768GB
 
 context_budget:
   # Chosen-token scoring needs one position beyond the student window.
