@@ -319,19 +319,15 @@ def _rollout_evidence_from_harbor(
 
 def _completed_disposition(
     *,
-    verification: VerificationResult,
     preserve_timeout: bool,
     preserve_exclude_from_baseline: bool,
     preserve_exception_type: Optional[str],
     terminal_exception_type: Optional[str],
 ) -> TrainingDisposition:
-    reason = "verifier disabled" if verification.status is VerificationStatus.SKIPPED else "verified"
-    if preserve_timeout:
-        reason = f"preserved {preserve_exception_type}"
     return TrainingDisposition(
         loss_eligible=True,
         baseline_eligible=not preserve_exclude_from_baseline if preserve_timeout else True,
-        reason=reason,
+        reason=f"preserved {preserve_exception_type}" if preserve_timeout else "verified",
         exception_type=terminal_exception_type,
     )
 
@@ -441,7 +437,6 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         # Schema-driven Harbor config builder
         # Automatically maps YAML fields to Harbor's TrialConfig with validation
         self._harbor_config_builder = HarborConfigBuilder(terminal_bench_cfg)
-        self._verifier_disabled = self._harbor_config_builder.get_verifier_disabled()
         self._packed_task_materializer = PackedTaskMaterializer(PACKED_TASK_CACHE_ROOT)
 
         # Configure Harbor log level (default WARNING to reduce noise)
@@ -1639,7 +1634,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         preserve_timeout: bool,
     ) -> tuple[Optional[ParsedTestResult], Optional[VerifierTestCollection]]:
         """Parse and identify verifier tests when shaping can consume them."""
-        if preserve_timeout or self._verifier_disabled or not self._reward_shaping_enabled:
+        if preserve_timeout or not self._reward_shaping_enabled:
             return None, None
         verifier_stdout = getattr(result.verifier_result, "stdout", None)
         parsed_tests, parser_name = parse_test_output_with_parser(
@@ -1664,7 +1659,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         parsed_tests: Optional[ParsedTestResult],
     ) -> RewardResult:
         """Apply the configured per-trial shaper before any group-aware shaping."""
-        if preserve_timeout or verification.status is VerificationStatus.SKIPPED:
+        if preserve_timeout:
             return RewardResult(unshaped_reward=None, optimization_reward=0.0)
 
         if verification.score is None:
@@ -1817,8 +1812,6 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         literal_bridge_correlated = not had_native_rollout_details and bool(rollout_details)
 
         verification = verification_from_harbor_result(result)
-        if self._verifier_disabled and verification.status is VerificationStatus.UNAVAILABLE:
-            verification = VerificationResult.skipped("verifier disabled")
 
         # Preserve-on-soft-timeout state (see _should_preserve_timeout_trajectory).
         # When set, a POST-generation failure (no verifier reward) does NOT discard
@@ -1935,10 +1928,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         # Check for missing verifier result (trial ran but didn't produce valid output)
         # Note: exception_info is already handled above, so if we reach here it's None.
         # A preserved timeout trajectory legitimately has no verifier_result -> skip.
-        if (
-            verification.status not in (VerificationStatus.VERIFIED, VerificationStatus.SKIPPED)
-            and not preserve_timeout
-        ):
+        if verification.status is not VerificationStatus.VERIFIED and not preserve_timeout:
             logger.warning(
                 f"Trajectory {trajectory_id} failed: No verifier result and no exception info. "
                 f"This is unexpected - marking as infrastructure failure."
@@ -2269,7 +2259,6 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         )
         reward_result.validate_for(evidence)
         disposition = _completed_disposition(
-            verification=verification,
             preserve_timeout=preserve_timeout,
             preserve_exclude_from_baseline=preserve_exclude_from_baseline,
             preserve_exception_type=preserve_exception_type,

@@ -17,7 +17,6 @@ from skyrl_train.metric_names import IDENTITY_AWARE_REWARD_METRIC_PREFIX
 from skyrl_train.trajectory_runners.types import TrajectoryID
 from skyrl_train.utils.harbor_errors import ErrorHandlingConfig
 from skyrl_train.trajectory_runners.harbor.literal_log_store import LiteralLogStore
-from skyrl_train.trajectory_runners.harbor.configuration import HarborConfigBuilder
 
 
 def _runner_output(
@@ -39,7 +38,6 @@ def _runner_output(
 
 def _runner(shaper: str | None = None):
     runner = object.__new__(HarborTrajectoryRunner)
-    runner._verifier_disabled = False
     runner._reward_shaping_enabled = True
     runner._reward_shaping_config = {"shaper_kwargs": {}}
     if shaper is not None:
@@ -60,7 +58,6 @@ class _Tokenizer:
 
 def _trial_runner() -> HarborTrajectoryRunner:
     runner = object.__new__(HarborTrajectoryRunner)
-    runner._verifier_disabled = False
     runner._error_handling_config = ErrorHandlingConfig(
         enable_error_classification=True,
         passthrough_exceptions=frozenset({"TurnCapExhaustedError"}),
@@ -221,7 +218,6 @@ def test_identity_aware_shaping_preserves_the_downstream_truncation_penalty(veri
 
 def test_unrecognized_verifier_output_is_binned_as_a_verifier_failure():
     runner = object.__new__(HarborTrajectoryRunner)
-    runner._verifier_disabled = False
     runner._error_handling_config = ErrorHandlingConfig(enable_error_classification=True)
     runner._reward_shaping_enabled = True
     runner._collect_rollout_details = False
@@ -254,12 +250,8 @@ def test_unrecognized_verifier_output_is_binned_as_a_verifier_failure():
 
 @pytest.mark.parametrize("recorded", [True, False])
 @pytest.mark.parametrize("timed_out", [True, False])
-@pytest.mark.parametrize("verifier_disabled", [True, False])
-def test_opencode_preserves_recorded_evidence_without_verifier_reward(tmp_path, recorded, timed_out, verifier_disabled):
+def test_opencode_preserves_recorded_evidence_without_verifier_reward(tmp_path, recorded, timed_out):
     runner = _trial_runner()
-    runner._verifier_disabled = HarborConfigBuilder(
-        OmegaConf.create({"harbor": {"verifier_disable": verifier_disabled}})
-    ).get_verifier_disabled()
     runner._preserve_logprobs_on_timeout = True
     runner._collect_rollout_details = True
     runner._rollout_logprobs_required = True
@@ -284,11 +276,9 @@ def test_opencode_preserves_recorded_evidence_without_verifier_reward(tmp_path, 
     )
     output = runner._process_trial_result(result, TrajectoryID(instance_id="task", repetition_id=0))
 
-    expected_eligible = recorded and (timed_out or verifier_disabled)
+    expected_eligible = recorded and timed_out
     assert output.disposition.loss_eligible is expected_eligible
     assert output.reward_result.optimization_reward == 0.0
-    if expected_eligible and not timed_out:
-        assert output.verification.status.value == "skipped"
     if expected_eligible:
         assert output.evidence.prompt_token_ids == (7, 8)
         assert output.evidence.response_token_ids == (2, 10)

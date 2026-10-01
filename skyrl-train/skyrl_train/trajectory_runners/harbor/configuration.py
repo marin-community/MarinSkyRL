@@ -617,9 +617,6 @@ class HarborConfigBuilder:
 
         return EnvironmentConfig(**env_fields)
 
-    def get_verifier_disabled(self) -> bool:
-        return self._build_verifier_config().disable
-
     def _build_verifier_config(self) -> VerifierConfig:
         """Build VerifierConfig from config."""
         verifier_fields = {}
