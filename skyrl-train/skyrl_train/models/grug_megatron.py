@@ -49,6 +49,7 @@ from torch import nn
 
 from skyrl_train.mismatch_probe.numerics import active_numerics
 from skyrl_train.models import grug_inductor_kernels as vllm_inductor
+from skyrl_train.models.grug_handoffs import clear_hand_offs, hand_off, same_storage, take_hand_off
 from skyrl_train.models.grug_rounding import (
     STAGE_STATISTIC_COLUMNS,
     append_stage_statistic,
@@ -143,31 +144,12 @@ class StageStatistic:
 
 HandOff = ResidualSum | GatedProduct | StageStatistic
 
-# What formed each bf16 tensor a norm will read (a layer's output, the embedding norm's output), keyed by that
-# tensor. Each entry keeps a weak reference to the tensor: under pipeline parallelism several micro-batches are in
-# flight and a stage's last residual has no reader, so a freed tensor's ``id()`` can come back for an unrelated
-# tensor, which must not receive the entry.
-_HAND_OFFS: dict[int, tuple[weakref.ref, HandOff]] = {}
 # Per input norm, the statistic it took from its hand-off in a checkpoint unit's first forward, with a weak reference
 # to the norm's input. Full activation recompute reruns the unit inside the backward on ``detach()`` copies of its
-# inputs: new tensor objects with the same storage, which the hand-off cannot reach, so the recompute reads the
-# statistic here by storage.
+# inputs, after the first forward took the unit's hand-offs, so the recompute reads the statistic here by storage.
 _RECOMPUTE_STATISTICS: dict[int, list[tuple[weakref.ref, torch.Tensor | None]]] = {}
 # Compiled vLLM pads a GEMM's output width to a multiple of this many columns (the 20-head gate becomes 24).
 VLLM_GEMM_OUTPUT_ALIGNMENT = 8
-
-
-def _hand_off(receiver: torch.Tensor, parts: HandOff) -> None:
-    for key in [key for key, (ref, _) in _HAND_OFFS.items() if ref() is None]:
-        del _HAND_OFFS[key]
-    _HAND_OFFS[id(receiver)] = weakref.ref(receiver), parts
-
-
-def _take_hand_off(receiver: torch.Tensor) -> HandOff | None:
-    entry = _HAND_OFFS.pop(id(receiver), None)
-    if entry is None or entry[0]() is not receiver:
-        return None
-    return entry[1]
 
 
 class CheckpointPass(StrEnum):
@@ -185,14 +167,6 @@ def checkpoint_pass() -> CheckpointPass:
     return CheckpointPass.RECOMPUTE if torch.is_grad_enabled() else CheckpointPass.FIRST
 
 
-def _same_storage(left: torch.Tensor, right: torch.Tensor) -> bool:
-    return (
-        left.untyped_storage().data_ptr() == right.untyped_storage().data_ptr()
-        and left.storage_offset() == right.storage_offset()
-        and left.shape == right.shape
-    )
-
-
 def _keep_for_recompute(norm: nn.Module, receiver: torch.Tensor, statistic: torch.Tensor | None) -> None:
     entries = [(ref, kept) for ref, kept in _RECOMPUTE_STATISTICS.get(id(norm), []) if ref() is not None]
     entries.append((weakref.ref(receiver), statistic))
@@ -203,7 +177,7 @@ def _take_for_recompute(norm: nn.Module, receiver: torch.Tensor) -> torch.Tensor
     entries = _RECOMPUTE_STATISTICS.get(id(norm), [])
     for index, (ref, statistic) in enumerate(entries):
         original = ref()
-        if original is not None and _same_storage(original, receiver):
+        if original is not None and same_storage(original, receiver):
             del entries[index]
             return statistic
     raise RuntimeError("an input norm's recompute found no statistic from its checkpoint unit's first forward")
@@ -253,7 +227,7 @@ def _install_residual_hooks(layer: TransformerLayer) -> None:
         else:
             hidden = (parts.residual.float() + (parts.routed + parts.shared).float()).to(output[0].dtype)
         if numerics.input_norm_variance or numerics.final_norm_fp32 or numerics.vllm_norms:
-            _hand_off(hidden, parts)
+            hand_off(hidden, parts)
         return (hidden, *output[1:])
 
     layer.pre_mlp_layernorm.register_forward_pre_hook(keep_residual)
@@ -537,11 +511,11 @@ def install_numerics_hooks(root: nn.Module) -> None:
 def clear_numerics_handoffs() -> None:
     """Drop the hand-offs the numerics hooks pass from one module to the next within a forward.
 
-    Each forward starts empty: a pipeline stage's last residual has no reader, and the entries are keyed by ``id()``
-    of tensors that a later forward may reuse. The statistics kept for recompute stay: under pipeline parallelism a
-    micro-batch's backward, and its recompute, runs after later micro-batches' forwards.
+    Each forward starts empty: a pipeline stage's last residual has no reader, and the entries are keyed by tensors
+    that a later forward may reuse. The statistics kept for recompute stay: under pipeline parallelism a micro-batch's
+    backward, and its recompute, runs after later micro-batches' forwards.
     """
-    _HAND_OFFS.clear()
+    clear_hand_offs()
 
 
 class NormRole(StrEnum):
@@ -597,7 +571,7 @@ class GrugGatedRMSNorm(nn.Module):
             output = normalized * torch.sigmoid(gate)
         if self.role is NormRole.EMBEDDING and (numerics.input_norm_variance or numerics.vllm_norms):
             # Layer 0's input norm takes its variance from the unrounded embedding gated-norm product.
-            _hand_off(output, GatedProduct(normalized, gate))
+            hand_off(output, GatedProduct(normalized, gate))
         return output
 
     def _input_norm(self, hidden_states: torch.Tensor, numerics) -> torch.Tensor:
@@ -629,7 +603,7 @@ class GrugGatedRMSNorm(nn.Module):
         A checkpoint unit's first forward keeps what it computed for the recompute, which cannot reach the hand-off.
         """
         phase = checkpoint_pass()
-        parts = _take_hand_off(hidden_states)
+        parts = take_hand_off(hidden_states)
         if parts is None and phase is CheckpointPass.RECOMPUTE:
             return _take_for_recompute(self, hidden_states)
         statistic = None
@@ -642,7 +616,7 @@ class GrugGatedRMSNorm(nn.Module):
 
     def _final_norm(self, hidden_states: torch.Tensor, numerics) -> torch.Tensor:
         """The final norm: compiled vLLM normalizes the last layer's unrounded sum."""
-        parts = _take_hand_off(hidden_states)
+        parts = take_hand_off(hidden_states)
         if parts is None or not (numerics.final_norm_fp32 or numerics.vllm_norms):
             return self.norm(hidden_states)
         if not isinstance(parts, ResidualSum):
@@ -994,7 +968,7 @@ def _stage_output_statistic(output: torch.Tensor) -> torch.Tensor | None:
     numerics = active_numerics()
     if not (numerics.input_norm_variance or numerics.vllm_norms):
         return None
-    parts = _take_hand_off(output)
+    parts = take_hand_off(output)
     if not isinstance(parts, ResidualSum):
         raise RuntimeError("a pipeline stage's output carries no residual sum to hand its input-norm statistic on")
     with torch.no_grad():
@@ -1039,7 +1013,7 @@ class GrugGPTModel(GPTModel):
         if self._received is not None:
             hidden, statistic = self._received
             self._received = None
-            _hand_off(hidden, StageStatistic(statistic))
+            hand_off(hidden, StageStatistic(statistic))
         output = super().forward(*args, **kwargs)
         if self.post_process:
             return output
