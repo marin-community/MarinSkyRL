@@ -67,10 +67,6 @@ register(
     entry_point="skyrl_gym.envs.prompt_only.env:PromptOnlyEnv",
 )
 
-register(
-    id="mismatch_fixture",
-    entry_point="skyrl_gym.envs.mismatch_fixture:MismatchFixtureEnv",
-)
 
 register(
     id="reasoning_gym",

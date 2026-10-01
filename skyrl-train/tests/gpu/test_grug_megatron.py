@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+from pathlib import Path
 
 import pytest
 from types import SimpleNamespace
@@ -25,12 +26,7 @@ from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_disp
 from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.mismatch_probe.collect import ProbeCollector
-from skyrl_train.models.grug_moe import GRUG_ROUTER_BIAS_SUFFIX, GrugMoeForCausalLM
-from tests.gpu.tiny_grug import (
-    NUM_LAYERS,
-    TOY_SHAPE,
-    write_tiny_checkpoint as _write_tiny_checkpoint,
-)
+from skyrl_train.models.grug_moe import GRUG_ROUTER_BIAS_SUFFIX, GrugMoeConfig, GrugMoeForCausalLM
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.utils import initialize_ray
 from skyrl_train.utils.torch_utils import logprobs_from_logits
@@ -47,6 +43,9 @@ from tests.gpu.grug_serving import (
 )
 from tests.gpu.utils import get_test_actor_config, init_worker_with_type
 
+TOKENIZER = "Qwen/Qwen2.5-0.5B-Instruct"
+NUM_LAYERS = 8
+NUM_EXPERTS = 8
 ROLLOUT_WORLD_SIZE = 2
 RESPONSE_LENGTH = 8
 PROMPT_LENGTH = 12
@@ -78,6 +77,17 @@ LOGPROB_MEAN_ABS_TOLERANCE = 3e-2
 TRAIN_EVAL_LOGPROB_MAX_ABS_TOLERANCE = 1e-3
 
 
+TOY_SHAPE = dict(
+    hidden_size=64,
+    intermediate_size=64,
+    shared_expert_intermediate_size=64,
+    num_local_experts=NUM_EXPERTS,
+    num_hidden_layers=NUM_LAYERS,
+    num_attention_heads=2,
+    num_key_value_heads=1,
+    head_dim=64,
+    sliding_window=16,
+)
 # Snowball's attention geometry, expert count, and window at a fraction of its width and depth.
 SNOWBALL_LIKE_SHAPE = dict(
     hidden_size=2560,
@@ -93,6 +103,39 @@ SNOWBALL_LIKE_SHAPE = dict(
 # Snowball's width with few experts, so each expert sees as many tokens per micro-batch
 # as it does at full scale (about 700 for 2700-token rows across two EP ranks).
 SNOWBALL_LIKE_DENSE_EXPERTS_SHAPE = {**SNOWBALL_LIKE_SHAPE, "num_local_experts": 32}
+
+
+def _write_tiny_checkpoint(
+    path: Path,
+    max_position_embeddings: int = 128,
+    num_experts_per_tok: int = 2,
+    shape: dict | None = None,
+    vocab_size_multiple: int = 1,
+) -> None:
+    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
+    shape = TOY_SHAPE if shape is None else shape
+    config = GrugMoeConfig(
+        vocab_size=((len(tokenizer) + vocab_size_multiple - 1) // vocab_size_multiple) * vocab_size_multiple,
+        num_experts_per_tok=num_experts_per_tok,
+        max_position_embeddings=max_position_embeddings,
+        initializer_range=0.02,
+        qk_mult=1.37,
+        qk_mult_long_scale=1.1,
+        **shape,
+    )
+    torch.manual_seed(17)
+    model = GrugMoeForCausalLM(config)
+    with torch.no_grad():
+        # Non-trivial gates and router biases so the Megatron port has to reproduce them.
+        for module in model.modules():
+            if module.__class__.__name__ == "GrugMoeGatedNorm":
+                module.down_proj.weight.normal_(std=0.2)
+                module.up_proj.weight.normal_(std=0.2)
+        for layer in model.model.layers:
+            layer.self_attn.attn_gate.weight.normal_(std=0.2)
+            layer.mlp.router.bias.copy_(torch.linspace(-0.3, 0.3, config.num_local_experts))
+    model.save_pretrained(path, safe_serialization=True)
+    tokenizer.save_pretrained(path)
 
 
 def _config(model_path: str, *, world_size: int, pp: int, ep: int):

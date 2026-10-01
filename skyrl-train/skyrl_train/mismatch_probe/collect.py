@@ -267,6 +267,11 @@ class ProbeCollector:
             trainer.group_advantage_invariant = original_contract
             trainer.all_metrics = original_metrics
 
+        routes = training_input.routed_experts_tensor()
+        training_input.routed_expert_rows = None
+        if routes is not None:
+            training_input["rollout_routed_experts"] = routes
+
         response_width = training_input["response_mask"].shape[1]
         prompt_width = training_input["sequences"].shape[1] - response_width
         padded_count = len(training_input["sequences"]) - len(sample_ids)

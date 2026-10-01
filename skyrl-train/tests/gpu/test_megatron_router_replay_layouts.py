@@ -37,7 +37,7 @@ import torch
 from transformers import AutoTokenizer
 
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
-from tests.gpu.tiny_grug import NUM_EXPERTS, NUM_LAYERS, write_tiny_checkpoint as _write_tiny_checkpoint
+from tests.gpu.test_grug_megatron import NUM_EXPERTS, NUM_LAYERS, _write_tiny_checkpoint
 from skyrl_train.mismatch_probe.collect import BatchLayout, ProbeCollector
 from skyrl_train.mismatch_probe.archive import MismatchArchive
 from skyrl_train.trainer import RayPPOTrainer
