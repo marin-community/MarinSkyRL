@@ -52,6 +52,8 @@ class ModeSpec:
     route_source: str = "generation"
     # True records the trainer's per-region activations at trainer.mismatch_probe.capture_layers.
     captures_layers: bool = False
+    # True scores each sequence as the logged vLLM step of its re-read computed it (``vllm_steps``).
+    needs_step_plan: bool = False
 
 
 TRAINER_MODES: dict[str, ModeSpec] = {
@@ -81,7 +83,9 @@ TRAINER_MODES: dict[str, ModeSpec] = {
 # ``KEPT_STACK``) is the kept numerics since J4; its ``+vllm_xsa``, ``+vllm_qk``, ``+vllm_norms``, ``+vllm_swiglu``
 # and ``+vllm_log_softmax`` candidates take the XSA, q/k, norm, shared-activation and log-softmax values from compiled
 # vLLM's own kernels, ``VLLM_FORWARD`` adds all five, and ``VLLM_FORWARD_EP_SUM`` adds vLLM's expert-parallel
-# addition order as well.
+# addition order as well. ``KEPT_STACK_3`` replaces ``router_rows`` with ``vllm_steps``: each sequence is scored as the
+# logged vLLM step of the re-read computed it (FA3 split counts, router GEMM rows, LM-head rows), so its candidates
+# (``STEP_CANDIDATES``) score re-read replay only; ``VLLM_STEP_FORWARD_EP_SUM`` is ``VLLM_FORWARD_EP_SUM`` so scored.
 COMPILED_STACK = "compiled_stack"
 COMPILED_STACK_ALL = "compiled_stack_all"
 VLLM_KERNEL_STACK = "vllm_kernel_stack"
@@ -94,6 +98,9 @@ KEPT_STACK_2 = KEPT_VLLM_KERNELS_ROUTER_ROWS
 _VLLM_REGION_FLAGS = ("vllm_xsa", "vllm_qk", "vllm_norms", "vllm_swiglu", "vllm_log_softmax")
 VLLM_FORWARD = "+".join((KEPT_STACK_2, *_VLLM_REGION_FLAGS))
 VLLM_FORWARD_EP_SUM = f"{VLLM_FORWARD}+ep_sum"
+KEPT_STACK_3 = f"{KEPT_VLLM_KERNELS}+vllm_steps"
+VLLM_STEP_FORWARD = "+".join((KEPT_STACK_3, *_VLLM_REGION_FLAGS))
+VLLM_STEP_FORWARD_EP_SUM = f"{VLLM_STEP_FORWARD}+ep_sum"
 _COMPILED_STACK_FLAGS = (
     "gated_norm",
     "qk_rope",
@@ -106,6 +113,9 @@ _COMPILED_STACK_FLAGS = (
 )
 _KERNEL_FLAGS = ("fa3_attention", "ep_sum")
 _KEPT_2_FLAGS = ("fa3_attention", "vllm_gemm", "vllm_experts", "router_rows")
+_KEPT_3_FLAGS = ("fa3_attention", "vllm_gemm", "vllm_experts", "vllm_steps")
+# ``vllm_steps`` needs a logged step for every sequence, which only re-read replay has.
+_STEP_FLAG = "vllm_steps"
 # ``ep_sum`` needs each row's vLLM data-parallel rank, which the probe knows for replay modes only.
 _NEEDS_PLACEMENT = "ep_sum"
 
@@ -115,7 +125,7 @@ def _enabled(*flags: str) -> dict[str, bool]:
 
 
 NUMERICS_CANDIDATES = {
-    **{flag: {flag: True} for flag in NUMERICS_FLAGS},
+    **{flag: {flag: True} for flag in NUMERICS_FLAGS if flag != _STEP_FLAG},
     COMPILED_STACK: _enabled(*_COMPILED_STACK_FLAGS),
     COMPILED_STACK_ALL: _enabled(*_COMPILED_STACK_FLAGS, "route_weight"),
     KEPT_STACK: _enabled(*_COMPILED_STACK_FLAGS, "fa3_attention"),
@@ -140,6 +150,15 @@ NUMERICS_CANDIDATES = {
     },
     VLLM_FORWARD: _enabled(*_COMPILED_STACK_FLAGS, *_KEPT_2_FLAGS, *_VLLM_REGION_FLAGS),
     VLLM_FORWARD_EP_SUM: _enabled(*_COMPILED_STACK_FLAGS, *_KEPT_2_FLAGS, *_VLLM_REGION_FLAGS, "ep_sum"),
+}
+
+
+# Candidates scored as the logged re-read's vLLM steps computed each sequence: re-read replay modes only.
+STEP_CANDIDATES = {
+    KEPT_STACK_3: _enabled(*_COMPILED_STACK_FLAGS, *_KEPT_3_FLAGS),
+    f"{KEPT_STACK_3}+ep_sum": _enabled(*_COMPILED_STACK_FLAGS, *_KEPT_3_FLAGS, "ep_sum"),
+    VLLM_STEP_FORWARD: _enabled(*_COMPILED_STACK_FLAGS, *_KEPT_3_FLAGS, *_VLLM_REGION_FLAGS),
+    VLLM_STEP_FORWARD_EP_SUM: _enabled(*_COMPILED_STACK_FLAGS, *_KEPT_3_FLAGS, *_VLLM_REGION_FLAGS, "ep_sum"),
 }
 
 
@@ -206,3 +225,13 @@ for _candidate, _flags in NUMERICS_CANDIDATES.items():
     )
     if not _flags.get(_NEEDS_PLACEMENT):
         TRAINER_MODES[f"{NATIVE_MODE}+{_candidate}"] = ModeSpec(_with_numerics(_native, _flags), replays_prompt=False)
+
+for _candidate, _flags in STEP_CANDIDATES.items():
+    for _mode, _repeat in ((REREAD_REPLAY_MODE, False), (REPEAT_REREAD_REPLAY_MODE, True)):
+        TRAINER_MODES[f"{_mode}+{_candidate}"] = ModeSpec(
+            _with_numerics(_replay, _flags),
+            requires_routes=True,
+            repeat_layout=_repeat,
+            route_source="reread",
+            needs_step_plan=True,
+        )

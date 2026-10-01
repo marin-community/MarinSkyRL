@@ -7,6 +7,11 @@ token's routed expert outputs the way vLLM's expert-parallel combine does: every
 token's slots it owns in fp32 and rounds once, and a bf16 ring reduction adds the rank partials,
 starting after the rank that holds the token's request and ending at it. ``vllm_experts`` computes each
 token-expert slot with vLLM's fused-MoE Triton kernels (``vllm_expert_outputs``).
+
+``vllm_steps`` reproduces the engine step of a logged re-read: each sequence's prefill ran alone in one vLLM step
+(``VllmStep``), which fixes its FA3 split counts, the row count of the fp32 router GEMM, and the row counts of the
+LM-head GEMMs that vLLM's model runner V2 runs for prompt log-probabilities (1,024-row chunks) and for the sampled
+position (one row). ``vllm_token_logprobs`` is model runner V2's log-probability kernel.
 """
 
 from __future__ import annotations
@@ -36,6 +41,9 @@ H100_SMS = 132
 EXPERT_OFFSET_ELEMENTS = 16
 # The probe engines' ``max_num_batched_tokens``: the rows of a full vLLM prefill step.
 VLLM_MAX_BATCHED_TOKENS = 8192
+# Model runner V2 computes prompt log-probabilities from LM-head calls of this many rows
+# (``compute_prompt_logprobs_with_chunking``).
+VLLM_PROMPT_LOGPROB_CHUNK = 1024
 
 
 @dataclass(frozen=True)
@@ -109,30 +117,41 @@ def fa3_split_counts(
 
 
 @dataclass(frozen=True)
-class Fa3Plan:
-    """The FA3 split count and valid length of each sequence of a scoring micro-batch, in batch order."""
+class VllmStep:
+    """The vLLM engine step that ran one sequence's re-read prefill, the sequence alone in the step.
 
-    splits: tuple[int, ...]
-    lengths: tuple[int, ...]
+    ``tokens`` is the prefix the step scheduled (the sequence's tokens without its last) and ``rows`` the row count
+    the step's model forward ran: ``tokens`` padded to a CUDA-graph capture size, or ``tokens`` itself above the
+    largest. ``tokens == 0`` marks a batch row without a logged step (padding past the probe's samples).
+    """
+
+    tokens: int
+    rows: int
 
 
-_plan: Fa3Plan | None = None
+_steps: tuple[VllmStep, ...] | None = None
 
 
 @contextmanager
-def fa3_attention_plan(splits: Sequence[int], lengths: Sequence[int]) -> Iterator[None]:
-    """Give ``fa3_attention`` the split count vLLM used for each sequence of the enclosed scoring forwards.
-
-    Without a plan every sequence runs unsplit, which is what vLLM does on steps that fill the GPU.
-    """
-    global _plan
-    if len(splits) != len(lengths):
-        raise ValueError("fa3_attention plan needs one split count per sequence length")
-    previous, _plan = _plan, Fa3Plan(tuple(int(v) for v in splits), tuple(int(v) for v in lengths))
+def vllm_step_plan(steps: Sequence[VllmStep]) -> Iterator[None]:
+    """Give ``vllm_steps`` the logged vLLM step of each sequence of the enclosed forward, in micro-batch order."""
+    global _steps
+    previous, _steps = _steps, tuple(steps)
     try:
         yield
     finally:
-        _plan = previous
+        _steps = previous
+
+
+def planned_vllm_steps(batch: int) -> tuple[VllmStep, ...]:
+    """The step plan of the current scoring forward, which must hold one step per sequence of its micro-batch."""
+    if _steps is None:
+        raise RuntimeError("vllm_steps numerics need each sequence's logged vLLM step (a re-read replay mode)")
+    if torch.is_grad_enabled():
+        raise NotImplementedError("vllm_steps numerics reproduce a logged scoring step; a training forward has none")
+    if len(_steps) != batch:
+        raise ValueError(f"the vLLM step plan holds {len(_steps)} sequences for a micro-batch of {batch}")
+    return _steps
 
 
 def _fa3_forward(query, key, value, *, rows: int, requests: int, window: int | None, scale: float, splits: int):
@@ -156,28 +175,97 @@ def _fa3_forward(query, key, value, *, rows: int, requests: int, window: int | N
 
 
 def fa3_attention_sbhd(
-    query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, *, window: int | None, scale: float
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    *,
+    window: int | None,
+    scale: float,
+    steps: Sequence[VllmStep] | None = None,
 ) -> torch.Tensor:
     """vLLM's FA3 forward on Megatron's ``[S, B, heads, dim]`` tensors; returns ``[S, B, heads * dim]``.
 
-    Without a plan each sequence is one unsplit varlen request of ``S`` rows: right padding changes no
-    valid row, since a causal row reads no later key and its key blocks start at key 0. With a plan
-    (``fa3_attention_plan``) each sequence runs alone on its valid rows with vLLM's split count.
+    Without ``steps`` each sequence is one unsplit varlen request of ``S`` rows: right padding changes no
+    valid row, since a causal row reads no later key and its key blocks start at key 0. With ``steps`` each
+    sequence runs alone on the prefix its vLLM step scheduled, with the split count FA3 chose for a request
+    alone in a step of that many tokens (``fa3_split_counts``); its later rows stay zero, as no logged
+    position reads them. A sequence without a step (``tokens == 0``) runs unsplit on all ``S`` rows.
     """
     sequence, batch, heads, head_dim = query.shape
     flat = [t.transpose(0, 1).reshape(batch * sequence, *t.shape[2:]).contiguous() for t in (query, key, value)]
-    if _plan is None:
+    if steps is None:
         output = _fa3_forward(*flat, rows=sequence, requests=batch, window=window, scale=scale, splits=1)
         return output.view(batch, sequence, heads * head_dim).transpose(0, 1).contiguous()
-    if torch.is_grad_enabled():
-        raise NotImplementedError("fa3_attention split plans are for scoring forwards; training runs unsplit")
-    if len(_plan.splits) != batch:
-        raise ValueError(f"fa3_attention plan has {len(_plan.splits)} sequences for a micro-batch of {batch}")
+    kv_heads = key.shape[2]
     output = torch.zeros(batch, sequence, heads, head_dim, dtype=query.dtype, device=query.device)
-    for index, (splits, length) in enumerate(zip(_plan.splits, _plan.lengths, strict=True)):
+    for index, step in enumerate(steps):
+        length = step.tokens or sequence
+        splits = 1
+        if step.tokens:
+            (splits,) = fa3_split_counts(
+                [Fa3Request(step.tokens, step.tokens)],
+                kv_heads=kv_heads,
+                query_heads_per_kv_head=heads // kv_heads,
+                window=window,
+                step_tokens=step.tokens,
+            )
         rows = [t[index * sequence : index * sequence + length] for t in flat]
         output[index, :length] = _fa3_forward(*rows, rows=length, requests=1, window=window, scale=scale, splits=splits)
     return output.view(batch, sequence, heads * head_dim).transpose(0, 1).contiguous()
+
+
+def step_rows_linear(x: torch.Tensor, weight: torch.Tensor, steps: Sequence[VllmStep]) -> torch.Tensor:
+    """``F.linear(x, weight)`` of ``[S, B, K]`` rows, each sequence's rows computed as its vLLM step computed them.
+
+    A GEMM library picks its kernel, and with it each output's summation order, from the call's row count. vLLM ran
+    sequence ``b`` alone in a step of ``steps[b].rows`` rows with its tokens first, so its first rows run here as one
+    call of exactly that many rows, zero rows after its own. Rows past ``steps[b].rows``, which no logged token reads,
+    and sequences without a step come from one plain call.
+    """
+    output = torch.nn.functional.linear(x, weight)
+    for index, step in enumerate(steps):
+        if not step.rows:
+            continue
+        used = min(step.rows, x.shape[0])
+        padded = x.new_zeros(step.rows, x.shape[-1])
+        padded[:used] = x[:used, index]
+        output[:used, index] = torch.nn.functional.linear(padded, weight)[:used]
+    return output
+
+
+def step_lm_head_logits(hidden: torch.Tensor, weight: torch.Tensor, steps: Sequence[VllmStep]) -> torch.Tensor:
+    """LM-head logits of ``[S, B, H]`` hidden states with each logged position computed as vLLM's step computed it.
+
+    For a step of ``t`` tokens vLLM's model runner V2 takes prompt log-probabilities from LM-head calls on rows
+    ``0 .. t - 1`` in chunks of ``VLLM_PROMPT_LOGPROB_CHUNK`` rows, and the sampled position's log-probability from a
+    one-row call on row ``t - 1``. Rows ``0 .. t - 2`` hold the chunks' logits and row ``t - 1`` the one-row call's;
+    every other row comes from one plain call.
+    """
+    output = torch.nn.functional.linear(hidden, weight)
+    for index, step in enumerate(steps):
+        tokens = step.tokens
+        if not tokens:
+            continue
+        rows = hidden[:, index]
+        for start in range(0, tokens, VLLM_PROMPT_LOGPROB_CHUNK):
+            end = min(start + VLLM_PROMPT_LOGPROB_CHUNK, tokens)
+            output[start:end, index] = torch.nn.functional.linear(rows[start:end].contiguous(), weight)
+        output[tokens - 1, index] = torch.nn.functional.linear(rows[tokens - 1 : tokens].contiguous(), weight)[0]
+    return output
+
+
+def vllm_token_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Tensor:
+    """Model runner V2's log-probability of ``token_ids[i]`` under row ``i`` of the ``[rows, vocab]`` ``logits``.
+
+    vLLM's model runner V2 computes every prompt and sampled log-probability with ``compute_token_logprobs``: one
+    Triton program per row takes the row's maximum and the sum of ``exp(logit - max)`` over 1,024-wide vocabulary
+    blocks, and returns ``logit - max - log(sum)``. Each row's value depends on that row alone.
+    """
+    from vllm.v1.worker.gpu.sample.logprob import compute_token_logprobs
+
+    if logits.ndim != 2 or logits.stride(-1) != 1:
+        raise ValueError(f"vLLM's log-probability kernel reads rows of unit vocabulary stride, got {logits.stride()}")
+    return compute_token_logprobs(logits, token_ids.reshape(-1, 1))[:, 0]
 
 
 def vllm_ep_combine(

@@ -15,15 +15,18 @@ kernels also store the kernel's per-row sum of squares, and ``_NORM_FROM_SQUARE_
 sum with the kernels' own second loop, so a recomputed checkpoint unit can reproduce the norm from that sum alone.
 
 Several reduction kernels have more than one launch config, which vLLM's autotuner picks by timing at its first
-launch; the configs sum in different orders. ``KernelConfigs`` holds the configs the trainer launches.
+launch; the configs sum in different orders. ``KernelConfigs`` holds the config the trainer launches for each kernel;
+``engine_kernel_choices`` reads the configs a vLLM worker launched, so a probe can score with that engine's choices.
 """
 
 from __future__ import annotations
 
 import functools
-from collections.abc import Iterator
+import hashlib
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 
@@ -1148,16 +1151,143 @@ SHARED_WIDTH = 2560
 
 
 @dataclass(frozen=True)
+class Launch:
+    """One launch config of an Inductor Triton kernel: its block sizes, its warps and, when recorded, its stages."""
+
+    kwargs: tuple[tuple[str, int], ...]
+    num_warps: int
+    num_stages: int | None = None
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, Any]) -> "Launch":
+        stages = record.get("num_stages")
+        return cls(
+            tuple(sorted((str(name), int(value)) for name, value in record["kwargs"].items())),
+            int(record["num_warps"]),
+            None if stages is None else int(stages),
+        )
+
+    def record(self) -> dict[str, Any]:
+        return {"kwargs": dict(self.kwargs), "num_warps": self.num_warps, "num_stages": self.num_stages}
+
+
+_NORM_LAUNCH = Launch((("R0_BLOCK", 4096), ("XBLOCK", 1)), 16)
+_POINTWISE_LAUNCH = Launch((("XBLOCK", 1024),), 4)
+_QK_SUMS_LAUNCH = Launch((("XBLOCK", 8),), 2)
+
+# Each vendored kernel by its role, and the launch config the trainer uses when no engine choice is given: what every
+# rank of the archived Snowball probe engines chose, except the post-attention norm, whose autotuner chose an R0_BLOCK
+# of 4,096 in some jobs and 2,048 in others. The pointwise kernels' per-element arithmetic does not depend on the block.
+VENDORED_KERNELS: dict[str, tuple[str, str]] = {
+    "xsa_gate": _XSA_GATE,
+    "rms_norm": _RMS_NORM,
+    "gated_product": _GATED_PRODUCT,
+    "shared_swiglu": _SHARED_SWIGLU,
+    "residual_norm": _RESIDUAL_NORM,
+    "final_norm": _FINAL_NORM,
+    "qk_square_sums": _QK_SQUARE_SUMS,
+    "qk_rope": _QK_ROPE,
+    "q_scale": _Q_SCALE,
+    "qk_full": _QK_FULL,
+    "embedding_norm": _EMBEDDING_NORM,
+    "embedding_product_norm": _EMBEDDING_PRODUCT_NORM,
+}
+DEFAULT_LAUNCHES: dict[str, Launch] = {
+    "xsa_gate": Launch((("R0_BLOCK", 128), ("XBLOCK", 2)), 2),
+    "rms_norm": _NORM_LAUNCH,
+    "gated_product": _POINTWISE_LAUNCH,
+    "shared_swiglu": _POINTWISE_LAUNCH,
+    "residual_norm": _NORM_LAUNCH,
+    "final_norm": _NORM_LAUNCH,
+    "qk_square_sums": _QK_SUMS_LAUNCH,
+    "qk_rope": _POINTWISE_LAUNCH,
+    "q_scale": _POINTWISE_LAUNCH,
+    "qk_full": _QK_SUMS_LAUNCH,
+    "embedding_norm": _NORM_LAUNCH,
+    "embedding_product_norm": _NORM_LAUNCH,
+}
+# Fields of an Inductor ``.best_config`` file that are not the config's block sizes.
+_BEST_CONFIG_FIELDS = frozenset(
+    {
+        "num_warps",
+        "num_stages",
+        "configs_hash",
+        "found_by_coordesc",
+        "time_taken_ms",
+        "triton_cache_hash",
+        "num_consumer_groups",
+        "num_buffers_warp_spec",
+    }
+)
+
+
+def source_digest(text: str) -> str:
+    """SHA-256 of a kernel source, the key an engine reports each loaded kernel's launch config under."""
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+_ROLE_BY_DIGEST = {source_digest(text): role for role, (_, text) in VENDORED_KERNELS.items()}
+
+
+@dataclass(frozen=True)
 class KernelConfigs:
-    """The launch config of each vLLM reduction kernel whose candidate configs sum in different orders.
+    """The launch config of each vendored kernel, by role; a derived kernel launches with the config of its source."""
 
-    The defaults are what every rank of the archived Snowball probe engines chose (their ``*.best_config`` files),
-    except ``post_attention_norm_block``: vLLM's autotuner chose 4,096 in some jobs and 2,048 in others.
+    launches: tuple[tuple[str, Launch], ...] = tuple(DEFAULT_LAUNCHES.items())
+
+    def launch(self, role: str) -> Launch:
+        return dict(self.launches)[role]
+
+    @classmethod
+    def from_records(cls, records: Mapping[str, Mapping[str, Any]]) -> "KernelConfigs":
+        """The defaults, with the launch configs in ``records`` (role → ``Launch.record()``) in their place."""
+        unknown = set(records) - set(DEFAULT_LAUNCHES)
+        if unknown:
+            raise ValueError(f"launch configs for unknown vLLM kernels: {sorted(unknown)}")
+        launches = dict(DEFAULT_LAUNCHES)
+        launches.update({role: Launch.from_record(record) for role, record in records.items()})
+        return cls(tuple(launches.items()))
+
+
+def engine_kernel_choices(kernels: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    """The launch config each vendored kernel ran with in one vLLM worker, by role.
+
+    ``kernels`` are the worker's loaded Inductor kernels (``WorkerWrap.probe_numerics_provenance``): each source's
+    SHA-256, the launch configs its autotuner holds, and its ``.best_config`` file. A kernel holds one launch config
+    after its first launch (autotuning, or a ``.best_config`` found at load, drops the others); that config wins over
+    the file, which ranks sharing one Inductor cache overwrite. A role the worker did not load is absent.
     """
-
-    norm_block: int = 4096
-    post_attention_norm_block: int = 4096
-    qk_xblock: int = 8
+    choices: dict[str, dict[str, Any]] = {}
+    for kernel in kernels:
+        role = _ROLE_BY_DIGEST.get(kernel["sha256"])
+        if role is None:
+            continue
+        launches = {Launch.from_record(launch) for launch in kernel.get("launches") or ()}
+        best = kernel.get("best_config")
+        best_launch = None
+        if best is not None:
+            best_launch = Launch.from_record(
+                {
+                    "kwargs": {name: value for name, value in best.items() if name not in _BEST_CONFIG_FIELDS},
+                    "num_warps": best["num_warps"],
+                    "num_stages": best.get("num_stages"),
+                }
+            )
+        if len(launches) == 1:
+            (launch,) = launches
+            source = "autotuner"
+        elif best_launch is not None:
+            launch, source = best_launch, "best_config"
+        else:
+            continue
+        if role in choices and choices[role]["launch"] != launch.record():
+            raise ValueError(f"vLLM worker launched the {role} kernel with two configs")
+        choices[role] = {
+            "launch": launch.record(),
+            "source": source,
+            "best_config_agrees": None if best_launch is None else best_launch == launch,
+        }
+    return choices
 
 
 _configs = KernelConfigs()
@@ -1174,21 +1304,8 @@ def kernel_configs(configs: KernelConfigs) -> Iterator[KernelConfigs]:
         _configs = previous
 
 
-@dataclass(frozen=True)
-class _Launch:
-    kwargs: tuple[tuple[str, int], ...]
-    num_warps: int
-
-
-def _norm_launch(block: int) -> _Launch:
-    return _Launch((("XBLOCK", 1), ("R0_BLOCK", block)), 16)
-
-
-_POINTWISE_LAUNCH = _Launch((("XBLOCK", 1024),), 4)
-
-
 @functools.cache
-def _kernel(name: str, text: str, device: int, launch: _Launch):
+def _kernel(name: str, text: str, device: int, launch: Launch):
     """``name`` compiled from ``text`` by Inductor's runtime for ``device``, launching only ``launch``.
 
     The autotune cache stays off so that no ``.best_config`` left by another process narrows the candidates, and
@@ -1212,6 +1329,7 @@ def _kernel(name: str, text: str, device: int, launch: _Launch):
         for launcher in kernel.launchers
         if tuple(sorted(launcher.config.kwargs.items())) == tuple(sorted(launch.kwargs))
         and launcher.config.num_warps == launch.num_warps
+        and (launch.num_stages is None or launcher.config.num_stages == launch.num_stages)
     ]
     if len(wanted) != 1:
         found = [str(launcher.config) for launcher in kernel.launchers]
@@ -1220,9 +1338,14 @@ def _kernel(name: str, text: str, device: int, launch: _Launch):
     return kernel
 
 
-def _run(source: tuple[str, str], launch: _Launch, *arguments) -> None:
+def _run(source: tuple[str, str], launch: Launch, *arguments) -> None:
     device = torch.cuda.current_device()
     _kernel(*source, device, launch).run(*arguments, stream=torch.cuda.current_stream(device).cuda_stream)
+
+
+@functools.cache
+def _unit_weight(device: torch.device) -> torch.Tensor:
+    return torch.ones(HIDDEN, dtype=torch.bfloat16, device=device)
 
 
 def _rows(tensor: torch.Tensor, width: int) -> torch.Tensor:
@@ -1241,7 +1364,7 @@ def xsa_head_gate(attention: torch.Tensor, value: torch.Tensor, gate: torch.Tens
     output = torch.empty_like(attention)
     _run(
         _XSA_GATE,
-        _Launch((("XBLOCK", 2), ("R0_BLOCK", 128)), 2),
+        _configs.launch("xsa_gate"),
         attention,
         value,
         padded_gate,
@@ -1275,13 +1398,21 @@ def query_key_rope(
     device = query.device.index
     query_sums = torch.empty(rows * HEADS, dtype=torch.float32, device=query.device)
     key_sums = torch.empty(rows * KV_HEADS, dtype=torch.float32, device=query.device)
-    qk_launch = _Launch((("XBLOCK", _configs.qk_xblock),), 2)
-    _run(_QK_SQUARE_SUMS, qk_launch, query, key, query_sums, key_sums, HEADS * rows, KV_HEADS * rows)
+    _run(
+        _QK_SQUARE_SUMS,
+        _configs.launch("qk_square_sums"),
+        query,
+        key,
+        query_sums,
+        key_sums,
+        HEADS * rows,
+        KV_HEADS * rows,
+    )
     key_out = torch.empty(rows, KV_HEADS, HEAD_DIM, dtype=torch.bfloat16, device=query.device)
     query_rotary = torch.empty(rows, HEADS, ROTARY_DIM, dtype=torch.bfloat16, device=query.device)
     _run(
         _QK_ROPE,
-        _POINTWISE_LAUNCH,
+        _configs.launch("qk_rope"),
         key,
         key_sums,
         positions.to(torch.int64).contiguous(),
@@ -1295,7 +1426,7 @@ def query_key_rope(
         HEADS * ROTARY_DIM * rows,
     )
     query_out = torch.empty_like(query)
-    _run(_Q_SCALE, _POINTWISE_LAUNCH, query_rotary, query, query_sums, query_out, HIDDEN * rows)
+    _run(_Q_SCALE, _configs.launch("q_scale"), query_rotary, query, query_sums, query_out, HIDDEN * rows)
     return query_out, key_out.view(rows, KV_HEADS * HEAD_DIM)
 
 
@@ -1307,7 +1438,7 @@ def query_key_full(query: torch.Tensor, key: torch.Tensor) -> tuple[torch.Tensor
     query_out = torch.empty_like(query)
     _run(
         _QK_FULL,
-        _Launch((("XBLOCK", _configs.qk_xblock),), 2),
+        _configs.launch("qk_full"),
         key_out,
         query,
         query_out,
@@ -1322,7 +1453,7 @@ def rms_norm(hidden: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     """Compiled vLLM's post-attention RMSNorm of the stored bf16 residual ``[rows, 2560]``."""
     hidden = _rows(hidden, HIDDEN)
     output = torch.empty_like(hidden)
-    _run(_RMS_NORM, _norm_launch(_configs.post_attention_norm_block), hidden, weight, output, hidden.shape[0], HIDDEN)
+    _run(_RMS_NORM, _configs.launch("rms_norm"), hidden, weight, output, hidden.shape[0], HIDDEN)
     return output
 
 
@@ -1330,7 +1461,7 @@ def gated_product(normalized: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
     """Compiled vLLM's gated-norm output ``normalized * sigmoid(gate)``, one rounding."""
     output = _rows(normalized, HIDDEN).clone()
     gate = _rows(gate, HIDDEN)
-    _run(_GATED_PRODUCT, _POINTWISE_LAUNCH, output, gate, output.numel())
+    _run(_GATED_PRODUCT, _configs.launch("gated_product"), output, gate, output.numel())
     return output
 
 
@@ -1339,17 +1470,18 @@ def shared_activation(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     if gate.shape[-1] != SHARED_WIDTH or up.shape != gate.shape:
         raise ValueError(f"gate and up of width {SHARED_WIDTH} expected, got {tuple(gate.shape)} and {tuple(up.shape)}")
     output = _rows(gate, SHARED_WIDTH).clone()
-    _run(_SHARED_SWIGLU, _POINTWISE_LAUNCH, output, _rows(up, SHARED_WIDTH), output.numel())
+    _run(_SHARED_SWIGLU, _configs.launch("shared_swiglu"), output, _rows(up, SHARED_WIDTH), output.numel())
     return output
 
 
 def residual_square_sum(
-    residual: torch.Tensor, routed: torch.Tensor, shared: torch.Tensor, weight: torch.Tensor
+    residual: torch.Tensor, routed: torch.Tensor, shared: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """The bf16 layer output ``residual + (routed + shared)`` and the fp32 per-row sum of squares of the unrounded sum.
 
-    Both come from compiled vLLM's fused residual-add and input-norm kernel (``weight`` is the next input norm's; the
-    kernel's normalized output is not returned: ``rms_norm_from_square_sum`` computes it from the sum).
+    Both come from compiled vLLM's fused residual-add and input-norm kernel. The kernel's normalized output is not
+    returned (``rms_norm_from_square_sum`` computes it from the sum), and the norm weight enters only that output, so
+    the kernel normalizes with a unit weight.
     """
     output = _rows(residual, HIDDEN).clone()
     rows = output.shape[0]
@@ -1357,11 +1489,11 @@ def residual_square_sum(
     scratch = torch.empty_like(output)
     _run(
         _RESIDUAL_NORM_SQUARE_SUM,
-        _norm_launch(_configs.norm_block),
+        _configs.launch("residual_norm"),
         output,
         _rows(routed, HIDDEN),
         _rows(shared, HIDDEN),
-        weight,
+        _unit_weight(output.device),
         scratch,
         rows,
         HIDDEN,
@@ -1370,12 +1502,11 @@ def residual_square_sum(
     return output, square_sum
 
 
-def gated_product_square_sum(
-    normalized: torch.Tensor, gate: torch.Tensor, weight: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
+def gated_product_square_sum(normalized: torch.Tensor, gate: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """The embedding gated norm's bf16 product and the fp32 per-row sum of squares of the unrounded product.
 
-    Both come from compiled vLLM's fused product and layer-0 input-norm kernel (``weight`` is layer 0's input norm's).
+    Both come from compiled vLLM's fused product and layer-0 input-norm kernel, normalizing with a unit weight as
+    ``residual_square_sum`` does.
     """
     output = _rows(normalized, HIDDEN).clone()
     rows = output.shape[0]
@@ -1383,10 +1514,10 @@ def gated_product_square_sum(
     scratch = torch.empty_like(output)
     _run(
         _EMBEDDING_PRODUCT_NORM_SQUARE_SUM,
-        _norm_launch(_configs.norm_block),
+        _configs.launch("embedding_product_norm"),
         output,
         _rows(gate, HIDDEN),
-        weight,
+        _unit_weight(output.device),
         scratch,
         rows,
         HIDDEN,
@@ -1403,7 +1534,7 @@ def rms_norm_from_square_sum(hidden: torch.Tensor, square_sum: torch.Tensor, wei
     output = torch.empty_like(hidden)
     _run(
         _NORM_FROM_SQUARE_SUM,
-        _norm_launch(_configs.norm_block),
+        _configs.launch("residual_norm"),
         hidden,
         square_sum,
         weight,
@@ -1421,7 +1552,7 @@ def final_norm(
     output = _rows(residual, HIDDEN).clone()
     _run(
         _FINAL_NORM,
-        _norm_launch(_configs.norm_block),
+        _configs.launch("final_norm"),
         output,
         _rows(routed, HIDDEN),
         _rows(shared, HIDDEN),
@@ -1442,5 +1573,5 @@ def embedding_norm(embeddings: torch.Tensor, weight: torch.Tensor) -> torch.Tens
     rows = table.shape[0]
     output = torch.empty_like(table)
     identity = torch.arange(rows, dtype=torch.int32, device=table.device)
-    _run(_EMBEDDING_NORM, _norm_launch(_configs.norm_block), identity, table, weight, output, rows, HIDDEN)
+    _run(_EMBEDDING_NORM, _configs.launch("embedding_norm"), identity, table, weight, output, rows, HIDDEN)
     return output

@@ -257,24 +257,23 @@ def test_base_config_defaults_chunk_size_for_policy_and_ref():
     assert ref == 1024, f"ref logprob_chunk_size default = {ref!r}, expected 1024"
 
 
-@pytest.mark.parametrize("chunk_size", [None, 1, 4, 100])
-def test_vllm_prompt_logprobs_are_each_rows_bf16_log_softmax_at_the_next_token(single_rank_group, chunk_size):
+def test_vllm_prompt_logprobs_score_each_row_at_the_next_token(single_rank_group, monkeypatch):
     torch.manual_seed(0)
     batch, seq, vocab = 2, 9, 32
     logits = (torch.randn(batch, seq, vocab) * 4).to(torch.bfloat16)
     targets = torch.randint(0, vocab, (batch, seq))
-    # vLLM's prompt log-probabilities: log_softmax(dim=-1, dtype=float32) of one row of bf16 logits at the next token.
+
+    # vLLM's log-probability kernel runs on the GPU only; a stand-in returning each row's logit at its token shows
+    # which row and token every position reads.
+    def logit_at(rows, token_ids):
+        return rows.float().gather(-1, token_ids.view(-1, 1))[:, 0]
+
+    monkeypatch.setattr(model_utils, "vllm_token_logprobs", logit_at)
+    values = vllm_prompt_logprobs(logits, targets)
+
     expected = torch.stack(
-        [
-            torch.stack(
-                [logits[b, p].log_softmax(dim=-1, dtype=torch.float32)[targets[b, p + 1]] for p in range(seq - 1)]
-            )
-            for b in range(batch)
-        ]
+        [torch.stack([logits[b, p, targets[b, p + 1]].float() for p in range(seq - 1)]) for b in range(batch)]
     )
-    values = vllm_prompt_logprobs(logits, targets, chunk_size)
     assert torch.equal(values, expected)
     # The positions line up with the trainer's own log-probabilities.
-    trainer = _logprobs(logits, targets, single_rank_group, chunk_size, inference_only=True)
-    assert values.shape == trainer.shape
-    assert torch.allclose(values, trainer, atol=1e-5, rtol=0)
+    assert values.shape == _logprobs(logits, targets, single_rank_group, None, inference_only=True).shape

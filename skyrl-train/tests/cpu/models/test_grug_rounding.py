@@ -6,10 +6,13 @@ import torch.nn.functional as F
 
 from skyrl_train.models.grug_moe import GRUG_XSA_EPS
 from skyrl_train.models.grug_rounding import (
+    STAGE_STATISTIC_COLUMNS,
+    append_stage_statistic,
     gated_norm_product_fp32,
     rms_norm_hybrid,
     rms_norm_single_rounding,
     rotate_neox_fp32,
+    split_stage_statistic,
     swiglu_single_rounding,
     vllm_value,
     weighted_down_projection_single_rounding,
@@ -123,3 +126,29 @@ def test_vllm_value_keeps_the_kernels_bytes_and_takes_the_trainers_gradient():
     assert torch.equal(source.grad, torch.full_like(source, 3))
     with torch.no_grad():
         assert vllm_value(kernel, lambda: reference) is kernel
+
+
+def test_stage_statistic_crosses_a_pipeline_boundary_bit_for_bit_and_only_the_hidden_states_take_gradient():
+    sequence, batch, hidden_size = 5, 2, 8
+    hidden = _bf16(sequence, batch, hidden_size, seed=0).requires_grad_()
+    # Statistics whose bf16 halves are NaN, infinity and subnormal patterns, and signed zeros: any arithmetic or bf16
+    # conversion on the way changes their bits.
+    statistic = torch.tensor([float("nan"), -0.0, 0.0, 3.0e-39, -1.0e38, 1.0 + 2.0**-23, float("inf"), 1.0e-45])
+    statistic = statistic.repeat(2)[: sequence * batch].view(sequence, batch, 1)
+    statistic.view(torch.int32)[0, 0, 0] = 0x7F80FFFF  # a NaN whose low bf16 word is a NaN pattern as well
+
+    packed = append_stage_statistic(hidden, statistic)
+    assert packed.dtype == torch.bfloat16 and packed.shape == (sequence, batch, hidden_size + STAGE_STATISTIC_COLUMNS)
+    # The next stage receives the packed tensor as a leaf requiring gradient, as Megatron's pipeline delivers it.
+    received = packed.detach().clone().requires_grad_()
+    received_hidden, received_statistic = split_stage_statistic(received, hidden_size)
+    assert torch.equal(received_hidden.view(torch.int16), hidden.detach().view(torch.int16))
+    assert torch.equal(received_statistic.view(torch.int32), statistic.view(torch.int32))
+
+    weight = _bf16(sequence, batch, hidden_size, seed=1)
+    (received_hidden.float() * weight.float()).sum().backward()
+    assert torch.equal(received.grad[..., :hidden_size], weight)
+    assert not received.grad[..., hidden_size:].any()
+    # The previous stage backpropagates the received gradient into its hidden states alone.
+    packed.backward(received.grad)
+    assert torch.equal(hidden.grad, weight)

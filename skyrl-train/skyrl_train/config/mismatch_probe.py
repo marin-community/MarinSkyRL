@@ -129,6 +129,10 @@ def validate_mismatch_probe_config(
     timing_modes = list(probe.get("timing_modes") or [])
     if any(mode not in TRAINER_MODES or mode not in {NATIVE_MODE, REPEAT_MODE, *modes} for mode in timing_modes):
         raise ValueError("trainer.mismatch_probe.timing_modes must name scored trainer modes")
+    if any(TRAINER_MODES[mode].needs_step_plan for mode in timing_modes):
+        raise ValueError(
+            "trainer.mismatch_probe.timing_modes cannot time vllm_steps modes: a training pass has no vLLM step"
+        )
     capture_layers = list(probe.get("capture_layers") or [])
     if any(TRAINER_MODES[mode].captures_layers for mode in modes) and not capture_layers:
         raise ValueError("trainer.mismatch_probe native_capture requires capture_layers")

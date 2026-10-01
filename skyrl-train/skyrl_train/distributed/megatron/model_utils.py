@@ -22,6 +22,8 @@ import torch
 import torch.distributed as dist
 import megatron.core.parallel_state as mpu
 
+from skyrl_train.models.grug_vllm_kernels import vllm_token_logprobs
+
 
 @torch.no_grad()
 def _compute_distributed_log_softmax(
@@ -331,23 +333,20 @@ def from_parallel_logits_to_logprobs(
     return logprobs[:, :-1]
 
 
-def vllm_prompt_logprobs(logits: torch.Tensor, target: torch.Tensor, chunk_size: Optional[int]) -> torch.Tensor:
-    """Each next token's log-probability as vLLM computes prompt log-probabilities, without gradients.
+def vllm_prompt_logprobs(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Each next token's log-probability as vLLM's model runner V2 computes it, without gradients.
 
-    vLLM's prompt log-probabilities are ``logits.log_softmax(dim=-1, dtype=torch.float32)`` of the unsharded bf16
-    logits (``Sampler.compute_logprobs``), whose reduction over the vocabulary sums in another order than the
-    trainer's ``_compute_distributed_log_softmax``. Each row is computed alone, so chunking along the sequence
-    leaves the bytes unchanged. ``logits`` is ``[batch, seq_len, vocab]`` and ``target`` the unshifted
-    ``[batch, seq_len]`` tokens; returns ``[batch, seq_len - 1]`` as ``from_parallel_logits_to_logprobs`` does.
+    vLLM's model runner V2 computes every prompt and sampled log-probability with its own kernel on the unsharded
+    bf16 logits (``vllm_token_logprobs``), whose reduction over the vocabulary sums in another order than the
+    trainer's ``_compute_distributed_log_softmax``. ``logits`` is ``[batch, seq_len, vocab]`` and ``target`` the
+    unshifted ``[batch, seq_len]`` tokens; returns ``[batch, seq_len - 1]`` as ``from_parallel_logits_to_logprobs``
+    does.
     """
+    batch, seq_len, vocab = logits.shape
     target = target.roll(shifts=-1, dims=-1)
-    step = chunk_size or logits.shape[1]
-    pieces = []
     with torch.no_grad():
-        for start in range(0, logits.shape[1], step):
-            rows = logits[:, start : start + step].log_softmax(dim=-1, dtype=torch.float32)
-            pieces.append(rows.gather(-1, target[:, start : start + step].unsqueeze(-1)).squeeze(-1))
-    return torch.cat(pieces, dim=1)[:, :-1]
+        values = vllm_token_logprobs(logits.reshape(batch * seq_len, vocab), target.reshape(-1))
+    return values.view(batch, seq_len)[:, :-1]
 
 
 def from_parallel_logits_to_logprobs_packed_sequences(

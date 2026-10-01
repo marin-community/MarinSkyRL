@@ -3,12 +3,17 @@
 import pytest
 import torch
 
+from skyrl_train.models import grug_vllm_kernels
 from skyrl_train.models.grug_vllm_kernels import (
     EXPERT_OFFSET_ELEMENTS,
+    VLLM_PROMPT_LOGPROB_CHUNK,
     Fa3Request,
+    VllmStep,
     expert_weight_offsets,
     fa3_split_counts,
     fixed_rows_linear,
+    step_lm_head_logits,
+    step_rows_linear,
     vllm_ep_combine,
     vllm_qkv_projection,
 )
@@ -125,3 +130,30 @@ def test_fixed_rows_linear_computes_every_row_in_calls_of_the_given_size(rows):
     weight = torch.randint(-3, 4, (6, 8), generator=generator).float()
 
     assert torch.equal(fixed_rows_linear(x, weight, rows), torch.nn.functional.linear(x, weight))
+
+
+def test_step_linears_compute_each_sequence_in_the_calls_its_vllm_step_made(monkeypatch):
+    sequence, hidden, outputs = VLLM_PROMPT_LOGPROB_CHUNK + 40, 4, 3
+    generator = torch.Generator().manual_seed(0)
+    # Small integers keep every product and sum exact, so only a lost, misplaced or mis-sized row can differ.
+    x = torch.randint(-3, 4, (sequence, 3, hidden), generator=generator).float()
+    weight = torch.randint(-3, 4, (outputs, hidden), generator=generator).float()
+    # A step that padded the prefix's rows, a step past the first prompt-log-probability chunk, and no step.
+    steps = [VllmStep(tokens=300, rows=304), VllmStep(tokens=sequence - 1, rows=sequence - 1), VllmStep(0, 0)]
+    calls = []
+    plain_linear = torch.nn.functional.linear
+
+    def linear(rows, matrix):
+        # A GEMM picks its summation order from its row count, the contract here; on the CPU only the calls show it.
+        calls.append(rows.numel() // rows.shape[-1])
+        return plain_linear(rows, matrix)
+
+    monkeypatch.setattr(grug_vllm_kernels.torch.nn.functional, "linear", linear)
+    assert torch.equal(step_rows_linear(x, weight, steps), x @ weight.t())
+    # One call for every row, then each logged sequence's first rows in one call of its step's row count.
+    assert calls == [sequence * 3, 304, sequence - 1]
+
+    calls.clear()
+    assert torch.equal(step_lm_head_logits(x, weight, steps), x @ weight.t())
+    # Prompt log-probabilities in 1,024-row chunks of the step's tokens, then the sampled position's one row.
+    assert calls == [sequence * 3, 300, 1, VLLM_PROMPT_LOGPROB_CHUNK, sequence - 1 - VLLM_PROMPT_LOGPROB_CHUNK, 1]

@@ -40,8 +40,13 @@ expert-parallel addition order:
   from the unrounded last-layer sum (as ``final_norm_fp32``); the gradients are those flags' and ``gated_norm``'s;
 - ``vllm_swiglu``: the shared expert's activation ``silu(gate) * up`` takes its value from compiled vLLM's Inductor
   kernel (its exponential and division); the gradient is ``shared_swiglu``'s. It replaces ``shared_swiglu``;
-- ``vllm_log_softmax``: the log-probabilities come from ``log_softmax(dtype=float32)`` of the bf16 logits, as
-  vLLM computes prompt log-probabilities; the gradient is the trainer's own log-softmax's.
+- ``vllm_log_softmax``: the log-probabilities come from vLLM's model runner V2 log-probability kernel on the bf16
+  logits (``compute_token_logprobs``), which computes every prompt and sampled log-probability the probe's engines
+  return; the gradient is the trainer's own log-softmax's;
+- ``vllm_steps``: in a scoring forward of a logged re-read (re-read replay), each sequence is computed as the vLLM
+  engine step that ran its prefill alone: FA3 with that step's split counts, the fp32 router GEMM at the step's row
+  count, and the LM head at the row counts of model runner V2's prompt and sampled log-probabilities. It replaces
+  ``router_rows`` and has no training forward: the step log exists only for the re-read.
 
 Probe modes set flags for one scoring forward. The process default is the current trainer numerics, or
 the set named by ``trainer.mismatch_probe.train_numerics``, which then applies to training too.
@@ -75,6 +80,7 @@ class GrugNumerics:
     vllm_norms: bool = False
     vllm_swiglu: bool = False
     vllm_log_softmax: bool = False
+    vllm_steps: bool = False
 
 
 NUMERICS_FLAGS = tuple(field.name for field in fields(GrugNumerics))

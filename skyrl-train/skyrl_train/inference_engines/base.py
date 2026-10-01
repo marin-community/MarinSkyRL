@@ -197,6 +197,14 @@ class InferenceEngineInterface(ABC):
         """Per-worker parameter digest, versions and compiled output code, when supported."""
         raise NotImplementedError()
 
+    async def begin_probe_step_log(self) -> None:
+        """Start recording each worker's engine steps for a mismatch probe, when supported."""
+        raise NotImplementedError()
+
+    async def end_probe_step_log(self) -> List[Dict[str, Any]]:
+        """Stop recording and return each worker's placement and engine steps, when supported."""
+        raise NotImplementedError()
+
     async def seal_online_eagle_capture(self, destination: str) -> OnlineEagleResult:
         """Publish the active capture to cloud storage."""
         raise NotImplementedError()

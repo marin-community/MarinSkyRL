@@ -1,3 +1,4 @@
+import contextlib
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Callable, List, Optional
@@ -18,6 +19,7 @@ from skyrl_train.distributed.megatron.model_utils import (
 )
 from skyrl_train.mismatch_probe.numerics import active_numerics
 from skyrl_train.models.grug_rounding import vllm_value
+from skyrl_train.models.grug_vllm_kernels import VllmStep, vllm_step_plan
 from skyrl_train.distributed.megatron.megatron_utils import get_model_config
 from skyrl_train.distillation import DistillationInput, student_topk_logprobs
 from skyrl_train.models.megatron_router_replay import MegatronRouterReplay, VllmExpertParallel
@@ -61,6 +63,9 @@ class MegatronForwardMicroBatch:
     rollout_prompt_routed_experts: Optional[torch.Tensor] = None
     # The vLLM data-parallel rank that served each sequence, for the ``ep_sum`` numerics.
     vllm_dp_ranks: Optional[torch.Tensor] = None
+    # Each sequence's logged vLLM re-read step (its scheduled tokens and rows; 0 without one), for ``vllm_steps``.
+    vllm_step_tokens: Optional[torch.Tensor] = None
+    vllm_step_rows: Optional[torch.Tensor] = None
 
 
 @dataclass(frozen=True)
@@ -188,7 +193,7 @@ class MegatronModelWrapper:
         if active_numerics().vllm_log_softmax:
             if mpu.get_tensor_model_parallel_world_size() != 1:
                 raise NotImplementedError("vllm_log_softmax numerics need the unsharded vocabulary (TP 1)")
-            value = vllm_prompt_logprobs(logits, compact_sequences, self._logprob_chunk_size)
+            value = vllm_prompt_logprobs(logits, compact_sequences)
             compact_logprobs = vllm_value(value, trainer_logprobs)
         else:
             compact_logprobs = trainer_logprobs()
@@ -332,13 +337,16 @@ class MegatronModelWrapper:
         record_recompute: bool = False,
         rollout_prompt_routed_experts: Optional[torch.Tensor] = None,
         vllm_dp_ranks: Optional[torch.Tensor] = None,
+        vllm_step_tokens: Optional[torch.Tensor] = None,
+        vllm_step_rows: Optional[torch.Tensor] = None,
     ):
         """Run the shared packed or left-unpadded Megatron model boundary.
 
         When router replay is installed and routes are present, brackets the
         model call with ``begin_forward`` / ``end_forward`` (never falling back
         to native routing); with replay installed but no routes, fails fast
-        before the model runs.
+        before the model runs. Logged vLLM steps, when given, are the step plan
+        of the model call (``vllm_steps``).
         """
         attention_mask = attention_mask.to(bool)
         armed = False
@@ -392,13 +400,21 @@ class MegatronModelWrapper:
                 )
                 packed_seq_params = None
 
-            outputs = model(
-                model_sequences,
-                model_position_ids,
-                model_attention_mask,
-                packed_seq_params=packed_seq_params,
-                fp32_output=False,
-            )
+            plan = contextlib.nullcontext()
+            if vllm_step_tokens is not None:
+                steps = [
+                    VllmStep(int(tokens), int(rows))
+                    for tokens, rows in zip(vllm_step_tokens.tolist(), vllm_step_rows.tolist(), strict=True)
+                ]
+                plan = vllm_step_plan(steps)
+            with plan:
+                outputs = model(
+                    model_sequences,
+                    model_position_ids,
+                    model_attention_mask,
+                    packed_seq_params=packed_seq_params,
+                    fp32_output=False,
+                )
             if armed:
                 self.router_replay.end_forward()
         except BaseException:
@@ -454,6 +470,8 @@ class MegatronModelWrapper:
                 num_actions=batch.num_actions,
                 rollout_prompt_routed_experts=batch.rollout_prompt_routed_experts,
                 vllm_dp_ranks=batch.vllm_dp_ranks,
+                vllm_step_tokens=batch.vllm_step_tokens,
+                vllm_step_rows=batch.vllm_step_rows,
             )
 
             return outputs, partial(collection_func, data=batch, packed_seq_params=packed_seq_params)

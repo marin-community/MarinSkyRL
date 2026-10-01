@@ -1,3 +1,6 @@
+import gc
+import hashlib
+import inspect
 import json
 import os
 from pathlib import Path
@@ -179,6 +182,100 @@ def _build_error_response(message: str, type_phrase: str, code: int) -> Dict[str
 # launch config the autotuner chose for each kernel.
 OUTPUT_CODE_PATTERNS = ("*.py", "*.best_config")
 
+
+def _launch_record(config) -> dict[str, Any]:
+    """A Triton launch config as plain data: its block sizes, warps and stages."""
+    return {
+        "kwargs": {name: int(value) for name, value in config.kwargs.items()},
+        "num_warps": int(config.num_warps),
+        "num_stages": int(config.num_stages),
+    }
+
+
+def _is_kernel_source(path: Path) -> bool:
+    """True for one Triton kernel's source file, False for a compiled graph module that embeds kernel sources."""
+    text = path.read_text(errors="replace")
+    return text.count("@triton.jit") == 1 and "async_compile" not in text
+
+
+def _best_config(kernel_file: Path) -> dict[str, Any] | None:
+    """The ``.best_config`` file Inductor's autotune cache writes beside ``kernel_file``.
+
+    Inductor names the file by a hash of the kernel file's name and the torch build, in the kernel's directory, so it is
+    read only when that directory holds this kernel's source alone and one ``.best_config``.
+    """
+    configs = sorted(kernel_file.parent.glob("*.best_config"))
+    kernels = [path for path in kernel_file.parent.glob("*.py") if _is_kernel_source(path)]
+    if len(configs) != 1 or kernels != [kernel_file]:
+        return None
+    return json.loads(configs[0].read_text())
+
+
+def loaded_inductor_kernels(objects) -> list[dict[str, Any]]:
+    """Every Inductor Triton kernel loaded in this process, with the launch configs it holds and its ``.best_config``.
+
+    A kernel holds every candidate config until its first launch; autotuning, or a ``.best_config`` file found at
+    load, leaves the one it launches. Kernels are keyed by the SHA-256 of their source file.
+    """
+    from torch._inductor.runtime.triton_heuristics import CachingAutotuner
+
+    kernels: dict[str, dict[str, Any]] = {}
+    for obj in objects:
+        if not isinstance(obj, CachingAutotuner) or not obj.filename:
+            continue
+        path = Path(obj.filename)
+        entry = kernels.setdefault(
+            str(path),
+            {
+                "file": path.name,
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "kernel_name": obj.inductor_meta.get("kernel_name"),
+                "launches": [],
+                "best_config": _best_config(path),
+            },
+        )
+        for launcher in obj.launchers:
+            record = _launch_record(launcher.config)
+            if record not in entry["launches"]:
+                entry["launches"].append(record)
+    return list(kernels.values())
+
+
+@dataclass
+class _StepLog:
+    """The engine steps one worker ran while a probe step log recorded (``WorkerWrap.begin_probe_step_log``)."""
+
+    steps: list[dict[str, Any]]
+    current: dict[str, Any] | None = None
+
+
+def _scheduled_step(scheduler_output) -> dict[str, Any]:
+    """The requests one engine step scheduled: each one's scheduled and already computed tokens, and for a request
+    new to the engine its prompt's length and the SHA-256 of its token IDs (int64)."""
+    requests = []
+    for new in scheduler_output.scheduled_new_reqs:
+        tokens = new.prompt_token_ids or []
+        requests.append(
+            {
+                "id": new.req_id,
+                "scheduled": int(scheduler_output.num_scheduled_tokens[new.req_id]),
+                "computed": int(new.num_computed_tokens),
+                "prompt_tokens": len(tokens),
+                "prompt_sha256": hashlib.sha256(np.asarray(tokens, dtype=np.int64).tobytes()).hexdigest(),
+            }
+        )
+    cached = scheduler_output.scheduled_cached_reqs
+    for req_id, computed in zip(cached.req_ids, cached.num_computed_tokens, strict=True):
+        requests.append(
+            {
+                "id": req_id,
+                "scheduled": int(scheduler_output.num_scheduled_tokens[req_id]),
+                "computed": int(computed),
+            }
+        )
+    return {"requests": requests, "scheduled_tokens": int(scheduler_output.total_num_scheduled_tokens)}
+
+
 # Guard so the fake/meta registration runs at most once per worker process.
 _NORM_META_FAKES_REGISTERED = False
 
@@ -329,6 +426,9 @@ def setup_envvars_for_vllm(kwargs, bundle_indices):
 
 
 class WorkerWrap:
+    # The engine steps a mismatch probe is recording on this worker (``begin_probe_step_log``).
+    _probe_step_log: _StepLog | None = None
+
     def set_numa_affinity(self):
         """Set CPU affinity to match this worker's GPU NUMA node.
 
@@ -1054,12 +1154,11 @@ class WorkerWrap:
         """Read-only numerics provenance for mismatch probes.
 
         Returns this worker's placement, a SHA-256 over its live parameters in name
-        order, library and GPU versions, and the Inductor output-code modules that
-        compiled vLLM runs with the kernel configs its autotuner chose
-        (``torch._inductor`` cache directory, ``*.py`` and ``*.best_config``).
+        order, library and GPU versions and the matmul precision settings, the Inductor
+        output-code modules that compiled vLLM runs with the kernel configs its autotuner
+        chose (``torch._inductor`` cache directory, ``*.py`` and ``*.best_config``), and
+        every loaded Inductor kernel's launch configs (``loaded_inductor_kernels``).
         """
-        import hashlib
-
         import triton
         from torch._inductor.runtime.cache_dir_utils import cache_dir
 
@@ -1084,9 +1183,63 @@ class WorkerWrap:
                 "triton": triton.__version__,
                 "vllm": vllm.__version__,
                 "gpu": torch.cuda.get_device_name(),
+                "model_runner": "v2" if self.use_v2_model_runner else "v1",
+                "float32_matmul_precision": torch.get_float32_matmul_precision(),
+                "allow_bf16_reduced_precision_reduction": torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction,
             },
             "inductor_output_code": output_code,
+            "inductor_kernels": loaded_inductor_kernels(gc.get_objects()),
         }
+
+    def begin_probe_step_log(self) -> None:
+        """Record each engine step this worker runs until ``end_probe_step_log``: its scheduled requests and rows.
+
+        Wraps two methods of the model runner V2 instance (``execute_model`` and ``prepare_inputs``) with recorders
+        that read the scheduler output and the step's execution descriptor and call the original methods unchanged.
+        """
+        runner = self.model_runner
+        if not self.use_v2_model_runner:
+            raise NotImplementedError("the probe step log reads vLLM's model runner V2")
+        if self._probe_step_log is not None:
+            raise RuntimeError("a probe step log is already recording on this worker")
+        log = self._probe_step_log = _StepLog(steps=[])
+        execute_model, prepare_inputs = runner.execute_model, runner.prepare_inputs
+        signature = inspect.signature(execute_model)
+
+        def logged_execute_model(*args, **kwargs):
+            arguments = signature.bind(*args, **kwargs).arguments
+            if arguments.get("dummy_run", False):
+                step = {"requests": [], "scheduled_tokens": 0, "dummy": True}
+            else:
+                step = {**_scheduled_step(arguments["scheduler_output"]), "dummy": False}
+            log.steps.append(step)
+            log.current = step
+            try:
+                output = execute_model(*args, **kwargs)
+            finally:
+                log.current = None
+            state = runner.execute_model_state
+            if state is not None and state.dp_sync is not None:
+                # Each data-parallel rank's rows this step, as the ranks agreed them.
+                step["tokens_across_dp"] = [int(value) for value in state.dp_sync.num_tokens_across_dp.tolist()]
+            return output
+
+        def logged_prepare_inputs(scheduler_output, batch_req_state, batch_desc):
+            if log.current is not None:
+                log.current.update(rows=int(batch_desc.num_tokens), cudagraph_mode=str(batch_desc.cg_mode))
+            return prepare_inputs(scheduler_output, batch_req_state, batch_desc)
+
+        runner.execute_model = logged_execute_model
+        runner.prepare_inputs = logged_prepare_inputs
+
+    def end_probe_step_log(self) -> dict[str, Any]:
+        """Stop the probe step log, restore the model runner's methods and return this worker's placement and steps."""
+        log = self._probe_step_log
+        if log is None:
+            raise RuntimeError("no probe step log is recording on this worker")
+        del self.model_runner.execute_model, self.model_runner.prepare_inputs
+        self._probe_step_log = None
+        return {"placement": asdict(self._device_placement()), "steps": log.steps}
 
     def _device_placement(self) -> InferenceWorkerPlacement:
         dp, pp = get_dp_group(), get_pp_group()
@@ -1920,6 +2073,14 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
     async def probe_numerics_provenance(self) -> list[dict[str, Any]]:
         """Numerics provenance from every worker of this engine; see ``WorkerWrap``."""
         return await self.llm.collective_rpc("probe_numerics_provenance")
+
+    async def begin_probe_step_log(self) -> None:
+        """Start recording every engine step on each worker (``WorkerWrap.begin_probe_step_log``)."""
+        await self.llm.collective_rpc("begin_probe_step_log")
+
+    async def end_probe_step_log(self) -> list[dict[str, Any]]:
+        """Stop recording and return each worker's placement and engine steps."""
+        return await self.llm.collective_rpc("end_probe_step_log")
 
     async def expert_block_rpc(self, method: str, *args) -> list:
         """Call one expert-block sync method on every worker of this engine.

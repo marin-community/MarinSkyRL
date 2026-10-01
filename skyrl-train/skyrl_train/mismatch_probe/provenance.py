@@ -78,7 +78,12 @@ def manifest(probe, trainer, *, status: mismatch.ArchiveStatus):
         config_json=json.dumps(OmegaConf.to_container(probe.cfg, resolve=True), sort_keys=True, default=str),
         software_json=json.dumps(software, sort_keys=True),
         hardware_json=json.dumps(
-            {"placement": OmegaConf.to_container(trainer.cfg.trainer.placement), "vllm": probe.vllm_provenance},
+            {
+                "placement": OmegaConf.to_container(trainer.cfg.trainer.placement),
+                "vllm": probe.vllm_provenance,
+                "vllm_reread": probe.reread_record(),
+                "prefill_reference": probe.prefill_reference(),
+            },
             sort_keys=True,
         ),
         batch_layout_json=json.dumps(asdict(probe.batch_layout), sort_keys=True),

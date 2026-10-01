@@ -17,23 +17,87 @@ from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.group_admission import GroupAdvantageInvariant
 from skyrl_train.inference_engines.vllm_teacher_oracle import tokenizer_vocabulary_fingerprint
 from skyrl_train.mismatch_probe.archive import MismatchArchive, read_frozen_probe
-from skyrl_train.mismatch_probe.collect import TIMING_REPETITIONS, ProbeCollector
+from skyrl_train.mismatch_probe.collect import TIMING_REPETITIONS, ProbeCollector, token_digest
 from skyrl_train.mismatch_probe.callback import MismatchProbeCallback
+from skyrl_train.mismatch_probe.modes import KEPT_STACK_3
+from skyrl_train.models.grug_inductor_kernels import VENDORED_KERNELS, source_digest
 from skyrl_train.models.megatron_router_replay import MegatronRouterReplay
 from skyrl_train.training_batch import TrainingOutputBatch
 from skyrl_train.trainer import RayPPOTrainer
+
+
+class _Engine:
+    """One vLLM data-parallel rank's client engine; its worker logs each step as ``WorkerWrap`` does."""
+
+    def __init__(self, endpoint, dp_rank):
+        self.endpoint = endpoint
+        self.dp_rank = dp_rank
+        self.steps = None
+
+    async def generate(self, request):
+        # Every request runs in a step of its own, padded to a multiple of 8 rows; the other rank runs a dummy step.
+        for prefix in request["prompt_token_ids"]:
+            rows = -(-len(prefix) // 8) * 8
+            if self.steps is not None:
+                self.steps.append(
+                    {
+                        "requests": [
+                            {
+                                "id": f"r{len(self.steps)}",
+                                "scheduled": len(prefix),
+                                "computed": 0,
+                                "prompt_tokens": len(prefix),
+                                "prompt_sha256": token_digest(prefix),
+                            }
+                            for prefix in request["prompt_token_ids"]
+                        ],
+                        "scheduled_tokens": sum(len(prefix) for prefix in request["prompt_token_ids"]),
+                        "dummy": False,
+                        "rows": rows,
+                        "tokens_across_dp": [rows, rows],
+                    }
+                )
+            for engine in self.endpoint.engines:
+                if engine is not self and engine.steps is not None:
+                    engine.steps.append({"requests": [], "scheduled_tokens": 0, "dummy": True})
+        output = await self.endpoint.generate(request)
+        output.pop("engine_indices")
+        return output
+
+
+def _kernel_record(role, block):
+    """A vLLM worker's loaded vendored kernel holding one launch config with ``block`` reduction columns."""
+    return {
+        "file": f"c{role}.py",
+        "sha256": source_digest(VENDORED_KERNELS[role][1]),
+        "kernel_name": VENDORED_KERNELS[role][0],
+        "launches": [{"kwargs": {"XBLOCK": 1, "R0_BLOCK": block}, "num_warps": 16, "num_stages": 1}],
+        "best_config": None,
+    }
 
 
 class _InferenceEndpoint:
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer
         self.route_offset = 0
+        # The post-attention norm's block the engines' autotuners chose.
+        self.norm_block = 2048
         # Two vLLM data-parallel ranks, one client engine each; ``failover_engine`` serves every prompt.
-        self.engines = [object(), object()]
+        self.engines = [_Engine(self, 0), _Engine(self, 1)]
         self.failover_engine = None
 
     async def reset_prefix_cache(self):
         pass
+
+    async def begin_probe_step_log(self):
+        for engine in self.engines:
+            engine.steps = []
+
+    async def end_probe_step_log(self):
+        logs = [[{"placement": {"dp_rank": engine.dp_rank}, "steps": engine.steps}] for engine in self.engines]
+        for engine in self.engines:
+            engine.steps = None
+        return logs
 
     async def probe_numerics_provenance(self):
         worker = {
@@ -41,6 +105,7 @@ class _InferenceEndpoint:
             "parameter_sha256": "ab" * 32,
             "versions": {"torch": "test"},
             "inductor_output_code": {"q7/cq7kernel.py": "def call(args):\n    pass\n"},
+            "inductor_kernels": [_kernel_record("rms_norm", self.norm_block)],
         }
         return [[worker]]
 
@@ -82,6 +147,8 @@ class _PolicyEndpoint:
         self.prompt_routes_by_mode = {}
         self.response_routes_by_mode = {}
         self.dp_ranks_by_mode = {}
+        self.steps_by_mode = {}
+        self.kernel_configs_by_mode = {}
         self.timed_modes = []
         self.actor_infos = [
             SimpleNamespace(rank=MeshRank(dp=dp, sp=0, tp=0, pp=0, world_size=2, dp_size=2, pp_size=1))
@@ -98,7 +165,11 @@ class _PolicyEndpoint:
         if method != "probe_forward":
             raise ValueError(method)
         width = data.metadata["response_length"]
-        self.dp_ranks_by_mode[data.metadata["probe_mode"]] = data.get("vllm_dp_rank")
+        mode = data.metadata["probe_mode"]
+        self.dp_ranks_by_mode[mode] = data.get("vllm_dp_rank")
+        tokens, rows = data.get("vllm_step_tokens"), data.get("vllm_step_rows")
+        self.steps_by_mode[mode] = None if tokens is None else list(zip(tokens.tolist(), rows.tolist(), strict=True))
+        self.kernel_configs_by_mode[mode] = data.metadata["vllm_kernel_configs"]
         self.prompt_routes_by_mode[data.metadata["probe_mode"]] = data["rollout_prompt_routed_experts"].clone()
         self.response_routes_by_mode[data.metadata["probe_mode"]] = data["rollout_routed_experts"].clone()
         probabilities = torch.log_softmax(torch.arange(32, dtype=torch.float32), dim=0)
@@ -151,7 +222,13 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
     cfg.trainer.mismatch_probe.prompts.count = 3
     cfg.trainer.mismatch_probe.prompts.samples_per_prompt = 1
     cfg.trainer.policy.megatron_config.moe_router_replay = True
-    cfg.trainer.mismatch_probe.extra_trainer_modes = ["router_replay", "router_replay_response", "reread_replay"]
+    step_mode = f"reread_replay+{KEPT_STACK_3}"
+    cfg.trainer.mismatch_probe.extra_trainer_modes = [
+        "router_replay",
+        "router_replay_response",
+        "reread_replay",
+        step_mode,
+    ]
     cfg.trainer.mismatch_probe.reread_again = True
     cfg.trainer.mismatch_probe.timing_modes = ["native", "reread_replay"]
     cfg.trainer.algorithm.advantage_estimator = "uniform"
@@ -280,13 +357,20 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
     assert reread_prompt[0, :, 0].tolist() == [[0, 0], [3, 4], [4, 5]]
     assert reread_response[0, :, 0].tolist() == [[7, 0], [1, 2], [3, 4], [0, 0]]
     # Replay modes also carry the vLLM data-parallel rank that served their routes' source (the padding row
-    # takes 0): the re-read's even split, or the engine each generation's session id hashes to.
-    assert trainer.policy_model.dp_ranks_by_mode["reread_replay"].tolist() == [0, 0, 1, 0]
+    # takes 0): rank 0, which re-read every prefix, or the engine each generation's session id hashes to.
+    assert trainer.policy_model.dp_ranks_by_mode["reread_replay"].tolist() == [0, 0, 0, 0]
     sessions = [int.from_bytes(hashlib.sha256(f"p{i}_0".encode()).digest(), "big") % 2 for i in range(3)]
     assert sessions == [1, 1, 0]
     for mode in ("router_replay", "router_replay_response"):
         assert trainer.policy_model.dp_ranks_by_mode[mode].tolist() == [*sessions, 0]
     assert trainer.policy_model.dp_ranks_by_mode["native"] is None
+    # The vllm_steps mode scores each sample as the logged step of its re-read ran it: its prefix (prompt and
+    # response but the last token) and the step's rows; the padding row has no step. Other modes carry no steps.
+    assert trainer.policy_model.steps_by_mode[step_mode] == [(5, 8), (4, 8), (6, 8), (0, 0)]
+    assert trainer.policy_model.steps_by_mode["reread_replay"] is None
+    # Every mode launches the vLLM kernels with the configs the re-read engine's autotuner chose.
+    chosen = {"rms_norm": {"kwargs": {"R0_BLOCK": 2048, "XBLOCK": 1}, "num_warps": 16, "num_stages": 1}}
+    assert all(configs == chosen for configs in trainer.policy_model.kernel_configs_by_mode.values())
     rereads = {row.sample_id: row for row in chained_scores(cfg) if row.scorer == "vllm.rescore" and row.update == 0}
     agains = [row for row in chained_scores(cfg) if row.scorer == "vllm.rescore_again" and row.update == 0]
     assert len(rereads) == len(agains) == 3
@@ -298,6 +382,7 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
     assert frozen["p0:0"].logprobs == rereads["p0:0"].logprobs
     trainer.inference_engine_client.route_offset = 2
     trainer.inference_engine_client.failover_engine = 1
+    trainer.inference_engine_client.norm_block = 4096
     cfg.trainer.mismatch_probe.reuse_probe = cfg.trainer.mismatch_probe.archive_uri
     cfg.trainer.mismatch_probe.archive_uri = str(tmp_path / "frozen-reference")
     cfg.trainer.mismatch_probe.score_after_updates = [0]
@@ -309,10 +394,13 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
     assert code.read_text() == "def call(args):\n    pass\n"
     vllm_workers = json.loads(read_frozen_probe(cfg.trainer.mismatch_probe.archive_uri).manifest.hardware_json)["vllm"]
     assert [worker["parameter_sha256"] for worker in vllm_workers] == ["ab" * 32]
-    # The fresh re-read now routes differently and one engine served it all, but re-read replay still
-    # uses the frozen reference, placed as the client's even split placed that batched re-read.
+    # The fresh re-read now routes differently and this job's engines autotuned another block, but re-read replay
+    # still scores against the frozen reference: its routes, the rank, steps and kernel configs its source logged.
     assert trainer.policy_model.prompt_routes_by_mode["reread_replay"][0, :, 0].tolist() == [[0, 0], [3, 4], [4, 5]]
-    assert trainer.policy_model.dp_ranks_by_mode["reread_replay"].tolist() == [0, 0, 1, 0]
+    assert trainer.policy_model.dp_ranks_by_mode["reread_replay"].tolist() == [0, 0, 0, 0]
+    assert trainer.policy_model.steps_by_mode[step_mode] == [(5, 8), (4, 8), (6, 8), (0, 0)]
+    assert trainer.policy_model.kernel_configs_by_mode[step_mode] == chosen
+    assert trainer.policy_model.kernel_configs_by_mode["router_replay"]["rms_norm"]["kwargs"]["R0_BLOCK"] == 4096
     timing = json.loads(read_frozen_probe(cfg.trainer.mismatch_probe.archive_uri).manifest.timing_json)
     # The slowest data-parallel rank sets each repetition's pass time.
     assert timing["training_pass@0:reread_replay/seconds"] == [1.5] * TIMING_REPETITIONS

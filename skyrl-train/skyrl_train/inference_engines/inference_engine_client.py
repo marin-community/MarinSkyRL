@@ -438,6 +438,14 @@ class InferenceEngineClient(InferenceEngineInterface):
         """Numerics provenance from every worker of every engine."""
         return await self._run_on_all_engines("probe_numerics_provenance")
 
+    async def begin_probe_step_log(self) -> None:
+        """Start recording the engine steps of every worker of every engine."""
+        await self._run_on_all_engines("begin_probe_step_log")
+
+    async def end_probe_step_log(self) -> List[List[Dict[str, Any]]]:
+        """Each engine's workers' placements and engine steps since ``begin_probe_step_log``, in engine order."""
+        return await self._run_on_all_engines("end_probe_step_log")
+
     async def begin_online_eagle_capture(self, config: Dict[str, Any]) -> List[OnlineEagleResult]:
         """Begin the same capture interval on every live inference engine."""
         return await self._run_on_all_engines("begin_online_eagle_capture", config)

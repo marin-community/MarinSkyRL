@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import copy
 import hashlib
 import importlib.util
@@ -36,6 +37,7 @@ from skyrl_train.distributed.megatron.remote_model import install_remote_hf_stat
 from skyrl_train.distributed.utils import init_worker_process_group_with_device
 from skyrl_train.mismatch_probe.capture import capture_layer_regions, write_capture
 from skyrl_train.mismatch_probe.modes import NUMERICS_CANDIDATES, TRAINER_MODES, probe_mode_scope
+from skyrl_train.models.grug_inductor_kernels import KernelConfigs, kernel_configs
 from skyrl_train.mismatch_probe.numerics import set_default_numerics
 from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE, validate_grug_training_strategy
 from skyrl_train.timing_observability import PhaseBreakdown
@@ -75,6 +77,19 @@ from transformers import AutoConfig, AutoTokenizer
 
 from marinskyrl.hugging_face_retry import load_hugging_face_with_retry
 from marinskyrl.runtime_options import WeightSyncTransport
+
+
+@contextlib.contextmanager
+def _probe_scope(worker, settings):
+    """A probe mode's scope, with the vLLM kernels launched as the engine of the mode's reference launched them.
+
+    ``settings["vllm_kernel_configs"]`` maps each vendored vLLM kernel's role to that engine's launch config.
+    """
+    with (
+        probe_mode_scope(worker, settings),
+        kernel_configs(KernelConfigs.from_records(settings.get("vllm_kernel_configs") or {})),
+    ):
+        yield
 
 
 class _MegatronInitMode(StrEnum):
@@ -230,6 +245,8 @@ class MegatronWorker:
                     probe_row_indices=micro.get("probe_row_indices"),
                     rollout_prompt_routed_experts=micro.get("rollout_prompt_routed_experts"),
                     vllm_dp_ranks=micro.get("vllm_dp_rank"),
+                    vllm_step_tokens=micro.get("vllm_step_tokens"),
+                    vllm_step_rows=micro.get("vllm_step_rows"),
                 )
             )
 
@@ -275,7 +292,7 @@ class MegatronWorker:
         rng_state = MegatronStrategy.get_rng_state()
         rng_tracker = get_cuda_rng_tracker()
         tracker_states = copy.deepcopy(rng_tracker.get_states())
-        scope = probe_mode_scope(self, data.metadata)
+        scope = _probe_scope(self, data.metadata)
         capture = data.metadata.get("probe_capture") or {}
         capture_rank = (
             mpu.get_data_parallel_rank() == 0
@@ -353,7 +370,7 @@ class MegatronWorker:
             )
         seconds = []
         try:
-            with probe_mode_scope(self, data.metadata):
+            with _probe_scope(self, data.metadata):
                 self.model.train()
                 torch.cuda.reset_peak_memory_stats()
                 for repetition in range(repetitions + 1):

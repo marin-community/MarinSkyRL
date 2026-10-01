@@ -50,11 +50,14 @@ from torch import nn
 from skyrl_train.mismatch_probe.numerics import active_numerics
 from skyrl_train.models import grug_inductor_kernels as vllm_inductor
 from skyrl_train.models.grug_rounding import (
+    STAGE_STATISTIC_COLUMNS,
+    append_stage_statistic,
     gated_norm_product_fp32,
     rms_norm_hybrid,
     rms_norm_single_rounding,
     weighted_down_projection_single_rounding,
     rotate_neox_fp32,
+    split_stage_statistic,
     swiglu_single_rounding,
     vllm_value,
     xsa_and_gate_single_rounding,
@@ -63,6 +66,9 @@ from skyrl_train.models.grug_vllm_kernels import (
     VLLM_MAX_BATCHED_TOKENS,
     fa3_attention_sbhd,
     fixed_rows_linear,
+    planned_vllm_steps,
+    step_lm_head_logits,
+    step_rows_linear,
     vllm_ep_combine,
     vllm_expert_outputs,
     vllm_qkv_projection,
@@ -95,9 +101,12 @@ class ResidualSum:
     def unrounded(self) -> torch.Tensor:
         return self.residual.detach().float() + (self.routed.detach().float() + self.shared.detach().float())
 
-    def square_sum(self, weight: torch.Tensor) -> torch.Tensor:
-        """Compiled vLLM's per-row sum of squares of the unrounded sum, from its fused residual-add and norm kernel."""
-        return vllm_inductor.residual_square_sum(self.residual, self.routed, self.shared, weight)[1]
+    def statistic(self, numerics) -> torch.Tensor:
+        """The next input norm's statistic of the unrounded sum: compiled vLLM's per-row sum of squares from its fused
+        residual-add and norm kernel (``vllm_norms``, ``[rows]``), else the sum's variance (``[..., 1]``)."""
+        if numerics.vllm_norms:
+            return vllm_inductor.residual_square_sum(self.residual, self.routed, self.shared)[1]
+        return self.unrounded().pow(2).mean(dim=-1, keepdim=True)
 
 
 @dataclass(frozen=True)
@@ -110,12 +119,29 @@ class GatedProduct:
     def unrounded(self) -> torch.Tensor:
         return gated_norm_product_fp32(self.normalized.detach(), self.gate.detach())
 
-    def square_sum(self, weight: torch.Tensor) -> torch.Tensor:
-        """Compiled vLLM's per-row sum of squares of the unrounded product, from its fused product and norm kernel."""
-        return vllm_inductor.gated_product_square_sum(self.normalized, self.gate, weight)[1]
+    def statistic(self, numerics) -> torch.Tensor:
+        """Layer 0's input-norm statistic of the unrounded product: compiled vLLM's per-row sum of squares from its fused
+        product and norm kernel (``vllm_norms``, ``[rows]``), else the product's variance (``[..., 1]``)."""
+        if numerics.vllm_norms:
+            return vllm_inductor.gated_product_square_sum(self.normalized, self.gate)[1]
+        return self.unrounded().pow(2).mean(dim=-1, keepdim=True)
 
 
-HandOff = ResidualSum | GatedProduct
+@dataclass(frozen=True)
+class StageStatistic:
+    """The input-norm statistic of a pipeline stage's first layer, computed on the previous stage from the unrounded
+    residual sum that formed the layer's input (``ResidualSum.statistic``) and received with the hidden states.
+
+    ``value`` is ``[S, B, 1]`` fp32; both stages run the same numerics, so it is the statistic this stage's norm needs.
+    """
+
+    value: torch.Tensor
+
+    def statistic(self, numerics) -> torch.Tensor:
+        return self.value.reshape(-1) if numerics.vllm_norms else self.value
+
+
+HandOff = ResidualSum | GatedProduct | StageStatistic
 
 # What formed each bf16 tensor a norm will read (a layer's output, the embedding norm's output), keyed by that
 # tensor. Each entry keeps a weak reference to the tensor: under pipeline parallelism several micro-batches are in
@@ -394,11 +420,15 @@ def _install_fa3_attention_hooks(attention: "GrugSelfAttention") -> None:
                 **kwargs,
             )
 
-        if not active_numerics().fa3_attention:
+        numerics = active_numerics()
+        if not (numerics.fa3_attention or numerics.vllm_steps):
             return cudnn()
         if packed_seq_params is not None or attention_bias is not None or kwargs:
             raise NotImplementedError("fa3_attention numerics support unpacked causal sequences only")
-        output = fa3_attention_sbhd(query, key, value, window=attention.fa3_window, scale=attention.fa3_scale)
+        steps = planned_vllm_steps(query.shape[1]) if numerics.vllm_steps else None
+        output = fa3_attention_sbhd(
+            query, key, value, window=attention.fa3_window, scale=attention.fa3_scale, steps=steps
+        )
         if not torch.is_grad_enabled():
             return output
         reference = cudnn()
@@ -568,7 +598,8 @@ class GrugGatedRMSNorm(nn.Module):
         weight = self.norm.weight
         statistic = self._input_statistic(hidden_states, numerics)
         if statistic is None:
-            # No hand-off reaches a pipeline stage's first layer: normalize the rounded input by its own variance.
+            # A layer run on its own, with no layer or pipeline stage handing its sum on: normalize the rounded input
+            # by its own variance.
             if not numerics.vllm_norms:
                 return self.norm(hidden_states)
             value = vllm_inductor.rms_norm(hidden_states, weight).view_as(hidden_states)
@@ -595,10 +626,7 @@ class GrugGatedRMSNorm(nn.Module):
         statistic = None
         if parts is not None:
             with torch.no_grad():
-                if numerics.vllm_norms:
-                    statistic = parts.square_sum(self.norm.weight)
-                else:
-                    statistic = parts.unrounded().pow(2).mean(dim=-1, keepdim=True)
+                statistic = parts.statistic(numerics)
         if phase is CheckpointPass.FIRST:
             _keep_for_recompute(self, hidden_states, statistic)
         return statistic
@@ -909,7 +937,12 @@ class GrugTopKRouter(TopKRouter):
     def forward(self, input: torch.Tensor, padding_mask: torch.Tensor | None = None):
         self._maintain_float32_expert_bias()
         numerics = active_numerics()
-        if numerics.router_gemm or numerics.router_rows:
+        if numerics.vllm_steps:
+            # Each sequence's logits from the fp32 GEMM at the row count of the vLLM step that computed it.
+            if numerics.router_rows or input.ndim != 3:
+                raise NotImplementedError("vllm_steps numerics take the router GEMM's rows from the logged step alone")
+            logits = step_rows_linear(input.float(), self.weight.float(), planned_vllm_steps(input.shape[1]))
+        elif numerics.router_gemm or numerics.router_rows:
             # Compiled vLLM runs an fp32 GEMM on the stored bf16 input and fp32 weights holding the bf16 values.
             fp32_input, weight = input.float(), self.weight.float()
             if not numerics.router_rows:
@@ -928,23 +961,81 @@ class GrugTopKRouter(TopKRouter):
         return self.routing(logits, padding_mask)
 
 
+def _install_step_lm_head(model: GPTModel) -> None:
+    """Compute the LM head's logits at the row counts of each sequence's logged vLLM step under ``vllm_steps``."""
+    output_layer = model.output_layer
+    output_forward = output_layer.forward
+
+    def forward(hidden_states, weight=None, runtime_gather_output=None, **kwargs):
+        if not active_numerics().vllm_steps:
+            return output_forward(hidden_states, weight=weight, runtime_gather_output=runtime_gather_output, **kwargs)
+        if kwargs or output_layer.bias is not None or model.config.tensor_model_parallel_size != 1:
+            raise NotImplementedError("vllm_steps numerics need the unsharded, bias-free LM head")
+        head = output_layer.weight if weight is None else weight
+        return step_lm_head_logits(hidden_states, head, planned_vllm_steps(hidden_states.shape[1])), None
+
+    output_layer.forward = forward
+
+
+def _stage_output_statistic(output: torch.Tensor) -> torch.Tensor | None:
+    """The next stage's first input-norm statistic, from the residual sum that formed this stage's last output.
+
+    ``None`` when the numerics take no statistic from the unrounded sum.
+    """
+    numerics = active_numerics()
+    if not (numerics.input_norm_variance or numerics.vllm_norms):
+        return None
+    parts = _take_hand_off(output)
+    if not isinstance(parts, ResidualSum):
+        raise RuntimeError("a pipeline stage's output carries no residual sum to hand its input-norm statistic on")
+    with torch.no_grad():
+        return parts.statistic(numerics).reshape(*output.shape[:-1], 1)
+
+
 class GrugGPTModel(GPTModel):
-    """GPTModel with Grug's gated embedding norm on the first pipeline stage."""
+    """GPTModel with Grug's gated embedding norm on the first pipeline stage.
+
+    Under the norm-input numerics a stage that is not the last appends each token's input-norm statistic (one fp32,
+    as two bf16 words) to the hidden states it hands on, and the next stage splits it off for its first layer's input
+    norm (``StageStatistic``). Megatron's pipeline exchanges each micro-batch's tensor shape, so the wider tensor
+    rides the existing point-to-point transfer in the forward and its gradient in the backward.
+    """
 
     def __init__(self, config: TransformerConfig, *args, **kwargs):
         super().__init__(config, *args, **kwargs)
         install_numerics_hooks(self)
+        self._received: tuple[torch.Tensor, torch.Tensor] | None = None
         if self.post_process and isinstance(self.decoder.final_layernorm, GrugGatedRMSNorm):
             self.decoder.final_layernorm.role = NormRole.FINAL
+            _install_step_lm_head(self)
         if self.pre_process:
             self.embed_norm = GrugGatedRMSNorm(
                 config=config, hidden_size=config.hidden_size, eps=config.layernorm_epsilon
             )
             self.embed_norm.role = NormRole.EMBEDDING
 
+    def set_input_tensor(self, input_tensor) -> None:
+        tensors = input_tensor if isinstance(input_tensor, list) else [input_tensor]
+        if len(tensors) != 1:
+            raise ValueError("a Grug pipeline stage receives one tensor")
+        received = tensors[0]
+        self._received = None
+        if received is not None and received.shape[-1] == self.config.hidden_size + STAGE_STATISTIC_COLUMNS:
+            self._received = split_stage_statistic(received, self.config.hidden_size)
+            received = self._received[0]
+        super().set_input_tensor(received)
+
     def forward(self, *args, **kwargs):
         clear_numerics_handoffs()
-        return super().forward(*args, **kwargs)
+        if self._received is not None:
+            hidden, statistic = self._received
+            self._received = None
+            _hand_off(hidden, StageStatistic(statistic))
+        output = super().forward(*args, **kwargs)
+        if self.post_process:
+            return output
+        statistic = _stage_output_statistic(output)
+        return output if statistic is None else append_stage_statistic(output, statistic)
 
     def _preprocess(
         self,

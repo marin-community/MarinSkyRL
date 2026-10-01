@@ -34,6 +34,55 @@ def vllm_value(value: torch.Tensor, reference: Callable[[], torch.Tensor]) -> to
     return _ValueWithGradient.apply(value, reference())
 
 
+# The extra columns a pipeline stage's output carries: one fp32 input-norm statistic per token, as two bf16 words.
+STAGE_STATISTIC_COLUMNS = 2
+
+
+class _AppendStageStatistic(torch.autograd.Function):
+    """``[S, B, H]`` bf16 hidden states with each token's fp32 statistic appended as two bf16 words: ``[S, B, H + 2]``.
+
+    The words are the statistic's bytes, moved without arithmetic. The statistic takes no gradient; the hidden states
+    take the gradient of their columns.
+    """
+
+    @staticmethod
+    def forward(ctx, hidden: torch.Tensor, statistic: torch.Tensor) -> torch.Tensor:
+        ctx.width = hidden.shape[-1]
+        words = statistic.float().contiguous().view(torch.int16)
+        return torch.cat((hidden.contiguous().view(torch.int16), words), dim=-1).view(torch.bfloat16)
+
+    @staticmethod
+    def backward(ctx, grad: torch.Tensor):
+        return grad[..., : ctx.width], None
+
+
+class _SplitStageStatistic(torch.autograd.Function):
+    """The inverse of ``_AppendStageStatistic``: the ``[S, B, H]`` hidden states and the ``[S, B, 1]`` fp32 statistic."""
+
+    @staticmethod
+    def forward(ctx, packed: torch.Tensor, width: int):
+        ctx.packed_width = packed.shape[-1]
+        words = packed.view(torch.int16)
+        hidden = words[..., :width].contiguous().view(torch.bfloat16)
+        statistic = words[..., width:].contiguous().view(torch.float32)
+        ctx.mark_non_differentiable(statistic)
+        return hidden, statistic
+
+    @staticmethod
+    def backward(ctx, grad_hidden: torch.Tensor, grad_statistic: torch.Tensor | None):
+        grad = grad_hidden.new_zeros(*grad_hidden.shape[:-1], ctx.packed_width)
+        grad[..., : grad_hidden.shape[-1]] = grad_hidden
+        return grad, None
+
+
+def append_stage_statistic(hidden: torch.Tensor, statistic: torch.Tensor) -> torch.Tensor:
+    return _AppendStageStatistic.apply(hidden, statistic)
+
+
+def split_stage_statistic(packed: torch.Tensor, width: int) -> tuple[torch.Tensor, torch.Tensor]:
+    return _SplitStageStatistic.apply(packed, width)
+
+
 def rms_norm_single_rounding(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     """vLLM's RMSNorm on an fp32 input: ``x * rsqrt(mean(x^2) + eps) * weight`` in fp32, rounded once."""
     variance = x.pow(2).mean(dim=-1, keepdim=True)
