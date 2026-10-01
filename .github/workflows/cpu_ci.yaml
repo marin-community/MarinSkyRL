@@ -144,7 +144,7 @@ jobs:
             --output "$sandbox_dir/server.py"
           echo "c79197dc02e33b63b58b30783e3cfe0076e8edf6ceb409835b5d0762756b621d  $sandbox_dir/server.py" | sha256sum --check
           uv venv --python 3.12 "$sandbox_dir/venv"
-          uv pip install --python "$sandbox_dir/venv/bin/python" Flask==3.1.2 ipython==9.6.0 psutil==7.1.0
+          uv pip install --python "$sandbox_dir/venv/bin/python" Flask==3.1.2 ipython==9.6.0 psutil==7.1.0 numpy==2.2.6 pandas==2.3.0
           setsid "$sandbox_dir/venv/bin/python" "$sandbox_dir/server.py" > "$sandbox_dir/server.log" 2>&1 &
           sandbox_pid=$!
           ready=false
