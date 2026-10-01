@@ -13,6 +13,21 @@ Training and evaluating modern AI agents with modular tasks, tools, and backends
 
 </div>
 
+## Marin retirement notice
+
+This package is a dormant snapshot and is excluded from the maintained MarinSkyRL build.
+`GeneralReactTask`, `DummyReactTask`, and the `coder1` verifier have been removed, together with their dependent
+examples. See the [retirement guide](../docs/coder1-retirement.md) for supported replacements.
+
+The standalone dependency lock can be regenerated with `uv lock` from this directory
+and checked with `uv lock --check`. The remaining optional backends are `verl` and `tinker`.
+Trainer packaging is owned by the
+[root `marinskyrl` distribution](../README.md#marinskyrl-packaging), and the historical
+`examples/run_skyrl/` integrations are unsupported. Maintained agentic training uses
+the root trainer with Harbor. Standalone lock resolution does not validate the archived
+agent's runtime compatibility; that remains tracked in
+[issue #884](https://github.com/marin-community/MarinSkyRL/issues/884).
+
 ## News 📰✨
 
 - 🚀 Initial public release with SWE, MemAgent (step-wise training), and Web Research examples!

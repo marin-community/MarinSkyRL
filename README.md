@@ -25,6 +25,9 @@ This is a fork of SkyRL maintained for the [Marin project](https://github.com/ma
 
 MarinSkyRL is maintained as a hard snapshot; no upstream sync or merge-back is planned.
 
+The dormant `skyrl-agent` snapshot's `coder1` verifier and `GeneralReactTask` have been removed.
+See the [retirement guide](docs/coder1-retirement.md) for supported code-verification routes and migration requirements.
+
 ## MarinSkyRL packaging
 
 The repository root builds one `marinskyrl` wheel containing the typed Iris launcher, `skyrl_train`, and
