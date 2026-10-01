@@ -92,7 +92,7 @@ def workload_statuses(client: IrisClient, job_name: JobName) -> list[JobStatus]:
 
 def cancel_owned_job(client: IrisClient, job_name: JobName, name: str) -> None:
     status = client.job_status(job_name)
-    if status.job_id != job_name or status.name != name:
+    if status.job_id != job_name or status.name != job_name.to_wire() or job_name.name != name:
         raise RuntimeError("recorded CatCount job identity differs from Iris")
     if status.state not in TERMINAL_JOB_STATES:
         client.cancel_job(job_name)
