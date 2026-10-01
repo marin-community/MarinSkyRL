@@ -30,7 +30,12 @@ async def _environment_operation[T](executor: Executor | None, operation: Callab
     try:
         return await asyncio.shield(pending)
     except asyncio.CancelledError:
-        await pending
+        while not pending.done():
+            try:
+                await asyncio.shield(pending)
+            except asyncio.CancelledError:
+                continue
+        pending.result()
         raise
 
 

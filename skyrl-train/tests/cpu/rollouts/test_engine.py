@@ -2028,8 +2028,9 @@ def environment_executor(request):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cancellations", [1, 2])
 async def test_cancellation_waits_for_the_tool_before_session_cleanup(
-    python_tool_task, monkeypatch, environment_executor
+    python_tool_task, monkeypatch, environment_executor, cancellations
 ):
     loop = asyncio.get_running_loop()
     started = asyncio.Event()
@@ -2060,11 +2061,12 @@ async def test_cancellation_waits_for_the_tool_before_session_cleanup(
     operation = asyncio.create_task(session.advance(ModelTurn(message, (1, 2), (3, 4), None, "stop")))
     try:
         await asyncio.wait_for(started.wait(), timeout=5)
-        operation.cancel()
-        completion_at_cancel = loop.create_future()
-        # This callback runs after the operation receives cancellation, while HTTP remains blocked.
-        loop.call_soon(lambda: completion_at_cancel.set_result(operation.done()))
-        assert not await completion_at_cancel
+        for _ in range(cancellations):
+            operation.cancel()
+            completion_at_cancel = loop.create_future()
+            # Let cancellation propagate through the environment task while HTTP remains blocked.
+            loop.call_soon(loop.call_soon, lambda: completion_at_cancel.set_result(operation.done()))
+            assert not await completion_at_cancel
     finally:
         release.set()
         try:

@@ -202,7 +202,7 @@ class WholeTaskProjection:
 
     def project(self, rollouts: Sequence[RolloutData], request: TrajectoryRequestBatch) -> TrajectoryBatch:
         required = logprobs_requested(request, self.projection.runner_config)
-        policies = task_error_policies(request, self.error_handling, self.harbor_error_handling)
+        policies = _task_error_policies(request, self.error_handling, self.harbor_error_handling)
         outputs = [
             training_output(rollout, policy, logprobs_required=required)
             for rollout, policy in zip(rollouts, policies, strict=True)
@@ -211,7 +211,7 @@ class WholeTaskProjection:
             if environment == "taskcompendium":
                 outputs[index] = replace(outputs[index], env_metrics={})
         batch = self.projection.project(outputs, request)
-        merge_task_metrics(batch, rollouts, request)
+        _merge_task_metrics(batch, rollouts, request)
         return batch
 
 
@@ -223,19 +223,19 @@ class StepTaskProjection:
 
     def project(self, rollouts: Sequence[RolloutData], request: TrajectoryRequestBatch) -> TrajectoryBatch:
         required = logprobs_requested(request, self.projection.runner_config)
-        policies = task_error_policies(request, self.error_handling, self.harbor_error_handling)
+        policies = _task_error_policies(request, self.error_handling, self.harbor_error_handling)
         batch = self.projection.project(
             [
-                step_training_outputs(rollout, policy, logprobs_required=required)
+                _step_training_outputs(rollout, policy, logprobs_required=required)
                 for rollout, policy in zip(rollouts, policies, strict=True)
             ],
             request,
         )
-        merge_task_metrics(batch, rollouts, request)
+        _merge_task_metrics(batch, rollouts, request)
         return batch
 
 
-def task_error_policies(
+def _task_error_policies(
     request: TrajectoryRequestBatch, default: ErrorHandlingConfig, harbor: ErrorHandlingConfig | None
 ) -> list[ErrorHandlingConfig]:
     if harbor is None:
@@ -246,7 +246,7 @@ def task_error_policies(
     ]
 
 
-def merge_task_metrics(
+def _merge_task_metrics(
     batch: TrajectoryBatch, rollouts: Sequence[RolloutData], request: TrajectoryRequestBatch
 ) -> None:
     """Count task evidence and preserve environment-specific metrics."""
@@ -286,7 +286,7 @@ def merge_task_metrics(
             metrics[key] = metrics.get(key, 0.0) + value
 
 
-def step_training_outputs(
+def _step_training_outputs(
     rollout: RolloutData,
     error_handling: ErrorHandlingConfig = DEFAULT_ERROR_HANDLING_CONFIG,
     *,

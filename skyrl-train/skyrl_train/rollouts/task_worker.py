@@ -25,6 +25,7 @@ from taskcompendium.rollout import (
     ModelTurn,
     RolloutContractError,
     RolloutData,
+    RolloutEngine,
     RolloutFailure,
     RolloutInterrupted,
     RolloutOperation,
@@ -71,7 +72,7 @@ from skyrl_train.trajectory_runners.types import (
 )
 
 
-async def model_turn(
+async def _model_turn(
     client: ModelClient,
     request: ModelRequest,
     *,
@@ -130,7 +131,7 @@ async def model_turn(
     )
 
 
-async def grade_task_cohorts(
+async def _grade_task_cohorts(
     tasks: list[TaskSpec],
     rollouts: list[RolloutData],
     request: TrajectoryRequestBatch,
@@ -138,7 +139,7 @@ async def grade_task_cohorts(
     *,
     logprobs_required: bool = False,
 ) -> list[RolloutData]:
-    """Complete task-declared group grading before the engine emits rollouts."""
+    """Complete task-declared group grading before training projection."""
     groups: dict[str, list[int]] = {}
     parameters = {}
     for index, task in enumerate(tasks):
@@ -195,7 +196,7 @@ async def grade_task_cohorts(
     return result
 
 
-def failed_rollout(
+def _failed_rollout(
     interruption: RolloutInterrupted,
     task: TaskSpec,
     config: ErrorHandlingConfig,
@@ -258,7 +259,7 @@ def failed_rollout(
     )
 
 
-async def run_engine_task(engine: ShellboxRolloutEngine, task: TaskSpec, executor: Executor) -> RolloutData:
+async def _run_engine_task(engine: RolloutEngine, task: TaskSpec, executor: Executor) -> RolloutData:
     """Run the blocking iterator in a worker thread and await cancellation cleanup."""
     pending = asyncio.get_running_loop().run_in_executor(
         executor, copy_context().run, list, engine.generate(iter([task]))
@@ -355,7 +356,7 @@ class TaskRolloutWorker:
 
             async def model(request):
                 pending = asyncio.run_coroutine_threadsafe(
-                    model_turn(
+                    _model_turn(
                         self.model_client,
                         request,
                         sampling_params=sampling,
@@ -397,9 +398,9 @@ class TaskRolloutWorker:
             while True:
                 try:
                     async with harbor_slots, self.task_slots:
-                        result = await run_engine_task(engine, task, self.engine_executor)
+                        result = await _run_engine_task(engine, task, self.engine_executor)
                 except RolloutInterrupted as interruption:
-                    result = failed_rollout(
+                    result = _failed_rollout(
                         interruption,
                         task,
                         self.error_handling if harbor is None else harbor.error_handling,
@@ -419,7 +420,7 @@ class TaskRolloutWorker:
         with rollout_phase("collect"):
             async with asyncio.TaskGroup() as group:
                 pending = [group.create_task(run(index, task)) for index, task in enumerate(tasks)]
-            rollouts = await grade_task_cohorts(
+            rollouts = await _grade_task_cohorts(
                 tasks,
                 [task.result() for task in pending],
                 request,
