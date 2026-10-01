@@ -10,6 +10,8 @@ from skyrl_train.config.behavior_logprobs import (
     configure_behavior_logprob_sampling,
     validate_behavior_logprob_sampling,
 )
+import skyrl_train.objective.losses  # noqa: F401
+import skyrl_train.utils.advantage_estimators  # noqa: F401
 from skyrl_train.inference_engines.utils import get_vllm_sampling_params
 from skyrl_train.inference_engines.vllm.utils import apply_openai_sampling, pop_vllm_wrapper_kwargs
 from skyrl_train.config.objective_spec import rollout_logprobs_required
@@ -124,13 +126,15 @@ def test_checked_in_behavior_logprob_configs_use_validated_sampling():
     assert checked
 
 
-def test_mismatch_probe_samples_the_distribution_the_trainer_scores():
+def test_mismatch_probe_samples_the_distribution_the_trainer_scores(monkeypatch):
     from unittest import mock
 
     from skyrl_train.config.utils import get_default_config
     from skyrl_train.utils.utils import validate_cfg
 
+    monkeypatch.delenv("WANDB_API_KEY", raising=False)
     cfg = get_default_config()
+    cfg.trainer.logger = "console"
     OmegaConf.set_struct(cfg, False)
     probe = cfg.trainer.mismatch_probe
     probe.enabled = True
