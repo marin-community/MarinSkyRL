@@ -29,6 +29,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     BATCH_ERROR_METRIC_PREFIX,
     get_batch_failure_metrics,
     get_rollout_metrics,
+    get_custom_chat_template,
     get_response_ids_and_loss_mask_from_messages,
     get_generation_prompt_ids,
     detect_qwen3_5_empty_think_prefix,
@@ -515,18 +516,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             f"Error classification: enabled={self._error_handling_config.enable_error_classification}"
         )
 
-        # Read custom chat template
-        custom_chat_template_path = trajectory_runner_cfg.engine_init_kwargs.get(
-            "custom_chat_template_chat_completion_path", None
-        )
-        if custom_chat_template_path:
-            with open(custom_chat_template_path, "r") as f:
-                self.custom_chat_template_content = f.read()
-            logger.info(
-                f"HarborTrajectoryRunner initialized with custom chat template read from: {custom_chat_template_path}"
-            )
-        else:
-            self.custom_chat_template_content = None
+        self.custom_chat_template_content = get_custom_chat_template(trajectory_runner_cfg.chat_template)
 
         # --- ARCH-GATED qwen3_5/3.6 thinking-enable for the re-tokenize / TIS path ---
         # The Qwen3.5/3.6 chat template's DEFAULT generation prompt (enable_thinking

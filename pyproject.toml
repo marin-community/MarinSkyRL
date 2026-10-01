@@ -11,6 +11,7 @@ version = "0.1.0"
 description = "Marin's typed launcher and RL training runtime"
 requires-python = "==3.12.*"
 dependencies = [
+    "verifyit[answer,schema,reasoning-gym,judge] @ git+https://github.com/marin-community/verifyit@a04f28fd8c00879f949031e58ce9fbe5f4d5da6e",
     "aiohttp>=3.13.3",
     "boto3",
     "datasets>=4.0.0",
@@ -21,7 +22,7 @@ dependencies = [
     "func_timeout",
     "hf_transfer",
     "huggingface-hub>=0.34.0",
-    "math-verify==0.8.0",
+    "math-verify==0.9.0",
     "hydra-core==1.3.2",
     "jaxtyping",
     "langdetect==1.0.9",
@@ -280,6 +281,7 @@ ignore = [
 addopts = "-v -s"
 testpaths = ["skyrl-train/tests", "cloud/iris/tests"]
 markers = [
+    "nightly: extended CPU learning and checkpoint-resume coverage",
     "vllm",
     "integrations",
     "megatron",

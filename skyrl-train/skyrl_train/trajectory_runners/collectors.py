@@ -36,6 +36,10 @@ async def collect_agent_loops(
     """Fan a request batch out over one harness-specific agent loop."""
     trajectory_ids = request.get("trajectory_ids")
     sampling_params = request.get("sampling_params")
+    max_tokens = runner.trajectory_runner_cfg.sampling_params.max_generate_length
+    if sampling_params is not None:
+        max_key = "max_tokens" if runner.trajectory_runner_cfg.backend == "vllm" else "max_new_tokens"
+        max_tokens = sampling_params.get(max_key, max_tokens)
 
     async def collect_one(index: int, prompt, env_class: str, env_extra: dict) -> InteractionT:
         try:
@@ -43,7 +47,7 @@ async def collect_agent_loops(
                 prompt,
                 env_class,
                 env_extra,
-                runner.trajectory_runner_cfg.sampling_params.max_generate_length,
+                max_tokens,
                 runner.trajectory_runner_cfg.max_input_length,
                 sampling_params=sampling_params,
                 trajectory_id=trajectory_ids[index] if trajectory_ids is not None else None,

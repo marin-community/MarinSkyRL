@@ -11,9 +11,10 @@ authors = [
 ]
 license = { text = "MIT" }
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 
 dependencies = [
+    "verifyit[answer,schema,reasoning-gym,judge] @ git+https://github.com/marin-community/verifyit@a04f28fd8c00879f949031e58ce9fbe5f4d5da6e",
     "func_timeout",
     "loguru",
     "numpy",
@@ -21,7 +22,7 @@ dependencies = [
     "requests",
     "omegaconf",
     "openapi-schema-validator",
-    "math-verify==0.8.0",
+    "math-verify==0.9.0",
     "reasoning-gym==0.1.25",
     "verifiable-instructions @ git+https://github.com/abukharin-nv/verifiable-instructions.git@f46a5ac87b1400a4f8973039844b6be9b56e3faf",
     "xmltodict",

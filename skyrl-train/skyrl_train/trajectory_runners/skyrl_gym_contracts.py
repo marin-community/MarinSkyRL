@@ -6,7 +6,7 @@ from typing import Any
 import numpy as np
 
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
-from skyrl_gym.verification import RewardResult, RolloutEvidence, VerificationResult
+from skyrl_gym.verification import RewardResult, RolloutEvidence, VerificationResult, normalized_verifier_score
 
 
 def verification_from_env_step(step_output: BaseTextEnvStepOutput) -> VerificationResult:
@@ -90,11 +90,16 @@ def fold_verification_results(
     if results[-1].score is None:
         return results[-1], None
 
-    outcome = sum(result.score for result in results if result.score is not None)
+    scored = [result for result in results if result.score is not None]
+    outcome = sum(normalized_verifier_score(result) for result in scored) / len(scored)
+    passed = all(
+        result.passed if result.passed is not None else normalized_verifier_score(result) >= 1.0 for result in scored
+    )
     return (
         VerificationResult.verified(
             outcome,
-            diagnostics={"steps": tuple(result.diagnostics for result in results)},
+            passed=passed,
+            diagnostics={"steps": tuple(result.diagnostics for result in results), "num_scored_steps": len(scored)},
         ),
         outcome,
     )

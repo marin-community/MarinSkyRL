@@ -7,10 +7,10 @@ import torch
 from marinskyrl.distillation import TeacherEvidenceKind
 from skyrl_train.distillation import (
     ChosenTokenTeacherEvidence,
-    SparseForwardKLInput,
+    TeacherTopKInput,
     TeacherScoreRequest,
     TopKTeacherEvidence,
-    prepare_sparse_forward_kl,
+    prepare_teacher_topk,
 )
 from skyrl_train.distillation_adapters import (
     AdmittedGroupDistillationAdapter,
@@ -134,7 +134,7 @@ async def test_coordinator_prepares_sparse_forward_kl_from_the_same_scoring_cont
     scored = await coordinator.score(TeacherScoringWork(request, 0.5, torch.tensor([[1.0, 0.25]])))
     await coordinator.close()
 
-    assert isinstance(scored.distillation, SparseForwardKLInput)
+    assert isinstance(scored.distillation, TeacherTopKInput)
     torch.testing.assert_close(scored.distillation.retained_mass, torch.tensor([[0.9, 0.8]]))
     torch.testing.assert_close(scored.distillation.loss_weights, torch.tensor([[0.5, 0.125]]))
 
@@ -165,7 +165,7 @@ def test_routed_sparse_evidence_reassembles_original_row_order():
         scored.append(
             ScoredDistillationBatch(
                 evidence,
-                prepare_sparse_forward_kl(request, evidence, coefficient=0.5, route_weights=torch.ones(1, 2)),
+                prepare_teacher_topk(request, evidence, coefficient=0.5, route_weights=torch.ones(1, 2)),
             )
         )
     routed_work = RoutedTeacherScoringWork(
@@ -181,7 +181,7 @@ def test_routed_sparse_evidence_reassembles_original_row_order():
 
     assembled = TeacherEvidenceCoordinator.assemble_routed(routed_work, tuple(scored))
 
-    assert isinstance(assembled.distillation, SparseForwardKLInput)
+    assert isinstance(assembled.distillation, TeacherTopKInput)
     torch.testing.assert_close(assembled.distillation.teacher_topk_indices[0], topk_indices[1][0])
     torch.testing.assert_close(assembled.distillation.teacher_topk_indices[1], topk_indices[0][0])
     assert assembled.teacher_revisions == ("teacher-a-revision", "teacher-b-revision")

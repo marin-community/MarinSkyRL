@@ -2,7 +2,8 @@ from omegaconf import OmegaConf
 import pytest
 from harbor_config.errors import ErrorCategory, errors_by_category, known_error_types
 
-from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled
+from skyrl_train.config.objective_spec import rollout_logprobs_required
+from skyrl_train.config.utils import get_default_config
 from skyrl_train.utils.harbor_errors import (
     ErrorHandlingConfig,
     ErrorTreatment,
@@ -116,17 +117,18 @@ def test_retryable_infrastructure_classification_is_not_implicitly_excluded():
 @pytest.mark.parametrize(
     "algorithm_config",
     [
-        {"use_tis": True, "policy_loss_type": "regular"},
-        {"use_tis": False, "policy_loss_type": "behavior_clip"},
+        {"off_policy_correction": "tis", "policy_loss_type": "regular"},
+        {"off_policy_correction": "none", "policy_loss_type": "behavior_clip"},
     ],
 )
 def test_behavior_referenced_passthrough_without_logprobs_gets_named_error(algorithm_config):
-    required = rollout_logprobs_enabled(OmegaConf.create(algorithm_config))
+    cfg = get_default_config()
+    cfg.trainer.algorithm = OmegaConf.merge(cfg.trainer.algorithm, algorithm_config)
 
     error_type = passthrough_logprob_error_type(
         ErrorTreatment.PASSTHROUGH,
         has_rollout_logprobs=False,
-        rollout_logprobs_required=required,
+        rollout_logprobs_required=rollout_logprobs_required(cfg.trainer.algorithm),
     )
 
     assert error_type == PASSTHROUGH_WITHOUT_LOGPROBS_ERROR

@@ -112,6 +112,29 @@ DEFAULT_NCCL_TRACE_BUFFER_SIZE = 20_000
 
 
 ENV_VAR_SPECS = (
+    # Verifyit's judge client owns these names. They are set only inside the
+    # isolated grading child, using the benchmark's existing provider settings.
+    EnvVarSpec(
+        "VERIFYIT_JUDGE_BASE_URL",
+        "environment.skyrl_gym.nemotron_ultra.judges",
+        EnvVarSource.EXTERNAL,
+        frozenset({EnvVarScope.TASK_RUNTIME}),
+        frozenset({EnvVarWriter.PYTHON_ASSIGNMENT}),
+    ),
+    EnvVarSpec(
+        "VERIFYIT_JUDGE_MODEL",
+        "environment.skyrl_gym.nemotron_ultra.judges",
+        EnvVarSource.EXTERNAL,
+        frozenset({EnvVarScope.TASK_RUNTIME}),
+        frozenset({EnvVarWriter.PYTHON_ASSIGNMENT}),
+    ),
+    EnvVarSpec(
+        "VERIFYIT_JUDGE_API_KEY",
+        "environment.skyrl_gym.nemotron_ultra.judges",
+        EnvVarSource.SECRET,
+        frozenset({EnvVarScope.TASK_RUNTIME}),
+        frozenset({EnvVarWriter.PYTHON_ASSIGNMENT}),
+    ),
     EnvVarSpec(DEBUG_MODE_ENV, "trainer.debug_mode", EnvVarSource.CONFIG, ALL_RUNTIME_SCOPES),
     EnvVarSpec(DEBUG_ARTIFACT_DIR_ENV, "trainer.debug_mode", EnvVarSource.DERIVED, ALL_RUNTIME_SCOPES),
     EnvVarSpec("NCCL_DEBUG", "trainer.debug_mode", EnvVarSource.DERIVED, ALL_RUNTIME_SCOPES),

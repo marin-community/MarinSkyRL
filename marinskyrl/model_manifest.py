@@ -127,6 +127,9 @@ def _manifest_identity(
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
+SAFETENSORS_LENGTH_PREFIX_BYTES = 8
+
+
 def read_safetensors_header(source: BinaryIO, source_name: str) -> tuple[bytes, tuple[str, ...]]:
     """Consume and validate one safetensors header, returning its bytes and tensor keys."""
 
@@ -141,8 +144,8 @@ def read_safetensors_header(source: BinaryIO, source_name: str) -> tuple[bytes, 
             remaining -= len(chunk)
         return b"".join(chunks)
 
-    prefix = read_exact(8)
-    if len(prefix) != 8:
+    prefix = read_exact(SAFETENSORS_LENGTH_PREFIX_BYTES)
+    if len(prefix) != SAFETENSORS_LENGTH_PREFIX_BYTES:
         raise ValueError(f"Truncated safetensors header: {source_name}")
     header_size = struct.unpack("<Q", prefix)[0]
     if header_size > MAX_SAFETENSORS_HEADER_BYTES:

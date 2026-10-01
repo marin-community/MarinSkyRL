@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Iterable, Sequence
 from dataclasses import dataclass
 
 from omegaconf import DictConfig, OmegaConf
-from transformers import PreTrainedTokenizerBase
+from transformers import AutoConfig, PreTrainedTokenizerBase
 
 from marinskyrl.distillation import (
     DistillationPlan,
@@ -115,6 +115,19 @@ def prepare_distillation_runtime(
                 f"teacher {teacher.id!r} tokenizer vocabulary does not match the policy tokenizer; "
                 "vocabulary-level distillation requires identical token-ID semantics"
             )
+        student_window = cfg.generator.engine_init_kwargs.get("max_model_len")
+        if student_window is not None:
+            teacher_config = AutoConfig.from_pretrained(
+                teacher.model.path,
+                revision=teacher.model.revision,
+                trust_remote_code=True,
+            )
+            teacher_window = getattr(teacher_config, "max_position_embeddings", None)
+            if teacher_window is not None and teacher_window <= int(student_window):
+                raise ValueError(
+                    f"teacher {teacher.id!r} max_position_embeddings={teacher_window} must exceed "
+                    f"the student window {student_window} to score a full student sequence"
+                )
         prepared_teachers.append(PreparedLocalTeacher(teacher, teacher_tokenizer))
 
     return PreparedDistillationRuntime(
@@ -142,6 +155,10 @@ async def _start_local_teacher_pool(
     engine_init_kwargs.pop("openai_sampling_params", None)
     engine_init_kwargs["revision"] = teacher.model.revision
     engine_init_kwargs["served_model_name"] = teacher.model.path
+    if "max_model_len" in engine_init_kwargs:
+        # Scoring prefills the whole student sequence, which may fill the student's window, and
+        # generates one token, so the teacher needs one position beyond that window.
+        engine_init_kwargs["max_model_len"] = int(engine_init_kwargs["max_model_len"]) + 1
     role = InferenceEngineRoleConfig(
         pretrain=teacher.model.path,
         backend=teacher.backend,

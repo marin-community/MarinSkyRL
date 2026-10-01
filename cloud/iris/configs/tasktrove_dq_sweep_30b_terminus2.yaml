@@ -99,8 +99,6 @@ trainer:
     eps_clip_high: 0.05
     loss_reduction: sequence_mean
     policy_loss_type: behavior_clip
-    use_tis: false
-    tis_imp_ratio_cap: 2.0
     tito_full: true
 
   epochs: 2

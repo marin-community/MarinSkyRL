@@ -32,8 +32,6 @@ def example_dummy_config():
         "resume_mode": "none",
         "algorithm": {
             "advantage_estimator": "grpo",
-            "use_kl_estimator_k3": False,
-            "use_abs_kl": False,
             "kl_estimator_type": "k1",
             "use_kl_loss": True,
             "kl_loss_coef": 0.0,
@@ -105,6 +103,10 @@ def stub_megatron_modules() -> None:
             "ChainedOptimizer": type("ChainedOptimizer", (), {}),
             "DistributedOptimizer": type("DistributedOptimizer", (), {}),
         },
+        "megatron.core.optimizer.cpu_offloading": {
+            "HybridDeviceOptimizer": type("HybridDeviceOptimizer", (), {}),
+        },
+        "megatron.core.optimizer.clip_grads": {"clip_grad_by_total_norm_fp32": lambda *args, **kwargs: None},
         "megatron.core.utils": {"get_attr_wrapped_model": lambda *args, **kwargs: None},
         "megatron.core.packed_seq_params": {
             "PackedSeqParams": type(

@@ -32,7 +32,8 @@ from skyrl_gym.envs.nemotron_ultra.rdkit_chemistry import grade_rdkit_chemistry
 from skyrl_gym.envs.nemotron_ultra.sandbox import SandboxClient
 from skyrl_gym.envs.nemotron_ultra.structured_outputs import grade_structured_output
 from skyrl_gym.envs.nemotron_ultra.tool_call import grade_expected_action
-from skyrl_gym.verification import RolloutEvidence, VerificationResult
+from skyrl_gym.envs.reasoning_gym.scoring import extract_answer
+from skyrl_gym.verification import VERIFIER_RUNTIME_ERROR, RolloutEvidence, VerificationResult
 
 _NS_TOOLS_AGENT = "ns_tools_simple_agent"
 _LEAN_AGENT = "math_formal_lean_refinement_agent"
@@ -68,7 +69,7 @@ def _extract_reasoning_gym_answer(text: str) -> str:
     matches = list(re.finditer(r"<answer>(.*?)</answer>", text, re.DOTALL))
     if matches:
         return matches[-1].group(1).strip()
-    return last_boxed_answer(text) or text.strip()
+    return last_boxed_answer(text) or extract_answer(text)
 
 
 class NemotronUltraEnv(BaseTextEnv):
@@ -76,6 +77,9 @@ class NemotronUltraEnv(BaseTextEnv):
 
     def __init__(self, env_config: DictConfig, extras: dict[str, Any] | None = None):
         super().__init__()
+        self.verifyit_enabled = bool(env_config.get("verifyit_enabled", False))
+        self.math_verifier_timeout_seconds = env_config.get("verifyit_math_total_timeout_seconds", 60.0)
+        self.judge_verifier_timeout_seconds = env_config.get("verifyit_judge_total_timeout_seconds", 120.0)
         self.grading = NemotronUltraGrading(env_config.get("grading", NemotronUltraGrading.VERIFY))
         judges = env_config.get("judges", {})
         general_judge = judges.get("general") if isinstance(judges, Mapping) else None
@@ -146,6 +150,28 @@ class NemotronUltraEnv(BaseTextEnv):
                 return grading_message
         return {"role": "assistant", "content": action, "tool_calls": []}
 
+    def _grade_judge_profile(self, action: str, kind: str, judge):
+        if self.verifyit_enabled:
+            from skyrl_gym.envs.nemotron_ultra.judge_profiles_verifyit import grade_judge_profile_verifyit
+
+            return grade_judge_profile_verifyit(
+                action, self.record, judge, kind=kind, timeout_seconds=self.judge_verifier_timeout_seconds
+            )
+        scorers = {"abstention": grade_abstention, "multichallenge": grade_multichallenge, "jailbreak": grade_jailbreak}
+        return scorers[kind](action, self.record, judge)
+
+    def _grade_math(self, action: str):
+        if self.verifyit_enabled:
+            from skyrl_gym.envs.nemotron_ultra.math_judge_verifyit import grade_math_verifyit
+
+            return grade_math_verifyit(
+                action,
+                self.record,
+                judge=self.general_judge,
+                timeout_seconds=self.math_verifier_timeout_seconds,
+            )
+        return grade_math(action, self.record, judge=self.general_judge)
+
     def _require_general_judge(self) -> OpenAIJudge:
         if self.general_judge is None:
             raise RuntimeError(f"Nemotron Ultra verifier {self.agent!r} requires the general judge")
@@ -181,7 +207,9 @@ class NemotronUltraEnv(BaseTextEnv):
         except (requests.RequestException, RuntimeError, ValueError) as error:
             details = {
                 "agent": self.agent,
-                "error_type": type(error).__name__,
+                "error_type": VERIFIER_RUNTIME_ERROR,
+                "error_category": "infrastructure",
+                "cause_error_type": type(error).__name__,
                 "error_message": str(error),
                 "grading_action": action,
             }
@@ -216,10 +244,12 @@ class NemotronUltraEnv(BaseTextEnv):
             reward = float(self.genrm_config.get("default_score", 3.0))
             diagnostics["cohort_reward_pending"] = True
         elif self.agent == _NS_TOOLS_AGENT:
-            reward, details = grade_math(action, self.record, judge=self.general_judge)
+            reward, details = self._grade_math(action)
             diagnostics.update(details)
         elif self.agent == _LEAN_AGENT:
-            reward, details, correction_prompt = verify_lean_attempt(action, self.record, sandbox=self.sandbox)
+            reward, details, correction_prompt = verify_lean_attempt(
+                action, self.record, sandbox=self.sandbox, verifyit_enabled=self.verifyit_enabled
+            )
             diagnostics.update(details)
             if correction_prompt is not None and self.turns < self.max_turns:
                 return BaseTextEnvStepOutput(
@@ -231,22 +261,39 @@ class NemotronUltraEnv(BaseTextEnv):
                     reset_conversation=[{"role": "user", "content": correction_prompt}],
                 )
         elif self.agent in _TOOL_COMPARISON_AGENTS:
-            reward, category = grade_expected_action(
-                self.record["expected_action"],
-                self._assistant_message(action),
-            )
+            comparator = grade_expected_action
+            if self.verifyit_enabled:
+                from skyrl_gym.envs.nemotron_ultra.tool_comparison_verifyit import grade_expected_action_verifyit
+
+                comparator = grade_expected_action_verifyit
+            reward, category = comparator(self.record["expected_action"], self._assistant_message(action))
             diagnostics["category"] = category.value
         elif self.agent == "calendar_simple_agent":
-            reward, reason = grade_calendar(action, self.record["exp_cal_state"])
+            calendar_scorer = grade_calendar
+            if self.verifyit_enabled:
+                from skyrl_gym.envs.nemotron_ultra.calendar_verifyit import grade_calendar_verifyit
+
+                calendar_scorer = grade_calendar_verifyit
+            reward, reason = calendar_scorer(action, self.record["exp_cal_state"])
             diagnostics["reason"] = reason
         elif self.agent in _FORMAT_AGENTS:
-            reward, details = grade_format(action, self.record["verifier"])
+            format_scorer = grade_format
+            if self.verifyit_enabled:
+                from skyrl_gym.envs.nemotron_ultra.format_verifyit import grade_format_verifyit
+
+                format_scorer = grade_format_verifyit
+            reward, details = format_scorer(action, self.record["verifier"])
             diagnostics.update(details)
         elif self.agent == "mcqa_simple_agent":
-            reward, details = grade_mcqa(action, self.record)
+            reward, details = grade_mcqa(action, self.record, verifyit_enabled=self.verifyit_enabled)
             diagnostics.update(details)
         elif self.agent in _STRUCTURED_OUTPUT_AGENTS:
-            reward, details = grade_structured_output(action, self.record, self._assistant_message(action))
+            structured_scorer = grade_structured_output
+            if self.verifyit_enabled:
+                from skyrl_gym.envs.nemotron_ultra.structured_outputs_verifyit import grade_structured_output_verifyit
+
+                structured_scorer = grade_structured_output_verifyit
+            reward, details = structured_scorer(action, self.record, self._assistant_message(action))
             diagnostics.update(details)
         elif self.agent == "rdkit_chemistry_agent":
             reward, details = grade_rdkit_chemistry(action, self.record)
@@ -264,22 +311,29 @@ class NemotronUltraEnv(BaseTextEnv):
                 assistant_message=self._assistant_message(action),
                 timeout_seconds=self.code_verifier_timeout_seconds,
                 limits=self.code_verifier,
+                verifyit_enabled=self.verifyit_enabled,
+                sandbox=self.sandbox,
             )
             diagnostics.update(details)
         elif self.agent == "instruction_following_simple_agent":
-            reward, details = grade_instruction_following(action, self.record)
+            instruction_scorer = grade_instruction_following
+            if self.verifyit_enabled:
+                from skyrl_gym.envs.instruction_verifyit import grade_nemotron_instructions
+
+                instruction_scorer = grade_nemotron_instructions
+            reward, details = instruction_scorer(action, self.record)
             diagnostics.update(details)
         elif self.agent == "math_with_judge_simple_agent":
-            reward, details = grade_math(action, self.record, judge=self.general_judge)
+            reward, details = self._grade_math(action)
             diagnostics.update(details)
         elif self.agent == "abstention_simple_agent":
-            reward, details = grade_abstention(action, self.record, self._require_general_judge())
+            reward, details = self._grade_judge_profile(action, "abstention", self._require_general_judge())
             diagnostics.update(details)
         elif self.agent == "multichallenge_simple_agent":
-            reward, details = grade_multichallenge(action, self.record, self._require_general_judge())
+            reward, details = self._grade_judge_profile(action, "multichallenge", self._require_general_judge())
             diagnostics.update(details)
         elif self.agent in _JAILBREAK_AGENTS:
-            reward, details = grade_jailbreak(action, self.record, self._require_safety_judge())
+            reward, details = self._grade_judge_profile(action, "jailbreak", self._require_safety_judge())
             diagnostics.update(details)
         elif self.agent == "reasoning_gym_simple_agent":
             task_name = self.record["metadata"]["source_dataset"]
@@ -289,12 +343,19 @@ class NemotronUltraEnv(BaseTextEnv):
                 "metadata": self.record["metadata"],
             }
             answer = _extract_reasoning_gym_answer(action)
-            reward = float(reasoning_gym.get_score_answer_fn(task_name)(answer=answer, entry=entry))
+            if self.verifyit_enabled:
+                from skyrl_gym.envs.verifyit_clients import grade_reasoning_entry
+
+                reward = grade_reasoning_entry(task_name, entry, answer)
+            else:
+                reward = float(reasoning_gym.get_score_answer_fn(task_name)(answer=answer, entry=entry))
             diagnostics.update({"task_name": task_name, "extracted_answer": answer})
         else:
             raise NotImplementedError(f"Nemotron Ultra verifier {self.agent!r} has not been ported")
 
-        if diagnostics.get("error_type") == "schema_error" or any(diagnostics.get("instruction_errors", [])):
+        if diagnostics.get("error_type") in {"schema_error", "verification_error"} or any(
+            diagnostics.get("instruction_errors", [])
+        ):
             return BaseTextEnvStepOutput(
                 observations=[],
                 reward=0.0,

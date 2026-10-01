@@ -1,84 +1,65 @@
+from contextlib import contextmanager
 import os
+from collections.abc import Iterator
+
 from loguru import logger
 import torch
 import torch.distributed
 
 
+PROFILE_UPDATE_INDEX = 1  # Let one training call warm the kernels before capture.
+
+
 class Profiler:
-    """
-    A PyTorch profiler wrapper class for collecting performance metrics.
-    """
+    """Capture one forward micro-batch on the selected ranks."""
 
     def __init__(self, config):
-        """
-        config contains:
-        - enable: bool
-        - ranks: list[int]
-        - save_path: str
-        """
-        self.enable = config.enable
-        if not config.enable:
-            return
-        self.config = config
+        if not config.save_path:
+            raise ValueError("Profiler save_path is required when profiling is enabled")
         self.save_path = config.save_path
-        self.ranks = config.ranks
-        self.saved = False
-        self.prof = None
         self.rank = torch.distributed.get_rank()
-        if self.rank in self.ranks:
+        self.update_index = -1
+        self.captured = False
+        self.prof = None
+        if self.rank in config.ranks:
             logger.info(f"[Profiler] Profiler init for rank {self.rank}")
+            activities = [torch.profiler.ProfilerActivity.CPU]
+            if torch.cuda.is_available():
+                activities.append(torch.profiler.ProfilerActivity.CUDA)
+            self.prof = torch.profiler.profile(activities=activities, record_shapes=False, with_stack=False)
 
-            self.prof = torch.profiler.profile(
-                activities=[
-                    torch.profiler.ProfilerActivity.CPU,
-                    torch.profiler.ProfilerActivity.CUDA,
-                ],
-                schedule=torch.profiler.schedule(
-                    wait=0,
-                    warmup=0,
-                    active=1,
-                    repeat=1,
-                ),
-                record_shapes=True,
-                with_stack=True,
-            )
+    def begin_update(self) -> None:
+        self.update_index += 1
 
-    def check(self):
-        return self.prof is not None and self.enable
+    def for_mini_batch(self, index: int) -> "Profiler | None":
+        if self.prof is not None and self.update_index == PROFILE_UPDATE_INDEX and index == 0 and not self.captured:
+            return self
+        return None
 
-    def start(self):
-        if self.check():
-            logger.info(f"[Profiler] started for rank {self.rank}")
-            self.prof.start()
-
-    def step(self):
-        if self.check():
-            self.prof.step()
-
-    def stop(self):
-        if self.check():
-            logger.info(f"[Profiler] stopped for rank {self.rank}")
+    @contextmanager
+    def capture_forward(self) -> Iterator[None]:
+        if self.captured:
+            yield
+            return
+        assert self.prof is not None
+        logger.info(f"[Profiler] Capturing first forward micro-batch of update {self.update_index} on rank {self.rank}")
+        self.prof.start()
+        try:
+            yield
+        finally:
             self.prof.stop()
+            self.captured = True
 
     def save(self):
-        if self.prof is not None and not self.saved:
-            if not os.path.exists(self.save_path):
-                os.makedirs(self.save_path)
-            save_file_name = f"/prof_rank_{self.rank}.json"
-            logger.info(f"[Profiler] Saving trace to {self.save_path + save_file_name}")
-            self.prof.export_chrome_trace(self.save_path + save_file_name)
-            self.enable = False
-            self.saved = True
-
-    def stop_and_save(self):
-        if self.check():
-            self.stop()
-            self.save()
-
-    def stop_trace(self):
-        if self.check():
-            logger.info(f"[Profiler] Trace stopped for rank {self.rank}")
-            self.enable = False
+        if not self.captured or self.prof is None:
+            return
+        os.makedirs(self.save_path, exist_ok=True)
+        table_path = os.path.join(self.save_path, f"prof_rank_{self.rank}.txt")
+        sort_key = "self_cuda_time_total" if torch.cuda.is_available() else "self_cpu_time_total"
+        with open(table_path, "w", encoding="utf-8") as table_file:
+            table_file.write(self.prof.key_averages().table(sort_by=sort_key, row_limit=50))
+        logger.info(f"[Profiler] Saved operator table to {table_path}")
+        self.prof = None
 
 
 class CudaTimer:

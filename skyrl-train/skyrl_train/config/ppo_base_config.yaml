@@ -97,6 +97,7 @@ trainer:
     enable_numa_affinity: false
   strategy: megatron
   policy:
+    max_consecutive_nonfinite_steps: 3
     host_memory_monitor:
       enabled: true
       interval_seconds: 60
@@ -179,9 +180,7 @@ trainer:
       type: "fixed"
       kl_target: 0.1
       horizon: 10000
-    kl_estimator_type: "k3"
-    use_kl_estimator_k3: false
-    use_abs_kl: false
+    kl_estimator_type: "k3_unbiased_gradient"
     # ROLE-ACTIVATING: true requires a reference model and can add or share a physical reference bundle according
     # to placement settings. A wrapper must not treat this as a reward-only toggle.
     use_kl_in_reward: false
@@ -194,6 +193,8 @@ trainer:
     advantage_batch_normalize: false
     value_head_prefix: "value_head"
     policy_loss_type: "regular"
+    # FTPOConfig owns the defaults; set policy_loss_type=ftpo to activate.
+    ftpo: {}
     loss_reduction: "token_mean"
     grpo_norm_by_std: true
     rloo_n_filter_zero_reward_groups: true
@@ -202,8 +203,8 @@ trainer:
     eps_clip_low: 0.2
     eps_clip_high: 0.2
     clip_ratio_c: 3.0
-    tis_imp_ratio_cap: -1.0
-    use_tis: false
+    off_policy_correction: null
+    off_policy_correction_rules: null
     tito_full: null
     tis_splice: true
     tis_lcs_alert_threshold: 0.005
@@ -219,6 +220,7 @@ trainer:
       max_sample_batches: 30
       informative_on: shaped
       min_reward_std: 0.0
+      max_mean_reward: null
 
     group_admission:
       # Null uses a shared adaptive sync/async deadline: 30 minutes before timing exists,
@@ -235,25 +237,8 @@ trainer:
       ppo_kl_coef: 1.0
     
     cispo:
-      cispo_eps_clip_low: 0
+      cispo_eps_clip_low: 1.0
       cispo_eps_clip_high: 5
-
-    z_clip:
-      enabled: false
-      alpha: 0.97
-      z_thresh: 2.5
-      warmup_steps: 25
-      mode: "zscore"
-      clip_option: "adaptive_scaling"
-      clip_factor: 1.0
-      skip_update_on_spike: false
-
-    stale_clip:
-      enabled: false
-      alpha: 0.3
-      entropy_threshold: 0.15
-      entropy_window: 10
-      min_lr_scale: 0.1
 
   # Rollout workers generate prompt groups under leases from the rollout buffer; each step trains on
   # train_batch_size groups. At 0 staleness every group comes from the current policy (synchronous training).
@@ -307,6 +292,7 @@ trainer:
   reset_global_step_on_resume: false
   ckpt_path: "${oc.env:HOME}/ckpts/"
   max_ckpts_to_keep: -1
+  callbacks: null
   ckpt_interval: 5
   hf_save_interval: ${trainer.ckpt_interval}
   export_hf_artifact: false
@@ -320,7 +306,7 @@ trainer:
   policy_mini_batch_size: 256
   critic_mini_batch_size: 256
   micro_train_batch_size_per_gpu: 1
-  micro_forward_batch_size_per_gpu: 1
+  micro_forward_batch_size_per_gpu: ${trainer.micro_train_batch_size_per_gpu}
   update_ref_every_epoch: false
   use_sample_packing: true
   # Disaggregated only: keep the policy's optimizer state and gradient buffers on

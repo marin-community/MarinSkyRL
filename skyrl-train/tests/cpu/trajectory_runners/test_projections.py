@@ -1,3 +1,5 @@
+from skyrl_train.batch_sampling import filter_trajectory_batch
+from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
 from dataclasses import replace
 
 import numpy as np
@@ -165,3 +167,54 @@ def test_projection_derives_mask_baseline_and_token_credit_from_contracts():
     assert output["error_treatments"] == ["passthrough"]
     assert output["unshaped_rewards"] == [0.0]
     assert output["unshaped_reward_available"] == [False]
+
+
+def test_whole_trajectory_projection_carries_environment_rates_into_async_batch():
+    n10_hit = replace(_step([3], 1.0), env_metrics={"exact_n10": 1.0})
+    n10_miss = replace(
+        _step([4, 6], 0.4725),
+        verification=VerificationResult.verified(0.0, passed=False),
+        env_metrics={"exact_n10": 0.0},
+    )
+    n20_miss = replace(_step([5, 7, 8], 0.0), env_metrics={"exact_n20": 0.0})
+    projection = WholeTrajectoryProjection(_config(), _Tokenizer())
+    easy_batch = projection.project(
+        [n10_hit, n10_miss],
+        {"env_classes": ["cat_count", "cat_count"], "sampling_params": {"logprobs": True}},
+    )
+    hard_batch = projection.project(
+        [n20_miss],
+        {"env_classes": ["cat_count"], "sampling_params": {"logprobs": True}},
+    )
+
+    joined = concatenate_trajectory_batches([easy_batch, hard_batch], tis_lcs_alert_threshold=0.005)
+
+    assert joined["rollout_metrics"]["environment/exact_n10"] == 0.5
+    assert joined["rollout_metrics"]["environment/exact_n20"] == 0.0
+    assert joined["rollout_metrics"]["generate/avg_tokens_non_zero_rewards"] == 1.0
+    assert joined["rollout_metrics"]["generate/avg_tokens_zero_rewards"] == 2.5
+
+    filtered = filter_trajectory_batch(joined, [0, 1])
+    assert filtered["rollout_metrics"]["generate/avg_tokens_non_zero_rewards"] == 1.0
+    assert filtered["rollout_metrics"]["generate/avg_tokens_zero_rewards"] == 2.0
+    assert "environment/exact_n20" not in filtered["rollout_metrics"]
+
+    unverified = projection.project(
+        [
+            replace(
+                n20_miss,
+                reward=RewardResult(unshaped_reward=0.0, optimization_reward=0.7),
+                verification=VerificationResult.unavailable("judge unavailable"),
+            )
+        ],
+        {"env_classes": ["cat_count"], "sampling_params": {"logprobs": True}},
+    )
+    assert unverified["rollout_metrics"]["generate/avg_tokens_non_zero_rewards"] == 0.0
+    assert unverified["rollout_metrics"]["generate/avg_tokens_zero_rewards"] == 3.0
+    unverified.pop("verification_results")
+    mixed = concatenate_trajectory_batches([joined, unverified], tis_lcs_alert_threshold=0.005)
+    assert mixed["rollout_metrics"]["generate/avg_tokens_non_zero_rewards"] == 2.0
+    assert mixed["rollout_metrics"]["generate/avg_tokens_zero_rewards"] == 2.5
+    unverified_only = filter_trajectory_batch(mixed, [3])
+    assert unverified_only["rollout_metrics"]["generate/avg_tokens_non_zero_rewards"] == 3.0
+    assert unverified_only["rollout_metrics"]["generate/avg_tokens_zero_rewards"] == 0.0

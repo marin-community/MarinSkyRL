@@ -5,12 +5,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, fields
 import math
-from typing import Optional
 
 import torch
 from loguru import logger
 
-from skyrl_train.tensor_math import LOG_PROB_DELTA_CLIP, masked_mean, safe_exp_delta
+from skyrl_train.tensor_math import LOG_PROB_DELTA_CLIP
 
 # Absolute-position bucket width; the async RL dashboard reads pos_first256 and pos_last256 by name.
 POSITION_WINDOW = 256
@@ -32,7 +31,6 @@ MISMATCH_STALENESS_BUCKETS = (
     ("staleness8+", 8),
 )
 
-TIS_DIAG_KEYS = ("tis/imp_ratio_mean", "tis/imp_ratio_capped_fraction", "tis/log_ratio_abs_mean")
 LOG_RATIO_BASE_METRIC_KEYS = (
     "log_ratio_abs_mean",
     "log_ratio_abs_max",
@@ -331,41 +329,6 @@ def _failed_log_ratio_metrics() -> dict[str, float]:
     metrics = _log_ratio_diag_zero_metrics()
     metrics["log_ratio_diagnostics_failed"] = 1.0
     return metrics
-
-
-def compute_tis_diagnostics(
-    old_action_log_probs: torch.Tensor,
-    rollout_action_logprobs: Optional[torch.Tensor],
-    loss_mask: torch.Tensor,
-    cap: float,
-) -> dict:
-    """TIS importance-ratio diagnostics for a policy training micro-batch.
-
-    Mask-weighted means of the importance ratio exp(old_lp - rollout_lp) over
-    response tokens. At an on-policy step the ratio should be ~1.0; a large
-    deviation or a heavy capped fraction at `cap` (tis_imp_ratio_cap) signals
-    that the rollout logprobs are misaligned to the training tokens.
-
-    Always returns the full TIS_DIAG_KEYS set — including the fallback branch
-    when rollout logprobs are absent — so every rank contributes identical keys
-    to the per-key all_reduce(status) (mismatched keysets deadlock NCCL).
-    Callers gate on use_tis; this function does not read config.
-    """
-    if rollout_action_logprobs is None:
-        # Preserve identical rank keysets when the generator omits rollout logprobs.
-        values = (1.0, 0.0, 0.0)
-        return dict(zip(TIS_DIAG_KEYS, values, strict=True))
-    with torch.no_grad():
-        cap = float(cap)
-        delta = (old_action_log_probs - rollout_action_logprobs).float()
-        imp = safe_exp_delta(delta)
-        m = loss_mask.float()
-        values = (
-            masked_mean(imp, m).item(),  # imp_ratio_mean
-            masked_mean((imp > cap).float(), m).item(),  # imp_ratio_capped_fraction
-            masked_mean(delta.abs(), m).item(),  # log_ratio_abs_mean
-        )
-        return dict(zip(TIS_DIAG_KEYS, values, strict=True))
 
 
 def _log_ratio_diag_zero_metrics(n_position_buckets: int = 10) -> dict:

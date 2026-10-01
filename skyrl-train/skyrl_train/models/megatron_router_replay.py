@@ -64,26 +64,25 @@ def require_scalar_num_actions(num_actions) -> None:
 def dense_replay_targets(rollout_routed_experts, batch_size, seq_len, num_actions):
     """Build the dense per-position replay target and mask, layout-agnostic.
 
-    ``rollout_routed_experts`` is ``[B, response_len, L, K]`` on the response
-    axis. Each row describes the model position that predicted that response
-    token: the first row belongs on the final prompt token, and the last row
-    belongs immediately before the final response token. Returns ``(full, mask)``
-    where ``full`` is a ``[B, seq_len, L, K]`` long tensor sentinel-filled outside
-    those prediction positions. Prompt / pad / sentinel rows fall through to
-    native routing.
+    ``rollout_routed_experts`` is ``[B, local_response_len, L, K]``. It starts
+    at the beginning of the global ``num_actions`` response window. Each row
+    belongs on the model position that predicted that response token, beginning
+    with the final prompt token. Returns ``(full, mask)`` where ``full`` is a
+    ``[B, seq_len, L, K]`` long tensor. ``mask`` is True only for captured,
+    non-sentinel prediction positions. Other positions use native routing.
     """
     require_scalar_num_actions(num_actions)
     device = rollout_routed_experts.device
     captured = rollout_routed_experts.to(dtype=torch.long)
     B, response_len, L, K = captured.shape
     assert B == batch_size, f"router_replay batch mismatch: {B} vs {batch_size}"
-    assert response_len == num_actions, f"router_replay response_len {response_len} != num_actions {num_actions}"
-    if response_len >= seq_len:
+    assert response_len <= num_actions, f"router_replay response_len {response_len} exceeds num_actions {num_actions}"
+    if num_actions >= seq_len:
         raise ValueError("router_replay requires a prompt token before the response")
 
     full = torch.full((batch_size, seq_len, L, K), SENTINEL_EXPERT_ID, dtype=torch.long, device=device)
-    prediction_start = seq_len - response_len - 1
-    full[:, prediction_start : seq_len - 1, :, :] = captured
+    prediction_start = seq_len - num_actions - 1
+    full[:, prediction_start : prediction_start + response_len, :, :] = captured
 
     response_pos = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=device)
     response_pos[:, prediction_start : seq_len - 1] = True
@@ -438,5 +437,5 @@ def validate_replay_geometry(
         raise ValueError(
             f"router replay: rollout_routed_experts carries an expert id outside [0, num_experts={num_experts})"
         )
-    if response_len != num_actions:
-        raise ValueError(f"router replay: response_len={response_len} != num_actions={num_actions}")
+    if response_len > num_actions:
+        raise ValueError(f"router replay: response_len={response_len} exceeds num_actions={num_actions}")

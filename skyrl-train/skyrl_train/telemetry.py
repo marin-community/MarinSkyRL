@@ -11,6 +11,7 @@ import ray
 from loguru import logger
 
 from marinskyrl.environment_contract import TRAINING_TYPE_ENV, TrainingType
+from skyrl_train.metric_names import ENVIRONMENT_METRIC_PREFIX
 
 try:
     from rigging import telemetry
@@ -97,7 +98,7 @@ def record_training_metrics(metrics: Mapping[str, object], *, step: int, kind: s
                 "val/",
                 "eval/",
                 "env/",
-                "tis/",
+                ENVIRONMENT_METRIC_PREFIX,
             )
         ):
             continue

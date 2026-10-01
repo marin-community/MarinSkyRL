@@ -8,8 +8,8 @@ import json
 from typing import Any
 
 from skyrl_gym.envs.lcb.livecodebench import (
-    VerifierLimits,
     TestExecutionMode,
+    VerifierLimits,
     extract_code_from_model,
     lcb_execution_result,
     normalize_lcb_ground_truth,
@@ -34,23 +34,33 @@ def grade_code(
     timeout_seconds: int = DEFAULT_PER_TEST_TIMEOUT_SECONDS,
     reasoning_format_penalty: float = 0.0,
     limits: VerifierLimits | None = None,
+    verifyit_enabled: bool = False,
+    sandbox=None,
 ) -> tuple[float, dict[str, Any]]:
     """Grade the final fenced program with binary success across NVIDIA tests.
 
     ``limits`` bounds the verifier child; see ``VerifierLimits``.
     """
     code = extract_code_from_model(text)
-    if not code:
+    if not code and not verifyit_enabled:
         return 0.0, {"extracted_model_code": None, "result": "missing_code"}
     tests = json.loads(normalize_lcb_ground_truth(record["verifier_metadata"]["unit_tests"]))
-    results, execution = lcb_execution_result(
-        tests,
-        code,
-        timeout=timeout_seconds,
-        debug=False,
-        execution_mode=TestExecutionMode.stop_on_failure,
-        limits=limits,
-    )
+    if verifyit_enabled:
+        from skyrl_gym.envs.lcb.verifyit_execution import execute_code_verifyit
+
+        _, execution = execute_code_verifyit(tests, code or "", timeout=timeout_seconds, limits=limits, sandbox=sandbox)
+        if not code:
+            return 0.0, {"extracted_model_code": None, "result": "missing_code", "execution_output": execution}
+        results = execution["test_results"]
+    else:
+        results, execution = lcb_execution_result(
+            tests,
+            code,
+            timeout=timeout_seconds,
+            debug=False,
+            execution_mode=TestExecutionMode.stop_on_failure,
+            limits=limits,
+        )
     if execution.get("execution_error"):
         raise RuntimeError(f"Code verifier unavailable: {execution}")
     correct = all(result is True for result in results)

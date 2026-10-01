@@ -85,7 +85,7 @@ def grade_multichallenge(
                 {"role": "user", "content": prompt},
             ]
         )
-        verdict = final_verdict(output, {"[[YES]]", "[[NO]]"})[2:-2]
+        verdict = final_verdict(output, {"YES", "NO", "[[YES]]", "[[NO]]"}).removeprefix("[[").removesuffix("]]")
         expected = pass_criteria.upper()
         score = float(verdict == expected) if expected in {"YES", "NO"} else float(verdict == "YES")
         return {"question": item.get("question", ""), "verdict": verdict, "score": score, "judge_output": output}
