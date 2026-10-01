@@ -87,7 +87,8 @@ class _InferenceEndpoint:
     async def reset_prefix_cache(self):
         pass
 
-    async def begin_probe_step_log(self):
+    async def begin_probe_step_log(self, attention_layers=()):
+        self.attention_layers = list(attention_layers)
         for engine in self.engines:
             engine.steps = []
 
@@ -106,6 +107,13 @@ class _InferenceEndpoint:
             [{"placement": {"dp_rank": engine.dp_rank}, "steps": engine.steps, "kernels": [norm, xsa]}]
             for engine in self.engines
         ]
+        if self.attention_layers:
+            # Each worker answers for the layers it was asked for; only the serving engine ran a step.
+            for workers in logs:
+                workers[0]["capture"] = {"attention": {}, "lm_head": []}
+            logs[0][0]["capture"]["attention"] = {
+                layer: {"query": torch.full((2,), float(layer))} for layer in self.attention_layers
+            }
         for engine in self.engines:
             engine.steps = None
         return logs
@@ -159,6 +167,7 @@ class _PolicyEndpoint:
         self.dp_ranks_by_mode = {}
         self.steps_by_mode = {}
         self.kernels_by_mode = {}
+        self.captures_by_mode = {}
         self.timed_modes = []
         self.actor_infos = [
             SimpleNamespace(rank=MeshRank(dp=dp, sp=0, tp=0, pp=0, world_size=2, dp_size=2, pp_size=1))
@@ -180,6 +189,7 @@ class _PolicyEndpoint:
         tokens, rows = data.get("vllm_step_tokens"), data.get("vllm_step_rows")
         self.steps_by_mode[mode] = None if tokens is None else list(zip(tokens.tolist(), rows.tolist(), strict=True))
         self.kernels_by_mode[mode] = data.metadata["vllm_kernels"]
+        self.captures_by_mode.setdefault(mode, data.metadata.get("probe_capture"))
         self.prompt_routes_by_mode[data.metadata["probe_mode"]] = data["rollout_prompt_routed_experts"].clone()
         self.response_routes_by_mode[data.metadata["probe_mode"]] = data["rollout_routed_experts"].clone()
         probabilities = torch.log_softmax(torch.arange(32, dtype=torch.float32), dim=0)
@@ -336,6 +346,7 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
 
     cfg.trainer.mismatch_probe.archive_uri = str(tmp_path / "reused")
     cfg.trainer.mismatch_probe.score_after_updates = [0, 1, 2]
+    cfg.trainer.mismatch_probe.capture_layers = [1]
     trainer.total_training_steps = 9
     trainer.global_step = 7
     trainer.colocate_all = False
@@ -389,6 +400,18 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
         "gate_columns": [20],
     }
     assert all(kernels == chosen for kernels in trainer.policy_model.kernels_by_mode.values())
+    # The update-0 re-read keeps its first prefix's attention at the capture layers, from the engine that re-read it;
+    # the vllm_steps mode captures the same first sequence on the trainer.
+    captures = sorted(path.name for path in (tmp_path / "reused-engine-capture").iterdir())
+    assert captures == ["vllm.rescore@0.pt"]
+    engine_capture = torch.load(tmp_path / "reused-engine-capture" / "vllm.rescore@0.pt")
+    assert (engine_capture["sample_id"], engine_capture["prefix"]) == ("p0:0", [3, 4, 7, 9, 11])
+    assert engine_capture["attention"][1]["query"].tolist() == [1.0, 1.0]
+    assert trainer.policy_model.captures_by_mode[step_mode] == {
+        "uri": str(tmp_path / "reused-trainer-capture" / "update-0" / step_mode),
+        "layers": [1],
+    }
+    assert trainer.policy_model.captures_by_mode["router_replay"] is None
     rereads = {row.sample_id: row for row in chained_scores(cfg) if row.scorer == "vllm.rescore" and row.update == 0}
     agains = [row for row in chained_scores(cfg) if row.scorer == "vllm.rescore_again" and row.update == 0]
     assert len(rereads) == len(agains) == 3

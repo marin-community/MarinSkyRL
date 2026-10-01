@@ -19,6 +19,7 @@ from skyrl_train.inference_engines.inference_engine_client_http_endpoint import 
 from skyrl_train.inference_engines.chat_template import template_error_from_exception
 from transformers import PreTrainedTokenizerBase
 import asyncio
+from collections.abc import Sequence
 from typing import List, Any, Optional, Dict, Union, Hashable
 from skyrl_train.inference_engines.utils import (
     route_prompts_to_engines,
@@ -438,9 +439,9 @@ class InferenceEngineClient(InferenceEngineInterface):
         """Numerics provenance from every worker of every engine."""
         return await self._run_on_all_engines("probe_numerics_provenance")
 
-    async def begin_probe_step_log(self) -> None:
-        """Start recording the engine steps of every worker of every engine."""
-        await self._run_on_all_engines("begin_probe_step_log")
+    async def begin_probe_step_log(self, attention_layers: Sequence[int] = ()) -> None:
+        """Start recording the engine steps of every worker of every engine (``WorkerWrap.begin_probe_step_log``)."""
+        await self._run_on_all_engines("begin_probe_step_log", attention_layers)
 
     async def end_probe_step_log(self) -> List[List[Dict[str, Any]]]:
         """Each engine's workers' placements and engine steps since ``begin_probe_step_log``, in engine order."""

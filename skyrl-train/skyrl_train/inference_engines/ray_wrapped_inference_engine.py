@@ -394,8 +394,8 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def probe_numerics_provenance(self):
         return await self.inference_engine_actor.probe_numerics_provenance.remote()
 
-    async def begin_probe_step_log(self):
-        return await self.inference_engine_actor.begin_probe_step_log.remote()
+    async def begin_probe_step_log(self, attention_layers=()):
+        return await self.inference_engine_actor.begin_probe_step_log.remote(attention_layers)
 
     async def end_probe_step_log(self):
         return await self.inference_engine_actor.end_probe_step_log.remote()

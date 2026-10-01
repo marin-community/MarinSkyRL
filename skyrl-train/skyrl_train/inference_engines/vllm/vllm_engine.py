@@ -2,9 +2,11 @@ import hashlib
 import inspect
 import json
 import os
+import re
 from pathlib import Path
 import tempfile
 import threading
+from collections.abc import Sequence
 from typing import List, Any, Dict, Optional, Tuple, Iterator, AsyncGenerator
 from dataclasses import asdict, dataclass, field, fields as _dataclass_fields, replace
 from loguru import logger
@@ -200,15 +202,35 @@ def _kernel_record(autotuner) -> dict[str, Any]:
     }
 
 
+# A vLLM attention layer's name holds its decoder layer index: ``model.layers.3.self_attn.attn``.
+_LAYER_NAME = re.compile(r"\.layers\.(\d+)\.")
+
+
+def _attention_record(arguments: dict[str, Any]) -> dict[str, Any]:
+    """One FA3 call's real-token query, key, value and output (CPU copies) and the split count it was given."""
+    metadata = arguments["attn_metadata"]
+    tokens = metadata.num_actual_tokens
+    return {
+        **{name: arguments[name][:tokens].cpu() for name in ("query", "key", "value", "output")},
+        "max_num_splits": int(metadata.max_num_splits),
+        "scheduler_metadata": metadata.scheduler_metadata is not None,
+    }
+
+
 @dataclass
 class _StepLog:
-    """The engine steps one worker ran while a probe step log recorded (``WorkerWrap.begin_probe_step_log``), and the
-    Inductor kernels those steps launched outside CUDA graphs, by first launch."""
+    """The engine steps one worker ran while a probe step log recorded (``WorkerWrap.begin_probe_step_log``), the
+    Inductor kernels those steps launched outside CUDA graphs, by first launch, and, when asked for, the first step's
+    attention inputs and outputs at some decoder layers and its LM head inputs."""
 
     steps: list[dict[str, Any]]
     current: dict[str, Any] | None = None
     kernels: list[Any] = field(default_factory=list)
     kernel_index: dict[int, int] = field(default_factory=dict)
+    captured: dict[str, Any] | None = None
+    sampling: dict[str, Any] | None = None
+    attention: dict[int, dict[str, Any]] = field(default_factory=dict)
+    lm_head: list[dict[str, torch.Tensor]] = field(default_factory=list)
 
 
 def _scheduled_step(scheduler_output) -> dict[str, Any]:
@@ -392,6 +414,7 @@ class WorkerWrap:
     # ``CachingAutotuner.run`` while the recording wraps it.
     _probe_step_log: _StepLog | None = None
     _probe_kernel_run: Any = None
+    _probe_capture_undo: Any = None
 
     def set_numa_affinity(self):
         """Set CPU affinity to match this worker's GPU NUMA node.
@@ -1153,7 +1176,7 @@ class WorkerWrap:
             "inductor_output_code": output_code,
         }
 
-    def begin_probe_step_log(self) -> None:
+    def begin_probe_step_log(self, attention_layers: list[int] = ()) -> None:
         """Record each engine step this worker runs until ``end_probe_step_log``: its scheduled requests and rows, and
         the Inductor kernels it launches.
 
@@ -1161,6 +1184,8 @@ class WorkerWrap:
         that read the scheduler output and the step's execution descriptor and call the original methods unchanged.
         Inductor's ``CachingAutotuner.run`` is wrapped too: a step that runs outside CUDA graphs launches each of its
         compiled kernels through it, and the step records them in launch order (CUDA graph replays launch none).
+        With ``attention_layers`` the first step that schedules tokens also keeps its attention inputs and outputs at
+        those decoder layers and its LM head inputs (``_capture_first_step``).
         """
         from torch._inductor.runtime.triton_heuristics import CachingAutotuner
 
@@ -1212,6 +1237,72 @@ class WorkerWrap:
         runner.prepare_inputs = logged_prepare_inputs
         CachingAutotuner.run = logged_run
         self._probe_kernel_run = run
+        self._probe_capture_undo = (
+            self._capture_first_step(log, frozenset(attention_layers)) if attention_layers else None
+        )
+
+    def _capture_first_step(self, log: _StepLog, layers: frozenset[int]):
+        """Keep the first logged step's attention inputs and output at ``layers`` and its LM head inputs; return the
+        function that removes the wrappers.
+
+        The attention op runs outside vLLM's piecewise CUDA graphs, so wrapping ``FlashAttentionImpl.forward`` sees each
+        layer's query, key and value as the compiled pieces left them and the output FA3 wrote. Model runner V2 computes
+        logits in ``sample_tokens``, after ``execute_model``: the prompt log-probabilities' chunks, then the sampled
+        position. Each ``compute_logits`` call of the first step keeps its input rows and each row's maximum and
+        log-sum-exp of the logits.
+        """
+        from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
+
+        runner = self.model_runner
+        attention_forward, sample_tokens = FlashAttentionImpl.forward, runner.sample_tokens
+        compute_logits = runner.model.compute_logits
+        signature = inspect.signature(attention_forward)
+
+        def captured_step(step: dict[str, Any] | None) -> bool:
+            if step is None or step["dummy"]:
+                return False
+            if log.captured is None:
+                log.captured = step
+            return log.captured is step
+
+        def logged_attention(*args, **kwargs):
+            output = attention_forward(*args, **kwargs)
+            if captured_step(log.current):
+                arguments = signature.bind(*args, **kwargs).arguments
+                layer = int(_LAYER_NAME.search(arguments["layer"].layer_name).group(1))
+                if layer in layers:
+                    log.attention[layer] = _attention_record(arguments)
+            return output
+
+        def logged_sample_tokens(*args, **kwargs):
+            log.sampling = log.steps[-1] if log.steps else None
+            try:
+                return sample_tokens(*args, **kwargs)
+            finally:
+                log.sampling = None
+
+        def logged_compute_logits(hidden_states):
+            logits = compute_logits(hidden_states)
+            if log.sampling is not None and log.sampling is log.captured:
+                values = logits.float()
+                log.lm_head.append(
+                    {
+                        "hidden": hidden_states.cpu(),
+                        "max": values.max(dim=-1).values.cpu(),
+                        "logsumexp": values.logsumexp(dim=-1).cpu(),
+                    }
+                )
+            return logits
+
+        FlashAttentionImpl.forward = logged_attention
+        runner.sample_tokens = logged_sample_tokens
+        runner.model.compute_logits = logged_compute_logits
+
+        def undo() -> None:
+            FlashAttentionImpl.forward = attention_forward
+            del runner.sample_tokens, runner.model.compute_logits
+
+        return undo
 
     def end_probe_step_log(self) -> dict[str, Any]:
         """Stop the probe step log, restore the wrapped methods and return this worker's placement, its steps (each
@@ -1223,12 +1314,17 @@ class WorkerWrap:
             raise RuntimeError("no probe step log is recording on this worker")
         del self.model_runner.execute_model, self.model_runner.prepare_inputs
         CachingAutotuner.run = self._probe_kernel_run
-        self._probe_step_log = None
-        return {
+        record = {
             "placement": asdict(self._device_placement()),
             "steps": log.steps,
             "kernels": [_kernel_record(autotuner) for autotuner in log.kernels],
         }
+        if self._probe_capture_undo is not None:
+            self._probe_capture_undo()
+            record["capture"] = {"attention": log.attention, "lm_head": log.lm_head}
+        self._probe_step_log = None
+        self._probe_capture_undo = None
+        return record
 
     def _device_placement(self) -> InferenceWorkerPlacement:
         dp, pp = get_dp_group(), get_pp_group()
@@ -2063,9 +2159,9 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         """Numerics provenance from every worker of this engine; see ``WorkerWrap``."""
         return await self.llm.collective_rpc("probe_numerics_provenance")
 
-    async def begin_probe_step_log(self) -> None:
+    async def begin_probe_step_log(self, attention_layers: Sequence[int] = ()) -> None:
         """Start recording every engine step on each worker (``WorkerWrap.begin_probe_step_log``)."""
-        await self.llm.collective_rpc("begin_probe_step_log")
+        await self.llm.collective_rpc("begin_probe_step_log", args=(list(attention_layers),))
 
     async def end_probe_step_log(self) -> list[dict[str, Any]]:
         """Stop recording and return each worker's placement and engine steps."""

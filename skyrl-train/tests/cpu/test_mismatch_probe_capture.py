@@ -13,6 +13,27 @@ class _Scale(nn.Module):
         return hidden_states * self.factor
 
 
+class _CoreAttention(nn.Module):
+    def forward(self, query, key, value, attention_mask, attn_mask_type=None):
+        return query + key - value
+
+
+class _Attention(nn.Module):
+    """Attention whose core takes query x, key 3x and value x: the output is 3x."""
+
+    def __init__(self):
+        super().__init__()
+        self.core_attention = _CoreAttention()
+
+    def forward(self, hidden_states):
+        return self.core_attention(hidden_states, hidden_states * 3, hidden_states, None, attn_mask_type="causal")
+
+
+class _OutputLayer(nn.Module):
+    def forward(self, hidden_states):
+        return torch.cat((hidden_states, -hidden_states), dim=-1), None
+
+
 class _Router(nn.Module):
     def forward(self, hidden_states):
         return hidden_states.softmax(-1), hidden_states > 0
@@ -34,7 +55,7 @@ class _Layer(nn.Module):
         super().__init__()
         self.layer_number = layer_number
         self.input_layernorm = _Scale(2.0)
-        self.self_attention = _Scale(3.0)
+        self.self_attention = _Attention()
         self.pre_mlp_layernorm = _Scale(5.0)
         self.mlp = _MoE()
 
@@ -57,6 +78,8 @@ class _Wrapped(nn.Module):
         super().__init__()
         self.module = nn.Module()
         self.module.decoder = _Decoder()
+        self.module.post_process = True
+        self.module.output_layer = _OutputLayer()
 
 
 def test_capture_records_each_region_of_the_first_pass_through_the_listed_layer(tmp_path):
@@ -67,6 +90,7 @@ def test_capture_records_each_region_of_the_first_pass_through_the_listed_layer(
             hidden = batch
             for layer in model.module.decoder.layers:
                 hidden, _ = layer(hidden)
+            model.module.output_layer(hidden)
     regions = captured[1]
     # Each layer maps x to 7x after attention and to 7x + 52.5x = 59.5x after the MoE block.
     layer_input = first * 59.5
@@ -79,7 +103,19 @@ def test_capture_records_each_region_of_the_first_pass_through_the_listed_layer(
     assert torch.equal(regions["shared_expert"], layer_input * 17.5)
     assert torch.equal(regions["mlp"], layer_input * 52.5)
     assert torch.equal(regions["output"], layer_input * 59.5)
+    # The core attention's inputs and output, as FA3 takes and returns them.
+    attention_input = layer_input * 2
+    assert torch.equal(regions["attention_query"], attention_input)
+    assert torch.equal(regions["attention_key"], attention_input * 3)
+    assert torch.equal(regions["attention_value"], attention_input)
+    assert torch.equal(regions["attention_core"], attention_input * 3)
     assert 0 not in captured
+    # The LM head's input rows of the first pass, and each row's maximum and log-sum-exp of its logits.
+    final = first * 59.5 * 59.5
+    logits = torch.cat((final, -final), dim=-1)
+    assert torch.equal(captured["lm_head"]["hidden"], final)
+    assert torch.equal(captured["lm_head"]["max"], logits.max(dim=-1).values)
+    assert torch.equal(captured["lm_head"]["logsumexp"], logits.logsumexp(dim=-1))
 
     destination = str(tmp_path / "pp-0.pt")
     write_capture(destination, captured, {"sequences": torch.tensor([[3, 4]])})

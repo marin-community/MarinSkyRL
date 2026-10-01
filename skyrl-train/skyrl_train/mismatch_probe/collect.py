@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import json
 import math
 import os
@@ -641,7 +642,10 @@ class ProbeCollector:
             }
             label = rescore_label(update, cache_mode) + (":again" if scorer == RESCORE_AGAIN_SCORER else "")
             if cache_mode == CACHE_OFF:
-                output, steps = await self._serial_reread(trainer, prefixes, overrides, sampling_params, label)
+                # The update-0 re-read keeps its first prefix's attention and LM head inputs at the capture layers.
+                capture = scorer == RESCORE_SCORER and update == 0
+                layers = list(self.spec.get("capture_layers") or ()) if capture else []
+                output, steps = await self._serial_reread(trainer, prefixes, overrides, sampling_params, label, layers)
             else:
                 engine_input = {
                     "prompts": None,
@@ -709,16 +713,18 @@ class ProbeCollector:
                 )
         return result
 
-    async def _serial_reread(self, trainer, prefixes, overrides, sampling_params, label):
+    async def _serial_reread(self, trainer, prefixes, overrides, sampling_params, label, attention_layers):
         """Re-read each prefix alone on ``REREAD_ENGINE``, one request at a time, under a vLLM step log.
 
         Each prefix then runs whole in an engine step of its own, so its FA3 split counts and its GEMM row counts
-        follow from its length and the logged rows alone, and the trainer can reproduce them (``vllm_steps``).
+        follow from its length and the logged rows alone, and the trainer can reproduce them (``vllm_steps``). With
+        ``attention_layers`` the engine keeps the first prefix's attention inputs and outputs at those decoder layers and
+        its LM head inputs, written to ``<archive>-engine-capture/<label>.pt``.
         """
         client = trainer.inference_engine_client
         engine = client.engines[REREAD_ENGINE]
         outputs = []
-        await client.begin_probe_step_log()
+        await client.begin_probe_step_log(attention_layers)
         try:
             for prefix, override in zip(prefixes, overrides, strict=True):
                 request = {
@@ -731,6 +737,12 @@ class ProbeCollector:
                 outputs.append(await engine.generate(request))
         finally:
             logs = await client.end_probe_step_log()
+        captures = [worker.pop("capture", None) for workers in logs for worker in workers]
+        if attention_layers:
+            capture = captures[sum(len(workers) for workers in logs[:REREAD_ENGINE])]
+            payload = io.BytesIO()
+            torch.save({**capture, "sample_id": self.probes[0].sample_id, "prefix": prefixes[0]}, payload)
+            write_bytes_atomic(f"{self.archive_uri.rstrip('/')}-engine-capture/{label}.pt", payload.getvalue())
         self.reread_step_logs[label] = [[_compact_worker_log(worker) for worker in workers] for workers in logs]
         steps = reread_steps(logs, prefixes, REREAD_ENGINE)
         (worker,) = logs[REREAD_ENGINE]
@@ -954,7 +966,11 @@ class ProbeCollector:
             order = (
                 self.batch_layout.repeat_order if TRAINER_MODES[mode].repeat_layout else self.batch_layout.native_order
             )
-            if TRAINER_MODES[mode].captures_layers:
+            # Re-read replay scored as the logged steps computed each prefix also captures its first sequence, the
+            # prefix whose attention and LM head inputs the update-0 re-read engine kept.
+            if TRAINER_MODES[mode].captures_layers or (
+                TRAINER_MODES[mode].needs_step_plan and not TRAINER_MODES[mode].repeat_layout and update == 0
+            ):
                 data.metadata["probe_capture"] = {
                     "uri": f"{self.archive_uri.rstrip('/')}-trainer-capture/update-{update}/{mode}",
                     "layers": list(self.spec.get("capture_layers") or ()),

@@ -12,10 +12,14 @@ at every region boundary of the Grug decoder layer, in the router's sequence-maj
 - ``router_probs`` and ``router_map``: combine weights and selected experts;
 - ``shared_expert``: shared-expert output;
 - ``mlp``: MoE block output (routed plus shared);
-- ``output``: residual stream leaving the layer.
+- ``output``: residual stream leaving the layer;
+- ``attention_query``, ``attention_key``, ``attention_value`` and ``attention_core``: the core
+  attention's inputs and output (FA3's, under ``fa3_attention`` or ``vllm_steps``), which a vLLM
+  re-read's engine capture holds too.
 
-The file also holds the micro-batch token IDs and attention mask, so the harness can rebuild
-positions after left-padding removal.
+The last stage also records ``lm_head``: the output layer's input rows and each row's maximum and
+log-sum-exp of the logits. The file also holds the micro-batch token IDs and attention mask, so the
+harness can rebuild positions after left-padding removal.
 """
 
 from __future__ import annotations
@@ -34,12 +38,17 @@ def _first_tensor(value: Any) -> torch.Tensor:
     return value[0] if isinstance(value, (tuple, list)) else value
 
 
-def _grug_layers(actor_module, layer_numbers: set[int]):
+def _gpt_models(actor_module):
     for chunk in actor_module:
         # Unwrap DDP and Float16Module to the GPT model that owns the decoder.
         while hasattr(chunk, "module"):
             chunk = chunk.module
-        for layer in chunk.decoder.layers:
+        yield chunk
+
+
+def _grug_layers(actor_module, layer_numbers: set[int]):
+    for model in _gpt_models(actor_module):
+        for layer in model.decoder.layers:
             if layer.layer_number in layer_numbers:
                 yield layer
 
@@ -51,15 +60,15 @@ def capture_layer_regions(
     destination: str,
     *,
     enabled: bool,
-) -> Iterator[dict[int, dict[str, torch.Tensor]]]:
+) -> Iterator[dict[int | str, dict[str, torch.Tensor]]]:
     """Record region tensors of the first forward through each listed 0-based layer, then write them."""
-    captured: dict[int, dict[str, torch.Tensor]] = {}
+    captured: dict[int | str, dict[str, torch.Tensor]] = {}
     if not enabled or not layers:
         yield captured
         return
     handles = []
 
-    def store(layer_index: int, name: str, tensor: torch.Tensor) -> None:
+    def store(layer_index: int | str, name: str, tensor: torch.Tensor) -> None:
         regions = captured.setdefault(layer_index, {})
         if name not in regions:
             regions[name] = tensor.detach().to("cpu", copy=True)
@@ -84,6 +93,13 @@ def capture_layer_regions(
                 lambda m, a, out, index=index: store(index, "attention", _first_tensor(out))
             )
         )
+
+        def core_attention(module, args, kwargs, out, index=index):
+            for name, tensor in zip(("attention_query", "attention_key", "attention_value"), args[:3], strict=True):
+                store(index, name, tensor)
+            store(index, "attention_core", _first_tensor(out))
+
+        handles.append(layer.self_attention.core_attention.register_forward_hook(core_attention, with_kwargs=True))
         handles.append(
             layer.pre_mlp_layernorm.register_forward_pre_hook(
                 lambda m, args, index=index: store(index, "residual_after_attention", _first_tensor(args))
@@ -113,6 +129,17 @@ def capture_layer_regions(
                     lambda m, a, out, index=index: store(index, "shared_expert", _first_tensor(out))
                 )
             )
+    for model in _gpt_models(actor_module):
+        if not model.post_process:
+            continue
+
+        def lm_head(module, args, out):
+            logits = _first_tensor(out).detach().float()
+            store("lm_head", "hidden", _first_tensor(args))
+            store("lm_head", "max", logits.max(dim=-1).values)
+            store("lm_head", "logsumexp", logits.logsumexp(dim=-1))
+
+        handles.append(model.output_layer.register_forward_hook(lm_head))
     try:
         yield captured
     finally:
@@ -121,7 +148,7 @@ def capture_layer_regions(
 
 
 def write_capture(
-    destination: str, captured: Mapping[int, Mapping[str, torch.Tensor]], batch: Mapping[str, Any]
+    destination: str, captured: Mapping[int | str, Mapping[str, torch.Tensor]], batch: Mapping[str, Any]
 ) -> None:
     """Write one pipeline stage's captured regions with the micro-batch token layout."""
     payload = io.BytesIO()

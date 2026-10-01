@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from typing import List, Dict, TypedDict, Any, Optional, Hashable, NotRequired
 
 import numpy as np
@@ -197,8 +198,9 @@ class InferenceEngineInterface(ABC):
         """Per-worker parameter digest, versions and compiled output code, when supported."""
         raise NotImplementedError()
 
-    async def begin_probe_step_log(self) -> None:
-        """Start recording each worker's engine steps for a mismatch probe, when supported."""
+    async def begin_probe_step_log(self, attention_layers: Sequence[int] = ()) -> None:
+        """Start recording each worker's engine steps for a mismatch probe, when supported; with ``attention_layers``
+        also the first step's attention inputs and outputs at those decoder layers and its LM head inputs."""
         raise NotImplementedError()
 
     async def end_probe_step_log(self) -> List[Dict[str, Any]]:
