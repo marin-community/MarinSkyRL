@@ -98,8 +98,7 @@ from skyrl_train.config.trajectory_runner_capabilities import TrajectoryRunnerMo
 
 cfg = get_default_config()
 cfg.trainer.logger = "console"
-cfg.trainer.algorithm.use_tis = True
-cfg.trainer.algorithm.tis_imp_ratio_cap = 2.0
+cfg.trainer.algorithm.off_policy_correction = "tis"
 with pytest.raises(ValueError, match="mini-swe cannot supply exact sampled completion"):
     run_ray_driver(cfg, None, TrajectoryRunnerMode.MINI_SWE)
 """,

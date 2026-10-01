@@ -121,8 +121,8 @@ LAUNCH_CONFIG=/path/to/resolved-opencode-launch.yaml \
 
 The launch document is the complete Hydra YAML emitted by the Marin artifact. The script submits
 that document synchronously and gates its combined launcher and task log. Its log must contain one finite training
-step, eight correlated trials, at least 16 correlated turns, 100% exact TIS/full-TITO,
-and no fallback, decline, skipped batch, or failed trajectory. A failure before those
+step, eight correlated trials, at least 16 correlated turns, 100% exact behavior-logprob alignment with full token-in/token-out coverage,
+a finite positive correction weight no greater than 2, and no fallback, decline, skipped batch, or failed trajectory. A failure before those
 metrics should be triaged from the uploaded job log in this order: Iris allocation and
 runtime setup, Daytona snapshot/sandbox setup, OpenCode process errors, RecordProxy
 correlation, continuation declines, then policy forward/backward and weight sync.

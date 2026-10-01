@@ -505,7 +505,6 @@ def test_grpo_loop_credit_is_token_local_when_every_group_member_has_the_same_ou
                     "loss_reduction": loss_reduction,
                     "eps_clip_low": 0.2,
                     "eps_clip_high": 0.2,
-                    "use_tis": False,
                     "max_seq_len": response_length,
                 },
             }

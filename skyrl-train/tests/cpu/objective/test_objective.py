@@ -26,8 +26,6 @@ def test_composed_rows_match_full_batch_value_gradient_and_reporting(mode, micro
         dict(
             policy_loss_type="behavior_clip" if reward_mode == "replace" else "importance_sampling",
             loss_reduction=mode.value,
-            use_tis=False,
-            tis_imp_ratio_cap=2.0,
             use_kl_loss=True,
             kl_loss_coef=0.7,
             kl_estimator_type="k2",
@@ -42,6 +40,7 @@ def test_composed_rows_match_full_batch_value_gradient_and_reporting(mode, micro
     if reward_mode == "replace":
         mask = mask * teacher_mask
     weights = policy_data_weights(mask, tags, 0.25)
+    correction = torch.tensor([[0.5, 0, 0], [0, 2, 1.5], [0, 0, 0], [0.75, 1, 0]])
     route_weights = torch.tensor([[0.2, 0, 0], [0, 2, 0.5], [0, 0, 0], [1.5, 0, 0]])
     advantages = torch.tensor([[2, 99, 99], [-1, 0.5, 3], [99, 99, 99], [0, 2, 99]])
     log_probs = torch.where(mask.bool(), torch.full_like(mask, -0.8), torch.nan).requires_grad_()
@@ -59,7 +58,7 @@ def test_composed_rows_match_full_batch_value_gradient_and_reporting(mode, micro
     for i in range(4):
         for j in range(3):
             if mask[i, j]:
-                term = -(log_probs[i, j] - old[i, j]).exp() * advantages[i, j] * weights[i, j]
+                term = -(log_probs[i, j] - old[i, j]).exp() * advantages[i, j] * weights[i, j] * correction[i, j]
                 if mode == LossReduction.SEQUENCE_MEAN:
                     term = term / weights[i].sum()
                 expected["policy"] = expected["policy"] + term * (reward_mode == "add")
@@ -101,11 +100,12 @@ def test_composed_rows_match_full_batch_value_gradient_and_reporting(mode, micro
             advantages=advantages[chunk],
             loss_mask=mask[chunk],
             rollout_logprobs=None,
+            correction_weights=correction[chunk],
             response_span_tags=tags[chunk],
             token_entropy=entropy[chunk],
             think_token_weight=0.25,
             teacher=TopKTeacherBatch(
-                evidence, support[chunk], TopKLossParams(DistillationObjectiveKind.SPARSE_FORWARD_KL, 0.2, 0.2, 3)
+                evidence, support[chunk], TopKLossParams(DistillationObjectiveKind.SPARSE_FORWARD_KL, 0.2, 0.2, 3), 3
             ),
         )
         objective = compute_policy_objective(

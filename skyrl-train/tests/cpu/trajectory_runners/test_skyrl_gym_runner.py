@@ -2,6 +2,9 @@
 uv run --group dev --extra cpu --isolated pytest tests/cpu/trajectory_runners/test_skyrl_gym_runner.py
 """
 
+import torch
+from skyrl_train.config.objective_spec import load_correction
+from skyrl_train.objective.correction import compute_correction
 from concurrent.futures import Executor, Future
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -323,8 +326,7 @@ async def test_agent_loop_failure_closes_environment_before_masking(generator_cf
 def test_tis_config_does_not_select_a_generation_strategy():
     cfg = get_default_config()
     cfg.trainer.logger = "console"
-    cfg.trainer.algorithm.use_tis = True
-    cfg.trainer.algorithm.tis_imp_ratio_cap = 2.0
+    cfg.trainer.algorithm.off_policy_correction = "tis"
     cfg.generator.sampling_params.logprobs = None
 
     validate_cfg(cfg)
@@ -881,6 +883,14 @@ async def test_multi_turn_assembly_aligns_per_token_fields_across_observations(
         output["behavior_topk_logprobs"][0],
         [[-0.1, -2.0], [-0.2, -1.9]] + [[0.0, 0.0]] * gap + [[-0.3, -1.8], [-0.4, -1.7]],
     )
+    behavior = torch.from_numpy(np.stack(output["rollout_logprobs"]))
+    ratios = torch.tensor([[1.5, 4.0] + [torch.nan] * gap + [1.0, 0.5]])
+    correction = compute_correction(
+        behavior + ratios.log(), behavior, torch.tensor(output["loss_masks"]), load_correction("tis")
+    )
+    torch.testing.assert_close(correction.weights, torch.tensor([[1.5, 2.0] + [0.0] * gap + [1.0, 0.5]]))
+    assert correction.metrics["policy/correction/weight_mean"] == pytest.approx(1.25)
+    assert correction.metrics["policy/correction/truncated_fraction"] == pytest.approx(0.25)
     output["trajectory_ids"] = [TrajectoryID("tool-trajectory", 0)]
     work = build_teacher_scoring_work(
         output,

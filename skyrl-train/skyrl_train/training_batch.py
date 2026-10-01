@@ -356,6 +356,7 @@ class TrainingInput(TypedDict, total=False):
     kl: Float[torch.Tensor, "batch_size seq_len"]
     rewards: Optional[Float[torch.Tensor, "batch_size seq_len"]]
     rollout_logprobs: Optional[Float[torch.Tensor, "batch_size seq_len"]]
+    correction_weights: Optional[Float[torch.Tensor, "batch_size seq_len"]]
     # Policy versions this row is behind at consumption; one entry per row.
     rollout_staleness: Optional[Integer[torch.Tensor, "batch_size"]]  # noqa: F821
     teacher_action_log_probs: Optional[Float[torch.Tensor, "batch_size seq_len"]]
@@ -436,6 +437,7 @@ class TrainingBatchIterator(Iterator[Experience]):
             action_mask=batch["response_mask"],
             num_actions=batch.metadata["response_length"],
             rollout_logprobs=batch.get("rollout_logprobs"),
+            correction_weights=batch.get("correction_weights"),
             distillation=distillation_input_from_tensors(
                 teacher_action_log_probs=batch.get("teacher_action_log_probs"),
                 teacher_topk_indices=batch.get("teacher_topk_indices"),

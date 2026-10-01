@@ -19,6 +19,7 @@ import zstandard
 from omegaconf import OmegaConf
 from skyrl_train.evaluate import evaluation_dump_dir
 from examples.cat_count.cpu_canary import PROMPT, pretrain
+from skyrl_train.metric_names import CORRECTION_WEIGHT_MEAN_METRIC
 
 from tests.cpu.tiny_training.cat_count import FAST_STEPS, cat_count_config, run_cat_count
 from tests.cpu.tiny_training.cpu_backend import CPUInferenceEngine
@@ -247,9 +248,9 @@ def test_cat_count_cpu_learns_and_flipped_advantage_fails(tmp_path, cat_count_po
     assert all(final > initial for initial, final in zip(before, after, strict=True))
     assert sum(negative_after) <= sum(negative_before)
     assert (sum(after) - sum(negative_after)) / 2 >= 0.4
-    assert all(any(name.startswith("policy/tis/") for name in row) for row in training)
+    assert all(math.isfinite(row["policy/mismatch/pooled/log_ratio_abs_mean"]) for row in training)
     assert all(math.isfinite(row["policy/policy_loss"]) for row in training)
-    assert all(row["tis/skipped_fraction"] == 0 for row in training)
+    assert all(0 < row[CORRECTION_WEIGHT_MEAN_METRIC] <= 2 for row in training)
     assert any(row["policy/ppo_clip_ratio"] > 0 for row in training)
     assert all("environment/exact" in row for row in training)
     assert any("environment/exact_n20" in row for row in training)

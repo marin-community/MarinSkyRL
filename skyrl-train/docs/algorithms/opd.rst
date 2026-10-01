@@ -34,44 +34,12 @@ uses an unquantized local vLLM teacher. No quantized local-teacher configuration
 currently defined or production-gated. SGLang teacher scoring is rejected because it
 cannot provide the required prompt logprobs.
 
-Teacher objectives
-------------------
+Choosing the teacher objective
+------------------------------
 
-``trainer.algorithm.distillation.objective=sampled_reverse_kl`` uses chosen-token
-teacher scores to form detached policy advantages. At each valid training token,
-the teacher advantage is the teacher coefficient times the route weight times
-``teacher_logprob - old_policy_logprob``. The optional ``advantage_clip`` bounds
-that log-probability difference symmetrically before either weight is applied.
-Its default is ``null``. The driver consumes chosen-token evidence before sending
-the resulting advantages to the learner.
-
-With ``reward_mode=add``, teacher advantages follow environment-advantage
-normalization and loop credit. With ``reward_mode=replace``, only positions with
-valid teacher evidence are eligible for training, and teacher advantages supply
-the policy credit. REPLACE requires ``advantage_estimator=uniform``, an
-advantage-linear policy loss, no reward KL penalty, no advantage normalization,
-no loop credit and no dynamic sampling. Configured KL and entropy loss rows still
-train over the eligible positions.
-
-``policy_loss_type=importance_sampling`` applies the ratio of current to old
-policy probabilities to the teacher advantage without PPO clipping. Other
-advantage-linear policy losses apply their own clipping or weighting rules.
-The driver reports ``distillation/teacher_advantage_mean``,
-``distillation/teacher_advantage_abs_mean``,
-``distillation/teacher_advantage_clipped_fraction`` and
-``distillation/valid_tokens``.
-
-``sparse_forward_kl`` normalizes the teacher's retained top-K probabilities and
-compares them with the student's full-distribution probabilities on that support.
-``student_topk_policy_surrogate`` applies the clipped policy surrogate on the
-rollout policy's selected support. These objectives carry top-K evidence to the
-learner and form a separate teacher loss row. REPLACE sets their policy
-advantages to zero. Both require TP=1, CP=1, sequence parallelism=1 and sample
-packing disabled; ``advantage_clip`` applies only to chosen-token evidence.
-
-All objective rows use denominators counted over the complete optimizer window
-and data-parallel ranks. Route weights and the teacher coefficient weight the
-numerator. They do not change token or sequence counts.
+See :doc:`objective_guide` for teacher options, ADD and REPLACE setups,
+recipe selection and worked OPD/MOPD setups.
+:doc:`objective` describes how evidence becomes policy credit or a teacher term.
 
 Routing and residency
 ---------------------

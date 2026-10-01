@@ -17,6 +17,7 @@ from ray.actor import ActorHandle
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from marinskyrl.environment_contract import TrainingType
+from marinskyrl.distillation import DistillationObjectiveKind, compile_distillation_plan_from_config
 from skyrl_train.curriculum import CurriculumConfig, CurriculumOrder, SamplingKind
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.domain_sampling import DomainWeightedOrder
@@ -160,7 +161,9 @@ class TrainingContext:
         selection = GroupSelectionPolicy(
             DynamicSamplingType(dynamic_sampling.type) if dynamic_sampling.type is not None else None,
             criteria=resolve_dynamic_sampling_criteria(
-                dynamic_sampling.informative_on, float(dynamic_sampling.min_reward_std)
+                dynamic_sampling.informative_on,
+                float(dynamic_sampling.min_reward_std),
+                dynamic_sampling.max_mean_reward,
             ),
         )
         batch_size = config.trainer.train_batch_size
@@ -173,10 +176,16 @@ class TrainingContext:
             dynamic_sampling=selection.sampling_type,
             max_candidate_groups=max_sample_batches * batch_size if max_sample_batches > 0 else None,
         )
+        plan = compile_distillation_plan_from_config(config)
         admission = GroupAdmissionPolicy(
             GroupAdvantageInvariant.from_config(algorithm.resolved_group_advantage),
             rollout_logprobs_required=rollout_logprobs_required(
                 algorithm, loss_spec=PolicyLossRegistry.spec(algorithm.policy_loss_type)
+            ),
+            student_topk_width=(
+                plan.teachers[0].top_k
+                if plan is not None and plan.objective is DistillationObjectiveKind.STUDENT_TOPK_POLICY_SURROGATE
+                else None
             ),
         )
         object_store_root = config.trainer.rollout_buffer.object_store_root
