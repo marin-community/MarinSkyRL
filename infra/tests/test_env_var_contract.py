@@ -100,7 +100,7 @@ def test_typed_process_boundary_settings_project_only_to_workers():
                 "debug_mode": "off",
                 "collective_phase_diagnostics": False,
                 "placement": {"enable_numa_affinity": True},
-                "algorithm": {"batch_invariant": False},
+                "algorithm": {"numerics": "native"},
             },
             "generator": {"fuse_weights": True},
         }
@@ -137,7 +137,7 @@ def test_non_debug_worker_projection_does_not_require_an_artifact_directory():
             "trainer": {
                 "debug_mode": "off",
                 "placement": {"enable_numa_affinity": True},
-                "algorithm": {"batch_invariant": False},
+                "algorithm": {"numerics": "native"},
             },
             "generator": {"fuse_weights": False},
         }

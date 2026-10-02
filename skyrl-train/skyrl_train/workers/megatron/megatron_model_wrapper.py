@@ -11,11 +11,15 @@ from megatron.core.pipeline_parallel import get_forward_backward_func
 import megatron.core.parallel_state as mpu
 from megatron.core.distributed import finalize_model_grads
 
+from skyrl_train.config.numerics import Numerics
 from skyrl_train.distributed.megatron.model_utils import (
     from_parallel_logits_to_logprobs,
     from_parallel_logits_to_logprobs_packed_sequences,
+    vllm_prompt_logprobs,
     vocab_parallel_entropy,
 )
+from skyrl_train.models.grug_rounding import vllm_value
+from skyrl_train.models.grug_vllm_kernels import serving_engine_ranks
 from skyrl_train.distributed.megatron.megatron_utils import get_model_config
 from skyrl_train.ftpo import FTPOTargets, FTPOInputs, boundary_values, compact_boundary_logits, ftpo_counts
 from skyrl_train.distillation import TopKEvidence, student_topk_logprobs
@@ -106,6 +110,8 @@ class MegatronModelWrapper:
     # MoE router replay (R3); set as an instance attribute by the worker after
     # install. Class-level None keeps flag-off behavior for every wrapper.
     router_replay: Optional[MegatronRouterReplay] = None
+    # The model computes the bytes of a decode-invariant vLLM engine (Grug's vLLM numerics).
+    vllm_numerics: bool = False
 
     def __init__(
         self,
@@ -115,8 +121,10 @@ class MegatronModelWrapper:
         policy_loss_fn: Optional[Callable] = None,
         logprob_chunk_size: Any = _UNSET,
         vocabulary_size: int | None = None,
+        numerics: Numerics = Numerics.NATIVE,
     ):
         self.cfg = config
+        self.vllm_numerics = numerics is Numerics.EXACT
         self.vocabulary_size = vocabulary_size
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
@@ -164,6 +172,8 @@ class MegatronModelWrapper:
         if self.use_sample_packing:
             if packed_seq_params is None:
                 raise ValueError("Packed sequence parameters are required when sample packing is enabled.")
+            if self.vllm_numerics:
+                raise NotImplementedError("Grug's vLLM numerics support unpacked sequences only")
             packed_sequences = pack_padded_tokens(sequences, attention_mask, packed_seq_params)
             return from_parallel_logits_to_logprobs_packed_sequences(
                 logits,
@@ -179,16 +189,26 @@ class MegatronModelWrapper:
             )
 
         compact_sequences = compact_left_padded_tokens(sequences, attention_mask)
-        compact_logprobs = from_parallel_logits_to_logprobs(
-            logits,
-            compact_sequences,
-            vocab_start_index=tp_rank * logits.shape[-1],
-            vocab_end_index=(tp_rank + 1) * logits.shape[-1],
-            tp_group=tp_group,
-            inference_only=not self.actor_module[0].training,
-            cp_group=None,
-            chunk_size=self._logprob_chunk_size,
-        )
+
+        def trainer_logprobs() -> torch.Tensor:
+            return from_parallel_logits_to_logprobs(
+                logits,
+                compact_sequences,
+                vocab_start_index=tp_rank * logits.shape[-1],
+                vocab_end_index=(tp_rank + 1) * logits.shape[-1],
+                tp_group=tp_group,
+                inference_only=not self.actor_module[0].training,
+                cp_group=None,
+                chunk_size=self._logprob_chunk_size,
+            )
+
+        if self.vllm_numerics:
+            if mpu.get_tensor_model_parallel_world_size() != 1:
+                raise NotImplementedError("Grug's vLLM numerics need the unsharded vocabulary (TP 1)")
+            # vLLM's values, differentiated as the trainer's own log-probabilities.
+            compact_logprobs = vllm_value(vllm_prompt_logprobs(logits, compact_sequences), trainer_logprobs)
+        else:
+            compact_logprobs = trainer_logprobs()
         return scatter_token_values(compact_logprobs, attention_mask, drop_last=True)
 
     def _token_entropies(self, logits: torch.Tensor, attention_mask: torch.Tensor, packed_seq_params) -> torch.Tensor:
@@ -302,15 +322,27 @@ class MegatronModelWrapper:
         probe_row_indices: Optional[torch.Tensor] = None,
         num_actions: Optional[int] = None,
         record_recompute: bool = False,
+        rollout_engine_dp_ranks: Optional[torch.Tensor] = None,
     ):
         """Run the shared packed or left-unpadded Megatron model boundary.
 
         When router replay is installed and routes are present, brackets the
         model call with ``begin_forward`` / ``end_forward`` (never falling back
         to native routing); with replay installed but no routes, fails fast
-        before the model runs.
+        before the model runs. Under Grug's vLLM numerics the model call sees
+        each sequence's serving engine rank (``rollout_engine_dp_ranks``).
         """
         attention_mask = attention_mask.to(bool)
+        serving = nullcontext()
+        if self.vllm_numerics:
+            if rollout_engine_dp_ranks is None:
+                raise ValueError(
+                    "Grug's vLLM numerics need each sequence's serving engine rank (rollout_engine_dp_ranks)"
+                )
+            serving = serving_engine_ranks(
+                rollout_engine_dp_ranks.to(device=sequences.device, dtype=torch.long),
+                int(self.cfg.generator.inference_engine_expert_parallel_size),
+            )
         armed = False
         if self.router_replay is not None:
             if rollout_routed_experts is None:
@@ -349,13 +381,14 @@ class MegatronModelWrapper:
                 )
                 packed_seq_params = None
 
-            outputs = model(
-                model_sequences,
-                model_position_ids,
-                model_attention_mask,
-                packed_seq_params=packed_seq_params,
-                fp32_output=False,
-            )
+            with serving:
+                outputs = model(
+                    model_sequences,
+                    model_position_ids,
+                    model_attention_mask,
+                    packed_seq_params=packed_seq_params,
+                    fp32_output=False,
+                )
             if armed:
                 self.router_replay.end_forward()
         except BaseException:
@@ -415,6 +448,7 @@ class MegatronModelWrapper:
                 rollout_routed_experts=batch.rollout_routed_experts,
                 probe_row_indices=batch.probe_row_indices,
                 num_actions=batch.num_actions,
+                rollout_engine_dp_ranks=batch.rollout_engine_dp_ranks,
             )
 
             return outputs, partial(collection_func, data=batch, packed_seq_params=packed_seq_params)
@@ -630,6 +664,7 @@ class MegatronModelWrapper:
                     rollout_routed_experts=batch.rollout_routed_experts,
                     num_actions=batch.num_actions,
                     record_recompute=True,
+                    rollout_engine_dp_ranks=batch.rollout_engine_dp_ranks,
                 )
 
             return outputs, partial(loss_func, data=batch, packed_seq_params=packed_seq_params)
