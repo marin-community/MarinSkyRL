@@ -74,20 +74,19 @@ def compute_score(solution_str, ground_truth, method="strict", format_score=0.0,
             except InvalidOperation:
                 return 0
         return score if answer == ground_truth else format_score
-    from verifyit.grade import Status
-    from verifyit.adapters.skyrl import grade_gsm8k_final_line, grade_gsm8k_extracted
+    from verifyit.grade import InvalidTask, Status
+    from skyrl_gym.envs.math_verifyit import MathPolicy, grade_math_response
 
-    if method == "final_line":
-        verdict = grade_gsm8k_final_line(ground_truth, solution_str)
-        if verdict.status != Status.SCORED:
-            raise RuntimeError("GSM8K verification unavailable")
-        if verdict.detail.get("reason") == "missing_final_answer":
-            return 0
-        return score if verdict.reward == 1.0 else format_score
-    answer = extract_solution(solution_str=solution_str, method=method)
-    verdict = grade_gsm8k_extracted(ground_truth, answer or "")
-    if verdict.status != Status.SCORED:
-        raise RuntimeError("GSM8K verification unavailable")
-    if answer is None:
+    policy = {
+        "strict": MathPolicy.GSM_STRICT,
+        "flexible": MathPolicy.GSM_FLEXIBLE,
+        "final_line": MathPolicy.GSM_FINAL_LINE,
+    }.get(method, method)
+    verdict = grade_math_response(solution_str, ground_truth, policy=policy)
+    if verdict.status is Status.INVALID_TASK:
+        raise InvalidTask(verdict.detail["error"])
+    if verdict.status is not Status.SCORED:
+        raise RuntimeError(verdict.detail["error"])
+    if verdict.detail["prediction"] is None:
         return 0
     return score if verdict.reward else format_score

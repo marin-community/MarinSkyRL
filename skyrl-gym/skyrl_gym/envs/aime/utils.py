@@ -193,6 +193,27 @@ def rational_value(answer: str) -> Optional[Fraction]:
     return None
 
 
+def extract_minerva_answers(
+    solution_str: str,
+    gt: str,
+    gt_need_extract: bool = False,
+    answer_pattern: str = r"(?i)Answer\s*:\s*([^\n<]+)",
+) -> tuple[str, str]:
+    """Apply the source last-answer and normalization policy to both answers."""
+    # Extract answer from solution
+    match = re.findall(answer_pattern, solution_str)
+    extracted_answer = match[-1] if match else "[INVALID]"
+    pred = normalize_final_answer(extracted_answer)
+
+    # Process ground truth
+    if gt_need_extract:
+        gt = normalize_final_answer(remove_boxed(last_boxed_only_string(gt)))
+    else:
+        gt = normalize_final_answer(gt)
+
+    return gt, pred
+
+
 def is_correct_minerva(
     solution_str: str,
     gt: str,
@@ -215,16 +236,7 @@ def is_correct_minerva(
     NOTE(shu): parsing the answer before the last character "<"
     Later refactor this into the tokenizer
     """
-    # Extract answer from solution
-    match = re.findall(answer_pattern, solution_str)
-    extracted_answer = match[-1] if match else "[INVALID]"
-    pred = normalize_final_answer(extracted_answer)
-
-    # Process ground truth
-    if gt_need_extract:
-        gt = normalize_final_answer(remove_boxed(last_boxed_only_string(gt)))
-    else:
-        gt = normalize_final_answer(gt)
+    gt, pred = extract_minerva_answers(solution_str, gt, gt_need_extract, answer_pattern)
 
     if verifyit_enabled:
         from verifyit.adapters.skyrl import grade_aime_candidate
@@ -235,6 +247,22 @@ def is_correct_minerva(
     pred_value = rational_value(pred)
     gt_value = rational_value(gt)
     return pred_value is not None and pred_value == gt_value, pred
+
+
+def extract_strict_box(pred: str, pause_tokens_index: Optional[list[int]] = None) -> Optional[str]:
+    """Apply the source final-window and last-box extraction policy."""
+    # Extract the relevant part of the prediction
+    if pause_tokens_index is not None:
+        assert len(pause_tokens_index) == 4
+        pred = pred[pause_tokens_index[-1] - 100 :]
+    else:
+        pred = pred[-100:]
+
+    # Extract and check the boxed answer
+    boxed_pred = last_boxed_only_string(pred)
+    extracted_pred = remove_boxed(boxed_pred) if boxed_pred is not None else None
+
+    return extracted_pred
 
 
 def is_correct_strict_box(
@@ -250,16 +278,7 @@ def is_correct_strict_box(
     Returns:
         Tuple of (score, extracted_prediction)
     """
-    # Extract the relevant part of the prediction
-    if pause_tokens_index is not None:
-        assert len(pause_tokens_index) == 4
-        pred = pred[pause_tokens_index[-1] - 100 :]
-    else:
-        pred = pred[-100:]
-
-    # Extract and check the boxed answer
-    boxed_pred = last_boxed_only_string(pred)
-    extracted_pred = remove_boxed(boxed_pred) if boxed_pred is not None else None
+    extracted_pred = extract_strict_box(pred, pause_tokens_index)
 
     if verifyit_enabled:
         from verifyit.adapters.skyrl import grade_literal_candidate

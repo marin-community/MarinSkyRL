@@ -1757,7 +1757,7 @@ requires-dist = [
     { name = "reasoning-gym", specifier = "==0.1.25" },
     { name = "requests" },
     { name = "verifiable-instructions", git = "https://github.com/abukharin-nv/verifiable-instructions.git?rev=f46a5ac87b1400a4f8973039844b6be9b56e3faf" },
-    { name = "verifyit", extras = ["answer", "schema", "reasoning-gym", "judge"], git = "https://github.com/marin-community/verifyit?rev=b08a5ee8d94fcb4a2134562aee94ff9715dadd14" },
+    { name = "verifyit", extras = ["answer", "schema", "reasoning-gym", "judge"], git = "https://github.com/marin-community/verifyit?rev=232988d88eda32ef480685587f1bd0fdfc394dce" },
     { name = "xmltodict" },
 ]
 provides-extras = ["dev"]
@@ -1897,7 +1897,7 @@ dependencies = [
 [[package]]
 name = "verifyit"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/verifyit?rev=b08a5ee8d94fcb4a2134562aee94ff9715dadd14#b08a5ee8d94fcb4a2134562aee94ff9715dadd14" }
+source = { git = "https://github.com/marin-community/verifyit?rev=232988d88eda32ef480685587f1bd0fdfc394dce#232988d88eda32ef480685587f1bd0fdfc394dce" }
 dependencies = [
     { name = "harbor-config" },
     { name = "tomlkit" },

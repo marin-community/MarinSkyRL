@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import skyrl_gym
 import pytest
 from omegaconf import DictConfig
@@ -148,16 +150,11 @@ def test_enabled_aime_reports_invalid_task_before_candidate(reference, response)
     assert result["verification"].diagnostics["verifyit_status"] == "invalid_task"
 
 
-def test_enabled_aime_worker_failure_cannot_reuse_previous_credit(monkeypatch):
-    import verifyit.adapters.skyrl as core
-
+def test_enabled_aime_worker_failure_cannot_reuse_previous_credit():
     env = AIMEEnv(DictConfig({"verifyit_enabled": True}), extras={"reward_model": {"ground_truth": "42"}})
     assert env.step(r"Answer: \boxed{42}")["reward"] == 1.0
 
-    def failed_worker(*args, **kwargs):
-        raise TimeoutError("grading exceeded its deadline")
-
-    monkeypatch.setattr(core, "grade_aime_candidate", failed_worker)
+    env.verifier = replace(env.verifier, verifyit_timeout=0.000001)
     result = env.step(r"Answer: \boxed{42}")
     assert result["reward"] == -1.0
     assert result["verification"].status is VerificationStatus.ERROR

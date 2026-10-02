@@ -18,6 +18,7 @@ from verifyit.grade import Aggregation, InvalidTask, Reward, Status, aggregate_r
 from verifyit.modes.grade_exact import grade_exact_candidate
 from verifyit.modes.grade_json_schema import grade_json_schema_candidate
 from verifyit.spec import EmptyOutputPolicy, ExactSpec
+from verifyit.preparation.sqlite import prepare_sqlite_row_set
 
 from skyrl_gym.envs.text_to_sql import scoring as runtime
 
@@ -77,6 +78,8 @@ def structure_rows(result: tuple[int, list[tuple]]) -> SQLObservation:
 
 def prepare_rows(observation: SQLObservation, policy: SQLPolicy, ordered: bool) -> str:
     """Apply the selected source numeric, multiplicity and column-count policy."""
+    if policy is SQLPolicy.LEGACY:
+        return prepare_sqlite_row_set(observation.rows)
     encoded = []
     for row in observation.rows:
         values = []
@@ -91,8 +94,6 @@ def prepare_rows(observation: SQLObservation, policy: SQLPolicy, ordered: bool) 
             else:
                 values.append([type(value).__name__, value])
         encoded.append(json.dumps(values, ensure_ascii=False, separators=(",", ":")))
-    if policy is SQLPolicy.LEGACY:
-        encoded = list(set(encoded))
     if not ordered:
         encoded.sort()
     return json.dumps(

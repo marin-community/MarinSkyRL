@@ -3,6 +3,7 @@ from omegaconf import DictConfig
 
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput, verification_error_step
 from skyrl_gym.envs.gsm8k import utils
+from skyrl_gym.verification import RewardResult, VerificationResult
 
 
 class GSM8kMultiTurnEnv(BaseTextEnv):
@@ -17,6 +18,7 @@ class GSM8kMultiTurnEnv(BaseTextEnv):
 
         self.ground_truth: str = reward_spec["ground_truth"]
         self.verifyit_enabled = bool(env_config.get("verifyit_enabled", False))
+        self.verifyit_timeout = env_config.get("verifyit_timeout", 10.0)
         self.max_turns = 5
         if "max_turns" in extras:
             self.max_turns = int(extras["max_turns"])
@@ -48,34 +50,59 @@ class GSM8kMultiTurnEnv(BaseTextEnv):
     def step(self, action: str) -> BaseTextEnvStepOutput:
         self.turns += 1
 
-        # Per-turn reward: 1.0 if correct, 0.2/max_turns if well-formatted but incorrect, 0.0 otherwise.
+        verification = None
+        reward_result = None
         if self.verifyit_enabled:
-            from verifyit.grade import InvalidTask
+            try:
+                from verifyit.grade import Status
+                from skyrl_gym.envs.math_verifyit import MathPolicy, grade_math_response
 
-        error_types = (InvalidTask,) if self.verifyit_enabled else ()
-        try:
+                verdict = grade_math_response(
+                    action, self.ground_truth, policy=MathPolicy.GSM_STRICT, timeout=self.verifyit_timeout
+                )
+                if verdict.status is not Status.SCORED:
+                    return verification_error_step(
+                        verdict.detail.get("error", "Math verification failed"),
+                        minimum_reward=0.0,
+                        diagnostics=verdict.detail,
+                    )
+                verification = VerificationResult.verified(
+                    verdict.reward, passed=verdict.reward == 1.0, diagnostics=verdict.detail
+                )
+                # The source format bonus is an optimization reward, separate from correctness.
+                bonus = (
+                    self.format_score_per_turn
+                    if verdict.detail["prediction"] is not None and not verdict.reward
+                    else 0.0
+                )
+                reward = verdict.reward + bonus
+                reward_result = RewardResult(
+                    unshaped_reward=verdict.reward, optimization_reward=reward, components={"format": bonus}
+                )
+            except Exception as error:
+                return verification_error_step(
+                    str(error),
+                    minimum_reward=0.0,
+                    diagnostics={"verifyit_status": "infra_error", "error_type": type(error).__name__},
+                )
+        else:
             reward = utils.compute_score(
-                solution_str=action,
-                ground_truth=self.ground_truth,
-                method="strict",
-                format_score=self.format_score_per_turn,
-                score=1.0,
-                verifyit_enabled=self.verifyit_enabled,
-            )
-        except error_types as error:
-            return verification_error_step(
-                str(error), minimum_reward=0.0, diagnostics={"verifyit_status": "invalid_task"}
+                action, self.ground_truth, method="strict", format_score=self.format_score_per_turn, score=1.0
             )
         done = self.turns >= self.max_turns or reward == 1.0
 
         observations = [] if done else self._make_observation()
 
-        return BaseTextEnvStepOutput(
+        output = BaseTextEnvStepOutput(
             observations=observations,
             reward=reward,
             done=done,
             metadata={},
         )
+        if verification is not None:
+            output["verification"] = verification
+            output["reward_result"] = reward_result
+        return output
 
     def get_metrics(self) -> Dict[str, Any]:
         return {
