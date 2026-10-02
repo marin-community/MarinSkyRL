@@ -15,8 +15,7 @@ class SQLEnv(BaseTextEnv):
     """
 
     def __init__(self, env_config: DictConfig, extras: Dict[str, Any] = {}):
-        super().__init__()
-        self.verifyit_enabled = bool(env_config.get("verifyit_enabled", False))
+        super().__init__(env_config)
 
         # Initialize the environment
         assert "db_id" in extras, "db_id field is required"

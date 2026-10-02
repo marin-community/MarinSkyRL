@@ -17,13 +17,12 @@ class MCQEnv(BaseTextEnv):
     """
 
     def __init__(self, env_config: DictConfig, extras: dict[str, Any] | None = None):
-        super().__init__()
+        super().__init__(env_config)
         extras = extras or {}
         assert "reward_model" in extras, "reward_model field is required"
         assert "ground_truth" in extras["reward_model"], "ground_truth is required in reward_model field"
         self.raw_ground_truth = extras["reward_model"]["ground_truth"]
         self.ground_truth = str(self.raw_ground_truth).strip().upper()
-        self.verifyit_enabled = bool(env_config.get("verifyit_enabled", False))
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
         if self.verifyit_enabled:

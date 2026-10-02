@@ -98,3 +98,34 @@ finally:
         "reward": 0.0 if enabled else 1.0,
         "status": "error" if enabled else None,
     }
+
+
+@pytest.mark.parametrize("route", ["search", "searchcode"])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_shared_reward_boundary_retains_native_exceptions(route, enabled, monkeypatch):
+    truth = {"target": ["NYC"]} if route == "search" else "42"
+    env = make_search(route, enabled, truth)
+
+    def unavailable(*args):
+        raise RuntimeError("source scorer unavailable")
+
+    monkeypatch.setattr(env, "_get_reward", unavailable)
+    try:
+        if enabled:
+            result = env.step("<answer>NYC</answer>" if route == "search" else "<solution>#### 42</solution>")
+            assert result["reward"] == 0
+            assert result["verification"].status is VerificationStatus.ERROR
+            assert result["verification"].diagnostics["verifyit_status"] == "infrastructure_error"
+        else:
+            with pytest.raises(RuntimeError, match="source scorer unavailable"):
+                env.step("<answer>NYC</answer>" if route == "search" else "<solution>#### 42</solution>")
+    finally:
+        env.close()
+
+
+@pytest.mark.parametrize("config", [None, {"verifyit_enabled": True}])
+def test_nonparticipating_environment_keeps_native_step(config):
+    from skyrl_gym.envs.prompt_only.env import PromptOnlyEnv
+
+    env = PromptOnlyEnv(config)
+    assert env.step("arbitrary source action") == {"observations": [], "reward": 0.0, "done": True, "metadata": {}}

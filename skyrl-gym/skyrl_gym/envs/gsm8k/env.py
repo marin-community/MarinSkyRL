@@ -17,11 +17,10 @@ class GSM8kEnv(BaseTextEnv):
     """
 
     def __init__(self, env_config: DictConfig, extras: Dict[str, Any] = {}):
-        super().__init__()
+        super().__init__(env_config)
 
         self.ground_truth = ground_truth_from_extras(extras)
         self.reward_method = env_config.get("reward_method", "strict")
-        self.verifyit_enabled = bool(env_config.get("verifyit_enabled", False))
         self.verifyit_timeout = env_config.get("verifyit_timeout", 10.0)
         self.stop_reason = None
         self.structured_chat = env_config.get("structured_chat", False)

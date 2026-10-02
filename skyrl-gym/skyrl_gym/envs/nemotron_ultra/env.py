@@ -79,8 +79,7 @@ class NemotronUltraEnv(BaseTextEnv):
     """Select the NVIDIA-compatible verifier declared by each dataset row."""
 
     def __init__(self, env_config: DictConfig, extras: dict[str, Any] | None = None):
-        super().__init__()
-        self.verifyit_enabled = bool(env_config.get("verifyit_enabled", False))
+        super().__init__(env_config)
         self.tool_comparison_policy = env_config.get(
             "verifyit_tool_comparison_policy", "nemotron_strict_typed_arguments_v1"
         )

@@ -12,12 +12,11 @@ class GSM8kMultiTurnEnv(BaseTextEnv):
     """
 
     def __init__(self, env_config: DictConfig, extras: Dict[str, Any] = {}):
-        super().__init__()
+        super().__init__(env_config)
         reward_spec = extras.get("reward_spec", {})
         assert "ground_truth" in reward_spec, "reward_spec.ground_truth is required"
 
         self.ground_truth: str = reward_spec["ground_truth"]
-        self.verifyit_enabled = bool(env_config.get("verifyit_enabled", False))
         self.verifyit_timeout = env_config.get("verifyit_timeout", 10.0)
         self.max_turns = 5
         if "max_turns" in extras:

@@ -18,7 +18,7 @@ class AIMEEnv(BaseTextEnv):
     """
 
     def __init__(self, env_config: DictConfig, extras: Dict[str, Any] = {}):
-        super().__init__()
+        super().__init__(env_config)
 
         assert "reward_model" in extras, "reward_model field is required"
         assert "ground_truth" in extras["reward_model"], "ground_truth is required in reward_model field"
@@ -30,7 +30,7 @@ class AIMEEnv(BaseTextEnv):
             ground_truth=self.ground_truth,
             evaluation_token_budget=int(env_config.get("evaluation_token_budget", 8192)),
             strict_box_verify=bool(env_config.get("strict_box_verify", False)),
-            verifyit_enabled=bool(env_config.get("verifyit_enabled", False)),
+            verifyit_enabled=self.verifyit_enabled,
             verifyit_timeout=env_config.get("verifyit_timeout", 10.0),
         )
         self.reward_policy = AIMERewardPolicy(

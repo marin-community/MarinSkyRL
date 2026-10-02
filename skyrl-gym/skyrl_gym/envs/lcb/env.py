@@ -29,10 +29,9 @@ class LCBEnv(BaseTextEnv):
         env_config: DictConfig,
         extras: dict[str, Any] | None = None,
     ):
-        super().__init__()
+        super().__init__(env_config)
         self.sandbox_config = env_config.get("sandbox", {})
         self.code_verifier_config = env_config.get("code_verifier", {})
-        self.verifyit_enabled = bool(env_config.get("verifyit_enabled", False))
         self.reward_mode = str(env_config.get("reward_mode", BINARY_REWARD_MODE))
         if self.reward_mode not in LCB_REWARD_MODES:
             raise ValueError(f"Unsupported LCB reward_mode: {self.reward_mode!r}.")

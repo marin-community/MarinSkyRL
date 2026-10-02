@@ -24,8 +24,7 @@ class TextToSQLEnv(BaseTextEnv):
     """Result-set-equivalence text-to-SQL verifier. One step, then done."""
 
     def __init__(self, env_config: DictConfig, extras: dict[str, Any] | None = None):
-        super().__init__()
-        self.verifyit_enabled = bool(env_config.get("verifyit_enabled", False))
+        super().__init__(env_config)
         reward_model = (extras or {}).get("reward_model")
         ground_truth = reward_model.get("ground_truth") if isinstance(reward_model, Mapping) else None
         self._ground_truth = ground_truth if self.verifyit_enabled or isinstance(ground_truth, str) else None
