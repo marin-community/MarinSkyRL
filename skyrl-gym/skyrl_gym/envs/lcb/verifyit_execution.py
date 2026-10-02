@@ -456,7 +456,7 @@ def _execute_code_verifyit(
     reasoning_format_penalty: float = 0.0,
     started: float,
 ):
-    from verifyit.bounded import call_bounded
+    from verifyit.execution.worker import call_bounded
     from verifyit.grade import InvalidTask
 
     from skyrl_gym.envs.lcb.livecodebench import DEFAULT_LIMITS, verifier_slots

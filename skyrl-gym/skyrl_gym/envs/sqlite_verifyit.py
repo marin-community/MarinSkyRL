@@ -13,7 +13,7 @@ from fractions import Fraction
 from pathlib import Path
 
 from harbor_config.errors import error_category
-from verifyit.bounded import call_bounded
+from verifyit.execution.worker import call_bounded
 from verifyit.grade import Aggregation, InvalidTask, Reward, Status, aggregate_rewards, finalize_preparation_failure
 from verifyit.modes.grade_exact import grade_exact_candidate
 from verifyit.modes.grade_json_schema import grade_json_schema_candidate

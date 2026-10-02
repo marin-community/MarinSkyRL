@@ -139,7 +139,7 @@ def _calendar(response: str, expected: dict):
 
 
 def grade_calendar_verifyit(response: str, expected: dict) -> tuple[float, str]:
-    from verifyit.bounded import call_bounded
+    from verifyit.execution.worker import call_bounded
 
     try:
         verdict = call_bounded(_calendar, response, expected, timeout=5)

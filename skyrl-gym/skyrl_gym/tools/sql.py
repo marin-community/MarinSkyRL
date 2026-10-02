@@ -61,7 +61,7 @@ class SQLCodeExecutorToolGroup(ToolGroup):
         else:
             db_file = os.path.join(self.db_path, db_id, db_id + ".sqlite")
             if self.verifyit_enabled:
-                from verifyit.bounded import call_bounded
+                from verifyit.execution.worker import call_bounded
 
                 obs = call_bounded(execute_bounded_sql_tool, db_file, sql, timeout=timeout)
             else:

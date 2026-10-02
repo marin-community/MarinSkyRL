@@ -134,9 +134,9 @@ def test_failed_runtime_does_not_commit_partially_consumed_rng():
 
 @pytest.mark.parametrize("missing_or_inconsistent", ["source_feedback", "num_passed", "num_total"])
 def test_malformed_scored_child_result_does_not_commit_rng(monkeypatch, missing_or_inconsistent):
-    import verifyit.bounded
+    import verifyit.execution.worker
 
-    real_call_bounded = verifyit.bounded.call_bounded
+    real_call_bounded = verifyit.execution.worker.call_bounded
 
     def missing_feedback(*args, **kwargs):
         verdict = real_call_bounded(*args, **kwargs)
@@ -150,7 +150,7 @@ def test_malformed_scored_child_result_does_not_commit_rng(monkeypatch, missing_
             detail["source_feedback"] = feedback
         return {**verdict, "detail": detail}
 
-    monkeypatch.setattr(verifyit.bounded, "call_bounded", missing_feedback)
+    monkeypatch.setattr(verifyit.execution.worker, "call_bounded", missing_feedback)
     before = random.getstate()
     score, feedback = grade_nemotron_instructions(
         "unrelated candidate",

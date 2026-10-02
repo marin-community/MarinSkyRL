@@ -108,7 +108,7 @@ def grade_format_verifyit(text: str, verifier: dict[str, Any], timeout: float = 
     import math
 
     try:
-        from verifyit.bounded import call_bounded
+        from verifyit.execution.worker import call_bounded
 
         if (
             isinstance(timeout, bool)
