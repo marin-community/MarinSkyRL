@@ -736,9 +736,6 @@ def validate_generator_cfg(cfg: DictConfig):
             "Please set `inference_engine_tensor_parallel_size` to 1."
         )
 
-    if cfg.generator.backend == "sglang" and not cfg.generator.use_conversation_multi_turn:
-        raise NotImplementedError("`use_conversation_multi_turn=False` is not supported for SGLang backend")
-
     validate_generation_logprobs(cfg)
 
     validate_megatron_cfg(cfg)
@@ -756,16 +753,6 @@ def validate_generator_cfg(cfg: DictConfig):
                 "supported for SGLang backend since we always set `skip_tokenizer_init` to True. "
                 "If you have to use these parameters, you can switch to vLLM. "
                 "See this issue for more: https://github.com/sgl-project/sglang/issues/9039#issuecomment-3218331087"
-            )
-
-    if cfg.generator.use_conversation_multi_turn:
-        if (
-            cfg.generator.sampling_params.stop is not None or cfg.generator.eval_sampling_params.stop is not None
-        ) and not cfg.generator.append_eos_token_after_stop_str_in_multi_turn:
-            logger.warning(
-                "WARNING: `sampling_params.stop` and `eval_sampling_params.stop` are specified and we "
-                "are using multi-turn generation. You might want to set `append_eos_token_after_stop_str_in_multi_turn` "
-                "to `True` to append tokenizer.eos_token_id to the assistant-generated response to match the chat template."
             )
 
     if cfg.generator.enable_http_endpoint:

@@ -49,7 +49,6 @@ uv run --isolated --extra megatron --extra vllm -m skyrl_train.entrypoints.main_
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
   environment.env_class=text2sql \
-  generator.use_conversation_multi_turn=true \
   generator.n_samples_per_prompt=5 \
   generator.gpu_memory_utilization=0.7 \
   generator.max_turns=$MAX_TURNS \

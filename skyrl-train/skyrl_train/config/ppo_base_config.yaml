@@ -447,10 +447,6 @@ generator:
     logprobs: null
     stop: null
 
-  use_conversation_multi_turn: true
-
-  append_eos_token_after_stop_str_in_multi_turn: true
-
   eval_sampling_params:
     max_generate_length: ${generator.sampling_params.max_generate_length}
     repetition_penalty: 1.0

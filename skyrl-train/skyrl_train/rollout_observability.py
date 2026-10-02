@@ -183,11 +183,6 @@ def rollout_wait(name: str) -> Iterator[None]:
         observation.add_wait(name, observation.phases.clock() - started)
 
 
-def time_tokenization(func: Callable, *args, **kwargs):
-    with rollout_phase("tokenize"):
-        return func(*args, **kwargs)
-
-
 @contextlib.contextmanager
 def dispatch_wait(name: str, *, step: int, mode: str, enabled: bool) -> Iterator[None]:
     """Measure an await of the rollout dispatch loop outside the rollout call."""

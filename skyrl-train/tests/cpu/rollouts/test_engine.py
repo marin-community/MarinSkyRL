@@ -1756,7 +1756,7 @@ async def test_task_group_grader_preserves_separate_samples_and_private_inputs(t
     "environment,extras,responses,rewards",
     [
         ("cat_count", {"extra_info": {"n": 2}}, ["cat cat"], [0.0, 1.0]),
-        ("gsm8k", {"reward_spec": {"ground_truth": "12"}}, ["#### 12"], [0.0, 1.0]),
+        ("gsm8k", {"extra_info": None, "reward_spec": {"ground_truth": "12"}}, ["#### 12"], [0.0, 1.0]),
         ("gsm8k", {"reward_spec": {"ground_truth": "12"}}, ["#### 13"], [0.0, 0.0]),
         ("mcq", {"reward_model": {"ground_truth": "B"}}, [r"\boxed{B}"], [0.0, 1.0]),
         (
