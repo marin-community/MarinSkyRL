@@ -358,6 +358,95 @@ def test_pause_generation_vllm_engine(ray_init_fixture):
 
 
 @pytest.mark.vllm
+@pytest.mark.parametrize("pause_mode", ["keep", "abort"])
+def test_policy_step_stamps_split_responses_at_the_weight_sync_pause(ray_init_fixture, pause_mode):
+    """Tokens sampled before a pause carry the step installed at the earlier resume; later tokens carry the next one.
+
+    Under ``keep`` a request stays resident across the pause and vLLM's own output count at the pause is the exact
+    split. Under ``abort`` the client joins two attempts, and an attempt returned by the pause itself carries only
+    the earlier step.
+    """
+    cfg = get_test_actor_config(num_inference_engines=1, model=MODEL)
+    cfg.generator.weight_sync_pause.mode = pause_mode
+    cfg.trainer.placement.colocate_all = True
+    cfg.generator.weight_sync_backend = "nccl"
+    cfg.trainer.strategy = "megatron"
+    sampling_params = {"max_tokens": 2048, "stop": None, "stop_token_ids": None, "ignore_eos": True, "temperature": 0.0}
+    client, _ = init_inference_engines(
+        cfg=cfg,
+        use_local=True,
+        tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+        colocate_all=True,
+        backend="vllm",
+        model=MODEL,
+        num_inference_engines=1,
+        sleep_level=1,
+        max_num_seqs=4,
+    )
+    engine = client.engines[0]
+    messages: List[ConversationType] = get_test_prompts(MODEL, num_samples=1)[0]
+    chat_body = {"model": MODEL, "messages": messages, "return_token_ids": True, **sampling_params}
+
+    async def run():
+        await client.pause_generation()
+        await client.resume_generation(policy_step=1)
+        chat = asyncio.create_task(client.chat_completion({"json": dict(chat_body), "headers": {}}))
+        tokens = asyncio.create_task(
+            client.generate(
+                {
+                    "prompts": [messages],
+                    "prompt_token_ids": None,
+                    "sampling_params": dict(sampling_params),
+                    "session_ids": [0],
+                }
+            )
+        )
+        direct = asyncio.create_task(engine.chat_completion({"json": dict(chat_body), "headers": {}}))
+        await asyncio.sleep(1)
+        await client.pause_generation()
+        # vLLM's own output count per resident request, keyed by the id the caller passed, read inside the actor.
+        output_tokens = ray.get(
+            engine.inference_engine_actor.__ray_call__.remote(
+                lambda actor: {
+                    state.external_req_id: state.detokenizer.num_output_tokens()
+                    for state in actor.llm.output_processor.request_states.values()
+                }
+            )
+        )
+        await client.resume_generation(policy_step=2)
+        return await chat, await tokens, await direct, output_tokens
+
+    chat_response, token_output, direct_response, output_tokens_at_pause = asyncio.run(run())
+
+    chat_choice = chat_response["choices"][0]
+    stamped = {
+        "chat": (chat_choice["token_ids"], chat_choice["policy_steps"]),
+        "tokens": (token_output["response_ids"][0], token_output["response_policy_steps"][0].tolist()),
+    }
+    for token_ids, steps in stamped.values():
+        assert len(token_ids) == len(steps) == sampling_params["max_tokens"]
+        assert steps == sorted(steps) and set(steps) == {1, 2}
+    direct_choice = direct_response["choices"][0]
+    if pause_mode == "keep":
+        assert len(output_tokens_at_pause) == 3
+        assert stamped["chat"][1].index(2) == output_tokens_at_pause[chat_response["id"]]
+        assert direct_choice["policy_steps"].index(2) == output_tokens_at_pause[direct_response["id"]]
+        (token_split,) = (
+            count
+            for request_id, count in output_tokens_at_pause.items()
+            if request_id not in (chat_response["id"], direct_response["id"])
+        )
+        assert stamped["tokens"][1].index(2) == token_split
+    else:
+        # The pause emptied the engine, and the attempt it aborted carries the earlier step on every token.
+        assert output_tokens_at_pause == {}
+        assert direct_choice["finish_reason"] == "abort"
+        assert 0 < direct_response["usage"]["completion_tokens"] < sampling_params["max_tokens"]
+        assert direct_choice["policy_steps"] == [1] * direct_response["usage"]["completion_tokens"]
+        assert len(direct_choice["token_ids"]) == direct_response["usage"]["completion_tokens"]
+
+
+@pytest.mark.vllm
 def test_weight_sync_with_inflight_decodes_keeps_engine_alive(ray_init_fixture):
     """Regression for EngineCore decoding against meta tensors during a weight reload."""
     cfg = get_test_actor_config(num_inference_engines=1, model=MODEL)

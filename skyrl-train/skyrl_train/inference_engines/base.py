@@ -62,6 +62,7 @@ class InferenceEngineOutput(TypedDict):
     prompt_ids: NotRequired[List[List[int]]]
     assistant_messages: NotRequired[List[Dict[str, Any]]]
     routed_experts: NotRequired[List[np.ndarray | None]]
+    response_policy_steps: NotRequired[List[np.ndarray]]
 
 
 class NamedWeightsUpdateRequest(TypedDict):
@@ -181,8 +182,8 @@ class InferenceEngineInterface(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    async def resume_generation(self) -> None:
-        """Resume the scheduler after a weight update."""
+    async def resume_generation(self, policy_step: int | None = None) -> None:
+        """Resume the scheduler after a weight update; ``policy_step`` stamps the tokens the new weights sample."""
         raise NotImplementedError()
 
     async def begin_online_eagle_capture(self, config: Dict[str, Any]) -> OnlineEagleResult:

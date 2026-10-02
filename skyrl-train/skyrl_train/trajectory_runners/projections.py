@@ -7,6 +7,7 @@ import numpy as np
 from omegaconf import DictConfig
 
 from skyrl_train.distillation import INVALID_TOPK_INDEX
+from skyrl_train.inference_engines.vllm.policy_steps import UNSAMPLED_POLICY_STEP
 from skyrl_train.metric_names import TOKEN_PROVENANCE_RECONSTRUCTED_FRACTION_METRIC
 from skyrl_gym.verification import RewardResult, TrainingDisposition
 from skyrl_train.trajectory_runners.types import (
@@ -77,6 +78,7 @@ class WholeTrajectoryProjection:
         )
         attach_student_topk(batch, outputs, responses, loss_masks)
         attach_routed_experts(batch, outputs, responses)
+        attach_policy_steps(batch, outputs, responses)
         attach_terminal_classifications(batch, outputs)
         attach_server_errors(batch, outputs)
         _attach_reward_channels(batch, outputs, responses)
@@ -143,6 +145,7 @@ class StepWiseTrajectoryProjection:
         )
         attach_student_topk(batch, steps, responses, loss_masks)
         attach_routed_experts(batch, steps, responses)
+        attach_policy_steps(batch, steps, responses)
         attach_terminal_classifications(batch, steps)
         attach_server_errors(batch, steps)
         _attach_reward_channels(batch, steps, responses)
@@ -198,6 +201,19 @@ def attach_routed_experts(
             raise ValueError("routed_experts must align with response token IDs")
         projected.append(np.zeros((len(response), *shape), dtype=dtype) if routes is None else routes)
     batch["rollout_routed_experts"] = projected
+
+
+def attach_policy_steps(
+    batch: TrajectoryBatch, outputs: Sequence[AgentLoopOutput], responses: Sequence[Sequence[int]]
+) -> None:
+    """Project per-token policy steps, filling rows without stamps with the unsampled step."""
+    captured = [output.evidence.policy_steps for output in outputs]
+    if all(steps is None for steps in captured):
+        return
+    batch["rollout_policy_steps"] = [
+        np.full(len(response), UNSAMPLED_POLICY_STEP, dtype=np.int32) if steps is None else steps
+        for steps, response in zip(captured, responses, strict=True)
+    ]
 
 
 def attach_student_topk(

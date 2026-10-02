@@ -123,7 +123,7 @@ class FakeEngines:
     async def pause_generation(self):
         pass
 
-    async def resume_generation(self):
+    async def resume_generation(self, policy_step=None):
         pass
 
 
