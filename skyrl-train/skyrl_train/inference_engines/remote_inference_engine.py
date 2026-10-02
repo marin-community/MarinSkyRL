@@ -405,6 +405,27 @@ class RemoteInferenceEngine(InferenceEngineInterface):
 
         return await self._weight_loader.load_weights(request)
 
+    async def update_draft_weights(self, weights_path: str) -> dict[str, bool]:
+        """Publish one immutable online-draft checkpoint through the serving bracket."""
+        if self.engine_backend != "vllm":
+            raise ValueError("Remote draft checkpoint updates require the vLLM-compatible API")
+        async with aiohttp.ClientSession() as session:
+            async with session.post(f"{self.url}/start_draft_weight_update") as response:
+                response.raise_for_status()
+                started = await response.json()
+            publication = (
+                {"publication_id": started["publication_id"], "model_version": started["model_version"]}
+                if "publication_id" in started
+                else {}
+            )
+            async with session.post(
+                f"{self.url}/update_weights", json={**publication, "update_info": {"weights_path": weights_path}}
+            ) as response:
+                response.raise_for_status()
+            async with session.post(f"{self.url}/finish_weight_update", json=publication) as response:
+                response.raise_for_status()
+        return {"active": True}
+
     async def begin_weight_reload(self):
         return await self._weight_loader.begin_weight_reload()
 
