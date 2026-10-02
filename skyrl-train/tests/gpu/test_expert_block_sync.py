@@ -83,7 +83,6 @@ HERO_SYNC_NAMES = [
     LM_HEAD_NAME,
     ROUTER_NAME,
     "model.layers.0.mlp.latent_down_proj.weight",
-    "model.layers.0.self_attn.sconv_k.weight",
     "model.layers.0.shared_experts.1.up_proj.weight",
     "model.layers.0.self_attn.q_proj.weight",
 ]
@@ -218,8 +217,7 @@ def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flippe
     try:
         client = engine_client(cfg, str(serving_path), geometry)
         policy = _init_policy(cfg, geometry.policy_gpus)
-        hero_sync_names = [name for name in HERO_SYNC_NAMES if ".sconv" not in name]
-        names = hero_sync_names if hero else [*PARAMETER_NAMES, *BIAS_NAMES, GATED_NORM_NAME, *SLICED_NAMES]
+        names = HERO_SYNC_NAMES if hero else [*PARAMETER_NAMES, *BIAS_NAMES, GATED_NORM_NAME, *SLICED_NAMES]
         bias_names = HERO_BIAS_NAMES if hero else BIAS_NAMES
         expert_names = HERO_EXPERTS if hero else SERVING_EXPERT_INDEX_BY_NAME
         before = rank0_validation_snapshot(policy, names)
@@ -248,7 +246,7 @@ def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flippe
             await client.resume_generation()
 
         asyncio.run(prepare_and_sync(1))
-        assert_engine_weights(client, hero_sync_names if hero else SYNC_NAMES, trained, bias_names, expert_names)
+        assert_engine_weights(client, HERO_SYNC_NAMES if hero else SYNC_NAMES, trained, bias_names, expert_names)
 
         async def corrupt_and_verify():
             flipped = await client.engines[-1].inference_engine_actor.flip_installed_byte.remote()
@@ -268,7 +266,7 @@ def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flippe
         trained_again = rank0_validation_snapshot(policy, names)
         assert any(not torch.equal(trained_again[key], trained[key]) for key in changed_names)
         asyncio.run(prepare_and_sync(2))
-        assert_engine_weights(client, hero_sync_names if hero else SYNC_NAMES, trained_again, bias_names, expert_names)
+        assert_engine_weights(client, HERO_SYNC_NAMES if hero else SYNC_NAMES, trained_again, bias_names, expert_names)
         asyncio.run(sync.close())
         print(
             f"EXPERT_BLOCK_VERIFY_PASS geometry={name} policy_gpus={geometry.policy_gpus} policy_pp={geometry.policy_pp} "
