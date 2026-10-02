@@ -197,8 +197,9 @@ jobs:
           triage-notes: >-
             The nightly runs GSM8K GRPO, OPD, Grug Megatron and the asynchronous
             CatCount learning gate through WIF-authenticated Iris jobs. CatCount reports
-            INFRASTRUCTURE_FAILURE separately from GATE_FAILURE and retries infrastructure once.
-            Separate Iris or cluster failures
-            from lock, native-extension, and training regressions. A repository-local PR
+            INFRASTRUCTURE_FAILURE and retries once when no native training row reached
+            the log. Failures after training starts and metric violations are GATE_FAILURE.
+            Inspect the native log to distinguish placement, connection, lock,
+            native-extension and training failures. A repository-local PR
             that fixes the tracked failure must end its body with a Fixes link to this
             issue. Use Part of only when the PR does not restore the lane.
