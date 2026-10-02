@@ -69,6 +69,11 @@ def _register_grug_muonh(optim_config: Mapping) -> None:
         model_config = get_model_config(model_chunks[0])
         if model_config.tensor_model_parallel_size != 1:
             raise ValueError("Hero MuonH fused-matrix updates currently require tensor parallel size 1")
+        expert_tp_size = model_config.expert_tensor_parallel_size
+        if expert_tp_size is None:
+            expert_tp_size = model_config.tensor_model_parallel_size
+        if expert_tp_size != 1:
+            raise ValueError("Hero MuonH whole-matrix updates require expert tensor parallel size 1")
         kv_rows = model_config.kv_channels
         query_rows = model_config.num_attention_heads // model_config.num_query_groups * kv_rows
         return {

@@ -25,16 +25,10 @@ def grug_engine_client(
     shared_pg=None,
     inference_engine_enable_sleep: bool = False,
     moe_backend: str | None = None,
-    capture_routes: bool = False,
-    enable_flashinfer_autotune: bool = True,
 ) -> InferenceEngineClient:
     """Start vLLM engines for a tiny Grug checkpoint."""
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    engine_init_kwargs = {
-        "max_model_len": MAX_MODEL_LEN,
-        "enable_return_routed_experts": capture_routes,
-        "enable_flashinfer_autotune": enable_flashinfer_autotune,
-    }
+    engine_init_kwargs = {"max_model_len": MAX_MODEL_LEN}
     if moe_backend is not None:
         engine_init_kwargs["kernel_config"] = {"moe_backend": moe_backend}
     engines = create_ray_wrapped_inference_engines(

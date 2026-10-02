@@ -139,6 +139,20 @@ def test_hero_worker_repeated_updates(tmp_path, monkeypatch, tp, pp, ep, cp, pac
     initialize_ray(cfg)
     try:
         policy = _init_policy(cfg, world_size)
+        if muonh:
+            snapshots = ray.get(policy.async_run_ray_method("pass_through", "grug_optimizer_route_snapshot"))
+            routes = {name: route for snapshot in snapshots for name, route in snapshot["routes"].items()}
+            for name_fragment, expected_route in (
+                ("self_attention.linear_qkv.weight", "grug_muonh_qkv"),
+                ("mlp.experts.linear_fc1.weight", "grug_muonh_gate_up"),
+                ("output_layer.weight", "grug_adamh"),
+                ("self_attention.sconv_k.weight", "adam"),
+                ("mlp.router.weight", "adam"),
+            ):
+                assert any(name_fragment in name and route == expected_route for name, route in routes.items()), (
+                    name_fragment,
+                    expected_route,
+                )
         names = list(original)
         before = rank0_validation_snapshot(policy, names)
         for name in names:

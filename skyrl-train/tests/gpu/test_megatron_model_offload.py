@@ -1,5 +1,6 @@
-"""Model offload preserves weights and releases pinned host staging."""
+"""Model offload preserves weights in sharded and unsharded Megatron layouts."""
 
+import pytest
 import torch
 from megatron.core import parallel_state
 from megatron.core.distributed import DistributedDataParallel, DistributedDataParallelConfig
@@ -9,7 +10,8 @@ from skyrl_train.distributed.megatron.megatron_utils import load_megatron_model_
 from tests.gpu.grug_gpu_gates import require_hoppers
 
 
-def test_megatron_model_offload_round_trips_without_retaining_host_copy(tmp_path):
+@pytest.mark.parametrize("distributed_optimizer", [True, False], ids=["sharded", "whole-matrix"])
+def test_megatron_model_offload_round_trips_without_retaining_host_copy(tmp_path, distributed_optimizer):
     require_hoppers(1)
     torch.distributed.init_process_group("nccl", init_method=f"file://{tmp_path / 'rendezvous'}", rank=0, world_size=1)
     parallel_state.initialize_model_parallel()
@@ -18,7 +20,7 @@ def test_megatron_model_offload_round_trips_without_retaining_host_copy(tmp_path
         module = torch.nn.Linear(4096, 4096, bias=False, device="cuda", dtype=torch.bfloat16)
         model = DistributedDataParallel(
             config,
-            DistributedDataParallelConfig(use_distributed_optimizer=True, grad_reduce_in_fp32=False),
+            DistributedDataParallelConfig(use_distributed_optimizer=distributed_optimizer, grad_reduce_in_fp32=False),
             module,
         )
         inputs = torch.ones(1, 4096, device="cuda", dtype=torch.bfloat16)
@@ -28,6 +30,8 @@ def test_megatron_model_offload_round_trips_without_retaining_host_copy(tmp_path
             for value in (1, 2, 3):
                 module.weight.fill_(value)
                 offload_megatron_model_to_cpu([model])
+                if not distributed_optimizer:
+                    assert module.weight.device.type == "cpu"
                 load_megatron_model_to_gpu([model])
                 torch.testing.assert_close(model(inputs), torch.full_like(inputs, 4096 * value), rtol=0, atol=0)
                 # The obsolete pinned weight copy would retain 32 MiB.

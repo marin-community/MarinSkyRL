@@ -236,6 +236,27 @@ def test_megatron_muonh_preserves_unclipped_zero_decay_recipe_in_mcore_config():
         init_megatron_optim_config(recipe, {"weight_decay": 0.01})
 
 
+def test_megatron_muonh_rejects_expert_tensor_shards():
+    try:
+        from megatron.core.optimizer.emerging_optimizers import _EMERGING_OPTIMIZERS
+
+        from skyrl_train.distributed.megatron.optimizer import _register_grug_muonh
+    except ImportError:
+        pytest.skip("Megatron Core optimizer is not in the CPU test profile")
+
+    from types import SimpleNamespace
+
+    original = dict(_EMERGING_OPTIMIZERS)
+    try:
+        _register_grug_muonh({"optimizer": "MuonH", "lr": 0.03, "weight_decay": 0.0})
+        model = SimpleNamespace(config=SimpleNamespace(tensor_model_parallel_size=1, expert_tensor_parallel_size=2))
+        with pytest.raises(ValueError, match="expert tensor parallel size 1"):
+            _EMERGING_OPTIMIZERS["grug_muonh"].config_to_kwargs(None, [model], None)
+    finally:
+        _EMERGING_OPTIMIZERS.clear()
+        _EMERGING_OPTIMIZERS.update(original)
+
+
 def test_megatron_adamh_reuses_gradient_across_scratch_chunks_without_changing_direction():
     torch.manual_seed(11)
     shape = (1025, 4096)  # Just over the 16 MiB scratch chunk boundary.
