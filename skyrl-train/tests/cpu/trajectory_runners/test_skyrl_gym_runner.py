@@ -529,13 +529,16 @@ async def test_agent_loop_trains_skipped_verdicts_and_masks_missing_ones(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stop_with_unsampled_eos", [False, True], ids=["served-tokens", "unsampled-eos"])
 @patch("skyrl_gym.make")
 async def test_agent_loop_forwards_environment_chat_options_and_structured_assistant_message(
-    mock_make, tokenizer, mock_env, generator_cfg, skyrl_gym_cfg
+    mock_make, tokenizer, mock_env, generator_cfg, skyrl_gym_cfg, stop_with_unsampled_eos
 ):
     generator_cfg.use_conversation_multi_turn = True
     generator_cfg.require_exact_chat_transport = True
     generator_cfg.sampling_params.logprobs = 0
+    if stop_with_unsampled_eos:
+        generator_cfg.sampling_params.stop = ["<stop>"]
     tools = [{"type": "function", "name": "search", "parameters": {"type": "object"}}]
     mock_env.init.return_value = (
         [{"role": "user", "content": "look it up"}],
@@ -551,7 +554,7 @@ async def test_agent_loop_forwards_environment_chat_options_and_structured_assis
     }
     model_client = AsyncMock()
     model_client.generate.return_value = {
-        "responses": ["<tool-call tokens>"],
+        "responses": ["<tool-call tokens><stop>" if stop_with_unsampled_eos else "<tool-call tokens>"],
         "response_ids": [[21, 22]],
         "prompt_ids": [[11, 12, 13]],
         "stop_reasons": ["tool_calls"],
@@ -568,6 +571,13 @@ async def test_agent_loop_forwards_environment_chat_options_and_structured_assis
         tokenizer=tokenizer,
         model_client=model_client,
     )
+
+    if stop_with_unsampled_eos:
+        with pytest.raises(ExactChatTransportError, match="appended EOS token was not sampled"):
+            await runner.agent_loop(
+                [{"role": "user", "content": "look it up"}], ENV_CLASS, {}, max_tokens=8, max_input_length=512
+            )
+        return
 
     output = await runner.agent_loop(
         [{"role": "user", "content": "look it up"}], ENV_CLASS, {}, max_tokens=8, max_input_length=512

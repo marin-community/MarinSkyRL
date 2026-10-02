@@ -25,7 +25,10 @@ global ``layer_number`` instead of a global instantiation-order list.
 from __future__ import annotations
 
 from collections import deque
+from contextlib import contextmanager
+from skyrl_train.mismatch_probe.modes import FILTERED_REPLAY_MODE, REPLAY_MODE
 from enum import Enum
+import math
 from typing import Callable, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
@@ -45,6 +48,7 @@ __all__ = [
     "sequence_major_flatten",
     "slice_sequence_parallel",
     "validate_replay_geometry",
+    "filtered_replay_topk",
 ]
 
 # Sentinel expert id written during rollout capture for unmatched /
@@ -175,6 +179,57 @@ class _Phase(Enum):
     FORWARD = "forward"
 
 
+class RouterScoreType(Enum):
+    LOGITS = "logits"
+    PROBABILITIES = "probabilities"
+    BIASED_PROBABILITIES = "biased_probabilities"
+
+
+def filtered_replay_topk(
+    scores: torch.Tensor,
+    native_idx: torch.Tensor,
+    targets: torch.Tensor,
+    mask: torch.Tensor,
+    keep_fraction: float,
+    score_type: RouterScoreType = RouterScoreType.LOGITS,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Filtered router replay (Composer 2 Technical Report, arXiv:2603.24477): replay vLLM's experts except those whose trainer selection score is below keep_fraction of the trainer's k-th best, refilling those slots with the trainer's next-best unused experts."""
+    if score_type is RouterScoreType.BIASED_PROBABILITIES:
+        raise NotImplementedError("filtered replay does not support expert bias added to probability scores")
+    if not 0.0 <= keep_fraction <= 1.0 or not math.isfinite(keep_fraction):
+        raise ValueError("filtered replay keep_fraction must be finite and in [0, 1]")
+    if scores.ndim != 2 or native_idx.shape != targets.shape or native_idx.shape[0] != scores.shape[0]:
+        raise ValueError("filtered replay scores, native choices and captured choices have incompatible shapes")
+    if mask.shape != (scores.shape[0],):
+        raise ValueError("filtered replay mask must have one value per token")
+    if not torch.isfinite(scores).all():
+        raise ValueError("filtered replay requires finite selection scores")
+    selected = native_idx.clone()
+    replacements = torch.zeros_like(targets, dtype=torch.bool)
+    threshold_offset = math.log(keep_fraction) if keep_fraction else -math.inf
+    native_scores = scores.detach().gather(1, native_idx)
+    cutoff_scores = native_scores.amin(dim=-1)
+    ranked_native = native_idx.gather(1, torch.argsort(native_scores, dim=-1, descending=True, stable=True))
+    for row in torch.nonzero(mask, as_tuple=False).flatten().tolist():
+        captured = targets[row].tolist()
+        if len(set(captured)) != len(captured):
+            raise ValueError("filtered replay captured experts must be distinct within a row")
+        cutoff_score = cutoff_scores[row].item()
+        cutoff_score = (
+            cutoff_score + threshold_offset if score_type is RouterScoreType.LOGITS else cutoff_score * keep_fraction
+        )
+        kept = [scores[row, expert].item() >= cutoff_score for expert in captured]
+        used = {expert for expert, accepted in zip(captured, kept, strict=True) if accepted}
+        native_candidates = iter(expert for expert in ranked_native[row].tolist() if expert not in used)
+        for slot, (expert, accepted) in enumerate(zip(captured, kept, strict=True)):
+            if accepted:
+                selected[row, slot] = expert
+            else:
+                selected[row, slot] = next(native_candidates)
+                replacements[row, slot] = True
+    return selected, replacements
+
+
 class MegatronRouterReplay:
     """Per-layer replay controller for megatron-core ``TopKRouter.router_replay``.
 
@@ -201,12 +256,32 @@ class MegatronRouterReplay:
         self._expected: tuple[int, ...] = ()
         self._consumed: set[int] = set()
         self._response_mask: Optional[torch.Tensor] = None
+        self._probe_positions: Optional[torch.Tensor] = None
+        self._probe_observations: list[dict[str, object]] = []
         self._record_recompute = False
         self._fifo: dict[int, deque] = {idx: deque() for idx in self.local_layer_indices}
         self._masked_rows = 0
         self._hit_rows = 0
         self._response_rows = 0
         self._sentinel_rows = 0
+        self._scoring_mode = REPLAY_MODE
+        self._keep_fraction: float | None = None
+
+    @contextmanager
+    def scoring_mode(self, mode: str, keep_fraction: float | None = None):
+        """Scope a probe forward without changing subsequent training forwards."""
+        if self._phase is not _Phase.IDLE:
+            raise RuntimeError("router replay: scoring mode requires an idle controller")
+        if mode not in (REPLAY_MODE, FILTERED_REPLAY_MODE):
+            raise ValueError(f"unsupported replay scoring mode: {mode}")
+        if mode == FILTERED_REPLAY_MODE and keep_fraction is None:
+            raise ValueError("filtered replay requires keep_fraction")
+        previous = (self._scoring_mode, self._keep_fraction)
+        self._scoring_mode, self._keep_fraction = mode, keep_fraction
+        try:
+            yield
+        finally:
+            self._scoring_mode, self._keep_fraction = previous
 
     # ------------------------------------------------------------- drivers
 
@@ -217,6 +292,7 @@ class MegatronRouterReplay:
         response_mask: Optional[torch.Tensor] = None,
         *,
         record_recompute: bool = True,
+        probe_positions: Optional[torch.Tensor] = None,
     ) -> None:
         """Arm the controller for one forward over the model's local layers.
 
@@ -226,6 +302,8 @@ class MegatronRouterReplay:
         sentinel exclusion and feeds the ``sentinel_fraction`` metric.
         ``record_recompute`` is true for training forwards whose backward will
         replay activation-checkpointed layers, even when forward runs under no_grad.
+        ``probe_positions`` holds ``[N, 2]`` sample and response positions;
+        non-response rows use -1 for the response position.
         """
         if self._phase is not _Phase.IDLE:
             raise RuntimeError("router replay: begin_forward while a forward is already armed (phase must be IDLE)")
@@ -233,6 +311,9 @@ class MegatronRouterReplay:
         self._expected = tuple(sorted(per_layer_targets))
         self._consumed = set()
         self._response_mask = response_mask
+        if probe_positions is not None and (probe_positions.ndim != 2 or probe_positions.shape != (mask.numel(), 2)):
+            raise ValueError("probe positions must have one (sample, response-position) pair per router row")
+        self._probe_positions = probe_positions
         self._record_recompute = record_recompute
         self._phase = _Phase.FORWARD
 
@@ -249,6 +330,7 @@ class MegatronRouterReplay:
         self._current = {}
         self._expected = ()
         self._response_mask = None
+        self._probe_positions = None
         self._record_recompute = False
         self._phase = _Phase.IDLE
 
@@ -262,6 +344,7 @@ class MegatronRouterReplay:
         self._expected = ()
         self._consumed = set()
         self._response_mask = None
+        self._probe_positions = None
         self._record_recompute = False
         self._phase = _Phase.IDLE
         for fifo in self._fifo.values():
@@ -294,6 +377,11 @@ class MegatronRouterReplay:
         self._sentinel_rows = 0
         return {"hit_fraction": hit_fraction, "sentinel_fraction": sentinel_fraction}
 
+    def take_probe_observations(self) -> list[dict[str, object]]:
+        """Return route choices captured only for an explicitly marked probe forward."""
+        observations, self._probe_observations = self._probe_observations, []
+        return observations
+
     # ------------------------------------------------------ router-side entry
 
     def get_replay_topk(
@@ -306,11 +394,13 @@ class MegatronRouterReplay:
         default_compute_topk: Optional[
             Callable[[torch.Tensor, int, Optional[int], Optional[int]], Tuple[torch.Tensor, torch.Tensor]]
         ] = None,
+        score_type: RouterScoreType = RouterScoreType.LOGITS,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Return ``(probs, top_indices)`` with rollout choices on masked rows.
 
-        Masked rows return the captured target experts; every other row returns
-        the native top-k. ``probs`` are always the live routing scores gathered
+        Masked rows use captured experts, with implausible choices replaced by
+        native experts in filtered mode. Other rows use the native top-k.
+        ``probs`` are always the live routing scores gathered
         at the returned indices, so gradients flow through the gate on both
         replayed and native rows. Runs mcore's ``default_compute_topk``
         unconditionally to keep the autograd graph identical to a flag-off
@@ -332,8 +422,45 @@ class MegatronRouterReplay:
 
         mask = mask.to(device=scores.device, dtype=torch.bool)
         targets = targets.to(device=scores.device)
-        idx = torch.where(mask.unsqueeze(-1), targets, native_idx)
+        replaced = torch.zeros_like(targets, dtype=torch.bool)
+        if self._scoring_mode == FILTERED_REPLAY_MODE:
+            idx, replaced = filtered_replay_topk(scores, native_idx, targets, mask, self._keep_fraction, score_type)
+        else:
+            idx = torch.where(mask.unsqueeze(-1), targets, native_idx)
         probs = scores.gather(1, idx)
+
+        if self._probe_positions is not None:
+            if self._probe_positions.shape[0] != scores.shape[0]:
+                raise ValueError("probe route positions do not match the router's token order")
+            positions = self._probe_positions.to(scores.device)
+            active = positions[:, 1] >= 0
+            packed = (
+                torch.cat(
+                    (
+                        positions[active],
+                        native_idx[active],
+                        idx[active],
+                        replaced[active].long(),
+                        mask[active, None].long(),
+                    ),
+                    dim=-1,
+                )
+                .detach()
+                .cpu()
+                .tolist()
+            )
+            self._probe_observations.extend(
+                {
+                    "layer": layer_idx,
+                    "sample": row[0],
+                    "position": row[1],
+                    "native": row[2 : 2 + topk],
+                    "effective": row[2 + topk : 2 + 2 * topk],
+                    "replaced": row[2 + 2 * topk : 2 + 3 * topk],
+                    "route_valid": bool(row[-1]),
+                }
+                for row in packed
+            )
 
         replayed = mask.sum().item()
         # A masked row whose target is all-sentinel means the mask and the
@@ -382,9 +509,15 @@ class LayerReplayHandle:
     positionally.
     """
 
-    def __init__(self, controller: MegatronRouterReplay, layer_idx: int) -> None:
+    def __init__(
+        self,
+        controller: MegatronRouterReplay,
+        layer_idx: int,
+        score_type: RouterScoreType = RouterScoreType.LOGITS,
+    ) -> None:
         self._controller = controller
         self.layer_idx = layer_idx
+        self._score_type = score_type
 
     def get_replay_topk(
         self,
@@ -395,7 +528,7 @@ class LayerReplayHandle:
         default_compute_topk: Optional[Callable] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return self._controller.get_replay_topk(
-            self.layer_idx, scores, topk, num_groups, group_topk, default_compute_topk
+            self.layer_idx, scores, topk, num_groups, group_topk, default_compute_topk, self._score_type
         )
 
 

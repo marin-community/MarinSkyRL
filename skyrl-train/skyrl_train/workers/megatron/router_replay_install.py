@@ -27,6 +27,7 @@ from skyrl_train.models.megatron_router_replay import (
     MIN_ROUTER_TOPK,
     LayerReplayHandle,
     MegatronRouterReplay,
+    RouterScoreType,
     capture_layer_indices,
     expand_moe_layer_freq,
     num_moe_layers,
@@ -106,7 +107,16 @@ def install_megatron_router_replay(
                     f"router replay: TopKRouter at layer_number={layer_number} is not a MoE layer by the pattern"
                 )
             capture_idx = mapping[layer_number]
-            module.router_replay = LayerReplayHandle(controller, capture_idx)
+            declared_score_type = getattr(module, "replay_score_type", None)
+            if declared_score_type is not None:
+                score_type = declared_score_type
+            elif module.score_function == "softmax" and not module.config.moe_router_pre_softmax:
+                score_type = RouterScoreType.LOGITS
+            elif module.score_function == "softmax" or module.expert_bias is None:
+                score_type = RouterScoreType.PROBABILITIES
+            else:
+                score_type = RouterScoreType.BIASED_PROBABILITIES
+            module.router_replay = LayerReplayHandle(controller, capture_idx, score_type)
             found.add(capture_idx)
 
     if found != expected_local:

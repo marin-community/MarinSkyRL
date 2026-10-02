@@ -1,75 +1,77 @@
-import torch
-import torch.nn as nn
-import torch.distributed
-import ray
-from transformers import AutoTokenizer, AutoConfig
-from huggingface_hub import snapshot_download
-
 import asyncio
+import copy
 import importlib.util
 import os
-from enum import StrEnum
-from typing import List, Dict, Any, Optional
 from collections import defaultdict
-from loguru import logger
-from skyrl_train.utils.progress import tqdm
-from omegaconf import OmegaConf
+from enum import StrEnum
+from typing import Any
 
-from megatron.bridge import AutoBridge
 import megatron.core.parallel_state as mpu
+import ray
+import skyrl_train.models.grug_megatron_bridge  # noqa: F401  # registers the Grug bridge with Megatron-Bridge
+import torch
+import torch.distributed
+from huggingface_hub import snapshot_download
+from loguru import logger
+from megatron.bridge import AutoBridge
 from megatron.core.optimizer import DistributedOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
-
-from skyrl_train.distributed.megatron.optimizer import (
-    init_megatron_optim_config,
-    get_megatron_optimizer,
-    get_megatron_optimizer_param_scheduler,
-)
+from megatron.core.tensor_parallel.random import get_cuda_rng_tracker
+from omegaconf import OmegaConf
 from skyrl_train.distributed.dispatch import MeshRank
-from skyrl_train.distributed.utils import init_worker_process_group_with_device
 from skyrl_train.distributed.megatron.megatron_strategy import MegatronStrategy
-from skyrl_train.distributed.megatron.remote_model import install_remote_hf_state
 from skyrl_train.distributed.megatron.megatron_utils import (
     get_model_config,
     materialize_megatron_params,
     dp_weight_checksum_mismatch,
     print_model_size,
 )
-from skyrl_train.utils.utils import (
-    moe_router_replay_requested,
-    update_model_config,
-    str_to_torch_dtype,
-    get_physical_gpu_id,
+from skyrl_train.distributed.megatron.optimizer import (
+    get_megatron_optimizer,
+    get_megatron_optimizer_param_scheduler,
+    init_megatron_optim_config,
 )
-from marinskyrl.hugging_face_retry import load_hugging_face_with_retry
-from skyrl_train.workers.megatron.router_replay_install import install_megatron_router_replay
-import skyrl_train.models.grug_megatron_bridge  # noqa: F401  # registers the Grug bridge with Megatron-Bridge
+from skyrl_train.distributed.megatron.remote_model import install_remote_hf_state
+from skyrl_train.distributed.utils import init_worker_process_group_with_device
+from skyrl_train.mismatch_probe.modes import TRAINER_MODES
 from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE, validate_grug_training_strategy
+from skyrl_train.timing_observability import PhaseBreakdown
 from marinskyrl.runtime_options import PolicyLossType
 from skyrl_train.training_batch import (
     TrainingBatchIterator,
     TrainingOutputBatch,
     gradient_accumulation_steps,
 )
-from skyrl_train.timing_observability import PhaseBreakdown
 from skyrl_train.utils.metrics import policy_progress_metrics, policy_training_metrics
-from skyrl_train.workers.worker import (
-    PolicyWorkerBase,
-    RefWorkerBase,
-    CriticWorkerBase,
-    log_r3_resident_set,
+from skyrl_train.utils.profiler import Profiler
+from skyrl_train.utils.progress import tqdm
+from skyrl_train.utils.utils import (
+    get_physical_gpu_id,
+    moe_router_replay_requested,
+    str_to_torch_dtype,
+    update_model_config,
 )
+from skyrl_train.weight_sync.expert_block.sender import ExpertBlockSender
+from skyrl_train.weight_sync.weight_extractor import validate_weight_sync_mode
+from skyrl_train.workers.grug_validation import GrugValidationSnapshot
 from skyrl_train.workers.megatron.megatron_model_wrapper import (
     MegatronForwardMicroBatch,
     MegatronModelWrapper,
     MegatronPolicyMicroBatch,
 )
-from skyrl_train.utils.profiler import Profiler
-from marinskyrl.runtime_options import WeightSyncTransport
-from skyrl_train.weight_sync.expert_block.sender import ExpertBlockSender
-from skyrl_train.weight_sync.weight_extractor import validate_weight_sync_mode
+from skyrl_train.workers.megatron.router_replay_install import install_megatron_router_replay
 from skyrl_train.workers.megatron.weight_extractor import BucketedMegatronWeightExtractor, mapping_hf_names
-from skyrl_train.workers.grug_validation import GrugValidationSnapshot
+from skyrl_train.workers.worker import (
+    CriticWorkerBase,
+    PolicyWorkerBase,
+    RefWorkerBase,
+    log_r3_resident_set,
+)
+from torch import nn
+from transformers import AutoConfig, AutoTokenizer
+
+from marinskyrl.hugging_face_retry import load_hugging_face_with_retry
+from marinskyrl.runtime_options import WeightSyncTransport
 
 
 class _MegatronInitMode(StrEnum):
@@ -172,9 +174,9 @@ class MegatronWorker:
     def make_megatron_module(
         self,
         wrap_with_ddp: bool = True,
-        ddp_config: Optional[Dict[str, Any]] = None,
+        ddp_config: dict[str, Any] | None = None,
         bf16: bool = True,
-    ) -> List[nn.Module]:
+    ) -> list[nn.Module]:
         """
         Creates a megatron GPTModel (optionally DDP wrapped) using the bridge.
         """
@@ -191,13 +193,13 @@ class MegatronWorker:
         )
         return model
 
-    def forward(self, data):
+    def forward(self, data, *, probe_micro_batch_size: int | None = None):
         """
         Override `Worker.forward` to support passing the full mini batch to the MegatronModelWrapper.forward method.
         """
         log_r3_resident_set(self._rank, data)
         # Run in micro batches grouped into a single mini-batch
-        micro_bsz = self.cfg.trainer.micro_forward_batch_size_per_gpu
+        micro_bsz = probe_micro_batch_size or self.cfg.trainer.micro_forward_batch_size_per_gpu
         micro_batches = data.chunk(micro_bsz)
 
         # Build typed micro-batches expected by MegatronModelWrapper.forward
@@ -218,6 +220,7 @@ class MegatronWorker:
                     num_actions=num_actions,
                     ftpo_chosen_mask=micro.get("ftpo_chosen_mask"),
                     rollout_routed_experts=micro.routed_experts_tensor(),
+                    probe_row_indices=micro.get("probe_row_indices"),
                 )
             )
 
@@ -252,7 +255,33 @@ class MegatronWorker:
         output.metadata = data.metadata
         return output
 
-    def _log_forward_fingerprint(self, call: str, micro_payloads: List[MegatronForwardMicroBatch]) -> None:
+    def probe_forward(self, data):
+        """Use the normal Megatron policy forward with a scoped probe routing mode."""
+        mode = data.metadata["probe_mode"]
+        micro_batch_size = data.metadata["probe_micro_batch_size"]
+        controller = self.model.router_replay
+        if mode not in TRAINER_MODES:
+            raise ValueError(f"unsupported probe mode: {mode}")
+        module_modes = [(module, module.training) for chunk in self.actor_module for module in chunk.modules()]
+        rng_state = MegatronStrategy.get_rng_state()
+        rng_tracker = get_cuda_rng_tracker()
+        tracker_states = copy.deepcopy(rng_tracker.get_states())
+        scope = TRAINER_MODES[mode].context(self, data.metadata)
+        try:
+            with scope:
+                if controller is not None:
+                    controller.take_probe_observations()
+                output = self.forward(data, probe_micro_batch_size=micro_batch_size)
+                output.metadata = dict(output.metadata)
+                output.metadata["probe_routes"] = controller.take_probe_observations() if controller is not None else []
+                return output
+        finally:
+            for module, was_training in module_modes:
+                module.training = was_training
+            MegatronStrategy.load_rng_state(rng_state)
+            rng_tracker.set_states(tracker_states)
+
+    def _log_forward_fingerprint(self, call: str, micro_payloads: list[MegatronForwardMicroBatch]) -> None:
         """Log checksums of this rank's inputs and parameters so two calls can be compared."""
         token_sum = sum(int(micro.sequences.long().sum().item()) for micro in micro_payloads)
         mask_sum = sum(int(micro.attention_mask.long().sum().item()) for micro in micro_payloads)
@@ -273,7 +302,7 @@ class MegatronWorker:
             f"params={param_count} param_sum={param_sum:.6f}"
         )
 
-    def _log_train_eval_parity_probe(self, micro_buffer: List[MegatronPolicyMicroBatch]) -> None:
+    def _log_train_eval_parity_probe(self, micro_buffer: list[MegatronPolicyMicroBatch]) -> None:
         """Re-run forward-only passes on the training micro-batches and compare them with the old log-probs.
 
         The eval-mode pass measures whether the log-prob forward is repeatable at all; the
@@ -343,16 +372,16 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.model: MegatronModelWrapper = None
-        self.actor_module: List[nn.Module] = None
+        self.actor_module: list[nn.Module] = None
         self.scheduler: OptimizerParamScheduler = None
         self.optimizer: DistributedOptimizer = None
         self.profiler: Profiler | None = None
         self._warned_exact_unit_policy_ratio = False
         self._consecutive_nonfinite_steps = 0
 
-    def forward(self, data):
+    def forward(self, data, *, probe_micro_batch_size: int | None = None):
         with self._memory.span("forward", step=data.metadata.get("global_step")):
-            return super().forward(data)
+            return super().forward(data, probe_micro_batch_size=probe_micro_batch_size)
 
     def offload_to_cpu(self, pin_memory=True, non_blocking=True, offload_optimizer=True, offload_model=True):
         self.strategy.offload_to_cpu(
@@ -845,7 +874,7 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.model: MegatronModelWrapper = None
-        self.actor_module: List[nn.Module] = None
+        self.actor_module: list[nn.Module] = None
 
     def offload_to_cpu(self, pin_memory=True, non_blocking=True, **kwargs):
         self.strategy.offload_to_cpu(self.actor_module, None, pin_memory, non_blocking)
