@@ -964,6 +964,47 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         )
 
     async def _apply_genrm_cohort_rewards(
+        self, outputs: list[AgentLoopOutput], input_batch: TrajectoryRequestBatch
+    ) -> None:
+        if not self.genrm_config.get("verifyit_enabled", False):
+            await self._apply_genrm_cohort_rewards_impl(outputs, input_batch)
+            return
+        from verifyit.grade import InvalidTask
+
+        try:
+            await self._apply_genrm_cohort_rewards_impl(outputs, input_batch)
+        except (
+            InvalidTask,
+            RuntimeError,
+            ValueError,
+            TypeError,
+            KeyError,
+            IndexError,
+            requests.RequestException,
+        ) as error:
+            extras = input_batch.get("env_extras") or []
+            for index, output in enumerate(outputs):
+                extra = extras[index] if index < len(extras) else {}
+                info = extra.get("extra_info") if isinstance(extra, dict) else None
+                ultra = info.get("nemotron_ultra") if isinstance(info, dict) else None
+                if not isinstance(ultra, dict) or ultra.get("agent") not in {
+                    "genrm_simple_agent",
+                    "genrm_simple_agent_reasoning_off",
+                }:
+                    continue
+                output.verification = VerificationResult.error(
+                    "Invalid GenRM comparison cohort",
+                    diagnostics={
+                        "error_type": type(error).__name__,
+                        "error_message": str(error),
+                        "invalid_task": isinstance(error, InvalidTask),
+                    },
+                )
+                output.reward = RewardResult(unshaped_reward=None, optimization_reward=0.0)
+                output.disposition = TrainingDisposition.mask("Invalid GenRM comparison cohort")
+                output.env_metrics["genrm/comparison_failure"] = 1.0
+
+    async def _apply_genrm_cohort_rewards_impl(
         self,
         outputs: list[AgentLoopOutput],
         input_batch: TrajectoryRequestBatch,
@@ -1020,15 +1061,22 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     outputs[index].reward = RewardResult(unshaped_reward=None, optimization_reward=0.0)
                     outputs[index].disposition = TrainingDisposition.mask("Insufficient valid GenRM peers")
                 continue
-            histories = [input_batch["prompts"][index] for index in indices]
-            if any(history != histories[0] for history in histories):
-                raise ValueError("GenRM cohort rows must share the same conversation")
-            records = [json.loads((ultra_at(index) or {})["record_json"]) for index in indices]
-            if not all(isinstance(record, dict) for record in records):
-                raise TypeError("GenRM record_json must decode to an object")
-            principles = {record.get("principle") for record in records}
-            if len(principles) != 1 or None in principles:
-                raise ValueError("GenRM cohort rows must agree on a non-empty principle")
+            try:
+                histories = [input_batch["prompts"][index] for index in indices]
+                if any(history != histories[0] for history in histories):
+                    raise ValueError("GenRM cohort rows must share the same conversation")
+                records = [json.loads((ultra_at(index) or {})["record_json"]) for index in indices]
+                if not all(isinstance(record, dict) for record in records):
+                    raise TypeError("GenRM record_json must decode to an object")
+                principles = {record.get("principle") for record in records}
+                if len(principles) != 1 or None in principles:
+                    raise ValueError("GenRM cohort rows must agree on a non-empty principle")
+            except (ValueError, TypeError, KeyError) as error:
+                if not self.genrm_config.get("verifyit_enabled", False):
+                    raise
+                from verifyit.grade import InvalidTask
+
+                raise InvalidTask(f"Invalid GenRM trusted cohort: {error}") from error
             response_objects = []
             for index in indices:
                 messages = outputs[index].evidence.messages
@@ -1057,7 +1105,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     outputs[index].disposition = TrainingDisposition.mask("GenRM comparisons failed")
                     outputs[index].env_metrics["genrm/comparison_failure"] = 1.0
                 continue
-            for index, reward in zip(indices, rewards, strict=True):
+            for cohort_index, (index, reward) in enumerate(zip(indices, rewards, strict=True)):
                 old_token_rewards = outputs[index].reward.token_rewards
                 token_rewards = None
                 if old_token_rewards is not None:
@@ -1071,11 +1119,13 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     optimization_reward=reward,
                     token_rewards=token_rewards,
                 )
+                enabled = bool(self.genrm_config.get("verifyit_enabled", False))
+                verification_reward = metrics[f"verification_reward_{cohort_index}"] if enabled else reward
                 outputs[index].verification = VerificationResult.verified(
-                    reward,
+                    verification_reward,
                     diagnostics={"agent": (ultra_at(index) or {})["agent"], "genrm_metrics": metrics},
-                    score_min=1.0,
-                    score_max=5.0,
+                    score_min=0.0 if enabled else 1.0,
+                    score_max=1.0 if enabled else 5.0,
                 )
                 outputs[index].env_metrics.update({f"genrm/{name}": value for name, value in metrics.items()})
 

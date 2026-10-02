@@ -1,6 +1,6 @@
 # Unified verification
 
-SkyRL clients call verifyit's existing verifier modes while retaining task-specific response extraction and framework reward reporting. The dependency is pinned to published commit `c57d19b9f77c2d8fc2ec6f4919ac351e0b8e0c7e` in the project metadata. No local campaign checkout or unpublished wheel is needed. SkyRL uses math-verify 0.9.0, upgraded from 0.8.0 to satisfy the unified dependency. Math parsing or equivalence behavior can change with this upgrade; the 2026-10-01 campaign snapshot used math-verify 0.8.0. The offline comparisons use 0.9.0 on both paths.
+SkyRL clients call verifyit's existing verifier modes while retaining task-specific response extraction and framework reward reporting. The dependency is pinned to published commit `97b5f74e3074e583012d2c8cde15f4549863da9a` in the project metadata. No local campaign checkout or unpublished wheel is needed. SkyRL uses math-verify 0.9.0, upgraded from 0.8.0 to satisfy the unified dependency. Math parsing or equivalence behavior can change with this upgrade; the 2026-10-01 campaign snapshot used math-verify 0.8.0. The offline comparisons use 0.9.0 on both paths.
 
 ## Install and reproduce
 
@@ -43,6 +43,14 @@ print(environment.step("Answer: 42"))
 ```
 
 Set the option to `false` or omit it to run the original Reasoning Gym, IFEval, SQL, LiveCodeBench or Nemotron scorer. The [launcher acceptance configuration](../cloud/iris/configs/nemotron_ultra_rlvr_acceptance.yaml) shows the deployed sandbox host/port and judge `base_url`, `model`, and `api_key_env` settings. Set `environment.skyrl_gym.nemotron_ultra.verifyit_enabled: true` alongside those fields; the [trajectory runner](../skyrl-train/skyrl_train/trajectory_runners/skyrl_gym.py) passes each environment configuration to its constructor and propagates the option to GenRM. Other environments use `environment.skyrl_gym.<environment_name>.verifyit_enabled: true`.
+
+Enabled GenRM grades completed comparison cohorts through core Judge and Schema inside a bounded Script worker. At least two responses are required. Verification rewards use [0, 1]; native optimization rewards retain the source's adjusted rating scale (base bounds −1.5–7.5) and length bonuses/penalties. The original source declares 1–5 bounds even though tie adjustments and shaping can exceed them. Malformed provider cohorts become error verdicts with optimization reward zero before shaping. Invalid trusted cohort data is reported separately as `invalid_task`; the enabled boundary conservatively masks all affected GenRM rows in that batch, including any earlier graded group, while preserving unrelated environments. Provider protocol and trusted-task failures never receive the source's default score of three. The archived environment traces contain pending-cohort placeholders, so the local controlled HTTP tests establish post-cohort behavior without claiming final archived judge-score parity.
+
+The following offline tests serve controlled judge responses over local HTTP, compare original and enabled cohort rewards, and check malformed provider and child-task failures without credentials:
+
+```bash
+uv run --project skyrl-gym --locked --extra dev python -m pytest skyrl-gym/tests/test_genrm_verifyit.py
+```
 
 Code and Lean use the [SandboxClient protocol](../skyrl-gym/skyrl_gym/envs/nemotron_ultra/sandbox.py): point the configured host/port to a running NeMo Skills sandbox with the benchmark’s Python dependencies or Lean project/toolchain. The acceptance configuration’s cluster hostname is an example deployment, not a public service. Judge settings are consumed by [OpenAIJudge](../skyrl-gym/skyrl_gym/envs/nemotron_ultra/judge.py); set the named environment variable locally with your provider credential before running judge routes. Direct source APIs expose `verifyit_enabled=True` where applicable; the checked-in replay demonstrates MCQA's switch.
 

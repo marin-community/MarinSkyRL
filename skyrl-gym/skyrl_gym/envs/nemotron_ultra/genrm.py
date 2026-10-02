@@ -55,7 +55,32 @@ def grade_genrm_group(
             judge=judge,
             config=config,
         )
+    pairs, comparisons = collect_genrm_comparisons(
+        conversation_history=conversation_history,
+        response_objects=response_objects,
+        principle=principle,
+        judge=judge,
+        config=config,
+    )
     default_score = float(config.get("default_score", 3.0))
+    metadata = [(first, second, 0) for first, second in pairs]
+    rewards, metrics, _, _ = aggregate_scores(
+        comparison_results=comparisons,
+        comparison_metadata=metadata,
+        response_objs=response_objects,
+        aggregator_method="simple_tiebreaker",
+        default_score=default_score,
+        reasoning_bonus=float(config.get("reasoning_bonus", 0.5)),
+        answer_bonus=float(config.get("answer_bonus", 0.5)),
+        top_percentile=float(config.get("top_percentile", 0.2)),
+        group_reasoning_length_penalty_coeff=float(config.get("group_reasoning_length_penalty_coeff", 0.1)),
+        group_answer_length_penalty_coeff=float(config["group_answer_length_penalty_coeff"]),
+    )
+    return rewards, metrics
+
+
+def collect_genrm_comparisons(*, conversation_history, response_objects, principle, judge, config):
+    """Collect decoded provider comparisons; this transport function does not grade."""
     pairs = generate_comparison_pairs("circular", len(response_objects))
     max_workers = int(config.get("max_concurrent_comparisons", len(pairs)))
     if max_workers < 1:
@@ -89,17 +114,4 @@ def grade_genrm_group(
 
     with ThreadPoolExecutor(max_workers=min(max_workers, len(pairs))) as executor:
         comparisons = list(executor.map(compare, pairs))
-    metadata = [(first, second, 0) for first, second in pairs]
-    rewards, metrics, _, _ = aggregate_scores(
-        comparison_results=comparisons,
-        comparison_metadata=metadata,
-        response_objs=response_objects,
-        aggregator_method="simple_tiebreaker",
-        default_score=default_score,
-        reasoning_bonus=float(config.get("reasoning_bonus", 0.5)),
-        answer_bonus=float(config.get("answer_bonus", 0.5)),
-        top_percentile=float(config.get("top_percentile", 0.2)),
-        group_reasoning_length_penalty_coeff=float(config.get("group_reasoning_length_penalty_coeff", 0.1)),
-        group_answer_length_penalty_coeff=float(config["group_answer_length_penalty_coeff"]),
-    )
-    return rewards, metrics
+    return pairs, comparisons

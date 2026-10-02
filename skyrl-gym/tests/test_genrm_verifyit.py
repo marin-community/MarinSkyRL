@@ -107,7 +107,9 @@ def test_whole_cohort_retains_pairing_ties_and_length_shaping(genrm_server, tran
     genrm_server.requests.clear()
     args["config"]["verifyit_enabled"] = True
     cutover = grade_genrm_group(**args)
-    assert cutover == native
+    assert cutover[0] == pytest.approx(native[0])
+    assert {key: cutover[1][key] for key in native[1]} == pytest.approx(native[1])
+    assert all(0 <= cutover[1][f"verification_reward_{i}"] <= 1 for i in range(len(cutover[0])))
     assert sorted(genrm_server.requests, key=lambda x: json.dumps(x, sort_keys=True)) == sorted(
         requests, key=lambda x: json.dumps(x, sort_keys=True)
     )
@@ -141,3 +143,28 @@ def test_failed_response_status_cannot_carry_positive_scores(genrm_server):
     args["config"]["verifyit_enabled"] = True
     with pytest.raises(RuntimeError, match="cohort verification failed"):
         grade_genrm_group(**args)
+
+
+def test_genrm_worker_preserves_invalid_task_status(genrm_server, tmp_path):
+    import dataclasses
+    import shlex
+    import sys
+
+    from verifyit.grade import Status, run
+    from verifyit.spec import ScriptSpec, render_spec
+
+    args = cohort(genrm_server)
+    args["response_objects"] = args["response_objects"][:1]
+    args["judge"] = dataclasses.asdict(args["judge"])
+    payload = tmp_path / "input.json"
+    payload.write_text(json.dumps(args))
+    (tmp_path / "check.sh").write_text(
+        f"exec {shlex.quote(sys.executable)} -m skyrl_gym.envs.nemotron_ultra.genrm_verifyit {shlex.quote(str(payload))}\n"
+    )
+    spec = tmp_path / "verifier.toml"
+    spec.write_text(render_spec(ScriptSpec(path="check.sh", timeout=10, verdict_file="cohort.json")))
+    verdict = run(spec, tmp_path)
+    assert verdict.status is Status.INVALID_TASK
+    assert verdict.reward == 0
+    assert "comparison cohort" in verdict.detail["error"]
+    assert not genrm_server.requests

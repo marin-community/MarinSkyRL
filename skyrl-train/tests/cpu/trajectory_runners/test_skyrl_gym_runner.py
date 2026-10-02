@@ -1214,3 +1214,45 @@ async def test_cat_count_preserves_sampled_evidence_and_verification(
     assert batch["loss_masks"] == [[1, 1, 1]]
     assert batch["verification_results"][0].passed is True
     assert batch["env_metrics"][0]["exact_n2"] == 1.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent", ["genrm_simple_agent", "genrm_simple_agent_reasoning_off"])
+@pytest.mark.parametrize("record", ["[1]", "not-json"])
+async def test_enabled_genrm_invalid_trusted_cohort_discards_placeholder_credit(agent, record):
+    from skyrl_gym.envs.nemotron_ultra.env import NemotronUltraGrading
+    from skyrl_gym.envs.nemotron_ultra.judge import OpenAIJudge
+    from skyrl_gym.verification import VerificationStatus
+
+    runner = object.__new__(SkyRLGymTrajectoryRunner)
+    runner.genrm_config = {"verifyit_enabled": False, "num_rollouts_per_prompt": 2, "answer_bonus": 5}
+    runner.genrm_judge = OpenAIJudge(base_url="http://127.0.0.1:1/v1", model="unused")
+    runner.nemotron_ultra_grading = NemotronUltraGrading.VERIFY
+    outputs = [
+        AgentLoopOutput(
+            evidence=RolloutEvidence(response="answer"),
+            verification=VerificationResult.verified(3),
+            reward=RewardResult(unshaped_reward=3, optimization_reward=3, token_rewards=(3,)),
+            disposition=TrainingDisposition.train(),
+            loss_mask=[1],
+            env_metrics={},
+        )
+        for _ in range(2)
+    ]
+    request = {
+        "prompts": [[{"role": "user", "content": "q"}]] * 2,
+        "env_classes": ["nemotron_ultra"] * 2,
+        "env_extras": [{"extra_info": {"nemotron_ultra": {"agent": agent, "record_json": record}}}] * 2,
+        "trajectory_ids": [TrajectoryID("p", 0), TrajectoryID("p", 1)],
+        "sampling_params": None,
+        "batch_metadata": None,
+    }
+    # Default keeps source exception behavior; enabled must translate the same failure.
+    with pytest.raises((TypeError, ValueError)):
+        await runner._apply_genrm_cohort_rewards(outputs, request)
+    runner.genrm_config["verifyit_enabled"] = True
+    await runner._apply_genrm_cohort_rewards(outputs, request)
+    assert all(output.verification.status is VerificationStatus.ERROR for output in outputs)
+    assert all(output.verification.diagnostics["invalid_task"] for output in outputs)
+    assert all(output.reward.optimization_reward == 0 and output.reward.token_rewards is None for output in outputs)
+    assert all(not output.disposition.loss_eligible for output in outputs)
