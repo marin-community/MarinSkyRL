@@ -1,15 +1,14 @@
+from types import SimpleNamespace
+
 import pytest
 import torch
-from vllm.vllm_flash_attn import flash_attn_varlen_func
+from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl, FlashAttentionMetadata
 
+from skyrl_train.inference_engines.vllm import decode_invariant
 from skyrl_train.models.grug_fa3_invariant import (
-    FA3_BLOCK_M,
     FA3_DYNAMIC_SPLIT_MAX_BATCH,
     FA3_INVARIANT_SPLITS,
     fa3_fixed_split_metadata,
-    fa3_invariant_requests,
-    fa3_request_calls,
-    fa3_window_start_rows,
 )
 from tests.gpu.grug_gpu_gates import require_hoppers
 
@@ -17,78 +16,73 @@ HEADS, KV_HEADS, HEAD_DIM, BLOCK, WINDOW = 20, 5, 128, 16, 2048
 GROUP = HEADS // KV_HEADS
 SCALE = HEAD_DIM**-0.5
 LENGTHS = (700, 2049, 3100)
+VLLM_FORWARD = FlashAttentionImpl.forward
 
 
-def _paged_calls(query, caches, query_start, key_lengths, tables, window, *, causal_rows):
-    """FA3 calls as the engine issues them: paged keys, fixed-split metadata, at most 992 requests per call, and with
-    ``causal_rows`` on a sliding-window layer the one-row requests in calls of their own on FA3's causal kernel from
-    each row's window start; without it every request on the local kernel."""
-    output = torch.empty_like(query)
-    calls = fa3_request_calls(
-        query_start, one_row_calls=causal_rows and window is not None, max_requests=FA3_DYNAMIC_SPLIT_MAX_BATCH
+def _step(query_start, key_lengths, block_table) -> FlashAttentionMetadata:
+    """A step's FA3 metadata as the decode-invariant engine's metadata builder writes it."""
+    query_start_loc = torch.tensor(query_start, dtype=torch.int32, device="cuda")
+    return FlashAttentionMetadata(
+        num_actual_tokens=query_start[-1],
+        max_query_len=max(end - begin for begin, end in zip(query_start, query_start[1:])),
+        query_start_loc=query_start_loc,
+        max_seq_len=max(key_lengths),
+        seq_lens=torch.tensor(key_lengths, dtype=torch.int32, device="cuda"),
+        block_table=block_table,
+        slot_mapping=torch.empty(0, dtype=torch.int64, device="cuda"),
+        use_cascade=False,
+        common_prefix_len=0,
+        cu_prefix_query_lens=None,
+        prefix_kv_lens=None,
+        suffix_kv_lens=None,
+        scheduler_metadata=fa3_fixed_split_metadata(query_start_loc, GROUP, KV_HEADS),
+        max_num_splits=FA3_INVARIANT_SPLITS,
     )
-    for begin, end, one_row in calls:
-        rows = slice(query_start[begin], query_start[end])
-        starts = torch.tensor([s - query_start[begin] for s in query_start[begin : end + 1]], dtype=torch.int32)
-        starts = starts.cuda()
-        lengths = torch.tensor(key_lengths[begin:end], dtype=torch.int32, device="cuda")
-        metadata = fa3_fixed_split_metadata(starts, GROUP, KV_HEADS)
-        if one_row:
-            fa3_window_start_rows(
-                query[rows],
-                caches[0],
-                caches[1],
-                output[rows],
-                cu_seqlens_q=starts,
-                seqused_k=lengths,
-                leftpad_k=torch.clamp(lengths - window, min=0),
-                max_seqlen_k=max(key_lengths[begin:end]),
-                block_table=tables[begin:end],
-                softmax_scale=SCALE,
-                scheduler_metadata=metadata,
-                num_splits=FA3_INVARIANT_SPLITS,
-            )
-            continue
-        flash_attn_varlen_func(
-            q=query[rows],
-            k=caches[0],
-            v=caches[1],
-            out=output[rows],
-            cu_seqlens_q=starts,
-            max_seqlen_q=int((starts[1:] - starts[:-1]).max()),
-            seqused_k=lengths,
-            max_seqlen_k=max(key_lengths[begin:end]),
-            softmax_scale=SCALE,
-            causal=True,
-            window_size=None if window is None else [window - 1, 0],
-            block_table=tables[begin:end],
-            scheduler_metadata=metadata,
-            fa_version=3,
-            num_splits=FA3_INVARIANT_SPLITS,
+
+
+def _attend(forward, impl, query, kv_cache, query_start, key_lengths, block_table):
+    layer = SimpleNamespace(**{name: torch.ones((), device="cuda") for name in ("_q_scale", "_k_scale", "_v_scale")})
+    output = torch.empty_like(query)
+    forward(impl, layer, query, None, None, kv_cache, _step(query_start, key_lengths, block_table), output)
+    return output
+
+
+def _decoded_alone(impl, query, kv_cache, table):
+    """Each row of ``query`` as a one-row request of a step of at most ``FA3_DYNAMIC_SPLIT_MAX_BATCH`` requests, run by
+    vLLM's FA3 forward."""
+    output = torch.empty_like(query)
+    for begin in range(0, len(query), FA3_DYNAMIC_SPLIT_MAX_BATCH):
+        end = min(begin + FA3_DYNAMIC_SPLIT_MAX_BATCH, len(query))
+        output[begin:end] = _attend(
+            VLLM_FORWARD,
+            impl,
+            query[begin:end],
+            kv_cache,
+            list(range(end - begin + 1)),
+            list(range(begin + 1, end + 1)),
+            table.repeat(end - begin, 1),
         )
     return output
 
 
 def _sequences(generator):
     blocks = [-(-length // BLOCK) for length in LENGTHS]
-    caches = [torch.zeros(sum(blocks), BLOCK, KV_HEADS, HEAD_DIM, dtype=torch.bfloat16, device="cuda") for _ in "kv"]
-    order = torch.randperm(sum(blocks), generator=generator).to(torch.int32).cuda()
-    tables, sequences, used = [], [], 0
+    kv_cache = torch.zeros(sum(blocks), KV_HEADS, BLOCK, 2 * HEAD_DIM, dtype=torch.bfloat16, device="cuda")
+    order = torch.randperm(sum(blocks), generator=generator).cuda()
+    queries, tables, used = [], [], 0
     for length, count in zip(LENGTHS, blocks, strict=True):
-        q = (torch.randn(length, HEADS, HEAD_DIM, generator=generator) * 2).to(torch.bfloat16).cuda()
-        k = (torch.randn(length, KV_HEADS, HEAD_DIM, generator=generator) * 2).to(torch.bfloat16).cuda()
-        v = torch.randn(length, KV_HEADS, HEAD_DIM, generator=generator).to(torch.bfloat16).cuda()
+        queries.append((torch.randn(length, HEADS, HEAD_DIM, generator=generator) * 2).to(torch.bfloat16).cuda())
+        keys = torch.randn(length, KV_HEADS, HEAD_DIM, generator=generator) * 2
+        values = torch.randn(length, KV_HEADS, HEAD_DIM, generator=generator)
+        padded = torch.zeros(count * BLOCK, KV_HEADS, 2 * HEAD_DIM)
+        padded[:length] = torch.cat([keys, values], dim=-1)
         table = order[used : used + count]
         used += count
-        for cache, values in zip(caches, (k, v), strict=True):
-            padded = torch.zeros(count * BLOCK, KV_HEADS, HEAD_DIM, dtype=torch.bfloat16, device="cuda")
-            padded[:length] = values
-            cache[table.long()] = padded.view(count, BLOCK, KV_HEADS, HEAD_DIM)
-        tables.append(table)
-        sequences.append((q, k, v))
+        kv_cache[table] = padded.view(count, BLOCK, KV_HEADS, 2 * HEAD_DIM).transpose(1, 2).to(torch.bfloat16).cuda()
+        tables.append(table.to(torch.int32))
     width = max(blocks)
     table_rows = torch.stack([torch.nn.functional.pad(table, (0, width - table.numel())) for table in tables])
-    return sequences, caches, table_rows
+    return queries, kv_cache, table_rows
 
 
 def _same_rows(left, right) -> bool:
@@ -96,24 +90,22 @@ def _same_rows(left, right) -> bool:
 
 
 @pytest.mark.parametrize("window", [None, WINDOW], ids=["full", "sliding_window"])
-def test_engine_prefill_rows_equal_rows_decoded_alone(window):
+def test_engine_decode_and_prefill_rows_equal_rows_decoded_alone(window):
     require_hoppers(1)
-    sequences, caches, tables = _sequences(torch.Generator().manual_seed(0))
-    for index, (length, (q, _, _)) in enumerate(zip(LENGTHS, sequences, strict=True)):
-        decode = (q, caches, list(range(length + 1)), list(range(1, length + 1)), tables[[index] * length], window)
-        decoded = _paged_calls(*decode, causal_rows=True)
-        # The local kernel gives every row decoded alone the same bytes.
-        assert _same_rows(decoded, _paged_calls(*decode, causal_rows=False))
-        # A prefill from a 16-token cached prefix, through the engine's request plan (its rows before position 32
-        # run as their own request; on a sliding-window layer each row past the window alone).
-        planned = fa3_invariant_requests([0, length - 16], [length], window, FA3_BLOCK_M // GROUP)
-        prefill = _paged_calls(
-            q[16:],
-            caches,
-            planned.query_start.tolist(),
-            planned.key_lengths.tolist(),
-            tables[[index] * planned.key_lengths.numel()],
-            window,
-            causal_rows=True,
-        )
+    decode_invariant.install()
+    impl = FlashAttentionImpl(HEADS, HEAD_DIM, SCALE, KV_HEADS, None, window, "auto")
+    queries, kv_cache, tables = _sequences(torch.Generator().manual_seed(0))
+    for length, query, table in zip(LENGTHS, queries, tables, strict=True):
+        table = table[None]
+        decoded = _decoded_alone(impl, query, kv_cache, table)
+
+        # Decode steps of every row and of the last FA3_DYNAMIC_SPLIT_MAX_BATCH rows.
+        for first in (0, max(length - FA3_DYNAMIC_SPLIT_MAX_BATCH, 0)):
+            count = length - first
+            step = (list(range(count + 1)), list(range(first + 1, length + 1)), table.repeat(count, 1))
+            assert _same_rows(
+                _attend(FlashAttentionImpl.forward, impl, query[first:], kv_cache, *step), decoded[first:]
+            )
+        # A prefill of the rows after a 16-token cached prefix.
+        prefill = _attend(FlashAttentionImpl.forward, impl, query[16:], kv_cache, [0, length - 16], [length], table)
         assert _same_rows(prefill, decoded[16:])
