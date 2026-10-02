@@ -29,6 +29,19 @@ class BaseTextEnvStepOutput(TypedDict):
     reset_conversation: NotRequired[ConversationType]
 
 
+def verification_error_step(
+    reason: str, *, minimum_reward: float, diagnostics: Dict[str, Any]
+) -> BaseTextEnvStepOutput:
+    """Translate a framework error into its caller-declared minimum reward."""
+    return BaseTextEnvStepOutput(
+        observations=[],
+        reward=minimum_reward,
+        done=True,
+        metadata={},
+        verification=VerificationResult.error(reason, diagnostics=diagnostics),
+    )
+
+
 class BaseTextEnv(Env[ConversationType, str]):
     """
     Base environment class for all text-in / text-out environments.

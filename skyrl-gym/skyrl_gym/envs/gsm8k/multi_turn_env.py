@@ -1,9 +1,8 @@
 from typing import Dict, Any
 from omegaconf import DictConfig
 
-from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
+from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput, verification_error_step
 from skyrl_gym.envs.gsm8k import utils
-from skyrl_gym.verification import VerificationResult
 
 
 class GSM8kMultiTurnEnv(BaseTextEnv):
@@ -64,12 +63,8 @@ class GSM8kMultiTurnEnv(BaseTextEnv):
                 verifyit_enabled=self.verifyit_enabled,
             )
         except error_types as error:
-            return BaseTextEnvStepOutput(
-                observations=[],
-                reward=0.0,
-                done=True,
-                metadata={},
-                verification=VerificationResult.error(str(error), diagnostics={"verifyit_status": "invalid_task"}),
+            return verification_error_step(
+                str(error), minimum_reward=0.0, diagnostics={"verifyit_status": "invalid_task"}
             )
         done = self.turns >= self.max_turns or reward == 1.0
 

@@ -1,4 +1,4 @@
-from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput, ConversationType
+from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput, ConversationType, verification_error_step
 from typing import Tuple, Any
 from skyrl_gym.tools import SearchToolGroup, PythonCodeExecutorToolGroup
 from skyrl_gym.envs.gsm8k import utils
@@ -14,6 +14,7 @@ class SearchCodeEnv(BaseTextEnv):
 
     def __init__(self, env_config: DictConfig, extras: Dict[str, Any] = {}):
         super().__init__()
+        self.verifyit_enabled = bool(env_config.get("verifyit_enabled", False))
 
         assert "reward_spec" in extras, "reward_spec field is required"
         assert "ground_truth" in extras["reward_spec"], "ground_truth is required in reward_spec field"
@@ -57,7 +58,7 @@ class SearchCodeEnv(BaseTextEnv):
         if done:
             # Concat all chat history into a single string and compute reward
             chat_history_str = "\n".join([item["content"] for item in self.chat_history])
-            return utils.compute_score(chat_history_str, self.ground_truth)
+            return utils.compute_score(chat_history_str, self.ground_truth, verifyit_enabled=self.verifyit_enabled)
         else:
             return 0
 
@@ -78,7 +79,25 @@ class SearchCodeEnv(BaseTextEnv):
 
         error = None
         done = self._is_done(action)
-        reward = self._get_reward(action, done)
+        error_types = (RuntimeError, ImportError) if self.verifyit_enabled else ()
+        invalid_task_types = ()
+        try:
+            if self.verifyit_enabled:
+                from verifyit.grade import InvalidTask
+
+                invalid_task_types = (InvalidTask,)
+                error_types += invalid_task_types
+            reward = self._get_reward(action, done)
+        except error_types as grading_error:
+            return verification_error_step(
+                str(grading_error),
+                minimum_reward=0.0,
+                diagnostics={
+                    "verifyit_status": "invalid_task"
+                    if isinstance(grading_error, invalid_task_types)
+                    else "infrastructure_error"
+                },
+            )
 
         if done:
             return BaseTextEnvStepOutput(observations=[], reward=reward, done=done, metadata={})
