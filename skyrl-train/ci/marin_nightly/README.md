@@ -49,8 +49,7 @@ it requires that many observations inside the range. Endpoint inclusion is
 controlled by `inclusive_minimum` and `inclusive_maximum`. A `trend` compares
 the mean of the first and last `window` observations; too few observations fail.
 Negative `min_improvement` values permit a bounded decrease.
-`MetricSeries` holds the observations and computes their statistics;
-`MetricGate` checks them and returns typed failures. Top-level `finite_metrics`
+The gate returns typed failures for missing, nonfinite or out-of-range observations. Top-level `finite_metrics`
 and `bounds` check the final training payload.
 
 ```json
@@ -72,19 +71,19 @@ synchronous lane is a manual launcher option outside CI.
 
 `cat-count-h100` submits a 4-CPU, 16-GB-memory, 8-GB-disk coordinator and two
 worker tasks with two H100s and 65 CPUs each. It uses seed 17, behavior clipping
-and staleness 2, without checkpoints or HF export. `resolve_runtime.sh --commit`
-selects the nightly checkout's revision; the Marin launcher uses that revision
-for both its package and GPU runtime. Scheduled runs use Marin main.
-The workflow’s `marin_revision` input supports branch validation; `lane`
-selects a single lane for manual dispatch. Scheduled runs execute every lane.
+and staleness 2, without checkpoints or HF export. The runner clones Marin main,
+sets the external MarinSkyRL source to the commit under test, and runs Marin's
+`config/update-external.py MarinSkyRL`. That pin supplies both the launcher
+package and the GPU runtime. Manual dispatch can select one lane; scheduled
+runs execute every lane.
 
-Each attempt has a 20-minute deadline. Coordinator eviction, lost workers and
-a deadline before training are reported as `INFRASTRUCTURE_FAILURE` and retried
-once. Learning, metric and application failures are `GATE_FAILURE` and are not
-retried. `CAT_COUNT_NIGHTLY_RESULT` records the conclusion and attempt times;
+Each attempt has a 20-minute deadline including queue time. A failure with no
+native training row is reported as `INFRASTRUCTURE_FAILURE` and retried once.
+A failed job after training starts, or a failed metric gate, is `GATE_FAILURE`
+and is not retried. The script records each attempt's wall time and exit status;
 `OK against ...cat-count-canary-qwen2.5-0.5b-async.json` is the passing gate line.
-The workflow uploads native logs and owned-job receipts. Cleanup verifies those
-identities before cancellation.
+The workflow uploads the combined native log and cancels its own named jobs
+in the shared cleanup step.
 
 ## Two Ray instances cannot share a node
 
@@ -184,11 +183,11 @@ gh workflow run marin-nightly.yaml \
   -f target_cluster=cw-rno2a
 ```
 
-## Tightening the spec
+## GSM8K learning gate
 
-The shipped thresholds are structural: metrics exist, are finite, and `reward/avg_raw_reward`
-is inside `[0, 1]` (gsm8k scores each rollout 0 or 1, so a mean outside that range means the
-reward path is broken). There is deliberately no reward floor above zero — a 0.6B model can
-legitimately score nothing on 16 GSM8K prompts, and a floor would make the nightly flaky
-rather than informative. Once enough nightlies have run green, replace it with a floor drawn
-from the observed distribution and lower the wall-clock budget to the observed p95.
+Every training step must report finite policy loss, final loss, entropy and mean
+reward. Mean reward stays in [0, 1]. The mean of the last three reward observations
+must exceed the first three by at least 0.3; this uses the first logged training
+reward at step 1 because this lane has no reward evaluation before training.
+Seven scheduled nights cleared this threshold with a minimum margin of 0.187.
+The 1,800-second wall-clock allowance is a hang deadline.

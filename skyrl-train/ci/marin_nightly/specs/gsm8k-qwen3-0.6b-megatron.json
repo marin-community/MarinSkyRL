@@ -4,9 +4,9 @@
     "produced_by": "ci/marin_nightly/run_h100.sh, submitted to Iris by .github/workflows/marin-nightly.yaml",
     "why_these_thresholds": [
       "Every training step records finite policy loss, final loss, entropy and mean raw reward. Mean raw reward stays inside [0, 1], the range of GSM8K rollout scores.",
-      "max_wall_clock_seconds is 1800, about 2x the 883s observed on cw-rno2a 2026-09-10 over this recipe. It is a hang backstop, not a budget."
+      "max_wall_clock_seconds is 1800, about 2x the 883s observed on cw-rno2a 2026-09-10 over this recipe. It is a hang backstop, not a budget.",
+      "Mean reward over the final three steps must exceed the first three by at least 0.3. Seven scheduled runs from 2026-09-25 through 2026-10-01 cleared this by 0.187 to 0.272; the 2026-09-25 run used FSDP2 and the following six used Megatron. The first reward is logged at training step 1, not step 0."
     ],
-    "tightening": "Set reward-trend bounds after enough Megatron nights establish an observed distribution.",
     "observed": "2026-09-10, cw-rno2a, one H100, 30 steps: 883s end to end, median train_step 7.92s, mean 8.09s, max 10.8s."
   },
   "min_train_steps": 30,
@@ -36,6 +36,10 @@
       "bounds": {
         "minimum": 0.0,
         "maximum": 1.0
+      },
+      "trend": {
+        "window": 3,
+        "min_improvement": 0.3
       }
     }
   ]

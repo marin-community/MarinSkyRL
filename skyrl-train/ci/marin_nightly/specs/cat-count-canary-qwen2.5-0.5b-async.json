@@ -58,8 +58,7 @@
       "max_step": 30,
       "bounds": {
         "minimum_count": 1,
-        "minimum": 0.65,
-        "inclusive_minimum": true
+        "minimum": 0.65
       }
     },
     {

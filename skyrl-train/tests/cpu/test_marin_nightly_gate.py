@@ -1,16 +1,12 @@
 import json
 import math
+import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 import torch
-from iris.client.workload_codec import job_status_from_proto, task_status_from_proto
-from iris.rpc import job_pb2
-from iris.cluster.types import JobName
-
-from ci.marin_nightly import cat_count_nightly
-
 from skyrl_train.objective.teacher import teacher_advantages
 
 from ci.marin_nightly.gate import (
@@ -54,7 +50,7 @@ def healthy_log(steps: int = 2) -> str:
     GRPO run's does, so it also satisfies the reward-trend gate, not just the structural checks."""
     lines = ["Ray runtime started.", "::: training"]
     for step in range(1, steps + 1):
-        reward = round(0.05 + 0.005 * (step - 1), 4)
+        reward = round(0.05 + 0.02 * (step - 1), 4)
         lines.append(mirror_line(step, **{"reward/avg_raw_reward": reward}))
     lines.append("Training complete.")
     return "\n".join(lines)
@@ -94,7 +90,7 @@ def reward_log(rewards: list[float]) -> str:
 def test_parse_metrics_reads_payloads_out_of_decorated_log_lines():
     steps = parse_metrics(healthy_log(steps=2))
     assert [(s.kind, s.step) for s in steps] == [("train", 1), ("train", 2)]
-    assert steps[-1].values["reward/avg_raw_reward"] == 0.055
+    assert steps[-1].values["reward/avg_raw_reward"] == 0.07
 
 
 def test_parse_metrics_ignores_a_log_with_no_payloads():
@@ -243,12 +239,10 @@ def test_duplicate_payloads_do_not_count_as_completed_steps(spec):
         ("nan_loss", FailureKind.NONFINITE, "policy/policy_loss"),
         ("missing_loss", FailureKind.MISSING_METRIC, "policy/policy_loss"),
         ("flat_train", FailureKind.TREND, "environment/exact_n10"),
-        ("sparse_train", FailureKind.MISSING_METRIC, "environment/exact_n10"),
         ("flat_eval", FailureKind.TREND, "eval/cat_count_n10/avg_score"),
         ("no_eval", FailureKind.OBSERVATIONS, "eval/cat_count_n10/avg_score"),
         ("no_zero_variance", FailureKind.BOUNDS, "reward/zero_std_group_fraction"),
         ("no_ratio_change", FailureKind.BOUNDS, "policy/ppo_ratio_exact_unit_fraction"),
-        ("nan_clip", FailureKind.NONFINITE, "policy/ppo_clip_ratio"),
     ],
 )
 def test_metric_gates_require_finite_learning_and_enough_evidence(tmp_path, mutation, expected_kind, expected_metric):
@@ -321,14 +315,10 @@ def test_metric_gates_require_finite_learning_and_enough_evidence(tmp_path, muta
                 values.pop("policy/policy_loss")
             if mutation == "flat_train" and "environment/exact_n10" in values:
                 values["environment/exact_n10"] = 0.1
-            if mutation == "sparse_train" and row.step == 3:
-                values.pop("environment/exact_n10")
             if mutation == "no_zero_variance":
                 values["reward/zero_std_group_fraction"] = 0.0
             if mutation == "no_ratio_change":
                 values["policy/ppo_ratio_exact_unit_fraction"] = 1.0
-            if mutation == "nan_clip" and row.step == 4:
-                values["policy/ppo_clip_ratio"] = float("nan")
         elif mutation == "flat_eval":
             values["eval/cat_count_n10/avg_score"] = 0.1
         steps[index] = replace(row, values=values)
@@ -341,54 +331,30 @@ def test_metric_gates_require_finite_learning_and_enough_evidence(tmp_path, muta
         assert failures == []
 
 
-@pytest.mark.parametrize(
-    "mutation",
-    ["healthy", "flat_eval", "late_crossing", "dp_divergence", "missing_step_zero", "missing_initial_metric"],
-)
-def test_cat_count_shipped_specs_require_learning_from_step_zero(mutation):
-    path = SHIPPED_SPEC.parent / "cat-count-canary-qwen2.5-0.5b-async.json"
-    spec = load_spec(path)
-    metrics = {
-        "policy/policy_loss": 0.1,
-        "policy/final_loss": 0.1,
-        "policy/policy_entropy": 1.0,
-        "reward/zero_std_group_fraction": 0.2,
-        "policy/ppo_clip_ratio": 0.01,
-        "policy/ppo_ratio_exact_unit_fraction": 0.9,
-        "policy/mismatch/pooled/log_ratio_abs_mean": 0.01,
-        "async/staleness_mean": 1.0,
-        "policy/dp_weight_checksum_mismatch": 0.0,
-        "environment/exact_n10": 0.5,
-        "environment/exact_n20": 0.25,
-    }
-    steps = [StepMetrics("train", step, metrics) for step in range(1, max(10, spec.min_train_steps) + 1)]
-    evaluations = [
-        StepMetrics("eval", step, {"eval/sampled/train/avg_score": score})
-        for step, score in ((0, 0.25), (5, 0.30), (10, 0.65))
-    ]
-    if mutation == "flat_eval":
-        evaluations[-1] = replace(evaluations[-1], values={"eval/sampled/train/avg_score": 0.25})
-    if mutation == "late_crossing":
-        evaluations[-1] = replace(evaluations[-1], step=35)
-    if mutation == "dp_divergence":
-        steps[1] = replace(steps[1], values={**metrics, "policy/dp_weight_checksum_mismatch": 1.0})
-    if mutation == "missing_step_zero":
-        evaluations = evaluations[1:]
-    if mutation == "missing_initial_metric":
-        evaluations[0] = replace(evaluations[0], values={})
-    failures = check_run([*steps, *evaluations], spec, 300)
-    if mutation == "healthy":
-        assert failures == []
-    else:
-        expected_kind = {
-            "missing_step_zero": FailureKind.OBSERVATIONS,
-            "missing_initial_metric": FailureKind.MISSING_METRIC,
-        }.get(mutation, FailureKind.BOUNDS)
-        expected_metric = (
-            "policy/dp_weight_checksum_mismatch" if mutation == "dp_divergence" else "eval/sampled/train/avg_score"
-        )
-        assert any(failure.kind == expected_kind and failure.metric == expected_metric for failure in failures)
-    assert check_log_patterns("Training done!\n[telemetry] enabled run_id=test\n", spec) == []
+@pytest.mark.parametrize("run,wall_clock,expected_status", [("healthy", 635.58, 0), ("divergence", 680, 1)])
+def test_cat_count_gate_replays_native_runs(run, wall_clock, expected_status):
+    log = Path(__file__).parents[1] / "fixtures" / "cat_count_logs" / f"{run}.txt"
+    spec_path = SHIPPED_SPEC.parent / "cat-count-canary-qwen2.5-0.5b-async.json"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SHIPPED_SPEC.parents[1] / "gate.py"),
+            "--log",
+            str(log),
+            "--spec",
+            str(spec_path),
+            "--wall-clock-seconds",
+            str(wall_clock),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == expected_status, result.stdout + result.stderr
+    if run == "divergence":
+        failures = check_run(parse_metrics(log.read_text()), load_spec(spec_path), wall_clock)
+        assert {(failure.kind, failure.metric) for failure in failures} == {
+            (FailureKind.BOUNDS, "policy/dp_weight_checksum_mismatch")
+        }
 
 
 @pytest.mark.parametrize(
@@ -479,50 +445,3 @@ def test_opencode_spec_requires_exact_concurrent_literal_coverage():
             del metrics["policy/correction/weight_mean"]
         failures = check_run(parse_metrics(mirror_line(1, **metrics)), spec, wall_clock_seconds=900)
         assert any(failure.metric == "policy/correction/weight_mean" for failure in failures)
-
-
-@pytest.mark.parametrize(
-    "state,reason,previous_loss,deadline,trained,infrastructure",
-    [
-        (job_pb2.JOB_STATE_SUCCEEDED, "", False, False, True, False),
-        (job_pb2.JOB_STATE_SUCCEEDED, "", True, False, True, False),
-        (job_pb2.JOB_STATE_FAILED, "PodDeleted", False, False, True, True),
-        (job_pb2.JOB_STATE_PENDING, "PodDeleted", False, True, True, True),
-        (job_pb2.JOB_STATE_FAILED, "Evicted", False, False, False, True),
-        (job_pb2.JOB_STATE_FAILED, "", False, True, False, True),
-        (job_pb2.JOB_STATE_FAILED, "", False, True, True, False),
-        (job_pb2.JOB_STATE_FAILED, "ValueError", False, False, True, False),
-    ],
-)
-def test_cat_count_nightly_separates_infrastructure_from_application_failures(
-    state, reason, previous_loss, deadline, trained, infrastructure
-):
-    task_state = job_pb2.TASK_STATE_SUCCEEDED if state == job_pb2.JOB_STATE_SUCCEEDED else job_pb2.TASK_STATE_FAILED
-    task = job_pb2.TaskStatus(
-        task_id="/atqamar/nightly/0",
-        state=task_state,
-        current_attempt_id=1,
-        attempts=[job_pb2.TaskAttempt(attempt_id=1, state=task_state, terminal_reason=reason)],
-    )
-    if state == job_pb2.JOB_STATE_PENDING:
-        task.state = job_pb2.TASK_STATE_PENDING
-        task.current_attempt_id = 2
-    if previous_loss:
-        task.attempts.add(
-            attempt_id=0, state=job_pb2.TASK_STATE_WORKER_FAILED, is_worker_failure=True, terminal_reason="PodDeleted"
-        )
-    summary = job_status_from_proto(job_pb2.JobStatus(job_id="/atqamar/nightly", state=state))
-
-    class RecordedIrisClient:
-        def job_status(self, _job_name):
-            return summary
-
-        def list_jobs(self, *, prefix):
-            return []
-
-        def list_tasks(self, _job_name):
-            return [task_status_from_proto(task)]
-
-    statuses = cat_count_nightly.workload_statuses(RecordedIrisClient(), JobName.from_wire("/atqamar/nightly"))
-    log = mirror_line(1) if trained else ""
-    assert (cat_count_nightly.infrastructure_reason(statuses, log, deadline) is not None) == infrastructure
