@@ -23,30 +23,39 @@ def decode_routed_experts(routes: str, expected_rows: int) -> np.ndarray:
 
 
 def normalize_routed_experts(routes: str, prompt_ids: list[int], response_ids: list[int]) -> np.ndarray:
+    """Return response routes from vLLM's encoded route array, with a sentinel for the final unforwarded token."""
+    rows = decode_routed_experts(routes, len(prompt_ids) + len(response_ids) - 1)
+    return response_routed_experts(rows, len(prompt_ids), len(response_ids))
+
+
+def response_routed_experts(rows: np.ndarray, prompt_length: int, response_length: int) -> np.ndarray:
     """Return response routes, with a sentinel for the final unforwarded token.
 
-    vLLM's encoded array starts at the first prompt token and ends at the
+    vLLM's route array starts at the first prompt token and ends at the
     penultimate generated token. The last generated token has no forward pass.
     """
-    expected = len(prompt_ids) + len(response_ids) - 1
-    rows = decode_routed_experts(routes, expected)
+    expected = prompt_length + response_length - 1
     if (
         rows.ndim != 3
+        or rows.shape[0] != expected
         or rows.shape[1] == 0
         or rows.shape[2] == 0
         or not np.issubdtype(rows.dtype, np.integer)
         or np.any(rows < 0)
         or np.any(rows > np.iinfo(np.uint32).max)
     ):
-        raise ValueError("routed_experts must have [token, layer, expert] nonnegative integer shape")
-    response_rows = rows[len(prompt_ids) :]
+        raise ValueError(
+            f"routed_experts must be a nonnegative integer [token, layer, expert] array with {expected} token rows, "
+            f"got shape {rows.shape} and dtype {rows.dtype}"
+        )
+    response_rows = rows[prompt_length:]
     dtype = (
         np.uint8
         if not response_rows.size or response_rows.max() <= 255
         else np.min_scalar_type(int(response_rows.max()))
     )
-    result = np.empty((len(response_ids), *rows.shape[1:]), dtype=dtype)
-    if not response_ids:
+    result = np.empty((response_length, *rows.shape[1:]), dtype=dtype)
+    if not response_length:
         return result
     result[:-1] = response_rows
     result[-1] = 0

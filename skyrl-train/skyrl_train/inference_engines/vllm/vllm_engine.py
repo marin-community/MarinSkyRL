@@ -7,6 +7,7 @@ from typing import List, Any, Dict, Optional, Tuple, Iterator, AsyncGenerator
 from dataclasses import asdict, dataclass, fields as _dataclass_fields, replace
 from loguru import logger
 from http import HTTPStatus
+import numpy as np
 import ray
 import torch
 import asyncio
@@ -33,6 +34,7 @@ from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
     request_id_for_group,
 )
 from skyrl_train.io import io
+from skyrl_train.trajectory_runners.routed_experts import response_routed_experts
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest, ChatCompletionResponse
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
@@ -1457,6 +1459,7 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         response_logprobs: Optional[List[List[float]]] = []
         student_topk_indices: List[List[List[int]]] = []
         behavior_topk_logprobs: List[List[List[float]]] = []
+        routed_experts: List[Optional[np.ndarray]] = []
         all_prompt_logprobs: Optional[List] = None
         params_by_prompt = sampling_params if isinstance(sampling_params, list) else [sampling_params] * len(outputs)
         if len(params_by_prompt) != len(outputs):
@@ -1470,6 +1473,13 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
             responses.append(resp.text)
             stop_reasons.append(resp.finish_reason)
             response_ids.append(resp.token_ids)
+            routed_experts.append(
+                None
+                if resp.routed_experts is None
+                else response_routed_experts(
+                    np.asarray(resp.routed_experts), len(output.prompt_token_ids), len(resp.token_ids)
+                )
+            )
             _logprobs = None
             selected_ids = []
             selected_scores = []
@@ -1530,6 +1540,10 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         if response_top_k is not None and response_top_k > 0:
             result["student_topk_indices"] = student_topk_indices
             result["behavior_topk_logprobs"] = behavior_topk_logprobs
+        if any(routes is not None for routes in routed_experts):
+            if any(routes is None for routes in routed_experts):
+                raise ValueError("vLLM omitted routed experts for part of a batch")
+            result["routed_experts"] = routed_experts
         return result
 
     def get_model_max_len(self) -> int:
