@@ -210,6 +210,8 @@ def create_ray_wrapped_inference_engines_from_config(
         role,
         engine_init_kwargs=engine_init_kwargs,
     )
+    if cfg.generator.weight_sync_transport == "expert_block":
+        engine_kwargs["require_verified_placements"] = True
 
     # Conditionally add LoRA parameters if LoRA is enabled
     if cfg.trainer.policy.model.lora.rank > 0:

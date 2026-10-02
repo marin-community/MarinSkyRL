@@ -142,6 +142,7 @@ def engine_client(cfg, model_path: str, geometry: Geometry) -> InferenceEngineCl
         max_num_seqs=cfg.trainer.train_batch_size,
         tokenizer=tokenizer,
         backend="vllm",
+        require_verified_placements=True,
         engine_init_kwargs={"max_model_len": MAX_MODEL_LEN},
     )
     return InferenceEngineClient(engines, tokenizer, cfg)
