@@ -38,6 +38,7 @@ from skyrl_train.trajectory_runners.trajectory_reward_shaping import (
 )
 from skyrl_train.metric_names import ROLLOUT_FAILURE_FRACTION_METRIC
 from skyrl_train.inference_engines.base import ConversationType
+from skyrl_train.inference_engines.vllm.policy_steps import UNSAMPLED_POLICY_STEP
 from loguru import logger
 from skyrl_gym.metrics import aggregate_for_environment
 from skyrl_gym.verification import VerificationResult, VerificationStatus, normalized_verifier_score
@@ -873,6 +874,15 @@ def concatenate_trajectory_batches(
     }
     if rollout_routed_experts_concat is not None:
         result["rollout_routed_experts"] = rollout_routed_experts_concat
+    if any(output.get("rollout_policy_steps") is not None for output in trajectory_batches):
+        result["rollout_policy_steps"] = [
+            row
+            for output in trajectory_batches
+            for row in (
+                output.get("rollout_policy_steps")
+                or [np.full(len(ids), UNSAMPLED_POLICY_STEP, dtype=np.int32) for ids in output["response_ids"]]
+            )
+        ]
     if selected_topk_concat is not None:
         result["student_topk_indices"] = selected_topk_concat
         result["behavior_topk_logprobs"] = behavior_topk_concat

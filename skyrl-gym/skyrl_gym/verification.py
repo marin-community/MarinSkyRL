@@ -40,6 +40,8 @@ class RolloutEvidence:
     student_topk_indices: np.ndarray | None = None
     behavior_topk_logprobs: np.ndarray | None = None
     routed_experts: np.ndarray | None = None
+    # The policy step that sampled each response token; -1 where no engine step sampled it.
+    policy_steps: np.ndarray | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -66,6 +68,9 @@ class RolloutEvidence:
         if self.routed_experts is not None:
             if len(self.routed_experts) != len(self.response_token_ids):
                 raise ValueError("routed_experts must align with response_token_ids")
+        if self.policy_steps is not None:
+            if len(self.policy_steps) != len(self.response_token_ids):
+                raise ValueError("policy_steps must align with response_token_ids")
 
 
 class VerificationStatus(StrEnum):

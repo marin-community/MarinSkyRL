@@ -87,6 +87,7 @@ class _ChatResult:
     assistant_message: dict[str, Any]
     generation_token_budget: int | None
     routed_experts: np.ndarray | None = None
+    policy_steps: np.ndarray | None = None
 
 
 def _choice_routed_experts(choice: dict[str, Any], prompt_ids: list[int], response_ids: list[int]) -> np.ndarray | None:
@@ -117,6 +118,8 @@ def _assemble_chat_results(results: list[_ChatResult]) -> ModelClientOutput:
         output["behavior_topk_logprobs"] = selected_scores
     if any(result.routed_experts is not None for result in results):
         output["routed_experts"] = [result.routed_experts for result in results]
+    if any(result.policy_steps is not None for result in results):
+        output["response_policy_steps"] = [result.policy_steps for result in results]
     return output
 
 
@@ -324,6 +327,7 @@ class DirectModelClient:
                 message,
                 chat_options.get("max_completion_tokens"),
                 _choice_routed_experts(choice, prompt_ids, response_ids),
+                None if choice.get("policy_steps") is None else np.asarray(choice["policy_steps"], dtype=np.int32),
             )
 
         results = await asyncio.gather(

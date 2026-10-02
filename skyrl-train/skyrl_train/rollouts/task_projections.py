@@ -16,6 +16,7 @@ from taskcompendium.grading import GradeResult, Outcome
 from rolloutengine.contracts import RolloutData
 
 from skyrl_train.error_treatment import ErrorTreatment
+from skyrl_train.inference_engines.vllm.policy_steps import UNSAMPLED_POLICY_STEP
 from skyrl_train.metric_names import TASK_ROLLOUT_METRIC_PREFIX
 from skyrl_train.trajectory_runners.projections import (
     StepWiseTrajectoryProjection,
@@ -198,6 +199,14 @@ def training_output(
                 if len(values) != len(step.turn.response_token_ids):
                     raise ValueError("Expert routes must align with generated tokens")
                 routed_experts[step.response_end + 1 - len(values) : step.response_end + 1] = values
+    stamps = [step.turn.metadata.get("response_policy_steps") for step in rollout.steps]
+    policy_steps = None
+    if any(values is not None for values in stamps):
+        # Observation tokens between turns keep the unsampled stamp.
+        policy_steps = np.full(len(rollout.response_token_ids), UNSAMPLED_POLICY_STEP, dtype=np.int32)
+        for step, values in zip(rollout.steps, stamps, strict=True):
+            if values is not None:
+                policy_steps[step.response_end + 1 - len(values) : step.response_end + 1] = values
     return AgentLoopOutput(
         evidence=RolloutEvidence(
             messages=rollout.messages,
@@ -210,6 +219,7 @@ def training_output(
             student_topk_indices=None if selected is None else selected.indices,
             behavior_topk_logprobs=None if selected is None else selected.topk_logprobs,
             routed_experts=routed_experts,
+            policy_steps=policy_steps,
         ),
         verification=verification,
         reward=RewardResult(
