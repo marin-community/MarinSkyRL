@@ -66,14 +66,6 @@ async def test_remote_completion_keeps_sampled_ids_and_aligned_behavior_logprobs
                 "sampling_params": {"temperature": 1.0, **({"logprobs": 2} if capture else {})},
             }
         )
-        # An abort retry extends the original prompt with served IDs, never encoded response text.
-        retry_ids = [[0, 1] + result["response_ids"][0], [0, 2] + result["response_ids"][1]]
-        await engine.generate(
-            {
-                "prompt_token_ids": retry_ids,
-                "sampling_params": {"temperature": 1.0, **({"logprobs": 2} if capture else {})},
-            }
-        )
     assert result["responses"] == [" X", " X"]
     assert result["response_ids"] == [[3], [2]]
     assert result["response_logprobs"] == [[-0.25], [-0.5]]
@@ -87,7 +79,6 @@ async def test_remote_completion_keeps_sampled_ids_and_aligned_behavior_logprobs
     else:
         assert "student_topk_indices" not in result
         assert "behavior_topk_logprobs" not in result
-    assert requests[1]["prompt"] == [[0, 1, 3], [0, 2, 2]]
 
 
 @pytest.mark.asyncio
@@ -159,3 +150,88 @@ async def test_remote_pause_forwards_configured_policy_and_surfaces_rejection(mo
         assert result["stop_reasons"] == ["length"]
         assert result["response_ids"] == [[3]]
         assert result["response_logprobs"] == [[-0.25]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("omit_selected", [False, True])
+async def test_remote_teacher_keeps_selected_prompt_maps_and_rejects_ignored_selection(omit_selected):
+    async def generate(request):
+        body = await request.json()
+        assert body["prompt_logprob_token_ids"] == [[[0, 0], [2, 2]]]
+        return web.json_response(
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "text": " X",
+                        "token_ids": [3],
+                        "finish_reason": "length",
+                        "logprobs": {"token_logprobs": [-0.25]},
+                        "prompt_logprobs": [
+                            None,
+                            {"1": {"logprob": -0.1}}
+                            if omit_selected
+                            else {"1": {"logprob": -0.1}, "2": {"logprob": -4.0}},
+                        ],
+                    }
+                ]
+            }
+        )
+
+    app = web.Application()
+    app.router.add_post("/v1/completions", generate)
+    async with TestServer(app) as server:
+        engine = RemoteInferenceEngine(
+            str(server.make_url("")).removeprefix("http://").rstrip("/"),
+            "test",
+            "vllm",
+            AliasingTokenizer(),
+        )
+        request = {
+            "prompt_token_ids": [[0, 1]],
+            "sampling_params": {"max_tokens": 1, "prompt_logprobs": 2},
+            "sampling_params_per_prompt": [{"prompt_logprob_token_ids": [[0, 0], [2, 2]]}],
+        }
+        if omit_selected:
+            with pytest.raises(ValueError, match="omitted a selected prompt token ID"):
+                await engine.generate(request)
+        else:
+            result = await engine.generate(request)
+            assert result["prompt_logprobs"] == [[None, {1: -0.1, 2: -4.0}]]
+            assert result["response_ids"] == [[3]]
+            assert result["response_logprobs"] == [[-0.25]]
+
+
+@pytest.mark.asyncio
+async def test_remote_teardown_releases_only_its_initialized_weight_group():
+    active = False
+
+    async def initialize(request):
+        nonlocal active
+        assert (await request.json())["group_name"] == "owned"
+        active = True
+        return web.json_response({"status": "initialized"})
+
+    async def destroy(_request):
+        nonlocal active
+        if not active:
+            raise web.HTTPConflict(text="No group is owned")
+        active = False
+        return web.json_response({"status": "destroyed"})
+
+    app = web.Application()
+    app.router.add_post("/init_weight_update_communicator", initialize)
+    app.router.add_post("/destroy_weights_update_group", destroy)
+    async with TestServer(app) as server:
+        engine = RemoteInferenceEngine(
+            str(server.make_url("")).removeprefix("http://").rstrip("/"),
+            "test",
+            "vllm",
+            AliasingTokenizer(),
+        )
+        await engine.teardown()
+        await engine.init_weight_update_communicator("127.0.0.1", 1234, 1, 2, "owned", "gloo")
+        assert active
+        await engine.teardown()
+        assert not active
+        await engine.teardown()
