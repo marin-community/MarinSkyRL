@@ -117,7 +117,7 @@ def test_aime_total_deadline_has_one_owned_worker_and_reaps_it():
     stopped = threading.Event()
 
     def workers():
-        rows = subprocess.check_output(["ps", "-eo", "pid,ppid,command"], text=True).splitlines()
+        rows = subprocess.check_output(["ps", "-ww", "-eo", "pid,ppid,command"], text=True).splitlines()
         candidates = [row.split(None, 2) for row in rows if " -m verifyit.execution.worker" in row]
         for pid, parent, _ in candidates:
             if int(parent) in owned:
