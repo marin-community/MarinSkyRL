@@ -53,6 +53,9 @@ expert-parallel addition order:
 - ``fa3_window_rows``: ``fa3_attention`` computes every row as a decode-invariant engine computes it in its decode steps
   and its prefills alike: every request with the engine's fixed FA3 split count, and on sliding-window layers every row
   past the window as a one-row request.
+- ``vllm_topk``: the router selects its experts with vLLM's Grug router call, ``torch.topk`` of the biased logits for
+  ``k + 1`` experts with the first ``k`` kept, so exact ties resolve as the engine resolves them (``torch.topk``'s choice
+  for a row does not depend on the other rows of the call); without it a stable sort keeps the lower index.
 
 Probe modes set flags for one scoring forward. The process default is the current trainer numerics, or
 the set named by ``trainer.mismatch_probe.train_numerics``, which then applies to training too.
@@ -89,6 +92,7 @@ class GrugNumerics:
     vllm_steps: bool = False
     invariant_router: bool = False
     fa3_window_rows: bool = False
+    vllm_topk: bool = False
 
 
 NUMERICS_FLAGS = tuple(field.name for field in fields(GrugNumerics))

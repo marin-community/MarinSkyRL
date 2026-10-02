@@ -961,7 +961,13 @@ class GrugSelfAttention(SelfAttention):
 
 
 def _grug_topk_indices(biased_logits: torch.Tensor, topk: int) -> torch.Tensor:
-    """Return the first K indices from Grug's biased top-(K+1) selection."""
+    """Return the first K indices from Grug's biased top-(K+1) selection.
+
+    Under ``vllm_topk`` the selection is vLLM's Grug router call (``torch.topk`` of K + 1, the first K kept), which
+    resolves exact ties as the engine does; otherwise a stable sort keeps JAX's lower-index tie rule.
+    """
+    if active_numerics().vllm_topk:
+        return torch.topk(biased_logits, k=topk + 1, dim=-1).indices[:, :topk]
     _, indices = jax_top_k(biased_logits, topk + 1)
     return indices[:, :topk]
 

@@ -20,6 +20,10 @@ REPEAT_REPLAY_MODE = "repeat_replay"
 REREAD_REPLAY_MODE = "reread_replay"
 NATIVE_CAPTURE_MODE = "native_capture"
 REPEAT_REREAD_REPLAY_MODE = "repeat_reread_replay"
+# Native routing scored with the replay controller armed only to carry each row's vLLM data-parallel rank (``ep_sum``),
+# from generation (``native_placed``) or from the re-read (``native_placed_reread``).
+NATIVE_PLACED_MODE = "native_placed"
+NATIVE_PLACED_REREAD_MODE = "native_placed_reread"
 
 
 class ProbeWorker(Protocol):
@@ -28,6 +32,13 @@ class ProbeWorker(Protocol):
 
 def _native(worker: ProbeWorker, settings: Mapping[str, Any]) -> AbstractContextManager:
     return nullcontext()
+
+
+def _native_placed(worker: ProbeWorker, settings: Mapping[str, Any]) -> AbstractContextManager:
+    controller = worker.model.router_replay
+    if controller is None:
+        raise ValueError("native_placed probe modes need an installed replay controller to carry vLLM's placement")
+    return controller.scoring_mode(NATIVE_PLACED_MODE)
 
 
 def _replay(worker: ProbeWorker, settings: Mapping[str, Any]) -> AbstractContextManager:
@@ -265,4 +276,21 @@ for _flag in _COMPILED_STACK_FLAGS:
     )
     TRAINER_MODES[f"{REPLAY_MODE}+{COMPILED_STACK}_without_{_flag}"] = ModeSpec(
         _with_numerics(_replay, NUMERICS_CANDIDATES[f"{COMPILED_STACK}_without_{_flag}"]), requires_routes=True
+    )
+
+
+# Native routing under the Exact set, with the trainer's stable-sort selection and with vLLM's ``torch.topk`` selection
+# (``vllm_topk``): under Exact the router logits equal the engine's, so native routing reproduces the engine's experts
+# exactly when the selection rule is the engine's.
+VLLM_INVARIANT_FORWARD_TOPK = f"{VLLM_INVARIANT_FORWARD}+vllm_topk"
+NUMERICS_CANDIDATES[VLLM_INVARIANT_FORWARD_TOPK] = {**NUMERICS_CANDIDATES[VLLM_INVARIANT_FORWARD], "vllm_topk": True}
+TRAINER_MODES[f"{REPLAY_MODE}+{VLLM_INVARIANT_FORWARD_TOPK}"] = ModeSpec(
+    _with_numerics(_replay, NUMERICS_CANDIDATES[VLLM_INVARIANT_FORWARD_TOPK]), requires_routes=True
+)
+for _candidate in (VLLM_INVARIANT_FORWARD, VLLM_INVARIANT_FORWARD_TOPK):
+    TRAINER_MODES[f"{NATIVE_PLACED_MODE}+{_candidate}"] = ModeSpec(
+        _with_numerics(_native_placed, NUMERICS_CANDIDATES[_candidate]), requires_routes=True
+    )
+    TRAINER_MODES[f"{NATIVE_PLACED_REREAD_MODE}+{_candidate}"] = ModeSpec(
+        _with_numerics(_native_placed, NUMERICS_CANDIDATES[_candidate]), requires_routes=True, route_source="reread"
     )

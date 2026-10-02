@@ -28,7 +28,7 @@ from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from skyrl_train.config.router_replay import validate_replay_keep_fraction
-from skyrl_train.mismatch_probe.modes import FILTERED_REPLAY_MODE, REPLAY_MODE
+from skyrl_train.mismatch_probe.modes import FILTERED_REPLAY_MODE, NATIVE_PLACED_MODE, REPLAY_MODE
 from enum import Enum
 import math
 from typing import Callable, Mapping, Optional, Sequence, Tuple
@@ -298,7 +298,7 @@ class MegatronRouterReplay:
         """Scope a probe forward without changing subsequent training forwards."""
         if self._phase is not _Phase.IDLE:
             raise RuntimeError("router replay: scoring mode requires an idle controller")
-        if mode not in (REPLAY_MODE, FILTERED_REPLAY_MODE):
+        if mode not in (REPLAY_MODE, FILTERED_REPLAY_MODE, NATIVE_PLACED_MODE):
             raise ValueError(f"unsupported replay scoring mode: {mode}")
         if mode == FILTERED_REPLAY_MODE:
             validate_replay_keep_fraction(keep_fraction, "filtered replay keep_fraction")
@@ -461,6 +461,9 @@ class MegatronRouterReplay:
         replaced = torch.zeros_like(targets, dtype=torch.bool)
         if self._scoring_mode == FILTERED_REPLAY_MODE and is_forward:
             idx, replaced = filtered_replay_topk(scores, native_idx, targets, mask, self._keep_fraction, score_type)
+        elif self._scoring_mode == NATIVE_PLACED_MODE and is_forward:
+            # Native routing; the controller is armed only to serve each row's vLLM placement.
+            idx = native_idx
         else:
             idx = torch.where(mask.unsqueeze(-1), targets, native_idx)
         probs = scores.gather(1, idx)
