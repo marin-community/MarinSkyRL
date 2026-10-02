@@ -1,3 +1,4 @@
+import copy
 import threading
 import warnings
 
@@ -7,9 +8,13 @@ import pytest
 import torch
 from torch.distributed import checkpoint
 from torch.distributed.checkpoint.api import CheckpointException
+from torch.distributed.checkpoint.default_planner import DefaultLoadPlanner
+from torch.distributed.checkpoint.planner import LoadItemType, LoadPlan, ReadItem
+from torch.distributed.checkpoint.metadata import MetadataIndex
 
 from marinskyrl.remote_io import S3MultipartWriteStream
 from skyrl_train.io.torch_distributed_checkpoint import StreamingFsspecWriter
+from skyrl_train.io.checkpoint_reader import RecordCheckpointReader
 
 
 _TEST_PART_BYTES = 5 * 2**20
@@ -218,3 +223,75 @@ def test_streaming_fsspec_writer_preserves_upload_part_failure(monkeypatch):
             )
 
     assert filesystem.aborted
+
+
+def test_record_checkpoint_reader_restores_adam_and_continues_the_same_update(tmp_path):
+    model = torch.nn.Linear(5, 3)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+    inputs = torch.arange(10, dtype=torch.float32).reshape(2, 5) / 10
+
+    def update(model, optimizer):
+        optimizer.zero_grad()
+        model(inputs).square().sum().backward()
+        optimizer.step()
+
+    for _ in range(8):
+        update(model, optimizer)
+    saved = {"model": model.state_dict(), "optimizer": optimizer.state_dict(), "step": 8, "rng": torch.get_rng_state()}
+    checkpoint.save(saved, checkpoint_id=tmp_path / "checkpoint", no_dist=True)
+    restored = copy.deepcopy(saved)
+    restored["step"] = 0
+    for tensor in restored["model"].values():
+        tensor.zero_()
+    for state in restored["optimizer"]["state"].values():
+        for tensor in state.values():
+            tensor.zero_()
+    restored["rng"].zero_()
+    checkpoint.load(
+        restored,
+        storage_reader=RecordCheckpointReader(str(tmp_path / "checkpoint")),
+        no_dist=True,
+    )
+    assert restored["step"] == 8
+    assert torch.equal(restored["rng"], saved["rng"])
+    for key, value in saved["model"].items():
+        assert torch.equal(restored["model"][key], value)
+    for key, state in saved["optimizer"]["state"].items():
+        for field, value in state.items():
+            assert torch.equal(restored["optimizer"]["state"][key][field], value)
+
+    resumed = torch.nn.Linear(5, 3)
+    resumed.load_state_dict(restored["model"])
+    resumed_optimizer = torch.optim.Adam(resumed.parameters(), lr=0.01)
+    resumed_optimizer.load_state_dict(restored["optimizer"])
+    update(model, optimizer)
+    update(resumed, resumed_optimizer)
+    for expected, actual in zip(model.parameters(), resumed.parameters(), strict=True):
+        assert torch.equal(expected, actual)
+
+
+def test_record_checkpoint_reader_restores_a_slice_from_a_larger_saved_tensor(tmp_path):
+    source = torch.arange(8 * 2**20, dtype=torch.float32)
+    checkpoint.save({"tensor": source}, checkpoint_id=tmp_path / "checkpoint", no_dist=True)
+    offset = 3 * 2**20
+    restored = {"tensor": torch.full((2**20,), -1.0)}
+    planner = DefaultLoadPlanner()
+    plan = LoadPlan(
+        items=[
+            ReadItem(
+                type=LoadItemType.TENSOR,
+                dest_index=MetadataIndex("tensor"),
+                dest_offsets=torch.Size([0]),
+                storage_index=MetadataIndex("tensor", torch.Size([0])),
+                storage_offsets=torch.Size([offset]),
+                lengths=restored["tensor"].size(),
+            )
+        ]
+    )
+    # The 4 MiB destination comes from the middle of a saved 32 MiB tensor.
+    reader = RecordCheckpointReader(str(tmp_path / "checkpoint"))
+    metadata = reader.read_metadata()
+    reader.set_up_storage_reader(metadata, is_coordinator=True)
+    planner.set_up_planner(restored, metadata, is_coordinator=True)
+    reader.read_data(plan, planner).wait()
+    assert torch.equal(restored["tensor"], source[offset : offset + 2**20])
