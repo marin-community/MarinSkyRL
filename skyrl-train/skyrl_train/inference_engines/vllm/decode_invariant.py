@@ -43,6 +43,7 @@ from torch._inductor.runtime.triton_heuristics import CachingAutotuner
 from vllm.model_executor.models import grugmoe
 from vllm.v1.attention.backends import flash_attn
 
+from skyrl_train.config.decode_invariant import DECODE_INVARIANT_FLASH_ATTN_VERSION
 from skyrl_train.models.grug_invariant_kernels import check_bf16_values, invariant_router_logits, launcher_preference
 from skyrl_train.models.grug_fa3_invariant import (
     FA3_BLOCK_M,
@@ -117,6 +118,22 @@ def _patch_fixed_splits() -> None:
 
     builder.__init__, builder.build = fixed_init, fixed_build
     builder.use_cascade_attention = lambda self, *args, **kwargs: False
+
+
+def _patch_flash_attention_version() -> None:
+    """Every attention layer runs FA3, the kernel the fixed splits and window starts are written for: vLLM selects
+    another version on a GPU that is not Hopper or under ``attention_config.flash_attn_version``."""
+    original_init = flash_attn.FlashAttentionImpl.__init__
+
+    def checked_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        if self.vllm_flash_attn_version != DECODE_INVARIANT_FLASH_ATTN_VERSION:
+            raise RuntimeError(
+                f"a decode-invariant engine runs FA{DECODE_INVARIANT_FLASH_ATTN_VERSION}; vLLM selected "
+                f"FA{self.vllm_flash_attn_version} for {torch.cuda.get_device_name()}"
+            )
+
+    flash_attn.FlashAttentionImpl.__init__ = checked_init
 
 
 def _patch_request_plan() -> None:
@@ -301,6 +318,7 @@ def install() -> None:
     global _installed
     if _installed:
         return
+    _patch_flash_attention_version()
     _patch_fixed_splits()
     _patch_request_plan()
     _patch_router()

@@ -20,7 +20,7 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineOutput,
     NamedWeightsUpdateRequest,
 )
-from skyrl_train.config.decode_invariant import decode_invariant_engine_problems
+from skyrl_train.config.decode_invariant import decode_invariant_engine_problems, flash_attn_version_override
 from skyrl_train.config.weight_sync_pause import (
     DEFAULT_WEIGHT_SYNC_PAUSE_POLICY,
     WeightSyncPausePolicy,
@@ -546,6 +546,7 @@ def create_ray_wrapped_inference_engines(
         problems = decode_invariant_engine_problems(
             backend=backend,
             attention_backend=vllm_attention_backend,
+            flash_attn_version=flash_attn_version_override(engine_init_kwargs),
             enforce_eager=enforce_eager,
             tensor_parallel_size=tensor_parallel_size,
             decode_context_parallel_size=decode_context_parallel_size,

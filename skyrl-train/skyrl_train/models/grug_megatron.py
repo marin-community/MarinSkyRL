@@ -133,6 +133,8 @@ def validate_vllm_numerics_model(config: TransformerConfig) -> None:
         "moe_shared_expert_intermediate_size": vllm_shapes.SHARED_WIDTH,
         "grug_qk_mult": vllm_shapes.QUERY_FACTORS[0],
         "grug_qk_mult_long_scale": vllm_shapes.QUERY_FACTORS[1],
+        "layernorm_epsilon": vllm_shapes.RMS_NORM_EPS,
+        "softmax_scale": None,
         "tensor_model_parallel_size": 1,
         "context_parallel_size": 1,
         "moe_token_dispatcher_type": ALLTOALL_DISPATCHER,

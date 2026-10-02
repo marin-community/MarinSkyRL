@@ -10,6 +10,7 @@ from transformers import LlamaConfig
 import skyrl_train.inference_engines.ray_wrapped_inference_engine as rwie
 import skyrl_train.objective.losses  # noqa: F401
 from skyrl_train.config.decode_invariant import DECODE_INVARIANT_ATTENTION_BACKEND
+from skyrl_train.config.grug_vllm_shapes import ROTARY_POSITIONS, VOCAB
 from skyrl_train.config.numerics import TRITON_MOE_BACKEND, Numerics
 from skyrl_train.config.trajectory_runner_capabilities import TrajectoryRunnerMode
 from skyrl_train.config.utils import get_default_config
@@ -116,6 +117,8 @@ MEGATRON = "trainer.policy.megatron_config"
 FALLBACKS = {
     "another model family": (_policy(LlamaConfig(num_hidden_layers=1)), GYM, "not Grug"),
     "another Grug shape": (_policy(GrugMoeConfig(num_key_value_heads=4)), GYM, "num_key_value_heads"),
+    "another norm epsilon": (_policy(GrugMoeConfig(rms_norm_eps=1e-6)), GYM, "rms_norm_eps"),
+    "a larger vocabulary": (_policy(GrugMoeConfig(vocab_size=VOCAB + 64)), GYM, "vocab_size"),
     "Hero parts": (_policy(GrugMoeConfig(sconv=True)), GYM, "Hero"),
     "unreadable model config": (_unreadable_policy, GYM, "could not be read"),
     "trainer tensor parallelism": (
@@ -153,6 +156,26 @@ FALLBACKS = {
         _settings({f"{MEGATRON}.transformer_config_kwargs.recompute_num_layers": 2}),
         GYM,
         "recompute",
+    ),
+    "an overridden model setting": (
+        _settings({f"{MEGATRON}.transformer_config_kwargs.layernorm_epsilon": 1e-6}),
+        GYM,
+        "layernorm_epsilon",
+    ),
+    "sequences past the rotary table": (
+        _settings({"generator.sampling_params.max_generate_length": ROTARY_POSITIONS}),
+        GYM,
+        "max_generate_length",
+    ),
+    "an engine rotary override": (
+        _settings({"generator.rope_scaling": {"rope_type": "yarn", "factor": 2.0}}),
+        GYM,
+        "rope_scaling",
+    ),
+    "FlashAttention 2 engines": (
+        _settings({"generator.engine_init_kwargs.attention_config": {"flash_attn_version": 2}}),
+        GYM,
+        "flash_attn_version",
     ),
     "packed sequences": (_settings({"trainer.use_sample_packing": True}), GYM, "use_sample_packing"),
     "trainer flash attention": (_trainer_flash_attention, GYM, "flash_attn"),

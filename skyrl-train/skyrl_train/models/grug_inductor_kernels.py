@@ -26,7 +26,7 @@ import functools
 import torch
 from torch._inductor.async_compile import AsyncCompile
 
-from skyrl_train.config.grug_vllm_shapes import HEAD_DIM, HEADS, HIDDEN, KV_HEADS, SHARED_WIDTH
+from skyrl_train.config.grug_vllm_shapes import HEAD_DIM, HEADS, HIDDEN, KV_HEADS, ROTARY_POSITIONS, SHARED_WIDTH
 from skyrl_train.models.grug_invariant_kernels import launcher_preference
 
 # XSA and the 2*sigmoid head gate over each head's 128 dims (every attention layer).
@@ -1136,8 +1136,6 @@ _NORM_FROM_SQUARE_SUM = _norm_from_square_sum()
 
 # Inductor's padded head-gate GEMM writes 24 columns, and the vendored XSA kernel reads the gate at that row stride.
 GATE_COLUMNS = 24
-# Rows of vLLM's bf16 rotary table (``max_position_embeddings``); the RoPE kernel bounds its position index by it.
-ROTARY_POSITIONS = 65536
 ROTARY_DIM = 64
 
 

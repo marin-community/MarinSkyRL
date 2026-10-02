@@ -15,8 +15,22 @@ from omegaconf import DictConfig, OmegaConf
 from transformers import AutoConfig, PretrainedConfig
 
 from skyrl_train.config.behavior_logprobs import behavior_logprob_problems
-from skyrl_train.config.decode_invariant import DECODE_INVARIANT_ATTENTION_BACKEND, decode_invariant_engine_problems
-from skyrl_train.config.grug_vllm_shapes import HEAD_DIM, HEADS, HIDDEN, KV_HEADS, QUERY_FACTORS, SHARED_WIDTH
+from skyrl_train.config.decode_invariant import (
+    DECODE_INVARIANT_ATTENTION_BACKEND,
+    decode_invariant_engine_problems,
+    flash_attn_version_override,
+)
+from skyrl_train.config.grug_vllm_shapes import (
+    HEAD_DIM,
+    HEADS,
+    HIDDEN,
+    KV_HEADS,
+    QUERY_FACTORS,
+    RMS_NORM_EPS,
+    ROTARY_POSITIONS,
+    SHARED_WIDTH,
+    VOCAB,
+)
 from skyrl_train.config.trajectory_runner_capabilities import TrajectoryRunnerMode
 from skyrl_train.config.weight_sync_pause import resolve_weight_sync_pause_policy
 
@@ -30,7 +44,7 @@ ALLTOALL_DISPATCHER = "alltoall"
 # The deepest pipeline the trainer's stage statistic hand-off was verified on.
 MAX_PIPELINE_STAGES = 2
 # The Grug model config attributes that compiled vLLM's kernels hard-code, and their Snowball values.
-COMPILED_MODEL_SHAPES = {
+COMPILED_MODEL_VALUES = {
     "hidden_size": HIDDEN,
     "num_attention_heads": HEADS,
     "num_key_value_heads": KV_HEADS,
@@ -38,7 +52,30 @@ COMPILED_MODEL_SHAPES = {
     "shared_expert_intermediate_size": SHARED_WIDTH,
     "qk_mult": QUERY_FACTORS[0],
     "qk_mult_long_scale": QUERY_FACTORS[1],
+    "rms_norm_eps": RMS_NORM_EPS,
 }
+# Megatron settings the trainer takes from the model config, as the engines take theirs: a transformer_config_kwargs
+# override changes the trainer's model alone.
+MODEL_CONFIG_TRANSFORMER_SETTINGS = (
+    "hidden_size",
+    "num_attention_heads",
+    "num_query_groups",
+    "kv_channels",
+    "layernorm_epsilon",
+    "softmax_scale",
+    "window_size",
+    "window_attn_skip_freq",
+    "no_rope_freq",
+    "rotary_base",
+    "rotary_interleaved",
+    "ffn_hidden_size",
+    "moe_ffn_hidden_size",
+    "moe_shared_expert_intermediate_size",
+    "num_moe_experts",
+    "moe_router_topk",
+    "grug_qk_mult",
+    "grug_qk_mult_long_scale",
+)
 
 
 class Numerics(StrEnum):
@@ -74,21 +111,25 @@ def one_layer_recompute_units(granularity: str | None, method: str | None, num_l
 def exact_setup_problems(cfg: DictConfig, runner_mode: TrajectoryRunnerMode) -> list[str]:
     """Why the settings of ``cfg`` and the trajectory runner are not a setup ``exact`` numerics support.
 
-    ``exact`` needs decode-invariant engines (compiled local vLLM engines with FLASH_ATTN at TP 1, Triton MoE kernels,
-    all-gather/reduce-scatter expert parallelism and no speculative decoding) sampling with the behavior-logprob
-    program at temperature 1, weight syncs that clear the engines' prefix caches, a trajectory runner that reports each
+    ``exact`` needs decode-invariant engines (compiled local vLLM engines with FLASH_ATTN running FA3 at TP 1, Triton
+    MoE kernels, all-gather/reduce-scatter expert parallelism, the model config's rotary table and no speculative
+    decoding) sampling with the behavior-logprob program at temperature 1, sequences within the RoPE kernel's
+    ``ROTARY_POSITIONS``, weight syncs that clear the engines' prefix caches, a trajectory runner that reports each
     sequence's serving engine rank, and a Megatron trainer on unpacked sequences with one GPU per tensor-, context- and
     expert tensor-parallel group, at most two pipeline stages, the all-to-all token dispatcher, Transformer Engine's
-    fused attention for the gradient, parameter all-gathers that complete before the forward, and activation recompute
-    off or in one-layer units. An unset attention backend or MoE backend is accepted: ``configure_exact_engines`` sets
-    it.
+    fused attention for the gradient, parameter all-gathers that complete before the forward, activation recompute off
+    or in one-layer units, and no transformer_config_kwargs override of a setting the model config gives
+    (``MODEL_CONFIG_TRANSFORMER_SETTINGS``). An unset attention backend or MoE backend is accepted:
+    ``configure_exact_engines`` sets it.
     """
     generator = cfg.generator
+    engine = generator.engine_init_kwargs
     problems = [
         f"needs {setting}"
         for setting in decode_invariant_engine_problems(
             backend=generator.backend,
             attention_backend=generator.get("vllm_attention_backend") or DECODE_INVARIANT_ATTENTION_BACKEND,
+            flash_attn_version=flash_attn_version_override(engine),
             enforce_eager=generator.enforce_eager,
             tensor_parallel_size=generator.inference_engine_tensor_parallel_size,
             decode_context_parallel_size=generator.get("inference_engine_decode_context_parallel_size", 1),
@@ -96,7 +137,16 @@ def exact_setup_problems(cfg: DictConfig, runner_mode: TrajectoryRunnerMode) -> 
     ]
     if not generator.run_engines_locally:
         problems.append("needs generator.run_engines_locally=true")
-    engine = generator.engine_init_kwargs
+    if generator.get("rope_scaling") or generator.get("rope_theta") is not None:
+        problems.append(
+            "needs no generator.rope_scaling or generator.rope_theta: the trainer's rotary table is the model config's"
+        )
+    longest = generator.max_input_length + generator.sampling_params.max_generate_length
+    if longest > ROTARY_POSITIONS:
+        problems.append(
+            f"needs generator.max_input_length + generator.sampling_params.max_generate_length <= {ROTARY_POSITIONS}: "
+            f"the RoPE kernel reads positions below it, and sequences can reach {longest}"
+        )
     if engine.get("moe_backend", TRITON_MOE_BACKEND) != TRITON_MOE_BACKEND:
         problems.append(f"needs generator.engine_init_kwargs.moe_backend={TRITON_MOE_BACKEND}")
     if engine.get("all2all_backend", ALLGATHER_REDUCESCATTER) != ALLGATHER_REDUCESCATTER:
@@ -137,6 +187,11 @@ def exact_setup_problems(cfg: DictConfig, runner_mode: TrajectoryRunnerMode) -> 
     transformer = megatron.transformer_config_kwargs
     if transformer.get("moe_token_dispatcher_type", ALLTOALL_DISPATCHER) != ALLTOALL_DISPATCHER:
         problems.append(f"needs moe_token_dispatcher_type={ALLTOALL_DISPATCHER}")
+    problems.extend(
+        f"needs no transformer_config_kwargs.{name}: the trainer takes it from the model config, as the engines do"
+        for name in MODEL_CONFIG_TRANSFORMER_SETTINGS
+        if name in transformer
+    )
     if trainer.gradient_checkpointing and not one_layer_recompute_units(
         transformer.get("recompute_granularity"),
         transformer.get("recompute_method"),
@@ -159,8 +214,8 @@ def policy_model_config(model_path: str, revision: str | None) -> PretrainedConf
 
 
 def exact_model_problems(model_config: PretrainedConfig) -> list[str]:
-    """Why the policy model is not one that compiled vLLM's kernels compute: Snowball-shaped Grug without Hero layers,
-    ShortConv or latent experts."""
+    """Why the policy model is not one that compiled vLLM's kernels compute: Grug with Snowball's shapes and norm
+    epsilon, a vocabulary within Snowball's, and no Hero layers, ShortConv or latent experts."""
     # skyrl_train.models imports skyrl_train.utils, whose validate_cfg imports this module.
     from skyrl_train.models import GRUG_MOE_MODEL_TYPE  # noqa: PLC0415
 
@@ -168,9 +223,14 @@ def exact_model_problems(model_config: PretrainedConfig) -> list[str]:
         return [f"the policy is {model_config.model_type}, not Grug"]
     problems = [
         f"the policy's {name} is {getattr(model_config, name)}, not Snowball's {value}"
-        for name, value in COMPILED_MODEL_SHAPES.items()
+        for name, value in COMPILED_MODEL_VALUES.items()
         if getattr(model_config, name) != value
     ]
+    if model_config.vocab_size > VOCAB:
+        problems.append(
+            f"the policy's vocab_size is {model_config.vocab_size}, above Snowball's {VOCAB}, below which the "
+            "embedding kernel reads token ids"
+        )
     if model_config.uses_hero_architecture:
         problems.append("the policy uses Hero layers, ShortConv or latent experts")
     return problems
