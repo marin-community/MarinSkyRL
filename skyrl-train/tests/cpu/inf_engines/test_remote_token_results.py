@@ -20,7 +20,8 @@ class AliasingTokenizer:
 
 
 @pytest.mark.asyncio
-async def test_remote_completion_keeps_sampled_ids_and_aligned_behavior_logprobs():
+@pytest.mark.parametrize("capture", [False, True])
+async def test_remote_completion_keeps_sampled_ids_and_aligned_behavior_logprobs(capture):
     requests = []
 
     async def generate(request):
@@ -34,14 +35,20 @@ async def test_remote_completion_keeps_sampled_ids_and_aligned_behavior_logprobs
                         "text": " X",
                         "token_ids": [3],
                         "finish_reason": "abort",
-                        "logprobs": {"token_logprobs": [-0.25]},
+                        "logprobs": {
+                            "token_logprobs": [-0.25],
+                            "top_logprobs": [{"token_id:2": -0.75, "token_id:3": -0.25}],
+                        },
                     },
                     {
                         "index": 1,
                         "text": " X",
                         "token_ids": [2],
                         "finish_reason": "stop",
-                        "logprobs": {"token_logprobs": [-0.5]},
+                        "logprobs": {
+                            "token_logprobs": [-0.5],
+                            "top_logprobs": [{"token_id:3": -0.8, "token_id:2": -0.5}],
+                        },
                     },
                 ]
             }
@@ -53,16 +60,33 @@ async def test_remote_completion_keeps_sampled_ids_and_aligned_behavior_logprobs
         engine = RemoteInferenceEngine(
             str(server.make_url("")).removeprefix("http://").rstrip("/"), "test", "vllm", AliasingTokenizer()
         )
-        result = await engine.generate({"prompt_token_ids": [[0, 1], [0, 2]], "sampling_params": {"temperature": 1.0}})
+        result = await engine.generate(
+            {
+                "prompt_token_ids": [[0, 1], [0, 2]],
+                "sampling_params": {"temperature": 1.0, **({"logprobs": 2} if capture else {})},
+            }
+        )
         # An abort retry extends the original prompt with served IDs, never encoded response text.
         retry_ids = [[0, 1] + result["response_ids"][0], [0, 2] + result["response_ids"][1]]
-        await engine.generate({"prompt_token_ids": retry_ids, "sampling_params": {"temperature": 1.0}})
+        await engine.generate(
+            {
+                "prompt_token_ids": retry_ids,
+                "sampling_params": {"temperature": 1.0, **({"logprobs": 2} if capture else {})},
+            }
+        )
     assert result["responses"] == [" X", " X"]
     assert result["response_ids"] == [[3], [2]]
     assert result["response_logprobs"] == [[-0.25], [-0.5]]
     assert result["stop_reasons"] == ["abort", "stop"]
     assert requests[0]["return_token_ids"] is True
-    assert requests[0]["logprobs"] == 0
+    assert requests[0]["logprobs"] == (2 if capture else 0)
+    if capture:
+        assert requests[0]["return_tokens_as_token_ids"] is True
+        assert result["student_topk_indices"] == [[[3, 2]], [[2, 3]]]
+        assert result["behavior_topk_logprobs"] == [[[-0.25, -0.75]], [[-0.5, -0.8]]]
+    else:
+        assert "student_topk_indices" not in result
+        assert "behavior_topk_logprobs" not in result
     assert requests[1]["prompt"] == [[0, 1, 3], [0, 2, 2]]
 
 

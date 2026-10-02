@@ -1,4 +1,5 @@
 import aiohttp
+from skyrl_train.inference_engines.response_topk import select_chat_response_topk
 from skyrl_train.inference_engines.base import (
     InferenceEngineInterface,
     InferenceEngineInput,
@@ -226,6 +227,8 @@ class RemoteInferenceEngine(InferenceEngineInterface):
                 payload["prompt"] = prompt_token_ids
                 payload["return_token_ids"] = True
                 payload.setdefault("logprobs", 0)
+                if payload["logprobs"] is not None and payload["logprobs"] > 0:
+                    payload["return_tokens_as_token_ids"] = True
                 request_url = f"{self.url}/v1/completions"
             elif self.engine_backend == "sglang":
                 # SGLang supports /generate, works exactly like its Python `async_generate()` method
@@ -246,6 +249,8 @@ class RemoteInferenceEngine(InferenceEngineInterface):
         output_ids = []
         finish_reasons = []
         response_logprobs = None
+        student_topk_indices = []
+        behavior_topk_logprobs = []
 
         if self.engine_backend == "vllm":
             if len(response["choices"]) != len(prompt_token_ids):
@@ -265,6 +270,18 @@ class RemoteInferenceEngine(InferenceEngineInterface):
                     if len(logprobs) != len(token_ids) or any(value is None for value in logprobs):
                         raise ValueError("Remote sampled-token logprobs must align with the returned token IDs")
                     response_logprobs.append(logprobs)
+                if payload["logprobs"] is not None and payload["logprobs"] > 0:
+                    rows = choice["logprobs"]["top_logprobs"]
+                    if rows is None or len(rows) != len(token_ids):
+                        raise ValueError("Remote response top-K must align with the returned token IDs")
+                    candidates = [
+                        select_chat_response_topk(
+                            [{"token": token, "logprob": score} for token, score in row.items()], payload["logprobs"]
+                        )
+                        for row in rows
+                    ]
+                    student_topk_indices.append([ids for ids, _ in candidates])
+                    behavior_topk_logprobs.append([scores for _, scores in candidates])
         elif self.engine_backend == "sglang":
             # since prompt_token_ids is a list of lists, response is a list of dicts
             for output in response:
@@ -277,9 +294,13 @@ class RemoteInferenceEngine(InferenceEngineInterface):
         else:
             raise ValueError(f"Invalid engine backend: {self.engine_backend}")
 
-        return InferenceEngineOutput(
+        output = InferenceEngineOutput(
             responses=outputs, stop_reasons=finish_reasons, response_ids=output_ids, response_logprobs=response_logprobs
         )
+        if student_topk_indices:
+            output["student_topk_indices"] = student_topk_indices
+            output["behavior_topk_logprobs"] = behavior_topk_logprobs
+        return output
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         body = request_payload.get("json", {})
