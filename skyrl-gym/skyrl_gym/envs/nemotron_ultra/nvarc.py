@@ -98,7 +98,7 @@ def grade_transductive_arc(
     if verifyit_enabled:
         from verifyit.adapters.skyrl import grade_grid_candidate
 
-        correct = grade_grid_candidate(record["expected_output"], predicted).reward == 1.0
+        correct = grade_grid_candidate(record.get("expected_output"), predicted).reward == 1.0
     else:
         correct = predicted is not None and predicted == record["expected_output"]
     return float(correct), {
@@ -117,6 +117,11 @@ def grade_inductive_arc(
     python_timeout_seconds: int = 30,
     verifyit_enabled: bool = False,
 ) -> tuple[float, dict[str, Any]]:
+    if verifyit_enabled:
+        from verifyit.adapters.skyrl import grade_grid_candidate
+
+        grade_grid_candidate(record.get("expected_output"), None)
+        grade_grid_candidate(record.get("test_input"), None)
     code = _extract_python(text)
     execution = None
     predicted = None
@@ -125,7 +130,7 @@ def grade_inductive_arc(
     if verifyit_enabled:
         from verifyit.adapters.skyrl import grade_grid_candidate
 
-        correct = grade_grid_candidate(record["expected_output"], predicted).reward == 1.0
+        correct = grade_grid_candidate(record.get("expected_output"), predicted).reward == 1.0
     else:
         correct = predicted is not None and predicted == record["expected_output"]
     return float(correct), {

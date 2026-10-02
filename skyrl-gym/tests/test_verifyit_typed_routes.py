@@ -85,6 +85,17 @@ print(json.dumps(results))
         ("rdkit_chemistry_agent", {"property_type": "count", "expected_answer": "Infinity"}, "((2))"),
         ("rdkit_chemistry_agent", {"property_type": "count", "expected_answer": "NaN"}, "((2))"),
         ("nvarc_transductive_simple_agent", {"expected_output": [[True]]}, "[[1]]"),
+        ("nvarc_transductive_simple_agent", {}, "[[1]]"),
+        (
+            "nvarc_inductive_simple_agent",
+            {"test_input": [[1]]},
+            '```python\ndef transform(grid): raise AssertionError("must not execute")\n```',
+        ),
+        (
+            "nvarc_inductive_simple_agent",
+            {"expected_output": [[1]]},
+            '```python\ndef transform(grid): raise AssertionError("must not execute")\n```',
+        ),
     ],
 )
 def test_typed_route_invalid_task_is_framework_error(agent, record, response):
