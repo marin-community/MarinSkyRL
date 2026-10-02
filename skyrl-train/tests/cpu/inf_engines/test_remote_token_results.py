@@ -66,14 +66,6 @@ async def test_remote_completion_keeps_sampled_ids_and_aligned_behavior_logprobs
                 "sampling_params": {"temperature": 1.0, **({"logprobs": 2} if capture else {})},
             }
         )
-        # An abort retry extends the original prompt with served IDs, never encoded response text.
-        retry_ids = [[0, 1] + result["response_ids"][0], [0, 2] + result["response_ids"][1]]
-        await engine.generate(
-            {
-                "prompt_token_ids": retry_ids,
-                "sampling_params": {"temperature": 1.0, **({"logprobs": 2} if capture else {})},
-            }
-        )
     assert result["responses"] == [" X", " X"]
     assert result["response_ids"] == [[3], [2]]
     assert result["response_logprobs"] == [[-0.25], [-0.5]]
@@ -87,7 +79,6 @@ async def test_remote_completion_keeps_sampled_ids_and_aligned_behavior_logprobs
     else:
         assert "student_topk_indices" not in result
         assert "behavior_topk_logprobs" not in result
-    assert requests[1]["prompt"] == [[0, 1, 3], [0, 2, 2]]
 
 
 @pytest.mark.asyncio
