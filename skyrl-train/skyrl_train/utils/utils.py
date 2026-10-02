@@ -558,6 +558,7 @@ def validate_cfg(cfg: DictConfig):
     resolve_weight_sync_pause_policy(cfg.generator)
     validate_generator_cfg(cfg)
     validate_batch_invariant_config(cfg)
+    validate_decode_invariant_config(cfg)
     validate_hf_export_config(cfg)
     try:
         resolve_grug_query_bias_update(cfg.trainer.policy)
@@ -686,6 +687,29 @@ def validate_batch_invariant_config(cfg: DictConfig) -> None:
         raise ValueError(
             "trainer.algorithm.batch_invariant=true cannot configure a remote inference server; "
             "run the vLLM engines locally so both rollout and trainer activation is guaranteed"
+        )
+
+
+def validate_decode_invariant_config(cfg: DictConfig) -> None:
+    """Accept a decode-invariant engine only in the geometry it is verified in: compiled vLLM engines this run starts,
+    with FlashAttention, one GPU per tensor- and context-parallel group."""
+
+    if not cfg.generator.decode_invariant:
+        return
+    generator = cfg.generator
+    if generator.backend != "vllm" or not generator.run_engines_locally:
+        raise ValueError("generator.decode_invariant=true needs vLLM engines that this run starts")
+    if generator.get("vllm_attention_backend") != "FLASH_ATTN":
+        raise ValueError("generator.decode_invariant=true needs generator.vllm_attention_backend=FLASH_ATTN")
+    if generator.enforce_eager:
+        raise ValueError("generator.decode_invariant=true needs compiled engines (generator.enforce_eager=false)")
+    if (
+        generator.inference_engine_tensor_parallel_size != 1
+        or generator.get("inference_engine_decode_context_parallel_size", 1) != 1
+    ):
+        raise ValueError(
+            "generator.decode_invariant=true needs inference_engine_tensor_parallel_size=1 and "
+            "inference_engine_decode_context_parallel_size=1"
         )
 
 
