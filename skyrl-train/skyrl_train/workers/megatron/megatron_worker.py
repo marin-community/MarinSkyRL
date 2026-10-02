@@ -47,6 +47,7 @@ from skyrl_train.utils.metrics import policy_progress_metrics, policy_training_m
 from skyrl_train.utils.profiler import Profiler
 from skyrl_train.utils.progress import tqdm
 from skyrl_train.utils.utils import (
+    Timer,
     get_physical_gpu_id,
     moe_router_replay_requested,
     str_to_torch_dtype,
@@ -118,59 +119,62 @@ class MegatronWorker:
         """
         Initialize the Megatron-Bridge bridge and provider objects + hf_config and tokenizer
         """
-        hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True, revision=model_revision)
-        validate_grug_training_strategy(getattr(hf_config, "model_type", None), "megatron")
-        tokenizer = AutoTokenizer.from_pretrained(
-            tokenizer_path,
-            trust_remote_code=True,
-            revision=tokenizer_revision,
-        )
+        with Timer("megatron/init_configs"):
+            hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True, revision=model_revision)
+            validate_grug_training_strategy(getattr(hf_config, "model_type", None), "megatron")
+            tokenizer = AutoTokenizer.from_pretrained(
+                tokenizer_path,
+                trust_remote_code=True,
+                revision=tokenizer_revision,
+            )
 
-        override_config_kwargs = {
-            "bos_token_id": tokenizer.bos_token_id,
-            "eos_token_id": tokenizer.eos_token_id,
-            "pad_token_id": tokenizer.pad_token_id,
-        }
-        override_config_kwargs.update(model_config_kwargs.get("model_config", {}))
-        update_model_config(hf_config, override_config_kwargs=override_config_kwargs)
+            override_config_kwargs = {
+                "bos_token_id": tokenizer.bos_token_id,
+                "eos_token_id": tokenizer.eos_token_id,
+                "pad_token_id": tokenizer.pad_token_id,
+            }
+            override_config_kwargs.update(model_config_kwargs.get("model_config", {}))
+            update_model_config(hf_config, override_config_kwargs=override_config_kwargs)
 
-        # if flash_attn is enabled, we use flash attention backend, otherwise fall back to fused attention backend
-        transformer_config_kwargs = OmegaConf.to_container(transformer_config_kwargs, resolve=True)
-        transformer_config_kwargs["attention_backend"] = "flash" if flash_attn else "fused"
+            # if flash_attn is enabled, we use flash attention backend, otherwise fall back to fused attention backend
+            transformer_config_kwargs = OmegaConf.to_container(transformer_config_kwargs, resolve=True)
+            transformer_config_kwargs["attention_backend"] = "flash" if flash_attn else "fused"
 
-        if not self.cfg.trainer.gradient_checkpointing:
-            for key in ("recompute_granularity", "recompute_method", "recompute_num_layers"):
-                transformer_config_kwargs[key] = None
+            if not self.cfg.trainer.gradient_checkpointing:
+                for key in ("recompute_granularity", "recompute_method", "recompute_num_layers"):
+                    transformer_config_kwargs[key] = None
 
-        bridge = AutoBridge.from_hf_pretrained(model_path, trust_remote_code=True, revision=model_revision)
-        self.remote_hf_state = None
-        if model_source_uri:
-            self.remote_hf_state = install_remote_hf_state(bridge, model_source_uri, model_path)
-        provider = bridge.to_megatron_provider()
-        provider.tensor_model_parallel_size = megatron_config.tensor_model_parallel_size
-        provider.pipeline_model_parallel_size = megatron_config.pipeline_model_parallel_size
-        provider.pipeline_dtype = torch.bfloat16 if bf16 else torch.float32
-        provider.context_parallel_size = megatron_config.context_parallel_size
-        provider.expert_model_parallel_size = megatron_config.expert_model_parallel_size
-        provider.expert_tensor_parallel_size = megatron_config.expert_tensor_parallel_size
-        provider.sequence_parallel = megatron_config.tensor_model_parallel_size > 1
-        provider.attention_backend = "flash" if flash_attn else "fused"
-        provider.variable_seq_lengths = True
-        provider.masked_softmax_fusion = True
-        provider.moe_token_dispatcher_type = "alltoall"
-        # Megatron-Bridge enables wgrad fusion whenever Transformer Engine is present, but the
-        # non-TE output layer still needs APEX's fused_weight_gradient_mlp_cuda extension.
-        provider.gradient_accumulation_fusion = importlib.util.find_spec("fused_weight_gradient_mlp_cuda") is not None
+            bridge = AutoBridge.from_hf_pretrained(model_path, trust_remote_code=True, revision=model_revision)
+            self.remote_hf_state = None
+            if model_source_uri:
+                self.remote_hf_state = install_remote_hf_state(bridge, model_source_uri, model_path)
+            provider = bridge.to_megatron_provider()
+            provider.tensor_model_parallel_size = megatron_config.tensor_model_parallel_size
+            provider.pipeline_model_parallel_size = megatron_config.pipeline_model_parallel_size
+            provider.pipeline_dtype = torch.bfloat16 if bf16 else torch.float32
+            provider.context_parallel_size = megatron_config.context_parallel_size
+            provider.expert_model_parallel_size = megatron_config.expert_model_parallel_size
+            provider.expert_tensor_parallel_size = megatron_config.expert_tensor_parallel_size
+            provider.sequence_parallel = megatron_config.tensor_model_parallel_size > 1
+            provider.attention_backend = "flash" if flash_attn else "fused"
+            provider.variable_seq_lengths = True
+            provider.masked_softmax_fusion = True
+            provider.moe_token_dispatcher_type = "alltoall"
+            # Megatron-Bridge enables wgrad fusion whenever Transformer Engine is present, but the
+            # non-TE output layer still needs APEX's fused_weight_gradient_mlp_cuda extension.
+            provider.gradient_accumulation_fusion = (
+                importlib.util.find_spec("fused_weight_gradient_mlp_cuda") is not None
+            )
 
-        for k, v in transformer_config_kwargs.items():
-            setattr(provider, k, v)
-        provider.finalize()
+            for k, v in transformer_config_kwargs.items():
+                setattr(provider, k, v)
+            provider.finalize()
 
-        self.provider = provider
-        self.bridge = bridge
+            self.provider = provider
+            self.bridge = bridge
 
-        self.strategy.hf_config = hf_config
-        self.tokenizer = tokenizer
+            self.strategy.hf_config = hf_config
+            self.tokenizer = tokenizer
 
     def make_megatron_module(
         self,
@@ -183,16 +187,17 @@ class MegatronWorker:
         """
         from megatron.core.distributed.distributed_data_parallel_config import DistributedDataParallelConfig
 
-        default_ddp_config = DistributedDataParallelConfig()
-        if wrap_with_ddp:
-            default_ddp_config.use_distributed_optimizer = True
-        if ddp_config is not None:
-            for k, v in ddp_config.items():
-                setattr(default_ddp_config, k, v)
-        model = self.provider.provide_distributed_model(
-            ddp_config=default_ddp_config, wrap_with_ddp=wrap_with_ddp, bf16=bf16
-        )
-        return model
+        with Timer("megatron/make_megatron_module"):
+            default_ddp_config = DistributedDataParallelConfig()
+            if wrap_with_ddp:
+                default_ddp_config.use_distributed_optimizer = True
+            if ddp_config is not None:
+                for k, v in ddp_config.items():
+                    setattr(default_ddp_config, k, v)
+            model = self.provider.provide_distributed_model(
+                ddp_config=default_ddp_config, wrap_with_ddp=wrap_with_ddp, bf16=bf16
+            )
+            return model
 
     def forward(self, data, *, probe_micro_batch_size: int | None = None):
         """
@@ -465,10 +470,16 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         torch.distributed.barrier()
 
         if self.remote_hf_state is not None:
+            stats = self.remote_hf_state.store.read_stats
             logger.info(
-                "Loaded Megatron policy weights directly from {} (rank range bytes read: {})",
+                "Loaded Megatron policy weights directly from {} "
+                "(rank range bytes read: {}; opens={} reads={} read_seconds={:.2f} MB_per_s={:.2f})",
                 self.cfg.trainer.policy.model.source_uri,
-                self.remote_hf_state.store.bytes_read,
+                stats.bytes_read,
+                stats.opens,
+                stats.reads,
+                stats.read_seconds,
+                stats.bytes_read / 1_000_000 / stats.read_seconds if stats.read_seconds else 0.0,
             )
 
         if self._rank == 0:
@@ -483,10 +494,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             self.profiler = Profiler(self.cfg.trainer.policy.megatron_config.torch_profiler_config)
 
         # create optimizer
-        optim_config = init_megatron_optim_config(
-            self.cfg.trainer.policy.optimizer_config, self.cfg.trainer.policy.megatron_config.optimizer_config_kwargs
-        )
-        self.optimizer = get_megatron_optimizer(self.actor_module, optim_config)
+        with Timer("megatron/optimizer"):
+            optim_config = init_megatron_optim_config(
+                self.cfg.trainer.policy.optimizer_config,
+                self.cfg.trainer.policy.megatron_config.optimizer_config_kwargs,
+            )
+            self.optimizer = get_megatron_optimizer(self.actor_module, optim_config)
 
         self._normalize_mini_batch_size()
 

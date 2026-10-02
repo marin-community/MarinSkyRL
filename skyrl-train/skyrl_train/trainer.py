@@ -652,7 +652,8 @@ class RayPPOTrainer:
         implementation = type(self.trajectory_runner).__name__
         logger.info("Starting trajectory runner: implementation={}", implementation)
         try:
-            await self.trajectory_runner.startup()
+            with Timer("rollout_workers/startup", self.all_startup_timings):
+                await self.trajectory_runner.startup()
             logger.info("Trajectory runner ready: implementation={}", implementation)
         except Exception as e:
             logger.opt(depth=0).error("Trajectory runner startup failed: " + str(e))
@@ -1853,6 +1854,9 @@ class RayPPOTrainer:
             else:
                 critic_model = None
 
+        self.all_startup_timings.update(
+            {f"policy/{name}": duration for name, duration in policy_model.startup_timings.items()}
+        )
         self.policy_model: PPORayActorGroup = policy_model
         self.critic_model: Optional[PPORayActorGroup] = critic_model
         self.ref_model: Optional[PPORayActorGroup] = ref_model

@@ -72,6 +72,7 @@ from skyrl_train.models.grug_query_bias import (
 from skyrl_train.models.grug_moe import GrugMoeForCausalLM
 from skyrl_train.batch_invariant import enable_trainer_batch_invariance
 from skyrl_train.utils.utils import (
+    Timer,
     configure_ray_worker_logging,
     get_tcp_url,
     resolve_actor_cuda_env,
@@ -574,6 +575,7 @@ class PPORayActorGroup:
         self.colocate_all = colocate_all
         self.sequence_parallel_size = sequence_parallel_size
         self.record_memory = record_memory
+        self.startup_timings = {}
         self._initiate_actors(pg, num_gpus_per_actor)
 
     def _initiate_actors(self, pg: Optional[PlacementGroup], num_gpus_per_actor: float):
@@ -616,98 +618,101 @@ class PPORayActorGroup:
                     )
                 ),
             )
-        if pg:
-            master_actor = self.ray_actor_type.options(
-                num_cpus=num_gpus_per_actor,
-                num_gpus=num_gpus_per_actor,
-                resources=self._resources,
-                scheduling_strategy=PlacementGroupSchedulingStrategy(
-                    placement_group=pg,
-                    placement_group_bundle_index=reordered_bundle_indices[0] if reordered_bundle_indices else 0,
-                ),
-            ).remote(
-                cfg=self.cfg,
-                world_size=world_size,
-                rank=0,
-                local_rank=0,
-                master_addr=None,
-                master_port=None,
-                sequence_parallel_size=self.sequence_parallel_size,
-                record_memory=self.record_memory,
-                pin_to_ray_gpu_id=self._pin_to_ray_gpu_id,
-                force_cvd_mask=self._force_cvd_mask,
-            )
-        else:
-            master_actor = self.ray_actor_type.options(
-                num_cpus=num_gpus_per_actor,
-                num_gpus=num_gpus_per_actor,
-                resources=self._resources,
-            ).remote(
-                cfg=self.cfg,
-                world_size=world_size,
-                rank=0,
-                local_rank=0,
-                master_addr=None,
-                master_port=None,
-                sequence_parallel_size=self.sequence_parallel_size,
-                record_memory=self.record_memory,
-                pin_to_ray_gpu_id=self._pin_to_ray_gpu_id,
-                force_cvd_mask=self._force_cvd_mask,
-            )
-        self._actor_handlers = [master_actor]
-        # Create worker actors
-        if world_size > 1:
-            master_addr, master_port = ray.get(master_actor.get_master_addr_port.remote())
-            for rank in range(1, world_size):
-                local_rank = rank % self._num_gpus_per_node
+        with Timer("actor_create", self.startup_timings):
+            if pg:
+                master_actor = self.ray_actor_type.options(
+                    num_cpus=num_gpus_per_actor,
+                    num_gpus=num_gpus_per_actor,
+                    resources=self._resources,
+                    scheduling_strategy=PlacementGroupSchedulingStrategy(
+                        placement_group=pg,
+                        placement_group_bundle_index=reordered_bundle_indices[0] if reordered_bundle_indices else 0,
+                    ),
+                ).remote(
+                    cfg=self.cfg,
+                    world_size=world_size,
+                    rank=0,
+                    local_rank=0,
+                    master_addr=None,
+                    master_port=None,
+                    sequence_parallel_size=self.sequence_parallel_size,
+                    record_memory=self.record_memory,
+                    pin_to_ray_gpu_id=self._pin_to_ray_gpu_id,
+                    force_cvd_mask=self._force_cvd_mask,
+                )
+            else:
+                master_actor = self.ray_actor_type.options(
+                    num_cpus=num_gpus_per_actor,
+                    num_gpus=num_gpus_per_actor,
+                    resources=self._resources,
+                ).remote(
+                    cfg=self.cfg,
+                    world_size=world_size,
+                    rank=0,
+                    local_rank=0,
+                    master_addr=None,
+                    master_port=None,
+                    sequence_parallel_size=self.sequence_parallel_size,
+                    record_memory=self.record_memory,
+                    pin_to_ray_gpu_id=self._pin_to_ray_gpu_id,
+                    force_cvd_mask=self._force_cvd_mask,
+                )
+            self._actor_handlers = [master_actor]
+            # Create worker actors
+            if world_size > 1:
+                master_addr, master_port = ray.get(master_actor.get_master_addr_port.remote())
+                for rank in range(1, world_size):
+                    local_rank = rank % self._num_gpus_per_node
 
-                if pg:
-                    worker_actor = self.ray_actor_type.options(
-                        num_cpus=num_gpus_per_actor,
-                        num_gpus=num_gpus_per_actor,
-                        resources=self._resources,
-                        scheduling_strategy=PlacementGroupSchedulingStrategy(
-                            placement_group=pg,
-                            placement_group_bundle_index=(
-                                reordered_bundle_indices[rank]
-                                if reordered_bundle_indices
-                                else rank // self._num_gpus_per_node
+                    if pg:
+                        worker_actor = self.ray_actor_type.options(
+                            num_cpus=num_gpus_per_actor,
+                            num_gpus=num_gpus_per_actor,
+                            resources=self._resources,
+                            scheduling_strategy=PlacementGroupSchedulingStrategy(
+                                placement_group=pg,
+                                placement_group_bundle_index=(
+                                    reordered_bundle_indices[rank]
+                                    if reordered_bundle_indices
+                                    else rank // self._num_gpus_per_node
+                                ),
                             ),
-                        ),
-                    ).remote(
-                        cfg=self.cfg,
-                        world_size=world_size,
-                        rank=rank,
-                        local_rank=local_rank,
-                        master_addr=master_addr,
-                        master_port=master_port,
-                        sequence_parallel_size=self.sequence_parallel_size,
-                        record_memory=self.record_memory,
-                        pin_to_ray_gpu_id=self._pin_to_ray_gpu_id,
-                        force_cvd_mask=self._force_cvd_mask,
-                    )
-                else:
-                    worker_actor = self.ray_actor_type.options(
-                        num_cpus=num_gpus_per_actor,
-                        num_gpus=num_gpus_per_actor,
-                        resources=self._resources,
-                    ).remote(
-                        cfg=self.cfg,
-                        world_size=world_size,
-                        rank=rank,
-                        local_rank=local_rank,
-                        master_addr=master_addr,
-                        master_port=master_port,
-                        sequence_parallel_size=self.sequence_parallel_size,
-                        record_memory=self.record_memory,
-                        pin_to_ray_gpu_id=self._pin_to_ray_gpu_id,
-                        force_cvd_mask=self._force_cvd_mask,
-                    )
-                self._actor_handlers.append(worker_actor)
+                        ).remote(
+                            cfg=self.cfg,
+                            world_size=world_size,
+                            rank=rank,
+                            local_rank=local_rank,
+                            master_addr=master_addr,
+                            master_port=master_port,
+                            sequence_parallel_size=self.sequence_parallel_size,
+                            record_memory=self.record_memory,
+                            pin_to_ray_gpu_id=self._pin_to_ray_gpu_id,
+                            force_cvd_mask=self._force_cvd_mask,
+                        )
+                    else:
+                        worker_actor = self.ray_actor_type.options(
+                            num_cpus=num_gpus_per_actor,
+                            num_gpus=num_gpus_per_actor,
+                            resources=self._resources,
+                        ).remote(
+                            cfg=self.cfg,
+                            world_size=world_size,
+                            rank=rank,
+                            local_rank=local_rank,
+                            master_addr=master_addr,
+                            master_port=master_port,
+                            sequence_parallel_size=self.sequence_parallel_size,
+                            record_memory=self.record_memory,
+                            pin_to_ray_gpu_id=self._pin_to_ray_gpu_id,
+                            force_cvd_mask=self._force_cvd_mask,
+                        )
+                    self._actor_handlers.append(worker_actor)
+            ray.get([actor.get_master_addr_port.remote() for actor in self._actor_handlers])
 
         # Initialize process group
         logger.info("Initializing process group for RayActorGroup")
-        ray.get([actor.init_worker_process_group.remote() for actor in self._actor_handlers])
+        with Timer("pg_init", self.startup_timings):
+            ray.get([actor.init_worker_process_group.remote() for actor in self._actor_handlers])
         logger.info("Initialized process group for RayActorGroup")
         self.actor_infos = [ActorInfo(actor, ray.get(actor.get_mesh_rank.remote())) for actor in self._actor_handlers]
         logger.info(f"Mesh Ranks: {[actor_info.rank for actor_info in self.actor_infos]}")
