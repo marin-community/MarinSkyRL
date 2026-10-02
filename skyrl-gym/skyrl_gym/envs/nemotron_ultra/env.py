@@ -303,13 +303,15 @@ class NemotronUltraEnv(BaseTextEnv):
             reward, details = structured_scorer(action, self.record, self._assistant_message(action))
             diagnostics.update(details)
         elif self.agent == "rdkit_chemistry_agent":
-            reward, details = grade_rdkit_chemistry(action, self.record)
+            reward, details = grade_rdkit_chemistry(action, self.record, verifyit_enabled=self.verifyit_enabled)
             diagnostics.update(details)
         elif self.agent == "nvarc_inductive_simple_agent":
-            reward, details = grade_inductive_arc(action, self.record, sandbox=self.sandbox)
+            reward, details = grade_inductive_arc(
+                action, self.record, sandbox=self.sandbox, verifyit_enabled=self.verifyit_enabled
+            )
             diagnostics.update(details)
         elif self.agent == "nvarc_transductive_simple_agent":
-            reward, details = grade_transductive_arc(action, self.record)
+            reward, details = grade_transductive_arc(action, self.record, verifyit_enabled=self.verifyit_enabled)
             diagnostics.update(details)
         elif self.agent == "code_gen_simple_agent":
             reward, details = grade_code(

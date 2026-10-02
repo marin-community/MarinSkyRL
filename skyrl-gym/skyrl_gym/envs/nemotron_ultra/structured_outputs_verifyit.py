@@ -67,6 +67,10 @@ def grade_structured_output_verifyit(
             }:
                 raise ValueError("Unsupported schema dialect")
         OAS32Validator.check_schema(schema)
+        framed = dict(schema)
+        framed[_ORIGINAL_DIALECT] = framed.get("$schema")
+        framed["$schema"] = _DIALECT
+        grade_json_schema_candidate(framed, None)
     except Exception as error:
         return 0.0, {"error_type": "schema_error", "error_message": str(error)[:200]}
 
@@ -93,9 +97,6 @@ def grade_structured_output_verifyit(
                 value = _coerce_xml(value, schema)
             if schema_type == "csv":
                 value = _coerce_csv(value, schema)
-        framed = dict(schema)
-        framed[_ORIGINAL_DIALECT] = framed.get("$schema")
-        framed["$schema"] = _DIALECT
         verdict = grade_json_schema_candidate(framed, value)
         if verdict.status is not Status.SCORED:
             return 0.0, {
