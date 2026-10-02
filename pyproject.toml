@@ -11,7 +11,7 @@ version = "0.1.0"
 description = "Marin's typed launcher and RL training runtime"
 requires-python = "==3.12.*"
 dependencies = [
-    "verifyit[answer,schema,reasoning-gym,judge] @ git+https://github.com/marin-community/verifyit@a04f28fd8c00879f949031e58ce9fbe5f4d5da6e",
+    "verifyit[answer,schema,reasoning-gym,judge] @ git+https://github.com/marin-community/verifyit@0af87fba3c4156d85076d9c09643af88e4467655",
     "aiohttp>=3.13.3",
     "boto3",
     "datasets>=4.0.0",

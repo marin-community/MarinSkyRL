@@ -1,6 +1,6 @@
 # Unified verification
 
-SkyRL clients call verifyit's existing verifier modes while retaining task-specific response extraction and framework reward reporting. The dependency is pinned to a published source commit in the project metadata. No local campaign checkout or unpublished wheel is needed. SkyRL uses math-verify 0.9.0, upgraded from 0.8.0 to satisfy the unified dependency. Math parsing or equivalence behavior can change with this upgrade; the 2026-10-01 campaign snapshot used math-verify 0.8.0. The offline comparisons use 0.9.0 on both paths.
+SkyRL clients call verifyit's existing verifier modes while retaining task-specific response extraction and framework reward reporting. The dependency is pinned to published commit `0af87fba3c4156d85076d9c09643af88e4467655` in the project metadata. No local campaign checkout or unpublished wheel is needed. SkyRL uses math-verify 0.9.0, upgraded from 0.8.0 to satisfy the unified dependency. Math parsing or equivalence behavior can change with this upgrade; the 2026-10-01 campaign snapshot used math-verify 0.8.0. The offline comparisons use 0.9.0 on both paths.
 
 ## Install and reproduce
 
@@ -17,7 +17,7 @@ uv pip install --python .venv-verifiers/bin/python -e './skyrl-gym[dev]'
 
 The replay uses checked-in response fixtures. It invokes both the original and cutover MCQA scorer and both original and cutover Reasoning Gym environments, and both math scoring entrypoints with a local HTTP judge fixture. The output retains each input and both results, including scored zero. A mismatch exits unsuccessfully. Math wrong-answer fallback receives the same fixed non-equivalence response from a local HTTP server on both paths; no model inference is involved. This is a scoring roundtrip, without model inference or a live judge. The fixtures are synthetic; they do not reproduce archived model-run scores.
 
-For a frozen gym installation, run `uv sync --project skyrl-gym --frozen --extra dev`, then `uv run --project skyrl-gym --frozen python tools/verifyit/replay.py --output /tmp/skyrl-verifier-replay.json`. The gym and root locks include the exact published verifyit revision and math-verify 0.9.0.
+For a frozen gym installation, run `uv sync --project skyrl-gym --frozen --extra dev --python 3.12`, then `uv run --project skyrl-gym --frozen python tools/verifyit/replay.py --output /tmp/skyrl-verifier-replay.json`. The gym and root locks include the exact published verifyit revision and math-verify 0.9.0.
 
 The normal launcher installation uses the root project's CPU or GPU profile described in the README. The smaller installation above exercises verifiers without installing a training runtime. Code and Lean verification additionally require the configured sandbox runtime. Judge routes require their configured provider and credentials; they cannot be exercised through the offline fixtures.
 
@@ -25,7 +25,7 @@ The Gym CI job starts the real [NeMo Skills local sandbox](https://github.com/NV
 
 ## Enable verifyit
 
-For environments that retain their original scorer, pass `verifyit_enabled: true` in the environment configuration:
+For MCQ, AIME, GSM8K and environments that retain their original scorer, pass `verifyit_enabled: true` in the environment configuration:
 
 ```python
 import skyrl_gym
@@ -46,7 +46,13 @@ Set the option to `false` or omit it to run the original Reasoning Gym, IFEval, 
 
 Code and Lean use the [SandboxClient protocol](../skyrl-gym/skyrl_gym/envs/nemotron_ultra/sandbox.py): point the configured host/port to a running NeMo Skills sandbox with the benchmark’s Python dependencies or Lean project/toolchain. The acceptance configuration’s cluster hostname is an example deployment, not a public service. Judge settings are consumed by [OpenAIJudge](../skyrl-gym/skyrl_gym/envs/nemotron_ultra/judge.py); set the named environment variable locally with your provider credential before running judge routes. Direct source APIs expose `verifyit_enabled=True` where applicable; the checked-in replay demonstrates MCQA's switch.
 
-GSM8K, AIME, MCQ, search exact match, ARC grid comparison and chemistry numeric comparison call the unified primitives directly. These clients do not have an original-path switch; compare them against the pinned source revision linked in the route inventory when investigating a difference.
+MCQ, AIME and GSM8K also preserve their original scoring when the option is omitted or false. AIME retains its extraction and optimization reward policy; GSM8K retains its configured strict, flexible or final-line extraction. Enabled non-strict AIME canonicalizes finite exact constants under a bounded worker, then uses Exact comparison. Colon ratios are translated to fractions. Parsed names and expressions containing variables retain literal text comparison; this does not grant symbolic equivalence. Multiple answers, undefined references and parsing failures are rejected conservatively; strict-box mode retains literal comparison. Invalid references or worker failures produce an error verdict and AIME reward -1. The enabled paths send prepared candidates to verifyit. The following command tests correct and wrong responses on both paths, including package import and default scoring with verifyit unavailable:
+
+```bash
+uv run --project skyrl-gym --locked --extra dev python -m pytest skyrl-gym/tests/test_mcq.py skyrl-gym/tests/test_aime.py skyrl-gym/tests/test_gsm8k.py
+```
+
+LiveCodeBench and Nemotron code generation use verifyit for output comparison and combining test verdicts. Their adapters manage sandbox sessions and transform wire values; they do not calculate correctness or partial credit. Source-native grading remains the default. Configure the sandbox host/port and set `verifyit_enabled: true` to use the unified grading path. Nonzero Nemotron reasoning-format penalties remain environment reward shaping.
 
 Verification failures return minimum reward and retain framework verification/error information. A wrong candidate scoring zero is distinct from an invalid reference or unavailable verifier. Intentional corrections can change scores on malformed inputs; ordinary valid inputs should preserve source behavior.
 

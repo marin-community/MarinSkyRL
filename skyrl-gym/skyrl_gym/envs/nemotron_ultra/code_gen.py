@@ -48,7 +48,9 @@ def grade_code(
     if verifyit_enabled:
         from skyrl_gym.envs.lcb.verifyit_execution import execute_code_verifyit
 
-        _, execution = execute_code_verifyit(tests, code or "", timeout=timeout_seconds, limits=limits, sandbox=sandbox)
+        code_reward, execution = execute_code_verifyit(
+            tests, code or "", timeout=timeout_seconds, limits=limits, sandbox=sandbox
+        )
         if not code:
             return 0.0, {"extracted_model_code": None, "result": "missing_code", "execution_output": execution}
         results = execution["test_results"]
@@ -63,9 +65,38 @@ def grade_code(
         )
     if execution.get("execution_error"):
         raise RuntimeError(f"Code verifier unavailable: {execution}")
-    correct = all(result is True for result in results)
-    format_violation = _has_reasoning_format_violation(text, assistant_message)
-    reward = reasoning_format_penalty if format_violation else float(correct)
+    if verifyit_enabled:
+        from verifyit.grade import Aggregation, aggregate_rewards, scored
+        from verifyit.modes.grade_json_schema import grade_json_schema_candidate
+
+        reasoning = (assistant_message or {}).get("reasoning_content", "")
+        format_verdict = grade_json_schema_candidate(
+            {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "pattern": r"^(?![\s\S]*</?think>)[\s\S]*$"},
+                    "reasoning": {
+                        "type": "string",
+                        "pattern": r"^(?![\s\S]*<think>[\s\S]*<think>)(?![\s\S]*</think>[\s\S]*</think>)[\s\S]*$",
+                    },
+                },
+                "required": ["text", "reasoning"],
+            },
+            {"text": text, "reasoning": reasoning if isinstance(reasoning, str) else ""},
+        )
+        combined = aggregate_rewards([scored(code_reward), format_verdict], expected_total=2, policy=Aggregation.ALL)
+        if combined.status.value != "scored":
+            raise RuntimeError("Code format verification unavailable")
+        correct = code_reward == 1.0
+        format_violation = format_verdict.reward == 0.0
+        reward = combined.reward
+        if format_violation:
+            # Preserve the environment's configured RL penalty, including negative values.
+            reward = reasoning_format_penalty
+    else:
+        correct = all(result is True for result in results)
+        format_violation = _has_reasoning_format_violation(text, assistant_message)
+        reward = reasoning_format_penalty if format_violation else float(correct)
     return reward, {
         "extracted_model_code": code,
         "test_results": results,

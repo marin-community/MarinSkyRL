@@ -1,7 +1,7 @@
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from skyrl_gym.envs.aime.verifier import AIMERewardPolicy, AIMEVerifier
 from skyrl_gym.metrics import default_aggregate_metrics
-from skyrl_gym.verification import RolloutEvidence
+from skyrl_gym.verification import RolloutEvidence, VerificationResult
 from typing import Dict, Any
 from omegaconf import DictConfig
 
@@ -30,6 +30,7 @@ class AIMEEnv(BaseTextEnv):
             ground_truth=self.ground_truth,
             evaluation_token_budget=int(env_config.get("evaluation_token_budget", 8192)),
             strict_box_verify=bool(env_config.get("strict_box_verify", False)),
+            verifyit_enabled=bool(env_config.get("verifyit_enabled", False)),
         )
         self.reward_policy = AIMERewardPolicy(
             length_penalty_weight=float(env_config.get("length_penalty_weight", 0.0)),
@@ -47,7 +48,22 @@ class AIMEEnv(BaseTextEnv):
         done = True  # always done after one step
 
         evidence = self._evidence or RolloutEvidence(response=action)
-        verification = self.verifier.verify(evidence)
+        if self.verifier.verifyit_enabled:
+            from verifyit.grade import InvalidTask
+
+            try:
+                verification = self.verifier.verify(evidence)
+            except Exception as error:
+                status = "invalid_task" if isinstance(error, InvalidTask) else "infra_error"
+                return BaseTextEnvStepOutput(
+                    observations=[],
+                    reward=-1.0,
+                    done=True,
+                    metadata={},
+                    verification=VerificationResult.error(str(error), diagnostics={"verifyit_status": status}),
+                )
+        else:
+            verification = self.verifier.verify(evidence)
         reward_result, reward_diagnostics = self.reward_policy.evaluate(evidence, verification)
         metadata = {
             "acc": verification.passed is True,

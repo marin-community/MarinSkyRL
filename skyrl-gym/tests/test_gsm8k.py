@@ -17,10 +17,11 @@ from skyrl_gym.verification import RolloutEvidence
         ("The answer is 42", "42", 0.0),
     ],
 )
-def test_compute_score(output, ground_truth, expected):
+@pytest.mark.parametrize("verifyit_enabled", [False, True])
+def test_compute_score(output, ground_truth, expected, verifyit_enabled):
     env = skyrl_gym.make(
         "gsm8k",
-        env_config=DictConfig({"env_class": "gsm8k"}),
+        env_config=DictConfig({"env_class": "gsm8k", "verifyit_enabled": verifyit_enabled}),
         extras={"reward_spec": {"method": "rule", "ground_truth": ground_truth}},
     )
     # Skip init() since it's not used in this test
@@ -68,3 +69,18 @@ def test_invalid_reference_cannot_receive_format_credit(method):
     from skyrl_gym.envs.gsm8k.utils import compute_score
 
     assert compute_score("#### 10", None, method=method, format_score=0.5) == 0
+
+
+@pytest.mark.parametrize("reference", [None, "nan", "invalid"])
+@pytest.mark.parametrize("method", ["strict", "final_line"])
+def test_enabled_malformed_reference_reports_task_error_before_candidate_checks(reference, method):
+    env = skyrl_gym.make(
+        "gsm8k",
+        env_config=DictConfig({"verifyit_enabled": True, "reward_method": method}),
+        extras={"reward_model": {"ground_truth": reference}},
+    )
+    for response in ("#### 10", "no answer"):
+        result = env.step(response)
+        assert result["reward"] == 0
+        assert result["verification"].status.value == "error"
+        assert result["verification"].diagnostics["verifyit_status"] == "invalid_task"

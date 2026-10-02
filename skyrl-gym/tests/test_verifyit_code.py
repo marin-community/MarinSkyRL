@@ -2,7 +2,9 @@
 
 import pytest
 
+from skyrl_gym.envs.lcb import verifyit_execution
 from skyrl_gym.envs.lcb.verifyit_execution import execute_code_verifyit
+from skyrl_gym.envs.nemotron_ultra import code_gen
 
 
 @pytest.mark.parametrize(
@@ -45,6 +47,9 @@ def test_candidate_cannot_recover_reference_or_overwrite_verdict(code):
         ("def solve(x): return (x, x)", "[7,7]", 1),
         ("def solve(x): return [(x, x)]", "[[7,7]]", 0),
         ("def solve(x): return True", "1", 0),
+        ("def solve(x): return 1.0", "1", 1),
+        ('def solve(x): return {"1": [x, True]}', '{"1": [7, true]}', 1),
+        ("def solve(x): return {1: [x, True]}", '{"1": [7, true]}', 0),
         ('def solve(x): return float("nan")', "14", 0),
         ('def solve(x): raise RuntimeError("bad")', "14", 0),
     ],
@@ -251,3 +256,40 @@ def test_explicit_protocol_timeout_and_lost_session_have_distinct_statuses(lost_
         server.shutdown()
         server.server_close()
         worker.join()
+
+
+@pytest.mark.parametrize(
+    "text,reasoning,violation",
+    [
+        ("", "", False),
+        ("<THINK>", "<THINK><THINK>", False),
+        ("<thinking>", "<think></think>", False),
+        ("prefix<think>", "", True),
+        ("line\n</think>", "", True),
+        ("", "<think>\n<think>", True),
+        ("", "</think></think>", True),
+        ("", "<think<think>", False),
+        ("", None, False),
+    ],
+)
+@pytest.mark.parametrize("penalty", [0.0, -0.25])
+def test_code_format_schema_preserves_native_tags_and_rl_penalty(monkeypatch, text, reasoning, violation, penalty):
+    # Execution is the external boundary; both paths receive one passing case.
+    monkeypatch.setattr(code_gen, "lcb_execution_result", lambda *args, **kwargs: ([True], {}))
+    monkeypatch.setattr(
+        verifyit_execution, "execute_code_verifyit", lambda *args, **kwargs: (1.0, {"test_results": [True]})
+    )
+    answer = text + "\n```python\nprint(1)\n```"
+    record = {"verifier_metadata": {"unit_tests": [{"input": "", "output": "1", "testtype": "stdin"}]}}
+    rewards = []
+    for enabled in (False, True):
+        reward, detail = code_gen.grade_code(
+            answer,
+            record,
+            assistant_message={"reasoning_content": reasoning},
+            reasoning_format_penalty=penalty,
+            verifyit_enabled=enabled,
+        )
+        rewards.append(reward)
+        assert detail["reasoning_format_violation_rate"] == float(violation)
+    assert rewards == [penalty if violation else 1.0] * 2

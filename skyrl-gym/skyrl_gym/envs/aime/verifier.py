@@ -13,14 +13,27 @@ class AIMEVerifier:
     ground_truth: str
     evaluation_token_budget: int = 8192
     strict_box_verify: bool = False
+    verifyit_enabled: bool = False
 
     def __post_init__(self) -> None:
+        if self.verifyit_enabled:
+            from verifyit.modes.grade_exact import grade_exact_candidate
+            from verifyit.spec import ExactSpec
+
+            grade_exact_candidate(ExactSpec(expected=(self.ground_truth,)), "")
         if self.evaluation_token_budget <= 0:
             raise ValueError("evaluation_token_budget must be positive")
 
     def verify(self, evidence: RolloutEvidence) -> VerificationResult:
+        if self.verifyit_enabled and not self.strict_box_verify:
+            from verifyit.adapters.skyrl import grade_aime_candidate
+            from skyrl_gym.envs.aime.utils import normalize_final_answer
+
+            grade_aime_candidate(normalize_final_answer(self.ground_truth), "")
         response = evidence.response or ""
-        correct, prediction = verify(response[-300:], self.ground_truth, self.strict_box_verify)
+        correct, prediction = verify(
+            response[-300:], self.ground_truth, self.strict_box_verify, verifyit_enabled=self.verifyit_enabled
+        )
         generated_tokens = evidence.generated_token_count
         over_budget = generated_tokens is not None and generated_tokens > self.evaluation_token_budget
         parseable_answer = prediction is not None and str(prediction).strip() not in {"", "[INVALID]"}
