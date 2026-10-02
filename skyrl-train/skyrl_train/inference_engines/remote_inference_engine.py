@@ -5,6 +5,7 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineOutput,
     NamedWeightsUpdateRequest,
 )
+from skyrl_train.config.weight_sync_pause import DEFAULT_WEIGHT_SYNC_PAUSE_POLICY, WeightSyncPausePolicy
 from skyrl_train.weight_sync.weight_loader import WeightLoader
 from typing import List, Optional, Any, Dict
 import json
@@ -156,6 +157,7 @@ class RemoteInferenceEngine(InferenceEngineInterface):
         dp_size: Optional[int] = None,
         ep_size: Optional[int] = None,
         dcp_size: Optional[int] = None,
+        weight_sync_pause_policy: WeightSyncPausePolicy = DEFAULT_WEIGHT_SYNC_PAUSE_POLICY,
     ):
         """Initialize the InferenceEngine.
 
@@ -174,6 +176,7 @@ class RemoteInferenceEngine(InferenceEngineInterface):
         self._ep_size = ep_size
         self._dcp_size = dcp_size
         self.tokenizer = tokenizer
+        self.weight_sync_pause_policy = weight_sync_pause_policy
 
         # Create weight loader for coordinating weight updates
         self._weight_loader = RemoteWeightLoader(self.url, engine_backend)
@@ -366,10 +369,16 @@ class RemoteInferenceEngine(InferenceEngineInterface):
         await self._weight_loader.destroy_group()
 
     async def pause_generation(self) -> None:
-        raise NotImplementedError("Pausing generation is not supported for remote inference engines.")
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{self.url}/pause_generation", json=asdict(self.weight_sync_pause_policy)
+            ) as response:
+                response.raise_for_status()
 
     async def resume_generation(self) -> None:
-        raise NotImplementedError("Resuming generation is not supported for remote inference engines.")
+        async with aiohttp.ClientSession() as session:
+            async with session.post(f"{self.url}/resume_generation") as response:
+                response.raise_for_status()
 
 
 def create_remote_inference_engines(
@@ -382,6 +391,7 @@ def create_remote_inference_engines(
     data_parallel_size: Optional[int] = None,
     expert_parallel_size: Optional[int] = None,
     decode_context_parallel_size: Optional[int] = None,
+    weight_sync_pause_policy: WeightSyncPausePolicy = DEFAULT_WEIGHT_SYNC_PAUSE_POLICY,
 ):
     # `decode_context_parallel_size` is metadata only for remote engines: SkyRL does not
     # launch the server, so the operator must pass `-dcp <n>` on the external `vllm serve`
@@ -398,6 +408,7 @@ def create_remote_inference_engines(
             dp_size=data_parallel_size,
             ep_size=expert_parallel_size,
             dcp_size=decode_context_parallel_size,
+            weight_sync_pause_policy=weight_sync_pause_policy,
         )
         for url in urls
     ]

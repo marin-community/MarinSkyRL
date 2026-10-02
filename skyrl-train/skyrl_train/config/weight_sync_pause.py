@@ -25,12 +25,10 @@ class WeightSyncPausePolicy:
 DEFAULT_WEIGHT_SYNC_PAUSE_POLICY = WeightSyncPausePolicy(WeightSyncPauseMode.KEEP, True)
 
 
-def validate_weight_sync_pause_backend(
-    policy: WeightSyncPausePolicy, *, backend: str, run_engines_locally: bool
-) -> None:
-    """Restrict configured pause behavior to local vLLM engines."""
-    if policy != DEFAULT_WEIGHT_SYNC_PAUSE_POLICY and (backend != "vllm" or not run_engines_locally):
-        raise ValueError("non-default generator.weight_sync_pause requires local vLLM inference engines")
+def validate_weight_sync_pause_backend(policy: WeightSyncPausePolicy, *, backend: str) -> None:
+    """Restrict configured pause behavior to vLLM-compatible engines."""
+    if policy != DEFAULT_WEIGHT_SYNC_PAUSE_POLICY and backend != "vllm":
+        raise ValueError("non-default generator.weight_sync_pause requires vLLM inference engines")
 
 
 def resolve_weight_sync_pause_policy(generator: DictConfig) -> WeightSyncPausePolicy:
@@ -46,9 +44,7 @@ def resolve_weight_sync_pause_policy(generator: DictConfig) -> WeightSyncPausePo
         raise ValueError("generator.weight_sync_pause.clear_cache must be a boolean")
 
     policy = WeightSyncPausePolicy(mode=mode, clear_cache=raw_policy.clear_cache)
-    validate_weight_sync_pause_backend(
-        policy, backend=generator.backend, run_engines_locally=generator.run_engines_locally
-    )
+    validate_weight_sync_pause_backend(policy, backend=generator.backend)
     if not policy.clear_cache and policy.mode is not WeightSyncPauseMode.KEEP:
         raise ValueError("generator.weight_sync_pause.clear_cache=false requires mode=keep")
     if policy.mode is WeightSyncPauseMode.WAIT and generator.vllm_v1_disable_multiproc:

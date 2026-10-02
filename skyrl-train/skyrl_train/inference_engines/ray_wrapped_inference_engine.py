@@ -531,7 +531,7 @@ def create_ray_wrapped_inference_engines(
     """
     engine_init_kwargs = dict(engine_init_kwargs)
     # Direct factory callers bypass generator config validation.
-    validate_weight_sync_pause_backend(weight_sync_pause_policy, backend=backend, run_engines_locally=True)
+    validate_weight_sync_pause_backend(weight_sync_pause_policy, backend=backend)
     model_metadata_path = engine_init_kwargs.pop(MODEL_METADATA_PATH_KEY, pretrain)
     if backend == "vllm":
         import vllm
