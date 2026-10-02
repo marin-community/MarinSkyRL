@@ -11,7 +11,7 @@ version = "0.1.0"
 description = "Marin's typed launcher and RL training runtime"
 requires-python = "==3.12.*"
 dependencies = [
-    "verifyit[answer,schema,reasoning-gym,judge] @ git+https://github.com/marin-community/verifyit@d683cbfd8fbcc90c4355e8fa6f71f4717ef79753",
+    "verifyit[answer,schema,reasoning-gym,judge] @ git+https://github.com/marin-community/verifyit@b08a5ee8d94fcb4a2134562aee94ff9715dadd14",
     "aiohttp>=3.13.3",
     "boto3",
     "datasets>=4.0.0",
@@ -241,7 +241,7 @@ causal-conv1d = [
 mamba-ssm = [
     { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-torch2.13-20260910-6d12d7a0/mamba_ssm-2.3.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
 ]
-harbor-config = { url = "https://github.com/marin-community/harbor/releases/download/harbor-config-952a005353273590631b8f970f4664a121710b32/harbor_config-0.1.0-py3-none-any.whl" }
+harbor-config = { git = "https://github.com/marin-community/harbor", rev = "6b2e76e1dae5c084eed05edefefffcec8c0c1ad9", subdirectory = "packages/harbor-config" }
 
 [[tool.uv.index]]
 name = "pytorch-cpu"

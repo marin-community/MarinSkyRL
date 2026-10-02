@@ -147,3 +147,17 @@ NeMo's `/verify` is the only endpoint that actually removes IPI state, so cleanu
 invokes its native computation but ignores its reward. Cleanup errors remain
 visible and cannot produce credit. Without the option, the route retains its
 original unimplemented behavior.
+
+
+Tool-comparison routes, including the SWE pivot alias, snapshot their input records before
+preparing schema and numeric contracts. With `verifyit_enabled: true`,
+`verifyit_tool_comparison_policy: nemotron_strict_typed_arguments_v1` names the established
+strict opt-in policy: duplicate JSON keys fail closed, integer and floating types remain
+distinct, and absent tool calls become an empty list while other falsey values retain their
+types. Verifyit's Schema/Numeric modes and ALL reducer determine correctness. Framework
+metadata records the effective policy and SHA-256 hashes of the input records; trusted
+reference contents are not newly exposed in diagnostics. Errors retain policy and stage
+provenance. Unrepresentable numeric candidates and excessively nested candidate JSON
+score zero; malformed trusted action types and nested trusted JSON remain invalid tasks. Omitting the opt-in still uses
+the original source scorer. The policy retains the documented stricter behavior for
+boolean/integer confusion and malformed JSON; it is not a source-parity claim for those inputs.

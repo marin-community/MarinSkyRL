@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import uuid
@@ -79,6 +80,9 @@ class NemotronUltraEnv(BaseTextEnv):
     def __init__(self, env_config: DictConfig, extras: dict[str, Any] | None = None):
         super().__init__()
         self.verifyit_enabled = bool(env_config.get("verifyit_enabled", False))
+        self.tool_comparison_policy = env_config.get(
+            "verifyit_tool_comparison_policy", "nemotron_strict_typed_arguments_v1"
+        )
         self.math_verifier_timeout_seconds = env_config.get("verifyit_math_total_timeout_seconds", 60.0)
         self.judge_verifier_timeout_seconds = env_config.get("verifyit_judge_total_timeout_seconds", 120.0)
         self.grading = NemotronUltraGrading(env_config.get("grading", NemotronUltraGrading.VERIFY))
@@ -282,12 +286,15 @@ class NemotronUltraEnv(BaseTextEnv):
         action = final_answer_text(action)
         error_types = (requests.RequestException, RuntimeError, ValueError)
         invalid_task_types = ()
+        preparation_error_types = ()
         if self.verifyit_enabled:
             error_types += (ImportError,)
         try:
             if self.verifyit_enabled:
                 from verifyit.grade import InvalidTask
+                from verifyit.preparation.errors import PreparationError
 
+                preparation_error_types = (PreparationError,)
                 invalid_task_types = (InvalidTask,)
                 error_types += invalid_task_types
             return self._step(action)
@@ -302,6 +309,15 @@ class NemotronUltraEnv(BaseTextEnv):
             }
             if isinstance(error, invalid_task_types):
                 details.update(error_category="invalid_task", verifyit_status="invalid_task")
+            if self.verifyit_enabled and self.agent in _TOOL_COMPARISON_AGENTS:
+                details["preparation"] = {
+                    "policy": self.tool_comparison_policy,
+                    "stage": "tool_comparison",
+                }
+                if isinstance(error, preparation_error_types):
+                    details["preparation"].update(
+                        stage=error.failure.stage, error_category=error.failure.category.value
+                    )
             if self.agent == _IPI_AGENT and self.ipi_client is not None:
                 try:
                     self.ipi_client.close(self.ipi_calls)
@@ -361,12 +377,32 @@ class NemotronUltraEnv(BaseTextEnv):
                     reset_conversation=[{"role": "user", "content": correction_prompt}],
                 )
         elif self.agent in _TOOL_COMPARISON_AGENTS:
-            comparator = grade_expected_action
             if self.verifyit_enabled:
-                from skyrl_gym.envs.nemotron_ultra.tool_comparison_verifyit import grade_expected_action_verifyit
+                from skyrl_gym.envs.nemotron_ultra.tool_comparison_verifyit import (
+                    grade_prepared_tool_action,
+                    prepare_tool_action,
+                    structure_tool_action,
+                )
 
-                comparator = grade_expected_action_verifyit
-            reward, category = comparator(self.record["expected_action"], self._assistant_message(action))
+                inputs = structure_tool_action(self.record["expected_action"], self._assistant_message(action))
+                prepared = prepare_tool_action(
+                    inputs,
+                    self.tool_comparison_policy,
+                )
+                reward, category = grade_prepared_tool_action(prepared)
+                diagnostics["preparation"] = {
+                    "policy": prepared.policy.value,
+                    "expected_action_sha256": hashlib.sha256(
+                        json.dumps(prepared.raw.expected_action, sort_keys=True).encode()
+                    ).hexdigest(),
+                    "assistant_message_sha256": hashlib.sha256(
+                        json.dumps(prepared.raw.assistant_message, sort_keys=True).encode()
+                    ).hexdigest(),
+                }
+            else:
+                reward, category = grade_expected_action(
+                    self.record["expected_action"], self._assistant_message(action)
+                )
             diagnostics["category"] = category.value
         elif self.agent == "calendar_simple_agent":
             calendar_scorer = grade_calendar
