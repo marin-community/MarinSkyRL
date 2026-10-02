@@ -337,6 +337,9 @@ async def test_generate_preserves_per_prompt_selected_scores_across_engine_routi
 @pytest.mark.parametrize("num_engines", [1, 2])
 @pytest.mark.parametrize("num_prompts", [1, 3])
 async def test_generate_preserves_response_topk_across_engine_routing(num_engines, num_prompts):
+    def routes(base):
+        return np.asarray([[[base + 1, base + 2]], [[0, 0]]], dtype=np.uint8)
+
     class TopKEngine:
         async def generate(self, input_batch):
             bases = [row[0] for row in input_batch["prompt_token_ids"]]
@@ -347,6 +350,7 @@ async def test_generate_preserves_response_topk_across_engine_routing(num_engine
                 response_logprobs=[[-0.1, -0.2] for _ in bases],
                 student_topk_indices=[[[base, base + 2], [base + 1, base + 3]] for base in bases],
                 behavior_topk_logprobs=[[[-0.1, -1.1], [-0.2, -1.2]] for _ in bases],
+                routed_experts=[routes(base) for base in bases],
             )
 
     client = InferenceEngineClient(
@@ -360,6 +364,9 @@ async def test_generate_preserves_response_topk_across_engine_routing(num_engine
 
     assert output["student_topk_indices"] == [[[base, base + 2], [base + 1, base + 3]] for base in range(num_prompts)]
     assert output["behavior_topk_logprobs"] == [[[-0.1, -1.1], [-0.2, -1.2]] for _ in range(num_prompts)]
+    assert len(output["routed_experts"]) == num_prompts
+    for base, prompt_routes in enumerate(output["routed_experts"]):
+        np.testing.assert_array_equal(prompt_routes, routes(base))
 
 
 @pytest.mark.parametrize(("num_engines", "num_prompts", "with_session_id"), ROUTING_CASES)
@@ -972,6 +979,7 @@ async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key, tokenizer, 
                     response_ids=[[21, 22]],
                     stop_reasons=["abort"],
                     response_logprobs=[[-0.1, -0.2]],
+                    routed_experts=[np.asarray([[[1, 2]], [[0, 0]]], dtype=np.uint8)],
                 ),
                 # 2) abort with 0 tokens (should be ignored)
                 InferenceEngineOutput(
@@ -986,6 +994,7 @@ async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key, tokenizer, 
                     response_ids=[[23, 24]],
                     stop_reasons=["stop"],
                     response_logprobs=[[-0.3, -0.4]],
+                    routed_experts=[np.asarray([[[3, 4]], [[0, 0]]], dtype=np.uint8)],
                 ),
             ]
 
@@ -1035,6 +1044,8 @@ async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key, tokenizer, 
     assert out["response_ids"] == [expected_final_response_ids]
     assert out["stop_reasons"] == ["stop"]
     assert out["response_logprobs"] == [[-0.1, -0.2, -0.3, -0.4]]
+    # Each turn's routes follow its tokens; the aborted turn's last token keeps its sentinel row.
+    np.testing.assert_array_equal(out["routed_experts"][0], [[[1, 2]], [[0, 0]], [[3, 4]], [[0, 0]]])
 
 
 @pytest.mark.asyncio
