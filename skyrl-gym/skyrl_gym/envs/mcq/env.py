@@ -1,3 +1,4 @@
+import logging
 from typing import Any
 
 from omegaconf import DictConfig
@@ -20,26 +21,38 @@ class MCQEnv(BaseTextEnv):
         extras = extras or {}
         assert "reward_model" in extras, "reward_model field is required"
         assert "ground_truth" in extras["reward_model"], "ground_truth is required in reward_model field"
-        self.ground_truth = str(extras["reward_model"]["ground_truth"]).strip().upper()
+        self.raw_ground_truth = extras["reward_model"]["ground_truth"]
+        self.ground_truth = str(self.raw_ground_truth).strip().upper()
         self.verifyit_enabled = bool(env_config.get("verifyit_enabled", False))
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
-        answer = extract_mcq_answer(action)
         if self.verifyit_enabled:
-            from verifyit.grade import InvalidTask
-            from verifyit.modes.grade_mcq import grade_mcq_candidate
-            from verifyit.spec import McqSpec
-
             try:
-                reward = grade_mcq_candidate(McqSpec(expected=self.ground_truth, options=26), answer or "").reward
-            except InvalidTask as error:
+                from skyrl_gym.envs.mcq.verifyit import MCQPolicy, grade_mcq
+            except Exception as error:
+                logging.getLogger(__name__).exception("MCQ verifier import failed")
+                reward = 0.0
+                details = {
+                    "error_type": "verification_error",
+                    "verifyit_status": "infra_error",
+                    "cause_error_type": type(error).__name__,
+                    "preparation_stage": "mcq_import",
+                    "error_message": str(error),
+                }
+            else:
+                reward, details = grade_mcq(
+                    action, {"expected_answer": self.raw_ground_truth}, policy=MCQPolicy.FIRST_BOX
+                )
+            if details.get("error_type"):
                 return BaseTextEnvStepOutput(
                     observations=[],
                     reward=0.0,
                     done=True,
-                    metadata={},
-                    verification=VerificationResult.error(str(error), diagnostics={"verifyit_status": "invalid_task"}),
+                    metadata=details,
+                    verification=VerificationResult.error("MCQ verification failed", diagnostics=details),
                 )
+            return BaseTextEnvStepOutput(observations=[], reward=reward, done=True, metadata=details)
         else:
+            answer = extract_mcq_answer(action)
             reward = float(answer is not None and answer == self.ground_truth)
         return BaseTextEnvStepOutput(observations=[], reward=reward, done=True, metadata={})

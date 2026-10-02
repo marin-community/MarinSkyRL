@@ -54,6 +54,18 @@ uv run --project skyrl-gym --locked --extra dev python -m pytest skyrl-gym/tests
 
 Code and source-native Lean use the [SandboxClient protocol](../skyrl-gym/skyrl_gym/envs/nemotron_ultra/sandbox.py): point the configured host/port to a running NeMo Skills sandbox with the benchmark’s Python dependencies or Lean project/toolchain. The acceptance configuration’s cluster hostname is an example deployment, not a public service. Judge settings are consumed by [OpenAIJudge](../skyrl-gym/skyrl_gym/envs/nemotron_ultra/judge.py); set the named environment variable locally with your provider credential before running judge routes. Direct source APIs expose `verifyit_enabled=True` where applicable; the checked-in replay demonstrates MCQA's switch.
 
+Enabled MCQ uses `skyrl_mcq_first_box_v1`; Ultra MCQA uses
+`skyrl_ultra_mcqa_source_v1`, retaining final-answer reasoning removal and last-box
+selection. The client captures raw text and task fields before applying either
+policy, and records the policy, effective mode, patterns, option mapping and raw
+input hash. Core MCQ owns final letter correctness; Exact compares source-normalized
+option text. A ten-second shared worker deadline bounds capture, validation,
+extraction and scoring, with process-group cleanup. Invalid option shapes,
+references, modes, malformed regexes and ambiguous regex captures now return
+`invalid_task`, including on blank candidates. This deliberately fixes the source's
+silent malformed-regex fallback. Regex timeouts return infrastructure errors.
+The disabled source path retains its existing behavior and optional dependencies.
+
 MCQ, AIME and GSM8K also preserve their original scoring when the option is omitted or false. AIME retains its extraction and optimization reward policy; GSM8K retains its configured strict, flexible or final-line extraction. Enabled non-strict AIME canonicalizes finite exact constants under a bounded worker, then uses Exact comparison. Colon ratios are translated to fractions. Parsed names and expressions containing variables retain literal text comparison; this does not grant symbolic equivalence. Multiple answers, undefined references and parsing failures are rejected conservatively; strict-box mode retains literal comparison. Invalid references or worker failures produce an error verdict and AIME reward -1. The enabled paths send prepared candidates to verifyit. The following command tests correct and wrong responses on both paths, including package import and default scoring with verifyit unavailable:
 
 ```bash

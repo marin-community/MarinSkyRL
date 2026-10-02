@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import uuid
 from collections.abc import Mapping
@@ -283,12 +284,15 @@ class NemotronUltraEnv(BaseTextEnv):
         return self.ipi_terminal
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
-        action = final_answer_text(action)
+        if not (self.verifyit_enabled and self.agent == "mcqa_simple_agent"):
+            action = final_answer_text(action)
         error_types = (requests.RequestException, RuntimeError, ValueError)
         invalid_task_types = ()
         preparation_error_types = ()
         if self.verifyit_enabled:
             error_types += (ImportError,)
+            if self.agent == "mcqa_simple_agent":
+                error_types = (Exception,)
         try:
             if self.verifyit_enabled:
                 from verifyit.grade import InvalidTask
@@ -307,6 +311,9 @@ class NemotronUltraEnv(BaseTextEnv):
                 "error_message": str(error),
                 "grading_action": action,
             }
+            if self.verifyit_enabled and self.agent == "mcqa_simple_agent":
+                logging.getLogger(__name__).exception("MCQA verification boundary failed")
+                details.update(verifyit_status="infra_error", preparation_stage="mcqa_boundary")
             if isinstance(error, invalid_task_types):
                 details.update(error_category="invalid_task", verifyit_status="invalid_task")
             if self.verifyit_enabled and self.agent in _TOOL_COMPARISON_AGENTS:
