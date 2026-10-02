@@ -16,9 +16,9 @@ from omegaconf import DictConfig, OmegaConf
 from shellbox.backends.docker.machine import DockerMachineFactory
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
 from shellbox.machine import MachineFactory
-from taskcompendium.environment import EnvironmentKind, ExternalVerifierSpec
+from taskcompendium.environment import EnvironmentKind
 from taskcompendium.grading import GradeResult, Outcome
-from taskcompendium.models import TaskSpec, VerifierKind
+from taskcompendium.models import TaskSpec
 from rolloutengine.contracts import (
     GenerationLimitReached,
     ModelRequest,
@@ -31,8 +31,7 @@ from rolloutengine.contracts import (
     RolloutOperation,
 )
 from rolloutengine.engine import ShellboxRolloutEngine
-from taskcompendium.submission import AnswerFormat, SubmissionConvention, conversation_messages
-from skyrl_gym.envs.nemotron_ultra.judge import OpenAIJudge
+from taskcompendium.submission import AnswerFormat, SubmissionConvention
 from skyrl_gym.envs.registration import EnvSpec, registry
 
 from skyrl_train.inference_engines.base import ChatContinuation, InferenceEngineInterface, InferenceEngineInput
@@ -40,7 +39,7 @@ from skyrl_train.inference_engines.inference_engine_client import InferenceEngin
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.rollouts.buffer import RolloutGroup, RolloutTask, RolloutWriter
 from taskcompendium.importers.skyrl import GYM_INTERACTION
-from skyrl_train.rollouts.cohort_grading import GENRM_AGENTS, apply_genrm_cohort_rewards
+from skyrl_train.rollouts.group_grading import GROUP_GRADERS, GroupGrader, grade_groups
 from skyrl_train.rollouts.gym_tasks import GymTaskSession, grade_result
 from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings, harbor_grading_failure, shape_harbor_rollouts
 from skyrl_train.rollouts.workers import WorkerShard, detached_config
@@ -60,11 +59,10 @@ from skyrl_train.trajectory_runners.projections import (
 from skyrl_train.rollouts.task_projections import (
     StepTaskProjection,
     WholeTaskProjection,
-    training_output,
     verification_result,
 )
 from skyrl_train.trajectory_runners.skyrl_gym_contracts import fold_verification_results
-from skyrl_train.utils.harbor_errors import DEFAULT_ERROR_HANDLING_CONFIG, ErrorHandlingConfig
+from skyrl_train.utils.harbor_errors import ErrorHandlingConfig
 from skyrl_train.trajectory_runners.types import (
     TokenProvenance,
     TrajectoryBatch,
@@ -129,74 +127,6 @@ async def _model_turn(
             "generation_token_budget": (output.get("generation_token_budgets") or [None])[0],
         },
     )
-
-
-async def _grade_task_cohorts(
-    tasks: list[TaskSpec],
-    rollouts: list[RolloutData],
-    request: TrajectoryRequestBatch,
-    error_handling: ErrorHandlingConfig = DEFAULT_ERROR_HANDLING_CONFIG,
-    *,
-    logprobs_required: bool = False,
-) -> list[RolloutData]:
-    """Complete task-declared group grading before training projection."""
-    groups: dict[str, list[int]] = {}
-    parameters = {}
-    for index, task in enumerate(tasks):
-        if task.verifier.kind != VerifierKind.EXTERNAL:
-            continue
-        verifier = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
-        if verifier.name != "nemotron_ultra" or rollouts[index].grade.status == Outcome.SKIPPED:
-            continue
-        extras = verifier.parameters["extras"]
-        ultra = extras.get("extra_info", {}).get("nemotron_ultra", {})
-        if ultra.get("agent") not in GENRM_AGENTS:
-            continue
-        parameters[index] = verifier.parameters
-        groups.setdefault(task.id, []).append(index)
-    result = list(rollouts)
-    for indices in groups.values():
-        environment_config = parameters[indices[0]]["config"]
-        if any(parameters[index]["config"] != environment_config for index in indices):
-            raise ValueError("A GenRM cohort must use one grading configuration")
-        config = dict(environment_config.get("genrm", {}))
-        if environment_config.get("verifyit_enabled", False):
-            config["verifyit_enabled"] = True
-        judge_config = config.get("judge")
-        judge = None if judge_config is None else OpenAIJudge(**judge_config)
-        outputs = [
-            training_output(rollouts[index], error_handling, logprobs_required=logprobs_required) for index in indices
-        ]
-        trajectory_ids = request.get("trajectory_ids")
-        cohort_request = TrajectoryRequestBatch(
-            prompts=[conversation_messages(tasks[index].context) for index in indices],
-            env_classes=["nemotron_ultra"] * len(indices),
-            env_extras=[parameters[index]["extras"] for index in indices],
-            trajectory_ids=None if trajectory_ids is None else [trajectory_ids[index] for index in indices],
-            batch_metadata=request.get("batch_metadata"),
-            sampling_params=request.get("sampling_params"),
-        )
-        await apply_genrm_cohort_rewards(outputs, cohort_request, config, judge)
-        for index, output in zip(indices, outputs, strict=True):
-            token_rewards = output.reward.token_rewards
-            steps = tuple(
-                replace(
-                    step,
-                    transition=replace(
-                        step.transition,
-                        reward=None if token_rewards is None else token_rewards[step.response_end],
-                        token_rewards=None,
-                        token_credit=None,
-                        reward_components={},
-                        grade=grade_result(output.verification),
-                    ),
-                )
-                for step in rollouts[index].steps
-            )
-            result[index] = replace(
-                rollouts[index], grade=grade_result(output.verification), steps=steps, metrics=output.env_metrics
-            )
-    return result
 
 
 def _failed_rollout(
@@ -299,6 +229,7 @@ class TaskRolloutWorker:
         concurrent_tasks: int | None = None,
         concurrent_harbor_tasks: int | None = None,
         retry_wait: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        group_graders: Mapping[str, GroupGrader] = GROUP_GRADERS,
     ):
         self.trajectory_runner_cfg = trajectory_runner_cfg
         self.model_client = model_client
@@ -306,6 +237,7 @@ class TaskRolloutWorker:
         self.command_timeout = command_timeout
         self.harbor = harbor
         self.retry_wait = retry_wait
+        self.group_graders = group_graders
         self.task_slots = asyncio.Semaphore(concurrent_tasks) if concurrent_tasks is not None else nullcontext()
         self.harbor_task_slots = (
             nullcontext()
@@ -423,10 +355,15 @@ class TaskRolloutWorker:
         with rollout_phase("collect"):
             async with asyncio.TaskGroup() as group:
                 pending = [group.create_task(run(index, task)) for index, task in enumerate(tasks)]
-            rollouts = await _grade_task_cohorts(
+            rollouts = await asyncio.to_thread(
+                grade_groups,
                 tasks,
                 [task.result() for task in pending],
-                request,
+                [item.instance_id for item in request["trajectory_ids"]]
+                if request.get("trajectory_ids") is not None
+                else [task.id for task in tasks],
+                self.group_graders,
+                phase,
                 self.error_handling,
                 logprobs_required=sampling.get("logprobs") is not None,
             )

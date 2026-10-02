@@ -52,6 +52,32 @@ def verification_result(grade: GradeResult) -> VerificationResult:
     return VerificationResult.error(grade.error or grade.status.value, diagnostics=grade.diagnostics)
 
 
+def rollout_loss_eligible(
+    rollout: RolloutData,
+    error_handling: ErrorHandlingConfig,
+    *,
+    logprobs_required: bool,
+) -> bool:
+    """Return execution eligibility before the final grade is available."""
+    if rollout.failure is None:
+        return True
+    treatment = (
+        classify_exception_type(rollout.failure.exception_type, error_handling)
+        if error_handling.enable_error_classification
+        else ErrorTreatment.MASK
+    )
+    return (
+        bool(any(rollout.loss_mask))
+        and treatment is not ErrorTreatment.MASK
+        and passthrough_logprob_error_type(
+            treatment,
+            has_rollout_logprobs=rollout.logprobs is not None,
+            rollout_logprobs_required=logprobs_required,
+        )
+        is None
+    )
+
+
 def training_output(
     rollout: RolloutData,
     error_handling: ErrorHandlingConfig = DEFAULT_ERROR_HANDLING_CONFIG,
@@ -114,9 +140,7 @@ def training_output(
             rollout_logprobs_required=logprobs_required,
         )
         disposition = TrainingDisposition(
-            loss_eligible=bool(any(rollout.loss_mask))
-            and treatment is not ErrorTreatment.MASK
-            and missing_logprobs is None,
+            loss_eligible=rollout_loss_eligible(rollout, error_handling, logprobs_required=logprobs_required),
             baseline_eligible=not treatment_excludes_from_baseline(treatment, verifier_available=graded)
             and missing_logprobs is None,
             reason="Rollout execution failed",

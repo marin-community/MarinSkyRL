@@ -19,12 +19,13 @@ from omegaconf import OmegaConf
 from skyrl_gym.envs.base_text_env import BaseTextEnv
 from skyrl_gym.envs.registration import EnvSpec, registry
 from skyrl_gym.verification import RewardResult, VerificationResult, VerificationStatus, normalized_verifier_score
-from taskcompendium.grading import numeric_answer
+from taskcompendium.grading import GradeResult, Outcome, numeric_answer, skipped_verifier
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
 from shellbox.image import DockerfileSource
 from shellbox.machine import Command, ShellSimBuiltins
 from taskcompendium.environment import (
     EnvironmentKind,
+    ExternalVerifierSpec,
     EnvironmentSpec,
     FileReward,
     RewardFile,
@@ -1696,6 +1697,58 @@ async def test_genrm_final_grades_and_credit_reach_training_batch(
         expected_mask = [1, 1] if grading == "skip" else [0, 0]
         assert batch["loss_masks"] == [expected_mask, expected_mask]
         assert batch["exclude_from_baseline"] == [grading != "skip"] * 2
+
+
+@pytest.mark.asyncio
+async def test_task_group_grader_preserves_separate_samples_and_private_inputs(task_inputs, tmp_path):
+    config, request = task_inputs
+    task = TaskSpec.model_validate_json(request["env_extras"][0]["task_spec"])
+    task = task.model_copy(
+        update={
+            "verifier": skipped_verifier("Group grading supplies the final score"),
+            "group_verifier": ExternalVerifierSpec(name="group_total", parameters={"private_offset": 10}),
+        }
+    )
+    path = str(tmp_path / "tasks.parquet")
+    write_tasks(path, iter([task]))
+    task = next(read_tasks(path))
+    request.update(
+        prompts=request["prompts"] * 4,
+        env_classes=["taskcompendium"] * 4,
+        env_extras=[{"task_spec": task.model_dump_json()}] * 4,
+        trajectory_ids=[TrajectoryID(group, sample) for group, sample in [("a", 0), ("b", 0), ("a", 1), ("b", 1)]],
+    )
+
+    def group_total(task, records, eligible, phase):
+        total = sum(int(record.steps[-1].turn.text) for record, valid in zip(records, eligible, strict=True) if valid)
+        return [
+            replace(
+                record,
+                grade=GradeResult(
+                    Outcome.GRADED,
+                    total + task.group_verifier.parameters["private_offset"],
+                    score_max=100,
+                ),
+            )
+            for record in records
+        ]
+
+    model = ConversationClient(["1", "2", "3", "4"])
+    worker = TaskRolloutWorker(
+        config,
+        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        model,
+        {},
+        command_timeout=5,
+        concurrent_tasks=1,
+        group_graders={"group_total": group_total},
+    )
+    rollouts = await worker.generate(request)
+    batch = await worker.training_batch(request, rollouts)
+    assert batch["rewards"] == [14, 16, 14, 16]
+    assert batch["loss_masks"] == [[1, 1]] * 4
+    assert [record.response_token_ids for record in rollouts] == [(3, 4), (5, 6), (7, 8), (9, 10)]
+    assert all("private_offset" not in str(item["prompts"]) for item in model.requests)
 
 
 @pytest.mark.asyncio
