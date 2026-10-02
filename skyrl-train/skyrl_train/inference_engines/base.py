@@ -8,8 +8,9 @@ ConversationType = List[MessageType]
 OnlineEagleResult = Dict[str, Any] | List[Dict[str, Any]]
 
 
-class PromptSamplingOverride(TypedDict):
+class PromptSamplingOverride(TypedDict, total=False):
     prompt_logprob_token_ids: List[List[int]]
+    logprob_token_ids: List[int]
 
 
 class ChatContinuation(TypedDict):
@@ -22,8 +23,7 @@ class InferenceEngineInput(TypedDict):
     prompts: Optional[List[ConversationType]]
     prompt_token_ids: Optional[List[List[int]]]
     sampling_params: Optional[Dict[str, Any]]
-    # Per-prompt selected-ID scoring overrides for a teacher batch. Rollout
-    # sampling remains shared; each override contains only prompt_logprob_token_ids.
+    # Per-prompt token scoring overrides. Rollout sampling remains shared.
     sampling_params_per_prompt: NotRequired[List[PromptSamplingOverride]]
     session_ids: Optional[List[Hashable]]
     # Per-sample Responses-API options (tools, parallel_tool_calls, etc.) that
