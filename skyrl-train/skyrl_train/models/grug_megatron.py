@@ -356,10 +356,10 @@ def _one_layer_units(config: TransformerConfig) -> bool:
 def _recomputing_one_layer(config: TransformerConfig) -> bool:
     """True in full activation recompute's second forward of a checkpointed unit that holds one layer.
 
-    Megatron re-runs each checkpointed unit's forward inside the autograd engine's backward, where the engine's
-    graph task is set.
+    Megatron re-runs each checkpointed unit's forward inside the backward with gradients enabled and its checkpoint flag
+    set (``checkpoint_pass``).
     """
-    return _one_layer_units(config) and torch.is_grad_enabled() and torch._C._current_graph_task_id() != -1
+    return _one_layer_units(config) and checkpoint_pass() is CheckpointPass.RECOMPUTE
 
 
 def _install_vllm_experts_hooks(experts: TEGroupedMLP) -> None:
