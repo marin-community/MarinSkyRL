@@ -199,7 +199,8 @@ def create_ray_wrapped_inference_engines_from_config(
         decode_context_parallel_size=cfg.generator.get("inference_engine_decode_context_parallel_size", 1),
         shared_pg=colocate_pg,
         inference_engine_enable_sleep=(cfg.trainer.placement.colocate_all and operation is EntrypointOperation.TRAIN),
-        max_logprobs=max([1, *requested_logprobs]),
+        # Chat requests K+1 entries to recover K alternatives when the sampled token falls outside top K.
+        max_logprobs=max([1, *(value + 1 for value in requested_logprobs)]),
     )
     model_revision = cfg.trainer.policy.model.get("revision")
     if model_revision is not None and policy_source_uri is None:

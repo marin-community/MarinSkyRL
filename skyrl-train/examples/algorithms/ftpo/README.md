@@ -23,9 +23,11 @@ and off-policy correction. Use the existing data, rollout, optimizer, checkpoint
 and placement configuration. Provision the reference role even though KL is off.
 Greedy generation (`temperature=0`) is supported. Candidate probabilities use
 vLLM `raw_logprobs`; the objective uses unscaled logits regardless of sampling
-temperature. SkyRL derives the engine's `max_logprobs` from
-`generator.sampling_params.logprobs` and `generator.eval_sampling_params.logprobs`;
-omit it from `generator.engine_init_kwargs`.
+temperature. SkyRL sets the engine's `max_logprobs` to accommodate the largest
+training or evaluation log-probability request, including profiles in
+`trainer.callbacks[].additional_evaluations`. It reserves one extra entry for
+chat responses that include the sampled token outside the natural top K.
+Omit `max_logprobs` from `generator.engine_init_kwargs`.
 
 The existing token-tail loop detector selects the start of the first repeated
 copy in a periodic suffix. Its settings live under
