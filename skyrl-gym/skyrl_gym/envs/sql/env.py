@@ -6,6 +6,7 @@ from skyrl_gym.envs.sql.utils import compute_score_single
 import os
 from typing import Dict
 from omegaconf import DictConfig
+from skyrl_gym.verification import VerificationResult
 
 
 class SQLEnv(BaseTextEnv):
@@ -110,17 +111,28 @@ class SQLEnv(BaseTextEnv):
 
         error = None
         done = self._is_done(action)
+        if self.verifyit_enabled:
+            from verifyit.grade import InvalidTask
+
+        error_types = (RuntimeError, InvalidTask) if self.verifyit_enabled else (RuntimeError,)
         try:
             reward = self._get_reward(action, done)
-        except RuntimeError:
-            from skyrl_gym.verification import VerificationResult
-
+        except error_types as grading_error:
             return BaseTextEnvStepOutput(
                 observations=[],
-                reward=0.0,
+                reward=-1.0 if self.verifyit_enabled else 0.0,
                 done=True,
                 metadata={},
-                verification=VerificationResult.error("SQL verification failed"),
+                verification=VerificationResult.error(
+                    str(grading_error) if self.verifyit_enabled else "SQL verification failed",
+                    diagnostics={
+                        "verifyit_status": "invalid_task"
+                        if self.verifyit_enabled and isinstance(grading_error, InvalidTask)
+                        else "infrastructure_error"
+                    }
+                    if self.verifyit_enabled
+                    else {},
+                ),
             )
 
         if done:

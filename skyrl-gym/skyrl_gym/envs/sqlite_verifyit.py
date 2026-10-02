@@ -150,8 +150,12 @@ def score_legacy_sql(response: str, reference: str, database: str) -> float:
         verdict = _client(
             {"profile": "legacy", "reference_sql": reference, "candidate": candidate, "format_valid": valid}, database
         )
-    except (InvalidTask, ImportError, OSError, TypeError, ValueError, RuntimeError, sqlite3.Error) as error:
+    except InvalidTask:
+        raise
+    except (ImportError, OSError, TypeError, ValueError, RuntimeError, sqlite3.Error) as error:
         raise RuntimeError("SQL verification failed") from error
+    if verdict.status is Status.INVALID_TASK:
+        raise InvalidTask("SQL trusted contract is invalid")
     if verdict.status is not Status.SCORED:
         raise RuntimeError(f"SQL verification failed ({verdict.status.value})")
     return -1.0 if not valid else verdict.reward

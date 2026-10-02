@@ -70,7 +70,7 @@ def test_legacy_sql_keeps_set_semantics_format_projection_and_original_database(
     response = "<think>query</think><solution>SELECT DISTINCT x FROM t</solution>"
     assert score_legacy_sql(response, "SELECT x FROM t", str(database)) == 1
     assert score_legacy_sql("wrong format", "SELECT x FROM t", str(database)) == -1
-    with pytest.raises(RuntimeError, match="verification failed"):
+    with pytest.raises(InvalidTask, match="reference query failed"):
         score_legacy_sql("wrong format", "SELECT missing FROM t", str(database))
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT count(*) FROM t").fetchone()[0] == 3
@@ -116,3 +116,35 @@ def test_malformed_contract_fails_closed_at_actual_framework_boundary():
     assert result["reward"] == 0.0
     assert result["verification"].status is VerificationStatus.ERROR
     assert result["verification"].diagnostics["verifyit_status"] == "invalid_task"
+
+
+@pytest.mark.parametrize("failure", ["invalid_reference", "missing_database"])
+def test_legacy_sql_actual_environment_errors_use_minimum_reward_and_typed_status(tmp_path, failure):
+    directory = tmp_path / "spider" / "database" / "fixture"
+    directory.mkdir(parents=True)
+    database = directory / "fixture.sqlite"
+    with sqlite3.connect(database) as connection:
+        connection.executescript("CREATE TABLE t(x INTEGER); INSERT INTO t VALUES(1);")
+    env = skyrl_gym.make(
+        "text2sql",
+        env_config=OmegaConf.create({"verifyit_enabled": True, "db_path": str(tmp_path)}),
+        extras={
+            "db_id": "fixture",
+            "data": "spider",
+            "reward_spec": {
+                "ground_truth": "SELECT missing FROM t" if failure == "invalid_reference" else "SELECT x FROM t"
+            },
+        },
+    )
+    if failure == "missing_database":
+        database.unlink()
+    try:
+        result = env.step("<think>query</think><solution>SELECT x FROM t</solution>")
+        assert result["reward"] == -1
+        assert result["verification"].status is VerificationStatus.ERROR
+        assert result["verification"].score is None
+        assert result["verification"].diagnostics["verifyit_status"] == (
+            "invalid_task" if failure == "invalid_reference" else "infrastructure_error"
+        )
+    finally:
+        env.close()
