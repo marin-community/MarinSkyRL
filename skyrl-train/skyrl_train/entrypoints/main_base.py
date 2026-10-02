@@ -268,13 +268,13 @@ def create_remote_inference_engines_from_config(cfg: DictConfig, tokenizer: PreT
 
 class BasePPOExp:
     def __init__(self, cfg: DictConfig):
-        from skyrl_train.utils.utils import Timer  # noqa: PLC0415
-
         """
         Initializes a PPO experiment.
 
         The `cfg` passed here will be the final config from Hydra, including CLI overrides.
         """
+        from skyrl_train.utils.utils import Timer  # noqa: PLC0415
+
         self.cfg = cfg
         self._configure_log_level()
         self.startup_timings = {}
@@ -548,8 +548,6 @@ class BasePPOExp:
         )
 
     def _setup_trainer(self):
-        from skyrl_train.utils.utils import Timer  # noqa: PLC0415
-
         """Setup and return the trainer.
 
         Instantiates the trainer and all the associated models for training.
@@ -557,6 +555,8 @@ class BasePPOExp:
         Returns:
             RayPPOTrainer: The trainer.
         """
+        from skyrl_train.utils.utils import Timer  # noqa: PLC0415
+
         logger.info(self.get_cfg_as_str(self.cfg))
         os.makedirs(self.cfg.trainer.export_path, exist_ok=True)
         os.makedirs(self.cfg.trainer.ckpt_path, exist_ok=True)
