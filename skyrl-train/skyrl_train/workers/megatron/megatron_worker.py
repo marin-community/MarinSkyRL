@@ -228,6 +228,7 @@ class MegatronWorker:
                     ftpo_chosen_mask=micro.get("ftpo_chosen_mask"),
                     rollout_routed_experts=micro.routed_experts_tensor(),
                     rollout_engine_dp_ranks=micro.get(ENGINE_DP_RANKS_KEY),
+                    loss_mask=micro.get("loss_mask"),
                     probe_row_indices=micro.get("probe_row_indices"),
                 )
             )

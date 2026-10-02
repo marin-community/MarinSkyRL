@@ -71,6 +71,8 @@ class MegatronForwardMicroBatch:
     rollout_routed_experts: Optional[torch.Tensor] = None
     # The data-parallel rank of the inference engine that generated each sequence.
     rollout_engine_dp_ranks: Optional[torch.Tensor] = None
+    # The response tokens the loss reads, when the batch carries them.
+    loss_mask: Optional[torch.Tensor] = None
     ftpo_chosen_mask: torch.Tensor | None = None
     probe_row_indices: Optional[torch.Tensor] = None
 
@@ -324,6 +326,7 @@ class MegatronModelWrapper:
         num_actions: Optional[int] = None,
         record_recompute: bool = False,
         rollout_engine_dp_ranks: Optional[torch.Tensor] = None,
+        loss_mask: Optional[torch.Tensor] = None,
     ):
         """Run the shared packed or left-unpadded Megatron model boundary.
 
@@ -331,7 +334,9 @@ class MegatronModelWrapper:
         model call with ``begin_forward`` / ``end_forward`` (never falling back
         to native routing); with replay installed but no routes, fails fast
         before the model runs. Under Grug's vLLM numerics the model call sees
-        each sequence's serving engine rank (``rollout_engine_dp_ranks``).
+        each sequence's serving engine rank (``rollout_engine_dp_ranks``), which
+        every sequence with loss tokens (``loss_mask``, or the response tokens
+        when the batch carries no loss mask) must have.
         """
         attention_mask = attention_mask.to(bool)
         serving = nullcontext()
@@ -341,14 +346,22 @@ class MegatronModelWrapper:
                     "Grug's vLLM numerics need each sequence's serving engine rank (rollout_engine_dp_ranks)"
                 )
             ranks = rollout_engine_dp_ranks.to(device=sequences.device, dtype=torch.long)
-            # A row without a model call has no serving rank (-1) and no generated tokens to score.
-            generated = attention_mask[:, -num_actions:].any(dim=1)
-            if bool(((ranks < 0) & generated).any()):
+            # A trajectory that failed before its model call is a row of one placeholder token, no loss tokens and no
+            # serving rank; its bytes are read by no loss.
+            scored = (
+                loss_mask.to(device=ranks.device) != 0 if loss_mask is not None else attention_mask[:, -num_actions:]
+            ).any(dim=1)
+            if bool(((ranks < 0) & scored).any()):
                 raise ValueError(
-                    "Grug's vLLM numerics need the serving engine rank of every sequence with generated tokens, "
+                    "Grug's vLLM numerics need the serving engine rank of every sequence with loss tokens, "
                     f"got {rollout_engine_dp_ranks.tolist()}"
                 )
-            serving = serving_engine_ranks(ranks, int(self.cfg.generator.inference_engine_expert_parallel_size))
+            generator = self.cfg.generator
+            serving = serving_engine_ranks(
+                ranks,
+                int(generator.inference_engine_data_parallel_size),
+                int(generator.inference_engine_expert_parallel_size),
+            )
         armed = False
         if self.router_replay is not None:
             if rollout_routed_experts is None:
@@ -455,6 +468,7 @@ class MegatronModelWrapper:
                 probe_row_indices=batch.probe_row_indices,
                 num_actions=batch.num_actions,
                 rollout_engine_dp_ranks=batch.rollout_engine_dp_ranks,
+                loss_mask=batch.loss_mask,
             )
 
             return outputs, partial(collection_func, data=batch, packed_seq_params=packed_seq_params)
@@ -671,6 +685,7 @@ class MegatronModelWrapper:
                     num_actions=batch.num_actions,
                     record_recompute=True,
                     rollout_engine_dp_ranks=batch.rollout_engine_dp_ranks,
+                    loss_mask=batch.loss_mask,
                 )
 
             return outputs, partial(loss_func, data=batch, packed_seq_params=packed_seq_params)

@@ -37,6 +37,8 @@ _EXPERT_OFFSET_TABLES: dict[tuple, tuple[int, torch.Tensor]] = {}
 # Each sequence's serving vLLM data-parallel rank and vLLM's expert-parallel size, while ``serving_engine_ranks`` holds
 # them.
 _SERVING_RANKS: tuple[torch.Tensor, int] | None = None
+# A sequence without a serving rank: no model call produced its tokens, and no loss reads them.
+NO_SERVING_RANK = -1
 
 
 @functools.lru_cache(maxsize=64)
@@ -169,14 +171,16 @@ def vllm_token_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.
 
 
 @contextmanager
-def serving_engine_ranks(ranks: torch.Tensor, expert_parallel_size: int) -> Iterator[None]:
-    """Give the forwards in the block each sequence's serving vLLM data-parallel rank (``[B]``) and vLLM's
-    expert-parallel size, which decide the order of vLLM's expert-parallel combine (``vllm_ep_combine``)."""
+def serving_engine_ranks(ranks: torch.Tensor, data_parallel_size: int, expert_parallel_size: int) -> Iterator[None]:
+    """Give the forwards in the block each sequence's serving vLLM data-parallel rank (``[B]``, below
+    ``data_parallel_size``, or ``NO_SERVING_RANK``) and vLLM's expert-parallel size, which decide the order of vLLM's
+    expert-parallel combine (``vllm_ep_combine``). With one expert-parallel rank the combine is the same from every
+    serving rank."""
     global _SERVING_RANKS
-    if ranks.numel() and ranks.max() >= expert_parallel_size:
+    if ranks.numel() and (ranks.min() < NO_SERVING_RANK or ranks.max() >= data_parallel_size):
         raise ValueError(
-            f"each sequence's serving engine rank must be a vLLM data-parallel rank below {expert_parallel_size}, "
-            f"got {ranks.tolist()}"
+            f"each sequence's serving engine rank must be a vLLM data-parallel rank below {data_parallel_size} or "
+            f"{NO_SERVING_RANK}, got {ranks.tolist()}"
         )
     previous, _SERVING_RANKS = _SERVING_RANKS, (ranks, expert_parallel_size)
     try:

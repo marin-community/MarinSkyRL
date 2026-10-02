@@ -48,7 +48,7 @@ def test_ep_combine_adds_rank_partials_in_the_ring_order_of_each_tokens_serving_
     pairs = routing_map.t().nonzero()
     permuted = values[pairs[:, 1], pairs[:, 0]]
 
-    with serving_engine_ranks(serving, ep_size):
+    with serving_engine_ranks(serving, data_parallel_size=ep_size, expert_parallel_size=ep_size):
         home, size = serving_row_ranks(tokens)
     combined = vllm_ep_combine(permuted, routing_map, selected, home, size)
 
@@ -61,6 +61,29 @@ def test_ep_combine_adds_rank_partials_in_the_ring_order_of_each_tokens_serving_
     # The same slots summed once in fp32 differ, so the test sees the ring's bf16 roundings.
     single = values.gather(1, selected[:, :, None].expand(-1, -1, hidden)).float().sum(1).to(torch.bfloat16)
     assert not torch.equal(combined, single)
+
+
+def test_ep_combine_of_one_expert_parallel_rank_rounds_once_from_any_serving_rank():
+    """Data-parallel engines without expert parallelism (EP 1) add every slot on the serving rank in fp32 and round
+    once, so each sequence's serving rank, any rank below the data-parallel size, leaves the sum unchanged."""
+    sequences, positions, hidden, num_experts, top_k, data_parallel_size = 2, 8, 16, 8, 4, 2
+    tokens = sequences * positions
+    generator = torch.Generator().manual_seed(1)
+    selected = torch.stack([torch.randperm(num_experts, generator=generator)[:top_k] for _ in range(tokens)])
+    values = torch.randn(tokens, num_experts, hidden, generator=generator) * torch.logspace(-2, 2, num_experts)[:, None]
+    values = values.to(torch.bfloat16)
+    routing_map = torch.zeros(tokens, num_experts, dtype=torch.bool).scatter(1, selected, True)
+    pairs = routing_map.t().nonzero()
+    permuted = values[pairs[:, 1], pairs[:, 0]]
+    once = values.gather(1, selected[:, :, None].expand(-1, -1, hidden)).float().sum(1).to(torch.bfloat16)
+
+    for serving in (torch.tensor([0, 1]), torch.tensor([1, 0]), torch.tensor([-1, 1])):
+        with serving_engine_ranks(serving, data_parallel_size=data_parallel_size, expert_parallel_size=1):
+            home, size = serving_row_ranks(tokens)
+        assert torch.equal(vllm_ep_combine(permuted, routing_map, selected, home, size), once)
+    with pytest.raises(ValueError, match="below 2"):
+        with serving_engine_ranks(torch.tensor([0, 2]), data_parallel_size=data_parallel_size, expert_parallel_size=1):
+            pass
 
 
 def test_vllm_qkv_projection_has_the_layout_of_megatrons_fused_projection():
