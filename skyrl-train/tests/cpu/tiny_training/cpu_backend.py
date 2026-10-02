@@ -348,7 +348,7 @@ class CPUInferenceEngine(InferenceEngineInterface):
     async def pause_generation(self) -> None:
         self._resumed.clear()
 
-    async def resume_generation(self) -> None:
+    async def resume_generation(self, policy_step: int | None = None) -> None:
         self._resumed.set()
 
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):

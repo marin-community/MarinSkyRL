@@ -1134,7 +1134,7 @@ class _MockStreamEngine:
     async def pause_generation(self):
         pass
 
-    async def resume_generation(self):
+    async def resume_generation(self, policy_step=None):
         pass
 
     async def chat_completion_stream(self, request_payload):
@@ -1158,7 +1158,7 @@ class _MockWeightSyncEngine:
             raise RuntimeError("reshape_and_cache_flash attempted to run with Meta tensors")
         self.reloads += 1
 
-    async def resume_generation(self):
+    async def resume_generation(self, policy_step=None):
         self.scheduler_paused = False
 
 
@@ -1239,7 +1239,7 @@ class _MockCompletionEngine:
     async def pause_generation(self):
         pass
 
-    async def resume_generation(self):
+    async def resume_generation(self, policy_step=None):
         pass
 
 
@@ -1468,7 +1468,7 @@ class _MockGenerateEngine:
     async def pause_generation(self):
         self.scheduler_paused = True
 
-    async def resume_generation(self):
+    async def resume_generation(self, policy_step=None):
         self.scheduler_paused = False
 
 

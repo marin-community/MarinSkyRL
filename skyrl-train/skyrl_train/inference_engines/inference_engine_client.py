@@ -229,11 +229,11 @@ class InferenceEngineClient(InferenceEngineInterface):
         awaitables = [getattr(engine, method_name)(*args, **kwargs) for engine in live_engines]
         return await asyncio.gather(*awaitables)
 
-    async def _run_on_all_engines_before_deadline(self, method_name: str):
+    async def _run_on_all_engines_before_deadline(self, method_name: str, *args):
         """Fan out a weight-sync pause or resume, failing loudly if an engine never answers."""
         try:
             async with asyncio.timeout(self.weight_sync_pause_timeout):
-                return await self._run_on_all_engines(method_name)
+                return await self._run_on_all_engines(method_name, *args)
         except TimeoutError:
             raise TimeoutError(
                 f"{method_name} did not complete on every engine within "
@@ -357,12 +357,17 @@ class InferenceEngineClient(InferenceEngineInterface):
         prompt_logprobs: List[Optional[Any]] = [None for _ in range(n)]
         student_topk_indices: List[Optional[List[List[int]]]] = [None for _ in range(n)]
         behavior_topk_logprobs: List[Optional[List[List[float]]]] = [None for _ in range(n)]
+        response_policy_steps: List[Optional[np.ndarray]] = [None for _ in range(n)]
         # a bit hacky for now
         add_resp_logprobs = False
         add_prompt_logprobs = False
         add_student_topk = False
 
         for indices, result in zip(indices_list, results):
+            policy_steps = result.get("response_policy_steps")
+            if policy_steps is not None:
+                for local_idx, original_idx in enumerate(indices):
+                    response_policy_steps[original_idx] = policy_steps[local_idx]
             selected_ids = result.get("student_topk_indices")
             selected_scores = result.get("behavior_topk_logprobs")
             if (selected_ids is None) != (selected_scores is None):
@@ -401,6 +406,8 @@ class InferenceEngineClient(InferenceEngineInterface):
                 raise ValueError("Inference engine omitted student top-K evidence for part of the batch")
             output["student_topk_indices"] = student_topk_indices
             output["behavior_topk_logprobs"] = behavior_topk_logprobs
+        if all(row is not None for row in response_policy_steps):
+            output["response_policy_steps"] = response_policy_steps
         return output
 
     async def begin_online_eagle_capture(self, config: Dict[str, Any]) -> List[OnlineEagleResult]:
@@ -474,6 +481,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         accum_response_logprobs: List[float] = []
         accum_student_topk_indices: List[List[int]] = []
         accum_behavior_topk_logprobs: List[List[float]] = []
+        accum_policy_steps: List[np.ndarray] = []
         saw_student_topk: Optional[bool] = None
         stop_reason: str = ABORT_FINISH_REASON
 
@@ -515,6 +523,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                 accum_response_logprobs = []
                 accum_student_topk_indices = []
                 accum_behavior_topk_logprobs = []
+                accum_policy_steps = []
                 saw_student_topk = None
                 num_turns = 0
                 stop_reason = ABORT_FINISH_REASON
@@ -559,6 +568,8 @@ class InferenceEngineClient(InferenceEngineInterface):
             accum_response_ids.extend(new_response_ids)
             if new_response_logprobs is not None:
                 accum_response_logprobs.extend(new_response_logprobs)
+            if partial_response.get("response_policy_steps") is not None:
+                accum_policy_steps.append(partial_response["response_policy_steps"][0])
             num_turns += 1
 
         # 4. Build the final response and return.
@@ -581,6 +592,8 @@ class InferenceEngineClient(InferenceEngineInterface):
         if saw_student_topk:
             output["student_topk_indices"] = [accum_student_topk_indices]
             output["behavior_topk_logprobs"] = [accum_behavior_topk_logprobs]
+        if accum_policy_steps:
+            output["response_policy_steps"] = [np.concatenate(accum_policy_steps)]
         return output
 
     async def _chat_completion_with_retry(
@@ -1079,16 +1092,16 @@ class InferenceEngineClient(InferenceEngineInterface):
         self.generation_paused_event.set()
         await self._run_on_all_engines_before_deadline("pause_generation")
 
-    async def resume_generation(self) -> None:
+    async def resume_generation(self, policy_step: int | None = None) -> None:
         """
         Resumes generation for all engines, intended for in-flight weight updates and partial rollouts.
 
         Resume all in-flight requests with the previously-generated tokens, and unblock incoming requests
-        that were blocked by `pause_generation()`.
+        that were blocked by `pause_generation()`. ``policy_step`` stamps the tokens the engines sample next.
         """
         if not self.generation_paused_event.is_set():
             raise RuntimeError("Generation is not paused, cannot resume.")
-        await self._run_on_all_engines_before_deadline("resume_generation")
+        await self._run_on_all_engines_before_deadline("resume_generation", policy_step)
         self._release_generation_waiters()
 
     # ----------------------------
@@ -1215,6 +1228,7 @@ class AccumulatedResponse:
     content: str = ""
     logprobs_content: List[Any] = field(default_factory=list)
     token_ids: List[int] = field(default_factory=list)
+    policy_steps: List[int] = field(default_factory=list)
     completion_tokens: int = 0
     routed_experts: np.ndarray | None = None
     route_prompt_ids: List[int] | None = None
@@ -1345,6 +1359,8 @@ def _parse_partial_response_and_inplace_update_accum(
             accum.logprobs_content.extend(logprobs["content"])
         if choice.get("token_ids") is not None:
             accum.token_ids.extend(choice["token_ids"])
+        if choice.get("policy_steps") is not None:
+            accum.policy_steps.extend(choice["policy_steps"])
         accum.completion_tokens += new_completion_tokens
 
     return finish_reason, stop_reason, response_role, aborted_without_generating
@@ -1376,6 +1392,8 @@ def _build_final_response(
         final_choice["logprobs"]["content"] = accum.logprobs_content
     if final_choice.get("token_ids", None) is not None:
         final_choice["token_ids"] = accum.token_ids
+    if final_choice.get("policy_steps") is not None:
+        final_choice["policy_steps"] = accum.policy_steps
     if accum.routed_experts is not None:
         route_buffer = io.BytesIO()
         np.save(route_buffer, accum.routed_experts)
