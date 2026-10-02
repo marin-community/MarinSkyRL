@@ -3,9 +3,14 @@ name: Marin Nightly E2E
 
 on:
   schedule:
-    - cron: "0 9 * * *"
+    - cron: "0 9 * * 1-6"
+    - cron: "0 9 * * 0"
   workflow_dispatch:
     inputs:
+      grug_cutlass:
+        description: Include the weekly Grug CUTLASS case alongside nightly Triton
+        type: boolean
+        default: false
       model:
         description: "HF model id to train"
         default: Qwen/Qwen3-0.6B
@@ -51,7 +56,7 @@ jobs:
             cpu: 32
             memory: 256GB
             iris_timeout: 7200
-            workflow_timeout_minutes: 140
+            workflow_timeout_minutes: ${{ (github.event.schedule == '0 9 * * 0' || inputs.grug_cutlass) && 140 || 100 }}
             task_script: skyrl-train/ci/marin_nightly/run_grug_megatron.sh
             log: grug-megatron.log
     runs-on: ubuntu-latest
@@ -65,6 +70,7 @@ jobs:
       MODEL: ${{ github.event.inputs.model || 'Qwen/Qwen3-0.6B' }}
       STRATEGY: megatron
       TARGET_CLUSTER: ${{ matrix.target_cluster }}
+      GRUG_CUTLASS_WEEKLY: ${{ (github.event.schedule == '0 9 * * 0' || inputs.grug_cutlass) && '1' || '0' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -116,6 +122,7 @@ jobs:
             --cpu "${{ matrix.cpu }}" --memory "${{ matrix.memory }}" --disk 200GB \
             --no-sync \
             --timeout "${{ matrix.iris_timeout }}" \
+            -e GRUG_CUTLASS_WEEKLY "$GRUG_CUTLASS_WEEKLY" \
             "${TASK_ENV[@]}" \
             -- bash "${{ matrix.task_script }}" 2>&1 | tee "${{ matrix.log }}"
 
