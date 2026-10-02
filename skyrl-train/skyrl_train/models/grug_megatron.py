@@ -29,7 +29,6 @@ it replaces.
 """
 
 import math
-import weakref
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from functools import partial
@@ -67,7 +66,14 @@ from torch import nn
 from skyrl_train.config import grug_vllm_shapes as vllm_shapes
 from skyrl_train.config.numerics import ALLTOALL_DISPATCHER, MAX_PIPELINE_STAGES, Numerics, one_layer_recompute_units
 from skyrl_train.models import grug_inductor_kernels as vllm_inductor
-from skyrl_train.models.grug_handoffs import clear_hand_offs, hand_off, same_storage, take_hand_off
+from skyrl_train.models.grug_handoffs import (
+    clear_hand_offs,
+    expect_backward,
+    hand_off,
+    keep_for_recompute,
+    take_for_recompute,
+    take_hand_off,
+)
 from skyrl_train.models.grug_invariant_kernels import invariant_router_logits
 from skyrl_train.models.grug_reference_kernels import (
     gated_product_value,
@@ -188,15 +194,6 @@ class StageStatistic:
         return self.value.reshape(-1)
 
 
-# Per module, what it computed in a checkpoint unit's first forward for the unit's recompute, with a weak reference to
-# the tensor that identifies the unit (an input norm's input, or the decoder layer's input). Full activation recompute
-# reruns the unit inside the backward on ``detach()`` copies of its inputs, after the first forward took the unit's
-# hand-offs, so the recompute reads what it needs here by storage. Only a forward whose backward will run keeps
-# entries, and its backward takes every one of them (``assert_recompute_drained``).
-_KEPT_FOR_RECOMPUTE: dict[int, list[tuple[weakref.ref, torch.Tensor]]] = {}
-# True while a forward runs with gradients enabled, so that a backward, and the recompute of its checkpoint units,
-# follows.
-_BACKWARD_FOLLOWS = False
 # The input of each decoder layer whose forward is running, innermost last: the key of its checkpoint unit.
 _LAYER_INPUTS: list[torch.Tensor] = []
 
@@ -223,31 +220,6 @@ def _one_layer_units(config: TransformerConfig) -> bool:
 def _recomputing_one_layer(config: TransformerConfig) -> bool:
     """True in full activation recompute's second forward of a checkpointed unit that holds one layer."""
     return _one_layer_units(config) and checkpoint_pass() is CheckpointPass.RECOMPUTE
-
-
-def _keep_for_recompute(owner: nn.Module, receiver: torch.Tensor, value: torch.Tensor) -> None:
-    """Keep ``value`` for the recompute of the checkpoint unit that ``receiver`` identifies; a forward without a
-    backward recomputes nothing and keeps nothing."""
-    if not _BACKWARD_FOLLOWS:
-        return
-    _KEPT_FOR_RECOMPUTE.setdefault(id(owner), []).append((weakref.ref(receiver), value))
-
-
-def _take_for_recompute(owner: nn.Module, receiver: torch.Tensor) -> torch.Tensor:
-    entries = _KEPT_FOR_RECOMPUTE.get(id(owner), [])
-    for index, (ref, value) in enumerate(entries):
-        original = ref()
-        if original is not None and same_storage(original, receiver):
-            del entries[index]
-            return value
-    raise RuntimeError("a checkpoint unit's recompute found nothing kept by the unit's first forward")
-
-
-def assert_recompute_drained() -> None:
-    """Raise unless every value a checkpoint unit's first forward kept was taken by the unit's recompute."""
-    kept = sum(len(entries) for entries in _KEPT_FOR_RECOMPUTE.values())
-    if kept:
-        raise RuntimeError(f"{kept} values kept by checkpoint units' first forwards were not taken by their recompute")
 
 
 def _install_layer_input_hooks(layer: TransformerLayer) -> None:
@@ -443,11 +415,11 @@ def _install_fa3_attention_hooks(attention: "GrugSelfAttention") -> None:
             raise NotImplementedError("Grug's vLLM numerics support unpacked causal sequences only")
         phase, unit = checkpoint_pass(), _unit_key(attention.config)
         if phase is CheckpointPass.RECOMPUTE and unit is not None:
-            output = _take_for_recompute(core, unit)
+            output = take_for_recompute(core, unit)
         else:
             output = fa3_attention_sbhd(query, key, value, window=attention.fa3_window, scale=attention.fa3_scale)
             if phase is CheckpointPass.FIRST and unit is not None:
-                _keep_for_recompute(core, unit, output)
+                keep_for_recompute(core, unit, output)
         if not torch.is_grad_enabled():
             return output
         reference = cudnn_forward(
@@ -618,7 +590,7 @@ class GrugGatedRMSNorm(nn.Module):
         parts = take_hand_off(hidden_states)
         if parts is None:
             if phase is CheckpointPass.RECOMPUTE:
-                return _take_for_recompute(self, hidden_states)
+                return take_for_recompute(self, hidden_states)
             raise RuntimeError(
                 "a layer's input norm found no hand-off of the sum that formed its input: the embedding gated norm, "
                 "the previous layer or the previous pipeline stage registered none"
@@ -626,7 +598,7 @@ class GrugGatedRMSNorm(nn.Module):
         with torch.no_grad():
             statistic = parts.statistic()
         if phase is CheckpointPass.FIRST:
-            _keep_for_recompute(self, hidden_states, statistic)
+            keep_for_recompute(self, hidden_states, statistic)
         return statistic
 
     def _final_norm(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -1016,8 +988,7 @@ class GrugGPTModel(GPTModel):
     def forward(self, *args, **kwargs):
         if not self.vllm_numerics:
             return super().forward(*args, **kwargs)
-        global _BACKWARD_FOLLOWS
-        _BACKWARD_FOLLOWS = torch.is_grad_enabled()
+        expect_backward(torch.is_grad_enabled())
         # Each forward starts without hand-offs: a stage's last residual has no reader, and the entries are keyed by
         # tensors that a later forward may reuse. The statistics kept for recompute stay: under pipeline parallelism a
         # micro-batch's backward, and its recompute, runs after later micro-batches' forwards.

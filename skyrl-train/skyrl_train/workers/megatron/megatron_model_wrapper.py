@@ -18,7 +18,7 @@ from skyrl_train.distributed.megatron.model_utils import (
     vllm_prompt_logprobs,
     vocab_parallel_entropy,
 )
-from skyrl_train.models.grug_megatron import assert_recompute_drained
+from skyrl_train.models.grug_handoffs import assert_recompute_drained
 from skyrl_train.models.grug_rounding import vllm_value
 from skyrl_train.models.grug_vllm_kernels import serving_engine_ranks
 from skyrl_train.distributed.megatron.megatron_utils import get_model_config

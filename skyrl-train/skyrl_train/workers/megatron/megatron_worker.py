@@ -35,7 +35,6 @@ from skyrl_train.distributed.megatron.remote_model import install_remote_hf_stat
 from skyrl_train.distributed.utils import init_worker_process_group_with_device
 from skyrl_train.config.numerics import NUMERICS_KEY, Numerics
 from skyrl_train.mismatch_probe.modes import TRAINER_MODES
-from skyrl_train.models.grug_megatron_bridge import GrugModelProvider
 from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE, validate_grug_training_strategy
 from skyrl_train.timing_observability import PhaseBreakdown
 from marinskyrl.runtime_options import PolicyLossType
@@ -167,7 +166,7 @@ class MegatronWorker:
 
         for k, v in transformer_config_kwargs.items():
             setattr(provider, k, v)
-        if isinstance(provider, GrugModelProvider):
+        if hf_config.model_type == GRUG_MOE_MODEL_TYPE:
             provider.grug_numerics = numerics
         elif numerics is Numerics.EXACT:
             raise ValueError(f"{NUMERICS_KEY}={numerics} needs a Grug model")
