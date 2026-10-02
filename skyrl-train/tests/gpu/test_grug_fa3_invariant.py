@@ -11,6 +11,7 @@ from skyrl_train.models.grug_fa3_invariant import (
     fa3_request_calls,
     fa3_window_start_rows,
 )
+from skyrl_train.models.grug_vllm_kernels import fa3_attention_sbhd
 from tests.gpu.grug_gpu_gates import require_hoppers
 
 HEADS, KV_HEADS, HEAD_DIM, BLOCK, WINDOW = 20, 5, 128, 16, 2048
@@ -96,10 +97,10 @@ def _same_rows(left, right) -> bool:
 
 
 @pytest.mark.parametrize("window", [None, WINDOW], ids=["full", "sliding_window"])
-def test_engine_prefill_rows_equal_rows_decoded_alone(window):
+def test_engine_steps_and_trainer_rows_equal_rows_decoded_alone(window):
     require_hoppers(1)
     sequences, caches, tables = _sequences(torch.Generator().manual_seed(0))
-    for index, (length, (q, _, _)) in enumerate(zip(LENGTHS, sequences, strict=True)):
+    for index, (length, (q, k, v)) in enumerate(zip(LENGTHS, sequences, strict=True)):
         decode = (q, caches, list(range(length + 1)), list(range(1, length + 1)), tables[[index] * length], window)
         decoded = _paged_calls(*decode, causal_rows=True)
         # The local kernel gives every row decoded alone the same bytes.
@@ -117,3 +118,6 @@ def test_engine_prefill_rows_equal_rows_decoded_alone(window):
             causal_rows=True,
         )
         assert _same_rows(prefill, decoded[16:])
+
+        trainer = fa3_attention_sbhd(q[:, None], k[:, None], v[:, None], window=window, scale=SCALE)
+        assert _same_rows(trainer.view(length, HEADS, HEAD_DIM), decoded)

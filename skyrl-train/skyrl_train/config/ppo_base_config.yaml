@@ -170,7 +170,17 @@ trainer:
       optimizer_kwargs: {}
     sequence_parallel_size: 1
   algorithm:
-    batch_invariant: false
+    # native: Megatron's and vLLM's own kernels. batch_invariant: vLLM's batch-invariant kernels on both sides.
+    # exact: decode-invariant vLLM engines and a Grug trainer that computes their bytes for every token
+    # (config/numerics.py lists what exact needs).
+    numerics: native
+    # Set by config resolution: the numerics the run was configured with when they fell back to native.
+    numerics_fallback_from: null
+    # Under exact numerics, every engine generates one fixed short sequence after the first weight sync and after every
+    # every_weight_syncs-th one (0: the first only), and the trainer's scores must equal the engines' bit for bit.
+    exactness_check:
+      every_weight_syncs: 10
+      on_failure: stop
     advantage_estimator: "grpo"
     group_advantage_min_size: null
     resolved_group_advantage:
