@@ -189,7 +189,7 @@ def compose_launch_config(raw: Mapping[str, Any] | DictConfig) -> DictConfig:
 
 
 def _is_source_recipe(skyrl: DictConfig) -> bool:
-    return "context_budget" in skyrl or "config_groups" in skyrl
+    return "context_budget" in skyrl or "config_groups" in skyrl or "defaults" in skyrl
 
 
 def _compose_source_recipe(config: DictConfig) -> DictConfig:

@@ -7,10 +7,15 @@ NONE of this is reached, so the legacy path stays byte-identical.
 The controller path replaces the pinggy tunnel with the native iris
 capability-URL scheme that shipped in marin #6857 (``/proxy/t/*``): the co-located
 vLLM (or the RecordProxy in the literal combo) is registered with the iris
-controller under ``ENDPOINT_ACCESS_LINK``, then a scoped capability token is
-minted for it and carried IN THE URL PATH:
+controller under ``ENDPOINT_ACCESS_LINK``, then the task's own controller mints a
+capability URL that carries a scoped token IN THE URL PATH:
 
-    api_base = https://<ingress_host>/proxy/t/<token>/<encoded_endpoint>/v1
+    api_base = <capability_url>/v1
+
+On a CoreWeave child with ``federation_public_parent`` set, ``<capability_url>`` is
+``https://iris.oa.dev/proxy/t/cluster=<cluster>/<token>/<encoded_endpoint>`` and the
+public parent relays it back to the child. The federated path below instead mints at
+the parent and builds ``https://<ingress_host>/proxy/t/<token>/<encoded_endpoint>/v1``.
 
 Possession of the URL is the credential — there is NO auth header, and the
 sandbox-facing ``api_key`` is an unused dummy (installed OpenAI-compatible agents
@@ -23,8 +28,8 @@ TOKEN LIFETIME. The controller clamps a minted token to
 ``MAX_ENDPOINT_TOKEN_TTL_SECONDS`` = 24h (``DEFAULT`` = 1h). The endpoint
 REGISTRATION is separately lease-renewed for the whole run (see
 :class:`ControllerEndpointRegistration`); only the token expires. So the api_base
-is resolved through :func:`capability_api_base`, which mints a 24h token, caches
-it worker-side keyed by endpoint name, and re-mints when within
+is resolved through :func:`capability_api_base`, which mints a 24h capability URL,
+caches it worker-side keyed by endpoint name, and re-mints when within
 ``TOKEN_REFRESH_MARGIN_SECONDS`` of expiry.
 
 INJECTION CADENCE (important). The launchers bake the resolved api_base into the
@@ -149,6 +154,16 @@ def inject_ingress_agent_key(env: Optional[dict] = None) -> bool:
 # --------------------------------------------------------------------------- #
 
 
+class CapabilityUrlMinter(Protocol):
+    """Mints a capability URL for an endpoint registered on the task's own controller.
+
+    Returns ``(capability_url, expires_at_epoch_seconds)``, where the URL is the
+    controller's ``/proxy/t/...`` route for the endpoint, without the ``/v1`` suffix.
+    """
+
+    def mint(self, endpoint_name: str, ttl_hours: float) -> Tuple[str, float]: ...
+
+
 class CapabilityMinter(Protocol):
     """Mints a scoped capability token for a registered endpoint.
 
@@ -166,39 +181,52 @@ class _CachedToken:
     expires_at: float  # epoch seconds
 
 
-class CapabilityTokenCache:
-    """Worker-side cache of scoped capability tokens, keyed by endpoint name.
+@dataclass
+class _CachedUrl:
+    url: str
+    expires_at: float  # epoch seconds
 
-    Mints on first use and re-mints when a cached token is within
+
+class CapabilityUrlCache:
+    """Worker-side cache of capability URLs, keyed by endpoint name.
+
+    Mints on first use and re-mints when a cached URL's token is within
     :data:`TOKEN_REFRESH_MARGIN_SECONDS` of expiry, so every resolve of the
     api_base hands out a token with ample life left. Thread-safe: harbor spawns
     and lease renewers touch it from different threads.
     """
 
-    def __init__(self, minter: CapabilityMinter, *, ttl_hours: float = DEFAULT_TOKEN_TTL_HOURS) -> None:
+    def __init__(self, minter: CapabilityUrlMinter, *, ttl_hours: float = DEFAULT_TOKEN_TTL_HOURS) -> None:
         self._minter = minter
         self._ttl_hours = ttl_hours
         self._lock = threading.Lock()
-        self._cache: Dict[str, _CachedToken] = {}
+        self._cache: Dict[str, _CachedUrl] = {}
 
-    def token_for(self, endpoint_name: str, *, now: Optional[float] = None) -> str:
+    def url_for(self, endpoint_name: str, *, now: Optional[float] = None) -> str:
         now = time.time() if now is None else now
         with self._lock:
             cached = self._cache.get(endpoint_name)
             if cached is not None and cached.expires_at - now > TOKEN_REFRESH_MARGIN_SECONDS:
-                return cached.token
-            token, expires_at = self._minter.mint(endpoint_name, self._ttl_hours)
-            if not token:
+                return cached.url
+            url, expires_at = self._minter.mint(endpoint_name, self._ttl_hours)
+            if not url:
                 raise RuntimeError(
-                    f"minting a capability token for {endpoint_name} returned an empty "
-                    "token; refusing to build an unreachable api_base."
+                    f"the controller returned no capability URL for {endpoint_name}: its cluster "
+                    "config sets neither dashboard_url nor federation_public_parent, so the "
+                    "endpoint has no public route."
                 )
-            self._cache[endpoint_name] = _CachedToken(token=token, expires_at=expires_at)
-            return token
+            self._cache[endpoint_name] = _CachedUrl(url=url, expires_at=expires_at)
+            return url
 
 
-class _ControllerCapabilityMinter:
+class _ControllerCapabilityUrlMinter:
     """Mints via the in-cluster controller ``MintEndpointToken`` RPC.
+
+    The controller returns the endpoint's public capability URL. On a CoreWeave child
+    whose cluster config sets ``federation_public_parent``, that URL points at the
+    parent (``https://iris.oa.dev/proxy/t/cluster=<cluster>/<token>/<name>``), which
+    relays it back to the child, so a Daytona sandbox reaches the endpoint without
+    any parent-side credentials.
 
     Builds a ``ControllerServiceClientSync`` from the task's
     ``IRIS_CONTROLLER_ADDRESS`` (network-level trust in-cluster, no explicit
@@ -234,59 +262,39 @@ class _ControllerCapabilityMinter:
             ttl=duration_to_proto(Duration.from_hours(ttl_hours)),
         )
         resp = self._stub.mint_endpoint_token(request)
-        return resp.token, resp.expires_at.epoch_ms / 1000.0
+        return resp.capability_url, resp.expires_at.epoch_ms / 1000.0
 
 
 # Process-wide cache; the default minter is constructed lazily on first resolve
 # (it needs the in-cluster controller address, unavailable at import time).
-_TOKEN_CACHE: Optional[CapabilityTokenCache] = None
-_TOKEN_CACHE_LOCK = threading.Lock()
+_URL_CACHE: Optional[CapabilityUrlCache] = None
+_URL_CACHE_LOCK = threading.Lock()
 
 
-def _default_token_cache() -> CapabilityTokenCache:
-    global _TOKEN_CACHE
-    with _TOKEN_CACHE_LOCK:
-        if _TOKEN_CACHE is None:
-            _TOKEN_CACHE = CapabilityTokenCache(_ControllerCapabilityMinter())
-        return _TOKEN_CACHE
+def _default_url_cache() -> CapabilityUrlCache:
+    global _URL_CACHE
+    with _URL_CACHE_LOCK:
+        if _URL_CACHE is None:
+            _URL_CACHE = CapabilityUrlCache(_ControllerCapabilityUrlMinter())
+        return _URL_CACHE
 
 
 def capability_api_base(
-    ingress_host: str,
     endpoint_name: str,
     *,
-    cache: Optional[CapabilityTokenCache] = None,
+    cache: Optional[CapabilityUrlCache] = None,
     now: Optional[float] = None,
 ) -> str:
-    """Resolve the current capability api_base for a REGISTERED endpoint.
+    """Resolve the current capability api_base for an endpoint REGISTERED on this task's controller.
 
-    Mints (or reuses a cached, still-fresh) scoped token and returns
-    ``https://<ingress_host>/proxy/t/<token>/<encoded_endpoint>/v1``. The endpoint
-    MUST already be registered with ``ENDPOINT_ACCESS_LINK`` (see
-    :func:`register_controller_endpoint`), else the mint has nothing to resolve.
-    ``cache`` is injectable for tests; production uses the process-wide worker
-    cache backed by the controller RPC.
+    Returns the controller-minted capability URL (cached while its token is fresh)
+    with ``/v1`` appended. The endpoint MUST already be registered with
+    ``ENDPOINT_ACCESS_LINK`` (see :func:`register_controller_endpoint`), else the
+    mint has nothing to resolve. ``cache`` is injectable for tests; production uses
+    the process-wide worker cache backed by the controller RPC.
     """
-    token_cache = cache if cache is not None else _default_token_cache()
-    token = token_cache.token_for(endpoint_name, now=now)
-    return build_capability_api_base(ingress_host, endpoint_name, token)
-
-
-def build_controller_endpoint_meta(
-    ingress_host: str,
-    endpoint_name: str,
-    *,
-    cache: Optional[CapabilityTokenCache] = None,
-) -> Dict[str, str]:
-    """Endpoint metadata dict for controller mode (capability api_base + dummy key).
-
-    metrics_endpoint is intentionally omitted: the capability route fronts only
-    the ``/v1`` inference surface, so ``/metrics`` is not reachable through it.
-    """
-    return {
-        "api_base": capability_api_base(ingress_host, endpoint_name, cache=cache),
-        "api_key": DUMMY_API_KEY,
-    }
+    url_cache = cache if cache is not None else _default_url_cache()
+    return f"{url_cache.url_for(endpoint_name, now=now).rstrip('/')}/v1"
 
 
 # --------------------------------------------------------------------------- #
@@ -497,12 +505,14 @@ def controller_registration_plan(
 # --------------------------------------------------------------------------- #
 #
 # WHY a SEPARATE mint path. The plain :func:`capability_api_base` mints against the
-# task's OWN in-cluster controller (``_ControllerCapabilityMinter`` uses
+# task's OWN in-cluster controller (``_ControllerCapabilityUrlMinter`` uses
 # ``IRIS_CONTROLLER_ADDRESS``). On a CoreWeave peer that controller is the CoreWeave
 # controller, whose signing key marin (iris.oa.dev) does NOT trust: federation trust
 # is UNIDIRECTIONAL (cw trusts marin, not the reverse), so a cw-minted token 401s at
-# iris.oa.dev. And the peer controller's own public host is IP-locked. So a Daytona
-# sandbox can only reach the co-located vLLM through iris.oa.dev, which requires:
+# iris.oa.dev. And the peer controller's own public host is IP-locked. A job submitted
+# directly to a peer whose config sets ``federation_public_parent`` needs none of this:
+# the peer mints a URL the parent relays (see :func:`capability_api_base`). For a job
+# federated through marin, this path reaches the co-located vLLM through iris.oa.dev by:
 #
 #   1. the job be DELEGATED by marin to the peer (launcher --target-cluster), so
 #      marin's ``has_received_job_from_peer`` gate passes and it federation-proxies
@@ -585,7 +595,7 @@ class _FederatedTokenState:
 
 
 class FederatedCapabilityTokenCache:
-    """Parent-minting analog of :class:`CapabilityTokenCache`.
+    """Parent-minting analog of :class:`CapabilityUrlCache`, caching tokens rather than URLs.
 
     On the first ``token_for`` for an endpoint it waits (once) for FederationSync to
     mirror the endpoint onto the parent, then mints at the PARENT and caches the token,
