@@ -207,7 +207,6 @@ def training_output(
     stamps = [step.turn.metadata.get("response_policy_steps") for step in rollout.steps]
     policy_steps = None
     if any(values is not None for values in stamps):
-        # Observation tokens between turns keep the unsampled stamp.
         policy_steps = np.full(len(rollout.response_token_ids), UNSAMPLED_POLICY_STEP, dtype=np.int32)
         for step, values in zip(rollout.steps, stamps, strict=True):
             if values is not None:

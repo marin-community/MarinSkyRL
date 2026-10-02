@@ -353,8 +353,7 @@ class TrainingInput(TypedDict, total=False):
     rewards: Optional[Float[torch.Tensor, "batch_size seq_len"]]
     rollout_logprobs: Optional[Float[torch.Tensor, "batch_size seq_len"]]
     correction_weights: Optional[Float[torch.Tensor, "batch_size seq_len"]]
-    # Policy steps each response token is behind at consumption: the engine stamp where one exists, else the
-    # row's lease; zero on padding.
+    # Policy steps each response token is behind at consumption.
     rollout_staleness: Optional[Integer[torch.Tensor, "batch_size seq_len"]]
     teacher_action_log_probs: Optional[Float[torch.Tensor, "batch_size seq_len"]]
     teacher_topk_indices: Optional[Integer[torch.Tensor, "batch_size seq_len top_k"]]

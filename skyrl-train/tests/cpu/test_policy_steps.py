@@ -1,5 +1,3 @@
-"""Per-token policy steps from the engine stamp to the training batch."""
-
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 
@@ -219,7 +217,6 @@ async def test_token_staleness_reaches_the_training_batch_through_stamped_rollou
     trainer.pad_batch = lambda batch: batch
     trainer.group_advantage_invariant = GroupAdvantageInvariant.no_group_advantage(physical_group_size=1)
     trainer._training_metrics_enabled = False
-    # The trainer's own postprocessing turns the per-response reward into a per-token reward on the last token.
     trainer.postprocess_trajectory_batch = lambda batch, uids: {
         **batch,
         "rewards": [

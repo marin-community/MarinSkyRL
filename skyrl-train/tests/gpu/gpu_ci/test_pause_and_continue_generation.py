@@ -388,7 +388,6 @@ def test_policy_step_stamps_split_responses_at_the_weight_sync_pause(ray_init_fi
     chat_body = {"model": MODEL, "messages": messages, "return_token_ids": True, **sampling_params}
 
     async def run():
-        # The trainer's initial sync installs the first step on an idle engine.
         await client.pause_generation()
         await client.resume_generation(policy_step=1)
         chat = asyncio.create_task(client.chat_completion({"json": dict(chat_body), "headers": {}}))
@@ -403,7 +402,6 @@ def test_policy_step_stamps_split_responses_at_the_weight_sync_pause(ray_init_fi
             )
         )
         direct = asyncio.create_task(engine.chat_completion({"json": dict(chat_body), "headers": {}}))
-        # Decode for a while so the pause lands inside every response.
         await asyncio.sleep(1)
         await client.pause_generation()
         # vLLM's own output count per resident request, keyed by the id the caller passed, read inside the actor.

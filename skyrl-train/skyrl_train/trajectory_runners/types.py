@@ -119,7 +119,6 @@ class TrajectoryBatch(TypedDict):
     student_topk_indices: Optional[List[np.ndarray]]
     behavior_topk_logprobs: Optional[List[np.ndarray]]
     rollout_routed_experts: Optional[List[np.ndarray]]
-    # int32 per response token: the policy step that sampled it, -1 where no engine step did.
     rollout_policy_steps: Optional[List[np.ndarray]]
     teacher_evidence: Optional[TeacherEvidenceBatch]
     distillation: Optional[PreparedTeacherInput]

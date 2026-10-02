@@ -62,8 +62,6 @@ class InferenceEngineOutput(TypedDict):
     prompt_ids: NotRequired[List[List[int]]]
     assistant_messages: NotRequired[List[Dict[str, Any]]]
     routed_experts: NotRequired[List[np.ndarray | None]]
-    # The policy step whose weights sampled each response token, int32 aligned with response_ids; -1 where the
-    # engine sampled no token or had no step installed yet. Only the local vLLM engine stamps tokens.
     response_policy_steps: NotRequired[List[np.ndarray]]
 
 

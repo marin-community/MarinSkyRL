@@ -40,7 +40,6 @@ class RolloutEvidence:
     student_topk_indices: np.ndarray | None = None
     behavior_topk_logprobs: np.ndarray | None = None
     routed_experts: np.ndarray | None = None
-    # The policy step that sampled each response token; -1 where no engine step sampled it.
     policy_steps: np.ndarray | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
