@@ -1,15 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Task-owned calendar assertions through the existing ScriptSpec verdict channel."""
+"""Translate calendar times and intervals into core JSONSchema constraints."""
 
 from __future__ import annotations
 
-import json
 import math
 import re
-import os
-from pathlib import Path
-from typing import Any
+from itertools import combinations
 
 
 def _time_to_minutes(value: str) -> int:
@@ -23,7 +20,7 @@ def _time_to_minutes(value: str) -> int:
     suffix = match.group(3)
     if suffix is None and match.group(2) is None:
         raise ValueError("24-hour clock requires minutes")
-    if not 0 <= minute < 60 or not (1 <= hour <= 12 if suffix else 0 <= hour < 24):
+    if not 0 <= minute < 60 or not (1 <= hour <= 12 if suffix else (0 <= hour < 24 or hour == 24 and minute == 0)):
         raise ValueError("clock time outside valid range")
     if suffix:
         hour = hour % 12 + (12 if suffix == "pm" else 0)
@@ -37,129 +34,123 @@ def _duration(value: object) -> None:
         raise ValueError("duration must be finite")
 
 
-def _validate_reference(reference: dict) -> None:
+def _event_schema(identifier: str, reference: dict) -> dict:
     _duration(reference["duration"])
-    low = _time_to_minutes(reference["min_time"])
-    high = _time_to_minutes(reference["max_time"])
-    if low > high:
+    start = {"type": "number", "minimum": _time_to_minutes(reference["min_time"])}
+    end = {"type": "number", "maximum": _time_to_minutes(reference["max_time"])}
+    if start["minimum"] > end["maximum"]:
         raise ValueError("calendar window is reversed")
     constraint = reference["constraint"]
-    if constraint is None:
-        return
-    if not isinstance(constraint, str):
-        raise ValueError("invalid calendar constraint")
-    for prefix in ("before ", "after ", "at "):
-        if constraint.startswith(prefix):
-            _time_to_minutes(constraint.removeprefix(prefix))
-            return
-    if constraint.startswith("between "):
-        lower, upper = constraint.removeprefix("between ").split(" and ")
-        if _time_to_minutes(lower) <= _time_to_minutes(upper):
-            return
-    raise ValueError("invalid calendar constraint")
-
-
-def _conflicts(events: list[dict[str, Any]], event: dict[str, Any]) -> bool:
-    start = _time_to_minutes(event["start_time"])
-    end = start + event["duration"]
-    for other in events:
-        if other is event:
-            continue
-        other_start = _time_to_minutes(other["start_time"])
-        other_end = other_start + other["duration"]
-        if not (end <= other_start or start >= other_end):
-            return True
-    return False
-
-
-def _satisfies(event: dict[str, Any], expected: dict[str, Any]) -> bool:
-    if event["duration"] != expected["duration"]:
-        return False
-    start = _time_to_minutes(event["start_time"])
-    end = start + event["duration"]
-    if start < _time_to_minutes(expected["min_time"]) or end > _time_to_minutes(expected["max_time"]):
-        return False
-    constraint = expected["constraint"]
-    if constraint is None:
-        return True
-    if constraint.startswith("before "):
-        return end <= _time_to_minutes(constraint.removeprefix("before "))
-    if constraint.startswith("after "):
-        return start >= _time_to_minutes(constraint.removeprefix("after "))
-    if constraint.startswith("between "):
-        low, high = constraint.removeprefix("between ").split(" and ")
-        return start >= _time_to_minutes(low) and end <= _time_to_minutes(high)
-    if constraint.startswith("at "):
-        return start == _time_to_minutes(constraint.removeprefix("at "))
-    raise RuntimeError(f"Unknown calendar constraint: {constraint!r}")
-
-
-def _check(events: object, expected: dict, think: bool) -> dict:
-    # Validate trusted constraints before interpreting candidate evidence.
-    try:
-        if not isinstance(expected, dict):
-            raise ValueError("calendar references must be an object")
-        for reference in expected.values():
-            _validate_reference(reference)
-    except (KeyError, TypeError, ValueError, AttributeError, RuntimeError):
-        return {"status": "invalid_task", "reward": 0.0, "detail": {"reason": "invalid_calendar_reference"}}
-    reason = "pass"
-    try:
-        if think:
-            reason = "think_found"
-        elif not expected:
-            pass
-        elif not events:
-            reason = "no_json_list"
+    if constraint is not None:
+        if constraint.startswith("before "):
+            end = {"allOf": [end, {"maximum": _time_to_minutes(constraint.removeprefix("before "))}]}
+        elif constraint.startswith("after "):
+            start = {"allOf": [start, {"minimum": _time_to_minutes(constraint.removeprefix("after "))}]}
+        elif constraint.startswith("at "):
+            start = {"allOf": [start, {"const": _time_to_minutes(constraint.removeprefix("at "))}]}
+        elif constraint.startswith("between "):
+            lower, upper = constraint.removeprefix("between ").split(" and ")
+            low, high = _time_to_minutes(lower), _time_to_minutes(upper)
+            if low > high:
+                raise ValueError("calendar constraint is reversed")
+            start = {"allOf": [start, {"minimum": low}]}
+            end = {"allOf": [end, {"maximum": high}]}
         else:
-            for event in events:
-                _duration(event["duration"])
-                _time_to_minutes(event["start_time"])
-            by_id = {str(event["event_id"]): event for event in events}
-            if len(by_id) != len(expected):
-                reason = "different_number_of_events"
-            elif any(_conflicts(events, event) for event in events):
-                reason = "conflicting_events"
-            elif any(not _satisfies(by_id[event_id], expected[event_id]) for event_id in expected):
-                reason = "constraint_violated"
-    except (KeyError, TypeError, ValueError, AttributeError):
-        reason = "invalid_response"
-    return {"status": "scored", "reward": float(reason == "pass"), "detail": {"reason": reason}}
+            raise ValueError("invalid calendar constraint")
+    return {
+        "type": "object",
+        "required": ["id", "start", "end", "duration"],
+        "properties": {
+            "id": {"const": identifier},
+            "start": start,
+            "end": end,
+            "duration": {"type": "number", "minimum": 0, "const": reference["duration"]},
+        },
+    }
 
 
-def _grade_calendar_verifyit(response: str, expected: dict) -> tuple[float, str]:
-    from tempfile import TemporaryDirectory
-
-    from verifyit.grade import Status, run
-    from verifyit.spec import ScriptSpec, render_spec
+def _calendar(response: str, expected: dict):
+    from verifyit.grade import InvalidTask
+    from verifyit.json_objects import unique_object
+    from verifyit.modes.grade_json_schema import grade_json_schema_candidate
     from skyrl_gym.envs.nemotron_ultra.calendar import _extract_json_list
 
-    with TemporaryDirectory(prefix="skyrl-calendar-") as directory:
-        root = Path(directory)
-        (root / "checker.py").write_text(Path(__file__).read_text())
-        events = _extract_json_list(response)
-        (root / "data.json").write_text(
-            json.dumps({"events": events, "expected": expected, "think": "<think>" in response}, allow_nan=False)
-        )
-        (root / "verifier.toml").write_text(
-            render_spec(ScriptSpec(path="checker.py", verdict_file="calendar-result.json"))
-        )
-        verdict = run(root / "verifier.toml", root)
-    if verdict.status is not Status.SCORED:
-        raise RuntimeError("calendar verification failed")
-    return verdict.reward, verdict.detail["reason"]
+    try:
+        if not isinstance(expected, dict) or any(not isinstance(key, str) for key in expected):
+            raise ValueError("calendar references require text identifiers")
+        contracts = [_event_schema(key, value) for key, value in expected.items()]
+    except (KeyError, TypeError, ValueError, AttributeError) as error:
+        raise InvalidTask("invalid calendar reference") from error
+    schema = {"type": "object", "properties": {"think": {"const": False}}}
+    instance = {"think": "<think>" in response}
+    if expected:
+        schema["properties"]["events"] = {
+            "type": "array",
+            "minItems": len(expected),
+            "maxItems": len(expected),
+            "items": {"oneOf": contracts},
+            "allOf": [
+                {
+                    "contains": {"type": "object", "properties": {"id": {"const": key}}, "required": ["id"]},
+                    "minContains": 1,
+                    "maxContains": 1,
+                }
+                for key in expected
+            ],
+        }
+        schema["properties"]["gaps"] = {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["forward", "backward"],
+                "anyOf": [
+                    {"properties": {direction: {"type": "number", "minimum": 0}}}
+                    for direction in ("forward", "backward")
+                ],
+            },
+        }
+        try:
+            events = _extract_json_list(response, object_pairs_hook=unique_object)
+        except ValueError:
+            events = None
+        prepared = []
+        # Retain one overflow item so core maxItems rejects oversized schedules.
+        for event in (events or [])[: len(expected) + 1]:
+            try:
+                start = _time_to_minutes(event["start_time"])
+                prepared.append(
+                    {
+                        "id": str(event["event_id"]),
+                        "start": start,
+                        "end": start + event["duration"],
+                        "duration": event["duration"],
+                    }
+                )
+            except (KeyError, TypeError, ValueError):
+                prepared.append({})
+        gaps = []
+        for first, second in combinations(prepared, 2):
+            try:
+                gaps.append({"forward": second["start"] - first["end"], "backward": first["start"] - second["end"]})
+            except (KeyError, TypeError):
+                gaps.append({})
+        instance.update(events=prepared, gaps=gaps)
+    return grade_json_schema_candidate(schema, instance)
 
 
 def grade_calendar_verifyit(response: str, expected: dict) -> tuple[float, str]:
+    from verifyit.bounded import call_bounded
+
     try:
-        return _grade_calendar_verifyit(response, expected)
-    except (ImportError, OSError, TypeError, ValueError, RuntimeError) as error:
+        verdict = call_bounded(_calendar, response, expected, timeout=5)
+    except OSError as error:
         raise RuntimeError("calendar verification failed") from error
-
-
-if __name__ == "__main__":
-    tests = Path(os.environ["VERIFYIT_TESTS_DIR"])
-    logs = Path(os.environ["VERIFYIT_LOGS_DIR"])
-    data = json.loads((tests / "data.json").read_text())
-    verdict = _check(data["events"], data["expected"], data["think"])
-    (logs / "calendar-result.json").write_text(json.dumps(verdict, allow_nan=False))
+    path = verdict.detail.get("path", "")
+    reason = "pass" if verdict.detail.get("reason") == "valid" else "constraint_violated"
+    if path == "think":
+        reason = "think_found"
+    elif path.startswith("gaps"):
+        reason = "conflicting_events"
+    elif path == "events":
+        reason = "different_number_of_events"
+    return verdict.reward, reason
