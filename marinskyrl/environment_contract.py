@@ -112,6 +112,13 @@ DEFAULT_NCCL_TRACE_BUFFER_SIZE = 20_000
 
 
 ENV_VAR_SPECS = (
+    EnvVarSpec(
+        "ELAN_TOOLCHAIN",
+        "environment.skyrl_gym.nemotron_ultra.lean_runtime",
+        EnvVarSource.EXTERNAL,
+        frozenset({EnvVarScope.TASK_RUNTIME}),
+        frozenset({EnvVarWriter.DOCKER_ENV}),
+    ),
     # Verifyit's judge client owns these names. They are set only inside the
     # isolated grading child, using the benchmark's existing provider settings.
     EnvVarSpec(

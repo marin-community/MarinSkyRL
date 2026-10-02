@@ -13,14 +13,36 @@ class AIMEVerifier:
     ground_truth: str
     evaluation_token_budget: int = 8192
     strict_box_verify: bool = False
+    verifyit_enabled: bool = False
+    verifyit_timeout: float = 10.0
 
     def __post_init__(self) -> None:
         if self.evaluation_token_budget <= 0:
             raise ValueError("evaluation_token_budget must be positive")
 
     def verify(self, evidence: RolloutEvidence) -> VerificationResult:
-        response = evidence.response or ""
-        correct, prediction = verify(response[-300:], self.ground_truth, self.strict_box_verify)
+        details = {}
+        if self.verifyit_enabled:
+            from verifyit.grade import Status
+            from skyrl_gym.envs.math_verifyit import MathPolicy, grade_math_response
+
+            policy = MathPolicy.AIME_BOX if self.strict_box_verify else MathPolicy.AIME_MINERVA
+            verdict = grade_math_response(
+                evidence.response,
+                self.ground_truth,
+                policy=policy,
+                stop_reason=evidence.stop_reason,
+                timeout=self.verifyit_timeout,
+            )
+            if verdict.status is not Status.SCORED:
+                return VerificationResult.error(
+                    verdict.detail.get("error", "Math verification failed"), diagnostics=verdict.detail
+                )
+            correct, prediction = bool(verdict.reward), verdict.detail["prediction"]
+            details = verdict.detail
+        else:
+            response = evidence.response or ""
+            correct, prediction = verify(response[-300:], self.ground_truth, self.strict_box_verify)
         generated_tokens = evidence.generated_token_count
         over_budget = generated_tokens is not None and generated_tokens > self.evaluation_token_budget
         parseable_answer = prediction is not None and str(prediction).strip() not in {"", "[INVALID]"}
@@ -28,6 +50,7 @@ class AIMEVerifier:
             1.0 if correct else -1.0,
             passed=bool(correct),
             diagnostics={
+                **details,
                 "prediction": prediction,
                 "generated_token_count": generated_tokens,
                 "evaluation_token_budget": self.evaluation_token_budget,

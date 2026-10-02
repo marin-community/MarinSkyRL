@@ -19,7 +19,7 @@ def _time_to_minutes(value: str) -> int:
     return hour * 60 + minute
 
 
-def _extract_json_list(text: str) -> list[Any] | None:
+def _extract_json_list(text: str, *, object_pairs_hook=None) -> list[Any] | None:
     start: int | None = None
     stack: list[str] = []
     in_string = False
@@ -62,7 +62,7 @@ def _extract_json_list(text: str) -> list[Any] | None:
         candidate = text[start : index + 1]
         start = None
         try:
-            parsed = json.loads(candidate)
+            parsed = json.loads(candidate, object_pairs_hook=object_pairs_hook)
         except json.JSONDecodeError:
             continue
         if isinstance(parsed, list) and any(isinstance(item, dict) for item in parsed):

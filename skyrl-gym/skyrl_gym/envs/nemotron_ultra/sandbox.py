@@ -33,6 +33,7 @@ class SandboxClient:
         timeout_seconds: float,
         session_id: str | None = None,
         max_output_characters: int = 1000,
+        lean_audit: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         headers = {"Content-Type": "application/json"}
         if session_id is not None:
@@ -48,6 +49,7 @@ class SandboxClient:
                     "timeout": timeout_seconds,
                     "max_output_characters": max_output_characters,
                     **({"traceback_verbosity": "Plain"} if language == "ipython" else {}),
+                    **({"lean_audit": lean_audit} if lean_audit is not None else {}),
                 },
                 timeout=timeout_seconds + 5.0,
             )

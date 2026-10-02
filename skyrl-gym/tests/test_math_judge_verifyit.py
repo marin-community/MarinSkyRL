@@ -17,6 +17,9 @@ def judge_server():
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             server.requests.append(body)
+            if hasattr(server, "entered"):
+                server.entered.set()
+                server.release.wait(timeout=10)
             index = min(len(server.requests) - 1, len(server.replies) - 1)
             response = {
                 "id": "source-judge",
@@ -39,7 +42,10 @@ def judge_server():
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(encoded)))
             self.end_headers()
-            self.wfile.write(encoded)
+            try:
+                self.wfile.write(encoded)
+            except BrokenPipeError:
+                pass
 
         def log_message(self, *args):
             pass
@@ -84,7 +90,9 @@ def test_actual_source_math_before_after(candidate, expected, question, score, j
     server.requests.clear()
     cutover_score, cutover_detail = grade_math_verifyit(candidate, record, judge=judge)
     assert native_score == cutover_score == score
-    assert native_detail == cutover_detail
+    assert native_detail == {
+        key: value for key, value in cutover_detail.items() if key not in {"preparation", "verifyit_verdict"}
+    }
 
 
 @pytest.mark.parametrize(
@@ -101,10 +109,13 @@ def test_source_symmetric_judge_before_after(judge_server, replies, score):
     record = {"question": "Which animal?", "expected_answer": "cat"}
     native_score, native_detail = grade_math("It is a feline.", record, judge=judge)
     native_requests = list(server.requests)
+    native_detail["judge_outputs"] = [reply.splitlines()[-1] for reply in native_detail["judge_outputs"]]
     server.requests.clear()
     cutover_score, cutover_detail = grade_math_verifyit("It is a feline.", record, judge=judge)
     assert native_score == cutover_score == score
-    assert native_detail == cutover_detail
+    assert native_detail == {
+        key: value for key, value in cutover_detail.items() if key not in {"preparation", "verifyit_verdict"}
+    }
     assert server.requests == native_requests
 
 
@@ -139,7 +150,9 @@ def test_trusted_prose_reference_routes_to_judge_before_after(judge_server, labe
     server.requests.clear()
     reward, detail = grade_math_verifyit(r"\boxed{977}", record, judge=judge)
     assert native_score == reward == score
-    assert native_detail == detail
+    assert native_detail == {
+        key: value for key, value in detail.items() if key not in {"preparation", "verifyit_verdict"}
+    }
     assert server.requests == native_requests
 
 
@@ -204,7 +217,9 @@ def test_valid_typographic_reference_retains_native_fallback(judge_server, candi
     server.requests.clear()
     reward, detail = grade_math_verifyit(candidate, record, judge=judge)
     assert native_score == reward == score
-    assert native_detail == detail
+    assert native_detail == {
+        key: value for key, value in detail.items() if key not in {"preparation", "verifyit_verdict"}
+    }
     assert server.requests == native_requests
 
 
@@ -292,7 +307,9 @@ def test_native_hybrid_reference_policy_requires_actual_symmetric_judge(referenc
     server.requests.clear()
     reward, detail = grade_math_verifyit(candidate, record, judge=judge)
     assert reward == native_score == score
-    assert detail == native_detail
+    assert {
+        key: value for key, value in detail.items() if key not in {"preparation", "verifyit_verdict"}
+    } == native_detail
     assert server.requests == native_requests
     assert len(server.requests) == (2 if score else 1)
 
@@ -324,3 +341,202 @@ def test_unexpected_reference_parser_failure_is_unscored(kind, failure, monkeypa
     assert verdict["status"] == "infra_error"
     assert verdict["reward"] == 0.0
     assert server.requests == []
+
+
+@pytest.mark.parametrize(
+    "replies,missing,reward", [(["[[A!=B]]", "broken provider"], 1, 0.0), (["[[A=B]]", "[[A=B]]"], 0, 1.0)]
+)
+def test_core_composition_preserves_source_short_circuit_and_raw_inputs(judge_server, replies, missing, reward):
+    server, judge = judge_server
+    server.replies = replies
+    text = "<think>private reasoning</think>It is a feline."
+    record = {"question": "Which animal?", "expected_answer": "cat"}
+    score, detail = grade_math_verifyit(text, record, judge=judge)
+    verdict = detail["verifyit_verdict"]
+    assert score == reward
+    assert len(server.requests) == 2 - missing
+    assert verdict["detail"]["total"] == 2
+    assert verdict["detail"]["missing"] == missing
+    assert "raw" not in detail["preparation"]
+    assert len(detail["preparation"]["raw_sha256"]) == 64
+    assert detail["preparation"]["text"] == "It is a feline."
+
+
+def test_structure_math_judge_detaches_nested_raw_record():
+    from skyrl_gym.envs.nemotron_ultra.math_judge_verifyit import structure_math_judge
+
+    record = {"question": "Compute", "expected_answer": "2", "metadata": {"source": ["original"]}}
+    captured = structure_math_judge("answer", record)
+    record["metadata"]["source"].append("later")
+    assert captured.record["metadata"]["source"] == ["original"]
+    assert captured.text == "answer"
+
+
+def test_invalid_reference_diagnostics_do_not_expose_trusted_text(judge_server):
+    server, judge = judge_server
+    secret = "trusted_private_answer_83f9"
+    reward, detail = grade_math_verifyit(
+        "response", {"question": "Question", "expected_answer": secret, "math_reference_kind": "invalid"}, judge=judge
+    )
+    assert reward == 0.0
+    assert detail["error_type"] == "schema_error"
+    assert secret not in json.dumps(detail)
+    assert not server.requests
+
+
+@pytest.mark.parametrize("agent", ["ns_tools_simple_agent", "math_with_judge_simple_agent"])
+def test_framework_judge_diagnostics_keep_trusted_reference_private(agent, judge_server):
+    import dataclasses
+    import skyrl_gym
+
+    server, judge = judge_server
+    secret = "PRIVATE_EXPECTED_CANARY"
+    server.replies = [f"The trusted reference is {secret}.\n[[A=B]]"]
+    ultra = {
+        "route": "skyrl_gym",
+        "agent": agent,
+        "record_json": json.dumps({"question": "Compare the answer", "expected_answer": secret}),
+        "request_json": "{}",
+    }
+    for enabled in (False, True):
+        server.requests.clear()
+        env = skyrl_gym.make(
+            "nemotron_ultra",
+            env_config={"verifyit_enabled": enabled, "judges": {"general": dataclasses.asdict(judge)}},
+            extras={"extra_info": {"nemotron_ultra": ultra}},
+        )
+        try:
+            result = env.step("A candidate interpretation.")
+        finally:
+            env.close()
+        assert result["reward"] == 1.0
+        assert len(server.requests) == 2
+        if enabled:
+            assert secret not in json.dumps(result, default=str)
+            assert result["metadata"]["judge_outputs"] == ["[[A=B]]", "[[A=B]]"]
+        else:
+            assert secret in json.dumps(result, default=str)
+
+
+def test_malformed_worker_result_is_unscored(monkeypatch):
+    from skyrl_gym.envs.nemotron_ultra import math_judge_verifyit as adapter
+
+    monkeypatch.setattr(adapter, "call_bounded", lambda *args, **kwargs: None)
+    reward, detail = adapter.grade_math_verifyit("2", {"expected_answer": "2", "question": "1+1?"}, judge=None)
+    assert reward == 0
+    assert detail["verifyit_verdict"]["status"] == "infra_error"
+
+
+@pytest.mark.parametrize("value,expected", [(float("nan"), 0), (float("inf"), 0), (True, 0), (2, 0), (1, 1)])
+def test_worker_reward_validation(value, expected, monkeypatch):
+    from verifyit.grade import Reward, Status
+    from skyrl_gym.envs.nemotron_ultra import math_judge_verifyit as adapter
+
+    monkeypatch.setattr(
+        adapter,
+        "call_bounded",
+        lambda *args, **kwargs: Reward(value, Status.SCORED, {"source_feedback": {"library_reward": 1}}),
+    )
+    reward, detail = adapter.grade_math_verifyit("2", {"expected_answer": "2", "question": "1+1?"}, judge=None)
+    assert reward == expected
+    assert detail["verifyit_verdict"]["status"] == ("scored" if expected else "infra_error")
+
+
+def test_deserialization_uses_total_deadline(monkeypatch):
+    from skyrl_gym.envs.nemotron_ultra import math_judge_verifyit as adapter
+
+    clock = [10.0]
+    loads = adapter.json.loads
+
+    def slow_decode(payload):
+        clock[0] += 2
+        return loads(payload)
+
+    monkeypatch.setattr(adapter.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(adapter.json, "loads", slow_decode)
+    reward, detail = adapter.grade_math_verifyit(
+        "2", {"expected_answer": "2", "question": "1+1?"}, judge=None, timeout_seconds=1
+    )
+    assert reward == 0
+    assert detail["verifyit_verdict"]["status"] == "infra_error"
+
+
+def test_worker_timeout_cleans_process_group_and_parent_directory(monkeypatch, tmp_path, judge_server):
+    import dataclasses
+    import os
+    from verifyit.execution import command
+    from skyrl_gym.envs.nemotron_ultra import math_judge_verifyit as adapter
+
+    processes = []
+    popen = command.subprocess.Popen
+
+    def observe_process(*args, **kwargs):
+        process = popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(command.subprocess, "Popen", observe_process)
+    monkeypatch.setattr(adapter.tempfile, "tempdir", str(tmp_path))
+    server, judge = judge_server
+    judge = dataclasses.replace(judge, timeout_seconds=20)
+    server.entered = threading.Event()
+    server.release = threading.Event()
+    try:
+        reward, detail = adapter.grade_math_verifyit(
+            "A dog.", {"expected_answer": "A cat.", "question": "Which animal?"}, judge=judge, timeout_seconds=5
+        )
+    finally:
+        server.release.set()
+    assert server.entered.is_set()
+    assert reward == 0
+    assert detail["verifyit_verdict"]["status"] == "infra_error"
+    assert len(processes) == 1
+    assert processes[0].poll() is not None
+    with pytest.raises(ProcessLookupError):
+        os.killpg(processes[0].pid, 0)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_actual_worker_exception_discards_credit():
+    from verifyit.execution.worker import call_bounded
+    from skyrl_gym.envs.nemotron_ultra.math_judge_verifyit import _evaluate_bounded
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as directory:
+        result = call_bounded(
+            _evaluate_bounded,
+            {
+                "text": "A dog.",
+                "record": {"expected_answer": "A cat.", "question": "Which animal?"},
+                "judge": {"private": "secret"},
+            },
+            directory,
+            timeout=10,
+        )
+    assert result.reward == 0
+    assert result.status.value == "infra_error"
+
+
+def test_public_projection_cannot_return_late_credit(monkeypatch):
+    from verifyit.grade import Reward, Status
+    from skyrl_gym.envs.nemotron_ultra import math_judge_verifyit as adapter
+
+    clock = [10.0]
+    sha256 = adapter.hashlib.sha256
+
+    def slow_digest(payload):
+        clock[0] += 2
+        return sha256(payload)
+
+    monkeypatch.setattr(adapter.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(adapter.hashlib, "sha256", slow_digest)
+    monkeypatch.setattr(
+        adapter,
+        "call_bounded",
+        lambda *args, **kwargs: Reward(1, Status.SCORED, {"source_feedback": {"library_reward": 1}}),
+    )
+    reward, detail = adapter.grade_math_verifyit(
+        "2", {"expected_answer": "2", "question": "1+1?"}, judge=None, timeout_seconds=1
+    )
+    assert reward == 0
+    assert detail["verifyit_verdict"]["status"] == "infra_error"

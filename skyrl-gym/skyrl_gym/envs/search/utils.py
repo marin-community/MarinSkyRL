@@ -16,9 +16,8 @@
 # Adapted from https://github.com/PeterGriffinJin/Search-R1/blob/main/verl/utils/reward_score/qa_em.py
 
 import re
+from collections.abc import Mapping
 import string
-
-from verifyit.adapters.skyrl import grade_search_em
 
 
 def normalize_answer(s):
@@ -78,7 +77,7 @@ def extract_solution(solution_str):
     return matches[-1].group(1).strip()
 
 
-def compute_score(solution_str, ground_truth, method="strict", format_score=0.0, score=1.0):
+def compute_score(solution_str, ground_truth, method="strict", format_score=0.0, score=1.0, *, verifyit_enabled=False):
     """The scoring function for exact match (EM).
 
     Args:
@@ -88,15 +87,22 @@ def compute_score(solution_str, ground_truth, method="strict", format_score=0.0,
         format_score: the score for the format
         score: the score for the correct answer
     """
+    if verifyit_enabled:
+        from verifyit.adapters.skyrl import grade_search_em
+        from verifyit.grade import Status
+
+        targets = ground_truth.get("target") if isinstance(ground_truth, Mapping) else None
+        verdict = grade_search_em(targets, solution_str)
+        if verdict.status is not Status.SCORED:
+            raise RuntimeError(f"search verification failed ({verdict.status.value})")
+        correct = verdict.reward
     answer = extract_solution(solution_str=solution_str)
 
     if answer is None:
         return 0
-    else:
-        if grade_search_em(ground_truth["target"], solution_str).reward:
-            return score
-        else:
-            return format_score
+    if not verifyit_enabled:
+        correct = em_check(answer, ground_truth["target"])
+    return score if correct else format_score
 
 
 def compute_score_subem(solution_str, ground_truth, method="strict", format_score=0.0, score=1.0):

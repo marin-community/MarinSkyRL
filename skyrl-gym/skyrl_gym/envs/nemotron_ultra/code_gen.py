@@ -36,31 +36,43 @@ def grade_code(
     limits: VerifierLimits | None = None,
     verifyit_enabled: bool = False,
     sandbox=None,
+    raw_response: str | None = None,
 ) -> tuple[float, dict[str, Any]]:
     """Grade the final fenced program with binary success across NVIDIA tests.
 
     ``limits`` bounds the verifier child; see ``VerifierLimits``.
     """
+    if verifyit_enabled:
+        from skyrl_gym.envs.lcb.verifyit_execution import CodePolicy, execute_code_verifyit
+
+        reward, execution = execute_code_verifyit(
+            record,
+            text if raw_response is None else raw_response,
+            policy=CodePolicy.NEMOTRON,
+            assistant_message=assistant_message,
+            reasoning_format_penalty=reasoning_format_penalty,
+            timeout=timeout_seconds,
+            limits=limits,
+            sandbox=sandbox,
+        )
+        details = execution.pop("framework_output")
+        execution["comparisons"] = [
+            {k: v for k, v in comparison.items() if k in {"module", "candidate", "reward"}}
+            for comparison in execution.get("comparisons", [])
+        ]
+        return reward, {**details, "execution_output": execution}
     code = extract_code_from_model(text)
-    if not code and not verifyit_enabled:
+    if not code:
         return 0.0, {"extracted_model_code": None, "result": "missing_code"}
     tests = json.loads(normalize_lcb_ground_truth(record["verifier_metadata"]["unit_tests"]))
-    if verifyit_enabled:
-        from skyrl_gym.envs.lcb.verifyit_execution import execute_code_verifyit
-
-        _, execution = execute_code_verifyit(tests, code or "", timeout=timeout_seconds, limits=limits, sandbox=sandbox)
-        if not code:
-            return 0.0, {"extracted_model_code": None, "result": "missing_code", "execution_output": execution}
-        results = execution["test_results"]
-    else:
-        results, execution = lcb_execution_result(
-            tests,
-            code,
-            timeout=timeout_seconds,
-            debug=False,
-            execution_mode=TestExecutionMode.stop_on_failure,
-            limits=limits,
-        )
+    results, execution = lcb_execution_result(
+        tests,
+        code,
+        timeout=timeout_seconds,
+        debug=False,
+        execution_mode=TestExecutionMode.stop_on_failure,
+        limits=limits,
+    )
     if execution.get("execution_error"):
         raise RuntimeError(f"Code verifier unavailable: {execution}")
     correct = all(result is True for result in results)

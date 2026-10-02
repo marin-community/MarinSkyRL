@@ -1,4 +1,4 @@
-"""Whole-cohort source parity through a real model protocol and ScriptSpec child."""
+"""Whole-cohort source parity through a local model protocol and one bounded worker."""
 
 import json
 import threading
@@ -107,7 +107,9 @@ def test_whole_cohort_retains_pairing_ties_and_length_shaping(genrm_server, tran
     genrm_server.requests.clear()
     args["config"]["verifyit_enabled"] = True
     cutover = grade_genrm_group(**args)
-    assert cutover == native
+    assert cutover[0] == pytest.approx(native[0])
+    assert {key: cutover[1][key] for key in native[1]} == pytest.approx(native[1])
+    assert all(0 <= cutover[1][f"verification_reward_{i}"] <= 1 for i in range(len(cutover[0])))
     assert sorted(genrm_server.requests, key=lambda x: json.dumps(x, sort_keys=True)) == sorted(
         requests, key=lambda x: json.dumps(x, sort_keys=True)
     )
@@ -141,3 +143,57 @@ def test_failed_response_status_cannot_carry_positive_scores(genrm_server):
     args["config"]["verifyit_enabled"] = True
     with pytest.raises(RuntimeError, match="cohort verification failed"):
         grade_genrm_group(**args)
+
+
+def test_genrm_worker_preserves_invalid_task_status(genrm_server):
+    from skyrl_gym.envs.nemotron_ultra.genrm_verifyit import grade_genrm_cohort
+
+    args = cohort(genrm_server)
+    args["response_objects"] = args["response_objects"][:1]
+    with pytest.raises(RuntimeError) as raised:
+        grade_genrm_cohort(**args)
+    assert raised.value.failure.status == "invalid_task"
+    assert raised.value.verdict.reward == 0
+    assert raised.value.failure.stage == "reference_preparation"
+    assert not genrm_server.requests
+
+
+@pytest.mark.parametrize("bad", [2, -1, True, 10**400])
+def test_bad_trusted_percentile_precedes_provider(genrm_server, bad):
+    from skyrl_gym.envs.nemotron_ultra.genrm_verifyit import grade_genrm_cohort
+
+    args = cohort(genrm_server)
+    args["config"]["top_percentile"] = bad
+    with pytest.raises(RuntimeError) as raised:
+        grade_genrm_cohort(**args)
+    assert raised.value.failure.status == "invalid_task"
+    assert raised.value.verdict.reward == 0
+    assert not genrm_server.requests
+
+
+def test_cohort_receipt_preserves_raw_and_public_policy_separation(genrm_server):
+    from skyrl_gym.envs.nemotron_ultra.genrm_verifyit import grade_genrm_cohort
+
+    args = cohort(genrm_server)
+    raw_assistants = [{"role": "assistant", "content": "raw " + str(index)} for index in range(3)]
+    result = grade_genrm_cohort(**args, raw_assistants=raw_assistants)
+    assert result.protected["capture"].raw_assistants == raw_assistants
+    assert len(result.protected["provider_attempts"]) == 3
+    assert all(receipt["raw_completion"] for receipt in result.protected["provider_attempts"])
+    assert result.preparation["policies"]["score_json"] == "strict_single_object_v1"
+    assert "raw " not in json.dumps(result.preparation)
+    assert "Compare answer quality" not in json.dumps(result.preparation)
+    assert result.metrics == {key: value for key, value in result.metrics.items() if isinstance(value, (int, float))}
+
+
+def test_expired_parent_budget_rejects_before_provider(genrm_server):
+    import time
+    from skyrl_gym.envs.nemotron_ultra.genrm_verifyit import grade_genrm_cohort
+
+    args = cohort(genrm_server)
+    args["config"]["verifyit_timeout_seconds"] = 0.01
+    with pytest.raises(RuntimeError) as raised:
+        grade_genrm_cohort(**args, started_at=time.monotonic() - 1)
+    assert raised.value.failure.status == "infra_error"
+    assert raised.value.verdict.reward == 0
+    assert not genrm_server.requests

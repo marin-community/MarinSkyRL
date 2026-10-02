@@ -7,8 +7,9 @@ import os
 
 
 class SQLCodeExecutorToolGroup(ToolGroup):
-    def __init__(self, db_file_path: str):
+    def __init__(self, db_file_path: str, verifyit_enabled: bool = False):
         self.db_path = db_file_path
+        self.verifyit_enabled = verifyit_enabled
         super().__init__(name="SQLCodeExecutorToolGroup")
 
     @tool
@@ -59,6 +60,38 @@ class SQLCodeExecutorToolGroup(ToolGroup):
             obs = "Your previous action is invalid. Follow the format of outputting thinking process and sql tool, and try again."
         else:
             db_file = os.path.join(self.db_path, db_id, db_id + ".sqlite")
-            obs = _execute_sql_wrapper(db_file, sql, timeout)
+            if self.verifyit_enabled:
+                from verifyit.execution.worker import call_bounded
+
+                obs = call_bounded(execute_bounded_sql_tool, db_file, sql, timeout=timeout)
+            else:
+                obs = _execute_sql_wrapper(db_file, sql, timeout)
 
         return f"\n\n<observation>{obs}\n{reminder_text}</observation>\n\n"
+
+
+def execute_bounded_sql_tool(database: str, statement: str) -> str:
+    """Read-only, 100000-row interactive observation policy, bounded by its caller."""
+    from pathlib import Path
+    from skyrl_gym.envs.text_to_sql import scoring
+    from skyrl_gym.envs.sqlite_verifyit import _query_error
+
+    connection = sqlite3.connect(Path(database).resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        try:
+            _, rows = scoring._run_query(connection, statement, read_only=True)
+        except sqlite3.Error as error:
+            if not _query_error(error):
+                raise
+            return "Error executing SQL: query rejected"
+        if len(rows) > scoring._MAX_RESULT_ROWS:
+            return "Error executing SQL: result exceeds 100000 rows"
+        frame = pd.DataFrame(frozenset(rows))
+        observation = frame.to_string(index=False)
+        if len(observation) > 9000:
+            observation = "Truncated to 50 lines since returned response too long: " + frame.head(50).to_string(
+                index=False
+            )
+        return observation
+    finally:
+        connection.close()

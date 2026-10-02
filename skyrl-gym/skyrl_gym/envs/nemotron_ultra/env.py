@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import re
 import uuid
 from collections.abc import Mapping
@@ -35,6 +37,7 @@ from skyrl_gym.envs.nemotron_ultra.tool_call import grade_expected_action
 from skyrl_gym.envs.reasoning_gym.scoring import extract_answer
 from skyrl_gym.verification import VERIFIER_RUNTIME_ERROR, RolloutEvidence, VerificationResult
 
+_IPI_AGENT = "indirect_prompt_injection_simple_agent"
 _NS_TOOLS_AGENT = "ns_tools_simple_agent"
 _LEAN_AGENT = "math_formal_lean_refinement_agent"
 _TOOL_COMPARISON_AGENTS = {
@@ -76,10 +79,13 @@ class NemotronUltraEnv(BaseTextEnv):
     """Select the NVIDIA-compatible verifier declared by each dataset row."""
 
     def __init__(self, env_config: DictConfig, extras: dict[str, Any] | None = None):
-        super().__init__()
-        self.verifyit_enabled = bool(env_config.get("verifyit_enabled", False))
+        super().__init__(env_config)
+        self.tool_comparison_policy = env_config.get(
+            "verifyit_tool_comparison_policy", "nemotron_strict_typed_arguments_v1"
+        )
         self.math_verifier_timeout_seconds = env_config.get("verifyit_math_total_timeout_seconds", 60.0)
         self.judge_verifier_timeout_seconds = env_config.get("verifyit_judge_total_timeout_seconds", 120.0)
+        self.judge_profile_policies = env_config.get("verifyit_judge_profile_policies", {})
         self.grading = NemotronUltraGrading(env_config.get("grading", NemotronUltraGrading.VERIFY))
         judges = env_config.get("judges", {})
         general_judge = judges.get("general") if isinstance(judges, Mapping) else None
@@ -93,9 +99,15 @@ class NemotronUltraEnv(BaseTextEnv):
         if ultra.get("route") != "skyrl_gym":
             raise ValueError("terminal-bench Nemotron Ultra rows must not execute in the SkyRL Gym environment")
         self.agent = str(ultra["agent"])
+        self.reasoning_record_json = ultra.get("record_json")
         self.record = self._decode_mapping(ultra.get("record_json"), "record_json")
-        self.request = self._decode_mapping(ultra.get("request_json"), "request_json")
+        self.request_json = ultra.get("request_json")
+        self.request = self._decode_mapping(self.request_json, "request_json")
         self.evidence: RolloutEvidence | None = None
+        self.ipi_client = None
+        self.ipi_calls = []
+        self.ipi_url = env_config.get("ipi_resources_url")
+        self.ipi_terminal = None
         sandbox_config = env_config.get("sandbox", {})
         self.sandbox = SandboxClient(
             host=str(sandbox_config.get("host", "127.0.0.1")),
@@ -116,6 +128,8 @@ class NemotronUltraEnv(BaseTextEnv):
         )
         if self.agent in {"genrm_simple_agent", "genrm_simple_agent_reasoning_off"}:
             self.max_turns = 1
+        elif self.agent == _IPI_AGENT and self.verifyit_enabled:
+            self.max_turns = 5
         elif self.agent == _NS_TOOLS_AGENT:
             self.max_turns = 50
         elif self.agent == _LEAN_AGENT:
@@ -133,7 +147,11 @@ class NemotronUltraEnv(BaseTextEnv):
         return decoded
 
     def close(self) -> None:
-        self.sandbox.close_session(self.sandbox_session_id)
+        try:
+            if self.ipi_client is not None:
+                self.ipi_client.close(self.ipi_calls)
+        finally:
+            self.sandbox.close_session(self.sandbox_session_id)
 
     def set_rollout_evidence(self, evidence: RolloutEvidence) -> None:
         self.evidence = evidence
@@ -155,7 +173,12 @@ class NemotronUltraEnv(BaseTextEnv):
             from skyrl_gym.envs.nemotron_ultra.judge_profiles_verifyit import grade_judge_profile_verifyit
 
             return grade_judge_profile_verifyit(
-                action, self.record, judge, kind=kind, timeout_seconds=self.judge_verifier_timeout_seconds
+                action,
+                self.record,
+                judge,
+                kind=kind,
+                timeout_seconds=self.judge_verifier_timeout_seconds,
+                policies=self.judge_profile_policies,
             )
         scorers = {"abstention": grade_abstention, "multichallenge": grade_multichallenge, "jailbreak": grade_jailbreak}
         return scorers[kind](action, self.record, judge)
@@ -200,11 +223,92 @@ class NemotronUltraEnv(BaseTextEnv):
         diagnostics["max_steps_exhausted"] = observations is not None
         return None
 
+    def _ipi_turn(self, action: str) -> BaseTextEnvStepOutput:
+        from verifyit.grade import InvalidTask
+        from verifyit.json_objects import unique_object
+        from verifyit.modes.grade_json_schema import grade_json_schema_candidate
+
+        from skyrl_gym.envs.nemotron_ultra.ipi import IPIClient, grade_trace, parse_calls
+
+        if self.ipi_terminal is not None:
+            return self.ipi_terminal
+        if self.ipi_client is None:
+            try:
+                record = json.loads(self.reasoning_record_json, object_pairs_hook=unique_object)
+                request = json.loads(self.request_json, object_pairs_hook=unique_object)
+            except ValueError as error:
+                raise InvalidTask("IPI trusted record/request is not unique-key JSON") from error
+            if (
+                grade_json_schema_candidate({"type": "array", "items": {"type": "object"}}, [record, request]).reward
+                != 1
+            ):
+                raise InvalidTask("IPI trusted record and request must be finite objects")
+            params = record.get("responses_create_params", {})
+            if (
+                grade_json_schema_candidate({"type": "array", "items": {"type": "object"}}, [request, params]).reward
+                != 1
+            ):
+                raise InvalidTask("IPI trusted request metadata must be finite objects")
+            shared = {key: {"const": value} for key, value in request.items() if key in params}
+            if grade_json_schema_candidate({"type": "object", "properties": shared}, params).reward != 1:
+                raise InvalidTask("IPI record and request metadata conflict")
+            # Sky separates the request from record_json; NeMo requires its envelope, not its prompt for grading.
+            record = {**record, "responses_create_params": {"input": [], **params, **request}}
+            grade_trace(record, [], truncated=True)  # Validate trusted contract before tools/candidate.
+            if not isinstance(self.ipi_url, str) or not self.ipi_url:
+                raise RuntimeError("IPI requires ipi_resources_url pointing to the pinned NeMo service")
+            self.ipi_client = IPIClient(self.ipi_url, record)
+            self.ipi_client.seed()
+        if self.evidence is None:
+            raise RuntimeError("IPI requires structured rollout evidence")
+        reason = self.evidence.stop_reason
+        if reason not in {"stop", "tool_calls", "length", "max_output_tokens"}:
+            raise RuntimeError("IPI completion protocol is unavailable")
+        calls = parse_calls(self.evidence.metadata.get("assistant_message"))
+        if len({call["call_id"] for call in [*self.ipi_calls, *calls]}) != len(self.ipi_calls) + len(calls):
+            raise ValueError("IPI function identities repeat")
+        self.ipi_calls.extend(calls)
+        truncated = reason in {"length", "max_output_tokens"}
+        if calls and not truncated and self.turns < self.max_turns:
+            return BaseTextEnvStepOutput(
+                observations=self.ipi_client.execute(calls),
+                reward=0.0,
+                done=False,
+                metadata={"agent": self.agent},
+                verification=VerificationResult.unavailable("tool episode is continuing"),
+            )
+        verdict = grade_trace(self.ipi_client.record, self.ipi_calls, truncated=truncated or bool(calls))
+        self.ipi_client.close(self.ipi_calls)
+        self.ipi_terminal = BaseTextEnvStepOutput(
+            observations=[],
+            reward=verdict.reward,
+            done=True,
+            metadata={"agent": self.agent},
+            verification=VerificationResult.verified(verdict.reward, passed=verdict.reward == 1),
+        )
+        return self.ipi_terminal
+
     def step(self, action: str) -> BaseTextEnvStepOutput:
-        action = final_answer_text(action)
+        raw_action = action
+        if not (self.verifyit_enabled and self.agent in {"mcqa_simple_agent", "code_gen_simple_agent"}):
+            action = final_answer_text(action)
+        error_types = (requests.RequestException, RuntimeError, ValueError)
+        invalid_task_types = ()
+        preparation_error_types = ()
+        if self.verifyit_enabled:
+            error_types += (ImportError,)
+            if self.agent in {"mcqa_simple_agent", "code_gen_simple_agent"}:
+                error_types = (Exception,)
         try:
-            return self._step(action)
-        except (requests.RequestException, RuntimeError, ValueError) as error:
+            if self.verifyit_enabled:
+                from verifyit.grade import InvalidTask
+                from verifyit.preparation.errors import PreparationError
+
+                preparation_error_types = (PreparationError,)
+                invalid_task_types = (InvalidTask,)
+                error_types += invalid_task_types
+            return self._step(action, raw_action=raw_action)
+        except error_types as error:
             details = {
                 "agent": self.agent,
                 "error_type": VERIFIER_RUNTIME_ERROR,
@@ -213,7 +317,47 @@ class NemotronUltraEnv(BaseTextEnv):
                 "error_message": str(error),
                 "grading_action": action,
             }
-            return BaseTextEnvStepOutput(
+            if self.verifyit_enabled and self.agent == "mcqa_simple_agent":
+                logging.getLogger(__name__).exception("MCQA verification boundary failed")
+                details.update(verifyit_status="infra_error", preparation_stage="mcqa_boundary")
+            if self.verifyit_enabled and self.agent == "code_gen_simple_agent":
+                logging.getLogger(__name__).exception("Code verification boundary failed")
+                details.update(
+                    verifyit_status="infra_error",
+                    preparation_stage="code_boundary",
+                    error_message="Code verification unavailable",
+                    preparation={
+                        "policy": "lcb_source_v1",
+                        "response_policy": "nemotron_final_answer_text_v1",
+                        "raw_response": raw_action,
+                        "grading_response": action,
+                    },
+                )
+            if isinstance(error, invalid_task_types):
+                details.update(error_category="invalid_task", verifyit_status="invalid_task")
+            if isinstance(error, preparation_error_types):
+                details.update(error.verdict.detail)
+                details.update(
+                    verifyit_status=error.verdict.status.value,
+                    error_category=error.failure.category.value,
+                    cause_error_type=error.failure.error_type,
+                    preparation_stage=error.failure.stage,
+                )
+            if self.verifyit_enabled and self.agent in _TOOL_COMPARISON_AGENTS:
+                details["preparation"] = {
+                    "policy": self.tool_comparison_policy,
+                    "stage": "tool_comparison",
+                }
+                if isinstance(error, preparation_error_types):
+                    details["preparation"].update(
+                        stage=error.failure.stage, error_category=error.failure.category.value
+                    )
+            if self.agent == _IPI_AGENT and self.ipi_client is not None:
+                try:
+                    self.ipi_client.close(self.ipi_calls)
+                except (requests.RequestException, RuntimeError) as cleanup_error:
+                    details.update(cleanup_error=str(cleanup_error), error_category="infrastructure")
+            result = BaseTextEnvStepOutput(
                 observations=[],
                 reward=0.0,
                 done=True,
@@ -221,9 +365,15 @@ class NemotronUltraEnv(BaseTextEnv):
                 verification=VerificationResult.error("verifier failed", diagnostics=details),
             )
 
-    def _step(self, action: str) -> BaseTextEnvStepOutput:
+            if self.agent == _IPI_AGENT and self.verifyit_enabled:
+                self.ipi_terminal = result
+            return result
+
+    def _step(self, action: str, *, raw_action: str | None = None) -> BaseTextEnvStepOutput:
         diagnostics: dict[str, Any] = {"agent": self.agent}
         self.turns += 1
+        if self.agent == _IPI_AGENT and self.verifyit_enabled:
+            return self._ipi_turn(action)
         if self.agent == _NS_TOOLS_AGENT:
             tool_turn = self._ns_tools_turn(action, diagnostics)
             if tool_turn is not None:
@@ -261,12 +411,32 @@ class NemotronUltraEnv(BaseTextEnv):
                     reset_conversation=[{"role": "user", "content": correction_prompt}],
                 )
         elif self.agent in _TOOL_COMPARISON_AGENTS:
-            comparator = grade_expected_action
             if self.verifyit_enabled:
-                from skyrl_gym.envs.nemotron_ultra.tool_comparison_verifyit import grade_expected_action_verifyit
+                from skyrl_gym.envs.nemotron_ultra.tool_comparison_verifyit import (
+                    grade_prepared_tool_action,
+                    prepare_tool_action,
+                    structure_tool_action,
+                )
 
-                comparator = grade_expected_action_verifyit
-            reward, category = comparator(self.record["expected_action"], self._assistant_message(action))
+                inputs = structure_tool_action(self.record["expected_action"], self._assistant_message(action))
+                prepared = prepare_tool_action(
+                    inputs,
+                    self.tool_comparison_policy,
+                )
+                reward, category = grade_prepared_tool_action(prepared)
+                diagnostics["preparation"] = {
+                    "policy": prepared.policy.value,
+                    "expected_action_sha256": hashlib.sha256(
+                        json.dumps(prepared.raw.expected_action, sort_keys=True).encode()
+                    ).hexdigest(),
+                    "assistant_message_sha256": hashlib.sha256(
+                        json.dumps(prepared.raw.assistant_message, sort_keys=True).encode()
+                    ).hexdigest(),
+                }
+            else:
+                reward, category = grade_expected_action(
+                    self.record["expected_action"], self._assistant_message(action)
+                )
             diagnostics["category"] = category.value
         elif self.agent == "calendar_simple_agent":
             calendar_scorer = grade_calendar
@@ -296,19 +466,26 @@ class NemotronUltraEnv(BaseTextEnv):
             reward, details = structured_scorer(action, self.record, self._assistant_message(action))
             diagnostics.update(details)
         elif self.agent == "rdkit_chemistry_agent":
-            reward, details = grade_rdkit_chemistry(action, self.record)
+            reward, details = grade_rdkit_chemistry(action, self.record, verifyit_enabled=self.verifyit_enabled)
             diagnostics.update(details)
         elif self.agent == "nvarc_inductive_simple_agent":
-            reward, details = grade_inductive_arc(action, self.record, sandbox=self.sandbox)
+            reward, details = grade_inductive_arc(
+                action, self.record, sandbox=self.sandbox, verifyit_enabled=self.verifyit_enabled
+            )
             diagnostics.update(details)
         elif self.agent == "nvarc_transductive_simple_agent":
-            reward, details = grade_transductive_arc(action, self.record)
+            reward, details = grade_transductive_arc(action, self.record, verifyit_enabled=self.verifyit_enabled)
             diagnostics.update(details)
         elif self.agent == "code_gen_simple_agent":
             reward, details = grade_code(
                 action,
                 self.record,
-                assistant_message=self._assistant_message(action),
+                assistant_message=(
+                    self.evidence.metadata.get("assistant_message") if self.evidence is not None else None
+                )
+                if self.verifyit_enabled
+                else self._assistant_message(action),
+                raw_response=raw_action,
                 timeout_seconds=self.code_verifier_timeout_seconds,
                 limits=self.code_verifier,
                 verifyit_enabled=self.verifyit_enabled,
@@ -327,20 +504,36 @@ class NemotronUltraEnv(BaseTextEnv):
             reward, details = self._grade_math(action)
             diagnostics.update(details)
         elif self.agent == "abstention_simple_agent":
-            reward, details = self._grade_judge_profile(action, "abstention", self._require_general_judge())
+            reward, details = self._grade_judge_profile(
+                raw_action if self.verifyit_enabled else action, "abstention", self._require_general_judge()
+            )
             diagnostics.update(details)
         elif self.agent == "multichallenge_simple_agent":
-            reward, details = self._grade_judge_profile(action, "multichallenge", self._require_general_judge())
+            reward, details = self._grade_judge_profile(
+                raw_action if self.verifyit_enabled else action, "multichallenge", self._require_general_judge()
+            )
             diagnostics.update(details)
         elif self.agent in _JAILBREAK_AGENTS:
-            reward, details = self._grade_judge_profile(action, "jailbreak", self._require_safety_judge())
+            reward, details = self._grade_judge_profile(
+                raw_action if self.verifyit_enabled else action, "jailbreak", self._require_safety_judge()
+            )
             diagnostics.update(details)
         elif self.agent == "reasoning_gym_simple_agent":
-            task_name = self.record["metadata"]["source_dataset"]
+            record = self.record
+            if self.verifyit_enabled:
+                from verifyit.grade import InvalidTask
+                from verifyit.json_objects import unique_object
+
+                try:
+                    record = json.loads(self.reasoning_record_json, object_pairs_hook=unique_object)
+                    json.dumps(record, allow_nan=False)
+                except ValueError as error:
+                    raise InvalidTask("invalid Reasoning Gym record") from error
+            task_name = record["metadata"]["source_dataset"]
             entry = {
-                "question": self.record["question"],
-                "answer": self.record.get("answer"),
-                "metadata": self.record["metadata"],
+                "question": record["question"],
+                "answer": record.get("answer"),
+                "metadata": record["metadata"],
             }
             answer = _extract_reasoning_gym_answer(action)
             if self.verifyit_enabled:
