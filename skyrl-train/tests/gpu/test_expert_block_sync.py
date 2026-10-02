@@ -109,6 +109,7 @@ GEOMETRIES = {
     "unequal-ep": Geometry(policy_gpus=2, policy_pp=2, policy_ep=1, engines=1, engine_dp=2, engine_pp=1),
     "receiver-pp2": Geometry(policy_gpus=2, policy_pp=1, policy_ep=2, engines=1, engine_dp=2, engine_pp=2),
 }
+HERO_SINGLE_SERVING_GEOMETRY = Geometry(policy_gpus=2, policy_pp=1, policy_ep=2, engines=1, engine_dp=1, engine_pp=1)
 
 
 def flip_one_installed_byte(worker) -> int:
@@ -180,12 +181,13 @@ def remove_shortconv_from_tiny_hero_checkpoint(model_path):
     [
         *(pytest.param(name, False, id=name) for name in GEOMETRIES),
         pytest.param("equal-ep", True, id="hero-split-experts"),
+        pytest.param("single-serving-ep", True, id="hero-split-experts-single-serving"),
     ],
 )
 def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flipped_one(
     tmp_path, name, hero, monkeypatch
 ):
-    geometry = GEOMETRIES[name]
+    geometry = HERO_SINGLE_SERVING_GEOMETRY if name == "single-serving-ep" else GEOMETRIES[name]
     require_hoppers(geometry.gpus)
     from skyrl_train.inference_engines.vllm import vllm_engine  # noqa: PLC0415 - vLLM is a GPU-only extra
 
