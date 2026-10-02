@@ -48,7 +48,7 @@ async def test_remote_weight_loader_uses_backend_endpoints(engine_server, backen
     request = {"names": ["model.layer.weight"], "dtypes": ["bfloat16"], "shapes": [[4096, 4096]]}
 
     assert await loader.init_communicator(**INIT_COMMUNICATOR_PARAMS) == {"success": True}
-    assert await loader.load_weights(request) == {"success": True}
+    assert await loader.load_weights(request) == {"results": [{"success": True}]}
     assert await loader.destroy_group() == {"success": True}
 
     assert received == [
