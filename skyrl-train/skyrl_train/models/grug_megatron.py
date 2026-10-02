@@ -192,7 +192,7 @@ class StageStatistic:
 # the tensor that identifies the unit (an input norm's input, or the decoder layer's input). Full activation recompute
 # reruns the unit inside the backward on ``detach()`` copies of its inputs, after the first forward took the unit's
 # hand-offs, so the recompute reads what it needs here by storage.
-_RECOMPUTE_STATISTICS: dict[int, list[tuple[weakref.ref, torch.Tensor | None]]] = {}
+_RECOMPUTE_STATISTICS: dict[int, list[tuple[weakref.ref, torch.Tensor]]] = {}
 # The input of each decoder layer whose forward is running, innermost last: the key of its checkpoint unit.
 _LAYER_INPUTS: list[torch.Tensor] = []
 
@@ -221,13 +221,13 @@ def _recomputing_one_layer(config: TransformerConfig) -> bool:
     return _one_layer_units(config) and checkpoint_pass() is CheckpointPass.RECOMPUTE
 
 
-def _keep_for_recompute(owner: nn.Module, receiver: torch.Tensor, value: torch.Tensor | None) -> None:
+def _keep_for_recompute(owner: nn.Module, receiver: torch.Tensor, value: torch.Tensor) -> None:
     entries = [(ref, kept) for ref, kept in _RECOMPUTE_STATISTICS.get(id(owner), []) if ref() is not None]
     entries.append((weakref.ref(receiver), value))
     _RECOMPUTE_STATISTICS[id(owner)] = entries
 
 
-def _take_for_recompute(owner: nn.Module, receiver: torch.Tensor) -> torch.Tensor | None:
+def _take_for_recompute(owner: nn.Module, receiver: torch.Tensor) -> torch.Tensor:
     entries = _RECOMPUTE_STATISTICS.get(id(owner), [])
     for index, (ref, value) in enumerate(entries):
         original = ref()
@@ -591,29 +591,27 @@ class GrugGatedRMSNorm(nn.Module):
         """A layer's input norm: compiled vLLM takes the statistic from the unrounded sum that formed its input."""
         weight = self.norm.weight
         statistic = self._input_statistic(hidden_states)
-        if statistic is None:
-            # A layer run on its own, with no layer or pipeline stage handing its sum on: normalize the rounded input
-            # by its own statistic.
-            value = vllm_inductor.rms_norm(hidden_states, weight).view_as(hidden_states)
-            return vllm_value(value, lambda: self.norm(hidden_states))
         value = vllm_inductor.rms_norm_from_square_sum(hidden_states, statistic, weight).view_as(hidden_states)
         variance = (statistic / hidden_states.shape[-1]).view(*hidden_states.shape[:-1], 1)
         # Differentiated as rms_norm_hybrid(hidden_states, variance_with_gradient(variance, hidden_states), weight, eps).
         return hybrid_input_norm_value(value, hidden_states, variance, weight, self.eps)
 
-    def _input_statistic(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
+    def _input_statistic(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """The input norm's statistic of the unrounded sum: compiled vLLM's per-row sum of squares.
 
         A checkpoint unit's first forward keeps what it computed for the recompute, which cannot reach the hand-off.
         """
         phase = checkpoint_pass()
         parts = take_hand_off(hidden_states)
-        if parts is None and phase is CheckpointPass.RECOMPUTE:
-            return _take_for_recompute(self, hidden_states)
-        statistic = None
-        if parts is not None:
-            with torch.no_grad():
-                statistic = parts.statistic()
+        if parts is None:
+            if phase is CheckpointPass.RECOMPUTE:
+                return _take_for_recompute(self, hidden_states)
+            raise RuntimeError(
+                "a layer's input norm found no hand-off of the sum that formed its input: the embedding gated norm, "
+                "the previous layer or the previous pipeline stage registered none"
+            )
+        with torch.no_grad():
+            statistic = parts.statistic()
         if phase is CheckpointPass.FIRST:
             _keep_for_recompute(self, hidden_states, statistic)
         return statistic
@@ -621,10 +619,8 @@ class GrugGatedRMSNorm(nn.Module):
     def _final_norm(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """The final norm: compiled vLLM normalizes the last layer's unrounded sum."""
         parts = take_hand_off(hidden_states)
-        if parts is None:
-            return self.norm(hidden_states)
         if not isinstance(parts, ResidualSum):
-            raise RuntimeError("the final norm's input must come from a decoder layer's residual sum")
+            raise RuntimeError("the final norm found no residual sum handed on by the last decoder layer")
         # The hand-off may come from a no-grad checkpointed forward; keep its values and take the gradient through the
         # bf16 residual so the loss still reaches the layers before this norm. ``x - x.detach()`` is exactly zero, so
         # the values are unchanged bit for bit.
