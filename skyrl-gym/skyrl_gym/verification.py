@@ -40,6 +40,8 @@ class RolloutEvidence:
     student_topk_indices: np.ndarray | None = None
     behavior_topk_logprobs: np.ndarray | None = None
     routed_experts: np.ndarray | None = None
+    # The data-parallel rank of the inference engine that served the rollout's last model call.
+    engine_dp_rank: int | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:

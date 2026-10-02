@@ -25,7 +25,7 @@ from collections import defaultdict, deque
 import numpy as np
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
-from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
+from skyrl_train.training_batch import ENGINE_DP_RANKS_KEY, TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.rollouts.buffer import RolloutGroup
 from skyrl_train.rollouts.context import TrainingContext, TrainingContextState
 from skyrl_train.trajectory_selection import trajectory_selector_from_config
@@ -2116,6 +2116,11 @@ class RayPPOTrainer:
                     rollout_staleness if rollout_staleness is not None else [0] * len(response_ids),
                     dtype=torch.int32,
                 ),
+                ENGINE_DP_RANKS_KEY: (
+                    torch.tensor(trajectory_batch[ENGINE_DP_RANKS_KEY], dtype=torch.long)
+                    if trajectory_batch.get(ENGINE_DP_RANKS_KEY) is not None
+                    else None
+                ),
                 "is_last_step": (
                     torch.tensor(trajectory_batch["is_last_step"], dtype=torch.bool)
                     if trajectory_batch.get("is_last_step", None) is not None
@@ -2579,6 +2584,8 @@ class RayPPOTrainer:
         fwd_keys = ["sequences", "attention_mask"]
         if training_input.routed_experts is not None:
             fwd_keys.append("rollout_routed_experts")
+        if training_input.get(ENGINE_DP_RANKS_KEY) is not None:
+            fwd_keys.append(ENGINE_DP_RANKS_KEY)
         data_fwd_pass = training_input.select(keys=fwd_keys, metadata_keys=["response_length"])
         data_fwd_pass.metadata["global_step"] = self.global_step
 

@@ -18,7 +18,7 @@ from skyrl_train.inference_engines.chat_template import (
     sequentialize_multi_tool_call_turns,
     template_error_from_exception,
 )
-from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.inference_engines.inference_engine_client import ENGINE_DP_RANK_KEY, InferenceEngineClient
 from skyrl_train.inference_engines.response_topk import select_chat_response_topk
 from skyrl_train.trajectory_runners.types import TokenProvenance
 from skyrl_train.trajectory_runners.routed_experts import normalize_routed_experts
@@ -67,6 +67,7 @@ class _ChatResult:
     stop_reason: str
     assistant_message: dict[str, Any]
     routed_experts: np.ndarray | None = None
+    engine_dp_rank: int | None = None
 
 
 def _choice_routed_experts(choice: dict[str, Any], prompt_ids: list[int], response_ids: list[int]) -> np.ndarray | None:
@@ -96,6 +97,8 @@ def _assemble_chat_results(results: list[_ChatResult]) -> ModelClientOutput:
         output["behavior_topk_logprobs"] = selected_scores
     if any(result.routed_experts is not None for result in results):
         output["routed_experts"] = [result.routed_experts for result in results]
+    if all(result.engine_dp_rank is not None for result in results):
+        output["engine_dp_ranks"] = [result.engine_dp_rank for result in results]
     return output
 
 
@@ -291,6 +294,7 @@ class DirectModelClient:
                 choice["finish_reason"],
                 message,
                 _choice_routed_experts(choice, prompt_ids, response_ids),
+                response.get(ENGINE_DP_RANK_KEY),
             )
 
         results = await asyncio.gather(

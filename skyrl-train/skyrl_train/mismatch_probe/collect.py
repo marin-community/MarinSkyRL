@@ -45,7 +45,7 @@ from skyrl_train.mismatch_probe.modes import NATIVE_MODE, REPEAT_MODE, TRAINER_M
 from skyrl_train.mismatch_probe.provenance import manifest
 from skyrl_train.metric_names import TOKEN_PROVENANCE_RECONSTRUCTED_FRACTION_METRIC
 from skyrl_train.models.megatron_router_replay import SENTINEL_EXPERT_ID
-from skyrl_train.training_batch import TrainingInputBatch
+from skyrl_train.training_batch import ENGINE_DP_RANKS_KEY, TrainingInputBatch
 from skyrl_train.trajectory_runners.trajectory_processing import (
     concatenate_trajectory_batches,
     prepare_trajectory_request,
@@ -493,7 +493,12 @@ class ProbeCollector:
         for mode in modes:
             order = self.batch_layout.repeat_order if mode == REPEAT_MODE else self.batch_layout.native_order
             data = training_input.select(
-                ["sequences", "attention_mask", *(["rollout_routed_experts"] if route_rows is not None else [])],
+                [
+                    "sequences",
+                    "attention_mask",
+                    *(["rollout_routed_experts"] if route_rows is not None else []),
+                    *([ENGINE_DP_RANKS_KEY] if training_input.get(ENGINE_DP_RANKS_KEY) is not None else []),
+                ],
                 ["response_length"],
             )
             data["probe_row_indices"] = torch.arange(data.batch_size, dtype=torch.long)

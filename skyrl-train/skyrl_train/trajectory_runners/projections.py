@@ -10,6 +10,7 @@ from skyrl_train.distillation import INVALID_TOPK_INDEX
 from skyrl_train.metric_names import TOKEN_PROVENANCE_RECONSTRUCTED_FRACTION_METRIC
 from skyrl_gym.verification import RewardResult, TrainingDisposition
 from skyrl_train.trajectory_runners.types import (
+    UNKNOWN_ENGINE_DP_RANK,
     AgentLoopOutput,
     TokenProvenance,
     TrajectoryBatch,
@@ -76,6 +77,7 @@ class WholeTrajectoryProjection:
         )
         attach_student_topk(batch, outputs, responses, loss_masks)
         attach_routed_experts(batch, outputs, responses)
+        attach_engine_dp_ranks(batch, outputs)
         attach_terminal_classifications(batch, outputs)
         attach_server_errors(batch, outputs)
         _attach_reward_channels(batch, outputs, responses)
@@ -142,6 +144,7 @@ class StepWiseTrajectoryProjection:
         )
         attach_student_topk(batch, steps, responses, loss_masks)
         attach_routed_experts(batch, steps, responses)
+        attach_engine_dp_ranks(batch, steps)
         attach_terminal_classifications(batch, steps)
         attach_server_errors(batch, steps)
         _attach_reward_channels(batch, steps, responses)
@@ -197,6 +200,14 @@ def attach_routed_experts(
             raise ValueError("routed_experts must align with response token IDs")
         projected.append(np.zeros((len(response), *shape), dtype=dtype) if routes is None else routes)
     batch["rollout_routed_experts"] = projected
+
+
+def attach_engine_dp_ranks(batch: TrajectoryBatch, outputs: Sequence[AgentLoopOutput]) -> None:
+    """Project each row's serving engine rank when the model transport reported one."""
+    ranks = [output.evidence.engine_dp_rank for output in outputs]
+    if all(rank is None for rank in ranks):
+        return
+    batch["rollout_engine_dp_ranks"] = [UNKNOWN_ENGINE_DP_RANK if rank is None else rank for rank in ranks]
 
 
 def attach_student_topk(

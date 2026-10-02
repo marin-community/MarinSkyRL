@@ -43,6 +43,8 @@ import io
 import numpy as np
 
 ABORT_FINISH_REASON = "abort"
+# The chat response key holding the data-parallel rank of the engine that generated the response.
+ENGINE_DP_RANK_KEY = "engine_dp_rank"
 
 # Cap on the session -> engine memo so it cannot grow unbounded across a long run.
 # Sessions are evicted LRU once the cap is exceeded (a re-appearing evicted session
@@ -67,6 +69,9 @@ class InferenceEngineClient(InferenceEngineInterface):
             full_config: DictConfig - See ppo_base_config.yaml
         """
         self.engines = engines
+        # ``create_ray_wrapped_inference_engines`` lists every engine's data-parallel ranks in rank order.
+        data_parallel_size = int(full_config.generator.inference_engine_data_parallel_size)
+        self._engine_dp_ranks = [index % data_parallel_size for index in range(len(engines))]
         self.tokenizer = tokenizer
         # Use served_model_name if configured (for Harbor/LiteLLM compatibility),
         # otherwise fall back to the full model path.
@@ -347,6 +352,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                         per_prompt_sampling_params[j] for j in indices_list[i]
                     ]
                 results[i] = await self.engines[fallback].generate(engine_input)
+                task_engine_idxs[i] = fallback
             elif isinstance(result, BaseException):
                 raise result
 
@@ -359,12 +365,15 @@ class InferenceEngineClient(InferenceEngineInterface):
         prompt_logprobs: List[Optional[Any]] = [None for _ in range(n)]
         student_topk_indices: List[Optional[List[List[int]]]] = [None for _ in range(n)]
         behavior_topk_logprobs: List[Optional[List[List[float]]]] = [None for _ in range(n)]
+        engine_dp_ranks = [0] * n
         # a bit hacky for now
         add_resp_logprobs = False
         add_prompt_logprobs = False
         add_student_topk = False
 
-        for indices, result in zip(indices_list, results):
+        for indices, result, engine_idx in zip(indices_list, results, task_engine_idxs, strict=True):
+            for original_idx in indices:
+                engine_dp_ranks[original_idx] = self._engine_dp_ranks[engine_idx]
             selected_ids = result.get("student_topk_indices")
             selected_scores = result.get("behavior_topk_logprobs")
             if (selected_ids is None) != (selected_scores is None):
@@ -397,6 +406,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             response_ids=response_ids,
             response_logprobs=response_logprobs if add_resp_logprobs else None,
             prompt_logprobs=prompt_logprobs if add_prompt_logprobs else None,
+            engine_dp_ranks=engine_dp_ranks,
         )
         if add_student_topk:
             if any(row is None for row in student_topk_indices) or any(row is None for row in behavior_topk_logprobs):
@@ -579,6 +589,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             response_ids=[accum_response_ids],
             response_logprobs=[accum_response_logprobs] if len(accum_response_logprobs) > 0 else None,
             prompt_logprobs=final_prompt_logprobs,
+            engine_dp_ranks=[self._engine_dp_ranks[engine_idx]],
         )
         if saw_student_topk:
             output["student_topk_indices"] = [accum_student_topk_indices]
@@ -587,9 +598,10 @@ class InferenceEngineClient(InferenceEngineInterface):
 
     async def _chat_completion_with_retry(
         self, engine_idx: int, original_request_payload: Dict[str, Any]
-    ) -> Dict[str, Any]:
+    ) -> tuple[Dict[str, Any], int]:
         """
         Keep sending `chat_completion` requests (with previous responses accumulated) until the finish_reason is not "abort".
+        Returns the response and the index of the engine that generated it.
 
         The retry mechanism is intended to be used in combination with `pause_generation()` and `resume_generation()` for
         in-flight weight updates and partial rollouts.
@@ -701,7 +713,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                     partial_response.get("error_category", "server_error"),
                     partial_response.get("request_id"),
                 )
-                return partial_response
+                return partial_response, engine_idx
 
             # 1.3. Parse partial response and in-place update accumulators.
             finish_reason, stop_reason, response_role, aborted_without_generating = (
@@ -723,18 +735,19 @@ class InferenceEngineClient(InferenceEngineInterface):
                 if finish_reason != ABORT_FINISH_REASON:
                     # If we only made one request and it is not aborted, return the partial result directly.
                     # This is the codepath that will hit when we do not use `pause_generation()` or `resume_generation()`.
-                    return partial_response
+                    return partial_response, engine_idx
                 # NOTE(Charlie): not doing deepcopy here to avoid copying large logprobs, so be careful when modifying this.
                 base_response = partial_response.copy()
 
         # 2. Build final response by combining fields
         assert base_response is not None, "Expected at least one non-empty response to build final response"
-        return _build_final_response(
+        response = _build_final_response(
             base_response=base_response,
             accum=accum,
             finish_reason=finish_reason,
             stop_reason=stop_reason,
         )
+        return response, engine_idx
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         session_id = request_payload["json"].pop("session_id", None)
@@ -753,9 +766,12 @@ class InferenceEngineClient(InferenceEngineInterface):
         self._inc_inflight(engine_idx)
         try:
             # Always use the retry loop which also issues the first request inside
-            return await self._chat_completion_with_retry(engine_idx, request_payload)
+            response, served_engine_idx = await self._chat_completion_with_retry(engine_idx, request_payload)
         finally:
             self._dec_inflight(engine_idx)
+        if "choices" in response:
+            response[ENGINE_DP_RANK_KEY] = self._engine_dp_ranks[served_engine_idx]
+        return response
 
     async def tokenize(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         """Delegate terminal-bench tokenization to a live vLLM serving actor."""
