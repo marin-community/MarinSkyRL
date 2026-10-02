@@ -171,8 +171,8 @@ def attach_server_errors(batch: TrajectoryBatch, outputs: Sequence[AgentLoopOutp
             errors.append(
                 {
                     "category": diagnostics["error_category"],
-                    "request_id": diagnostics["request_id"],
-                    "status_code": diagnostics["status_code"],
+                    "request_id": diagnostics.get("request_id"),
+                    "status_code": diagnostics.get("status_code"),
                 }
             )
         else:

@@ -60,6 +60,23 @@ def test_whole_trajectory_projection_preserves_one_sample_per_trajectory():
     assert "trajectory_ids" not in output
 
 
+def test_whole_trajectory_projection_preserves_partial_server_error_diagnostics():
+    failed = replace(
+        _step([3], 0.0),
+        verification=VerificationResult.error(
+            "model server rejected generation", diagnostics={"error_category": "constrained_decoding"}
+        ),
+        disposition=TrainingDisposition.mask("model server error", exception_type="ModelServerError"),
+    )
+
+    output = WholeTrajectoryProjection(_config(), _Tokenizer()).project(
+        [failed], {"env_classes": None, "sampling_params": {"logprobs": True}}
+    )
+
+    assert output["loss_masks"] == [[0]]
+    assert output["server_errors"] == [{"category": "constrained_decoding", "request_id": None, "status_code": None}]
+
+
 def test_whole_trajectory_projection_preserves_routes_and_fills_missing_rows():
     routed = _step([3, 4], [0.0, 1.0])
     routed.evidence = replace(routed.evidence, routed_experts=np.asarray([[[1, 2]], [[3, 4]]], dtype=np.uint8))
