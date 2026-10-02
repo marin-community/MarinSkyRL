@@ -39,21 +39,9 @@ complete pass/fail result for on-demand distributed runs.
 The two-run debug artifact acceptance contract and its Jupiter command are documented in
 [`docs/debug-modes.md`](docs/debug-modes.md#jupiter-acceptance-test).
 
-## Scheduled RL gates
-
-The 06:00 UTC CatCount CPU nightly checks reversed-signal controls on seeds 0
-and 1 and async checkpoint resume. PR CI runs the positive CPU canary on seed 0.
-Both download the calibrated S3 policy and use cached pretraining when the
-object store is unavailable.
-
-At 09:00 UTC, Marin Nightly E2E runs GSM8K learning, synchronous OPD, Grug
-Megatron training and the asynchronous CatCount H100 canary. Manual dispatch
-can select one lane; other lanes have no job in that run. CatCount uses Marin
-main with its external runtime pinned to the MarinSkyRL commit under test.
-OpenCode runs manually through its launcher script. The GPU CI suite runs
-manually with pytest on a GPU allocation. See
-[`skyrl-train/ci/marin_nightly/README.md`](skyrl-train/ci/marin_nightly/README.md)
-for gate thresholds and reproduction commands.
+See [the nightly gates](skyrl-train/ci/marin_nightly/README.md) for scheduled
+OPD, Grug and CatCount coverage. Colocated synchronous RL is not a production
+mode; CatCount covers learning.
 
 ## Before a PR
 

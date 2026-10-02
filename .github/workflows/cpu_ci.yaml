@@ -76,10 +76,6 @@ jobs:
         env:
           MACOSX_DEPLOYMENT_TARGET: "14.0"
         run: uv sync --frozen --dry-run --group dev --extra cpu --python-platform aarch64-apple-darwin
-      - uses: actions/cache@v6
-        with:
-          path: .pytest_cache/d/cat_count_policy
-          key: cat-count-policy-${{ runner.os }}-${{ hashFiles('skyrl-train/examples/cat_count/cpu_canary.py', 'skyrl-gym/skyrl_gym/envs/cat_count/reward.py', 'skyrl-train/tests/cpu/test_cat_count_cpu_canary.py', 'pyproject.toml', 'skyrl-gym/pyproject.toml', 'uv.lock') }}
       - name: Install skyrl-train
         run: uv sync --frozen --group dev --group harbor-test --extra cpu --extra telemetry
       - name: Check the lockfile is current

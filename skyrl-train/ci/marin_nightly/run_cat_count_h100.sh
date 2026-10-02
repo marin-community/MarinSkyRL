@@ -43,6 +43,10 @@ for attempt in 1 2; do
   python3 "$REPOSITORY_ROOT/skyrl-train/ci/marin_nightly/gate.py" --log "$log" \
     --spec "$REPOSITORY_ROOT/skyrl-train/ci/marin_nightly/specs/cat-count-canary-qwen2.5-0.5b-async.json" \
     --wall-clock-seconds "$wall_clock" || { echo "GATE_FAILURE: native metrics failed"; exit 1; }
+  run_id="$(sed -n '/\[telemetry\].* run_id=/ { s/.* run_id=\([^ ]*\).*/\1/; p; q; }' "$log")"
+  (cd "$MARIN_ROOT" && uv run --frozen --package marin-core --extra cpu --no-default-groups \
+    python "$REPOSITORY_ROOT/skyrl-train/ci/marin_nightly/dashboard_readiness.py" --run-id "$run_id") \
+    || echo "::: the readiness reporter itself failed; the run and its gate are unaffected"
   exit 0
 done
 exit 2

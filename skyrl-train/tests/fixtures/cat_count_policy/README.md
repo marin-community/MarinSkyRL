@@ -4,11 +4,11 @@ The CPU canary downloads the calibrated 529,792-parameter FP32 policy from
 `s3://marin-us-east-02a/marin/rl-canaries/cat-count/cpu/pretrained/llama-530k/v1/`.
 Its manifest SHA256 is `7a5f1047648a90262514a663168580610b9f6bbe1522b2c38b7578bbc5eb82ae`;
 each downloaded file must match the manifest's byte count and SHA256.
-Credentials or network failures select cached local pretraining. Actions caches
-key every producer source, pretrain parameter and dependency-lock input.
 CatCount CI steps supply the repository's CoreWeave credentials and S3 endpoint
-through the shared remote I/O factory. Each run prints `CAT_COUNT_POLICY source=s3`
-or `source=pretrain`; forks without credentials use cached local pretraining.
+through the shared remote I/O factory. A successful download prints
+`CAT_COUNT_POLICY source=s3`. Tests skip when credentials are absent, as on fork
+PRs; download and integrity errors with credentials present fail the test.
+CI never pretrains the policy.
 
 PR CI runs ten normal training steps on seed 0 with the positive assertions.
 Nightly checks normal/reversed pairs on seeds 0 and 1 and asynchronous resume,

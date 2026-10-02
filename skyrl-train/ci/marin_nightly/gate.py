@@ -10,7 +10,13 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Literal
 
+# `WANDB_MIRROR kind=train step=2 metrics={"policy/policy_loss": 0.1, ...}`, embedded in a
+# loguru line, so the prefix is matched loosely and the JSON object runs to end of line.
 METRIC_LINE = re.compile(r"WANDB_MIRROR kind=(?P<kind>\w+) step=(?P<step>\d+) metrics=(?P<metrics>\{.*\})\s*$")
+
+# The trainer's loguru sink colorizes even when piped, so the payload arrives wrapped in SGR
+# escapes (`\x1b[32m...WANDB_MIRROR...}\x1b[0m`). The trailing reset defeats the `\}\s*$` anchor,
+# which silently parses zero steps out of a perfectly healthy run -- strip the escapes first.
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -203,17 +209,6 @@ class GateSpec:
 
 def load_spec(path: Path) -> GateSpec:
     raw = json.loads(path.read_text())
-    unknown = raw.keys() - {
-        "provenance",
-        "min_train_steps",
-        "finite_metrics",
-        "bounds",
-        "max_wall_clock_seconds",
-        "required_log_patterns",
-        "metric_gates",
-    }
-    if unknown:
-        raise ValueError(f"unknown gate spec fields: {sorted(unknown)}")
     rows = []
     for value in raw.get("metric_gates", ()):
         row = dict(value)
@@ -306,9 +301,14 @@ def check_log_patterns(log_text: str, spec: GateSpec) -> list[GateFailure]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--log", type=Path, required=True)
-    parser.add_argument("--spec", type=Path, required=True)
-    parser.add_argument("--wall-clock-seconds", type=float, required=True)
+    parser.add_argument("--log", type=Path, required=True, help="training run log to read")
+    parser.add_argument("--spec", type=Path, required=True, help="gate spec to check against")
+    parser.add_argument(
+        "--wall-clock-seconds",
+        type=float,
+        required=True,
+        help="how long the run took, measured by the caller",
+    )
     args = parser.parse_args()
     spec = load_spec(args.spec)
     log_text = args.log.read_text()

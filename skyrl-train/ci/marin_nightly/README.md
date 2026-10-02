@@ -1,21 +1,17 @@
 # Nightly end-to-end gates
 
-The nightly runs GSM8K GRPO on one H100, synchronous OPD on four H100s,
-Grug Megatron training on four H100s, and the asynchronous CatCount learning
-canary on four H100s. OpenCode runs manually through its launcher script.
-All policy updates use Megatron and the frozen root environment. GSM8K and
-CatCount are scored against checked-in specs; the other nightly lanes
-exercise teacher scoring, Grug training and weight sync.
+The nightly runs synchronous OPD, Grug Megatron training and the asynchronous
+CatCount learning canary on H100s. Colocated synchronous RL is not a production
+mode; CatCount covers learning. OpenCode runs manually through its launcher
+script. All policy updates use Megatron and the frozen root environment.
 
 | file | role |
 | --- | --- |
-| `run_h100.sh` | train GSM8K and gate metrics on H100 |
 | `run_opd_h100.sh` | run synchronous OPD with separate policy, rollout, and teacher roles |
 | `run_grug_megatron.sh` | run Grug parity, training, and serving gates on four H100s |
 | `run_opencode.sh` | submit and gate the federated OpenCode RL canary |
 | `run_cat_count_h100.sh` | submit the CatCount coordinator and gate sampled learning on four H100s |
 | `gate.py` | score a training run against its spec |
-| `specs/gsm8k-qwen3-0.6b-megatron.json` | GSM8K gate thresholds and provenance |
 | `specs/cat-count-canary-qwen2.5-0.5b-async.json` | CatCount sampled learning and per-step mechanism requirements |
 | `specs/opencode-qwen3-8b.json` | OpenCode continuation and policy update thresholds |
 
@@ -75,8 +71,9 @@ worker tasks with two H100s and 65 CPUs each. It uses seed 17, behavior clipping
 and staleness 2, without checkpoints or HF export. The runner clones Marin main,
 sets the external MarinSkyRL source to the commit under test, and runs Marin's
 `config/update-external.py MarinSkyRL`. That pin supplies both the launcher
-package and the GPU runtime. Manual dispatch can select one lane; scheduled
-runs execute every lane.
+package and the GPU runtime. Scheduled and manually dispatched workflows run
+all three lanes. The CatCount job summary reports dashboard readiness without
+affecting its learning result.
 
 Each attempt has a 20-minute deadline including queue time. A failure with no
 native training row is reported as `INFRASTRUCTURE_FAILURE` and retried once.
@@ -93,36 +90,23 @@ each other's and the second dies: "Session name ... does not match persisted val
 was an error connecting to Redis." Observed on 2026-09-10 between two single-GPU jobs submitted six
 seconds apart.
 
-This is not specific to this lane and it is not new. `gsm8k-h100` starts Ray through
-the standalone SkyRL Hydra entrypoint; `grug-megatron-h100` starts it through `initialize_ray` in
-`tests/gpu/test_grug_megatron.py`; both target `cw-rno2a` and both are launched by the same 09:00
-cron. Marin-managed launches instead enter through the config-native task runtime, which pins the
-ports before starting the same training entrypoint.
-
-No collision has been observed between the scheduled lanes, and Iris placement may well keep them
-apart, but nothing here guarantees it. If one of them fails at `ray start` with that message, this
-is why. Two runs launched by hand seconds apart will do it: run them serially.
+The Grug tests start Ray through `initialize_ray`; CatCount starts it through
+the Marin task runtime. Both target `cw-rno2a`. A Ray startup error with that
+message indicates two instances sharing a host; inspect their placement.
 
 ## Running it by hand
 
 The gate is pure stdlib and runs anywhere, against any run log:
 
 ```bash
-uv run --frozen python -m ci.marin_nightly.gate \
+python3 skyrl-train/ci/marin_nightly/gate.py \
     --log nightly-run.log \
-    --spec ci/marin_nightly/specs/gsm8k-qwen3-0.6b-megatron.json \
+    --spec skyrl-train/ci/marin_nightly/specs/cat-count-canary-qwen2.5-0.5b-async.json \
     --wall-clock-seconds 900
 ```
 
-The training run starts from the cluster-configured Iris task image and resolves the
-architecture-specific `vllm` wheel from the root `uv.lock`. It takes its knobs from the
-environment (`MODEL`, `MAX_STEPS`, `DATA_DIR`). Inside an Iris GPU task:
-
-```bash
-MAX_STEPS=2 bash ci/marin_nightly/run_h100.sh
-```
-
-The Megatron lane runs `tests/gpu/test_grug_megatron.py` and the two-GPU CP2
+The Grug lane runs `tests/gpu/test_grug_megatron.py`, the Levanter parity oracle
+and the two-GPU CP2
 FlashAttention forward/backward smoke with the frozen Megatron runtime closure;
 see `docs/grug-megatron-training.md` for the Grug tests.
 
@@ -180,15 +164,5 @@ To exercise the whole path — provision, train, gate, tear down — trigger the
 
 ```bash
 gh workflow run marin-nightly.yaml \
-  -f lane=cat-count-h100 \
   -f target_cluster=cw-rno2a
 ```
-
-## GSM8K learning gate
-
-Every training step must report finite policy loss, final loss, entropy and mean
-reward. Mean reward stays in [0, 1]. The mean of the last three reward observations
-must exceed the first three by at least 0.3; this uses the first logged training
-reward at step 1 because this lane has no reward evaluation before training.
-Seven scheduled nights cleared this threshold with a minimum margin of 0.187.
-The 1,800-second wall-clock allowance is a hang deadline.

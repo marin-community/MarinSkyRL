@@ -15,8 +15,7 @@ from dataclasses import dataclass
 
 from connectrpc.errors import ConnectError
 from finelog.client.log_client import LogClient
-from iris.client.client import get_iris_ctx
-from iris.cluster.endpoints import LOG_SERVER_ENDPOINT_NAME
+from finelog.deploy.config import load_finelog_config
 
 # Rows land asynchronously, so the first query after a run routinely sees nothing.
 POLL_ATTEMPTS = 6
@@ -157,19 +156,14 @@ def _hand_query(run_id: str) -> str:
 
 
 def main() -> int:
+    from finelog.deploy.connect import open_client
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-id", required=True, help="the run identity telemetry rows join on")
     args = parser.parse_args()
-    ctx = get_iris_ctx()
-    if ctx is None or ctx.client is None:
-        print(report_line({"run_id": args.run_id, "error": "no iris context"}))
-        print("::: telemetry readiness: no Iris context, so nothing was checked")
-        return 0
-
     try:
-        endpoint = ctx.client.resolve_endpoint(LOG_SERVER_ENDPOINT_NAME)
-        client = LogClient.connect(endpoint)
-        result = collect(client, args.run_id)
+        with open_client(load_finelog_config("marin"), "marin") as client:
+            result = collect(client, args.run_id)
     except (ConnectError, ConnectionError, TimeoutError, OSError, ValueError) as error:
         # An unreachable log server says nothing about the run. Print the query instead.
         print(report_line({"run_id": args.run_id, "error": str(error)}))

@@ -1,4 +1,3 @@
-import argparse
 import asyncio
 import hashlib
 import json
@@ -13,7 +12,6 @@ from multiprocessing.context import ForkServerContext
 
 import fsspec
 import pytest
-from botocore.exceptions import BotoCoreError, ClientError
 import skyrl_gym
 import skyrl_train
 import torch
@@ -21,7 +19,7 @@ import zstandard
 from omegaconf import OmegaConf
 from marinskyrl.remote_io import create_s3_filesystem
 from skyrl_train.evaluate import evaluation_dump_dir
-from examples.cat_count.cpu_canary import PROMPT, pretrain
+from examples.cat_count.cpu_canary import PROMPT
 from skyrl_train.metric_names import CORRECTION_WEIGHT_MEAN_METRIC
 
 from tests.cpu.tiny_training.cat_count import FAST_STEPS, cat_count_config, run_cat_count
@@ -66,39 +64,12 @@ def test_policy_download_rejects_a_corrupted_manifest(tmp_path, monkeypatch):
 
 @pytest.fixture(scope="session")
 def cat_count_policy(pytestconfig) -> Path:
-    cache = Path(pytestconfig.cache.mkdir("cat_count_policy"))
-    downloaded = cache / "llama-530k-v1"
-    downloaded.mkdir(exist_ok=True)
-    try:
-        download_policy(downloaded)
-        print("CAT_COUNT_POLICY source=s3")
-        return downloaded
-    except (OSError, BotoCoreError, ClientError) as error:
-        print(f"CAT_COUNT_POLICY source=pretrain reason={type(error).__name__}")
-    parameters = argparse.Namespace(steps=3000, lr=3e-4, width=128, layers=2, seed=0)
-    repository = Path(__file__).resolve().parents[3]
-    sources = (
-        "skyrl-train/examples/cat_count/cpu_canary.py",
-        "skyrl-gym/skyrl_gym/envs/cat_count/reward.py",
-        "skyrl-train/tests/cpu/test_cat_count_cpu_canary.py",
-        "pyproject.toml",
-        "skyrl-gym/pyproject.toml",
-        "uv.lock",
-    )
-    digest = hashlib.sha256(json.dumps(vars(parameters), sort_keys=True).encode())
-    for source in sources:
-        digest.update(source.encode())
-        digest.update((repository / source).read_bytes())
-    identity = digest.hexdigest()[:16]
-    directory = cache / f"llama-{identity}"
-    parameters.out = directory
-    if not all((directory / name).exists() for name in ("model.safetensors", "config.json", "tokenizer.json")):
-        torch.set_num_threads(1)
-        started = time.perf_counter()
-        pretrain(parameters)
-        print(f"CAT_COUNT_PRETRAIN cache=cold seconds={time.perf_counter() - started:.3f} identity={identity}")
-    else:
-        print(f"CAT_COUNT_PRETRAIN cache=warm identity={identity}")
+    if not os.environ.get("AWS_ACCESS_KEY_ID"):
+        pytest.skip("CatCount CPU canary: S3 credentials unavailable (e.g. fork PR); policy is not pretrained in CI")
+    directory = Path(pytestconfig.cache.mkdir("cat_count_policy")) / "llama-530k-v1"
+    directory.mkdir(exist_ok=True)
+    download_policy(directory)
+    print("CAT_COUNT_POLICY source=s3")
     return directory
 
 
