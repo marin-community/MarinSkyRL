@@ -1236,7 +1236,7 @@ async def test_cat_count_preserves_sampled_evidence_and_verification(
 
 
 class _RankedEngine:
-    """Inference engine that answers every prompt with ``SAMPLED_IDS`` and records the requests it served."""
+    """Inference engine that answers every prompt with ``SAMPLED_IDS`` and counts the prompts it served."""
 
     def __init__(self):
         self.served = 0
@@ -1275,8 +1275,7 @@ class _ForwardRecorder:
 async def test_rollout_rows_carry_their_serving_engine_rank_to_training_micro_batches(
     tokenizer, generator_cfg, skyrl_gym_cfg, use_env, monkeypatch
 ):
-    """Two engine groups of two data-parallel ranks each serve two trajectories routed by session to engines 3 and 2;
-    each row keeps its engine's rank through collation, padding, the policy forward and the training micro-batch."""
+    """Rows served by engines 3 and 2 keep their data-parallel ranks through the policy forward and the micro-batches."""
     use_env(ScriptedEnv(BaseTextEnvStepOutput(observations=[], reward=1.0, done=True, metadata={})))
     config = get_default_config()
     config.generator.inference_engine_data_parallel_size = 2

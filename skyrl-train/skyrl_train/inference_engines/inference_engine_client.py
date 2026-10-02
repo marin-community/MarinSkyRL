@@ -43,7 +43,7 @@ import io
 import numpy as np
 
 ABORT_FINISH_REASON = "abort"
-# The chat response key holding the data-parallel rank of the engine that generated the response.
+# ``chat_completion`` adds this key to every chat response it returns.
 ENGINE_DP_RANK_KEY = "engine_dp_rank"
 
 # Cap on the session -> engine memo so it cannot grow unbounded across a long run.
