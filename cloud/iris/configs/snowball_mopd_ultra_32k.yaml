@@ -1,18 +1,25 @@
 # Snowball 67B-A2B three-teacher on-policy distillation at a 32K window on a blend-proportional
 # sample of NVIDIA's Nemotron Ultra MOPD blend. Nine H100 nodes: four PP2 x EP8 learner
 # nodes, two EP8 rollout nodes, and one pinned EP8 teacher node per Snowball expert.
+# Request 768 GB of host memory per node: at 512 GB, the eight learner processes per node
+# (about 60 GB each while saving) ran the node out of memory during checkpoint saves.
 #
 # The sample (infra/rl_data/nemotron_ultra_mopd_subset.py --rows) routes every generator of the
-# blend, so rows keep their teacher_route column and the stock shuffle preserves the blend's mix;
-# --swe-rows 0 leaves out the Harbor SWE agent's rows.
+# blend, so rows keep their teacher_route column and the stock shuffle preserves the blend's mix.
 # grading: skip lets judge-backed rows train without a judge; the distillation loss ignores the
-# reward. ns_tools and Lean rows execute in the in-cluster NeMo Skills sandbox. Build the sample
-# with --swe-rows 0. Harbor SWE rows need a launch with controller ingress, so the Daytona
-# sandbox can reach the rollout engines, and are validated separately.
+# reward. ns_tools and Lean rows execute in the in-cluster NeMo Skills sandbox.
+#
+# Harbor SWE rows (--swe-rows N) run opencode in Daytona and train only when the launch passes the
+# sample's swe-tasks/tasks.parquet as data.terminal_bench_data, sets ingress.mode controller and
+# ingress.record_literal, and provides TOGETHER_API_KEY for the TaskTrove verifiers. Without that
+# task data the Harbor settings below are unused.
 #
 # Pass the student with --model-path (open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92
 # pinned to a commit) and the sample's train.parquet with --train-data.
 entrypoint: standard
+
+config_groups:
+  terminal_bench_config: terminal_bench
 
 context_budget:
   # The swe and terminal teachers have 32,768 positions, and scoring a trajectory takes one
@@ -21,6 +28,31 @@ context_budget:
   max_new_tokens_per_turn: 8192
   max_turns: 50
   generated_budget_fraction: 1.0
+
+terminal_bench:
+  harbor:
+    name: opencode
+    version: "1.18.2"
+    collect_rollout_details: true
+    override_setup_timeout_sec: 600
+    override_timeout_sec: 600
+    verifier_override_timeout_sec: 300
+    override_cpus: 1
+    override_memory_mb: 4096
+    override_storage_mb: 4096
+    auto_snapshot: true
+    env_network_policy:
+      mode: unrestricted
+    max_retries: 3
+    n_concurrent_trials: 32
+    enable_reward_shaping: false
+    enable_error_classification: true
+    default_error_treatment: zero
+  model_info:
+  archiving:
+    enabled: false
+  trace_upload:
+    enabled: false
 
 environment:
   env_class: nemotron_ultra
@@ -50,6 +82,9 @@ trainer:
       routing_plan: opd
       coefficient: 1.0
       reward_mode: replace
+    group_admission:
+      # A Harbor trial may take 600 s setup, 600 s agent, and 300 s verifier time.
+      stall_timeout: 3600
   epochs: 1
   max_steps: 100
   update_epochs_per_batch: 1
@@ -189,6 +224,7 @@ data:
   kind: parquet
   train_data: []
   val_data: []
+  terminal_bench_data: []
   shuffle: true
 
 extra_env:
