@@ -1,3 +1,5 @@
+import math
+
 import aiohttp
 from skyrl_train.inference_engines.response_topk import select_chat_response_topk
 from skyrl_train.inference_engines.base import (
@@ -159,6 +161,7 @@ class RemoteInferenceEngine(InferenceEngineInterface):
         ep_size: Optional[int] = None,
         dcp_size: Optional[int] = None,
         weight_sync_pause_policy: WeightSyncPausePolicy = DEFAULT_WEIGHT_SYNC_PAUSE_POLICY,
+        max_model_len: Optional[int] = None,
     ):
         """Initialize the InferenceEngine.
 
@@ -177,10 +180,13 @@ class RemoteInferenceEngine(InferenceEngineInterface):
         self._ep_size = ep_size
         self._dcp_size = dcp_size
         self.tokenizer = tokenizer
+        # Explicit externally configured serving limit; remote servers are not launched here.
+        self.max_model_len = max_model_len
         self.weight_sync_pause_policy = weight_sync_pause_policy
 
         # Create weight loader for coordinating weight updates
         self._weight_loader = RemoteWeightLoader(self.url, engine_backend)
+        self._owns_weight_group = False
 
     def tp_size(self) -> int:
         return self._tp_size
@@ -208,6 +214,12 @@ class RemoteInferenceEngine(InferenceEngineInterface):
         )
 
         sampling_params = request_sampling_params if request_sampling_params is not None else {}
+        per_prompt_sampling = input_batch.get("sampling_params_per_prompt")
+        if per_prompt_sampling is not None:
+            if self.engine_backend != "vllm" or sampling_params.get("prompt_logprobs") is None:
+                raise ValueError("Selected prompt scoring requires a vLLM-compatible prompt-logprobs endpoint")
+            if len(per_prompt_sampling) != len(prompt_token_ids):
+                raise ValueError("Selected prompt overrides must align with prompt_token_ids")
         if "n" in sampling_params and sampling_params["n"] > 1:
             raise ValueError(
                 "n is not supported yet for remote inference engines. "
@@ -226,6 +238,10 @@ class RemoteInferenceEngine(InferenceEngineInterface):
                 payload["model"] = self.model_name
                 payload["prompt"] = prompt_token_ids
                 payload["return_token_ids"] = True
+                if per_prompt_sampling is not None:
+                    payload["prompt_logprob_token_ids"] = [
+                        row["prompt_logprob_token_ids"] for row in per_prompt_sampling
+                    ]
                 payload.setdefault("logprobs", 0)
                 if payload["logprobs"] is not None and payload["logprobs"] > 0:
                     payload["return_tokens_as_token_ids"] = True
@@ -251,6 +267,7 @@ class RemoteInferenceEngine(InferenceEngineInterface):
         response_logprobs = None
         student_topk_indices = []
         behavior_topk_logprobs = []
+        prompt_logprobs = []
 
         if self.engine_backend == "vllm":
             if len(response["choices"]) != len(prompt_token_ids):
@@ -265,6 +282,33 @@ class RemoteInferenceEngine(InferenceEngineInterface):
                 finish_reasons.append(choice["finish_reason"])
                 token_ids = choice["token_ids"]
                 output_ids.append(token_ids)
+                if sampling_params.get("prompt_logprobs") is not None:
+                    raw_prompt_scores = choice["prompt_logprobs"]
+                    if raw_prompt_scores is None:
+                        if choice["finish_reason"] != "abort":
+                            raise ValueError("Remote teacher omitted prompt logprobs")
+                        prompt_logprobs.append([])
+                    else:
+                        if len(raw_prompt_scores) != len(prompt_token_ids[i]):
+                            raise ValueError("Remote prompt logprobs must align with prompt tokens")
+                        scores = [
+                            None
+                            if row is None
+                            else {int(token): float(score["logprob"]) for token, score in row.items()}
+                            for row in raw_prompt_scores
+                        ]
+                        for position, row in enumerate(scores):
+                            if row is None:
+                                if position != 0:
+                                    raise ValueError("Remote teacher omitted a scored prompt position")
+                                continue
+                            if any(token < 0 or not math.isfinite(score) or score > 0 for token, score in row.items()):
+                                raise ValueError("Remote teacher returned invalid prompt logprobs")
+                            if per_prompt_sampling is not None and position > 0:
+                                requested = per_prompt_sampling[i]["prompt_logprob_token_ids"][position]
+                                if any(token not in row for token in requested):
+                                    raise ValueError("Remote teacher omitted a selected prompt token ID")
+                        prompt_logprobs.append(scores)
                 if response_logprobs is not None:
                     logprobs = choice["logprobs"]["token_logprobs"]
                     if len(logprobs) != len(token_ids) or any(value is None for value in logprobs):
@@ -297,6 +341,8 @@ class RemoteInferenceEngine(InferenceEngineInterface):
         output = InferenceEngineOutput(
             responses=outputs, stop_reasons=finish_reasons, response_ids=output_ids, response_logprobs=response_logprobs
         )
+        if prompt_logprobs:
+            output["prompt_logprobs"] = prompt_logprobs
         if student_topk_indices:
             output["student_topk_indices"] = student_topk_indices
             output["behavior_topk_logprobs"] = behavior_topk_logprobs
@@ -342,9 +388,11 @@ class RemoteInferenceEngine(InferenceEngineInterface):
         self, master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing: bool = False
     ):
         """Initialize the distributed process group for syncing weights."""
-        return await self._weight_loader.init_communicator(
+        result = await self._weight_loader.init_communicator(
             master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing
         )
+        self._owns_weight_group = True
+        return result
 
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
         if "names" not in request:
@@ -387,7 +435,9 @@ class RemoteInferenceEngine(InferenceEngineInterface):
             }
 
     async def teardown(self):
-        await self._weight_loader.destroy_group()
+        if self._owns_weight_group:
+            await self._weight_loader.destroy_group()
+            self._owns_weight_group = False
 
     async def pause_generation(self) -> None:
         async with aiohttp.ClientSession() as session:
