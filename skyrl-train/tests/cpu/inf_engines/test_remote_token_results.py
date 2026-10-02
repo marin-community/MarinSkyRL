@@ -22,18 +22,33 @@ async def test_remote_completion_keeps_sampled_ids_and_aligned_behavior_logprobs
     async def generate(request):
         body = await request.json()
         requests.append(body)
-        return web.json_response({"choices": [
-            {"index": 0, "text": " X", "token_ids": [3], "finish_reason": "abort",
-             "logprobs": {"token_logprobs": [-0.25]}},
-            {"index": 1, "text": " X", "token_ids": [2], "finish_reason": "stop",
-             "logprobs": {"token_logprobs": [-0.5]}},
-        ]})
+        return web.json_response(
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "text": " X",
+                        "token_ids": [3],
+                        "finish_reason": "abort",
+                        "logprobs": {"token_logprobs": [-0.25]},
+                    },
+                    {
+                        "index": 1,
+                        "text": " X",
+                        "token_ids": [2],
+                        "finish_reason": "stop",
+                        "logprobs": {"token_logprobs": [-0.5]},
+                    },
+                ]
+            }
+        )
 
     app = web.Application()
     app.router.add_post("/v1/completions", generate)
     async with TestServer(app) as server:
-        engine = RemoteInferenceEngine(str(server.make_url("")).removeprefix("http://").rstrip("/"),
-                                       "test", "vllm", AliasingTokenizer())
+        engine = RemoteInferenceEngine(
+            str(server.make_url("")).removeprefix("http://").rstrip("/"), "test", "vllm", AliasingTokenizer()
+        )
         result = await engine.generate({"prompt_token_ids": [[0, 1], [0, 2]], "sampling_params": {"temperature": 1.0}})
         # An abort retry extends the original prompt with served IDs, never encoded response text.
         retry_ids = [[0, 1] + result["response_ids"][0], [0, 2] + result["response_ids"][1]]
