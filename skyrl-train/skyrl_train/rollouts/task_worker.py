@@ -359,12 +359,17 @@ class TaskRolloutWorker:
                 grade_groups,
                 tasks,
                 [task.result() for task in pending],
-                [item.instance_id for item in request["trajectory_ids"]]
-                if request.get("trajectory_ids") is not None
+                [item.instance_id for item in trajectory_ids]
+                if trajectory_ids is not None
                 else [task.id for task in tasks],
                 self.group_graders,
                 phase,
-                self.error_handling,
+                [
+                    self.harbor.error_handling
+                    if self.harbor is not None and "harbor" in task.metadata
+                    else self.error_handling
+                    for task in tasks
+                ],
                 logprobs_required=sampling.get("logprobs") is not None,
             )
             if self.harbor is not None:

@@ -1719,7 +1719,7 @@ async def test_task_group_grader_preserves_separate_samples_and_private_inputs(t
         trajectory_ids=[TrajectoryID(group, sample) for group, sample in [("a", 0), ("b", 0), ("a", 1), ("b", 1)]],
     )
 
-    def group_total(task, records, eligible, phase):
+    def group_total(task, records, eligible, _phase):
         total = sum(int(record.steps[-1].turn.text) for record, valid in zip(records, eligible, strict=True) if valid)
         return [
             replace(

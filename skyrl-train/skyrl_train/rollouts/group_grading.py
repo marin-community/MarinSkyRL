@@ -21,7 +21,7 @@ def grade_groups(
     group_ids: Sequence[str],
     graders: Mapping[str, GroupGrader],
     phase: str,
-    error_handling: ErrorHandlingConfig,
+    error_handling: Sequence[ErrorHandlingConfig],
     *,
     logprobs_required: bool,
 ) -> list[RolloutData]:
@@ -47,7 +47,8 @@ def grade_groups(
         grader = graders[task.group_verifier.name]
         records = [rollouts[index] for index in indices]
         eligible = [
-            rollout_loss_eligible(record, error_handling, logprobs_required=logprobs_required) for record in records
+            rollout_loss_eligible(rollouts[index], error_handling[index], logprobs_required=logprobs_required)
+            for index in indices
         ]
         graded = grader(task, records, eligible, phase)
         for index, record in zip(indices, graded, strict=True):
