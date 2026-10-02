@@ -18,6 +18,7 @@ from skyrl_train.distributed.megatron.model_utils import (
     vllm_prompt_logprobs,
     vocab_parallel_entropy,
 )
+from skyrl_train.models.grug_megatron import assert_recompute_drained
 from skyrl_train.models.grug_rounding import vllm_value
 from skyrl_train.models.grug_vllm_kernels import serving_engine_ranks
 from skyrl_train.distributed.megatron.megatron_utils import get_model_config
@@ -683,6 +684,8 @@ class MegatronModelWrapper:
                 forward_only=False,
             )
 
+        if self.vllm_numerics:
+            assert_recompute_drained()
         if self.router_replay is not None:
             # Fail before the optimizer step: a non-empty FIFO or a masked row
             # that was not replayed means a layout bug, not a metric.

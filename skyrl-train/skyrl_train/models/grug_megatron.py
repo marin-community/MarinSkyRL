@@ -191,8 +191,12 @@ class StageStatistic:
 # Per module, what it computed in a checkpoint unit's first forward for the unit's recompute, with a weak reference to
 # the tensor that identifies the unit (an input norm's input, or the decoder layer's input). Full activation recompute
 # reruns the unit inside the backward on ``detach()`` copies of its inputs, after the first forward took the unit's
-# hand-offs, so the recompute reads what it needs here by storage.
+# hand-offs, so the recompute reads what it needs here by storage. Only a forward whose backward will run keeps
+# entries, and its backward takes every one of them (``assert_recompute_drained``).
 _RECOMPUTE_STATISTICS: dict[int, list[tuple[weakref.ref, torch.Tensor]]] = {}
+# True while a forward runs with gradients enabled, so that a backward, and the recompute of its checkpoint units,
+# follows.
+_BACKWARD_FOLLOWS = False
 # The input of each decoder layer whose forward is running, innermost last: the key of its checkpoint unit.
 _LAYER_INPUTS: list[torch.Tensor] = []
 
@@ -222,9 +226,11 @@ def _recomputing_one_layer(config: TransformerConfig) -> bool:
 
 
 def _keep_for_recompute(owner: nn.Module, receiver: torch.Tensor, value: torch.Tensor) -> None:
-    entries = [(ref, kept) for ref, kept in _RECOMPUTE_STATISTICS.get(id(owner), []) if ref() is not None]
-    entries.append((weakref.ref(receiver), value))
-    _RECOMPUTE_STATISTICS[id(owner)] = entries
+    """Keep ``value`` for the recompute of the checkpoint unit that ``receiver`` identifies; a forward without a
+    backward recomputes nothing and keeps nothing."""
+    if not _BACKWARD_FOLLOWS:
+        return
+    _RECOMPUTE_STATISTICS.setdefault(id(owner), []).append((weakref.ref(receiver), value))
 
 
 def _take_for_recompute(owner: nn.Module, receiver: torch.Tensor) -> torch.Tensor:
@@ -235,6 +241,13 @@ def _take_for_recompute(owner: nn.Module, receiver: torch.Tensor) -> torch.Tenso
             del entries[index]
             return value
     raise RuntimeError("a checkpoint unit's recompute found nothing kept by the unit's first forward")
+
+
+def assert_recompute_drained() -> None:
+    """Raise unless every value a checkpoint unit's first forward kept was taken by the unit's recompute."""
+    kept = sum(len(entries) for entries in _RECOMPUTE_STATISTICS.values())
+    if kept:
+        raise RuntimeError(f"{kept} values kept by checkpoint units' first forwards were not taken by their recompute")
 
 
 def _install_layer_input_hooks(layer: TransformerLayer) -> None:
@@ -1003,6 +1016,8 @@ class GrugGPTModel(GPTModel):
     def forward(self, *args, **kwargs):
         if not self.vllm_numerics:
             return super().forward(*args, **kwargs)
+        global _BACKWARD_FOLLOWS
+        _BACKWARD_FOLLOWS = torch.is_grad_enabled()
         # Each forward starts without hand-offs: a stage's last residual has no reader, and the entries are keyed by
         # tensors that a later forward may reuse. The statistics kept for recompute stay: under pipeline parallelism a
         # micro-batch's backward, and its recompute, runs after later micro-batches' forwards.
