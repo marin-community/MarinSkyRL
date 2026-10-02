@@ -193,7 +193,7 @@ class StageStatistic:
 # reruns the unit inside the backward on ``detach()`` copies of its inputs, after the first forward took the unit's
 # hand-offs, so the recompute reads what it needs here by storage. Only a forward whose backward will run keeps
 # entries, and its backward takes every one of them (``assert_recompute_drained``).
-_RECOMPUTE_STATISTICS: dict[int, list[tuple[weakref.ref, torch.Tensor]]] = {}
+_KEPT_FOR_RECOMPUTE: dict[int, list[tuple[weakref.ref, torch.Tensor]]] = {}
 # True while a forward runs with gradients enabled, so that a backward, and the recompute of its checkpoint units,
 # follows.
 _BACKWARD_FOLLOWS = False
@@ -230,11 +230,11 @@ def _keep_for_recompute(owner: nn.Module, receiver: torch.Tensor, value: torch.T
     backward recomputes nothing and keeps nothing."""
     if not _BACKWARD_FOLLOWS:
         return
-    _RECOMPUTE_STATISTICS.setdefault(id(owner), []).append((weakref.ref(receiver), value))
+    _KEPT_FOR_RECOMPUTE.setdefault(id(owner), []).append((weakref.ref(receiver), value))
 
 
 def _take_for_recompute(owner: nn.Module, receiver: torch.Tensor) -> torch.Tensor:
-    entries = _RECOMPUTE_STATISTICS.get(id(owner), [])
+    entries = _KEPT_FOR_RECOMPUTE.get(id(owner), [])
     for index, (ref, value) in enumerate(entries):
         original = ref()
         if original is not None and same_storage(original, receiver):
@@ -245,7 +245,7 @@ def _take_for_recompute(owner: nn.Module, receiver: torch.Tensor) -> torch.Tenso
 
 def assert_recompute_drained() -> None:
     """Raise unless every value a checkpoint unit's first forward kept was taken by the unit's recompute."""
-    kept = sum(len(entries) for entries in _RECOMPUTE_STATISTICS.values())
+    kept = sum(len(entries) for entries in _KEPT_FOR_RECOMPUTE.values())
     if kept:
         raise RuntimeError(f"{kept} values kept by checkpoint units' first forwards were not taken by their recompute")
 
