@@ -110,3 +110,40 @@ Unsupported candidate declaration kinds fail closed.
 Reasoning Gym cutovers validate the original serialized trusted record before normalization. Duplicate JSON keys and nonfinite values produce minimum-reward error verdicts even for blank candidates. Omitting `verifyit_enabled` preserves source parsing and grading. Both the `reasoning_gym` environment and Nemotron `reasoning_gym_simple_agent` delegate scores to verifyit's existing ReasoningGym mode; dataset scoring uses reasoning-gym 0.1.25.
 
 Search and SearchCode keep source grading when the option is omitted. Enabled Search preserves last-answer-tag extraction, punctuation/article/whitespace normalization and exact alternative matching through Schema, Exact and shared reducers. Enabled SearchCode forwards its final history to the existing numeric-answer verifier. Malformed trusted references produce minimum-reward errors; tool calls and retrieval remain framework operations. The final-step contracts can be exercised offline with `uv run --project skyrl-gym --frozen python -m pytest skyrl-gym/tests/test_verifyit_search.py`.
+
+### Indirect prompt injection
+
+The opt-in `indirect_prompt_injection_simple_agent` uses the original NeMo Gym
+resource server pinned to `7a19900a114f8c349c9fac031b016575e39cfa36`.
+Configure `verifyit_enabled: true` and
+`ipi_resources_url: http://127.0.0.1:18765`. The server requires Python >=3.13.14;
+SkyRL communicates over HTTP and retains its existing Python requirement. From
+the pinned NeMo checkout, start the original resource app:
+
+```bash
+uv sync --frozen --no-dev --python 3.13
+uv run --no-sync python - <<'PY'
+import uvicorn
+from omegaconf import OmegaConf
+from nemo_gym.config_types import BaseServerConfig
+from nemo_gym.server_utils import ServerClient
+from resources_servers.indirect_prompt_injection.app import IPIResourcesServer, IPIResourcesServerConfig
+server = IPIResourcesServer(
+    config=IPIResourcesServerConfig(host="127.0.0.1", port=18765, entrypoint="app.py", name="ipi"),
+    server_client=ServerClient(head_server_config=BaseServerConfig(host="127.0.0.1", port=18766), global_config_dict=OmegaConf.create({})),
+)
+uvicorn.run(server.setup_webserver(), host="127.0.0.1", port=18765)
+PY
+```
+
+Rollouts must supply structured assistant tool calls and completion reasons.
+The client seeds isolated cookie sessions and forwards declared tools to the
+original service. Schema owns required-tool, attacker-discriminator and
+truncation checks. Unknown verification types use all attacker argument keys, matching the source
+fallback. Nonfinite, null or container-valued trusted discriminators are invalid tasks. Ordinary tool
+arguments preserve source string normalization and null handling. Each session
+has a 30-second grading deadline and a separate five-second disposal request.
+NeMo's `/verify` is the only endpoint that actually removes IPI state, so cleanup
+invokes its native computation but ignores its reward. Cleanup errors remain
+visible and cannot produce credit. Without the option, the route retains its
+original unimplemented behavior.

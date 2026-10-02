@@ -31,6 +31,9 @@ dependencies = [
 [project.urls]
 Repository = "https://github.com/NovaSky-AI/SkyRL"
 
+[tool.setuptools.package-data]
+"skyrl_gym.envs.nemotron_ultra" = ["abstention_prompt.txt", "jailbreak_verifiers.yaml"]
+
 [tool.setuptools.packages.find]
 include = ["skyrl_gym*"]
 

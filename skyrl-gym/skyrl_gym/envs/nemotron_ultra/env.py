@@ -35,6 +35,7 @@ from skyrl_gym.envs.nemotron_ultra.tool_call import grade_expected_action
 from skyrl_gym.envs.reasoning_gym.scoring import extract_answer
 from skyrl_gym.verification import VERIFIER_RUNTIME_ERROR, RolloutEvidence, VerificationResult
 
+_IPI_AGENT = "indirect_prompt_injection_simple_agent"
 _NS_TOOLS_AGENT = "ns_tools_simple_agent"
 _LEAN_AGENT = "math_formal_lean_refinement_agent"
 _TOOL_COMPARISON_AGENTS = {
@@ -95,8 +96,13 @@ class NemotronUltraEnv(BaseTextEnv):
         self.agent = str(ultra["agent"])
         self.reasoning_record_json = ultra.get("record_json")
         self.record = self._decode_mapping(ultra.get("record_json"), "record_json")
-        self.request = self._decode_mapping(ultra.get("request_json"), "request_json")
+        self.request_json = ultra.get("request_json")
+        self.request = self._decode_mapping(self.request_json, "request_json")
         self.evidence: RolloutEvidence | None = None
+        self.ipi_client = None
+        self.ipi_calls = []
+        self.ipi_url = env_config.get("ipi_resources_url")
+        self.ipi_terminal = None
         sandbox_config = env_config.get("sandbox", {})
         self.sandbox = SandboxClient(
             host=str(sandbox_config.get("host", "127.0.0.1")),
@@ -117,6 +123,8 @@ class NemotronUltraEnv(BaseTextEnv):
         )
         if self.agent in {"genrm_simple_agent", "genrm_simple_agent_reasoning_off"}:
             self.max_turns = 1
+        elif self.agent == _IPI_AGENT and self.verifyit_enabled:
+            self.max_turns = 5
         elif self.agent == _NS_TOOLS_AGENT:
             self.max_turns = 50
         elif self.agent == _LEAN_AGENT:
@@ -134,7 +142,11 @@ class NemotronUltraEnv(BaseTextEnv):
         return decoded
 
     def close(self) -> None:
-        self.sandbox.close_session(self.sandbox_session_id)
+        try:
+            if self.ipi_client is not None:
+                self.ipi_client.close(self.ipi_calls)
+        finally:
+            self.sandbox.close_session(self.sandbox_session_id)
 
     def set_rollout_evidence(self, evidence: RolloutEvidence) -> None:
         self.evidence = evidence
@@ -201,14 +213,83 @@ class NemotronUltraEnv(BaseTextEnv):
         diagnostics["max_steps_exhausted"] = observations is not None
         return None
 
+    def _ipi_turn(self, action: str) -> BaseTextEnvStepOutput:
+        from verifyit.grade import InvalidTask
+        from verifyit.json_objects import unique_object
+        from verifyit.modes.grade_json_schema import grade_json_schema_candidate
+
+        from skyrl_gym.envs.nemotron_ultra.ipi import IPIClient, grade_trace, parse_calls
+
+        if self.ipi_terminal is not None:
+            return self.ipi_terminal
+        if self.ipi_client is None:
+            try:
+                record = json.loads(self.reasoning_record_json, object_pairs_hook=unique_object)
+                request = json.loads(self.request_json, object_pairs_hook=unique_object)
+            except ValueError as error:
+                raise InvalidTask("IPI trusted record/request is not unique-key JSON") from error
+            if (
+                grade_json_schema_candidate({"type": "array", "items": {"type": "object"}}, [record, request]).reward
+                != 1
+            ):
+                raise InvalidTask("IPI trusted record and request must be finite objects")
+            params = record.get("responses_create_params", {})
+            if (
+                grade_json_schema_candidate({"type": "array", "items": {"type": "object"}}, [request, params]).reward
+                != 1
+            ):
+                raise InvalidTask("IPI trusted request metadata must be finite objects")
+            shared = {key: {"const": value} for key, value in request.items() if key in params}
+            if grade_json_schema_candidate({"type": "object", "properties": shared}, params).reward != 1:
+                raise InvalidTask("IPI record and request metadata conflict")
+            # Sky separates the request from record_json; NeMo requires its envelope, not its prompt for grading.
+            record = {**record, "responses_create_params": {"input": [], **params, **request}}
+            grade_trace(record, [], truncated=True)  # Validate trusted contract before tools/candidate.
+            if not isinstance(self.ipi_url, str) or not self.ipi_url:
+                raise RuntimeError("IPI requires ipi_resources_url pointing to the pinned NeMo service")
+            self.ipi_client = IPIClient(self.ipi_url, record)
+            self.ipi_client.seed()
+        if self.evidence is None:
+            raise RuntimeError("IPI requires structured rollout evidence")
+        reason = self.evidence.stop_reason
+        if reason not in {"stop", "tool_calls", "length", "max_output_tokens"}:
+            raise RuntimeError("IPI completion protocol is unavailable")
+        calls = parse_calls(self.evidence.metadata.get("assistant_message"))
+        if len({call["call_id"] for call in [*self.ipi_calls, *calls]}) != len(self.ipi_calls) + len(calls):
+            raise ValueError("IPI function identities repeat")
+        self.ipi_calls.extend(calls)
+        truncated = reason in {"length", "max_output_tokens"}
+        if calls and not truncated and self.turns < self.max_turns:
+            return BaseTextEnvStepOutput(
+                observations=self.ipi_client.execute(calls),
+                reward=0.0,
+                done=False,
+                metadata={"agent": self.agent},
+                verification=VerificationResult.unavailable("tool episode is continuing"),
+            )
+        verdict = grade_trace(self.ipi_client.record, self.ipi_calls, truncated=truncated or bool(calls))
+        self.ipi_client.close(self.ipi_calls)
+        self.ipi_terminal = BaseTextEnvStepOutput(
+            observations=[],
+            reward=verdict.reward,
+            done=True,
+            metadata={"agent": self.agent},
+            verification=VerificationResult.verified(verdict.reward, passed=verdict.reward == 1),
+        )
+        return self.ipi_terminal
+
     def step(self, action: str) -> BaseTextEnvStepOutput:
         action = final_answer_text(action)
         error_types = (requests.RequestException, RuntimeError, ValueError)
+        invalid_task_types = ()
         if self.verifyit_enabled:
-            from verifyit.grade import InvalidTask
-
-            error_types += (InvalidTask,)
+            error_types += (ImportError,)
         try:
+            if self.verifyit_enabled:
+                from verifyit.grade import InvalidTask
+
+                invalid_task_types = (InvalidTask,)
+                error_types += invalid_task_types
             return self._step(action)
         except error_types as error:
             details = {
@@ -219,9 +300,14 @@ class NemotronUltraEnv(BaseTextEnv):
                 "error_message": str(error),
                 "grading_action": action,
             }
-            if self.verifyit_enabled and isinstance(error, InvalidTask):
+            if isinstance(error, invalid_task_types):
                 details.update(error_category="invalid_task", verifyit_status="invalid_task")
-            return BaseTextEnvStepOutput(
+            if self.agent == _IPI_AGENT and self.ipi_client is not None:
+                try:
+                    self.ipi_client.close(self.ipi_calls)
+                except (requests.RequestException, RuntimeError) as cleanup_error:
+                    details.update(cleanup_error=str(cleanup_error), error_category="infrastructure")
+            result = BaseTextEnvStepOutput(
                 observations=[],
                 reward=0.0,
                 done=True,
@@ -229,9 +315,15 @@ class NemotronUltraEnv(BaseTextEnv):
                 verification=VerificationResult.error("verifier failed", diagnostics=details),
             )
 
+            if self.agent == _IPI_AGENT and self.verifyit_enabled:
+                self.ipi_terminal = result
+            return result
+
     def _step(self, action: str) -> BaseTextEnvStepOutput:
         diagnostics: dict[str, Any] = {"agent": self.agent}
         self.turns += 1
+        if self.agent == _IPI_AGENT and self.verifyit_enabled:
+            return self._ipi_turn(action)
         if self.agent == _NS_TOOLS_AGENT:
             tool_turn = self._ns_tools_turn(action, diagnostics)
             if tool_turn is not None:
