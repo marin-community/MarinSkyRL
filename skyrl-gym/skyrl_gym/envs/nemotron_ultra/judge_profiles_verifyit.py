@@ -17,7 +17,6 @@ from harbor_config.errors import error_category
 from verifyit.execution.worker import call_bounded
 from verifyit.grade import Aggregation, InvalidTask, Reward, Status, aggregate_rewards, finalize_preparation_failure
 from verifyit.modes.grade_judge import JudgeConnection, grade_judge_candidate, validate_judge_spec
-from verifyit.preparation.errors import PreparationFailure
 from verifyit.spec import JudgeSpec
 
 from skyrl_gym.envs.nemotron_ultra.answer_extraction import final_answer_text, last_boxed_answer
@@ -208,14 +207,13 @@ def prepare_profile(inputs: ProfileInputs, judge: dict[str, Any]) -> PreparedPro
 
 
 def _failure(error: Exception, status: Status, stage: str) -> Reward:
-    failure = PreparationFailure(
-        status,
-        error_category("InvalidTask" if status == Status.INVALID_TASK else type(error).__name__),
-        type(error).__name__,
-        str(error),
-        stage,
+    return finalize_preparation_failure(
+        status=status,
+        category=error_category("InvalidTask" if status == Status.INVALID_TASK else type(error).__name__),
+        error_type=type(error).__name__,
+        message=str(error),
+        stage=stage,
     )
-    return finalize_preparation_failure(**dataclasses.asdict(failure))
 
 
 def _evaluate(inputs: ProfileInputs, judge: dict[str, Any]) -> Reward:

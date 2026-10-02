@@ -17,6 +17,9 @@ def judge_server():
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             server.requests.append(body)
+            if hasattr(server, "entered"):
+                server.entered.set()
+                server.release.wait(timeout=10)
             index = min(len(server.requests) - 1, len(server.replies) - 1)
             response = {
                 "id": "source-judge",
@@ -39,7 +42,10 @@ def judge_server():
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(encoded)))
             self.end_headers()
-            self.wfile.write(encoded)
+            try:
+                self.wfile.write(encoded)
+            except BrokenPipeError:
+                pass
 
         def log_message(self, *args):
             pass
@@ -410,3 +416,127 @@ def test_framework_judge_diagnostics_keep_trusted_reference_private(agent, judge
             assert result["metadata"]["judge_outputs"] == ["[[A=B]]", "[[A=B]]"]
         else:
             assert secret in json.dumps(result, default=str)
+
+
+def test_malformed_worker_result_is_unscored(monkeypatch):
+    from skyrl_gym.envs.nemotron_ultra import math_judge_verifyit as adapter
+
+    monkeypatch.setattr(adapter, "call_bounded", lambda *args, **kwargs: None)
+    reward, detail = adapter.grade_math_verifyit("2", {"expected_answer": "2", "question": "1+1?"}, judge=None)
+    assert reward == 0
+    assert detail["verifyit_verdict"]["status"] == "infra_error"
+
+
+@pytest.mark.parametrize("value,expected", [(float("nan"), 0), (float("inf"), 0), (True, 0), (2, 0), (1, 1)])
+def test_worker_reward_validation(value, expected, monkeypatch):
+    from verifyit.grade import Reward, Status
+    from skyrl_gym.envs.nemotron_ultra import math_judge_verifyit as adapter
+
+    monkeypatch.setattr(
+        adapter,
+        "call_bounded",
+        lambda *args, **kwargs: Reward(value, Status.SCORED, {"source_feedback": {"library_reward": 1}}),
+    )
+    reward, detail = adapter.grade_math_verifyit("2", {"expected_answer": "2", "question": "1+1?"}, judge=None)
+    assert reward == expected
+    assert detail["verifyit_verdict"]["status"] == ("scored" if expected else "infra_error")
+
+
+def test_deserialization_uses_total_deadline(monkeypatch):
+    from skyrl_gym.envs.nemotron_ultra import math_judge_verifyit as adapter
+
+    clock = [10.0]
+    loads = adapter.json.loads
+
+    def slow_decode(payload):
+        clock[0] += 2
+        return loads(payload)
+
+    monkeypatch.setattr(adapter.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(adapter.json, "loads", slow_decode)
+    reward, detail = adapter.grade_math_verifyit(
+        "2", {"expected_answer": "2", "question": "1+1?"}, judge=None, timeout_seconds=1
+    )
+    assert reward == 0
+    assert detail["verifyit_verdict"]["status"] == "infra_error"
+
+
+def test_worker_timeout_cleans_process_group_and_parent_directory(monkeypatch, tmp_path, judge_server):
+    import dataclasses
+    import os
+    from verifyit.execution import command
+    from skyrl_gym.envs.nemotron_ultra import math_judge_verifyit as adapter
+
+    processes = []
+    popen = command.subprocess.Popen
+
+    def observe_process(*args, **kwargs):
+        process = popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(command.subprocess, "Popen", observe_process)
+    monkeypatch.setattr(adapter.tempfile, "tempdir", str(tmp_path))
+    server, judge = judge_server
+    judge = dataclasses.replace(judge, timeout_seconds=20)
+    server.entered = threading.Event()
+    server.release = threading.Event()
+    try:
+        reward, detail = adapter.grade_math_verifyit(
+            "A dog.", {"expected_answer": "A cat.", "question": "Which animal?"}, judge=judge, timeout_seconds=5
+        )
+    finally:
+        server.release.set()
+    assert server.entered.is_set()
+    assert reward == 0
+    assert detail["verifyit_verdict"]["status"] == "infra_error"
+    assert len(processes) == 1
+    assert processes[0].poll() is not None
+    with pytest.raises(ProcessLookupError):
+        os.killpg(processes[0].pid, 0)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_actual_worker_exception_discards_credit():
+    from verifyit.execution.worker import call_bounded
+    from skyrl_gym.envs.nemotron_ultra.math_judge_verifyit import _evaluate_bounded
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as directory:
+        result = call_bounded(
+            _evaluate_bounded,
+            {
+                "text": "A dog.",
+                "record": {"expected_answer": "A cat.", "question": "Which animal?"},
+                "judge": {"private": "secret"},
+            },
+            directory,
+            timeout=10,
+        )
+    assert result.reward == 0
+    assert result.status.value == "infra_error"
+
+
+def test_public_projection_cannot_return_late_credit(monkeypatch):
+    from verifyit.grade import Reward, Status
+    from skyrl_gym.envs.nemotron_ultra import math_judge_verifyit as adapter
+
+    clock = [10.0]
+    sha256 = adapter.hashlib.sha256
+
+    def slow_digest(payload):
+        clock[0] += 2
+        return sha256(payload)
+
+    monkeypatch.setattr(adapter.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(adapter.hashlib, "sha256", slow_digest)
+    monkeypatch.setattr(
+        adapter,
+        "call_bounded",
+        lambda *args, **kwargs: Reward(1, Status.SCORED, {"source_feedback": {"library_reward": 1}}),
+    )
+    reward, detail = adapter.grade_math_verifyit(
+        "2", {"expected_answer": "2", "question": "1+1?"}, judge=None, timeout_seconds=1
+    )
+    assert reward == 0
+    assert detail["verifyit_verdict"]["status"] == "infra_error"

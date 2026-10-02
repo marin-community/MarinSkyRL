@@ -14,7 +14,6 @@ from verifyit.preparation.errors import InvalidPreparation, PreparationError, Pr
 from skyrl_gym.envs.nemotron_ultra.genrm import collect_genrm_comparisons
 from skyrl_gym.envs.nemotron_ultra.genrm_utils import (
     apply_length_bonuses,
-    extract_from_response_obj,
     generate_comparison_pairs,
 )
 from skyrl_gym.envs.nemotron_ultra.judge import OpenAIJudge
@@ -34,7 +33,6 @@ class PreparedGenRM:
     capture: CapturedGenRM
     policies: dict[str, str]
     pairs: list[tuple[int, int]]
-    lengths: list[dict[str, int]]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -178,11 +176,7 @@ def prepare_genrm_cohort(capture, config):
         "require_all_peers_v1",
     ):
         raise InvalidTask("GenRM preparation policy is unsupported")
-    lengths = []
-    for response in capture.responses:
-        reasoning, answer = extract_from_response_obj(response)
-        lengths.append({"reasoning": len(reasoning.strip()), "answer": len(answer.strip())})
-    return PreparedGenRM(capture, policies, generate_comparison_pairs("circular", len(capture.responses)), lengths)
+    return PreparedGenRM(capture, policies, generate_comparison_pairs("circular", len(capture.responses)))
 
 
 def _grade_genrm_cohort(

@@ -1,31 +1,23 @@
 # Unified verification
 
-SkyRL clients call verifyit's existing verifier modes while retaining task-specific response extraction and framework reward reporting. The dependency is pinned to published commit `5cc623fa8bdd229421a12e1b3745320a492ad704` in the project metadata. No local campaign checkout or unpublished wheel is needed. SkyRL uses math-verify 0.9.0, upgraded from 0.8.0 to satisfy the unified dependency. Math parsing or equivalence behavior can change with this upgrade; the 2026-10-01 campaign snapshot used math-verify 0.8.0. The offline comparisons use 0.9.0 on both paths.
+Set `verifyit_enabled: true` to use verifyit's existing modes. Omit the option or set it to
+`false` to retain native scoring. SkyRL owns tool interactions, sandbox services, source
+response preparation and framework reward reporting. Dependency revisions are pinned in
+[the root manifest](../pyproject.toml), [the Gym manifest](../skyrl-gym/pyproject.toml) and their
+lockfiles; no campaign checkout is required.
 
-## Install and reproduce
+## Install and enable
 
-SkyRL Gym now requires Python >=3.11 (previously >=3.10), matching verifyit’s minimum. The root launcher remains Python 3.12. The commands below select Python 3.12.
-
-From this checkout, with Git and [uv](https://docs.astral.sh/uv/) installed:
+Gym requires Python >=3.11; the root launcher uses Python 3.12. For a frozen Gym install:
 
 ```bash
-uv venv --python 3.12 .venv-verifiers
-uv pip install --python .venv-verifiers/bin/python -e './skyrl-gym[dev]'
-.venv-verifiers/bin/python tools/verifyit/replay.py --output /tmp/skyrl-verifier-replay.json
-.venv-verifiers/bin/python -m pytest skyrl-gym/tests/test_verifyit_reasoning_mcqa.py
+uv sync --project skyrl-gym --frozen --extra dev --python 3.12
+uv run --project skyrl-gym --frozen python tools/verifyit/replay.py --output /tmp/skyrl-verifier-replay.json
 ```
 
-The replay uses checked-in response fixtures. It invokes both the original and cutover MCQA scorer and both original and cutover Reasoning Gym environments, and both math scoring entrypoints with a local HTTP judge fixture. The output retains each input and both results, including scored zero. A mismatch exits unsuccessfully. Math wrong-answer fallback receives the same fixed non-equivalence response from a local HTTP server on both paths; no model inference is involved. This is a scoring roundtrip, without model inference or a live judge. The fixtures are synthetic; they do not reproduce archived model-run scores.
-
-For a frozen gym installation, run `uv sync --project skyrl-gym --frozen --extra dev --python 3.12`, then `uv run --project skyrl-gym --frozen python tools/verifyit/replay.py --output /tmp/skyrl-verifier-replay.json`. The gym and root locks include the exact published verifyit revision and math-verify 0.9.0.
-
-The normal launcher installation uses the root project's CPU or GPU profile described in the README. The smaller installation above exercises verifiers without installing a training runtime. Code and Lean verification additionally require the configured sandbox runtime. Judge routes require their configured provider and credentials; they cannot be exercised through the offline fixtures.
-
-The Gym CI job starts the real [NeMo Skills local sandbox](https://github.com/NVIDIA-NeMo/Skills/blob/bcf059af55c20a89f797724598f9908d126153e6/nemo_skills/code_execution/local_sandbox/local_sandbox_server.py) at revision `bcf059af55c20a89f797724598f9908d126153e6`, verifies its SHA256, and installs Flask 3.1.2, IPython 9.6.0, psutil 7.1.0, NumPy 2.2.6 and pandas 2.3.0 in a separate test environment. The service requires Linux resource limits; its setup, bounded health check and process-group cleanup are in [cpu_ci.yaml](../.github/workflows/cpu_ci.yaml). This supplies execution for code integration tests rather than substituting precomputed rewards.
-
-## Enable verifyit
-
-For MCQ, AIME, GSM8K and environments that retain their original scorer, pass `verifyit_enabled: true` in the environment configuration:
+The replay uses synthetic local fixtures and a fixed HTTP judge. It checks representative
+source/enabled outcomes without model inference; it does not establish all-route parity.
+For launcher and training dependencies, follow the [README](../README.md).
 
 ```python
 import skyrl_gym
@@ -42,119 +34,96 @@ environment = skyrl_gym.make(
 print(environment.step("Answer: 42"))
 ```
 
-Set the option to `false` or omit it to run the original Reasoning Gym, IFEval, SQL, LiveCodeBench or Nemotron scorer. The [launcher acceptance configuration](../cloud/iris/configs/nemotron_ultra_rlvr_acceptance.yaml) shows the deployed sandbox host/port and judge `base_url`, `model`, and `api_key_env` settings. Set `environment.skyrl_gym.nemotron_ultra.verifyit_enabled: true` alongside those fields; the [trajectory runner](../skyrl-train/skyrl_train/trajectory_runners/skyrl_gym.py) passes each environment configuration to its constructor and propagates the option to GenRM. Other environments use `environment.skyrl_gym.<environment_name>.verifyit_enabled: true`.
+Training uses `environment.skyrl_gym.<environment_name>.verifyit_enabled: true`.
+For Nemotron, set `environment.skyrl_gym.nemotron_ultra.verifyit_enabled: true`; the
+trajectory runner also forwards it to GenRM. The [launcher configuration](../cloud/iris/configs/nemotron_ultra_rlvr_acceptance.yaml)
+shows sandbox host/port and judge `base_url`, `model`, and `api_key_env` fields. Set the
+credential environment variable locally. Its cluster hostname requires your deployment.
 
-Enabled Nemotron abstention, multichallenge, and the four jailbreak policy routes use
-core Judge and Exact with MEAN or PRODUCT composition under one process-group deadline.
-`verifyit_judge_total_timeout_seconds` sets the total budget (default 120 seconds).
-All component specs are validated before requests, including references on the IDK gate.
-The four jailbreak policies preserve source fractional scores such as missing-disclaimer 0.3.
+Invalid references and infrastructure failures receive minimum reward with an error
+status. A wrong candidate scoring zero remains a completed verdict. Public diagnostics
+retain policy names and input hashes; protected receipts may contain references and
+provider prose. Source-native diagnostics remain unchanged. Math parsing uses
+math-verify 0.9.0; the dependency upgrade from 0.8.0 can change equivalence behavior.
 
-`verifyit_judge_profile_policies` selects named preparation controls. Defaults are
-`response: nemotron_final_answer_v1` (reasoning removal and abstention last-box selection),
-`abstention: nemotron_articles_punctuation_case_v1`,
-`rubric: nemotron_yes_unless_no_v1`,
+## Preparation and limits
+
+- MCQ uses `skyrl_mcq_first_box_v1`; Ultra MCQA uses `skyrl_ultra_mcqa_source_v1`.
+  Invalid options, modes, references and regexes are task errors, including for blank
+  candidates; regex timeouts are infrastructure errors. This fixes native malformed-regex
+  fallback. Their worker budget is ten seconds.
+- AIME/GSM8K use `verifyit_timeout` (default ten seconds). AIME retains its source answer
+  window and strict-box or Minerva policy. Non-strict AIME supports finite constants,
+  colon ratios and flat numeric tuples; tuple order and spelling remain significant.
+  Nested/singleton tuples and unsupported parsed forms are invalid references. Strict-box
+  mode distinguishes a missing box from an empty box. GSM8K retains first-marker,
+  last-number and completed final-line policies; multi-turn format bonuses remain shaping.
+- Reasoning Gym and IFEval use existing modes. Reasoning Gym rejects duplicate JSON keys
+  and nonfinite trusted records before normalization. Search retains last-answer-tag and
+  QA normalization; SearchCode forwards final history to its numeric-answer verifier.
+- Structured outputs use `nemotron_structured_output_source_v1` for source JSON/XML/CSV
+  parsing and schema-directed coercion. Invalid schemas are task errors even when the
+  candidate cannot be prepared. Tool comparison uses `nemotron_strict_typed_arguments_v1`:
+  integer/float/boolean distinctions are preserved, duplicate keys fail closed and
+  malformed candidate JSON scores zero. These strict cases can differ from native scores.
+- Seeded SQL uses `skyrl_seeded_round6_multiset_columns_readonly_finite_100000_reference_first_v1`:
+  six-decimal rounding, numeric int/float equivalence, duplicate rows, column count and
+  optional order. Original and perturbed databases must match. WITHOUT ROWID tasks are
+  unsupported. Legacy SQL uses `skyrl_legacy_set_numeric_readonly_finite_100000_reference_first_v1`;
+  empty results ignore column count and framework scores remain -1/0/1. Both policies
+  admit all references first, require read-only queries and cap finite results at 100000
+  rows. Final grading has a 90-second worker budget; interactive tools use five seconds
+  per call. Native episode limits remain separate.
+
+## Judge and code services
+
+Judge profiles use `verifyit_judge_total_timeout_seconds` (default 120).
+`verifyit_judge_profile_policies` defaults to `response: nemotron_final_answer_v1`,
+`abstention: nemotron_articles_punctuation_case_v1`, `rubric: nemotron_yes_unless_no_v1`,
 `labels: source_alias_lines_no_contradictions_v1`, and `composition: source_v1`.
-Alternatives are `response: literal_v1`, `abstention: literal_v1`,
-`rubric: binary_only_v1`, `labels: bracketed_only_no_contradictions_v1`, and
-`composition: mean_v1` or `product_v1`. Unknown controls are invalid tasks.
-Multichallenge accepts bare YES/NO and bracketed labels by default; contradictory
-completed labels fail as infrastructure errors. This is stricter than the native
-final-line-only parser. Public diagnostics retain policy names, input digests,
-component labels/rewards, and core status. Trusted task snapshots and provider prose
-stay in the bounded transport receipt and must be captured only by protected tooling.
+Alternatives are `literal_v1` for response/abstention, `binary_only_v1` for rubric,
+`bracketed_only_no_contradictions_v1` for labels, and `mean_v1`/`product_v1` for composition.
+Unknown controls are invalid tasks. Contradictory completed labels fail as infrastructure
+errors; native parsing considers only the final line. Jailbreak fractional rewards are
+preserved. Math/judge uses `nemotron_math_judge_source_v1`: source extraction and reference
+admission precede core Math, then symmetric Judge when needed. A first negative judge
+skips the second request while retaining both components in the denominator.
 
-Enabled GenRM grades completed comparison cohorts through core Judge and Schema inside a bounded Script worker. At least two responses are required. Verification rewards use [0, 1]; native optimization rewards retain the source's adjusted rating scale (base bounds −1.5–7.5) and length bonuses/penalties. The original source declares 1–5 bounds even though tie adjustments and shaping can exceed them. Malformed provider cohorts become error verdicts with optimization reward zero before shaping. Invalid trusted cohort data is reported separately as `invalid_task`; the enabled boundary conservatively masks all affected GenRM rows in that batch, including any earlier graded group, while preserving unrelated environments. Provider protocol and trusted-task failures never receive the source's default score of three. The archived environment traces contain pending-cohort placeholders, so the local controlled HTTP tests establish post-cohort behavior without claiming final archived judge-score parity.
+GenRM requires at least two responses and uses core paired Judge scores. Its
+`verifyit_timeout_seconds` defaults to 120; `verifyit_score_json_policy` selects
+`strict_single_object_v1` or `source_last_object_v1`, and `verifyit_peer_policy` selects
+`source_valid_peers_v1` or `require_all_peers_v1`. Length bonuses remain trainer shaping.
 
-The following offline tests serve controlled judge responses over local HTTP, compare original and enabled cohort rewards, and check malformed provider and child-task failures without credentials:
+Code and native Lean require a [SandboxClient](../skyrl-gym/skyrl_gym/envs/nemotron_ultra/sandbox.py)
+service with the task's Python dependencies or Lean toolchain. Code uses `lcb_source_v1`
+for source test normalization and fenced-code extraction; core primitives compare outputs
+and combine test verdicts. `code_verifier.total_timeout_seconds` must be finite and positive
+(default 300). Queueing and parent serialization consume that budget, though serialization
+is not interruptible. Parent session cleanup uses a separate ten-second HTTP timeout;
+this is not a strict end-to-end wall-clock bound. Cleanup failure prevents credit.
 
-```bash
-uv run --project skyrl-gym --locked --extra dev python -m pytest skyrl-gym/tests/test_genrm_verifyit.py
-```
+## Audited Lean service
 
-Code and source-native Lean use the [SandboxClient protocol](../skyrl-gym/skyrl_gym/envs/nemotron_ultra/sandbox.py): point the configured host/port to a running NeMo Skills sandbox with the benchmark’s Python dependencies or Lean project/toolchain. The acceptance configuration’s cluster hostname is an example deployment, not a public service. Judge settings are consumed by [OpenAIJudge](../skyrl-gym/skyrl_gym/envs/nemotron_ultra/judge.py); set the named environment variable locally with your provider credential before running judge routes. Direct source APIs expose `verifyit_enabled=True` where applicable; the checked-in replay demonstrates MCQA's switch.
-
-Enabled MCQ uses `skyrl_mcq_first_box_v1`; Ultra MCQA uses
-`skyrl_ultra_mcqa_source_v1`, retaining final-answer reasoning removal and last-box
-selection. The client captures raw text and task fields before applying either
-policy, and records the policy, effective mode, patterns, option mapping and raw
-input hash. Core MCQ owns final letter correctness; Exact compares source-normalized
-option text. A ten-second shared worker deadline bounds capture, validation,
-extraction and scoring, with process-group cleanup. Invalid option shapes,
-references, modes, malformed regexes and ambiguous regex captures now return
-`invalid_task`, including on blank candidates. This deliberately fixes the source's
-silent malformed-regex fallback. Regex timeouts return infrastructure errors.
-The disabled source path retains its existing behavior and optional dependencies.
-
-AIME, GSM8K and GSM8K multi-turn preserve source scoring when `verifyit_enabled` is omitted or false. When enabled, `verifyit_timeout` (default 10 seconds) bounds raw capture, trusted-reference validation, source extraction and core grading in one worker. Invalid references and ordinary verifier failures return typed error verdicts at minimum reward: -1 for AIME, 0 for GSM8K. Successful diagnostics record the named preparation policy, prediction and raw-input digest; reference answers remain internal. AIME retains its last-300-character window and either Minerva normalization or strict last-100-character box extraction. GSM8K retains strict first-marker, flexible last-number and final-line decimal policies; the single-turn final-line route also requires a completed stop reason. GSM8K multi-turn records the source format bonus separately from core correctness in `reward_result`.
-
-Enabled non-strict AIME canonicalizes finite exact constants and colon ratios before Exact comparison. Parsed variable expressions retain literal text comparison. Flat parenthesized tuples of at least two finite Python numeric literals use literal comparison of the normalized spelling: `(18,-24)` matches itself, while `(-24,18)` and `(18.0,-24)` do not. Nested tuples, singleton tuples, bracketed vectors, LaTeX tuple syntax and other compound forms are outside this tuple extension. Undefined references and unsupported parsed forms remain invalid tasks. Strict-box mode retains literal comparison, distinguishing a missing box from an empty box. The following command tests correct and wrong responses on both paths, including package import and default scoring with verifyit unavailable:
-
-```bash
-uv run --project skyrl-gym --locked --extra dev python -m pytest skyrl-gym/tests/test_mcq.py skyrl-gym/tests/test_aime.py skyrl-gym/tests/test_gsm8k.py skyrl-gym/tests/test_verifyit_gsm8k_multi_turn.py skyrl-gym/tests/test_math_preparation_verifyit.py
-```
-
-LiveCodeBench and Nemotron code generation use verifyit for output comparison and combining test verdicts. Their adapters manage sandbox sessions and transform wire values; they do not calculate correctness or partial credit. Source-native grading remains the default. Configure the sandbox host/port and set `verifyit_enabled: true` to use the unified grading path. Nonzero Nemotron reasoning-format penalties remain environment reward shaping. The enabled code paths snapshot source inputs before applying `lcb_source_v1`: source test normalization, final fenced-block extraction, callable top-level tuple conversion, and Schema/decimal-line comparison. Public diagnostics retain policy, candidate text and reference hashes; trusted tests stay outside candidate execution. Invalid test fixtures remain unscored invalid tasks, including constructor failures and worker validation. Cleanup failures retain the primary error and make an otherwise scored result an infrastructure failure at zero reward. Ordinary verifier exceptions return typed infrastructure failures at zero; server logs retain their tracebacks. Both enabled routes require a finite positive `code_verifier.total_timeout_seconds` (default 300); `None` is an invalid task. One worker covers raw-input copying, source preparation, reference validation, execution, format checking and aggregation. Waiting for a verifier slot consumes the same budget. Inputs follow the source JSON/text contract. Parent serialization is charged to the budget but is not interruptible; imports and protocol operations can also add overhead. Parent-owned session cleanup uses a separate 10-second HTTP timeout, so the grading budget is not a strict end-to-end wall-clock limit. Native timeout behavior is unchanged.
-
-Verification failures return minimum reward and retain framework verification/error information. A wrong candidate scoring zero is distinct from an invalid reference or unavailable verifier. Intentional corrections can change scores on malformed inputs; ordinary valid inputs should preserve source behavior.
-
-Both Nemotron structured-output aliases use `nemotron_structured_output_source_v1` when enabled. This policy preserves source parsing, payload selection and schema-directed XML/CSV coercion. Core Schema checks tool names and payloads; core ALL combines their verdicts. Preparation diagnostics identify the policy and hash raw inputs using `python_repr_utf8_v1`; candidate representations before and after coercion remain visible. Public errors omit trusted schema literals, tool names and payload keys; protected audit receipts retain full primitive inputs and errors. Invalid schemas remain task errors even when the candidate cannot be prepared. Tool argument decoding limits produce candidate zero scores after trusted-schema validation. Source scoring remains the default. Run `uv run --project skyrl-gym --frozen --extra dev python -m pytest skyrl-gym/tests/test_structured_outputs_verifyit.py` for the boundary tests.
-
-## Coverage and limits
-
-[The route inventory](../tools/verifyit/route-inventory.json) lists the 37 routes in the maintained packages and their original source locations. The replay command above produces fresh, local evidence for representative routes; it does not establish all-route parity.
-
-Exact, numeric, schema, instruction, code and judge clients reuse existing verifyit modes. No new verifier template is introduced. Source-specific setup, external services and sandbox requirements remain part of each benchmark's contract.
-
-
-### Audited Lean cutover
-
-The opt-in `math_formal_lean_refinement_agent` requires the audited runtime shipped in
-[tools/lean_runtime](../skyrl-gym/tools/lean_runtime). An ordinary sandbox completion flag cannot
-establish that a proof matches the task. From this checkout:
+The enabled `math_formal_lean_refinement_agent` requires [this runtime](../skyrl-gym/tools/lean_runtime):
 
 ```bash
 docker build --platform linux/amd64 -t skyrl-lean-audit skyrl-gym/tools/lean_runtime
-docker run --rm --init --name skyrl-lean-audit --cpus 1 --memory 4g --pids-limit 128 \
-  -p 127.0.0.1:6000:6000 skyrl-lean-audit
+docker run --rm --init --name skyrl-lean-audit --cpus 1 --memory 4g --pids-limit 128 -p 127.0.0.1:6000:6000 skyrl-lean-audit
 ```
 
-Set `environment.skyrl_gym.nemotron_ultra.verifyit_enabled: true` and its sandbox host/port to
-`127.0.0.1:6000` when the trainer runs on the same machine. Stop the service with
-`docker stop skyrl-lean-audit`. Keep the original path on its original sandbox; the audited
-service rejects unaudited requests. It handles requests serially, with one 30-second deadline
-for task compilation, candidate compilation and inspection. Candidate and task Lean run under
-separate unprivileged users. HTTP access must remain restricted to trusted callers.
+Configure sandbox host/port `127.0.0.1:6000` for a local trainer; stop with
+`docker stop skyrl-lean-audit`. Restrict HTTP access to trusted callers. The runtime pins
+Lean 4.12.0 and Mathlib `809c3fb3b5c8f5d7dace56e200b426187516535a`, and handles requests
+serially with a 30-second deadline. Separate unprivileged users compile task/candidate
+modules. Kernel inspection checks the immutable theorem type and rejects `sorryAx`, new
+axioms and trusted-name collisions; `propext`, `Classical.choice` and `Quot.sound` are allowed.
+Compiler rejection scores zero; missing audit evidence and unavailable tools fail closed.
 
-The runtime pins Lean 4.12.0 and Mathlib `809c3fb3b5c8f5d7dace56e200b426187516535a`.
-The archived producer's historical toolchain revision is unknown; these pins implement the
-published Nemotron profile. The 4 GiB runtime limit is required for the Mathlib audit; it does
-not describe the historical producer's resources.
+## Indirect prompt injection service
 
-The immutable task statement determines the expected theorem type. A separate inspector reads
-only the candidate module's declarations, rechecks them with Lean's kernel against trusted
-imports, and checks a witness against that expected type. It rejects requested-name collisions
-with trusted declarations. Ordinary `propext`, `Classical.choice` and `Quot.sound` dependencies
-are allowed; `sorryAx` and candidate-added axioms are rejected. Candidate stdout cannot supply
-audit evidence. Existing verifyit JSON Schema primitives and the shared ALL reducer own the
-score; the runtime only supplies compiler and inspection results. A compiler rejection scores
-zero and retains correction feedback; missing or truncated audit evidence reports an error
-with minimum optimization reward. A trusted declaration that cannot compile under the pinned
-libraries is an invalid task; unavailable tooling and audit timeouts remain infrastructure errors.
-Unsupported candidate declaration kinds fail closed.
-
-Reasoning Gym cutovers validate the original serialized trusted record before normalization. Duplicate JSON keys and nonfinite values produce minimum-reward error verdicts even for blank candidates. Omitting `verifyit_enabled` preserves source parsing and grading. Both the `reasoning_gym` environment and Nemotron `reasoning_gym_simple_agent` delegate scores to verifyit's existing ReasoningGym mode; dataset scoring uses reasoning-gym 0.1.25.
-
-Search and SearchCode keep source grading when the option is omitted. Enabled Search preserves last-answer-tag extraction, punctuation/article/whitespace normalization and exact alternative matching through Schema, Exact and shared reducers. Enabled SearchCode forwards its final history to the existing numeric-answer verifier. Malformed trusted references produce minimum-reward errors; tool calls and retrieval remain framework operations. The final-step contracts can be exercised offline with `uv run --project skyrl-gym --frozen python -m pytest skyrl-gym/tests/test_verifyit_search.py`.
-
-### Indirect prompt injection
-
-The opt-in `indirect_prompt_injection_simple_agent` uses the original NeMo Gym
-resource server pinned to `7a19900a114f8c349c9fac031b016575e39cfa36`.
-Configure `verifyit_enabled: true` and
-`ipi_resources_url: http://127.0.0.1:18765`. The server requires Python >=3.13.14;
-SkyRL communicates over HTTP and retains its existing Python requirement. From
-the pinned NeMo checkout, start the original resource app:
+`indirect_prompt_injection_simple_agent` requires NeMo Gym resource revision
+`7a19900a114f8c349c9fac031b016575e39cfa36`, Python >=3.13.14, and
+`ipi_resources_url: http://127.0.0.1:18765`. From that checkout:
 
 ```bash
 uv sync --frozen --no-dev --python 3.13
@@ -172,34 +141,8 @@ uvicorn.run(server.setup_webserver(), host="127.0.0.1", port=18765)
 PY
 ```
 
-Rollouts must supply structured assistant tool calls and completion reasons.
-The client seeds isolated cookie sessions and forwards declared tools to the
-original service. Schema owns required-tool, attacker-discriminator and
-truncation checks. Unknown verification types use all attacker argument keys, matching the source
-fallback. Nonfinite, null or container-valued trusted discriminators are invalid tasks. Ordinary tool
-arguments preserve source string normalization and null handling. Each session
-has a 30-second grading deadline and a separate five-second disposal request.
-NeMo's `/verify` is the only endpoint that actually removes IPI state, so cleanup
-invokes its native computation but ignores its reward. Cleanup errors remain
-visible and cannot produce credit. Without the option, the route retains its
-original unimplemented behavior.
-
-
-Tool-comparison routes, including the SWE pivot alias, snapshot their input records before
-preparing schema and numeric contracts. With `verifyit_enabled: true`,
-`verifyit_tool_comparison_policy: nemotron_strict_typed_arguments_v1` names the established
-strict opt-in policy: duplicate JSON keys fail closed, integer and floating types remain
-distinct, and absent tool calls become an empty list while other falsey values retain their
-types. Verifyit's Schema/Numeric modes and ALL reducer determine correctness. Framework
-metadata records the effective policy and SHA-256 hashes of the input records; trusted
-reference contents are not newly exposed in diagnostics. Errors retain policy and stage
-provenance. Unrepresentable numeric candidates and excessively nested candidate JSON
-score zero; malformed trusted action types and nested trusted JSON remain invalid tasks. Omitting the opt-in still uses
-the original source scorer. The policy retains the documented stricter behavior for
-boolean/integer confusion and malformed JSON; it is not a source-parity claim for those inputs.
-
-The opt-in Nemotron `ns_tools_simple_agent` and `math_with_judge_simple_agent` paths retain raw candidate and task data alongside the named `nemotron_math_judge_source_v1` preparation policy. That policy declares final-answer extraction, boxed/pure symbolic admission, reference-kind handling, and question-based additive-constant equivalence. Core Math owns symbolic grading; core Judge verdicts feed `aggregate_rewards(ALL, expected_total=2)`. A first negative judge result skips the second provider request, with the missing component retained in the denominator. The bounded Script only transports the core verdict. Returned preparation and core-verdict metadata supplement source feedback. On the enabled path, `judge_outputs` contains only validated labels returned by core Judge; full provider completions remain in protected transport receipts. The disabled source path keeps its existing diagnostics.
-
-The opt-in SQL routes capture raw tasks, responses and SQLite rows before applying named client policies. `text_to_sql` uses `skyrl_seeded_round6_multiset_columns_readonly_finite_100000_reference_first_v1`: source extraction, six-decimal float rounding, numeric int/float equivalence, row multiplicity, column count and optional row order are preserved. Both seeded and every-third-row perturbed databases must match; perturbation can be a no-op on small databases. WITHOUT ROWID tasks are unsupported and return `invalid_task`. `text2sql` uses `skyrl_legacy_set_numeric_readonly_finite_100000_reference_first_v1`: Schema checks full-history protocol observations, literal Exact compares canonical row sets, and ALL combines acceptance. Empty legacy results ignore column count. Framework projection retains -1 for format failure, 0 for mismatch and 1 for match; error results retain the -1..1 bounds and minimum reward with no verifier score.
-
-Both enabled policies deliberately require read-only queries, at most 100000 result rows, finite numbers and reference-first validation. These migration constraints are not universal native parity. SQL rejection scores zero; SQLite corruption, disk/resource faults and unknown runtime errors retain infrastructure status. Protected raw inputs and references stay in verifier-owned results. Public diagnostics expose policy, input digest and sanitized status: framework `infrastructure_error` corresponds to core `infra_error`. One existing verifyit worker bounds final task parsing, extraction, database construction, perturbation and grading to 90 seconds; transport/startup adds overhead. Interactive `text2sql` tools use separate five-second workers with process-group cleanup and a read-only/100000-row observation policy. This is a per-call budget; source `max_turns` governs the episode. Omitting `verifyit_enabled` preserves native behavior and works without verifyit installed. Run `uv run --project skyrl-gym --frozen --extra dev python -m pytest skyrl-gym/tests/test_verifyit_sql.py` for the SQL boundary tests.
+Supply structured assistant tool calls and completion reasons. Each isolated session has
+30 seconds for grading and a separate five-second disposal request. Cleanup calls NeMo's
+`/verify` only to remove state and ignores its reward. Cleanup errors prevent credit.
+Nonfinite/null/container trusted discriminators are invalid tasks. Unknown verification
+types use the source fallback of all attacker keys. The disabled route remains unimplemented.

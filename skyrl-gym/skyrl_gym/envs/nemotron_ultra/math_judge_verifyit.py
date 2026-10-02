@@ -11,21 +11,22 @@ import math
 import os
 from pathlib import Path
 import re
-import shlex
-import sys
 import tempfile
+import time
 from typing import Any
 
 from harbor_config.errors import ErrorCategory, error_category
+from verifyit.execution.worker import call_bounded
 from verifyit.grade import (
     Aggregation,
     Reward,
     Status,
+    _validated_reward,
     aggregate_rewards,
     finalize_preparation_failure,
     run,
 )
-from verifyit.spec import JudgeSpec, MathProfile, MathSpec, ScriptSpec, render_spec
+from verifyit.spec import JudgeSpec, MathProfile, MathSpec, render_spec
 
 from skyrl_gym.envs.nemotron_ultra.answer_extraction import (
     final_answer_text,
@@ -274,124 +275,74 @@ def _evaluate(data: dict[str, Any], root: Path) -> dict[str, Any]:
     )
 
 
+def _evaluate_bounded(data: dict, directory: str) -> Reward:
+    try:
+        verdict = _evaluate(data, Path(directory))
+    except Exception as error:
+        verdict = _failure(Status.INFRA_ERROR, type(error).__name__)
+    verdict["detail"].setdefault(
+        "preparation", {"policy": MathJudgePolicy.SOURCE.value, "raw": {"text": data["text"], "record": data["record"]}}
+    )
+    return Reward(verdict["reward"], Status(verdict["status"]), verdict["detail"])
+
+
 def grade_math_verifyit(
     text: str, record: dict[str, Any], *, judge, timeout_seconds: float = 60.0
 ) -> tuple[float, dict[str, Any]]:
+    started = time.monotonic()
     if (
         isinstance(timeout_seconds, bool)
         or not isinstance(timeout_seconds, (int, float))
         or not 0 < timeout_seconds <= 3600
         or not math.isfinite(timeout_seconds)
     ):
+        return 0.0, {"error_type": "schema_error", "error_message": "Invalid total verifier deadline"}
+    try:
+        payload = json.dumps(
+            {"text": text, "record": record, "judge": dataclasses.asdict(judge) if judge else None}, allow_nan=False
+        )
+    except (TypeError, ValueError):
+        return 0.0, {"error_type": "schema_error", "error_message": "Invalid math verifier reference/configuration"}
+    try:
+        data = json.loads(payload)
+        with tempfile.TemporaryDirectory(prefix="skyrl-math-judge-") as directory:
+            remaining = timeout_seconds - (time.monotonic() - started)
+            result = _validated_reward(call_bounded(_evaluate_bounded, data, directory, timeout=remaining))
+    except Exception as error:
+        result = Reward(0, Status.INFRA_ERROR, {"error": type(error).__name__})
+    try:
+        if result.status is Status.SCORED:
+            feedback = dict(result.detail["source_feedback"])
+            if "judge_outputs" in feedback:
+                feedback["judge_outputs"] = [
+                    component["detail"]["verdict"] for component in result.detail["judge_verdicts"]
+                ]
+        if time.monotonic() - started >= timeout_seconds:
+            raise TimeoutError("Math/judge verification exceeded its deadline")
+    except (KeyError, TypeError, ValueError, TimeoutError) as error:
+        result = Reward(0, Status.INFRA_ERROR, {"error": type(error).__name__})
+    # Full primitive inputs stay in the transport receipt, never agent-visible metadata.
+    preparation = result.detail.get("preparation", {})
+    public_preparation = {key: value for key, value in preparation.items() if key != "raw"}
+    public_preparation["raw_sha256"] = hashlib.sha256(payload.encode()).hexdigest()
+    public_verdict = {
+        "reward": result.reward,
+        "status": result.status.value,
+        "detail": {key: result.detail[key] for key in ("passed", "total", "missing") if key in result.detail},
+    }
+    public_detail = (
+        {**feedback, "verifyit_verdict": public_verdict, "preparation": public_preparation}
+        if result.status is Status.SCORED
+        else {}
+    )
+    if time.monotonic() - started >= timeout_seconds:
+        result = Reward(0, Status.INFRA_ERROR, {})
+        public_verdict = {"reward": 0.0, "status": Status.INFRA_ERROR.value, "detail": {}}
+    if result.status is not Status.SCORED:
         return 0.0, {
-            "error_type": "schema_error",
-            "error_message": "Invalid total verifier deadline",
-        }
-    with tempfile.TemporaryDirectory(prefix="skyrl-math-judge-") as directory:
-        root = Path(directory)
-        payload = root / "input.json"
-        try:
-            payload.write_text(
-                json.dumps(
-                    {
-                        "text": text,
-                        "record": record,
-                        "judge": dataclasses.asdict(judge) if judge else None,
-                    },
-                    allow_nan=False,
-                )
-            )
-        except (TypeError, ValueError):
-            return 0.0, {
-                "error_type": "schema_error",
-                "error_message": "Invalid math verifier reference/configuration",
-            }
-        checker = root / "check.sh"
-        checker.write_text(
-            "set -eu\nexec "
-            + shlex.quote(sys.executable)
-            + " "
-            + "-m skyrl_gym.envs.nemotron_ultra.math_judge_verifyit"
-            + " --check "
-            + shlex.quote(str(payload))
-            + "\n"
-        )
-        spec_path = root / "outer.toml"
-        spec_path.write_text(
-            render_spec(
-                ScriptSpec(
-                    path=checker.name,
-                    timeout=float(timeout_seconds),
-                    verdict_file="math-judge-verdict.json",
-                )
-            )
-        )
-        result = run(spec_path, root)
-        # Full primitive inputs stay in the transport receipt, never agent-visible metadata.
-        preparation = result.detail.get("preparation", {})
-        public_preparation = {key: value for key, value in preparation.items() if key != "raw"}
-        public_preparation["raw_sha256"] = hashlib.sha256(payload.read_bytes()).hexdigest()
-        public_verdict = {
-            "reward": result.reward,
-            "status": result.status.value,
-            "detail": {key: result.detail[key] for key in ("passed", "total", "missing") if key in result.detail},
-        }
-        if result.status is not Status.SCORED:
-            return 0.0, {
-                "error_type": ("schema_error" if result.status is Status.INVALID_TASK else "verification_error"),
-                "error_message": "Math/judge verification failed",
-                "verifyit_verdict": public_verdict,
-                "preparation": public_preparation,
-            }
-        feedback = dict(result.detail["source_feedback"])
-        if "judge_outputs" in feedback:
-            feedback["judge_outputs"] = [
-                component["detail"]["verdict"] for component in result.detail["judge_verdicts"]
-            ]
-        return result.reward, {
-            **feedback,
+            "error_type": ("schema_error" if result.status is Status.INVALID_TASK else "verification_error"),
+            "error_message": "Math/judge verification failed",
             "verifyit_verdict": public_verdict,
             "preparation": public_preparation,
         }
-
-
-def _main() -> None:
-    data = json.loads(Path(sys.argv[2]).read_text())
-    calls = []
-    active = {}
-
-    def observe(frame, event, arg):
-        if frame.f_code.co_name != "grade" or not frame.f_code.co_filename.endswith(
-            ("/verifyit/modes/grade_math.py", "/verifyit/modes/grade_judge.py")
-        ):
-            return
-        if event == "call":
-            item = {
-                "path": frame.f_code.co_filename,
-                "spec": dataclasses.asdict(frame.f_locals["spec"]),
-                "candidate": Path(frame.f_locals["spec"].output).read_text(),
-            }
-            calls.append(item)
-            active[id(frame)] = item
-        elif event == "return" and id(frame) in active:
-            active.pop(id(frame))["verdict"] = dataclasses.asdict(arg) if arg else None
-
-    sys.setprofile(observe)
-    directory = Path(sys.argv[2]).parent / "inner"
-    directory.mkdir()
-    try:
-        verdict = _evaluate(data, directory)
-    except Exception as error:
-        verdict = _failure(Status.INFRA_ERROR, type(error).__name__)
-    finally:
-        sys.setprofile(None)
-    verdict["detail"]["primitive_calls"] = calls
-    verdict["detail"].setdefault(
-        "preparation", {"policy": MathJudgePolicy.SOURCE.value, "raw": {"text": data["text"], "record": data["record"]}}
-    )
-    destination = Path(os.environ["VERIFYIT_LOGS_DIR"]) / "math-judge-verdict.json"
-    destination.write_text(json.dumps(verdict, allow_nan=False))
-
-
-if __name__ == "__main__":
-    _main()
+    return result.reward, public_detail
