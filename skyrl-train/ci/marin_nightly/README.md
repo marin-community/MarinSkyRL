@@ -3,7 +3,8 @@
 The nightly runs GSM8K GRPO on one H100, synchronous OPD on four H100s,
 Grug Megatron training on four H100s, and the asynchronous CatCount learning
 canary on four H100s. OpenCode is a separate manual workflow.
-All policy updates use Megatron and the frozen root environment. GSM8K and CatCount are scored against checked-in specs; the other nightly lanes
+All policy updates use Megatron and the frozen root environment. GSM8K and
+CatCount are scored against checked-in specs; the other nightly lanes
 exercise teacher scoring, Grug training and weight sync.
 
 | file | role |
@@ -31,8 +32,8 @@ WANDB_MIRROR kind=train step=2 metrics={"policy/policy_loss": 0.41, "reward/avg_
 against the spec's required metrics and bounds. A spec can also require evidence across
 the run: finite values at every step, minimum observation counts, first-to-last-window
 improvement, and a minimum number of observations above or below a threshold. Training and evaluation
-payloads are separate streams. `step` selects a numbered step, `first`, or
-`last` before checking a series; a required selected observation must exist. Duplicate payloads for one stream and step count once;
+payloads are separate streams. A selected observation must exist. Duplicate
+payloads for one stream and step count once;
 conflicting copies fail. The gate exits non-zero with one line per violation.
 `tests/cpu/test_marin_nightly_gate.py` covers it.
 
@@ -179,7 +180,7 @@ To exercise the whole path — provision, train, gate, tear down — trigger the
 
 ```bash
 gh workflow run marin-nightly.yaml \
-  -f max_steps=2 \
+  -f lane=cat-count-h100 \
   -f target_cluster=cw-rno2a
 ```
 

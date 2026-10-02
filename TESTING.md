@@ -20,7 +20,7 @@ and may select a different PyTorch/CUDA build from the image under test. Standar
 frozen root profile before running GPU tests. Isolated `uv` runs remain useful on networked development hosts
 when dependency resolution itself is part of the test.
 
-The manually dispatched GPU CI suite lives in `skyrl-train/tests/gpu/gpu_ci/`. Expensive, destructive, multi-node, and
+The manual GPU test suite lives in `skyrl-train/tests/gpu/gpu_ci/`. Expensive, destructive, multi-node, and
 fault-injection tests live outside that directory and require an explicit file path. A Python file deliberately
 named without the `test_` prefix is opt-in and must remain outside default discovery.
 

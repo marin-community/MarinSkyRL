@@ -358,20 +358,25 @@ def test_cat_count_gate_replays_native_runs(run, wall_clock, expected_status):
 
 
 @pytest.mark.parametrize(
-    "selector,bound,selected_step,bad_score",
+    "selector,max_step,bound,selected_step,bad_score,min_observations",
     [
-        (0, MetricBound(0.0, 0.1), 0, 0.3),
-        ("first", MetricBound(0.0, 0.1), 0, 0.3),
-        ("last", MetricBound(0.7, 1.0), 6, 0.6),
+        (0, None, MetricBound(0.0, 0.1), 0, 0.3, 1),
+        ("first", None, MetricBound(0.0, 0.1), 0, 0.3, 1),
+        ("last", None, MetricBound(0.7, 1.0), 6, 0.6, 1),
+        (None, 3, MetricBound(0.0, 0.3), 3, 0.4, 2),
     ],
 )
-def test_evaluation_step_selection_requires_the_selected_value(spec, selector, bound, selected_step, bad_score):
+def test_evaluation_step_selection_requires_the_selected_value(
+    spec, selector, max_step, bound, selected_step, bad_score, min_observations
+):
     spec = replace(
         spec,
         min_train_steps=0,
         finite_metrics=(),
         bounds={},
-        metric_gates=(MetricGate("eval", "eval/score", 1, bounds=bound, step=selector),),
+        metric_gates=(
+            MetricGate("eval", "eval/score", min_observations, bounds=bound, step=selector, max_step=max_step),
+        ),
     )
     rows = [StepMetrics("eval", step, {"eval/score": score}) for step, score in ((0, 0.0), (3, 0.3), (6, 0.8))]
     assert check_run(list(reversed(rows)), spec, 300) == []
