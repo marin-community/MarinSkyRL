@@ -64,7 +64,8 @@ from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint,
 from megatron.core.typed_torch import apply_module
 from torch import nn
 
-from skyrl_train.config.numerics import Numerics, one_layer_recompute_units
+from skyrl_train.config import grug_vllm_shapes as vllm_shapes
+from skyrl_train.config.numerics import ALLTOALL_DISPATCHER, MAX_PIPELINE_STAGES, Numerics, one_layer_recompute_units
 from skyrl_train.models import grug_inductor_kernels as vllm_inductor
 from skyrl_train.models.grug_handoffs import clear_hand_offs, hand_off, same_storage, take_hand_off
 from skyrl_train.models.grug_invariant_kernels import invariant_router_logits
@@ -116,23 +117,19 @@ def _vllm_numerics(config: TransformerConfig) -> bool:
     return config.grug_numerics is Numerics.EXACT
 
 
-# The deepest pipeline the stage statistic hand-off was verified on.
-MAX_PIPELINE_STAGES = 2
-
-
 def validate_vllm_numerics_model(config: TransformerConfig) -> None:
     """Refuse a model whose shapes or parts the vendored vLLM kernels do not compute: they are compiled for Snowball."""
     expected = {
-        "hidden_size": vllm_inductor.HIDDEN,
-        "num_attention_heads": vllm_inductor.HEADS,
-        "num_query_groups": vllm_inductor.KV_HEADS,
-        "kv_channels": vllm_inductor.HEAD_DIM,
-        "moe_shared_expert_intermediate_size": vllm_inductor.SHARED_WIDTH,
-        "grug_qk_mult": vllm_inductor.QUERY_FACTORS[0],
-        "grug_qk_mult_long_scale": vllm_inductor.QUERY_FACTORS[1],
+        "hidden_size": vllm_shapes.HIDDEN,
+        "num_attention_heads": vllm_shapes.HEADS,
+        "num_query_groups": vllm_shapes.KV_HEADS,
+        "kv_channels": vllm_shapes.HEAD_DIM,
+        "moe_shared_expert_intermediate_size": vllm_shapes.SHARED_WIDTH,
+        "grug_qk_mult": vllm_shapes.QUERY_FACTORS[0],
+        "grug_qk_mult_long_scale": vllm_shapes.QUERY_FACTORS[1],
         "tensor_model_parallel_size": 1,
         "context_parallel_size": 1,
-        "moe_token_dispatcher_type": "alltoall",
+        "moe_token_dispatcher_type": ALLTOALL_DISPATCHER,
         "params_dtype": torch.bfloat16,
     }
     found = {name: getattr(config, name) for name in expected}

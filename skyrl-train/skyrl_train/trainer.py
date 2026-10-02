@@ -285,7 +285,7 @@ class RayPPOTrainer:
 
     # Set at startup when generator.weight_sync_transport is expert_block.
     _expert_block_sync: ExpertBlockSync | None = None
-    # Set at construction under exact numerics (trainer.algorithm.numerics=exact).
+    # Set at construction when the run's numerics resolve to exact (trainer.algorithm.resolved_numerics).
     _exactness_check: ExactnessCheck | None = None
 
     _training_metrics_enabled: bool = False
@@ -318,7 +318,7 @@ class RayPPOTrainer:
         # The check's responses carry no captured routes, so it runs under native routing only (router replay under
         # exact numerics is a mismatch-probe diagnostic).
         if (
-            Numerics(cfg.trainer.algorithm.numerics) is Numerics.EXACT
+            Numerics(cfg.trainer.algorithm.resolved_numerics) is Numerics.EXACT
             and not cfg.trainer.policy.megatron_config.moe_router_replay
         ):
             self._exactness_check = ExactnessCheck(cfg, tokenizer)
@@ -3202,11 +3202,12 @@ class RayPPOTrainer:
         logger.info(f"Queued out-of-band HF export for global_step_{self.global_step}: {request_path}")
 
     def _log_numerics_fallback(self) -> None:
-        """Record that the configured numerics fell back to native at config resolution."""
-        fallback_from = self.cfg.trainer.algorithm.numerics_fallback_from
-        if fallback_from is None:
+        """Record that exact numerics fell back to native at config resolution, and why."""
+        reasons = self.cfg.trainer.algorithm.numerics_fallback_reasons
+        if not reasons:
             return
-        payload = {f"startup/numerics_fallback_from_{fallback_from}": 1.0}
+        logger.warning(f"Exact numerics fell back to native: {'; '.join(reasons)}")
+        payload = {"startup/numerics_fallback_from_exact": 1.0}
         self._log_metrics_stdout(payload, step=self.global_step, kind="startup")
         self.tracker.log(payload, step=self.global_step, commit=False)
 

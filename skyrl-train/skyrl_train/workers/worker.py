@@ -321,7 +321,7 @@ class Worker(DistributedTorchRayActor):
         telemetry_config = TelemetryConfig.from_environment()
         if telemetry_config.endpoint is not None:
             self._telemetry.enter_context(ProcessTelemetry(telemetry_config, WORKER_ROLE))
-        enable_trainer_batch_invariance(Numerics(cfg.trainer.algorithm.numerics) is Numerics.BATCH_INVARIANT)
+        enable_trainer_batch_invariance(Numerics(cfg.trainer.algorithm.resolved_numerics) is Numerics.BATCH_INVARIANT)
 
     @property
     def device(self) -> torch.device:

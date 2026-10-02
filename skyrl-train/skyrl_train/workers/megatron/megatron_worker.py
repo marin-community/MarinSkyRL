@@ -460,7 +460,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             model_source_uri=self.cfg.trainer.policy.model.get("source_uri"),
             tokenizer_path=self.cfg.trainer.policy.model.get("tokenizer_path"),
             tokenizer_revision=self.cfg.trainer.policy.model.get("tokenizer_revision"),
-            numerics=Numerics(self.cfg.trainer.algorithm.numerics),
+            numerics=Numerics(self.cfg.trainer.algorithm.resolved_numerics),
         )
 
         self.actor_module = self.make_megatron_module(
@@ -515,7 +515,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             logprob_chunk_size=OmegaConf.select(
                 self.cfg, "trainer.policy.megatron_config.logprob_chunk_size", default=None
             ),
-            numerics=Numerics(self.cfg.trainer.algorithm.numerics),
+            numerics=Numerics(self.cfg.trainer.algorithm.resolved_numerics),
         )
         self._maybe_install_router_replay("policy")
 
@@ -548,7 +548,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             logprob_chunk_size=OmegaConf.select(
                 self.cfg, "trainer.policy.megatron_config.logprob_chunk_size", default=None
             ),
-            numerics=Numerics(self.cfg.trainer.algorithm.numerics),
+            numerics=Numerics(self.cfg.trainer.algorithm.resolved_numerics),
         )
 
     def _ppo_train_impl(self, train_data, timing: PhaseBreakdown) -> "TrainingOutputBatch":
