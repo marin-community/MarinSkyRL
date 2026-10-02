@@ -192,8 +192,12 @@ async def test_token_staleness_reaches_the_training_batch_through_stamped_rollou
     )
     writer = Writer()
     try:
-        await worker.run_task(RolloutTask(RolloutLease("a", policy_step=7, batch_id=9), {"uid": "a"}, _task_request(0)), writer)
-        await worker.run_task(RolloutTask(RolloutLease("b", policy_step=8, batch_id=9), {"uid": "b"}, _task_request(1)), writer)
+        await worker.run_task(
+            RolloutTask(RolloutLease("a", policy_step=7, batch_id=9), {"uid": "a"}, _task_request(0)), writer
+        )
+        await worker.run_task(
+            RolloutTask(RolloutLease("b", policy_step=8, batch_id=9), {"uid": "b"}, _task_request(1)), writer
+        )
     finally:
         await worker.shutdown()
 

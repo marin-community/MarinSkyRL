@@ -13,7 +13,7 @@ from skyrl_gym.verification import (
     VerificationResult,
 )
 from taskcompendium.grading import GradeResult, Outcome
-from rolloutengine.contracts import RolloutData
+from rolloutengine.contracts import RolloutData, RolloutStep
 
 from skyrl_train.error_treatment import ErrorTreatment
 from skyrl_train.inference_engines.vllm.policy_steps import UNSAMPLED_POLICY_STEP
@@ -77,6 +77,11 @@ def rollout_loss_eligible(
         )
         is None
     )
+
+
+def _turn_window(step: RolloutStep, count: int) -> slice:
+    """The response positions of a turn's last ``count`` generated tokens."""
+    return slice(step.response_end + 1 - count, step.response_end + 1)
 
 
 def training_output(
@@ -189,7 +194,7 @@ def training_output(
             if tags is not None:
                 if len(tags) != len(step.turn.response_token_ids):
                     raise ValueError("Span tags must align with generated tokens")
-                response_span_tags[step.response_end + 1 - len(tags) : step.response_end + 1] = tags
+                response_span_tags[_turn_window(step, len(tags))] = tags
     template = next((value for value in routes if value is not None), None)
     routed_experts = None
     if template is not None:
@@ -198,7 +203,7 @@ def training_output(
             if values is not None:
                 if len(values) != len(step.turn.response_token_ids):
                     raise ValueError("Expert routes must align with generated tokens")
-                routed_experts[step.response_end + 1 - len(values) : step.response_end + 1] = values
+                routed_experts[_turn_window(step, len(values))] = values
     stamps = [step.turn.metadata.get("response_policy_steps") for step in rollout.steps]
     policy_steps = None
     if any(values is not None for values in stamps):
@@ -206,7 +211,7 @@ def training_output(
         policy_steps = np.full(len(rollout.response_token_ids), UNSAMPLED_POLICY_STEP, dtype=np.int32)
         for step, values in zip(rollout.steps, stamps, strict=True):
             if values is not None:
-                policy_steps[step.response_end + 1 - len(values) : step.response_end + 1] = values
+                policy_steps[_turn_window(step, len(values))] = values
     return AgentLoopOutput(
         evidence=RolloutEvidence(
             messages=rollout.messages,
