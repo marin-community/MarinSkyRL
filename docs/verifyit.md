@@ -52,7 +52,7 @@ The following offline tests serve controlled judge responses over local HTTP, co
 uv run --project skyrl-gym --locked --extra dev python -m pytest skyrl-gym/tests/test_genrm_verifyit.py
 ```
 
-Code and Lean use the [SandboxClient protocol](../skyrl-gym/skyrl_gym/envs/nemotron_ultra/sandbox.py): point the configured host/port to a running NeMo Skills sandbox with the benchmark’s Python dependencies or Lean project/toolchain. The acceptance configuration’s cluster hostname is an example deployment, not a public service. Judge settings are consumed by [OpenAIJudge](../skyrl-gym/skyrl_gym/envs/nemotron_ultra/judge.py); set the named environment variable locally with your provider credential before running judge routes. Direct source APIs expose `verifyit_enabled=True` where applicable; the checked-in replay demonstrates MCQA's switch.
+Code and source-native Lean use the [SandboxClient protocol](../skyrl-gym/skyrl_gym/envs/nemotron_ultra/sandbox.py): point the configured host/port to a running NeMo Skills sandbox with the benchmark’s Python dependencies or Lean project/toolchain. The acceptance configuration’s cluster hostname is an example deployment, not a public service. Judge settings are consumed by [OpenAIJudge](../skyrl-gym/skyrl_gym/envs/nemotron_ultra/judge.py); set the named environment variable locally with your provider credential before running judge routes. Direct source APIs expose `verifyit_enabled=True` where applicable; the checked-in replay demonstrates MCQA's switch.
 
 MCQ, AIME and GSM8K also preserve their original scoring when the option is omitted or false. AIME retains its extraction and optimization reward policy; GSM8K retains its configured strict, flexible or final-line extraction. Enabled non-strict AIME canonicalizes finite exact constants under a bounded worker, then uses Exact comparison. Colon ratios are translated to fractions. Parsed names and expressions containing variables retain literal text comparison; this does not grant symbolic equivalence. Multiple answers, undefined references and parsing failures are rejected conservatively; strict-box mode retains literal comparison. Invalid references or worker failures produce an error verdict and AIME reward -1. The enabled paths send prepared candidates to verifyit. The following command tests correct and wrong responses on both paths, including package import and default scoring with verifyit unavailable:
 
@@ -69,3 +69,40 @@ Verification failures return minimum reward and retain framework verification/er
 [The route inventory](../tools/verifyit/route-inventory.json) lists the 37 routes in the maintained packages and their original source locations. The replay command above produces fresh, local evidence for representative routes; it does not establish all-route parity.
 
 Exact, numeric, schema, instruction, code and judge clients reuse existing verifyit modes. No new verifier template is introduced. Source-specific setup, external services and sandbox requirements remain part of each benchmark's contract.
+
+
+### Audited Lean cutover
+
+The opt-in `math_formal_lean_refinement_agent` requires the audited runtime shipped in
+[tools/lean_runtime](../skyrl-gym/tools/lean_runtime). An ordinary sandbox completion flag cannot
+establish that a proof matches the task. From this checkout:
+
+```bash
+docker build --platform linux/amd64 -t skyrl-lean-audit skyrl-gym/tools/lean_runtime
+docker run --rm --init --name skyrl-lean-audit --cpus 1 --memory 4g --pids-limit 128 \
+  -p 127.0.0.1:6000:6000 skyrl-lean-audit
+```
+
+Set `environment.skyrl_gym.nemotron_ultra.verifyit_enabled: true` and its sandbox host/port to
+`127.0.0.1:6000` when the trainer runs on the same machine. Stop the service with
+`docker stop skyrl-lean-audit`. Keep the original path on its original sandbox; the audited
+service rejects unaudited requests. It handles requests serially, with one 30-second deadline
+for task compilation, candidate compilation and inspection. Candidate and task Lean run under
+separate unprivileged users. HTTP access must remain restricted to trusted callers.
+
+The runtime pins Lean 4.12.0 and Mathlib `809c3fb3b5c8f5d7dace56e200b426187516535a`.
+The archived producer's historical toolchain revision is unknown; these pins implement the
+published Nemotron profile. The 4 GiB runtime limit is required for the Mathlib audit; it does
+not describe the historical producer's resources.
+
+The immutable task statement determines the expected theorem type. A separate inspector reads
+only the candidate module's declarations, rechecks them with Lean's kernel against trusted
+imports, and checks a witness against that expected type. It rejects requested-name collisions
+with trusted declarations. Ordinary `propext`, `Classical.choice` and `Quot.sound` dependencies
+are allowed; `sorryAx` and candidate-added axioms are rejected. Candidate stdout cannot supply
+audit evidence. Existing verifyit JSON Schema primitives and the shared ALL reducer own the
+score; the runtime only supplies compiler and inspection results. A compiler rejection scores
+zero and retains correction feedback; missing or truncated audit evidence reports an error
+with minimum optimization reward. A trusted declaration that cannot compile under the pinned
+libraries is an invalid task; unavailable tooling and audit timeouts remain infrastructure errors.
+Unsupported candidate declaration kinds fail closed.
