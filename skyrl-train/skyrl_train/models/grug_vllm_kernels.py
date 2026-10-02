@@ -9,8 +9,9 @@ on the trainer's query, key and value, computing every row as a decode-invariant
 sums the token's slots it owns in fp32 and rounds once, and a bf16 ring reduction adds the rank partials, starting after
 the rank that holds the token's request and ending at it. ``vllm_topk_experts`` selects each token's experts with
 vLLM's call, ``vllm_expert_outputs`` computes each token-expert slot with vLLM's fused-MoE Triton kernels,
-``vllm_qkv_projection`` the attention's q, k and v as vLLM's three GEMMs, and ``vllm_token_logprobs`` the
-log-probabilities with model runner V2's kernel.
+``vllm_qkv_projection`` the attention's q, k and v as vLLM's three GEMMs on weights repacked from Megatron's fused
+QKV weight once per trainer forward (``repacked_weights``), and ``vllm_token_logprobs`` the log-probabilities with
+model runner V2's kernel.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 
 import torch
+import torch.nn.functional as F
 
 from skyrl_train.models.grug_fa3_invariant import (
     FA3_DYNAMIC_SPLIT_MAX_BATCH,
@@ -328,6 +330,78 @@ def expert_weight_offsets(weights: Sequence[torch.Tensor], base: torch.Tensor) -
     return [distance // unit for distance in distances]
 
 
+# vLLM's q, k and v weights repacked from each fused QKV weight (by its storage and layout), while ``repacked_weights``
+# holds them.
+_REPACKED_QKV_WEIGHTS: dict[tuple, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+
+
+@contextmanager
+def repacked_weights() -> Iterator[None]:
+    """Keep the q, k and v weights ``vllm_qkv_projection`` repacks for the block, one trainer forward or
+    forward-backward of unchanging parameters, and drop them before and after it."""
+    _REPACKED_QKV_WEIGHTS.clear()
+    try:
+        yield
+    finally:
+        _REPACKED_QKV_WEIGHTS.clear()
+
+
+def _qkv_slices(query_width: int, head_dim: int) -> tuple[slice, slice, slice]:
+    """Each KV group's query, key and value rows of Megatron's fused QKV weight."""
+    return (
+        slice(0, query_width),
+        slice(query_width, query_width + head_dim),
+        slice(query_width + head_dim, query_width + 2 * head_dim),
+    )
+
+
+def _repacked_qkv_weights(
+    fused_weight: torch.Tensor, groups: int, query_width: int, head_dim: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """vLLM's contiguous q, k and v weights gathered from ``fused_weight``'s groups, repacked once per
+    ``repacked_weights`` block for each fused weight."""
+    key = (fused_weight.data_ptr(), tuple(fused_weight.shape), fused_weight.dtype, groups, query_width, head_dim)
+    weights = _REPACKED_QKV_WEIGHTS.get(key)
+    if weights is None:
+        grouped = fused_weight.detach().view(groups, query_width + 2 * head_dim, -1)
+        weights = tuple(grouped[:, rows].reshape(-1, grouped.shape[-1]) for rows in _qkv_slices(query_width, head_dim))
+        _REPACKED_QKV_WEIGHTS[key] = weights
+    return weights
+
+
+class _QkvProjection(torch.autograd.Function):
+    """vLLM's three GEMMs on the repacked weights, differentiated as ``F.linear`` of each part on its weight slice.
+
+    The backward computes each part's gradients as autograd computes ``F.linear``'s, writes the weight gradients
+    into the fused layout, and adds the input gradients in autograd's order: the value projection's first, the
+    query projection's last.
+    """
+
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, fused_weight: torch.Tensor, groups: int, query_width: int, head_dim: int):
+        weights = _repacked_qkv_weights(fused_weight, groups, query_width, head_dim)
+        ctx.save_for_backward(x, *weights)
+        ctx.layout = (groups, query_width, head_dim)
+        parts = [F.linear(x, weight) for weight in weights]
+        return torch.cat([part.view(*x.shape[:-1], groups, -1) for part in parts], dim=-1).view(*x.shape[:-1], -1)
+
+    @staticmethod
+    def backward(ctx, grad: torch.Tensor):
+        x, *weights = ctx.saved_tensors
+        groups, query_width, head_dim = ctx.layout
+        rows = x.reshape(-1, x.shape[-1])
+        grouped_grad = grad.reshape(rows.shape[0], groups, query_width + 2 * head_dim)
+        grad_fused = weights[0].new_zeros(groups * (query_width + 2 * head_dim), rows.shape[1])
+        grouped_fused = grad_fused.view(groups, query_width + 2 * head_dim, -1)
+        grad_x = None
+        for part, weight in reversed(list(zip(_qkv_slices(query_width, head_dim), weights, strict=True))):
+            grad_part = grouped_grad[:, :, part].reshape(rows.shape[0], -1)
+            term = grad_part.mm(weight)
+            grad_x = term if grad_x is None else grad_x + term
+            grouped_fused[:, part] = rows.t().mm(grad_part).t().view(groups, -1, rows.shape[1])
+        return grad_x.view(x.shape), grad_fused, None, None, None
+
+
 def vllm_qkv_projection(
     x: torch.Tensor, fused_weight: torch.Tensor, groups: int, query_width: int, head_dim: int
 ) -> torch.Tensor:
@@ -335,16 +409,10 @@ def vllm_qkv_projection(
 
     Megatron's fused weight holds, for each of ``groups`` KV groups, the group's ``query_width`` query rows, then
     its key and its value rows (``head_dim`` each). vLLM's q, k and v weights are those rows gathered across the
-    groups. The result has the fused projection's layout, so Megatron's split reads q, k and v from it.
+    groups, repacked once per ``repacked_weights`` block. The result has the fused projection's layout, so
+    Megatron's split reads q, k and v from it, and its gradient is ``F.linear(x, fused_weight)``'s.
     """
-    grouped = fused_weight.view(groups, query_width + 2 * head_dim, -1)
-    weights = (
-        grouped[:, :query_width],
-        grouped[:, query_width : query_width + head_dim],
-        grouped[:, query_width + head_dim :],
-    )
-    parts = [torch.nn.functional.linear(x, weight.reshape(-1, weight.shape[-1])) for weight in weights]
-    return torch.cat([part.view(*x.shape[:-1], groups, -1) for part in parts], dim=-1).view(*x.shape[:-1], -1)
+    return _QkvProjection.apply(x, fused_weight, groups, query_width, head_dim)
 
 
 def _expert_offset_table(weights: Sequence[torch.Tensor], device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:

@@ -4,6 +4,7 @@ import torch
 from skyrl_train.models.grug_vllm_kernels import (
     EXPERT_OFFSET_ELEMENTS,
     expert_weight_offsets,
+    repacked_weights,
     serving_engine_ranks,
     serving_row_ranks,
     vllm_ep_combine,
@@ -86,16 +87,30 @@ def test_ep_combine_of_one_expert_parallel_rank_rounds_once_from_any_serving_ran
             pass
 
 
-def test_vllm_qkv_projection_has_the_layout_of_megatrons_fused_projection():
+def test_vllm_qkv_projection_has_the_layout_and_gradient_of_megatrons_fused_projection():
     groups, heads_per_group, head_dim, hidden = 3, 2, 4, 8
     generator = torch.Generator().manual_seed(0)
     # Small integers keep every product and sum exact, so a difference can only be a misplaced row.
     fused = torch.randint(-3, 4, (groups * (heads_per_group + 2) * head_dim, hidden), generator=generator).float()
     x = torch.randint(-3, 4, (5, 2, hidden), generator=generator).float()
+    upstream = torch.randint(-3, 4, (5, 2, fused.shape[0]), generator=generator).float()
+    expected_x, expected_fused = x.clone().requires_grad_(), fused.clone().requires_grad_()
+    torch.nn.functional.linear(expected_x, expected_fused).backward(upstream)
 
-    projected = vllm_qkv_projection(x, fused, groups, heads_per_group * head_dim, head_dim)
+    with repacked_weights():
+        x, fused = x.requires_grad_(), fused.requires_grad_()
+        projected = vllm_qkv_projection(x, fused, groups, heads_per_group * head_dim, head_dim)
+        projected.backward(upstream)
+        # The repacked weights follow the fused weight's values within one block of unchanging parameters.
+        fused.data.mul_(2)
+        doubled = vllm_qkv_projection(x, fused, groups, heads_per_group * head_dim, head_dim)
 
-    assert torch.equal(projected, torch.nn.functional.linear(x, fused))
+    assert torch.equal(projected, torch.nn.functional.linear(expected_x, expected_fused))
+    assert torch.equal(x.grad, expected_x.grad)
+    assert torch.equal(fused.grad, expected_fused.grad)
+    assert torch.equal(doubled, projected)
+    with repacked_weights():
+        assert torch.equal(vllm_qkv_projection(x, fused, groups, heads_per_group * head_dim, head_dim), 2 * projected)
 
 
 def test_expert_weight_offsets_address_each_expert_from_the_lowest_addressed_weight():

@@ -385,8 +385,12 @@ def _install_vllm_gemm_attention_hooks(attention: "GrugSelfAttention") -> None:
     _install_vllm_gemm(attention.linear_proj, lambda x: F.linear(x, attention.linear_proj.weight))
 
 
-def _install_vllm_gemm_shared_hooks(shared: SharedExpertMLP) -> None:
-    """Compiled vLLM's shared expert: gate and up projections as two GEMMs, then the down projection."""
+def _install_vllm_shared_expert_hooks(shared: SharedExpertMLP) -> None:
+    """Compiled vLLM's shared expert: gate and up projections as two GEMMs, the activation ``silu(gate) * up`` from
+    its activation kernel, then the down projection. The activation's gradient is that of the activation computed in
+    fp32 and rounded once."""
+    if shared.use_shared_expert_gate or shared.config.moe_shared_expert_overlap:
+        raise NotImplementedError("Grug's vLLM numerics need an ungated shared expert outside the dispatcher")
     fc1, fc2 = shared.linear_fc1, shared.linear_fc2
 
     def gate_and_up(x: torch.Tensor) -> torch.Tensor:
@@ -395,6 +399,16 @@ def _install_vllm_gemm_shared_hooks(shared: SharedExpertMLP) -> None:
 
     _install_vllm_gemm(fc1, gate_and_up)
     _install_vllm_gemm(fc2, lambda x: F.linear(x, fc2.weight))
+
+    def forward(hidden_states: torch.Tensor) -> torch.Tensor:
+        fc1_output, _ = fc1(hidden_states)
+        gate, up = torch.chunk(fc1_output, 2, dim=-1)
+        value = vllm_inductor.shared_activation(gate, up).view(gate.shape)
+        # Differentiated as swiglu_single_rounding(fc1_output).
+        output, _ = fc2(swiglu_value(value, fc1_output))
+        return output
+
+    shared.forward = forward
 
 
 def _install_fa3_attention_hooks(attention: "GrugSelfAttention") -> None:
@@ -471,27 +485,6 @@ def _install_ep_combine_hooks(layer: TransformerLayer) -> None:
     dispatcher.combine_postprocess = combine_postprocess
 
 
-def _install_shared_swiglu_hooks(shared: SharedExpertMLP) -> None:
-    """Take the shared expert's activation ``silu(gate) * up`` from compiled vLLM's activation kernel; the gradient is
-    that of the activation computed in fp32 and rounded once."""
-    stored: dict[str, torch.Tensor] = {}
-
-    def keep_fc1_output(module, args, output):
-        stored["fc1"] = output[0] if isinstance(output, tuple) else output
-
-    def replace_fc2_input(module, args):
-        fc1_output = stored.pop("fc1", None)
-        if fc1_output is None:
-            raise RuntimeError("Grug's vLLM numerics need the shared expert's fc1 output")
-        gate, up = torch.chunk(fc1_output, 2, dim=-1)
-        value = vllm_inductor.shared_activation(gate, up).view(gate.shape)
-        # Differentiated as swiglu_single_rounding(fc1_output).
-        return (swiglu_value(value, fc1_output), *args[1:])
-
-    shared.linear_fc1.register_forward_hook(keep_fc1_output)
-    shared.linear_fc2.register_forward_pre_hook(replace_fc2_input)
-
-
 class NormRole(StrEnum):
     """Where a gated norm sits, which decides the residual it reads under the vLLM numerics."""
 
@@ -506,8 +499,7 @@ def install_vllm_numerics(model: "GrugGPTModel") -> None:
     validate_vllm_numerics_model(model.config)
     for module in model.modules():
         if isinstance(module, SharedExpertMLP):
-            _install_shared_swiglu_hooks(module)
-            _install_vllm_gemm_shared_hooks(module)
+            _install_vllm_shared_expert_hooks(module)
         if isinstance(module, TEGroupedMLP):
             _install_vllm_experts_hooks(module)
         if isinstance(module, GrugSelfAttention):

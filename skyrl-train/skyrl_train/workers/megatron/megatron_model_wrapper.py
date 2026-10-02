@@ -20,7 +20,7 @@ from skyrl_train.distributed.megatron.model_utils import (
 )
 from skyrl_train.models.grug_handoffs import assert_recompute_drained
 from skyrl_train.models.grug_rounding import vllm_value
-from skyrl_train.models.grug_vllm_kernels import serving_engine_ranks
+from skyrl_train.models.grug_vllm_kernels import repacked_weights, serving_engine_ranks
 from skyrl_train.distributed.megatron.megatron_utils import get_model_config
 from skyrl_train.ftpo import FTPOTargets, FTPOInputs, boundary_values, compact_boundary_logits, ftpo_counts
 from skyrl_train.distillation import TopKEvidence, student_topk_logprobs
@@ -475,15 +475,16 @@ class MegatronModelWrapper:
 
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.actor_module))
 
-        output = forward_backward_func(
-            forward_step_func=forward_step,
-            data_iterator=batch_generator,
-            model=self.actor_module,
-            num_microbatches=len(micro_batches),
-            seq_length=seq_len,
-            micro_batch_size=micro_batch_size,
-            forward_only=True,
-        )
+        with repacked_weights() if self.vllm_numerics else nullcontext():
+            output = forward_backward_func(
+                forward_step_func=forward_step,
+                data_iterator=batch_generator,
+                model=self.actor_module,
+                num_microbatches=len(micro_batches),
+                seq_length=seq_len,
+                micro_batch_size=micro_batch_size,
+                forward_only=True,
+            )
 
         if self.router_replay is not None:
             # No backward ran, so nothing may be left to recompute; discard the
@@ -693,7 +694,10 @@ class MegatronModelWrapper:
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.actor_module))
 
         timing = timings or PhaseBreakdown("ppo_train", enabled=False)
-        with timing.span("megatron_forward_backward_scheduler"):
+        with (
+            timing.span("megatron_forward_backward_scheduler"),
+            repacked_weights() if self.vllm_numerics else nullcontext(),
+        ):
             metrics_list = forward_backward_func(
                 forward_step_func=forward_step,
                 data_iterator=batch_generator,
