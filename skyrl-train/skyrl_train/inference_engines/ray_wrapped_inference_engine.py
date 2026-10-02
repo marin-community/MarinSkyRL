@@ -20,6 +20,7 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineOutput,
     NamedWeightsUpdateRequest,
 )
+from skyrl_train.config.decode_invariant import decode_invariant_engine_problems
 from skyrl_train.config.weight_sync_pause import (
     DEFAULT_WEIGHT_SYNC_PAUSE_POLICY,
     WeightSyncPausePolicy,
@@ -86,6 +87,15 @@ _NCCL_FR_ENV_PASSTHROUGH = (
     # EnvVarManager scope below.
     "TORCH_NCCL_DEBUG_INFO_PIPE_FILE",
 )
+
+
+WORKER_EXTENSION = "skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap"
+# A decode-invariant engine (``vllm/decode_invariant.py``): its workers import this extension, which installs the
+# patches before the model loads, and Inductor pads the head-gate GEMM in every engine process instead of timing it.
+DECODE_INVARIANT_WORKER_EXTENSION = (
+    "skyrl_train.inference_engines.vllm.decode_invariant_worker.DecodeInvariantWorkerWrap"
+)
+DECODE_INVARIANT_COMPILATION_CONFIG = {"inductor_compile_config": {"force_shape_pad": True}}
 
 
 def validate_grug_vllm_support(hf_config: PretrainedConfig, supported_architectures: Collection[str]) -> None:
@@ -489,6 +499,7 @@ def create_ray_wrapped_inference_engines(
     enable_prefix_caching: bool,
     enforce_eager: bool,
     engine_init_timeout_seconds: float,
+    decode_invariant: bool = False,
     expert_parallel_size: int = 1,
     pipeline_parallel_size: int = 1,
     data_parallel_size: int = 1,
@@ -530,6 +541,21 @@ def create_ray_wrapped_inference_engines(
         still require the ray backend for shared-GPU resource management.
     """
     engine_init_kwargs = dict(engine_init_kwargs)
+    worker_extension_cls = WORKER_EXTENSION
+    if decode_invariant:
+        problems = decode_invariant_engine_problems(
+            backend=backend,
+            attention_backend=vllm_attention_backend,
+            enforce_eager=enforce_eager,
+            tensor_parallel_size=tensor_parallel_size,
+            decode_context_parallel_size=decode_context_parallel_size,
+        )
+        if problems:
+            raise ValueError(f"a decode-invariant engine needs {'; '.join(problems)}")
+        if "compilation_config" in engine_init_kwargs:
+            raise ValueError("a decode-invariant engine sets its own compilation_config")
+        worker_extension_cls = DECODE_INVARIANT_WORKER_EXTENSION
+        engine_init_kwargs["compilation_config"] = DECODE_INVARIANT_COMPILATION_CONFIG
     # Direct factory callers bypass generator config validation.
     validate_weight_sync_pause_backend(weight_sync_pause_policy, backend=backend, run_engines_locally=True)
     model_metadata_path = engine_init_kwargs.pop(MODEL_METADATA_PATH_KEY, pretrain)
@@ -863,7 +889,7 @@ def create_ray_wrapped_inference_engines(
                 engine = AsyncVLLMRayActor.options(**engine_options).remote(
                     model=pretrain,
                     enforce_eager=enforce_eager,
-                    worker_extension_cls="skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap",
+                    worker_extension_cls=worker_extension_cls,
                     tensor_parallel_size=tensor_parallel_size,
                     pipeline_parallel_size=pipeline_parallel_size,
                     enable_expert_parallel=expert_parallel_size > 1,

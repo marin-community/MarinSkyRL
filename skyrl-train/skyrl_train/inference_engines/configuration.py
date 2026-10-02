@@ -26,6 +26,8 @@ class InferenceEngineRoleConfig:
     shared_pg: Any
     inference_engine_enable_sleep: bool
     max_logprobs: int = 1
+    # Start decode-invariant vLLM engines (``vllm/decode_invariant.py``).
+    decode_invariant: bool = False
 
 
 def inference_engine_kwargs_from_config(
@@ -49,6 +51,7 @@ def inference_engine_kwargs_from_config(
         "vllm_v1_disable_multiproc": cfg.generator.vllm_v1_disable_multiproc,
         "enable_prefix_caching": cfg.generator.enable_prefix_caching,
         "enforce_eager": cfg.generator.enforce_eager,
+        "decode_invariant": role.decode_invariant,
         "shared_pg": role.shared_pg,
         "engine_init_timeout_seconds": cfg.generator.engine_init_timeout_seconds,
         "gpu_memory_utilization": cfg.generator.gpu_memory_utilization,
