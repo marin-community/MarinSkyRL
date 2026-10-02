@@ -190,7 +190,7 @@ ENV_VAR_SPECS = (
     ),
     EnvVarSpec(
         VLLM_BATCH_INVARIANT_ENV,
-        "trainer.algorithm.batch_invariant",
+        "trainer.algorithm.numerics",
         EnvVarSource.CONFIG,
         frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.INFERENCE_WORKER}),
     ),
@@ -510,7 +510,7 @@ class EnvVarManager:
         for name in passthrough_names:
             if value := ambient.get(name):
                 values[name] = value
-        if _config_value(config, "trainer.algorithm.batch_invariant", False):
+        if _config_value(config, "trainer.algorithm.numerics", "native") == "batch_invariant":
             values[VLLM_BATCH_INVARIANT_ENV] = "1"
         if _config_value(config, "generator.fuse_weights", False):
             values[VLLM_ALLOW_INSECURE_SERIALIZATION_ENV] = "1"

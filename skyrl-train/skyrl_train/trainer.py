@@ -25,6 +25,7 @@ from collections import defaultdict, deque
 import numpy as np
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
+from skyrl_train.exactness_check import ExactnessCheck
 from skyrl_train.training_batch import ENGINE_DP_RANKS_KEY, TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.rollouts.buffer import RolloutGroup
 from skyrl_train.rollouts.context import TrainingContext, TrainingContextState
@@ -68,6 +69,7 @@ from marinskyrl.distillation import (
 )
 from skyrl_train.objective.teacher import teacher_advantages
 from skyrl_train.objective.correction import compute_correction
+from skyrl_train.config.numerics import Numerics
 from skyrl_train.config.objective_spec import off_policy_correction
 from skyrl_train.config.ftpo import ftpo_config
 from skyrl_train.ftpo import select_ftpo_candidates
@@ -311,6 +313,9 @@ class RayPPOTrainer:
         self.colocate_all = cfg.trainer.placement.colocate_all
         self.tracker = tracker
         self.tokenizer = tokenizer
+        self._exactness_check = (
+            ExactnessCheck(cfg, tokenizer) if Numerics(cfg.trainer.algorithm.numerics) is Numerics.EXACT else None
+        )
         self.train_dataset = train_dataset
         self.eval_dataset = eval_dataset
         self.inference_engine_client = inference_engine_client
@@ -1145,6 +1150,20 @@ class RayPPOTrainer:
                 if pause:
                     await self.inference_engine_client.resume_generation()
         self._log_weight_update_completed(reason=reason, duration_seconds=update_timer.duration)
+        if self._exactness_check is not None and self._exactness_check.due(reason):
+            await self._exactness_check.generate(self.inference_engine_client)
+
+    def _score_exactness_check(self) -> None:
+        """Score the engines' exactness-check responses with the policy, which holds the weights they last received."""
+        check = self._exactness_check
+        if check is None or check.pending is None:
+            return
+        batch = check.batch(self.policy_model.actor_infos[0].rank.dp_size)
+        batch.metadata["global_step"] = self.global_step
+        started = time.monotonic()
+        outputs = ray.get(self.policy_model.async_run_ray_method("mesh", "forward", data=batch))
+        logprobs = concatenate_outputs_after_mesh_dispatch(self.policy_model.actor_infos, outputs)["output"]
+        self.all_metrics.update(check.compare(logprobs, time.monotonic() - started))
 
     async def sync_policy_weights_to_inference_engines(self) -> None:
         # Align policy actors before the weight extraction collectives.
@@ -1253,6 +1272,7 @@ class RayPPOTrainer:
             return
 
         self._log_startup_timings()
+        self._log_numerics_fallback()
         self._record_run_configuration()
 
         if self.cfg.trainer.algorithm.use_kl_in_reward:
@@ -2639,7 +2659,10 @@ class RayPPOTrainer:
         if self.colocate_all:
             all_rank_action_log_probs: List[TrainingOutputBatch] = ray.get(action_log_probs_refs)
             action_log_probs = collect_results(self.policy_model.actor_infos, all_rank_action_log_probs, key="output")
+            self._score_exactness_check()
             self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
+        else:
+            self._score_exactness_check()
 
         # wait all models done
         # if not colocate_policy_ref, then need to gather reference_scores
@@ -3171,6 +3194,15 @@ class RayPPOTrainer:
             logger.info(f"Refreshing pending HF export request for global_step_{self.global_step}")
         request_path = write_hf_export_request(request)
         logger.info(f"Queued out-of-band HF export for global_step_{self.global_step}: {request_path}")
+
+    def _log_numerics_fallback(self) -> None:
+        """Record that the configured numerics fell back to native at config resolution."""
+        fallback_from = self.cfg.trainer.algorithm.numerics_fallback_from
+        if fallback_from is None:
+            return
+        payload = {f"startup/numerics_fallback_from_{fallback_from}": 1.0}
+        self._log_metrics_stdout(payload, step=self.global_step, kind="startup")
+        self.tracker.log(payload, step=self.global_step, commit=False)
 
     def _log_startup_timings(self) -> None:
         publish_startup_timings(
