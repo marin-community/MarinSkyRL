@@ -99,6 +99,16 @@ class VllmServer:
             await engine.reset_prefix_cache()
             return {"status": "ok"}
 
+        @app.post("/begin_weight_reload")
+        async def _begin_weight_reload():
+            await engine.collective_rpc("skyrl_begin_weight_reload")
+            return {"status": "ok"}
+
+        @app.post("/finish_weight_reload")
+        async def _finish_weight_reload():
+            await engine.collective_rpc("skyrl_finish_weight_reload")
+            return {"status": "ok"}
+
         @app.post("/update_weights")
         async def _update_weights(request: Request):
             data = await request.json()
