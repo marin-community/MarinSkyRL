@@ -13,6 +13,8 @@ from urllib.parse import urlsplit
 from omegaconf import DictConfig, OmegaConf
 from rigging.secrets import is_secret_reference
 
+from marinskyrl.runtime_options import PolicyLossType
+
 
 class DistillationObjectiveKind(StrEnum):
     SAMPLED_REVERSE_KL = "sampled_reverse_kl"
@@ -716,3 +718,27 @@ def compile_distillation_plan_from_config(cfg: DictConfig) -> DistillationPlan |
     resolved = OmegaConf.to_container(cfg, resolve=True)
     assert isinstance(resolved, dict)
     return compile_distillation_plan(resolved)
+
+
+def validate_generation_logprobs(cfg: DictConfig) -> None:
+    """Validate generation log probabilities against the configured distillation plan."""
+    generator = cfg.get("generator", {})
+    logprobs = generator.get("sampling_params", {}).get("logprobs")
+    if logprobs is None:
+        return
+    assert isinstance(logprobs, int)
+    if logprobs > 0 and cfg.get("trainer", {}).get("algorithm", {}).get("policy_loss_type") != PolicyLossType.FTPO:
+        plan = compile_distillation_plan_from_config(cfg)
+        widths = {teacher.top_k for teacher in plan.teachers} if plan is not None else set()
+        if (
+            plan is None
+            or plan.objective is not DistillationObjectiveKind.STUDENT_TOPK_POLICY_SURROGATE
+            or widths != {logprobs}
+            or generator.get("backend") != "vllm"
+        ):
+            raise ValueError(
+                "positive generator.sampling_params.logprobs requires a local vLLM "
+                "student_topk_policy_surrogate plan with matching teacher top_k, or FTPO"
+            )
+    if not generator.get("run_engines_locally", False):
+        raise NotImplementedError("Remote inference mode doesn't support `sampling_params.logprobs`")

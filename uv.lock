@@ -297,18 +297,18 @@ wheels = [
 
 [[package]]
 name = "apache-tvm-ffi"
-version = "0.1.11"
+version = "0.1.12"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "typing-extensions", marker = "sys_platform == 'linux'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/6d/3d/4b9226cd45aa800a6904603dda9b323d728f3c3869952a673f3483b78b19/apache_tvm_ffi-0.1.11.tar.gz", hash = "sha256:153cd2c5a9717804cb0bcd9b2709f22a1e5f80ed05b5a490faf5949b136eedba", size = 2798354, upload-time = "2026-05-04T17:48:43.852Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ff/95/ef83880657e89a0ce0f1ad79cbff11698286d00522dbc290d34a8458e9c2/apache_tvm_ffi-0.1.12.tar.gz", hash = "sha256:2aa5c8ece3144dad11afd6d0f10191d03cdb368bbcd9c92f9fb919f35906223d", size = 2843816, upload-time = "2026-06-09T18:17:31.68Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/05/9d/0f81ca556e5836b3ca64818cdae3f47dc7822bd35d22ddef7a54106d801d/apache_tvm_ffi-0.1.11-cp312-abi3-macosx_11_0_arm64.whl", hash = "sha256:6ae51cc7df415b5f373a9df4baa1165a65608e519bea81e7dd23428f00eeb689", size = 2418793, upload-time = "2026-05-04T17:47:57.879Z" },
-    { url = "https://files.pythonhosted.org/packages/2a/a9/f48e5dd4ae1f6f0c5ffac259c0a9531b7d6a7c0a4c45bc2229d55de6adf8/apache_tvm_ffi-0.1.11-cp312-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:da2c8d07fdc737d1ba75f4de25c29f156905b9dc980f1da90c395b4db525f522", size = 2605176, upload-time = "2026-05-04T17:47:59.676Z" },
-    { url = "https://files.pythonhosted.org/packages/36/99/2848df4e8ed5bf51df1d286d1718510584fa61e88adbc9c5b23d71b38f7c/apache_tvm_ffi-0.1.11-cp312-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:78aa1857b04a2ea718317041ab3f01288b3d496e6036eb1b99ebdc9da0fdaef5", size = 2725887, upload-time = "2026-05-04T17:48:01.381Z" },
-    { url = "https://files.pythonhosted.org/packages/7d/80/963c991934a4eb0fa0c0178f51963333fe14a96b732009da642b6bf6b42e/apache_tvm_ffi-0.1.11-cp312-abi3-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:a8b845c8dff498fb981c1dda36c954549204191b485a385845e604966594d0b2", size = 2513121, upload-time = "2026-05-04T17:48:03.43Z" },
-    { url = "https://files.pythonhosted.org/packages/4d/18/95569107ee83619d61a3bb0d28743a0599f85c5161981e3e098c82c2b185/apache_tvm_ffi-0.1.11-cp312-abi3-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:2843f084cdc94dedacd8b257a395a2b71b8a3dc7fc99711b148bf1d161983128", size = 2697683, upload-time = "2026-05-04T17:48:05.222Z" },
+    { url = "https://files.pythonhosted.org/packages/7d/ef/8f2ea57791e8df55c5a52e20d415c01032ef5fa3761574268201b7cc2c79/apache_tvm_ffi-0.1.12-cp312-abi3-macosx_11_0_arm64.whl", hash = "sha256:218e55c807d49182710ef2ab0336313ba6becccb7e565f4941d23bded09646d4", size = 2463724, upload-time = "2026-06-09T18:16:41.904Z" },
+    { url = "https://files.pythonhosted.org/packages/bc/c4/34aec1f10353eee555687f3196241457b8e8a06da2014a176f5b022e24bd/apache_tvm_ffi-0.1.12-cp312-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:557d8deb672f2ad7f445399e3fa0c727a6e11472e19c895ee244cbb8cfd99a66", size = 2616513, upload-time = "2026-06-09T18:16:44.115Z" },
+    { url = "https://files.pythonhosted.org/packages/c8/2a/bff8d73841b49f196852edd8460241d3a363e6b0d64c3a9367542658394f/apache_tvm_ffi-0.1.12-cp312-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:817af52916ca9987e019ae9c811406835c7f26c590b2a7bcfa9db0e3809f4228", size = 2757612, upload-time = "2026-06-09T18:16:45.987Z" },
+    { url = "https://files.pythonhosted.org/packages/9c/20/51d0c31c76bef0f21c11bce0465598d1ea5fdaca22e47a69c29deadeada7/apache_tvm_ffi-0.1.12-cp312-abi3-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:8a7b08f377ea2663dae10e3045f8d0215f0378ee975096174a8af6381eeb1504", size = 2533956, upload-time = "2026-06-09T18:16:47.891Z" },
+    { url = "https://files.pythonhosted.org/packages/52/f3/fba607d803cb081be2d66ea51865492b42872898bd271d9bcc3e1ced4ef3/apache_tvm_ffi-0.1.12-cp312-abi3-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:dc0acd7eeb0e451d5e3f686af3ba0b495fdbf97b5b54cf9a0f770cdafe0e691a", size = 2719638, upload-time = "2026-06-09T18:16:50.021Z" },
 ]
 
 [[package]]
@@ -2799,21 +2799,21 @@ wheels = [
 
 [[package]]
 name = "marin-finestore"
-version = "0.2.123.dev35633925924"
+version = "0.2.135.dev36906221286"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "marin-rigging" },
     { name = "pyarrow" },
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/b2/99/223589155b48893714331ab5f65c9477257080181373360e592c83ba6028/marin_finestore-0.2.123.dev35633925924.tar.gz", hash = "sha256:230c8352322876f31297f31e3bf57277b8ea56c9fc36d9a7e5f6395f03672adf", size = 53121, upload-time = "2026-09-21T17:46:19.116Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/fe/a7/b6e31c6f59b5d80b04c489e93d9c3dc780b3d4b10885b9aca4037df9bff9/marin_finestore-0.2.135.dev36906221286.tar.gz", hash = "sha256:c5e0bfff8169a0ec808ed0abc8dad8bd3ebce1c96c9269095ec5b7946bf4dfbe", size = 55095, upload-time = "2026-10-01T18:23:34.683Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/64/d2/55e2fa27c8420478f541e458d254fa2f5082b3c4c945e2a406fb9a6d5ff7/marin_finestore-0.2.123.dev35633925924-py3-none-any.whl", hash = "sha256:22e3e57cd11982662881e0012e2ffe61f36f40353d12eacb477b1b586b946572", size = 42477, upload-time = "2026-09-21T17:46:05.014Z" },
+    { url = "https://files.pythonhosted.org/packages/81/82/fc0f88fb5a33e0d07d2b5c6c49671b74dc54f8f4503dd09f30a1713cbf17/marin_finestore-0.2.135.dev36906221286-py3-none-any.whl", hash = "sha256:004fa184339f29b223e27a5e8dde6e6f0f6246bc6962121990ef33e30f2c0ae7", size = 45002, upload-time = "2026-10-01T18:23:20.436Z" },
 ]
 
 [[package]]
 name = "marin-iris"
-version = "0.2.123.dev35633925924"
+version = "0.2.135.dev36906221286"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
@@ -2843,9 +2843,9 @@ dependencies = [
     { name = "uvicorn", extra = ["standard"] },
     { name = "zstandard" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/69/ef/5845477688e30f11808b12dd538f81974cfd62e2ecca3b665f80e1c19484/marin_iris-0.2.123.dev35633925924.tar.gz", hash = "sha256:dcd5c82a1ece113c57f704c23a2a13f6729b65bb13a42f63bd12f6cbcd764f6f", size = 934370, upload-time = "2026-09-21T17:46:23.17Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/04/6c/d4a9ceddfcf63fb819eabd451ce90c7801cf42320719390fe19561bffe6e/marin_iris-0.2.135.dev36906221286.tar.gz", hash = "sha256:e59720fdf3991a9f0d2983fd28cc6f3df753803a802d87f4d15483c9fa610573", size = 937374, upload-time = "2026-10-01T18:23:37.942Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ec/df/8a7befe4daba4e5192581d442300185eec74c5c90969108bb40c0eb562b6/marin_iris-0.2.123.dev35633925924-py3-none-any.whl", hash = "sha256:c77382031674db289d5e3e6d80c576908d4d63b676caecdbeedfc20f26da4d33", size = 1127624, upload-time = "2026-09-21T17:46:10.144Z" },
+    { url = "https://files.pythonhosted.org/packages/85/07/df47a1a2f076d6271fba25e2fba6eba96b51565bd52dcf1553cbdd821e7b/marin_iris-0.2.135.dev36906221286-py3-none-any.whl", hash = "sha256:bb93a2d58ab4d49bebf896e05843ef8b675a9583794057dd8fbab4db0add41aa", size = 1132500, upload-time = "2026-10-01T18:23:24.686Z" },
 ]
 
 [[package]]
@@ -2862,7 +2862,7 @@ wheels = [
 
 [[package]]
 name = "marin-rigging"
-version = "0.2.123.dev35633925924"
+version = "0.2.135.dev36906221286"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiobotocore", version = "3.7.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux' or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
@@ -2874,6 +2874,8 @@ dependencies = [
     { name = "fsspec" },
     { name = "gcsfs" },
     { name = "google-auth" },
+    { name = "msgspec" },
+    { name = "psutil" },
     { name = "pydantic" },
     { name = "pyjwt", extra = ["crypto"] },
     { name = "pyyaml" },
@@ -2882,9 +2884,9 @@ dependencies = [
     { name = "starlette" },
     { name = "zstandard" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/95/e5/803e775a86a57d9191d6fa16ada58d10729302e2c9a61bf133f56f824223/marin_rigging-0.2.123.dev35633925924.tar.gz", hash = "sha256:3380ada59385f1f11150683b828aef911d7c1bab8d0dcbd798714883fa50e71d", size = 214760, upload-time = "2026-09-21T17:46:26.093Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/3c/5f/d085ef4973e8445c0c988a87e831ac2009ab21cde478b3a8cd8e1b2385b2/marin_rigging-0.2.135.dev36906221286.tar.gz", hash = "sha256:9ca6d8ab3feba5284456a55efa14133cf60f4a296e39247548e9882a399227e8", size = 223917, upload-time = "2026-10-01T18:23:40.703Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/83/55/0e6dd604b9e556a160bf9850c67fdac9b5105d93137f328e10f58c0bba23/marin_rigging-0.2.123.dev35633925924-py3-none-any.whl", hash = "sha256:36e55c185d4ad9daa51387c0083848a1f916df7e49536dabd4744b01a6f2f343", size = 436921, upload-time = "2026-09-21T17:46:14.287Z" },
+    { url = "https://files.pythonhosted.org/packages/e4/5a/e7c8289383f1729bb83803be834d5a73e74dd180a8fa3ac1ff0a1c438a4a/marin_rigging-0.2.135.dev36906221286-py3-none-any.whl", hash = "sha256:256511f2224c34cdd9093f72d357e98037b464a25096489501f08e0f63aa1b63", size = 519636, upload-time = "2026-10-01T18:23:28.451Z" },
 ]
 
 [package.optional-dependencies]
@@ -2929,6 +2931,7 @@ dependencies = [
     { name = "loguru" },
     { name = "marin-finelog" },
     { name = "marin-finelog-server" },
+    { name = "marin-finestore" },
     { name = "marin-iris" },
     { name = "marin-iris-native" },
     { name = "marin-rigging", extra = ["secrets"] },
@@ -3027,8 +3030,8 @@ vllm = [
     { name = "torchcodec", marker = "sys_platform == 'linux'" },
     { name = "torchdata", marker = "sys_platform == 'linux'" },
     { name = "torchvision", marker = "sys_platform == 'linux'" },
-    { name = "vllm", version = "0.0.0.dev20260916+marin.70ea9ae8f260.cu132", source = { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-candidate-70ea9ae8f260/vllm-0.0.0.dev20260916+marin.70ea9ae8f260.cu132-cp38-abi3-manylinux_2_28_aarch64.whl" }, marker = "(platform_machine != 'x86_64' and sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
-    { name = "vllm", version = "0.0.0.dev20260916+marin.70ea9ae8f260.cu132", source = { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-candidate-70ea9ae8f260/vllm-0.0.0.dev20260916+marin.70ea9ae8f260.cu132-cp38-abi3-manylinux_2_28_x86_64.whl" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
+    { name = "vllm", version = "0.0.0.dev20260929+marin.39e62869693c.cu132", source = { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260929-39e62869693c/vllm-0.0.0.dev20260929+marin.39e62869693c.cu132-cp38-abi3-manylinux_2_28_aarch64.whl" }, marker = "(platform_machine != 'x86_64' and sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
+    { name = "vllm", version = "0.0.0.dev20260929+marin.39e62869693c.cu132", source = { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260929-39e62869693c/vllm-0.0.0.dev20260929+marin.39e62869693c.cu132-cp38-abi3-manylinux_2_28_x86_64.whl" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
 ]
 
 [package.dev-dependencies]
@@ -3103,6 +3106,7 @@ requires-dist = [
     { name = "mamba-ssm", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'megatron'", url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-torch2.13-20260910-6d12d7a0/mamba_ssm-2.3.1-cp312-cp312-linux_x86_64.whl" },
     { name = "marin-finelog" },
     { name = "marin-finelog-server" },
+    { name = "marin-finestore", specifier = ">=0.2.135.dev36906221286" },
     { name = "marin-iris" },
     { name = "marin-iris-native" },
     { name = "marin-rigging", extras = ["prometheus"], marker = "extra == 'telemetry'", specifier = ">=0.2.123.dev35633925924" },
@@ -3166,9 +3170,9 @@ requires-dist = [
     { name = "uvicorn" },
     { name = "verifiable-instructions", git = "https://github.com/abukharin-nv/verifiable-instructions.git?rev=f46a5ac87b1400a4f8973039844b6be9b56e3faf" },
     { name = "verifyit", extras = ["answer", "schema", "reasoning-gym", "judge"], git = "https://github.com/marin-community/verifyit?rev=b08a5ee8d94fcb4a2134562aee94ff9715dadd14" },
-    { name = "vllm", marker = "platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'vllm'", url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-candidate-70ea9ae8f260/vllm-0.0.0.dev20260916+marin.70ea9ae8f260.cu132-cp38-abi3-manylinux_2_28_aarch64.whl" },
-    { name = "vllm", marker = "platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux' and extra == 'vllm'", specifier = "==0.0.0.dev20260916+marin.70ea9ae8f260.cu132" },
-    { name = "vllm", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'vllm'", url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-candidate-70ea9ae8f260/vllm-0.0.0.dev20260916+marin.70ea9ae8f260.cu132-cp38-abi3-manylinux_2_28_x86_64.whl" },
+    { name = "vllm", marker = "platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'vllm'", url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260929-39e62869693c/vllm-0.0.0.dev20260929+marin.39e62869693c.cu132-cp38-abi3-manylinux_2_28_aarch64.whl" },
+    { name = "vllm", marker = "platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux' and extra == 'vllm'", specifier = "==0.0.0.dev20260929+marin.39e62869693c.cu132" },
+    { name = "vllm", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'vllm'", url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260929-39e62869693c/vllm-0.0.0.dev20260929+marin.39e62869693c.cu132-cp38-abi3-manylinux_2_28_x86_64.whl" },
     { name = "wandb" },
     { name = "xmltodict" },
 ]
@@ -6648,7 +6652,7 @@ wheels = [
 
 [[package]]
 name = "tilelang"
-version = "0.1.12"
+version = "0.1.14"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "apache-tvm-ffi", marker = "sys_platform == 'linux'" },
@@ -6662,11 +6666,11 @@ dependencies = [
     { name = "typing-extensions", marker = "sys_platform == 'linux'" },
     { name = "z3-solver", marker = "sys_platform == 'linux'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/6d/9a/5776adb5b6e03e141c8cff020e16c45b87c9b7a7a5bdfe83416d6cc23933/tilelang-0.1.12.tar.gz", hash = "sha256:595b39581d099a53f875bd8d553863e7e4f58998052b58764f5472cbfbb87043", size = 93565090, upload-time = "2026-07-08T04:22:52.901Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/98/b6/b2a79ca220c63f0ec43ece86c0a37f92af9e22261b13951e58700b008a2b/tilelang-0.1.14.tar.gz", hash = "sha256:7ae0fba6c63dae80b3c9c5c11a70bb8d7165794994f290f36e2fe87bfb143cfc", size = 91668408, upload-time = "2026-09-02T06:23:14.202Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/13/51/4ae1fb532406082a4ebf16c890f5f98db14b8588f2c486334ba23578b4bc/tilelang-0.1.12-cp38-abi3-macosx_11_0_arm64.whl", hash = "sha256:8741d6cd519782645d55c17abd8986402c62948bc2122d3417c445d11de5dd16", size = 38347295, upload-time = "2026-07-08T04:22:35.691Z" },
-    { url = "https://files.pythonhosted.org/packages/d1/53/f281a0bd9ee7e03d6a97828fc0e443321ed26ea2b0bd74bf9f1d9451d30f/tilelang-0.1.12-cp38-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:bbeb5573cbe2544a51a5c9a6cc737c5e3b5c2d95411caa3687fd9b08eb9d5f97", size = 50501074, upload-time = "2026-07-08T04:22:39.973Z" },
-    { url = "https://files.pythonhosted.org/packages/fb/a4/ff0b14d00d29fe418063cd97490f55aa9cad6f981a6fbbf29124b024637d/tilelang-0.1.12-cp38-abi3-manylinux_2_34_aarch64.whl", hash = "sha256:a1701eba4ad603d73f1b128b88f6a2350f1b1161729e5b2d1e540a1ec7a82d52", size = 46281933, upload-time = "2026-07-08T04:22:44.244Z" },
+    { url = "https://files.pythonhosted.org/packages/91/13/aa13f149ea8c83c1115f715c2e611cec9a09dfdec1d0871551dda3979c16/tilelang-0.1.14-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:a78003b810b63092de380accc1e73c0139a1f11b0377e1335774b72845ba0571", size = 32731973, upload-time = "2026-09-02T06:23:01.02Z" },
+    { url = "https://files.pythonhosted.org/packages/40/69/e69a18eaf239efaa1718922a26d0a4605a0525a2263d3224f506354c02ae/tilelang-0.1.14-cp39-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:fcc5d47ac1baeb7a8555ff5384af9ce9f3efef46dd926bc23d2c1cd425f68600", size = 45387334, upload-time = "2026-09-02T06:23:04.013Z" },
+    { url = "https://files.pythonhosted.org/packages/6a/ea/1463c3c736f7ace24169caeaa14189fa4aa486206179d92a47283339883a/tilelang-0.1.14-cp39-abi3-manylinux_2_34_aarch64.whl", hash = "sha256:99308791d356732aa30525d28ce686e32c9b3961852ab380be0d688fff448e74", size = 41034991, upload-time = "2026-09-02T06:23:07.405Z" },
 ]
 
 [[package]]
@@ -6705,7 +6709,7 @@ wheels = [
 
 [[package]]
 name = "tokenspeed-mla"
-version = "0.1.8"
+version = "0.1.9"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "apache-tvm-ffi", marker = "sys_platform == 'linux'" },
@@ -6714,8 +6718,8 @@ dependencies = [
     { name = "torch", version = "2.13.0+cu132", source = { registry = "https://download.pytorch.org/whl/cu132" }, marker = "sys_platform == 'linux'" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/1e/65/81d7e9f14472bc4c6abb576c9b1edd8e40ab01832027c4e647bfe2890749/tokenspeed_mla-0.1.8-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:952209cf4b29a54e6b6e7e088be9d4a40f24792b06fdfa330de8077b9926a7d9", size = 752341, upload-time = "2026-06-24T03:36:28.619Z" },
-    { url = "https://files.pythonhosted.org/packages/27/df/0037ade72b165ac97859040919e006aa3d80cb8cc3a79420fb6c03eb16a0/tokenspeed_mla-0.1.8-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:6a7526d7327746893f8c20d24aa63ba5b8a123d0dfd6e66388e13b768b6452c6", size = 755827, upload-time = "2026-06-24T03:36:29.96Z" },
+    { url = "https://files.pythonhosted.org/packages/88/ed/8c2798431b64537f9b02d17474641b479d7162e6041bc673450edca9645b/tokenspeed_mla-0.1.9-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:656aa91b08162b9ea7cfc471f52ff4d6936df01f7deac2675c25d06f00e94547", size = 752334, upload-time = "2026-07-11T03:20:26.226Z" },
+    { url = "https://files.pythonhosted.org/packages/57/69/820fec3943d2acf852931e0f561fc60009655373534c567e52342f394f65/tokenspeed_mla-0.1.9-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:daae411e2e24079cf6d3f7e04100024c9083c233964927aa459e98b4c4f138fb", size = 755823, upload-time = "2026-07-11T03:20:27.915Z" },
 ]
 
 [[package]]
@@ -7206,8 +7210,8 @@ wheels = [
 
 [[package]]
 name = "vllm"
-version = "0.0.0.dev20260916+marin.70ea9ae8f260.cu132"
-source = { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-candidate-70ea9ae8f260/vllm-0.0.0.dev20260916+marin.70ea9ae8f260.cu132-cp38-abi3-manylinux_2_28_aarch64.whl" }
+version = "0.0.0.dev20260929+marin.39e62869693c.cu132"
+source = { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260929-39e62869693c/vllm-0.0.0.dev20260929+marin.39e62869693c.cu132-cp38-abi3-manylinux_2_28_aarch64.whl" }
 resolution-markers = [
     "platform_machine == 'aarch64' and sys_platform == 'linux'",
 ]
@@ -7289,14 +7293,14 @@ dependencies = [
     { name = "xgrammar", marker = "platform_machine != 'x86_64' and sys_platform == 'linux'" },
 ]
 wheels = [
-    { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-candidate-70ea9ae8f260/vllm-0.0.0.dev20260916+marin.70ea9ae8f260.cu132-cp38-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:fdbf8d6bcff756ff3ed1f5d562759936d2eceef8fde9d35d62df3e3a683a9d60" },
+    { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260929-39e62869693c/vllm-0.0.0.dev20260929+marin.39e62869693c.cu132-cp38-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:8a3ba6d09d43c779d67775ee9be0e54febcad724bce5192021b005407df0fdf8" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.13.3" },
     { name = "anthropic", specifier = ">=0.71.0" },
-    { name = "apache-tvm-ffi", specifier = "==0.1.11" },
+    { name = "apache-tvm-ffi", specifier = "==0.1.12" },
     { name = "av", marker = "extra == 'audio'" },
     { name = "b12x", marker = "extra == 'b12x'", specifier = "==1.3.0" },
     { name = "blake3" },
@@ -7380,9 +7384,9 @@ requires-dist = [
     { name = "starlette", specifier = ">=1.0.1" },
     { name = "tensorizer", marker = "extra == 'tensorizer'", specifier = "==2.10.1" },
     { name = "tiktoken", specifier = ">=0.6.0" },
-    { name = "tilelang", specifier = "==0.1.12" },
+    { name = "tilelang", specifier = "==0.1.14" },
     { name = "tokenizers", specifier = ">=0.21.1" },
-    { name = "tokenspeed-mla", marker = "sys_platform == 'linux'", specifier = "==0.1.8" },
+    { name = "tokenspeed-mla", marker = "sys_platform == 'linux'", specifier = "==0.1.9" },
     { name = "torch", specifier = "==2.13.0" },
     { name = "torchaudio", specifier = "==2.11.0" },
     { name = "torchcodec", specifier = ">=0.14" },
@@ -7399,8 +7403,8 @@ provides-extras = ["zen", "bench", "tensorizer", "fastsafetensors", "instanttens
 
 [[package]]
 name = "vllm"
-version = "0.0.0.dev20260916+marin.70ea9ae8f260.cu132"
-source = { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-candidate-70ea9ae8f260/vllm-0.0.0.dev20260916+marin.70ea9ae8f260.cu132-cp38-abi3-manylinux_2_28_x86_64.whl" }
+version = "0.0.0.dev20260929+marin.39e62869693c.cu132"
+source = { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260929-39e62869693c/vllm-0.0.0.dev20260929+marin.39e62869693c.cu132-cp38-abi3-manylinux_2_28_x86_64.whl" }
 resolution-markers = [
     "platform_machine == 'x86_64' and sys_platform == 'linux'",
 ]
@@ -7482,14 +7486,14 @@ dependencies = [
     { name = "xgrammar", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
 ]
 wheels = [
-    { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-candidate-70ea9ae8f260/vllm-0.0.0.dev20260916+marin.70ea9ae8f260.cu132-cp38-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:62a688cea684daeb940d94ac2a52e6df0ced4cb3663b29d3e3187e2bd261a418" },
+    { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260929-39e62869693c/vllm-0.0.0.dev20260929+marin.39e62869693c.cu132-cp38-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:93da77d0d4bb6f2f5ac8611efd09aa2e4654d4cacb5d21eab5dd2ec34186e27b" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.13.3" },
     { name = "anthropic", specifier = ">=0.71.0" },
-    { name = "apache-tvm-ffi", specifier = "==0.1.11" },
+    { name = "apache-tvm-ffi", specifier = "==0.1.12" },
     { name = "av", marker = "extra == 'audio'" },
     { name = "b12x", marker = "extra == 'b12x'", specifier = "==1.3.0" },
     { name = "blake3" },
@@ -7573,9 +7577,9 @@ requires-dist = [
     { name = "starlette", specifier = ">=1.0.1" },
     { name = "tensorizer", marker = "extra == 'tensorizer'", specifier = "==2.10.1" },
     { name = "tiktoken", specifier = ">=0.6.0" },
-    { name = "tilelang", specifier = "==0.1.12" },
+    { name = "tilelang", specifier = "==0.1.14" },
     { name = "tokenizers", specifier = ">=0.21.1" },
-    { name = "tokenspeed-mla", marker = "sys_platform == 'linux'", specifier = "==0.1.8" },
+    { name = "tokenspeed-mla", marker = "sys_platform == 'linux'", specifier = "==0.1.9" },
     { name = "torch", specifier = "==2.13.0" },
     { name = "torchaudio", specifier = "==2.11.0" },
     { name = "torchcodec", specifier = ">=0.14" },
