@@ -210,6 +210,8 @@ def create_ray_wrapped_inference_engines_from_config(
         role,
         engine_init_kwargs=engine_init_kwargs,
     )
+    if cfg.generator.weight_sync_transport == "expert_block":
+        engine_kwargs["require_verified_placements"] = True
 
     # Conditionally add LoRA parameters if LoRA is enabled
     if cfg.trainer.policy.model.lora.rank > 0:
@@ -358,12 +360,10 @@ class BasePPOExp:
         return prompts_dataset
 
     def get_eval_dataset(self):
-        """Initializes the evaluation dataset.
-
-        Returns:
-            PromptDataset: The evaluation dataset.
-        """
-        if self.cfg.trainer.eval_interval > 0 and self.cfg.data.val_data:
+        """Load validation prompts for evaluation or new mismatch-probe generation."""
+        probe = self.cfg.trainer.mismatch_probe
+        needs_probe_prompts = probe.enabled and probe.reuse_probe is None
+        if (self.cfg.trainer.eval_interval > 0 or needs_probe_prompts) and self.cfg.data.val_data:
             from skyrl_train.dataset import PromptDataset  # noqa: PLC0415
 
             prompts_dataset = PromptDataset(

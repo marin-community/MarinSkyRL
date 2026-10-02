@@ -334,6 +334,7 @@ class RayPPOTrainer:
         self._shutdown_complete = False
         self._restored_rollout_state: TrainingContextState | None = None
         self.global_step = 0
+        self.loaded_checkpoint_path: str | None = None
         self._last_saved_step: int | None = None
         self._last_evaluated_step: int | None = None
         self._pending_checkpoint_upload: tuple[asyncio.Task[tuple[float, float]], TrainerState] | None = None
@@ -404,6 +405,7 @@ class RayPPOTrainer:
                 f"the training dataset has {len(self.train_dataset)} prompts, fewer than one batch of {batch_size}"
             )
         self.total_training_steps = self.num_steps_per_epoch * self.cfg.trainer.epochs
+        self.available_training_steps = self.total_training_steps
         max_steps = self.cfg.trainer.get("max_steps")
         if max_steps is not None and max_steps > 0:
             self.total_training_steps = min(self.total_training_steps, max_steps)
@@ -1233,22 +1235,20 @@ class RayPPOTrainer:
         if self.colocate_all:
             self.policy_model.backload_to_gpu()
 
+        restored_data = False
         if self.resume_mode != ResumeMode.NONE:
             with Timer("load_checkpoints", self.all_startup_timings):
-                self.global_step, _ = self.load_checkpoints()
+                self.global_step, self.loaded_checkpoint_path = self.load_checkpoints()
             logger.info(f"Resumed training from global_step {self.global_step}")
             if self._restored_rollout_state is not None:
                 await self.context.load_state_dict(self._restored_rollout_state)
                 self._restored_rollout_state = None
+                restored_data = True
 
         await self._start_draft_trainer()
         await self._sync_policy_for_rollouts(reason="initial")
 
-        # Synchronize before checking completion so a requested final evaluation uses the checkpoint weights.
-        # The loaded global_step counts completed steps, so >= treats a resume exactly at max_steps as complete.
-        if self._ftpo_stopped or (
-            self.resume_mode != ResumeMode.NONE and self.global_step >= self.total_training_steps
-        ):
+        if self._ftpo_stopped:
             await self._handle_resume_at_max_steps()
             return
 
@@ -1266,6 +1266,23 @@ class RayPPOTrainer:
             self._control,
             trainer=self,
         )
+
+        if self._control.step_limit is not None:
+            limit = self._control.step_limit
+            available_steps = self.available_training_steps + (0 if restored_data else self.global_step)
+            if limit < self.global_step or limit > available_steps:
+                raise ValueError("callback step limit exceeds the available training batches")
+            self.total_training_steps = limit
+        elif self.resume_mode != ResumeMode.NONE and self.global_step >= self.total_training_steps:
+            await self._handle_resume_at_max_steps()
+            return
+
+        if self._control.should_training_stop:
+            await self._finalize_training(
+                completed_step=self.global_step, epoch=self.global_step // self.num_steps_per_epoch
+            )
+            return
+
         if self._control.should_evaluate and self.eval_dataset is not None:
             await self._run_pretraining_evaluation(initial_state)
             self._control.should_evaluate = False

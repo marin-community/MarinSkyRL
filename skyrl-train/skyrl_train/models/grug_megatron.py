@@ -49,6 +49,7 @@ from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint,
 from megatron.core.typed_torch import apply_module
 from torch import nn
 
+from skyrl_train.models.megatron_router_replay import RouterScoreType
 from skyrl_train.models.grug_shortconv import causal_short_conv
 from skyrl_train.models.grug_moe import (
     GRUG_ATTN_GATE_SCALE,
@@ -286,6 +287,8 @@ class GrugTopKRouter(TopKRouter):
     only steers expert selection; the combine weights come from the unbiased
     logits of the first ``k`` selected experts.
     """
+
+    replay_score_type = RouterScoreType.LOGITS
 
     def __init__(self, config: TransformerConfig, pg_collection=None, is_mtp_layer: bool = False):
         super().__init__(config=config, pg_collection=pg_collection, is_mtp_layer=is_mtp_layer)

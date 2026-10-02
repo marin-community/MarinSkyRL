@@ -3,6 +3,7 @@ defaults:
   - megatron_config@trainer.policy.megatron_config: policy
   - megatron_config@trainer.ref.megatron_config: ref
   - skyrl_gym_config: default
+  - mismatch_probe@trainer.mismatch_probe: default
 
 data:
   train_data: ["${oc.env:HOME}/data/gsm8k/train.parquet"]
@@ -342,6 +343,7 @@ trainer:
   rope_theta: null
 
   step_wise_training: false
+
 
 generator:
   model_name: ${trainer.policy.model.path}

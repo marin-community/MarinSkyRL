@@ -29,11 +29,11 @@ from tests.gpu.router_replay_fixtures import random_unique_routes
 from tests.gpu.test_grug_megatron import (
     NUM_EXPERTS,
     NUM_LAYERS,
+    _write_tiny_checkpoint,
     RESPONSE_LENGTH,
     _config,
     _padded_batch,
     _train_step,
-    _write_tiny_checkpoint,
 )
 from tests.gpu.utils import init_worker_with_type
 
