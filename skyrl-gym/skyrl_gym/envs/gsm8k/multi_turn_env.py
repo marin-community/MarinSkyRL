@@ -3,6 +3,7 @@ from omegaconf import DictConfig
 
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from skyrl_gym.envs.gsm8k import utils
+from skyrl_gym.verification import VerificationResult
 
 
 class GSM8kMultiTurnEnv(BaseTextEnv):
@@ -16,6 +17,7 @@ class GSM8kMultiTurnEnv(BaseTextEnv):
         assert "ground_truth" in reward_spec, "reward_spec.ground_truth is required"
 
         self.ground_truth: str = reward_spec["ground_truth"]
+        self.verifyit_enabled = bool(env_config.get("verifyit_enabled", False))
         self.max_turns = 5
         if "max_turns" in extras:
             self.max_turns = int(extras["max_turns"])
@@ -48,13 +50,27 @@ class GSM8kMultiTurnEnv(BaseTextEnv):
         self.turns += 1
 
         # Per-turn reward: 1.0 if correct, 0.2/max_turns if well-formatted but incorrect, 0.0 otherwise.
-        reward = utils.compute_score(
-            solution_str=action,
-            ground_truth=self.ground_truth,
-            method="strict",
-            format_score=self.format_score_per_turn,
-            score=1.0,
-        )
+        if self.verifyit_enabled:
+            from verifyit.grade import InvalidTask
+
+        error_types = (InvalidTask,) if self.verifyit_enabled else ()
+        try:
+            reward = utils.compute_score(
+                solution_str=action,
+                ground_truth=self.ground_truth,
+                method="strict",
+                format_score=self.format_score_per_turn,
+                score=1.0,
+                verifyit_enabled=self.verifyit_enabled,
+            )
+        except error_types as error:
+            return BaseTextEnvStepOutput(
+                observations=[],
+                reward=0.0,
+                done=True,
+                metadata={},
+                verification=VerificationResult.error(str(error), diagnostics={"verifyit_status": "invalid_task"}),
+            )
         done = self.turns >= self.max_turns or reward == 1.0
 
         observations = [] if done else self._make_observation()
