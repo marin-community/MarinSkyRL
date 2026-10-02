@@ -355,8 +355,7 @@ class TaskRolloutWorker:
         with rollout_phase("collect"):
             async with asyncio.TaskGroup() as group:
                 pending = [group.create_task(run(index, task)) for index, task in enumerate(tasks)]
-            rollouts = await asyncio.to_thread(
-                grade_groups,
+            rollouts = await grade_groups(
                 tasks,
                 [task.result() for task in pending],
                 [item.instance_id for item in trajectory_ids]

@@ -1,5 +1,6 @@
 """Apply task-declared graders to completed rollout groups."""
 
+import asyncio
 from collections.abc import Callable, Mapping, Sequence
 from types import MappingProxyType
 
@@ -15,7 +16,7 @@ GroupGrader = Callable[[TaskSpec, Sequence[RolloutData], Sequence[bool], str], S
 GROUP_GRADERS: Mapping[str, GroupGrader] = MappingProxyType({GENRM_GROUP_VERIFIER: grade_genrm_rollouts})
 
 
-def grade_groups(
+async def grade_groups(
     tasks: Sequence[TaskSpec],
     rollouts: Sequence[RolloutData],
     group_ids: Sequence[str],
@@ -50,7 +51,7 @@ def grade_groups(
             rollout_loss_eligible(rollouts[index], error_handling[index], logprobs_required=logprobs_required)
             for index in indices
         ]
-        graded = grader(task, records, eligible, phase)
+        graded = await asyncio.to_thread(grader, task, records, eligible, phase)
         for index, record in zip(indices, graded, strict=True):
             if record.task_id != task.id:
                 raise ValueError("Group grader changed a rollout task ID")
