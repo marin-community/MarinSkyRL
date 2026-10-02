@@ -3,9 +3,14 @@ name: Marin Nightly E2E
 
 on:
   schedule:
-    - cron: "0 9 * * *"
+    - cron: "0 9 * * 1-6"
+    - cron: "0 9 * * 0"
   workflow_dispatch:
     inputs:
+      grug_cutlass:
+        description: Include the weekly Grug CUTLASS case alongside nightly Triton
+        type: boolean
+        default: false
       target_cluster:
         description: "Iris cluster to federate the job to"
         default: cw-rno2a
@@ -34,7 +39,7 @@ jobs:
             cpu: 32
             memory: 256GB
             iris_timeout: 7200
-            workflow_timeout_minutes: 140
+            workflow_timeout_minutes: ${{ (github.event.schedule == '0 9 * * 0' || inputs.grug_cutlass) && 140 || 100 }}
             task_script: skyrl-train/ci/marin_nightly/run_grug_megatron.sh
             log: grug-megatron.log
           - lane: cat-count-h100
@@ -50,6 +55,7 @@ jobs:
     env:
       JOB_NAME: marinskyrl-nightly-${{ matrix.lane }}-${{ github.run_id }}-${{ github.run_attempt }}
       TARGET_CLUSTER: ${{ github.event.inputs.target_cluster || 'cw-rno2a' }}
+      GRUG_CUTLASS_WEEKLY: ${{ (github.event.schedule == '0 9 * * 0' || inputs.grug_cutlass) && '1' || '0' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -72,6 +78,7 @@ jobs:
             --cpu "${{ matrix.cpu }}" --memory "${{ matrix.memory }}" --disk 200GB \
             --no-sync \
             --timeout "${{ matrix.iris_timeout }}" \
+            -e GRUG_CUTLASS_WEEKLY "$GRUG_CUTLASS_WEEKLY" \
             -- bash "${{ matrix.task_script }}" 2>&1 | tee "${{ matrix.log }}"
 
       - name: Cancel any Iris job the run left behind
