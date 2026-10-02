@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from skyrl_gym.envs.aime.utils import compute_length_penalty, verify
+from skyrl_gym.envs.aime.utils import compute_length_penalty, normalize_final_answer, verify
 from skyrl_gym.verification import RewardResult, RolloutEvidence, VerificationResult
 
 
@@ -27,7 +27,6 @@ class AIMEVerifier:
     def verify(self, evidence: RolloutEvidence) -> VerificationResult:
         if self.verifyit_enabled and not self.strict_box_verify:
             from verifyit.adapters.skyrl import grade_aime_candidate
-            from skyrl_gym.envs.aime.utils import normalize_final_answer
 
             grade_aime_candidate(normalize_final_answer(self.ground_truth), "")
         response = evidence.response or ""

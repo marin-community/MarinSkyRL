@@ -1,4 +1,4 @@
-"""Trusted LCB runtime with existing exact comparisons and source aggregation."""
+"""LiveCodeBench sandbox transport using core comparison and aggregation."""
 
 from __future__ import annotations
 
