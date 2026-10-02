@@ -8,7 +8,14 @@ from skyrl_train.inference_engines.base import (
 from skyrl_train.weight_sync.weight_loader import WeightLoader
 from typing import List, Optional, Any, Dict
 import json
+from dataclasses import asdict, dataclass
 from transformers import PreTrainedTokenizerBase
+
+
+@dataclass(frozen=True)
+class WeightPublication:
+    publication_id: str
+    model_version: int
 
 
 class RemoteWeightLoader(WeightLoader):
@@ -27,6 +34,7 @@ class RemoteWeightLoader(WeightLoader):
         """
         self._url = url
         self._engine_backend = engine_backend
+        self._publication: Optional[WeightPublication] = None
 
     async def init_communicator(
         self,
@@ -66,20 +74,36 @@ class RemoteWeightLoader(WeightLoader):
                     "override_existing": override_existing,
                 },
             ) as response:
+                response.raise_for_status()
                 return await response.json()
 
+    async def begin_weight_reload(self) -> Dict[str, Any]:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(f"{self._url}/begin_weight_reload") as response:
+                response.raise_for_status()
+                result = await response.json()
+        # Native serving returns an active publication identity; vLLM's layerwise
+        # reload bracket returns status only and receives its usual tensor metadata.
+        self._publication = (
+            WeightPublication(result["publication_id"], result["model_version"]) if "publication_id" in result else None
+        )
+        return result
+
+    async def finish_weight_reload(self) -> Dict[str, Any]:
+        publication = self._publication
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self._url}/finish_weight_reload", json=asdict(publication) if publication is not None else {}
+                ) as response:
+                    response.raise_for_status()
+                    return await response.json()
+        finally:
+            if self._publication is publication:
+                self._publication = None
+
     async def load_weights(self, request: NamedWeightsUpdateRequest) -> Dict[str, Any]:
-        """Load weights via HTTP to the remote inference server.
-
-        Remote engines only support broadcast weight updates (no IPC).
-        Each request should contain a single weight to update.
-
-        Args:
-            request: Weight update request containing names, dtypes, shapes.
-
-        Returns:
-            Response from the remote server.
-        """
+        """Receive a bucket in its trainer broadcast order, one HTTP request per tensor."""
         if self._engine_backend == "vllm":
             weight_update_method = "update_weights"
         elif self._engine_backend == "sglang":
@@ -87,20 +111,22 @@ class RemoteWeightLoader(WeightLoader):
         else:
             raise ValueError(f"Invalid engine backend: {self._engine_backend}")
 
+        results = []
+        publication = self._publication
         async with aiohttp.ClientSession() as session:
-            name = request["names"][0]
-            dtype = request["dtypes"][0]
-            shape = request["shapes"][0]
-
-            resp = await session.post(
-                f"{self._url}/{weight_update_method}",
-                json={
-                    "name": name,
-                    "dtype": dtype,
-                    "shape": shape,
-                },
-            )
-            return await resp.json()
+            for name, dtype, shape in zip(request["names"], request["dtypes"], request["shapes"], strict=True):
+                async with session.post(
+                    f"{self._url}/{weight_update_method}",
+                    json={
+                        **(asdict(publication) if publication is not None else {}),
+                        "name": name,
+                        "dtype": dtype,
+                        "shape": shape,
+                    },
+                ) as response:
+                    response.raise_for_status()
+                    results.append(await response.json())
+        return {"results": results}
 
     async def destroy_group(self) -> Dict[str, Any]:
         """Destroy the weights update group.
@@ -109,8 +135,9 @@ class RemoteWeightLoader(WeightLoader):
             Response from the remote server.
         """
         async with aiohttp.ClientSession() as session:
-            resp = await session.post(f"{self._url}/destroy_weights_update_group")
-            return await resp.json()
+            async with session.post(f"{self._url}/destroy_weights_update_group") as response:
+                response.raise_for_status()
+                return await response.json()
 
 
 class RemoteInferenceEngine(InferenceEngineInterface):
@@ -299,16 +326,18 @@ class RemoteInferenceEngine(InferenceEngineInterface):
         if "names" not in request:
             raise ValueError(f"Expected update weight request with 'names' entry, got keys: {request.keys()}")
 
-        assert len(request["names"]) == 1, (
-            f"Remote inference engines support only requests with a single named weight at a time , got request with {len(request['names'])} entries"
-        )
-
         if request.get("extras") and "ipc_handles" in request["extras"][0]:
             raise ValueError(
                 "Remote inference engines do not support CUDA IPC weight updates. Only local engines support IPC."
             )
 
         return await self._weight_loader.load_weights(request)
+
+    async def begin_weight_reload(self):
+        return await self._weight_loader.begin_weight_reload()
+
+    async def finish_weight_reload(self):
+        return await self._weight_loader.finish_weight_reload()
 
     # TODO(tgriggs): Come up with a (more) elegant way to handle text or json responses, and test it and handle errors.
     async def reset_prefix_cache(self):
