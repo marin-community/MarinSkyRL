@@ -278,12 +278,12 @@ def _parallel_logprobs(
             if not torch.is_grad_enabled() and chunk_size is not None:
                 return torch.cat(
                     [
-                        -parallel_cross_entropy(x, y, dist_process_group=group)
+                        -parallel_cross_entropy(x, y, dist_process_group=group, overwrite_input=False)
                         for x, y in zip(logits.split(chunk_size, dim=1), targets.split(chunk_size, dim=1), strict=True)
                     ],
                     dim=1,
                 )
-            return -parallel_cross_entropy(logits, targets, dist_process_group=group)
+            return -parallel_cross_entropy(logits, targets, dist_process_group=group, overwrite_input=False)
     if chunk_size is not None:
         return ChunkedDistributedLogprob.apply(
             logits, targets, vocab_start_index, vocab_end_index, chunk_size, group, inference_only

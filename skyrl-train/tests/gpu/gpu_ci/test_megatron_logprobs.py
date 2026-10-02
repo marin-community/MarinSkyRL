@@ -55,6 +55,8 @@ def _check_rank(rank, world_size, rendezvous):
             entropy_logprobs = reference.float().log_softmax(dim=-1)
             reference_entropy = -(entropy_logprobs.exp() * entropy_logprobs).sum(dim=-1)
             (expected.mul(gradient).sum() + 0.003 * reference_entropy.sum()).backward()
+            # A BF16 one-ULP miss can be rounding rather than a formula error;
+            # keep the strict qualification gate across dependency changes.
             torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-6)
             torch.testing.assert_close(
                 local.grad, reference.grad[..., rank * width : (rank + 1) * width].to(dtype), rtol=1e-6, atol=1e-6
@@ -113,7 +115,8 @@ def _check_rank(rank, world_size, rendezvous):
         dist.destroy_process_group()
 
 
-def test_parallel_logprob_gradients_and_scoring(tmp_path):
+def test_logprobs_tp1_match_fp32_reference(tmp_path):
     world_size = 1
     require_hoppers(world_size)
+    # Isolate Megatron and NCCL globals from the other GPU CI tests.
     mp.spawn(_check_rank, args=(world_size, f"file://{tmp_path / 'rendezvous'}"), nprocs=world_size, join=True)

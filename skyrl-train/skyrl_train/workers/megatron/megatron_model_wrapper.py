@@ -101,12 +101,10 @@ class MegatronModelWrapper:
         self.actor_optimizer = actor_optimizer
         self.policy_loss_fn = policy_loss_fn
         self.use_sample_packing = self.cfg.trainer.use_sample_packing
-        # Optional sequence-dim chunk size for the vocab-parallel logprob
-        # computation. None => the whole [B, S, vocab//TP] fp32 exp is
-        # materialized at once, which OOMs on long sequences. A non-null value
-        # activates the numerically-exact ChunkedDistributedLogprob path
-        # (per-position log-softmax, chunked along seq), bounding peak memory
-        # regardless of sequence length. Byte-identical when unset.
+        # Sequence chunk size bounds scoring copies. Native TE training at
+        # CUDA BF16/FP32 TP1 uses one full model-dtype gradient buffer and
+        # multiplies derivatives in FP32 before casting. Other paths retain
+        # the legacy chunked computation, or whole-input FP32 when None.
         #
         # Callers pass this EXPLICITLY (the policy worker its own
         # trainer.policy.megatron_config.logprob_chunk_size, the ref worker its own
