@@ -86,6 +86,7 @@ class NemotronUltraEnv(BaseTextEnv):
         )
         self.math_verifier_timeout_seconds = env_config.get("verifyit_math_total_timeout_seconds", 60.0)
         self.judge_verifier_timeout_seconds = env_config.get("verifyit_judge_total_timeout_seconds", 120.0)
+        self.judge_profile_policies = env_config.get("verifyit_judge_profile_policies", {})
         self.grading = NemotronUltraGrading(env_config.get("grading", NemotronUltraGrading.VERIFY))
         judges = env_config.get("judges", {})
         general_judge = judges.get("general") if isinstance(judges, Mapping) else None
@@ -173,7 +174,12 @@ class NemotronUltraEnv(BaseTextEnv):
             from skyrl_gym.envs.nemotron_ultra.judge_profiles_verifyit import grade_judge_profile_verifyit
 
             return grade_judge_profile_verifyit(
-                action, self.record, judge, kind=kind, timeout_seconds=self.judge_verifier_timeout_seconds
+                action,
+                self.record,
+                judge,
+                kind=kind,
+                timeout_seconds=self.judge_verifier_timeout_seconds,
+                policies=self.judge_profile_policies,
             )
         scorers = {"abstention": grade_abstention, "multichallenge": grade_multichallenge, "jailbreak": grade_jailbreak}
         return scorers[kind](action, self.record, judge)
@@ -499,13 +505,19 @@ class NemotronUltraEnv(BaseTextEnv):
             reward, details = self._grade_math(action)
             diagnostics.update(details)
         elif self.agent == "abstention_simple_agent":
-            reward, details = self._grade_judge_profile(action, "abstention", self._require_general_judge())
+            reward, details = self._grade_judge_profile(
+                raw_action if self.verifyit_enabled else action, "abstention", self._require_general_judge()
+            )
             diagnostics.update(details)
         elif self.agent == "multichallenge_simple_agent":
-            reward, details = self._grade_judge_profile(action, "multichallenge", self._require_general_judge())
+            reward, details = self._grade_judge_profile(
+                raw_action if self.verifyit_enabled else action, "multichallenge", self._require_general_judge()
+            )
             diagnostics.update(details)
         elif self.agent in _JAILBREAK_AGENTS:
-            reward, details = self._grade_judge_profile(action, "jailbreak", self._require_safety_judge())
+            reward, details = self._grade_judge_profile(
+                raw_action if self.verifyit_enabled else action, "jailbreak", self._require_safety_judge()
+            )
             diagnostics.update(details)
         elif self.agent == "reasoning_gym_simple_agent":
             record = self.record

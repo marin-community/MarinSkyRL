@@ -1,6 +1,6 @@
 # Unified verification
 
-SkyRL clients call verifyit's existing verifier modes while retaining task-specific response extraction and framework reward reporting. The dependency is pinned to published commit `232988d88eda32ef480685587f1bd0fdfc394dce` in the project metadata. No local campaign checkout or unpublished wheel is needed. SkyRL uses math-verify 0.9.0, upgraded from 0.8.0 to satisfy the unified dependency. Math parsing or equivalence behavior can change with this upgrade; the 2026-10-01 campaign snapshot used math-verify 0.8.0. The offline comparisons use 0.9.0 on both paths.
+SkyRL clients call verifyit's existing verifier modes while retaining task-specific response extraction and framework reward reporting. The dependency is pinned to published commit `5cc623fa8bdd229421a12e1b3745320a492ad704` in the project metadata. No local campaign checkout or unpublished wheel is needed. SkyRL uses math-verify 0.9.0, upgraded from 0.8.0 to satisfy the unified dependency. Math parsing or equivalence behavior can change with this upgrade; the 2026-10-01 campaign snapshot used math-verify 0.8.0. The offline comparisons use 0.9.0 on both paths.
 
 ## Install and reproduce
 
@@ -43,6 +43,26 @@ print(environment.step("Answer: 42"))
 ```
 
 Set the option to `false` or omit it to run the original Reasoning Gym, IFEval, SQL, LiveCodeBench or Nemotron scorer. The [launcher acceptance configuration](../cloud/iris/configs/nemotron_ultra_rlvr_acceptance.yaml) shows the deployed sandbox host/port and judge `base_url`, `model`, and `api_key_env` settings. Set `environment.skyrl_gym.nemotron_ultra.verifyit_enabled: true` alongside those fields; the [trajectory runner](../skyrl-train/skyrl_train/trajectory_runners/skyrl_gym.py) passes each environment configuration to its constructor and propagates the option to GenRM. Other environments use `environment.skyrl_gym.<environment_name>.verifyit_enabled: true`.
+
+Enabled Nemotron abstention, multichallenge, and the four jailbreak policy routes use
+core Judge and Exact with MEAN or PRODUCT composition under one process-group deadline.
+`verifyit_judge_total_timeout_seconds` sets the total budget (default 120 seconds).
+All component specs are validated before requests, including references on the IDK gate.
+The four jailbreak policies preserve source fractional scores such as missing-disclaimer 0.3.
+
+`verifyit_judge_profile_policies` selects named preparation controls. Defaults are
+`response: nemotron_final_answer_v1` (reasoning removal and abstention last-box selection),
+`abstention: nemotron_articles_punctuation_case_v1`,
+`rubric: nemotron_yes_unless_no_v1`,
+`labels: source_alias_lines_no_contradictions_v1`, and `composition: source_v1`.
+Alternatives are `response: literal_v1`, `abstention: literal_v1`,
+`rubric: binary_only_v1`, `labels: bracketed_only_no_contradictions_v1`, and
+`composition: mean_v1` or `product_v1`. Unknown controls are invalid tasks.
+Multichallenge accepts bare YES/NO and bracketed labels by default; contradictory
+completed labels fail as infrastructure errors. This is stricter than the native
+final-line-only parser. Public diagnostics retain policy names, input digests,
+component labels/rewards, and core status. Trusted task snapshots and provider prose
+stay in the bounded transport receipt and must be captured only by protected tooling.
 
 Enabled GenRM grades completed comparison cohorts through core Judge and Schema inside a bounded Script worker. At least two responses are required. Verification rewards use [0, 1]; native optimization rewards retain the source's adjusted rating scale (base bounds −1.5–7.5) and length bonuses/penalties. The original source declares 1–5 bounds even though tie adjustments and shaping can exceed them. Malformed provider cohorts become error verdicts with optimization reward zero before shaping. Invalid trusted cohort data is reported separately as `invalid_task`; the enabled boundary conservatively masks all affected GenRM rows in that batch, including any earlier graded group, while preserving unrelated environments. Provider protocol and trusted-task failures never receive the source's default score of three. The archived environment traces contain pending-cohort placeholders, so the local controlled HTTP tests establish post-cohort behavior without claiming final archived judge-score parity.
 
