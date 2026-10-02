@@ -149,6 +149,8 @@ engines:
 
 - ``abort`` ends them. The client continues a non-streaming chat completion or single-prompt
   ``generate`` call from its generated tokens, so the response can contain tokens sampled under both policies.
+  Chat responses that include exact prompt and response IDs preserve them on retries independently of expert-router
+  capture. The client rejects inconsistent continuation IDs instead of re-tokenizing the partial response.
   It re-issues a single-prompt ``/completions`` request once from the start. A streaming chat completion ends
   early with finish reason ``abort`` because a stream cannot be re-issued mid-response. Agents that stream, such
   as OpenCode under Harbor, see that turn cut short.
