@@ -696,8 +696,8 @@ async def test_chat_completion_retry_accumulates_and_sends_continuations():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("drop_second_routes", [False, True])
-async def test_chat_completion_retry_keeps_routes_across_interrupted_chunks(drop_second_routes):
+@pytest.mark.parametrize("capture", ["none", "routes", "missing_routes", "wrong_prompt"])
+async def test_chat_completion_retry_keeps_exact_ids_and_optional_routes(capture):
     def encoded_routes(values):
         buffer = io.BytesIO()
         np.save(buffer, np.asarray(values, dtype=np.uint8).reshape(-1, 1, 1))
@@ -736,15 +736,22 @@ async def test_chat_completion_retry_keeps_routes_across_interrupted_chunks(drop
         async def chat_completion(self, request):
             self.requests.append(deepcopy(request))
             response = deepcopy(self.responses.pop(0))
-            if drop_second_routes and len(self.requests) == 2:
+            if capture in ("none", "wrong_prompt") or (capture == "missing_routes" and len(self.requests) == 2):
                 response["choices"][0].pop("routed_experts")
+            if capture == "wrong_prompt" and len(self.requests) == 2:
+                response["prompt_token_ids"][-1] = 99
             return response
 
     engine = Engine()
     client = InferenceEngineClient([engine], object(), _make_min_cfg())
     request = {"json": {"messages": [{"role": "user", "content": "Hi"}], "max_tokens": 3}}
-    if drop_second_routes:
-        with pytest.raises(ValueError, match="routed_experts capture is incomplete"):
+    if capture in ("missing_routes", "wrong_prompt"):
+        message = (
+            "routed_experts capture is incomplete"
+            if capture == "missing_routes"
+            else "Chat retry prompt does not match"
+        )
+        with pytest.raises(ValueError, match=message):
             await client.chat_completion(request)
         return
     response = await client.chat_completion(request)
@@ -752,10 +759,11 @@ async def test_chat_completion_retry_keeps_routes_across_interrupted_chunks(drop
 
     assert choice["token_ids"] == [11, 12, 13]
     assert engine.requests[1]["json"]["_skyrl_exact_prompt_token_ids"] == [1, 2, 11, 12]
-    np.testing.assert_array_equal(
-        normalize_routed_experts(choice["routed_experts"], response["prompt_token_ids"], choice["token_ids"]),
-        [[[3]], [[4]], [[0]]],
-    )
+    if capture == "routes":
+        np.testing.assert_array_equal(
+            normalize_routed_experts(choice["routed_experts"], response["prompt_token_ids"], choice["token_ids"]),
+            [[[3]], [[4]], [[0]]],
+        )
 
 
 @pytest.mark.asyncio
