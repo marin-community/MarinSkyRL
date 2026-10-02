@@ -62,6 +62,9 @@ class InferenceEngineOutput(TypedDict):
     routed_experts: NotRequired[List[np.ndarray | None]]
     # Set by ``InferenceEngineClient``, not by the engines.
     engine_dp_ranks: NotRequired[List[int]]
+    # An engine's expert routes for the forward passes that generated each response token, [token, layer, top_k];
+    # InferenceEngineClient turns them into ``routed_experts``.
+    generation_routed_experts: NotRequired[List[np.ndarray]]
 
 
 class NamedWeightsUpdateRequest(TypedDict):
