@@ -1,6 +1,8 @@
 """Pure scheduling and diagnostic reductions for the SWE pilot."""
 
 from collections import defaultdict
+from collections.abc import Iterable
+from typing import Any
 
 VERIFIERS = ("tool_name", "nemo", "exact")
 
@@ -14,6 +16,25 @@ def evaluation_kind(arm: str, step: int, loss_total: int = 0, loss_step: int = 0
             return "full"
         return "quick" if step <= 20 and step % 2 == 0 else None
     return "full" if loss_total // 250000 > (loss_total - loss_step) // 250000 else None
+
+
+def quick_evaluation_batches(
+    prompt_batches: Iterable[list[dict[str, Any]]], source_ids: Iterable[str], batch_size: int
+) -> list[list[dict[str, Any]]]:
+    """Pack the fixed quick-evaluation rows in validation order."""
+    quick_ids = set(source_ids)
+    prompts = [
+        prompt
+        for batch in prompt_batches
+        for prompt in batch
+        if prompt["env_extras"]["extra_info"]["source_id"] in quick_ids
+    ]
+    if (
+        len(prompts) != len(quick_ids)
+        or {prompt["env_extras"]["extra_info"]["source_id"] for prompt in prompts} != quick_ids
+    ):
+        raise ValueError("Quick-evaluation source IDs must appear exactly once in validation")
+    return [prompts[start : start + batch_size] for start in range(0, len(prompts), batch_size)]
 
 
 def diagnostic_metrics(batch, *, prefix: str, indices: list[int] | None = None) -> dict[str, float]:

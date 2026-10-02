@@ -1,6 +1,6 @@
 import json
 import torch
-from marinskyrl.pivot_pilot import diagnostic_metrics, evaluation_kind
+from marinskyrl.pivot_pilot import diagnostic_metrics, evaluation_kind, quick_evaluation_batches
 from skyrl_train.utils.progress import tqdm
 from typing import Any, Dict, List, Protocol
 from loguru import logger
@@ -126,15 +126,15 @@ async def _collect_evaluation_rollouts(
     last_batch = None
     pbar = None
     try:
-        pbar = tqdm(total=len(eval_dataloader), initial=0, desc="Evaluation Progress")
-        for prompts in eval_dataloader:
+        prompt_batches: StatefulDataLoader | list[list[dict[str, Any]]] = eval_dataloader
+        pilot = cfg.trainer.get("pivot_pilot")
+        if pilot is not None and evaluation_kind(pilot.arm, global_step or 0) == "quick":
+            prompt_batches = quick_evaluation_batches(
+                eval_dataloader, pilot.quick_source_ids, cfg.trainer.eval_batch_size
+            )
+        pbar = tqdm(total=len(prompt_batches), initial=0, desc="Evaluation Progress")
+        for prompts in prompt_batches:
             pbar.update(1)
-            pilot = cfg.trainer.get("pivot_pilot")
-            if pilot is not None and evaluation_kind(pilot.arm, global_step or 0) == "quick":
-                quick_ids = set(pilot.quick_source_ids)
-                prompts = [prompt for prompt in prompts if prompt["env_extras"]["extra_info"]["source_id"] in quick_ids]
-                if not prompts:
-                    continue
             request, uids = prepare_trajectory_request(
                 prompts,
                 cfg.generator.eval_n_samples_per_prompt,
