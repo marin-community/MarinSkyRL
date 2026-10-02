@@ -118,7 +118,9 @@ def test_malformed_contract_fails_closed_at_actual_framework_boundary():
     assert result["verification"].diagnostics["verifyit_status"] == "invalid_task"
 
 
-@pytest.mark.parametrize("failure", ["invalid_reference", "missing_database"])
+@pytest.mark.parametrize(
+    "failure", ["invalid_reference", "missing_database", "corrupt_database", "interactive_timeout"]
+)
 def test_legacy_sql_actual_environment_errors_use_minimum_reward_and_typed_status(tmp_path, failure):
     directory = tmp_path / "spider" / "database" / "fixture"
     directory.mkdir(parents=True)
@@ -138,13 +140,84 @@ def test_legacy_sql_actual_environment_errors_use_minimum_reward_and_typed_statu
     )
     if failure == "missing_database":
         database.unlink()
+    elif failure == "corrupt_database":
+        database.write_bytes(b"not a SQLite database" * 100)
+    action = "<think>query</think><solution>SELECT x FROM t</solution>"
+    if failure == "interactive_timeout":
+        action = (
+            "<think>query</think><sql>WITH RECURSIVE t(x) AS "
+            "(SELECT 1 UNION ALL SELECT x+1 FROM t) SELECT sum(x) FROM t</sql>"
+        )
     try:
-        result = env.step("<think>query</think><solution>SELECT x FROM t</solution>")
+        result = env.step(action)
         assert result["reward"] == -1
         assert result["verification"].status is VerificationStatus.ERROR
         assert result["verification"].score is None
+        assert result["verification"].score_min == -1.0
+        assert result["verification"].score_max == 1.0
         assert result["verification"].diagnostics["verifyit_status"] == (
             "invalid_task" if failure == "invalid_reference" else "infrastructure_error"
         )
     finally:
         env.close()
+
+
+def test_seeded_without_rowid_is_invalid_task_before_candidate(reference):
+    task = json.loads(reference)
+    task.update(
+        schema_sql="CREATE TABLE t(x INTEGER PRIMARY KEY) WITHOUT ROWID", insert_sql="INSERT INTO t VALUES(1),(2),(3)"
+    )
+    env = skyrl_gym.make(
+        "text_to_sql",
+        env_config=OmegaConf.create({"verifyit_enabled": True}),
+        extras={"reward_model": {"ground_truth": json.dumps(task)}},
+    )
+    result = env.step("DELETE FROM t")
+    assert result["reward"] == 0
+    assert result["verification"].diagnostics["verifyit_status"] == "invalid_task"
+    assert result["verification"].diagnostics["verdict"]["stage"] == "task_preparation"
+
+
+def test_sql_raw_capture_retains_precision_duplicates_and_protected_task(reference):
+    from skyrl_gym.envs.sqlite_verifyit import grade_sql
+
+    task = json.loads(reference)
+    task["reference_sql"] = "SELECT 1.0/3 FROM t"
+    raw = json.dumps(task)
+    result = grade_sql(raw, "<solution>SELECT 0.333333 FROM t</solution>")
+    assert result.verdict.reward == 1
+    assert result.inputs.ground_truth == raw
+    assert result.inputs.response == "<solution>SELECT 0.333333 FROM t</solution>"
+    assert result.references[0].rows == ((1 / 3,),) * 4
+    assert result.candidates[0].rows == ((0.333333,),) * 4
+    assert raw not in repr(result.diagnostics())
+    assert "SELECT" not in repr(result.diagnostics())
+
+
+def test_corrupt_database_is_infrastructure_not_candidate_rejection(tmp_path):
+    from skyrl_gym.envs.sqlite_verifyit import grade_sql, SQLPolicy
+    from verifyit.grade import Status
+
+    database = tmp_path / "broken.sqlite"
+    database.write_bytes(b"this is not a sqlite database" * 100)
+    result = grade_sql(
+        "SELECT x FROM t",
+        "<think>x</think><solution>SELECT x FROM t</solution>",
+        str(database),
+        policy=SQLPolicy.LEGACY,
+    )
+    assert result.verdict.status is Status.INFRA_ERROR
+    assert result.verdict.reward == 0
+    assert result.verdict.detail["stage"] == "reference_execution"
+
+
+def test_enabled_environment_handles_ordinary_candidate_exception(reference):
+    env = skyrl_gym.make(
+        "text_to_sql",
+        env_config=OmegaConf.create({"verifyit_enabled": True}),
+        extras={"reward_model": {"ground_truth": reference}},
+    )
+    result = env.step(None)
+    assert result["reward"] == 0
+    assert result["verification"].status is VerificationStatus.ERROR
+    assert result["verification"].diagnostics["verifyit_status"] == "infrastructure_error"
