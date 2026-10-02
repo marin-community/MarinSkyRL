@@ -23,6 +23,7 @@ from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_exp
 from skyrl_train.config.query_bias import resolve_grug_query_bias_update
 from skyrl_train.config.weight_sync_pause import resolve_weight_sync_pause_policy
 from skyrl_train.config.behavior_logprobs import configure_behavior_logprob_sampling
+from skyrl_train.config.decode_invariant import validate_decode_invariant_config
 from skyrl_train.config.mismatch_probe import validate_mismatch_probe_config
 from skyrl_train.config.objective_spec import rollout_logprobs_required, validate_objective
 from skyrl_train.callbacks.types import (
@@ -558,6 +559,7 @@ def validate_cfg(cfg: DictConfig):
     resolve_weight_sync_pause_policy(cfg.generator)
     validate_generator_cfg(cfg)
     validate_batch_invariant_config(cfg)
+    validate_decode_invariant_config(cfg)
     validate_hf_export_config(cfg)
     try:
         resolve_grug_query_bias_update(cfg.trainer.policy)
