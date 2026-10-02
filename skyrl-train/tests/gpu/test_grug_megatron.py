@@ -527,7 +527,10 @@ def test_grug_megatron_four_gpu_pp2_disaggregated_rollout_train_broadcast_rollou
 
 
 @pytest.mark.vllm
-@pytest.mark.parametrize("moe_backend", [os.environ.get("GRUG_MOE_BACKEND", "triton")])
+@pytest.mark.parametrize(
+    "moe_backend",
+    ["triton"] + (["flashinfer_cutlass"] if os.environ.get("GRUG_CUTLASS_WEEKLY") == "1" else []),
+)
 def test_grug_megatron_two_gpu_colocated_sleep_sync_preserves_grouped_experts(tmp_path, moe_backend):
     """A sleep-level-2 CUDA-IPC sync preserves grouped experts and serving output."""
 
