@@ -4,11 +4,13 @@ import json
 import sqlite3
 
 import pytest
+from verifyit.grade import InvalidTask
 from omegaconf import OmegaConf
 
 import skyrl_gym
 from skyrl_gym.envs.sqlite_verifyit import score_legacy_sql, score_seeded_sql
 from skyrl_gym.envs.text_to_sql.scoring import score
+from skyrl_gym.verification import VerificationStatus
 
 
 @pytest.fixture
@@ -57,7 +59,8 @@ def test_seeded_sql_actual_environment_reports_wrong_candidate_and_verifier_fail
     )
     result = bad.step("SELECT x FROM t")
     assert result["reward"] == 0
-    assert result["verification"].score is None
+    assert result["verification"].status is VerificationStatus.ERROR
+    assert result["verification"].diagnostics["verifyit_status"] == "invalid_task"
 
 
 def test_legacy_sql_keeps_set_semantics_format_projection_and_original_database(tmp_path):
@@ -76,13 +79,40 @@ def test_legacy_sql_keeps_set_semantics_format_projection_and_original_database(
 def test_invalid_reference_precedes_rejected_candidate(reference):
     task = json.loads(reference)
     task["reference_sql"] = "SELECT absent_column FROM t"
-    with pytest.raises(RuntimeError, match="verification failed"):
+    with pytest.raises(InvalidTask, match="reference query failed"):
         score_seeded_sql(json.dumps(task), "DELETE FROM t")
 
 
 def test_nonfinite_sql_results_fail_closed(reference):
     task = json.loads(reference)
     task["reference_sql"] = "SELECT 1e999"
-    with pytest.raises(RuntimeError, match="verification failed"):
+    with pytest.raises(InvalidTask, match="nonfinite"):
         score_seeded_sql(json.dumps(task), "SELECT 1e999")
     assert score_seeded_sql(reference, "SELECT 1e999")[0] == 0
+
+
+@pytest.mark.parametrize("ordered,score_value", [(True, 0.0), (False, 1.0)])
+def test_order_policy_remains_explicit(reference, ordered, score_value):
+    task = json.loads(reference)
+    task.update(reference_sql="SELECT x FROM t ORDER BY x", order_significant=ordered)
+    response = "SELECT x FROM t ORDER BY x DESC"
+    assert score(json.dumps(task), response)[0] == score_seeded_sql(json.dumps(task), response)[0] == score_value
+
+
+@pytest.mark.parametrize("query,reward", [("SELECT NULL AS x FROM t", 1.0), ("SELECT '' AS x FROM t", 0.0)])
+def test_null_is_a_value_not_missing_evidence(reference, query, reward):
+    task = json.loads(reference)
+    task["reference_sql"] = "SELECT NULL AS x FROM t"
+    assert score(json.dumps(task), query)[0] == score_seeded_sql(json.dumps(task), query)[0] == reward
+
+
+def test_malformed_contract_fails_closed_at_actual_framework_boundary():
+    env = skyrl_gym.make(
+        "text_to_sql",
+        env_config=OmegaConf.create({"verifyit_enabled": True}),
+        extras={"reward_model": {"ground_truth": "{}"}},
+    )
+    result = env.step("SELECT 1")
+    assert result["reward"] == 0.0
+    assert result["verification"].status is VerificationStatus.ERROR
+    assert result["verification"].diagnostics["verifyit_status"] == "invalid_task"

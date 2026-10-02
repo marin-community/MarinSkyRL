@@ -35,20 +35,30 @@ class TextToSQLEnv(BaseTextEnv):
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
         if self._ground_truth is None:
-            return BaseTextEnvStepOutput(
+            result = BaseTextEnvStepOutput(
                 observations=[],
                 reward=0.0,
                 done=True,
                 metadata={"verifier_error": _INVALID_GROUND_TRUTH_ERROR},
             )
+            if self.verifyit_enabled:
+                from skyrl_gym.verification import VerificationResult
+
+                result["verification"] = VerificationResult.error(
+                    _INVALID_GROUND_TRUTH_ERROR, diagnostics={"verifyit_status": "invalid_task"}
+                )
+            return result
         scorer = score
         if self.verifyit_enabled:
             from skyrl_gym.envs.sqlite_verifyit import score_seeded_sql
 
+            from verifyit.grade import InvalidTask
+
             scorer = score_seeded_sql
+        error_types = (RuntimeError, InvalidTask) if self.verifyit_enabled else (RuntimeError,)
         try:
             reward, metadata = scorer(self._ground_truth, action)
-        except RuntimeError:
+        except error_types as error:
             from skyrl_gym.verification import VerificationResult
 
             return BaseTextEnvStepOutput(
@@ -56,6 +66,11 @@ class TextToSQLEnv(BaseTextEnv):
                 reward=0.0,
                 done=True,
                 metadata={},
-                verification=VerificationResult.error("SQL verification failed"),
+                verification=VerificationResult.error(
+                    "SQL verification failed",
+                    diagnostics={"verifyit_status": "invalid_task"}
+                    if self.verifyit_enabled and isinstance(error, InvalidTask)
+                    else {},
+                ),
             )
         return BaseTextEnvStepOutput(observations=[], reward=reward, done=True, metadata=metadata)
