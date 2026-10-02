@@ -173,7 +173,7 @@ def serving_engine_ranks(ranks: torch.Tensor, expert_parallel_size: int) -> Iter
     """Give the forwards in the block each sequence's serving vLLM data-parallel rank (``[B]``) and vLLM's
     expert-parallel size, which decide the order of vLLM's expert-parallel combine (``vllm_ep_combine``)."""
     global _SERVING_RANKS
-    if ranks.numel() and (ranks.min() < 0 or ranks.max() >= expert_parallel_size):
+    if ranks.numel() and ranks.max() >= expert_parallel_size:
         raise ValueError(
             f"each sequence's serving engine rank must be a vLLM data-parallel rank below {expert_parallel_size}, "
             f"got {ranks.tolist()}"

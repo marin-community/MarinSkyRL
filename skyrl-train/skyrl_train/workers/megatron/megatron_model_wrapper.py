@@ -340,10 +340,15 @@ class MegatronModelWrapper:
                 raise ValueError(
                     "Grug's vLLM numerics need each sequence's serving engine rank (rollout_engine_dp_ranks)"
                 )
-            serving = serving_engine_ranks(
-                rollout_engine_dp_ranks.to(device=sequences.device, dtype=torch.long),
-                int(self.cfg.generator.inference_engine_expert_parallel_size),
-            )
+            ranks = rollout_engine_dp_ranks.to(device=sequences.device, dtype=torch.long)
+            # A row without a model call has no serving rank (-1) and no generated tokens to score.
+            generated = attention_mask[:, -num_actions:].any(dim=1)
+            if bool(((ranks < 0) & generated).any()):
+                raise ValueError(
+                    "Grug's vLLM numerics need the serving engine rank of every sequence with generated tokens, "
+                    f"got {rollout_engine_dp_ranks.tolist()}"
+                )
+            serving = serving_engine_ranks(ranks, int(self.cfg.generator.inference_engine_expert_parallel_size))
         armed = False
         if self.router_replay is not None:
             if rollout_routed_experts is None:
