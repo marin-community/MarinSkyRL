@@ -109,17 +109,30 @@ def _raw_config() -> dict[str, Any]:
     }
 
 
+@pytest.mark.parametrize("storage_prefix", ["s3://runs/smoke", "gs://runs/smoke"])
 @pytest.mark.parametrize(("loss", "reduction"), [("regular", "token_mean"), ("gspo", "sequence_mean")])
-def test_launch_config_composes_and_loads_as_structured_hydra(tmp_path: Path, loss: str, reduction: str) -> None:
+def test_launch_config_composes_and_loads_as_structured_hydra(
+    tmp_path: Path, loss: str, reduction: str, storage_prefix: str
+) -> None:
     path = tmp_path / "resolved-launch.yaml"
     raw = _raw_config()
     raw["skyrl"]["trainer"]["algorithm"].update(policy_loss_type=loss, loss_reduction=reduction)
+    trainer = raw["skyrl"]["trainer"]
+    trainer["resume_mode"] = "from_path"
+    trainer["resume_path"] = f"{storage_prefix}/checkpoints/global_step_1"
+    trainer["mismatch_probe"] = {
+        "archive_uri": f"{storage_prefix}/mismatch_probe",
+        "reuse_probe": f"{storage_prefix}/source/mismatch_probe",
+    }
     path.write_text(yaml.safe_dump(raw, sort_keys=False))
 
     config = load_launch_config(path)
 
     assert config.skyrl.trainer.train_batch_size == 8
     assert validate_launch_config(config).num_nodes == 1
+    assert config.skyrl.trainer.resume_path == f"{storage_prefix}/checkpoints/global_step_1"
+    assert config.skyrl.trainer.mismatch_probe.archive_uri == f"{storage_prefix}/mismatch_probe"
+    assert config.skyrl.trainer.mismatch_probe.reuse_probe == f"{storage_prefix}/source/mismatch_probe"
     if loss == "gspo":
         config.skyrl.trainer.algorithm.loss_reduction = "token_mean"
         with pytest.raises(ValueError, match="gspo requires trainer.algorithm.loss_reduction=sequence_mean"):

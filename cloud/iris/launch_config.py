@@ -5,16 +5,20 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
+import posixpath
 import tempfile
 from typing import Any, Mapping
 
 from omegaconf import MISSING, DictConfig, OmegaConf
 
+from skyrl_train.config.mismatch_probe import validate_mismatch_probe_config
 from skyrl_train.config.objective_spec import validate_objective
 
 from cloud.iris.ray_storage import RaySpillBackend, resolve_ray_spill_target
 from cloud.iris.role_plan import derive_num_nodes, derive_role_plan
 from cloud.iris.rl_config_translation import (
+    RL_ENTRYPOINTS,
+    RLEntrypoint,
     compose_skyrl_config,
     parse_rl_config,
     registered_rl_entrypoint_module,
@@ -22,6 +26,7 @@ from cloud.iris.rl_config_translation import (
     validate_tp_divides_heads,
 )
 from cloud.iris.runtime_environment import RuntimeMode, runtime_profile_for_strategy
+from marinskyrl.distillation import validate_generation_logprobs
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from marinskyrl.task_sources import data_source
 
@@ -240,6 +245,10 @@ def load_launch_config(path: Path) -> DictConfig:
         if config.run.mode != RunMode.TRAIN:
             raise ValueError("checkpoint_export launch configs must already contain a composed SkyRL subtree")
         config = _compose_source_recipe(config)
+    probe = config.skyrl.get("trainer", {}).get("mismatch_probe", {})
+    if probe.get("enabled") and not probe.get("archive_uri"):
+        artifact_root = posixpath.dirname(str(config.artifacts.resolved_config_uri))
+        probe.archive_uri = join_resource_path(artifact_root, "mismatch_probe")
     validate_launch_config(config)
     return config
 
@@ -337,6 +346,11 @@ def validate_launch_config(config: DictConfig) -> LaunchTopology:
     runtime = raw["runtime"]
     entrypoint = runtime["entrypoint"]
     registered_rl_entrypoint_module(entrypoint)
+    validate_generation_logprobs(config.skyrl)
+    validate_mismatch_probe_config(
+        skyrl,
+        synchronous=entrypoint == RL_ENTRYPOINTS[RLEntrypoint.STANDARD] and run["mode"] == RunMode.TRAIN,
+    )
     expected_profile = runtime_profile_for_strategy(
         skyrl.get("trainer", {}).get("strategy"),
         mode=RuntimeMode.CHECKPOINT_EXPORT if run["mode"] == RunMode.CHECKPOINT_EXPORT else RuntimeMode.TRAINING,
