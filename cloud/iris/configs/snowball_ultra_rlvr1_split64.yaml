@@ -83,7 +83,8 @@ trainer:
       optimizer_checkpoint_sharding_type: dp_reshardable
       ddp_config:
         overlap_grad_reduce: true
-        overlap_param_gather: true
+        # Exact numerics resolves to native when parameter all-gathers overlap the forward.
+        overlap_param_gather: false
         grad_reduce_in_fp32: false
   ref:
     megatron_config:
