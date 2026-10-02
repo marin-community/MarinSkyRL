@@ -13,6 +13,7 @@ import asyncio
 import collections
 import time
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
@@ -168,11 +169,18 @@ class RolloutWriter(Protocol):
     async def write_rollout(self, lease: RolloutLease, group: RolloutGroup) -> None: ...
 
 
+@dataclass(frozen=True)
+class PayloadReference:
+    """Nest one reference so Ray passes an ObjectRef to ``commit`` without resolving it."""
+
+    value: object | None
+
+
 @dataclass
 class ReadyRollout:
     """A committed group that no batch has taken yet.
 
-    ``payload`` holds the payload store's reference to the ``RolloutGroup``; it is empty when the verdict
+    ``payload`` holds one reference to the ``RolloutGroup``; it is None when the verdict
     excludes the group.
     ``committed_at`` is the buffer process's monotonic time at commit, and None for a group restored from a
     checkpoint.
@@ -183,7 +191,7 @@ class ReadyRollout:
     batch_id: int
     prompt: dict
     verdict: RolloutVerdict
-    payload: list
+    payload: object | None
     committed_at: float | None
 
 
@@ -215,6 +223,17 @@ class BatchSelection:
 
 
 @dataclass(frozen=True)
+class AdmittedRollout:
+    """One selected group's stable batch index, identity, and size."""
+
+    index: int
+    uid: str
+    policy_step: int
+    sample_count: int
+    response_tokens: int
+
+
+@dataclass(frozen=True)
 class Admission:
     """Progress toward the current batch since the previous ``admit`` call.
 
@@ -222,7 +241,8 @@ class Admission:
     ``selection`` is set only on the call that completes the batch.
     """
 
-    payloads: list
+    batch_id: int
+    admitted: list[AdmittedRollout]
     retries: list[dict]
     generated: list[tuple[int, GeneratedWork]]
     dispositions: list[GroupDisposition]
@@ -422,13 +442,15 @@ class RolloutBuffer:
             self._leases[lease.lease_id] = lease
             return lease
 
-    async def commit(self, lease_id: str, prompt: dict, verdict: RolloutVerdict, payload: list) -> None:
+    async def commit(self, lease_id: str, prompt: dict, verdict: RolloutVerdict, payload: PayloadReference) -> None:
         """Record a written group and release its lease."""
         async with self._changed:
             lease = self._leases.pop(lease_id)
             self._generated.append((lease.policy_step, verdict.work))
             self._ready.append(
-                ReadyRollout(lease_id, lease.policy_step, lease.batch_id, prompt, verdict, payload, time.monotonic())
+                ReadyRollout(
+                    lease_id, lease.policy_step, lease.batch_id, prompt, verdict, payload.value, time.monotonic()
+                )
             )
             self._select()
             self._changed.notify_all()
@@ -447,10 +469,25 @@ class RolloutBuffer:
             self._select()
             self._changed.notify_all()
 
+    def payload_refs(self, batch_id: int, indices: Sequence[int]) -> list[object]:
+        """Resolve selected group indices while their batch is the current training step."""
+        if batch_id != self._policy_step:
+            raise ValueError(f"batch {batch_id} is no longer available; current batch is {self._policy_step}")
+        batch = self._admitted[batch_id]
+        if any(index < 0 or index >= len(batch) for index in indices):
+            raise IndexError(f"group index outside batch {batch_id} with {len(batch)} admitted groups")
+        refs: list[object] = []
+        for index in indices:
+            ref = batch[index].payload
+            if ref is None:
+                raise RuntimeError(f"batch {batch_id} contains an admitted group without a payload")
+            refs.append(ref)
+        return refs
+
     async def admit(self, timeout: float) -> Admission:
         """Wait up to ``timeout`` seconds for the current batch to progress.
 
-        Returns newly admitted payloads, prompts to regenerate, and groups that left the buffer. The call that
+        Returns newly admitted group metadata, prompts to regenerate, and groups that left the buffer. The call that
         completes the batch also returns how the batch was selected; the batch then counts as taken until the next
         ``publish``.
 
@@ -493,7 +530,19 @@ class RolloutBuffer:
                     f"{len(self._admitted[batch_id])} of {self.config.batch_size} admitted"
                 )
             admission = Admission(
-                payloads=[ref for rollout in self._unreported for ref in rollout.payload],
+                batch_id=self._policy_step,
+                admitted=[
+                    AdmittedRollout(
+                        index=index,
+                        uid=rollout.verdict.uid,
+                        policy_step=rollout.policy_step,
+                        sample_count=rollout.verdict.work.sample_count,
+                        response_tokens=rollout.verdict.work.generated_token_count,
+                    )
+                    for index, rollout in enumerate(
+                        self._unreported, start=len(self._admitted[self._policy_step]) - len(self._unreported)
+                    )
+                ],
                 retries=self._retries,
                 generated=self._generated,
                 dispositions=self._dispositions,
