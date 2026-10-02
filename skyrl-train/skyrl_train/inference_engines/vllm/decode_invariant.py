@@ -1,35 +1,17 @@
 """A decode-invariant compiled vLLM engine for Grug: each token's bytes do not depend on the step that computes it.
 
-Compiled vLLM gives a token other bytes in a decode step than in a prefill step, or in steps of another composition,
-in these places (a one-H100 sweep of each kernel at Snowball's shapes, one row to 8,192 rows per call):
+``install`` patches vLLM in the calling process:
 
-- FA3 splits a request's keys by the step: 32 splits at most on CUDA-graph steps (a per-request count on the device,
-  from the step's total key blocks), FA3's heuristic above. Rows computed with another split count add their key
-  blocks in another order. Every FA3 request runs ``FA3_INVARIANT_SPLITS`` splits, through scheduler metadata the
-  metadata builder writes for every step (``_patch_fixed_splits``). FA3 cuts each query tile's key blocks into the
-  splits, so a prefill request starts at a multiple of 32 positions (one tile of packed query heads), its rows before
-  the first such position running as a request of their own, and a call holds at most 992 requests, the most FA3
-  splits.
-- On a sliding-window layer FA3 aligns its key blocks to the window start of each query tile's first row. A decode
-  row is a tile of its own; inside a prefill tile the same row past the window adds other block groups. Prefill rows
-  past the window run as one-row requests, as decode steps run them (``_patch_request_plan``). With fixed splits, every
-  one-row request of a sliding-window layer runs on FA3's causal kernel from its window start
-  (``fa3_window_start_rows``), which reads the same key blocks in the same splits as the local kernel, in less time.
-- cuBLAS picks the fp32 router GEMM's kernel from the step's row count. A Triton GEMM with one tile shape computes the
-  router logits instead (``_patch_router``).
-- The 20-output head-gate GEMM: Inductor's ``pad_mm`` pass times it against a zero-padded 24-output copy when each
-  engine process compiles, and the unpadded GEMM's cuBLAS kernel follows the row count. Every process compiles the
-  padded GEMM: the engine's compilation setting ``force_shape_pad``, which ``create_ray_wrapped_inference_engines``
-  sets for a decode-invariant engine.
-- Inductor's autotuner picks some reductions' launch configs by timing them in each process. Every process takes the
-  first config in a fixed order (``_patch_autotune``), so every engine launches the same configs.
+- ``_patch_fixed_splits``: every FA3 request runs ``FA3_INVARIANT_SPLITS`` key splits, and cascade attention is off.
+- ``_patch_request_plan``: a step's FA3 call runs as the calls ``_invariant_calls`` plans, which compute each row as a
+  decode step computes it.
+- ``_patch_router``: a Triton GEMM with one tile shape computes the fp32 router logits.
+- ``_patch_autotune``: Inductor's autotuner takes each kernel's launch configs in a fixed order instead of timing them.
 
-Every other kernel of a token's forward (the bf16 cuBLAS GEMMs, Inductor's fused kernels, the Triton experts, the LM
-head and the log-probability kernel) gives the same bytes at every row count measured, from one row to 8,192.
-
-``install`` applies the patches in the calling process. ``decode_invariant_worker.DecodeInvariantWorkerWrap`` is the
-engine's worker extension: vLLM imports it in every worker process before the model loads, compiles and captures CUDA
-graphs, and importing it installs the patches. vLLM stays compiled.
+Inductor pads the head-gate GEMM in every engine process (``force_shape_pad``, which
+``create_ray_wrapped_inference_engines`` sets for a decode-invariant engine). The engine's other kernels give a row
+the same bytes at every row count. ``decode_invariant_worker.DecodeInvariantWorkerWrap`` is the engine's worker
+extension; importing it installs the patches in each worker process before the model loads.
 """
 
 from __future__ import annotations
@@ -49,14 +31,15 @@ from skyrl_train.models.grug_fa3_invariant import (
     FA3_DYNAMIC_SPLIT_MAX_BATCH,
     FA3_INVARIANT_SPLITS,
     fa3_fixed_split_metadata,
+    fa3_fixed_split_metadata_size,
     fa3_invariant_requests,
     fa3_request_calls,
     fa3_window_start_rows,
 )
 
 _installed = False
-# ``(window, window starts)`` while ``invariant_forward`` runs a call of one-row sliding-window requests: vLLM's FA3
-# forward makes one varlen call, which ``_causal_window_varlen`` runs on FA3's causal kernel.
+# ``(window, window starts)`` while ``invariant_forward`` runs a call of one-row sliding-window requests, whose varlen
+# call ``_causal_window_varlen`` runs.
 _window_call: tuple[int, torch.Tensor] | None = None
 
 
@@ -72,15 +55,8 @@ def _grug_router_logits_fake(x: torch.Tensor, weight: torch.Tensor) -> torch.Ten
 
 
 def _patch_fixed_splits() -> None:
-    """Every FA3 call of the engine runs ``FA3_INVARIANT_SPLITS`` splits for each request, on CUDA-graph steps
-    (captured with them) and on eager steps; vLLM's cascade attention, another computation for requests that share a
-    prefix, stays off.
-
-    The metadata builder writes FA3's scheduler metadata (``fa3_fixed_split_metadata``), into a buffer that lives as
-    long as the builder when full CUDA graphs replay the step's FA3 calls. The metadata follows the step's query lengths
-    alone, so the builder writes it only when they change (a run of decode steps of the same requests reuses it; FA3's
-    combine kernel zeroes the tile semaphore after each call).
-    """
+    """Every FA3 call of the engine runs ``FA3_INVARIANT_SPLITS`` splits for each request, on CUDA-graph and eager
+    steps, with cascade attention off."""
     builder = flash_attn.FlashAttentionMetadataBuilder
     original_init, original_build = builder.__init__, builder.build
 
@@ -91,8 +67,9 @@ def _patch_fixed_splits() -> None:
         self.skyrl_scheduler_metadata = None
         self.skyrl_query_lengths = None
         if self.use_full_cuda_graph:
+            # Full CUDA graphs replay FA3 calls that read the scheduler metadata from this buffer.
             batch = max(self.vllm_config.scheduler_config.max_num_seqs, self.max_cudagraph_size or 0)
-            size = 3 * -(-batch // 4) * 4 + 1
+            size = fa3_fixed_split_metadata_size(batch)
             self.skyrl_scheduler_buffer = torch.zeros(size, dtype=torch.int32, device=self.device)
 
     def fixed_build(self, common_prefix_len, common_attn_metadata, fast_build=False):
@@ -104,6 +81,7 @@ def _patch_fixed_splits() -> None:
         if query_start.numel() != metadata.query_start_loc.numel():
             raise ValueError("the step's host and device query starts hold different request counts")
         query_lengths = (query_start[1:] - query_start[:-1]).numpy().tobytes()
+        # The metadata depends on the query lengths alone, and FA3's combine kernel zeroes its tile semaphore.
         if query_lengths != self.skyrl_query_lengths:
             self.skyrl_scheduler_metadata = fa3_fixed_split_metadata(
                 metadata.query_start_loc,
@@ -120,17 +98,7 @@ def _patch_fixed_splits() -> None:
 
 
 def _patch_request_plan() -> None:
-    """Run a step's FA3 call as the calls that compute each row as a decode step computes it.
-
-    Prefill and mixed steps, which vLLM runs outside CUDA graphs, and decode steps of more than
-    ``FA3_DYNAMIC_SPLIT_MAX_BATCH`` requests run as the requests ``fa3_invariant_requests`` gives (on sliding-window
-    layers, each prefill row past the window as a one-row request), in calls of at most that many requests, each with
-    its own metadata. The one-row requests of a sliding-window layer go in calls of their own on FA3's causal kernel,
-    which start each row's keys at its window start (``fa3_window_start_rows``); a decode step of at most that many
-    requests, which full CUDA graphs capture, runs as one such call with window starts computed on the device from its
-    key lengths. Other decode steps of at most that many requests run as built. The calls are built once per step's
-    metadata and window.
-    """
+    """Run a step's FA3 call as the calls ``_invariant_calls`` plans."""
     original_forward = flash_attn.FlashAttentionImpl.forward
     original_varlen = flash_attn.flash_attn_varlen_func
 
@@ -202,8 +170,13 @@ class _StepCall(NamedTuple):
 
 
 def _invariant_calls(impl, metadata) -> list[_StepCall] | None:
-    """The FA3 calls of ``impl``'s layer for the step of ``metadata``, or ``None`` when the step's call runs as
-    built."""
+    """The FA3 calls that compute each row of ``impl``'s layer as a decode step computes it, or ``None`` when the step's
+    call runs as built.
+
+    A prefill or mixed step, or a decode step of more than ``FA3_DYNAMIC_SPLIT_MAX_BATCH`` requests, runs as the
+    requests ``fa3_invariant_requests`` gives, in calls of at most that many requests. On a sliding-window layer the
+    one-row requests run in calls of their own on FA3's causal kernel from each row's window start.
+    """
     left, right = impl.sliding_window
     window = left + 1 if left >= 0 and right == 0 else None
     cached = metadata.__dict__.setdefault("_skyrl_calls", {})
@@ -212,9 +185,8 @@ def _invariant_calls(impl, metadata) -> list[_StepCall] | None:
     requests = metadata.query_start_loc.numel() - 1
     single_rows = metadata.max_query_len <= 1
     if window is not None and single_rows and requests <= FA3_DYNAMIC_SPLIT_MAX_BATCH:
-        # A decode step: the window starts follow the key lengths on the device, so a captured CUDA graph replays them.
-        # Every KV-cache group's metadata of a step holds the step's one key-length tensor, so the step computes them
-        # once for all sliding-window layers.
+        # Window starts are computed on the device, so captured CUDA graphs replay them, and cached on the step's
+        # key-length tensor, which every KV-cache group of the step shares.
         by_window = metadata.seq_lens.__dict__.setdefault("_skyrl_window_starts", {})
         if window not in by_window:
             by_window[window] = torch.clamp(metadata.seq_lens[:requests] - window, min=0)
@@ -276,18 +248,15 @@ def _patch_router() -> None:
 
 
 def check_router_weights(model: torch.nn.Module) -> None:
-    """Raise unless every materialized router weight holds bf16 values (the invariant router GEMM multiplies in bf16).
-
-    A weight sync loads into meta parameters and materializes them when it finishes, so the worker checks again then.
-    """
+    """Raise unless every materialized router weight holds bf16 values; a weight sync's meta parameters are
+    skipped until it finishes."""
     for name, parameter in model.named_parameters():
         if name.endswith(".mlp.router.weight") and not parameter.is_meta:
             check_bf16_values(name, parameter.data)
 
 
 def _patch_autotune() -> None:
-    """Inductor's autotuner ranks a kernel's configs by a fixed order (largest reduction block, then warps, then
-    rows per program, then stages) instead of timing them, so every engine process launches the same config."""
+    """Inductor's autotuner ranks a kernel's launch configs by ``launcher_preference`` instead of timing them."""
 
     def benchmark_all_configs(self, *args, **kwargs):
         ranked = sorted(self.launchers, key=launcher_preference)

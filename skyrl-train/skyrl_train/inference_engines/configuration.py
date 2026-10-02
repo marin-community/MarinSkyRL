@@ -26,7 +26,6 @@ class InferenceEngineRoleConfig:
     shared_pg: Any
     inference_engine_enable_sleep: bool
     max_logprobs: int = 1
-    # Start decode-invariant vLLM engines (``vllm/decode_invariant.py``).
     decode_invariant: bool = False
 
 

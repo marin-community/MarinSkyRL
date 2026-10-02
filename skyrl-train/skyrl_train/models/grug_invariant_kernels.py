@@ -1,16 +1,4 @@
-"""Row-invariant kernels that the decode-invariant vLLM engine and the Grug trainer both run.
-
-A GEMM library picks its kernel, and with it the order it adds each output's products, from the call's row count. The
-Triton GEMM here uses one tile shape and one partition of K for every call, so a row's bytes depend on that row and the
-weight alone, whatever else the call holds.
-
-``invariant_router_logits`` is Grug's fp32 router GEMM. The router input is bf16 and the router weight holds bf16
-values, so every product is exact in fp32; the kernel multiplies on bf16 tensor cores, sums each 64-wide K block apart,
-adds the blocks of each of eight fixed K slices in order, then adds the eight slice sums left to right.
-
-``launcher_preference`` orders an Inductor kernel's launch configs, which sum in different orders: the engine's
-autotuner and the trainer's copies of compiled vLLM's kernels both launch the first.
-"""
+"""Row-invariant kernels that the decode-invariant vLLM engine and the Grug trainer both run."""
 
 from __future__ import annotations
 
@@ -18,9 +6,7 @@ import torch
 import triton
 import triton.language as tl
 
-# One tile shape and one K partition for every call: the bytes of a row do not depend on the row count. K is cut into
-# ROUTER_SPLITS fixed slices so that a call of a few rows (a decode step) runs on enough programs; each slice's sum
-# is kept apart and the slices are added in order.
+# Every call uses one tile shape and ROUTER_SPLITS fixed K slices, whose sums are kept apart and added in order.
 ROUTER_BLOCK_M = 64
 ROUTER_BLOCK_N = 64
 ROUTER_BLOCK_K = 64
@@ -81,8 +67,9 @@ def _router_sum_kernel(partial_ptr, out_ptr, elements, SPLITS: tl.constexpr, BLO
 def invariant_router_logits(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     """Grug's fp32 router logits ``x @ weight.T`` for ``x`` ``[rows, K]`` and ``weight`` ``[N, K]``, both bf16-valued.
 
-    Each row's bytes depend on that row and the weight alone. Inputs may be bf16 or fp32 holding bf16 values; an fp32
-    value that bf16 cannot hold exactly would be rounded, so callers check the weight once (``check_bf16_values``).
+    Each row's bytes depend on that row and the weight alone: the kernel multiplies on bf16 tensor cores, sums each
+    64-wide K block apart, adds the blocks of each of eight fixed K slices in order, then adds the slice sums left to
+    right. Inputs may be bf16 or fp32 holding bf16 values; callers check the weight once (``check_bf16_values``).
     """
     if x.ndim != 2 or weight.ndim != 2 or x.shape[1] != weight.shape[1]:
         raise ValueError(f"router logits need [rows, K] and [N, K], got {tuple(x.shape)} and {tuple(weight.shape)}")

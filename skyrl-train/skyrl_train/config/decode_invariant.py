@@ -12,8 +12,7 @@ def decode_invariant_engine_problems(
     tensor_parallel_size: int,
     decode_context_parallel_size: int,
 ) -> list[str]:
-    """The settings, by generator key, that a decode-invariant engine needs and these engines do not have: compiled
-    vLLM with FLASH_ATTN on one GPU per tensor- and decode-context-parallel group."""
+    """The ``generator`` settings a decode-invariant engine needs that these engine settings lack."""
     problems = []
     if backend != "vllm":
         problems.append("generator.backend=vllm")

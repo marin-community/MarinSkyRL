@@ -1,7 +1,7 @@
-"""Worker extension of a decode-invariant vLLM engine (``decode_invariant``).
+"""Worker extension of a decode-invariant vLLM engine; importing it installs ``decode_invariant``'s patches.
 
-vLLM resolves an engine's worker extension class in each worker process before it builds the worker, so importing this
-module installs every decode-invariant patch before the model loads, compiles and captures CUDA graphs.
+vLLM imports an engine's worker extension in each worker process before the model loads, compiles and captures CUDA
+graphs.
 """
 
 from skyrl_train.inference_engines.vllm import decode_invariant
