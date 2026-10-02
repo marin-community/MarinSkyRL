@@ -360,3 +360,24 @@ def test_launch_validates_correction_and_selection_contract(tmp_path: Path, over
     else:
         # Explicitly uncorrected stale policies and active reward filters are valid launch contracts.
         load_launch_config(path)
+
+
+@pytest.mark.parametrize(
+    ("recipe", "nodes"), [("snowball_mopd_ultra_async_smoke", 8), ("snowball_mopd_ultra_async_32k_smoke", 9)]
+)
+def test_inherited_recipe_round_trips_as_a_self_contained_launch(tmp_path: Path, recipe: str, nodes: int):
+    raw = _raw_config()
+    raw["skyrl"] = {"defaults": [recipe, "_self_"], "trainer": {"max_steps": 2}}
+    raw["iris"]["allocation"]["num_nodes"] = nodes
+    path = tmp_path / "launch.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    config = load_launch_config(path)
+    assert config.skyrl.trainer.max_steps == 2
+    assert config.skyrl.trainer.rollout_buffer.max_staleness_steps == 1
+    assert config.skyrl.trainer.algorithm.off_policy_correction == "tis"
+    assert config.skyrl.data.sampling.kind is None
+    assert config.skyrl.generator.engine_init_kwargs.max_model_len == (8192 if nodes == 8 else 32767)
+    resolved = tmp_path / "resolved.yaml"
+    OmegaConf.save(config, resolved)
+    reloaded = load_launch_config(resolved)
+    assert OmegaConf.to_container(reloaded, resolve=True) == OmegaConf.to_container(config, resolve=True)
