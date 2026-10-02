@@ -7,7 +7,14 @@ from skyrl_gym.verification import VerificationResult
 
 from skyrl_train.dynamic_sampling import DynamicSamplingType, GroupSelectionResult
 from skyrl_train.group_admission import AdmissionRejection, GroupAdmissionStalledError
-from skyrl_train.rollouts.buffer import BatchPolicy, GroupRewards, RolloutBuffer, RolloutBufferConfig, RolloutVerdict
+from skyrl_train.rollouts.buffer import (
+    BatchPolicy,
+    GroupRewards,
+    PayloadReference,
+    RolloutBuffer,
+    RolloutBufferConfig,
+    RolloutVerdict,
+)
 from skyrl_train.rollouts.loader import JudgedGroup
 from skyrl_train.telemetry import GeneratedWork
 
@@ -54,7 +61,7 @@ def _verdict(
 
 async def _commit(buffer: RolloutBuffer, lease_id: str, uid: str, **verdict) -> None:
     """Commit a group whose payload stands in for its object reference with its UID."""
-    await buffer.commit(lease_id, {"uid": uid}, _verdict(uid, **verdict), [uid])
+    await buffer.commit(lease_id, {"uid": uid}, _verdict(uid, **verdict), PayloadReference(uid))
 
 
 async def _generate(buffer: RolloutBuffer, uid: str, **verdict) -> None:

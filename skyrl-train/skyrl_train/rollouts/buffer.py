@@ -169,11 +169,18 @@ class RolloutWriter(Protocol):
     async def write_rollout(self, lease: RolloutLease, group: RolloutGroup) -> None: ...
 
 
+@dataclass(frozen=True)
+class PayloadReference:
+    """Nest one reference so Ray passes an ObjectRef to ``commit`` without resolving it."""
+
+    value: object | None
+
+
 @dataclass
 class ReadyRollout:
     """A committed group that no batch has taken yet.
 
-    ``payload`` holds the payload store's reference to the ``RolloutGroup``; it is empty when the verdict
+    ``payload`` holds one reference to the ``RolloutGroup``; it is None when the verdict
     excludes the group.
     ``committed_at`` is the buffer process's monotonic time at commit, and None for a group restored from a
     checkpoint.
@@ -184,7 +191,7 @@ class ReadyRollout:
     batch_id: int
     prompt: dict
     verdict: RolloutVerdict
-    payload: list
+    payload: object | None
     committed_at: float | None
 
 
@@ -435,13 +442,15 @@ class RolloutBuffer:
             self._leases[lease.lease_id] = lease
             return lease
 
-    async def commit(self, lease_id: str, prompt: dict, verdict: RolloutVerdict, payload: list) -> None:
+    async def commit(self, lease_id: str, prompt: dict, verdict: RolloutVerdict, payload: PayloadReference) -> None:
         """Record a written group and release its lease."""
         async with self._changed:
             lease = self._leases.pop(lease_id)
             self._generated.append((lease.policy_step, verdict.work))
             self._ready.append(
-                ReadyRollout(lease_id, lease.policy_step, lease.batch_id, prompt, verdict, payload, time.monotonic())
+                ReadyRollout(
+                    lease_id, lease.policy_step, lease.batch_id, prompt, verdict, payload.value, time.monotonic()
+                )
             )
             self._select()
             self._changed.notify_all()
@@ -460,14 +469,20 @@ class RolloutBuffer:
             self._select()
             self._changed.notify_all()
 
-    def payload_refs(self, batch_id: int, indices: Sequence[int]) -> list:
+    def payload_refs(self, batch_id: int, indices: Sequence[int]) -> list[object]:
         """Resolve selected group indices while their batch is the current training step."""
         if batch_id != self._policy_step:
             raise ValueError(f"batch {batch_id} is no longer available; current batch is {self._policy_step}")
         batch = self._admitted[batch_id]
         if any(index < 0 or index >= len(batch) for index in indices):
             raise IndexError(f"group index outside batch {batch_id} with {len(batch)} admitted groups")
-        return [batch[index].payload[0] for index in indices]
+        refs: list[object] = []
+        for index in indices:
+            ref = batch[index].payload
+            if ref is None:
+                raise RuntimeError(f"batch {batch_id} contains an admitted group without a payload")
+            refs.append(ref)
+        return refs
 
     async def admit(self, timeout: float) -> Admission:
         """Wait up to ``timeout`` seconds for the current batch to progress.
