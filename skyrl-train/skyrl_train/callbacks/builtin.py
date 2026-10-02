@@ -43,6 +43,7 @@ from skyrl_train.mismatch_probe.callback import MismatchProbeCallback
 
 from .base import TrainerCallback, TrainerState, TrainerControl, CallbackHandler
 from .types import (
+    CallbackErrorBehavior,
     CHECKPOINT_CALLBACK_TYPE,
     HF_MODEL_SAVE_CALLBACK_TYPE,
 )
@@ -126,7 +127,7 @@ class CheckpointCallback(TrainerCallback):
 class DistillationTokenBudgetCallback(TrainerCallback):
     """Stop either trainer after reaching a cumulative teacher-scored-token budget."""
 
-    error_behavior = "raise"
+    error_behavior = CallbackErrorBehavior.RAISE
 
     def __init__(self, token_budget: int):
         if token_budget <= 0:
@@ -195,6 +196,8 @@ class EvaluationCallback(TrainerCallback):
         stop_when: Metrics mapped to minimum scores or gains over the initial evaluation.
     """
 
+    error_behavior = CallbackErrorBehavior.RAISE
+
     def __init__(
         self,
         eval_steps: int = 5,
@@ -218,8 +221,6 @@ class EvaluationCallback(TrainerCallback):
             raise ValueError("additional evaluation names must be identifiers")
         if any(not keys for keys in self.metric_groups.values()):
             raise ValueError("evaluation metric groups must be nonempty")
-
-    error_behavior = "raise"
 
     async def on_evaluate_async(
         self, state: TrainerState, control: TrainerControl, *, metrics: Dict[str, float], trainer, **kwargs

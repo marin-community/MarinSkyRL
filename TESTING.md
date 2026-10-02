@@ -20,7 +20,7 @@ and may select a different PyTorch/CUDA build from the image under test. Standar
 frozen root profile before running GPU tests. Isolated `uv` runs remain useful on networked development hosts
 when dependency resolution itself is part of the test.
 
-Regular GPU CI tests live in `skyrl-train/tests/gpu/gpu_ci/`. Expensive, destructive, multi-node, and
+The manual GPU test suite lives in `skyrl-train/tests/gpu/gpu_ci/`. Expensive, destructive, multi-node, and
 fault-injection tests live outside that directory and require an explicit file path. A Python file deliberately
 named without the `test_` prefix is opt-in and must remain outside default discovery.
 
@@ -38,6 +38,10 @@ complete pass/fail result for on-demand distributed runs.
 
 The two-run debug artifact acceptance contract and its Jupiter command are documented in
 [`docs/debug-modes.md`](docs/debug-modes.md#jupiter-acceptance-test).
+
+See [the nightly gates](skyrl-train/ci/marin_nightly/README.md) for scheduled
+OPD, Grug and CatCount coverage. Colocated synchronous RL is not a production
+mode; CatCount covers learning.
 
 ## Before a PR
 

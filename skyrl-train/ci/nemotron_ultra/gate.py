@@ -9,7 +9,7 @@ import re
 import sys
 from pathlib import Path
 
-from ci.marin_nightly.gate import ANSI_ESCAPE, TRAIN, parse_metrics
+from ci.marin_nightly.gate import ANSI_ESCAPE, MetricKind, parse_metrics
 from infra.rl_data.sources import NEMOTRON_ULTRA_RLVR1_AGENTS, NEMOTRON_ULTRA_RLVR2_AGENTS
 
 SAMPLE_LINE = re.compile(r"NEMOTRON_ULTRA_SAMPLE (?P<manifest>\{.*\})\s*$")
@@ -39,7 +39,7 @@ def check_log(log_text: str) -> list[str]:
             f"sample manifest reports {manifests[0].get('rows')!r} rows, expected {len(expected_coverage())}"
         )
 
-    train_steps = [step for step in parse_metrics(log_text) if step.kind == TRAIN]
+    train_steps = [step for step in parse_metrics(log_text) if step.kind == MetricKind.TRAIN]
     if len(train_steps) != 1:
         failures.append(f"logged {len(train_steps)} training steps, expected exactly one")
     if not train_steps:
