@@ -156,7 +156,10 @@ def _hand_query(run_id: str) -> str:
 
 
 def main() -> int:
-    from finelog.deploy.connect import open_client
+    try:
+        from finelog.deploy.connect import open_client
+    except ImportError as error:
+        raise RuntimeError("Dashboard reporting requires Marin's Finelog environment") from error
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-id", required=True, help="the run identity telemetry rows join on")
