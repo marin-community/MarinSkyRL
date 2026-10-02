@@ -1,8 +1,10 @@
 """Source parity for the verifyit backed Nemotron tool comparison route."""
 
 import json
+import math
 
 import pytest
+from verifyit.grade import InvalidTask
 
 from skyrl_gym.envs.nemotron_ultra.tool_call import grade_expected_action
 from skyrl_gym.envs.nemotron_ultra.tool_comparison_verifyit import grade_expected_action_verifyit
@@ -30,7 +32,6 @@ def test_tool_argument_comparison_matches_pinned_source(expected_arguments, actu
     "assistant",
     [
         {"content": "done", "tool_calls": []},
-        {"tool_calls": []},
         {"tool_calls": [{"function": {"name": "wrong", "arguments": "{}"}}]},
         {"tool_calls": [{"function": {"name": "transfer", "arguments": "{"}}]},
         {"tool_calls": [{"function": {"name": "transfer", "arguments": "{}"}}] * 2},
@@ -48,7 +49,7 @@ def test_tool_message_action_matches_pinned_source():
 
 
 def test_invalid_reference_cannot_be_scored_as_candidate_failure():
-    with pytest.raises(ValueError, match="expected tool arguments"):
+    with pytest.raises(InvalidTask, match="numeric expected"):
         grade_expected_action_verifyit(
             {"type": "function_call", "name": "transfer", "arguments": '{"amount": Infinity}'},
             {"tool_calls": [{"function": {"name": "transfer", "arguments": "{}"}}]},
@@ -67,3 +68,38 @@ def test_nonfinite_candidate_cannot_receive_credit(value):
     expected = {"type": "function_call", "name": "transfer", "arguments": '{"value": 1.0}'}
     assistant = {"tool_calls": [{"function": {"name": "transfer", "arguments": '{"value": ' + value + "}"}}]}
     assert grade_expected_action_verifyit(expected, assistant)[0] == 0.0
+
+
+@pytest.mark.parametrize(
+    "value,score", [(math.nextafter(1e-6, 0.0), 1.0), (1e-6, 0.0), (math.nextafter(1e-6, math.inf), 0.0)]
+)
+def test_numeric_strict_threshold_is_owned_by_core(value, score):
+    expected = {"type": "function_call", "name": "transfer", "arguments": '{"value": 0.0}'}
+    assistant = {"tool_calls": [{"function": {"name": "transfer", "arguments": json.dumps({"value": value})}}]}
+    assert grade_expected_action_verifyit(expected, assistant)[0] == score
+
+
+@pytest.mark.parametrize("actual,score", [("null", 1.0), ("false", 0.0), ("[]", 0.0)])
+def test_nested_null_contract(actual, score):
+    expected = {"type": "function_call", "name": "transfer", "arguments": '{"value": [null]}'}
+    assistant = {"tool_calls": [{"function": {"name": "transfer", "arguments": '{"value": [' + actual + "]}"}}]}
+    assert grade_expected_action_verifyit(expected, assistant)[0] == score
+
+
+def test_duplicate_candidate_keys_fail_closed():
+    expected = {"type": "function_call", "name": "transfer", "arguments": '{"value": 1}'}
+    assistant = {"tool_calls": [{"function": {"name": "transfer", "arguments": '{"value": 0, "value": 1}'}}]}
+    assert grade_expected_action_verifyit(expected, assistant)[0] == 0.0
+
+
+def test_missing_call_receives_core_structural_failure():
+    expected = {"type": "function_call", "name": "transfer", "arguments": "{}"}
+    assert grade_expected_action_verifyit(expected, {"tool_calls": []})[0] == 0.0
+
+
+@pytest.mark.parametrize("calls,score", [(None, 1.0), ([], 1.0), (False, 0.0), (0, 0.0), ("", 0.0), ({}, 0.0)])
+def test_message_tool_calls_require_array_or_absent(calls, score):
+    expected = {"type": "message", "content": "done"}
+    assistant = {"content": "done", "tool_calls": calls}
+    assert grade_expected_action(expected, assistant)[0] == 1.0  # Source erases falsey malformed values.
+    assert grade_expected_action_verifyit(expected, assistant)[0] == score
