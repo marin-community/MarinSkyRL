@@ -34,7 +34,6 @@ from marinskyrl.speculative_decoding import (
     parse_speculative_decoding_config,
     runai_model_uri,
 )
-from skyrl_train.utils.utils import Timer
 
 if TYPE_CHECKING:
     from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -269,6 +268,8 @@ def create_remote_inference_engines_from_config(cfg: DictConfig, tokenizer: PreT
 
 class BasePPOExp:
     def __init__(self, cfg: DictConfig):
+        from skyrl_train.utils.utils import Timer  # noqa: PLC0415
+
         """
         Initializes a PPO experiment.
 
@@ -547,6 +548,8 @@ class BasePPOExp:
         )
 
     def _setup_trainer(self):
+        from skyrl_train.utils.utils import Timer  # noqa: PLC0415
+
         """Setup and return the trainer.
 
         Instantiates the trainer and all the associated models for training.
