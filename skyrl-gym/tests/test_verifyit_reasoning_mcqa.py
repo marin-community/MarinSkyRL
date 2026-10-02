@@ -7,6 +7,7 @@ from omegaconf import OmegaConf
 
 import skyrl_gym
 from skyrl_gym.envs.nemotron_ultra.mcqa import grade_mcqa
+from skyrl_gym.verification import VerificationStatus
 
 
 @pytest.mark.parametrize("response", ["Answer: 42", "Answer: wrong\nAnswer: x = 42", "42"])
@@ -50,3 +51,42 @@ def test_invalid_reference_does_not_become_successful_verification():
     result = env.step(r"\boxed{Z}")
     assert result["reward"] == 0
     assert result["verification"].score is None
+
+
+@pytest.mark.parametrize("route", ["reasoning_gym", "nemotron_ultra"])
+@pytest.mark.parametrize("defect", ["duplicate_answer", "nonfinite_metadata"])
+@pytest.mark.parametrize("candidate", ["Answer: 42", ""])
+def test_reasoning_trusted_json_defect_is_an_error_even_for_blank_candidates(route, defect, candidate):
+    record = {"question": "What is 6 times 7?", "answer": "42", "metadata": {"source_dataset": "simple_equations"}}
+    if defect == "nonfinite_metadata":
+        record["metadata"]["unexpected"] = float("nan")
+    encoded = json.dumps(record)
+    if defect == "duplicate_answer":
+        encoded = encoded.replace('"answer": "42"', '"answer": "wrong", "answer": "42"')
+    if route == "reasoning_gym":
+        extras = {"reward_model": {"ground_truth": '{"task":"simple_equations","entry":' + encoded + "}"}}
+    else:
+        extras = {
+            "extra_info": {
+                "nemotron_ultra": {
+                    "route": "skyrl_gym",
+                    "agent": "reasoning_gym_simple_agent",
+                    "record_json": encoded,
+                    "request_json": "{}",
+                }
+            }
+        }
+    env = skyrl_gym.make(route, env_config=OmegaConf.create({"verifyit_enabled": True}), extras=extras)
+    try:
+        result = env.step(candidate)
+        assert result["reward"] == 0
+        assert result["verification"].status is VerificationStatus.ERROR
+        assert result["verification"].score is None
+    finally:
+        env.close()
+    # Preserve the source path's permissive JSON behavior, even though opt-in rejects it.
+    native = skyrl_gym.make(route, env_config=OmegaConf.create({}), extras=extras)
+    try:
+        assert native.step("Answer: 42")["reward"] == 1
+    finally:
+        native.close()

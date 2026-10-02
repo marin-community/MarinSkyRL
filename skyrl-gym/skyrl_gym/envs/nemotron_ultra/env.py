@@ -93,6 +93,7 @@ class NemotronUltraEnv(BaseTextEnv):
         if ultra.get("route") != "skyrl_gym":
             raise ValueError("terminal-bench Nemotron Ultra rows must not execute in the SkyRL Gym environment")
         self.agent = str(ultra["agent"])
+        self.reasoning_record_json = ultra.get("record_json")
         self.record = self._decode_mapping(ultra.get("record_json"), "record_json")
         self.request = self._decode_mapping(ultra.get("request_json"), "request_json")
         self.evidence: RolloutEvidence | None = None
@@ -345,11 +346,21 @@ class NemotronUltraEnv(BaseTextEnv):
             reward, details = self._grade_judge_profile(action, "jailbreak", self._require_safety_judge())
             diagnostics.update(details)
         elif self.agent == "reasoning_gym_simple_agent":
-            task_name = self.record["metadata"]["source_dataset"]
+            record = self.record
+            if self.verifyit_enabled:
+                from verifyit.grade import InvalidTask
+                from verifyit.json_objects import unique_object
+
+                try:
+                    record = json.loads(self.reasoning_record_json, object_pairs_hook=unique_object)
+                    json.dumps(record, allow_nan=False)
+                except ValueError as error:
+                    raise InvalidTask("invalid Reasoning Gym record") from error
+            task_name = record["metadata"]["source_dataset"]
             entry = {
-                "question": self.record["question"],
-                "answer": self.record.get("answer"),
-                "metadata": self.record["metadata"],
+                "question": record["question"],
+                "answer": record.get("answer"),
+                "metadata": record["metadata"],
             }
             answer = _extract_reasoning_gym_answer(action)
             if self.verifyit_enabled:

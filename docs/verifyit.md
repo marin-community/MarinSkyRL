@@ -1,6 +1,6 @@
 # Unified verification
 
-SkyRL clients call verifyit's existing verifier modes while retaining task-specific response extraction and framework reward reporting. The dependency is pinned to published commit `97b5f74e3074e583012d2c8cde15f4549863da9a` in the project metadata. No local campaign checkout or unpublished wheel is needed. SkyRL uses math-verify 0.9.0, upgraded from 0.8.0 to satisfy the unified dependency. Math parsing or equivalence behavior can change with this upgrade; the 2026-10-01 campaign snapshot used math-verify 0.8.0. The offline comparisons use 0.9.0 on both paths.
+SkyRL clients call verifyit's existing verifier modes while retaining task-specific response extraction and framework reward reporting. The dependency is pinned to published commit `fa173b9f007bf504e16df86bf76aca4d25054c50` in the project metadata. No local campaign checkout or unpublished wheel is needed. SkyRL uses math-verify 0.9.0, upgraded from 0.8.0 to satisfy the unified dependency. Math parsing or equivalence behavior can change with this upgrade; the 2026-10-01 campaign snapshot used math-verify 0.8.0. The offline comparisons use 0.9.0 on both paths.
 
 ## Install and reproduce
 
@@ -106,3 +106,5 @@ zero and retains correction feedback; missing or truncated audit evidence report
 with minimum optimization reward. A trusted declaration that cannot compile under the pinned
 libraries is an invalid task; unavailable tooling and audit timeouts remain infrastructure errors.
 Unsupported candidate declaration kinds fail closed.
+
+Reasoning Gym cutovers validate the original serialized trusted record before normalization. Duplicate JSON keys and nonfinite values produce minimum-reward error verdicts even for blank candidates. Omitting `verifyit_enabled` preserves source parsing and grading. Both the `reasoning_gym` environment and Nemotron `reasoning_gym_simple_agent` delegate scores to verifyit's existing ReasoningGym mode; dataset scoring uses reasoning-gym 0.1.25.

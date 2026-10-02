@@ -23,7 +23,7 @@ class ReasoningGymEnv(BaseTextEnv):
         reward_model = (extras or {}).get("reward_model")
         ground_truth = reward_model.get("ground_truth") if isinstance(reward_model, Mapping) else None
         try:
-            self.ground_truth = normalize_ground_truth(ground_truth)
+            self.ground_truth = normalize_ground_truth(ground_truth, verifyit_enabled=self.verifyit_enabled)
         except (TypeError, ValueError):
             logger.exception("reasoning_gym: invalid reward_model.ground_truth=%r; scoring 0.", ground_truth)
             self.ground_truth = None
