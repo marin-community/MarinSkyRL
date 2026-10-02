@@ -36,7 +36,8 @@ def test_mismatch_metrics_bucket_by_staleness_and_absolute_position():
     delta = torch.tensor([0.1, 0.2, 0.3, 0.9], dtype=torch.float64).unsqueeze(1).expand(4, 700)
     rollout = torch.zeros_like(delta)
     rollout[~mask] = math.nan
-    result = mismatch_ratio_metrics(delta, rollout, mask, torch.tensor([0, 0, 3, 9]))
+    staleness = torch.tensor([0, 0, 3, 9]).unsqueeze(1).expand(4, 700)
+    result = mismatch_ratio_metrics(delta, rollout, mask, staleness)
     assert result["policy/mismatch/staleness0/log_ratio_abs_mean"] == pytest.approx((300 * 0.1 + 600 * 0.2) / 900)
     assert result["policy/mismatch/staleness8+/log_ratio_abs_mean"] == pytest.approx(0.9)
     assert result["policy/mismatch/staleness0/pos_last256/selected_tokens"] == 512
@@ -47,7 +48,7 @@ def test_mismatch_metrics_bucket_by_staleness_and_absolute_position():
     # Put a single mismatch exactly at the 600-token row's last-window boundary.
     changed = torch.zeros_like(delta)
     changed[1, 343:345] = torch.tensor([10.0, 20.0])
-    boundary = mismatch_ratio_metrics(changed, rollout, mask, torch.tensor([0, 0, 3, 9]))
+    boundary = mismatch_ratio_metrics(changed, rollout, mask, staleness)
     assert boundary["policy/mismatch/staleness0/pos_last256/log_ratio_abs_mean"] == pytest.approx(20 / 512)
 
 
@@ -90,7 +91,8 @@ DASHBOARD_MISMATCH_KEYS = (
 def test_mismatch_metrics_emit_every_key_the_dashboard_reads(staleness):
     mask = torch.ones(6, 800)
     learner = torch.randn(6, 800, dtype=torch.float64)
-    result = mismatch_ratio_metrics(learner, torch.zeros_like(learner), mask, torch.tensor(staleness))
+    token_staleness = torch.tensor(staleness).unsqueeze(1).expand(6, 800)
+    result = mismatch_ratio_metrics(learner, torch.zeros_like(learner), mask, token_staleness)
     read = {f"policy/mismatch/{key}" for key in DASHBOARD_MISMATCH_KEYS if staleness[-1] or "staleness0" in key}
     assert read - result.keys() == set()
     assert all(math.isfinite(result[key]) for key in read)

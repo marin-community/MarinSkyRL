@@ -136,6 +136,7 @@ from skyrl_train.telemetry import (
     record_training_metrics,
 )
 from skyrl_train.rollout_observability import async_phase_window, monitor_event_loop_lag
+from skyrl_train.inference_engines.vllm.policy_steps import UNSAMPLED_POLICY_STEP
 from skyrl_train.utils.importance_ratio_diagnostics import mismatch_ratio_metrics
 from skyrl_train.timing_observability import StepWallTime, publish_startup_timings, publish_step_timings
 from skyrl_train.hf_export import (
@@ -1132,18 +1133,15 @@ class RayPPOTrainer:
                 await asyncio.to_thread(self.policy_model.offload_to_cpu, offload_optimizer=False, offload_model=True)
                 await self.inference_engine_client.wake_up(tags=["kv_cache"])
             else:
-                # Expert-block sync writes into live engine parameters, so the initial sync pauses generation too.
-                pause = reason != "initial" or self._expert_block_sync is not None
-                if pause:
-                    await self.inference_engine_client.pause_generation()
+                await self.inference_engine_client.pause_generation()
                 # Training backloads the optimizer before every step. Offload it after every update, including
                 # the initial sync, so Megatron gradient buffers are not resized while still on the GPU.
                 await asyncio.to_thread(
                     self._offload_policy_optimizer, timings, timer_label="offload_policy_optimizer_to_cpu"
                 )
                 await self.sync_policy_weights_to_inference_engines()
-                if pause:
-                    await self.inference_engine_client.resume_generation()
+                # The synced weights serve the leases that `_publish` opens next, under the same step number.
+                await self.inference_engine_client.resume_generation(policy_step=self.global_step + 1)
         self._log_weight_update_completed(reason=reason, duration_seconds=update_timer.duration)
 
     async def sync_policy_weights_to_inference_engines(self) -> None:
@@ -1675,9 +1673,35 @@ class RayPPOTrainer:
 
         with Timer("convert_to_training_input", self.all_timings):
             training_input = self.convert_to_training_input(trajectory_batch, uids, rollout_staleness=rollout_staleness)
+        self.all_metrics.update(self._token_staleness_metrics(trajectory_batch, training_input, len(uids)))
         if self._training_metrics_enabled:
             self._record_consumed_staleness(uids, rollout_staleness, training_input["response_mask"][: len(uids)])
         return training_input
+
+    @staticmethod
+    def _token_staleness_metrics(
+        trajectory_batch: TrajectoryBatch, training_input: TrainingInputBatch, row_count: int
+    ) -> Dict[str, float]:
+        """Staleness of the trained tokens by engine stamp, beside the lease family ``async/staleness_*``."""
+        loss_mask = training_input["loss_mask"][:row_count] > 0
+        if not loss_mask.any():
+            return {}
+        staleness = training_input["rollout_staleness"][:row_count][loss_mask]
+        masks = [np.asarray(mask, dtype=bool) for mask in trajectory_batch["loss_masks"]]
+        stamps = trajectory_batch.get("rollout_policy_steps")
+        if stamps is None:
+            stamps = [np.full(len(mask), UNSAMPLED_POLICY_STEP, dtype=np.int32) for mask in masks]
+        trained_stamps = [row[mask] for row, mask in zip(stamps, masks, strict=True)]
+        return {
+            "async/staleness_tokens_mean": staleness.float().mean().item(),
+            "async/staleness_tokens_max": staleness.max().item(),
+            "async/staleness_tokens_ratio": (staleness > 0).float().mean().item(),
+            "async/staleness_tokens_stamped": float(np.mean(np.concatenate(trained_stamps) != UNSAMPLED_POLICY_STEP)),
+            "async/staleness_tokens_spanning": sum(
+                len(np.unique(row[row != UNSAMPLED_POLICY_STEP])) > 1 for row in trained_stamps
+            )
+            / len(trained_stamps),
+        }
 
     def _record_consumed_staleness(
         self, uids: List[str], rollout_staleness: List[int], response_masks: torch.Tensor
@@ -2104,6 +2128,25 @@ class RayPPOTrainer:
             if len(rollout_routed_experts_rows) != len(response_ids):
                 raise ValueError("routed experts must have one row per response")
         distillation_tensors = _validated_distillation_tensors(trajectory_batch, response_masks_tensor)
+        # Every response token starts at its lease's charge; an engine stamp replaces it with the exact charge.
+        lease_staleness = torch.tensor(
+            rollout_staleness if rollout_staleness is not None else [0] * len(response_ids), dtype=torch.int32
+        )
+        rollout_staleness_tensor = lease_staleness.unsqueeze(1) * response_masks_tensor.to(torch.int32)
+        policy_steps = collate_response_token_channel(
+            trajectory_batch.get("rollout_policy_steps"),
+            response_masks_tensor,
+            dtype=torch.int32,
+            expected_lengths=[len(response) for response in response_ids],
+        )
+        if policy_steps is not None:
+            stamped = (policy_steps != UNSAMPLED_POLICY_STEP) & (response_masks_tensor > 0)
+            rollout_staleness_tensor[stamped] = self.global_step - policy_steps[stamped]
+            assert bool((rollout_staleness_tensor[stamped] >= 0).all()) and bool(
+                (
+                    rollout_staleness_tensor[stamped] <= lease_staleness.unsqueeze(1).expand_as(policy_steps)[stamped]
+                ).all()
+            ), "a token's policy step must fall between its lease's step and the training step"
         training_input = TrainingInputBatch(
             {
                 "sequences": sequences_tensor,  # Full trajectories (padded and concatenated prompts and responses)
@@ -2112,10 +2155,7 @@ class RayPPOTrainer:
                 "rewards": rewards_tensor,
                 "loss_mask": loss_masks_tensor,
                 "rollout_logprobs": rollout_logprobs_tensor,
-                "rollout_staleness": torch.tensor(
-                    rollout_staleness if rollout_staleness is not None else [0] * len(response_ids),
-                    dtype=torch.int32,
-                ),
+                "rollout_staleness": rollout_staleness_tensor,
                 "is_last_step": (
                     torch.tensor(trajectory_batch["is_last_step"], dtype=torch.bool)
                     if trajectory_batch.get("is_last_step", None) is not None
