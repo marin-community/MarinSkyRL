@@ -11,7 +11,7 @@ from transformers import AutoTokenizer
 
 from skyrl_train.dataset.routed_expert_batch import RoutedExpertRows, _collate_routed_experts_from_arrays
 from skyrl_train.training_batch import TrainingInputBatch
-from skyrl_train.trajectory_runners.routed_experts import normalize_routed_experts
+from skyrl_train.trajectory_runners.routed_experts import generation_routes, normalize_routed_experts, response_routes
 from skyrl_train.trajectory_runners.trajectory_processing import (
     align_routed_experts_with_lcs,
     concatenate_trajectory_batches,
@@ -30,6 +30,18 @@ def _encoded_routes(rows):
 
 def _route_row(value):
     return [[value, value + 1], [value + 2, value + 3]]
+
+
+def test_generation_routes_start_at_the_forward_pass_of_the_last_prompt_token():
+    rows = np.asarray([_route_row(1), _route_row(2), _route_row(3)], dtype=np.int64)
+
+    generated = generation_routes(rows, prompt_length=2, response_length=2)
+
+    np.testing.assert_array_equal(generated, [_route_row(2), _route_row(3)])
+    assert generated.dtype == np.uint8
+    np.testing.assert_array_equal(response_routes(generated), [_route_row(3), [[0, 0], [0, 0]]])
+    with pytest.raises(ValueError, match="3 token rows"):
+        generation_routes(rows[:2], prompt_length=2, response_length=2)
 
 
 @pytest.mark.parametrize(
