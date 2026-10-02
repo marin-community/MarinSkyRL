@@ -60,6 +60,8 @@ class InferenceEngineOutput(TypedDict):
     prompt_ids: NotRequired[List[List[int]]]
     assistant_messages: NotRequired[List[Dict[str, Any]]]
     routed_experts: NotRequired[List[np.ndarray | None]]
+    # The data-parallel rank of the engine that generated each response, from ``InferenceEngineClient``.
+    engine_dp_ranks: NotRequired[List[int]]
 
 
 class NamedWeightsUpdateRequest(TypedDict):
