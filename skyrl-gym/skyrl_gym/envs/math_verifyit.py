@@ -17,7 +17,7 @@ from verifyit.grade import Aggregation, InvalidTask, Reward, Status, aggregate_r
 from verifyit.modes.grade_json_schema import grade_json_schema_candidate
 
 from skyrl_gym.envs.aime.utils import extract_minerva_answers, extract_strict_box, normalize_final_answer
-from skyrl_gym.envs.gsm8k.utils import extract_solution
+from skyrl_gym.envs.gsm8k.utils import COMPLETED_STOP_REASONS, extract_solution
 
 
 class MathPolicy(StrEnum):
@@ -63,12 +63,7 @@ def prepare_math(inputs: MathInputs, policy: MathPolicy) -> tuple[str, str | Non
         return extract_minerva_answers(response[-300:], reference)
     if policy is MathPolicy.AIME_BOX:
         return reference, extract_strict_box(response[-300:])
-    if policy is MathPolicy.GSM_COMPLETED_FINAL_LINE and inputs.stop_reason not in {
-        "stop",
-        "complete",
-        "eos",
-        "end_turn",
-    }:
+    if policy is MathPolicy.GSM_COMPLETED_FINAL_LINE and inputs.stop_reason not in COMPLETED_STOP_REASONS:
         response = ""
     method = {MathPolicy.GSM_STRICT: "strict", MathPolicy.GSM_FLEXIBLE: "flexible"}.get(policy, "final_line")
     return reference, extract_solution(response, method=method)

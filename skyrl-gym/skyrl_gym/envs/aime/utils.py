@@ -219,8 +219,6 @@ def is_correct_minerva(
     gt: str,
     gt_need_extract: bool = False,
     answer_pattern: str = r"(?i)Answer\s*:\s*([^\n<]+)",
-    *,
-    verifyit_enabled: bool = False,
 ) -> tuple[bool, str]:
     """Check if the solution is correct according to Minerva criteria.
 
@@ -238,10 +236,6 @@ def is_correct_minerva(
     """
     gt, pred = extract_minerva_answers(solution_str, gt, gt_need_extract, answer_pattern)
 
-    if verifyit_enabled:
-        from verifyit.adapters.skyrl import grade_aime_candidate
-
-        return grade_aime_candidate(gt, pred).reward == 1.0, pred
     if pred == gt:
         return True, pred
     pred_value = rational_value(pred)
@@ -258,7 +252,6 @@ def extract_strict_box(pred: str, pause_tokens_index: Optional[list[int]] = None
     else:
         pred = pred[-100:]
 
-    # Extract and check the boxed answer
     boxed_pred = last_boxed_only_string(pred)
     extracted_pred = remove_boxed(boxed_pred) if boxed_pred is not None else None
 
@@ -266,7 +259,7 @@ def extract_strict_box(pred: str, pause_tokens_index: Optional[list[int]] = None
 
 
 def is_correct_strict_box(
-    pred: str, gt: str, pause_tokens_index: Optional[list[int]] = None, *, verifyit_enabled: bool = False
+    pred: str, gt: str, pause_tokens_index: Optional[list[int]] = None
 ) -> tuple[int, Optional[str]]:
     """Check if the prediction is correct using strict boxed answer criteria.
 
@@ -280,12 +273,7 @@ def is_correct_strict_box(
     """
     extracted_pred = extract_strict_box(pred, pause_tokens_index)
 
-    if verifyit_enabled:
-        from verifyit.adapters.skyrl import grade_literal_candidate
-
-        reward = grade_literal_candidate(gt, extracted_pred).reward if extracted_pred is not None else 0.0
-    else:
-        reward = float(extracted_pred is not None and extracted_pred == gt)
+    reward = float(extracted_pred is not None and extracted_pred == gt)
     return 2 * int(reward) - 1, extracted_pred
 
 
@@ -294,8 +282,6 @@ def verify(
     answer: str,
     strict_box_verify: bool = False,
     pause_tokens_index: Optional[list[int]] = None,
-    *,
-    verifyit_enabled: bool = False,
 ) -> bool:
     """Verify if the solution is correct.
 
@@ -309,12 +295,10 @@ def verify(
         True if the solution is correct, False otherwise
     """
     if strict_box_verify:
-        correct, pred = is_correct_strict_box(
-            solution_str, answer, pause_tokens_index, verifyit_enabled=verifyit_enabled
-        )
+        correct, pred = is_correct_strict_box(solution_str, answer, pause_tokens_index)
         return correct == 1, pred
 
-    correct, pred = is_correct_minerva(solution_str, answer, verifyit_enabled=verifyit_enabled)
+    correct, pred = is_correct_minerva(solution_str, answer)
     return correct, pred
 
 

@@ -36,7 +36,7 @@ class GSM8kEnv(BaseTextEnv):
         self.stop_reason = evidence.stop_reason
 
     def _get_reward(self, action: str) -> float:
-        if self.reward_method == "final_line" and self.stop_reason not in {"stop", "complete", "eos", "end_turn"}:
+        if self.reward_method == "final_line" and self.stop_reason not in utils.COMPLETED_STOP_REASONS:
             return 0.0
         return utils.compute_score(
             action, self.ground_truth, method=self.reward_method, verifyit_enabled=self.verifyit_enabled

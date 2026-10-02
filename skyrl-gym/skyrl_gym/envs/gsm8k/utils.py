@@ -16,6 +16,8 @@ from decimal import Decimal, InvalidOperation
 
 import re
 
+COMPLETED_STOP_REASONS = frozenset({"stop", "complete", "eos", "end_turn"})
+
 FINAL_ANSWER = re.compile(r"#### (-?(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)(?:\.[0-9]+)?)")
 
 
