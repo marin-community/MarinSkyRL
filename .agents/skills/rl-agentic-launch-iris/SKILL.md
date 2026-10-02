@@ -5,6 +5,9 @@ description: Validate, submit, and observe agentic MarinSkyRL training on Iris w
 
 # Launch agentic RL on Iris
 
+For Snowball or Hero resource sizing and performance diagnosis, start with the
+[task chooser](../../../docs/performance.md), including its multi-turn qualification limits.
+
 Read `.agents/ops/coreweave.md`, the selected configuration, and the current
 `cloud.iris.iris_backend` interface before constructing a command. Resolve cluster, runtime profile,
 credentials, capacity, retry policy, and artifact destinations at execution time.
