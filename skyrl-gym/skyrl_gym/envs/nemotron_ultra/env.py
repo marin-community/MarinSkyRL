@@ -284,14 +284,15 @@ class NemotronUltraEnv(BaseTextEnv):
         return self.ipi_terminal
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
-        if not (self.verifyit_enabled and self.agent == "mcqa_simple_agent"):
+        raw_action = action
+        if not (self.verifyit_enabled and self.agent in {"mcqa_simple_agent", "code_gen_simple_agent"}):
             action = final_answer_text(action)
         error_types = (requests.RequestException, RuntimeError, ValueError)
         invalid_task_types = ()
         preparation_error_types = ()
         if self.verifyit_enabled:
             error_types += (ImportError,)
-            if self.agent == "mcqa_simple_agent":
+            if self.agent in {"mcqa_simple_agent", "code_gen_simple_agent"}:
                 error_types = (Exception,)
         try:
             if self.verifyit_enabled:
@@ -301,7 +302,7 @@ class NemotronUltraEnv(BaseTextEnv):
                 preparation_error_types = (PreparationError,)
                 invalid_task_types = (InvalidTask,)
                 error_types += invalid_task_types
-            return self._step(action)
+            return self._step(action, raw_action=raw_action)
         except error_types as error:
             details = {
                 "agent": self.agent,
@@ -314,8 +315,29 @@ class NemotronUltraEnv(BaseTextEnv):
             if self.verifyit_enabled and self.agent == "mcqa_simple_agent":
                 logging.getLogger(__name__).exception("MCQA verification boundary failed")
                 details.update(verifyit_status="infra_error", preparation_stage="mcqa_boundary")
+            if self.verifyit_enabled and self.agent == "code_gen_simple_agent":
+                logging.getLogger(__name__).exception("Code verification boundary failed")
+                details.update(
+                    verifyit_status="infra_error",
+                    preparation_stage="code_boundary",
+                    error_message="Code verification unavailable",
+                    preparation={
+                        "policy": "lcb_source_v1",
+                        "response_policy": "nemotron_final_answer_text_v1",
+                        "raw_response": raw_action,
+                        "grading_response": action,
+                    },
+                )
             if isinstance(error, invalid_task_types):
                 details.update(error_category="invalid_task", verifyit_status="invalid_task")
+            if isinstance(error, preparation_error_types):
+                details.update(error.verdict.detail)
+                details.update(
+                    verifyit_status=error.verdict.status.value,
+                    error_category=error.failure.category.value,
+                    cause_error_type=error.failure.error_type,
+                    preparation_stage=error.failure.stage,
+                )
             if self.verifyit_enabled and self.agent in _TOOL_COMPARISON_AGENTS:
                 details["preparation"] = {
                     "policy": self.tool_comparison_policy,
@@ -342,7 +364,7 @@ class NemotronUltraEnv(BaseTextEnv):
                 self.ipi_terminal = result
             return result
 
-    def _step(self, action: str) -> BaseTextEnvStepOutput:
+    def _step(self, action: str, *, raw_action: str | None = None) -> BaseTextEnvStepOutput:
         diagnostics: dict[str, Any] = {"agent": self.agent}
         self.turns += 1
         if self.agent == _IPI_AGENT and self.verifyit_enabled:
@@ -453,7 +475,12 @@ class NemotronUltraEnv(BaseTextEnv):
             reward, details = grade_code(
                 action,
                 self.record,
-                assistant_message=self._assistant_message(action),
+                assistant_message=(
+                    self.evidence.metadata.get("assistant_message") if self.evidence is not None else None
+                )
+                if self.verifyit_enabled
+                else self._assistant_message(action),
+                raw_response=raw_action,
                 timeout_seconds=self.code_verifier_timeout_seconds,
                 limits=self.code_verifier,
                 verifyit_enabled=self.verifyit_enabled,
