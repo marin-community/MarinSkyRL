@@ -4,6 +4,8 @@ set -euo pipefail
 REPOSITORY_ROOT="$(git rev-parse --show-toplevel)"
 RUNTIME_COMMIT="$(git rev-parse HEAD)"
 MARIN_ROOT="${RUNNER_TEMP:-$(mktemp -d)}/cat-count-marin"
+TARGET_CLUSTER="${TARGET_CLUSTER:-cw-rno2a}"
+DEADLINE=1200
 git clone --filter=blob:none --branch main --single-branch https://github.com/marin-community/marin.git "$MARIN_ROOT"
 sed -i "s/branch = \"main\"/rev = \"$RUNTIME_COMMIT\"/" "$MARIN_ROOT/config/external/MarinSkyRL/pyproject.toml"
 uv run "$MARIN_ROOT/config/update-external.py" MarinSkyRL
@@ -15,13 +17,13 @@ for attempt in 1 2; do
   log="${RUNNER_TEMP:-/tmp}/cat-count-nightly-a$attempt.log"
   version="$(date -u +%Y.%m.%d).${GITHUB_RUN_ID:-$(date +%s)}${GITHUB_RUN_ATTEMPT:-1}$attempt"
   start=$(date +%s)
-  if (cd "$MARIN_ROOT" && timeout --signal=INT --kill-after=30s 1200s \
+  if (cd "$MARIN_ROOT" && timeout --signal=INT --kill-after=30s "${DEADLINE}s" \
     uv run --frozen --package marin-core --extra cpu --no-default-groups iris --cluster marin job run \
-    --target-cluster "${TARGET_CLUSTER:-cw-rno2a}" --job-name "${JOB_NAME:?}-a$attempt" \
+    --target-cluster "$TARGET_CLUSTER" --job-name "${JOB_NAME:?}-a$attempt" \
     --cpu 4 --memory 16GB --disk 8GB --extra cpu --priority interactive --max-retries 0 \
-    --timeout 1200 --enable-extra-resources -- python -m experiments.post_training.cat_count_canary \
-    --preset gate --version "$version" --cluster "${TARGET_CLUSTER:-cw-rno2a}" \
-    --job-timeout-seconds 1200 --set trainer.logger=console --run) 2>&1 | tee "$log"; then
+    --timeout "$DEADLINE" --enable-extra-resources -- python -m experiments.post_training.cat_count_canary \
+    --preset gate --version "$version" --cluster "$TARGET_CLUSTER" \
+    --job-timeout-seconds "$DEADLINE" --set trainer.logger=console --run) 2>&1 | tee "$log"; then
     status=0
   else
     status=$?
@@ -30,6 +32,8 @@ for attempt in 1 2; do
   echo "CAT_COUNT_NIGHTLY attempt=$attempt wall_clock_seconds=$wall_clock exit_status=$status"
   if ! grep -q 'WANDB_MIRROR kind=train ' "$log"; then
     echo "INFRASTRUCTURE_FAILURE: no training step ran"
+    uv run --project "$MARIN_ROOT" --frozen --package marin-core --extra cpu --no-default-groups \
+      iris --cluster marin job cancel --prefix "/runner/$JOB_NAME-a$attempt"
     continue
   fi
   if ((status != 0)); then

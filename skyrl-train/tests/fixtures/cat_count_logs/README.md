@@ -4,7 +4,7 @@ These captures preserve native metric payloads, the telemetry run identity and
 `Training done!` in their original order. ANSI colors and unrelated setup output
 are excluded. Values and repeated payloads are unchanged.
 
-The healthy Phase C run took 635.58 seconds. The completed-step divergence
+The healthy asynchronous run took 635.58 seconds. The completed-step divergence
 control took 680 seconds; both ranks completed optimizer steps while rank 1
 used unsynchronized gradients. It fails the DP weight checksum row.
 

@@ -50,7 +50,8 @@ At 09:00 UTC, Marin Nightly E2E runs GSM8K learning, synchronous OPD, Grug
 Megatron training and the asynchronous CatCount H100 canary. Manual dispatch
 can select one lane; other lanes have no job in that run. CatCount uses Marin
 main with its external runtime pinned to the MarinSkyRL commit under test.
-OpenCode and the GPU CI suite run only on manual dispatch. See
+OpenCode runs manually through its launcher script. The GPU CI suite runs
+manually with pytest on a GPU allocation. See
 [`skyrl-train/ci/marin_nightly/README.md`](skyrl-train/ci/marin_nightly/README.md)
 for gate thresholds and reproduction commands.
 
