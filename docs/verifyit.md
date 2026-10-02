@@ -64,6 +64,8 @@ LiveCodeBench and Nemotron code generation use verifyit for output comparison an
 
 Verification failures return minimum reward and retain framework verification/error information. A wrong candidate scoring zero is distinct from an invalid reference or unavailable verifier. Intentional corrections can change scores on malformed inputs; ordinary valid inputs should preserve source behavior.
 
+Both Nemotron structured-output aliases use `nemotron_structured_output_source_v1` when enabled. This policy preserves source parsing, payload selection and schema-directed XML/CSV coercion. Core Schema checks tool names and payloads; core ALL combines their verdicts. Preparation diagnostics identify the policy and hash raw inputs using `python_repr_utf8_v1`; candidate representations before and after coercion remain visible. Public errors omit trusted schema literals, tool names and payload keys; protected audit receipts retain full primitive inputs and errors. Invalid schemas remain task errors even when the candidate cannot be prepared. Tool argument decoding limits produce candidate zero scores after trusted-schema validation. Source scoring remains the default. Run `uv run --project skyrl-gym --frozen --extra dev python -m pytest skyrl-gym/tests/test_structured_outputs_verifyit.py` for the boundary tests.
+
 ## Coverage and limits
 
 [The route inventory](../tools/verifyit/route-inventory.json) lists the 37 routes in the maintained packages and their original source locations. The replay command above produces fresh, local evidence for representative routes; it does not establish all-route parity.
