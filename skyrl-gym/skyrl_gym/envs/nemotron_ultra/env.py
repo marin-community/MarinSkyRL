@@ -202,9 +202,14 @@ class NemotronUltraEnv(BaseTextEnv):
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
         action = final_answer_text(action)
+        error_types = (requests.RequestException, RuntimeError, ValueError)
+        if self.verifyit_enabled:
+            from verifyit.grade import InvalidTask
+
+            error_types += (InvalidTask,)
         try:
             return self._step(action)
-        except (requests.RequestException, RuntimeError, ValueError) as error:
+        except error_types as error:
             details = {
                 "agent": self.agent,
                 "error_type": VERIFIER_RUNTIME_ERROR,
@@ -213,6 +218,8 @@ class NemotronUltraEnv(BaseTextEnv):
                 "error_message": str(error),
                 "grading_action": action,
             }
+            if self.verifyit_enabled and isinstance(error, InvalidTask):
+                details.update(error_category="invalid_task", verifyit_status="invalid_task")
             return BaseTextEnvStepOutput(
                 observations=[],
                 reward=0.0,

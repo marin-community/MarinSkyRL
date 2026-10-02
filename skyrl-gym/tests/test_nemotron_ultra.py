@@ -810,3 +810,24 @@ def test_nemotron_ultra_environment_is_registered():
         },
     )
     assert env.step("No calendar changes are needed.")["reward"] == 1.0
+
+
+@pytest.mark.parametrize(
+    "agent",
+    [
+        "single_step_tool_use_with_argument_comparison_agent",
+        "toolcall_schema_single_step_tool_use_with_argument_comparison_agent",
+    ],
+)
+@pytest.mark.parametrize("arguments", ['{"value": Infinity}', '{"value":'])
+def test_verifyit_invalid_tool_reference_returns_framework_error(agent, arguments):
+    env = _ultra_env(
+        agent,
+        {"verifyit_enabled": True},
+        {"expected_action": {"type": "function_call", "name": "transfer", "arguments": arguments}},
+    )
+    result = env.step("candidate response")
+    assert result["reward"] == 0.0
+    assert result["done"]
+    assert result["verification"].status is VerificationStatus.ERROR
+    assert result["verification"].diagnostics["verifyit_status"] == "invalid_task"
