@@ -196,6 +196,17 @@ class InferenceEngineClient(InferenceEngineInterface):
         l2 = big if c2 in self._dead_engines else loads[c2]
         return c2 if (c2 != c1 and l2 < l1) else c1
 
+    def live_engine_indices(self) -> List[int]:
+        """The engines that have not died, in engine order."""
+        return [index for index in range(len(self.engines)) if index not in self._dead_engines]
+
+    async def generate_on_engine(
+        self, engine_idx: int, prompt_token_ids: List[int], sampling_params: Dict[str, Any]
+    ) -> InferenceEngineOutput:
+        """One response to ``prompt_token_ids`` from engine ``engine_idx``, or another live engine if it dies, resumed
+        after any pause; ``engine_dp_ranks`` holds the rank of the engine that served it."""
+        return await self._generate_single_with_retry(engine_idx, prompt_token_ids, sampling_params)
+
     def _route_session(self, session_id: Union[str, int]) -> int:
         """Return the engine index for `session_id`, load-balancing the FIRST request of
         a session and returning the same engine (sticky) for every later turn."""
