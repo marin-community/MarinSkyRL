@@ -28,6 +28,11 @@ for attempt in 1 2; do
   else
     status=$?
   fi
+  if ((status == 0)); then
+    uv run --project "$MARIN_ROOT" --frozen --package marin-core --extra cpu --no-default-groups \
+      iris --cluster marin job logs "/runner/$JOB_NAME-a$attempt" --no-tail --max-lines 60000 \
+      2>&1 | tee "$log" || { echo "INFRASTRUCTURE_FAILURE: complete native log unavailable"; exit 2; }
+  fi
   wall_clock=$(($(date +%s) - start))
   echo "CAT_COUNT_NIGHTLY attempt=$attempt wall_clock_seconds=$wall_clock exit_status=$status"
   if ! grep -q 'WANDB_MIRROR kind=train ' "$log"; then
