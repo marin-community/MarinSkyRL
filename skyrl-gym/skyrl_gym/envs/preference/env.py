@@ -2,7 +2,7 @@ from typing import Any
 
 from omegaconf import DictConfig
 
-from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
+from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput, ground_truth_from_extras
 
 
 class PreferenceEnv(BaseTextEnv):
@@ -15,10 +15,7 @@ class PreferenceEnv(BaseTextEnv):
 
     def __init__(self, env_config: DictConfig, extras: dict[str, Any] | None = None):
         super().__init__()
-        extras = extras or {}
-        assert "reward_spec" in extras, "reward_spec field is required"
-        assert "ground_truth" in extras["reward_spec"], "ground_truth is required in reward_spec field"
-        self.ground_truth = extras["reward_spec"]["ground_truth"]
+        self.ground_truth = ground_truth_from_extras(extras or {})
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
         return BaseTextEnvStepOutput(observations=[], reward=0.0, done=True, metadata={})

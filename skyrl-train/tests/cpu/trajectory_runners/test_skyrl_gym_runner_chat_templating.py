@@ -18,6 +18,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import CUSTOM_CHAT_TEM
 from pathlib import Path
 from tests.cpu.trajectory_runners.chat_templating_test_constants import (
     QWEN2_5_EXPECTED_STR,
+    LLAMA3_2_DATE_STRING,
     LLAMA3_2_EXPECTED_STR,
     QWEN3_TITO_EXPECTED_STR,
     QWEN3_WITHOUT_THINKING_EXPECTED_STR,
@@ -77,7 +78,7 @@ def _build_runner(
     }
     if extra_overrides:
         overrides.update(extra_overrides)
-    OmegaConf.update(default_cfg, "generator", overrides)
+    OmegaConf.update(default_cfg, "generator", overrides, force_add=True)
 
     # Create skryl gym generator
     generator_cfg = default_cfg.generator
@@ -166,7 +167,9 @@ async def test_skyrl_gym_runner_chat_templating_exact(model_name, tokenization_c
     else:
         chat_template_config = {"source": "name", "name_or_path": None}
     # Create a mock generator config
-    runner = _build_runner(tokenizer, chat_template_config, mock_llm)
+    # Llama's default template reads the clock unless its public date override is supplied.
+    chat_template_kwargs = {"date_string": LLAMA3_2_DATE_STRING} if "Llama" in model_name else {}
+    runner = _build_runner(tokenizer, chat_template_config, mock_llm, {"chat_template_kwargs": chat_template_kwargs})
 
     prompt, extras = _default_prompt_and_extras()
     input_batch: TrajectoryRequestBatch = _make_input_batch(prompt, extras)
@@ -180,10 +183,12 @@ async def test_skyrl_gym_runner_chat_templating_exact(model_name, tokenization_c
             {"source": "name", "name_or_path": "qwen3_with_thinking"}
         )
         assert expected_str == tokenizer.apply_chat_template(
-            expected_chat_history, tokenize=False, chat_template=keep_thinking_chat_template
+            expected_chat_history, tokenize=False, chat_template=keep_thinking_chat_template, **chat_template_kwargs
         )
     else:
-        assert expected_str == tokenizer.apply_chat_template(expected_chat_history, tokenize=False)
+        assert expected_str == tokenizer.apply_chat_template(
+            expected_chat_history, tokenize=False, **chat_template_kwargs
+        )
 
     # 3. Check that the full response is exactly string matching with applying the chat template on history
     prompt_str = tokenizer.decode(trajectory_batch["prompt_token_ids"][0])
@@ -204,12 +209,18 @@ async def test_skyrl_gym_runner_chat_templating_exact(model_name, tokenization_c
     # the token ids and deflate the reconstructed loss mask. Coerce to a flat list of ids.
     system_prompt = normalize_token_ids(
         tokenizer.apply_chat_template(
-            [{"role": "system", "content": ""}] if "Llama" in model_name else [{}], tokenize=True
+            [{"role": "system", "content": ""}] if "Llama" in model_name else [{}],
+            tokenize=True,
+            **chat_template_kwargs,
         )
     )
-    empty_user = normalize_token_ids(tokenizer.apply_chat_template([{"role": "user", "content": ""}], tokenize=True))
+    empty_user = normalize_token_ids(
+        tokenizer.apply_chat_template([{"role": "user", "content": ""}], tokenize=True, **chat_template_kwargs)
+    )
     empty_user_with_generation_prompt = normalize_token_ids(
-        tokenizer.apply_chat_template([{"role": "user", "content": ""}], add_generation_prompt=True, tokenize=True)
+        tokenizer.apply_chat_template(
+            [{"role": "user", "content": ""}], add_generation_prompt=True, tokenize=True, **chat_template_kwargs
+        )
     )
     # TODO (erictang000): consider hard coding the full loss mask for each model to avoid copying logic in code
     generation_prompt_ids = empty_user_with_generation_prompt[len(empty_user) :]  # `<|im_start|>assistant\n`

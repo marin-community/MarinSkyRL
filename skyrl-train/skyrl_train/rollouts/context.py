@@ -17,6 +17,8 @@ from ray.actor import ActorHandle
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from marinskyrl.environment_contract import TrainingType
+from marinskyrl.runtime_options import PolicyLossType
+from marinskyrl.distillation import DistillationObjectiveKind, compile_distillation_plan_from_config
 from skyrl_train.curriculum import CurriculumConfig, CurriculumOrder, SamplingKind
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.domain_sampling import DomainWeightedOrder
@@ -30,6 +32,7 @@ from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.rollouts.buffer import (
     BatchPolicy,
     Admission,
+    AdmittedRollout,
     BufferSnapshot,
     ReadyRollout,
     RolloutBuffer,
@@ -42,10 +45,11 @@ from skyrl_train.rollouts.loader import PromptLoader, PromptLoaderState, PromptG
 from skyrl_train.rollouts.payloads import MemoryPayloads, ObjectStorePayloads, PayloadStore
 from skyrl_train.rollout_observability import dispatch_wait, observe_rollout_call, record_group_disposition
 from skyrl_train.rollouts.workers import RolloutWorkers
-from skyrl_train.telemetry import record_generated_work, record_rollout_buffer
+from skyrl_train.telemetry import GeneratedWork, record_generated_work, record_rollout_buffer
 from skyrl_train.trajectory_runners.trajectory_processing import prepare_trajectory_request
 from skyrl_train.trajectory_runners.types import TrajectoryRequestBatch
-from skyrl_train.utils.algorithm_registry import policy_loss_requires_rollout_logprobs
+from skyrl_train.config.objective_spec import rollout_logprobs_required
+from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
 
 _T = TypeVar("_T")
 
@@ -84,6 +88,15 @@ class TrainingContextState:
     loader: PromptLoaderState
     ready: list[ReadyRollout]
     object_store_root: str | None
+
+
+@dataclass(frozen=True)
+class RolloutBatchMetadata:
+    """Ordered selected groups and metrics, without reading their trajectory payloads."""
+
+    batch_id: int
+    groups: tuple[AdmittedRollout, ...]
+    metrics: dict[str, float]
 
 
 def prompt_order_from_config(config: DictConfig, dataset: PromptGroupDataset) -> PromptOrder:
@@ -159,7 +172,9 @@ class TrainingContext:
         selection = GroupSelectionPolicy(
             DynamicSamplingType(dynamic_sampling.type) if dynamic_sampling.type is not None else None,
             criteria=resolve_dynamic_sampling_criteria(
-                dynamic_sampling.informative_on, float(dynamic_sampling.min_reward_std)
+                dynamic_sampling.informative_on,
+                float(dynamic_sampling.min_reward_std),
+                dynamic_sampling.max_mean_reward,
             ),
         )
         batch_size = config.trainer.train_batch_size
@@ -172,9 +187,19 @@ class TrainingContext:
             dynamic_sampling=selection.sampling_type,
             max_candidate_groups=max_sample_batches * batch_size if max_sample_batches > 0 else None,
         )
+        plan = compile_distillation_plan_from_config(config)
         admission = GroupAdmissionPolicy(
             GroupAdvantageInvariant.from_config(algorithm.resolved_group_advantage),
-            rollout_logprobs_required=policy_loss_requires_rollout_logprobs(algorithm.policy_loss_type),
+            rollout_logprobs_required=rollout_logprobs_required(
+                algorithm, loss_spec=PolicyLossRegistry.spec(algorithm.policy_loss_type)
+            ),
+            student_topk_width=(
+                config.generator.sampling_params.logprobs
+                if algorithm.policy_loss_type == PolicyLossType.FTPO
+                else plan.teachers[0].top_k
+                if plan is not None and plan.objective is DistillationObjectiveKind.STUDENT_TOPK_POLICY_SURROGATE
+                else None
+            ),
         )
         object_store_root = config.trainer.rollout_buffer.object_store_root
         return cls(
@@ -220,8 +245,51 @@ class TrainingContext:
             GroupAdmissionStalledError: No group was admitted, or admitted payloads did not arrive, for
                 ``stall_timeout`` seconds.
         """
-        loop = asyncio.get_running_loop()
         groups: list[RolloutGroup] = []
+
+        async def fetch_admitted(admitted: tuple[AdmittedRollout, ...]) -> None:
+            fetched = await self._fetch_groups(self._policy_step, admitted, stall_timeout=stall_timeout)
+            groups.extend(fetched)
+            await on_admitted(fetched)
+
+        metadata = await self.next_batch_metadata(stall_timeout=stall_timeout, on_admitted=fetch_admitted)
+        return groups, metadata.metrics
+
+    async def _fetch_groups(
+        self, batch_id: int, selected: tuple[AdmittedRollout, ...], *, stall_timeout: float
+    ) -> list[RolloutGroup]:
+        try:
+            async with asyncio.timeout(stall_timeout):
+                refs = await self._until_failure(
+                    self._buffer.payload_refs.remote(batch_id, tuple(group.index for group in selected))
+                )
+                groups = await self._until_failure(self._payloads.fetch(refs))
+        except TimeoutError as error:
+            raise GroupAdmissionStalledError(
+                f"{len(selected)} selected rollout payloads did not arrive within "
+                f"{stall_timeout:.0f}s: batch_id={batch_id} indices={[group.index for group in selected]}"
+            ) from error
+        if len(groups) != len(selected):
+            raise ValueError("payload store returned the wrong number of selected rollout groups")
+        for expected, group in zip(selected, groups, strict=True):
+            if group.uid != expected.uid or group.policy_step != expected.policy_step:
+                raise ValueError(f"selected rollout payload does not match batch metadata for {expected.uid}")
+            work = GeneratedWork.from_batch(
+                group.trajectory_batch["response_ids"], group.trajectory_batch.get("is_last_step")
+            )
+            if work.sample_count != expected.sample_count or work.generated_token_count != expected.response_tokens:
+                raise ValueError(f"selected rollout payload size does not match batch metadata for {expected.uid}")
+        return groups
+
+    async def next_batch_metadata(
+        self,
+        *,
+        stall_timeout: float,
+        on_admitted: Callable[[tuple[AdmittedRollout, ...]], Awaitable[None]] | None = None,
+    ) -> RolloutBatchMetadata:
+        """Wait for a selected batch without reading its trajectory payloads."""
+        loop = asyncio.get_running_loop()
+        groups: list[AdmittedRollout] = []
         deadline = loop.time() + stall_timeout
         while True:
             timeout = max(deadline - loop.time(), 0.0)
@@ -238,20 +306,22 @@ class TrainingContext:
                         dwell_seconds=outcome.dwell_seconds,
                     )
             record_rollout_buffer(admission.ready_count, self.config.max_untrained_groups)
-            if admission.payloads:
-                try:
-                    async with asyncio.timeout(stall_timeout):
-                        admitted = await self._until_failure(self._payloads.fetch(admission.payloads))
-                except TimeoutError as error:
-                    raise GroupAdmissionStalledError(
-                        f"{len(admission.payloads)} admitted rollout payloads did not arrive within "
-                        f"{stall_timeout:.0f}s: policy_step={self._policy_step} admitted={len(groups)}"
-                    ) from error
+            if admission.admitted:
+                admitted = tuple(admission.admitted)
                 groups.extend(admitted)
-                await on_admitted(admitted)
+                if on_admitted is not None:
+                    await on_admitted(admitted)
                 deadline = loop.time() + stall_timeout
             if admission.selection is not None:
-                return groups, {**admission.selection.metrics, **self.loader.observe(admission.selection.judged)}
+                if len(groups) != self.config.batch_size:
+                    raise ValueError(f"selected batch has {len(groups)} groups, expected {self.config.batch_size}")
+                if any(group.index != index for index, group in enumerate(groups)):
+                    raise ValueError("selected batch group indices are not ordered from zero")
+                return RolloutBatchMetadata(
+                    self._policy_step,
+                    tuple(groups),
+                    {**admission.selection.metrics, **self.loader.observe(admission.selection.judged)},
+                )
 
     async def state_dict(self) -> TrainingContextState:
         """Capture every dispatched group that no trained batch has consumed.

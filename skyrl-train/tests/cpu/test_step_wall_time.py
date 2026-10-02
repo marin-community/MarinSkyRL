@@ -14,6 +14,7 @@ from skyrl_train.timing_observability import (
     publish_step_timings,
 )
 from skyrl_train.trainer import RayPPOTrainer
+from skyrl_train.callbacks.base import CallbackHandler, TrainerControl, TrainerState
 
 
 class Clock:
@@ -71,6 +72,9 @@ def test_step_end_checkpoint_and_evaluation_are_distinct_exclusive_phases():
     trainer.eval_dataset = object()
     trainer.all_timings = {}
     trainer.all_metrics = {}
+    trainer.global_step = 4
+    trainer._training_metrics_enabled = False
+    trainer.tracker = SimpleNamespace(log=lambda metrics, **kwargs: None)
 
     async def callback(event, _state, current_control, **_kwargs):
         clock.advance(1)
@@ -135,7 +139,10 @@ def test_pretraining_evaluation_is_startup_only():
     trainer._log_metrics_stdout = lambda metrics, **kwargs: mirrored.append((metrics, kwargs))
     logged, mirrored = [], []
 
-    asyncio.run(trainer._run_pretraining_evaluation())
+    trainer.callback_handler = CallbackHandler([])
+    trainer._control = TrainerControl()
+    state = TrainerState(global_step=0, epoch=0, total_steps=1, num_steps_per_epoch=1)
+    asyncio.run(trainer._run_pretraining_evaluation(state))
 
     assert trainer.all_timings == {}
     assert logged[0] == ({"eval/score": 0.5}, {"step": 0, "commit": True})

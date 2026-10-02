@@ -62,6 +62,8 @@ SkyRL is a full-stack RL library designed for modularity and extensibility.
    :maxdepth: 2
    :caption: Algorithms
 
+   algorithms/objective
+   algorithms/objective_guide
    algorithms/dapo
    algorithms/opd
    algorithms/custom_algorithms
@@ -98,9 +100,3 @@ SkyRL is a full-stack RL library designed for modularity and extensibility.
    :caption: Troubleshooting
 
    troubleshooting/troubleshooting
-
-.. toctree::
-   :maxdepth: 2
-   :caption: (NEW) SkyAgent
-
-   skyagent/agent-overview 

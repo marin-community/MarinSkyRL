@@ -23,6 +23,7 @@ from loguru import logger
 import asyncio
 import multiprocessing as mp
 
+from skyrl_train.config.objective_spec import rollout_logprobs_required
 from skyrl_train.config.trajectory_runner_capabilities import (
     EntrypointOperation,
     TrajectoryRunnerMode,
@@ -143,6 +144,14 @@ def create_ray_wrapped_inference_engines_from_config(
         **OmegaConf.to_container(cfg.generator.engine_init_kwargs, resolve=True),
         "openai_sampling_params": OmegaConf.to_container(cfg.generator.sampling_params, resolve=True),
     }
+    if cfg.generator.backend == "vllm":
+        # The template resolver imports Torch from the optional trainer runtime.
+        from skyrl_train.trajectory_runners.trajectory_processing import get_custom_chat_template  # noqa: PLC0415
+
+        engine_init_kwargs["chat_template"] = get_custom_chat_template(cfg.generator.chat_template)
+        engine_init_kwargs["default_chat_template_kwargs"] = OmegaConf.to_container(
+            cfg.generator.chat_template_kwargs, resolve=True
+        )
     engine_init_kwargs["tokenizer"] = cfg.trainer.policy.model.tokenizer_path
     tokenizer_revision = cfg.trainer.policy.model.get("tokenizer_revision")
     if tokenizer_revision is not None:
@@ -162,10 +171,15 @@ def create_ray_wrapped_inference_engines_from_config(
             engine_init_kwargs["async_scheduling"] = False
             engine_init_kwargs["weight_transfer_config"] = {"backend": "runai_streamer"}
 
+    requested_logprobs = [cfg.generator.sampling_params.logprobs, cfg.generator.eval_sampling_params.logprobs]
+    for callback in cfg.trainer.get("callbacks") or []:
+        if callback.get("type") == "evaluation":
+            requested_logprobs.extend(
+                (profile.get("sampling_params") or {}).get("logprobs")
+                for profile in (callback.get("additional_evaluations") or {}).values()
+            )
     requested_logprobs = [
-        value
-        for value in (cfg.generator.sampling_params.logprobs, cfg.generator.eval_sampling_params.logprobs)
-        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+        value for value in requested_logprobs if isinstance(value, int) and not isinstance(value, bool) and value > 0
     ]
 
     role = InferenceEngineRoleConfig(
@@ -344,12 +358,10 @@ class BasePPOExp:
         return prompts_dataset
 
     def get_eval_dataset(self):
-        """Initializes the evaluation dataset.
-
-        Returns:
-            PromptDataset: The evaluation dataset.
-        """
-        if self.cfg.trainer.eval_interval > 0 and self.cfg.data.val_data:
+        """Load validation prompts for evaluation or new mismatch-probe generation."""
+        probe = self.cfg.trainer.mismatch_probe
+        needs_probe_prompts = probe.enabled and probe.reuse_probe is None
+        if (self.cfg.trainer.eval_interval > 0 or needs_probe_prompts) and self.cfg.data.val_data:
             from skyrl_train.dataset import PromptDataset  # noqa: PLC0415
 
             prompts_dataset = PromptDataset(
@@ -458,7 +470,7 @@ class BasePPOExp:
 
         from skyrl_train.trajectory_runners.harbor.execution import HarborRunnerSpec  # noqa: PLC0415
         from skyrl_train.trajectory_runners.nemotron_ultra import NemotronUltraTrajectoryRouter  # noqa: PLC0415
-        from skyrl_train.utils.algorithm_registry import rollout_logprobs_enabled  # noqa: PLC0415
+        from skyrl_train.utils.algorithm_registry import PolicyLossRegistry  # noqa: PLC0415
 
         if not cfg.get("terminal_bench_config"):
             raise ValueError("data.terminal_bench_data requires terminal_bench_config")
@@ -467,7 +479,9 @@ class BasePPOExp:
             gym_runner=gym_runner,
             harbor_runner=harbor_runner,
             terminal_bench_data=terminal_bench_data,
-            require_rollout_logprobs=rollout_logprobs_enabled(cfg.trainer.algorithm),
+            require_rollout_logprobs=rollout_logprobs_required(
+                cfg.trainer.algorithm, loss_spec=PolicyLossRegistry.spec(cfg.trainer.algorithm.policy_loss_type)
+            ),
             tis_lcs_alert_threshold=float(cfg.trainer.algorithm.tis_lcs_alert_threshold),
         )
 
@@ -659,13 +673,17 @@ def run_ray_driver(
     from skyrl_train.entrypoints.ray_lifecycle import exit_without_ray_destructors, shutdown_ray  # noqa: PLC0415
     from marinskyrl.process_diagnostics import write_exception_receipt  # noqa: PLC0415
     from skyrl_train.telemetry import DRIVER_ROLE, process_telemetry  # noqa: PLC0415
+    from skyrl_train import objective  # noqa: F401, PLC0415 - register losses when the training runtime loads
     from skyrl_train.utils import validate_cfg  # noqa: PLC0415
     from skyrl_train.utils.logging_utils import log_exception_as_text  # noqa: PLC0415
     from skyrl_train.utils.progress import configure_progress  # noqa: PLC0415 - keep launcher imports Torch-free
     from skyrl_train.utils.utils import initialize_ray  # noqa: PLC0415
+    from skyrl_train.utils.algorithm_registry import PolicyLossRegistry  # noqa: PLC0415
 
     validate_cfg(cfg)
-    validate_trajectory_runner_capabilities(cfg, runner_mode, operation)
+    validate_trajectory_runner_capabilities(
+        cfg, runner_mode, operation, loss_spec=PolicyLossRegistry.spec(cfg.trainer.algorithm.policy_loss_type)
+    )
     configure_progress(cfg.trainer.progress)
 
     initialize_ray(cfg)
@@ -688,6 +706,8 @@ def run_ray_driver(
         failure: Exception | None = None
         try:
             exit_code = supervisor.wait(entrypoint.remote(cfg))
+            if exit_code in (None, 0) and operation is EntrypointOperation.TRAIN:
+                logger.info("Training done!")
         except Exception as e:
             log_exception_as_text(failure_message, e)
             receipt = write_exception_receipt(

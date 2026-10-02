@@ -2,7 +2,7 @@ import pytest
 import torch
 
 from marinskyrl.distillation import DomainGradientBalanceSpec
-from skyrl_train.distillation import SampledReverseKLInput, StudentTopKPolicySurrogateInput
+from skyrl_train.distillation import ChosenTokenTeacherInput, StudentTopKInput
 from skyrl_train.distillation_adapters import RoutedScoredDistillationBatch
 from skyrl_train.distillation_runtime import DistillationRuntime
 from skyrl_train.domain_gradient_balance import DomainGradientBalancer
@@ -25,7 +25,7 @@ def _scored_group(trajectory_id: str, logprobs: list[float], *, revision: str):
         teacher_revisions=(revision,),
         plan_version="routes-r1",
         evidence=(),
-        distillation=SampledReverseKLInput(
+        distillation=ChosenTokenTeacherInput(
             teacher_action_log_probs=torch.tensor([logprobs]),
             valid_mask=torch.ones((1, width), dtype=torch.bool),
             loss_weights=torch.full((1, width), 0.5),
@@ -89,7 +89,7 @@ def _topk_group(route_id: str, width: int) -> RoutedScoredDistillationBatch:
         teacher_revisions=("teacher-r1",),
         plan_version="routes-r1",
         evidence=(),
-        distillation=StudentTopKPolicySurrogateInput(
+        distillation=StudentTopKInput(
             student_topk_indices=torch.zeros(shape, dtype=torch.long),
             behavior_topk_logprobs=torch.full(shape, -3.0),
             teacher_on_student_logprobs=torch.full(shape, -2.0),

@@ -1,13 +1,13 @@
 """Released Open-MOPD domain-share behavior on row-aligned teacher evidence."""
 
 import torch
-from skyrl_train.distillation import StudentTopKPolicySurrogateInput
+from skyrl_train.distillation import StudentTopKInput
 from skyrl_train.domain_gradient_balance import DomainGradientBalancer
 
 from marinskyrl.distillation import DomainGradientBalanceSpec
 
 
-def _evidence(math_gap: float, code_gap: float, if_gap: float) -> StudentTopKPolicySurrogateInput:
+def _evidence(math_gap: float, code_gap: float, if_gap: float) -> StudentTopKInput:
     mask = torch.tensor([[1, 1, 1, 1], [1, 1, 0, 0], [1, 0, 0, 0]], dtype=torch.bool)
     behavior = torch.full((3, 4, 1), -3.0)
     teacher = torch.tensor(
@@ -18,7 +18,7 @@ def _evidence(math_gap: float, code_gap: float, if_gap: float) -> StudentTopKPol
         ],
         dtype=torch.float32,
     )
-    return StudentTopKPolicySurrogateInput(
+    return StudentTopKInput(
         student_topk_indices=torch.zeros((3, 4, 1), dtype=torch.long).masked_fill(~mask.unsqueeze(-1), -1),
         behavior_topk_logprobs=behavior.masked_fill(~mask.unsqueeze(-1), torch.nan),
         teacher_on_student_logprobs=teacher.masked_fill(~mask.unsqueeze(-1), torch.nan),

@@ -10,6 +10,11 @@ The `DAPO <https://arxiv.org/abs/2503.14476>`_ (Decoupled Clip and Dynamic Sampl
 
 In this guide, we walk through how to enable each of these components in SkyRL. We provide a simple example script for training DAPO on GSM8K in :code_link:`examples/algorithms/dapo/`.
 
+Select the `DAPO recipe <https://github.com/marin-community/MarinSkyRL/blob/main/skyrl-train/skyrl_train/config/algorithm_recipe/dapo.yaml>`_ with
+``+algorithm_recipe=dapo``; see :doc:`objective_guide` for its objective settings.
+DAPO's overlong filtering (``generator.apply_overlong_filtering``) and reward shaping
+(``generator.trajectory_reward_shaping.overlong``) are generator settings outside the recipe.
+
 Clip-Higher
 ~~~~~~~~~~~
 To use clip-higher, you can simply configure ``trainer.algorithm.eps_clip_high`` separately from ``trainer.algorithm.eps_clip_low``.
@@ -110,4 +115,3 @@ An example script with all of the above components enabled for basic GSM8K train
 
   export WANDB_API_KEY=your_wandb_api_key
   bash examples/algorithms/dapo/run_dapo_gsm8k.sh
-

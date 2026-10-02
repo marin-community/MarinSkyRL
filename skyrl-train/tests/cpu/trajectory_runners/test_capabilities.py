@@ -12,8 +12,8 @@ GYM = TrajectoryRunnerMode.SKYRL_GYM
 HARBOR = TrajectoryRunnerMode.HARBOR
 MINI_SWE = TrajectoryRunnerMode.MINI_SWE
 HARBOR_KEY = "terminal_bench_config.harbor"
-NO_TIS = {"trainer.algorithm.use_tis": False}
-FULL_TITO = {"trainer.algorithm.use_tis": False, "trainer.algorithm.tito_full": True}
+NO_ROLLOUT_LOGPROBS = {"trainer.algorithm.off_policy_correction": "none"}
+FULL_TITO = {"trainer.algorithm.off_policy_correction": "none", "trainer.algorithm.tito_full": True}
 OPENCODE = {f"{HARBOR_KEY}.version": SUPPORTED_OPENCODE_LITERAL_VERSION}
 EXACT_CHAT = {
     "generator.chat_template.name_or_path": "qwen2_5_with_generation_tag_simplified",
@@ -30,7 +30,12 @@ def _harbor_config(agent_name):
     return OmegaConf.create(
         {
             "trainer": {
-                "algorithm": {"use_tis": True, "policy_loss_type": "regular", "tito_full": None},
+                "algorithm": {
+                    "off_policy_correction": "tis",
+                    "off_policy_correction_rules": None,
+                    "policy_loss_type": "regular",
+                    "tito_full": None,
+                },
                 "placement": {"colocate_all": True},
             },
             "terminal_bench_config": {"harbor": harbor},
@@ -43,7 +48,12 @@ def _skyrl_config():
     return OmegaConf.create(
         {
             "trainer": {
-                "algorithm": {"use_tis": True, "policy_loss_type": "regular", "tito_full": None},
+                "algorithm": {
+                    "off_policy_correction": "tis",
+                    "off_policy_correction_rules": None,
+                    "policy_loss_type": "regular",
+                    "tito_full": None,
+                },
                 "step_wise_training": False,
             },
             "generator": {
@@ -69,7 +79,7 @@ ACCEPTED = [
     pytest.param(HARBOR, "pi", {}, False, id="harbor-pi"),
     pytest.param(GYM, None, {}, False, id="gym-tis"),
     pytest.param(GYM, None, {"trainer.step_wise_training": True}, False, id="gym-step-wise"),
-    pytest.param(GYM, None, {**NO_TIS, "trainer.algorithm.policy_loss_type": "behavior_clip"}, False, id="gym-clip"),
+    pytest.param(GYM, None, {"trainer.algorithm.policy_loss_type": "behavior_clip"}, False, id="gym-clip"),
     pytest.param(
         GYM,
         None,
@@ -77,14 +87,14 @@ ACCEPTED = [
         False,
         id="gym-full-tito-exact-chat",
     ),
-    pytest.param(GYM, None, NO_TIS, True, id="distill-gym"),
-    pytest.param(HARBOR, "terminus-2", NO_TIS, True, id="distill-harbor-terminus-2"),
-    pytest.param(HARBOR, "opencode", {**NO_TIS, **OPENCODE}, True, id="distill-harbor-opencode"),
-    pytest.param(HARBOR, "pi", NO_TIS, True, id="distill-harbor-pi"),
+    pytest.param(GYM, None, NO_ROLLOUT_LOGPROBS, True, id="distill-gym"),
+    pytest.param(HARBOR, "terminus-2", NO_ROLLOUT_LOGPROBS, True, id="distill-harbor-terminus-2"),
+    pytest.param(HARBOR, "opencode", {**NO_ROLLOUT_LOGPROBS, **OPENCODE}, True, id="distill-harbor-opencode"),
+    pytest.param(HARBOR, "pi", NO_ROLLOUT_LOGPROBS, True, id="distill-harbor-pi"),
     pytest.param(
         HARBOR,
         "terminus-2",
-        {**NO_TIS, "trainer.placement.colocate_all": False},
+        {**NO_ROLLOUT_LOGPROBS, "trainer.placement.colocate_all": False},
         True,
         id="distill-harbor-separate-placement",
     ),
@@ -103,6 +113,26 @@ def test_runner_capabilities_accept(mode, agent_name, overrides, distillation, l
 
 # (mode, harbor agent or None, overrides, distillation, operation, match naming the runner or config field)
 REJECTED = [
+    *(
+        pytest.param(
+            mode,
+            None,
+            {
+                **NO_ROLLOUT_LOGPROBS,
+                "trainer.callbacks": [
+                    {
+                        "type": "evaluation",
+                        "additional_evaluations": {"sampled": {"sampling_params": {"temperature": 1.0}}},
+                    }
+                ],
+            },
+            False,
+            "train",
+            "does not support additional evaluation sampling profiles",
+            id=f"{mode.value}-sampling-profiles",
+        )
+        for mode in (HARBOR, MINI_SWE)
+    ),
     pytest.param(HARBOR, "codex", {}, False, "train", "Harbor codex cannot supply exact", id="harbor-codex"),
     pytest.param(HARBOR, "future-agent", {}, False, "train", "Harbor future-agent", id="harbor-unknown-agent"),
     *(
@@ -154,7 +184,7 @@ REJECTED = [
     pytest.param(
         MINI_SWE,
         None,
-        {**NO_TIS, "trainer.algorithm.policy_loss_type": "behavior_clip"},
+        {"trainer.algorithm.policy_loss_type": "behavior_clip"},
         False,
         "train",
         "mini-swe",
@@ -172,15 +202,17 @@ REJECTED = [
     pytest.param(
         GYM,
         None,
-        {**EXACT_CHAT, **NO_TIS, "generator.sampling_params": {"logprobs": None}},
+        {**EXACT_CHAT, **NO_ROLLOUT_LOGPROBS, "generator.sampling_params": {"logprobs": None}},
         False,
         "train",
         "generator.sampling_params.logprobs",
         id="gym-exact-chat-without-logprobs",
     ),
-    pytest.param(MINI_SWE, None, NO_TIS, True, "train", "mini-swe", id="distill-mini-swe"),
-    pytest.param(HARBOR, "codex", NO_TIS, True, "train", "tokenized learner actions", id="distill-harbor-codex"),
-    pytest.param(HARBOR, "terminus-2", NO_TIS, True, "generate", "training-only", id="distill-generate"),
+    pytest.param(MINI_SWE, None, NO_ROLLOUT_LOGPROBS, True, "train", "mini-swe", id="distill-mini-swe"),
+    pytest.param(
+        HARBOR, "codex", NO_ROLLOUT_LOGPROBS, True, "train", "tokenized learner actions", id="distill-harbor-codex"
+    ),
+    pytest.param(HARBOR, "terminus-2", NO_ROLLOUT_LOGPROBS, True, "generate", "training-only", id="distill-generate"),
     pytest.param(GYM, None, FULL_TITO, False, "train", "SkyRL Gym does not support", id="full-tito-gym"),
     pytest.param(
         HARBOR, "terminus-kira", FULL_TITO, False, "train", "Harbor terminus-kira", id="full-tito-harbor-kira"

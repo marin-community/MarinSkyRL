@@ -1,6 +1,8 @@
 """Typed choices shared by the launcher and training runtime."""
 
+from collections.abc import Mapping
 from enum import StrEnum
+from typing import Any
 
 
 class R3Transport(StrEnum):
@@ -36,3 +38,27 @@ class AdvantageEstimator(StrEnum):
     RLOO_N = "rloo_n"  # RLOO-Neutral: excludes masked samples from baseline
     REINFORCE_PP = "reinforce++"
     UNIFORM = "uniform"
+    REWARD = "reward"
+
+
+class PolicyLossType(StrEnum):
+    REGULAR = "regular"
+    DUAL_CLIP = "dual_clip"
+    BEHAVIOR_CLIP = "behavior_clip"
+    GSPO = "gspo"
+    CISPO = "cispo"
+    CLIP_COV = "clip_cov"
+    KL_COV = "kl_cov"
+    SAPO = "sapo"
+    SFT = "sft"
+    FTPO = "ftpo"
+    IMPORTANCE_SAMPLING = "importance_sampling"
+
+
+def reference_model_required(algorithm: Mapping[str, Any]) -> bool:
+    """Return whether the objective needs a frozen reference actor."""
+    return bool(
+        algorithm.get("use_kl_loss")
+        or algorithm.get("use_kl_in_reward")
+        or algorithm.get("policy_loss_type") == PolicyLossType.FTPO
+    )

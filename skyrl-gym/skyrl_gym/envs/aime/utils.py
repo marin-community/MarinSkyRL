@@ -14,6 +14,8 @@
 # Adapted from https://github.com/EleutherAI/lm-evaluation-harness/blob/main/lm_eval/tasks/hendrycks_math/utils.py
 # https://github.com/volcengine/verl/blob/1a62568f801ba35ac1f5387e27232a2df7eac488/verl/utils/reward_score/math_dapo.py
 
+from verifyit.adapters.skyrl import grade_aime_candidate, grade_literal_candidate
+
 import math
 import re
 from fractions import Fraction
@@ -221,11 +223,7 @@ def is_correct_minerva(
     else:
         gt = normalize_final_answer(gt)
 
-    if pred == gt:
-        return True, pred
-    pred_value = rational_value(pred)
-    gt_value = rational_value(gt)
-    return pred_value is not None and pred_value == gt_value, pred
+    return grade_aime_candidate(gt, pred).reward == 1.0, pred
 
 
 def is_correct_strict_box(
@@ -252,7 +250,8 @@ def is_correct_strict_box(
     boxed_pred = last_boxed_only_string(pred)
     extracted_pred = remove_boxed(boxed_pred) if boxed_pred is not None else None
 
-    return 1 if (extracted_pred == gt) else -1, extracted_pred
+    reward = grade_literal_candidate(gt, extracted_pred).reward if extracted_pred is not None else 0.0
+    return 2 * int(reward) - 1, extracted_pred
 
 
 def verify(

@@ -20,7 +20,9 @@ Supports two configuration styles:
 
 import asyncio
 import contextlib
+import math
 import os
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Type
 
 from loguru import logger
@@ -36,6 +38,8 @@ from skyrl_train.inference_observability import (
     format_console_summary,
     trainer_metrics,
 )
+
+from skyrl_train.mismatch_probe.callback import MismatchProbeCallback
 
 from .base import TrainerCallback, TrainerState, TrainerControl, CallbackHandler
 from .types import (
@@ -159,18 +163,36 @@ class DistillationTokenBudgetCallback(TrainerCallback):
         return control
 
 
+@dataclass(frozen=True)
+class EvaluationSamplingConfig:
+    sampling_params: Dict[str, Any] | None = None
+    n_samples_per_prompt: int | None = None
+
+
+@dataclass(frozen=True)
+class EvaluationStopConfig:
+    minimum: float | None = None
+    min_improvement: float | None = None
+
+    def __post_init__(self):
+        if (self.minimum is None) == (self.min_improvement is None):
+            raise ValueError("evaluation stop requires exactly minimum or min_improvement")
+        threshold = self.minimum if self.minimum is not None else self.min_improvement
+        if not math.isfinite(threshold):
+            raise ValueError("evaluation stop thresholds must be finite")
+
+
 @register_callback("evaluation")
 class EvaluationCallback(TrainerCallback):
-    """
-    Callback for running evaluation at regular intervals.
-
-    This replaces the inline `eval_interval` logic in the training loop.
-    Evaluation runs on the validation dataset and logs metrics.
+    """Schedule evaluations and stop when configured score requirements are met.
 
     Args:
-        eval_steps: Run evaluation every N steps. Set to -1 or 0 to disable.
-        eval_on_train_end: Whether to run evaluation when training ends.
-        eval_before_train: Whether to run evaluation before training starts.
+        eval_steps: Evaluate every N completed steps; non-positive values disable evaluation.
+        eval_on_train_end: Evaluate the final policy.
+        eval_before_train: Evaluate the initial policy.
+        additional_evaluations: Named sampling overrides passed to the trainer's evaluator.
+        metric_groups: Output metric names mapped to source metrics whose mean is reported.
+        stop_when: Metrics mapped to minimum scores or gains over the initial evaluation.
     """
 
     def __init__(
@@ -178,10 +200,60 @@ class EvaluationCallback(TrainerCallback):
         eval_steps: int = 5,
         eval_on_train_end: bool = True,
         eval_before_train: bool = True,
+        additional_evaluations: Dict[str, Dict[str, Any]] | None = None,
+        metric_groups: Dict[str, List[str]] | None = None,
+        stop_when: Dict[str, Dict[str, float]] | None = None,
     ):
         self.eval_steps = eval_steps
         self.eval_on_train_end = eval_on_train_end
         self.eval_before_train = eval_before_train
+        self.additional_evaluations = {
+            name: EvaluationSamplingConfig(**parameters) for name, parameters in (additional_evaluations or {}).items()
+        }
+        self.metric_groups = metric_groups or {}
+        self.stop_when = {name: EvaluationStopConfig(**value) for name, value in (stop_when or {}).items()}
+        self._initial_values: Dict[str, float] = {}
+        self._initial_step: int | None = None
+        if any(not name.isidentifier() for name in self.additional_evaluations):
+            raise ValueError("additional evaluation names must be identifiers")
+        if any(not keys for keys in self.metric_groups.values()):
+            raise ValueError("evaluation metric groups must be nonempty")
+
+    error_behavior = "raise"
+
+    async def on_evaluate_async(
+        self, state: TrainerState, control: TrainerControl, *, metrics: Dict[str, float], trainer, **kwargs
+    ) -> TrainerControl:
+        for name, parameters in self.additional_evaluations.items():
+            additional = await trainer.eval(
+                val_set_name=name,
+                sampling_params=parameters.sampling_params,
+                n_samples_per_prompt=parameters.n_samples_per_prompt,
+            )
+            metrics.update({key.replace("eval/", f"eval/{name}/", 1): value for key, value in additional.items()})
+        for name, members in self.metric_groups.items():
+            metrics[name] = math.fsum(metrics[member] / len(members) for member in members)
+            if not math.isfinite(metrics[name]):
+                raise ValueError(f"nonfinite evaluation metric group {name}")
+        if not self.stop_when:
+            return control
+        if self._initial_step is None:
+            self._initial_values = {name: metrics[name] for name in self.stop_when}
+            self._initial_step = state.global_step
+        improvements = {name: metrics[name] - initial for name, initial in self._initial_values.items()}
+        for name, improvement in improvements.items():
+            if not math.isfinite(improvement):
+                raise ValueError(f"nonfinite evaluation improvement for {name}")
+            metrics[f"{name}_improvement"] = improvement
+        if state.global_step > self._initial_step and all(
+            metrics[name] >= requirement.minimum
+            if requirement.minimum is not None
+            else improvements[name] >= requirement.min_improvement
+            for name, requirement in self.stop_when.items()
+        ):
+            logger.info("Evaluation stop requirements reached at step {}", state.global_step)
+            control.should_training_stop = True
+        return control
 
     def on_train_begin(
         self,
@@ -782,6 +854,8 @@ def create_default_callbacks(cfg: DictConfig) -> List[TrainerCallback]:
         has_logging = any(isinstance(cb, LoggingCallback) for cb in callbacks)
         if not has_logging:
             callbacks.append(LoggingCallback())
+        if cfg.trainer.get("mismatch_probe", {}).get("enabled", False):
+            callbacks.append(MismatchProbeCallback(cfg))
         return callbacks
 
     # Fall back to legacy interval-based configuration
@@ -859,6 +933,8 @@ def create_default_callbacks(cfg: DictConfig) -> List[TrainerCallback]:
     # Logging callback (always enabled)
     callbacks.append(LoggingCallback())
 
+    if cfg.trainer.get("mismatch_probe", {}).get("enabled", False):
+        callbacks.append(MismatchProbeCallback(cfg))
     return callbacks
 
 

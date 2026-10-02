@@ -146,6 +146,17 @@ def test_multichallenge_malformed_reply_is_never_a_successful_no(reply):
         )
 
 
+@pytest.mark.parametrize("verdict", ["YES", "NO"])
+def test_multichallenge_accepts_plain_final_line_verdicts(verdict):
+    reward, details = grade_multichallenge(
+        "candidate",
+        {"rubric": [{"question": "valid?", "pass_criteria": verdict}]},
+        JudgeReplies(f"Reasoning about the criterion.\n{verdict}"),
+    )
+    assert reward == 1.0
+    assert details["rubric_evaluations"][0]["verdict"] == verdict
+
+
 def test_jailbreak_transport_failure_is_an_error_not_a_verified_zero():
     env = ultra_env("jailbreak_refusal_with_explanation", {"response_policy_mapped": "refusal_with_explanation"})
     env.safety_judge = JudgeReplies(requests.ConnectionError("judge down"))
@@ -244,6 +255,21 @@ def test_reasoning_gym_last_answer_wins_and_partial_credit_is_not_a_pass():
     assert not result["verification"].passed
 
 
+@pytest.mark.parametrize("response", ["**Final Answer: 3**", "The final answer is 3."])
+def test_reasoning_gym_grades_prose_final_answer(response):
+    env = ultra_env(
+        "reasoning_gym_simple_agent",
+        {
+            "question": "Calculate 0 + -3 - -6 / ( 1 * 7 + -6 ).",
+            "answer": "3",
+            "metadata": {"source_dataset": "basic_arithmetic", "expression": "0 + -3 - -6 / ( 1 * 7 + -6 )"},
+        },
+    )
+    result = env.step(f"<|start_think|>First I calculate the denominator.<|end_think|>It equals 3.\n{response}")
+    assert result["reward"] == 1.0
+    assert result["verification"].passed
+
+
 def test_arc_accepts_compact_grids_and_selects_the_final_box():
     assert parse_grid("12\n34") == [[1, 2], [3, 4]]
     assert parse_grid(r"\boxed{0 0} \boxed{1 2}") == [[1, 2]]
@@ -288,10 +314,96 @@ def test_stateful_sandbox_detects_reset_and_deletes_the_same_session(monkeypatch
     monkeypatch.setattr(requests, "delete", delete)
     sandbox = SandboxClient(host="sandbox.example")
     sandbox.execute("x=7", language="ipython", timeout_seconds=1, session_id="stable")
-    with pytest.raises(RuntimeError, match="lost stateful session"):
+    with pytest.raises(requests.RequestException, match="lost stateful session"):
         sandbox.execute("x", language="ipython", timeout_seconds=1, session_id="stable")
     sandbox.close_session("stable")
     assert deleted == [("http://sandbox.example:6000/sessions/stable", {"X-Session-ID": "stable"})]
+
+
+def python_tool_evidence(code):
+    return RolloutEvidence(
+        metadata={
+            "assistant_message": {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call",
+                        "function": {
+                            "name": "stateful_python_code_exec",
+                            "arguments": json.dumps({"code": code}),
+                        },
+                    }
+                ],
+            }
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        requests.ConnectionError("sandbox unavailable"),
+        requests.Timeout("sandbox response deadline"),
+        requests.HTTPError("sandbox HTTP 503"),
+        {"process_status": "completed", "stdout": "7", "new_session_created": True},
+        {"process_status": "unknown", "stdout": "", "stderr": "worker unavailable"},
+        {"process_status": "error", "stdout": "", "stderr": "connection closed", "error_type": "VerifierRuntimeError"},
+        {"process_status": "timeout", "new_session_created": True, "error_type": "VerifierRuntimeError"},
+        {"process_status": "completed", "stdout": None},
+        {"process_status": []},
+        ["invalid response"],
+        {},
+    ],
+)
+def test_sandbox_failures_end_rollouts_without_a_verdict(monkeypatch, failure):
+    replies = iter(
+        [
+            {"process_status": "completed", "stdout": "7", "new_session_created": True},
+            failure,
+        ]
+    )
+
+    def post(*args, **kwargs):
+        reply = next(replies)
+        if isinstance(reply, Exception):
+            raise reply
+        return HTTPReply(reply)
+
+    monkeypatch.setattr(requests, "post", post)
+    env = ultra_env("ns_tools_simple_agent", {"expected_answer": "7"})
+    for code in ["x=7; print(x)", "print(x)"]:
+        env.set_rollout_evidence(python_tool_evidence(code))
+        result = env.step("")
+    verification = result["verification"]
+    assert result["done"]
+    assert result["observations"] == []
+    assert verification.status is VerificationStatus.ERROR
+    assert verification.score is None
+    assert verification.passed is None
+    assert verification.diagnostics["error_type"] == "VerifierRuntimeError"
+    assert verification.diagnostics["error_category"] == "infrastructure"
+
+
+@pytest.mark.parametrize("status,stderr", [("error", "NameError: missing variable"), ("timeout", "KeyboardInterrupt")])
+def test_python_program_failures_preserve_tool_feedback(monkeypatch, status, stderr):
+    monkeypatch.setattr(
+        requests,
+        "post",
+        lambda *args, **kwargs: HTTPReply(
+            {
+                "process_status": status,
+                "stdout": "",
+                "stderr": stderr,
+                "new_session_created": True,
+            }
+        ),
+    )
+    env = ultra_env("ns_tools_simple_agent", {})
+    env.set_rollout_evidence(python_tool_evidence("print(x)"))
+    result = env.step("")
+    assert not result["done"]
+    assert result["observations"][0]["content"] == stderr
+    assert result["verification"].status is VerificationStatus.UNAVAILABLE
 
 
 def test_judge_length_finish_cannot_be_accepted_as_partial_json(monkeypatch):
@@ -384,20 +496,7 @@ def test_sandbox_transport_outage_is_preserved_as_verification_error(monkeypatch
 
     monkeypatch.setattr(requests, "post", refused)
     env = ultra_env("ns_tools_simple_agent", {"expected_answer": "7", "question": "compute"})
-    env.set_rollout_evidence(
-        RolloutEvidence(
-            metadata={
-                "assistant_message": {
-                    "tool_calls": [
-                        {
-                            "id": "call-1",
-                            "function": {"name": "stateful_python_code_exec", "arguments": '{"code":"x=7"}'},
-                        }
-                    ]
-                }
-            }
-        )
-    )
+    env.set_rollout_evidence(python_tool_evidence("x=7"))
     result = env.step("")
     assert result["verification"].status is VerificationStatus.ERROR
     assert "connection refused" in result["verification"].diagnostics["error_message"]

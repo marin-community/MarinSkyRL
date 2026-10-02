@@ -6,8 +6,10 @@ from unittest.mock import MagicMock
 
 import pytest
 from omegaconf import OmegaConf
+from skyrl_gym.envs.registration import registry
+from skyrl_gym.verification import VerificationResult
 
-from skyrl_train.evaluate import evaluate
+from skyrl_train.evaluate import _calculate_eval_metrics, evaluate
 from skyrl_train.trajectory_runners.base import TrajectoryRunner, TrajectoryBatch
 from skyrl_train.trajectory_runners.trajectory_retention import (
     TrajectorySink,
@@ -64,8 +66,26 @@ class DummyRunner(TrajectoryRunner):
         return self.output
 
 
+def test_eval_reports_normalized_verifier_score_alongside_raw_reward():
+    batch: TrajectoryBatch = {
+        "response_ids": [[1], [2]],
+        "rewards": [5.0, 0.0],
+        "verification_results": [
+            VerificationResult.verified(5.0, score_min=1.0, score_max=5.0),
+            VerificationResult.verified(0.0),
+        ],
+    }
+
+    metrics = _calculate_eval_metrics(batch, ["a", "b"], ["genrm", "math"], 1)
+
+    assert metrics["eval/all/avg_score"] == 2.5
+    assert metrics["eval/all/avg_verifier_score"] == 0.5
+    assert metrics["eval/all/verifier_score_coverage"] == 1.0
+
+
 @pytest.mark.asyncio
-async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
+async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path, monkeypatch):
+    monkeypatch.setitem(registry, "custom_env", registry["gsm8k"])
     cfg = configure_eval(dummy_config, tmp_path)
 
     prompts_batch = [
@@ -91,6 +111,8 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
         "loss_masks": [[1], [1]],
         "stop_reasons": ["stop", "stop"],
         "rollout_logprobs": None,
+        "env_classes": ["gsm8k", "custom_env"],
+        "env_metrics": [{"truncated": 1}, {"truncated": 0}],
     }
     runner = DummyRunner(trajectory_batch)
 
@@ -119,6 +141,10 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
         "eval/dataset_b/pass_at_1": 0.0,
         "eval/all/avg_score": 0.5,
         "eval/all/pass_at_1": 0.5,
+        "eval/all/environment/gsm8k/truncated": 1.0,
+        "eval/all/environment/custom_env/truncated": 0.0,
+        "eval/dataset_a/environment/gsm8k/truncated": 1.0,
+        "eval/dataset_b/environment/custom_env/truncated": 0.0,
     }
 
     for key, expected_value in expected_metrics.items():

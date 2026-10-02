@@ -13,17 +13,17 @@ from torch.nn.utils.rnn import pad_sequence
 from marinskyrl.distillation import TeacherEvidenceKind
 from skyrl_train.distillation import (
     ChosenTokenTeacherEvidence,
-    DistillationInput,
+    PreparedTeacherInput,
     INVALID_TOPK_INDEX,
-    SampledReverseKLInput,
-    SparseForwardKLInput,
+    ChosenTokenTeacherInput,
+    TeacherTopKInput,
     StudentSelectedTeacherEvidence,
-    StudentTopKPolicySurrogateInput,
+    StudentTopKInput,
     TeacherEvidenceBatch,
     TeacherScoreRequest,
     TopKTeacherEvidence,
     prepare_sampled_reverse_kl,
-    prepare_sparse_forward_kl,
+    prepare_teacher_topk,
     prepare_student_topk_policy_surrogate,
 )
 from skyrl_train.teacher_oracle import TeacherOracleCollection
@@ -56,7 +56,7 @@ class ScoredDistillationBatch:
     """Validated evidence and the minimal payload consumed by the learner."""
 
     evidence: TeacherEvidenceBatch
-    distillation: DistillationInput
+    distillation: PreparedTeacherInput
 
 
 @dataclass(frozen=True)
@@ -87,7 +87,7 @@ class RoutedScoredDistillationBatch:
     teacher_revisions: tuple[str, ...]
     plan_version: str
     evidence: tuple[TeacherEvidenceBatch, ...]
-    distillation: DistillationInput
+    distillation: PreparedTeacherInput
 
 
 def _routed_assembly_shape(
@@ -109,14 +109,14 @@ def _routed_assembly_shape(
 
 
 def _assemble_student_selected_inputs(
-    indexed_inputs: Sequence[tuple[tuple[int, ...], DistillationInput]],
+    indexed_inputs: Sequence[tuple[tuple[int, ...], PreparedTeacherInput]],
     shape: tuple[int, int],
     valid_mask: torch.Tensor,
     loss_weights: torch.Tensor,
-) -> StudentTopKPolicySurrogateInput:
-    if not all(isinstance(distillation, StudentTopKPolicySurrogateInput) for _, distillation in indexed_inputs):
+) -> StudentTopKInput:
+    if not all(isinstance(distillation, StudentTopKInput) for _, distillation in indexed_inputs):
         raise ValueError("routed teacher partitions must return one distillation objective kind")
-    payloads = tuple(cast(StudentTopKPolicySurrogateInput, distillation) for _, distillation in indexed_inputs)
+    payloads = tuple(cast(StudentTopKInput, distillation) for _, distillation in indexed_inputs)
     widths = {payload.student_topk_indices.shape[-1] for payload in payloads}
     if len(widths) != 1:
         raise ValueError("routed student-selected partitions must use one top-K width")
@@ -130,13 +130,13 @@ def _assemble_student_selected_inputs(
         indices[rows, :width] = payload.student_topk_indices
         behavior[rows, :width] = payload.behavior_topk_logprobs
         teacher[rows, :width] = payload.teacher_on_student_logprobs
-    return StudentTopKPolicySurrogateInput(indices, behavior, teacher, valid_mask, loss_weights)
+    return StudentTopKInput(indices, behavior, teacher, valid_mask, loss_weights)
 
 
 def assemble_distillation_inputs(
-    indexed_inputs: Sequence[tuple[tuple[int, ...], DistillationInput]],
+    indexed_inputs: Sequence[tuple[tuple[int, ...], PreparedTeacherInput]],
     shape: tuple[int, int],
-) -> DistillationInput:
+) -> PreparedTeacherInput:
     """Scatter homogeneous learner inputs into an explicitly sized batch."""
     if not indexed_inputs:
         raise ValueError("distillation assembly requires at least one input")
@@ -153,24 +153,24 @@ def assemble_distillation_inputs(
         valid_mask[indices, :width] = distillation.valid_mask
         loss_weights[indices, :width] = distillation.loss_weights
 
-    if isinstance(first, SampledReverseKLInput):
-        if not all(isinstance(distillation, SampledReverseKLInput) for _, distillation in indexed_inputs):
+    if isinstance(first, ChosenTokenTeacherInput):
+        if not all(isinstance(distillation, ChosenTokenTeacherInput) for _, distillation in indexed_inputs):
             raise ValueError("routed teacher partitions must return one distillation objective kind")
         teacher_logprobs = torch.full(shape, torch.nan, dtype=torch.float32)
         for original_indices, distillation in indexed_inputs:
-            payload = cast(SampledReverseKLInput, distillation)
+            payload = cast(ChosenTokenTeacherInput, distillation)
             indices = torch.tensor(original_indices, dtype=torch.long)
             teacher_logprobs[indices, : payload.valid_mask.shape[1]] = payload.teacher_action_log_probs
-        return SampledReverseKLInput(teacher_logprobs, valid_mask, loss_weights)
+        return ChosenTokenTeacherInput(teacher_logprobs, valid_mask, loss_weights)
 
-    if isinstance(first, StudentTopKPolicySurrogateInput):
+    if isinstance(first, StudentTopKInput):
         return _assemble_student_selected_inputs(indexed_inputs, shape, valid_mask, loss_weights)
 
-    if not isinstance(first, SparseForwardKLInput) or not all(
-        isinstance(distillation, SparseForwardKLInput) for _, distillation in indexed_inputs
+    if not isinstance(first, TeacherTopKInput) or not all(
+        isinstance(distillation, TeacherTopKInput) for _, distillation in indexed_inputs
     ):
         raise ValueError("routed teacher partitions must return one distillation objective kind")
-    payloads = tuple(cast(SparseForwardKLInput, distillation) for _, distillation in indexed_inputs)
+    payloads = tuple(cast(TeacherTopKInput, distillation) for _, distillation in indexed_inputs)
     topk_values = {payload.teacher_topk_indices.shape[-1] for payload in payloads}
     if len(topk_values) != 1:
         raise ValueError("routed sparse teacher partitions must use one top-K width")
@@ -184,7 +184,7 @@ def assemble_distillation_inputs(
         teacher_indices[indices, :width] = payload.teacher_topk_indices
         teacher_logprobs[indices, :width] = payload.teacher_topk_logprobs
         retained_mass[indices, :width] = payload.retained_mass
-    return SparseForwardKLInput(teacher_indices, teacher_logprobs, retained_mass, valid_mask, loss_weights)
+    return TeacherTopKInput(teacher_indices, teacher_logprobs, retained_mass, valid_mask, loss_weights)
 
 
 def _pad_token_rows(token_rows: list[list[int]]) -> tuple[torch.Tensor, torch.Tensor]:
@@ -196,7 +196,7 @@ def _pad_token_rows(token_rows: list[list[int]]) -> tuple[torch.Tensor, torch.Te
     return padded, mask
 
 
-def _collate_student_selected_rollout(
+def collate_student_selected_rollout(
     trajectory_batch: TrajectoryBatch,
     response_token_ids: list[list[int]],
     response_mask: torch.Tensor,
@@ -271,7 +271,7 @@ def build_teacher_scoring_work(
     behavior_logprobs = None
     selected_mask = None
     if evidence is TeacherEvidenceKind.STUDENT_SELECTED_TOPK:
-        selected_indices, behavior_logprobs, selected_mask = _collate_student_selected_rollout(
+        selected_indices, behavior_logprobs, selected_mask = collate_student_selected_rollout(
             trajectory_batch, response_token_ids, response_mask, top_k
         )
 
@@ -356,7 +356,7 @@ class TeacherEvidenceCoordinator:
                 route_weights=work.route_weights,
             )
         elif isinstance(evidence, TopKTeacherEvidence):
-            distillation = prepare_sparse_forward_kl(
+            distillation = prepare_teacher_topk(
                 work.request,
                 evidence,
                 coefficient=work.coefficient,

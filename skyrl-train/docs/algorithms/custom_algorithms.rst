@@ -54,13 +54,19 @@ Similarly, you can register custom policy loss functions:
 
 .. code-block:: python
 
-   from skyrl_train.utils.algorithm_registry import register_policy_loss, PolicyLossRegistry
+   from skyrl_train.config.objective_spec import LossSpec, RatioAnchor
+   from skyrl_train.objective.losses import PolicyLossInputs, TokenLoss
+   from skyrl_train.utils.algorithm_registry import register_policy_loss
 
-   @register_policy_loss("reinforce")
-   def compute_reinforce_policy_loss(log_probs, old_log_probs, advantages, config, loss_mask=None, rollout_log_probs=None):
-       # Your custom policy loss implementation (like REINFORCE)
-       loss = (-log_probs * advantages).mean()
-       return loss, {}
+   @register_policy_loss("reinforce", spec=LossSpec(RatioAnchor.NONE))
+   def compute_reinforce_policy_loss(inputs: PolicyLossInputs, config) -> TokenLoss:
+       return TokenLoss(-inputs.log_probs * inputs.advantages, {})
+
+The loss returns one value per response token. The shared objective applies data
+weights, reduction and distributed scaling. ``LossSpec`` declares the ratio
+anchor, whether the loss requires sequence-level credit, whether its computation
+is local to each row, and whether zero advantages give zero loss and gradients.
+Configuration validation uses this contract before training begins.
 
 Registry Ray Distribution
 ~~~~~~~~~~~~~~~~~~~~~~~~~~

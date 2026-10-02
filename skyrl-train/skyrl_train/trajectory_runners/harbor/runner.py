@@ -29,6 +29,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     BATCH_ERROR_METRIC_PREFIX,
     get_batch_failure_metrics,
     get_rollout_metrics,
+    get_custom_chat_template,
     get_response_ids_and_loss_mask_from_messages,
     get_generation_prompt_ids,
     detect_qwen3_5_empty_think_prefix,
@@ -515,18 +516,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             f"Error classification: enabled={self._error_handling_config.enable_error_classification}"
         )
 
-        # Read custom chat template
-        custom_chat_template_path = trajectory_runner_cfg.engine_init_kwargs.get(
-            "custom_chat_template_chat_completion_path", None
-        )
-        if custom_chat_template_path:
-            with open(custom_chat_template_path, "r") as f:
-                self.custom_chat_template_content = f.read()
-            logger.info(
-                f"HarborTrajectoryRunner initialized with custom chat template read from: {custom_chat_template_path}"
-            )
-        else:
-            self.custom_chat_template_content = None
+        self.custom_chat_template_content = get_custom_chat_template(trajectory_runner_cfg.chat_template)
 
         # --- ARCH-GATED qwen3_5/3.6 thinking-enable for the re-tokenize / TIS path ---
         # The Qwen3.5/3.6 chat template's DEFAULT generation prompt (enable_thinking
@@ -1810,6 +1800,17 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 exclude_from_baseline=exclude_from_baseline,
             )
 
+        # CLI agents record behavior evidence in the proxy log, not Harbor Chat.
+        # Recover both consumers before timeout classification; correlation releases
+        # the trial's log entries after the conversation has been reconstructed.
+        rollout_details = getattr(result.agent_result, "rollout_details", None)
+        had_native_rollout_details = bool(rollout_details)
+        cli_chat_history = None
+        if not had_native_rollout_details:
+            cli_chat_history = self._maybe_build_cli_chat_history(result)
+            rollout_details = self._maybe_correlate_cli_rollout_details(result, rollout_details)
+        literal_bridge_correlated = not had_native_rollout_details and bool(rollout_details)
+
         verification = verification_from_harbor_result(result)
 
         # Preserve-on-soft-timeout state (see _should_preserve_timeout_trajectory).
@@ -1951,7 +1952,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             # Branch on all_messages PRESENCE, not agent name, so the terminus path
             # stays byte-identical and any future Chat-driven agent keeps working.
             if isinstance(metadata, dict) and "all_messages" not in metadata:
-                chat_history = self._maybe_build_cli_chat_history(result)
+                chat_history = cli_chat_history or self._maybe_build_cli_chat_history(result)
                 if not chat_history:
                     # No recoverable conversation → drop the trajectory honestly,
                     # exactly as the pre-existing KeyError branch did (no silent
@@ -2041,17 +2042,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         # Process response messages (everything after the first message)
         response_messages = conversation[1:]
 
-        # Extract per-turn behavior logprobs from Harbor's rollout details.
-        rollout_details = getattr(result.agent_result, "rollout_details", None)
-        had_native_rollout_details = bool(rollout_details)
-        # CLI agents that bypass Harbor Chat return empty
-        # rollout_details even under a co-located RecordProxy (the proxy writes a
-        # shared worker-side log, not the in-sandbox trial dir). Recover this trial's
-        # token_ids/logprobs from that shared log by the per-trial correlation id
-        # harbor stamped (x-ot-trial-id). No-op when rollout_details is already
-        # populated (terminus native), the flag is off, or no proxy log is present.
-        rollout_details = self._maybe_correlate_cli_rollout_details(result, rollout_details)
-        literal_bridge_correlated = not had_native_rollout_details and bool(rollout_details)
+        # Use the behavior evidence recovered before timeout classification.
         literal_bridge_turns = 0
         if literal_bridge_correlated:
             completion_turns = rollout_details[0].get("completion_token_ids", [])

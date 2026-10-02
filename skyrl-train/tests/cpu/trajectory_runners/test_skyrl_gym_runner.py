@@ -2,12 +2,16 @@
 uv run --group dev --extra cpu --isolated pytest tests/cpu/trajectory_runners/test_skyrl_gym_runner.py
 """
 
+import torch
+from skyrl_train.config.objective_spec import load_correction
+from skyrl_train.objective.correction import compute_correction
 from concurrent.futures import Executor, Future
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import pytest
 import skyrl_gym
+from harbor_config.errors import ErrorCategory, error_category
 from loguru import logger
 from omegaconf import DictConfig
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
@@ -323,8 +327,7 @@ async def test_agent_loop_failure_closes_environment_before_masking(generator_cf
 def test_tis_config_does_not_select_a_generation_strategy():
     cfg = get_default_config()
     cfg.trainer.logger = "console"
-    cfg.trainer.algorithm.use_tis = True
-    cfg.trainer.algorithm.tis_imp_ratio_cap = 2.0
+    cfg.trainer.algorithm.off_policy_correction = "tis"
     cfg.generator.sampling_params.logprobs = None
 
     validate_cfg(cfg)
@@ -493,14 +496,15 @@ def test_skipped_grading_warns_once_when_a_batch_has_no_ultra_rows(generator_cfg
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("verification", "loss_eligible"),
+    ("verification", "loss_eligible", "exception_type"),
     [
-        (VerificationResult.skipped("grading is skipped"), True),
-        (VerificationResult.unavailable("judge unreachable"), False),
+        (VerificationResult.skipped("grading is skipped"), True, None),
+        (VerificationResult.unavailable("judge unreachable"), False, "VerifierUnavailable"),
+        (VerificationResult.error("sandbox lost state"), False, "VerifierRuntimeError"),
     ],
 )
 async def test_agent_loop_trains_skipped_verdicts_and_masks_missing_ones(
-    tokenizer, mock_llm, generator_cfg, skyrl_gym_cfg, use_env, verification, loss_eligible
+    tokenizer, mock_llm, generator_cfg, skyrl_gym_cfg, use_env, verification, loss_eligible, exception_type
 ):
     use_env(
         ScriptedEnv(
@@ -515,16 +519,26 @@ async def test_agent_loop_trains_skipped_verdicts_and_masks_missing_ones(
 
     assert output.verification.status is verification.status
     assert output.disposition.loss_eligible is loss_eligible
+    assert output.disposition.baseline_eligible is loss_eligible
+    assert output.disposition.exception_type == exception_type
+    if exception_type == "VerifierRuntimeError":
+        assert error_category(exception_type) is ErrorCategory.INFRASTRUCTURE
+    if not loss_eligible:
+        assert output.reward.unshaped_reward is None
+        assert output.reward.optimization_reward == 0.0
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stop_with_unsampled_eos", [False, True], ids=["served-tokens", "unsampled-eos"])
 @patch("skyrl_gym.make")
 async def test_agent_loop_forwards_environment_chat_options_and_structured_assistant_message(
-    mock_make, tokenizer, mock_env, generator_cfg, skyrl_gym_cfg
+    mock_make, tokenizer, mock_env, generator_cfg, skyrl_gym_cfg, stop_with_unsampled_eos
 ):
     generator_cfg.use_conversation_multi_turn = True
     generator_cfg.require_exact_chat_transport = True
     generator_cfg.sampling_params.logprobs = 0
+    if stop_with_unsampled_eos:
+        generator_cfg.sampling_params.stop = ["<stop>"]
     tools = [{"type": "function", "name": "search", "parameters": {"type": "object"}}]
     mock_env.init.return_value = (
         [{"role": "user", "content": "look it up"}],
@@ -540,7 +554,7 @@ async def test_agent_loop_forwards_environment_chat_options_and_structured_assis
     }
     model_client = AsyncMock()
     model_client.generate.return_value = {
-        "responses": ["<tool-call tokens>"],
+        "responses": ["<tool-call tokens><stop>" if stop_with_unsampled_eos else "<tool-call tokens>"],
         "response_ids": [[21, 22]],
         "prompt_ids": [[11, 12, 13]],
         "stop_reasons": ["tool_calls"],
@@ -557,6 +571,13 @@ async def test_agent_loop_forwards_environment_chat_options_and_structured_assis
         tokenizer=tokenizer,
         model_client=model_client,
     )
+
+    if stop_with_unsampled_eos:
+        with pytest.raises(ExactChatTransportError, match="appended EOS token was not sampled"):
+            await runner.agent_loop(
+                [{"role": "user", "content": "look it up"}], ENV_CLASS, {}, max_tokens=8, max_input_length=512
+            )
+        return
 
     output = await runner.agent_loop(
         [{"role": "user", "content": "look it up"}], ENV_CLASS, {}, max_tokens=8, max_input_length=512
@@ -881,6 +902,14 @@ async def test_multi_turn_assembly_aligns_per_token_fields_across_observations(
         output["behavior_topk_logprobs"][0],
         [[-0.1, -2.0], [-0.2, -1.9]] + [[0.0, 0.0]] * gap + [[-0.3, -1.8], [-0.4, -1.7]],
     )
+    behavior = torch.from_numpy(np.stack(output["rollout_logprobs"]))
+    ratios = torch.tensor([[1.5, 4.0] + [torch.nan] * gap + [1.0, 0.5]])
+    correction = compute_correction(
+        behavior + ratios.log(), behavior, torch.tensor(output["loss_masks"]), load_correction("tis")
+    )
+    torch.testing.assert_close(correction.weights, torch.tensor([[1.5, 2.0] + [0.0] * gap + [1.0, 0.5]]))
+    assert correction.metrics["policy/correction/weight_mean"] == pytest.approx(1.25)
+    assert correction.metrics["policy/correction/truncated_fraction"] == pytest.approx(0.25)
     output["trajectory_ids"] = [TrajectoryID("tool-trajectory", 0)]
     work = build_teacher_scoring_work(
         output,
@@ -1147,3 +1176,51 @@ async def test_genrm_failed_rollouts_keep_their_failure_and_never_enter_comparis
     else:
         assert outputs[0].reward.optimization_reward == 4.0
         assert outputs[2].reward.optimization_reward == 4.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("custom_template", [False, True], ids=["default-chat", "configured-token-path"])
+async def test_cat_count_preserves_sampled_evidence_and_verification(
+    generator_cfg, skyrl_gym_cfg, tokenizer, custom_template
+):
+    generator_cfg.use_conversation_multi_turn = not custom_template
+    generator_cfg.sampling_params.logprobs = 0
+    prompt = [{"role": "user", "content": "Reply with the word cat exactly 2 times."}]
+    if custom_template:
+        generator_cfg.chat_template.name_or_path = "qwen2_5_with_generation_tag_simplified"
+        prompt_ids = tokenizer.encode(
+            "<|im_start|>user\nReply with the word cat exactly 2 times.<|im_end|>\n<|im_start|>assistant\n",
+            add_special_tokens=False,
+        )
+    else:
+        prompt_ids = tokenizer.apply_chat_template(prompt, add_generation_prompt=True, return_dict=False)
+    model_client = AsyncMock()
+    model_client.generate.return_value = {
+        "responses": ["cat cat"],
+        "response_ids": [[21, 22, EOS]],
+        "stop_reasons": ["stop"],
+        "response_logprobs": [[-0.1, -0.2, -0.3]],
+        "token_provenance": "engine",
+    }
+    runner = SkyRLGymTrajectoryRunner(
+        generator_cfg,
+        skyrl_gym_cfg,
+        AsyncMock(),
+        tokenizer,
+        model_client=model_client,
+    )
+    batch = await runner.run(
+        {
+            "prompts": [prompt],
+            "env_extras": [{"extra_info": {"n": 2}}],
+            "env_classes": ["cat_count"],
+        }
+    )
+
+    assert batch["prompt_token_ids"] == [prompt_ids]
+    assert batch["response_ids"] == [[21, 22, EOS]]
+    np.testing.assert_allclose(batch["rollout_logprobs"][0], [-0.1, -0.2, -0.3])
+    assert batch["rewards"] == [[0.0, 0.0, 1.0]]
+    assert batch["loss_masks"] == [[1, 1, 1]]
+    assert batch["verification_results"][0].passed is True
+    assert batch["env_metrics"][0]["exact_n2"] == 1.0

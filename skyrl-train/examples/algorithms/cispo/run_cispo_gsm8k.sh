@@ -15,7 +15,7 @@ LOGGER="wandb"  # change to "console" to print to stdout
 
 # Configure CISPO parameters
 POLICY_LOSS="cispo"
-CISPO_EPS_CLIP_LOW=0
+CISPO_EPS_CLIP_LOW=1.0
 CISPO_EPS_CLIP_HIGH=5
 USE_KL_LOSS=false
 

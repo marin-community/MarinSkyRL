@@ -17,7 +17,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from marinskyrl.environment_contract import ENV_VAR_SPECS  # noqa: E402
 
 MANAGER_PATH = Path("marinskyrl/environment_contract.py")
-EXCLUDED_PARTS = {".agents", ".git", ".venv", "__pycache__", "skyrl-agent", "tests"}
+EXCLUDED_PARTS = {".agents", ".git", ".venv", "__pycache__", "tests"}
 ENV_MAPPING_NAMES = {"env", "env_vars", "environ", "environment", "extra_env", "runtime_env"}
 UPPER_NAME = re.compile(r"^[A-Z][A-Z0-9_]+$")
 SHELL_EXPORT = re.compile(r"^\s*export\s+([A-Z][A-Z0-9_]+)=", re.MULTILINE)

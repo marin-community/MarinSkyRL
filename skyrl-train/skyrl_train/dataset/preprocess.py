@@ -1,74 +1,8 @@
 from typing import List, Tuple, Optional, Sequence
 import numpy as np
 import torch
-from loguru import logger
 from transformers import AutoTokenizer
 from jaxtyping import Float, Integer
-
-
-def _routed_experts_dtype_for_num_experts(num_experts: Optional[int]) -> Optional[torch.dtype]:
-    """Pick the narrowest integer dtype that can hold ANY valid expert id for a
-    model with ``num_experts`` experts, DETERMINISTICALLY (max possible id =
-    ``num_experts - 1``), independent of the per-batch observed max.
-
-    This is load-bearing: the dtype must NOT depend on the data, or two batches
-    / ranks whose observed max straddles a dtype boundary (e.g. Qwen3-Next with
-    512 experts: one batch max=200 -> uint8, another max=300 -> int16) would
-    pick DIFFERENT dtypes for the same field, size-mismatching a later cross-rank
-    collective on this tensor -> NCCL hang. Keying on ``num_experts`` makes every
-    rank/batch agree.
-
-      * num_experts <= 256      -> uint8  (max id <= 255; Qwen3-Coder 128 -> uint8, identical to the prior per-batch pick)
-      * num_experts <= 32768    -> int16  (max id <= 32767; Qwen3-Next 512 -> int16, deterministic)
-      * otherwise               -> int64  (defensive; no shipped MoE model exceeds int16 range)
-
-    Returns None when ``num_experts`` is None/unknown, signalling the caller to
-    fall back to the (non-deterministic) per-batch-max pick.
-    """
-    if num_experts is None or num_experts <= 0:
-        return None
-    if num_experts <= (torch.iinfo(torch.uint8).max + 1):
-        return torch.uint8
-    if num_experts <= (torch.iinfo(torch.int16).max + 1):
-        return torch.int16
-    return torch.int64
-
-
-def _collate_routed_experts_from_arrays(
-    routed_experts: List[np.ndarray],
-    max_output_len: int,
-    num_experts: Optional[int],
-) -> "torch.Tensor":
-    """Build a dense ``[B, response, layer, top_k]`` routed-expert tensor.
-
-    Response rows are right-padded with zeroes in the final tensor dtype.
-    """
-    if any(rows.ndim != 3 for rows in routed_experts):
-        raise ValueError("routed_experts must contain [token, layer, top_k] arrays")
-    layers = max(rows.shape[1] for rows in routed_experts)
-    top_k = max(rows.shape[2] for rows in routed_experts)
-    _re_dtype = _routed_experts_dtype_for_num_experts(num_experts)
-    if _re_dtype is None:
-        _max_expert_id = max((int(rows.max()) for rows in routed_experts if rows.size), default=0)
-        if _max_expert_id <= torch.iinfo(torch.uint8).max:
-            _re_dtype = torch.uint8
-        elif _max_expert_id <= torch.iinfo(torch.int16).max:
-            _re_dtype = torch.int16
-        else:
-            _re_dtype = torch.int64
-        logger.warning(
-            "convert_prompts_responses_to_batch_tensors: num_experts is None; "
-            "using the NON-DETERMINISTIC per-batch-max dtype pick for "
-            "rollout_routed_experts (chose {}). This is safe for non-MoE / "
-            "unknown-config cases but must NOT be hit on a MoE-RL run — thread "
-            "the model's num_experts through to make the dtype rank-invariant.".format(_re_dtype)
-        )
-    numpy_dtype = {torch.uint8: np.uint8, torch.int16: np.int16, torch.int64: np.int64}[_re_dtype]
-    out = np.zeros((len(routed_experts), max_output_len, layers, top_k), dtype=numpy_dtype)
-    for index, rows in enumerate(routed_experts):
-        count = min(len(rows), max_output_len)
-        out[index, :count, : rows.shape[1], : rows.shape[2]] = rows[:count]
-    return torch.from_numpy(out)
 
 
 def _verify_inputs(
@@ -146,10 +80,8 @@ def convert_prompts_responses_to_batch_tensors(
     rewards: List[List[float]],
     loss_masks: List[List[int]],
     logprobs: Optional[List[np.ndarray]] = None,
-    routed_experts: Optional[List[np.ndarray]] = None,
     token_level_shaping: Optional[List[List[float]]] = None,
     response_span_tags: Optional[List[List[int]]] = None,
-    num_experts: Optional[int] = None,
 ) -> Tuple[
     Float[torch.Tensor, "batch seq_len"],
     Float[torch.Tensor, "batch seq_len"],
@@ -157,7 +89,6 @@ def convert_prompts_responses_to_batch_tensors(
     Float[torch.Tensor, "batch response_len"],
     Float[torch.Tensor, "batch response_len"],
     Optional[Float[torch.Tensor, "batch response_len"]],
-    Optional["torch.Tensor"],
     Optional[Float[torch.Tensor, "batch response_len"]],
     Optional[Integer[torch.Tensor, "batch response_len"]],
 ]:
@@ -233,17 +164,6 @@ def convert_prompts_responses_to_batch_tensors(
         for i, sample_logprobs in enumerate(logprobs):
             logprobs_tensor[i, : len(sample_logprobs)] = torch.as_tensor(sample_logprobs, dtype=torch.float)
 
-    # MoE router-replay capture rail (Stage 1): right-pad routed_experts on the
-    # response axis exactly like rollout_logprobs, but each per-token element is a
-    # [L, K] expert-index vector. Result: [batch, response_len, L, K] int. Padding
-    # rows are sentinel [L, K] (all zeros). 4-D is accepted by TensorBatch since
-    # _check_consistency only validates dim-0.
-    routed_experts_tensor = None
-    if routed_experts:
-        # Routes arrive as compact per-sample arrays. Slice assignment avoids
-        # rebuilding the nested Python integer graph during collation.
-        routed_experts_tensor = _collate_routed_experts_from_arrays(routed_experts, action_mask.size(1), num_experts)
-
     # Loop-behavior reward shaping (Stage B / F5 + F4): right-pad the per-token
     # shaping channel and span tags on the response axis exactly like rewards /
     # loss_mask. Both are gated upstream (only passed when
@@ -270,7 +190,6 @@ def convert_prompts_responses_to_batch_tensors(
         ret_rewards,
         ret_loss_masks,
         logprobs_tensor,
-        routed_experts_tensor,
         token_level_shaping_tensor,
         response_span_tags_tensor,
     )

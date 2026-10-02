@@ -2,6 +2,7 @@
 max_env_workers: 32 # environment threads in each rollout worker
 
 gsm8k:
+  structured_chat: false
   # Select final_line when only a completed response's last #### line should earn reward.
   reward_method: strict
 
