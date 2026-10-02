@@ -79,8 +79,9 @@ def exact_setup_problems(cfg: DictConfig, runner_mode: TrajectoryRunnerMode) -> 
     program at temperature 1, weight syncs that clear the engines' prefix caches, a trajectory runner that reports each
     sequence's serving engine rank, and a Megatron trainer on unpacked sequences with one GPU per tensor-, context- and
     expert tensor-parallel group, at most two pipeline stages, the all-to-all token dispatcher, Transformer Engine's
-    fused attention for the gradient, and activation recompute off or in one-layer units. An unset attention backend or
-    MoE backend is accepted: ``configure_exact_engines`` sets it.
+    fused attention for the gradient, parameter all-gathers that complete before the forward, and activation recompute
+    off or in one-layer units. An unset attention backend or MoE backend is accepted: ``configure_exact_engines`` sets
+    it.
     """
     generator = cfg.generator
     problems = [
@@ -128,6 +129,11 @@ def exact_setup_problems(cfg: DictConfig, runner_mode: TrajectoryRunnerMode) -> 
         problems.append("needs expert_tensor_parallel_size=1")
     if megatron.pipeline_model_parallel_size > MAX_PIPELINE_STAGES:
         problems.append(f"needs pipeline_model_parallel_size<={MAX_PIPELINE_STAGES}")
+    if megatron.ddp_config.overlap_param_gather:
+        problems.append(
+            "needs ddp_config.overlap_param_gather=false: the trainer's kernels read norm and expert weights outside "
+            "the modules whose forward waits for the parameter all-gather"
+        )
     transformer = megatron.transformer_config_kwargs
     if transformer.get("moe_token_dispatcher_type", ALLTOALL_DISPATCHER) != ALLTOALL_DISPATCHER:
         problems.append(f"needs moe_token_dispatcher_type={ALLTOALL_DISPATCHER}")

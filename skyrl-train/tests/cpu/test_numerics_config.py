@@ -139,6 +139,11 @@ FALLBACKS = {
         GYM,
         "pipeline_model_parallel_size",
     ),
+    "overlapped parameter all-gather": (
+        _settings({f"{MEGATRON}.ddp_config.overlap_param_gather": True}),
+        GYM,
+        "overlap_param_gather",
+    ),
     "another token dispatcher": (
         _settings({f"{MEGATRON}.transformer_config_kwargs.moe_token_dispatcher_type": "allgather"}),
         GYM,
