@@ -23,6 +23,7 @@ from loguru import logger
 import asyncio
 import multiprocessing as mp
 
+from skyrl_train.config.weight_sync_pause import resolve_weight_sync_pause_policy
 from skyrl_train.config.objective_spec import rollout_logprobs_required
 from skyrl_train.config.trajectory_runner_capabilities import (
     EntrypointOperation,
@@ -252,6 +253,7 @@ def create_remote_inference_engines_from_config(cfg: DictConfig, tokenizer: PreT
     # TODO(tgriggs): We may want a separate config for the model name in case it's different from the name used in the OpenAI API
     return create_remote_inference_engines(
         urls=cfg.generator.remote_inference_engine_urls,
+        weight_sync_pause_policy=resolve_weight_sync_pause_policy(cfg.generator),
         model_name=cfg.trainer.policy.model.path,
         engine_backend=cfg.generator.backend,
         tokenizer=tokenizer,

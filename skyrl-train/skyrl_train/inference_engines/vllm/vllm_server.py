@@ -94,6 +94,17 @@ class VllmServer:
             await engine.wake_up(tags)
             return {"status": "ok"}
 
+        @app.post("/pause_generation")
+        async def _pause_generation(request: Request):
+            data = await request.json()
+            await engine.pause_generation(mode=data["mode"], clear_cache=data["clear_cache"])
+            return {"status": "ok"}
+
+        @app.post("/resume_generation")
+        async def _resume_generation():
+            await engine.resume_generation()
+            return {"status": "ok"}
+
         @app.post("/reset_prefix_cache")
         async def _reset_prefix_cache(request: Request):
             await engine.reset_prefix_cache()

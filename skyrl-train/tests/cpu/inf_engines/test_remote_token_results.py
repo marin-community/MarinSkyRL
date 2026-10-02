@@ -1,6 +1,10 @@
 """Exact rollout token transport against a local OpenAI-compatible server."""
 
+import aiohttp
 import pytest
+from omegaconf import OmegaConf
+from skyrl_train.config.weight_sync_pause import resolve_weight_sync_pause_policy
+from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
@@ -60,3 +64,74 @@ async def test_remote_completion_keeps_sampled_ids_and_aligned_behavior_logprobs
     assert requests[0]["return_token_ids"] is True
     assert requests[0]["logprobs"] == 0
     assert requests[1]["prompt"] == [[0, 1, 3], [0, 2, 2]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode,clear_cache", [("abort", True), ("wait", True), ("keep", False)])
+async def test_remote_pause_forwards_configured_policy_and_surfaces_rejection(mode, clear_cache):
+    paused = False
+
+    async def pause(request):
+        nonlocal paused
+        body = await request.json()
+        assert body == {"mode": mode, "clear_cache": clear_cache}
+        if mode == "wait":
+            raise web.HTTPBadRequest(text="server does not support wait")
+        paused = True
+        return web.json_response({"status": "ok"})
+
+    async def resume(_request):
+        nonlocal paused
+        paused = False
+        return web.json_response({"status": "ok"})
+
+    async def generate(_request):
+        return web.json_response(
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "text": " X",
+                        "token_ids": [] if paused else [3],
+                        "finish_reason": "abort" if paused else "length",
+                        "logprobs": {"token_logprobs": [] if paused else [-0.25]},
+                    }
+                ]
+            }
+        )
+
+    app = web.Application()
+    app.router.add_post("/pause_generation", pause)
+    app.router.add_post("/resume_generation", resume)
+    app.router.add_post("/v1/completions", generate)
+    generator = OmegaConf.create(
+        {
+            "weight_sync_pause": {"mode": mode, "clear_cache": clear_cache},
+            "backend": "vllm",
+            "run_engines_locally": False,
+            "vllm_v1_disable_multiproc": False,
+        }
+    )
+    async with TestServer(app) as server:
+        (engine,) = create_remote_inference_engines(
+            [str(server.make_url("")).removeprefix("http://").rstrip("/")],
+            "test",
+            "vllm",
+            AliasingTokenizer(),
+            weight_sync_pause_policy=resolve_weight_sync_pause_policy(generator),
+        )
+        request = {"prompt_token_ids": [[0, 1]], "sampling_params": {"max_tokens": 1}}
+        if mode == "wait":
+            with pytest.raises(aiohttp.ClientResponseError) as error:
+                await engine.pause_generation()
+            assert error.value.status == 400
+        else:
+            await engine.pause_generation()
+            result = await engine.generate(request)
+            assert result["stop_reasons"] == ["abort"]
+            assert result["response_ids"] == result["response_logprobs"] == [[]]
+            await engine.resume_generation()
+        result = await engine.generate(request)
+        assert result["stop_reasons"] == ["length"]
+        assert result["response_ids"] == [[3]]
+        assert result["response_logprobs"] == [[-0.25]]

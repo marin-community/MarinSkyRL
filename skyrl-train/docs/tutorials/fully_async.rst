@@ -163,8 +163,12 @@ with its environment when the sync happens is unaffected.
 ``generator.weight_sync_pause.clear_cache=true`` (the default) clears the KV and prefix caches. Under ``keep``,
 vLLM re-prefills each running request's prompt and generated tokens under the new weights. Setting it to
 ``false`` keeps KV from the old weights, avoiding that work but potentially mixing policies in later generation.
-Only ``keep`` allows ``false``. A non-default pause policy requires local vLLM engines; SGLang and remote engines
-cannot pause generation.
+Only ``keep`` allows ``false``. Local and remote vLLM engines receive the configured policy;
+SGLang does not support non-default pause policies. Remote servers must expose
+``/pause_generation`` and ``/resume_generation``. Native Levanter serving supports only
+``mode=abort, clear_cache=true`` and rejects the default ``keep`` policy. Select ``abort``
+explicitly for that server. Single-request generation retries preserve the partial token
+IDs and logprobs while waiting for resume.
 
 Checkpointing
 ~~~~~~~~~~~~~
