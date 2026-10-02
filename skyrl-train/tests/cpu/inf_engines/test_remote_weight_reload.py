@@ -12,7 +12,7 @@ async def test_remote_bucket_keeps_publication_identity_and_broadcast_order(nati
     publication = {"publication_id": "candidate-7", "model_version": 6} if native_publication else {}
     received = []
 
-    async def begin(request):
+    async def begin(_request):
         return web.json_response(publication or {"status": "ok"})
 
     async def receive(request):

@@ -8,7 +8,14 @@ from skyrl_train.inference_engines.base import (
 from skyrl_train.weight_sync.weight_loader import WeightLoader
 from typing import List, Optional, Any, Dict
 import json
+from dataclasses import asdict, dataclass
 from transformers import PreTrainedTokenizerBase
+
+
+@dataclass(frozen=True)
+class WeightPublication:
+    publication_id: str
+    model_version: int
 
 
 class RemoteWeightLoader(WeightLoader):
@@ -27,7 +34,7 @@ class RemoteWeightLoader(WeightLoader):
         """
         self._url = url
         self._engine_backend = engine_backend
-        self._publication: Dict[str, Any] = {}
+        self._publication: Optional[WeightPublication] = None
 
     async def init_communicator(
         self,
@@ -77,19 +84,23 @@ class RemoteWeightLoader(WeightLoader):
                 result = await response.json()
         # Native serving returns an active publication identity; vLLM's layerwise
         # reload bracket returns status only and receives its usual tensor metadata.
-        self._publication = {key: result[key] for key in ("publication_id", "model_version") if key in result}
+        self._publication = (
+            WeightPublication(result["publication_id"], result["model_version"]) if "publication_id" in result else None
+        )
         return result
 
     async def finish_weight_reload(self) -> Dict[str, Any]:
         publication = self._publication
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(f"{self._url}/finish_weight_reload", json=publication) as response:
+                async with session.post(
+                    f"{self._url}/finish_weight_reload", json=asdict(publication) if publication is not None else {}
+                ) as response:
                     response.raise_for_status()
                     return await response.json()
         finally:
             if self._publication is publication:
-                self._publication = {}
+                self._publication = None
 
     async def load_weights(self, request: NamedWeightsUpdateRequest) -> Dict[str, Any]:
         """Receive a bucket in its trainer broadcast order, one HTTP request per tensor."""
@@ -106,7 +117,12 @@ class RemoteWeightLoader(WeightLoader):
             for name, dtype, shape in zip(request["names"], request["dtypes"], request["shapes"], strict=True):
                 async with session.post(
                     f"{self._url}/{weight_update_method}",
-                    json={**publication, "name": name, "dtype": dtype, "shape": shape},
+                    json={
+                        **(asdict(publication) if publication is not None else {}),
+                        "name": name,
+                        "dtype": dtype,
+                        "shape": shape,
+                    },
                 ) as response:
                     response.raise_for_status()
                     results.append(await response.json())
