@@ -36,6 +36,7 @@ from skyrl_train.distributed.megatron import model_utils  # noqa: E402
 from skyrl_train.distributed.megatron.model_utils import (  # noqa: E402
     from_parallel_logits_to_logprobs,
     from_parallel_logits_to_logprobs_packed_sequences,
+    vllm_prompt_logprobs,
     vocab_parallel_entropy,
 )
 
@@ -254,3 +255,25 @@ def test_base_config_defaults_chunk_size_for_policy_and_ref():
 
     assert policy == 1024, f"policy logprob_chunk_size default = {policy!r}, expected 1024"
     assert ref == 1024, f"ref logprob_chunk_size default = {ref!r}, expected 1024"
+
+
+def test_vllm_prompt_logprobs_score_each_row_at_the_next_token(single_rank_group, monkeypatch):
+    torch.manual_seed(0)
+    batch, seq, vocab = 2, 9, 32
+    logits = (torch.randn(batch, seq, vocab) * 4).to(torch.bfloat16)
+    targets = torch.randint(0, vocab, (batch, seq))
+
+    # vLLM's log-probability kernel runs on the GPU only; a stand-in returning each row's logit at its token shows
+    # which row and token every position reads.
+    def logit_at(rows, token_ids):
+        return rows.float().gather(-1, token_ids.view(-1, 1))[:, 0]
+
+    monkeypatch.setattr(model_utils, "vllm_token_logprobs", logit_at)
+    values = vllm_prompt_logprobs(logits, targets)
+
+    expected = torch.stack(
+        [torch.stack([logits[b, p, targets[b, p + 1]].float() for p in range(seq - 1)]) for b in range(batch)]
+    )
+    assert torch.equal(values, expected)
+    # The positions line up with the trainer's own log-probabilities.
+    assert values.shape == _logprobs(logits, targets, single_rank_group, None, inference_only=True).shape

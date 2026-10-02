@@ -45,4 +45,8 @@ check_train_eval_parity: false
 # Replay expert choices captured during rollout.
 moe_router_replay: false
 
+# Grug's forward numerics: megatron, or vllm_decode_invariant to compute the bytes a decode-invariant vLLM engine
+# (generator.decode_invariant) computes for every token (config/grug_numerics.py).
+grug_numerics: megatron
+
 check_dp_weight_consistency: false

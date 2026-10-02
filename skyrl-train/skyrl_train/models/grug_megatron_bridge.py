@@ -26,6 +26,7 @@ from megatron.bridge.utils.common_utils import extract_expert_number_from_param
 from megatron.core.pipeline_parallel.utils import is_pp_first_stage, is_pp_last_stage
 from megatron.core.utils import get_pg_rank
 
+from skyrl_train.config.grug_numerics import GrugNumerics
 from skyrl_train.models.grug_megatron import GrugGPTModel, grug_block_spec
 from skyrl_train.models.grug_moe import (
     GRUG_DEFAULT_GLOBAL_EVERY,
@@ -50,6 +51,7 @@ class GrugModelProvider(GPTModelProvider):
     grug_sconv_kernel: int = 4
     grug_sconv_sites: tuple[str, ...] = ()
     grug_hero: bool = False
+    grug_numerics: GrugNumerics = GrugNumerics.MEGATRON
 
     def provide(self, pre_process=None, post_process=None, vp_stage=None) -> GrugGPTModel:
         if self.virtual_pipeline_model_parallel_size:
