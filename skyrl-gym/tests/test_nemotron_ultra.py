@@ -11,6 +11,7 @@ import requests
 from omegaconf import OmegaConf
 
 from skyrl_gym.envs.lcb.livecodebench import DEFAULT_LIMITS, VerifierLimits
+from skyrl_gym.envs.nemotron_ultra.answer_extraction import has_final_answer
 from skyrl_gym.envs.nemotron_ultra.calendar import grade_calendar
 from skyrl_gym.envs.nemotron_ultra.code_gen import grade_code
 from skyrl_gym.envs.nemotron_ultra.env import NemotronUltraEnv
@@ -810,3 +811,112 @@ def test_nemotron_ultra_environment_is_registered():
         },
     )
     assert env.step("No calendar changes are needed.")["reward"] == 1.0
+
+
+def _turn(text: str, stop_reason: str = "stop", tool_calls: tuple = ()) -> RolloutEvidence:
+    return RolloutEvidence(
+        response=text,
+        stop_reason=stop_reason,
+        metadata={"assistant_message": {"role": "assistant", "content": text, "tool_calls": list(tool_calls)}},
+    )
+
+
+@pytest.mark.parametrize(
+    "text,stop_reason,tool_calls,expected",
+    [
+        ("answer", "stop", (), True),
+        ("<think>reason</think>answer", "stop", (), True),
+        ("", "stop", ({"function": {"name": "submit", "arguments": "{}"}},), True),
+        ("<|start_think|>B or C?", "stop", (), False),
+        ("", "stop", (), False),
+        ("answer", "length", (), False),
+    ],
+)
+def test_has_final_answer_requires_completed_text_after_the_reasoning(text, stop_reason, tool_calls, expected):
+    assert has_final_answer(text, _turn(text, stop_reason, tool_calls)) is expected
+
+
+@pytest.mark.parametrize("verifyit_enabled", [False, True])
+@pytest.mark.parametrize(
+    "agent,record,text,stop_reason",
+    [
+        pytest.param(
+            "instruction_following_simple_agent",
+            {"instruction_id_list": ["punctuation:no_comma"], "kwargs": [{}]},
+            "",
+            "stop",
+            id="empty",
+        ),
+        pytest.param(
+            "instruction_following_simple_agent",
+            {"instruction_id_list": ["punctuation:no_comma"], "kwargs": [{}]},
+            "<|start_think|>B or C?",
+            "stop",
+            id="unclosed-reasoning",
+        ),
+        pytest.param(
+            "mcqa_simple_agent",
+            {"expected_answer": "C", "options": [{"B": "wrong"}, {"C": "right"}]},
+            r"\boxed{C}",
+            "length",
+            id="length-stop",
+        ),
+    ],
+)
+def test_response_without_a_final_answer_scores_zero_without_grading(
+    agent, record, text, stop_reason, verifyit_enabled
+):
+    env = _ultra_env(agent, {"verifyit_enabled": verifyit_enabled}, record)
+    env.set_rollout_evidence(_turn(text, stop_reason))
+    result = env.step(text)
+    assert result["reward"] == 0.0
+    assert result["verification"].status is VerificationStatus.VERIFIED
+    assert result["metadata"]["result"] == "no_final_answer"
+
+
+def test_tool_call_turn_with_empty_content_is_graded():
+    record = {
+        "schema_str": '{"type":"object","properties":{"answer":{"type":"integer"}},"required":["answer"]}',
+        "response_mode": "tool_call",
+        "tool_name": "submit",
+        "tool_payload_key": "payload",
+    }
+    env = _ultra_env("structured_outputs_simple_agent", {}, record)
+    env.set_rollout_evidence(
+        _turn(
+            "",
+            tool_calls=(
+                {"type": "function", "function": {"name": "submit", "arguments": '{"payload":{"answer":42}}'}},
+            ),
+        )
+    )
+    assert env.step("")["reward"] == 1.0
+
+
+@pytest.mark.parametrize("stop_reason", ["stop", "length"])
+def test_genrm_rows_without_a_final_answer_reach_the_cohort(stop_reason):
+    env = _ultra_env("genrm_simple_agent", {})
+    env.set_rollout_evidence(_turn("", stop_reason))
+    result = env.step("")
+    assert result["reward"] == 3.0
+    assert result["metadata"]["cohort_reward_pending"]
+
+
+def test_length_stopped_lean_attempt_still_earns_its_correction_turn():
+    env = _ultra_env(
+        "math_formal_lean_refinement_agent",
+        {},
+        {"header": "import Mathlib\n", "formal_statement": "example : True := by\n"},
+    )
+    env.sandbox = _Sandbox(
+        {
+            "process_status": "failed",
+            "stdout": "",
+            "stderr": '{"severity":"error","pos":{"line":2,"column":0},"endPos":null,"data":"bad tactic"}',
+        }
+    )
+    text = "```lean4\nby\n  bad_tactic\n```"
+    env.set_rollout_evidence(_turn(text, "length"))
+    result = env.step(text)
+    assert not result["done"]
+    assert result["reset_conversation"]
