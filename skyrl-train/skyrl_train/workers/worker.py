@@ -536,6 +536,7 @@ class PPORayActorGroup:
             If none, create new placement group automatically. Defaults to None.
         num_gpus_per_actor (float, optional): Number of gpus allocated for each actor.
             If < 1.0, multiple models can share same gpu. Defaults to 1.
+        actor_env_vars: Environment variables applied to each actor before process-group initialization.
     """
 
     def __init__(
