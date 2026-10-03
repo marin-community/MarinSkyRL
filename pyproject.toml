@@ -22,6 +22,7 @@ dependencies = [
     "func_timeout",
     "hf_transfer",
     "huggingface-hub>=0.34.0",
+    "ijson>=3.5",
     "math-verify==0.9.0",
     "hydra-core==1.3.2",
     "jaxtyping",
