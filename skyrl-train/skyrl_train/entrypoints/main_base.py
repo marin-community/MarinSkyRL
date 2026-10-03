@@ -281,10 +281,8 @@ class BasePPOExp:
         self.colocate_pg = self.get_colocate_pg()
         # Reserve the policy/training placement group BEFORE the inference
         # engines (which are created later, in `_setup_trainer`), so that in the
-        # disaggregated no-ref case the policy claims its dedicated whole nodes
-        # first and the inference engines are forced onto the disjoint
-        # remainder. None unless `policy_strict_spread_pg` is enabled for an
-        # eligible (disaggregated, no-ref) run.
+        # disaggregated case the policy (and optional colocated reference)
+        # claims GPU slots before inference engines use the remainder.
         self.policy_pg = self.get_policy_pg()
 
     def create_inference_engine_client(
@@ -402,18 +400,15 @@ class BasePPOExp:
             return None
 
     def get_policy_pg(self, timeout: int | None = None):
-        """Reserve a dedicated whole-node placement group for the policy.
+        """Reserve policy GPU slots before starting inference engines.
 
-        Uses STRICT_SPREAD so each policy node gets exactly one bundle holding
-        all of that node's GPUs — guaranteeing the policy occupies a set of
-        whole, dedicated nodes that the (PACK) inference-engine placement group
-        cannot share. Returns None when not eligible (see
-        `policy_strict_spread_eligible`), in which case the legacy lazy-PACK
-        path in `PPORayActorGroup._initiate_actors` is used unchanged.
+        Whole-node bundles use STRICT_SPREAD; per-GPU bundles use PACK. Both
+        reserve the policy footprint before the inference placement group.
+        Returns None when not eligible (see `policy_strict_spread_eligible`),
+        leaving model actors to reserve their placement group lazily.
 
-        When a ref model is present in the disaggregated path, policy and ref
-        share a single placement group built inside `build_models`; that path
-        is left entirely untouched (eligibility requires use_ref_model=False).
+        A colocated reference model shares this group with the policy. Reserving
+        it here prevents inference actors from fragmenting the required nodes.
         """
         from skyrl_train.utils.utils import (
             get_ray_pg_ready_with_timeout,
@@ -576,9 +571,7 @@ class BasePPOExp:
             colocate_pg=self.colocate_pg,
         )
 
-        # Build the models. Pass the pre-reserved dedicated policy placement
-        # group (None unless `policy_strict_spread_pg` is enabled for an
-        # eligible disaggregated no-ref run).
+        # Pass the policy placement group reserved before inference startup.
         logger.info("Starting policy workers: strategy={}", self.cfg.trainer.strategy)
         try:
             trainer.build_models(PolicyWorker, CriticWorker, RefWorker, policy_pg=self.policy_pg)
