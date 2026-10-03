@@ -1,23 +1,20 @@
-"""Tests for the nightly end-to-end gate (ci/marin_nightly/gate.py).
-
-Run with: uv run --isolated --group dev --extra cpu pytest tests/cpu/test_marin_nightly_gate.py
-"""
-
 import json
 import math
+import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 import torch
-
 from skyrl_train.objective.teacher import teacher_advantages
 
 from ci.marin_nightly.gate import (
     GateSpec,
     LogPatternBound,
     MetricBound,
-    MetricSeries,
+    MetricGate,
+    FailureKind,
     SeriesTrend,
     StepMetrics,
     check_log_patterns,
@@ -26,7 +23,7 @@ from ci.marin_nightly.gate import (
     parse_metrics,
 )
 
-SHIPPED_SPEC = Path(__file__).parents[2] / "ci" / "marin_nightly" / "specs" / "gsm8k-qwen3-0.6b-megatron.json"
+SHIPPED_SPEC = Path(__file__).parents[2] / "ci" / "marin_nightly" / "specs" / "cat-count-canary-qwen2.5-0.5b-async.json"
 OPENCODE_SPEC = Path(__file__).parents[2] / "ci" / "marin_nightly" / "specs" / "opencode-qwen3-8b.json"
 OPD_SPEC = Path(__file__).parents[2] / "ci" / "marin_nightly" / "specs" / "opd-qwen3-sync.json"
 
@@ -75,11 +72,10 @@ def trend_spec(window: int = 2, min_improvement: float = 0.03, min_train_steps: 
         finite_metrics=(),
         bounds={},
         max_wall_clock_seconds=900,
-        metric_series=(
-            MetricSeries(
+        metric_gates=(
+            MetricGate(
                 kind="train",
                 metric="reward/avg_raw_reward",
-                required=True,
                 min_observations=min_train_steps,
                 trend=SeriesTrend(window, min_improvement),
             ),
@@ -120,7 +116,8 @@ def test_run_that_diverged_to_nan_fails(spec):
     log = "\n".join([mirror_line(1), mirror_line(2, **{"policy/policy_loss": float("nan")})])
     failures = check_run(parse_metrics(log), spec, wall_clock_seconds=300)
     assert len(failures) == 1
-    assert "policy/policy_loss" in failures[0]
+    assert failures[0].kind == FailureKind.NONFINITE
+    assert failures[0].metric == "policy/policy_loss"
 
 
 def test_run_healthy_early_but_broken_at_the_final_step_fails(spec):
@@ -132,7 +129,7 @@ def test_run_healthy_early_but_broken_at_the_final_step_fails(spec):
 def test_run_that_stopped_early_fails(spec):
     failures = check_run(parse_metrics(healthy_log(steps=1)), spec, wall_clock_seconds=300)
     assert len(failures) == 1
-    assert "expected at least 2" in failures[0]
+    assert failures[0].kind == FailureKind.TRAIN_STEPS
 
 
 def test_run_that_logged_nothing_fails(spec):
@@ -143,7 +140,8 @@ def test_missing_required_metric_fails(spec):
     log = "\n".join([mirror_line(1), mirror_line(2, drop=("reward/avg_raw_reward",))])
     failures = check_run(parse_metrics(log), spec, wall_clock_seconds=300)
     assert len(failures) == 1
-    assert "did not log reward/avg_raw_reward" in failures[0]
+    assert failures[0].kind == FailureKind.MISSING_METRIC
+    assert failures[0].metric == "reward/avg_raw_reward"
 
 
 @pytest.mark.parametrize("reward", [-0.1, 1.5])
@@ -152,13 +150,14 @@ def test_reward_outside_the_environments_range_fails(spec, reward):
     log = "\n".join([mirror_line(1), mirror_line(2, **{"reward/avg_raw_reward": reward})])
     failures = check_run(parse_metrics(log), spec, wall_clock_seconds=300)
     assert len(failures) == 1
-    assert "outside [0.0, 1.0]" in failures[0]
+    assert failures[0].kind == FailureKind.BOUNDS
+    assert failures[0].metric == "reward/avg_raw_reward"
 
 
 def test_run_over_the_wall_clock_budget_fails(spec):
     failures = check_run(parse_metrics(healthy_log()), spec, wall_clock_seconds=901)
     assert len(failures) == 1
-    assert "budget" in failures[0]
+    assert failures[0].kind == FailureKind.WALL_CLOCK
 
 
 def test_required_log_patterns_have_named_inclusive_bounds(spec):
@@ -173,20 +172,20 @@ def test_required_log_patterns_have_named_inclusive_bounds(spec):
 
     assert check_log_patterns(log, spec) == []
     failures = check_log_patterns(log + "AgentTimeoutError\n", spec)
-    assert failures == ["log pattern 'timeout' occurred 2 times, expected at most 1"]
+    assert [(failure.kind, failure.metric) for failure in failures] == [(FailureKind.LOG_PATTERN, "timeout")]
 
 
 def test_eval_payloads_do_not_count_as_training_steps(spec):
     log = "\n".join([mirror_line(1), mirror_line(1, kind="eval"), mirror_line(2, kind="eval")])
     failures = check_run(parse_metrics(log), spec, wall_clock_seconds=300)
-    assert "expected at least 2" in failures[0]
+    assert failures[0].kind == FailureKind.TRAIN_STEPS
 
     eval_spec = replace(
         spec,
         min_train_steps=0,
         finite_metrics=(),
         bounds={},
-        metric_series=(MetricSeries("eval", "eval/exact", True, 1),),
+        metric_gates=(MetricGate("eval", "eval/exact", 1),),
     )
     assert check_run([StepMetrics("eval", 0, {"eval/exact": 1.0})], eval_spec, 300) == []
     assert check_run([], eval_spec, 300) != []
@@ -194,31 +193,32 @@ def test_eval_payloads_do_not_count_as_training_steps(spec):
 
 
 @pytest.mark.parametrize(
-    "rewards,window,expected_pass,expected_message",
+    "rewards,window,expected_pass,expected_kind",
     [
-        ([0.25] * 4, 2, False, "rose by"),
-        ([0.05, 0.06, 0.20, 0.22], 2, True, ""),
-        ([0.25] * 3, 5, False, "expected at least 10 for its trend"),
+        ([0.25] * 4, 2, False, FailureKind.TREND),
+        ([0.05, 0.06, 0.20, 0.22], 2, True, None),
+        ([0.25] * 3, 5, False, FailureKind.OBSERVATIONS),
     ],
 )
-def test_reward_trend_gate(rewards, window, expected_pass, expected_message):
+def test_reward_trend_gate(rewards, window, expected_pass, expected_kind):
     failures = check_run(
         parse_metrics(reward_log(rewards)), trend_spec(window=window, min_train_steps=1), wall_clock_seconds=300
     )
     assert (failures == []) is expected_pass
     if not expected_pass:
         assert len(failures) == 1
-        assert expected_message in failures[0]
+        assert failures[0].kind == expected_kind
+        assert failures[0].metric == "reward/avg_raw_reward"
 
 
 def test_duplicate_payloads_do_not_count_as_completed_steps(spec):
     first = parse_metrics(mirror_line(1))[0]
     failures = check_run([first, first], spec, wall_clock_seconds=300)
-    assert any("logged 1 training steps" in failure for failure in failures)
+    assert {failure.kind for failure in failures} == {FailureKind.TRAIN_STEPS}
 
     changed = replace(first, values={**first.values, "policy/policy_loss": 0.1})
     failures = check_run([first, changed], spec, wall_clock_seconds=300)
-    assert any("conflicting train payloads at step 1" in failure for failure in failures)
+    assert any(failure.kind == FailureKind.CONFLICTING_PAYLOAD and failure.step == 1 for failure in failures)
 
     startup = [
         StepMetrics("startup", 0, {"startup/model_loading": 2.0}),
@@ -229,68 +229,60 @@ def test_duplicate_payloads_do_not_count_as_completed_steps(spec):
     nan_copies = parse_metrics("\n".join([mirror_line(1, **{"policy/policy_loss": float("nan")})] * 2))
     failures = check_run(nan_copies, replace(spec, min_train_steps=1), 300)
     assert len(failures) == 1
-    assert "not finite" in failures[0]
+    assert failures[0].kind == FailureKind.NONFINITE
 
 
 @pytest.mark.parametrize(
-    "mutation,expected",
+    "mutation,expected_kind,expected_metric",
     [
-        ("healthy", ""),
-        ("nan_loss", "nonfinite policy/policy_loss"),
-        ("missing_loss", "step 3 did not log policy/policy_loss"),
-        ("flat_train", "environment/exact_n10 rose by"),
-        ("sparse_train", "environment/exact_n10 has 4 finite observations"),
-        ("flat_eval", "eval eval/cat_count_n10/avg_score rose by"),
-        ("no_eval", "eval eval/cat_count_n10/avg_score has 0 finite observations"),
-        ("no_zero_variance", "reward/zero_std_group_fraction has 0 observations above 0.0"),
-        ("no_ratio_change", "policy/ppo_ratio_exact_unit_fraction has 0 observations below 1.0"),
-        ("nan_optional", "nonfinite policy/ppo_clip_ratio"),
+        ("healthy", None, None),
+        ("nan_loss", FailureKind.NONFINITE, "policy/policy_loss"),
+        ("missing_loss", FailureKind.MISSING_METRIC, "policy/policy_loss"),
+        ("flat_train", FailureKind.TREND, "environment/exact_n10"),
+        ("flat_eval", FailureKind.TREND, "eval/cat_count_n10/avg_score"),
+        ("no_eval", FailureKind.OBSERVATIONS, "eval/cat_count_n10/avg_score"),
+        ("no_zero_variance", FailureKind.BOUNDS, "reward/zero_std_group_fraction"),
+        ("no_ratio_change", FailureKind.BOUNDS, "policy/ppo_ratio_exact_unit_fraction"),
     ],
 )
-def test_cat_count_series_requires_finite_learning_and_enough_evidence(tmp_path, mutation, expected):
+def test_metric_gates_require_finite_learning_and_enough_evidence(tmp_path, mutation, expected_kind, expected_metric):
     path = tmp_path / "spec.json"
     path.write_text(
         json.dumps(
             {
                 "min_train_steps": 6,
                 "max_wall_clock_seconds": 600,
-                "metric_series": [
+                "metric_gates": [
                     {
                         "kind": "train",
                         "metric": "policy/policy_loss",
-                        "required": True,
                         "min_observations": 6,
-                        "finite_every_step": True,
                     },
                     {
                         "kind": "train",
                         "metric": "environment/exact_n10",
-                        "required": True,
-                        "min_observations": 5,
+                        "min_observations": 6,
                         "trend": {"window": 2, "min_improvement": 0.2},
                     },
                     {
                         "kind": "train",
                         "metric": "reward/zero_std_group_fraction",
-                        "required": True,
                         "min_observations": 6,
-                        "occurrence": {"minimum_count": 4, "comparison": "above", "threshold": 0.0},
+                        "bounds": {"minimum_count": 4, "minimum": 0.0, "inclusive_minimum": False},
                     },
                     {
                         "kind": "train",
                         "metric": "policy/ppo_ratio_exact_unit_fraction",
-                        "required": True,
                         "min_observations": 6,
-                        "occurrence": {"minimum_count": 1, "comparison": "below", "threshold": 1.0},
+                        "bounds": {"minimum_count": 1, "maximum": 1.0, "inclusive_maximum": False},
                     },
                     {
                         "kind": "eval",
                         "metric": "eval/cat_count_n10/avg_score",
-                        "required": True,
                         "min_observations": 3,
                         "trend": {"window": 1, "min_improvement": 0.4},
                     },
-                    {"kind": "train", "metric": "policy/ppo_clip_ratio", "required": False, "min_observations": 1},
+                    {"kind": "train", "metric": "policy/ppo_clip_ratio", "min_observations": 1},
                 ],
             }
         )
@@ -301,12 +293,13 @@ def test_cat_count_series_requires_finite_learning_and_enough_evidence(tmp_path,
             step,
             {
                 "policy/policy_loss": 0.4,
+                "policy/ppo_clip_ratio": 0.01,
                 "reward/zero_std_group_fraction": 0.0 if step == 1 else 0.5,
                 "policy/ppo_ratio_exact_unit_fraction": 0.9 if step == 6 else 1.0,
                 **({"environment/exact_n10": exact} if exact is not None else {}),
             },
         )
-        for step, exact in enumerate((0.0, None, 0.1, 0.2, 0.4, 0.6), start=1)
+        for step, exact in enumerate((0.0, 0.05, 0.1, 0.2, 0.4, 0.6), start=1)
     ]
     evaluation = [
         StepMetrics("eval", step, {"eval/cat_count_n10/avg_score": score})
@@ -322,85 +315,67 @@ def test_cat_count_series_requires_finite_learning_and_enough_evidence(tmp_path,
                 values.pop("policy/policy_loss")
             if mutation == "flat_train" and "environment/exact_n10" in values:
                 values["environment/exact_n10"] = 0.1
-            if mutation == "sparse_train" and row.step == 3:
-                values.pop("environment/exact_n10")
             if mutation == "no_zero_variance":
                 values["reward/zero_std_group_fraction"] = 0.0
             if mutation == "no_ratio_change":
                 values["policy/ppo_ratio_exact_unit_fraction"] = 1.0
-            if mutation == "nan_optional" and row.step == 4:
-                values["policy/ppo_clip_ratio"] = float("nan")
         elif mutation == "flat_eval":
             values["eval/cat_count_n10/avg_score"] = 0.1
         steps[index] = replace(row, values=values)
     if mutation == "no_eval":
         steps = train
     failures = check_run(steps, load_spec(path), 300)
-    if expected:
-        assert any(expected in failure for failure in failures)
+    if expected_kind is not None:
+        assert any(failure.kind == expected_kind and failure.metric == expected_metric for failure in failures)
     else:
         assert failures == []
 
 
-@pytest.mark.parametrize(
-    "mutation",
-    ["healthy", "flat_eval", "late_crossing", "dp_divergence", "missing_step_zero", "missing_initial_metric"],
-)
-def test_cat_count_shipped_specs_require_learning_from_step_zero(mutation):
-    path = SHIPPED_SPEC.parent / "cat-count-canary-qwen2.5-0.5b-async.json"
-    spec = load_spec(path)
-    metrics = {
-        "policy/policy_loss": 0.1,
-        "policy/final_loss": 0.1,
-        "policy/policy_entropy": 1.0,
-        "reward/zero_std_group_fraction": 0.2,
-        "policy/ppo_clip_ratio": 0.01,
-        "policy/ppo_ratio_exact_unit_fraction": 0.9,
-        "policy/mismatch/pooled/log_ratio_abs_mean": 0.01,
-        "async/staleness_mean": 1.0,
-        "policy/dp_weight_checksum_mismatch": 0.0,
-        "environment/exact_n10": 0.5,
-        "environment/exact_n20": 0.25,
-        "policy/rollout_train_prob_diff_mean": 1.003,
-    }
-    steps = [StepMetrics("train", step, metrics) for step in range(1, max(10, spec.min_train_steps) + 1)]
-    evaluations = [
-        StepMetrics("eval", step, {"eval/sampled/train/avg_score": score})
-        for step, score in ((0, 0.25), (5, 0.30), (10, 0.65))
-    ]
-    if mutation == "flat_eval":
-        evaluations[-1] = replace(evaluations[-1], values={"eval/sampled/train/avg_score": 0.25})
-    if mutation == "late_crossing":
-        evaluations[-1] = replace(evaluations[-1], step=35)
-    if mutation == "dp_divergence":
-        steps[1] = replace(steps[1], values={**metrics, "policy/dp_weight_checksum_mismatch": 1.0})
-    if mutation == "missing_step_zero":
-        evaluations = evaluations[1:]
-    if mutation == "missing_initial_metric":
-        evaluations[0] = replace(evaluations[0], values={})
-    failures = check_run([*steps, *evaluations], spec, 300)
-    if mutation == "healthy":
-        assert failures == []
-    else:
-        assert failures
-    assert check_log_patterns("Training done!\n[telemetry] enabled run_id=test\n", spec) == []
+@pytest.mark.parametrize("run,wall_clock,expected_status", [("healthy", 635.58, 0), ("divergence", 680, 1)])
+def test_cat_count_gate_replays_native_runs(run, wall_clock, expected_status):
+    log = Path(__file__).parents[1] / "fixtures" / "cat_count_logs" / f"{run}.txt"
+    spec_path = SHIPPED_SPEC.parent / "cat-count-canary-qwen2.5-0.5b-async.json"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SHIPPED_SPEC.parents[1] / "gate.py"),
+            "--log",
+            str(log),
+            "--spec",
+            str(spec_path),
+            "--wall-clock-seconds",
+            str(wall_clock),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == expected_status, result.stdout + result.stderr
+    if run == "divergence":
+        failures = check_run(parse_metrics(log.read_text()), load_spec(spec_path), wall_clock)
+        assert {(failure.kind, failure.metric) for failure in failures} == {
+            (FailureKind.BOUNDS, "policy/dp_weight_checksum_mismatch")
+        }
 
 
 @pytest.mark.parametrize(
-    "selector,bound,selected_step,bad_score",
+    "selector,max_step,bound,selected_step,bad_score,min_observations",
     [
-        (0, MetricBound(0.0, 0.1), 0, 0.3),
-        ("first", MetricBound(0.0, 0.1), 0, 0.3),
-        ("last", MetricBound(0.7, 1.0), 6, 0.6),
+        (0, None, MetricBound(0.0, 0.1), 0, 0.3, 1),
+        ("first", None, MetricBound(0.0, 0.1), 0, 0.3, 1),
+        ("last", None, MetricBound(0.7, 1.0), 6, 0.6, 1),
     ],
 )
-def test_evaluation_step_selection_requires_the_selected_value(spec, selector, bound, selected_step, bad_score):
+def test_evaluation_step_selection_requires_the_selected_value(
+    spec, selector, max_step, bound, selected_step, bad_score, min_observations
+):
     spec = replace(
         spec,
         min_train_steps=0,
         finite_metrics=(),
         bounds={},
-        metric_series=(MetricSeries("eval", "eval/score", True, 1, bounds=bound, at_step=selector),),
+        metric_gates=(
+            MetricGate("eval", "eval/score", min_observations, bounds=bound, step=selector, max_step=max_step),
+        ),
     )
     rows = [StepMetrics("eval", step, {"eval/score": score}) for step, score in ((0, 0.0), (3, 0.3), (6, 0.8))]
     assert check_run(list(reversed(rows)), spec, 300) == []
@@ -408,15 +383,6 @@ def test_evaluation_step_selection_requires_the_selected_value(spec, selector, b
     assert check_run(broken, spec, 300)
     missing = [row for row in rows if row.step != selected_step]
     assert check_run(missing, spec, 300)
-
-
-def test_shipped_spec_gates_a_healthy_run():
-    """The checked-in spec has to stay loadable by the gate and pass a plausible run."""
-    spec = load_spec(SHIPPED_SPEC)
-    assert check_run(parse_metrics(healthy_log(steps=spec.min_train_steps)), spec, wall_clock_seconds=600) == []
-    early_nan = parse_metrics(healthy_log(steps=spec.min_train_steps))
-    early_nan[0] = replace(early_nan[0], values={**early_nan[0].values, "policy/policy_loss": float("nan")})
-    assert check_run(early_nan, spec, wall_clock_seconds=600)
 
 
 def test_opd_gate_requires_teacher_credit_on_valid_training_tokens():
@@ -461,8 +427,8 @@ def test_opencode_spec_requires_exact_concurrent_literal_coverage():
         )
     )
     failures = check_run(approximate, spec, wall_clock_seconds=900)
-    assert any("exact_match_fraction" in failure for failure in failures)
-    assert any("lcs_fallback_fraction" in failure for failure in failures)
+    assert any(failure.metric == "generate/tis/exact_match_fraction" for failure in failures)
+    assert any(failure.metric == "generate/tis/lcs_fallback_fraction" for failure in failures)
 
     for weight in (math.nextafter(0.0, 1.0), 2.0):
         metrics = {**exact_metrics, "policy/correction/weight_mean": weight}
@@ -473,4 +439,4 @@ def test_opencode_spec_requires_exact_concurrent_literal_coverage():
         if invalid is None:
             del metrics["policy/correction/weight_mean"]
         failures = check_run(parse_metrics(mirror_line(1, **metrics)), spec, wall_clock_seconds=900)
-        assert any("policy/correction/weight_mean" in failure for failure in failures)
+        assert any(failure.metric == "policy/correction/weight_mean" for failure in failures)

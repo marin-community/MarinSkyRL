@@ -13,9 +13,11 @@ import asyncio
 import threading
 from abc import ABC
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Optional
 
 from loguru import logger
+
+from .types import CallbackErrorBehavior
 
 
 class AtomicStepCounter:
@@ -170,7 +172,7 @@ class TrainerCallback(ABC):
         ```
     """
 
-    error_behavior: Literal["raise", "warn", "ignore"] = "warn"
+    error_behavior: CallbackErrorBehavior = CallbackErrorBehavior.WARN
 
     # Sync variants (default implementations)
     def on_train_begin(
@@ -574,10 +576,10 @@ class CallbackHandler:
         """Handle an error from a callback based on its error_behavior setting."""
         callback_name = callback.__class__.__name__
 
-        if callback.error_behavior == "raise":
+        if callback.error_behavior == CallbackErrorBehavior.RAISE:
             logger.error(f"Callback {callback_name}.{event} raised an error")
             raise error
-        elif callback.error_behavior == "warn":
+        elif callback.error_behavior == CallbackErrorBehavior.WARN:
             logger.warning(f"Callback {callback_name}.{event} failed: {error}")
         # "ignore" does nothing
 
