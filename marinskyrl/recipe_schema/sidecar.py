@@ -37,10 +37,27 @@ TYPES = {
     "generator.gdn_backend": 'Literal["torch", "flashqla"]',
     "generator.chat_template.source": 'Literal["name", "file"]',
     "generator.error_handling.default_error_treatment": 'Literal["mask", "zero", "passthrough"]',
+    "generator.trajectory_retention.phases": 'tuple[Literal["train", "eval"], ...]',
     # Preserve the numeric forms accepted by Hydra and shipped presets.
     "trainer.algorithm.cispo.cispo_eps_clip_high": "int | float",
     "trainer.policy.model.lora.dropout": "Annotated[int | float, Field(ge=0, le=1)]",
     "trainer.critic.model.lora.dropout": "Annotated[int | float, Field(ge=0, le=1)]",
+    **{
+        f"trainer.step_phase_budgets.{phase}": "Annotated[int | float, Field(ge=0)]"
+        for phase in (
+            "group_admission",
+            "batch_assembly",
+            "training_preparation",
+            "advantages",
+            "policy_training",
+            "group_bookkeeping",
+            "weight_sync",
+            "step_end_bookkeeping",
+            "checkpoint_work",
+            "evaluation",
+            "unaccounted",
+        )
+    },
     # Positive counts.
     **dict.fromkeys(
         (
