@@ -1522,7 +1522,15 @@ class RayPPOTrainer:
                     batches.append(observation)
                 metric_batch = {
                     "response_ids": [row for batch in batches for row in batch["response_ids"]],
-                    "rewards": _concatenate_rewards(batches),
+                    "rewards": _concatenate_rewards(
+                        [
+                            {
+                                "rewards": batch["rewards"],
+                                "response_ids": [[0] if row else [] for row in batch["response_ids"]],
+                            }
+                            for batch in batches
+                        ]
+                    ),
                 }
                 _concatenate_environment_metrics(metric_batch, batches)
                 for key in (
@@ -1584,6 +1592,14 @@ class RayPPOTrainer:
                             1, sum(counts)
                         )
                     self.all_metrics[key] = value
+                if "unshaped_rewards" not in training_input.fields and isinstance(metric_batch["rewards"][0], list):
+                    metric_batch["unshaped_rewards"] = [
+                        0.0 if not response and not isinstance(reward, list) else outcome
+                        for batch in batches
+                        for response, reward, outcome in zip(
+                            batch["response_ids"], batch["rewards"], get_outcome_rewards(batch), strict=True
+                        )
+                    ]
                 self._record_reward_metrics(metric_batch, list(training_input.uids))
                 step_rewards = metric_batch["rewards"]
                 self._current_step_rewards = (
