@@ -43,6 +43,7 @@ exec /tmp/hero-venv/bin/python hero_task_runtime.py \
   --pp "$HERO_PP" --ep "$HERO_EP" --cp "$HERO_CP" --batch 16 --epochs 1 \
   --max-steps "$HERO_MAX_STEPS" --checkpoint-interval "$HERO_CHECKPOINT_INTERVAL" \
   --resume-path "$HERO_RESUME_PATH" --eval-interval 2 --generation-workers 4 \
+  --calibration-samples-per-prompt "${HERO_CALIBRATION_SAMPLES_PER_PROMPT:-1}" \
   --max-staleness-steps 1 --max-buffered-groups 16 \
   --optimizer MuonH --learning-rate 1e-6 --adam-learning-rate 1e-6 --optimizer-offload-fraction 0 \
   --serving-memory-utilization 0.9 --serving-max-seqs 16 --serving-batched-tokens 512 \

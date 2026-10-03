@@ -264,11 +264,28 @@ class MeasuredAsyncPPOExp(BasePPOExp):
                     calibration_request["sampling_params"] = get_sampling_params_for_backend(
                         self.cfg.generator.backend, self.cfg.generator.sampling_params
                     )
+                    calibration_samples = self.report["calibration_samples_per_prompt"]
+                    if calibration_samples > 1:
+                        from skyrl_train.trajectory_runners.trajectory_processing import prepare_trajectory_request
+
+                        assert self.cfg.generator.eval_n_samples_per_prompt == 1
+                        calibration_prompts = [
+                            {"prompt": prompt, "env_class": env, "env_extras": extra, "uid": identity.instance_id}
+                            for prompt, env, extra, identity in zip(
+                                request["prompts"], request["env_classes"], request["env_extras"],
+                                request["trajectory_ids"], strict=True,
+                            )
+                        ]
+                        calibration_request, _ = prepare_trajectory_request(
+                            calibration_prompts, calibration_samples, calibration_request["sampling_params"],
+                            self.cfg.environment.env_class, "eval", step,
+                        )
                     calibration = await run_trajectories(calibration_request, **runner_kwargs)
                     self.report["fixed_weight_check"] = await asyncio.to_thread(
                         check, self.trainer, calibration, self.output
                     )
                     self.report["fixed_weight_check"]["sampling_params"] = calibration_request["sampling_params"]
+                    self.report["fixed_weight_check"]["requested_samples_per_prompt"] = calibration_samples
                     save_report(self.output, self.report)
                     assert self.report["fixed_weight_check"]["passed"], self.report["fixed_weight_check"]
             return batch
@@ -439,6 +456,8 @@ def run_entrypoint(cfg):
 
 
 def main(args):
+    if args.calibration_samples_per_prompt < 1:
+        raise ValueError("The independent calibration draw needs at least one sample per prompt")
     cfg = config(args)
     if args.preflight:
         print(OmegaConf.to_yaml(cfg))
@@ -455,6 +474,7 @@ def main(args):
         "data_rows": len(raw.splitlines()),
         "eval_data_sha256": hashlib.sha256(Path(args.eval_data).read_bytes()).hexdigest() if args.eval_data else None,
         "eval_data_rows": len(Path(args.eval_data).read_bytes().splitlines()) if args.eval_data else 0,
+        "calibration_samples_per_prompt": args.calibration_samples_per_prompt,
         "config": OmegaConf.to_container(cfg, resolve=True),
         "vllm_batch_invariant": os.environ.get("VLLM_BATCH_INVARIANT") == "1",
         "serving_eager": cfg.generator.enforce_eager,
@@ -518,6 +538,7 @@ if __name__ == "__main__":
     parser.add_argument("--eval-data", default="")
     parser.add_argument("--baseline-output", default="")
     parser.add_argument("--eval-interval", type=int, default=0)
+    parser.add_argument("--calibration-samples-per-prompt", type=int, default=1)
     parser.add_argument("--generation-workers", type=int, default=4)
     parser.add_argument("--max-staleness-steps", type=int, default=1)
     parser.add_argument("--max-buffered-groups", type=int)
