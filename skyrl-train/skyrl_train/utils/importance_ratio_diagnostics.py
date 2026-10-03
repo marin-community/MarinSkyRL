@@ -122,7 +122,7 @@ def ratio_statistics(
             result["finite_fraction"] = count / selected
         if not count:
             return result
-        bins = (absolute / MISMATCH_RATIO_HISTOGRAM_LOG_WIDTH).long().clamp(max=MISMATCH_RATIO_HISTOGRAM_BINS)
+        bins = (absolute / MISMATCH_RATIO_HISTOGRAM_LOG_WIDTH).clamp(max=MISMATCH_RATIO_HISTOGRAM_BINS).long()
         histogram = all_reduce(torch.bincount(bins, minlength=MISMATCH_RATIO_HISTOGRAM_BINS + 1), "sum")
         position = 0.99 * (count - 1)
         orders = torch.tensor([math.floor(position) + 1, math.ceil(position) + 1], dtype=torch.int64)

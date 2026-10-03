@@ -48,6 +48,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     get_rollout_metrics,
     get_outcome_rewards,
     _concatenate_environment_metrics,
+    _concatenate_rewards,
 )
 from skyrl_train.metric_names import IDENTITY_AWARE_REWARD_METRIC_PREFIX
 from skyrl_train.trajectory_runners.trajectory_retention import make_trajectory_sink
@@ -1452,6 +1453,8 @@ class RayPPOTrainer:
                     "finalize_advantages_for_training",
                     "apply_loop_advantages",
                     "apply_loop_credit_and_drop_advantage_inputs",
+                    "select_trajectories",
+                    "fwd_logprobs_values_reward",
                 ):
                     if getattr(type(self), method) is not getattr(RayPPOTrainer, method):
                         raise ValueError(f"worker batch does not support overridden trainer math hook: {method}")
@@ -1518,7 +1521,7 @@ class RayPPOTrainer:
                     batches.append(observation)
                 metric_batch = {
                     "response_ids": [row for batch in batches for row in batch["response_ids"]],
-                    "rewards": [reward for batch in batches for reward in batch["rewards"]],
+                    "rewards": _concatenate_rewards(batches),
                 }
                 _concatenate_environment_metrics(metric_batch, batches)
                 for key in (
