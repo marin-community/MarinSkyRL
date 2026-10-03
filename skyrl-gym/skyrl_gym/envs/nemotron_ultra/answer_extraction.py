@@ -3,6 +3,7 @@
 import re
 
 from skyrl_gym.envs.aime.utils import last_boxed_only_string, remove_boxed
+from skyrl_gym.verification import RolloutEvidence
 
 REASONING_DELIMITERS = (
     ("<think>", "</think>"),
@@ -27,6 +28,16 @@ def final_answer_text(text: str) -> str:
     if any(opening in text for opening, _ in REASONING_DELIMITERS):
         return ""
     return text.strip().removesuffix("<|eot_id|>").strip()
+
+
+def has_final_answer(text: str, evidence: RolloutEvidence | None) -> bool:
+    """Return whether a completed response carries answer text or a tool call."""
+    if evidence is not None and evidence.stop_reason == "length":
+        return False
+    if final_answer_text(text):
+        return True
+    message = evidence.metadata.get("assistant_message") if evidence is not None else None
+    return bool(message and message.get("tool_calls"))
 
 
 def last_boxed_answer(text: str) -> str | None:

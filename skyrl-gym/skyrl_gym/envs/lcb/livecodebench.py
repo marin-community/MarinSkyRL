@@ -573,17 +573,12 @@ def run_test(
     debug=False,
     timeout=6,
     execution_mode=TestExecutionMode.collect_all,
-    max_memory_bytes=None,
 ):
     """
     if test(generated_code) is not None it'll try to run the code.
     otherwise it'll just return an input and output pair.
     """
     signal.signal(signal.SIGALRM, timeout_handler)
-
-    # Disable functionalities that can make destructive changes to the test.
-    # A non-null max_memory_bytes caps the child's address space via RLIMIT_AS/DATA/STACK.
-    reliability_guard(maximum_memory_bytes=max_memory_bytes)
 
     if debug:
         print(f"start = {datetime.now().time()}")
@@ -817,14 +812,22 @@ def verifier_slots() -> threading.BoundedSemaphore:
         return _verifier_slots
 
 
+class VerifierStartFailure(RuntimeError):
+    """The verifier child stopped before it ran the candidate program."""
+
+
+_CANDIDATE_STARTED = "candidate_started"
+
+
 def _run_test_in_subprocess(sample, generation, debug, connection, timeout, execution_mode, max_memory_bytes):
+    reliability_guard(maximum_memory_bytes=max_memory_bytes)
+    connection.send(_CANDIDATE_STARTED)
     res, metadata = run_test(
         sample,
         test=generation,
         debug=debug,
         timeout=timeout,
         execution_mode=execution_mode,
-        max_memory_bytes=max_memory_bytes,
     )
     connection.send((res, metadata))
     connection.close()
@@ -838,15 +841,7 @@ def lcb_execution_result(
     execution_mode=TestExecutionMode.collect_all,
     limits=None,
 ):
-    """Return per-test pass/failure results and execution diagnostics.
-
-    A process-level timeout catches extreme cases not handled by the per-test alarms.
-    Stop-on-failure mode preserves the binary scorer's original short circuit. Each
-    child runs under ``limits`` (default :class:`VerifierLimits`): a per-child memory
-    cap and a wall-clock deadline independent of test count, with deterministic
-    reaping. See https://echo.oa.dev/wiki/471 for the failure mode these bounds exist
-    to contain.
-    """
+    """Return candidate outcomes within ``limits``, raising VerifierStartFailure if execution never starts."""
     assert len(sample) >= 1, "Sample must contain at least one test case"
     limits = DEFAULT_LIMITS if limits is None else limits
     sample = postprocess_lcb_sample(sample)
@@ -874,12 +869,17 @@ def lcb_execution_result(
             deadline,
         )
         started = time.monotonic()
+        candidate_started = False
         results = None
-        if receiver.poll(deadline):
+        while results is None and receiver.poll(max(0.0, deadline - (time.monotonic() - started))):
             try:
-                results = receiver.recv()
+                message = receiver.recv()
             except EOFError:
-                results = None
+                break
+            if message == _CANDIDATE_STARTED:
+                candidate_started = True
+            else:
+                results = message
         p.join(max(0.0, deadline - (time.monotonic() - started)))
         timed_out = p.is_alive()
         if timed_out:
@@ -896,13 +896,12 @@ def lcb_execution_result(
     if results is not None:
         test_results, metadata = results
         return list(test_results), metadata
-    if results is None:
-        # No verdict was returned; retain the cause as well as failure sentinels.
-        results = [-1 for _ in range(num_tests)]
-        if debug:
-            print("global timeout")
-    return list(results), {
-        "execution_error": "process_timeout" if timed_out else "child_crash",
+    if not candidate_started:
+        raise VerifierStartFailure(
+            f"LiveCodeBench verifier child stopped before running the candidate (timed_out={timed_out}, exit_code={p.exitcode})"
+        )
+    return [-1] * num_tests, {
+        "execution_error": "process_timeout" if timed_out else "program_crash",
         "exit_code": p.exitcode,
     }
 

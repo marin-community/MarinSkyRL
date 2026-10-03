@@ -72,3 +72,8 @@ def test_mask_disposition_excludes_loss_and_baseline():
     assert not infrastructure_failure.baseline_eligible
     assert not infrastructure_failure.loss_eligible
     assert infrastructure_failure.exception_type == "OrchestratorFailure"
+
+
+def test_token_rewards_must_sum_to_the_optimization_reward():
+    with pytest.raises(ValueError, match="token_rewards sum"):
+        RewardResult(unshaped_reward=1.0, optimization_reward=1.0, token_rewards=(0.0, 0.0))

@@ -11,6 +11,7 @@ import requests
 from omegaconf import OmegaConf
 
 from skyrl_gym.envs.lcb.livecodebench import DEFAULT_LIMITS, VerifierLimits
+from skyrl_gym.envs.nemotron_ultra.answer_extraction import has_final_answer
 from skyrl_gym.envs.nemotron_ultra.calendar import grade_calendar
 from skyrl_gym.envs.nemotron_ultra.code_gen import grade_code
 from skyrl_gym.envs.nemotron_ultra.env import NemotronUltraEnv
@@ -20,7 +21,7 @@ from skyrl_gym.envs.nemotron_ultra.genrm_utils import (
     generate_comparison_pairs,
     parse_genrm_output,
 )
-from skyrl_gym.envs.nemotron_ultra.genrm import grade_genrm_group
+from skyrl_gym.envs.nemotron_ultra.genrm import grade_genrm_group, response_object
 from skyrl_gym.envs.nemotron_ultra.instruction_following import grade_instruction_following
 from skyrl_gym.envs.nemotron_ultra.jailbreak import grade_jailbreak
 from skyrl_gym.envs.nemotron_ultra.judge import GenRMResponseTransport, IncompleteJudgeResponse, OpenAIJudge
@@ -641,26 +642,122 @@ def test_math_reward_avoids_forking_the_multithreaded_worker(monkeypatch):
     assert requested_methods == ["forkserver"]
 
 
-def test_math_judge_retries_length_capped_output_with_a_larger_budget():
-    class LengthCappedJudge:
-        def __init__(self):
-            self.calls = []
+class _BudgetedJudgeService:
+    def __init__(
+        self, complete_at: int, *, output: str | None = None, stop: str = "length", strict_invalid: bool = False
+    ):
+        self.complete_at = complete_at
+        self.output = output
+        self.stop = stop
+        self.strict_invalid = strict_invalid
+        self.budgets = []
 
-        def generate(self, messages, *, max_tokens=8192):
-            self.calls.append(max_tokens)
-            if len(self.calls) == 1:
-                raise IncompleteJudgeResponse("finish_reason=length")
-            return "[[A=B]]"
+    def __call__(self, url, **kwargs):
+        payload = kwargs["json"]
+        budget = payload.get("max_completion_tokens", payload.get("max_output_tokens"))
+        self.budgets.append(budget)
+        complete = budget >= self.complete_at
+        output = self.output
+        if output is None:
+            metadata = payload.get("metadata") or json.loads(payload["messages"][-1]["content"])
+            first_is_better = metadata["response_1"] == "better"
+            output = (
+                '{"score_1":5,"score_2":1,"ranking":1}' if first_is_better else '{"score_1":1,"score_2":5,"ranking":6}'
+            )
+        if url.endswith("chat/completions"):
+            finish = "tool_calls" if self.strict_invalid else "stop" if complete else self.stop
+            body = {"choices": [{"finish_reason": finish, "message": {"content": output}}]}
+        else:
+            body = {
+                "status": "queued" if self.strict_invalid else "completed" if complete else "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens" if self.stop == "length" else self.stop},
+                "output": [
+                    {"type": "message", "status": "completed", "content": [{"type": "output_text", "text": output}]}
+                ],
+            }
+        response = requests.Response()
+        response.status_code = 200
+        response._content = json.dumps(body).encode()
+        return response
 
-    judge = LengthCappedJudge()
-    reward, details = grade_math(
+
+@pytest.mark.parametrize("transport", list(GenRMResponseTransport))
+def test_genrm_cohort_is_graded_when_the_judge_truncates_at_the_configured_budget(monkeypatch, transport):
+    service = _BudgetedJudgeService(complete_at=1024)
+    monkeypatch.setattr("skyrl_gym.envs.nemotron_ultra.judge.requests.post", service)
+    judge = OpenAIJudge(base_url="https://judge.example/v1", model="judge-model", response_transport=transport)
+    rewards, _ = grade_genrm_group(
+        conversation_history=[{"role": "user", "content": "q"}],
+        response_objects=[response_object({"content": "better"}), response_object({"content": "worse"})],
+        principle="Prefer correct answers.",
+        judge=judge,
+        config={
+            "max_output_tokens": 512,
+            "genrm_parse_retries": 0,
+            "max_concurrent_comparisons": 1,
+            "reasoning_bonus": 0.0,
+            "answer_bonus": 0.0,
+            "group_reasoning_length_penalty_coeff": 0.0,
+            "group_answer_length_penalty_coeff": 0.0,
+        },
+    )
+    assert rewards == pytest.approx([5.0, 1.0])
+    assert set(service.budgets) == {512, 1024}
+
+
+def test_math_judge_truncated_at_its_budget_is_retried_once_at_twice_the_budget(monkeypatch):
+    service = _BudgetedJudgeService(complete_at=16384, output="[[A=B]]")
+    monkeypatch.setattr("skyrl_gym.envs.nemotron_ultra.judge.requests.post", service)
+    reward, _ = grade_math(
         r"The answer is \boxed{0.25}.",
         {"question": "What is one half?", "expected_answer": r"\frac{1}{2}"},
-        judge=judge,
+        judge=OpenAIJudge(base_url="https://judge.example/v1", model="judge-model"),
     )
-
     assert reward == 1.0
-    assert judge.calls == [8192, 16384, 8192]
+    assert service.budgets == [8192, 16384, 8192, 16384]
+
+
+@pytest.mark.parametrize("transport", list(GenRMResponseTransport))
+def test_judge_truncated_at_twice_the_budget_stays_incomplete(monkeypatch, transport):
+    service = _BudgetedJudgeService(complete_at=10**9, output="partial")
+    monkeypatch.setattr("skyrl_gym.envs.nemotron_ultra.judge.requests.post", service)
+    judge = OpenAIJudge(base_url="https://judge.example/v1", model="judge-model", response_transport=transport)
+    with pytest.raises(IncompleteJudgeResponse):
+        judge.generate_response(
+            [],
+            metadata={"principle": "p", "response_1": "a", "response_2": "b"},
+            max_output_tokens=512,
+            temperature=0.0,
+            top_p=1.0,
+        )
+    assert service.budgets == [512, 1024]
+
+
+@pytest.mark.parametrize(
+    "transport,stop,strict_invalid",
+    [
+        (GenRMResponseTransport.CHAT_COMPLETIONS, "content_filter", False),
+        (GenRMResponseTransport.RESPONSES_METADATA, "content_filter", False),
+        (GenRMResponseTransport.RESPONSES_METADATA, "other", False),
+        (GenRMResponseTransport.CHAT_COMPLETIONS, "length", True),
+        (GenRMResponseTransport.RESPONSES_METADATA, "length", True),
+    ],
+)
+def test_judge_does_not_retry_non_budget_incompleteness(monkeypatch, transport, stop, strict_invalid):
+    service = _BudgetedJudgeService(complete_at=10**9, output="partial", stop=stop, strict_invalid=strict_invalid)
+    monkeypatch.setattr("skyrl_gym.envs.nemotron_ultra.judge.requests.post", service)
+    judge = OpenAIJudge(
+        base_url="https://judge.example/v1", model="judge-model", response_transport=transport, strict_completion=True
+    )
+    with pytest.raises(IncompleteJudgeResponse):
+        judge.generate_response(
+            [],
+            metadata={"principle": "p", "response_1": "a", "response_2": "b"},
+            max_output_tokens=512,
+            temperature=0.0,
+            top_p=1.0,
+        )
+    assert service.budgets == [512]
 
 
 def test_math_judge_persistent_output_cap_keeps_the_attempt_ungraded():
@@ -810,3 +907,122 @@ def test_nemotron_ultra_environment_is_registered():
         },
     )
     assert env.step("No calendar changes are needed.")["reward"] == 1.0
+
+
+def _turn(text: str, stop_reason: str = "stop", tool_calls: tuple = ()) -> RolloutEvidence:
+    return RolloutEvidence(
+        response=text,
+        stop_reason=stop_reason,
+        metadata={"assistant_message": {"role": "assistant", "content": text, "tool_calls": list(tool_calls)}},
+    )
+
+
+@pytest.mark.parametrize(
+    "text,stop_reason,tool_calls,expected",
+    [
+        ("answer", "stop", (), True),
+        ("<think>reason</think>answer", "stop", (), True),
+        ("", "stop", ({"function": {"name": "submit", "arguments": "{}"}},), True),
+        ("<|start_think|>B or C?", "stop", (), False),
+        ("", "stop", (), False),
+        ("answer", "length", (), False),
+    ],
+)
+def test_has_final_answer_requires_completed_text_after_the_reasoning(text, stop_reason, tool_calls, expected):
+    assert has_final_answer(text, _turn(text, stop_reason, tool_calls)) is expected
+
+
+@pytest.mark.parametrize("verifyit_enabled", [False, True])
+@pytest.mark.parametrize(
+    "agent,record,text,stop_reason",
+    [
+        pytest.param(
+            "instruction_following_simple_agent",
+            {"instruction_id_list": ["punctuation:no_comma"], "kwargs": [{}]},
+            "",
+            "stop",
+            id="empty",
+        ),
+        pytest.param(
+            "instruction_following_simple_agent",
+            {"instruction_id_list": ["punctuation:no_comma"], "kwargs": [{}]},
+            "<|start_think|>B or C?",
+            "stop",
+            id="unclosed-reasoning",
+        ),
+        pytest.param(
+            "mcqa_simple_agent",
+            {"expected_answer": "C", "options": [{"B": "wrong"}, {"C": "right"}]},
+            r"\boxed{C}",
+            "length",
+            id="length-stop",
+        ),
+    ],
+)
+def test_response_without_a_final_answer_scores_zero_without_grading(
+    agent, record, text, stop_reason, verifyit_enabled
+):
+    env = _ultra_env(agent, {"verifyit_enabled": verifyit_enabled}, record)
+    env.set_rollout_evidence(_turn(text, stop_reason))
+    result = env.step(text)
+    assert result["reward"] == 0.0
+    assert result["verification"].status is VerificationStatus.VERIFIED
+    assert result["metadata"]["result"] == "no_final_answer"
+
+
+def test_tool_call_turn_with_empty_content_is_graded():
+    record = {
+        "schema_str": '{"type":"object","properties":{"answer":{"type":"integer"}},"required":["answer"]}',
+        "response_mode": "tool_call",
+        "tool_name": "submit",
+        "tool_payload_key": "payload",
+    }
+    env = _ultra_env("structured_outputs_simple_agent", {}, record)
+    env.set_rollout_evidence(
+        _turn(
+            "",
+            tool_calls=(
+                {"type": "function", "function": {"name": "submit", "arguments": '{"payload":{"answer":42}}'}},
+            ),
+        )
+    )
+    assert env.step("")["reward"] == 1.0
+
+
+@pytest.mark.parametrize("stop_reason", ["stop", "length"])
+def test_genrm_rows_without_a_final_answer_reach_the_cohort(stop_reason):
+    env = _ultra_env("genrm_simple_agent", {})
+    env.set_rollout_evidence(_turn("", stop_reason))
+    result = env.step("")
+    assert result["reward"] == 3.0
+    assert result["metadata"]["cohort_reward_pending"]
+
+
+def test_length_stopped_lean_attempt_still_earns_its_correction_turn():
+    env = _ultra_env(
+        "math_formal_lean_refinement_agent",
+        {},
+        {"header": "import Mathlib\n", "formal_statement": "example : True := by\n"},
+    )
+    env.sandbox = _Sandbox(
+        {
+            "process_status": "failed",
+            "stdout": "",
+            "stderr": '{"severity":"error","pos":{"line":2,"column":0},"endPos":null,"data":"bad tactic"}',
+        }
+    )
+    text = "```lean4\nby\n  bad_tactic\n```"
+    env.set_rollout_evidence(_turn(text, "length"))
+    result = env.step(text)
+    assert not result["done"]
+    assert result["reset_conversation"]
+
+
+def test_code_gen_program_that_kills_its_process_scores_zero():
+    reward, details = grade_code(
+        "```python\nimport os\nos._exit(0)\n```",
+        {"verifier_metadata": {"unit_tests": [{"input": "1\n", "output": "1\n", "testtype": "stdin"}]}},
+        timeout_seconds=1,
+    )
+    assert reward == 0.0
+    assert details["execution_output"]["execution_error"] == "program_crash"

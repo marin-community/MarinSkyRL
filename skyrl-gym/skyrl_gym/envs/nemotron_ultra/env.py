@@ -15,7 +15,7 @@ from omegaconf import DictConfig
 
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from skyrl_gym.envs.lcb.livecodebench import DEFAULT_LIMITS, VerifierLimits
-from skyrl_gym.envs.nemotron_ultra.answer_extraction import final_answer_text, last_boxed_answer
+from skyrl_gym.envs.nemotron_ultra.answer_extraction import final_answer_text, has_final_answer, last_boxed_answer
 from skyrl_gym.envs.nemotron_ultra.calendar import grade_calendar
 from skyrl_gym.envs.nemotron_ultra.code_gen import DEFAULT_PER_TEST_TIMEOUT_SECONDS, grade_code
 from skyrl_gym.envs.nemotron_ultra.format_verification import grade_format
@@ -37,6 +37,9 @@ from skyrl_gym.verification import VERIFIER_RUNTIME_ERROR, RolloutEvidence, Veri
 
 _NS_TOOLS_AGENT = "ns_tools_simple_agent"
 _LEAN_AGENT = "math_formal_lean_refinement_agent"
+_GENRM_AGENTS = {"genrm_simple_agent", "genrm_simple_agent_reasoning_off"}
+# GenRM compares missing answers; Lean supplies a correction turn for an unsuccessful attempt.
+_AGENTS_GRADING_MISSING_ANSWERS = _GENRM_AGENTS | {_LEAN_AGENT}
 _TOOL_COMPARISON_AGENTS = {
     "single_step_tool_use_with_argument_comparison_agent",
     "swe_pivot_single_step_tool_use_with_argument_comparison_agent",
@@ -114,7 +117,7 @@ class NemotronUltraEnv(BaseTextEnv):
         self.code_verifier_timeout_seconds = int(
             code_verifier.get("per_test_timeout_seconds", DEFAULT_PER_TEST_TIMEOUT_SECONDS)
         )
-        if self.agent in {"genrm_simple_agent", "genrm_simple_agent_reasoning_off"}:
+        if self.agent in _GENRM_AGENTS:
             self.max_turns = 1
         elif self.agent == _NS_TOOLS_AGENT:
             self.max_turns = 50
@@ -239,7 +242,10 @@ class NemotronUltraEnv(BaseTextEnv):
                 verification=VerificationResult.skipped("grading is skipped", diagnostics=diagnostics),
             )
 
-        if self.agent in {"genrm_simple_agent", "genrm_simple_agent_reasoning_off"}:
+        if self.agent not in _AGENTS_GRADING_MISSING_ANSWERS and not has_final_answer(action, self.evidence):
+            reward = 0.0
+            diagnostics["result"] = "no_final_answer"
+        elif self.agent in _GENRM_AGENTS:
             # Replaced cohort-wise by SkyRLGymTrajectoryRunner before projection.
             reward = float(self.genrm_config.get("default_score", 3.0))
             diagnostics["cohort_reward_pending"] = True

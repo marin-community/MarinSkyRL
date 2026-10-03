@@ -13,6 +13,7 @@ import numpy as np
 Message: TypeAlias = Mapping[str, Any]
 UNKNOWN_STOP_REASON = "unknown"
 VERIFIER_RUNTIME_ERROR = "VerifierRuntimeError"
+_TOKEN_REWARD_SUM_TOLERANCE = 1e-6
 
 
 def _normalize_finite(value: float, *, field_name: str) -> float:
@@ -163,7 +164,7 @@ def normalized_verifier_score(result: VerificationResult) -> float:
 
 @dataclass(frozen=True)
 class RewardResult:
-    """Raw verifier outcome and the reward channels derived from it."""
+    """Carry a verifier outcome and reward channels whose token rewards sum to optimization_reward."""
 
     unshaped_reward: float | None
     optimization_reward: float
@@ -191,6 +192,14 @@ class RewardResult:
                     for index, value in enumerate(self.token_rewards)
                 ),
             )
+            total = math.fsum(self.token_rewards)
+            if not math.isclose(
+                total,
+                self.optimization_reward,
+                rel_tol=_TOKEN_REWARD_SUM_TOLERANCE,
+                abs_tol=_TOKEN_REWARD_SUM_TOLERANCE,
+            ):
+                raise ValueError(f"token_rewards sum to {total}, not optimization_reward {self.optimization_reward}")
         object.__setattr__(
             self,
             "components",
