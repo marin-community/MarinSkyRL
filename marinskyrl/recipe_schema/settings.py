@@ -42,6 +42,7 @@ def _parse_value(annotation: Any, key: str, raw: str) -> Any:
     options = tuple(_annotations(annotation))
     if Any in options:
         raise ValueError(f"setting {key!r} targets an untyped field; add its sidecar annotation")
+    adapter = TypeAdapter(annotation)
     if raw == "null" or any(
         option is FrozenMap
         or get_origin(option) in (tuple, dict, Mapping)
@@ -49,8 +50,10 @@ def _parse_value(annotation: Any, key: str, raw: str) -> Any:
         and issubclass(option, Section)
         for option in options
     ):
-        return json.loads(raw)
-    adapter = TypeAdapter(annotation)
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return adapter.validate_strings(raw)
     parsed = adapter.validate_strings(raw)
     if int in options and float in options:
         try:
