@@ -57,5 +57,7 @@ def diagnostic_metrics(batch, *, prefix: str, indices: list[int] | None = None) 
         if complete:
             result[f"{prefix}/{verifier}/mixed_group_fraction"] = sum(0 < sum(g) < 8 for g in complete) / len(complete)
     for field in ("malformed_tool_calls", "extra_tool_calls"):
-        result[f"{prefix}/{field}"] = sum(grade[field] for _, grade in usable) / len(usable)
+        observed = [grade[field] for _, grade in usable if field in grade]
+        if observed:
+            result[f"{prefix}/{field}"] = sum(observed) / len(observed)
     return result

@@ -27,6 +27,7 @@ class StepRewardCategory(StrEnum):
     ARGUMENT_VALUE_DIFFERENT = "An argument value in a tool call is different than the expected value"
     EXPECTED_TOOL_CALL = "A tool call that matches the expected tool call was found"
     MISSING_EXPECTED_CALLS = "The response does not contain distinct matches for all expected calls"
+    UNEXPECTED_CALL_COUNT = "The response must contain exactly one tool call"
 
 
 def _compare_arguments(
@@ -222,8 +223,15 @@ def grade_pivot_verifiers(expected_action: dict[str, Any], assistant_message: di
     calls = assistant_message.get("tool_calls") or []
     if expected_action["type"] not in {"message", "function_call"}:
         raise ValueError("The SWE pilot requires a single demonstrated action")
+    if expected_action["type"] == "function_call" and len(calls) != 1:
+        return {
+            "scores": dict.fromkeys(PIVOT_VERIFIERS, 0.0),
+            "categories": dict.fromkeys(PIVOT_VERIFIERS, StepRewardCategory.UNEXPECTED_CALL_COUNT.value),
+            "tool_call_count": len(calls),
+            "extra_tool_calls": max(0, len(calls) - 1),
+        }
     names = (
-        any(call.get("function", {}).get("name") == expected_action["name"] for call in calls)
+        calls[0].get("function", {}).get("name") == expected_action["name"]
         if expected_action["type"] == "function_call"
         else not calls
     )
@@ -239,5 +247,6 @@ def grade_pivot_verifiers(expected_action: dict[str, Any], assistant_message: di
         "scores": {"tool_name": float(names), "nemo": nemo, "exact": exact},
         "categories": {"exact": exact_category.value, "nemo": nemo_category.value},
         "malformed_tool_calls": malformed,
+        "tool_call_count": len(calls),
         "extra_tool_calls": max(0, len(calls) - int(expected_action["type"] == "function_call")),
     }

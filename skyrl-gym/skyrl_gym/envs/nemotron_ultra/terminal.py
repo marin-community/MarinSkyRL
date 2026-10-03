@@ -32,10 +32,11 @@ TERMINUS_2_SCHEMA = {
         },
     },
 }
+TERMINAL_PIVOT_VERIFIERS = ("exact_commands", "string_90", "schema_completion")
 
 
-def grade_terminal(text: str, record: dict[str, Any]) -> tuple[float, dict[str, Any]]:
-    """Return the released Terminal agent's binary reward and diagnostics."""
+def grade_terminal_verifiers(text: str, record: dict[str, Any]) -> dict[str, Any]:
+    """Score Terminal JSON actions with exact, released string, and schema/flag checks."""
     if record["metadata"].get("harness") != "terminus_2":
         raise ValueError("The pinned Terminal release requires the terminus_2 harness")
     expected = json.loads(record["expected_answer"])
@@ -44,9 +45,9 @@ def grade_terminal(text: str, record: dict[str, Any]) -> tuple[float, dict[str, 
         candidate = json.loads(text.rsplit("</think>", 1)[-1].strip())
         validate(candidate, TERMINUS_2_SCHEMA)
     except (json.JSONDecodeError, ValidationError):
-        return 0.0, {"reason": "invalid_response"}
+        return {"scores": dict.fromkeys(TERMINAL_PIVOT_VERIFIERS, 0.0), "reason": "invalid_response"}
     if expected.get("task_complete", False) and not candidate.get("task_complete", False):
-        return 0.0, {"reason": "task_incomplete"}
+        return {"scores": dict.fromkeys(TERMINAL_PIVOT_VERIFIERS, 0.0), "reason": "task_incomplete"}
     expected_commands, commands = expected["commands"], candidate["commands"]
     similarity = (
         0.0
@@ -58,4 +59,19 @@ def grade_terminal(text: str, record: dict[str, Any]) -> tuple[float, dict[str, 
         ).ratio()
     )
     threshold = record.get("threshold")
-    return float(similarity >= (0.9 if threshold is None else threshold)), {"similarity": similarity}
+    return {
+        "scores": {
+            "exact_commands": float(
+                [item["keystrokes"] for item in expected_commands] == [item["keystrokes"] for item in commands]
+            ),
+            "string_90": float(similarity >= (0.9 if threshold is None else threshold)),
+            "schema_completion": 1.0,
+        },
+        "similarity": similarity,
+    }
+
+
+def grade_terminal(text: str, record: dict[str, Any]) -> tuple[float, dict[str, Any]]:
+    """Return the released Terminal agent's binary reward and diagnostics."""
+    grades = grade_terminal_verifiers(text, record)
+    return grades["scores"]["string_90"], {key: value for key, value in grades.items() if key != "scores"}

@@ -211,9 +211,9 @@ def pilot_recipe(
     raw["environment"]["skyrl_gym"]["nemotron_ultra"]["pivot_arm"] = arm
     raw["pivot"].update(
         verifier_identities={
-            "tool_name": "expected_tool_name_match:v1",
-            "nemo": "word_count_similarity_threshold=0:v1",
-            "exact": "strict_recursive_arguments:v1",
+            "tool_name": "single_call_expected_tool_name_match:v2",
+            "nemo": "single_call_word_count_similarity_threshold=0:v2",
+            "exact": "single_call_strict_recursive_arguments:v2",
         },
         train_data_uri=train_uri,
         evaluation_rows=256,
