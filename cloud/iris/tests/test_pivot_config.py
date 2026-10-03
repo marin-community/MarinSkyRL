@@ -12,6 +12,27 @@ from infra.rl_data.pivot_recipe import recipe, STUDENTS
 CONFIGS = Path(__file__).parents[1] / "configs"
 
 
+def test_throughput_smoke_disables_pilot_callbacks(tmp_path):
+    raw = yaml.safe_load((CONFIGS / "snowball_pivotrl_split64.yaml").read_text())
+    raw["trainer"].update(pivot_pilot=None, eval_before_train=False, eval_interval=-1, ckpt_interval=-1, max_steps=2)
+    raw["environment"]["skyrl_gym"]["nemotron_ultra"]["require_completed_action"] = True
+    path = tmp_path / "smoke.yaml"
+    path.write_text(yaml.safe_dump(raw))
+
+    class HPC:
+        gpus_per_node = 8
+
+    cfg = compose_skyrl_config(
+        parse_rl_config(str(path)), {"job_name": "smoke", "experiments_dir": str(tmp_path), "num_nodes": 8}, HPC()
+    ).config
+    assert cfg.trainer.pivot_pilot is None
+    assert not cfg.trainer.eval_before_train
+    assert cfg.trainer.eval_interval == -1
+    assert cfg.trainer.ckpt_interval == -1
+    assert cfg.trainer.max_steps == 2
+    assert cfg.environment.skyrl_gym.nemotron_ultra.require_completed_action
+
+
 @pytest.mark.parametrize("mode,loss,samples", [("pivotrl", "regular", 16), ("sft", "sft", 1), ("sft_random", "sft", 1)])
 def test_pivot_mode_compiles_same_data_and_geometry(tmp_path, mode, loss, samples):
     baseline = yaml.safe_load((CONFIGS / "snowball_ultra_rlvr1_split64.yaml").read_text())

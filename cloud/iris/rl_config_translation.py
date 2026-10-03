@@ -857,7 +857,11 @@ def _skyrl_config_sections(
 
 _OPEN_CONFIG_ROOTS = frozenset({"teachers", "teacher_routing", "terminal_bench_config"})
 _NULLABLE_OVERRIDE_PATHS = frozenset(
-    {"generator.trajectory_retention.max_bytes_per_step", "generator.trajectory_retention.max_bytes_per_run"}
+    {
+        "generator.trajectory_retention.max_bytes_per_step",
+        "generator.trajectory_retention.max_bytes_per_run",
+        "trainer.pivot_pilot",
+    }
 )
 
 
