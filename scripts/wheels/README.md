@@ -30,8 +30,8 @@ used [recipe revision 543a0ba8](https://github.com/marin-community/MarinSkyRL/bl
 The [GB200 build](https://iris.oa.dev/#/job/%2Fromain%2Ffa4-te219-arm-build-11082662)
 used [revision 11082662](https://github.com/marin-community/MarinSkyRL/blob/11082662/scripts/wheels/build_native.sh).
 Those revisions called the same TE recipe `transformer-engine-torch-2.19`.
-The maintained `transformer-engine-torch` target uses the same source, build
-requirements, environment and compilation command. Architecture checks and
+The maintained `transformer-engine-torch` target uses the same source, pinned
+build requirements and compilation command. Architecture checks and
 provenance output surround that command. The unchanged build requirements have
 SHA-256 `48282703aecb3a4c1dcfc46f0d4530ce1a9d1da9918061fa54a5c02d7ad91e13`.
 
@@ -71,7 +71,7 @@ bash scripts/wheels/build_native.sh transformer-engine-torch /tmp/build-te-aarch
 Each directory retains its environment and source build cache. Wheels are written
 to `dist/`, with their SHA-256 digests in `SHA256SUMS`. `BUILD_INFO` records source
 and recipe hashes, submodules, architecture, Python, uv, compiler, glibc, NVCC
-and Torch ABI. `BUILD_REQUIREMENTS.txt` records the installed build environment.
+and Torch ABI. `BUILD_REQUIREMENTS.txt` records the pinned build requirement input.
 FlashAttention targets SM90; the other projects retain their upstream
 architecture choices. Only Transformer Engine is enabled for aarch64 here.
 
