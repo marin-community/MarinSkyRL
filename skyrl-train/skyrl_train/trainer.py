@@ -1711,6 +1711,14 @@ class RayPPOTrainer:
         pg = None
 
         use_ref_model = reference_model_required(cfg.trainer.algorithm)
+        ref_actor_env_vars = None
+        if (
+            use_ref_model
+            and cfg.trainer.strategy == "megatron"
+            and (cfg.trainer.placement.colocate_all or cfg.trainer.placement.colocate_policy_ref)
+            and cfg.trainer.ref.nccl_buffer_size_bytes is not None
+        ):
+            ref_actor_env_vars = {"NCCL_BUFFSIZE": str(cfg.trainer.ref.nccl_buffer_size_bytes)}
 
         if cfg.trainer.placement.colocate_all:
             num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
@@ -1751,6 +1759,7 @@ class RayPPOTrainer:
                     num_gpus_per_actor=0.2 if pg else 1,
                     colocate_all=True,
                     sequence_parallel_size=cfg.trainer.ref.sequence_parallel_size,
+                    actor_env_vars=ref_actor_env_vars,
                 )
             else:
                 ref_model = None
@@ -1836,6 +1845,7 @@ class RayPPOTrainer:
                     num_gpus_per_actor=0.25 if pg else 1,
                     colocate_all=False,
                     sequence_parallel_size=cfg.trainer.ref.sequence_parallel_size,
+                    actor_env_vars=ref_actor_env_vars,
                 )
             else:
                 ref_model = None
