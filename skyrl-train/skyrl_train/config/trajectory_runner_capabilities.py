@@ -1,7 +1,9 @@
 """Pre-launch behavior-evidence contracts for trajectory runners."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Any
 
 from omegaconf import DictConfig
 
@@ -13,6 +15,7 @@ from marinskyrl.harbor_agent_names import (
     OPENCODE_HARBOR_AGENT_NAME,
     PI_HARBOR_AGENT_NAME,
     TERMINUS_KIRA_HARBOR_AGENT_NAME,
+    configured_harbor_profiles,
 )
 
 SUPPORTED_OPENCODE_LITERAL_VERSION = "1.18.2"
@@ -101,11 +104,17 @@ def opencode_exact_continuation_enabled(cfg: DictConfig) -> bool:
     if harbor is None:
         return False
     agent_name = str(harbor.get("name", DEFAULT_HARBOR_AGENT_NAME)).strip().lower().replace("_", "-")
-    return bool(
-        str(cfg.get("generator", {}).get("backend", "")) == "vllm"
-        and agent_name == OPENCODE_HARBOR_AGENT_NAME
-        and harbor.get("collect_rollout_details", False)
+    profiles = configured_harbor_profiles(harbor)
+    uses_opencode = (
+        any(
+            profile.name == OPENCODE_HARBOR_AGENT_NAME
+            and profile.settings.get("collect_rollout_details", harbor.get("collect_rollout_details", False))
+            for profile in profiles
+        )
+        if profiles
+        else agent_name == OPENCODE_HARBOR_AGENT_NAME and harbor.get("collect_rollout_details", False)
     )
+    return bool(str(cfg.get("generator", {}).get("backend", "")) == "vllm" and uses_opencode)
 
 
 def _harbor_capabilities(cfg: DictConfig) -> TrajectoryRunnerCapabilities:
@@ -118,6 +127,41 @@ def _harbor_capabilities(cfg: DictConfig) -> TrajectoryRunnerCapabilities:
             action_tokens=ActionTokenHandling.UNAVAILABLE,
         )
 
+    profiles = configured_harbor_profiles(harbor)
+    if not profiles:
+        return _harbor_agent_capabilities(cfg, harbor)
+
+    agents = [
+        _harbor_agent_capabilities(cfg, {**dict(harbor), **profile.settings, "name": profile.name})
+        for profile in profiles
+    ]
+    fidelity_order = (EvidenceFidelity.UNAVAILABLE, EvidenceFidelity.RETOKENIZED, EvidenceFidelity.EXACT)
+    action_order = (
+        ActionTokenHandling.UNAVAILABLE,
+        ActionTokenHandling.RETOKENIZED,
+        ActionTokenHandling.RUNTIME_VALIDATED,
+        ActionTokenHandling.EXACT,
+    )
+    return TrajectoryRunnerCapabilities(
+        runner=f"Harbor panel ({', '.join(profile.name for profile in profiles)})",
+        sampled_completion=min((agent.sampled_completion for agent in agents), key=fidelity_order.index),
+        full_context_continuation=min((agent.full_context_continuation for agent in agents), key=fidelity_order.index),
+        action_tokens=min((agent.action_tokens for agent in agents), key=action_order.index),
+        requirements=tuple(
+            CapabilityRequirement(
+                config_path=requirement.config_path.replace(
+                    "terminal_bench.harbor.", f"terminal_bench.harbor.agent_profiles[{index}]."
+                ),
+                expected_value=requirement.expected_value,
+                satisfied=requirement.satisfied,
+            )
+            for index, agent in enumerate(agents)
+            for requirement in agent.requirements
+        ),
+    )
+
+
+def _harbor_agent_capabilities(cfg: DictConfig, harbor: Mapping[str, Any]) -> TrajectoryRunnerCapabilities:
     agent_name = str(harbor.get("name", DEFAULT_HARBOR_AGENT_NAME)).strip().lower().replace("_", "-")
     rollout_details = CapabilityRequirement(
         config_path="terminal_bench.harbor.collect_rollout_details",

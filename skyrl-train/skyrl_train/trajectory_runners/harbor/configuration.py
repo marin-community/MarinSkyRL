@@ -30,7 +30,7 @@ from typing import Any, Dict, Optional, Set
 
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
-from marinskyrl.harbor_agent_names import DEFAULT_HARBOR_AGENT_NAME
+from marinskyrl.harbor_agent_names import DEFAULT_HARBOR_AGENT_NAME, HarborAgentProfile, configured_harbor_profiles
 from skyrl_train.trajectory_runners.harbor.identity_aware_reward import IDENTITY_AWARE_SHAPER
 from skyrl_train.utils.harbor_errors import (
     DEFAULT_ERROR_HANDLING_CONFIG,
@@ -453,6 +453,12 @@ class HarborConfigBuilder:
             # Legacy: extract harbor fields from flat config
             self._harbor_cfg = self._extract_harbor_fields_legacy(terminal_bench_cfg)
 
+        self._agent_profiles = configured_harbor_profiles(self._harbor_cfg)
+        for profile in self._agent_profiles:
+            unknown = profile.settings.keys() - AGENT_SCHEMA.fields.keys()
+            if unknown:
+                raise ValueError(f"Harbor agent profile {profile.name} has unsupported fields: {sorted(unknown)}")
+
         # Extract model_info (special handling - nested dict passed to agent kwargs)
         model_info_cfg = terminal_bench_cfg.get("model_info", {})
         if isinstance(model_info_cfg, DictConfig):
@@ -521,7 +527,7 @@ class HarborConfigBuilder:
     # (so the schema validator doesn't flag them as "unknown"). PRM lives here
     # because it's consumed directly by _build_prm_turn_callback to construct
     # a turn_callback, not by the schema-based field-mapping pipeline.
-    SKYRL_EXTENSION_KEYS = frozenset({"prm"})
+    SKYRL_EXTENSION_KEYS = frozenset({"prm", "agent_profiles"})
 
     def _validate_config(self) -> None:
         """Validate config and issue warnings for unknown/unsupported fields."""
@@ -577,13 +583,15 @@ class HarborConfigBuilder:
         # Return default
         return mapping.default
 
-    def _build_agent_fields(self) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    def _build_agent_fields(self, profile: HarborAgentProfile | None = None) -> tuple[Dict[str, Any], Dict[str, Any]]:
         """Build agent direct fields and kwargs from config."""
         direct_fields = {}
         kwargs_fields = {}
 
         for yaml_key, mapping in AGENT_SCHEMA.fields.items():
             value = self._get_field_value(yaml_key, mapping, self._cfg)
+            if profile is not None:
+                value = profile.name if yaml_key == "name" else profile.settings.get(yaml_key, value)
             if value is not None:
                 if mapping.field_type == "kwargs":
                     kwargs_fields[mapping.harbor_field] = value
@@ -883,6 +891,7 @@ class HarborConfigBuilder:
         api_base: str,
         session_id: str,
         timeout_override_sec: Optional[int] = None,
+        task_index: int | None = None,
     ) -> TrialConfig:
         """
         Build a complete TrialConfig for a Harbor trial.
@@ -893,6 +902,7 @@ class HarborConfigBuilder:
             model_name: Model name for Harbor (e.g., "hosted_vllm/Qwen3-8B").
             api_base: Base URL for the inference API.
             session_id: Session ID for sticky routing.
+            task_index: Stable dataset index, required when agent_profiles is configured.
             timeout_override_sec: Optional timeout override in seconds.
                 If provided, overrides the default override_timeout_sec from config.
                 Useful for eval runs that may need different timeouts.
@@ -903,7 +913,12 @@ class HarborConfigBuilder:
         # Build component configs
         environment_config = self._build_environment_config()
         verifier_config = self._build_verifier_config()
-        agent_direct_fields, agent_kwargs = self._build_agent_fields()
+        profile = None
+        if self._agent_profiles:
+            if task_index is None or task_index < 0:
+                raise ValueError("Harbor agent profiles require a stable dataset task_index")
+            profile = self._agent_profiles[task_index % len(self._agent_profiles)]
+        agent_direct_fields, agent_kwargs = self._build_agent_fields(profile)
         trial_fields = self._get_trial_fields()
 
         # Add required agent kwargs

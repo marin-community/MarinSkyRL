@@ -5,6 +5,7 @@ from skyrl_train.config.trajectory_runner_capabilities import (
     SUPPORTED_OPENCODE_LITERAL_VERSION,
     EntrypointOperation,
     TrajectoryRunnerMode,
+    opencode_exact_continuation_enabled,
     validate_trajectory_runner_capabilities,
 )
 
@@ -62,6 +63,30 @@ def _skyrl_config():
             },
         }
     )
+
+
+def test_harbor_panel_validates_each_harness_before_training():
+    cfg = _harbor_config("pi")
+    cfg.terminal_bench_config.harbor.agent_profiles = [
+        {"name": "pi"},
+        {"name": "opencode", "version": SUPPORTED_OPENCODE_LITERAL_VERSION},
+    ]
+    validate_trajectory_runner_capabilities(cfg, HARBOR)
+    assert opencode_exact_continuation_enabled(cfg)
+
+    cfg.terminal_bench_config.harbor.agent_profiles.append({"name": "codex"})
+    with pytest.raises(ValueError, match="codex.*cannot supply exact"):
+        validate_trajectory_runner_capabilities(cfg, HARBOR)
+
+
+def test_harbor_panel_rejects_missing_evidence_in_one_profile():
+    cfg = _harbor_config("pi")
+    cfg.terminal_bench_config.harbor.agent_profiles = [
+        {"name": "pi"},
+        {"name": "opencode", "version": SUPPORTED_OPENCODE_LITERAL_VERSION, "collect_rollout_details": False},
+    ]
+    with pytest.raises(ValueError, match=r"agent_profiles\[1\].collect_rollout_details"):
+        validate_trajectory_runner_capabilities(cfg, HARBOR)
 
 
 def _config(agent_name, overrides, distillation, local_distillation_config):

@@ -73,6 +73,9 @@ cd ../..
 ```
 
 Install Harbor
+
+See [Harbor agent profiles](docs/harbor-agent-profiles.md) for stable task-to-agent assignment.
+
 ```bash
 git clone https://github.com/CharlieFRuan/harbor
 cd harbor

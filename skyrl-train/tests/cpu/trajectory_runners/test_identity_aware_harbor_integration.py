@@ -17,6 +17,7 @@ from harbor.verifier.verifier import VerifierOutputParseError
 from skyrl_train.metric_names import IDENTITY_AWARE_REWARD_METRIC_PREFIX
 from skyrl_train.trajectory_runners.types import BatchMetadata, TrajectoryID
 from skyrl_train.trajectory_runners.harbor.configuration import HarborConfigBuilder
+from skyrl_train.trajectory_runners.harbor.dataset import TerminalBenchTaskDataset
 from skyrl_train.trajectory_runners.trajectory_retention import (
     build_trajectory_records,
     parse_trajectory_retention_config,
@@ -83,6 +84,62 @@ def _trial_runner() -> HarborTrajectoryRunner:
         {"sampling_params": {"max_generate_length": 16}, "max_input_length": 16}
     )
     return runner
+
+
+@pytest.mark.asyncio
+async def test_task_harness_assignment_survives_shuffling_restarts_and_repeated_samples(tmp_path):
+    for name in ("task-c", "task-a", "task-d", "task-b"):
+        task = tmp_path / "data" / name
+        task.mkdir(parents=True)
+        (task / "instruction.md").write_text(name)
+    panel = ("opencode", "claude-code", "codex", "mini-swe-agent")
+    expected = dict(zip(("task-a", "task-b", "task-c", "task-d"), panel, strict=True))
+
+    class CompletedOrchestrator:
+        def __init__(self):
+            self.assignments = {}
+
+        async def submit_batch(self, trial_configs):
+            futures = []
+            for config in trial_configs:
+                self.assignments.setdefault(config.task.path.name, set()).add(config.agent.name)
+                future = asyncio.get_running_loop().create_future()
+                future.set_result(SimpleNamespace(verifier_result=None, exception_info=None, agent_result=None))
+                futures.append(future)
+            return futures
+
+    for order in ((3, 0, 2, 1), (1, 2, 0, 3)):
+        dataset = TerminalBenchTaskDataset([str(tmp_path / "data")])
+        items = [dataset[index] for index in order for _ in range(16)]
+        runner = _trial_runner()
+        orchestrator = CompletedOrchestrator()
+        runner._orchestrator = orchestrator
+        runner._orchestrator_started = True
+        runner._eval_session_active = False
+        runner._packed_task_materializer = harbor_runner_module.PackedTaskMaterializer(tmp_path / "packed")
+        runner._harbor_config_builder = HarborConfigBuilder(
+            OmegaConf.create({"harbor": {"agent_profiles": [{"name": name} for name in panel]}})
+        )
+        runner._agent_api_base = "http://localhost:8000/v1"
+        runner._tracked_exceptions = []
+        runner._literal_log_path = None
+        runner.model_name = "model"
+        runner.trials_dir = str(tmp_path / "trials")
+        request = {
+            "prompts": [item["prompt"] for item in items],
+            "env_classes": ["bfcl"] * len(items),
+            "env_extras": [item["env_extras"] for item in items],
+            "trajectory_ids": [
+                TrajectoryID(instance_id=item["uid"], repetition_id=index) for index, item in enumerate(items)
+            ],
+            "batch_metadata": BatchMetadata(global_step=0, training_phase="train"),
+            "sampling_params": {"max_tokens": 16},
+        }
+        try:
+            await runner.run(request)
+        finally:
+            runner._packed_task_materializer.close()
+        assert orchestrator.assignments == {task: {agent} for task, agent in expected.items()}
 
 
 @pytest.mark.parametrize(

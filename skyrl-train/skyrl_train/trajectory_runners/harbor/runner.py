@@ -962,6 +962,9 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 api_base=self._agent_api_base,
                 session_id=session_id,
                 timeout_override_sec=timeout_override,
+                task_index=(input_batch["env_extras"][i] or {}).get("task_index")
+                if input_batch["env_extras"]
+                else None,
             )
             trial_configs.append(trial_config)
             trajectory_ids.append(trajectory_id)
