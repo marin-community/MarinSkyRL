@@ -4,6 +4,7 @@ from hashlib import sha256
 from types import SimpleNamespace
 
 import numpy as np
+from omegaconf import open_dict
 import pytest
 import ray
 from ray.util.placement_group import placement_group
@@ -39,12 +40,14 @@ def test_megatron_pp_cp_worker_batches_match_driver_update(tmp_path, corrupt_rou
     require_hoppers(8)
     model_path = tmp_path / "model"
     model_path.mkdir()
-    _write_tiny_checkpoint(model_path, num_experts_per_tok=4, shape={**TOY_SHAPE, "global_every": 1})
+    _write_tiny_checkpoint(model_path, num_experts_per_tok=4, shape={**TOY_SHAPE, "num_key_value_heads": 2})
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     with safe_open(model_path / "model.safetensors", framework="pt", device="cpu") as checkpoint:
         parameter_names = list(checkpoint.keys())
     cfg = _config(str(model_path), world_size=8, pp=2, ep=1)
     cfg.trainer.policy.megatron_config.context_parallel_size = 2
+    with open_dict(cfg.trainer.policy.megatron_config.transformer_config_kwargs):
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs.cp_comm_type = "a2a"
     cfg.trainer.policy.megatron_config.moe_router_replay = True
     cfg.trainer.use_sample_packing = True
     cfg.trainer.train_batch_size = cfg.trainer.policy_mini_batch_size = 3
