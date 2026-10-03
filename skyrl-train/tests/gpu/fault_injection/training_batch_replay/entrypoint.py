@@ -184,6 +184,8 @@ def diagnostic_entrypoint(cfg: DictConfig):
 @hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
 def main(cfg: DictConfig) -> None:
     mode = _mode(cfg)
+    if mode is Mode.CAPTURE and cfg.trainer.get("batch_builder", "driver") != "driver":
+        raise ValueError("training batch capture requires trainer.batch_builder=driver")
     # Resolve interpolations once in the launcher process. Ray workers may have
     # different environment variables, but they must validate the same config.
     OmegaConf.update(

@@ -1134,7 +1134,7 @@ def get_rollout_metrics(
         env_classes: Optional list of environment class names for each trajectory
         verification_results: Verifier verdicts that override reward-sign token statistics when present
         trajectory_batches: Per-group observations for TIS, failure and retention metrics
-        tis_lcs_alert_threshold: Retained-token fraction below which LCS fallback raises an alignment alert
+        tis_lcs_alert_threshold: LCS-fallback token fraction above which the alignment alert fires
 
     Returns:
         Dictionary of aggregated metrics
