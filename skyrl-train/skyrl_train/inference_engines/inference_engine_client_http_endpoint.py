@@ -359,11 +359,18 @@ async def handle_openai_request(
 
         # Non-streaming requests stay attached to the client until completion.
         if endpoint == "/chat/completions":
+            lease = await continuation_manager.begin(payload) if continuation_manager is not None else None
             backend_request = _global_inference_engine_client.chat_completion(payload)
+            if lease is not None:
+                backend_request = lease.capture_response(backend_request)
         elif endpoint == "/completions":
             backend_request = _global_inference_engine_client.completion(payload)
         else:
-            backend_request = _global_inference_engine_client.tokenize(payload)
+            backend_request = (
+                continuation_manager.tokenize(payload)
+                if continuation_manager is not None
+                else _global_inference_engine_client.tokenize(payload)
+            )
         response = await _await_with_disconnect(raw_request, backend_request)
 
         if is_engine_error_response(response):
@@ -607,7 +614,12 @@ def create_app(
     @app.post(TOKENIZE_ENDPOINT)
     async def tokenize(raw_request: Request):
         """Delegate chat tokenization to the inference backend's serving renderer."""
-        return await handle_openai_request(raw_request, endpoint=TOKENIZE_ENDPOINT, bridge_stats=bridge_stats)
+        return await handle_openai_request(
+            raw_request,
+            endpoint=TOKENIZE_ENDPOINT,
+            bridge_stats=bridge_stats,
+            continuation_manager=continuation_manager,
+        )
 
     @app.get(MODELS_ENDPOINT)
     async def models():

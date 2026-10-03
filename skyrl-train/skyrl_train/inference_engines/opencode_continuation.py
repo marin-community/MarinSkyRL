@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 from collections import OrderedDict
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
@@ -20,6 +20,8 @@ from skyrl_train.inference_engines.inference_http_backend import InferenceHTTPBa
 logger = logging.getLogger(__name__)
 
 TRIAL_ID_HEADER = "x-ot-trial-id"
+TASK_AGENT_HEADER = "x-ot-task-agent"
+MINI_SWE_TASK_AGENT = "mini-swe-agent"
 _RENDER_SIGNATURE_FIELDS = CHAT_TOKENIZE_FIELDS - {"messages", "add_generation_prompt", "continue_final_message"}
 
 
@@ -38,7 +40,7 @@ def _extract_chunk_token_ids(chunk: dict[str, Any]) -> tuple[list[int] | None, l
     for choice in chunk.get("choices") or []:
         if not isinstance(choice, dict):
             continue
-        for candidate in (choice.get("delta"), choice):
+        for candidate in (choice.get("delta"), choice.get("message"), choice):
             if not isinstance(candidate, dict):
                 continue
             provider_fields = candidate.get("provider_specific_fields")
@@ -52,7 +54,11 @@ def _extract_chunk_token_ids(chunk: dict[str, Any]) -> tuple[list[int] | None, l
 
 
 def _render_signature(body: dict[str, Any]) -> dict[str, Any]:
-    return {key: deepcopy(value) for key, value in body.items() if key in _RENDER_SIGNATURE_FIELDS}
+    return {
+        key: deepcopy(value)
+        for key, value in body.items()
+        if key in _RENDER_SIGNATURE_FIELDS and not (key in {"tools", "chat_template_kwargs"} and not value)
+    }
 
 
 class OpenCodeContinuationLease:
@@ -69,6 +75,33 @@ class OpenCodeContinuationLease:
         self._trial_id = trial_id
         self._request_body = request_body
         self._lock = lock
+
+    def release(self) -> None:
+        """Release the trial after a generation or a prompt-budget inspection."""
+        self._lock.release()
+        self._manager._forget_unused_lock(self._trial_id, self._lock)
+
+    async def capture_response(self, response: Awaitable[dict[str, Any]]) -> dict[str, Any]:
+        """Retain served tokens from a non-streaming response and release the trial."""
+        try:
+            result = await response
+            prompt_ids, completion_ids = _extract_chunk_token_ids(result)
+            expected_prompt = self._request_body.get(EXACT_PROMPT_TOKEN_IDS_KEY)
+            if prompt_ids and completion_ids and (expected_prompt is None or prompt_ids == expected_prompt):
+                self._manager.commit(
+                    self._trial_id,
+                    self._request_body,
+                    prompt_token_ids=prompt_ids,
+                    completion_token_ids=completion_ids,
+                )
+            else:
+                self._manager.discard(self._trial_id)
+            return result
+        except BaseException:
+            self._manager.discard(self._trial_id)
+            raise
+        finally:
+            self.release()
 
     async def capture(self, stream: AsyncIterator[str]) -> AsyncIterator[str]:
         prompt_ids: list[int] | None = None
@@ -123,8 +156,7 @@ class OpenCodeContinuationLease:
                             completion_token_ids=completion_ids,
                         )
             finally:
-                self._lock.release()
-                self._manager._forget_unused_lock(self._trial_id, self._lock)
+                self.release()
 
 
 class OpenCodeContinuationManager:
@@ -148,7 +180,7 @@ class OpenCodeContinuationManager:
             # OpenCode's title and compaction agents share the trial header but call
             # the model with no tools. They are auxiliary generations, not turns in
             # the task agent's causal action chain, and must not replace its state.
-            or not body.get("tools")
+            or (not body.get("tools") and headers.get(TASK_AGENT_HEADER) != MINI_SWE_TASK_AGENT)
         ):
             return None
 
@@ -167,6 +199,22 @@ class OpenCodeContinuationManager:
         except BaseException:
             lock.release()
             raise
+
+    async def tokenize(self, request_payload: dict[str, Any]) -> dict[str, Any]:
+        """Count the same exact prompt that a marked agent will next generate from."""
+        lease = await self.begin(request_payload)
+        if lease is None:
+            return await self._backend.tokenize(request_payload)
+        try:
+            body = request_payload["json"]
+            exact_prompt = body.pop(EXACT_PROMPT_TOKEN_IDS_KEY, None)
+            body.pop("session_id", None)
+            result = await self._backend.tokenize(request_payload)
+            if exact_prompt is not None and "tokens" in result:
+                result = {**result, "tokens": exact_prompt, "count": len(exact_prompt)}
+            return result
+        finally:
+            lease.release()
 
     async def _continue_prompt(
         self,
