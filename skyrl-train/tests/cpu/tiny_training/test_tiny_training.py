@@ -164,6 +164,53 @@ def test_tiny_policy_trains_to_max_steps(
     _assert_trained_to_max_steps(tmp_path, mode, shape)
 
 
+def test_worker_batches_verify_two_tis_steps_with_a_group_split_between_dp_ranks(
+    runs: ForkServerContext, tmp_path: Path, tiny_policy: Path
+):
+    cfg = experiment.tiny_training_config(
+        tmp_path,
+        tiny_policy,
+        TrainingMode.SYNC,
+        RolloutShape.SINGLE_TURN,
+        max_steps=2,
+        checkpoint_interval=-1,
+        dp_size=2,
+        micro_batch_size=3,
+        dump_data_batch=True,
+    )
+    cfg.trainer.batch_builder = "verify"
+    cfg.trainer.train_batch_size = cfg.trainer.policy_mini_batch_size = 3
+    cfg.trainer.training_metrics = True
+    cfg.trainer.algorithm.advantage_estimator = "rloo_n"
+    cfg.trainer.algorithm.group_advantage_min_size = 2
+    cfg.generator.trajectory_reward_shaping.enabled = True
+    cfg.generator.trajectory_reward_shaping.overlong.penalty_scale = 0.0
+    run = runs.Process(target=experiment.run_tiny_training, args=(cfg,))
+    run.start()
+    run.join(RUN_TIMEOUT_SECONDS)
+    if run.exitcode is None:
+        run.kill()
+        run.join()
+        pytest.fail("worker verification did not finish")
+    assert run.exitcode == 0
+    steps = _trained_steps(tmp_path)
+    assert [record["trainer/global_step"] for record in steps] == [1, 2]
+    assert all(record["policy/raw_grad_norm"] > 0 for record in steps)
+    for step in (1, 2):
+        batch = TrainingInputBatch().load(tmp_path / f"exports/dumped_data/global_step_{step}_training_input.pkl")
+        assert batch.batch_size == 12
+        lengths = batch["response_mask"].sum(-1)
+        assert torch.unique(lengths).numel() > 1
+        assert torch.unique(batch["advantages"]).numel() > 2
+        eligible = batch["loss_mask"].bool()
+        expected = torch.zeros_like(batch["action_log_probs"], dtype=torch.float32)
+        expected[eligible] = (
+            (batch["action_log_probs"][eligible] - batch["rollout_logprobs"][eligible]).exp().clamp(max=2)
+        )
+        torch.testing.assert_close(batch["correction_weights"], expected, rtol=0, atol=0)
+        assert (expected[eligible] != 1).any()
+
+
 def test_async_training_resumes_with_committed_groups(runs: ForkServerContext, tmp_path: Path, tiny_policy: Path):
     mode, shape = TrainingMode.ASYNC, RolloutShape.SINGLE_TURN
     _train(runs, tmp_path, tiny_policy, mode, shape, steps=RESUMED_STEP, checkpoint_interval=1)
