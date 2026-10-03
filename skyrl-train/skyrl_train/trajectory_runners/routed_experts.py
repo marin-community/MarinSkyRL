@@ -23,31 +23,45 @@ def decode_routed_experts(routes: str, expected_rows: int) -> np.ndarray:
 
 
 def normalize_routed_experts(routes: str, prompt_ids: list[int], response_ids: list[int]) -> np.ndarray:
-    """Return response routes, with a sentinel for the final unforwarded token.
+    """Return response routes from vLLM's encoded route array, with a sentinel for the final unforwarded token."""
+    rows = decode_routed_experts(routes, len(prompt_ids) + len(response_ids) - 1)
+    return response_routes(generation_routes(rows, len(prompt_ids), len(response_ids)))
 
-    vLLM's encoded array starts at the first prompt token and ends at the
-    penultimate generated token. The last generated token has no forward pass.
+
+def generation_routes(rows: np.ndarray, prompt_length: int, response_length: int) -> np.ndarray:
+    """Return the routes of the forward passes that generated each response token, in a compact unsigned dtype.
+
+    vLLM's route array starts at the first prompt token and ends at the penultimate generated token, so its row
+    ``prompt_length - 1 + i`` is the forward pass whose output was response token ``i``.
     """
-    expected = len(prompt_ids) + len(response_ids) - 1
-    rows = decode_routed_experts(routes, expected)
+    expected = prompt_length + response_length - 1
     if (
-        rows.ndim != 3
+        prompt_length < 1
+        or rows.ndim != 3
+        or rows.shape[0] != expected
         or rows.shape[1] == 0
         or rows.shape[2] == 0
         or not np.issubdtype(rows.dtype, np.integer)
         or np.any(rows < 0)
         or np.any(rows > np.iinfo(np.uint32).max)
     ):
-        raise ValueError("routed_experts must have [token, layer, expert] nonnegative integer shape")
-    response_rows = rows[len(prompt_ids) :]
-    dtype = (
-        np.uint8
-        if not response_rows.size or response_rows.max() <= 255
-        else np.min_scalar_type(int(response_rows.max()))
-    )
-    result = np.empty((len(response_ids), *rows.shape[1:]), dtype=dtype)
-    if not response_ids:
-        return result
-    result[:-1] = response_rows
-    result[-1] = 0
+        raise ValueError(
+            f"routed_experts must be a nonnegative integer [token, layer, expert] array with {expected} token rows, "
+            f"got shape {rows.shape} and dtype {rows.dtype}"
+        )
+    selected = rows[prompt_length - 1 :]
+    dtype = np.uint8 if not selected.size or selected.max() <= 255 else np.min_scalar_type(int(selected.max()))
+    return selected.astype(dtype)
+
+
+def response_routes(generation_rows: np.ndarray) -> np.ndarray:
+    """Return each response token's route from ``generation_routes`` rows.
+
+    A response token's route is the forward pass that read it, which is the row that generated the next token. The
+    final token is never read, so it gets an all-zero sentinel row.
+    """
+    result = np.empty_like(generation_rows)
+    if len(generation_rows):
+        result[:-1] = generation_rows[1:]
+        result[-1] = 0
     return result
