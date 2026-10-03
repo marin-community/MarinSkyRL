@@ -114,6 +114,13 @@ def test_compile_distillation_plan_compiles_full_multi_teacher_config(generated_
     assert (resources.max_num_batched_tokens, resources.gpu_memory_utilization) == (4096, 0.65)
     # One engine spans tensor_parallel_size x data_parallel_size GPUs; expert parallelism runs inside it.
     assert (resources.data_parallel_size, resources.expert_parallel_size, resources.gpus_per_engine) == (4, 8, 8)
+    sparse = recipe.to_skyrl()
+    del sparse["teachers"]["swe"]["resources"]["data_parallel_size"]
+    del sparse["teachers"]["swe"]["resources"]["expert_parallel_size"]
+    sparse_plan = compile_distillation_plan(recipe_type.from_document(sparse).to_skyrl())
+    validate_distillation_runtime_support(sparse_plan)
+    resources = sparse_plan.teachers[1].resources
+    assert (resources.data_parallel_size, resources.expert_parallel_size, resources.gpus_per_engine) == (1, 1, 2)
     changed = recipe.with_settings(
         [
             "teachers.math.placement=null",
