@@ -172,9 +172,7 @@ def merge_mappings(base: Mapping[str, Any], patch: Mapping[str, Any]) -> dict[st
             if not value:
                 continue
             current = merged.get(key)
-            nested = merge_mappings(current if isinstance(current, Mapping) else {}, value)
-            if nested or isinstance(current, Mapping):
-                merged[key] = nested
+            merged[key] = merge_mappings(current if isinstance(current, Mapping) else {}, value)
         else:
             merged[key] = thaw(value)
     return merged

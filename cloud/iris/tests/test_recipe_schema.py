@@ -79,6 +79,9 @@ def test_named_parts_and_settings_validate_complete_documents_without_changing_r
         assert combined == expected
         assert list(combined.to_skyrl()["options"]) == ["math", "code", "chat", "buckets", "lr"]
     assert CompleteOptions.combine(base=base, empty=Options(options={"unused": {}})) == base
+    with_parent = base.merge(Options(options={"parent": None}))
+    nested_empty = Options(options={"parent": {"child": {}}})
+    assert CompleteOptions.combine(base=with_parent, empty=nested_empty) == with_parent
     conflicts = (
         (Options(options={"buckets": [1, 2]}), Options(options={"buckets": [1, 3]})),
         (Options(options={"parent": None}), Options(options={"parent": {"child": 2}})),

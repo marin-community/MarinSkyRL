@@ -55,5 +55,17 @@ def combine_parts(base: Mapping[str, Any], parts: Mapping[str, Mapping[str, Any]
                         f"{location}: parts {source!r} and {name!r} set conflicting values; use merge for an override"
                     )
             contributions[path] = name, value
-        combined = merge_mappings(combined, document)
+        combined = merge_mappings(combined, _without_empty_mappings(document))
     return combined
+
+
+def _without_empty_mappings(document: Mapping[str, Any]) -> dict[str, Any]:
+    contribution = {}
+    for key, value in document.items():
+        if isinstance(value, Mapping):
+            nested = _without_empty_mappings(value)
+            if nested:
+                contribution[key] = nested
+        else:
+            contribution[key] = value
+    return contribution
