@@ -10,6 +10,8 @@ from omegaconf import OmegaConf
 from marinskyrl.inference_placement import validate_expert_block_transport
 from marinskyrl.runtime_options import GDNBackend, R3Transport, WeightSyncTransport
 from skyrl_train import objective
+from skyrl_train.config.query_bias import GrugQueryBiasUpdateMode
+from skyrl_train.config.weight_sync_pause import WeightSyncPauseMode
 from skyrl_train.utils import advantage_estimators, utils as trainer_utils
 from skyrl_train.utils.utils import validate_cfg
 from tests.cpu.util import example_dummy_config
@@ -59,11 +61,18 @@ def test_validate_cfg_runs_the_transport_check(generated_recipe_schema):
                 "policy_mini_batch_size": 4,
                 "micro_train_batch_size_per_gpu": 1,
                 "flash_attn": False,
+                "progress": {"mode": "logging"},
+                "policy": {
+                    "grug_query_bias_update_mode": GrugQueryBiasUpdateMode.INTERPOLATE.value,
+                    "grug_query_bias_interpolation_weight": 0.25,
+                },
             },
             "generator": {
                 "weight_sync_transport": WeightSyncTransport.EXPERT_BLOCK.value,
                 "r3_transport": R3Transport.RESIDENT.value,
                 "gdn_backend": GDNBackend.FLASHQLA.value,
+                "weight_sync_pause": {"mode": WeightSyncPauseMode.WAIT.value},
+                "vllm_v1_disable_multiproc": False,
             },
         }
     )
@@ -72,9 +81,21 @@ def test_validate_cfg_runs_the_transport_check(generated_recipe_schema):
         validate_cfg(cfg)
     changed = recipe.with_settings([f"generator.weight_sync_transport={WeightSyncTransport.BROADCAST.value}"])
     validate_cfg(OmegaConf.merge(example_dummy_config(), changed.to_skyrl()))
-    for key in ("weight_sync_transport", "r3_transport", "gdn_backend"):
+    incompatible = changed.with_settings(["generator.vllm_v1_disable_multiproc=true"])
+    with pytest.raises(ValueError, match="mode=wait requires"):
+        validate_cfg(OmegaConf.merge(example_dummy_config(), incompatible.to_skyrl()))
+    compatible = incompatible.with_settings([f"generator.weight_sync_pause.mode={WeightSyncPauseMode.KEEP.value}"])
+    validate_cfg(OmegaConf.merge(example_dummy_config(), compatible.to_skyrl()))
+    for path in (
+        "generator.weight_sync_transport",
+        "generator.r3_transport",
+        "generator.gdn_backend",
+        "generator.weight_sync_pause.mode",
+        "trainer.progress.mode",
+        "trainer.policy.grug_query_bias_update_mode",
+    ):
         with pytest.raises(ValueError):
-            changed.with_settings([f"generator.{key}=unknown-runtime-choice"])
+            changed.with_settings([f"{path}=unknown-runtime-choice"])
 
 
 def test_the_model_package_imports_before_the_trainer_utilities():

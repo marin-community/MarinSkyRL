@@ -1,9 +1,12 @@
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import pytest
 
+from skyrl_train import dynamic_sampling
 from skyrl_train.dynamic_sampling import (
+    DynamicSamplingRewardSource,
     DynamicSamplingType,
     GroupSelectionPolicy,
     GroupSelectionResult,
@@ -249,7 +252,27 @@ def test_dynamic_filter_requires_unshaped_outcomes():
         policy.evaluate(_group(loss_masks=[[1], [1]]))
 
 
-def test_dynamic_filter_can_admit_shaped_reward_variance():
+def test_dynamic_filter_can_admit_shaped_reward_variance(generated_recipe_schema):
+    root = Path(__file__).resolve().parents[3]
+    assert Path(dynamic_sampling.__file__).resolve() == root / "skyrl-train/skyrl_train/dynamic_sampling.py"
+    recipe_type, _ = generated_recipe_schema
+    recipe = recipe_type.from_document(
+        {
+            "trainer": {
+                "algorithm": {
+                    "dynamic_sampling": {
+                        "type": DynamicSamplingType.FILTER.value,
+                        "informative_on": DynamicSamplingRewardSource.SHAPED.value,
+                    }
+                }
+            }
+        }
+    )
+    edited = recipe.with_settings(
+        [f"trainer.algorithm.dynamic_sampling.informative_on={DynamicSamplingRewardSource.UNSHAPED.value}"]
+    )
+    with pytest.raises(ValueError):
+        edited.with_settings(["trainer.algorithm.dynamic_sampling.informative_on=unknown-reward-source"])
     group = _group(loss_masks=[[1], [1], [1], [1]])
     group.trajectory_batch.update(
         {
@@ -258,8 +281,16 @@ def test_dynamic_filter_can_admit_shaped_reward_variance():
         }
     )
 
-    shaped = GroupSelectionPolicy(DynamicSamplingType.FILTER, criteria=resolve_dynamic_sampling_criteria("shaped"))
-    unshaped = GroupSelectionPolicy(DynamicSamplingType.FILTER, criteria=resolve_dynamic_sampling_criteria("unshaped"))
+    shaped_config = recipe.trainer.algorithm.dynamic_sampling
+    unshaped_config = edited.trainer.algorithm.dynamic_sampling
+    shaped = GroupSelectionPolicy(
+        DynamicSamplingType(shaped_config.type),
+        criteria=resolve_dynamic_sampling_criteria(shaped_config.informative_on),
+    )
+    unshaped = GroupSelectionPolicy(
+        DynamicSamplingType(unshaped_config.type),
+        criteria=resolve_dynamic_sampling_criteria(unshaped_config.informative_on),
+    )
 
     assert shaped.evaluate(group) is GroupSelectionResult.KEEP
     assert unshaped.evaluate(group) is GroupSelectionResult.INSUFFICIENT_REWARD_SPREAD
