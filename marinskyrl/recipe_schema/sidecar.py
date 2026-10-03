@@ -13,7 +13,7 @@ TYPES = {
     "trainer.algorithm.kl_estimator_type": 'Literal["k1", "abs", "k2", "k3", "k3_unbiased_gradient"]',
     "trainer.algorithm.off_policy_correction": 'Literal["none", "custom", "icepop", "outlier_mask", "seq_mask_tis", "tis"] | None',
     "trainer.algorithm.off_policy_correction_rules": "tuple[CorrectionRule, ...] | None",
-    "trainer.algorithm.dynamic_sampling.type": 'Literal["filter", "replace"] | None',
+    "trainer.algorithm.dynamic_sampling.type": 'Literal["filter"] | None',
     "trainer.algorithm.distillation": "Distillation | None",
     "trainer.algorithm.distillation.objective": 'Literal["sampled_reverse_kl", "sparse_forward_kl", "sparse_reverse_kl", "sparse_jsd", "student_topk_policy_surrogate"]',
     "trainer.algorithm.distillation.reward_mode": 'Literal["add", "replace"]',
