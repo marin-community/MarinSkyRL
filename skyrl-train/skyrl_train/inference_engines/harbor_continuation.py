@@ -162,10 +162,11 @@ class HarborContinuationLease:
 class HarborContinuationManager:
     """Maintain exact served-token prefixes independently for concurrent trials."""
 
-    def __init__(self, backend: InferenceHTTPBackend, *, max_trials: int = 4096) -> None:
+    def __init__(self, backend: InferenceHTTPBackend, *, max_states: int = 4096) -> None:
         self._backend = backend
-        self._max_trials = max_trials
-        self._states: OrderedDict[str, _ContinuationState] = OrderedDict()
+        self._max_states = max_states
+        self._states: OrderedDict[str, list[_ContinuationState]] = OrderedDict()
+        self._state_count = 0
         self._locks: dict[str, asyncio.Lock] = {}
 
     async def begin(self, request_payload: dict[str, Any]) -> HarborContinuationLease | None:
@@ -187,13 +188,32 @@ class HarborContinuationManager:
         lock = self._locks.setdefault(trial_id, asyncio.Lock())
         await lock.acquire()
         try:
+            # Mini-SWE's budget request retains function_call:null from the
+            # response DTO; LiteLLM omits it from generation requests. Both
+            # mean no legacy function call and must identify the same history.
+            body["messages"] = [
+                {key: value for key, value in message.items() if key != "function_call" or value is not None}
+                for message in body["messages"]
+            ]
             body.setdefault("session_id", trial_id)
-            state = self._states.get(trial_id)
-            if state is not None:
+            states = self._states.get(trial_id)
+            if states:
+                # A native agent can reject a response and retry without adding
+                # that assistant turn. Continue from its last surviving prefix.
+                messages = body["messages"]
+                state = next(
+                    (
+                        candidate
+                        for candidate in reversed(states)
+                        if len(messages) > len(candidate.messages)
+                        and messages[: len(candidate.messages)] == candidate.messages
+                        and messages[len(candidate.messages)].get("role") == "assistant"
+                        and _render_signature(body) == candidate.render_signature
+                    ),
+                    states[-1],
+                )
                 exact_prompt = await self._continue_prompt(state, request_payload)
-                if exact_prompt is None:
-                    self._states.pop(trial_id, None)
-                else:
+                if exact_prompt is not None:
                     body[EXACT_PROMPT_TOKEN_IDS_KEY] = exact_prompt
             return HarborContinuationLease(self, trial_id, deepcopy(body), lock)
         except BaseException:
@@ -260,22 +280,26 @@ class HarborContinuationManager:
         prompt_token_ids: list[int],
         completion_token_ids: list[int],
     ) -> None:
-        self._states[trial_id] = _ContinuationState(
-            messages=deepcopy(request_body["messages"]),
-            render_signature=_render_signature(request_body),
-            prompt_token_ids=list(prompt_token_ids),
-            completion_token_ids=list(completion_token_ids),
+        self._states.setdefault(trial_id, []).append(
+            _ContinuationState(
+                messages=deepcopy(request_body["messages"]),
+                render_signature=_render_signature(request_body),
+                prompt_token_ids=list(prompt_token_ids),
+                completion_token_ids=list(completion_token_ids),
+            )
         )
+        self._state_count += 1
         self._states.move_to_end(trial_id)
-        while len(self._states) > self._max_trials:
-            expired_trial, _ = self._states.popitem(last=False)
+        while self._state_count > self._max_states:
+            expired_trial, expired_states = self._states.popitem(last=False)
+            self._state_count -= len(expired_states)
             expired_lock = self._locks.get(expired_trial)
             if expired_lock is not None and not expired_lock.locked():
                 self._locks.pop(expired_trial, None)
 
     def discard(self, trial_id: str) -> None:
         """Forget a trial whose backend response disproved its requested prefix."""
-        self._states.pop(trial_id, None)
+        self._state_count -= len(self._states.pop(trial_id, []))
 
     def _forget_unused_lock(self, trial_id: str, lock: asyncio.Lock) -> None:
         if trial_id not in self._states and self._locks.get(trial_id) is lock:

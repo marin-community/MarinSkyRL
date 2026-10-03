@@ -90,6 +90,72 @@ class _ContinuationBackend:
         yield "data: [DONE]\n\n"
 
 
+class _MiniContinuationBackend(_ContinuationBackend):
+    async def tokenize(self, request):
+        tokens = []
+        for message in request["json"]["messages"]:
+            if message["role"] == "assistant":
+                tokens.extend([60, 61])
+                if message.get("content"):
+                    tokens.append(30)
+                tokens.append(77)
+            else:
+                tokens.extend([10, 20] if message["role"] == "user" else [40, 41])
+        if request["json"].get("add_generation_prompt", True):
+            tokens.extend([60, 61])
+        return {"tokens": tokens, "count": len(tokens), "max_model_len": 128}
+
+
+@pytest.mark.parametrize("discarded_response", [False, True])
+@pytest.mark.asyncio
+async def test_mini_budget_null_function_call_preserves_three_turn_sampled_prefix(discarded_response):
+    # Mini-SWE retains this null DTO field in budgets; LiteLLM drops it in generations.
+    first_prompt = [10, 20, 60, 61]
+    second_prompt = [*first_prompt, 99, 77, 40, 41, 60, 61]
+    retry_observation = [10, 20] if discarded_response else []
+    third_prompt = [*second_prompt, 100, 77, 40, 41, *retry_observation, 60, 61]
+    served_prompts = [first_prompt, second_prompt, third_prompt]
+    served_completions = [[99], [100], [101]]
+    if discarded_response:
+        served_prompts.insert(2, [*second_prompt, 100, 77, 40, 41, 60, 61])
+        served_completions.insert(2, [555])
+    backend = _MiniContinuationBackend(prompt_ids=served_prompts, completion_ids=served_completions)
+    set_global_state(backend, None)
+    app = create_app(backend=backend, enable_harbor_exact_continuation=True)
+    headers = {TRIAL_ID_HEADER: "mini-null-field", TASK_AGENT_HEADER: MINI_SWE_HARBOR_AGENT_NAME}
+    messages = [{"role": "user", "content": "run it"}]
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        for turn, expected_prompt in enumerate((first_prompt, second_prompt, third_prompt)):
+            if discarded_response and turn == 2:
+                rejected = await client.post(
+                    "/v1/chat/completions",
+                    headers=headers,
+                    json={"model": backend.model_name, "messages": messages, "tools": TOOLS},
+                )
+                assert rejected.json()["choices"][0]["token_ids"] == [555]
+                messages.append({"role": "user", "content": "No tool calls found in the response"})
+            budget = await client.post(
+                "/tokenize",
+                headers=headers,
+                json={"model": backend.model_name, "messages": messages, "tools": TOOLS, "add_generation_prompt": True},
+            )
+            assert budget.json()["tokens"] == expected_prompt
+            generation_messages = [
+                {key: value for key, value in message.items() if key != "function_call"} for message in messages
+            ]
+            response = await client.post(
+                "/v1/chat/completions",
+                headers=headers,
+                json={"model": backend.model_name, "messages": generation_messages, "tools": TOOLS},
+            )
+            assert response.status_code == 200
+            assert response.json()["prompt_token_ids"] == expected_prompt
+            messages.extend(
+                [{"role": "assistant", "content": "sampled", "function_call": None}, {"role": "tool", "content": "ok"}]
+            )
+    assert backend.chat_requests[-1]["json"][EXACT_PROMPT_TOKEN_IDS_KEY] == third_prompt
+
+
 @pytest.mark.parametrize("stream, native_tools", [(True, True), (False, False)])
 @pytest.mark.asyncio
 async def test_chat_continues_from_exact_served_ids_across_agent_turn(caplog, stream, native_tools):
