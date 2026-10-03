@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
 
+import numpy as np
+
 from skyrl_train.dynamic_sampling import DynamicSamplingType, GroupSelectionPolicy, GroupSelectionResult
 from skyrl_train.group_admission import (
     AdmissionRejection,
@@ -127,6 +129,50 @@ class GroupRewards:
 
 
 @dataclass(frozen=True)
+class RowFacts:
+    """Row scalars and field geometry carried with a committed group's verdict."""
+
+    prompt_len: np.ndarray
+    response_len: np.ndarray
+    score: np.ndarray
+    loss_tokens: np.ndarray
+    is_last_step: np.ndarray
+    exclude_from_baseline: np.ndarray
+    fields: tuple[str, ...]
+    route_geometry: tuple[int, int, np.dtype] | None
+    scalar_rewards: bool
+    stop_reasons: tuple[str | None, ...] | None
+
+    @classmethod
+    def from_batch(cls, batch: TrajectoryBatch) -> RowFacts:
+        responses = batch["response_ids"]
+        scalar_rewards = all(not isinstance(reward, list) for reward in batch["rewards"])
+        scores = [
+            np.sum(reward, dtype=np.float32) if isinstance(reward, list) else float(reward) if response else 0.0
+            for reward, response in zip(batch["rewards"], responses, strict=True)
+        ]
+        route_geometry = None
+        for row in batch.get("rollout_routed_experts") or ():
+            if row is not None and row.ndim == 3:
+                route_geometry = (*row.shape[1:], row.dtype)
+                break
+        return cls(
+            prompt_len=np.asarray([len(prompt) for prompt in batch["prompt_token_ids"]], dtype=np.int64),
+            response_len=np.asarray([len(response) for response in responses], dtype=np.int64),
+            score=np.asarray(scores, dtype=np.float32),
+            loss_tokens=np.asarray([sum(mask) for mask in batch["loss_masks"]], dtype=np.int64),
+            is_last_step=np.asarray(batch.get("is_last_step") or [True] * len(responses), dtype=bool),
+            exclude_from_baseline=np.asarray(
+                batch.get("exclude_from_baseline") or [False] * len(responses), dtype=bool
+            ),
+            fields=tuple(key for key, value in batch.items() if value is not None),
+            route_geometry=route_geometry,
+            scalar_rewards=scalar_rewards,
+            stop_reasons=tuple(batch["stop_reasons"]) if batch.get("stop_reasons") is not None else None,
+        )
+
+
+@dataclass(frozen=True)
 class RolloutVerdict:
     """What the buffer needs to know about a group's content to select it.
 
@@ -138,6 +184,7 @@ class RolloutVerdict:
     selection: GroupSelectionResult | None
     rewards: GroupRewards | None
     work: GeneratedWork
+    row_facts: RowFacts | None = None
 
     @property
     def trainable(self) -> bool:
@@ -162,7 +209,14 @@ class RolloutContentPolicy:
         work = GeneratedWork.from_batch(batch["response_ids"], batch.get("is_last_step"))
         if not decision.accepted:
             return RolloutVerdict(group.uid, decision.rejections, None, None, work)
-        return RolloutVerdict(group.uid, (), self.selection.evaluate(group), GroupRewards.from_batch(batch), work)
+        return RolloutVerdict(
+            group.uid,
+            (),
+            self.selection.evaluate(group),
+            GroupRewards.from_batch(batch),
+            work,
+            RowFacts.from_batch(batch),
+        )
 
 
 class RolloutWriter(Protocol):
@@ -231,6 +285,7 @@ class AdmittedRollout:
     policy_step: int
     sample_count: int
     response_tokens: int
+    row_facts: RowFacts | None = None
 
 
 @dataclass(frozen=True)
@@ -538,6 +593,7 @@ class RolloutBuffer:
                         policy_step=rollout.policy_step,
                         sample_count=rollout.verdict.work.sample_count,
                         response_tokens=rollout.verdict.work.generated_token_count,
+                        row_facts=rollout.verdict.row_facts,
                     )
                     for index, rollout in enumerate(
                         self._unreported, start=len(self._admitted[self._policy_step]) - len(self._unreported)
