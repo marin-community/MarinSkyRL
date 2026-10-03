@@ -2,7 +2,6 @@
 
 import asyncio
 from collections.abc import Callable, Mapping, Sequence
-from types import MappingProxyType
 
 from rolloutengine.contracts import RolloutData
 from taskcompendium.models import TaskSpec
@@ -13,7 +12,7 @@ from skyrl_train.rollouts.task_projections import rollout_loss_eligible
 from skyrl_train.utils.harbor_errors import ErrorHandlingConfig
 
 GroupGrader = Callable[[TaskSpec, GroupGraderSpec, Sequence[RolloutData], Sequence[bool], str], Sequence[RolloutData]]
-GROUP_GRADERS: Mapping[str, GroupGrader] = MappingProxyType({GENRM_GROUP_GRADER: grade_genrm_rollouts})
+GROUP_GRADERS: Mapping[str, GroupGrader] = {GENRM_GROUP_GRADER: grade_genrm_rollouts}
 
 
 async def grade_groups(

@@ -7,7 +7,7 @@ import pytest
 import ray
 from ray.util.queue import Queue
 
-from skyrl_train.config.trajectory_runner_capabilities import EntrypointOperation
+from skyrl_train.config.rollout_validation import EntrypointOperation
 from skyrl_train.entrypoints import ray_lifecycle, terminal_bench, terminal_bench_generate, taskcompendium
 from skyrl_train.entrypoints.main_base import EntrypointSupervisor, resolve_entrypoint_node_id, run_ray_driver
 from skyrl_train.config.utils import get_default_config
@@ -106,7 +106,7 @@ def test_driver_reports_remote_result_before_external_owner_exit(tmp_path, monke
     immediate_exit = Mock()
     monkeypatch.setenv("SKYRL_DEBUG_ARTIFACT_DIR", str(tmp_path))
     monkeypatch.setattr(trainer_utils, "initialize_ray", Mock())
-    monkeypatch.setattr(main_base, "validate_trajectory_runner_capabilities", Mock())
+    monkeypatch.setattr(main_base, "validate_rollout_launch", Mock())
     monkeypatch.setattr(main_base.EntrypointSupervisor, "wait", Mock(side_effect=remote_failure, return_value=None))
     monkeypatch.setattr(ray_lifecycle, "shutdown_ray", shutdown)
     monkeypatch.setattr(ray_lifecycle, "exit_without_ray_destructors", immediate_exit)

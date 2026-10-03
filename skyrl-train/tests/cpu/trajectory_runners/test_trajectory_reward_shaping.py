@@ -390,7 +390,7 @@ class _SharedShapingRunner(FixtureRunner):
         }
     }
 
-    async def _run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
+    async def _run(self, input_batch: TrajectoryRequestBatch) -> TrajectoryBatch:
         return _output([[1, 2]], [1.0], ["length"])
 
 

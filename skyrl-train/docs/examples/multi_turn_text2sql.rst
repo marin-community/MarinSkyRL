@@ -98,8 +98,6 @@ Now that we have our dataset and database files, let's walk through the some of 
         # generator.sampling_params.max_generate_length is the max length of the generated response for EACH turn
         generator.sampling_params.max_generate_length=3000 \
 
-        #### multi-turn generation format - see `skyrl_train/trajectory_runners/skyrl_gym.py` for more details
-        
         #### data configuration
         data.train_data="['$DATA_DIR/train.parquet']" \
         data.val_data="['$DATA_DIR/validation.parquet']" \

@@ -54,6 +54,7 @@ from skyrl_train.trajectory_runners.model_clients import (
 from skyrl_train.trajectory_runners.projections import (
     StepWiseTrajectoryProjection,
     WholeTrajectoryProjection,
+    logprobs_requested,
 )
 from skyrl_train.rollouts.task_projections import (
     StepTaskProjection,
@@ -212,6 +213,7 @@ class TaskRolloutWorker:
         self.model_client = model_client
         self.factories = factories
         self.command_timeout = command_timeout
+        self.chat_template_kwargs = dict(trajectory_runner_cfg.get("chat_template_kwargs", {}))
         self.harbor = harbor
         self.retry_wait = retry_wait
         self.group_graders = group_graders
@@ -254,6 +256,7 @@ class TaskRolloutWorker:
             self.trajectory_runner_cfg.backend, self.trajectory_runner_cfg.sampling_params
         )
         sampling.update(request.get("sampling_params") or {})
+        require_logprobs = logprobs_requested(request, self.trajectory_runner_cfg)
         context_limit = OmegaConf.select(self.trajectory_runner_cfg, "engine_init_kwargs.max_model_len")
         max_input_length = int(self.trajectory_runner_cfg.max_input_length)
         max_context_length = (
@@ -275,7 +278,7 @@ class TaskRolloutWorker:
                     sampling_params=sampling,
                     max_context_length=max_context_length,
                     max_prompt_length=max_input_length if context_limit is None else None,
-                    chat_template_kwargs=dict(self.trajectory_runner_cfg.get("chat_template_kwargs", {})),
+                    chat_template_kwargs=self.chat_template_kwargs,
                     session_id=session_id,
                 )
 
@@ -314,7 +317,7 @@ class TaskRolloutWorker:
                         interruption,
                         task,
                         self.error_handling if harbor is None else harbor.error_handling,
-                        logprobs_required=sampling.get("logprobs") is not None,
+                        logprobs_required=require_logprobs,
                     )
                 if harbor is None:
                     return result
@@ -345,7 +348,7 @@ class TaskRolloutWorker:
                     else self.error_handling
                     for task in tasks
                 ],
-                logprobs_required=sampling.get("logprobs") is not None,
+                logprobs_required=require_logprobs,
             )
             if self.harbor is not None:
                 rollouts = shape_harbor_rollouts(
@@ -358,7 +361,7 @@ class TaskRolloutWorker:
                 )
         return rollouts
 
-    async def run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
+    async def run(self, input_batch: TrajectoryRequestBatch) -> TrajectoryBatch:
         outputs = await self.generate(input_batch)
         return await self.training_batch(input_batch, outputs)
 
@@ -373,7 +376,7 @@ class TaskRolloutWorker:
         self.trajectory_sink = sink
 
     async def startup(self) -> None:
-        """Resources are scoped to each task and require no worker initialization."""
+        pass
 
     async def shutdown(self) -> None:
         """Release environment threads after all task sessions close."""
@@ -381,10 +384,10 @@ class TaskRolloutWorker:
             await asyncio.to_thread(self.environment_executor.shutdown, wait=True)
 
     async def start_eval_session(self, *, run_name: str, eval_step: int, val_set_name: str | None) -> None:
-        """Each evaluation task has its own session."""
+        pass
 
     async def stop_eval_session(self) -> None:
-        """Evaluation resources close with their tasks."""
+        pass
 
     async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> int:
         rollouts = await self.generate(task.request)

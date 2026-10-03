@@ -12,7 +12,7 @@ class EntrypointOperation(StrEnum):
     GENERATE = "generate"
 
 
-def validate_trajectory_runner_capabilities(
+def validate_rollout_launch(
     cfg: DictConfig,
     operation: EntrypointOperation = EntrypointOperation.TRAIN,
 ) -> None:

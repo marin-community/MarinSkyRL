@@ -65,7 +65,7 @@ def grade_genrm_rollouts(
     if judge_config is None:
         raise RuntimeError("GenRM tasks require a judge in the group-grader configuration")
     judge = OpenAIJudge(**judge_config)
-    expected_size = int(config.get("num_rollouts_per_prompt", 16))
+    expected_size = int(config["num_rollouts_per_prompt"])
     if len(rollouts) != expected_size:
         raise ValueError(f"GenRM cohort requires {expected_size} rollouts for a prompt, received {len(rollouts)}")
     indices = [

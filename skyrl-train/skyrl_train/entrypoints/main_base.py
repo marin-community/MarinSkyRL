@@ -24,11 +24,9 @@ import asyncio
 import multiprocessing as mp
 
 from skyrl_train.inference_engines.chat_template import get_custom_chat_template
-from skyrl_train.dataset.tasks import GymTaskDataset
-from skyrl_train.dataset.nemotron_ultra import NemotronTaskDataset
-from skyrl_train.config.trajectory_runner_capabilities import (
+from skyrl_train.config.rollout_validation import (
     EntrypointOperation,
-    validate_trajectory_runner_capabilities,
+    validate_rollout_launch,
 )
 from marinskyrl.speculative_decoding import (
     STANDARD_TRAINING_ENTRYPOINT,
@@ -349,6 +347,8 @@ class BasePPOExp:
         return prompts_dataset
 
     def task_dataset(self, data_files):
+        from skyrl_train.dataset.nemotron_ultra import NemotronTaskDataset  # noqa: PLC0415
+        from skyrl_train.dataset.tasks import GymTaskDataset  # noqa: PLC0415
         from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings  # noqa: PLC0415 - optional training dependencies
 
         terminal_data = list(self.cfg.data.get("terminal_bench_data", []))
@@ -665,7 +665,7 @@ def run_ray_driver(
     from skyrl_train.utils.progress import configure_progress  # noqa: PLC0415 - keep launcher imports Torch-free
     from skyrl_train.utils.utils import initialize_ray  # noqa: PLC0415
 
-    validate_trajectory_runner_capabilities(cfg, operation)
+    validate_rollout_launch(cfg, operation)
     if cfg.get("terminal_bench_config") is not None:
         HarborTaskSettings.from_config(cfg.terminal_bench_config)
     validate_cfg(cfg)

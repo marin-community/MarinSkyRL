@@ -8,18 +8,18 @@ from tempfile import TemporaryDirectory
 from typing import Any
 
 from datasets import Dataset
-import pyarrow.parquet as pq
-from rigging.filesystem.storage_path import StoragePath
 from transformers import PreTrainedTokenizerBase
 from taskcompendium.environment import ExternalVerifierSpec
 from taskcompendium.importers.skyrl import GYM_INTERACTION, gym_task
-from taskcompendium.models import AnswerType, Source, TaskSpec, VerifierKind
-from rolloutengine.parquet import PARQUET_BATCH_SIZE, write_tasks
-from rolloutengine.task_session import rollout_request
+from taskcompendium.models import Source, TaskSpec, VerifierKind
+from taskcompendium.parquet import write_tasks
+from rolloutengine.task_session import session_start
 from taskcompendium.submission import AnswerFormat, SubmissionConvention
 
 from skyrl_train.dataset.dataset import PromptDataset
 from skyrl_train.rollouts.group_grader import task_group_grader
+
+TASKCOMPENDIUM_ENVIRONMENT = "taskcompendium"
 
 
 def task_prompt(row: dict) -> dict:
@@ -29,18 +29,15 @@ def task_prompt(row: dict) -> dict:
         if task.verifier.kind == VerifierKind.EXTERNAL
         else None
     )
-    convention = SubmissionConvention(
-        id="rollout",
-        answer_format=AnswerFormat.FINAL_ACTION if task.answer_type == AnswerType.NATIVE_ACTION else AnswerFormat.PLAIN,
-    )
+    convention = SubmissionConvention(id="rollout", answer_format=AnswerFormat.PLAIN)
     result = {
         **(
             verifier.parameters["extras"]
             if verifier is not None and task.environment.interaction == GYM_INTERACTION
             else task.metadata.get("skyrl_extras", {})
         ),
-        "prompt": rollout_request(task, convention).messages,
-        "env_class": verifier.name if verifier is not None else "taskcompendium",
+        "prompt": session_start(task, convention).messages,
+        "env_class": verifier.name if verifier is not None else TASKCOMPENDIUM_ENVIRONMENT,
         "data_source": task.source.dataset,
         "group_grader": (
             specification.model_dump_json() if (specification := task_group_grader(task)) is not None else None
@@ -56,14 +53,6 @@ class TaskDataset(PromptDataset):
 
     def prepare_dataset(self, dataset):
         return dataset.map(task_prompt, num_proc=self.num_workers)
-
-
-def materialize_gym_tasks(
-    dataset: Dataset, *, source_name: str, environment_configs: Mapping[str, dict], cache_dir: Path
-) -> Path:
-    """Write source rows as immutable task Parquet before rollout execution."""
-
-    return cache_tasks(gym_tasks(dataset, source_name=source_name, environment_configs=environment_configs), cache_dir)
 
 
 def gym_tasks(dataset: Dataset, *, source_name: str, environment_configs: Mapping[str, dict]) -> Iterator[TaskSpec]:
@@ -88,28 +77,6 @@ def _gym_task(row: dict[str, Any], environment_configs: Mapping[str, dict], sour
     environment = row.pop("env_class")
     assert isinstance(environment, str)
     return gym_task(prompt, environment, row, environment_configs.get(environment, {}), source)
-
-
-def read_gym_tasks(
-    path: str,
-    *,
-    dataset: str,
-    revision: str,
-    environment_configs: Mapping[str, dict[str, object]],
-) -> Iterator[TaskSpec]:
-    """Convert source rows in bounded batches with explicit provenance."""
-    with StoragePath(path).open("rb") as source:
-        parquet = pq.ParquetFile(source)
-        index = 0
-        for batch in parquet.iter_batches(batch_size=PARQUET_BATCH_SIZE):
-            for source_row in batch.to_pylist():
-                row = dict(source_row)
-                yield _gym_task(
-                    row,
-                    environment_configs,
-                    Source(dataset=dataset, revision=revision, row=str(index), importer_revision="1"),
-                )
-                index += 1
 
 
 def cache_tasks(tasks: Iterator[TaskSpec], cache_dir: Path) -> Path:
@@ -143,11 +110,13 @@ class GymTaskDataset(TaskDataset):
         self.cache_dir = cache_dir.expanduser()
         super().__init__(list(datasets), tokenizer, max_prompt_length, num_workers=num_workers)
 
-    def prepare_dataset(self, dataset: Dataset) -> Dataset:
-        self.task_path = materialize_gym_tasks(
+    def _tasks(self, dataset: Dataset) -> Iterator[TaskSpec]:
+        return gym_tasks(
             dataset,
             source_name=", ".join(self.datasets),
             environment_configs=self.environment_configs,
-            cache_dir=self.cache_dir,
         )
+
+    def prepare_dataset(self, dataset: Dataset) -> Dataset:
+        self.task_path = cache_tasks(self._tasks(dataset), self.cache_dir)
         return super().prepare_dataset(Dataset.from_parquet(str(self.task_path)))
