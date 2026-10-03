@@ -82,6 +82,7 @@ def run_capture(output: str, run_id: str) -> int:
 
 
 def check_artifacts(output: str, run_id: str) -> dict:
+    """Return the retained identity, manifest and matching stderr path as JSON-ready data."""
     filesystem, root = fs_and_path(output)
     (manifest_path,) = filesystem.glob(f"{root}/rendezvous/debug_artifacts/*/sync-manifest.json")
     manifest = json.loads(filesystem.cat(manifest_path))

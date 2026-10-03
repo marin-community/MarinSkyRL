@@ -63,7 +63,8 @@ It substitutes the driver command in the existing Iris `run_head`; that runtime 
 and Ray shutdown. The tool projects the debug root through `EnvVarManager`. The normal RL launcher already does this.
 
 From a clean checkout with the root CPU launcher environment and Iris/CoreWeave access configured, check capacity
-and submit one Interactive dev node. Use a unique run ID and output prefix, a 15-minute queue deadline, and no retries:
+and submit one Interactive dev node with a unique run ID and output prefix. Cancel only this job if still queued
+after 15 minutes; retries default to zero:
 
 ```bash
 RUN=hero-worker-abort-$(date -u +%Y%m%dT%H%M%SZ)
