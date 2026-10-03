@@ -5,7 +5,7 @@ from skyrl_train.config.trajectory_runner_capabilities import (
     SUPPORTED_OPENCODE_LITERAL_VERSION,
     EntrypointOperation,
     TrajectoryRunnerMode,
-    opencode_exact_continuation_enabled,
+    harbor_exact_continuation_enabled,
     validate_trajectory_runner_capabilities,
 )
 from skyrl_train.trajectory_runners.harbor.configuration import HarborConfigBuilder
@@ -74,7 +74,7 @@ def test_harbor_panel_validates_each_harness_before_training():
         {"name": "opencode", "version": SUPPORTED_OPENCODE_LITERAL_VERSION, "collect_rollout_details": True},
     ]
     validate_trajectory_runner_capabilities(cfg, HARBOR)
-    assert opencode_exact_continuation_enabled(cfg)
+    assert harbor_exact_continuation_enabled(cfg)
     assert HarborConfigBuilder(cfg.terminal_bench_config).get_collect_rollout_details()
 
     cfg.terminal_bench_config.harbor.agent_profiles.append({"name": "codex"})

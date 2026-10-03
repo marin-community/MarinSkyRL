@@ -1,4 +1,4 @@
-"""Exact token continuation for OpenCode requests at the terminal-bench bridge."""
+"""Exact token continuation for Harbor chat requests at the serving bridge."""
 
 import asyncio
 import json
@@ -9,6 +9,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
+from marinskyrl.harbor_agent_names import MINI_SWE_HARBOR_AGENT_NAME
 from skyrl_train.inference_engines.chat_continuation import (
     CHAT_TOKENIZE_FIELDS,
     EXACT_PROMPT_TOKEN_IDS_KEY,
@@ -21,7 +22,6 @@ logger = logging.getLogger(__name__)
 
 TRIAL_ID_HEADER = "x-ot-trial-id"
 TASK_AGENT_HEADER = "x-ot-task-agent"
-MINI_SWE_TASK_AGENT = "mini-swe-agent"
 _RENDER_SIGNATURE_FIELDS = CHAT_TOKENIZE_FIELDS - {"messages", "add_generation_prompt", "continue_final_message"}
 
 
@@ -61,12 +61,12 @@ def _render_signature(body: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-class OpenCodeContinuationLease:
-    """One serialized OpenCode request whose stream will establish the next state."""
+class HarborContinuationLease:
+    """One serialized agent request whose response establishes the next token prefix."""
 
     def __init__(
         self,
-        manager: "OpenCodeContinuationManager",
+        manager: "HarborContinuationManager",
         trial_id: str,
         request_body: dict[str, Any],
         lock: asyncio.Lock,
@@ -159,7 +159,7 @@ class OpenCodeContinuationLease:
                 self.release()
 
 
-class OpenCodeContinuationManager:
+class HarborContinuationManager:
     """Maintain exact served-token prefixes independently for concurrent trials."""
 
     def __init__(self, backend: InferenceHTTPBackend, *, max_trials: int = 4096) -> None:
@@ -168,7 +168,7 @@ class OpenCodeContinuationManager:
         self._states: OrderedDict[str, _ContinuationState] = OrderedDict()
         self._locks: dict[str, asyncio.Lock] = {}
 
-    async def begin(self, request_payload: dict[str, Any]) -> OpenCodeContinuationLease | None:
+    async def begin(self, request_payload: dict[str, Any]) -> HarborContinuationLease | None:
         """Acquire a trial lease, or return ``None`` for an unmarked request."""
         headers = request_payload.get("headers", {})
         trial_id = headers.get(TRIAL_ID_HEADER)
@@ -180,7 +180,7 @@ class OpenCodeContinuationManager:
             # OpenCode's title and compaction agents share the trial header but call
             # the model with no tools. They are auxiliary generations, not turns in
             # the task agent's causal action chain, and must not replace its state.
-            or (not body.get("tools") and headers.get(TASK_AGENT_HEADER) != MINI_SWE_TASK_AGENT)
+            or (not body.get("tools") and headers.get(TASK_AGENT_HEADER) != MINI_SWE_HARBOR_AGENT_NAME)
         ):
             return None
 
@@ -195,7 +195,7 @@ class OpenCodeContinuationManager:
                     self._states.pop(trial_id, None)
                 else:
                     body[EXACT_PROMPT_TOKEN_IDS_KEY] = exact_prompt
-            return OpenCodeContinuationLease(self, trial_id, deepcopy(body), lock)
+            return HarborContinuationLease(self, trial_id, deepcopy(body), lock)
         except BaseException:
             lock.release()
             raise

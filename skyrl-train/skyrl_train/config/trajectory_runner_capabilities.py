@@ -12,6 +12,7 @@ from skyrl_train.config.objective_spec import LossSpec, rollout_logprobs_require
 
 from marinskyrl.harbor_agent_names import (
     DEFAULT_HARBOR_AGENT_NAME,
+    MINI_SWE_HARBOR_AGENT_NAME,
     OPENCODE_HARBOR_AGENT_NAME,
     PI_HARBOR_AGENT_NAME,
     TERMINUS_KIRA_HARBOR_AGENT_NAME,
@@ -98,23 +99,24 @@ def _terminal_bench_harbor_config(cfg: DictConfig) -> DictConfig | None:
     return terminal_bench.get("harbor") if terminal_bench is not None else None
 
 
-def opencode_exact_continuation_enabled(cfg: DictConfig) -> bool:
-    """Whether this launch needs the terminal-bench OpenCode continuation bridge."""
+def harbor_exact_continuation_enabled(cfg: DictConfig) -> bool:
+    """Whether this launch needs exact continuation for a captured Harbor chat agent."""
     harbor = _terminal_bench_harbor_config(cfg)
     if harbor is None:
         return False
     agent_name = str(harbor.get("name", DEFAULT_HARBOR_AGENT_NAME)).strip().lower().replace("_", "-")
     profiles = configured_harbor_profiles(harbor)
-    uses_opencode = (
+    exact_chat_agents = {OPENCODE_HARBOR_AGENT_NAME, MINI_SWE_HARBOR_AGENT_NAME}
+    uses_exact_chat = (
         any(
-            profile.name == OPENCODE_HARBOR_AGENT_NAME
+            profile.name in exact_chat_agents
             and profile.settings.get("collect_rollout_details", harbor.get("collect_rollout_details", False))
             for profile in profiles
         )
         if profiles
-        else agent_name == OPENCODE_HARBOR_AGENT_NAME and harbor.get("collect_rollout_details", False)
+        else agent_name in exact_chat_agents and harbor.get("collect_rollout_details", False)
     )
-    return bool(str(cfg.get("generator", {}).get("backend", "")) == "vllm" and uses_opencode)
+    return bool(str(cfg.get("generator", {}).get("backend", "")) == "vllm" and uses_exact_chat)
 
 
 def _harbor_capabilities(cfg: DictConfig) -> TrajectoryRunnerCapabilities:

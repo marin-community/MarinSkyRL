@@ -4,13 +4,13 @@ import logging
 
 import httpx
 import pytest
+from marinskyrl.harbor_agent_names import MINI_SWE_HARBOR_AGENT_NAME
 from skyrl_train.inference_engines.inference_engine_client_http_endpoint import create_app, set_global_state
-from skyrl_train.inference_engines.opencode_continuation import (
+from skyrl_train.inference_engines.harbor_continuation import (
     EXACT_PROMPT_TOKEN_IDS_KEY,
     TRIAL_ID_HEADER,
     TASK_AGENT_HEADER,
-    MINI_SWE_TASK_AGENT,
-    OpenCodeContinuationManager,
+    HarborContinuationManager,
 )
 
 TOOLS = [{"type": "function", "function": {"name": "bash", "parameters": {"type": "object"}}}]
@@ -96,11 +96,11 @@ async def test_chat_continues_from_exact_served_ids_across_agent_turn(caplog, st
     caplog.set_level(logging.INFO)
     backend = _ContinuationBackend()
     set_global_state(backend, None)
-    app = create_app(backend=backend, enable_opencode_exact_continuation=True)
+    app = create_app(backend=backend, enable_harbor_exact_continuation=True)
     headers = {TRIAL_ID_HEADER: "trial-a"}
     agent_fields = {"tools": TOOLS} if native_tools else {}
     if not native_tools:
-        headers[TASK_AGENT_HEADER] = MINI_SWE_TASK_AGENT
+        headers[TASK_AGENT_HEADER] = MINI_SWE_HARBOR_AGENT_NAME
     first_messages = [{"role": "user", "content": "run it"}]
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
@@ -164,7 +164,7 @@ async def test_chat_continues_from_exact_served_ids_across_agent_turn(caplog, st
 async def test_opencode_compaction_restarts_exact_continuation_segment():
     backend = _ContinuationBackend()
     set_global_state(backend, None)
-    app = create_app(backend=backend, enable_opencode_exact_continuation=True)
+    app = create_app(backend=backend, enable_harbor_exact_continuation=True)
     headers = {TRIAL_ID_HEADER: "trial-compacted"}
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
@@ -196,7 +196,7 @@ async def test_opencode_compaction_restarts_exact_continuation_segment():
 async def test_exact_continuation_is_scoped_to_marked_requests():
     backend = _ContinuationBackend()
     set_global_state(backend, None)
-    app = create_app(backend=backend, enable_opencode_exact_continuation=True)
+    app = create_app(backend=backend, enable_harbor_exact_continuation=True)
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         await client.post(
@@ -215,7 +215,7 @@ async def test_concurrent_trial_histories_remain_isolated():
         completion_ids=[[91], [92], [93], [94]],
     )
     set_global_state(backend, None)
-    app = create_app(backend=backend, enable_opencode_exact_continuation=True)
+    app = create_app(backend=backend, enable_harbor_exact_continuation=True)
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         for trial, initial in (("trial-a", "alpha"), ("trial-b", "beta")):
@@ -252,7 +252,7 @@ async def test_concurrent_trial_histories_remain_isolated():
 @pytest.mark.asyncio
 async def test_cancelled_stream_releases_trial_for_timeout_retry():
     backend = _ContinuationBackend()
-    manager = OpenCodeContinuationManager(backend)
+    manager = HarborContinuationManager(backend)
     payload = {
         "headers": {TRIAL_ID_HEADER: "trial-timeout"},
         "json": {
@@ -291,7 +291,7 @@ async def test_auxiliary_generation_does_not_replace_agent_continuation_state():
         completion_ids=[[99], [9], [100]],
     )
     set_global_state(backend, None)
-    app = create_app(backend=backend, enable_opencode_exact_continuation=True)
+    app = create_app(backend=backend, enable_harbor_exact_continuation=True)
     headers = {TRIAL_ID_HEADER: "trial-with-title"}
     first_messages = [{"role": "user", "content": "run it"}]
 
@@ -332,9 +332,9 @@ async def test_auxiliary_generation_does_not_replace_agent_continuation_state():
 @pytest.mark.asyncio
 async def test_cancelled_nonstream_response_releases_trial_for_retry():
     backend = _ContinuationBackend()
-    manager = OpenCodeContinuationManager(backend)
+    manager = HarborContinuationManager(backend)
     payload = {
-        "headers": {TRIAL_ID_HEADER: "trial-nonstream", TASK_AGENT_HEADER: MINI_SWE_TASK_AGENT},
+        "headers": {TRIAL_ID_HEADER: "trial-nonstream", TASK_AGENT_HEADER: MINI_SWE_HARBOR_AGENT_NAME},
         "json": {"model": backend.model_name, "messages": [{"role": "user", "content": "run bash"}]},
     }
     lease = await manager.begin(payload)
