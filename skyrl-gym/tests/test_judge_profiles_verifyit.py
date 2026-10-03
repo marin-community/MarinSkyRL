@@ -24,6 +24,8 @@ def server():
             request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             owner.requests.append(request)
             text = owner.by_prompt.get(request["messages"][-1]["content"], owner.reply)
+            budget = request.get("max_completion_tokens", request.get("max_tokens"))
+            complete = owner.complete_at is None or budget >= owner.complete_at
             response = {
                 "id": "source-judge",
                 "object": "chat.completion",
@@ -32,7 +34,7 @@ def server():
                 "choices": [
                     {
                         "index": 0,
-                        "finish_reason": "stop",
+                        "finish_reason": "stop" if complete else "length",
                         "message": {"role": "assistant", "content": text},
                     }
                 ],
@@ -49,6 +51,7 @@ def server():
 
     owner = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     owner.requests, owner.by_prompt, owner.reply = [], {}, "A"
+    owner.complete_at = None
     thread = threading.Thread(target=owner.serve_forever, daemon=True)
     thread.start()
     judge = OpenAIJudge(
@@ -61,6 +64,31 @@ def server():
     owner.shutdown()
     owner.server_close()
     thread.join()
+
+
+@pytest.mark.parametrize("verifyit_enabled", [False, True])
+@pytest.mark.asyncio
+async def test_profile_judge_recovers_from_8192_token_truncation(
+    server, nemotron_session, model_turn, verifyit_enabled
+):
+    owner, judge = server
+    owner.complete_at = 16384
+    owner.reply = "C"
+    session = await nemotron_session(
+        "abstention_simple_agent",
+        {"question": "What is two plus two?", "answer": "4"},
+        {
+            "verifyit_enabled": verifyit_enabled,
+            "judges": {"general": {"base_url": judge.base_url, "model": judge.model, "api_key": "test"}},
+        },
+    )
+    result = await session.advance(model_turn("An uncertain answer."))
+    assert result.done
+    assert result.reward == result.grade.reward == 0.5
+    assert {request.get("max_completion_tokens", request.get("max_tokens")) for request in owner.requests} == {
+        8192,
+        16384,
+    }
 
 
 @pytest.mark.parametrize("reply,score", [("Assistant assessed Answer.\nA", 1.0), ("B", 0.0), ("C", 0.5)])
