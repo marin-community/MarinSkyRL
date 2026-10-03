@@ -515,31 +515,9 @@ async def test_draft_refresh_retains_per_engine_exceptions() -> None:
     assert [engine.calls for engine in engines] == [[weights_path], [weights_path]]
 
 
-@pytest.mark.parametrize(
-    ("entrypoint", "agent_name", "collect_rollout_details", "backend", "expected"),
-    [
-        ("terminal_bench", "opencode", True, "vllm", True),
-        ("terminal_bench", "opencode", False, "vllm", False),
-        ("terminal_bench", "terminus-2", True, "vllm", False),
-        ("terminal_bench", "opencode", True, "sglang", False),
-        ("gsm8k", "opencode", True, "vllm", False),
-    ],
-)
-def test_exact_opencode_continuation_is_terminal_bench_scoped(
-    entrypoint, agent_name, collect_rollout_details, backend, expected
-):
-    configured = _make_min_cfg()
-    configured.entrypoint = entrypoint
-    configured.generator.backend = backend
-    configured.terminal_bench = {"harbor": {"name": agent_name, "collect_rollout_details": collect_rollout_details}}
-
-    client = InferenceEngineClient(engines=[], tokenizer=object(), full_config=configured)
-
-    assert client.enable_opencode_exact_continuation is expected
-
-
 @pytest.mark.asyncio
-async def test_chat_completion_retry_accumulates_and_sends_continuations():
+@pytest.mark.parametrize("exact_prompt", [None, [1, 2, 3, 4, 5]])
+async def test_chat_completion_retry_accumulates_and_sends_continuations(exact_prompt):
     """
     First response aborts with tokens; second aborts with 0 tokens (ignored);
     third finishes. Assert:
@@ -645,6 +623,8 @@ async def test_chat_completion_retry_accumulates_and_sends_continuations():
         },
         "headers": {"Content-Type": "application/json"},
     }
+    if exact_prompt is not None:
+        original["json"]["_skyrl_exact_prompt_token_ids"] = exact_prompt
 
     out = await client.chat_completion(original)
 
@@ -664,6 +644,8 @@ async def test_chat_completion_retry_accumulates_and_sends_continuations():
 
     # Second/third calls should be continuation requests
     for call in (second_call, third_call):
+        if exact_prompt is not None:
+            assert call["json"]["_skyrl_exact_prompt_token_ids"] == [1, 2, 3, 4, 5, 11]
         assert call["headers"] == original["headers"]
         # Flags
         assert call["json"].get("continue_final_message") is True

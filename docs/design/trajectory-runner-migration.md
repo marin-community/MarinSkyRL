@@ -1,5 +1,9 @@
 # Trajectory runner migration
 
+This document records the earlier trajectory-runner migration. The TaskCompendium
+rollout engine supersedes its Gym, MiniSWE, and Harbor execution paths. See the
+[current rollout guide](../../skyrl-train/docs/tutorials/skyrl_gym_runner.rst).
+
 ## Decision
 
 Replace the trainer-facing generator interface with a trajectory-runner interface. A trajectory runner owns the

@@ -29,7 +29,6 @@ async def test_generator_multi_turn_text2sql():
             env_class="text2sql",
             num_prompts=2,
             max_turns=6,
-            use_conversation_multi_turn=False,
         )
     finally:
         ray.shutdown()

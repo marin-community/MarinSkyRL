@@ -13,7 +13,7 @@ from skyrl_train.entrypoints.main_base import (
 )
 from skyrl_train.entrypoints.terminal_bench import TerminalBenchExp
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl_train.config.trajectory_runner_capabilities import EntrypointOperation, TrajectoryRunnerMode
+from skyrl_train.config.trajectory_runner_capabilities import EntrypointOperation
 from skyrl_train.trajectory_runners.trajectory_processing import prepare_trajectory_request
 
 
@@ -23,7 +23,7 @@ class TerminalBenchGenerateExp(TerminalBenchExp):
         trajectory_runner = self.get_trajectory_runner(self.cfg, self.tokenizer, inference_engine_client)
 
         input_batch, _ = prepare_trajectory_request(
-            list(self.train_dataset),
+            self.train_dataset.collate_fn(list(self.train_dataset)),
             self.cfg.generator.n_samples_per_prompt,
             get_sampling_params_for_backend(self.cfg.generator.backend, self.cfg.generator.sampling_params),
             self.cfg.environment.env_class,
@@ -57,7 +57,6 @@ def run(cfg: DictConfig) -> None:
     run_ray_driver(
         cfg,
         skyrl_entrypoint,
-        TrajectoryRunnerMode.HARBOR,
         operation=EntrypointOperation.GENERATE,
         failure_message="Generation failed",
     )

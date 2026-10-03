@@ -82,16 +82,8 @@ if [[ "$profile" == *-export ]]; then
 fi
 "$python" - <<'PY'
 import memray
-from daytona import Daytona, DaytonaConfig
-from harbor.literal.rollout_build import build_rollout_details_from_pairs
-from harbor.models.agent.context import AgentContext
-from harbor.models.environment_type import EnvironmentType
-from harbor.models.job.config import RetryConfig
-from harbor.models.trial.config import AgentConfig, EnvironmentConfig, TaskConfig, TrialConfig, VerifierConfig
-from harbor.models.trial.result import TrialResult
-from harbor.trial.hooks import TrialEvent, TrialHookEvent
-from harbor.trial.queue import TrialQueue
-from harbor.utils.logger import logger
-from harbor.utils.traces_utils import normalize_message
+from shellbox.backends.daytona.machine import DaytonaMachineFactory
+from shellbox.backends.shellsim.machine import ShellSimMachineFactory
+from rolloutengine.engine import ShellboxRolloutEngine
 PY
 "$python" -c "import quack.activation, torch, vllm; import vllm._C_stable_libtorch, vllm.cumem_allocator; from skyrl_train.models.grug_moe import GRUG_MOE_ARCHITECTURE; from vllm.model_executor.models import ModelRegistry; assert GRUG_MOE_ARCHITECTURE in ModelRegistry.get_supported_archs(); print('[rl-iris] frozen runtime ready:', torch.__version__, vllm.__version__)"

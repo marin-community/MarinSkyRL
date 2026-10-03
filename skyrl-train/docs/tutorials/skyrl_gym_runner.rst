@@ -1,205 +1,88 @@
-SkyRLGymTrajectoryRunner: Multi-turn Tokenization and Token-in-Token-out
-=================================================================
+Canonical task rollouts
+=======================
 
-Last updated: 2025-10-08
+Marin defines ``ShellboxRolloutEngine`` in
+``lib/rolloutengine/src/rolloutengine/engine.py``.
+SkyRL uses that engine through ``TaskRolloutWorker`` in
+``skyrl_train/rollouts/task_worker.py``.
 
-This document explains how ``SkyRLGymTrajectoryRunner`` manages the chat history and tokens for both
-single-turn and multi-turn rollouts, and how token-in-token-out (TI/TO) is enforced.
+``ShellboxRolloutEngine.run`` asynchronously executes one task. The worker
+starts one coroutine for each task, and inference runs on the worker's event
+loop. Blocking Gym environment operations use a separate executor.
+``trajectory_runner.max_concurrent_tasks`` limits active task coroutines.
+If that setting is absent, the concurrency limit uses
+``trajectory_runner.rollout_workers.executor_threads``.
 
-Overview
---------
+Task and environment operations
+-------------------------------
 
-``SkyRLGymTrajectoryRunner`` is an implementation of the ``TrajectoryRunner``, where we use SkyRL Gym for
-the environment of the rollouts. If you would like to use other environments, you can write your
-own trajectory runner by extending ``TrajectoryRunner``.
+A task Parquet file contains one serialized ``TaskSpec`` per row in the
+``task_spec`` column. A task declares its public conversation, executable
+environment, and private grading inputs.
 
-A ``SkyRLGymTrajectoryRunner`` uses an ``InferenceEngineClient`` like an LLM endpoint to generate response,
-ultimately returning ``TrajectoryBatch`` (including ``response_ids`` and ``loss_masks``) to
-the training loop for updating the model.
+The default SkyRL entrypoint converts Gym source rows to this format through
+``GymTaskDataset``. It writes reusable files in ``data.task_cache_dir``.
+``skyrl_train.entrypoints.taskcompendium`` reads task Parquet directly.
+The SWE examples use this entrypoint. The Harbor entrypoint converts task
+directories and packed sources through ``HarborTaskDataset`` and uses the same worker.
+With ``data.terminal_bench_data``, the default entrypoint prepares mixed Nemotron
+rows through ``NemotronTaskDataset``. Terminal rows contain the complete executable
+task. The worker does not require the original task directories.
+Harbor settings apply only to Harbor tasks. Gym tasks retain their own turn limits
+and error policies. Whole-trajectory and per-step output preserve task order,
+teacher routes, and source labels.
 
-``SkyRLGymTrajectoryRunner`` is implemented to enforce token-in-token-out (TI/TO) in most cases. To see
-what TI/TO is and why it is important, please refer to `issue #123 <https://github.com/NovaSky-AI/SkyRL/issues/123>`_.
+``GymTaskSession`` creates the environment, calls ``init`` and ``step``, grades
+the result, and closes its resources. It does not call the model.
+The canonical engine owns the inference loop for single-turn and multi-turn tasks.
+It also owns conversation and token accumulation. Each session returns its
+initial messages and model options in a typed ``SessionStart`` record.
+New task sessions implement environment operations without another rollout loop.
 
-To implement ``TrajectoryRunner.run()``, ``SkyRLGymTrajectoryRunner`` runs ``agent_loop()`` for every
-trajectory, whether the environment takes a single turn or many.
+Exact tokens
+------------
 
-Agent loop
-----------
+The model adapter uses the backend chat template and returns exact prompt and
+response tokens. Each continuation retains all previously served tokens.
+For example, prompt tokens ``[1, 2]`` and response tokens ``[3, 4]`` require the
+next prompt to start with ``[1, 2, 3, 4]``.
 
-``SkyRLGymTrajectoryRunner.agent_loop()`` lets the model interact with the environment for up to
-``generator.max_turns`` turns. We pass a single prompt to each invocation of the underlying
-LLM engine's ``.generate()`` method.
+The engine gives model tokens a loss mask of ``1``. It gives observation and
+chat-boundary tokens a mask of ``0`` and a log probability of ``0``.
+It does not reconstruct sampled responses from text or add sampled EOS tokens.
+An environment cannot replace the sampled action with different text.
+Token-contract violations abort the prompt group.
 
-There are three distinct codepaths in ``agent_loop()``, each managing the chat history and tokens
-differently. The codepaths are determined by:
+``generator.max_turns`` limits environment transitions.
+``generator.engine_init_kwargs.max_model_len`` sets the model context limit when
+configured. Each response fits the space after the exact rendered prompt.
+Without that setting, ``generator.max_input_length`` limits each prompt.
+A context-limit stop retains completed turns. An overlong initial prompt has no
+response or grade and does not enter loss or baseline calculations.
 
-- Config's ``generator.use_conversation_multi_turn``: If ``False``, all turns' observations and assistant
-  generations are stored in the same assistant message. If ``True``, each observation from the
-  environment's ``step()`` is a message.
-- Config's ``generator.chat_template``: Optional custom chat template (primarily for Qwen3 thinking-token handling).
+Training data and failures
+--------------------------
 
-The three codepaths are:
+``WholeTaskProjection`` emits one row per rollout. ``StepTaskProjection`` emits
+one row per retained model turn. Select step projection with
+``trainer.step_wise_training=true``. The two projections preserve exact tokens,
+behavior log probabilities, token rewards, expert routes, and teacher routes.
 
-1) (Default) Multi-turn conversation, strictly appending tokens
+Verifier scores remain separate from optimization rewards. A missing or failed
+verifier excludes the rollout from loss and baseline calculations. Explicitly
+skipped grading retains trainable tokens with zero reward.
+GenRM comparison grading completes before the worker emits a rollout group.
 
-   - Enabled when ``use_conversation_multi_turn == True`` and ``generator.chat_template`` is not defined.
-   - These are the default values for these configs, so this is the default codepath.
-   - Each observation is a turn of message following the model's chat template, appending
-     LLM-generated response and observations as raw tokens to maintain TI/TO, but requires the
-     fixed-base approach to ensure the raw tokens follow the model's chat template correctly
-     (see :ref:`multi-turn-tokenization-and-ti-to`).
-   - TI/TO: enforced.
-   - Example with Qwen2.5 chat template:
+``generator.error_handling`` controls mask, zero-reward, and pass-through
+policies. Timeout recovery retains only completed, verified Gym turns.
+It requires behavior log probabilities when the request requires them.
+``preserve_logprobs_on_timeout=false`` disables timeout recovery.
 
-.. code-block:: python
+``TaskRolloutWorker.run_task`` projects and finalizes a completed prompt group before one
+buffer write. A failed group cannot commit partial results.
+``environment.skyrl_gym.max_env_workers`` limits environment threads per worker.
+Cancellation waits for active environment operations before resource cleanup.
+The worker returns after the buffer commit.
 
-  <|im_start|>system
-  System prompt here<|im_end|>
-  <|im_start|>user
-  Question here<|im_end|>
-  <|im_start|>assistant
-  Response1<|im_end|>
-  <|im_start|>user
-  Observation1<|im_end|>
-  <|im_start|>assistant
-  Response2<|im_end|>
-  <|im_start|>user
-  Observation2<|im_end|>
-  ...
-
-2) Single assistant message for all turns, strictly appending tokens
-
-   - Enabled when ``use_conversation_multi_turn == False``.
-   - Keep an entire multi-step interaction inside a single assistant message, appending
-     LLM-generated response and observations as raw tokens to maintain TI/TO.
-   - TI/TO: enforced.
-   - Example with Qwen2.5 chat template:
-
-.. code-block:: python
-
-  <|im_start|>system
-  System prompt here<|im_end|>
-  <|im_start|>user
-  Question here<|im_end|>
-  <|im_start|>assistant
-  Response1
-  <observation>Observation1</observation>
-  Response2
-  <observation>Observation2</observation>
-  ...<|im_end|>
-
-3) Always re-tokenize full chat history (no TI/TO)
-
-   - Enabled when ``use_conversation_multi_turn == True`` and a ``generator.chat_template`` is defined.
-   - Mainly to serve models like Qwen3 that require special handling (e.g., strip non-last-turn thinking
-     tokens). We can also get ``[assistant_masks]`` and ``[input_ids]`` from the final tokenized chat
-     history with the help of ``{% generation %}`` and ``{% endgeneration %}`` tags in the jinja template.
-   - Chat history is maintained as string messages and re-tokenized every turn and
-     at the end to obtain ``assistant_masks`` and final ``response_ids``.
-   - TI/TO: NOT enforced
-
-.. note::
-
-  Qwen3's official chat template strips earlier-turn thinking tokens.
-  
-  With code path 1 (the default, no custom chat template), we never retokenize the chat history, so
-  earlier-turn thinking tokens remain in the strictly appended token sequence for each turn's
-  inference. When passing the token sequence to the training pipeline, all turns' thinking tokens
-  are kept as well.
-
-  Alternatively, with code path 3 (set ``generator.chat_template`` as below), we retokenize each
-  turn and the template strips earlier-turn thinking tokens, keeping only the last turn's thinking
-  tokens in both inference and training.
-
-  .. code-block:: yaml
-
-    chat_template:
-      source: "name"
-      name_or_path: "qwen3_without_thinking"
-
-  It remains an open question which is best for training Qwen3. We will soon add a custom attention mask
-  to match the official chat template's inference behavior (stripping thinking tokens),
-  while preserving on-policy training by masking the previous turns' thinking tokens during training.
-
-
-.. _multi-turn-tokenization-and-ti-to:
-
-Multi-turn Tokenization and TI/TO
----------------------------------
-
-In this section, we elaborate how TI/TO is enforced in the multi-turn generation, specifically
-for the first codepath. TI/TO for the second codepath is simple since we keep appending the
-generated tokens to the same message and hence do not need to worry about the chat templating
-between messages. The third codepath does not enforce TI/TO.
-
-In codepath 1, the agent loop does the following:
-  1. Tokenize dataset's prompt to initialize ``input_ids``
-  2. Feed ``input_ids`` to LLM engine, get ``output_ids`` out
-  3. ``input_ids += output_ids`` (a.k.a. token-in-token-out) -- the next turn's input IDs are precisely what the LLM generated
-  4. Tokenize observations got from SkyRL-Gym's environment output (i.e. ``env.step()``), and append to ``input_ids``
-  5. Repeat 2-4 until ``env.step()`` marks done
-
-To correctly tokenize the observations in step 4, we follow the fixed-base approach described in
-`this blog <https://jybsuper.github.io/posts/multiturn_tokenization/#the-breakthrough-fixed-base-approach>`_.
-
-Specifically, we instantiate a ``base_conversation`` that we never change ("fixed base"):
-
-.. code-block:: python
-  
-  self.base_conversation = [
-    {"role": "system", "content": "You are a helpful assistant."},
-    {"role": "user", "content": "I am a user."},
-  ]
-  self.base_conversation_token_ids = tokenizer.apply_chat_template(
-    self.base_conversation,
-    add_generation_prompt=False,
-    tokenize=True,
-  )
-
-When we get new observations ``new_obs``, which is a list of ``{role: str, content: str}``, we
-convert them to token IDs while following the model's chat template by:
-
-.. code-block:: python
-
-  observation_ids = self.tokenizer.apply_chat_template(
-    [*self.base_conversation, *new_obs],
-    add_generation_prompt=True,
-    tokenize=True,
-  )[len(self.base_conversation_token_ids) :]
-  input_ids += observation_ids
-  loss_mask += [0] * len(observation_ids)
-
-One tricky part is that, for some models, there are tokens after the last EOS token for a turn of
-message. For instance, in Qwen2.5 and Qwen3, the ``base_conversation_token_ids`` are equivalent to:
-
-.. code-block:: python
-
-  <|im_start|>system\nYou are a helpful assistant.<|im_end|>\n
-  <|im_start|>user\nI am a user.<|im_end|>\n
-
-Note that there is a ``\n`` in the assistant's message before the next user's message starts.
-If we do token-in-token-out, there is no way for the LLM engine to generate ``\n`` since the
-EOS token is ``<|im_end|>``. Therefore, we need to add the ``\n`` back when creating ``observation_ids``.
-In order to do this, we cut the ``\n`` out in ``base_conversation_token_ids``:
-
-.. code-block:: python
-
-  if self.tokenizer.eos_token_id in self.base_conversation_token_ids:
-      last_eos_token_index = (
-          len(self.base_conversation_token_ids)
-          - 1
-          - self.base_conversation_token_ids[::-1].index(self.tokenizer.eos_token_id)
-      )
-      self.base_conversation_token_ids = self.base_conversation_token_ids[: last_eos_token_index + 1]
-
-
-This way, ``observation_ids`` will be ``\n<|im_start|>user\nObservation here<|im_end|>\n`` (note the
-very first ``\n`` that makes up the former assistant's ``\n``). The ``\n`` at the **final** assistant
-turn will still be missing, but this is fine.
-You can see ``tests/cpu/trajectory_runners/test_skyrl_gym_runner_chat_templating.py`` for more details.
-
-
-References
-----------
-
-- https://jybsuper.github.io/posts/multiturn_tokenization/#the-breakthrough-fixed-base-approach
+Rollout telemetry records collection, backend tokenization, batch assembly,
+finalization, model waits, and environment queue and execution times.

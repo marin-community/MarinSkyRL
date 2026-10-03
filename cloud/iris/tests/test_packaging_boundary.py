@@ -5,18 +5,30 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pytest
+
 
 REPOSITORY_ROOT = Path(__file__).parents[3]
 
 
-def test_importing_launch_does_not_import_training_stacks() -> None:
-    program = """
+@pytest.mark.parametrize(
+    "module,blocked",
+    [
+        ("cloud.iris.launch", ("flash_attn", "ray", "skyrl_train.objective", "skyrl_train.trainer", "torch", "vllm")),
+        (
+            "skyrl_train.entrypoints.main_base",
+            ("flash_attn", "skyrl_train.objective", "skyrl_train.trainer", "torch", "vllm"),
+        ),
+    ],
+)
+def test_importing_entrypoints_does_not_import_training_stacks(module, blocked) -> None:
+    program = f"""
 import json
 import sys
 
-import cloud.iris.launch
+import {module}
 
-blocked = ("flash_attn", "ray", "skyrl_train.objective", "skyrl_train.trainer", "torch", "vllm")
+blocked = {blocked!r}
 print(json.dumps(sorted(name for name in blocked if name in sys.modules)))
 """
     result = subprocess.run(

@@ -10,6 +10,7 @@ import os
 import shutil
 import tarfile
 import tempfile
+import tomllib
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -33,7 +34,6 @@ _REQUIRED_TYPES = {
     "dockerfile_id": pa.string(),
     "task_binary": pa.binary(),
 }
-_REQUIRED_TASK_FILES = ("instruction.md", "task.toml", "environment/Dockerfile")
 _COMPLETE_MARKER_FILENAME = ".marinskyrl-complete"
 
 
@@ -206,7 +206,17 @@ def _safe_archive_files(blob: bytes) -> dict[str, tuple[bytes, int]]:
             if handle is None:
                 raise PackedTaskArchiveError(f"Cannot read task archive member: {member.name!r}")
             files[normalized] = (handle.read(), member.mode)
-    missing = set(_REQUIRED_TASK_FILES) - files.keys()
+    if "task.toml" not in files:
+        raise PackedTaskArchiveError("Packed task is missing task.toml")
+    try:
+        config = tomllib.loads(files["task.toml"][0].decode())
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+        raise PackedTaskArchiveError("Packed task has an invalid task.toml") from error
+    steps = config.get("steps", [])
+    required = {f"steps/{step['name']}/instruction.md" for step in steps} if steps else {"instruction.md"}
+    if not config.get("environment", {}).get("docker_image"):
+        required.add("environment/Dockerfile")
+    missing = required - files.keys()
     if missing:
         raise PackedTaskArchiveError(f"Packed task is missing required files: {sorted(missing)}")
     return files

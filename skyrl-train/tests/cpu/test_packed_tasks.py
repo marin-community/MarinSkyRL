@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gzip
 import io
+import shutil
 import tarfile
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -12,6 +13,8 @@ import pytest
 from omegaconf import OmegaConf
 
 from cloud.iris import rl_data
+from shellbox.backends.shellsim.machine import ShellSimMachineFactory
+from shellbox.machine import ShellSimBuiltins
 
 from marinskyrl.packed_tasks import (
     EmptyTaskSelectionError,
@@ -26,7 +29,13 @@ from marinskyrl.task_sources import (
     TaskTroveSelectionSnapshot,
     TaskTroveTagMatch,
 )
-from skyrl_train.trajectory_runners.harbor.dataset import TerminalBenchTaskDataset
+from skyrl_train.dataset.harbor import TerminalBenchTaskDataset, materialize_harbor_tasks
+from taskcompendium.environment import DockerBuild, EnvironmentKind, ShellVerifierSpec
+from taskcompendium.grading import Outcome, skipped_verifier
+from rolloutengine.parquet import read_tasks
+from rolloutengine.contracts import ModelTurn
+from rolloutengine.engine import ShellboxRolloutEngine
+from taskcompendium.submission import AnswerFormat, SubmissionConvention
 
 
 def _task_binary(name: str, *, solution: bool = False, unsafe_path: bool = False) -> bytes:
@@ -40,6 +49,10 @@ def _task_binary(name: str, *, solution: bool = False, unsafe_path: bool = False
         files["solution/solve.sh"] = b"#!/bin/sh\n"
     if unsafe_path:
         files["../escape"] = b"escaped"
+    return _archive(files)
+
+
+def _archive(files: dict[str, bytes]) -> bytes:
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w") as archive:
         for path, content in files.items():
@@ -173,6 +186,100 @@ def test_packed_dataset_materializes_reference_from_runtime_yaml(tmp_path: Path)
     task_path = PackedTaskMaterializer(cache).materialize_batch([reference])[reference]
     assert (task_path / "instruction.md").read_text() == "Do one"
     assert not (task_path / "solution").exists()
+
+
+def test_packed_selection_becomes_portable_task_parquet(tmp_path: Path) -> None:
+    dataset_path = tmp_path / "source.parquet"
+    _write_dataset(dataset_path)
+    source = _source(dataset_path, TaskTroveSelection(sources=("source-a",)))
+    output = materialize_harbor_tasks([asdict(source)], cache_dir=tmp_path / "cache")
+    dataset_path.unlink()
+    tasks = list(read_tasks(str(output)))
+    assert [task.context.events[0].content for task in tasks] == ["Do one", "Do three"]
+    assert [task.id for task in tasks] == [
+        "tasktrove/clean@fixture:abc123/source-a/task-1",
+        "tasktrove/clean@fixture:abc123/source-a/task-3",
+    ]
+    assert output.stat().st_mode & 0o777 == 0o600
+    for task in tasks:
+        assert isinstance(task.environment.image, DockerBuild)
+        assert {file.path: file.content for file in task.environment.image.files} == {
+            "/Dockerfile": b"FROM python:3.12-slim\n"
+        }
+        verifier = ShellVerifierSpec.model_validate_json(task.verifier.parameters_json)
+        assert {file.path: file.content for file in verifier.files} == {"/tests/test.sh": b"#!/bin/sh\nexit 0\n"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("staged", [False, True])
+@pytest.mark.parametrize("registry_image", [False, True])
+@pytest.mark.parametrize("verification", [True, False])
+async def test_packed_tasks_execute_after_source_removal(tmp_path, staged, registry_image, verification):
+    config = '[environment]\nworkdir = "/workspace"\nallow_internet = false\n'
+    files = {"setup_files/input": b"first\n"}
+    if registry_image:
+        config += 'docker_image = "fixture"\n'
+    else:
+        files["environment/Dockerfile"] = b"FROM busybox\n"
+    grader = b'test "$(cat /workspace/state)" = first && echo 1 > /logs/verifier/reward.txt\n'
+    if staged:
+        config += '[[steps]]\nname = "first"\nmin_reward = 1\n[[steps]]\nname = "second"\n'
+        files.update(
+            {
+                "steps/first/instruction.md": b"First stage.",
+                "steps/first/workdir/setup.sh": b"cp /setup_files/input /workspace/state\n",
+                "steps/first/tests/test.sh": grader,
+                "steps/second/instruction.md": b"Second stage.",
+                "steps/second/workdir/setup.sh": (
+                    b'test "$(cat /workspace/state)" = first && echo second > /workspace/state\n'
+                ),
+                "steps/second/tests/test.sh": grader.replace(b"= first", b"= second"),
+            }
+        )
+    else:
+        files["instruction.md"] = b"Single stage."
+        files["tests/test.sh"] = grader.replace(b"/workspace/state", b"/setup_files/input")
+    files["task.toml"] = config.encode()
+    if not verification:
+        files = {path: data for path, data in files.items() if "tests" not in Path(path).parts}
+    dataset_path = tmp_path / "source.parquet"
+    _write_dataset(dataset_path)
+    table = pq.read_table(dataset_path)
+    payloads = pa.array([_archive(files)] * len(table), type=pa.binary())
+    pq.write_table(table.set_column(table.schema.get_field_index("task_binary"), "task_binary", payloads), dataset_path)
+    source = _source(dataset_path, TaskTroveSelection(sources=("source-a",), limit=1))
+    cache = tmp_path / "cache"
+    output = materialize_harbor_tasks(
+        [asdict(source)],
+        cache_dir=cache,
+        verifier_override=None if verification else skipped_verifier("Verification is disabled"),
+    )
+    dataset_path.unlink()
+    shutil.rmtree(cache / "archives")
+
+    class Factory:
+        async def create(self, spec):
+            return await ShellSimMachineFactory().create(replace(spec, source=ShellSimBuiltins()))
+
+    class Model:
+        async def complete(self, request):
+            prompt = (*request.prefix_token_ids, 90) if request.prefix_token_ids else (10,)
+            return ModelTurn({"role": "assistant", "content": "Done."}, prompt, (20,), (-0.5,), "stop")
+
+    engine = ShellboxRolloutEngine(
+        Model().complete,
+        {EnvironmentKind.DOCKER: Factory()},
+        max_turns=1,
+        command_timeout=5,
+        convention=SubmissionConvention(id="plain", answer_format=AnswerFormat.PLAIN),
+    )
+    result = await engine.run(next(read_tasks(str(output))))
+    assert (result.grade.status, result.grade.reward) == (
+        (Outcome.GRADED, 1.0) if verification else (Outcome.SKIPPED, None)
+    )
+    assert result.response_token_ids == ((20, 90, 20) if staged else (20,))
+    assert result.loss_mask == ((1, 0, 1) if staged else (1,))
+    assert result.logprobs == ((-0.5, 0.0, -0.5) if staged else (-0.5,))
 
 
 def test_packed_materializer_reuses_reader_across_batches(tmp_path: Path) -> None:

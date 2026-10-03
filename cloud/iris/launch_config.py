@@ -119,16 +119,6 @@ class IrisConfig:
 
 
 @dataclass
-class IngressConfig:
-    """Optional controller ingress and literal-recording settings."""
-
-    mode: str = "direct"
-    host: str = ""
-    record_literal: bool = False
-    vllm_http_port: int = 8000
-
-
-@dataclass
 class RayConfig:
     """Ray bootstrap settings shared by every task replica."""
 
@@ -173,7 +163,6 @@ class SkyRLLaunchConfig:
     run: RunConfig = field(default_factory=RunConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     iris: IrisConfig = field(default_factory=IrisConfig)
-    ingress: IngressConfig = field(default_factory=IngressConfig)
     ray: RayConfig = field(default_factory=RayConfig)
     artifacts: ArtifactsConfig = field(default_factory=ArtifactsConfig)
     inputs: InputsConfig = field(default_factory=InputsConfig)
@@ -218,7 +207,6 @@ def _compose_source_recipe(config: DictConfig) -> DictConfig:
                 "checkpoint_root": str(config.artifacts.checkpoint_root),
                 "export_root": str(config.artifacts.export_root),
                 "resume_checkpoint_count": int(config.artifacts.resume_checkpoint_count),
-                "trace_root": join_resource_path(str(config.artifacts.attempts_root), "trace_jobs"),
                 "trajectory_root": join_resource_path(str(config.artifacts.attempts_root), "trajectories"),
                 "export_hf_artifact": bool(config.run.export_hf),
                 "seed": int(config.run.seed),
@@ -317,8 +305,6 @@ def validate_launch_config(config: DictConfig) -> LaunchTopology:
         raise ValueError(f"unsupported run.submission: {raw['run']['submission']!r}")
     if raw["inputs"]["data_kind"] not in {"tasks", "parquet"}:
         raise ValueError(f"unsupported inputs.data_kind: {raw['inputs']['data_kind']!r}")
-    if raw["ingress"]["mode"] not in {"direct", "controller"}:
-        raise ValueError(f"unsupported ingress.mode: {raw['ingress']['mode']!r}")
     if raw["iris"]["timeout"] < 0:
         raise ValueError("iris.timeout cannot be negative")
     _validate_inputs(raw["inputs"])
