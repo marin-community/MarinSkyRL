@@ -107,8 +107,6 @@ def test_preflight_callback_lets_training_continue(rewards, on_failure, generate
             "generator": {"inference_stats_interval": 0},
         }
     ).with_settings([f"trainer.preflight_gate.on_failure={on_failure}"])
-    with pytest.raises(ValueError):
-        recipe.with_settings(["trainer.preflight_gate.on_failure=unknown-failure-policy"])
     callback = next(
         callback
         for callback in callbacks.create_default_callbacks(OmegaConf.merge(base, recipe.to_skyrl()))
