@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from collections.abc import Callable
 import math
 
 import torch
@@ -29,6 +30,9 @@ def compute_correction(
     rollout_log_probs: torch.Tensor,
     loss_mask: torch.Tensor,
     correction: OffPolicyCorrection,
+    *,
+    all_reduce: Callable | None = None,
+    contributes: bool = True,
 ) -> CorrectionResult:
     """Return detached policy numerator weights and token-weighted correction statistics."""
     assert old_log_probs.shape == rollout_log_probs.shape == loss_mask.shape
@@ -62,12 +66,24 @@ def compute_correction(
             weights *= keep
             masked |= ~keep
     weights = torch.where(valid, weights, 0)
-    count = valid.sum().clamp(min=1)
+    totals = torch.stack(
+        [
+            valid.sum(),
+            (weights.double() if all_reduce is not None else weights).sum(),
+            (truncated & valid).sum(),
+            (masked & valid).sum(),
+        ]
+    )
+    if not contributes:
+        totals.zero_()
+    if all_reduce is not None:
+        totals = all_reduce(totals, "sum")
+    count = totals[0].clamp(min=1)
     metrics = (
         {
-            CORRECTION_WEIGHT_MEAN_METRIC: (weights.sum() / count).item(),
-            CORRECTION_TRUNCATED_FRACTION_METRIC: ((truncated & valid).sum() / count).item(),
-            CORRECTION_MASKED_FRACTION_METRIC: ((masked & valid).sum() / count).item(),
+            CORRECTION_WEIGHT_MEAN_METRIC: (totals[1] / count).item(),
+            CORRECTION_TRUNCATED_FRACTION_METRIC: (totals[2] / count).item(),
+            CORRECTION_MASKED_FRACTION_METRIC: (totals[3] / count).item(),
         }
         if correction.rules
         else {}

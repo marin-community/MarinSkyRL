@@ -2,6 +2,7 @@ import asyncio
 import concurrent.futures
 import contextlib
 import logging
+import math
 import os
 import socket
 import time
@@ -43,7 +44,10 @@ from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
 from skyrl_train.utils.policy_math import ppo_critic_loss
 from skyrl_train.utils.importance_ratio_diagnostics import (
     LogRatioMonitor,
+    mismatch_ratio_metrics,
 )
+from skyrl_train.config.objective_spec import off_policy_correction
+from skyrl_train.objective.correction import compute_correction
 from skyrl_train.learner_memory import LearnerCudaMetrics
 from skyrl_train.timing_observability import PhaseBreakdown
 from skyrl_train.telemetry import WORKER_ROLE, ProcessTelemetry, TelemetryConfig
@@ -886,6 +890,29 @@ class PolicyWorkerBase(Worker):
         self._loaded_batches[plan.batch_id] = batch
         output = TrainingOutputBatch({})
         output.metadata = {"batch_load_seconds": time.perf_counter() - started, "dp_rank": self.mesh_rank.dp}
+        observations = []
+        if self.mesh_rank.is_collection_dp_rank():
+            by_uid = {group.uid: group.trajectory_batch for group in groups}
+            offset = 0
+            for admitted, count in zip(reader.selected, plan.group_counts, strict=True):
+                if rows.start <= offset < rows.stop:
+                    group = by_uid[admitted.uid]
+                    observation = {
+                        key: group[key]
+                        for key in (
+                            "rewards",
+                            "env_metrics",
+                            "env_classes",
+                            "verification_results",
+                            "data_sources",
+                            "unshaped_rewards",
+                            "rollout_metrics",
+                        )
+                        if key in group and group[key] is not None
+                    }
+                    observations.append((admitted.index, observation))
+                offset += count
+        output.metadata["batch_observations"] = observations
         return output
 
     def forward_loaded(self, batch_id: int) -> TrainingOutputBatch:
@@ -904,7 +931,77 @@ class PolicyWorkerBase(Worker):
 
     def train_loaded(self, batch_id: int) -> TrainingOutputBatch:
         """Train on this actor's loaded batch through the existing policy path."""
-        return self.ppo_train(self._loaded_batches[batch_id])
+        from skyrl_train.trainer import RayPPOTrainer
+
+        batch = self._loaded_batches[batch_id]
+        contributes = self.mesh_rank.is_collection_dp_rank()
+        metrics = {}
+        correction = off_policy_correction(self.cfg.trainer.algorithm)
+        if correction.rules:
+            if batch.get("rollout_logprobs") is None:
+                raise ValueError("off_policy_correction requires rollout_logprobs")
+            result = compute_correction(
+                batch["action_log_probs"],
+                batch["rollout_logprobs"],
+                batch["loss_mask"],
+                correction,
+                all_reduce=self.strategy.all_reduce,
+                contributes=contributes,
+            )
+            batch["correction_weights"] = result.weights
+            metrics.update(result.metrics)
+        if self.cfg.trainer.training_metrics and batch.get("rollout_logprobs") is not None:
+            metrics.update(
+                mismatch_ratio_metrics(
+                    batch["action_log_probs"],
+                    batch["rollout_logprobs"],
+                    batch["loss_mask"],
+                    batch["rollout_staleness"],
+                    eps_clip_low=self.cfg.trainer.algorithm.eps_clip_low,
+                    eps_clip_high=self.cfg.trainer.algorithm.eps_clip_high,
+                    all_reduce=self.strategy.all_reduce,
+                    contributes=contributes,
+                )
+            )
+        if self.cfg.generator.sampling_params.logprobs is not None and batch.get("rollout_logprobs") is not None:
+            differences = (batch["rollout_logprobs"] - batch["action_log_probs"])[batch["loss_mask"] > 0].exp().double()
+            moments = torch.stack(
+                [torch.tensor(differences.numel(), dtype=torch.float64), differences.sum(), differences.square().sum()]
+            )
+            if not contributes:
+                moments.zero_()
+            count, total, squared = self.strategy.all_reduce(moments, "sum").tolist()
+            metrics["policy/rollout_train_prob_diff_mean"] = total / count if count else math.nan
+            variance = (squared - total * total / count) / (count - 1) if count > 1 else math.nan
+            metrics["policy/rollout_train_prob_diff_std"] = math.sqrt(max(variance, 0.0))
+        valid = batch["response_mask"].bool()
+        advantages = batch["advantages"][valid].double()
+        moments = torch.stack(
+            [
+                torch.tensor(advantages.numel(), dtype=torch.float64),
+                advantages.sum(),
+                advantages.abs().sum(),
+                batch["rewards"].sum(-1).double().sum(),
+                torch.tensor(batch.batch_size, dtype=torch.float64),
+            ]
+        )
+        if not contributes:
+            moments.zero_()
+        count, total, absolute, rewards, rows = self.strategy.all_reduce(moments, "sum").tolist()
+        metrics.update(
+            {
+                "loss/avg_raw_advantages": total / count if count else math.nan,
+                "loss/avg_raw_advantages_abs": absolute / count if count else math.nan,
+                "loss/avg_final_rewards": rewards / rows,
+            }
+        )
+        batch = RayPPOTrainer.apply_loop_advantages(batch)
+        batch.pop("rewards")
+        batch.pop("loop_advantages", None)
+        batch.metadata.pop("uids")
+        output = self.ppo_train(batch)
+        output.metadata["batch_metrics"] = metrics
+        return output
 
     def unload_batch(self, batch_id: int) -> None:
         """Release a loaded slice after a completed or failed training step."""
