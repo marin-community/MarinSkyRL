@@ -86,7 +86,11 @@ uv run --no-sync iris --cluster=cw-us-east-08a job run --no-wait \
 
 H100x8 is also suitable for this hardware-independent capture check. Set a 15-minute queue deadline and cancel
 only this job if it cannot start. The deliberately failing job should end FAILED with exit 42. Use its task events
-and Kubernetes pod identity to confirm normal container termination and removal. Do not force-delete the pod.
+and Kubernetes pod identity to confirm both task and uploader containers have terminated. The installed provider
+retains terminal single-task pods for one hour even after their GPU resources are released. For this check, delete
+only the exact stopped fixture pod with ordinary `kubectl delete pod`, then verify it is absent. Do not use force
+deletion or a grace-period override. This exercises retention after normal container shutdown and pod removal;
+it does not test automatic provider garbage collection.
 
 After the test pod is gone, read the retained bytes from the workstation. Use the external CoreWeave endpoint with
 virtual-host S3 addressing in the workstation's fsspec configuration, rather than the pod's internal endpoint:
