@@ -1,5 +1,5 @@
 """
-uv run --group dev --extra vllm --isolated pytest tests/gpu/gpu_ci/test_skyrl_gym_runner.py
+uv run --frozen pytest skyrl-train/tests/gpu/gpu_ci/test_skyrl_gym_runner.py
 """
 
 import os
@@ -9,7 +9,12 @@ from transformers import AutoTokenizer
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl_train.trajectory_runners.skyrl_gym import SkyRLGymTrajectoryRunner
+from taskcompendium.importers.skyrl import gym_task
+from taskcompendium.models import Source
+from skyrl_train.rollouts.task_worker import TaskRolloutWorker
+from skyrl_train.rollouts.task_projections import WholeTaskProjection
+from skyrl_train.trajectory_runners.projections import WholeTrajectoryProjection
+from skyrl_train.trajectory_runners.model_clients import DirectModelClient
 from skyrl_train.trajectory_runners.base import TrajectoryRequestBatch
 from tests.gpu.utils import Timer, get_test_trajectory_request
 from omegaconf import DictConfig, OmegaConf
@@ -74,7 +79,6 @@ async def run_trajectory_runner_end_to_end(
     env_class="gsm8k",
     num_prompts=2,
     max_turns=1,
-    use_conversation_multi_turn=True,
     max_env_workers=10,
 ):
     """
@@ -111,10 +115,8 @@ async def run_trajectory_runner_end_to_end(
                 "max_generate_length": max_generate_length,
                 "logprobs": None,
             },
-            "append_eos_token_after_stop_str_in_multi_turn": True,  # for search
             "max_input_length": max_input_length,
             "max_turns": max_turns,
-            "use_conversation_multi_turn": use_conversation_multi_turn,
             "apply_overlong_filtering": False,
             "backend": "vllm",
             "enable_http_endpoint": False,
@@ -148,11 +150,13 @@ async def run_trajectory_runner_end_to_end(
 
     await inference_engine_client.wake_up()
 
-    trajectory_runner = SkyRLGymTrajectoryRunner(
+    trajectory_runner = TaskRolloutWorker(
         trajectory_runner_cfg=generator_cfg,
-        skyrl_gym_cfg=env_cfg,
-        inference_engine_client=inference_engine_client,
-        tokenizer=tokenizer,
+        projection=WholeTaskProjection(WholeTrajectoryProjection(generator_cfg, tokenizer)),
+        model_client=DirectModelClient(inference_engine_client),
+        factories={},
+        command_timeout=120,
+        max_env_workers=max_env_workers,
     )
 
     input_batch: TrajectoryRequestBatch = get_test_trajectory_request(
@@ -163,6 +167,18 @@ async def run_trajectory_runner_end_to_end(
         data_path=data_path,
         env_class=env_class,
     )
+    input_batch["env_extras"] = [
+        {
+            "task_spec": gym_task(
+                prompt,
+                env_class,
+                extras,
+                OmegaConf.to_container(env_cfg.get(env_class, {}), resolve=True) if env_class in env_cfg else {},
+                Source(dataset="gpu-test", revision="1", row=str(index // n_samples_per_prompt), importer_revision="1"),
+            ).model_dump_json()
+        }
+        for index, (prompt, extras) in enumerate(zip(input_batch["prompts"], input_batch["env_extras"], strict=True))
+    ]
     # Attach request-time sampling params into the trajectory request
     input_batch["sampling_params"] = get_sampling_params_for_backend(
         "vllm",
@@ -179,8 +195,11 @@ async def run_trajectory_runner_end_to_end(
         ),
     )
 
-    with Timer("generate_responses"):
-        trajectory_batch = await trajectory_runner.run(input_batch)
+    try:
+        with Timer("generate_responses"):
+            trajectory_batch = await trajectory_runner.run(input_batch)
+    finally:
+        await trajectory_runner.shutdown()
 
     prompts_out = trajectory_batch["prompt_token_ids"]
     outputs = [
@@ -256,7 +275,6 @@ async def test_trajectory_runner_multi_turn_search():
             env_class="search",
             num_prompts=2,
             max_turns=2,
-            use_conversation_multi_turn=False,
             max_env_workers=0,
         )
     finally:
@@ -267,7 +285,7 @@ async def test_trajectory_runner_multi_turn_search():
 @pytest.mark.parametrize(
     "model_name", ["unsloth/Llama-3.2-1B-Instruct", "Qwen/Qwen2.5-1.5B-Instruct", "Qwen/Qwen3-0.6B"]
 )
-async def test_trajectory_runner_formatting_use_conversation_multi_turn(model_name):
+async def test_canonical_worker_masks_observations_and_preserves_model_tokens(model_name):
     """
     Test trajectory runner formatting when using conversation formatting for multi-turn
     """
@@ -285,7 +303,6 @@ async def test_trajectory_runner_formatting_use_conversation_multi_turn(model_na
             env_class="test_env",
             num_prompts=2,
             max_turns=3,
-            use_conversation_multi_turn=True,
         )
 
         for i, resp_ids in enumerate(trajectory_batch["response_ids"]):
@@ -298,10 +315,12 @@ async def test_trajectory_runner_formatting_use_conversation_multi_turn(model_na
             masked_out_resp_str = tokenizer.decode(masked_out_resp_ids)
             masked_in_resp_str = tokenizer.decode(masked_in_resp_ids)
 
-            assert (
-                MODEL_TO_GENERATION_PROMPT[model_name] in masked_out_resp_str
-                and MODEL_TO_GENERATION_PROMPT[model_name] not in masked_in_resp_str
-            ), "generation prompts should be loss masked out"
+            assert MODEL_TO_GENERATION_PROMPT[model_name] not in masked_in_resp_str
+            if masked_out_resp_ids:
+                assert MODEL_TO_GENERATION_PROMPT[model_name] in masked_out_resp_str
+            else:
+                # A length stop on the first turn has no continuation prompt.
+                assert stop_reason == "length"
 
             # Observations and EOS expectations only strictly apply when the model finished turns
             if stop_reason == "stop":
@@ -327,72 +346,6 @@ async def test_trajectory_runner_formatting_use_conversation_multi_turn(model_na
                 # On length stops, the model may not produce EOS at the end of each assistant turn.
                 # Only check that generation prompts are masked out.
                 logger.warning(f"Got stop reason {stop_reason}, so we did not fully check the response")
-            if model_name == "Qwen/Qwen3-0.6B":
-                assert (
-                    sum(1 for _ in prompt_token_ids if _ == tokenizer.eos_token_id) == 1
-                )  # 1 user eos (no system for Qwen3)
-            else:
-                assert sum(1 for _ in prompt_token_ids if _ == tokenizer.eos_token_id) == 2  # 1 system eos, 1 user eos
-    finally:
-        ray.shutdown()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name", ["unsloth/Llama-3.2-1B-Instruct", "Qwen/Qwen2.5-1.5B-Instruct", "Qwen/Qwen3-0.6B"]
-)
-async def test_trajectory_runner_formatting_no_use_conversation_multi_turn(model_name):
-    """
-    Test trajectory runner formatting when not using conversation formatting for multi-turn
-    """
-    initialize_ray(get_test_actor_config())
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        trajectory_batch = await run_trajectory_runner_end_to_end(
-            n_samples_per_prompt=1,
-            num_inference_engines=1,
-            tensor_parallel_size=1,
-            model=model_name,
-            max_prompt_length=3000,
-            max_input_length=10000,
-            max_generate_length=3000,
-            env_class="test_env",
-            num_prompts=2,
-            max_turns=3,
-            use_conversation_multi_turn=False,
-        )
-
-        for i, resp_ids in enumerate(trajectory_batch["response_ids"]):
-            loss_mask = trajectory_batch["loss_masks"][i]
-            prompt_token_ids = trajectory_batch["prompt_token_ids"][i]
-            masked_out_resp_ids = [resp_ids[j] for j in range(len(resp_ids)) if loss_mask[j] == 0]
-            masked_in_resp_ids = [resp_ids[j] for j in range(len(resp_ids)) if loss_mask[j] == 1]
-
-            prompt_str = tokenizer.decode(prompt_token_ids)
-            resp_str = tokenizer.decode(resp_ids)
-            masked_out_resp_str = tokenizer.decode(masked_out_resp_ids)
-            masked_in_resp_str = tokenizer.decode(masked_in_resp_ids)
-
-            assert f"{OBSERVATION_PROMPT} 1" in masked_out_resp_str, (
-                f'"{OBSERVATION_PROMPT} 1" observation should be loss masked out'
-            )
-            assert f"{OBSERVATION_PROMPT} 2" in masked_out_resp_str, (
-                f'"{OBSERVATION_PROMPT} 2" observation should be loss masked out'
-            )
-            assert (
-                prompt_str.count(MODEL_TO_GENERATION_PROMPT[model_name])
-                + resp_str.count(MODEL_TO_GENERATION_PROMPT[model_name])
-                == 1
-            ), "the single generation prompt should be included in the prompt"
-            assert (
-                MODEL_TO_GENERATION_PROMPT[model_name] in prompt_str
-                and MODEL_TO_GENERATION_PROMPT[model_name] not in masked_in_resp_str
-            ), "the single generation prompt should be included in the prompt"
-
-            # count number of eos tokens in masked_in_resp_ids
-            assert (
-                sum(1 for _ in masked_in_resp_ids if _ == tokenizer.eos_token_id) == 1
-            )  # 1 eos for each assistant response
             if model_name == "Qwen/Qwen3-0.6B":
                 assert (
                     sum(1 for _ in prompt_token_ids if _ == tokenizer.eos_token_id) == 1

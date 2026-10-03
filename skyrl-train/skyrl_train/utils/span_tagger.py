@@ -87,7 +87,7 @@ def _generated_slice_bounds(
     return prefix_len, prefix_len, gen_end
 
 
-def _tag_assistant_generated_span(
+def tag_generated_tokens(
     generated_token_ids: List[int],
     tokenizer,
 ) -> List[int]:
@@ -191,7 +191,7 @@ def tag_response_spans(
         # generation-prompt prefix -> OTHER
         tags.extend([SPAN_OTHER] * prefix_len)
         generated_token_ids = cur_token_ids[gen_start:gen_end]
-        tags.extend(_tag_assistant_generated_span(generated_token_ids, tokenizer))
+        tags.extend(tag_generated_tokens(generated_token_ids, tokenizer))
         # post-EOS tokens (e.g. trailing "\n") -> OTHER
         tags.extend([SPAN_OTHER] * (len(cur_token_ids) - gen_end))
 

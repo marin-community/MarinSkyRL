@@ -257,7 +257,7 @@ class NemotronUltraEnv(BaseTextEnv):
             )
 
         if self.agent in {"genrm_simple_agent", "genrm_simple_agent_reasoning_off"}:
-            # Replaced cohort-wise by SkyRLGymTrajectoryRunner before projection.
+            # The rollout worker replaces provisional scores after cohort grading.
             reward = float(self.genrm_config.get("default_score", 3.0))
             diagnostics["cohort_reward_pending"] = True
         elif self.agent == _NS_TOOLS_AGENT:

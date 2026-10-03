@@ -50,27 +50,44 @@ async def render_exact_chat_continuation(
     prefix_request = _tokenize_body(body, prefix_messages)
     prefix_request["add_generation_prompt"] = False
     prefix_request["continue_final_message"] = False
-    open_assistant_request = _tokenize_body(body, history_messages)
-    open_assistant_request["add_generation_prompt"] = True
-    open_assistant_request["continue_final_message"] = False
-    empty_assistant_request = _tokenize_body(body, [*history_messages, {"role": "assistant", "content": ""}])
-    empty_assistant_request["add_generation_prompt"] = False
-    empty_assistant_request["continue_final_message"] = False
+    boundary_request = _tokenize_body(body, [*history_messages, {"role": "assistant", "content": "boundary"}])
+    boundary_request["add_generation_prompt"] = False
+    boundary_request["continue_final_message"] = False
+    continued_request = {**boundary_request, "continue_final_message": True}
 
     headers = request_payload.get("headers", {})
     renders = []
-    for tokenize_request in (full_request, prefix_request, open_assistant_request, empty_assistant_request):
+    for tokenize_request in (full_request, prefix_request, continued_request, boundary_request):
         result = await tokenize({"json": tokenize_request, "headers": headers})
         renders.append(result.get("tokens") if isinstance(result, dict) else None)
-    full_ids, prefix_ids, open_assistant_ids, empty_assistant_ids = renders
+    full_ids, prefix_ids, continued_ids, boundary_ids = renders
     if (
         not all(isinstance(ids, list) and all(isinstance(token, int) for token in ids) for ids in renders)
-        or full_ids[: len(prefix_ids)] != prefix_ids
-        or empty_assistant_ids[: len(open_assistant_ids)] != open_assistant_ids
+        or boundary_ids[: len(continued_ids)] != continued_ids
     ):
         return None
 
-    assistant_boundary = empty_assistant_ids[len(open_assistant_ids) :]
+    assistant_boundary = boundary_ids[len(continued_ids) :]
+    if assistant_boundary and prefix_ids[-len(assistant_boundary) :] != assistant_boundary:
+        return None
+    suffix_ids = full_ids[len(prefix_ids) :]
+    if full_ids[: len(prefix_ids)] != prefix_ids:
+        # Some templates remove reasoning from earlier assistant turns. Render the new
+        # observations after the initial user/system prefix, then verify the same suffix
+        # in the full rendering. The served assistant tokens stay unchanged.
+        first_assistant = next(i for i, message in enumerate(messages) if message.get("role") == "assistant")
+        base_messages = messages[:first_assistant]
+        base_request = _tokenize_body(body, base_messages)
+        base_request["add_generation_prompt"] = False
+        base_request["continue_final_message"] = False
+        suffix_request = _tokenize_body(body, [*base_messages, *messages[assistant_message_index + 1 :]])
+        base_ids = (await tokenize({"json": base_request, "headers": headers})).get("tokens")
+        tail_ids = (await tokenize({"json": suffix_request, "headers": headers})).get("tokens")
+        if not isinstance(base_ids, list) or not isinstance(tail_ids, list) or tail_ids[: len(base_ids)] != base_ids:
+            return None
+        suffix_ids = tail_ids[len(base_ids) :]
+        if suffix_ids and full_ids[-len(suffix_ids) :] != suffix_ids:
+            return None
     overlap = max(
         (
             count
@@ -79,4 +96,4 @@ async def render_exact_chat_continuation(
         ),
         default=0,
     )
-    return [*served_prefix_token_ids, *assistant_boundary[overlap:], *full_ids[len(prefix_ids) :]]
+    return [*served_prefix_token_ids, *assistant_boundary[overlap:], *suffix_ids]

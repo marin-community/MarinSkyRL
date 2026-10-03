@@ -1,11 +1,6 @@
 set -x
 
-# The exact same script as `run_skyrl_sql.sh` but with `use_conversation_multi_turn=true`
-# and hence `append_eos_token_after_stop_str_in_multi_turn=true`
-# See https://skyrl.readthedocs.io/en/latest/tutorials/skyrl_gym_generator.html on what behavior
-# use_conversation_multi_turn corresponds to. You might want to change the data generation prompt
-# to let the model know that we are doing multi-turn conversations (i.e. user will provide
-# the search result for each turn).
+# The dataset prompt must support a separate assistant response after each observation.
 
 # Colocated GRPO training+generation for Qwen2.5-Coder-7B-Instruct on SkyRL-SQL-653 data.
 # Uses 1 node with 8 GPUs.
@@ -55,14 +50,12 @@ uv run --isolated --extra megatron --extra vllm -m skyrl_train.entrypoints.main_
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
   environment.env_class=text2sql \
-  generator.use_conversation_multi_turn=true \
   generator.n_samples_per_prompt=5 \
   generator.gpu_memory_utilization=0.7 \
   generator.max_turns=6 \
   generator.sampling_params.temperature=0.6 \
   generator.sampling_params.top_p=0.95 \
   generator.sampling_params.stop='["</sql>", "</solution>"]' \
-  generator.append_eos_token_after_stop_str_in_multi_turn=true \
   generator.eval_sampling_params.stop='["</sql>", "</solution>"]' \
   environment.skyrl_gym.text2sql.db_path=$DB_PATH \
   trainer.logger="wandb" \

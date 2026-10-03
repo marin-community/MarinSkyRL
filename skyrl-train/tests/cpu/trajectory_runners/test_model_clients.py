@@ -8,6 +8,7 @@ from jinja2 import TemplateError
 from omegaconf import OmegaConf
 
 from skyrl_train.inference_engines.chat_template import SINGLE_TOOL_CALL_TEMPLATE_ERROR
+from skyrl_train.inference_engines.chat_continuation import render_exact_chat_continuation
 from skyrl_train.inference_engines.utils import get_vllm_sampling_params
 from skyrl_train.trajectory_runners.model_clients import ContextLengthExceededError, DirectModelClient, ModelServerError
 
@@ -33,6 +34,43 @@ async def test_direct_model_client_preserves_engine_tokens():
     output = await DirectModelClient(engine).generate({"prompt_token_ids": [[1, 2]]})
 
     assert output == {**engine_output, "token_provenance": "engine"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reasoning", ["", "<think>\nCalculate the answer.\n</think>\n\n"])
+async def test_chat_answer_omits_stop_text_but_keeps_stop_token_evidence(load_tokenizer, reasoning):
+    tokenizer = load_tokenizer("Qwen/Qwen3-0.6B", revision="c1899de")
+    tokens = tokenizer.encode(reasoning + "20<|im_end|>", add_special_tokens=False)
+    engine = AsyncMock()
+    engine.model_name = "qwen"
+    engine.tokenizer = tokenizer
+    engine.tokenize.return_value = {"tokens": [1, 2]}
+
+    async def respond(payload):
+        content = "20<|im_end|>" if payload["json"].get("include_stop_str_in_output") else "20"
+        return {
+            "choices": [
+                {
+                    "message": {"role": "assistant", "content": content},
+                    "finish_reason": "stop",
+                    "token_ids": tokens,
+                    "logprobs": {"content": [{"logprob": -0.5} for _ in tokens]},
+                }
+            ]
+        }
+
+    engine.chat_completion.side_effect = respond
+    result = await DirectModelClient(engine).generate(
+        {
+            "prompts": [[{"role": "user", "content": "What is ten plus ten?"}]],
+            "chat_completion_params": [{}],
+            "sampling_params": {"include_stop_str_in_output": True, "logprobs": 0},
+        }
+    )
+    assert result["responses"] == ["20"]
+    assert result["assistant_messages"] == [{"role": "assistant", "content": "20"}]
+    assert result["response_ids"] == [tokens]
+    assert result["response_logprobs"] == [[-0.5] * len(tokens)]
 
 
 @pytest.mark.asyncio
@@ -160,11 +198,13 @@ async def test_direct_model_client_uses_vllm_chat_rendering_for_row_request_opti
         "model": "snowball",
         "messages": [{"role": "user", "content": "look it up"}],
         "session_id": "trajectory-2",
+        "_skyrl_exact_prompt_token_ids": [11, 12, 13],
         "temperature": 0.7,
         "tools": expected_tools,
         "parallel_tool_calls": False,
         "max_completion_tokens": 128,
         "return_token_ids": True,
+        "include_stop_str_in_output": False,
         "logprobs": True,
     }
     assert output["prompt_ids"] == [[11, 12, 13]]
@@ -231,13 +271,15 @@ async def test_strict_template_recovery_preserves_exact_prefix_and_tool_results(
         messages = request["json"]["messages"]
         if any(len(message.get("tool_calls") or []) > 1 for message in messages):
             raise WrappedValidationError()
+        if request["json"].get("continue_final_message"):
+            return {"tokens": [10, 20, 77]}
         if len(messages) == 5:
-            return {"tokens": [10, 20, 30, 40, 50]}
+            return {"tokens": [10, 20, 30, 99, 40, 50]}
         if len(messages) == 3 and messages[-1].get("tool_calls"):
-            return {"tokens": [10, 20, 30]}
+            return {"tokens": [10, 20, 30, 99]}
         if len(messages) == 2:
             return {"tokens": [10, 20]}
-        return {"tokens": [10, 20, 99]}
+        return {"tokens": [10, 20, 77, 99]}
 
     engine = AsyncMock()
     engine.model_name = "strict-tool-model"
@@ -290,10 +332,12 @@ async def test_direct_chat_continuation_preserves_sampled_tool_call_tokens():
 
     async def tokenize(request):
         messages = request["json"]["messages"]
+        if request["json"].get("continue_final_message"):
+            return {"tokens": [11, 12, 90]}
         if len(messages) == 1:
             return {"tokens": [11, 12]}
-        if len(messages) == 2 and messages[1]["content"] == "":
-            return {"tokens": [11, 12, 30]}
+        if len(messages) == 2 and not messages[1].get("tool_calls"):
+            return {"tokens": [11, 12, 90, 30]}
         if len(messages) == 2:
             return {"tokens": [11, 12, 99, 22, 30]}
         return {"tokens": [11, 12, 99, 22, 30, 40, 41]}
@@ -339,6 +383,57 @@ async def test_direct_chat_continuation_preserves_sampled_tool_call_tokens():
     # A row with `tools: []` is served as a tool-free request.
     assert "tools" not in chat_body
     assert all("tools" not in call.args[0]["json"] for call in engine.tokenize.await_args_list)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enable_thinking", [False, True])
+@pytest.mark.parametrize("observation_role", ["tool", "user"])
+async def test_qwen_continuation_preserves_served_tokens_after_template_rewrites(
+    load_tokenizer, enable_thinking, observation_role
+):
+    tokenizer = load_tokenizer("Qwen/Qwen3-0.6B", revision="c1899de")
+    history = [{"role": "user", "content": "Write 20 to a file."}]
+    call = {"type": "function", "function": {"name": "shell", "arguments": '{"command":"echo 20"}'}}
+    messages = [
+        *history,
+        {"role": "assistant", "content": None, "tool_calls": [call]},
+        {"role": observation_role, "content": "Read the file."},
+    ]
+    prompt = tokenizer.apply_chat_template(
+        history, tokenize=False, add_generation_prompt=True, enable_thinking=enable_thinking
+    )
+    # The sampled JSON has different whitespace from the template's tool-call rendering.
+    sampled = '<tool_call>\n{"name":"shell","arguments":{"command":"echo 20"}}\n</tool_call><|im_end|>'
+    if enable_thinking:
+        messages[1]["content"] = "<think>\nWrite the value.\n</think>\n\n"
+        sampled = messages[1]["content"] + sampled
+    served = tokenizer.encode(prompt + sampled, add_special_tokens=False)
+
+    async def tokenize(payload):
+        body = dict(payload["json"])
+        chat_kwargs = body.pop("chat_template_kwargs", {})
+        text = tokenizer.apply_chat_template(body.pop("messages"), tokenize=False, **body, **chat_kwargs)
+        return {"tokens": tokenizer.encode(text, add_special_tokens=False)}
+
+    actual = await render_exact_chat_continuation(
+        tokenize,
+        {
+            "json": {
+                "messages": messages,
+                "add_generation_prompt": True,
+                "chat_template_kwargs": {"enable_thinking": enable_thinking},
+            }
+        },
+        assistant_message_index=1,
+        served_prefix_token_ids=served,
+    )
+    observation = "Read the file."
+    if observation_role == "tool":
+        observation = f"<tool_response>\n{observation}\n</tool_response>"
+    suffix = f"\n<|im_start|>user\n{observation}<|im_end|>\n<|im_start|>assistant\n"
+    if not enable_thinking:
+        suffix += "<think>\n\n</think>\n\n"
+    assert actual == [*served, *tokenizer.encode(suffix, add_special_tokens=False)]
 
 
 @pytest.mark.asyncio
@@ -490,6 +585,7 @@ async def test_chat_output_budget_fits_the_exact_backend_rendered_prompt():
     )
     assert result["responses"] == ["7"]
     assert result["prompt_ids"] == [[1, 2, 3, 4]]
+    assert result["generation_token_budgets"] == [1]
 
 
 @pytest.mark.asyncio

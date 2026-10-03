@@ -32,9 +32,6 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     TitoFullDeclineReason,
     align_logprobs_by_token_ids,
     align_logprobs_with_lcs,
-    extract_logprobs_from_rollout_details,
-    extract_token_ids_from_rollout_details,
-    extract_prompt_token_ids_from_rollout_details,
     get_generation_prompt_ids,
     get_response_ids_and_loss_mask_from_messages,
     _assemble_response_ids_tito_full,
@@ -149,30 +146,6 @@ def test_lcs_fallback_alert_metric():
     metrics = unaligned.as_metrics(lcs_alert_threshold=0.2)
     assert metrics["tis/lcs_fallback_alert"] == 0.0
     assert metrics["tis/alignment_alert"] == 1.0
-
-
-def test_extract_float_format_no_longer_disables_tis():
-    rd = [{"logprobs": [[-0.1, -0.2]], "completion_token_ids": [[10, 20]]}]
-    assert extract_logprobs_from_rollout_details(rd) == [[-0.1, -0.2]]
-    assert extract_token_ids_from_rollout_details(rd) == [[10, 20]]
-
-
-# ---------------------------------------------------------------------------
-# Full TITO: prompt-id extractor + flag scaffold (Stage 2)
-# ---------------------------------------------------------------------------
-def test_extract_prompt_token_ids():
-    rd = [
-        {
-            "prompt_token_ids": [[1, 2, 3], [1, 2, 3, 10, 20, 4, 5]],
-            "completion_token_ids": [[10, 20], [30]],
-            "logprobs": [[-0.1, -0.2], [-0.3]],
-        }
-    ]
-    assert extract_prompt_token_ids_from_rollout_details(rd) == [[1, 2, 3], [1, 2, 3, 10, 20, 4, 5]]
-    # absent -> None (None-safe)
-    assert extract_prompt_token_ids_from_rollout_details([{"completion_token_ids": [[10]]}]) is None
-    assert extract_prompt_token_ids_from_rollout_details(None) is None
-    assert extract_prompt_token_ids_from_rollout_details([]) is None
 
 
 def test_tito_full_resolution_precedence():

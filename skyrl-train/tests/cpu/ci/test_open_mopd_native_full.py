@@ -13,10 +13,6 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from hydra import compose, initialize_config_dir
-from skyrl_train.config.trajectory_runner_capabilities import (
-    TrajectoryRunnerMode,
-    validate_trajectory_runner_capabilities,
-)
 from skyrl_train.inference_engines.utils import get_vllm_sampling_params
 from skyrl_train.utils.utils import validate_cfg
 
@@ -57,12 +53,6 @@ def test_full_schedule_preserves_released_objective_and_every_checkpoint():
     }
     assert set(config.teachers) == {"math", "code", "if"}
     assert config.trainer.resume_mode is None
-    validate_trajectory_runner_capabilities(config, TrajectoryRunnerMode.SKYRL_GYM)
-
-    config.generator.use_conversation_multi_turn = True
-    config.generator.chat_template.name_or_path = "qwen3_without_thinking"
-    with pytest.raises(ValueError, match="exact sampled completion token IDs"):
-        validate_trajectory_runner_capabilities(config, TrajectoryRunnerMode.SKYRL_GYM)
 
 
 def test_schedule_rejects_changed_bytes_before_training(monkeypatch, tmp_path):

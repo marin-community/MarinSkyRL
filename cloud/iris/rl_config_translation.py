@@ -26,7 +26,6 @@ from marinskyrl.environment_contract import TrainingType
 from marinskyrl.distillation import DistillationPlan, compile_distillation_plan, validate_distillation_runtime_support
 from marinskyrl.resource_locator import join_resource_path, model_source_for_path
 from marinskyrl.speculative_decoding import STANDARD_TRAINING_ENTRYPOINT, parse_speculative_decoding_config
-from marinskyrl.harbor_agent_names import DEFAULT_HARBOR_AGENT_NAME
 from marinskyrl.remote_io import filesystem_and_path, open_output_stream
 from marinskyrl.rollout_grading import validate_nemotron_ultra_grading
 
@@ -44,6 +43,7 @@ class RLEntrypoint(StrEnum):
     MINI_SWE = "mini_swe"
     ROLLOUT_ENGINE = "rollout_engine"
     STANDARD = "standard"
+    TASKCOMPENDIUM = "taskcompendium"
     TERMINAL_BENCH = "terminal_bench"
     TERMINAL_BENCH_GENERATE = "terminal_bench_generate"
 
@@ -54,6 +54,7 @@ RL_ENTRYPOINTS = MappingProxyType(
         RLEntrypoint.MINI_SWE: "skyrl_train.entrypoints.mini_swe",
         RLEntrypoint.ROLLOUT_ENGINE: "skyrl_train.entrypoints.rollout_engine",
         RLEntrypoint.STANDARD: STANDARD_TRAINING_ENTRYPOINT,
+        RLEntrypoint.TASKCOMPENDIUM: "skyrl_train.entrypoints.taskcompendium",
         RLEntrypoint.TERMINAL_BENCH: "skyrl_train.entrypoints.terminal_bench",
         RLEntrypoint.TERMINAL_BENCH_GENERATE: "skyrl_train.entrypoints.terminal_bench_generate",
     }
@@ -121,11 +122,7 @@ _DERIVED_CONTEXT_FIELDS = (
     ("generator", "max_turns"),
     ("generator", "sampling_params", "max_generate_length"),
     ("generator", "engine_init_kwargs", "max_model_len"),
-    ("terminal_bench", "harbor", "max_episodes"),
     ("terminal_bench", "harbor", "max_turns"),
-    ("terminal_bench", "harbor", "llm_call_kwargs", "max_tokens"),
-    ("terminal_bench", "model_info", "max_input_tokens"),
-    ("terminal_bench", "model_info", "max_output_tokens"),
     ("generator", "trajectory_reward_shaping", "overlong", "l_max"),
     ("generator", "trajectory_reward_shaping", "overlong", "l_cache"),
 )
@@ -145,24 +142,6 @@ class ContextBudget:
     def max_input_tokens(self) -> int:
         """Return the input allowance after reserving one complete response."""
         return self.request_window_tokens - self.max_new_tokens_per_turn
-
-    @property
-    def opencode_limit_output(self) -> int:
-        """OpenCode's per-request output cap (mirrors harbor ``_resolve_model_limit``)."""
-        return min(self.max_new_tokens_per_turn, max(1, self.max_input_tokens - 1))
-
-    @property
-    def opencode_limit_context(self) -> int:
-        """OpenCode's sliding-window / compaction-trigger size.
-
-        Mirrors the formula in ``harbor/src/harbor/agents/installed/opencode.py``
-        ``_resolve_model_limit``: ``context = window - output - margin`` where
-        ``margin`` reserves a small safety band so ``context + output`` stays
-        strictly below the engine's prompt cap.
-        """
-        output = self.opencode_limit_output
-        margin = min(1024, max(0, self.max_input_tokens - output - 1))
-        return max(1, self.max_input_tokens - output - margin)
 
     @property
     def generated_tokens_per_trajectory(self) -> int:
@@ -187,8 +166,6 @@ class ContextBudget:
             "max_input_tokens": self.max_input_tokens,
             "generated_tokens_per_trajectory": self.generated_tokens_per_trajectory,
             "overlong_cache_tokens": self.overlong_cache_tokens,
-            "opencode_limit_context": self.opencode_limit_context,
-            "opencode_limit_output": self.opencode_limit_output,
         }
 
 
@@ -296,11 +273,6 @@ def _materialize_context_budget(
     if terminal_bench is not None:
         harbor = terminal_bench.setdefault("harbor", {})
         harbor["max_turns"] = budget.max_turns
-        harbor.setdefault("llm_call_kwargs", {})["max_tokens"] = budget.max_new_tokens_per_turn
-        model_info = terminal_bench.get("model_info") or {}
-        model_info["max_input_tokens"] = budget.max_input_tokens
-        model_info["max_output_tokens"] = budget.max_new_tokens_per_turn
-        terminal_bench["model_info"] = model_info
 
     materialized_raw["context_budget"] = budget.as_dict()
     materialized_raw["trainer"] = copy.deepcopy(trainer)
@@ -632,39 +604,6 @@ def parse_checkpoint_export_config(
     )
 
 
-# Explicit mapping from custom environment import_paths to their base environment
-# types. Used to determine tunnel requirements for custom environments.
-IMPORT_PATH_TO_ENV_TYPE = {
-    "harbor.environments.pooled.daytona_dind:PooledDaytonaDinDEnvironment": "daytona",
-}
-
-
-def extract_terminal_bench_agent_env(parsed: ParsedRLConfig) -> tuple:
-    """Extract (agent_name, harbor_env) from a parsed terminal_bench config.
-
-    Raises:
-        ValueError: If import_path is specified but not in IMPORT_PATH_TO_ENV_TYPE.
-    """
-    tb = parsed.terminal_bench or {}
-    harbor = tb.get("harbor", {})
-
-    agent_name = harbor.get("name", DEFAULT_HARBOR_AGENT_NAME)
-
-    import_path = harbor.get("import_path")
-    if import_path:
-        if import_path not in IMPORT_PATH_TO_ENV_TYPE:
-            raise ValueError(
-                f"Unknown environment import_path: {import_path}\n"
-                f"Add it to IMPORT_PATH_TO_ENV_TYPE in rl_config_translation.py.\n"
-                f"Known import paths: {list(IMPORT_PATH_TO_ENV_TYPE.keys())}"
-            )
-        harbor_env = IMPORT_PATH_TO_ENV_TYPE[import_path]
-    else:
-        harbor_env = harbor.get("environment_type", "daytona")
-
-    return agent_name, harbor_env
-
-
 _OPTIONAL_HYDRA_PATTERNS = {
     ".distillation",
     ".domain_weights",
@@ -727,8 +666,6 @@ class TaskLocalSkyRLValues:
     train_data: tuple[str, ...]
     validation_data: tuple[str, ...]
     terminal_bench_data: tuple[str, ...]
-    agent_api_base: str | None
-    literal_log_path: str | None
     policy_model_path: str | None = None
     draft_model_uri: str | None = None
 
@@ -738,8 +675,6 @@ TASK_LOCAL_SKYRL_PATHS = MappingProxyType(
         "train_data": ("data.train_data",),
         "validation_data": ("data.val_data",),
         "terminal_bench_data": ("data.terminal_bench_data",),
-        "agent_api_base": ("terminal_bench_config.agent_api_base",),
-        "literal_log_path": ("terminal_bench_config.literal_log_path",),
         "policy_model_path": ("trainer.policy.model.path", "trainer.ref.model.path"),
         "draft_model_uri": ("generator.speculative_decoding.model.source_uri",),
     }
@@ -847,11 +782,6 @@ def _skyrl_config_sections(
     if hf_hub_repo_id:
         trainer["hf_hub_repo_id"] = hf_hub_repo_id
     terminal_bench = copy.deepcopy(parsed.terminal_bench)
-    if terminal_bench is not None:
-        if not terminal_bench.get("trials_dir") and experiments_dir and job_name:
-            terminal_bench["trials_dir"] = join_resource_path(experiments_dir, job_name, "trace_jobs")
-        if exp_args.get("trace_root"):
-            terminal_bench["trials_dir"] = exp_args["trace_root"]
 
     sections = {
         "trainer": trainer,

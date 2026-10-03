@@ -16,7 +16,7 @@ Modifying the code
     - Follow the :doc:`new task tutorial <../tutorials/new_env>`.  Your custom code can be placed anywhere - building on top of ``skyrl_train`` as a package - but we recommend structuring it as a folder similar to :code_link:`examples/multiply`. 
 
 - **Creating a custom Generator (ex: porting an agent harness, implementing custom trajectory generation logic, etc.)?** 
-    - Same as the above: your custom code can be placed anywhere and we typically use ``skyrl-train/examples/`` for this. See :code_link:`examples/mini_swe_agent` for an example of creating a custom ``Generator`` for `Mini-SWE-Agent <https://github.com/SWE-agent/mini-swe-agent>`_.
+    - Same as the above: your custom code can be placed anywhere and we typically use ``skyrl-train/examples/`` for this. See :code_link:`examples/mini_swe_agent` for SWE task conversion and the common Shellbox rollout engine.
 
 - **Looking to add a new algorithm by changing your advantage estimator or policy loss?** 
     - Follow the guide for :doc:`implementing custom algorithms <../algorithms/custom_algorithms>`. See :code_link:`examples/algorithms` for examples of various custom algorithm implementations.

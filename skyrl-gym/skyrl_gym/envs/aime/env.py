@@ -1,4 +1,4 @@
-from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
+from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput, ground_truth_from_extras
 from skyrl_gym.envs.aime.verifier import AIMERewardPolicy, AIMEVerifier
 from skyrl_gym.metrics import default_aggregate_metrics
 from skyrl_gym.verification import RolloutEvidence
@@ -20,9 +20,7 @@ class AIMEEnv(BaseTextEnv):
     def __init__(self, env_config: DictConfig, extras: Dict[str, Any] = {}):
         super().__init__()
 
-        assert "reward_model" in extras, "reward_model field is required"
-        assert "ground_truth" in extras["reward_model"], "ground_truth is required in reward_model field"
-        self.ground_truth = extras["reward_model"]["ground_truth"]
+        self.ground_truth = ground_truth_from_extras(extras)
 
         # ---- Tunable length-penalty config (hydra: environment.skyrl_gym.aime.*) ----
         # weight=0.0 -> legacy reward (backward compatible).
