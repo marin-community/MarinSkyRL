@@ -22,6 +22,9 @@ TYPES = {
     "trainer.mismatch_probe.extra_trainer_modes": 'tuple[Literal["router_replay", "router_replay_filtered"], ...]',
     "generator.backend": 'Literal["vllm", "sglang"]',
     "generator.weight_sync_backend": 'Literal["nccl", "gloo"]',
+    "generator.weight_sync_transport": 'Literal["broadcast", "expert_block"]',
+    "generator.r3_transport": 'Literal["by_value", "resident", "decentral"]',
+    "generator.gdn_backend": 'Literal["torch", "flashqla"]',
     "generator.chat_template.source": 'Literal["name", "file"]',
     # Preserve the numeric forms accepted by Hydra and shipped presets.
     "trainer.algorithm.cispo.cispo_eps_clip_high": "int | float",
