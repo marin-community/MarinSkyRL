@@ -35,7 +35,8 @@ from skyrl_train.utils.advantage_estimators import (
     compute_reinforce_plus_plus_outcome_advantage,
     compute_rloo_outcome_advantage,
 )
-from skyrl_train.utils.kl_controllers import AdaptiveKLController
+from skyrl_train.utils import kl_controllers
+from skyrl_train.utils.kl_controllers import get_kl_controller
 from skyrl_train.utils.algorithm_registry import (
     AdvantageEstimatorRegistry,
     NoGroupAdvantage,
@@ -375,8 +376,27 @@ def test_validate_cfg_materializes_rloo_n_group_invariant():
     }
 
 
-def test_adaptive_kl_controller_update():
-    controller = AdaptiveKLController(init_kl_coef=0.2, target=0.1, horizon=100)
+def test_adaptive_kl_controller_update(generated_recipe_schema):
+    root = Path(__file__).resolve().parents[4]
+    assert Path(kl_controllers.__file__).resolve() == root / "skyrl-train/skyrl_train/utils/kl_controllers.py"
+    recipe_type, base = generated_recipe_schema
+    recipe = recipe_type.from_document(
+        {
+            "trainer": {
+                "algorithm": {
+                    "kl_loss_coef": 0.2,
+                    "kl_ctrl": {"type": "fixed", "kl_target": 0.1, "horizon": 100},
+                }
+            }
+        }
+    )
+    fixed = get_kl_controller(OmegaConf.merge(base, recipe.to_skyrl()).trainer.algorithm)
+    fixed.update(current=0.2, n_steps=10)
+    assert math.isclose(fixed.value, 0.2, rel_tol=1e-5)
+    recipe = recipe.with_settings(["trainer.algorithm.kl_ctrl.type=adaptive"])
+    with pytest.raises(ValueError):
+        recipe.with_settings(["trainer.algorithm.kl_ctrl.type=unknown-controller"])
+    controller = get_kl_controller(OmegaConf.merge(base, recipe.to_skyrl()).trainer.algorithm)
     controller.update(current=0.2, n_steps=10)
 
     # Expected error: (0.2 / 0.1 - 1) = 1 → clipped to 0.2
