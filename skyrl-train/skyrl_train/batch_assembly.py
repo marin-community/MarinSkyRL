@@ -7,13 +7,17 @@ from typing import Any
 import numpy as np
 import torch
 from omegaconf import DictConfig
+from marinskyrl.runtime_options import AdvantageEstimator
 
 from skyrl_train.dataset.preprocess import collate_response_token_channel, convert_prompts_responses_to_batch_tensors
 from skyrl_train.dataset.routed_expert_batch import RoutedExpertRows
 from skyrl_train.rollouts.buffer import RolloutGroup
+from skyrl_train.rollouts.context import RolloutBatchMetadata
+from skyrl_train.group_admission import GroupAdvantageInvariant
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.trajectory_runners.trajectory_processing import scalar_reward_token_credit
 from skyrl_train.trajectory_runners.types import TrajectoryBatch
+from skyrl_train.utils.advantage_estimators import compute_advantages_and_returns
 
 
 @dataclass(frozen=True)
@@ -41,6 +45,107 @@ class BatchPlan:
         if remainder:
             raise ValueError("worker batch rows must be divisible by DP size")
         return range(dp * size, (dp + 1) * size)
+
+
+def plan_batch(meta: RolloutBatchMetadata, *, dp_size: int, algorithm: DictConfig) -> BatchPlan:
+    """Plan DP rows for outcome configs without a critic, KL, FTPO, distillation, trajectory selection,
+    stepwise training, batch advantage normalization or loop credit, with resolved meta.moe_router_replay
+    and meta.num_experts.
+    """
+    # trainer_utils imports policy workers.
+    from skyrl_train.utils.trainer_utils import consumed_stop_metrics
+
+    if not meta.groups:
+        raise ValueError("worker batch requires admitted groups")
+    facts = []
+    for group in meta.groups:
+        if group.row_facts is None:
+            raise ValueError(f"worker batch missing RowFacts for {group.uid}; its checkpoint can use driver mode")
+        if not group.row_facts.scalar_rewards:
+            raise ValueError(f"worker batch requires scalar rewards: {group.uid}")
+        if any(
+            values.shape != (group.sample_count,)
+            for values in (
+                group.row_facts.prompt_len,
+                group.row_facts.response_len,
+                group.row_facts.score,
+                group.row_facts.loss_tokens,
+                group.row_facts.is_last_step,
+                group.row_facts.exclude_from_baseline,
+            )
+        ):
+            raise ValueError(f"worker batch RowFacts must align with admitted rows: {group.uid}")
+        facts.append(group.row_facts)
+    uids = tuple(group.uid for group in meta.groups for _ in range(group.sample_count))
+    if dp_size < 1 or len(uids) % dp_size:
+        raise ValueError("worker batch rows must be divisible by DP size")
+    if algorithm.advantage_estimator not in (
+        AdvantageEstimator.RLOO,
+        AdvantageEstimator.RLOO_N,
+        AdvantageEstimator.GRPO,
+    ):
+        raise ValueError("worker batch requires an outcome advantage estimator: rloo, rloo_n, grpo")
+    fields = frozenset(key for group in facts for key in group.fields)
+    if "is_last_step" not in facts[0].fields:
+        fields = fields - {"is_last_step"}
+    elif any("is_last_step" not in group.fields for group in facts):
+        raise ValueError("worker batch requires is_last_step on every group when the first group carries it")
+    route_geometry = next((group.route_geometry for group in facts if group.route_geometry is not None), None)
+    if meta.moe_router_replay:
+        if meta.num_experts is None:
+            raise ValueError("worker batch router replay requires resolved num_experts")
+        if "rollout_routed_experts" not in fields or route_geometry is None:
+            raise ValueError("worker batch router replay requires rollout routes")
+    else:
+        fields = fields - {"rollout_routed_experts"}
+        route_geometry = None
+    excluded = np.concatenate([group.exclude_from_baseline for group in facts])
+    scores = torch.from_numpy(np.concatenate([group.score for group in facts]))[:, None]
+    advantages, _ = compute_advantages_and_returns(
+        token_level_rewards=scores,
+        response_mask=torch.ones_like(scores, dtype=torch.int64),
+        index=uids,
+        adv_estimator=algorithm.advantage_estimator,
+        config=algorithm,
+        values=None,
+        gamma=algorithm.gamma,
+        lambd=algorithm.lambd,
+        grpo_norm_by_std=algorithm.grpo_norm_by_std,
+        exclude_from_baseline=excluded,
+        group_advantage_invariant=GroupAdvantageInvariant.from_config(algorithm.resolved_group_advantage),
+    )
+    response_len = np.concatenate([group.response_len for group in facts])
+    stop_reasons = None
+    if "stop_reasons" in facts[0].fields:
+        if any(group.stop_reasons is None for group in facts):
+            raise ValueError("worker batch requires stop_reasons on every group when the first group carries them")
+        stop_reasons = [reason for group in facts for reason in group.stop_reasons]
+    metadata = {
+        "uids": list(uids),
+        "response_length": int(response_len.max()),
+        "avg_response_length": int(response_len.sum()) / len(uids),
+        "consumed_stop_metrics": consumed_stop_metrics(stop_reasons, len(uids)),
+        "pad_size": 0,
+    }
+    if "exclude_from_baseline" in fields:
+        metadata["exclude_from_baseline"] = excluded
+    return BatchPlan(
+        batch_id=meta.batch_id,
+        policy_step=meta.batch_id,
+        uids=uids,
+        dp_size=dp_size,
+        max_prompt_len=max(int(group.prompt_len.max()) for group in facts),
+        max_response_len=metadata["response_length"],
+        advantages=advantages[:, 0].numpy().copy(),
+        fields=fields,
+        route_geometry=route_geometry,
+        num_experts=meta.num_experts if meta.moe_router_replay else None,
+        group_counts=tuple(group.sample_count for group in meta.groups),
+        rollout_staleness=tuple(
+            meta.batch_id - group.policy_step for group in meta.groups for _ in range(group.sample_count)
+        ),
+        metadata=metadata,
+    )
 
 
 def assemble_slice(
@@ -150,5 +255,9 @@ def assemble_slice(
     )
     if loop_advantages is not None:
         training_input["loop_advantages"] = loop_advantages
+    if plan.advantages is not None:
+        advantages = torch.from_numpy(plan.advantages[rows.start : rows.stop].copy())[:, None] * response
+        training_input["advantages"] = advantages
+        training_input["returns"] = advantages
     training_input.metadata = dict(plan.metadata)
     return training_input

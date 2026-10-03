@@ -97,6 +97,8 @@ class RolloutBatchMetadata:
     batch_id: int
     groups: tuple[AdmittedRollout, ...]
     metrics: dict[str, float]
+    moe_router_replay: bool = False
+    num_experts: int | None = None
 
 
 @dataclass(frozen=True)

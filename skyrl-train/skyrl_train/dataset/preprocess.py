@@ -114,6 +114,8 @@ def convert_prompts_responses_to_batch_tensors(
         rewards: List of rewards for each response
         loss_masks: List of loss masks for each response
         logprobs: List of rollout log probs for each response
+        max_prompt_len: Optional whole-batch prompt width, at least the longest selected prompt
+        max_response_len: Optional whole-batch response width, at least the longest selected response
 
     Returns:
         sequences: Full trajectories (padded and concatenated prompts and responses). Size: (batch, seq_len).

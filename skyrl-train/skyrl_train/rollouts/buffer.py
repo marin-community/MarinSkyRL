@@ -141,6 +141,7 @@ class RowFacts:
     fields: tuple[str, ...]
     route_geometry: tuple[int, int, np.dtype] | None
     scalar_rewards: bool
+    stop_reasons: tuple[str | None, ...] | None
 
     @classmethod
     def from_batch(cls, batch: TrajectoryBatch) -> RowFacts:
@@ -167,6 +168,7 @@ class RowFacts:
             fields=tuple(key for key, value in batch.items() if value is not None),
             route_geometry=route_geometry,
             scalar_rewards=scalar_rewards,
+            stop_reasons=tuple(batch["stop_reasons"]) if batch.get("stop_reasons") is not None else None,
         )
 
 
