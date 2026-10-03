@@ -29,10 +29,11 @@ def _retained_failure(tmp_path, monkeypatch):
     return output, filesystem, log
 
 
-def test_acceptance_reads_failure_bytes_and_final_upload_receipt(tmp_path, monkeypatch):
+@pytest.mark.parametrize("suffix", ["", "/"])
+def test_acceptance_reads_failure_bytes_and_final_upload_receipt(tmp_path, monkeypatch, suffix):
     output, _, log = _retained_failure(tmp_path, monkeypatch)
 
-    receipt = check_artifacts(output, "abort-test")
+    receipt = check_artifacts(output + suffix, "abort-test")
 
     assert receipt["identity"]["worker_id"] == "worker123"
     assert receipt["failure_logs"] == [fsspec.core.url_to_fs(log)[1]]

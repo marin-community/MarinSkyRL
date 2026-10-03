@@ -8,6 +8,7 @@ It does not exercise an NCCL collective or generate an NCCL timeout dump.
 from __future__ import annotations
 
 import argparse
+from functools import partial
 import hashlib
 import json
 import os
@@ -23,6 +24,7 @@ from cloud.iris.artifacts import fs_and_path
 from cloud.iris.ray_storage import RaySpillBackend
 from marinskyrl.environment_contract import DEBUG_ARTIFACT_DIR_ENV, DebugMode, EnvVarManager, EnvVarScope
 from marinskyrl.process_diagnostics import ProcessOutcome, initialize_process_diagnostics
+from marinskyrl.resource_locator import join_resource_path
 
 
 WORKER_ARTIFACT = "runs/worker-abort.json"
@@ -43,14 +45,14 @@ def debug_environment(run_id: str) -> EnvVarManager:
     )
 
 
-def fixture_driver_command(_config_path: Path) -> list[str]:
+def fixture_driver_command(_config_path: Path, *, run_id: str) -> list[str]:
     return [
         sys.executable,
         "-m",
         "scripts.hero_failure_capture",
         "driver",
         "--run-id",
-        os.environ["HERO_CAPTURE_RUN_ID"],
+        run_id,
     ]
 
 
@@ -59,16 +61,15 @@ def run_controller(output: str, run_id: str) -> int:
     initialize_process_diagnostics("capture-task-runtime")
     args = argparse.Namespace(
         ray_port=6379,
-        rendezvous_dir=f"{output}/rendezvous",
-        ray_log_dir=f"{output}/ray-logs",
+        rendezvous_dir=join_resource_path(output, "rendezvous"),
+        ray_log_dir=join_resource_path(output, "ray-logs"),
         ray_spill_backend=RaySpillBackend.LOCAL,
         ray_spill_dir="/tmp/ray-spill",
         cluster_join_timeout=120,
         driver_liveness_timeout=180,
     )
-    # The arbitrary-command interface used by the custom Hero launcher predates
-    # main's config-only driver. Adapt only its subprocess command in this fixture.
-    with patch.object(task_runtime, "training_driver_command", fixture_driver_command):
+    # Substitute the fixture driver at the subprocess boundary; retain supervision.
+    with patch.object(task_runtime, "training_driver_command", partial(fixture_driver_command, run_id=run_id)):
         return task_runtime.run_head(args, Path("unused-fixture-config"))
 
 
@@ -179,7 +180,9 @@ def check_artifacts(output: str, run_id: str) -> dict:
         or copied.get(LOSS_ARTIFACT) != len(loss_bytes)
     ):
         raise ValueError("upload receipt does not cover the failure artifacts")
-    if manifest["source_root"] != identity["debug_root"] or not manifest["reason"].startswith("driver exit_code=42"):
+    if manifest["source_root"] != identity["debug_root"] or not manifest["reason"].startswith(
+        f"driver exit_code={FAILURE_EXIT_CODE}"
+    ):
         raise ValueError("missing final failure upload receipt")
     logs = filesystem.glob(f"{root}/ray-logs/{manifest['node_id']}/session_*/worker-*{identity['pid']}.err")
     marker = failure_marker(identity).encode()
@@ -202,7 +205,6 @@ def main() -> int:
     parser.add_argument("--output")
     parser.add_argument("--run-id", required=True)
     args = parser.parse_args()
-    os.environ["HERO_CAPTURE_RUN_ID"] = args.run_id
     if args.mode == "driver":
         return run_driver(args.run_id)
     if not args.output:
