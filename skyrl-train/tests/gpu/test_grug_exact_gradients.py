@@ -1,12 +1,12 @@
 from pathlib import Path
 
-import pytest
 import ray
 import torch
 from megatron.core import parallel_state as mpu
 from ray.util.placement_group import placement_group
 from transformers import AutoTokenizer
 
+from skyrl_train.config.grug_vllm_shapes import VOCAB
 from skyrl_train.config.numerics import Numerics
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.models.grug_moe import GrugMoeConfig, GrugMoeForCausalLM
@@ -21,6 +21,7 @@ from tests.gpu.utils import get_test_actor_config
 
 TOKENIZER = "Qwen/Qwen2.5-0.5B-Instruct"
 POLICY_WORLD_SIZE = 2
+PAD_TOKEN_ID = 0
 # One sequence per micro-batch, from under half the 2,048-token sliding window to over twice it. Two consecutive
 # micro-batches share a length: a freed tensor's storage can come back for the next micro-batch's same-shaped tensor.
 BODY_LENGTHS = (900, 1500, 2200, 2200, 3000, 4300)
@@ -81,7 +82,7 @@ def _write_checkpoint(path: Path) -> None:
     """A Snowball-shaped Grug model cut to four layers with narrow experts, random weights and non-trivial gates."""
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
     config = GrugMoeConfig(
-        vocab_size=len(tokenizer),
+        vocab_size=VOCAB,
         num_hidden_layers=4,
         intermediate_size=128,
         max_position_embeddings=8192,
@@ -257,8 +258,7 @@ def test_exact_gradients_agree_with_and_without_recompute(tmp_path):
     model_path = tmp_path / "model"
     model_path.mkdir()
     _write_checkpoint(model_path)
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    batch = _batch(tokenizer.pad_token_id, vocab_size=1000)
+    batch = _batch(PAD_TOKEN_ID, vocab_size=1000)
     with_recompute = _config(str(model_path), recompute=True)
     without_recompute = _config(str(model_path), recompute=False)
     _init_ray(with_recompute)
@@ -296,5 +296,7 @@ def test_exact_gradients_agree_with_and_without_recompute(tmp_path):
     noise_norm, noise_largest = _pooled(noise)
     for rank in range(POLICY_WORLD_SIZE):
         norm, largest = _pooled(deviation, f"pp{rank}/")
-        print(f"pp{rank}: |a-b| L2 {norm:.3e} vs pooled noise {noise_norm:.3e}; max {largest:.3e} vs {noise_largest:.3e}")
+        print(
+            f"pp{rank}: |a-b| L2 {norm:.3e} vs pooled noise {noise_norm:.3e}; max {largest:.3e} vs {noise_largest:.3e}"
+        )
         assert norm <= 2 * noise_norm and largest <= 2 * noise_largest, (rank, norm, largest, noise_norm, noise_largest)
