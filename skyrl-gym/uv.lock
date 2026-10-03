@@ -1757,7 +1757,7 @@ requires-dist = [
     { name = "reasoning-gym", specifier = "==0.1.25" },
     { name = "requests" },
     { name = "verifiable-instructions", git = "https://github.com/abukharin-nv/verifiable-instructions.git?rev=f46a5ac87b1400a4f8973039844b6be9b56e3faf" },
-    { name = "verifyit", extras = ["answer", "schema", "reasoning-gym", "judge"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fverifyit&rev=55488e209d1b074ac44c72e4639292d576310aae" },
+    { name = "verifyit", extras = ["answer", "schema", "reasoning-gym", "judge"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fverifyit&rev=563aadd00f3a2afd766fb94aff3af77bd4d785d6" },
     { name = "xmltodict" },
 ]
 provides-extras = ["dev"]
@@ -1897,7 +1897,7 @@ dependencies = [
 [[package]]
 name = "verifyit"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fverifyit&rev=55488e209d1b074ac44c72e4639292d576310aae#55488e209d1b074ac44c72e4639292d576310aae" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fverifyit&rev=563aadd00f3a2afd766fb94aff3af77bd4d785d6#563aadd00f3a2afd766fb94aff3af77bd4d785d6" }
 dependencies = [
     { name = "harbor-config" },
     { name = "tomlkit" },

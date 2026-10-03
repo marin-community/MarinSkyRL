@@ -38,7 +38,7 @@ overrides = [
     { name = "flashinfer-cubin", marker = "sys_platform == 'linux'", specifier = "==0.6.18.post1", index = "https://flashinfer.ai/whl" },
     { name = "flashinfer-python", marker = "sys_platform == 'linux'", specifier = "==0.6.18.post1" },
     { name = "fsspec", specifier = "==2026.4.0" },
-    { name = "marin-rigging", extras = ["prometheus", "secrets"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frigging&rev=55488e209d1b074ac44c72e4639292d576310aae" },
+    { name = "marin-rigging", extras = ["prometheus", "secrets"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frigging&rev=563aadd00f3a2afd766fb94aff3af77bd4d785d6" },
     { name = "nvidia-resiliency-ext", marker = "sys_platform == 'never'" },
     { name = "opentelemetry-api", marker = "sys_platform != 'linux'" },
     { name = "opentelemetry-api", marker = "sys_platform == 'linux'", specifier = "==1.44.0" },
@@ -2835,7 +2835,7 @@ wheels = [
 [[package]]
 name = "marin-rigging"
 version = "0.2.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frigging&rev=55488e209d1b074ac44c72e4639292d576310aae#55488e209d1b074ac44c72e4639292d576310aae" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frigging&rev=563aadd00f3a2afd766fb94aff3af77bd4d785d6#563aadd00f3a2afd766fb94aff3af77bd4d785d6" }
 dependencies = [
     { name = "aiobotocore", version = "3.7.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux' or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "aiobotocore", version = "3.9.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
@@ -2868,7 +2868,7 @@ secrets = [
 [[package]]
 name = "marin-rolloutengine"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frolloutengine&rev=55488e209d1b074ac44c72e4639292d576310aae#55488e209d1b074ac44c72e4639292d576310aae" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frolloutengine&rev=563aadd00f3a2afd766fb94aff3af77bd4d785d6#563aadd00f3a2afd766fb94aff3af77bd4d785d6" }
 dependencies = [
     { name = "harbor-config" },
     { name = "marin-shellbox" },
@@ -2878,7 +2878,7 @@ dependencies = [
 [[package]]
 name = "marin-shellbox"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fshellbox&rev=55488e209d1b074ac44c72e4639292d576310aae#55488e209d1b074ac44c72e4639292d576310aae" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fshellbox&rev=563aadd00f3a2afd766fb94aff3af77bd4d785d6#563aadd00f3a2afd766fb94aff3af77bd4d785d6" }
 dependencies = [
     { name = "httpx" },
 ]
@@ -3100,10 +3100,10 @@ requires-dist = [
     { name = "marin-finestore", specifier = ">=0.2.135.dev36906221286" },
     { name = "marin-iris" },
     { name = "marin-iris-native" },
-    { name = "marin-rigging", extras = ["prometheus"], marker = "extra == 'telemetry'", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frigging&rev=55488e209d1b074ac44c72e4639292d576310aae" },
-    { name = "marin-rigging", extras = ["secrets"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frigging&rev=55488e209d1b074ac44c72e4639292d576310aae" },
-    { name = "marin-rolloutengine", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frolloutengine&rev=55488e209d1b074ac44c72e4639292d576310aae" },
-    { name = "marin-shellbox", extras = ["daytona", "shellsim"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fshellbox&rev=55488e209d1b074ac44c72e4639292d576310aae" },
+    { name = "marin-rigging", extras = ["prometheus"], marker = "extra == 'telemetry'", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frigging&rev=563aadd00f3a2afd766fb94aff3af77bd4d785d6" },
+    { name = "marin-rigging", extras = ["secrets"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frigging&rev=563aadd00f3a2afd766fb94aff3af77bd4d785d6" },
+    { name = "marin-rolloutengine", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frolloutengine&rev=563aadd00f3a2afd766fb94aff3af77bd4d785d6" },
+    { name = "marin-shellbox", extras = ["daytona", "shellsim"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fshellbox&rev=563aadd00f3a2afd766fb94aff3af77bd4d785d6" },
     { name = "math-verify", specifier = "==0.9.0" },
     { name = "megatron-bridge", marker = "sys_platform == 'linux' and extra == 'megatron'", specifier = "==0.6.0" },
     { name = "megatron-core", marker = "sys_platform == 'linux' and extra == 'megatron'", specifier = "==0.18.0" },
@@ -3133,7 +3133,7 @@ requires-dist = [
     { name = "s3fs" },
     { name = "smart-open" },
     { name = "speculators", marker = "sys_platform == 'linux' and extra == 'vllm'", git = "https://github.com/lukedhlee/speculators.git?rev=6496b4db007de00dd4741349643d23b23e29dce8" },
-    { name = "taskcompendium", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=55488e209d1b074ac44c72e4639292d576310aae" },
+    { name = "taskcompendium", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=563aadd00f3a2afd766fb94aff3af77bd4d785d6" },
     { name = "tensorboard" },
     { name = "tensordict", marker = "sys_platform == 'linux' and extra == 'cuda'" },
     { name = "tensordict", marker = "sys_platform == 'linux' and extra == 'megatron'" },
@@ -3163,7 +3163,7 @@ requires-dist = [
     { name = "transformers", specifier = "==5.16.1" },
     { name = "uvicorn" },
     { name = "verifiable-instructions", git = "https://github.com/abukharin-nv/verifiable-instructions.git?rev=f46a5ac87b1400a4f8973039844b6be9b56e3faf" },
-    { name = "verifyit", extras = ["answer", "schema", "reasoning-gym", "judge"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fverifyit&rev=55488e209d1b074ac44c72e4639292d576310aae" },
+    { name = "verifyit", extras = ["answer", "schema", "reasoning-gym", "judge"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fverifyit&rev=563aadd00f3a2afd766fb94aff3af77bd4d785d6" },
     { name = "vllm", marker = "platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'vllm'", url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260929-39e62869693c/vllm-0.0.0.dev20260929+marin.39e62869693c.cu132-cp38-abi3-manylinux_2_28_aarch64.whl" },
     { name = "vllm", marker = "platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux' and extra == 'vllm'", specifier = "==0.0.0.dev20260929+marin.39e62869693c.cu132" },
     { name = "vllm", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'vllm'", url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260929-39e62869693c/vllm-0.0.0.dev20260929+marin.39e62869693c.cu132-cp38-abi3-manylinux_2_28_x86_64.whl" },
@@ -3180,7 +3180,7 @@ analysis = [
 ]
 dev = [
     { name = "litellm" },
-    { name = "marin-rigging", extras = ["prometheus"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frigging&rev=55488e209d1b074ac44c72e4639292d576310aae" },
+    { name = "marin-rigging", extras = ["prometheus"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frigging&rev=563aadd00f3a2afd766fb94aff3af77bd4d785d6" },
     { name = "marin-style", git = "https://github.com/marin-community/marin-style?rev=727f180cd423246ca1a6164163a5883cda5bf52b" },
     { name = "matplotlib" },
     { name = "pandas" },
@@ -6552,7 +6552,7 @@ wheels = [
 [[package]]
 name = "taskcompendium"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=55488e209d1b074ac44c72e4639292d576310aae#55488e209d1b074ac44c72e4639292d576310aae" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=563aadd00f3a2afd766fb94aff3af77bd4d785d6#563aadd00f3a2afd766fb94aff3af77bd4d785d6" }
 dependencies = [
     { name = "marin-rigging", extra = ["prometheus", "secrets"] },
     { name = "pyarrow" },
@@ -7212,7 +7212,7 @@ dependencies = [
 [[package]]
 name = "verifyit"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fverifyit&rev=55488e209d1b074ac44c72e4639292d576310aae#55488e209d1b074ac44c72e4639292d576310aae" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fverifyit&rev=563aadd00f3a2afd766fb94aff3af77bd4d785d6#563aadd00f3a2afd766fb94aff3af77bd4d785d6" }
 dependencies = [
     { name = "harbor-config" },
     { name = "tomlkit" },
