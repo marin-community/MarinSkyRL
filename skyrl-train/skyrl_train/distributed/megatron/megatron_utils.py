@@ -32,6 +32,8 @@ from megatron.core import parallel_state as mpu
 from megatron.core.utils import get_attr_wrapped_model
 from megatron.core.packed_seq_params import PackedSeqParams
 
+from skyrl_train.distributed.megatron.grug_muonh import MegatronGrugMuonH
+
 ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module)
 
 
@@ -196,20 +198,22 @@ def offload_megatron_model_to_cpu(models):
     """
     for model_chunk in models:
         if isinstance(model_chunk, DDP):
-            model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
-            for buffers in model_chunk_all_buffers:
-                for buffer in buffers:
-                    # offload parameters
+            buffers = [*model_chunk.buffers, *model_chunk.expert_parallel_buffers]
+            backed = [buffer for buffer in buffers if buffer.param_data is not None]
+            if backed and len(backed) != len(buffers):
+                raise RuntimeError("Megatron model has mixed sharded and unsharded parameter buffers")
+            if backed:
+                for buffer in backed:
                     if buffer.param_data.storage().size() > 0:
-                        buffer.param_data.cpu_data = buffer.param_data.data.cpu().pin_memory()
+                        buffer.param_data.cpu_data = torch.empty_like(buffer.param_data, device="cpu", pin_memory=True)
+                        buffer.param_data.cpu_data.copy_(buffer.param_data)
                         buffer.param_data_size = buffer.param_data.storage().size()
                         buffer.param_data.storage().resize_(0)
-
                     assert buffer.param_data_size == buffer.param_data.cpu_data.storage().size()
-        else:
-            # we need this for ref module
-            for _, param in model_chunk.named_parameters():
-                param.data = param.data.to("cpu", non_blocking=True)
+                continue
+        # Non-distributed Megatron optimizers and reference modules own parameter storage directly.
+        for param in model_chunk.parameters():
+            param.data = param.data.to("cpu", non_blocking=True)
     gc.collect()
     torch.cuda.empty_cache()
 
@@ -218,19 +222,23 @@ def offload_megatron_model_to_cpu(models):
 def load_megatron_model_to_gpu(models):
     for model_chunk in models:
         if isinstance(model_chunk, DDP):
-            model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
-            for buffers in model_chunk_all_buffers:
-                for buffer in buffers:
+            buffers = [*model_chunk.buffers, *model_chunk.expert_parallel_buffers]
+            backed = [buffer for buffer in buffers if buffer.param_data is not None]
+            if backed and len(backed) != len(buffers):
+                raise RuntimeError("Megatron model has mixed sharded and unsharded parameter buffers")
+            if backed:
+                for buffer in backed:
                     if buffer.param_data.storage().size() == 0:
                         buffer.param_data.storage().resize_(buffer.param_data_size)
-                        # copy data from cpu to cuda
                         buffer.param_data.copy_(buffer.param_data.cpu_data, non_blocking=True)
-        else:
-            # we need this for ref module
-            device_id = torch.cuda.current_device()
-            for _, param in model_chunk.named_parameters():
-                param.data = param.data.to(device_id, non_blocking=True)
+                        del buffer.param_data.cpu_data
+                continue
+        device_id = torch.cuda.current_device()
+        for param in model_chunk.parameters():
+            param.data = param.data.to(device_id, non_blocking=True)
     gc.collect()
+    torch.cuda.synchronize()
+    torch.accelerator.memory.empty_host_cache()
     torch.cuda.empty_cache()
 
 
@@ -273,6 +281,8 @@ def offload_megatron_copy_params(optimizers):
     for _opt in _iter_opts(optimizers):
         if hasattr(_opt, "shard_fp32_from_float16_groups"):
             offload_group_to_cpu(_opt.shard_fp32_from_float16_groups)
+        if hasattr(_opt, "fp32_from_float16_groups"):
+            offload_group_to_cpu(_opt.fp32_from_float16_groups)
 
 
 @torch.no_grad()
@@ -314,6 +324,8 @@ def load_megatron_copy_params(optimizers):
     for _opt in _iter_opts(optimizers):
         if hasattr(_opt, "shard_fp32_from_float16_groups"):
             load_group_to_gpu(_opt.shard_fp32_from_float16_groups)
+        if hasattr(_opt, "fp32_from_float16_groups"):
+            load_group_to_gpu(_opt.fp32_from_float16_groups)
 
 
 @torch.no_grad()
@@ -325,12 +337,10 @@ def offload_megatron_optimizer(optimizers):
 
     for _opt in _iter_opts(optimizers):
         offload_megatron_copy_params(_opt)
-        opt_state_dict_values = _opt.optimizer.state.values()
-        for v in opt_state_dict_values:
-            if "exp_avg" in v:
-                v["exp_avg"] = v["exp_avg"].to("cpu", non_blocking=True)
-            if "exp_avg_sq" in v:
-                v["exp_avg_sq"] = v["exp_avg_sq"].to("cpu", non_blocking=True)
+        for state in _opt.optimizer.state.values():
+            for name in ("exp_avg", "exp_avg_sq", "momentum_buffer"):
+                if name in state:
+                    state[name] = state[name].to("cpu", non_blocking=True)
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -348,12 +358,11 @@ def load_megatron_optimizer(optimizers):
         if hasattr(_opt.optimizer, "_move_new_state_to_right_device"):
             _opt.optimizer._move_new_state_to_right_device()
         else:
-            opt_state_dict_values = _opt.optimizer.state.values()
-            for v in opt_state_dict_values:
-                if "exp_avg" in v:
-                    v["exp_avg"] = v["exp_avg"].to(torch.cuda.current_device(), non_blocking=True)
-                if "exp_avg_sq" in v:
-                    v["exp_avg_sq"] = v["exp_avg_sq"].to(torch.cuda.current_device(), non_blocking=True)
+            keep_cpu_momentum = isinstance(_opt.optimizer, MegatronGrugMuonH) and _opt.optimizer.offload_momentum
+            for state in _opt.optimizer.state.values():
+                for name in ("exp_avg", "exp_avg_sq", "momentum_buffer"):
+                    if name in state and not (keep_cpu_momentum and name == "momentum_buffer"):
+                        state[name] = state[name].to(torch.cuda.current_device(), non_blocking=True)
         gc.collect()
         torch.cuda.empty_cache()
 

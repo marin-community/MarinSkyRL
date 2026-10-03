@@ -60,6 +60,7 @@ def inference_engine_kwargs_from_config(
         "vllm_attention_backend": cfg.generator.get("vllm_attention_backend", None),
         "engine_init_kwargs": engine_init_kwargs,
         "max_logprobs": role.max_logprobs,
+        "allow_cross_node_ep": cfg.generator.get("inference_engine_allow_cross_node_ep", False),
         "mp_backend": cfg.generator.get("inference_engine_mp_backend", False),
         "placement_group_timeout_seconds": int(cfg.trainer.distributed.placement_group_timeout_seconds),
         "weight_sync_pause_policy": resolve_weight_sync_pause_policy(cfg.generator),

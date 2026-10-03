@@ -22,7 +22,7 @@ import pytest
 
 from marinskyrl.inference_placement import InferenceWorkerPlacement
 from skyrl_train.entrypoints.main_base import create_ray_wrapped_inference_engines_from_config
-from skyrl_train.inference_engines.placement import node_local_bundle_nodes, verified_inference_replica_placements
+from skyrl_train.inference_engines.placement import inference_bundle_nodes, verified_inference_replica_placements
 from skyrl_train.inference_engines import ray_wrapped_inference_engine as factory
 from skyrl_train.inference_engines.utils import ReservedRendezvousPorts
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import resolve_engine_max_model_len
@@ -310,6 +310,17 @@ def test_data_parallel_workers_without_expert_parallelism_are_checked_with_no_ep
     assert {row.worker.ep_world_size for row in placements} == {1}
 
 
+def test_expert_block_single_worker_has_a_checked_placement(inference_scheduler):
+    engines = inference_scheduler.launch(
+        num_inference_engines=1, data_parallel_size=1, require_verified_placements=True
+    )
+    assert len(engines) == 1
+    assert inference_scheduler.groups[0].strategy == "STRICT_PACK"
+    placement = engines[0].worker_placements[0]
+    assert placement.weight_receiver_rank == 1
+    assert placement.worker.dp_world_size == 1
+
+
 @pytest.mark.parametrize(
     "replicas,dp,tp,strategy",
     [
@@ -337,6 +348,40 @@ def test_wrong_worker_topology_kills_the_replica_gang(inference_scheduler):
     assert scheduler.removed == scheduler.groups
 
 
+def test_cross_node_ep_verifies_each_receiver_against_its_bundle(inference_scheduler):
+    scheduler = inference_scheduler
+    engines = scheduler.launch(
+        num_inference_engines=1, data_parallel_size=16, expert_parallel_size=16, allow_cross_node_ep=True
+    )
+    assert len(engines) == 16
+    assert scheduler.groups[0].strategy == "PACK"
+    placements = [engine.worker_placements[0] for engine in engines]
+    assert [row.node_id for row in placements] == ["node-0"] * 8 + ["node-1"] * 8
+    assert [row.weight_receiver_rank for row in placements] == list(range(1, 17))
+
+
+@pytest.mark.parametrize(
+    "change,error", [({"host": "wrong-host"}, "worker host"), ({"gpu_uuid": "GPU-node-0-0"}, "distinct")]
+)
+def test_cross_node_ep_rejects_wrong_receiver(inference_scheduler, change, error):
+    scheduler = inference_scheduler
+    scheduler.report_changes[8] = change
+    with pytest.raises(ValueError, match=error):
+        scheduler.launch(
+            num_inference_engines=1, data_parallel_size=16, expert_parallel_size=16, allow_cross_node_ep=True
+        )
+    assert len(scheduler.killed) == 16
+    assert scheduler.removed == scheduler.groups
+
+
+def test_cross_node_ep_rejects_tensor_parallelism(inference_scheduler):
+    with pytest.raises(ValueError, match="TP=PP=1"):
+        inference_scheduler.launch(
+            tensor_parallel_size=2, data_parallel_size=8, expert_parallel_size=8, allow_cross_node_ep=True
+        )
+    assert not inference_scheduler.groups
+
+
 def _replica_reports():
     return [
         [asdict(InferenceWorkerPlacement(f"host-{replica}", f"GPU-{replica}-{rank}", rank, 8, rank, 8, rank, 8))]
@@ -348,7 +393,7 @@ def _replica_reports():
 def _verified_replicas(reports, offsets=None):
     return verified_inference_replica_placements(
         reports,
-        stage_nodes=[["node-0"], ["node-1"]],
+        bundle_nodes=[["node-0"] * 8, ["node-1"] * 8],
         node_hosts={"node-0": "host-0", "node-1": "host-1"},
         relative_rank_offsets=offsets if offsets is not None else [0] * 8 + [8] * 8,
         data_parallel_size=8,
@@ -417,7 +462,7 @@ def test_two_stage_replicas_are_verified_per_stage():
     ]
     placements = verified_inference_replica_placements(
         reports,
-        stage_nodes=[["node-0", "node-1"]],
+        bundle_nodes=[["node-0", "node-1"] * 2],
         node_hosts={"node-0": "host-0", "node-1": "host-1"},
         relative_rank_offsets=[0, 0],
         data_parallel_size=2,
@@ -430,7 +475,7 @@ def test_two_stage_replicas_are_verified_per_stage():
     with pytest.raises(ValueError, match="stage 1 spans nodes"):
         verified_inference_replica_placements(
             reports,
-            stage_nodes=[["node-0", "node-1"]],
+            bundle_nodes=[["node-0", "node-1"] * 2],
             node_hosts={"node-0": "host-0", "node-1": "host-1"},
             relative_rank_offsets=[0, 0],
             data_parallel_size=2,
@@ -446,7 +491,7 @@ def test_node_local_bundles_must_be_complete_and_on_one_node(monkeypatch, nodes)
         lambda pg: {"bundles_to_node_id": nodes},
     )
     with pytest.raises(ValueError, match="placement|bundles"):
-        node_local_bundle_nodes([object()], data_parallel_size=2, node_gpu_capacities={"a": 8, "b": 8})
+        inference_bundle_nodes([object()], data_parallel_size=2, node_gpu_capacities={"a": 8, "b": 8})
 
 
 def test_two_full_node_replicas_cannot_share_one_eight_gpu_node(monkeypatch):
@@ -455,4 +500,4 @@ def test_two_full_node_replicas_cannot_share_one_eight_gpu_node(monkeypatch):
         lambda pg: {"bundles_to_node_id": {i: "node-0" for i in range(8)}},
     )
     with pytest.raises(ValueError, match="exceed GPU capacity"):
-        node_local_bundle_nodes([object(), object()], data_parallel_size=8, node_gpu_capacities={"node-0": 8})
+        inference_bundle_nodes([object(), object()], data_parallel_size=8, node_gpu_capacities={"node-0": 8})

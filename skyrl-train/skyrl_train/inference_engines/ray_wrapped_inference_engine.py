@@ -51,7 +51,7 @@ from skyrl_train.utils.constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECO
 from skyrl_train.utils.utils import use_per_engine_strict_pack_pg
 from skyrl_train.inference_engines.placement import (
     colocated_engine_bundle_layout,
-    node_local_bundle_nodes,
+    inference_bundle_nodes,
     verified_inference_replica_placements,
 )
 
@@ -512,6 +512,8 @@ def create_ray_wrapped_inference_engines(
     max_logprobs: int = 1,
     require_v1_model_runner: bool = False,
     mp_backend: bool = False,
+    allow_cross_node_ep: bool = False,
+    require_verified_placements: bool = False,
     placement_group_timeout_seconds: int = DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS,
     weight_sync_pause_policy: WeightSyncPausePolicy = DEFAULT_WEIGHT_SYNC_PAUSE_POLICY,
 ) -> List[InferenceEngineInterface]:
@@ -546,6 +548,18 @@ def create_ray_wrapped_inference_engines(
         pass
     else:
         raise ValueError(f"Unsupported backend: {backend}")
+
+    if allow_cross_node_ep and (
+        backend != "vllm"
+        or tensor_parallel_size != 1
+        or pipeline_parallel_size != 1
+        or data_parallel_size < 2
+        or expert_parallel_size != data_parallel_size
+        or shared_pg is not None
+        or inference_engine_enable_sleep
+        or mp_backend
+    ):
+        raise ValueError("Cross-node EP requires non-colocated vLLM at TP=PP=1 and EP=DP>1")
 
     inference_engine_actors = []
     weight_sync_relative_rank_offsets = []
@@ -586,14 +600,16 @@ def create_ray_wrapped_inference_engines(
             "inference engines (trainer.placement.colocate_all=false). Colocated engines need "
             "the ray backend for shared-GPU resource management."
         )
-    # A TP=1 vLLM engine with DP>1 is one replica per engine in its own placement group (below).
-    # Each of its workers reports where it runs, and the report is checked against its bundle.
+    # Each supported expert-block receiver reports where it runs. Check that
+    # report against its placement-group bundle, including the DP=1 case.
     verify_workers = (
         backend == "vllm"
         and tensor_parallel_size == 1
-        and data_parallel_size > 1
+        and (data_parallel_size > 1 or require_verified_placements)
         and not (use_hybrid_engine or use_mp_backend or inference_engine_enable_sleep)
     )
+    if require_verified_placements and not verify_workers:
+        raise ValueError("Verified expert-block placements require non-colocated TP=1 vLLM workers")
     node_hosts: dict[str, str] = {}
     node_gpu_capacities: dict[str, int] = {}
     if verify_workers:
@@ -649,17 +665,20 @@ def create_ray_wrapped_inference_engines(
     # Per-engine STRICT_PACK forces every engine's bundles onto ONE node (a STRICT_PACK
     # PG is atomic-per-node), restoring the intended "TP=4 = one 4-GPU node, on-node
     # NVLink all-reduce" guarantee. Bundle indices become engine-local (0..n-1).
-    # Multi-GPU engine ranks exchange collectives and must remain node-local. A
-    # single-GPU engine instead shares one flat PACK group so rollout allocation
-    # does not fragment nodes needed by the policy workers.
+    # TP/PP ranks remain node-local. Explicit TP=PP=1 cross-node EP uses PACK;
+    # every DP/EP rank is then verified against its own bundle. Single-GPU
+    # engines share one flat PACK group to avoid fragmenting policy nodes.
     per_engine_pgs: list = []
     owned_placement_groups: list = []
-    use_per_engine_strict_pack = use_per_engine_strict_pack_pg(
-        use_hybrid_engine=use_hybrid_engine,
-        use_mp_backend=use_mp_backend,
-        tensor_parallel_size=tensor_parallel_size,
-        pipeline_parallel_size=pipeline_parallel_size,
-        data_parallel_size=data_parallel_size,
+    use_per_engine_placement_group = (
+        use_per_engine_strict_pack_pg(
+            use_hybrid_engine=use_hybrid_engine,
+            use_mp_backend=use_mp_backend,
+            tensor_parallel_size=tensor_parallel_size,
+            pipeline_parallel_size=pipeline_parallel_size,
+            data_parallel_size=data_parallel_size,
+        )
+        or require_verified_placements
     )
     if not use_hybrid_engine:
         if use_mp_backend:
@@ -679,15 +698,14 @@ def create_ray_wrapped_inference_engines(
             shared_pg = placement_group(bundles, strategy="PACK")
             owned_placement_groups.append(shared_pg)
             get_ray_pg_ready_with_timeout(shared_pg, timeout=placement_group_timeout_seconds)
-        elif use_per_engine_strict_pack:
-            # ray/uni backend, multi-GPU engines (TP*PP*DP > 1): one STRICT_PACK PG per
-            # engine so each engine's per_engine_gpu_count {GPU:1} bundles are
-            # guaranteed co-located on a single node (no cross-node TP all-reduce in
-            # decode). #232 fix.
+        elif use_per_engine_placement_group:
+            # Keep each engine's bundles in one placement group. STRICT_PACK
+            # keeps ordinary multi-GPU engines on one node; explicit cross-node
+            # EP uses PACK to spread its DP ranks across nodes.
             for _ in range(num_inference_engines):
                 pg = placement_group(
                     [{"GPU": 1, "CPU": 1} for _ in range(per_engine_gpu_count)],
-                    strategy="STRICT_PACK",
+                    strategy="PACK" if allow_cross_node_ep else "STRICT_PACK",
                 )
                 per_engine_pgs.append(pg)
                 owned_placement_groups.append(pg)
@@ -715,14 +733,15 @@ def create_ray_wrapped_inference_engines(
     else:
         placement_mode = EnginePlacementMode.SHARED
 
-    stage_nodes: list[list[str]] = []
+    bundle_nodes: list[list[str]] = []
     if verify_workers:
         try:
-            stage_nodes = node_local_bundle_nodes(
+            bundle_nodes = inference_bundle_nodes(
                 per_engine_pgs,
                 data_parallel_size=data_parallel_size,
                 node_gpu_capacities=node_gpu_capacities,
                 pipeline_parallel_size=pipeline_parallel_size,
+                allow_cross_node_ep=allow_cross_node_ep,
             )
         except Exception:
             _release_node_local_gang([], per_engine_pgs)
@@ -742,7 +761,7 @@ def create_ray_wrapped_inference_engines(
             placement_mode=placement_mode,
             colocated_engine_bundles=colocated_engine_bundles,
         )
-        if data_parallel_size > 1:
+        if data_parallel_size > 1 and not allow_cross_node_ep:
             _validate_node_local_dp_ranks(i, engine_pg, dp_rank_bundle_indices)
 
         rendezvous = _reserve_engine_rendezvous(
@@ -1021,12 +1040,13 @@ def create_ray_wrapped_inference_engines(
             if verify_workers:
                 placements = verified_inference_replica_placements(
                     startup_results,
-                    stage_nodes=stage_nodes,
+                    bundle_nodes=bundle_nodes,
                     node_hosts=node_hosts,
                     relative_rank_offsets=weight_sync_relative_rank_offsets,
                     data_parallel_size=data_parallel_size,
                     expert_parallel_size=expert_parallel_size,
                     pipeline_parallel_size=pipeline_parallel_size,
+                    allow_cross_node_ep=allow_cross_node_ep,
                 )
                 for index, engine in enumerate(engines):
                     engine.worker_placements = placements[
