@@ -16,6 +16,7 @@ from taskcompendium.grading import GradeResult, Outcome
 from rolloutengine.contracts import RolloutData
 
 from skyrl_train.error_treatment import ErrorTreatment
+from skyrl_train.dataset.tasks import TASKCOMPENDIUM_ENVIRONMENT
 from skyrl_train.metric_names import TASK_ROLLOUT_METRIC_PREFIX
 from skyrl_train.trajectory_runners.projections import (
     StepWiseTrajectoryProjection,
@@ -61,28 +62,36 @@ def rollout_loss_eligible(
     """Return execution eligibility before the final grade is available."""
     if rollout.failure is None:
         return True
+    treatment, missing_logprobs = _failure_policy(rollout, error_handling, logprobs_required)
+    return bool(any(rollout.loss_mask)) and treatment is not ErrorTreatment.MASK and missing_logprobs is None
+
+
+def _failure_policy(
+    rollout: RolloutData,
+    error_handling: ErrorHandlingConfig,
+    logprobs_required: bool,
+) -> tuple[ErrorTreatment, str | None]:
+    assert rollout.failure is not None
     treatment = (
         classify_exception_type(rollout.failure.exception_type, error_handling)
         if error_handling.enable_error_classification
         else ErrorTreatment.MASK
     )
     return (
-        bool(any(rollout.loss_mask))
-        and treatment is not ErrorTreatment.MASK
-        and passthrough_logprob_error_type(
+        treatment,
+        passthrough_logprob_error_type(
             treatment,
             has_rollout_logprobs=rollout.logprobs is not None,
             rollout_logprobs_required=logprobs_required,
-        )
-        is None
+        ),
     )
 
 
 def training_output(
     rollout: RolloutData,
-    error_handling: ErrorHandlingConfig = DEFAULT_ERROR_HANDLING_CONFIG,
+    error_handling: ErrorHandlingConfig,
     *,
-    logprobs_required: bool = False,
+    logprobs_required: bool,
 ) -> AgentLoopOutput:
     """Project token evidence and rewards with the configured training eligibility policy."""
     graded = rollout.grade.status == Outcome.GRADED
@@ -129,16 +138,7 @@ def training_output(
     error_treatment = None
     if rollout.failure is not None:
         failure = rollout.failure
-        treatment = (
-            classify_exception_type(failure.exception_type, error_handling)
-            if error_handling.enable_error_classification
-            else ErrorTreatment.MASK
-        )
-        missing_logprobs = passthrough_logprob_error_type(
-            treatment,
-            has_rollout_logprobs=rollout.logprobs is not None,
-            rollout_logprobs_required=logprobs_required,
-        )
+        treatment, missing_logprobs = _failure_policy(rollout, error_handling, logprobs_required)
         disposition = TrainingDisposition(
             loss_eligible=rollout_loss_eligible(rollout, error_handling, logprobs_required=logprobs_required),
             baseline_eligible=not treatment_excludes_from_baseline(treatment, verifier_available=graded)
@@ -241,7 +241,7 @@ class WholeTaskProjection:
             for rollout, policy in zip(rollouts, policies, strict=True)
         ]
         for index, environment in enumerate(request.get("env_classes") or []):
-            if environment == "taskcompendium":
+            if environment == TASKCOMPENDIUM_ENVIRONMENT:
                 outputs[index] = replace(outputs[index], env_metrics={})
         batch = self.projection.project(outputs, request)
         _merge_task_metrics(batch, rollouts, request)
@@ -257,13 +257,14 @@ class StepTaskProjection:
     def project(self, rollouts: Sequence[RolloutData], request: TrajectoryRequestBatch) -> TrajectoryBatch:
         required = logprobs_requested(request, self.projection.runner_config)
         policies = _task_error_policies(request, self.error_handling, self.harbor_error_handling)
-        batch = self.projection.project(
-            [
-                _step_training_outputs(rollout, policy, logprobs_required=required)
-                for rollout, policy in zip(rollouts, policies, strict=True)
-            ],
-            request,
-        )
+        outputs = [
+            _step_training_outputs(rollout, policy, logprobs_required=required)
+            for rollout, policy in zip(rollouts, policies, strict=True)
+        ]
+        for index, environment in enumerate(request.get("env_classes") or []):
+            if environment == TASKCOMPENDIUM_ENVIRONMENT:
+                outputs[index] = [replace(output, env_metrics={}) for output in outputs[index]]
+        batch = self.projection.project(outputs, request)
         _merge_task_metrics(batch, rollouts, request)
         return batch
 
@@ -313,7 +314,7 @@ def _merge_task_metrics(
     if environments is None:
         return
     for rollout, environment in zip(rollouts, environments, strict=True):
-        if environment != "taskcompendium":
+        if environment != TASKCOMPENDIUM_ENVIRONMENT:
             continue
         for key, value in rollout.metrics.items():
             metrics[key] = metrics.get(key, 0.0) + value
@@ -321,9 +322,9 @@ def _merge_task_metrics(
 
 def _step_training_outputs(
     rollout: RolloutData,
-    error_handling: ErrorHandlingConfig = DEFAULT_ERROR_HANDLING_CONFIG,
+    error_handling: ErrorHandlingConfig,
     *,
-    logprobs_required: bool = False,
+    logprobs_required: bool,
 ) -> list[AgentLoopOutput]:
     """Use exact served prompts and score each transition at its final action token."""
     if not rollout.steps:

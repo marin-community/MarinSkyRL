@@ -90,7 +90,7 @@ class ScriptedRunner(FixtureRunner):
     def __init__(self):
         self.calls = collections.Counter()
 
-    async def _run(self, input_batch, disable_tqdm=False):
+    async def _run(self, input_batch):
         uid = input_batch["trajectory_ids"][0].instance_id
         self.calls[uid] += 1
         await asyncio.sleep(0)

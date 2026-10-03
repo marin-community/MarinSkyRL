@@ -102,7 +102,6 @@ class RolloutWorker:
             self._runner.set_trajectory_sink(sink)
 
     async def startup(self) -> None:
-        # Inference I/O uses the default executor. Blocking rollout iterators use a separate pool.
         asyncio.get_running_loop().set_default_executor(
             ThreadPoolExecutor(max_workers=self._executor_threads, thread_name_prefix="rollout-worker")
         )
@@ -115,7 +114,7 @@ class RolloutWorker:
         self, input_batch: TrajectoryRequestBatch, observe: bool
     ) -> tuple[TrajectoryBatch, RolloutTimings | None]:
         with measure_rollout(enabled=observe) as observation:
-            output = await self._runner.run(input_batch, disable_tqdm=True)
+            output = await self._runner.run(input_batch)
         return output, None if observation is None else observation.timings()
 
     async def run_task(
@@ -204,8 +203,7 @@ class RolloutWorkerPool:
         if errors:
             raise ExceptionGroup("rollout worker shutdown failed", errors)
 
-    async def run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
-        del disable_tqdm
+    async def run(self, input_batch: TrajectoryRequestBatch) -> TrajectoryBatch:
         return await self._observed(
             _training_phase(input_batch), lambda actor, observe: actor.run.remote(input_batch, observe)
         )

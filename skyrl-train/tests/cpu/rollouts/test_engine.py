@@ -14,6 +14,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import requests
 import pytest
+from datasets import Dataset
 from harbor_config.errors import ErrorCategory, error_category
 from omegaconf import OmegaConf
 from skyrl_gym.envs.base_text_env import BaseTextEnv
@@ -46,7 +47,7 @@ from taskcompendium.models import (
 )
 
 from skyrl_train.rollouts.task_projections import StepTaskProjection, WholeTaskProjection
-from skyrl_train.dataset.tasks import GymTaskDataset, TaskDataset
+from skyrl_train.dataset.tasks import GymTaskDataset, TaskDataset, gym_tasks
 from skyrl_train.dataset.harbor import HarborTaskDataset
 from skyrl_train.dataset.nemotron_ultra import NemotronTaskDataset
 from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection, WholeTrajectoryProjection
@@ -55,8 +56,7 @@ from skyrl_train.rollouts.task_worker import TaskRolloutWorker
 from skyrl_train.rollouts.group_grader import GroupGraderSpec, task_group_grader
 from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
 from taskcompendium.importers.skyrl import gym_task
-from skyrl_train.dataset.tasks import read_gym_tasks
-from rolloutengine.parquet import read_tasks, write_tasks
+from taskcompendium.parquet import read_tasks, write_tasks
 from rolloutengine.contracts import ModelTurn, RolloutContractError
 from skyrl_train.rollouts.gym_tasks import GymTaskSession
 from skyrl_train.trajectory_runners.types import BatchMetadata, TokenProvenance, TrajectoryID
@@ -1787,7 +1787,11 @@ async def test_unified_gym_tasks_preserve_grading_and_turn_credit(
     )
     write_tasks(
         task_path,
-        read_gym_tasks(raw_path, dataset="fixture", revision="1", environment_configs={environment: {}}),
+        gym_tasks(
+            Dataset.from_parquet(raw_path),
+            source_name="fixture",
+            environment_configs={environment: {}},
+        ),
     )
     task = next(read_tasks(task_path))
     request["env_extras"] = [{"task_spec": task.model_dump_json()}]

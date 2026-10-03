@@ -38,7 +38,7 @@ class _Tokenizer:
 
 
 class _NormalizedRunner(FixtureRunner):
-    async def _run(self, input_batch, disable_tqdm=False):
+    async def _run(self, input_batch):
         return _output()
 
 

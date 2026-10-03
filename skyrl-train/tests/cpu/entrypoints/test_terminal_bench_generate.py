@@ -1,7 +1,7 @@
 from omegaconf import OmegaConf
 from taskcompendium.models import TaskSpec
 
-from skyrl_train.config.trajectory_runner_capabilities import EntrypointOperation
+from skyrl_train.config.rollout_validation import EntrypointOperation
 from skyrl_train.dataset.harbor import HarborTaskDataset
 from skyrl_train.entrypoints.terminal_bench_generate import TerminalBenchGenerateExp
 from skyrl_train.trajectory_runners.types import BatchMetadata, TrajectoryRequestBatch

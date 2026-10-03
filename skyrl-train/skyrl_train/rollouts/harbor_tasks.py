@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from harbor_config.models.job.config import RetryConfig
+from harbor_config.models.environment_type import EnvironmentType
 from harbor_config.models.trial.config import EnvironmentConfig, VerifierConfig
 from omegaconf import DictConfig
 from shellbox.backends.daytona.machine import DaytonaMachineFactory, DaytonaNetworkMode, DaytonaNetworkPolicy
@@ -42,7 +43,7 @@ class HarborTaskSettings:
     max_agent_timeout: float | None
     max_turns: int | None
     timeout_multiplier: float
-    eval_timeout: float
+    eval_timeout: float | None
     concurrent_trials: int
     error_handling: ErrorHandlingConfig
     reward_shaping: dict
@@ -53,19 +54,20 @@ class HarborTaskSettings:
     def from_config(cls, config: DictConfig):
         builder = HarborConfigBuilder(config)
         agent, options = builder.agent_fields()
+        trial = builder.trial_fields()
         return cls(
             builder.environment_config(),
             builder.verifier_config(),
             agent.get("override_timeout_sec"),
             agent.get("max_timeout_sec"),
             options.get("max_turns"),
-            float(builder.trial_fields().get("timeout_multiplier", 1)),
+            float(trial.get("timeout_multiplier", 1)),
             builder.get_eval_timeout_override_sec(),
             builder.get_n_concurrent_trials(),
             builder.get_error_handling_config(),
             builder.get_reward_shaping_config(),
             builder.build_retry_config(),
-            builder.trial_fields().get("trial_attempt_timeout_sec"),
+            trial.get("trial_attempt_timeout_sec"),
         )
 
     def retry_delay(self, failure: RolloutFailure | None, retries: int) -> float | None:
@@ -85,12 +87,12 @@ class HarborTaskSettings:
         return skipped_verifier("Harbor verification is disabled") if self.verifier.disable else None
 
     def machine_factory(self, runner_config: DictConfig) -> MachineFactory:
-        match self.environment.type.value:
-            case "docker":
+        match self.environment.type:
+            case EnvironmentType.DOCKER:
                 return DockerMachineFactory(
                     skopeo=Path(runner_config.skopeo), image_cache=Path(runner_config.image_cache).expanduser()
                 )
-            case "daytona":
+            case EnvironmentType.DAYTONA:
                 policy = self.environment.kwargs.get("network_policy")
                 return DaytonaMachineFactory(
                     ttl_minutes=self.environment.kwargs.get("ttl_minutes", 360),
@@ -209,6 +211,7 @@ def shape_harbor_rollouts(
     components = [{} for _ in rollouts]
     collections = [None for _ in rollouts]
     identifiers = request.get("trajectory_ids")
+    metadata = request.get("batch_metadata")
     eligible = [
         harbor and rollout.grade.status == Outcome.GRADED and rollout.failure is None
         for harbor, rollout in zip(harbor_tasks, rollouts, strict=True)
@@ -298,11 +301,11 @@ def shape_harbor_rollouts(
         reward, penalized = apply_truncation_penalty(
             rewards[index], rollout.grade.reward, truncated, config["truncation_penalty"]
         )
-        last = next(
+        last_step = next(
             (
-                index
-                for index in reversed(range(len(rollout.steps)))
-                if rollout.loss_mask[rollout.steps[index].response_end]
+                step_index
+                for step_index in reversed(range(len(rollout.steps)))
+                if rollout.loss_mask[rollout.steps[step_index].response_end]
             ),
             None,
         )
@@ -312,13 +315,12 @@ def shape_harbor_rollouts(
                 step,
                 transition=replace(
                     step.transition,
-                    reward=reward if index == last else 0.0,
-                    reward_components=component_rewards if index == last else {},
+                    reward=reward if step_index == last_step else 0.0,
+                    reward_components=component_rewards if step_index == last_step else {},
                 ),
             )
-            for index, step in enumerate(rollout.steps)
+            for step_index, step in enumerate(rollout.steps)
         )
-        metadata = request.get("batch_metadata")
         if config.get("enable_token_reward_channel") and (metadata is None or metadata.training_phase != "eval"):
             tags = [0] * len(rollout.response_token_ids)
             if config["enable_span_tagging"]:
