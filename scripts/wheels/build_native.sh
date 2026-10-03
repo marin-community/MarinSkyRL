@@ -82,11 +82,6 @@ build_environment=(
     "MAX_JOBS=$max_jobs"
     "${package_environment[@]}"
 )
-"$cuda_home/bin/nvcc" --version
-c++ --version
-env "${build_environment[@]}" uv build --wheel --no-build-isolation --python "$virtual_env/bin/python" \
-    --out-dir "$build_dir/dist" "$build_dir/source/$source_subdir"
-(cd "$build_dir/dist" && sha256sum -- *.whl) > "$build_dir/SHA256SUMS"
 {
     printf 'package=%s\narchitecture=%s\nsource=%s\n' "$package" "$architecture" "$source_commit"
     sha256sum "$0" "$script_dir/native-cu132.txt"
@@ -100,3 +95,7 @@ env "${build_environment[@]}" uv build --wheel --no-build-isolation --python "$v
         'import torch; print("torch=" + torch.__version__); print("cxx11_abi=" + str(torch.compiled_with_cxx11_abi()))'
 } > "$build_dir/BUILD_INFO"
 uv pip freeze --python "$virtual_env/bin/python" > "$build_dir/BUILD_REQUIREMENTS.txt"
+cat "$build_dir/BUILD_INFO"
+env "${build_environment[@]}" uv build --wheel --no-build-isolation --python "$virtual_env/bin/python" \
+    --out-dir "$build_dir/dist" "$build_dir/source/$source_subdir"
+(cd "$build_dir/dist" && sha256sum -- *.whl) > "$build_dir/SHA256SUMS"
