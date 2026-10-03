@@ -13,7 +13,7 @@ from tests.cpu.util import example_dummy_config
 def test_batch_invariant_reaches_ray_and_nested_vllm_workers(monkeypatch):
     monkeypatch.setattr("skyrl_train.utils.utils.peer_access_supported", lambda **_: True)
     cfg = example_dummy_config()
-    cfg.trainer.algorithm.batch_invariant = True
+    cfg.trainer.algorithm.numerics = "batch_invariant"
 
     ray_environment = prepare_runtime_environment(cfg)
     monkeypatch.setenv(VLLM_BATCH_INVARIANT_ENV, ray_environment[VLLM_BATCH_INVARIANT_ENV])

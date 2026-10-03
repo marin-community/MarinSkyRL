@@ -75,16 +75,26 @@ def validate_behavior_logprob_sampling(params: Mapping[str, Any]) -> None:
         )
 
 
-def configure_behavior_logprob_sampling(generator: DictConfig) -> None:
-    """Configure serving to return probabilities compatible with the trainer."""
-    validate_behavior_logprob_sampling(generator.sampling_params)
-    options = generator.engine_init_kwargs
+def _engine_option_mismatches(options: Mapping[str, Any]) -> list[str]:
     mismatches = []
     for key, required in ROLLOUT_LOGPROB_ENGINE_OPTIONS.items():
         if key in options and options[key] != required:
             mismatches.append(f"{key}={options[key]!r} (required value: {required!r})")
     if options.get("override_generation_config") or options.get("logits_processors"):
         mismatches.append("engine-level generation overrides or logits processors")
+    return mismatches
+
+
+def behavior_logprob_problems(generator: DictConfig) -> list[str]:
+    """The sampling parameters and engine options that keep ``generator`` from the behavior-logprob program."""
+    return _sampling_mismatches(generator.sampling_params) + _engine_option_mismatches(generator.engine_init_kwargs)
+
+
+def configure_behavior_logprob_sampling(generator: DictConfig) -> None:
+    """Configure serving to return probabilities compatible with the trainer."""
+    validate_behavior_logprob_sampling(generator.sampling_params)
+    options = generator.engine_init_kwargs
+    mismatches = _engine_option_mismatches(options)
     if mismatches:
         raise ValueError(
             "Behavior-logprob training requires processed rollout logprobs without checkpoint or engine-level "

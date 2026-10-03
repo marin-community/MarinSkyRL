@@ -16,7 +16,7 @@ _WORKER_CONFIG = OmegaConf.create(
                 "percent_step": 5,
                 "count_step": 1000,
             },
-            "algorithm": {"batch_invariant": False},
+            "algorithm": {"resolved_numerics": "native"},
         }
     }
 )

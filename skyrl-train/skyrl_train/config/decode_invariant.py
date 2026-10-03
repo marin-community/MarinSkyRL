@@ -1,13 +1,39 @@
 """What a decode-invariant vLLM engine (``inference_engines/vllm/decode_invariant.py``) runs on."""
 
+from collections.abc import Mapping
+from typing import Any
+
 # vLLM's attention backend for a decode-invariant engine: the engine patches FA3's calls.
 DECODE_INVARIANT_ATTENTION_BACKEND = "FLASH_ATTN"
+# The FlashAttention version the engine's fixed splits and window starts are written for, which vLLM selects on Hopper
+# when ``attention_config.flash_attn_version`` is unset.
+DECODE_INVARIANT_FLASH_ATTN_VERSION = 3
+# The GPU compute capability, Hopper's, that the engine's FA3 calls and the vendored compiled kernels are written for.
+DECODE_INVARIANT_COMPUTE_CAPABILITY = (9, 0)
+
+
+def flash_attn_version_override(engine_init_kwargs: Mapping[str, Any]) -> int | None:
+    """The ``attention_config.flash_attn_version`` that ``engine_init_kwargs`` forces on vLLM, or None."""
+    return (engine_init_kwargs.get("attention_config") or {}).get("flash_attn_version")
+
+
+def decode_invariant_gpu_problem() -> str | None:
+    """Why this process's GPU cannot run decode-invariant numerics, or None for a Hopper GPU or no visible GPU."""
+    import torch  # noqa: PLC0415 - keep launcher imports Torch-free
+
+    if not torch.cuda.is_available():
+        return None
+    major, minor = torch.cuda.get_device_capability()
+    if (major, minor) == DECODE_INVARIANT_COMPUTE_CAPABILITY:
+        return None
+    return f"{torch.cuda.get_device_name()} has compute capability {major}.{minor}, not Hopper's 9.0"
 
 
 def decode_invariant_engine_problems(
     *,
     backend: str,
     attention_backend: str | None,
+    flash_attn_version: int | None,
     enforce_eager: bool,
     tensor_parallel_size: int,
     decode_context_parallel_size: int,
@@ -18,6 +44,11 @@ def decode_invariant_engine_problems(
         problems.append("generator.backend=vllm")
     if attention_backend != DECODE_INVARIANT_ATTENTION_BACKEND:
         problems.append(f"generator.vllm_attention_backend={DECODE_INVARIANT_ATTENTION_BACKEND}")
+    if flash_attn_version not in (None, DECODE_INVARIANT_FLASH_ATTN_VERSION):
+        problems.append(
+            "generator.engine_init_kwargs.attention_config.flash_attn_version unset or "
+            f"{DECODE_INVARIANT_FLASH_ATTN_VERSION}"
+        )
     if enforce_eager:
         problems.append("generator.enforce_eager=false")
     if tensor_parallel_size != 1:

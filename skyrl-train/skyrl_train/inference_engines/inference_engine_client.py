@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from http import HTTPStatus
 from skyrl_train.config.trajectory_runner_capabilities import opencode_exact_continuation_enabled
 from skyrl_train.inference_engines.chat_continuation import EXACT_PROMPT_TOKEN_IDS_KEY
-from skyrl_train.trajectory_runners.routed_experts import decode_routed_experts
+from skyrl_train.trajectory_runners.routed_experts import decode_routed_experts, response_routes
 import base64
 import io
 import numpy as np
@@ -195,6 +195,17 @@ class InferenceEngineClient(InferenceEngineInterface):
         l1 = big if c1 in self._dead_engines else loads[c1]
         l2 = big if c2 in self._dead_engines else loads[c2]
         return c2 if (c2 != c1 and l2 < l1) else c1
+
+    def live_engine_indices(self) -> List[int]:
+        """The engines that have not died, in engine order."""
+        return [index for index in range(len(self.engines)) if index not in self._dead_engines]
+
+    async def generate_on_engine(
+        self, engine_idx: int, prompt_token_ids: List[int], sampling_params: Dict[str, Any]
+    ) -> InferenceEngineOutput:
+        """One response to ``prompt_token_ids`` from engine ``engine_idx``, or another live engine if it dies, resumed
+        after any pause; ``engine_dp_ranks`` holds the rank of the engine that served it."""
+        return await self._generate_single_with_retry(engine_idx, prompt_token_ids, sampling_params)
 
     def _route_session(self, session_id: Union[str, int]) -> int:
         """Return the engine index for `session_id`, load-balancing the FIRST request of
@@ -366,6 +377,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         student_topk_indices: List[Optional[List[List[int]]]] = [None for _ in range(n)]
         behavior_topk_logprobs: List[Optional[List[List[float]]]] = [None for _ in range(n)]
         engine_dp_ranks = [0] * n
+        generation_routes: List[Optional[np.ndarray]] = [None for _ in range(n)]
         # a bit hacky for now
         add_resp_logprobs = False
         add_prompt_logprobs = False
@@ -382,6 +394,9 @@ class InferenceEngineClient(InferenceEngineInterface):
                 if len(selected_ids) != len(indices) or len(selected_scores) != len(indices):
                     raise ValueError("Inference engine student top-K rows must align with responses")
                 add_student_topk = True
+            routes = result.get("generation_routed_experts")
+            if routes is not None and len(routes) != len(indices):
+                raise ValueError("Inference engine routed experts must align with responses")
             for local_idx, original_idx in enumerate(indices):
                 responses[original_idx] = result["responses"][local_idx]
                 stop_reasons[original_idx] = result["stop_reasons"][local_idx]
@@ -399,6 +414,10 @@ class InferenceEngineClient(InferenceEngineInterface):
                         raise ValueError("Inference engine student top-K tokens must align with response tokens")
                     student_topk_indices[original_idx] = selected_ids[local_idx]
                     behavior_topk_logprobs[original_idx] = selected_scores[local_idx]
+                if routes is not None:
+                    if len(routes[local_idx]) != len(response_ids[original_idx]):
+                        raise ValueError("Inference engine routed experts must align with response tokens")
+                    generation_routes[original_idx] = routes[local_idx]
 
         output = InferenceEngineOutput(
             responses=responses,
@@ -413,6 +432,10 @@ class InferenceEngineClient(InferenceEngineInterface):
                 raise ValueError("Inference engine omitted student top-K evidence for part of the batch")
             output["student_topk_indices"] = student_topk_indices
             output["behavior_topk_logprobs"] = behavior_topk_logprobs
+        if any(routes is not None for routes in generation_routes):
+            if any(routes is None for routes in generation_routes):
+                raise ValueError("Inference engine omitted routed experts for part of the batch")
+            output["routed_experts"] = [response_routes(rows) for rows in generation_routes]
         return output
 
     async def begin_online_eagle_capture(self, config: Dict[str, Any]) -> List[OnlineEagleResult]:
@@ -487,6 +510,9 @@ class InferenceEngineClient(InferenceEngineInterface):
         accum_student_topk_indices: List[List[int]] = []
         accum_behavior_topk_logprobs: List[List[float]] = []
         saw_student_topk: Optional[bool] = None
+        # A resumed turn's first route row is the forward pass that read the token ending the previous turn.
+        accum_generation_routes: List[np.ndarray] = []
+        saw_generation_routes: Optional[bool] = None
         stop_reason: str = ABORT_FINISH_REASON
 
         # We only use it if generation is completed in one turn to maintain original behavior with no retry.
@@ -528,6 +554,8 @@ class InferenceEngineClient(InferenceEngineInterface):
                 accum_student_topk_indices = []
                 accum_behavior_topk_logprobs = []
                 saw_student_topk = None
+                accum_generation_routes = []
+                saw_generation_routes = None
                 num_turns = 0
                 stop_reason = ABORT_FINISH_REASON
                 continue
@@ -567,6 +595,16 @@ class InferenceEngineClient(InferenceEngineInterface):
                 accum_student_topk_indices.extend(selected_ids[0])
                 accum_behavior_topk_logprobs.extend(selected_scores[0])
 
+            routes = partial_response.get("generation_routed_experts")
+            has_routes = routes is not None
+            if saw_generation_routes is not None and saw_generation_routes != has_routes:
+                raise ValueError("Inference engine omitted routed experts for part of a response")
+            saw_generation_routes = has_routes
+            if has_routes:
+                if len(routes) != 1 or len(routes[0]) != len(new_response_ids):
+                    raise ValueError("Inference engine routed experts must align with response tokens")
+                accum_generation_routes.append(routes[0])
+
             # 3.5 Accumulate outputs
             accum_response_ids.extend(new_response_ids)
             if new_response_logprobs is not None:
@@ -594,6 +632,8 @@ class InferenceEngineClient(InferenceEngineInterface):
         if saw_student_topk:
             output["student_topk_indices"] = [accum_student_topk_indices]
             output["behavior_topk_logprobs"] = [accum_behavior_topk_logprobs]
+        if saw_generation_routes:
+            output["routed_experts"] = [response_routes(np.concatenate(accum_generation_routes))]
         return output
 
     async def _chat_completion_with_retry(

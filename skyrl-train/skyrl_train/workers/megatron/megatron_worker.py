@@ -33,6 +33,7 @@ from skyrl_train.distributed.megatron.optimizer import (
 )
 from skyrl_train.distributed.megatron.remote_model import install_remote_hf_state
 from skyrl_train.distributed.utils import init_worker_process_group_with_device
+from skyrl_train.config.numerics import NUMERICS_KEY, Numerics, require_exact_gpu
 from skyrl_train.mismatch_probe.modes import TRAINER_MODES
 from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE, validate_grug_training_strategy
 from skyrl_train.timing_observability import PhaseBreakdown
@@ -110,6 +111,7 @@ class MegatronWorker:
         transformer_config_kwargs,
         tokenizer_path: str,
         tokenizer_revision: str | None,
+        numerics: Numerics,
         bf16=True,
         flash_attn=False,
         model_revision: str | None = None,
@@ -164,6 +166,12 @@ class MegatronWorker:
 
         for k, v in transformer_config_kwargs.items():
             setattr(provider, k, v)
+        if hf_config.model_type == GRUG_MOE_MODEL_TYPE:
+            provider.grug_numerics = numerics
+        elif numerics is Numerics.EXACT:
+            raise ValueError(f"{NUMERICS_KEY}={numerics} needs a Grug model")
+        if numerics is Numerics.EXACT:
+            require_exact_gpu()
         provider.finalize()
 
         self.provider = provider
@@ -222,6 +230,7 @@ class MegatronWorker:
                     ftpo_chosen_mask=micro.get("ftpo_chosen_mask"),
                     rollout_routed_experts=micro.routed_experts_tensor(),
                     rollout_engine_dp_ranks=micro.get(ENGINE_DP_RANKS_KEY),
+                    loss_mask=micro.get("loss_mask"),
                     probe_row_indices=micro.get("probe_row_indices"),
                 )
             )
@@ -453,6 +462,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             model_source_uri=self.cfg.trainer.policy.model.get("source_uri"),
             tokenizer_path=self.cfg.trainer.policy.model.get("tokenizer_path"),
             tokenizer_revision=self.cfg.trainer.policy.model.get("tokenizer_revision"),
+            numerics=Numerics(self.cfg.trainer.algorithm.resolved_numerics),
         )
 
         self.actor_module = self.make_megatron_module(
@@ -507,6 +517,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             logprob_chunk_size=OmegaConf.select(
                 self.cfg, "trainer.policy.megatron_config.logprob_chunk_size", default=None
             ),
+            numerics=Numerics(self.cfg.trainer.algorithm.resolved_numerics),
         )
         self._maybe_install_router_replay("policy")
 
@@ -539,6 +550,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             logprob_chunk_size=OmegaConf.select(
                 self.cfg, "trainer.policy.megatron_config.logprob_chunk_size", default=None
             ),
+            numerics=Numerics(self.cfg.trainer.algorithm.resolved_numerics),
         )
 
     def _ppo_train_impl(self, train_data, timing: PhaseBreakdown) -> "TrainingOutputBatch":
@@ -929,6 +941,7 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             model_source_uri=self.cfg.trainer.ref.model.get("source_uri"),
             tokenizer_path=self.cfg.trainer.ref.model.get("tokenizer_path"),
             tokenizer_revision=self.cfg.trainer.ref.model.get("tokenizer_revision"),
+            numerics=Numerics.NATIVE,
         )
 
         self.actor_module = self.make_megatron_module(

@@ -23,8 +23,10 @@ from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_exp
 from skyrl_train.config.query_bias import resolve_grug_query_bias_update
 from skyrl_train.config.weight_sync_pause import resolve_weight_sync_pause_policy
 from skyrl_train.config.behavior_logprobs import configure_behavior_logprob_sampling
+from skyrl_train.config.numerics import Numerics, apply_numerics_resolution, validate_numerics_config
 from skyrl_train.config.mismatch_probe import validate_mismatch_probe_config
 from skyrl_train.config.objective_spec import rollout_logprobs_required, validate_objective
+from skyrl_train.config.trajectory_runner_capabilities import TrajectoryRunnerMode
 from skyrl_train.callbacks.types import (
     CHECKPOINT_CALLBACK_TYPE,
     HF_MODEL_SAVE_CALLBACK_TYPE,
@@ -481,7 +483,8 @@ def validate_hf_export_config(cfg: DictConfig) -> None:
             )
 
 
-def validate_cfg(cfg: DictConfig):
+def validate_cfg(cfg: DictConfig, runner_mode: TrajectoryRunnerMode = TrajectoryRunnerMode.SKYRL_GYM):
+    """Validate ``cfg`` for a run whose trajectories ``runner_mode`` produces, and resolve its derived settings."""
     validate_mismatch_probe_config(cfg)
     if cfg.trainer.strategy != "megatron":
         raise ValueError(f"Unsupported training strategy: {cfg.trainer.strategy}")
@@ -557,7 +560,8 @@ def validate_cfg(cfg: DictConfig):
     validate_objective(cfg, loss_spec=spec)
     resolve_weight_sync_pause_policy(cfg.generator)
     validate_generator_cfg(cfg)
-    validate_batch_invariant_config(cfg)
+    apply_numerics_resolution(cfg, runner_mode)
+    validate_numerics_config(cfg)
     validate_hf_export_config(cfg)
     try:
         resolve_grug_query_bias_update(cfg.trainer.policy)
@@ -610,8 +614,11 @@ def validate_cfg(cfg: DictConfig):
 
     cfg.trainer.algorithm = algorithm_config
 
-    behavior_logprobs_required = rollout_logprobs_required(cfg.trainer.algorithm, loss_spec=spec) or bool(
-        cfg.trainer.mismatch_probe.get("enabled", False)
+    # Exact numerics compare the trainer's log-probabilities with the rollout's processed ones, from one distribution.
+    behavior_logprobs_required = (
+        rollout_logprobs_required(cfg.trainer.algorithm, loss_spec=spec)
+        or bool(cfg.trainer.mismatch_probe.get("enabled", False))
+        or Numerics(cfg.trainer.algorithm.resolved_numerics) is Numerics.EXACT
     )
     if behavior_logprobs_required:
         if cfg.generator.sampling_params.logprobs is None:
@@ -673,20 +680,6 @@ def validate_cfg(cfg: DictConfig):
 
     if cfg.generator.engine_init_timeout_seconds <= 0:
         raise ValueError("generator.engine_init_timeout_seconds must be greater than zero")
-
-
-def validate_batch_invariant_config(cfg: DictConfig) -> None:
-    """Validate that trainer and rollout kernels are controlled together."""
-
-    if not cfg.trainer.algorithm.batch_invariant:
-        return
-    if cfg.generator.backend != "vllm":
-        raise ValueError("trainer.algorithm.batch_invariant=true requires generator.backend='vllm'")
-    if not cfg.generator.run_engines_locally:
-        raise ValueError(
-            "trainer.algorithm.batch_invariant=true cannot configure a remote inference server; "
-            "run the vLLM engines locally so both rollout and trainer activation is guaranteed"
-        )
 
 
 def validate_generator_cfg(cfg: DictConfig):

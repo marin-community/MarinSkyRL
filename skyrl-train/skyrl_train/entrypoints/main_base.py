@@ -23,6 +23,7 @@ from loguru import logger
 import asyncio
 import multiprocessing as mp
 
+from skyrl_train.config.numerics import Numerics
 from skyrl_train.config.objective_spec import rollout_logprobs_required
 from skyrl_train.config.trajectory_runner_capabilities import (
     EntrypointOperation,
@@ -200,6 +201,7 @@ def create_ray_wrapped_inference_engines_from_config(
         shared_pg=colocate_pg,
         inference_engine_enable_sleep=(cfg.trainer.placement.colocate_all and operation is EntrypointOperation.TRAIN),
         max_logprobs=max([1, *requested_logprobs]),
+        decode_invariant=Numerics(cfg.trainer.algorithm.resolved_numerics) is Numerics.EXACT,
     )
     model_revision = cfg.trainer.policy.model.get("revision")
     if model_revision is not None and policy_source_uri is None:
@@ -680,7 +682,7 @@ def run_ray_driver(
     from skyrl_train.utils.utils import initialize_ray  # noqa: PLC0415
     from skyrl_train.utils.algorithm_registry import PolicyLossRegistry  # noqa: PLC0415
 
-    validate_cfg(cfg)
+    validate_cfg(cfg, runner_mode)
     validate_trajectory_runner_capabilities(
         cfg, runner_mode, operation, loss_spec=PolicyLossRegistry.spec(cfg.trainer.algorithm.policy_loss_type)
     )

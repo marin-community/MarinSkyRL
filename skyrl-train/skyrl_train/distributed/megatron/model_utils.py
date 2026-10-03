@@ -22,6 +22,8 @@ import torch
 import torch.distributed as dist
 import megatron.core.parallel_state as mpu
 
+from skyrl_train.models.grug_vllm_kernels import vllm_token_logprobs
+
 
 @torch.no_grad()
 def _compute_distributed_log_softmax(
@@ -329,6 +331,16 @@ def from_parallel_logits_to_logprobs(
         logprobs = logprobs[:, :-pad_len]
 
     return logprobs[:, :-1]
+
+
+def vllm_prompt_logprobs(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """``from_parallel_logits_to_logprobs`` on unsharded ``[batch, seq_len, vocab]`` logits, computed as vLLM's model
+    runner V2 computes it (``vllm_token_logprobs``), without gradients."""
+    batch, seq_len, vocab = logits.shape
+    target = target.roll(shifts=-1, dims=-1)
+    with torch.no_grad():
+        values = vllm_token_logprobs(logits.reshape(batch * seq_len, vocab), target.reshape(-1))
+    return values.view(batch, seq_len)[:, :-1]
 
 
 def from_parallel_logits_to_logprobs_packed_sequences(

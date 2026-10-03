@@ -10,6 +10,7 @@ from skyrl_train.models.grug_fa3_invariant import (
     FA3_INVARIANT_SPLITS,
     fa3_fixed_split_metadata,
 )
+from skyrl_train.models.grug_vllm_kernels import fa3_attention_sbhd
 from tests.gpu.grug_gpu_gates import require_hoppers
 
 HEADS, KV_HEADS, HEAD_DIM, BLOCK, WINDOW = 20, 5, 128, 16, 2048
@@ -85,12 +86,18 @@ def _sequences(generator):
     return queries, kv_cache, table_rows
 
 
+def _sequence_keys_values(kv_cache, table, length):
+    """The ``[length, KV_HEADS, HEAD_DIM]`` keys and values of the sequence whose blocks ``table`` lists."""
+    blocks = kv_cache[table[: -(-length // BLOCK)].long()].transpose(1, 2).reshape(-1, KV_HEADS, 2 * HEAD_DIM)
+    return blocks[:length, :, :HEAD_DIM].contiguous(), blocks[:length, :, HEAD_DIM:].contiguous()
+
+
 def _same_rows(left, right) -> bool:
     return torch.equal(left.contiguous().view(torch.int16), right.contiguous().view(torch.int16))
 
 
 @pytest.mark.parametrize("window", [None, WINDOW], ids=["full", "sliding_window"])
-def test_engine_decode_and_prefill_rows_equal_rows_decoded_alone(window):
+def test_engine_steps_and_trainer_rows_equal_rows_decoded_alone(window):
     require_hoppers(1)
     decode_invariant.install()
     impl = FlashAttentionImpl(HEADS, HEAD_DIM, SCALE, KV_HEADS, None, window, "auto")
@@ -109,3 +116,7 @@ def test_engine_decode_and_prefill_rows_equal_rows_decoded_alone(window):
         # A prefill of the rows after a 16-token cached prefix.
         prefill = _attend(FlashAttentionImpl.forward, impl, query[16:], kv_cache, [0, length - 16], [length], table)
         assert _same_rows(prefill, decoded[16:])
+
+        keys, values = _sequence_keys_values(kv_cache, table[0], length)
+        trainer = fa3_attention_sbhd(query[:, None], keys[:, None], values[:, None], window=window, scale=SCALE)
+        assert _same_rows(trainer.view(length, HEADS, HEAD_DIM), decoded)

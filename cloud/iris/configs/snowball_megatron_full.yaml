@@ -47,10 +47,13 @@ trainer:
       context_parallel_size: 1
       expert_model_parallel_size: 8
       expert_tensor_parallel_size: 1
+      # The trainer routes each response token with the experts its vLLM engine chose.
+      moe_router_replay: true
       optimizer_checkpoint_sharding_type: dp_reshardable
       ddp_config:
         overlap_grad_reduce: true
-        overlap_param_gather: true
+        # Exact numerics resolves to native when parameter all-gathers overlap the forward.
+        overlap_param_gather: false
         grad_reduce_in_fp32: false
   ref:
     megatron_config:
@@ -80,6 +83,8 @@ generator:
   sampling_params:
     temperature: 1.0
     top_p: 1.0
+  engine_init_kwargs:
+    enable_return_routed_experts: true
 
 data:
   kind: parquet
