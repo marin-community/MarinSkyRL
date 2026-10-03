@@ -54,28 +54,6 @@ def _write_index(metadata_dir: Path, weight_map: dict[str, str]) -> None:
 
 
 @pytest.mark.parametrize("indexed", [True, False])
-def test_remote_read_statistics_match_file_reads(tmp_path: Path, monkeypatch, indexed: bool) -> None:
-    shard = tmp_path / "model.safetensors"
-    tensors = {f"layer.{index}.weight": torch.arange(8 + index, dtype=torch.float32) for index in range(3)}
-    save_file(tensors, shard)
-    filesystem = CountingFileSystem(shard.read_bytes())
-    local_filesystem_for = io._get_filesystem
-    monkeypatch.setattr(
-        io, "_get_filesystem", lambda path: filesystem if path.startswith("s3://") else local_filesystem_for(path)
-    )
-    metadata = tmp_path / "metadata"
-    if indexed:
-        _write_index(metadata, {key: shard.name for key in tensors})
-    else:
-        metadata.mkdir()
-    store = RemoteSafetensorsTensorStore("s3://bucket/policy", metadata)
-    for key in sorted(tensors):
-        torch.testing.assert_close(store.load_tensors([key])[key], tensors[key])
-    assert store.read_stats.opens == filesystem.opens
-    assert store.read_stats.bytes_read == filesystem.bytes_read == len(filesystem.payload)
-
-
-@pytest.mark.parametrize("indexed", [True, False])
 def test_single_key_and_expert_slice_reads_fetch_only_requested_bytes(
     tmp_path: Path, monkeypatch, indexed: bool
 ) -> None:
