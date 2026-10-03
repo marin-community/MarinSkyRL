@@ -544,6 +544,7 @@ class PPORayActorGroup:
             If none, create new placement group automatically. Defaults to None.
         num_gpus_per_actor (float, optional): Number of gpus allocated for each actor.
             If < 1.0, multiple models can share same gpu. Defaults to 1.
+        actor_env_vars: Environment variables applied to each actor before process-group initialization.
     """
 
     def __init__(
@@ -561,6 +562,7 @@ class PPORayActorGroup:
         record_memory: bool = False,
         pin_to_ray_gpu_id: bool = False,
         force_cvd_mask: bool = False,
+        actor_env_vars: Optional[Dict[str, str]] = None,
     ) -> None:
         self.cfg = cfg
         self._num_nodes = num_nodes
@@ -582,6 +584,7 @@ class PPORayActorGroup:
         self.colocate_all = colocate_all
         self.sequence_parallel_size = sequence_parallel_size
         self.record_memory = record_memory
+        self._actor_runtime_env = {"env_vars": actor_env_vars} if actor_env_vars else None
         self._initiate_actors(pg, num_gpus_per_actor)
 
     def _initiate_actors(self, pg: Optional[PlacementGroup], num_gpus_per_actor: float):
@@ -602,6 +605,7 @@ class PPORayActorGroup:
             )
 
         reordered_bundle_indices = []
+        actor_options = {"runtime_env": self._actor_runtime_env} if self._actor_runtime_env else {}
         if pg is not None:
             pg_data = placement_group_table(pg)
             should_reorder_bundles = len(pg_data["bundles"]) == world_size
@@ -629,6 +633,7 @@ class PPORayActorGroup:
                 num_cpus=num_gpus_per_actor,
                 num_gpus=num_gpus_per_actor,
                 resources=self._resources,
+                **actor_options,
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=pg,
                     placement_group_bundle_index=reordered_bundle_indices[0] if reordered_bundle_indices else 0,
@@ -650,6 +655,7 @@ class PPORayActorGroup:
                 num_cpus=num_gpus_per_actor,
                 num_gpus=num_gpus_per_actor,
                 resources=self._resources,
+                **actor_options,
             ).remote(
                 cfg=self.cfg,
                 world_size=world_size,
@@ -674,6 +680,7 @@ class PPORayActorGroup:
                         num_cpus=num_gpus_per_actor,
                         num_gpus=num_gpus_per_actor,
                         resources=self._resources,
+                        **actor_options,
                         scheduling_strategy=PlacementGroupSchedulingStrategy(
                             placement_group=pg,
                             placement_group_bundle_index=(
@@ -699,6 +706,7 @@ class PPORayActorGroup:
                         num_cpus=num_gpus_per_actor,
                         num_gpus=num_gpus_per_actor,
                         resources=self._resources,
+                        **actor_options,
                     ).remote(
                         cfg=self.cfg,
                         world_size=world_size,
