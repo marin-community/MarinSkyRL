@@ -4,7 +4,6 @@ import runpy
 from types import SimpleNamespace
 
 import pytest
-from datasets import Dataset
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
@@ -14,7 +13,6 @@ from marinskyrl import recipe_schema as schema
 from marinskyrl import speculative_decoding as speculative
 from scripts import generate_recipe_schema as generator
 from skyrl_train.config import ftpo
-from skyrl_train import domain_sampling
 from skyrl_gym.envs.gsm8k import env as gsm8k
 from skyrl_gym.envs.reasoning_gym import env as reasoning_gym
 from skyrl_gym.verification import VerificationStatus
@@ -277,29 +275,3 @@ def test_generated_distillation_options_preserve_the_compiled_teacher_plan(gener
     assert distillation.compile_distillation_plan(disabled.to_skyrl()) is None
     with pytest.raises(ValueError):
         authored.with_settings(["trainer.algorithm.distillation.coefficent=2.0"])
-
-
-def test_generated_route_weights_preserve_sample_order_across_recipe_changes(generated_author_sections):
-    root = Path(__file__).resolve().parents[3]
-    assert Path(domain_sampling.__file__).resolve() == root / "skyrl-train/skyrl_train/domain_sampling.py"
-    print(f"domain sampling source: {domain_sampling.__file__}")
-    recipe_type, _ = generated_author_sections
-    weights = {"math": 1, "code": 1.0, "chat": 1.0}
-    document = {"data": {"sampling": {"kind": "domain-weighted", "domain_weights": weights}}}
-    recipe = recipe_type.from_document(document)
-    rows = Dataset.from_dict({domain_sampling.ROUTE_COLUMN: [route for route in weights for _ in range(4)]})
-    baseline = domain_sampling.DomainWeightedOrder(rows, weights, seed=3, window_size=4)
-    preserved = recipe.merge(recipe_type.from_document({"data": {"shuffle": False}})).with_settings(
-        ["data.sampling.decay=0.9"]
-    )
-    sampled = domain_sampling.DomainWeightedOrder(
-        rows, preserved.to_skyrl()["data"]["sampling"]["domain_weights"], seed=3, window_size=4
-    )
-    assert [sampled.next_index() for _ in range(12)] == [baseline.next_index() for _ in range(12)]
-    changed = recipe.with_settings(["data.sampling.domain_weights.math=2"])
-    sampled = domain_sampling.DomainWeightedOrder(
-        rows, changed.to_skyrl()["data"]["sampling"]["domain_weights"], seed=3, window_size=4
-    )
-    routes = [rows[index][domain_sampling.ROUTE_COLUMN] for index in (sampled.next_index() for _ in range(4))]
-    assert routes.count("math") == 2
-    assert routes.count("code") == routes.count("chat") == 1

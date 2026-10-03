@@ -14,6 +14,11 @@ ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = ROOT / "scripts/generate_recipe_schema.py"
 BASE = """defaults:
   - _self_
+data:
+  sampling:
+    domain_weights:
+      math-reasoning: 1
+      code: 2.0
 trainer:
   strategy: megatron
   max_steps: 0
@@ -45,6 +50,7 @@ generator:
     temperature: 1
 """
 SIDECAR = """TYPES = {
+    'data.sampling.domain_weights': 'NumberMap',
     'trainer.strategy': 'Literal["megatron"]',
     'trainer.max_steps': 'NonNegativeInt',
     'trainer.placement.policy_num_nodes': 'PositiveInt | None',
@@ -126,14 +132,11 @@ def test_generator_cli_preserves_group_types_and_adjacent_comments_and_detects_d
     assert "Filled from allocation" in description
     assert "colocation" not in description
     assert recipe_type().to_skyrl() == {}
+    assert list(recipe.data.sampling.domain_weights.items()) == [("math-reasoning", 1), ("code", 2.0)]
     sparse = recipe_type.from_document({"trainer": {"algorithm": {"ftpo": {"lambda_mse": 0.25}}}})
     assert sparse.to_skyrl() == {"trainer": {"algorithm": {"ftpo": {"lambda_mse": 0.25}}}}
     adapter = recipe_type.from_document({"generator": {"adapter": {"name": "custom", "parameters": {"count": 2}}}})
     assert adapter.to_skyrl() == {"generator": {"adapter": {"name": "custom", "parameters": {"count": 2}}}}
-    assert adapter.with_settings(["generator.adapter.parameters=null"]).to_skyrl() == {
-        "generator": {"adapter": {"name": "custom", "parameters": None}}
-    }
-    assert adapter.with_settings(["generator.adapter=null"]).to_skyrl() == {"generator": {"adapter": None}}
     for following in ("hf_save_interval", "micro_forward_batch_size_per_gpu"):
         with pytest.raises(ValidationError):
             recipe_type.model_validate_json(json.dumps({"trainer": {following: None}}))

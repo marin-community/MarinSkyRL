@@ -262,7 +262,13 @@ def render_sections(
             if field_path in owned:
                 continue
             default = undeclared[field_path][1] if field_path in undeclared else lookup(field_path)
-            if isinstance(value, dict) and value and field_path not in open_paths:
+            declared_annotation = undeclared[field_path][0] if field_path in undeclared else types.get(field_path)
+            if (
+                isinstance(value, dict)
+                and value
+                and field_path not in open_paths
+                and declared_annotation != "NumberMap"
+            ):
                 section_name = emit(field_path, value)
                 annotation = types.get(field_path, section_name)
                 if default is None:
