@@ -300,3 +300,18 @@ def test_dynamic_filter_applies_minimum_reward_std():
 
     assert default_floor.evaluate(group) is GroupSelectionResult.KEEP
     assert high_floor.evaluate(group) is GroupSelectionResult.INSUFFICIENT_REWARD_SPREAD
+
+
+@pytest.mark.parametrize(
+    ("rewards", "expected"),
+    [
+        ([1.0, 1.0, 1.0, 0.0], GroupSelectionResult.INSUFFICIENT_REWARD_SPREAD),
+        ([1.0, 0.0, 1.0, 1.0], GroupSelectionResult.KEEP),
+    ],
+)
+def test_dynamic_filter_reads_only_rows_in_the_group_baseline(rewards, expected):
+    group = _group(loss_masks=[[1], [1], [1], [0]], exclude_from_baseline=[False, False, False, True])
+    group.trajectory_batch["rewards"] = rewards
+    group.trajectory_batch["unshaped_rewards"] = rewards
+    selection = GroupSelectionPolicy(DynamicSamplingType.FILTER)
+    assert selection.evaluate(group) is expected

@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Sequence
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import replace
 import io as stdlib_io
@@ -10,7 +11,7 @@ import shutil
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 from jaxtyping import Float
 from pathlib import Path
 import ray
@@ -61,8 +62,7 @@ from skyrl_train.env_vars import NCCL_BUFFER_SIZE_ENV_VAR
 from skyrl_train.tensor_math import masked_mean
 from skyrl_train.utils.policy_math import compute_approx_kl, normalize_advantages_dict
 from skyrl_train.utils.kl_controllers import get_kl_controller, FixedKLController, AdaptiveKLController
-from skyrl_train.utils.algorithm_registry import AdvantageEstimator
-from skyrl_train.utils.advantage_estimators import GRPO_FLAT_REWARD_STD_TOLERANCE, compute_advantages_and_returns
+from skyrl_train.utils.advantage_estimators import compute_advantages_and_returns, flat_group_fraction
 from marinskyrl.runtime_options import PolicyLossType, reference_model_required
 from marinskyrl.distillation import (
     DistillationObjectiveKind,
@@ -101,6 +101,8 @@ from skyrl_train.draft_trainer import (
 )
 from skyrl_train.group_admission import (
     GroupAdvantageInvariant,
+    GroupAdvantageKind,
+    baseline_eligible_mask,
     admission_stall_timeout,
     assert_training_groups_eligible,
 )
@@ -309,19 +311,6 @@ def _token_staleness_metrics(
         metrics["async/staleness_tokens_stamped"] = stamped.count_nonzero().item() / count
         metrics["async/staleness_tokens_spanning"] = spanning.float().mean().item()
     return metrics
-
-
-def _zero_std_group_fraction(uids: Sequence[str], rewards: torch.Tensor) -> float:
-    group_rewards: dict[str, list[torch.Tensor]] = {}
-    for uid, reward in zip(uids, rewards, strict=True):
-        group_rewards.setdefault(uid, []).append(reward)
-    if not group_rewards:
-        return 0.0
-    flat_groups = sum(
-        len(group) > 1 and torch.std(torch.stack(group)).item() <= GRPO_FLAT_REWARD_STD_TOLERANCE
-        for group in group_rewards.values()
-    )
-    return flat_groups / len(group_rewards)
 
 
 # Per-token credit added after the outcome advantage and its batch normalization.
@@ -2273,14 +2262,8 @@ class RayPPOTrainer:
                 response_masks_tensor.bool(),
                 self.cfg.generator.sampling_params.logprobs,
             )
-            excluded = trajectory_batch.get("exclude_from_baseline")
-            final = trajectory_batch.get("is_last_step")
-            if excluded is None:
-                excluded = [False] * len(response_ids)
-            if final is None:
-                final = [True] * len(response_ids)
             loop = parse_trajectory_reward_shaping_config(self.cfg.generator.get("trajectory_reward_shaping")).loop
-            eligible = [last and not exclude for last, exclude in zip(final, excluded, strict=True)]
+            eligible = baseline_eligible_mask(trajectory_batch).tolist()
             verified_boundaries = None
             closure_targets = None
             if ftpo.boundary.uses_verified_boundaries:
@@ -2462,7 +2445,6 @@ class RayPPOTrainer:
         if loop_advantages_tensor is not None:
             training_input["loop_advantages"] = loop_advantages_tensor
         training_input.metadata = {"uids": uids}
-        # For RLOO-N: pass through exclude_from_baseline flags if present
         if trajectory_batch.get("exclude_from_baseline") is not None:
             training_input.metadata["exclude_from_baseline"] = np.array(
                 trajectory_batch["exclude_from_baseline"], dtype=bool
@@ -2687,11 +2669,14 @@ class RayPPOTrainer:
 
         return_sums = token_level_rewards.sum(dim=-1)[: num_samples - pad_size]
         if (
-            self.cfg.trainer.algorithm.advantage_estimator == AdvantageEstimator.GRPO
+            self.group_advantage_invariant.kind is not GroupAdvantageKind.NONE
             and not self.cfg.trainer.step_wise_training
         ):
-            self.all_metrics["reward/zero_std_group_fraction"] = _zero_std_group_fraction(
-                data.metadata["uids"][: num_samples - pad_size], return_sums
+            excluded = data.metadata.get("exclude_from_baseline")
+            self.all_metrics["reward/zero_std_group_fraction"] = flat_group_fraction(
+                token_level_rewards[: num_samples - pad_size],
+                data.metadata["uids"][: num_samples - pad_size],
+                None if excluded is None else excluded[: num_samples - pad_size],
             )
         if self.cfg.trainer.step_wise_training:
             avg_rewards: float = return_sums[data["is_last_step"][: num_samples - pad_size]].mean().item()
