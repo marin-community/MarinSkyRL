@@ -48,6 +48,16 @@ GCC/G++ `14.2.0-19`, glibc `2.41-12+deb13u3`, git `1:2.47.3-0+deb13u1`, and
 uv `0.10.3`. Install the compiler and git inside the build container. These are
 Linux wheels for that task environment; they do not claim manylinux portability.
 
+For TE 2.19, pin the multi-architecture task image
+`ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990`.
+The maintained recipe built successfully in CPU-only x86_64 and aarch64 tasks
+with CPython `3.12.14`, uv `0.10.3`, GCC/G++ `14.2.0-19` and glibc
+`2.41-12+deb13u4`. The pinned requirements supply NVCC `13.2.78`, Torch
+`2.13.0+cu132` and setuptools `80.10.2`. Each task requested two CPU cores,
+16 GiB memory and 64 GiB disk. Preserve the image digest with the build records;
+select the architecture using the live cluster topology rather than requesting
+a GPU for compilation.
+
 ```bash
 bash scripts/wheels/build_native.sh flash-attn /tmp/build-flash-attn
 bash scripts/wheels/build_native.sh causal-conv1d /tmp/build-causal-conv1d
