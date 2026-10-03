@@ -2326,73 +2326,69 @@ class RayPPOTrainer:
         """
         token_level_rewards = data["rewards"]
 
-        if self.cfg.trainer.step_wise_training:
-            is_last_step = data["is_last_step"].bool()
-            response_mask = data["response_mask"]
-            index = np.array(data.metadata["uids"])
-            adv_estimator = self.cfg.trainer.algorithm.advantage_estimator
-            config = self.cfg.trainer.algorithm
-            values = data["values"]
-            gamma = self.cfg.trainer.algorithm.gamma
-            lambd = self.cfg.trainer.algorithm.lambd
-            grpo_norm_by_std = self.cfg.trainer.algorithm.grpo_norm_by_std
-            last_step_rewards = token_level_rewards[is_last_step]
-            # compatible with any advantage estimator
-            last_step_advantages, last_step_returns = compute_advantages_and_returns(
-                token_level_rewards=last_step_rewards,
-                response_mask=response_mask[is_last_step],
-                index=index[is_last_step.cpu().numpy()],
-                adv_estimator=adv_estimator,
-                values=values[is_last_step] if values is not None else None,
-                config=config,
-                gamma=gamma,
-                lambd=lambd,
-                grpo_norm_by_std=grpo_norm_by_std,
-                group_advantage_invariant=self.group_advantage_invariant,
+        pad_size = data.metadata.get("pad_size", 0)
+        index = np.asarray(data.metadata["uids"])
+        exclude_from_baseline = data.metadata.get("exclude_from_baseline")
+        if exclude_from_baseline is not None:
+            exclude_from_baseline = np.asarray(exclude_from_baseline, dtype=bool)
+        outcome_rewards, outcome_mask = token_level_rewards, data["response_mask"]
+        outcome_values = data["values"]
+        step_wise = self.cfg.trainer.step_wise_training
+        if step_wise:
+            final = data["is_last_step"].bool()
+            final_rows = final.cpu().numpy()
+            outcome_rewards = token_level_rewards[final]
+            outcome_mask = data["response_mask"][final]
+            if outcome_values is not None:
+                outcome_values = outcome_values[final]
+            index = index[final_rows]
+            if exclude_from_baseline is not None:
+                exclude_from_baseline = exclude_from_baseline[final_rows]
+        advantages, returns = compute_advantages_and_returns(
+            token_level_rewards=outcome_rewards,
+            response_mask=outcome_mask,
+            index=index,
+            adv_estimator=self.cfg.trainer.algorithm.advantage_estimator,
+            config=self.cfg.trainer.algorithm,
+            values=outcome_values,
+            gamma=self.cfg.trainer.algorithm.gamma,
+            lambd=self.cfg.trainer.algorithm.lambd,
+            grpo_norm_by_std=self.cfg.trainer.algorithm.grpo_norm_by_std,
+            exclude_from_baseline=exclude_from_baseline,
+            group_advantage_invariant=self.group_advantage_invariant,
+        )
+        if self.group_advantage_invariant.kind is not GroupAdvantageKind.NONE:
+            real_outcomes = len(index) - pad_size
+            self.all_metrics["reward/zero_std_group_fraction"] = flat_group_fraction(
+                outcome_rewards[:real_outcomes],
+                index[:real_outcomes],
+                None if exclude_from_baseline is None else exclude_from_baseline[:real_outcomes],
             )
-            traj_ids = (
-                torch.cat([torch.tensor([False], device=is_last_step.device), is_last_step[:-1]]).int().cumsum(dim=0)
-            )
-            num_groups = traj_ids[-1].item() + 1
-            assert num_groups == len(last_step_advantages), (
-                f"number of groups {num_groups} doesn't match the number of trajectories as given by `is_last_step` {len(last_step_advantages)}. The `is_last_step` tensor is likely malformed"
-            )
-            advantages = last_step_advantages[traj_ids]
-            returns = last_step_returns[traj_ids]
-        else:
-            # For RLOO-N: pass exclude_from_baseline if present in metadata
-            exclude_from_baseline = data.metadata.get("exclude_from_baseline", None)
-            advantages, returns = compute_advantages_and_returns(
-                token_level_rewards=token_level_rewards,
-                response_mask=data["response_mask"],
-                index=data.metadata["uids"],
-                adv_estimator=self.cfg.trainer.algorithm.advantage_estimator,
-                config=self.cfg.trainer.algorithm,
-                values=data["values"],
-                gamma=self.cfg.trainer.algorithm.gamma,
-                lambd=self.cfg.trainer.algorithm.lambd,
-                grpo_norm_by_std=self.cfg.trainer.algorithm.grpo_norm_by_std,
-                exclude_from_baseline=exclude_from_baseline,
-                group_advantage_invariant=self.group_advantage_invariant,
-            )
+        if step_wise:
+            trajectory_outcomes = []
+            for estimates in (advantages, returns):
+                # Float64 reduction preserves constant float32 estimates exactly.
+                outcome = (estimates.double() * outcome_mask).sum(dim=-1, keepdim=True)
+                outcome = outcome / outcome_mask.sum(dim=-1, keepdim=True).clamp_min(1)
+                if not torch.all((estimates - outcome).abs()[outcome_mask.bool()] <= 1e-6):
+                    raise ValueError("step-wise training requires an outcome advantage estimator")
+                trajectory_outcomes.append(outcome.to(estimates.dtype))
+            advantages, returns = trajectory_outcomes
+            traj_ids = torch.cat([torch.tensor([False], device=final.device), final[:-1]]).int().cumsum(dim=0)
+            trajectory_count = traj_ids[-1].item() + 1
+            if trajectory_count != len(advantages):
+                raise ValueError(
+                    f"is_last_step marks {len(advantages)} trajectories but its rows form {trajectory_count}"
+                )
+            advantages = advantages[traj_ids] * data["response_mask"]
+            returns = returns[traj_ids] * data["response_mask"]
         data["returns"] = returns
         data["advantages"] = advantages
 
         # remove padding while calculating metrics
-        pad_size = data.metadata.get("pad_size", 0)
         num_samples = len(token_level_rewards)
 
         return_sums = token_level_rewards.sum(dim=-1)[: num_samples - pad_size]
-        if (
-            self.group_advantage_invariant.kind is not GroupAdvantageKind.NONE
-            and not self.cfg.trainer.step_wise_training
-        ):
-            excluded = data.metadata.get("exclude_from_baseline")
-            self.all_metrics["reward/zero_std_group_fraction"] = flat_group_fraction(
-                token_level_rewards[: num_samples - pad_size],
-                data.metadata["uids"][: num_samples - pad_size],
-                None if excluded is None else excluded[: num_samples - pad_size],
-            )
         if self.cfg.trainer.step_wise_training:
             avg_rewards: float = return_sums[data["is_last_step"][: num_samples - pad_size]].mean().item()
         else:

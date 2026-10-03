@@ -5,13 +5,20 @@ import asyncio
 import pytest
 from skyrl_gym.verification import VerificationResult
 
-from skyrl_train.dynamic_sampling import DynamicSamplingType, GroupSelectionResult
-from skyrl_train.group_admission import AdmissionRejection, GroupAdmissionStalledError
+from skyrl_train.dynamic_sampling import DynamicSamplingType, GroupSelectionPolicy, GroupSelectionResult
+from skyrl_train.group_admission import (
+    AdmissionRejection,
+    GroupAdmissionPolicy,
+    GroupAdvantageInvariant,
+    GroupAdmissionStalledError,
+)
 from skyrl_train.rollouts.buffer import (
     BatchPolicy,
     GroupRewards,
     PayloadReference,
     RolloutBuffer,
+    RolloutContentPolicy,
+    RolloutGroup,
     RolloutBufferConfig,
     RolloutVerdict,
 )
@@ -224,6 +231,7 @@ async def test_dynamic_sampling_filter_discards_uninformative_groups(batch_polic
 def test_group_passes_by_verifier_verdict_rather_than_partial_credit(verdicts, passed):
     rewards = [0.3, 0.8]
     batch = {
+        "response_ids": [[1], [2]],
         "rewards": rewards,
         "verification_results": [
             VerificationResult.verified(reward, passed=verdict) for reward, verdict in zip(rewards, verdicts)
@@ -395,3 +403,49 @@ async def test_every_judged_group_reports_one_disposition_with_its_uid_and_dwell
         ("c", "consumed"),
     ]
     assert all(outcome.tokens == 8 and outcome.dwell_seconds >= 0 for outcome in dispositions)
+
+
+def _step_wise_group(uid, steps_per_trial, final_rewards):
+    batch = {
+        "response_ids": [],
+        "prompt_token_ids": [],
+        "loss_masks": [],
+        "rewards": [],
+        "unshaped_rewards": [],
+        "is_last_step": [],
+        "stop_reasons": [],
+        "rollout_metrics": {},
+    }
+    for steps, reward in zip(steps_per_trial, final_rewards, strict=True):
+        for step in range(steps):
+            final = step == steps - 1
+            batch["response_ids"].append([2])
+            batch["prompt_token_ids"].append([1])
+            batch["loss_masks"].append([1])
+            batch["rewards"].append(reward if final else 0.0)
+            batch["unshaped_rewards"].append(reward if final else 0.0)
+            batch["is_last_step"].append(final)
+            batch["stop_reasons"].append("stop")
+    return RolloutGroup(batch, uid, 1, {})
+
+
+@pytest.mark.asyncio
+async def test_dynamic_sampling_judges_step_wise_groups_by_their_final_rows(batch_policy):
+    content = RolloutContentPolicy(
+        GroupAdmissionPolicy(
+            GroupAdvantageInvariant.exact_physical(physical_group_size=2), rollout_logprobs_required=False
+        ),
+        GroupSelectionPolicy(DynamicSamplingType.FILTER),
+    )
+    buffer = _buffer(batch_policy, batch_size=2, dynamic_sampling=DynamicSamplingType.FILTER)
+    await buffer.publish(1)
+    for group in [
+        _step_wise_group("three-rows", [2, 1], [1.0, 0.0]),
+        _step_wise_group("five-rows", [3, 2], [0.0, 1.0]),
+    ]:
+        lease = await asyncio.wait_for(buffer.acquire_lease(), PROGRESS_TIMEOUT)
+        await buffer.commit(lease.lease_id, {}, content.verdict(group), PayloadReference(group.uid))
+    while (admission := await buffer.admit(PROGRESS_TIMEOUT)).selection is None:
+        pass
+    assert admission.selection.judged == [JudgedGroup("three-rows", (1.0, 0.0)), JudgedGroup("five-rows", (0.0, 1.0))]
+    assert admission.selection.metrics["async/dynamic_sampling/candidate_pass_at_2"] == 1.0
