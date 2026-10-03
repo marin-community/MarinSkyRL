@@ -124,6 +124,7 @@ def test_compile_distillation_plan_compiles_full_multi_teacher_config(generated_
     changed = recipe.with_settings(
         [
             "teachers.math.placement=null",
+            "teachers.math.backend=null",
             "teachers.swe.resources.data_parallel_size=null",
             "teachers.swe.resources.expert_parallel_size=null",
             "teachers.swe.top_k=null",
@@ -140,9 +141,13 @@ def test_compile_distillation_plan_compiles_full_multi_teacher_config(generated_
     resources = changed_plan.teachers[1].resources
     assert (resources.data_parallel_size, resources.expert_parallel_size, resources.gpus_per_engine) == (1, 1, 2)
     assert [(route.key, route.weight) for route in changed_plan.routing.routes] == [("math", 0.7), ("swe", 0.6)]
-    for typo in ("teachers.swe.modle.path=teacher", "teacher_routing.mopd_v1.routes.math.teachre=swe"):
+    for invalid in (
+        "teachers.swe.modle.path=teacher",
+        "teacher_routing.mopd_v1.routes.math.teachre=swe",
+        "teachers.swe.backend=sglang",
+    ):
         with pytest.raises(ValueError):
-            recipe.with_settings([typo])
+            recipe.with_settings([invalid])
 
 
 def test_compile_distillation_plan_accepts_sparse_forward_kl_with_topk_teachers():

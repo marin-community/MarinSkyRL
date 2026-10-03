@@ -256,7 +256,7 @@ CLASSES = {
         "evidence": ('Literal["chosen_token", "topk_distribution", "student_selected_topk"]', True),
         "top_k": ("PositiveInt | None", False),
         "endpoints": ("tuple[TeacherEndpoint, ...]", False),
-        "backend": ("str | None", False),
+        "backend": ('Literal["vllm"] | None', False),
         "resources": ("TeacherResources | None", False),
         "tokenizer_fingerprint": ("str | None", False),
         "max_sequence_length": ("PositiveInt | None", False),
