@@ -82,6 +82,9 @@ def convert_prompts_responses_to_batch_tensors(
     logprobs: Optional[List[np.ndarray]] = None,
     token_level_shaping: Optional[List[List[float]]] = None,
     response_span_tags: Optional[List[List[int]]] = None,
+    *,
+    max_prompt_len: int | None = None,
+    max_response_len: int | None = None,
 ) -> Tuple[
     Float[torch.Tensor, "batch seq_len"],
     Float[torch.Tensor, "batch seq_len"],
@@ -131,6 +134,15 @@ def convert_prompts_responses_to_batch_tensors(
 
         max_input_len = max(max_input_len, prompt_token_len)
         max_output_len = max(max_output_len, response_token_len)
+
+    if max_prompt_len is not None:
+        if max_prompt_len < max_input_len:
+            raise ValueError("global prompt width must fit every selected prompt")
+        max_input_len = max_prompt_len
+    if max_response_len is not None:
+        if max_response_len < max_output_len:
+            raise ValueError("global response width must fit every selected response")
+        max_output_len = max_response_len
 
     # Copy each row's tokens into preallocated tensors. Building the padded batch from nested Python lists would
     # walk every padding element under the GIL, and padding dominates a batch with a long response window.

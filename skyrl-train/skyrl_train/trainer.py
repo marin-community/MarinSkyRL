@@ -26,6 +26,7 @@ import numpy as np
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
+from skyrl_train.batch_assembly import BatchPlan, assemble_slice
 from skyrl_train.rollouts.buffer import RolloutGroup
 from skyrl_train.rollouts.context import TrainingContext, TrainingContextState
 from skyrl_train.trajectory_selection import trajectory_selector_from_config
@@ -44,10 +45,6 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     verifier_score_summary,
 )
 from skyrl_train.trajectory_runners.trajectory_retention import make_trajectory_sink
-from skyrl_train.dataset.preprocess import (
-    collate_response_token_channel,
-    convert_prompts_responses_to_batch_tensors,
-)
 from skyrl_train.dataset.routed_expert_batch import RoutedExpertRows
 from skyrl_train.distillation import DISTILLATION_SCORED_TOKENS_METRIC, validate_distillation_attachment
 from skyrl_train.distillation_adapters import AsyncRoutedTeacherScoreTicket, RoutedScoredDistillationBatch
@@ -2039,54 +2036,35 @@ class RayPPOTrainer:
     ) -> TrainingInputBatch:
         """Converts lists to a padded batch of tensors for training"""
         assert_training_groups_eligible(trajectory_batch, uids, self.group_advantage_invariant)
-        prompt_ids: List[List[int]] = trajectory_batch["prompt_token_ids"]
-        response_ids: List[List[int]] = trajectory_batch["response_ids"]
-        rewards: List[List[float]] = trajectory_batch["rewards"]
-        loss_masks: List[List[int]] = trajectory_batch["loss_masks"]
-
-        logprobs: Optional[List[np.ndarray]] = trajectory_batch.get("rollout_logprobs", None)
-
-        # MoE router-replay capture rail (Stage 1): only pull routed_experts when
-        # the flag is on. Gated so the flag-off TrainingInputBatch is byte-identical
-        # (the field is never even passed to the collator nor set on the batch).
-        moe_router_replay = moe_router_replay_requested(self.cfg)
-        routed_experts = trajectory_batch.get("rollout_routed_experts", None) if moe_router_replay else None
-        # Deterministic dtype for the compact rollout_routed_experts transport:
-        # resolve the model's expert count once (memoized) and pass it to the
-        # route rows so the narrowed dtype is keyed on num_experts (max possible id),
-        # NOT the per-batch observed max — otherwise ranks whose batch max straddles
-        # a dtype boundary diverge and a later collective on this tensor hangs NCCL.
-        # Only needed when we actually carry routed experts (moe_router_replay on).
-        num_experts = self._resolve_num_experts() if routed_experts is not None else None
-
-        # Loop-behavior reward shaping (Stage B / F5 + F4): only pull the per-token
-        # shaping channel + span tags when the channel is enabled. Gated so the
-        # flag-off TrainingInputBatch is byte-identical (the fields are never passed
-        # to the collator nor set on the batch). Mirrors moe_router_replay above.
-        enable_token_reward_channel = bool(self.cfg.trainer.algorithm.get("enable_token_reward_channel", False))
-        token_level_shaping = trajectory_batch.get("token_level_shaping", None) if enable_token_reward_channel else None
-        response_span_tags = trajectory_batch.get("response_span_tags", None) if enable_token_reward_channel else None
-        loop_advantages = trajectory_batch.get("loop_advantages")
-
-        (
-            sequences_tensor,
-            attention_masks_tensor,
-            response_masks_tensor,
-            rewards_tensor,
-            loss_masks_tensor,
-            rollout_logprobs_tensor,
-            token_level_shaping_tensor,
-            response_span_tags_tensor,
-        ) = convert_prompts_responses_to_batch_tensors(
-            self.tokenizer,
-            prompt_ids,
-            response_ids,
-            rewards,
-            loss_masks,
-            logprobs,
-            token_level_shaping,
-            response_span_tags,
+        prompt_ids = trajectory_batch["prompt_token_ids"]
+        response_ids = trajectory_batch["response_ids"]
+        loss_masks = trajectory_batch["loss_masks"]
+        fields = frozenset(key for key, value in trajectory_batch.items() if value is not None)
+        routed_experts = (
+            trajectory_batch.get("rollout_routed_experts") if moe_router_replay_requested(self.cfg) else None
         )
+        if routed_experts is None:
+            fields = fields - {"rollout_routed_experts"}
+        plan = BatchPlan(
+            batch_id=0,
+            policy_step=0,
+            uids=tuple(uids),
+            dp_size=1,
+            max_prompt_len=max(map(len, prompt_ids)),
+            max_response_len=max(map(len, response_ids)),
+            advantages=None,
+            fields=fields,
+            route_geometry=None,
+            num_experts=self._resolve_num_experts() if routed_experts is not None else None,
+            group_counts=(len(response_ids),),
+            rollout_staleness=tuple(rollout_staleness if rollout_staleness is not None else [0] * len(response_ids)),
+            metadata={},
+        )
+        training_input = assemble_slice(
+            plan, None, trajectory_batch, pad_token_id=self.tokenizer.pad_token_id, algorithm=self.cfg.trainer.algorithm
+        )
+        response_masks_tensor = training_input["response_mask"]
+        rollout_logprobs_tensor = training_input["rollout_logprobs"]
         if (
             rollout_logprobs_required(
                 self.cfg.trainer.algorithm,
@@ -2096,37 +2074,10 @@ class RayPPOTrainer:
         ):
             raise ValueError("rollout_logprobs are required by the configured objective")
         if rollout_logprobs_tensor is not None:
-            assert rollout_logprobs_tensor.shape == loss_masks_tensor.shape, "Logprobs should look like responses"
-        # Keep the response-window width for placement, without allocating its dense route canvas.
-        rollout_routed_experts_rows = None
-        if routed_experts is not None:
-            rollout_routed_experts_rows = RoutedExpertRows(
-                tuple(routed_experts), response_masks_tensor.shape[1], num_experts
+            assert rollout_logprobs_tensor.shape == training_input["loss_mask"].shape, (
+                "Logprobs should look like responses"
             )
-            if len(rollout_routed_experts_rows) != len(response_ids):
-                raise ValueError("routed experts must have one row per response")
-        distillation_tensors = _validated_distillation_tensors(trajectory_batch, response_masks_tensor)
-        training_input = TrainingInputBatch(
-            {
-                "sequences": sequences_tensor,  # Full trajectories (padded and concatenated prompts and responses)
-                "attention_mask": attention_masks_tensor,
-                "response_mask": response_masks_tensor,
-                "rewards": rewards_tensor,
-                "loss_mask": loss_masks_tensor,
-                "rollout_logprobs": rollout_logprobs_tensor,
-                "rollout_staleness": torch.tensor(
-                    rollout_staleness if rollout_staleness is not None else [0] * len(response_ids),
-                    dtype=torch.int32,
-                ),
-                "is_last_step": (
-                    torch.tensor(trajectory_batch["is_last_step"], dtype=torch.bool)
-                    if trajectory_batch.get("is_last_step", None) is not None
-                    else None
-                ),
-            },
-            routed_expert_rows=rollout_routed_experts_rows,
-        )
-        training_input.update(distillation_tensors)
+        training_input.update(_validated_distillation_tensors(trajectory_batch, response_masks_tensor))
         ftpo = ftpo_config(self.cfg.trainer.algorithm)
         if ftpo is not None:
             candidates, scores, _ = collate_student_selected_rollout(
@@ -2158,21 +2109,6 @@ class RayPPOTrainer:
             training_input["loss_mask"] = weights
             self.all_metrics["ftpo/selected_boundaries"] = float(chosen.any(-1).sum())
             self.all_metrics["ftpo/chosen_candidates"] = float(chosen.sum())
-        # Stage B (F5/F4): attach the per-token shaping channel + span tags ONLY
-        # when present, so the flag-off batch dict has exactly the same keys as
-        # today (TensorBatch.__eq__ compares key sets).
-        if token_level_shaping_tensor is not None:
-            training_input["token_level_shaping"] = token_level_shaping_tensor
-        if response_span_tags_tensor is not None:
-            training_input["response_span_tags"] = response_span_tags_tensor
-        loop_advantages_tensor = collate_response_token_channel(
-            loop_advantages,
-            response_masks_tensor,
-            dtype=torch.float,
-            expected_lengths=[len(response) for response in response_ids],
-        )
-        if loop_advantages_tensor is not None:
-            training_input["loop_advantages"] = loop_advantages_tensor
         training_input.metadata = {"uids": uids}
         # For RLOO-N: pass through exclude_from_baseline flags if present
         if trajectory_batch.get("exclude_from_baseline") is not None:
