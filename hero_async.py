@@ -84,8 +84,7 @@ def config(args):
     cfg.trainer.max_steps = args.max_steps
     cfg.trainer.resume_mode = "from_path" if args.resume_path else "none"
     cfg.trainer.resume_path = args.resume_path or None
-    # The step-32 checkpoint uses the previous dataloader format. Restore the
-    # model and optimizer, then start a fresh prompt stream.
+    # Restore the model and optimizer, then start a fresh prompt stream.
     cfg.trainer.restore_dataloader_state = False
     cfg.trainer.ckpt_interval = args.checkpoint_interval
     cfg.trainer.max_ckpts_to_keep = 1

@@ -22,7 +22,7 @@ def manifest_identity(root: Path) -> tuple[str, list[dict[str, str]]]:
     return digest, files
 
 
-def verify_source_manifest(root: Path, expected_commit: str, expected_sha256: str) -> int:
+def verify_source_manifest(root: Path, expected_commit: str, expected_sha256: str, *, verify_imports: bool = True) -> int:
     path = root / SOURCE_MANIFEST
     actual_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
     if actual_sha256 != expected_sha256:
@@ -36,7 +36,8 @@ def verify_source_manifest(root: Path, expected_commit: str, expected_sha256: st
             raise ValueError(f"Invalid source manifest path: {relative}")
         if hashlib.sha256((root / relative).read_bytes()).hexdigest() != entry["sha256"]:
             raise ValueError(f"Source bundle file mismatch: {relative}")
-    for module in ("skyrl_train.weight_sync.expert_block.driver", "skyrl_train.models.grug_moe", "cloud.iris.task_runtime"):
+    modules = ("skyrl_train.weight_sync.expert_block.driver", "skyrl_train.models.grug_moe", "cloud.iris.task_runtime")
+    for module in modules if verify_imports else ():
         spec = importlib.util.find_spec(module)
         if spec is None or spec.origin is None or not Path(spec.origin).resolve().is_relative_to(root.resolve()):
             raise ValueError(f"Running module is outside the pinned source bundle: {module}: {spec}")

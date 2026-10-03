@@ -25,7 +25,8 @@ def main():
     revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip()
     digest, _ = manifest_identity(root)
     source_digest = hashlib.sha256((root / SOURCE_MANIFEST).read_bytes()).hexdigest()
-    verify_source_manifest(root, revision, source_digest)
+    # The submitter needs Iris, while runtime import paths are checked inside each training task.
+    verify_source_manifest(root, revision, source_digest, verify_imports=False)
     plan = json.loads(args.plan.read_text())
     env = plan['environment']
     env.update(HERO_SOURCE_REVISION=revision, HERO_RUNTIME_BUNDLE_SHA256=digest,
