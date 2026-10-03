@@ -172,7 +172,7 @@ def _distributed_ratio_worker(rank, directory):
         mask = torch.arange(7)[None, :] < torch.tensor([1, 2, 3, 7, 4, 5])[:, None]
         learner[~mask] = rollout[~mask] = math.nan
         staleness = torch.tensor([0, 0, 0, 1, 3, 8])
-        for mode in ("uneven", "all_stale", "empty", "nonfinite", "replica", "overflow"):
+        for mode in ("uneven", "all_stale", "empty", "nonfinite", "replica", "overflow", "large_finite"):
             current = learner.clone()
             behavior = rollout
             current_mask = torch.zeros_like(mask) if mode == "empty" else mask
@@ -183,13 +183,16 @@ def _distributed_ratio_worker(rank, directory):
                 current = torch.full((2, 100), 50.0)
                 current[-1, -1] = 100.0
                 behavior, current_mask, ages = torch.zeros_like(current), torch.ones_like(current), torch.zeros(2)
+            if mode == "large_finite":
+                current = torch.full((2, 100), 1e18, dtype=torch.float64)
+                behavior, current_mask, ages = torch.zeros_like(current), torch.ones_like(current), torch.zeros(2)
             rows = (
                 slice(None)
                 if mode == "replica"
                 else slice(rank * (len(current) // 2), (rank + 1) * (len(current) // 2))
             )
             contributes = mode != "replica" or rank == 0
-            if mode not in ("nonfinite", "overflow"):
+            if mode not in ("nonfinite", "overflow", "large_finite"):
                 reference = compute_correction(current, behavior, current_mask, load_correction("tis"))
                 correction = compute_correction(
                     current[rows],
@@ -215,7 +218,7 @@ def _distributed_ratio_worker(rank, directory):
             }
             for key, actual in reduced.items():
                 if key.endswith("log_ratio_abs_p99"):
-                    if mode == "overflow":
+                    if mode in ("overflow", "large_finite"):
                         assert actual == reference[key.replace("_p99", "_max")]
                     else:
                         assert reference[key] <= actual + 1e-9
