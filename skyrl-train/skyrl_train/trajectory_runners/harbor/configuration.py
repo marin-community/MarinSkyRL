@@ -58,7 +58,7 @@ ENVIRONMENT_SCHEMA = SectionSchema(
         "override_memory_mb": FieldMapping("override_memory_mb"),
         "override_storage_mb": FieldMapping("override_storage_mb"),
         "override_gpus": FieldMapping("override_gpus"),
-        "environment_type": FieldMapping("type", default="daytona"),
+        "environment_type": FieldMapping("type", default=EnvironmentType.DAYTONA.value),
         "env_network_policy": FieldMapping("network_policy", field_type="kwargs"),
         "ttl_minutes": FieldMapping("ttl_minutes", field_type="kwargs"),
     }
