@@ -26,6 +26,7 @@ from typing import Any, Optional
 from urllib.parse import unquote, urlparse
 
 import yaml
+from harbor_config.models.environment_type import EnvironmentType
 from iris.client.client import IrisClient, Job
 from iris.cluster.constraints import CLUSTER_CONSTRAINT_KEY, Constraint, ConstraintOp, infer_preemptible_constraint
 from iris.cluster.platforms.k8s.coreweave_topology import gpu_gang_coscheduling_level
@@ -647,8 +648,12 @@ def _rl_config_uses_daytona(config: DictConfig) -> bool:
         RL_ENTRYPOINTS[RLEntrypoint.TERMINAL_BENCH],
         RL_ENTRYPOINTS[RLEntrypoint.TERMINAL_BENCH_GENERATE],
     } or bool(config.skyrl.get("data", {}).get("terminal_bench_data"))
-    backend = OmegaConf.select(config, "skyrl.terminal_bench_config.harbor.environment_type", default="daytona")
-    return uses_harbor and backend == "daytona"
+    backend = OmegaConf.select(
+        config,
+        "skyrl.terminal_bench_config.harbor.environment_type",
+        default=EnvironmentType.DAYTONA.value,
+    )
+    return uses_harbor and backend == EnvironmentType.DAYTONA.value
 
 
 def build_debug_launch_env(args: SimpleNamespace) -> dict[str, str]:

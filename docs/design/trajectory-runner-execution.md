@@ -2,7 +2,7 @@
 
 This document records the earlier design. The training entrypoints now use
 the common TaskCompendium engine. See the
-[current rollout guide](../../skyrl-train/docs/tutorials/skyrl_gym_runner.rst).
+[current rollout guide](../../skyrl-train/docs/tutorials/task_rollouts.rst).
 
 ## Context
 
