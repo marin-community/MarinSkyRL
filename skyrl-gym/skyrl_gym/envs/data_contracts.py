@@ -23,6 +23,8 @@ from skyrl_gym.envs.lcb.livecodebench import (
     normalize_lcb_ground_truth,
 )
 from skyrl_gym.envs.mcq.utils import extract_mcq_answer
+from skyrl_gym.envs.nupa.answers import parse_ground_truth
+from skyrl_gym.envs.nupa.verifier import NUPAVerifier
 from skyrl_gym.envs.reasoning_gym.scoring import normalize_ground_truth as normalize_reasoning_gym_ground_truth
 from skyrl_gym.envs.reasoning_gym.scoring import score_response as score_reasoning_gym_response
 from skyrl_gym.envs.registration import spec
@@ -147,6 +149,20 @@ def _mcq_is_correct(response: str, ground_truth: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# NUPA (representation-sensitive numeric answers, NUPA-Loose semantics)
+# ---------------------------------------------------------------------------
+
+
+def _normalize_nupa(ground_truth: Any) -> str:
+    answer, answer_format = parse_ground_truth(ground_truth)
+    return json.dumps({"answer": answer, "answer_format": answer_format}, sort_keys=True)
+
+
+def _nupa_is_correct(response: str, ground_truth: str) -> bool:
+    return NUPAVerifier(ground_truth=ground_truth).verify(RolloutEvidence(response=response)).passed is True
+
+
+# ---------------------------------------------------------------------------
 # Preference (schema-only — reward comes from a RM at runtime)
 # ---------------------------------------------------------------------------
 
@@ -200,6 +216,11 @@ CONTRACTS = {
         normalize_ground_truth=_normalize_mcq,
         is_correct=_mcq_is_correct,
         prompt_instruction="\nAnswer with the option letter from the given choices. Put your answer in \\boxed{ANSWER}",
+    ),
+    "nupa": VerifierDataContract(
+        env_id="nupa",
+        normalize_ground_truth=_normalize_nupa,
+        is_correct=_nupa_is_correct,
     ),
     "preference": VerifierDataContract(
         env_id="preference",

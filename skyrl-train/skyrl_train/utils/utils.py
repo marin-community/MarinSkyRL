@@ -71,14 +71,13 @@ def moe_router_replay_requested(cfg: DictConfig, role: str = "policy") -> bool:
 
 
 def policy_strict_spread_eligible(cfg: DictConfig) -> bool:
-    """Whether a dedicated STRICT_SPREAD policy placement group should be used.
+    """Whether to reserve policy nodes before inference engines start.
 
     Pure (Ray-free) predicate so it is unit-testable. Eligible only when ALL of:
       - `trainer.placement.policy_strict_spread_pg` is enabled (opt-in; default
         false, so every existing run is byte-for-byte unchanged),
       - the run is disaggregated (`colocate_all=false`), and
-      - no reference model is used (`use_kl_loss` and `use_kl_in_reward` both
-        false) — i.e. the policy placement group is NOT shared with a ref model.
+      - a reference model, when used, shares the policy placement group.
     """
     placement = cfg.trainer.placement
     if not bool(getattr(placement, "policy_strict_spread_pg", False)):
@@ -87,7 +86,7 @@ def policy_strict_spread_eligible(cfg: DictConfig) -> bool:
         return False
     algo = cfg.trainer.algorithm
     use_ref_model = reference_model_required(algo)
-    return not use_ref_model
+    return not use_ref_model or bool(placement.colocate_policy_ref)
 
 
 def resolve_pinned_local_rank(
