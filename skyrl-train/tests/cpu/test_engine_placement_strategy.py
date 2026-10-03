@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import msgpack
 import pytest
 
+from skyrl_train import objective  # noqa: F401 - register losses before config validation
 from marinskyrl.inference_placement import InferenceWorkerPlacement
 from skyrl_train.entrypoints.main_base import create_ray_wrapped_inference_engines_from_config
 from skyrl_train.inference_engines.placement import inference_bundle_nodes, verified_inference_replica_placements
@@ -335,6 +336,9 @@ def test_data_parallel_workers_without_expert_parallelism_are_checked_with_no_ep
 
 def test_expert_block_single_worker_has_a_checked_placement_through_normal_config(inference_scheduler):
     cfg = example_dummy_config()
+    cfg.trainer.train_batch_size = 4
+    cfg.trainer.policy_mini_batch_size = 4
+    cfg.trainer.micro_train_batch_size_per_gpu = 1
     cfg.trainer.placement.colocate_all = False
     cfg.generator.update(
         weight_sync_transport="expert_block",
@@ -346,6 +350,7 @@ def test_expert_block_single_worker_has_a_checked_placement_through_normal_confi
     )
     cfg.generator.engine_init_kwargs = {"language_model_only": False}
 
+    validate_cfg(cfg)
     engines = create_ray_wrapped_inference_engines_from_config(cfg, None, None)
 
     placement = engines[0].worker_placements[0]
