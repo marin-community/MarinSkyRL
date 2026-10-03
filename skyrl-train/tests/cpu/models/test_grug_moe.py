@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -59,6 +60,53 @@ def tiny_config(**overrides) -> GrugMoeConfig:
     }
     values.update(overrides)
     return GrugMoeConfig(**values)
+
+
+@pytest.fixture
+def saved_grug_config(tmp_path):
+    tiny_config().save_pretrained(tmp_path)
+    path = tmp_path / "config.json"
+    return path, json.loads(path.read_text())
+
+
+@pytest.mark.parametrize(
+    ("omitted", "named"),
+    [
+        (("qk_mult",), "qk_mult"),
+        (("sliding_window",), "sliding_window"),
+        (("max_position_embeddings", "max_seq_len"), "maximum sequence length"),
+        (("num_experts_per_tok", "num_experts_per_token"), "experts per token"),
+    ],
+)
+def test_grug_checkpoint_without_a_sampler_defaulted_key_fails_to_load(saved_grug_config, omitted, named):
+    path, config = saved_grug_config
+    for key in omitted:
+        config.pop(key, None)
+    path.write_text(json.dumps(config))
+
+    with pytest.raises((TypeError, ValueError), match=named):
+        AutoConfig.from_pretrained(path.parent)
+
+
+@pytest.mark.parametrize(
+    "theta",
+    [
+        {"rope_parameters": {"rope_type": "default", "rope_theta": 500000.0}},
+        {"rope": {"theta": 500000.0}},
+    ],
+    ids=["rope_parameters", "rope"],
+)
+def test_grug_checkpoint_rope_theta_aliases_resolve_to_the_stored_theta(saved_grug_config, theta):
+    path, config = saved_grug_config
+    config.pop("rope_theta")
+    config.update(theta)
+    path.write_text(json.dumps(config))
+
+    loaded = AutoConfig.from_pretrained(path.parent)
+    assert loaded.rope_theta == 500000.0
+    exported = path.parent / "exported"
+    loaded.save_pretrained(exported)
+    assert AutoConfig.from_pretrained(exported).rope_theta == 500000.0
 
 
 def test_tiny_grug_forward_backward_and_checkpoint_contract(tmp_path):
