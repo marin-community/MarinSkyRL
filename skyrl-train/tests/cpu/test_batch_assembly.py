@@ -48,7 +48,10 @@ def test_dp_slices_with_fields_and_longest_rows_on_other_ranks_match_driver(dp_s
             "rewards": [0.0, 1.0, 3.0, 2.0],
             "is_last_step": [True] * 4,
             "stop_reasons": ["stop", "length", None, "stop"],
+            "loop_advantages": [[0.0] * length for length in lengths],
         }
+        if index % 2 == 0:
+            batch["rewards"] = [[0.0] * (length - 1) + [reward] for length, reward in zip(lengths, batch["rewards"])]
         if index >= 4:
             batch["rollout_logprobs"] = [np.full(length, -1.25, dtype=np.float32) for length in lengths]
             batch["rollout_routed_experts"] = [np.full((length, 3, 2), index, dtype=np.uint8) for length in lengths]
@@ -86,12 +89,14 @@ def test_dp_slices_with_fields_and_longest_rows_on_other_ranks_match_driver(dp_s
     )
     whole["values"] = None
     whole = trainer.compute_advantages_and_returns(whole)
+    whole = trainer.apply_loop_advantages(whole)
     whole.pop("values")
     whole.metadata.pop("metrics")
     for rank, expected in enumerate(whole.chunk(whole.batch_size // dp_size)):
         rows = plan.rank_rows(rank)
         owned = [group for index, group in enumerate(groups) if index * 4 < rows.stop and (index + 1) * 4 > rows.start]
         actual = assemble_slice(plan, rank, owned, pad_token_id=0, algorithm=cfg.trainer.algorithm)
+        actual = trainer.apply_loop_advantages(actual)
         assert actual.keys() == expected.keys()
         for key, value in expected.items():
             if value is None:
@@ -100,6 +105,8 @@ def test_dp_slices_with_fields_and_longest_rows_on_other_ranks_match_driver(dp_s
                 assert actual[key] is not None
                 assert actual[key].dtype == value.dtype
                 torch.testing.assert_close(actual[key], value, rtol=0, atol=0)
+                if value.is_floating_point():
+                    assert actual[key].numpy().tobytes() == value.numpy().tobytes()
         assert actual.metadata.keys() == expected.metadata.keys()
         for key, value in expected.metadata.items():
             if isinstance(value, np.ndarray):
