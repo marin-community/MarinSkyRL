@@ -22,7 +22,6 @@ from skyrl_train.telemetry import TelemetryConfig
 
 VLLM_MAX_RECORDS_PER_ENGINE = 512
 PUBLICATION_LOSS_METRIC = "metric_publication_dropped_records"
-VLLM_MAX_HISTOGRAM_RECORDS_PER_ENGINE = 512
 HISTOGRAM_PUBLICATION_ATTRIBUTE = "histogram_publication_id"
 
 
@@ -157,7 +156,7 @@ class FinelogInferenceMetricsSink:
             from rigging.telemetry.metrics import HistogramSnapshotPublisher  # noqa: PLC0415
 
             self._histogram_publisher = HistogramSnapshotPublisher(
-                max_records=VLLM_MAX_HISTOGRAM_RECORDS_PER_ENGINE,
+                max_records=VLLM_MAX_RECORDS_PER_ENGINE,
                 attributes={"metric_source": "vllm"},
             )
         self._bridge_publisher = MetricSnapshotPublisher(

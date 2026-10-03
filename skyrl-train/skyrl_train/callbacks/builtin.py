@@ -927,7 +927,9 @@ def create_default_callbacks(cfg: DictConfig) -> List[TrainerCallback]:
                 log_every_steps=inference_stats_interval,
                 log_to_console=True,
                 log_to_tracker=True,
-                histogram_format=VllmHistogramFormat(getattr(cfg.generator, "vllm_histogram_format", "scalar")),
+                histogram_format=VllmHistogramFormat(
+                    getattr(cfg.generator, "vllm_histogram_format", VllmHistogramFormat.SCALAR)
+                ),
             )
         )
 
