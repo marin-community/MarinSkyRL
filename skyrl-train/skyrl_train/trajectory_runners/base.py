@@ -15,7 +15,7 @@ from skyrl_train.trajectory_runners.trajectory_retention import RetentionSink
 class TrajectoryRunner(Protocol):
     """Training batches, buffer submission, and worker resource lifecycle."""
 
-    async def run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch: ...
+    async def run(self, input_batch: TrajectoryRequestBatch) -> TrajectoryBatch: ...
 
     async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> int:
         """Commit a leased prompt group and return its response token count."""

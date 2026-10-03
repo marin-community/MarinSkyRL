@@ -1,17 +1,17 @@
 """Prepare mixed Nemotron rows as portable tasks before rollout execution."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 from datasets import Dataset
 from taskcompendium.environment import ExternalVerifierSpec
 from taskcompendium.models import TaskSpec, VerifierSpec
-from rolloutengine.parquet import read_tasks
+from taskcompendium.parquet import read_tasks
 from transformers import PreTrainedTokenizerBase
 
 from skyrl_train.dataset.harbor import materialize_harbor_tasks
-from skyrl_train.dataset.tasks import TaskDataset, cache_tasks, gym_tasks
+from skyrl_train.dataset.tasks import GymTaskDataset
 
 
 def terminal_task_index(path: Path) -> dict[str, TaskSpec]:
@@ -56,7 +56,7 @@ def resolve_terminal_task(task: TaskSpec, terminals: Mapping[str, TaskSpec]) -> 
     )
 
 
-class NemotronTaskDataset(TaskDataset):
+class NemotronTaskDataset(GymTaskDataset):
     """Convert Gym and terminal source rows to one task Parquet file."""
 
     def __init__(
@@ -71,14 +71,18 @@ class NemotronTaskDataset(TaskDataset):
         verifier_override: VerifierSpec | None = None,
         num_workers: int = 8,
     ):
-        self.environment_configs = environment_configs
-        self.cache_dir = cache_dir.expanduser()
+        cache_dir = cache_dir.expanduser()
         self.terminals = terminal_task_index(
-            materialize_harbor_tasks(terminal_bench_data, cache_dir=self.cache_dir, verifier_override=verifier_override)
+            materialize_harbor_tasks(terminal_bench_data, cache_dir=cache_dir, verifier_override=verifier_override)
         )
-        super().__init__(list(datasets), tokenizer, max_prompt_length, num_workers=num_workers)
+        super().__init__(
+            datasets,
+            tokenizer,
+            max_prompt_length,
+            environment_configs=environment_configs,
+            cache_dir=cache_dir,
+            num_workers=num_workers,
+        )
 
-    def prepare_dataset(self, dataset: Dataset) -> Dataset:
-        tasks = gym_tasks(dataset, source_name=", ".join(self.datasets), environment_configs=self.environment_configs)
-        self.task_path = cache_tasks((resolve_terminal_task(task, self.terminals) for task in tasks), self.cache_dir)
-        return super().prepare_dataset(Dataset.from_parquet(str(self.task_path)))
+    def _tasks(self, dataset: Dataset) -> Iterator[TaskSpec]:
+        return (resolve_terminal_task(task, self.terminals) for task in super()._tasks(dataset))

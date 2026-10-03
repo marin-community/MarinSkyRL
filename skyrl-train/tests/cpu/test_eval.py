@@ -62,7 +62,7 @@ class DummyRunner(FixtureRunner):
         self.output = output
         self.seen_inputs = []
 
-    async def _run(self, input_batch, disable_tqdm: bool = False):
+    async def _run(self, input_batch):
         self.seen_inputs.append(input_batch)
         return self.output
 

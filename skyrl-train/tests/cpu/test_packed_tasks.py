@@ -32,7 +32,7 @@ from marinskyrl.task_sources import (
 from skyrl_train.dataset.harbor import TerminalBenchTaskDataset, materialize_harbor_tasks
 from taskcompendium.environment import DockerBuild, EnvironmentKind, ShellVerifierSpec
 from taskcompendium.grading import Outcome, skipped_verifier
-from rolloutengine.parquet import read_tasks
+from taskcompendium.parquet import read_tasks
 from rolloutengine.contracts import ModelTurn
 from rolloutengine.engine import ShellboxRolloutEngine
 from taskcompendium.submission import AnswerFormat, SubmissionConvention
@@ -180,10 +180,10 @@ def test_packed_dataset_materializes_reference_from_runtime_yaml(tmp_path: Path)
     cache = tmp_path / "cache"
 
     first = dataset[0]
-    reference = PackedTaskReference(**first["env_extras"]["packed_task"])
+    assert isinstance(first, PackedTaskReference)
 
-    assert first["prompt"].startswith("tasktrove://")
-    task_path = PackedTaskMaterializer(cache).materialize_batch([reference])[reference]
+    assert first.stable_uri().startswith("tasktrove://")
+    task_path = PackedTaskMaterializer(cache).materialize_batch([first])[first]
     assert (task_path / "instruction.md").read_text() == "Do one"
     assert not (task_path / "solution").exists()
 

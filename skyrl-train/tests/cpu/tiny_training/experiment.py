@@ -20,9 +20,7 @@ from pathlib import Path
 
 import ray
 from omegaconf import DictConfig, OmegaConf
-from skyrl_train.config.trajectory_runner_capabilities import (
-    validate_trajectory_runner_capabilities,
-)
+from skyrl_train.config.rollout_validation import validate_rollout_launch
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.dataset.tasks import GymTaskDataset
 from skyrl_train.entrypoints.main_base import BasePPOExp, EntrypointOperation
@@ -223,7 +221,7 @@ class TinyTrainingExp(BasePPOExp):
 def run_tiny_training(cfg: DictConfig) -> None:
     """Validate the config as the production driver does, then run in a fresh local Ray session."""
     validate_cfg(cfg)
-    validate_trajectory_runner_capabilities(cfg, EntrypointOperation.TRAIN)
+    validate_rollout_launch(cfg, EntrypointOperation.TRAIN)
     ray.init(
         num_cpus=LOGICAL_CPUS,
         num_gpus=LOGICAL_GPUS,

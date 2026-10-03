@@ -8,7 +8,7 @@ from skyrl_train.trajectory_runners.types import TrajectoryID
 
 
 class _AlignedRunner(FixtureRunner):
-    async def _run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
+    async def _run(self, input_batch: TrajectoryRequestBatch) -> TrajectoryBatch:
         return {
             "prompt_token_ids": [[1]],
             "response_ids": [[2, 3, 4]],
@@ -21,7 +21,7 @@ class _AlignedRunner(FixtureRunner):
 
 
 class _ReconstructedRunner(FixtureRunner):
-    async def _run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
+    async def _run(self, input_batch: TrajectoryRequestBatch) -> TrajectoryBatch:
         return {
             "prompt_token_ids": [[1]],
             "response_ids": [[2, 3]],
@@ -43,7 +43,7 @@ class _ReconstructedRunner(FixtureRunner):
 
 
 class _TwoRowRunner(FixtureRunner):
-    async def _run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
+    async def _run(self, input_batch: TrajectoryRequestBatch) -> TrajectoryBatch:
         return {
             "prompt_token_ids": [[1], [2]],
             "response_ids": [[3], [4]],

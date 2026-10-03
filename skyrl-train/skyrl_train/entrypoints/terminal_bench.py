@@ -23,41 +23,28 @@ class TerminalBenchExp(BasePPOExp):
             RolloutWorkerResources.from_config(cfg),
         )
 
-    def get_train_dataset(self):
-        """Initializes the training dataset.
-
-        Returns:
-            HarborTaskDataset: The training dataset.
-        """
-        prompts_dataset = HarborTaskDataset(
-            data_files=self.cfg.data.train_data,
+    def _task_dataset(self, data_files) -> HarborTaskDataset:
+        return HarborTaskDataset(
+            data_files=data_files,
             tokenizer=self.tokenizer,
             max_prompt_length=self.cfg.trainer.max_prompt_length,
             cache_dir=Path(self.cfg.data.task_cache_dir),
             verifier_override=HarborTaskSettings.from_config(self.cfg.terminal_bench_config).verifier_override(),
         )
+
+    def get_train_dataset(self):
+        prompts_dataset = self._task_dataset(self.cfg.data.train_data)
         # make sure the dataset is large enough to train on
         assert len(prompts_dataset) >= self.cfg.trainer.train_batch_size, (
-            f"dataset should be atleast as large as `train_batch_size` {self.cfg.trainer.train_batch_size}, got size {len(prompts_dataset)}"
+            f"dataset must be at least as large as `train_batch_size` {self.cfg.trainer.train_batch_size}, "
+            f"but has size {len(prompts_dataset)}"
         )
         return prompts_dataset
 
     def get_eval_dataset(self):
-        """Initializes the evaluation dataset.
-
-        Returns:
-            HarborTaskDataset: The evaluation dataset.
-        """
-        if self.cfg.trainer.eval_interval > 0 and self.cfg.data.val_data:
-            prompts_dataset = HarborTaskDataset(
-                data_files=self.cfg.data.val_data,
-                tokenizer=self.tokenizer,
-                max_prompt_length=self.cfg.trainer.max_prompt_length,
-                cache_dir=Path(self.cfg.data.task_cache_dir),
-                verifier_override=HarborTaskSettings.from_config(self.cfg.terminal_bench_config).verifier_override(),
-            )
-            return prompts_dataset
-        return None
+        if self.cfg.trainer.eval_interval <= 0 or not self.cfg.data.val_data:
+            return None
+        return self._task_dataset(self.cfg.data.val_data)
 
 
 @ray.remote(num_cpus=1, max_retries=0)

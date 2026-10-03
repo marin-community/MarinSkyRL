@@ -115,8 +115,7 @@ def add_alignment_metrics(output: TrajectoryBatch) -> None:
 
     A runner that returns rollout logprobs promises they are position-aligned
     with its response IDs. That direct token-in/token-out path is exact by
-    construction. Runners that reconstruct token streams can publish richer
-    exact/LCS/failure metrics themselves; those observations take precedence.
+    construction. Preserve metrics that a runner supplied.
     """
     rollout_logprobs = output.get("rollout_logprobs")
     if rollout_logprobs is None:
