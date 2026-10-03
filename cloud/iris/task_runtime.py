@@ -190,6 +190,7 @@ DEFAULT_RENDEZVOUS_TIMEOUT = 1800
 DEFAULT_CLUSTER_JOIN_TIMEOUT = 1800
 POLL_INTERVAL = 5
 STARTUP_POLL_INTERVAL = 1.0
+RENDEZVOUS_REFRESH_INTERVAL = 5.0
 # Tolerates clock skew between nodes and the time rank-0 needs to start Ray.
 RENDEZVOUS_FRESHNESS_SLACK = 60
 # Bound the rank-0 rendezvous PutObject: unbounded fsspec/s3fs put can wedge the
@@ -1811,7 +1812,7 @@ def run_head(args: argparse.Namespace, config_path: Path, derived_gloo_ifname: s
         _log(
             f"[task-runtime] Ray head subprocess returned; writing rendezvous -> {_rendezvous_uri(args.rendezvous_dir)}"
         )
-        rewrite_limiter = RateLimiter(5.0)
+        rewrite_limiter = RateLimiter(RENDEZVOUS_REFRESH_INTERVAL)
         write_rendezvous(args.rendezvous_dir, head_ip, ray_port, gang_epoch)
         rewrite_limiter.mark_run()
         # Refresh every five seconds so the rendezvous stays within the freshness slack.
@@ -2188,6 +2189,7 @@ def main() -> None:
             cache_ttl_days=args.draft_model_cache_ttl_days,
             cache_source_prefix=args.draft_model_cache_source_prefix,
         )
+    # vLLM probes the tokenizer directory for the policy model configuration.
     if policy_tokenizer is not None and policy_local_path is not None:
         policy_config_path = Path(policy_local_path) / "config.json"
         model_config_path = Path(policy_tokenizer.local_path) / policy_config_path.name

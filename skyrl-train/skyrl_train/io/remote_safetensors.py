@@ -52,6 +52,8 @@ def _safe_relative_path(value: str) -> str:
 
 @dataclass(frozen=True)
 class ReadStats:
+    """Count shard opens and logical header or tensor reads with their bytes and elapsed time."""
+
     opens: int = 0
     reads: int = 0
     bytes_read: int = 0
