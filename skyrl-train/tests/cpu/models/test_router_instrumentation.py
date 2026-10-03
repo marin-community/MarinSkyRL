@@ -28,6 +28,7 @@ def _grug_config() -> GrugMoeConfig:
         head_dim=4,
         max_position_embeddings=16,
         sliding_window=4,
+        qk_mult=1.37,
     )
 
 
