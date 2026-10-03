@@ -1707,6 +1707,9 @@ class RayPPOTrainer:
         pg = None
 
         use_ref_model = reference_model_required(cfg.trainer.algorithm)
+        policy_actor_env_vars = None
+        if cfg.trainer.strategy == "megatron" and cfg.trainer.policy.nccl_buffer_size_bytes is not None:
+            policy_actor_env_vars = {"NCCL_BUFFSIZE": str(cfg.trainer.policy.nccl_buffer_size_bytes)}
         ref_actor_env_vars = None
         if (
             use_ref_model
@@ -1741,6 +1744,7 @@ class RayPPOTrainer:
                 colocate_all=True,
                 sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,
                 record_memory=cfg.trainer.policy.record_memory,
+                actor_env_vars=policy_actor_env_vars,
             )
             if use_ref_model:
                 assert num_policy_gpus == num_ref_gpus, (
@@ -1824,6 +1828,7 @@ class RayPPOTrainer:
                 sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,
                 pin_to_ray_gpu_id=_policy_pin_to_ray_gpu_id,
                 force_cvd_mask=_policy_force_cvd_mask,
+                actor_env_vars=policy_actor_env_vars,
             )
             if use_ref_model:
                 ref_model = PPORayActorGroup(
