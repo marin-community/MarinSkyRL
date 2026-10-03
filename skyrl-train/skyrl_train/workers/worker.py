@@ -67,6 +67,7 @@ from skyrl_train.training_batch import (
 from skyrl_train.batch_assembly import BatchPlan, assemble_slice
 from skyrl_train.rollouts.context import RolloutReader
 from skyrl_train.trajectory_selection import optimization_samples_per_prompt
+from skyrl_train.trajectory_runners.trajectory_processing import get_outcome_rewards
 from skyrl_train.utils.metrics import mean_metrics, policy_progress_metrics, policy_training_metrics
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.models.grug_query_bias import (
@@ -919,6 +920,10 @@ class PolicyWorkerBase(Worker):
                         )
                         if key in group and group[key] is not None
                     }
+                    observation["unshaped_rewards"] = get_outcome_rewards(group)
+                    observation["rewards"] = [
+                        [sum(reward)] if isinstance(reward, list) else reward for reward in group["rewards"]
+                    ]
                     observations.append((admitted.index, observation))
                 offset += count
         output.metadata["batch_observations"] = observations

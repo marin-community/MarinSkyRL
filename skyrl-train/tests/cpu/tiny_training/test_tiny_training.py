@@ -164,8 +164,9 @@ def test_tiny_policy_trains_to_max_steps(
     _assert_trained_to_max_steps(tmp_path, mode, shape)
 
 
+@pytest.mark.parametrize("builder", ["verify", "worker"])
 def test_worker_batches_verify_two_tis_steps_with_a_group_split_between_dp_ranks(
-    runs: ForkServerContext, tmp_path: Path, tiny_policy: Path
+    runs: ForkServerContext, tmp_path: Path, tiny_policy: Path, builder: str
 ):
     cfg = experiment.tiny_training_config(
         tmp_path,
@@ -176,9 +177,9 @@ def test_worker_batches_verify_two_tis_steps_with_a_group_split_between_dp_ranks
         checkpoint_interval=-1,
         dp_size=2,
         micro_batch_size=3,
-        dump_data_batch=True,
+        dump_data_batch=builder == "verify",
     )
-    cfg.trainer.batch_builder = "verify"
+    cfg.trainer.batch_builder = builder
     cfg.trainer.train_batch_size = cfg.trainer.policy_mini_batch_size = 3
     cfg.trainer.training_metrics = True
     cfg.trainer.algorithm.advantage_estimator = "rloo_n"
@@ -196,6 +197,9 @@ def test_worker_batches_verify_two_tis_steps_with_a_group_split_between_dp_ranks
     steps = _trained_steps(tmp_path)
     assert [record["trainer/global_step"] for record in steps] == [1, 2]
     assert all(record["policy/raw_grad_norm"] > 0 for record in steps)
+    if builder == "worker":
+        assert all(record["generate/avg_num_tokens"] > 0 for record in steps)
+        return
     for step in (1, 2):
         batch = TrainingInputBatch().load(tmp_path / f"exports/dumped_data/global_step_{step}_training_input.pkl")
         assert batch.batch_size == 12
