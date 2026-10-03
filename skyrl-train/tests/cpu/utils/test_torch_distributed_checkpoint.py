@@ -1,6 +1,7 @@
 import copy
 import threading
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 
 import fsspec
 from fsspec import AbstractFileSystem
@@ -15,38 +16,41 @@ from torch.distributed.checkpoint.metadata import MetadataIndex
 from marinskyrl.remote_io import MultipartWriteMode, S3MultipartWriteStream
 from skyrl_train.io.torch_distributed_checkpoint import StreamingFsspecWriter
 from skyrl_train.io.checkpoint_reader import RecordCheckpointReader
+from skyrl_train.checkpoint_generation import commit_attempt, new_attempt_path, resolve_checkpoint_payload
+from skyrl_train.hf_export_schema import TRAINER_STATE_FILENAME
 
 
 _TEST_PART_BYTES = 5 * 2**20
 
 
-def test_streaming_fsspec_writer_round_trips_one_aggregated_object_per_rank():
-    checkpoint_uri = "memory://streaming-checkpoint/step"
-    filesystem = fsspec.filesystem("memory")
-    if filesystem.exists("/streaming-checkpoint"):
-        filesystem.rm("/streaming-checkpoint", recursive=True)
-    state = {
-        "first": torch.arange(8),
-        "second": torch.arange(6).reshape(2, 3),
-    }
+@pytest.mark.parametrize("empty_rank", [False, True])
+def test_streaming_fsspec_writer_round_trips_one_aggregated_object_per_rank(tmp_path, empty_rank):
+    step_path = str(tmp_path / "global_step_1")
+    attempt = new_attempt_path(step_path)
+    checkpoint_uri = f"{attempt}/policy"
+    filesystem = fsspec.filesystem("file")
+    state = {} if empty_rank else {"first": torch.arange(8), "second": torch.arange(6).reshape(2, 3)}
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         checkpoint.save(state, storage_writer=StreamingFsspecWriter(checkpoint_uri, filesystem=filesystem))
 
-    files = filesystem.find("/streaming-checkpoint/step")
+    files = filesystem.find(checkpoint_uri)
     assert len([path for path in files if path.endswith(".distcp")]) == 1
-    assert "/streaming-checkpoint/step/.metadata" in files
+    torch.save({"global_step": 1}, f"{attempt}/{TRAINER_STATE_FILENAME}")
+    commit_attempt(
+        step_path,
+        attempt,
+        required_files={TRAINER_STATE_FILENAME, "policy/.metadata", "policy/__0_0.distcp"},
+    )
+    assert resolve_checkpoint_payload(step_path, verify_files=True) == attempt
 
-    restored = {
-        "first": torch.zeros_like(state["first"]),
-        "second": torch.zeros_like(state["second"]),
-    }
+    restored = {key: torch.zeros_like(value) for key, value in state.items()}
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         checkpoint.load(restored, checkpoint_id=checkpoint_uri)
-    assert torch.equal(restored["first"], state["first"])
-    assert torch.equal(restored["second"], state["second"])
+    for key, value in state.items():
+        assert torch.equal(restored[key], value)
 
 
 class _FailingWriteStream:
@@ -275,15 +279,17 @@ def test_checkpoint_stream_waits_for_inflight_part_before_abort(monkeypatch):
             super().__init__()
             self.first_part_started = threading.Event()
             self.second_part_failed = threading.Event()
+            self.release_first_part = threading.Event()
             self.first_part_finished = threading.Event()
+            self.abort_requested = threading.Event()
 
         def call_s3(self, method: str, **kwargs):
             if method == "upload_part":
                 part = int(kwargs["PartNumber"])
                 if part == 1:
                     self.first_part_started.set()
-                    if not self.second_part_failed.wait(timeout=3):
-                        raise TimeoutError("second part never failed")
+                    if not self.release_first_part.wait(timeout=5):
+                        raise TimeoutError("first part was not released")
                     self.first_part_finished.set()
                     return {"ETag": "etag-1"}
                 if not self.first_part_started.wait(timeout=3):
@@ -291,6 +297,7 @@ def test_checkpoint_stream_waits_for_inflight_part_before_abort(monkeypatch):
                 self.second_part_failed.set()
                 raise OSError("injected second-part failure")
             if method == "abort_multipart_upload":
+                self.abort_requested.set()
                 assert self.first_part_finished.is_set(), "abort raced an in-flight UploadPart"
             return super().call_s3(method, **kwargs)
 
@@ -302,9 +309,19 @@ def test_checkpoint_stream_waits_for_inflight_part_before_abort(monkeypatch):
         mode=MultipartWriteMode.COMPLETION_ORDER,
     )
 
-    with pytest.raises(OSError, match="injected second-part failure"):
+    def save():
         stream.write(b"a" * _TEST_PART_BYTES + b"b" * _TEST_PART_BYTES)
         stream.commit()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        saving = executor.submit(save)
+        try:
+            assert filesystem.second_part_failed.wait(timeout=5)
+            assert not filesystem.abort_requested.wait(timeout=0.5), "abort raced an in-flight UploadPart"
+        finally:
+            filesystem.release_first_part.set()
+        with pytest.raises(OSError, match="injected second-part failure"):
+            saving.result(timeout=5)
 
     assert filesystem.aborted
     assert filesystem.completed_parts is None

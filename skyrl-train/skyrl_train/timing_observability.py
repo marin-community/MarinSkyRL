@@ -7,7 +7,7 @@ import time
 import math
 from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Protocol
 
 from loguru import logger
@@ -54,13 +54,6 @@ class PhaseTiming:
     parent: str | None
 
 
-@dataclass
-class CheckpointPhaseSample:
-    """Counters populated by a checkpoint phase before it completes."""
-
-    counters: dict[str, int | float] = field(default_factory=dict)
-
-
 @contextmanager
 def checkpoint_phase(
     backend: str,
@@ -69,13 +62,12 @@ def checkpoint_phase(
     *,
     rank: int,
     step: int | None,
-) -> Iterator[CheckpointPhaseSample]:
+) -> Iterator[None]:
     """Record a rank-local wall span without synchronizing CUDA."""
     started = time.perf_counter()
-    sample = CheckpointPhaseSample()
     outcome = "success"
     try:
-        yield sample
+        yield
     except BaseException:
         outcome = "failure"
         raise
@@ -100,7 +92,7 @@ def checkpoint_phase(
                         "schema": "checkpoint_phase_v1",
                         **attributes,
                         "duration_seconds": duration,
-                        "counters": sample.counters,
+                        "counters": {},
                     },
                     sort_keys=True,
                 ),

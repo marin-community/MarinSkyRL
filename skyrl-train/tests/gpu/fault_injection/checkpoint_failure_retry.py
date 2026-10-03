@@ -1,11 +1,3 @@
-"""Opt-in real-GPU/S3 checkpoint failure, retry, and fresh-process recovery test.
-
-Run the two tests as separate pytest processes, in order, with one unique
-CHECKPOINT_TEST_ROOT under an east-region TTL S3 prefix. The first test injects
-an error after a distributed checkpoint save has completed, leaving an
-uncommitted trainer generation; the second loads the retry through `latest`.
-"""
-
 from __future__ import annotations
 
 import asyncio

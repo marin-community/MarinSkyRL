@@ -47,6 +47,11 @@ def _json_bytes(payload: dict) -> bytes:
     return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
+def _valid_file_size(path: str, size: int) -> bool:
+    # DCP ranks with no assigned records write an empty shard.
+    return size > 0 or (size == 0 and path.endswith(".distcp"))
+
+
 def _inventory(attempt_path: str) -> dict[str, int]:
     """Inventory exact object names/sizes; cloud find may return scheme-less keys."""
 
@@ -68,17 +73,12 @@ def _inventory(attempt_path: str) -> dict[str, int]:
 
 
 def commit_attempt(step_path: str, attempt_path: str, *, required_files: set[str]) -> dict:
-    """Publish an attempt only after required files and its inventory are durable.
-
-    A failure before the last write leaves the prior commit record untouched.
-    Replacing an existing record is allowed so a replayed step can commit a new
-    complete generation without overwriting the previous attempt's payload.
-    """
+    """Publish an attempt only after required files and its inventory are durable."""
     step = extract_step_from_path(step_path)
     attempt_id = _attempt_id(step_path, attempt_path)
     files = _inventory(attempt_path)
     missing = sorted(required_files - files.keys())
-    empty = sorted(path for path in required_files if path in files and files[path] <= 0)
+    empty = sorted(path for path in required_files if path in files and not _valid_file_size(path, files[path]))
     if missing or empty:
         raise RuntimeError(f"Checkpoint attempt incomplete: missing={missing}, empty={empty}")
     manifest = {
@@ -102,11 +102,7 @@ def commit_attempt(step_path: str, attempt_path: str, *, required_files: set[str
 
 
 def resolve_checkpoint_payload(step_path: str, *, verify_files: bool = False) -> str:
-    """Resolve a committed attempt, or a pre-versioning legacy checkpoint.
-
-    An uncommitted new attempt is never treated as a legacy checkpoint merely
-    because its step prefix exists.
-    """
+    """Resolve the selected committed attempt or an existing flat checkpoint."""
     commit_path = os.path.join(step_path, COMMIT_FILENAME)
     if not io.exists(commit_path):
         if io.exists(os.path.join(step_path, TRAINER_STATE_FILENAME)):
@@ -132,7 +128,7 @@ def resolve_checkpoint_payload(step_path: str, *, verify_files: bool = False) ->
     files = manifest.get("files")
     if not isinstance(required_files, list) or not isinstance(files, dict):
         raise ValueError(f"Invalid checkpoint inventory at {attempt_path}")
-    if any(not isinstance(path, str) or files.get(path, 0) <= 0 for path in required_files):
+    if any(not isinstance(path, str) or not _valid_file_size(path, files.get(path, -1)) for path in required_files):
         raise ValueError(f"Checkpoint manifest omits a required file at {attempt_path}")
     if verify_files:
         actual_files = _inventory(attempt_path)

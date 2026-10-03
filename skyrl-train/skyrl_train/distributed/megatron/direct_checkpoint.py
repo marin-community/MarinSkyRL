@@ -67,13 +67,7 @@ def invalidate_checkpoint_plan_cache(cache_key: str) -> None:
 
 
 def _mcore_to_pyt_save_state_dict(state_dict: dict) -> dict:
-    """Use DCP's checkpointable shard path for tensors with prepended axes.
-
-    MCore 0.18 sends these regular-grid tensors through legacy PyTorch
-    ShardedTensor construction, which validates a large synthetic global grid
-    on every save. The checkpointable path describes only real local shards.
-    The expanded local view has the same shape and offsets as the legacy path.
-    """
+    """Describe regular-grid prepended-axis tensors with equivalent local checkpointable shards."""
     legacy_keys = {
         key
         for key, shards in state_dict.items()
@@ -106,11 +100,7 @@ def _mcore_to_pyt_save_state_dict(state_dict: dict) -> dict:
 
 
 class DirectS3TorchDistSaveShardedStrategy(TorchDistSaveShardedStrategy):
-    """Save MCore torch-dist shards directly to S3 through PyTorch DCP.
-
-    MCore 0.18 has no storage-writer hook, so this adapter preserves its state
-    translation and planner while replacing only the writer.
-    """
+    """Save MCore torch-dist shards directly to S3 through PyTorch DCP."""
 
     def __init__(self, checkpoint_dir: str, *, plan_cache_key: str | None = None) -> None:
         super().__init__()

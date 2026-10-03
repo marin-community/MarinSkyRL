@@ -1,5 +1,3 @@
-"""Rank-local, lossless state snapshots for opt-in checkpoint replay tests."""
-
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -11,12 +9,7 @@ import torch
 
 
 def snapshot_value(value: Any) -> Any:
-    """Copy all numerical leaves to CPU without retaining live model references.
-
-    Megatron's sharded wrappers carry local tensor data plus placement metadata.
-    The same rank and geometry are compared on both sides of the replay, so the
-    local data is the numerical state that must match. Unknown types fail closed.
-    """
+    """Copy supported numerical leaves to CPU without retaining live model references."""
     if isinstance(value, torch.Tensor):
         return value.detach().cpu().clone()
     if isinstance(value, np.ndarray):

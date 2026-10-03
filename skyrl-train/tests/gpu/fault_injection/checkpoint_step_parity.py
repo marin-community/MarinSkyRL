@@ -1,11 +1,3 @@
-"""Opt-in four-H100 Megatron checkpoint-to-next-step numerical parity gate.
-
-Run the two cases in order as separate pytest processes on one node. The first
-process records rank-local reference state before and after an uninterrupted
-step; the second restores the committed S3 checkpoint into fresh actors and
-requires exact state equality before and after replaying the SHA256-pinned batch.
-"""
-
 from __future__ import annotations
 
 import asyncio

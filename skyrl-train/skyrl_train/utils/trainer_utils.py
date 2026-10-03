@@ -21,8 +21,8 @@ from skyrl_train.io import io
 from skyrl_train.checkpoint_generation import COMMIT_FILENAME
 from skyrl_train.metric_names import ENVIRONMENT_METRIC_PREFIX
 from marinskyrl.resource_locator import join_resource_path
-from skyrl_train.checkpoint_listing import list_committed_checkpoint_dirs
-from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, extract_step_from_path
+from skyrl_train.checkpoint_listing import list_checkpoint_dirs, list_committed_checkpoint_dirs
+from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, LATEST_CHECKPOINT_FILE, extract_step_from_path
 from skyrl_train.dataset import PromptDataset
 from torchdata.stateful_dataloader import StatefulDataLoader
 
@@ -104,33 +104,29 @@ def cleanup_old_checkpoints(
     if max_checkpoints < 0:
         return
 
-    checkpoint_dirs = list_committed_checkpoint_dirs(checkpoint_base_path)
+    checkpoint_dirs = list_checkpoint_dirs(checkpoint_base_path)
 
     if len(checkpoint_dirs) <= max_checkpoints:
         return
 
-    # Sort by step number (extract number from global_step_N)
-    def extract_step(dirname):
-        try:
-            return int(dirname.split("global_step_")[1])
-        except (IndexError, ValueError):
-            return 0
+    checkpoint_dirs.sort(key=extract_step_from_path)
 
-    checkpoint_dirs.sort(key=extract_step)
-
-    protected_steps = protected_steps or set()
+    protected_steps = set(protected_steps or ())
+    latest_path = os.path.join(checkpoint_base_path, LATEST_CHECKPOINT_FILE)
+    if io.exists(latest_path):
+        protected_steps.add(int(io.read_bytes(latest_path)))
     recent = set(checkpoint_dirs[-max_checkpoints:]) if max_checkpoints > 0 else set()
     dirs_to_remove = [
         directory
         for directory in checkpoint_dirs
-        if directory not in recent and extract_step(directory) not in protected_steps
+        if directory not in recent and extract_step_from_path(directory) not in protected_steps
     ]
 
     for dir_name in dirs_to_remove:
         full_path = os.path.join(checkpoint_base_path, dir_name)
         try:
             io.remove(full_path)
-            step_num = extract_step(dir_name)
+            step_num = extract_step_from_path(dir_name)
             logger.info(f"Cleaned up old checkpoint: global_step_{step_num} at {full_path}")
         except Exception as e:
             logger.warning(f"Failed to remove old checkpoint {full_path}: {e}")
@@ -148,10 +144,7 @@ def validate_consistency_for_latest_checkpoint(
     if io.exists(root_ckpt_folder):
         checkpoint_dirs = list_committed_checkpoint_dirs(root_ckpt_folder)
         if checkpoint_dirs:
-            # A generation commit precedes the latest-pointer write. If the
-            # latter fails, the complete but unadvertised generation is safe
-            # to ignore while resuming from the last advertised step. Keep
-            # the historical mismatch check for older flat checkpoints.
+            # Only the latest pointer selects a generation for recovery.
             legacy_steps = [
                 extract_step_from_path(directory)
                 for directory in checkpoint_dirs

@@ -1,20 +1,15 @@
-"""Tests for ``RayPPOTrainer._cleanup_old_checkpoints`` dispatch behavior.
-
-Contracts covered: cleanup leases no Ray worker when disabled
-(``max_ckpts_to_keep < 0``); and a per-node dispatch failure cannot kill a run
-whose checkpoint is already on disk, nor block the driver-side cleanup pass.
-
-Background on the incident that motivated these tests is in
-``docs/debug-log-checkpoint-cleanup-fanout.md``.
-
-    uv run --isolated --extra dev pytest tests/cpu/test_checkpoint_cleanup.py
-"""
-
 from unittest.mock import MagicMock, patch
 
 import ray.exceptions
+import pytest
 
+from marinskyrl.checkpoint_paths import LATEST_CHECKPOINT_FILE
+from skyrl_train.checkpoint_generation import commit_attempt, new_attempt_path, resolve_checkpoint_payload
+from skyrl_train.hf_export import write_hf_export_request
+from skyrl_train.hf_export_schema import HFExportRequest, TRAINER_STATE_FILENAME
+from skyrl_train.io import io
 from skyrl_train.trainer import RayPPOTrainer
+from tests.cpu.utils.test_io import GcsMemoryFileSystem
 
 
 def _make_bare_trainer(max_ckpts_to_keep: int, ckpt_path: str, node_ids) -> RayPPOTrainer:
@@ -29,14 +24,6 @@ def _make_bare_trainer(max_ckpts_to_keep: int, ckpt_path: str, node_ids) -> RayP
 
 
 def test_cleanup_takes_no_cluster_dependency_when_disabled():
-    """Cleanup with ``max_ckpts_to_keep < 0`` does not lease a Ray worker.
-
-    The payload is a no-op at this value, so the only thing the fan-out can do is
-    fail; ``run_on_each_node`` is the Ray lease boundary, so its non-invocation
-    is the contract under test. The failure-isolation test cannot substitute:
-    once the fan-out is wrapped in ``except RayError``, a "does it raise" check
-    passes whether or not this early return exists.
-    """
     trainer = _make_bare_trainer(max_ckpts_to_keep=-1, ckpt_path="/unused", node_ids=["a", "b", "c"])
 
     with patch("skyrl_train.trainer.run_on_each_node") as mock_dispatch:
@@ -46,12 +33,6 @@ def test_cleanup_takes_no_cluster_dependency_when_disabled():
 
 
 def test_cleanup_runs_driver_side_after_fanout_failure(tmp_path):
-    """A per-node dispatch failure must not kill the run or skip driver cleanup.
-
-    Cleanup runs after a successful checkpoint save, so it is best-effort: the
-    Ray failure is swallowed and the independent driver-side pass still removes
-    old checkpoints so a shared ``ckpt_path`` does not accumulate.
-    """
     for step in (1, 2, 3):
         checkpoint_dir = tmp_path / f"global_step_{step}"
         checkpoint_dir.mkdir()
@@ -65,31 +46,34 @@ def test_cleanup_runs_driver_side_after_fanout_failure(tmp_path):
     assert remaining == ["global_step_3"], "driver-side cleanup should keep only the newest checkpoint"
 
 
-def test_cloud_cleanup_runs_once_on_driver_without_node_leases():
-    checkpoint_root = "s3://bucket/checkpoints"
-    trainer = _make_bare_trainer(max_ckpts_to_keep=2, ckpt_path=checkpoint_root, node_ids=[])
+@pytest.mark.parametrize("retention", [0, 1])
+def test_cloud_retention_keeps_latest_and_pending_export_without_cluster_access(monkeypatch, retention):
+    filesystem = GcsMemoryFileSystem()
+    monkeypatch.setattr(io, "_get_filesystem", lambda path: filesystem)
+    checkpoint_root = "gs://bucket/checkpoints"
+    for step in (1, 2, 3, 4):
+        step_path = f"{checkpoint_root}/global_step_{step}"
+        attempt = new_attempt_path(step_path)
+        io.write_bytes_atomic(f"{attempt}/{TRAINER_STATE_FILENAME}", b"trainer state")
+        commit_attempt(step_path, attempt, required_files={TRAINER_STATE_FILENAME})
+    failed_attempt = new_attempt_path(f"{checkpoint_root}/global_step_0")
+    io.write_bytes_atomic(f"{failed_attempt}/{TRAINER_STATE_FILENAME}", b"uncommitted state")
+    io.write_bytes_atomic(f"{checkpoint_root}/{LATEST_CHECKPOINT_FILE}", b"2")
+    write_hf_export_request(
+        HFExportRequest(
+            step=1,
+            checkpoint_base_path=checkpoint_root,
+            checkpoint_path=f"{checkpoint_root}/global_step_1",
+            export_path="gs://bucket/exports",
+            model_path="org/model",
+            num_nodes=1,
+            gpus_per_node=1,
+        )
+    )
+    trainer = _make_bare_trainer(retention, checkpoint_root, node_ids=[])
+    trainer._cleanup_old_checkpoints()
 
-    with (
-        patch("skyrl_train.trainer.protected_hf_export_steps", return_value={3}),
-        patch("skyrl_train.trainer.get_node_ids") as mock_node_ids,
-        patch("skyrl_train.trainer.run_on_each_node") as mock_dispatch,
-        patch("skyrl_train.trainer.cleanup_old_checkpoints") as mock_cleanup,
-    ):
-        trainer._cleanup_old_checkpoints()
-
-    mock_node_ids.assert_not_called()
-    mock_dispatch.assert_not_called()
-    mock_cleanup.assert_called_once_with(checkpoint_root, 2, {3})
-
-
-def test_driver_retention_zero_still_keeps_advertised_latest():
-    checkpoint_root = "s3://bucket/checkpoints"
-    trainer = _make_bare_trainer(max_ckpts_to_keep=0, ckpt_path=checkpoint_root, node_ids=[])
-
-    with (
-        patch("skyrl_train.trainer.protected_hf_export_steps", return_value=set()),
-        patch("skyrl_train.trainer.cleanup_old_checkpoints") as mock_cleanup,
-    ):
-        trainer._cleanup_old_checkpoints()
-
-    mock_cleanup.assert_called_once_with(checkpoint_root, 1, set())
+    assert not io.exists(f"{checkpoint_root}/global_step_3")
+    assert not io.exists(f"{checkpoint_root}/global_step_0")
+    for step in (1, 2, 4):
+        assert resolve_checkpoint_payload(f"{checkpoint_root}/global_step_{step}", verify_files=True)

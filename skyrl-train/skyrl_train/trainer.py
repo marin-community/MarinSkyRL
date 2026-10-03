@@ -774,53 +774,51 @@ class RayPPOTrainer:
         return str(self.cfg.trainer.strategy) == "megatron"
 
     def _can_replay_driver_rng(self) -> bool:
-        staleness = (
-            OmegaConf.select(self.cfg, "trainer.rollout_buffer.max_staleness_steps", default=0)
-            if isinstance(self.cfg, DictConfig)
-            else getattr(getattr(self.cfg.trainer, "rollout_buffer", None), "max_staleness_steps", 0)
-        )
         return (
             self._megatron_checkpointing()
-            and int(staleness) == 0
+            and int(self.cfg.trainer.rollout_buffer.max_staleness_steps) == 0
             and not bool(self.cfg.generator.get("enable_http_endpoint", False))
         )
 
-    def _settle_checkpoint_refs(self, refs: list[ObjectRef], *, operation: str) -> list[Any]:
-        """Wait for every rank, then return results in order or raise the first error."""
+    def _restore_loaded_driver_rng(self) -> None:
+        if self._loaded_driver_rng_state is not None:
+            _restore_driver_rng_state(self._loaded_driver_rng_state)
+            self._loaded_driver_rng_state = None
+
+    def _trainer_checkpoint_state(self, step: int) -> dict[str, Any]:
+        return {
+            "global_step": step,
+            "config": self.cfg,
+            "distillation_scored_tokens_total": self.distillation_scored_tokens_total,
+            "ftpo_stopped": self._ftpo_stopped,
+            "domain_gradient_balance_state": self._domain_balancer.state_dict() if self._domain_balancer else None,
+        }
+
+    def _settle_checkpoint_refs(self, refs: list[ObjectRef], *, operation: str) -> None:
+        """Wait for every rank before raising the first worker error."""
         timeout = int(self.cfg.trainer.distributed.worker_collective_timeout_seconds)
         deadline = time.monotonic() + timeout
         pending = list(refs)
-        results: dict[ObjectRef, Any] = {}
-        errors: list[Exception] = []
+        first_error: Exception | None = None
         while pending:
             ready, pending = ray.wait(pending, num_returns=1, timeout=max(0.0, deadline - time.monotonic()))
             if not ready:
                 raise RuntimeError(f"{operation}: {len(pending)} worker calls did not settle within {timeout}s")
             for ref in ready:
                 try:
-                    results[ref] = ray.get(ref)
+                    ray.get(ref)
                 except Exception as error:
-                    errors.append(error)
-        if errors:
-            raise errors[0]
-        return [results[ref] for ref in refs]
+                    if first_error is None:
+                        first_error = error
+        if first_error is not None:
+            raise first_error
 
     def _save_megatron_component(self, component: str, actors: PPORayActorGroup, root: str) -> set[str]:
         component_path = os.path.join(root, component)
         refs = actors.async_run_ray_method(
             "pass_through", "save_checkpoint", ckpt_dir=component_path, tokenizer=self.tokenizer
         )
-        save_error: Exception | None = None
-        try:
-            self._settle_checkpoint_refs(refs, operation=f"{component} save")
-        except Exception as error:
-            save_error = error
-        # A successful save RPC only stages its upload. Every rank must settle
-        # before a new attempt can use the same worker or become visible.
-        wait_refs = actors.async_run_ray_method("pass_through", "wait_checkpoint_upload")
-        self._settle_checkpoint_refs(wait_refs, operation=f"{component} upload")
-        if save_error is not None:
-            raise save_error
+        self._settle_checkpoint_refs(refs, operation=f"{component} save")
         if not refs:
             raise RuntimeError(f"{component} has no checkpoint workers")
         required = {
@@ -855,26 +853,17 @@ class RayPPOTrainer:
         rollout_state: TrainingContextState,
         rng_state: dict[str, Any] | None,
     ) -> None:
-        rollout_buffer = stdlib_io.BytesIO()
-        torch.save(rollout_state, rollout_buffer)
-        io.write_bytes_atomic(os.path.join(attempt_path, _ROLLOUT_STATE_FILENAME), rollout_buffer.getvalue())
-        trainer_buffer = stdlib_io.BytesIO()
-        torch.save(
-            {
-                "global_step": step,
-                "config": self.cfg,
-                "distillation_scored_tokens_total": self.distillation_scored_tokens_total,
-                "domain_gradient_balance_state": self._domain_balancer.state_dict() if self._domain_balancer else None,
-            },
-            trainer_buffer,
-        )
-        io.write_bytes_atomic(os.path.join(attempt_path, TRAINER_STATE_FILENAME), trainer_buffer.getvalue())
-        required.update({_ROLLOUT_STATE_FILENAME, TRAINER_STATE_FILENAME})
+        states = {
+            _ROLLOUT_STATE_FILENAME: rollout_state,
+            TRAINER_STATE_FILENAME: self._trainer_checkpoint_state(step),
+        }
         if rng_state is not None:
-            rng_buffer = stdlib_io.BytesIO()
-            torch.save(rng_state, rng_buffer)
-            io.write_bytes_atomic(os.path.join(attempt_path, _DRIVER_RNG_STATE), rng_buffer.getvalue())
-            required.add(_DRIVER_RNG_STATE)
+            states[_DRIVER_RNG_STATE] = rng_state
+        for filename, payload in states.items():
+            buffer = stdlib_io.BytesIO()
+            torch.save(payload, buffer)
+            io.write_bytes_atomic(os.path.join(attempt_path, filename), buffer.getvalue())
+            required.add(filename)
 
         step_path = os.path.join(self.cfg.trainer.ckpt_path, f"{GLOBAL_STEP_PREFIX}{step}")
         latest_path = os.path.join(self.cfg.trainer.ckpt_path, LATEST_CHECKPOINT_FILE)
@@ -1018,12 +1007,10 @@ class RayPPOTrainer:
             self._control.should_save = False
 
         if self._control.should_save_hf_model:
-            if step_wall is not None and getattr(self, "_pending_megatron_save", None) is None:
+            if step_wall is not None and self._pending_megatron_save is None:
                 step_wall.start("checkpoint_work")
-            # HF export reads the committed checkpoint. When checkpoint and HF
-            # export share a cadence, wait for the background shard uploads and
-            # marker publication before asking the exporter to consume it.
-            if getattr(self, "_pending_megatron_save", None) is not None:
+            # HF export reads the committed checkpoint.
+            if self._pending_megatron_save is not None:
                 self._pending_megatron_hf_export = True
             elif await self._drain_checkpoint_upload():
                 await asyncio.to_thread(self.handle_hf_export)
@@ -1450,9 +1437,7 @@ class RayPPOTrainer:
         await self._sync_policy_for_rollouts(reason="initial")
 
         if self._ftpo_stopped:
-            if self._loaded_driver_rng_state is not None:
-                _restore_driver_rng_state(self._loaded_driver_rng_state)
-                self._loaded_driver_rng_state = None
+            self._restore_loaded_driver_rng()
             await self._handle_resume_at_max_steps()
             return
 
@@ -1478,13 +1463,12 @@ class RayPPOTrainer:
                 raise ValueError("callback step limit exceeds the available training batches")
             self.total_training_steps = limit
         elif self.resume_mode != ResumeMode.NONE and self.global_step >= self.total_training_steps:
-            if self._loaded_driver_rng_state is not None:
-                _restore_driver_rng_state(self._loaded_driver_rng_state)
-                self._loaded_driver_rng_state = None
+            self._restore_loaded_driver_rng()
             await self._handle_resume_at_max_steps()
             return
 
         if self._control.should_training_stop:
+            self._restore_loaded_driver_rng()
             await self._finalize_training(
                 completed_step=self.global_step, epoch=self.global_step // self.num_steps_per_epoch
             )
@@ -1494,9 +1478,7 @@ class RayPPOTrainer:
             await self._run_pretraining_evaluation(initial_state)
             self._control.should_evaluate = False
 
-        if self._loaded_driver_rng_state is not None:
-            _restore_driver_rng_state(self._loaded_driver_rng_state)
-            self._loaded_driver_rng_state = None
+        self._restore_loaded_driver_rng()
         self.context.start()
         await self._publish(self.global_step + 1)
 
@@ -1514,12 +1496,13 @@ class RayPPOTrainer:
                 step_wall.start("step_end_bookkeeping")
                 step_state = self._create_trainer_state(epoch, active_step_duration=step_timer.elapsed)
                 await self._run_step_end_callbacks(step_state, step_wall=step_wall)
-            self.all_metrics.update(
-                step_wall.finish(step_timer.duration, ended_at=step_timer.start_time + step_timer.duration)
-            )
-            self._update_step_performance_metrics(
-                training_input, core_seconds=core_seconds, cycle_started=cycle_started
-            )
+            if self._pending_megatron_save is None:
+                self.all_metrics.update(
+                    step_wall.finish(step_timer.duration, ended_at=step_timer.start_time + step_timer.duration)
+                )
+                self._update_step_performance_metrics(
+                    training_input, core_seconds=core_seconds, cycle_started=cycle_started
+                )
 
             if self._control.should_log:
                 log_payload = {
@@ -1532,8 +1515,6 @@ class RayPPOTrainer:
                 await self.callback_handler.call_event_async(
                     "on_log", step_state, self._control, logs=log_payload, trainer=self
                 )
-            self._log_training_step_completed(epoch=epoch, duration_seconds=step_timer.duration)
-
             stop = self._control.should_training_stop
             if step_state.is_epoch_end:
                 await self._end_epoch(epoch)
@@ -1541,11 +1522,36 @@ class RayPPOTrainer:
             if self._pending_megatron_save is not None:
                 pending = self._pending_megatron_save
                 self._pending_megatron_save = None
+                step_wall.start("checkpoint_work")
                 committed = await self._save_megatron_checkpoint(pending)
-                if committed and self._pending_megatron_hf_export:
+                stop = stop or self._control.should_training_stop
+                if committed and (self._pending_megatron_hf_export or self._control.should_save_hf_model):
                     await asyncio.to_thread(self.handle_hf_export)
                 self._pending_megatron_hf_export = False
-            self._step_time_history.append(step_timer.duration)
+                ended_at = time.monotonic()
+                self.all_timings["step"] = ended_at - step_timer.start_time
+                self.all_metrics.update(step_wall.finish(self.all_timings["step"], ended_at=ended_at))
+                self._update_step_performance_metrics(
+                    training_input, core_seconds=core_seconds, cycle_started=cycle_started
+                )
+                if self._control.should_log:
+                    metrics = {
+                        **{f"timing/{key}": value for key, value in self.all_timings.items()},
+                        **{
+                            key: value
+                            for key, value in self.all_metrics.items()
+                            if key.startswith(("timing/", "async/performance/", "trainer/checkpoint_save_failures"))
+                        },
+                    }
+                    rng_state = _driver_rng_state() if self._can_replay_driver_rng() else None
+                    try:
+                        self._log_metrics_stdout(metrics, step=self.global_step, kind="checkpoint")
+                        self.tracker.log(metrics, step=self.global_step, commit=False)
+                    finally:
+                        if rng_state is not None:
+                            _restore_driver_rng_state(rng_state)
+            self._log_training_step_completed(epoch=epoch, duration_seconds=self.all_timings["step"])
+            self._step_time_history.append(self.all_timings["step"])
             self.all_metrics = {}
             publish_step_timings(self.all_timings, self.global_step)
             self.all_timings = {}
@@ -3145,16 +3151,9 @@ class RayPPOTrainer:
         torch.save(rollout_state, rollout_state_buffer)
 
         # Save additional trainer state
-        trainer_state = {
-            "global_step": step,
-            "config": self.cfg,
-            "distillation_scored_tokens_total": self.distillation_scored_tokens_total,
-            "ftpo_stopped": self._ftpo_stopped,
-            "domain_gradient_balance_state": self._domain_balancer.state_dict() if self._domain_balancer else None,
-        }
         trainer_state_path = os.path.join(global_step_folder, TRAINER_STATE_FILENAME)
         trainer_state_buffer = stdlib_io.BytesIO()
-        torch.save(trainer_state, trainer_state_buffer)
+        torch.save(self._trainer_checkpoint_state(step), trainer_state_buffer)
         latest_checkpoint_file = os.path.join(self.cfg.trainer.ckpt_path, LATEST_CHECKPOINT_FILE)
         return CheckpointSnapshot(
             step=step,

@@ -70,6 +70,7 @@ def test_step_end_checkpoint_and_evaluation_are_distinct_exclusive_phases():
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
     trainer.cfg = SimpleNamespace(trainer=SimpleNamespace(strategy="other"))
     trainer._control = control
+    trainer._pending_megatron_save = None
     trainer.eval_dataset = object()
     trainer.all_timings = {}
     trainer.all_metrics = {}

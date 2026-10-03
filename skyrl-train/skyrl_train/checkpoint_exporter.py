@@ -119,9 +119,8 @@ class CheckpointExporter:
         self._workers = workers
         self._tokenizer = tokenizer
         self._publisher = publisher
-        self._checkpoint_payload_path: str | None = None
 
-    def _validate_checkpoint(self) -> None:
+    def _validate_checkpoint(self) -> str:
         payload_path = resolve_checkpoint_payload(self._plan.checkpoint_path, verify_files=True)
         trainer_state_path = os.path.join(payload_path, TRAINER_STATE_FILENAME)
         if not io.exists(trainer_state_path):
@@ -136,16 +135,13 @@ class CheckpointExporter:
         policy_path = os.path.join(payload_path, POLICY_CHECKPOINT_SUBDIRECTORY)
         if not io.exists(policy_path):
             raise FileNotFoundError(f"policy checkpoint not found: {policy_path}")
-        self._checkpoint_payload_path = payload_path
+        return policy_path
 
     def run(self) -> CheckpointExportResult:
         try:
-            self._validate_checkpoint()
+            policy_path = self._validate_checkpoint()
             self._workers.initialize(self._plan.model_path)
-            assert self._checkpoint_payload_path is not None
-            self._workers.load_model_checkpoint(
-                os.path.join(self._checkpoint_payload_path, POLICY_CHECKPOINT_SUBDIRECTORY)
-            )
+            self._workers.load_model_checkpoint(policy_path)
             self._workers.save_hf_model(self._plan.policy_export_path, self._tokenizer)
             hf_model_io.verify_hf_model_export(self._plan.policy_export_path)
             if self._publisher is not None:
