@@ -23,6 +23,7 @@ from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_exp
 from skyrl_train.config.query_bias import resolve_grug_query_bias_update
 from skyrl_train.config.weight_sync_pause import resolve_weight_sync_pause_policy
 from skyrl_train.config.behavior_logprobs import configure_behavior_logprob_sampling
+from skyrl_train.config.mismatch_probe import validate_mismatch_probe_config
 from skyrl_train.config.objective_spec import rollout_logprobs_required, validate_objective
 from skyrl_train.callbacks.types import (
     CHECKPOINT_CALLBACK_TYPE,
@@ -42,12 +43,13 @@ from skyrl_train.env_vars import (
 from skyrl_train.group_admission import resolve_group_advantage_invariant
 from skyrl_train.trajectory_selection import optimization_samples_per_prompt, trajectory_selector_from_config
 from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
+from marinskyrl.runtime_options import reference_model_required
 from marinskyrl.rollout_grading import validate_nemotron_ultra_grading
 from marinskyrl.process_diagnostics import initialize_process_diagnostics
 from marinskyrl.distillation import (
-    DistillationObjectiveKind,
     compile_distillation_plan_from_config,
     validate_distillation_runtime_support,
+    validate_generation_logprobs,
 )
 from marinskyrl.inference_placement import validate_expert_block_transport
 from marinskyrl.runtime_options import GDNBackend, R3Transport
@@ -84,7 +86,7 @@ def policy_strict_spread_eligible(cfg: DictConfig) -> bool:
     if placement.colocate_all:
         return False
     algo = cfg.trainer.algorithm
-    use_ref_model = algo.use_kl_loss or algo.use_kl_in_reward
+    use_ref_model = reference_model_required(algo)
     return not use_ref_model
 
 
@@ -229,7 +231,7 @@ def policy_spread_bundles(cfg: DictConfig):
     return [{"GPU": num_gpus_per_node, "CPU": num_gpus_per_node} for _ in range(num_nodes)]
 
 
-def use_per_engine_strict_pack_pg(
+def use_per_engine_pg(
     *,
     use_hybrid_engine: bool,
     use_mp_backend: bool,
@@ -237,13 +239,11 @@ def use_per_engine_strict_pack_pg(
     pipeline_parallel_size: int,
     data_parallel_size: int,
 ) -> bool:
-    """Return whether each engine needs a node-local placement group.
+    """Return whether placement needs a separate group per multi-GPU engine.
 
-    Tensor, pipeline, and data-parallel ranks communicate within an engine and
-    must share a node. A single-GPU engine uses the flat PACK group so many
-    engines fill whole nodes instead of fragmenting the policy allocation.
-    Hybrid placement supplies its own group, and the multiprocessing backend
-    reserves each tensor/pipeline slice in one node-atomic bundle.
+    The engine factory uses PACK for supported cross-node EP. Single-GPU engines
+    share a PACK group; hybrid placement supplies its own group, and the mp
+    backend reserves each tensor/pipeline slice in one node-atomic bundle.
     """
     if use_hybrid_engine or use_mp_backend:
         return False
@@ -387,7 +387,7 @@ def validate_batch_sizes(cfg: DictConfig):
     # Validate training batch size is larger than the least common multiple of the DP sizes of policy (and ref if used).
     lcm_dp_size = policy_dp_size
 
-    use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
+    use_ref_model = reference_model_required(cfg.trainer.algorithm)
     if use_ref_model:
         ref_world_size = cfg.trainer.placement.ref_num_nodes * cfg.trainer.placement.ref_num_gpus_per_node
         pp = cfg.trainer.ref.megatron_config.pipeline_model_parallel_size
@@ -480,6 +480,7 @@ def validate_hf_export_config(cfg: DictConfig) -> None:
 
 
 def validate_cfg(cfg: DictConfig):
+    validate_mismatch_probe_config(cfg)
     if cfg.trainer.strategy != "megatron":
         raise ValueError(f"Unsupported training strategy: {cfg.trainer.strategy}")
     if cfg.trainer.critic.model.path:
@@ -571,7 +572,7 @@ def validate_cfg(cfg: DictConfig):
         "use_kl_in_reward and use_kl_loss should be mutually exclusive"
     )
 
-    use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
+    use_ref_model = reference_model_required(cfg.trainer.algorithm)
 
     validate_batch_sizes(cfg)
 
@@ -607,7 +608,9 @@ def validate_cfg(cfg: DictConfig):
 
     cfg.trainer.algorithm = algorithm_config
 
-    behavior_logprobs_required = rollout_logprobs_required(cfg.trainer.algorithm, loss_spec=spec)
+    behavior_logprobs_required = rollout_logprobs_required(cfg.trainer.algorithm, loss_spec=spec) or bool(
+        cfg.trainer.mismatch_probe.get("enabled", False)
+    )
     if behavior_logprobs_required:
         if cfg.generator.sampling_params.logprobs is None:
             logger.warning(
@@ -734,23 +737,7 @@ def validate_generator_cfg(cfg: DictConfig):
     if cfg.generator.backend == "sglang" and not cfg.generator.use_conversation_multi_turn:
         raise NotImplementedError("`use_conversation_multi_turn=False` is not supported for SGLang backend")
 
-    if cfg.generator.sampling_params.logprobs is not None:
-        assert isinstance(cfg.generator.sampling_params.logprobs, int)
-        if cfg.generator.sampling_params.logprobs > 0:
-            plan = compile_distillation_plan_from_config(cfg)
-            widths = {teacher.top_k for teacher in plan.teachers} if plan is not None else set()
-            if (
-                plan is None
-                or plan.objective is not DistillationObjectiveKind.STUDENT_TOPK_POLICY_SURROGATE
-                or widths != {cfg.generator.sampling_params.logprobs}
-                or cfg.generator.backend != "vllm"
-            ):
-                raise ValueError(
-                    "positive generator.sampling_params.logprobs requires a local vLLM "
-                    "student_topk_policy_surrogate plan with matching teacher top_k"
-                )
-        if not cfg.generator.run_engines_locally:
-            raise NotImplementedError("Remote inference mode doesn't support `sampling_params.logprobs`")
+    validate_generation_logprobs(cfg)
 
     validate_megatron_cfg(cfg)
     if cfg.generator.backend == "sglang":

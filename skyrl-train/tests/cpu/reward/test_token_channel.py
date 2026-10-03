@@ -21,9 +21,9 @@ def test_channel_lands_at_exact_positions():
     span_tags = [[1, 2, 3], [0, 1, 2, 3, 0]]
 
     out = convert_prompts_responses_to_batch_tensors(
-        TOKENIZER, PROMPTS, RESPONSES, REWARDS, LOSS_MASKS, None, None, shaping, span_tags
+        TOKENIZER, PROMPTS, RESPONSES, REWARDS, LOSS_MASKS, None, shaping, span_tags
     )
-    tls, rst = out[7], out[8]
+    tls, rst = out[6], out[7]
 
     # Right-padded with zeros to the longest response.
     assert torch.allclose(tls, torch.tensor([[0.1, 0.2, 0.3, 0.0, 0.0], [0.0, -0.5, 0.0, 0.7, 0.0]]))
@@ -33,8 +33,8 @@ def test_channel_lands_at_exact_positions():
 
 def test_channel_absent_when_not_provided():
     out = convert_prompts_responses_to_batch_tensors(TOKENIZER, PROMPTS, RESPONSES, REWARDS, LOSS_MASKS)
+    assert out[6] is None
     assert out[7] is None
-    assert out[8] is None
 
 
 def _trajectory_batch(prompt, response, **channel):

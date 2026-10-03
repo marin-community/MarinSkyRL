@@ -12,6 +12,7 @@ import numpy as np
 
 Message: TypeAlias = Mapping[str, Any]
 UNKNOWN_STOP_REASON = "unknown"
+VERIFIER_RUNTIME_ERROR = "VerifierRuntimeError"
 
 
 def _normalize_finite(value: float, *, field_name: str) -> float:

@@ -16,6 +16,7 @@ from marinskyrl.distillation import (
     DistillationRewardMode,
     compile_distillation_plan_from_config,
 )
+from skyrl_train.config.ftpo import validate_ftpo
 from skyrl_train.dynamic_sampling import DynamicSamplingType
 
 from marinskyrl.runtime_options import AdvantageEstimator, PolicyLossType
@@ -55,6 +56,7 @@ BUILTIN_LOSS_SPECS: Mapping[str, LossSpec] = MappingProxyType(
         PolicyLossType.IMPORTANCE_SAMPLING: LossSpec(RatioAnchor.OLD),
         PolicyLossType.BEHAVIOR_CLIP: LossSpec(RatioAnchor.ROLLOUT),
         PolicyLossType.SFT: LossSpec(RatioAnchor.NONE, advantage_linear=False),
+        PolicyLossType.FTPO: LossSpec(RatioAnchor.NONE, advantage_linear=False),
     }
 )
 
@@ -200,6 +202,7 @@ def rollout_logprobs_required(algorithm: DictConfig, *, loss_spec: LossSpec | No
 
 def validate_objective(cfg: DictConfig, *, loss_spec: LossSpec | None = None) -> None:
     """Reject objective settings that cannot affect the selected training rows correctly."""
+    validate_ftpo(cfg)
     limit = cfg.trainer.policy.max_consecutive_nonfinite_steps
     if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
         raise ValueError("trainer.policy.max_consecutive_nonfinite_steps must be null or an integer >= 1")

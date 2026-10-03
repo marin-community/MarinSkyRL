@@ -1800,6 +1800,17 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 exclude_from_baseline=exclude_from_baseline,
             )
 
+        # CLI agents record behavior evidence in the proxy log, not Harbor Chat.
+        # Recover both consumers before timeout classification; correlation releases
+        # the trial's log entries after the conversation has been reconstructed.
+        rollout_details = getattr(result.agent_result, "rollout_details", None)
+        had_native_rollout_details = bool(rollout_details)
+        cli_chat_history = None
+        if not had_native_rollout_details:
+            cli_chat_history = self._maybe_build_cli_chat_history(result)
+            rollout_details = self._maybe_correlate_cli_rollout_details(result, rollout_details)
+        literal_bridge_correlated = not had_native_rollout_details and bool(rollout_details)
+
         verification = verification_from_harbor_result(result)
 
         # Preserve-on-soft-timeout state (see _should_preserve_timeout_trajectory).
@@ -1941,7 +1952,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             # Branch on all_messages PRESENCE, not agent name, so the terminus path
             # stays byte-identical and any future Chat-driven agent keeps working.
             if isinstance(metadata, dict) and "all_messages" not in metadata:
-                chat_history = self._maybe_build_cli_chat_history(result)
+                chat_history = cli_chat_history or self._maybe_build_cli_chat_history(result)
                 if not chat_history:
                     # No recoverable conversation → drop the trajectory honestly,
                     # exactly as the pre-existing KeyError branch did (no silent
@@ -2031,17 +2042,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         # Process response messages (everything after the first message)
         response_messages = conversation[1:]
 
-        # Extract per-turn behavior logprobs from Harbor's rollout details.
-        rollout_details = getattr(result.agent_result, "rollout_details", None)
-        had_native_rollout_details = bool(rollout_details)
-        # CLI agents that bypass Harbor Chat return empty
-        # rollout_details even under a co-located RecordProxy (the proxy writes a
-        # shared worker-side log, not the in-sandbox trial dir). Recover this trial's
-        # token_ids/logprobs from that shared log by the per-trial correlation id
-        # harbor stamped (x-ot-trial-id). No-op when rollout_details is already
-        # populated (terminus native), the flag is off, or no proxy log is present.
-        rollout_details = self._maybe_correlate_cli_rollout_details(result, rollout_details)
-        literal_bridge_correlated = not had_native_rollout_details and bool(rollout_details)
+        # Use the behavior evidence recovered before timeout classification.
         literal_bridge_turns = 0
         if literal_bridge_correlated:
             completion_turns = rollout_details[0].get("completion_token_ids", [])

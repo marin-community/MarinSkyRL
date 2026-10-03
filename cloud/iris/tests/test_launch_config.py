@@ -11,8 +11,13 @@ import yaml
 from omegaconf import OmegaConf
 
 from cloud.iris import training_driver
-from cloud.iris.launch_config import load_launch_config, validate_launch_config
-from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, materialize_launch_config
+from cloud.iris.launch_config import LaunchTopology, load_launch_config, validate_launch_config
+from cloud.iris.rl_config_translation import (
+    RL_CONFIG_PAYLOAD_ENV,
+    compose_skyrl_config,
+    materialize_launch_config,
+    parse_rl_config,
+)
 from skyrl_train.distributed.step_policy import NonfiniteStepPolicy, nonfinite_step_policy
 
 
@@ -104,17 +109,30 @@ def _raw_config() -> dict[str, Any]:
     }
 
 
+@pytest.mark.parametrize("storage_prefix", ["s3://runs/smoke", "gs://runs/smoke"])
 @pytest.mark.parametrize(("loss", "reduction"), [("regular", "token_mean"), ("gspo", "sequence_mean")])
-def test_launch_config_composes_and_loads_as_structured_hydra(tmp_path: Path, loss: str, reduction: str) -> None:
+def test_launch_config_composes_and_loads_as_structured_hydra(
+    tmp_path: Path, loss: str, reduction: str, storage_prefix: str
+) -> None:
     path = tmp_path / "resolved-launch.yaml"
     raw = _raw_config()
     raw["skyrl"]["trainer"]["algorithm"].update(policy_loss_type=loss, loss_reduction=reduction)
+    trainer = raw["skyrl"]["trainer"]
+    trainer["resume_mode"] = "from_path"
+    trainer["resume_path"] = f"{storage_prefix}/checkpoints/global_step_1"
+    trainer["mismatch_probe"] = {
+        "archive_uri": f"{storage_prefix}/mismatch_probe",
+        "reuse_probe": f"{storage_prefix}/source/mismatch_probe",
+    }
     path.write_text(yaml.safe_dump(raw, sort_keys=False))
 
     config = load_launch_config(path)
 
     assert config.skyrl.trainer.train_batch_size == 8
     assert validate_launch_config(config).num_nodes == 1
+    assert config.skyrl.trainer.resume_path == f"{storage_prefix}/checkpoints/global_step_1"
+    assert config.skyrl.trainer.mismatch_probe.archive_uri == f"{storage_prefix}/mismatch_probe"
+    assert config.skyrl.trainer.mismatch_probe.reuse_probe == f"{storage_prefix}/source/mismatch_probe"
     if loss == "gspo":
         config.skyrl.trainer.algorithm.loss_reduction = "token_mean"
         with pytest.raises(ValueError, match="gspo requires trainer.algorithm.loss_reduction=sequence_mean"):
@@ -228,6 +246,22 @@ def test_task_materializes_the_forwarded_launch_document(tmp_path: Path) -> None
     assert destination.read_bytes() == contents
 
 
+def test_evaluation_metric_names_survive_iris_path_resolution(tmp_path: Path) -> None:
+    raw = yaml.safe_load((Path(__file__).resolve().parents[1] / "configs/qwen_megatron_smoke.yaml").read_text())
+    groups = {"eval/train/avg_score": ["eval/cat_count_n1/avg_score", "eval/cat_count_n2/avg_score"]}
+    profiles = {"sampled": {"sampling_params": {"stop": ["./END"]}}}
+    raw["trainer"]["callbacks"] = [{"type": "evaluation", "metric_groups": groups, "additional_evaluations": profiles}]
+    path = tmp_path / "evaluation.yaml"
+    path.write_text(yaml.safe_dump(raw))
+
+    config = compose_skyrl_config(
+        parse_rl_config(str(path)), {}, LaunchTopology(num_nodes=1, gpus_per_node=8, gpu_variant="H100")
+    ).config
+
+    assert config.trainer.callbacks[0].metric_groups == groups
+    assert config.trainer.callbacks[0].additional_evaluations == profiles
+
+
 def test_null_nonfinite_limit_in_launch_fails_on_first_invalid_step(tmp_path: Path) -> None:
     raw = _raw_config()
     raw["skyrl"]["trainer"]["policy"] = {"max_consecutive_nonfinite_steps": None}
@@ -326,3 +360,24 @@ def test_launch_validates_correction_and_selection_contract(tmp_path: Path, over
     else:
         # Explicitly uncorrected stale policies and active reward filters are valid launch contracts.
         load_launch_config(path)
+
+
+@pytest.mark.parametrize(
+    ("recipe", "nodes"), [("snowball_mopd_ultra_async_smoke", 8), ("snowball_mopd_ultra_async_32k_smoke", 9)]
+)
+def test_inherited_recipe_round_trips_as_a_self_contained_launch(tmp_path: Path, recipe: str, nodes: int):
+    raw = _raw_config()
+    raw["skyrl"] = {"defaults": [recipe, "_self_"], "trainer": {"max_steps": 2}}
+    raw["iris"]["allocation"]["num_nodes"] = nodes
+    path = tmp_path / "launch.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    config = load_launch_config(path)
+    assert config.skyrl.trainer.max_steps == 2
+    assert config.skyrl.trainer.rollout_buffer.max_staleness_steps == 1
+    assert config.skyrl.trainer.algorithm.off_policy_correction == "tis"
+    assert config.skyrl.data.sampling.kind is None
+    assert config.skyrl.generator.engine_init_kwargs.max_model_len == (8192 if nodes == 8 else 32767)
+    resolved = tmp_path / "resolved.yaml"
+    OmegaConf.save(config, resolved)
+    reloaded = load_launch_config(resolved)
+    assert OmegaConf.to_container(reloaded, resolve=True) == OmegaConf.to_container(config, resolve=True)

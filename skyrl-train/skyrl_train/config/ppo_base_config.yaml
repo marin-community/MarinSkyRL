@@ -3,6 +3,7 @@ defaults:
   - megatron_config@trainer.policy.megatron_config: policy
   - megatron_config@trainer.ref.megatron_config: ref
   - skyrl_gym_config: default
+  - mismatch_probe@trainer.mismatch_probe: default
 
 data:
   train_data: ["${oc.env:HOME}/data/gsm8k/train.parquet"]
@@ -193,6 +194,8 @@ trainer:
     advantage_batch_normalize: false
     value_head_prefix: "value_head"
     policy_loss_type: "regular"
+    # FTPOConfig owns the defaults; set policy_loss_type=ftpo to activate.
+    ftpo: {}
     loss_reduction: "token_mean"
     grpo_norm_by_std: true
     rloo_n_filter_zero_reward_groups: true
@@ -290,6 +293,7 @@ trainer:
   reset_global_step_on_resume: false
   ckpt_path: "${oc.env:HOME}/ckpts/"
   max_ckpts_to_keep: -1
+  callbacks: null
   ckpt_interval: 5
   hf_save_interval: ${trainer.ckpt_interval}
   export_hf_artifact: false
@@ -339,6 +343,7 @@ trainer:
   rope_theta: null
 
   step_wise_training: false
+
 
 generator:
   model_name: ${trainer.policy.model.path}

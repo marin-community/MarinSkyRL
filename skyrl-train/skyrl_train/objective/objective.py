@@ -6,6 +6,7 @@ from marinskyrl.distillation import DistillationRewardMode
 from omegaconf import DictConfig, OmegaConf
 
 from skyrl_train.config.objective_spec import LossReduction, TopKLossParams
+from skyrl_train.ftpo import FTPOInputs
 from skyrl_train.objective.losses import PolicyLoss, PolicyLossInputs, TokenLoss, complete_clip_metrics
 from skyrl_train.objective.reduction import StepCounts, policy_data_weights, reduce_to_step
 from skyrl_train.objective.teacher import TopKEvidence, mask_teacher_evidence, topk_teacher_loss
@@ -57,6 +58,7 @@ def build_objective_micro_batch(
     token_entropy: torch.Tensor,
     think_token_weight: float,
     teacher: TopKTeacherBatch | None,
+    ftpo: FTPOInputs | None = None,
     correction_weights: torch.Tensor | None = None,
 ) -> ObjectiveMicroBatch:
     """Prepare finite values at masked positions before objective formulas run."""
@@ -80,6 +82,7 @@ def build_objective_micro_batch(
             rollout_log_probs=None if rollout_logprobs is None else sanitize(rollout_logprobs),
             advantages=sanitize(advantages),
             loss_mask=loss_mask,
+            ftpo=ftpo,
         ),
         policy_data_weights=policy_data_weights(loss_mask, response_span_tags, think_token_weight),
         ref_log_probs=None if base_action_log_probs is None else sanitize(base_action_log_probs),

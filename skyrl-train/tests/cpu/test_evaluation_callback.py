@@ -1,5 +1,3 @@
-"""Behavioral tests for evaluation callback scheduling."""
-
 import pytest
 
 from skyrl_train.callbacks.base import TrainerControl, TrainerState
@@ -16,3 +14,14 @@ def test_evaluation_callback_respects_final_evaluation_configuration(eval_on_tra
     control = callback.on_train_end(state, TrainerControl())
 
     assert control.should_evaluate is expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("requirement", [{"minimum": 0.65}, {"min_improvement": 0.4}])
+async def test_evaluation_stops_at_the_first_qualifying_score(requirement):
+    callback = EvaluationCallback(stop_when={"eval/score": requirement})
+    state = TrainerState(global_step=0, epoch=0, total_steps=30, num_steps_per_epoch=30)
+    for step, score, stopped in ((0, 0.25, False), (5, 0.64, False), (10, 0.65, True)):
+        state.global_step = step
+        result = await callback.on_evaluate_async(state, TrainerControl(), metrics={"eval/score": score}, trainer=None)
+        assert result.should_training_stop is stopped

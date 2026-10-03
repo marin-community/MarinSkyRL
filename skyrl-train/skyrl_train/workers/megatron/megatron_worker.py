@@ -1,73 +1,78 @@
-import torch
-import torch.nn as nn
-import torch.distributed
-import ray
-from transformers import AutoTokenizer, AutoConfig
-from huggingface_hub import snapshot_download
-
 import asyncio
+import copy
 import importlib.util
 import os
-from enum import StrEnum
-from typing import List, Dict, Any, Optional
 from collections import defaultdict
-from loguru import logger
-from skyrl_train.utils.progress import tqdm
-from omegaconf import OmegaConf
+from datetime import timedelta
+from enum import StrEnum
+from typing import Any
 
-from megatron.bridge import AutoBridge
 import megatron.core.parallel_state as mpu
+import ray
+import skyrl_train.models.grug_megatron_bridge  # noqa: F401  # registers the Grug bridge with Megatron-Bridge
+import torch
+import torch.distributed
+from huggingface_hub import snapshot_download
+from loguru import logger
+from megatron.bridge import AutoBridge
 from megatron.core.optimizer import DistributedOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
-
-from skyrl_train.distributed.megatron.optimizer import (
-    init_megatron_optim_config,
-    get_megatron_optimizer,
-    get_megatron_optimizer_param_scheduler,
-)
+from megatron.core.tensor_parallel.random import get_cuda_rng_tracker
+from omegaconf import OmegaConf
 from skyrl_train.distributed.dispatch import MeshRank
-from skyrl_train.distributed.utils import init_worker_process_group_with_device
 from skyrl_train.distributed.megatron.megatron_strategy import MegatronStrategy
-from skyrl_train.distributed.megatron.remote_model import install_remote_hf_state
 from skyrl_train.distributed.megatron.megatron_utils import (
     get_model_config,
     materialize_megatron_params,
+    dp_weight_checksum_mismatch,
     print_model_size,
 )
-from skyrl_train.utils.utils import (
-    moe_router_replay_requested,
-    update_model_config,
-    str_to_torch_dtype,
-    get_physical_gpu_id,
+from skyrl_train.distributed.megatron.optimizer import (
+    get_megatron_optimizer,
+    get_megatron_optimizer_param_scheduler,
+    init_megatron_optim_config,
 )
-from marinskyrl.hugging_face_retry import load_hugging_face_with_retry
-from skyrl_train.workers.megatron.router_replay_install import install_megatron_router_replay
-import skyrl_train.models.grug_megatron_bridge  # noqa: F401  # registers the Grug bridge with Megatron-Bridge
+from skyrl_train.distributed.megatron.remote_model import install_remote_hf_state
+from skyrl_train.distributed.utils import init_worker_process_group_with_device
+from skyrl_train.mismatch_probe.modes import TRAINER_MODES
 from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE, validate_grug_training_strategy
+from skyrl_train.timing_observability import PhaseBreakdown
+from marinskyrl.runtime_options import PolicyLossType
 from skyrl_train.training_batch import (
     TrainingBatchIterator,
     TrainingOutputBatch,
     gradient_accumulation_steps,
 )
-from skyrl_train.timing_observability import PhaseBreakdown
 from skyrl_train.utils.metrics import policy_progress_metrics, policy_training_metrics
-from skyrl_train.workers.worker import (
-    PolicyWorkerBase,
-    RefWorkerBase,
-    CriticWorkerBase,
-    log_r3_resident_set,
+from skyrl_train.utils.profiler import Profiler
+from skyrl_train.utils.progress import tqdm
+from skyrl_train.utils.utils import (
+    get_physical_gpu_id,
+    moe_router_replay_requested,
+    str_to_torch_dtype,
+    update_model_config,
 )
+from skyrl_train.weight_sync.expert_block.sender import ExpertBlockSender
+from skyrl_train.weight_sync.weight_extractor import validate_weight_sync_mode
+from skyrl_train.workers.grug_validation import GrugValidationSnapshot
 from skyrl_train.workers.megatron.megatron_model_wrapper import (
     MegatronForwardMicroBatch,
     MegatronModelWrapper,
     MegatronPolicyMicroBatch,
 )
-from skyrl_train.utils.profiler import Profiler
-from marinskyrl.runtime_options import WeightSyncTransport
-from skyrl_train.weight_sync.expert_block.sender import ExpertBlockSender
-from skyrl_train.weight_sync.weight_extractor import validate_weight_sync_mode
+from skyrl_train.workers.megatron.router_replay_install import install_megatron_router_replay
 from skyrl_train.workers.megatron.weight_extractor import BucketedMegatronWeightExtractor, mapping_hf_names
-from skyrl_train.workers.grug_validation import GrugValidationSnapshot
+from skyrl_train.workers.worker import (
+    CriticWorkerBase,
+    PolicyWorkerBase,
+    RefWorkerBase,
+    log_r3_resident_set,
+)
+from torch import nn
+from transformers import AutoConfig, AutoTokenizer
+
+from marinskyrl.hugging_face_retry import load_hugging_face_with_retry
+from marinskyrl.runtime_options import WeightSyncTransport
 
 
 class _MegatronInitMode(StrEnum):
@@ -76,6 +81,12 @@ class _MegatronInitMode(StrEnum):
 
 
 class MegatronWorker:
+    @property
+    def scoring_temperature(self) -> float:
+        if self.cfg.trainer.algorithm.policy_loss_type == PolicyLossType.FTPO:
+            return 1.0
+        return self.cfg.generator.sampling_params.temperature
+
     def _download_hf_snapshot_if_needed(self, model_path: str, model_config) -> None:
         """Populate the local Hub cache only for non-streamed remote model IDs."""
         if model_config.get("source_uri") or self._local_rank != 0 or os.path.exists(model_path):
@@ -164,9 +175,9 @@ class MegatronWorker:
     def make_megatron_module(
         self,
         wrap_with_ddp: bool = True,
-        ddp_config: Optional[Dict[str, Any]] = None,
+        ddp_config: dict[str, Any] | None = None,
         bf16: bool = True,
-    ) -> List[nn.Module]:
+    ) -> list[nn.Module]:
         """
         Creates a megatron GPTModel (optionally DDP wrapped) using the bridge.
         """
@@ -183,13 +194,13 @@ class MegatronWorker:
         )
         return model
 
-    def forward(self, data):
+    def forward(self, data, *, probe_micro_batch_size: int | None = None):
         """
         Override `Worker.forward` to support passing the full mini batch to the MegatronModelWrapper.forward method.
         """
         log_r3_resident_set(self._rank, data)
         # Run in micro batches grouped into a single mini-batch
-        micro_bsz = self.cfg.trainer.micro_forward_batch_size_per_gpu
+        micro_bsz = probe_micro_batch_size or self.cfg.trainer.micro_forward_batch_size_per_gpu
         micro_batches = data.chunk(micro_bsz)
 
         # Build typed micro-batches expected by MegatronModelWrapper.forward
@@ -208,9 +219,9 @@ class MegatronWorker:
                     attention_mask=attention_mask,
                     position_ids=position_ids,
                     num_actions=num_actions,
-                    rollout_routed_experts=micro["rollout_routed_experts"]
-                    if "rollout_routed_experts" in micro.keys()
-                    else None,
+                    ftpo_chosen_mask=micro.get("ftpo_chosen_mask"),
+                    rollout_routed_experts=micro.routed_experts_tensor(),
+                    probe_row_indices=micro.get("probe_row_indices"),
                 )
             )
 
@@ -222,7 +233,7 @@ class MegatronWorker:
                 micro_batches=micro_payloads,
                 seq_len=seq_len,
                 micro_batch_size=mbs,
-                temperature=self.cfg.generator.sampling_params.temperature,
+                temperature=self.scoring_temperature,
             )
         if self.cfg.trainer.policy.megatron_config.check_train_eval_parity:
             self._log_forward_fingerprint("forward", micro_payloads)
@@ -231,7 +242,7 @@ class MegatronWorker:
                     micro_batches=micro_payloads,
                     seq_len=seq_len,
                     micro_batch_size=mbs,
-                    temperature=self.cfg.generator.sampling_params.temperature,
+                    temperature=self.scoring_temperature,
                 )
             if mpu.is_pipeline_last_stage(ignore_virtual=True):
                 diff = (repeated.float() - log_probs.float()).abs()
@@ -245,7 +256,33 @@ class MegatronWorker:
         output.metadata = data.metadata
         return output
 
-    def _log_forward_fingerprint(self, call: str, micro_payloads: List[MegatronForwardMicroBatch]) -> None:
+    def probe_forward(self, data):
+        """Use the normal Megatron policy forward with a scoped probe routing mode."""
+        mode = data.metadata["probe_mode"]
+        micro_batch_size = data.metadata["probe_micro_batch_size"]
+        controller = self.model.router_replay
+        if mode not in TRAINER_MODES:
+            raise ValueError(f"unsupported probe mode: {mode}")
+        module_modes = [(module, module.training) for chunk in self.actor_module for module in chunk.modules()]
+        rng_state = MegatronStrategy.get_rng_state()
+        rng_tracker = get_cuda_rng_tracker()
+        tracker_states = copy.deepcopy(rng_tracker.get_states())
+        scope = TRAINER_MODES[mode].context(self, data.metadata)
+        try:
+            with scope:
+                if controller is not None:
+                    controller.take_probe_observations()
+                output = self.forward(data, probe_micro_batch_size=micro_batch_size)
+                output.metadata = dict(output.metadata)
+                output.metadata["probe_routes"] = controller.take_probe_observations() if controller is not None else []
+                return output
+        finally:
+            for module, was_training in module_modes:
+                module.training = was_training
+            MegatronStrategy.load_rng_state(rng_state)
+            rng_tracker.set_states(tracker_states)
+
+    def _log_forward_fingerprint(self, call: str, micro_payloads: list[MegatronForwardMicroBatch]) -> None:
         """Log checksums of this rank's inputs and parameters so two calls can be compared."""
         token_sum = sum(int(micro.sequences.long().sum().item()) for micro in micro_payloads)
         mask_sum = sum(int(micro.attention_mask.long().sum().item()) for micro in micro_payloads)
@@ -266,7 +303,7 @@ class MegatronWorker:
             f"params={param_count} param_sum={param_sum:.6f}"
         )
 
-    def _log_train_eval_parity_probe(self, micro_buffer: List[MegatronPolicyMicroBatch]) -> None:
+    def _log_train_eval_parity_probe(self, micro_buffer: list[MegatronPolicyMicroBatch]) -> None:
         """Re-run forward-only passes on the training micro-batches and compare them with the old log-probs.
 
         The eval-mode pass measures whether the log-prob forward is repeatable at all; the
@@ -295,7 +332,7 @@ class MegatronWorker:
                     micro_batches=micro_payloads,
                     seq_len=seq_len,
                     micro_batch_size=micro_bsz,
-                    temperature=self.cfg.generator.sampling_params.temperature,
+                    temperature=self.scoring_temperature,
                 )
             if not mpu.is_pipeline_last_stage(ignore_virtual=True):
                 continue
@@ -336,16 +373,16 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.model: MegatronModelWrapper = None
-        self.actor_module: List[nn.Module] = None
+        self.actor_module: list[nn.Module] = None
         self.scheduler: OptimizerParamScheduler = None
         self.optimizer: DistributedOptimizer = None
         self.profiler: Profiler | None = None
         self._warned_exact_unit_policy_ratio = False
         self._consecutive_nonfinite_steps = 0
 
-    def forward(self, data):
+    def forward(self, data, *, probe_micro_batch_size: int | None = None):
         with self._memory.span("forward", step=data.metadata.get("global_step")):
-            return super().forward(data)
+            return super().forward(data, probe_micro_batch_size=probe_micro_batch_size)
 
     def offload_to_cpu(self, pin_memory=True, non_blocking=True, offload_optimizer=True, offload_model=True):
         self.strategy.offload_to_cpu(
@@ -389,7 +426,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             seed=self.cfg.trainer.seed,
             checkpoint_plan_cache=self.cfg.trainer.policy.megatron_config.checkpoint_plan_cache,
         )
-        self.strategy.setup_distributed()
+        self.strategy.setup_distributed(
+            timeout=timedelta(seconds=self.cfg.trainer.distributed.worker_collective_timeout_seconds)
+        )
 
         self.mesh_rank = MeshRank(
             dp=mpu.get_data_parallel_rank(),
@@ -462,6 +501,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # create worker model
         self.model = MegatronModelWrapper(
             config=self.cfg,
+            vocabulary_size=self.strategy.hf_config.vocab_size,
             actor_module=self.actor_module,
             actor_optimizer=self.optimizer,
             policy_loss_fn=self.policy_loss_fn,
@@ -495,6 +535,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self._initialize_policy_modules(model_path, mode=_MegatronInitMode.CHECKPOINT_EXPORT)
         self.model = MegatronModelWrapper(
             config=self.cfg,
+            vocabulary_size=self.strategy.hf_config.vocab_size,
             actor_module=self.actor_module,
             logprob_chunk_size=OmegaConf.select(
                 self.cfg, "trainer.policy.megatron_config.logprob_chunk_size", default=None
@@ -504,9 +545,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     def _ppo_train_impl(self, train_data, timing: PhaseBreakdown) -> "TrainingOutputBatch":
         """Train through Megatron Core's pipeline scheduler."""
         self._drain_r3_decentral_stagger(train_data)
-        if self.model.router_replay is not None and (
-            "rollout_routed_experts" not in train_data.keys() or train_data["rollout_routed_experts"] is None
-        ):
+        if self.model.router_replay is not None and train_data.routed_experts is None:
             raise ValueError("moe_router_replay is on but the batch carries no rollout_routed_experts")
         dataloader = TrainingBatchIterator(train_data, self.cfg.trainer.micro_train_batch_size_per_gpu)
 
@@ -552,11 +591,21 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         correction_weights=experience.correction_weights,
                         response_span_tags=experience.response_span_tags,
                         distillation=experience.distillation,
+                        ftpo=experience.ftpo,
                         rollout_routed_experts=experience.rollout_routed_experts,
                     )
                 )
 
                 if len(micro_buffer) == micro_batches_per_mini_batch:
+                    if experience.ftpo is not None:
+                        active = torch.stack([micro.loss_mask.sum() for micro in micro_buffer]).sum()
+                        torch.distributed.all_reduce(
+                            active, group=mpu.get_data_parallel_group(with_context_parallel=False)
+                        )
+                        if active.item() == 0:
+                            # Adam momentum/weight decay must not update an empty FTPO mini-batch.
+                            micro_buffer = []
+                            continue
                     if self.cfg.trainer.policy.megatron_config.check_train_eval_parity:
                         self._log_train_eval_parity_probe(micro_buffer)
                     # run mini-batch forward-backward and then one optimizer step
@@ -572,7 +621,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         micro_batches=micro_buffer,
                         seq_len=seq_len,
                         micro_batch_size=micro_bsz,
-                        temperature=self.cfg.generator.sampling_params.temperature,
+                        temperature=self.scoring_temperature,
                         timings=timing,
                         profiler=profiler,
                     )
@@ -589,6 +638,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                             consecutive_nonfinite_steps=self._consecutive_nonfinite_steps,
                             max_consecutive_nonfinite_steps=self.cfg.trainer.policy.max_consecutive_nonfinite_steps,
                         )
+                    checksum_mismatch = None
+                    if self.cfg.trainer.policy.megatron_config.check_dp_weight_consistency:
+                        with timing.span("megatron_dp_weight_checksum"):
+                            checksum_mismatch = dp_weight_checksum_mismatch(self.actor_module)
                     if step_result.applied:
                         self._consecutive_nonfinite_steps = 0
                     elif step_result.grad_norm is None:
@@ -605,6 +658,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         # Attach grad norm only for the last micro in the mini-batch
                         if i == len(metrics_list) - 1:
                             status["skipped_steps"] = float(not step_result.applied)
+                            if checksum_mismatch is not None:
+                                status["dp_weight_checksum_mismatch"] = checksum_mismatch
                             if step_result.grad_norm is not None:
                                 status["raw_grad_norm"] = step_result.grad_norm
 
@@ -631,6 +686,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             self.profiler.save()
 
         status_mean = policy_training_metrics(all_metrics, policy_update_steps)
+        if "ftpo/active_examples" in all_metrics:
+            examples = sum(all_metrics["ftpo/active_examples"])
+            status_mean["ftpo/chosen_win"] = sum(all_metrics["ftpo/chosen_win_sum"]) / max(examples, 1e-12)
         if status_mean.get("ppo_ratio_exact_unit_fraction") == 1.0 and not self._warned_exact_unit_policy_ratio:
             logger.warning(
                 "Megatron's recomputed old log probabilities exactly match the training forward for every policy "
@@ -820,7 +878,7 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.model: MegatronModelWrapper = None
-        self.actor_module: List[nn.Module] = None
+        self.actor_module: list[nn.Module] = None
 
     def offload_to_cpu(self, pin_memory=True, non_blocking=True, **kwargs):
         self.strategy.offload_to_cpu(self.actor_module, None, pin_memory, non_blocking)
@@ -843,7 +901,9 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             optimizer_config=None,
             seed=self.cfg.trainer.seed,
         )
-        self.strategy.setup_distributed()
+        self.strategy.setup_distributed(
+            timeout=timedelta(seconds=self.cfg.trainer.distributed.worker_collective_timeout_seconds)
+        )
 
         self.mesh_rank = MeshRank(
             dp=mpu.get_data_parallel_rank(),
@@ -889,6 +949,7 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         # create worker model — ref honors its OWN logprob_chunk_size key
         self.model = MegatronModelWrapper(
             config=self.cfg,
+            vocabulary_size=self.strategy.hf_config.vocab_size,
             actor_module=self.actor_module,
             logprob_chunk_size=OmegaConf.select(
                 self.cfg, "trainer.ref.megatron_config.logprob_chunk_size", default=None

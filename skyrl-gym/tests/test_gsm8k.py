@@ -11,6 +11,8 @@ from skyrl_gym.verification import RolloutEvidence
         ("The answer is #### 42", "43", 0.0),
         ("The answer is #### $10", "10", 1.0),
         ("The answer is #### $5", "5", 1.0),
+        ("The answer is #### $10", "11", 0.0),
+        ("The answer is #### $1,234", "1234", 1.0),
         # answer is not in the expected format
         ("The answer is 42", "42", 0.0),
     ],
@@ -59,3 +61,10 @@ def test_prepared_reward_model_extras_reach_the_verifier():
     )
     assert env.ground_truth == "42"
     assert env.step("The answer is #### 42")["reward"] == 1.0
+
+
+@pytest.mark.parametrize("method", ["strict", "flexible", "final_line"])
+def test_invalid_reference_cannot_receive_format_credit(method):
+    from skyrl_gym.envs.gsm8k.utils import compute_score
+
+    assert compute_score("#### 10", None, method=method, format_score=0.5) == 0

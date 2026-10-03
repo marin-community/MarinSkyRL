@@ -1,0 +1,88 @@
+"""Real SQLite fixtures exercise trusted execution and independent exact composition."""
+
+import json
+import sqlite3
+
+import pytest
+from omegaconf import OmegaConf
+
+import skyrl_gym
+from skyrl_gym.envs.sqlite_verifyit import score_legacy_sql, score_seeded_sql
+from skyrl_gym.envs.text_to_sql.scoring import score
+
+
+@pytest.fixture
+def reference():
+    return json.dumps(
+        {
+            "schema_sql": "CREATE TABLE t(x INTEGER)",
+            "insert_sql": "INSERT INTO t VALUES(1),(1),(2),(3)",
+            "reference_sql": "SELECT x FROM t",
+            "order_significant": False,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "query,expected",
+    [
+        ("SELECT x AS renamed FROM t ORDER BY x DESC", 1),
+        ("SELECT DISTINCT x FROM t", 0),
+        ("SELECT 1 UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3", 0),
+        ("DELETE FROM t", 0),
+    ],
+)
+def test_seeded_sql_preserves_duplicates_perturbation_and_readonly(reference, query, expected):
+    assert score_seeded_sql(reference, query)[0] == score(reference, query)[0] == expected
+
+
+def test_sql_rounding_and_column_count_remain_source_owned(reference):
+    task = json.loads(reference)
+    task["reference_sql"] = "SELECT 1.0/3"
+    assert score_seeded_sql(json.dumps(task), "SELECT 0.333333")[0] == 1
+    assert score_seeded_sql(reference, "SELECT x,x FROM t")[0] == 0
+
+
+def test_seeded_sql_actual_environment_reports_wrong_candidate_and_verifier_failure(reference):
+    extras = {"reward_model": {"ground_truth": reference}}
+    env = skyrl_gym.make("text_to_sql", env_config=OmegaConf.create({"verifyit_enabled": True}), extras=extras)
+    assert env.step("SELECT x FROM t")["reward"] == 1
+    assert env.step("SELECT 99")["reward"] == 0
+    task = json.loads(reference)
+    task["reference_sql"] = "SELECT absent_column FROM t"
+    bad = skyrl_gym.make(
+        "text_to_sql",
+        env_config=OmegaConf.create({"verifyit_enabled": True}),
+        extras={"reward_model": {"ground_truth": json.dumps(task)}},
+    )
+    result = bad.step("SELECT x FROM t")
+    assert result["reward"] == 0
+    assert result["verification"].score is None
+
+
+def test_legacy_sql_keeps_set_semantics_format_projection_and_original_database(tmp_path):
+    database = tmp_path / "fixture.sqlite"
+    with sqlite3.connect(database) as connection:
+        connection.executescript("CREATE TABLE t(x INTEGER); INSERT INTO t VALUES(1),(1),(2);")
+    response = "<think>query</think><solution>SELECT DISTINCT x FROM t</solution>"
+    assert score_legacy_sql(response, "SELECT x FROM t", str(database)) == 1
+    assert score_legacy_sql("wrong format", "SELECT x FROM t", str(database)) == -1
+    with pytest.raises(RuntimeError, match="verification failed"):
+        score_legacy_sql("wrong format", "SELECT missing FROM t", str(database))
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT count(*) FROM t").fetchone()[0] == 3
+
+
+def test_invalid_reference_precedes_rejected_candidate(reference):
+    task = json.loads(reference)
+    task["reference_sql"] = "SELECT absent_column FROM t"
+    with pytest.raises(RuntimeError, match="verification failed"):
+        score_seeded_sql(json.dumps(task), "DELETE FROM t")
+
+
+def test_nonfinite_sql_results_fail_closed(reference):
+    task = json.loads(reference)
+    task["reference_sql"] = "SELECT 1e999"
+    with pytest.raises(RuntimeError, match="verification failed"):
+        score_seeded_sql(json.dumps(task), "SELECT 1e999")
+    assert score_seeded_sql(reference, "SELECT 1e999")[0] == 0
