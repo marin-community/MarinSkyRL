@@ -357,6 +357,8 @@ generator:
   # whole-node rollout pool. Wrappers must not assume that changing replicas leaves the requested gang unchanged.
   num_inference_engines: 1
   backend: "vllm"
+  # Scalar is the rollback-safe default; other formats require a compatible reader and server.
+  vllm_histogram_format: scalar
   vllm_attention_backend: null
   weight_sync_backend: "nccl"
   # vLLM pause policy during weight sync. abort ends in-flight streams; keep preserves them.
