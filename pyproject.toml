@@ -120,7 +120,7 @@ megatron = [
     "transformer-engine-torch==2.19.0 ; sys_platform == 'linux'",
 ]
 telemetry = [
-    "marin-rigging[prometheus] @ git+https://github.com/marin-community/marin.git@55488e209d1b074ac44c72e4639292d576310aae#subdirectory=lib/rigging",
+    "marin-rigging[prometheus] @ git+https://github.com/marin-community/marin.git@563aadd00f3a2afd766fb94aff3af77bd4d785d6#subdirectory=lib/rigging",
     "memray ; sys_platform == 'linux'",
     "ray[default]",
 ]
@@ -193,7 +193,7 @@ override-dependencies = [
     "transformers==5.16.1",
     "opentelemetry-api==1.44.0 ; sys_platform == 'linux'",
     "opentelemetry-api ; sys_platform != 'linux'",
-    "marin-rigging[prometheus,secrets] @ git+https://github.com/marin-community/marin.git@55488e209d1b074ac44c72e4639292d576310aae#subdirectory=lib/rigging",
+    "marin-rigging[prometheus,secrets] @ git+https://github.com/marin-community/marin.git@563aadd00f3a2afd766fb94aff3af77bd4d785d6#subdirectory=lib/rigging",
 ]
 constraint-dependencies = [
     "botocore==1.42.97 ; sys_platform == 'linux'",
