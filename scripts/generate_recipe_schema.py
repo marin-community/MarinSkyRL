@@ -170,6 +170,17 @@ def render_sections(
     shadowed = undeclared.keys() & observed.keys()
     if shadowed:
         raise ValueError(f"UNDECLARED shadows YAML: {', '.join(sorted(shadowed))}")
+    for path, (_, default) in undeclared.items():
+        node = schema
+        keys = path.split(".")
+        for key in keys[:-1]:
+            child = node.get(key)
+            if child is None:
+                child = node[key] = {}
+            if not isinstance(child, dict):
+                raise ValueError(f"UNDECLARED parent is not a mapping: {path}")
+            node = child
+        node[keys[-1]] = default
 
     def observe_recipe(document: dict, prefix: str = "") -> None:
         for key, value in document.items():
@@ -246,19 +257,14 @@ def render_sections(
     def emit(path: str, mapping: dict) -> str:
         name = class_name(path)
         fields = []
-        values = dict(mapping)
-        for extra_path, (_, default) in undeclared.items():
-            parent, _, leaf = extra_path.rpartition(".")
-            if parent == path:
-                values[leaf] = default
-        for key, value in values.items():
+        for key, value in mapping.items():
             field_path = f"{path}.{key}"
             if field_path in owned:
                 continue
             default = lookup(field_path)
             if field_path in undeclared:
                 annotation, default = undeclared[field_path]
-                expression = f"field({default!r})"
+                expression = "unset_field()" if default is Ellipsis else f"field({default!r})"
             elif isinstance(value, dict) and value and field_path not in open_paths:
                 annotation = emit(field_path, value)
                 expression = f"Field(default_factory={annotation})" if default is not missing else "unset_field()"

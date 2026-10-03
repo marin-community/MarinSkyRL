@@ -78,6 +78,20 @@ TYPES = {
     "generator.eval_sampling_params.stop": "tuple[str, ...] | None",
     "data.sampling.kind": "str | None",
     "data.sampling.seed": "NonNegativeInt | None",
+    "environment.skyrl_gym.gsm8k.reward_method": 'Literal["strict", "flexible", "final_line"]',
+    "environment.skyrl_gym.llm_as_a_judge.base_url": "str | None",
+    "environment.skyrl_gym.nemotron_ultra.grading": 'Literal["verify", "skip"]',
+    "environment.skyrl_gym.nemotron_ultra.code_verifier.max_memory_bytes": "PositiveInt | None",
+    "environment.skyrl_gym.nemotron_ultra.code_verifier.total_timeout_seconds": "int | float | None",
+    **{
+        f"environment.skyrl_gym.nemotron_ultra.{judge}.{key}": annotation
+        for judge in ("judges.general", "judges.safety", "genrm.judge")
+        for key, annotation in (
+            ("api_key_env", "str | None"),
+            ("reasoning_effort", "str | None"),
+            ("response_transport", 'Literal["responses_metadata", "chat_completions"]'),
+        )
+    },
 }
 
 OPEN = frozenset(
@@ -89,24 +103,36 @@ OPEN = frozenset(
         "trainer.policy.megatron_config.transformer_config_kwargs",
         "trainer.ref.megatron_config.model_config_kwargs",
         "trainer.ref.megatron_config.transformer_config_kwargs",
-        "trainer.algorithm.ftpo",
         "trainer.algorithm.distillation",
         "generator.engine_init_kwargs",
         "generator.chat_template_kwargs",
         "generator.speculative_decoding",
-        "environment.skyrl_gym",
         "trainer.rope_scaling",
         "generator.rope_scaling",
     }
 )
 
 # Declared here because code reads them with a default but ppo_base_config.yaml does not list them.
+# Ellipsis keeps code-default fields unset in authored documents.
 UNDECLARED = {
     "data.kind": ('Literal["tasks", "parquet"]', "tasks"),  # launcher-only: how the launch host stages data
     "trainer.enable_db_registration": ("bool", True),
     "trainer.hf_hub_repo_id": ("str | None", None),
     "trainer.hf_hub_private": ("bool", False),
     "trainer.hf_hub_revision": ("str", "main"),
+    "environment.skyrl_gym.nemotron_ultra.verifyit_enabled": ("bool", ...),
+    # Sparse FTPO fields; skyrl_train.config.ftpo supplies execution defaults.
+    "trainer.algorithm.ftpo.margin": ("int | float", ...),
+    "trainer.algorithm.ftpo.lambda_mse": ("int | float", ...),
+    "trainer.algorithm.ftpo.lambda_mse_target": ("int | float", ...),
+    "trainer.algorithm.ftpo.tau_mse_target": ("int | float", ...),
+    "trainer.algorithm.ftpo.min_p": ("int | float", ...),
+    "trainer.algorithm.ftpo.max_chosen_tokens": ("PositiveInt", ...),
+    "trainer.algorithm.ftpo.min_decoded_chars": ("NonNegativeInt", ...),
+    "trainer.algorithm.ftpo.require_alnum": ("bool", ...),
+    "trainer.algorithm.ftpo.rejected_balance_strength": ("int | float", ...),
+    "trainer.algorithm.ftpo.chosen_balance_strength": ("int | float", ...),
+    "trainer.algorithm.ftpo.early_stopping_chosen_win": ("int | float | None", ...),
 }
 
 NAMES = {

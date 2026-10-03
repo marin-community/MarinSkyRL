@@ -1,11 +1,17 @@
+from dataclasses import asdict
 from pathlib import Path
+import runpy
 from types import SimpleNamespace
 
 import pytest
 from omegaconf import OmegaConf
+from pydantic import ValidationError
 
 from cloud.iris import rl_config_translation as launcher
 from marinskyrl import recipe_schema as schema
+from scripts.generate_recipe_schema import CONFIG_DIR, render_sections, source_documents
+from skyrl_train.config import ftpo
+from skyrl_gym.envs.gsm8k import env as gsm8k
 
 
 class EngineOptions(schema.Section):
@@ -56,3 +62,55 @@ def test_recipe_rules_accept_the_same_engine_options_and_entrypoints_as_the_laun
     assert merged.to_skyrl()["engine_init_kwargs"]["user_options"] == OmegaConf.to_container(
         composed.generator.engine_init_kwargs.user_options
     )
+
+
+def test_generated_ftpo_and_gym_options_preserve_runtime_behavior():
+    root = Path(__file__).resolve().parents[3]
+    assert Path(schema.__file__).resolve() == root / "marinskyrl/recipe_schema/__init__.py"
+    assert Path(ftpo.__file__).resolve() == root / "skyrl-train/skyrl_train/config/ftpo.py"
+    assert Path(gsm8k.__file__).resolve() == root / "skyrl-gym/skyrl_gym/envs/gsm8k/env.py"
+    print(f"recipe contract sources: {schema.__file__}; {ftpo.__file__}; {gsm8k.__file__}")
+    base, groups, comments = source_documents(CONFIG_DIR)
+    sidecar = runpy.run_path(str(root / "marinskyrl/recipe_schema/sidecar.py"))
+    generated = render_sections(base, sidecar, {"DERIVED_PATHS": set(), "LAUNCH_PATHS": set()}, comments, groups)
+    namespace = {"__name__": "marinskyrl.recipe_schema._transition", "__package__": "marinskyrl.recipe_schema"}
+    exec(compile(generated, "generated-author-sections", "exec"), namespace)
+    recipe_type = namespace["RecipeSections"]
+    complete = {
+        "trainer": {"algorithm": {"policy_loss_type": "ftpo", "ftpo": asdict(ftpo.FTPOConfig())}},
+        "environment": {"skyrl_gym": base["environment"]["skyrl_gym"]},
+    }
+    assert recipe_type.from_document(complete).to_skyrl() == complete
+    document = {
+        "trainer": {"algorithm": {"policy_loss_type": "ftpo", "ftpo": {"lambda_mse": 0.25, "require_alnum": True}}},
+        "environment": {"skyrl_gym": {"gsm8k": {"reward_method": "flexible", "structured_chat": True}}},
+    }
+    authored = recipe_type.from_document(document)
+    assert authored.to_skyrl() == document
+    expected = ftpo.ftpo_config(OmegaConf.create(document["trainer"]["algorithm"]))
+    assert ftpo.ftpo_config(OmegaConf.create(authored.to_skyrl()["trainer"]["algorithm"])) == expected
+    changed = authored.with_settings(["trainer.algorithm.ftpo.lambda_mse=0.5"])
+    effective = ftpo.ftpo_config(OmegaConf.create(changed.to_skyrl()["trainer"]["algorithm"]))
+    assert effective.lambda_mse == 0.5
+    assert effective.margin == expected.margin
+    environment = gsm8k.GSM8kEnv(
+        OmegaConf.create(authored.to_skyrl()["environment"]["skyrl_gym"]["gsm8k"]),
+        {"reward_spec": {"ground_truth": "42"}},
+    )
+    assert environment.init([]) == ([], {"chat_completion_params": {}})
+    assert environment.step("The answer is 42")["reward"] == 1.0
+    strict = authored.with_settings(["environment.skyrl_gym.gsm8k.reward_method=strict"])
+    strict_environment = gsm8k.GSM8kEnv(
+        OmegaConf.create(strict.to_skyrl()["environment"]["skyrl_gym"]["gsm8k"]),
+        {"reward_spec": {"ground_truth": "42"}},
+    )
+    assert strict_environment.step("The answer is 42")["reward"] == 0.0
+    for setting in ("trainer.algorithm.ftpo.lambda_mes=0.5", "environment.skyrl_gym.gsm8k.reward_methd=strict"):
+        with pytest.raises(ValueError):
+            authored.with_settings([setting])
+    for invalid in (
+        {"trainer": {"algorithm": {"ftpo": {"lambda_mes": 0.5}}}},
+        {"environment": {"skyrl_gym": {"gsm8k": {"reward_methd": "strict"}}}},
+    ):
+        with pytest.raises(ValidationError):
+            recipe_type.from_document(invalid)

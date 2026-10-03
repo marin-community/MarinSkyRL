@@ -25,6 +25,7 @@ trainer:
   algorithm:
     cispo:
       cispo_eps_clip_high: 5
+    ftpo: {}
   policy:
     model:
       lora:
@@ -50,7 +51,7 @@ SIDECAR = """TYPES = {
     'trainer.critic.model.lora.dropout': 'Annotated[int | float, Field(ge=0, le=1)]',
 }
 OPEN = frozenset({'generator.engine_init_kwargs'})
-UNDECLARED = {}
+UNDECLARED = {'trainer.algorithm.ftpo.lambda_mse': ('int | float', ...)}
 NAMES = {}
 """
 
@@ -119,6 +120,13 @@ def test_generator_cli_preserves_group_types_and_adjacent_comments_and_detects_d
     assert "Filled from allocation" in description
     assert "colocation" not in description
     assert recipe_type().to_skyrl() == {}
+    sparse = recipe_type.from_document({"trainer": {"algorithm": {"ftpo": {"lambda_mse": 0.25}}}})
+    assert sparse.to_skyrl() == {"trainer": {"algorithm": {"ftpo": {"lambda_mse": 0.25}}}}
+    assert sparse.with_settings(["trainer.algorithm.ftpo.lambda_mse=0.5"]).to_skyrl() == {
+        "trainer": {"algorithm": {"ftpo": {"lambda_mse": 0.5}}}
+    }
+    with pytest.raises(ValidationError):
+        recipe_type.from_document({"trainer": {"algorithm": {"ftpo": {"lambda_mes": 0.25}}}})
     for following in ("hf_save_interval", "micro_forward_batch_size_per_gpu"):
         with pytest.raises(ValidationError):
             recipe_type.model_validate_json(json.dumps({"trainer": {following: None}}))
