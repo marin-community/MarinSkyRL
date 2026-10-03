@@ -4,6 +4,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
 import pytest
+import skyrl_gym
+from skyrl_gym.verification import RolloutEvidence
 from jinja2 import TemplateError
 from omegaconf import OmegaConf
 
@@ -524,3 +526,28 @@ async def test_chat_output_keeps_the_per_turn_limit_of_vllm_sampling_params():
     )
     assert served[0]["max_completion_tokens"] == 6528
     assert "max_tokens" not in served[0]
+
+
+@pytest.mark.asyncio
+async def test_completed_chat_answer_receives_the_default_gsm8k_reward():
+    answer = "Work.\n#### 42.0"
+    engine = AsyncMock()
+    engine.model_name = "chat-model"
+    engine.tokenizer = MagicMock()
+    engine.tokenizer.decode.return_value = answer
+    engine.tokenize.return_value = {"tokens": [11, 12]}
+    engine.chat_completion.return_value = {
+        "choices": [{"message": {"role": "assistant", "content": answer}, "finish_reason": "stop", "token_ids": [21]}]
+    }
+    output = await DirectModelClient(engine).generate(
+        {
+            "prompts": [[{"role": "user", "content": "What is forty-two?"}]],
+            "chat_completion_params": [{}],
+        }
+    )
+    env = skyrl_gym.make(
+        "gsm8k", env_config=OmegaConf.create({}), extras={"reward_spec": {"method": "rule", "ground_truth": "42"}}
+    )
+    text = output["responses"][0]
+    env.set_rollout_evidence(RolloutEvidence(response=text, stop_reason=output["stop_reasons"][0]))
+    assert env.step(text)["reward"] == 1.0

@@ -20,7 +20,7 @@ from skyrl_gym.verification import RolloutEvidence
 def test_compute_score(output, ground_truth, expected):
     env = skyrl_gym.make(
         "gsm8k",
-        env_config=DictConfig({"env_class": "gsm8k"}),
+        env_config=DictConfig({"env_class": "gsm8k", "reward_method": "strict"}),
         extras={"reward_spec": {"method": "rule", "ground_truth": ground_truth}},
     )
     # Skip init() since it's not used in this test
@@ -56,7 +56,7 @@ def test_completed_final_line_reward(output, ground_truth, stop_reason, expected
 def test_prepared_reward_model_extras_reach_the_verifier():
     env = skyrl_gym.make(
         "gsm8k",
-        env_config=DictConfig({"env_class": "gsm8k"}),
+        env_config=DictConfig({"env_class": "gsm8k", "reward_method": "strict"}),
         extras={"reward_model": {"method": "rule", "ground_truth": "42"}},
     )
     assert env.ground_truth == "42"
@@ -68,3 +68,14 @@ def test_invalid_reference_cannot_receive_format_credit(method):
     from skyrl_gym.envs.gsm8k.utils import compute_score
 
     assert compute_score("#### 10", None, method=method, format_score=0.5) == 0
+
+
+@pytest.mark.parametrize("output", ["Draft #### 5\nCheck.\n#### 42", "Work.\n#### 42.0"])
+def test_default_reward_grades_the_completed_final_line(output):
+    env = skyrl_gym.make(
+        "gsm8k",
+        env_config=DictConfig({}),
+        extras={"reward_spec": {"method": "rule", "ground_truth": "42"}},
+    )
+    env.set_rollout_evidence(RolloutEvidence(response=output, stop_reason="stop"))
+    assert env.step(output)["reward"] == 1.0
