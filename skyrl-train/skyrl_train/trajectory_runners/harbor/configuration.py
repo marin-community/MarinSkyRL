@@ -877,11 +877,16 @@ class HarborConfigBuilder:
             True if rollout details collection is enabled.
         """
         mapping = AGENT_SCHEMA.fields.get("collect_rollout_details")
+        enabled = default
         if mapping:
             value = self._harbor_cfg.get("collect_rollout_details", mapping.default)
             if value is not None:
-                return bool(value)
-        return default
+                enabled = bool(value)
+        if self._agent_profiles:
+            return any(
+                bool(profile.settings.get("collect_rollout_details", enabled)) for profile in self._agent_profiles
+            )
+        return enabled
 
     def build_trial_config(
         self,

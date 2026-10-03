@@ -8,6 +8,7 @@ from skyrl_train.config.trajectory_runner_capabilities import (
     opencode_exact_continuation_enabled,
     validate_trajectory_runner_capabilities,
 )
+from skyrl_train.trajectory_runners.harbor.configuration import HarborConfigBuilder
 
 GYM = TrajectoryRunnerMode.SKYRL_GYM
 HARBOR = TrajectoryRunnerMode.HARBOR
@@ -67,12 +68,14 @@ def _skyrl_config():
 
 def test_harbor_panel_validates_each_harness_before_training():
     cfg = _harbor_config("pi")
+    cfg.terminal_bench_config.harbor.collect_rollout_details = False
     cfg.terminal_bench_config.harbor.agent_profiles = [
-        {"name": "pi"},
-        {"name": "opencode", "version": SUPPORTED_OPENCODE_LITERAL_VERSION},
+        {"name": "pi", "collect_rollout_details": True},
+        {"name": "opencode", "version": SUPPORTED_OPENCODE_LITERAL_VERSION, "collect_rollout_details": True},
     ]
     validate_trajectory_runner_capabilities(cfg, HARBOR)
     assert opencode_exact_continuation_enabled(cfg)
+    assert HarborConfigBuilder(cfg.terminal_bench_config).get_collect_rollout_details()
 
     cfg.terminal_bench_config.harbor.agent_profiles.append({"name": "codex"})
     with pytest.raises(ValueError, match="codex.*cannot supply exact"):
