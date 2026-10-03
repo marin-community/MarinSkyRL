@@ -9,6 +9,7 @@ from skyrl_train.utils.utils import policy_spread_bundles, policy_strict_spread_
 def _make_cfg(
     *,
     colocate_all=False,
+    colocate_policy_ref=True,
     policy_num_nodes=8,
     policy_num_gpus_per_node=4,
     policy_strict_spread_pg=True,
@@ -21,6 +22,7 @@ def _make_cfg(
             "trainer": {
                 "placement": {
                     "colocate_all": colocate_all,
+                    "colocate_policy_ref": colocate_policy_ref,
                     "policy_num_nodes": policy_num_nodes,
                     "policy_num_gpus_per_node": policy_num_gpus_per_node,
                     "policy_strict_spread_pg": policy_strict_spread_pg,
@@ -37,8 +39,9 @@ def _make_cfg(
     [
         pytest.param({}, True, id="disaggregated-no-ref"),
         pytest.param({"policy_strict_spread_pg": False}, False, id="flag-off"),
-        pytest.param({"use_kl_loss": True}, False, id="ref-model-via-kl-loss"),
-        pytest.param({"use_kl_in_reward": True}, False, id="ref-model-via-kl-in-reward"),
+        pytest.param({"use_kl_loss": True}, True, id="colocated-ref-via-kl-loss"),
+        pytest.param({"use_kl_in_reward": True}, True, id="colocated-ref-via-kl-in-reward"),
+        pytest.param({"use_kl_loss": True, "colocate_policy_ref": False}, False, id="separate-ref"),
         pytest.param({"colocate_all": True}, False, id="colocate-all"),
     ],
 )
