@@ -162,6 +162,22 @@ def test_tiny_policy_trains_to_max_steps(
     _train(runs, tmp_path, tiny_policy, mode, shape, steps=NUM_STEPS)
 
     _assert_trained_to_max_steps(tmp_path, mode, shape)
+    startup = next(record for record in read_metrics(tmp_path) if any(key.startswith("startup/") for key in record))
+    assert {
+        "startup/driver/tokenizer",
+        "startup/driver/train_dataset",
+        "startup/driver/eval_dataset",
+        "startup/driver/worker_classes",
+        "startup/driver/tracker",
+        "startup/driver/get_trainer",
+        "startup/placement/colocate_pg",
+        "startup/placement/policy_pg",
+        "startup/engines/create",
+        "startup/policy/actor_create",
+        "startup/policy/pg_init",
+        "startup/policy/build_models",
+        "startup/rollout_workers/startup",
+    } <= startup.keys()
 
 
 def test_async_training_resumes_with_committed_groups(runs: ForkServerContext, tmp_path: Path, tiny_policy: Path):
