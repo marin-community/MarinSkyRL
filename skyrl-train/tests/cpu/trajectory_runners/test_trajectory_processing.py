@@ -403,7 +403,7 @@ def test_unaligned_logprob_alert_survives_concatenation():
     assert merged["rollout_metrics"]["generate/tis/alignment_alert"] == 1.0
 
 
-def test_full_tito_and_literal_bridge_metrics_survive_concatenation():
+def test_full_tito_and_task_rollout_metrics_survive_concatenation():
     groups = [_generated_group(1, 0), _generated_group(1, 0)]
     first = AlignmentStats()
     first.n_tokens = 5
@@ -417,14 +417,14 @@ def test_full_tito_and_literal_bridge_metrics_survive_concatenation():
     groups[1]["rollout_metrics"].update(second.as_metrics(prefix="generate/tis/", lcs_alert_threshold=0.005))
     groups[0]["rollout_metrics"].update(
         {
-            "generate/literal_bridge/correlated_trials": 1.0,
-            "generate/literal_bridge/correlated_turns": 3.0,
+            "generate/task_rollout/tasks": 1.0,
+            "generate/task_rollout/turns": 3.0,
         }
     )
     groups[1]["rollout_metrics"].update(
         {
-            "generate/literal_bridge/correlated_trials": 1.0,
-            "generate/literal_bridge/correlated_turns": 2.0,
+            "generate/task_rollout/tasks": 1.0,
+            "generate/task_rollout/turns": 2.0,
         }
     )
 
@@ -435,8 +435,8 @@ def test_full_tito_and_literal_bridge_metrics_survive_concatenation():
     assert merged["rollout_metrics"]["generate/tis/tito_full/decline_count"] == 1.0
     assert merged["rollout_metrics"]["generate/tis/tito_full/decline/prefix_mismatch"] == 1.0
     assert merged["rollout_metrics"]["generate/tis/alignment_alert"] == 1.0
-    assert merged["rollout_metrics"]["generate/literal_bridge/correlated_trials"] == 2.0
-    assert merged["rollout_metrics"]["generate/literal_bridge/correlated_turns"] == 5.0
+    assert merged["rollout_metrics"]["generate/task_rollout/tasks"] == 2.0
+    assert merged["rollout_metrics"]["generate/task_rollout/turns"] == 5.0
 
 
 def test_identity_aware_reward_metrics_survive_concatenation():

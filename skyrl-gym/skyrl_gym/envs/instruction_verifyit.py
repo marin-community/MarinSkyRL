@@ -381,7 +381,7 @@ def _evaluate(kind: str, text: str, data: Any, *, runtime: bool = False) -> dict
 
 def _execute(kind: str, text: str, data: Any, timeout: float) -> tuple[float, dict]:
     try:
-        from verifyit.bounded import call_bounded
+        from verifyit.execution.worker import call_bounded
 
         if (
             isinstance(timeout, bool)

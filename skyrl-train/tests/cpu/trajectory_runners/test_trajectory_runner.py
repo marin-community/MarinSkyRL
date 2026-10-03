@@ -1,12 +1,13 @@
 import pytest
 
 from skyrl_train.batch_sampling import filter_trajectory_batch
-from skyrl_train.trajectory_runners.base import TrajectoryRequestBatch, TrajectoryRunner, TrajectoryBatch
+from tests.cpu.trajectory_runners.fixture_runner import FixtureRunner
+from skyrl_train.trajectory_runners.types import TrajectoryRequestBatch, TrajectoryBatch
 from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
 from skyrl_train.trajectory_runners.types import TrajectoryID
 
 
-class _AlignedRunner(TrajectoryRunner):
+class _AlignedRunner(FixtureRunner):
     async def _run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
         return {
             "prompt_token_ids": [[1]],
@@ -19,7 +20,7 @@ class _AlignedRunner(TrajectoryRunner):
         }
 
 
-class _ReconstructedRunner(TrajectoryRunner):
+class _ReconstructedRunner(FixtureRunner):
     async def _run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
         return {
             "prompt_token_ids": [[1]],
@@ -41,7 +42,7 @@ class _ReconstructedRunner(TrajectoryRunner):
         }
 
 
-class _TwoRowRunner(TrajectoryRunner):
+class _TwoRowRunner(FixtureRunner):
     async def _run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
         return {
             "prompt_token_ids": [[1], [2]],

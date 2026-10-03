@@ -22,12 +22,14 @@ Performs the optimization steps based on configured RL algorithm. Updates model 
 
 - `PPORayActorGroup <https://github.com/NovaSky-AI/SkyRL/blob/5a82809e218b2e0c3dd431377fb672e35ecc4a84/skyrl-train/skyrl_train/workers/worker.py#L385>`_: Our abstraction for a group of training workers (as Ray actors) that jointly execute operations for a given model (e.g., policy model, critic model, etc.).
 
-Trajectory runner
-~~~~~~~~~~~~~~~~~
-Acquires complete trajectories from an environment or agent harness and normalizes them for training. Model transport, sample projection, and environment interaction are composed behind this boundary.
+Rollout worker
+~~~~~~~~~~~~~~
+Marin's TaskCompendium package defines the shared Shellbox rollout engine.
+SkyRL supplies inference, converts its records to training batches, and writes completed groups to the rollout buffer.
+Gym environments supply task operations and grading through a task session.
 
-- ``TrajectoryRunner`` in ``skyrl_train/trajectory_runners/base.py``
-- ``SkyRLGymTrajectoryRunner`` in ``skyrl_train/trajectory_runners/skyrl_gym.py``
+- ``TaskRolloutWorker`` in ``skyrl_train/rollouts/task_worker.py``
+- ``GymTaskSession`` in ``skyrl_train/rollouts/gym_tasks.py``
 
 InferenceEngine
 ~~~~~~~~~~~~~~~

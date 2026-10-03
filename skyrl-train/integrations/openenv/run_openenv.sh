@@ -59,7 +59,6 @@ uv run --isolated --extra megatron --extra $INFERENCE_BACKEND --with "openenv@gi
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
   environment.env_class=openenv \
-  generator.use_conversation_multi_turn=false \
   generator.n_samples_per_prompt=4 \
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \

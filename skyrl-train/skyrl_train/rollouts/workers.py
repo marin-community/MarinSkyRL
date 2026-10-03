@@ -102,8 +102,7 @@ class RolloutWorker:
             self._runner.set_trajectory_sink(sink)
 
     async def startup(self) -> None:
-        # Harbor's litellm client runs each request's synchronous preamble on the loop's default executor, whose
-        # default width would serialize the worker's concurrent requests.
+        # Inference I/O uses the default executor. Blocking rollout iterators use a separate pool.
         asyncio.get_running_loop().set_default_executor(
             ThreadPoolExecutor(max_workers=self._executor_threads, thread_name_prefix="rollout-worker")
         )
@@ -143,13 +142,11 @@ class RolloutWorkerPool:
     """Rollout worker actors that the trainer uses as its trajectory runner.
 
     Each training task or ``run`` request goes whole to the least-loaded worker; training tasks write their groups
-    straight to the rollout buffer. An evaluation session reserves worker 0, because a Harbor runner in an
-    evaluation session sends every request to its evaluation orchestrator; evaluation requests run there, and
+    straight to the rollout buffer. An evaluation session reserves worker 0. Evaluation requests run there, and
     training continues on the other workers, or waits when there is only one. A request fails with
     ``RolloutWorkerStalledError`` when its worker completes nothing for the progress timeout.
 
-    Workers run on the driver's node, beside the rollout buffer actor they commit to and the Harbor proxy whose
-    node-local log they read.
+    Workers run on the driver's node beside the rollout buffer actor.
     """
 
     def __init__(self, spec: RunnerSpec, resources: RolloutWorkerResources):

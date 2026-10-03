@@ -11,28 +11,11 @@ context_budget:
 terminal_bench:
 
   harbor:
-    name: terminus-2
-    enable_summarize: false
-    store_all_messages: true
-    trajectory_config:
-      raw_content: true
-    enable_episode_logging: false
-    record_terminal_session: false
-    enable_pane_logging: false
-
-    strict_json_parser: true
-
-    interleaved_thinking: true
-    extra_body:
-      chat_template_kwargs:
-        enable_thinking: true
     override_timeout_sec: 900
 
     override_cpus: 1
     override_memory_mb: 2048
     override_storage_mb: 2048
-
-    auto_snapshot: true
 
     verifier_override_timeout_sec: 300
 
@@ -50,11 +33,7 @@ terminal_bench:
 
     n_concurrent_trials: 288
 
-    log_level: INFO
-
     enable_reward_shaping: false
-
-    collect_rollout_details: true
 
     enable_error_classification: true
     mask_exceptions:
@@ -70,18 +49,6 @@ terminal_bench:
     passthrough_exceptions:
       - AgentTimeoutError
     zero_exceptions: []
-
-  model_info:
-
-  archiving:
-    enabled: false
-
-  trace_upload:
-    enabled: true
-    repo_org: DCAgent
-    episodes: last
-    dataset_type: SFT
-    cleanup: true
 
 trainer:
   strategy: megatron
@@ -159,6 +126,8 @@ trainer:
     max_in_flight: 128
 
 generator:
+  chat_template_kwargs:
+    enable_thinking: true
   backend: vllm
   timeout_multiplier: 1.0
   model_dtype: bfloat16
@@ -179,9 +148,7 @@ generator:
 
   run_engines_locally: true
   weight_sync_backend: nccl
-  enable_http_endpoint: true
   inference_stats_interval: 1
-  append_eos_token_after_stop_str_in_multi_turn: true
 
   sampling_params:
     temperature: 1.2

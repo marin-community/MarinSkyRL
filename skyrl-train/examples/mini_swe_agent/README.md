@@ -1,81 +1,95 @@
-## Guide: Mini-SWE-Agent + SkyRL
+# SWE tasks with Shellbox
 
-This directory contains an integration to train a coding agent on the SWE-Bench task using [Mini-SWE-Agent](https://github.com/SWE-agent/mini-swe-agent) and SkyRL.
+SWE-Gym and SWE-Bench use the shared rollout engine in Marin. The model
+changes repository files through the `shell` tool. The grader applies the Git
+patch in a fresh copy of the task image, then runs the private evaluation script.
 
-To start training, follow three simple steps:
-1) Prepare the SWE-Gym dataset.
-2) Configure your environment backend (Podman).
-3) Launch training!
+The `mini_swe_agent` directory retains the SWE examples. These examples do not
+require Mini-SWE-Agent, LiteLLM, a model HTTP proxy, or a separate inference loop.
 
-Start by following the SkyRL [installation instructions](https://skyrl.readthedocs.io/en/latest/getting-started/installation.html), then enter the `skyrl-train` directory:
+## Prepare task Parquet
+
+For adjacent `marin` and `MarinSkyRL` checkouts, install the task packages in the
+SkyRL environment. Run these commands from `MarinSkyRL/skyrl-train` after the base
+SkyRL environment setup:
+
 ```bash
-cd SkyRL/skyrl-train
+uv pip install --python ../.venv/bin/python \
+  -e ../../marin/lib/tasktrove-verify \
+  -e '../../marin/lib/shellbox[shellsim]' \
+  -e ../../marin/lib/taskcompendium \
+  -e ../../marin/lib/rolloutengine
 ```
 
-## How it works
+Materialize the source rows:
 
-The Mini-SWE-Agent integration implements a custom `MiniSweAgentGenerator` that uses Mini-SWE-Agent to generate trajectories for SWE-Bench instances. The workflow consists of:
-
-1. **Generation**: Initialize a sandbox environment and generate a trajectory using Mini-SWE-Agent configured with SkyRL's HTTP endpoint, producing a git patch.
-2. **Evaluation**: Apply the generated patch to a fresh environment and run the evaluation script to determine if the instance was resolved.
-
-We launch a Ray task per trajectory to scale this across all nodes in the cluster.
-
-### 1) Prepare the dataset
-
-We use [SWE-Gym](https://huggingface.co/SWE-Gym), specifically the subset from [SumanthRH/SWE-Gym-Subset](https://huggingface.co/datasets/SumanthRH/SWE-Gym-Subset).
-
-Execute the following command:
 ```bash
-uv run --isolated examples/mini_swe_agent/preprocess_swegym.py --output_dir ~/data/swe_gym_subset # or modify to your desired path
+uv run --no-sync --project .. examples/mini_swe_agent/preprocess_swegym.py \
+  --train_revision TRAIN_DATASET_COMMIT \
+  --eval_revision EVAL_DATASET_COMMIT \
+  --output_dir ~/data/swe_gym_subset
 ```
 
-### 2) Configure environment backend
+Replace the two revision values with pinned dataset commit IDs. The converter
+reads `SumanthRH/SWE-Gym-Subset` for training and
+`SumanthRH/SWE-bench_Verified` for evaluation. Each output row contains one
+serialized `TaskSpec` in the `task_spec` column. The evaluation script stays in
+the private verifier fields.
 
-**Prerequisites**: Install the required environment backend. By default, we use [Podman](https://podman.io/docs). This can be modified in `examples/mini_swe_agent/swebench.yaml`.
+The converter uses each row's `image_name`, when present. Otherwise it derives
+the image name from the dataset and instance ID. Task commands use `/testbed`.
+The task environment permits network access and uses the environment variables
+in `preprocess_swegym.py`. The grader timeout is 3600 seconds.
 
-### 3) Launch training
+## Run training
 
-We provide example scripts for different model sizes:
+The Docker factory requires a Docker daemon and Skopeo on each rollout worker.
+It resolves registry images into `trajectory_runner.image_cache` and reuses them
+for task and verifier machines. Set `trajectory_runner.skopeo` to the executable
+path if Skopeo is not on `PATH`.
+rolloutengine, TaskCompendium, and Shellbox must be installed in the worker environment.
 
-**Qwen3-8B** (requires 1x 8xH100 node):
+List the task images from the materialized files:
+
+```bash
+uv run --no-sync --project .. python - <<'PY'
+from pathlib import Path
+from rolloutengine.parquet import read_tasks
+
+directory = Path("~/data/swe_gym_subset").expanduser()
+images = {
+    task.environment.image.reference
+    for name in ("train.parquet", "validation.parquet")
+    for task in read_tasks(str(directory / name))
+}
+for image in sorted(images):
+    print(image)
+PY
+```
+
+The worker resolves each listed image when a task first uses it.
+
 ```bash
 bash examples/mini_swe_agent/run_mini_swe_8B.sh
-```
-
-**Qwen3-Coder-30B** (requires 2x 8xH100 nodes):
-```bash
+# For the two-node example:
 bash examples/mini_swe_agent/run_mini_swe_30B.sh
 ```
 
-Make sure to update the `DATA_DIR` variable in the bash script if you saved the data to a custom path.
+The scripts use `skyrl_train.entrypoints.taskcompendium`. Edit `DATA_DIR` and
+`CKPT_PATH` in the selected script for the target workers. The scripts set the command timeout to 180
+seconds. `generator.max_turns` controls the model turn limit.
 
-All training parameters can be modified in the run scripts, such as model choice, GRPO group size, or training batch size.
+To change task setup, add commands to the task's `environment.setup` during
+materialization. The engine applies the same setup to the fresh grading machine.
+The grader collects staged and unstaged changes, including new files, through
+`git add -A` and `git diff --cached --binary`. It transfers the patch as a file,
+so the patch does not consume shell argument space.
 
-## Troubleshooting
+A successful evaluation command gives reward `1`. A failed patch application or
+evaluation command gives reward `0`. An evaluation timeout has no grade and
+excludes the rollout from training. An environment setup failure aborts the
+prompt group. The engine closes the agent and grading machines after execution.
 
-For issues with SkyRL or the Mini-SWE-Agent integration, please [open an Issue](https://github.com/NovaSky-AI/SkyRL/issues/new).
-
-### Common Issues
-
-- **Context length errors**: If you see `ValueError: The decoder prompt (length xxxx) is longer than the maximum model length`, increase `max_input_length` and `max_generate_length` or reduce steps in `swebench.yaml`.
-
-- **All zero rewards**: If rewards are consistently zero, the task may be too difficult. Consider:
-  - Filtering data for a better mix of easy/hard samples
-  - Using a stronger base model
-  - Increasing `step_limit` in `swebench.yaml`
-
-- **Argument list too long**: For very large git patches, you might notice evaluation errors such as `Argument list too long: 'podman'`. This is because we apply the model's git patch by passing it as a CLI argument, and for large patches, you can hit the system's `ARG_MAX` limits. On modern systems, this limit is about ~1MB. We make a simple assumption that such large patches are meant to be incorrect.
-
-- **Podman UID errors**: If running podman within a container, you might hit errors due to insufficient UIDs. To resolve this, you have two options on Linux-based machines:
-  1. Edit the `/etc/subuid` and `/etc/subgid` files to use a larger range of UIDs, like `100000-1100000`
-  2. Set `ignore_chown_errors=true` in Podman's containers.conf
-
-## Configuration
-
-Beyond the configuration for SkyRL in the training script, the task-specific configuration file is `examples/mini_swe_agent/swebench.yaml`, which controls:
-- Environment backend settings
-- Step limits for agent execution
-- Tool configurations for Mini-SWE-Agent
-
-For more details, refer to the [documentation](https://skyrl.readthedocs.io/en/latest/examples/mini_swe_agent.html).
+The common engine retains exact model token IDs and masks tool observations.
+Training can use one sample per trajectory or one sample per model turn through
+`trainer.step_wise_training`.
