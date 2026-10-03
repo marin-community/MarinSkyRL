@@ -27,6 +27,8 @@ nemotron_ultra:
   # verdict drives their correction turn. Valid only for pure on-policy distillation
   # (distillation reward_mode=replace, uniform advantages, no eval).
   grading: verify
+  # Capped single-action runs can reject responses that did not terminate normally.
+  require_completed_action: false
   sandbox:
     host: "127.0.0.1"
     port: 6000
