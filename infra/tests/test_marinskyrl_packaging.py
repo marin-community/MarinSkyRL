@@ -52,7 +52,7 @@ def test_root_wheel_owns_launcher_and_training_packages(built_wheel: BuiltWheel,
     environment = tmp_path / "schema-environment"
     subprocess.run(["uv", "venv", "--python", "3.12", str(environment)], check=True)
     interpreter = environment / "bin/python"
-    subprocess.run(["uv", "pip", "install", "--python", str(interpreter), "pydantic==2.12.5"], check=True)
+    subprocess.run(["uv", "pip", "install", "--python", str(interpreter), "pydantic==2.12.2"], check=True)
     subprocess.run(
         ["uv", "pip", "install", "--python", str(interpreter), "--no-deps", str(built_wheel.path)], check=True
     )
