@@ -178,6 +178,7 @@ class StepWiseRolloutCollector:
             output_ids = engine_output["response_ids"][0]
             sampled_ids = list(output_ids)
             routes_batch = engine_output.get("routed_experts")
+            engine_dp_ranks = engine_output.get("engine_dp_ranks")
             response_routes = routes_batch[0] if routes_batch is not None else None
             if response_routes is not None and len(response_routes) != len(sampled_ids):
                 raise ValueError("routed_experts must align with generated token IDs")
@@ -270,6 +271,7 @@ class StepWiseRolloutCollector:
                     student_topk_indices=None if selected is None else selected.indices,
                     behavior_topk_logprobs=None if selected is None else selected.topk_logprobs,
                     routed_experts=routed_experts,
+                    engine_dp_rank=None if engine_dp_ranks is None else engine_dp_ranks[0],
                 ),
                 verification=verification,
                 reward=reward_from_env_step(env_step_output, verification),

@@ -38,6 +38,7 @@ from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE, validate_grug_train
 from skyrl_train.timing_observability import PhaseBreakdown
 from marinskyrl.runtime_options import PolicyLossType
 from skyrl_train.training_batch import (
+    ENGINE_DP_RANKS_KEY,
     TrainingBatchIterator,
     TrainingOutputBatch,
     gradient_accumulation_steps,
@@ -220,6 +221,7 @@ class MegatronWorker:
                     num_actions=num_actions,
                     ftpo_chosen_mask=micro.get("ftpo_chosen_mask"),
                     rollout_routed_experts=micro.routed_experts_tensor(),
+                    rollout_engine_dp_ranks=micro.get(ENGINE_DP_RANKS_KEY),
                     probe_row_indices=micro.get("probe_row_indices"),
                 )
             )
@@ -316,6 +318,7 @@ class MegatronWorker:
                 position_ids=micro.position_ids,
                 num_actions=micro.num_actions,
                 rollout_routed_experts=micro.rollout_routed_experts,
+                rollout_engine_dp_ranks=micro.rollout_engine_dp_ranks,
             )
             for micro in micro_buffer
         ]
@@ -589,6 +592,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         distillation=experience.distillation,
                         ftpo=experience.ftpo,
                         rollout_routed_experts=experience.rollout_routed_experts,
+                        rollout_engine_dp_ranks=experience.rollout_engine_dp_ranks,
                     )
                 )
 

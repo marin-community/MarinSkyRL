@@ -64,6 +64,7 @@ class MegatronForwardMicroBatch:
     position_ids: torch.Tensor
     num_actions: int
     rollout_routed_experts: Optional[torch.Tensor] = None
+    rollout_engine_dp_ranks: Optional[torch.Tensor] = None
     ftpo_chosen_mask: torch.Tensor | None = None
     probe_row_indices: Optional[torch.Tensor] = None
 
@@ -96,6 +97,7 @@ class MegatronPolicyMicroBatch:
     ftpo: FTPOTargets | None = None
     correction_weights: Optional[torch.Tensor] = None
     rollout_routed_experts: Optional[torch.Tensor] = None
+    rollout_engine_dp_ranks: Optional[torch.Tensor] = None
 
 
 class MegatronModelWrapper:
