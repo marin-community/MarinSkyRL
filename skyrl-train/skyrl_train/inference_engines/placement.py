@@ -44,20 +44,21 @@ def inference_bundle_nodes(
     data_parallel_size: int,
     node_gpu_capacities: Mapping[str, int],
     pipeline_parallel_size: int = 1,
-    allow_cross_node_ep: bool = False,
+    expert_parallel_size: int = 1,
 ) -> list[list[str]]:
     """Return each replica's bundle nodes and check placement completeness and GPU capacity.
 
     Bundle ``dp * PP + pp`` of a replica's group belongs to stage ``pp`` of data-parallel rank ``dp``.
-    Each stage must fit on one node unless ``allow_cross_node_ep`` is enabled.
+    Each stage must fit on one node, except TP=PP=1 replicas with EP=DP>1.
     """
+    cross_node_ep = pipeline_parallel_size == 1 and expert_parallel_size == data_parallel_size > 1
     bundle_nodes = []
     per_replica = data_parallel_size * pipeline_parallel_size
     for replica, pg in enumerate(placement_groups):
         bundles = placement_group_table(pg)["bundles_to_node_id"]
         if set(bundles) != set(range(per_replica)):
             raise ValueError(f"Inference replica {replica} has incomplete placement bundles")
-        if not allow_cross_node_ep:
+        if not cross_node_ep:
             for stage in range(pipeline_parallel_size):
                 on_stage = {bundles[dp * pipeline_parallel_size + stage] for dp in range(data_parallel_size)}
                 if len(on_stage) != 1:
@@ -78,7 +79,6 @@ def verified_inference_replica_placements(
     data_parallel_size: int,
     expert_parallel_size: int,
     pipeline_parallel_size: int = 1,
-    allow_cross_node_ep: bool = False,
 ) -> list[InferenceReplicaPlacement]:
     """Match each worker's report to its bundle and check the topology.
 
@@ -111,7 +111,6 @@ def verified_inference_replica_placements(
         expert_parallel_size=expert_parallel_size,
         pipeline_parallel_size=pipeline_parallel_size,
         node_hosts=node_hosts,
-        allow_cross_node_ep=allow_cross_node_ep,
     )
     return placements
 

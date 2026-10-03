@@ -1,16 +1,10 @@
 """Unit tests for inference-engine placement and startup configuration.
 
-The placement strategy checks verify that the ray/uni backend chooses:
-  - per-engine STRICT_PACK ONLY for multi-GPU engines (TP*PP*DP > 1), to keep each
-    engine's TP/PP/DP workers on one node, and
-  - the flat PACK fallback for single-GPU engines (TP==PP==DP==1), so single-GPU
-    bundles pack densely and leave whole nodes free for the downstream policy
-    PACK PG, and
-  - never per-engine STRICT_PACK on the hybrid (colocate_all) or mp-backend
-    paths (the mp {GPU:tp_pp_size} bundle is already node-atomic), and
-  - for a TP=1 engine with DP>1, a check of every worker's own report against its bundle.
+Multi-GPU TP/PP and dense DP replicas stay node-local. Verified TP=PP=1 EP replicas
+use PACK, which can place a replica on one node or span nodes. Single-GPU engines
+share a flat PACK group; hybrid and multi-GPU mp executors keep their existing layout.
 
-uv run --isolated --group dev --extra cpu pytest tests/cpu/test_engine_placement_strategy.py
+uv run --frozen pytest skyrl-train/tests/cpu/test_engine_placement_strategy.py
 """
 
 from dataclasses import asdict, replace
@@ -177,13 +171,20 @@ def inference_scheduler(monkeypatch):
     """Fake the Ray and vLLM boundary: record allocated bundles and answer each actor's placement report."""
     groups, actors, killed, removed = [], [], [], []
     report_changes = {}
+    allocated = [0, 0]
 
     def placement_group(bundles, strategy):
-        index = len(groups)
+        nodes, gpu_indices = {}, {}
+        for index, bundle in enumerate(bundles):
+            node = next(i for i, used in enumerate(allocated) if used + bundle["GPU"] <= 8)
+            nodes[index] = f"node-{node}"
+            gpu_indices[index] = allocated[node]
+            allocated[node] += bundle["GPU"]
         pg = SimpleNamespace(
             bundle_specs=bundles,
             strategy=strategy,
-            nodes={i: f"node-{index if strategy == 'STRICT_PACK' else i // 8}" for i in range(len(bundles))},
+            nodes=nodes,
+            gpu_indices=gpu_indices,
             ready=lambda: None,
         )
         groups.append(pg)
@@ -201,7 +202,14 @@ def inference_scheduler(monkeypatch):
                 # vLLM forms an EP group only when expert parallelism is on.
                 ep_rank, ep_size = (rank, size) if kwargs.get("enable_expert_parallel") else (0, 1)
                 report = InferenceWorkerPlacement(
-                    node.replace("node", "host"), f"GPU-{node}-{index}", rank, size, ep_rank, ep_size, rank, size
+                    node.replace("node", "host"),
+                    f"GPU-{node}-{schedule.placement_group.gpu_indices[index]}",
+                    rank,
+                    size,
+                    ep_rank,
+                    ep_size,
+                    rank,
+                    size,
                 )
                 report = replace(report, **report_changes.get(len(actors), {}))
                 actor = SimpleNamespace(
@@ -262,7 +270,7 @@ def inference_scheduler(monkeypatch):
         return factory.create_ray_wrapped_inference_engines(
             num_inference_engines=kwargs.pop("num_inference_engines", 2),
             tensor_parallel_size=kwargs.pop("tensor_parallel_size", 1),
-            pipeline_parallel_size=1,
+            pipeline_parallel_size=kwargs.pop("pipeline_parallel_size", 1),
             model_dtype="bfloat16",
             pretrain="test",
             seed=7,
@@ -279,50 +287,68 @@ def inference_scheduler(monkeypatch):
     )
 
 
-def test_two_ep8_engines_get_a_node_each_and_every_worker_is_checked(inference_scheduler):
+@pytest.mark.parametrize(
+    "replicas,dp,expected_nodes",
+    [
+        (2, 8, ["node-0"] * 8 + ["node-1"] * 8),
+        (2, 4, ["node-0"] * 8),
+        (1, 16, ["node-0"] * 8 + ["node-1"] * 8),
+    ],
+)
+def test_ep_replicas_pack_and_verify_workers_through_normal_config(inference_scheduler, replicas, dp, expected_nodes):
     scheduler = inference_scheduler
     cfg = example_dummy_config()
     cfg.trainer.placement.colocate_all = False
     cfg.generator.update(
-        num_inference_engines=2,
+        num_inference_engines=replicas,
         inference_engine_tensor_parallel_size=1,
         inference_engine_pipeline_parallel_size=1,
-        inference_engine_data_parallel_size=8,
-        inference_engine_expert_parallel_size=8,
+        inference_engine_data_parallel_size=dp,
+        inference_engine_expert_parallel_size=dp,
     )
     cfg.generator.engine_init_kwargs = {"language_model_only": False}
     engines = create_ray_wrapped_inference_engines_from_config(cfg, None, None)
-    assert len(engines) == 16
-    assert [pg.strategy for pg in scheduler.groups] == ["STRICT_PACK", "STRICT_PACK"]
-    assert [sum(bundle["GPU"] for bundle in pg.bundle_specs) for pg in scheduler.groups] == [8, 8]
-    assert [engine.weight_sync_relative_rank_offset for engine in engines] == [0] * 8 + [8] * 8
+    total = replicas * dp
+    assert len(engines) == total
+    assert [pg.strategy for pg in scheduler.groups] == ["PACK"] * replicas
+    assert [sum(bundle["GPU"] for bundle in pg.bundle_specs) for pg in scheduler.groups] == [dp] * replicas
+    assert [engine.weight_sync_relative_rank_offset for engine in engines] == [i // dp * dp for i in range(total)]
     placements = [placement for engine in engines for placement in engine.worker_placements]
-    assert [row.weight_receiver_rank for row in placements] == list(range(1, 17))
-    assert [row.replica for row in placements] == [0] * 8 + [1] * 8
-    assert {row.worker.ep_world_size for row in placements} == {8}
-    assert len({row.worker.gpu_uuid for row in placements}) == 16
+    assert [row.node_id for row in placements] == expected_nodes
+    assert [row.weight_receiver_rank for row in placements] == list(range(1, total + 1))
+    assert [row.replica for row in placements] == [i // dp for i in range(total)]
+    assert [row.bundle_index for row in placements] == list(range(dp)) * replicas
+    assert [row.worker.dp_rank for row in placements] == list(range(dp)) * replicas
+    assert [row.worker.ep_rank for row in placements] == list(range(dp)) * replicas
+    assert {row.worker.ep_world_size for row in placements} == {dp}
+    assert len({row.worker.gpu_uuid for row in placements}) == total
 
 
 def test_data_parallel_workers_without_expert_parallelism_are_checked_with_no_ep_group(inference_scheduler):
     engines = inference_scheduler.launch(data_parallel_size=8, expert_parallel_size=1)
     placements = [placement for engine in engines for placement in engine.worker_placements]
     assert len(placements) == 16
+    assert [pg.strategy for pg in inference_scheduler.groups] == ["STRICT_PACK"] * 2
+    assert [row.node_id for row in placements] == ["node-0"] * 8 + ["node-1"] * 8
     assert {row.worker.ep_world_size for row in placements} == {1}
 
 
 @pytest.mark.parametrize(
-    "replicas,dp,tp,strategy",
+    "replicas,dp,tp,pp,strategy",
     [
         # Single-GPU engines share the flat group.
-        (16, 1, 1, "PACK"),
+        (16, 1, 1, 1, "PACK"),
         # Tensor-parallel engines keep their own groups; their workers are not checked.
-        (2, 1, 4, "STRICT_PACK"),
+        (2, 1, 4, 1, "STRICT_PACK"),
+        (2, 1, 1, 4, "STRICT_PACK"),
     ],
 )
 def test_engines_that_are_not_tp1_data_parallel_replicas_are_not_checked(
-    inference_scheduler, replicas, dp, tp, strategy
+    inference_scheduler, replicas, dp, tp, pp, strategy
 ):
-    engines = inference_scheduler.launch(num_inference_engines=replicas, data_parallel_size=dp, tensor_parallel_size=tp)
+    engines = inference_scheduler.launch(
+        num_inference_engines=replicas, data_parallel_size=dp, tensor_parallel_size=tp, pipeline_parallel_size=pp
+    )
     assert {pg.strategy for pg in inference_scheduler.groups} == {strategy}
     assert all(engine.worker_placements is None for engine in engines)
 
@@ -337,18 +363,6 @@ def test_wrong_worker_topology_kills_the_replica_gang(inference_scheduler):
     assert scheduler.removed == scheduler.groups
 
 
-def test_cross_node_ep_checks_every_worker_against_its_own_bundle(inference_scheduler):
-    scheduler = inference_scheduler
-    engines = scheduler.launch(
-        num_inference_engines=1, data_parallel_size=16, expert_parallel_size=16, allow_cross_node_ep=True
-    )
-    assert len(engines) == 16
-    assert scheduler.groups[0].strategy == "PACK"
-    placements = [engine.worker_placements[0] for engine in engines]
-    assert [p.node_id for p in placements] == ["node-0"] * 8 + ["node-1"] * 8
-    assert [p.weight_receiver_rank for p in placements] == list(range(1, 17))
-
-
 @pytest.mark.parametrize(
     "change,error", [({"host": "wrong-host"}, "worker host"), ({"gpu_uuid": "GPU-node-0-0"}, "distinct")]
 )
@@ -356,19 +370,9 @@ def test_cross_node_ep_rejects_wrong_worker_placement(inference_scheduler, chang
     scheduler = inference_scheduler
     scheduler.report_changes[8] = change
     with pytest.raises(ValueError, match=error):
-        scheduler.launch(
-            num_inference_engines=1, data_parallel_size=16, expert_parallel_size=16, allow_cross_node_ep=True
-        )
+        scheduler.launch(num_inference_engines=1, data_parallel_size=16, expert_parallel_size=16)
     assert len(scheduler.killed) == 16
     assert scheduler.removed == scheduler.groups
-
-
-def test_cross_node_ep_does_not_enable_cross_node_tensor_parallelism(inference_scheduler):
-    with pytest.raises(ValueError, match="TP=PP=1"):
-        inference_scheduler.launch(
-            tensor_parallel_size=2, data_parallel_size=8, expert_parallel_size=8, allow_cross_node_ep=True
-        )
-    assert not inference_scheduler.groups
 
 
 def _replica_reports():
@@ -401,7 +405,7 @@ def test_two_ep8_replicas_have_disjoint_gpus_and_receiver_ranks():
 @pytest.mark.parametrize(
     "change,error",
     [
-        ({"host": "host-other"}, "spans nodes"),
+        ({"host": "host-other"}, "worker host"),
         ({"gpu_uuid": "GPU-0-0"}, "distinct"),
         ({"gpu_uuid": ""}, "distinct"),
         ({"ep_world_size": 16}, "EP rank or world size"),
@@ -417,13 +421,21 @@ def test_replica_topology_rejects_a_worker_that_disagrees_with_its_bundle(change
         _verified_replicas(reports)
 
 
-def test_a_dense_model_that_reports_no_expert_parallel_group_is_verified_not_killed():
-    # vLLM builds an EP group only for MoE models: a dense model asked for EP=DP reports size 1 everywhere.
+def test_a_dense_model_that_reports_no_expert_parallel_group_stays_node_local():
+    # vLLM builds an EP group only for MoE models, even when EP=DP is requested.
     reports = _replica_reports()
     for report in reports:
         report[0].update(ep_rank=0, ep_world_size=1)
     assert len(_verified_replicas(reports)) == 16
-    # One worker of a MoE replica reporting no EP group is still a mismatch.
+    with pytest.raises(ValueError, match="spans nodes"):
+        verified_inference_replica_placements(
+            reports,
+            bundle_nodes=[["node-0"] * 4 + ["node-1"] * 4] * 2,
+            node_hosts={"node-0": "host-0", "node-1": "host-1"},
+            relative_rank_offsets=[0] * 8 + [8] * 8,
+            data_parallel_size=8,
+            expert_parallel_size=8,
+        )
     reports = _replica_reports()
     reports[3][0].update(ep_rank=0, ep_world_size=1)
     with pytest.raises(ValueError, match="EP rank or world size"):
