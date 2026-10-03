@@ -4,6 +4,7 @@ import contextlib
 import logging
 import os
 import socket
+import time
 from typing import Dict, Optional, Type, List, Any, Callable
 from skyrl_train.utils.progress import configure_progress, tqdm
 from marinskyrl.runtime_options import R3Transport
@@ -58,6 +59,8 @@ from skyrl_train.training_batch import (
     gradient_accumulation_steps,
     per_data_parallel_batch_size,
 )
+from skyrl_train.batch_assembly import BatchPlan, assemble_slice
+from skyrl_train.rollouts.context import RolloutReader
 from skyrl_train.trajectory_selection import optimization_samples_per_prompt
 from skyrl_train.utils.metrics import mean_metrics, policy_progress_metrics, policy_training_metrics
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -857,6 +860,55 @@ class PolicyWorkerBase(Worker):
         self._policy_train_spans: bool = self.cfg.trainer.policy_train_spans
         self._memory = LearnerCudaMetrics(enabled=self._policy_train_spans, rank=self._rank)
         self._model_version_step: int | None = None
+        self._loaded_batches: dict[int, TrainingInputBatch] = {}
+
+    async def load_batch(self, plan: BatchPlan, reader: RolloutReader) -> TrainingOutputBatch:
+        """Fetch and retain the contiguous rows assigned to this policy DP rank."""
+        if plan.batch_id in self._loaded_batches:
+            raise ValueError(f"worker batch {plan.batch_id} is already loaded")
+        started = time.perf_counter()
+        rows = plan.rank_rows(self.mesh_rank.dp)
+        indices = []
+        offset = 0
+        for admitted, count in zip(reader.selected, plan.group_counts, strict=True):
+            if offset < rows.stop and offset + count > rows.start:
+                indices.append(admitted.index)
+            offset += count
+        groups = await reader.read(plan.batch_id, tuple(indices))
+        batch = assemble_slice(
+            plan,
+            self.mesh_rank.dp,
+            groups,
+            pad_token_id=self._pad_token_id,
+            algorithm=self.cfg.trainer.algorithm,
+        )
+        batch.metadata["global_step"] = plan.policy_step
+        self._loaded_batches[plan.batch_id] = batch
+        output = TrainingOutputBatch({})
+        output.metadata = {"batch_load_seconds": time.perf_counter() - started, "dp_rank": self.mesh_rank.dp}
+        return output
+
+    def forward_loaded(self, batch_id: int) -> TrainingOutputBatch:
+        """Run policy forward and keep old-policy response scores on this actor."""
+        batch = self._loaded_batches[batch_id]
+        data = batch.select(keys=["sequences", "attention_mask"], metadata_keys=["response_length", "global_step"])
+        data.routed_expert_rows = batch.routed_expert_rows
+        scores = self.forward(data)["output"]
+        if self.mesh_rank.pp == self.mesh_rank.pp_size - 1:
+            batch["action_log_probs"] = scores
+        batch["base_action_log_probs"] = None
+        batch["values"] = None
+        output = TrainingOutputBatch({})
+        output.metadata = {"dp_rank": self.mesh_rank.dp}
+        return output
+
+    def train_loaded(self, batch_id: int) -> TrainingOutputBatch:
+        """Train on this actor's loaded batch through the existing policy path."""
+        return self.ppo_train(self._loaded_batches[batch_id])
+
+    def unload_batch(self, batch_id: int) -> None:
+        """Release a loaded slice after a completed or failed training step."""
+        self._loaded_batches.pop(batch_id, None)
 
     async def _begin_vllm_layerwise_weight_reload(self, inference_engine_client, *, enabled: bool) -> None:
         """Open a rank-synchronized vLLM reload around a streamed weight update."""
@@ -910,7 +962,11 @@ class PolicyWorkerBase(Worker):
         Timing-only (no tensor is touched) and gated to the R3-decentral path
         with routes present, so every other configuration is unchanged.
         """
-        staggered = self.cfg.generator.r3_transport == R3Transport.DECENTRAL and train_data.routed_experts is not None
+        staggered = (
+            self.cfg.trainer.get("batch_builder", "driver") == "driver"
+            and self.cfg.generator.r3_transport == R3Transport.DECENTRAL
+            and train_data.routed_experts is not None
+        )
         if staggered and self._world_size > 1 and torch.distributed.is_initialized():
             # Ungated per-rank marker: the timestamp cluster at release proves
             # co-arrival; the first shard collective must not time out after it.
