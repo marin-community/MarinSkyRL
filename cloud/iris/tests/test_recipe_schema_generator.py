@@ -20,6 +20,7 @@ data:
       math-reasoning: 1
       code: 2.0
 trainer:
+  callbacks: null
   strategy: megatron
   max_steps: 0
   placement:
@@ -50,6 +51,7 @@ generator:
     temperature: 1
 """
 SIDECAR = """TYPES = {
+    'trainer.callbacks': 'tuple[CounterCallback, ...] | None',
     'data.sampling.domain_weights': 'NumberMap',
     'trainer.strategy': 'Literal["megatron"]',
     'trainer.max_steps': 'NonNegativeInt',
@@ -65,6 +67,13 @@ UNDECLARED = {
     'generator.adapter.parameters.count': ('int', ...),
 }
 NAMES = {}
+CLASSES = {
+    'CounterCallback': {
+        'type': ('Literal["counter"]', True),
+        'count': ('int', False),
+    },
+}
+ALIASES = {}
 """
 
 
@@ -137,6 +146,8 @@ def test_generator_cli_preserves_group_types_and_adjacent_comments_and_detects_d
     assert sparse.to_skyrl() == {"trainer": {"algorithm": {"ftpo": {"lambda_mse": 0.25}}}}
     adapter = recipe_type.from_document({"generator": {"adapter": {"name": "custom", "parameters": {"count": 2}}}})
     assert adapter.to_skyrl() == {"generator": {"adapter": {"name": "custom", "parameters": {"count": 2}}}}
+    declared = recipe_type.from_document({"trainer": {"callbacks": [{"type": "counter"}]}})
+    assert declared.to_skyrl() == {"trainer": {"callbacks": [{"type": "counter"}]}}
     for following in ("hf_save_interval", "micro_forward_batch_size_per_gpu"):
         with pytest.raises(ValidationError):
             recipe_type.model_validate_json(json.dumps({"trainer": {following: None}}))

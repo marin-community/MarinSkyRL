@@ -7,13 +7,14 @@ import pytest
 from pydantic import Field
 
 import marinskyrl.recipe_schema as schema
-from marinskyrl.recipe_schema import ContextBudget, FrozenMap, NumberMap, OpenMap
+from marinskyrl.recipe_schema import ContextBudget, FrozenMap, NumberMap, OpenMap, SectionMap
 from marinskyrl.recipe_schema.operations import RecipeDocument
 
 
 class Options(RecipeDocument):
     options: OpenMap = Field(default_factory=FrozenMap)
     weights: NumberMap = Field(default_factory=FrozenMap)
+    budgets: SectionMap[ContextBudget] = Field(default_factory=FrozenMap)
     count: int = 1
 
 
@@ -69,6 +70,7 @@ def test_named_parts_and_settings_validate_complete_documents_without_changing_r
         context_budget=ContextBudget(request_window_tokens=256, max_new_tokens_per_turn=64, max_turns=2),
         options={"math": 1.0, "code": 1.0, "chat": 1.0},
         weights={"math": 1.0, "code": 1, "chat": 1.0},
+        budgets={"math": ContextBudget(request_window_tokens=256, max_new_tokens_per_turn=64, max_turns=2)},
     )
     parts = {
         "optimizer": Options(options={"lr": 1e-6}),
@@ -94,7 +96,14 @@ def test_named_parts_and_settings_validate_complete_documents_without_changing_r
             with pytest.raises(ValueError, match="parts 'first' and 'second'"):
                 CompleteOptions.combine(base=base, **dict(order))
     updated = expected.with_settings(
-        ["context_budget.max_turns=4", "options.math=2.0", "weights.math=2", "weights.code=2.0", "count=3"]
+        [
+            "context_budget.max_turns=4",
+            "options.math=2.0",
+            "weights.math=2",
+            "weights.code=2.0",
+            "budgets.math.max_turns=4",
+            "count=3",
+        ]
     )
     assert updated.context_budget.to_skyrl() == {
         "request_window_tokens": 256,
@@ -109,8 +118,12 @@ def test_named_parts_and_settings_validate_complete_documents_without_changing_r
     restored = pickle.loads(pickle.dumps(updated))
     assert restored == updated
     assert hash(restored) == hash(updated)
+    assert restored.budgets["math"].max_turns == 4
+    assert restored.budgets["math"].to_skyrl() == updated.context_budget.to_skyrl()
     with pytest.raises(TypeError):
         restored.weights["math"] = 9
+    with pytest.raises(TypeError):
+        restored.budgets["math"] = base.context_budget
     with pytest.raises(ValueError):
         updated.with_settings(["weights.math=heavy"])
     structured = expected.with_settings(['context_budget={"max_turns":4}'])

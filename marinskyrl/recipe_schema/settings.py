@@ -14,20 +14,9 @@ def parse_setting(model: type[Section], key: str, raw: str) -> Any:
     parts = key.split(".")
     if any(not part for part in parts):
         raise ValueError(f"invalid setting path {key!r}")
-    for index, name in enumerate(parts):
-        info = model.model_fields.get(name)
-        if info is None:
-            raise ValueError(f"unknown setting {key!r}: {model.__name__} has no field {name!r}")
-        annotation = info.annotation
+    annotation: Any = model
+    for name in parts:
         options = tuple(_annotations(annotation))
-        if index == len(parts) - 1:
-            if info.metadata:
-                annotation = Annotated[annotation, *info.metadata]
-            return _parse_value(annotation, key, raw)
-        section = next((option for option in options if isinstance(option, type) and issubclass(option, Section)), None)
-        if section is not None:
-            model = section
-            continue
         if FrozenMap in options:
             try:
                 return json.loads(raw)
@@ -35,11 +24,18 @@ def parse_setting(model: type[Section], key: str, raw: str) -> Any:
                 return raw
         mapping = next((option for option in options if get_origin(option) in (dict, Mapping)), None)
         if mapping is not None:
-            if index != len(parts) - 2:
-                raise ValueError(f"setting {key!r} descends into a scalar mapping value")
-            return _parse_value(get_args(mapping)[1], key, raw)
+            annotation = get_args(mapping)[1]
+            continue
+        sections = [option for option in options if isinstance(option, type) and issubclass(option, Section)]
+        if sections:
+            section = next((option for option in sections if name in option.model_fields), None)
+            if section is None:
+                raise ValueError(f"unknown setting {key!r}: no section has field {name!r}")
+            info = section.model_fields[name]
+            annotation = Annotated[info.annotation, *info.metadata] if info.metadata else info.annotation
+            continue
         raise ValueError(f"setting {key!r} descends into a scalar at {name!r}")
-    raise ValueError(f"invalid setting path {key!r}")
+    return _parse_value(annotation, key, raw)
 
 
 def _parse_value(annotation: Any, key: str, raw: str) -> Any:

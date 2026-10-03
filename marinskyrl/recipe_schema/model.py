@@ -7,7 +7,7 @@ import math
 from collections.abc import Iterator, Mapping
 from enum import Enum
 from types import MappingProxyType
-from typing import Annotated, Any, Self, get_args
+from typing import Annotated, Any, Self, TypeVar, get_args
 
 from pydantic import (
     AfterValidator,
@@ -54,7 +54,13 @@ class FrozenMap(Mapping[str, Any]):
         )
 
     def __reduce__(self) -> tuple:
-        return FrozenMap, (thaw(self),)
+        return FrozenMap._from_validated, (dict(self._items),)
+
+    @classmethod
+    def _from_validated(cls, items: Mapping[str, Any]) -> Self:
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "_items", MappingProxyType(dict(items)))
+        return instance
 
     def __repr__(self) -> str:
         return f"FrozenMap({thaw(self)!r})"
@@ -81,6 +87,8 @@ def thaw(value: Any) -> Any:
         return {key: thaw(item) for key, item in value.items()}
     if isinstance(value, tuple | list):
         return [thaw(item) for item in value]
+    if isinstance(value, Section):
+        return value.to_skyrl()
     return value
 
 
@@ -91,6 +99,8 @@ def document_key(value: Any, *, sort_mappings: bool = False) -> tuple:
         return "mapping", tuple((key, document_key(item, sort_mappings=sort_mappings)) for key, item in items)
     if isinstance(value, tuple | list):
         return "list", tuple(document_key(item, sort_mappings=sort_mappings) for item in value)
+    if isinstance(value, Section):
+        return document_key(value.to_skyrl(), sort_mappings=sort_mappings)
     if isinstance(value, bool):
         return "bool", value
     if isinstance(value, int | float):
@@ -172,6 +182,10 @@ class Section(BaseModel):
 
     def __hash__(self) -> int:
         return hash((type(self), document_key(self.to_skyrl())))
+
+
+_SectionT = TypeVar("_SectionT", bound=Section)
+SectionMap = Annotated[Mapping[str, _SectionT], AfterValidator(FrozenMap._from_validated), PlainSerializer(thaw)]
 
 
 def merge_mappings(base: Mapping[str, Any], patch: Mapping[str, Any]) -> dict[str, Any]:

@@ -65,7 +65,7 @@ TYPES = {
     "trainer.max_steps": "NonNegativeInt | None",
     "trainer.resume_path": "str | None",
     "trainer.eval_num_prompts": "PositiveInt | None",
-    "trainer.callbacks": "tuple[OpenMap, ...] | None",
+    "trainer.callbacks": "tuple[Callback, ...] | None",
     "trainer.rollout_buffer.max_in_flight": "PositiveInt | None",
     "trainer.rollout_buffer.object_store_root": "str | None",
     "trainer.policy.megatron_config.expert_tensor_parallel_size": "PositiveInt | None",
@@ -191,6 +191,73 @@ NAMES = {
     "generator.eval_sampling_params": "EvalSamplingParams",
     "trainer.policy.model.lora": "PolicyLora",
     "trainer.critic.model.lora": "CriticLora",
+}
+
+# CLASSES fields pair an annotation with whether the field is required.
+CLASSES = {
+    "EvaluationSampling": {
+        "sampling_params": ("EvalSamplingParams | None", False),
+        "n_samples_per_prompt": ("PositiveInt | None", False),
+    },
+    "EvaluationMinimum": {"minimum": ("int | float", True)},
+    "EvaluationImprovement": {"min_improvement": ("int | float", True)},
+    "CheckpointCallback": {
+        "type": ('Literal["checkpoint"]', True),
+        "save_steps": ("int", False),
+        "save_on_train_end": ("bool", False),
+    },
+    "DistillationTokenBudgetCallback": {
+        "type": ('Literal["distillation_token_budget"]', True),
+        "token_budget": ("PositiveInt", True),
+    },
+    "EvaluationCallback": {
+        "type": ('Literal["evaluation"]', True),
+        "eval_steps": ("int", False),
+        "eval_on_train_end": ("bool", False),
+        "eval_before_train": ("bool", False),
+        "additional_evaluations": ("SectionMap[EvaluationSampling] | None", False),
+        "metric_groups": (
+            "Annotated[Mapping[str, tuple[str, ...]], AfterValidator(FrozenMap), PlainSerializer(thaw)] | None",
+            False,
+        ),
+        "stop_when": ("SectionMap[EvaluationMinimum | EvaluationImprovement] | None", False),
+    },
+    "HFModelSaveCallback": {
+        "type": ('Literal["hf_model_save"]', True),
+        "save_steps": ("int", False),
+        "save_on_train_end": ("bool", False),
+    },
+    "DatabaseRegistrationCallback": {
+        "type": ('Literal["database_registration"]', True),
+        "agent_name": ("str | None", False),
+        "enabled": ("bool", False),
+    },
+    "RefModelUpdateCallback": {
+        "type": ('Literal["ref_model_update"]', True),
+        "update_every_epoch": ("bool", False),
+    },
+    "ProgressCallback": {"type": ('Literal["progress"]', True), "log_interval": ("int", False)},
+    "LoggingCallback": {"type": ('Literal["logging"]', True), "log_every_step": ("bool", False)},
+    "PreflightGateCallback": {
+        "type": ('Literal["preflight_gate"]', True),
+        "enabled": ("bool", False),
+        "min_reward": ("int | float", False),
+        "max_reward": ("int | float", False),
+        "on_failure": ('Literal["abort", "warn"]', False),
+        "num_trials": ("int", False),
+    },
+    "InferenceStatsCallback": {
+        "type": ('Literal["inference_stats"]', True),
+        "log_every_steps": ("int", False),
+        "log_to_console": ("bool", False),
+        "log_to_tracker": ("bool", False),
+        "console_log_level": ("str", False),
+        "poll_interval_seconds": ("int | float", False),
+    },
+}
+
+ALIASES = {
+    "Callback": 'Annotated[CheckpointCallback | DistillationTokenBudgetCallback | EvaluationCallback | HFModelSaveCallback | DatabaseRegistrationCallback | RefModelUpdateCallback | ProgressCallback | LoggingCallback | PreflightGateCallback | InferenceStatsCallback, Field(discriminator="type")]',
 }
 
 TYPES.update(

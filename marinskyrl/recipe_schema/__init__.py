@@ -4,6 +4,7 @@ from .model import FrozenMap as FrozenMap
 from .model import NumberMap as NumberMap
 from .model import OpenMap as OpenMap
 from .model import Section as Section
+from .model import SectionMap as SectionMap
 from .budget import ContextBudget as ContextBudget
 from .rules import RL_ENTRYPOINTS as RL_ENTRYPOINTS
 from .rules import SKYRL_INTERNAL_ENGINE_KWARGS as SKYRL_INTERNAL_ENGINE_KWARGS
