@@ -34,6 +34,7 @@ from marinskyrl.speculative_decoding import (
     parse_speculative_decoding_config,
     runai_model_uri,
 )
+from marinskyrl.runtime_options import WeightSyncTransport
 
 if TYPE_CHECKING:
     from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -210,7 +211,7 @@ def create_ray_wrapped_inference_engines_from_config(
         role,
         engine_init_kwargs=engine_init_kwargs,
     )
-    if cfg.generator.weight_sync_transport == "expert_block":
+    if cfg.generator.weight_sync_transport == WeightSyncTransport.EXPERT_BLOCK:
         engine_kwargs["require_verified_placements"] = True
 
     # Conditionally add LoRA parameters if LoRA is enabled

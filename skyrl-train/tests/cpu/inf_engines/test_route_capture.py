@@ -98,7 +98,7 @@ def test_client_retry_compact_routes_and_probe_observations_follow_prediction_to
     assert output["response_ids"] == [[20, 21]]
     assert response.dtype == (np.uint16 if expert_offset else np.uint8)
     np.testing.assert_array_equal(response, captured[2:])
-    # Main's compact batches can carry only the local response rows even when
+    # Compact batches can carry only the local response rows even when
     # the global padded action window is longer.
     num_experts = 384 if expert_offset else 8
     routes = RoutedExpertRows((response,), response_len=3, num_experts=num_experts).materialize()

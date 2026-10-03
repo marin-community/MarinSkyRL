@@ -88,12 +88,12 @@ def dense_replay_targets(rollout_routed_experts, batch_size, seq_len, num_action
     prediction_start = seq_len - num_actions - 1
     full[:, prediction_start : prediction_start + response_len, :, :] = captured
 
-    response_pos = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=device)
-    response_pos[:, prediction_start : seq_len - 1] = True
+    prediction_mask = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=device)
+    prediction_mask[:, prediction_start : seq_len - 1] = True
     # non-sentinel per [B, seq_len, L]; collapse over L: a position is valid
-    # for replay only where every layer carries real data, then AND with response_pos.
+    # for replay only where every layer carries real data, then AND with prediction_mask.
     non_sentinel = (full != SENTINEL_EXPERT_ID).any(dim=-1).all(dim=-1)  # [B, seq_len]
-    return full, response_pos & non_sentinel
+    return full, prediction_mask & non_sentinel
 
 
 # The all-K-sentinel capture convention is only unambiguous when native top-k
