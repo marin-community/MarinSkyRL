@@ -7,7 +7,7 @@ TYPES = {
     # Choices (values from MarinSkyRL's own enums and checks).
     "trainer.strategy": 'Literal["megatron"]',
     "trainer.resume_mode": 'Literal["none", "latest", "from_path"]',
-    "trainer.algorithm.advantage_estimator": 'Literal["gae", "grpo", "rloo", "rloo_n", "reinforce++", "uniform", "reward"]',
+    "trainer.algorithm.advantage_estimator": 'Literal["gae", "grpo", "rloo", "rloo_n", "rloo_n_pbs", "reinforce++", "uniform", "reward"]',
     "trainer.algorithm.policy_loss_type": 'Literal["regular", "dual_clip", "behavior_clip", "gspo", "cispo", "clip_cov", "kl_cov", "sapo", "sft", "ftpo", "importance_sampling"]',
     "trainer.algorithm.loss_reduction": 'Literal["token_mean", "sequence_mean", "seq_mean_token_sum_norm", "seq_mean_token_sum_norm_global"]',
     "trainer.algorithm.kl_estimator_type": 'Literal["k1", "abs", "k2", "k3", "k3_unbiased_gradient"]',
