@@ -146,7 +146,9 @@ class RowFacts:
     @classmethod
     def from_batch(cls, batch: TrajectoryBatch) -> RowFacts:
         responses = batch["response_ids"]
-        scalar_rewards = all(not isinstance(reward, list) for reward in batch["rewards"])
+        scalar_rewards = all(
+            not isinstance(reward, list) or sum(value != 0 for value in reward) <= 1 for reward in batch["rewards"]
+        )
         scores = [
             np.sum(reward, dtype=np.float32) if isinstance(reward, list) else float(reward) if response else 0.0
             for reward, response in zip(batch["rewards"], responses, strict=True)

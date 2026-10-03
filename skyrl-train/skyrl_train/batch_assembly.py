@@ -90,6 +90,10 @@ def plan_batch(meta: RolloutBatchMetadata, *, dp_size: int, algorithm: DictConfi
         fields = fields - {"is_last_step"}
     elif any("is_last_step" not in group.fields for group in facts):
         raise ValueError("worker batch requires is_last_step on every group when the first group carries it")
+    if "loop_advantages" not in facts[0].fields:
+        fields = fields - {"loop_advantages"}
+    elif any("loop_advantages" not in group.fields for group in facts):
+        raise ValueError("worker batch requires loop_advantages on every group when the first group carries it")
     route_geometry = next((group.route_geometry for group in facts if group.route_geometry is not None), None)
     if meta.moe_router_replay:
         if meta.num_experts is None:
@@ -126,6 +130,12 @@ def plan_batch(meta: RolloutBatchMetadata, *, dp_size: int, algorithm: DictConfi
         "avg_response_length": int(response_len.sum()) / len(uids),
         "consumed_stop_metrics": consumed_stop_metrics(stop_reasons, len(uids)),
         "pad_size": 0,
+        "response_lengths": response_len,
+        "consumed_work": (
+            len(uids),
+            int(response_len.sum()),
+            sum(int(group.loss_tokens.sum()) for group in facts),
+        ),
     }
     if "exclude_from_baseline" in fields:
         metadata["exclude_from_baseline"] = excluded
@@ -185,10 +195,18 @@ def assemble_slice(
             reward if isinstance(reward, list) else scalar_reward_token_credit(reward, response)
             for reward, response in zip(batch["rewards"], batch["response_ids"], strict=True)
         ]
+        if any(
+            value != 0
+            for group, index in selected
+            if group.get("loop_advantages") is not None
+            for value in group["loop_advantages"][index]
+        ):
+            raise ValueError("worker batch does not support nonzero loop credit")
         for key, dtype in (
             ("rollout_logprobs", np.float32),
             ("token_level_shaping", np.float32),
             ("response_span_tags", np.int64),
+            ("loop_advantages", np.float32),
         ):
             if key in plan.fields:
                 batch[key] = [
@@ -259,5 +277,7 @@ def assemble_slice(
         advantages = torch.from_numpy(plan.advantages[rows.start : rows.stop].copy())[:, None] * response
         training_input["advantages"] = advantages
         training_input["returns"] = advantages
-    training_input.metadata = dict(plan.metadata)
+    training_input.metadata = {
+        key: value for key, value in plan.metadata.items() if key not in ("response_lengths", "consumed_work")
+    }
     return training_input
