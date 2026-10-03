@@ -282,7 +282,7 @@ class BasePPOExp:
         # Reserve the policy/training placement group BEFORE the inference
         # engines (which are created later, in `_setup_trainer`), so that in the
         # disaggregated case the policy (and optional colocated reference)
-        # claims whole nodes before inference engines use the remainder.
+        # claims GPU slots before inference engines use the remainder.
         self.policy_pg = self.get_policy_pg()
 
     def create_inference_engine_client(
@@ -400,14 +400,12 @@ class BasePPOExp:
             return None
 
     def get_policy_pg(self, timeout: int | None = None):
-        """Reserve whole policy nodes before starting inference engines.
+        """Reserve policy GPU slots before starting inference engines.
 
-        Uses STRICT_SPREAD so each policy node gets exactly one bundle holding
-        all of that node's GPUs — guaranteeing the policy occupies a set of
-        whole, dedicated nodes that the (PACK) inference-engine placement group
-        cannot share. Returns None when not eligible (see
-        `policy_strict_spread_eligible`), in which case the legacy lazy-PACK
-        path in `PPORayActorGroup._initiate_actors` is used unchanged.
+        Whole-node bundles use STRICT_SPREAD; per-GPU bundles use PACK. Both
+        reserve the policy footprint before the inference placement group.
+        Returns None when not eligible (see `policy_strict_spread_eligible`),
+        leaving model actors to reserve their placement group lazily.
 
         A colocated reference model shares this group with the policy. Reserving
         it here prevents inference actors from fragmenting the required nodes.
