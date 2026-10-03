@@ -50,7 +50,7 @@ from upath import UPath
 
 ENVIRONMENT_TYPE = "iris"
 
-# Chunks ride inside one ``sh -c`` argument. Base64 expands them by 4/3 and
+# Chunks ride inside one ``bash -c`` argument. Base64 expands them by 4/3 and
 # Linux caps one argv string at 128 KiB.
 UPLOAD_CHUNK_BYTES = 64 * 1024
 DOWNLOAD_CHUNK_BYTES = 1024 * 1024
@@ -369,7 +369,7 @@ class IrisEnvironment(BaseEnvironment):
 
         resolved_user = self._resolve_user(user)
         if resolved_user not in (None, "root", 0, "0"):
-            script = f"su -s /bin/sh -c {shlex.quote(script)} {shlex.quote(str(resolved_user))}"
+            script = f"su -s /bin/bash -c {shlex.quote(script)} {shlex.quote(str(resolved_user))}"
         return script
 
     def _exec_sync(self, script: str, timeout_sec: int | None) -> ExecResult:
@@ -383,7 +383,7 @@ class IrisEnvironment(BaseEnvironment):
         response = self._rpc.exec_in_container(
             controller_pb2.Controller.ExecInContainerRequest(
                 task_id=self._task_id,
-                command=["sh", "-c", script],
+                command=["bash", "-c", script],
                 timeout_seconds=container_timeout,
             ),
             timeout_ms=rpc_timeout_ms,

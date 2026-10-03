@@ -95,7 +95,7 @@ async def test_mapped_dockerfile_image_starts_in_gvisor_and_restores_task_files(
         script = request.command[2]
         for root in ("/logs", "/tmp", "/app"):
             script = script.replace(root, str(sandbox_dir / root.lstrip("/")))
-        result = subprocess.run(["sh", "-c", script], cwd=sandbox_dir / "app", capture_output=True, text=True)
+        result = subprocess.run([*request.command[:2], script], cwd=sandbox_dir / "app", capture_output=True, text=True)
         stdout = result.stdout.replace(str(sandbox_dir), "")
         return SimpleNamespace(error="", stdout=stdout, stderr=result.stderr, exit_code=result.returncode)
 
@@ -138,6 +138,16 @@ async def test_mapped_dockerfile_image_starts_in_gvisor_and_restores_task_files(
         assert (sandbox_dir / "app/input.json").read_bytes() == (task_dir / "input.json").read_bytes()
         assert (sandbox_dir / "app/Dockerfile").read_bytes() == dockerfile
         assert task_config.model_dump() == original_config
+        result = await sandbox.exec(
+            'set -euo pipefail; values=("$BFCL_TEST_VALUE" "$PWD"); printf "%s\\n" "${values[@]}" > shell-result.txt',
+            cwd="/app",
+            env={"BFCL_TEST_VALUE": "quoted ' value"},
+        )
+        assert result.return_code == 0, result.stderr
+        assert (sandbox_dir / "app/shell-result.txt").read_text().splitlines() == [
+            "quoted ' value",
+            str(sandbox_dir / "app"),
+        ]
     finally:
         await sandbox.stop(delete=True)
     assert lifecycle["cancelled"]
