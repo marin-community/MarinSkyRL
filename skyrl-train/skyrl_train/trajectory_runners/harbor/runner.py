@@ -1380,6 +1380,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             "prompt_token_ids": [list(output.evidence.prompt_token_ids) for output in all_outputs],
             "response_ids": [list(output.evidence.response_token_ids) for output in all_outputs],
             "rewards": [output.reward_result.optimization_reward for output in all_outputs],
+            "verification_results": [output.verification for output in all_outputs],
             "unshaped_rewards": [float(output.reward_result.unshaped_reward or 0.0) for output in all_outputs],
             "loss_masks": [
                 project_loss_mask(output, list(output.evidence.response_token_ids)) for output in all_outputs

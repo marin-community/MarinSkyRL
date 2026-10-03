@@ -1,3 +1,4 @@
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -14,7 +15,12 @@ except ImportError:
 
 from harbor.verifier.verifier import VerifierOutputParseError
 from skyrl_train.metric_names import IDENTITY_AWARE_REWARD_METRIC_PREFIX
-from skyrl_train.trajectory_runners.types import TrajectoryID
+from skyrl_train.trajectory_runners.types import BatchMetadata, TrajectoryID
+from skyrl_train.trajectory_runners.harbor.configuration import HarborConfigBuilder
+from skyrl_train.trajectory_runners.trajectory_retention import (
+    build_trajectory_records,
+    parse_trajectory_retention_config,
+)
 from skyrl_train.utils.harbor_errors import ErrorHandlingConfig
 from skyrl_train.trajectory_runners.harbor.literal_log_store import LiteralLogStore
 
@@ -161,6 +167,76 @@ def test_full_tito_scores_against_the_served_initial_prompt():
     assert output.evidence.response_token_ids == (2, 10)
     assert output.loss_mask == [0, 1]
     np.testing.assert_allclose(output.evidence.behavior_logprobs, [0.0, -0.25])
+
+
+@pytest.mark.asyncio
+async def test_harbor_batch_retention_preserves_pass_fail_and_missing_verdicts(tmp_path):
+    results = [
+        SimpleNamespace(
+            verifier_result=SimpleNamespace(rewards={"reward": score}, stdout="verifier output"),
+            exception_info=None,
+            agent_result=SimpleNamespace(
+                metadata={
+                    "all_messages": [
+                        {"role": "user", "content": "solve it"},
+                        {"role": "assistant", "content": "done"},
+                    ],
+                    "summarization_count": 0,
+                    "stop_reason": "complete",
+                },
+                rollout_details=[
+                    {"prompt_token_ids": [[7, 8, 2]], "completion_token_ids": [[10]], "logprobs": [[-0.25]]}
+                ],
+            ),
+        )
+        for score in (1.0, 0.0)
+    ]
+    results.append(SimpleNamespace(verifier_result=None, exception_info=None, agent_result=None))
+
+    class CompletedOrchestrator:
+        async def submit_batch(self, trial_configs):
+            futures = []
+            for result in results:
+                future = asyncio.get_running_loop().create_future()
+                future.set_result(result)
+                futures.append(future)
+            return futures
+
+    runner = _trial_runner()
+    runner._orchestrator = CompletedOrchestrator()
+    runner._orchestrator_started = True
+    runner._eval_session_active = False
+    runner._packed_task_materializer = harbor_runner_module.PackedTaskMaterializer(tmp_path / "tasks")
+    runner._harbor_config_builder = HarborConfigBuilder(OmegaConf.create({"harbor": {"name": "pi"}}))
+    runner._agent_api_base = "http://localhost:8000/v1"
+    runner._tracked_exceptions = []
+    runner._literal_log_path = None
+    runner._tito_full = True
+    runner._collect_rollout_details = True
+    runner._tis_lcs_alert_threshold = 0.1
+    runner.model_name = "model"
+    runner.trials_dir = str(tmp_path / "trials")
+    request = {
+        "prompts": [str(tmp_path / "task")] * 3,
+        "env_classes": ["bfcl"] * 3,
+        "env_extras": [{}] * 3,
+        "trajectory_ids": [TrajectoryID(instance_id="task", repetition_id=index) for index in range(3)],
+        "batch_metadata": BatchMetadata(global_step=0, training_phase="eval"),
+        "sampling_params": {"max_tokens": 16},
+    }
+    batch = await runner.run(request)
+    config = parse_trajectory_retention_config(
+        {"enabled": True, "required": True, "output_path": str(tmp_path / "retained"), "run_id": "smoke"}
+    )
+    records = build_trajectory_records(request, batch, config, runner.tokenizer, runner_name="harbor")
+
+    assert [record.verification_result.status.value for record in records] == ["verified", "verified", "unavailable"]
+    assert [record.verification_result.passed for record in records] == [True, False, None]
+    assert [record.verification_result.score for record in records] == [1.0, 0.0, None]
+    assert [record.reward.outcome for record in records] == [1.0, 0.0, 0.0]
+    assert records[0].prompt.token_ids == (7, 8)
+    assert records[0].response.token_ids == (2, 10)
+    assert records[0].response.loss_mask == (0, 1)
 
 
 @pytest.mark.parametrize(
