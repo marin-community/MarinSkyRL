@@ -534,7 +534,7 @@ def test_grpo_loop_credit_is_token_local_when_every_group_member_has_the_same_ou
 
     result = trainer.compute_advantages_and_returns(data)
     result = trainer_module.normalize_advantages_dict(result)
-    result = trainer.apply_loop_advantages(result)
+    result = trainer.apply_token_credit(result)
 
     assert torch.equal(result["advantages"], loop_advantages)
     assert torch.equal(result["returns"], torch.zeros(4, response_length))
@@ -914,3 +914,65 @@ def test_grpo_reports_one_flat_and_one_varied_reward_group():
     assert trainer.all_metrics["reward/zero_std_group_fraction"] == pytest.approx(0.5)
     assert torch.equal(result["advantages"][:2], torch.zeros(2, 1))
     assert torch.isfinite(result["advantages"]).all()
+
+
+def _advantage_trainer(estimator, invariant, *, step_wise=False):
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create(
+        {
+            "trainer": {
+                "step_wise_training": step_wise,
+                "algorithm": {
+                    "advantage_estimator": estimator,
+                    "gamma": 1.0,
+                    "lambd": 1.0,
+                    "grpo_norm_by_std": True,
+                    "advantage_batch_normalize": False,
+                },
+            },
+        }
+    )
+    trainer.group_advantage_invariant = invariant
+    trainer.all_metrics = {}
+    trainer.distillation_plan = None
+    return trainer
+
+
+@pytest.mark.parametrize("estimator", ["grpo", "rloo_n"])
+@pytest.mark.parametrize("ftpo", [False, True])
+def test_token_shaping_is_added_after_the_normalized_outcome_advantage(estimator, ftpo):
+    invariant = (
+        GroupAdvantageInvariant.exact_physical(physical_group_size=2)
+        if estimator == "grpo"
+        else GroupAdvantageInvariant.minimum_baseline_eligible(physical_group_size=2, minimum_group_size=2)
+    )
+    trainer = _advantage_trainer(estimator, invariant)
+    trainer.cfg.trainer.algorithm.advantage_batch_normalize = True
+    mask = torch.tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 0.0]])
+    shaping = torch.tensor([[0.0, 0.3, 0.0], [0.0, 0.0, 0.5]])
+    loop_credit = torch.tensor([[0.1, 0.0, 0.0], [0.0, 0.0, 0.0]])
+    data = TrainingInputBatch(
+        {
+            "rewards": torch.tensor([[0.0, 0.0, 1.0], [0.0, 0.0, 0.0]]),
+            "response_mask": mask,
+            "loss_mask": mask.clone(),
+            "values": None,
+            "token_level_shaping": shaping,
+            "loop_advantages": loop_credit,
+        }
+    )
+    data.metadata = {"uids": ["g", "g"], "avg_response_length": 2.5}
+    if ftpo:
+        data["ftpo_chosen_mask"] = mask.bool()
+    outcome = trainer.compute_advantages_and_returns(copy.deepcopy(data))
+    expected = trainer_module.normalize_advantages_dict(outcome)["advantages"]
+    if not ftpo:
+        expected = expected + (shaping + loop_credit) * mask
+
+    result = trainer.finalize_advantages_for_training(trainer.compute_advantages_and_returns(data))
+
+    torch.testing.assert_close(result["advantages"], expected, rtol=0, atol=1e-6)
+    assert "loop_advantages" not in result
+    assert "token_level_shaping" not in result
+    assert "rewards" not in result
+    assert "uids" not in result.metadata

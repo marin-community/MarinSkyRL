@@ -6,6 +6,7 @@ from enum import StrEnum
 from omegaconf import DictConfig
 
 from marinskyrl.distillation import DistillationObjectiveKind, compile_distillation_plan_from_config
+from marinskyrl.runtime_options import terminal_bench_config
 from skyrl_train.config.objective_spec import LossSpec, rollout_logprobs_required
 
 from marinskyrl.harbor_agent_names import (
@@ -89,9 +90,7 @@ _HARBOR_EVIDENCE_PROFILES = {
 
 
 def _terminal_bench_harbor_config(cfg: DictConfig) -> DictConfig | None:
-    terminal_bench = cfg.get("terminal_bench_config")
-    if terminal_bench is None and str(cfg.get("entrypoint", "")) == "terminal_bench":
-        terminal_bench = cfg.get("terminal_bench")
+    terminal_bench = terminal_bench_config(cfg)
     return terminal_bench.get("harbor") if terminal_bench is not None else None
 
 

@@ -59,6 +59,7 @@ from skyrl_train.utils.pbs_shaping import compute_pbs_token_shaping
 from omegaconf import DictConfig
 from pathlib import Path
 from marinskyrl.packed_tasks import PackedTaskMaterializer, PackedTaskReference
+from marinskyrl.runtime_options import HARBOR_TOKEN_REWARD_DEFAULTS
 
 # Harbor orchestrator and trial imports.
 # QueueOrchestrator + OrchestratorEvent come through a compat shim because
@@ -457,18 +458,19 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         self._reward_shaping_config = self._harbor_config_builder.get_reward_shaping_config()
         self._reward_shaping_enabled = bool(self._reward_shaping_config.get("enable_reward_shaping", True))
 
-        # Loop-behavior reward shaping (Stage B / F5 + F4): master gate for the
-        # per-token shaping channel + span tagger. Default False -> the runner
-        # emits neither field, so the TrajectoryBatch is byte-identical to today.
-        self._enable_token_reward_channel = bool(self._reward_shaping_config.get("enable_token_reward_channel", False))
-        self._enable_span_tagging = bool(self._reward_shaping_config.get("enable_span_tagging", True))
+        self._enable_token_reward_channel = bool(
+            self._reward_shaping_config.get(
+                "enable_token_reward_channel", HARBOR_TOKEN_REWARD_DEFAULTS["enable_token_reward_channel"]
+            )
+        )
+        self._enable_span_tagging = bool(
+            self._reward_shaping_config.get("enable_span_tagging", HARBOR_TOKEN_REWARD_DEFAULTS["enable_span_tagging"])
+        )
 
-        # Loop-behavior reward shaping (Stage C / F2 + F6): potential-based
-        # shaping (PBS) of the EDIT-token span from the in-trajectory test-delta.
-        # Default False -> the channel ships Stage-B ZEROS (no-op). Requires the
-        # token reward channel AND span tagging to be on (PBS scatters onto the
-        # F4 EDIT tags). PBS is policy-invariant (Ng 1999) and bounded.
-        self._enable_pbs_shaping = bool(self._reward_shaping_config.get("enable_pbs_shaping", False))
+        # PBS requires the token reward channel and edit-span tags.
+        self._enable_pbs_shaping = bool(
+            self._reward_shaping_config.get("enable_pbs_shaping", HARBOR_TOKEN_REWARD_DEFAULTS["enable_pbs_shaping"])
+        )
         self._pbs_gamma = float(self._reward_shaping_config.get("pbs_gamma", 1.0))
         self._pbs_max_total_shaping = float(self._reward_shaping_config.get("pbs_max_total_shaping", 0.3))
         self._pbs_potential_shape = str(self._reward_shaping_config.get("pbs_potential_shape", "linear"))
@@ -1335,12 +1337,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                             _re_sentinel_rows(len(output.evidence.response_token_ids), sentinel_row)
                         )
 
-        # Collect the Stage B per-token shaping channel + span tags. Gated on
-        # enable_token_reward_channel so the TrajectoryBatch is byte-identical when
-        # off (keys omitted entirely). Sentinel-fill (zeros) any sample missing them
-        # so the lists stay 1:1 with response_ids. Emitted for train AND eval is
-        # harmless (channel is zeros), but mirror the routed_experts train-only gate
-        # to keep eval batches identical.
+        # Missing token credit is zero-filled to preserve response-token alignment.
         token_level_shaping_list = None
         response_span_tags_list = None
         if self._enable_token_reward_channel and not is_eval:
@@ -1398,8 +1395,6 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         if rollout_routed_experts_list is not None:
             trajectory_batch["rollout_routed_experts"] = rollout_routed_experts_list
 
-        # Attach the Stage B channel + tags only when present, so the flag-off
-        # TrajectoryBatch dict is byte-identical to today (keys absent, not None).
         if token_level_shaping_list is not None:
             trajectory_batch["token_level_shaping"] = token_level_shaping_list
         if response_span_tags_list is not None:
@@ -2155,12 +2150,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 f"({self._truncation_penalty}), reward {original_reward:.3f} -> {reward:.3f}"
             )
 
-        # Loop-behavior reward shaping (Stage B / F5 + F4): when the channel is
-        # enabled, emit a per-token shaping vector (ZEROS in Stage B — no-op) and,
-        # optionally, the F4 span tags. Both are computed on the SAME response_ids
-        # layout (the tagger re-walks the exact per-turn segmentation), so they
-        # align 1:1 with the training tokens. None when the channel is off ->
-        # byte-identical TrajectoryBatch.
+        # Token credit and span tags align with response_ids.
         token_level_shaping: Optional[List[float]] = None
         response_span_tags: Optional[List[int]] = None
         if self._enable_token_reward_channel:
@@ -2183,12 +2173,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                     tags = tags + [0] * (len(response_ids) - len(tags))
                 response_span_tags = tags
 
-            # Stage C (F2 + F6): replace the Stage-B zeros with potential-based
-            # shaping of the EDIT-token span from the in-trajectory test-delta.
-            # Requires span tags (PBS scatters onto SPAN_EDIT tokens). When the
-            # trajectory has no recognized test output / no edit turn, PBS returns
-            # an all-zero vector -> that trajectory stays pure-RLOO-N. PBS is
-            # policy-invariant (Ng 1999) and bounded to ±pbs_max_total_shaping.
+            # PBS distributes bounded test-outcome credit over edit spans.
             if self._enable_pbs_shaping and response_span_tags is not None:
                 try:
                     pbs_vector = compute_pbs_token_shaping(

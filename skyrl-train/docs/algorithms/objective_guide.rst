@@ -217,8 +217,6 @@ Set ``trainer.algorithm.advantage_estimator``. Implementation:
      - Use a leave-one-out baseline over a complete prompt group. `Back to Basics`_.
    * - ``rloo_n``
      - Exclude infrastructure failures; set ``group_advantage_min_size`` between 2 and the physical group size.
-   * - ``rloo_n_pbs``
-     - Add potential-based token shaping to an eligible-response baseline; requires an explicit group minimum of at least 2.
    * - ``reinforce++``
      - Use critic-free discounted returns; ``gamma: 1.0`` gives undiscounted returns. `REINFORCE++`_.
    * - ``gae``

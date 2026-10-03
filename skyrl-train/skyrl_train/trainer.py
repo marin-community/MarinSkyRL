@@ -272,6 +272,10 @@ def _zero_std_group_fraction(uids: Sequence[str], rewards: torch.Tensor) -> floa
     return flat_groups / len(group_rewards)
 
 
+# Per-token credit added after the outcome advantage and its batch normalization.
+TOKEN_CREDIT_KEYS = ("loop_advantages", "token_level_shaping")
+
+
 class RayPPOTrainer:
     """The rollout-buffer training loop.
 
@@ -2377,12 +2381,6 @@ class RayPPOTrainer:
         else:
             # For RLOO-N: pass exclude_from_baseline if present in metadata
             exclude_from_baseline = data.metadata.get("exclude_from_baseline", None)
-            # Stage C (F6): thread the per-token PBS shaping channel into the
-            # advantage estimator when it is present. The dispatcher forwards it
-            # via **kwargs; only the rloo_n_pbs combiner consumes it (every other
-            # estimator ignores the extra kwarg), and when the key is absent
-            # (channel off) token_level_shaping is None -> byte-identical path.
-            token_level_shaping = data["token_level_shaping"] if "token_level_shaping" in data else None
             advantages, returns = compute_advantages_and_returns(
                 token_level_rewards=token_level_rewards,
                 response_mask=data["response_mask"],
@@ -2394,7 +2392,6 @@ class RayPPOTrainer:
                 lambd=self.cfg.trainer.algorithm.lambd,
                 grpo_norm_by_std=self.cfg.trainer.algorithm.grpo_norm_by_std,
                 exclude_from_baseline=exclude_from_baseline,
-                token_level_shaping=token_level_shaping,
                 group_advantage_invariant=self.group_advantage_invariant,
             )
         data["returns"] = returns
@@ -2448,23 +2445,25 @@ class RayPPOTrainer:
         return data
 
     @staticmethod
-    def apply_loop_advantages(data: TrainingInputBatch) -> TrainingInputBatch:
-        """Add loop credit after normalization, or return unchanged when the channel is absent."""
-        loop_advantages = data.get("loop_advantages")
-        if loop_advantages is None:
-            return data
+    def apply_token_credit(data: TrainingInputBatch) -> TrainingInputBatch:
+        """Add each present token-credit channel to the outcome advantages."""
         advantages = data["advantages"]
-        loop_advantages = loop_advantages.to(device=advantages.device, dtype=advantages.dtype)
-        data["advantages"] = advantages + loop_advantages * data["response_mask"]
+        for key in TOKEN_CREDIT_KEYS:
+            credit = data.get(key)
+            if credit is not None:
+                credit = credit.to(device=advantages.device, dtype=advantages.dtype)
+                advantages = advantages + credit * data["response_mask"]
+        data["advantages"] = advantages
         return data
 
     def finalize_advantages_for_training(self, data: TrainingInputBatch) -> TrainingInputBatch:
-        """Normalize environment credit, add loop credit, then apply teacher credit."""
+        """Normalize environment credit, add token credit, then apply teacher credit."""
         if "ftpo_chosen_mask" in data:
-            data.pop("loop_advantages", None)
+            for key in TOKEN_CREDIT_KEYS:
+                data.pop(key, None)
         if self.cfg.trainer.algorithm.advantage_batch_normalize:
             data = normalize_advantages_dict(data)
-        data = self.apply_loop_credit_and_drop_advantage_inputs(data)
+        data = self.apply_token_credit_and_drop_advantage_inputs(data)
         plan = self.distillation_plan
         if plan is None:
             return data
@@ -2485,11 +2484,12 @@ class RayPPOTrainer:
             data["advantages"] = torch.zeros_like(data["advantages"])
         return data
 
-    def apply_loop_credit_and_drop_advantage_inputs(self, data: TrainingInputBatch) -> TrainingInputBatch:
-        """Apply loop credit, then remove rewards, loop_advantages, and uids before worker dispatch."""
-        data = self.apply_loop_advantages(data)
+    def apply_token_credit_and_drop_advantage_inputs(self, data: TrainingInputBatch) -> TrainingInputBatch:
+        """Apply token credit, then clear advantage inputs before worker dispatch."""
+        data = self.apply_token_credit(data)
         data.pop("rewards")
-        data.pop("loop_advantages", None)
+        for key in TOKEN_CREDIT_KEYS:
+            data.pop(key, None)
         data.metadata.pop("uids")
         return data
 
