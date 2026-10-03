@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import math
 import requests
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -56,6 +57,7 @@ from skyrl_train.trajectory_runners.skyrl_gym_contracts import (
     fold_verification_results,
     publish_rollout_evidence,
     verification_from_env_step,
+    with_validated_reward,
 )
 from skyrl_train.trajectory_runners.trajectory_processing import (
     _re_sentinel_rows,
@@ -856,7 +858,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             token_rewards = None
         else:
             token_level_rewards = self._place_step_rewards(response_ids, loss_mask, per_step_rewards)
-            optimization_reward = float(sum(token_level_rewards))
+            optimization_reward = math.fsum(reward for reward, _ in per_step_rewards)
             token_rewards = tuple(token_level_rewards)
 
         verification, unshaped_reward = fold_verification_results(verification_results)
@@ -922,21 +924,21 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             routed_experts=rollout_routes,
             metadata=({"terminal_exception_type": disposition.exception_type} if terminal_error is not None else {}),
         )
-        reward_result = RewardResult(
-            unshaped_reward=unshaped_reward,
-            optimization_reward=optimization_reward,
-            token_rewards=token_rewards,
-        )
-        reward_result.validate_for(evidence)
-        return AgentLoopOutput(
+        output = AgentLoopOutput(
             evidence=evidence,
             verification=verification,
-            reward=reward_result,
+            reward=RewardResult(unshaped_reward=None, optimization_reward=0.0),
             disposition=disposition,
             loss_mask=loss_mask,
             env_metrics=env_metrics,
             token_provenance=token_provenance,
             error_treatment=error_treatment,
+        )
+        return with_validated_reward(
+            output,
+            unshaped_reward=unshaped_reward,
+            optimization_reward=optimization_reward,
+            token_rewards=token_rewards,
         )
 
     async def _run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
@@ -1059,19 +1061,21 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     outputs[index].env_metrics["genrm/comparison_failure"] = 1.0
                 continue
             for index, reward in zip(indices, rewards, strict=True):
-                old_token_rewards = outputs[index].reward.token_rewards
+                output = outputs[index]
+                credited = [position for position, value in enumerate(output.loss_mask) if value]
                 token_rewards = None
-                if old_token_rewards is not None:
-                    token_rewards_list = [0.0] * len(old_token_rewards)
-                    credited = [position for position, value in enumerate(old_token_rewards) if value]
-                    if credited:
-                        token_rewards_list[credited[-1]] = reward
+                if output.reward.token_rewards is not None:
+                    token_rewards_list = [0.0] * len(output.evidence.response_token_ids)
+                    token_rewards_list[credited[-1]] = reward
                     token_rewards = tuple(token_rewards_list)
-                outputs[index].reward = RewardResult(
+                outputs[index] = with_validated_reward(
+                    output,
                     unshaped_reward=reward,
                     optimization_reward=reward,
                     token_rewards=token_rewards,
                 )
+                if not outputs[index].disposition.loss_eligible:
+                    continue
                 outputs[index].verification = VerificationResult.verified(
                     reward,
                     diagnostics={"agent": (ultra_at(index) or {})["agent"], "genrm_metrics": metrics},
