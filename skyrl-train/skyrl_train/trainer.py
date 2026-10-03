@@ -1,11 +1,13 @@
 import asyncio
 from dataclasses import replace
+from hashlib import sha256
 import io as stdlib_io
 import json
 import math
 import os
 import re
 import shutil
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -81,6 +83,7 @@ from skyrl_train.trajectory_runners.trajectory_reward_shaping import (
 from skyrl_train.distributed.dispatch import (
     ActorInfo,
     MeshRank,
+    WorkerGroupTaskError,
     collect_actor_results,
     concatenate_outputs_after_mesh_dispatch,
 )
@@ -1492,9 +1495,12 @@ class RayPPOTrainer:
         if scored_distillation is not None:
             self._attach_teacher_evidence(training_input, scored_distillation)
         try:
+            driver_batch = None
             if worker_builder:
-                loaded = await asyncio.to_thread(
-                    collect_actor_results, self.policy_model.actor_infos, load_refs, operation="load worker batch"
+                loaded = await self.context._until_failure(
+                    asyncio.to_thread(
+                        collect_actor_results, self.policy_model.actor_infos, load_refs, operation="load worker batch"
+                    )
                 )
                 observations = {
                     index: observation
@@ -1607,6 +1613,11 @@ class RayPPOTrainer:
                     )
                 self.all_timings["load_worker_batch"] = max(output.metadata["batch_load_seconds"] for output in loaded)
                 self._log_rollout_batch_completed(metadata, duration_seconds=rollout_wait_timer.duration)
+                if self.cfg.trainer.batch_builder == "verify":
+                    groups = await self.context._until_failure(
+                        reader.read(metadata.batch_id, tuple(group.index for group in metadata.groups))
+                    )
+                    driver_batch = await asyncio.to_thread(self.convert_rollout_groups_to_training_input, groups)
             else:
                 self._log_rollout_batch_completed(groups, duration_seconds=rollout_wait_timer.duration)
 
@@ -1615,15 +1626,25 @@ class RayPPOTrainer:
                 Timer("run_training", self.all_timings),
                 async_phase_window("training", step=self.global_step, enabled=self._rollout_spans_enabled),
             ):
-                status = await self._run_training(training_input, step_wall=step_wall)
+                if worker_builder:
+                    status = await self._run_training(training_input, step_wall=step_wall, driver_batch=driver_batch)
+                else:
+                    status = await self._run_training(training_input, step_wall=step_wall)
         finally:
             if worker_builder:
+                failure = sys.exception()
                 if load_refs:
                     await asyncio.to_thread(ray.wait, load_refs, num_returns=len(load_refs))
-                await asyncio.to_thread(
-                    ray.get,
-                    self.policy_model.async_run_ray_method("pass_through", "unload_batch", training_input.batch_id),
-                )
+                try:
+                    await asyncio.to_thread(
+                        ray.get,
+                        self.policy_model.async_run_ray_method("pass_through", "unload_batch", training_input.batch_id),
+                    )
+                except (ray.exceptions.RayActorError, WorkerGroupTaskError) as cleanup_error:
+                    if failure is None:
+                        raise
+                    failure.add_note(f"Loaded-batch cleanup failed: {cleanup_error}")
+                    raise failure
         step_wall.start("group_bookkeeping")
         self._log_optimizer_step_completed(
             epoch=epoch,
@@ -1709,31 +1730,110 @@ class RayPPOTrainer:
         self.tracker.log(startup_eval, step=self.global_step, commit=False)
 
     async def _run_training(
-        self, training_input: TrainingInputBatch | BatchPlan, *, step_wall: StepWallTime | None = None
+        self,
+        training_input: TrainingInputBatch | BatchPlan,
+        *,
+        step_wall: StepWallTime | None = None,
+        driver_batch: TrainingInputBatch | None = None,
     ):
         if isinstance(training_input, BatchPlan):
             await self._drain_policy_event_loops()
+            expected_inputs = {}
+            if self.cfg.trainer.batch_builder == "verify":
+                if driver_batch is None:
+                    raise ValueError("trainer.batch_builder=verify requires the same admitted driver batch")
+                driver_batch.metadata["global_step"] = self.global_step
+                for phase in ("forward", "training"):
+                    if phase == "forward":
+                        reference = driver_batch.select(
+                            keys=["sequences", "attention_mask"],
+                            metadata_keys=["response_length", "global_step"],
+                        )
+                        reference.routed_expert_rows = driver_batch.routed_expert_rows
+                    else:
+                        with Timer("verify_driver_preparation", self.all_timings):
+                            driver_batch = await asyncio.to_thread(self.fwd_logprobs_values_reward, driver_batch)
+                            correction = off_policy_correction(self.cfg.trainer.algorithm)
+                            if correction.rules:
+                                result = compute_correction(
+                                    driver_batch["action_log_probs"],
+                                    driver_batch["rollout_logprobs"],
+                                    driver_batch["loss_mask"],
+                                    correction,
+                                )
+                                driver_batch["correction_weights"] = result.weights
+                            driver_batch = self.compute_advantages_and_returns(driver_batch)
+                            driver_batch = self.finalize_advantages_for_training(driver_batch)
+                        reference = driver_batch
+                        if self.cfg.trainer.dump_data_batch:
+                            self.dump_data(driver_batch, file_name=f"global_step_{self.global_step}_training_input")
+                    expected_inputs[phase] = []
+                    for chunk in reference.chunk(reference.batch_size // training_input.dp_size):
+                        expected_inputs[phase].append(
+                            {
+                                "tensors": {
+                                    key: None
+                                    if value is None
+                                    else (
+                                        str(value.dtype),
+                                        tuple(value.shape),
+                                        sha256(value.detach().cpu().contiguous().view(torch.uint8).numpy()).hexdigest(),
+                                    )
+                                    for key, value in chunk.items()
+                                },
+                                "metadata": {key: chunk.metadata[key] for key in ("response_length", "global_step")},
+                                "routes": None
+                                if chunk.routed_expert_rows is None
+                                else (
+                                    chunk.routed_expert_rows.response_len,
+                                    chunk.routed_expert_rows.num_experts,
+                                    tuple(
+                                        (str(row.dtype), tuple(row.shape), sha256(row.tobytes(order="C")).hexdigest())
+                                        for row in chunk.routed_expert_rows.rows
+                                    ),
+                                ),
+                            }
+                        )
             with Timer("fwd_logprobs_values_reward", self.all_timings):
                 if self.colocate_all:
                     self.policy_model.backload_to_gpu(backload_optimizer=False, backload_model=True)
                 try:
-                    await asyncio.to_thread(
-                        ray.get,
+                    forwards = await asyncio.to_thread(
+                        collect_actor_results,
+                        self.policy_model.actor_infos,
                         self.policy_model.async_run_ray_method(
-                            "pass_through", "forward_loaded", training_input.batch_id
+                            "pass_through",
+                            "forward_loaded",
+                            training_input.batch_id,
+                            expected_inputs=expected_inputs.get("forward"),
                         ),
+                        operation="worker loaded forward",
                     )
+                    if expected_inputs:
+                        for actor, output in zip(self.policy_model.actor_infos, forwards, strict=True):
+                            if output.metadata.get("input_digests") != expected_inputs["forward"][actor.rank.dp]:
+                                raise ValueError(f"worker forward input digest mismatch on DP rank {actor.rank.dp}")
+                        logger.info("Worker forward input digests verified on {} ranks", len(forwards))
                 finally:
-                    if self.colocate_all:
-                        self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
-                    else:
-                        await asyncio.to_thread(
-                            ray.get, self.policy_model.async_run_ray_method("pass_through", "empty_cache")
-                        )
+                    failure = sys.exception()
+                    try:
+                        if self.colocate_all:
+                            self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
+                        else:
+                            await asyncio.to_thread(
+                                ray.get, self.policy_model.async_run_ray_method("pass_through", "empty_cache")
+                            )
+                    except (ray.exceptions.RayActorError, WorkerGroupTaskError) as cleanup_error:
+                        if failure is None:
+                            raise
+                        failure.add_note(f"Policy-forward cleanup failed: {cleanup_error}")
+                        raise failure
             if step_wall is not None:
                 step_wall.start("policy_training")
             with Timer("train_critic_and_policy", self.all_timings), critical_phase("train_step", self.global_step):
-                return await asyncio.to_thread(self.train_critic_and_policy, training_input)
+                return await asyncio.to_thread(
+                    self.train_critic_and_policy, training_input, expected_inputs=expected_inputs.get("training")
+                )
         if "ftpo_chosen_mask" in training_input and not training_input["loss_mask"].any():
             self.all_timings["train_critic_and_policy"] = 0.0
             self.all_metrics["policy/policy_update_steps"] = 0.0
@@ -2822,7 +2922,11 @@ class RayPPOTrainer:
         training_input["action_log_probs"] = action_log_probs
         training_input["values"] = values
 
-        if self._training_metrics_enabled and training_input.get("rollout_logprobs") is not None:
+        if (
+            self.cfg.trainer.get("batch_builder", "driver") == "driver"
+            and self._training_metrics_enabled
+            and training_input.get("rollout_logprobs") is not None
+        ):
             self.all_metrics.update(
                 mismatch_ratio_metrics(
                     action_log_probs,
@@ -2834,7 +2938,11 @@ class RayPPOTrainer:
                 )
             )
 
-        if self.cfg.generator.sampling_params.logprobs is not None and training_input["rollout_logprobs"] is not None:
+        if (
+            self.cfg.trainer.get("batch_builder", "driver") == "driver"
+            and self.cfg.generator.sampling_params.logprobs is not None
+            and training_input["rollout_logprobs"] is not None
+        ):
             logprobs_diff = (
                 training_input["rollout_logprobs"][training_input["loss_mask"] > 0]
                 - action_log_probs[training_input["loss_mask"] > 0]
@@ -2923,7 +3031,9 @@ class RayPPOTrainer:
 
         return data
 
-    def train_critic_and_policy(self, data: TrainingInputBatch | BatchPlan):
+    def train_critic_and_policy(
+        self, data: TrainingInputBatch | BatchPlan, *, expected_inputs: list[dict] | None = None
+    ):
         """
         Run the training step for the policy and critic models (this is overlapped if colocate_all is False).
         """
@@ -2932,6 +3042,7 @@ class RayPPOTrainer:
         policy_dispatch = "pass_through" if loaded else "mesh"
         policy_method = "train_loaded" if loaded else "ppo_train"
         policy_input = data.batch_id if loaded else data
+        policy_kwargs = {"expected_inputs": expected_inputs} if loaded else {}
         if self.colocate_all:
             if self.critic_model is not None:
                 with Timer("critic_train", self.all_timings):
@@ -2945,7 +3056,9 @@ class RayPPOTrainer:
                     self.critic_model.offload_to_cpu()
             with Timer("policy_train", self.all_timings):
                 self.policy_model.backload_to_gpu()
-                policy_refs = self.policy_model.async_run_ray_method(policy_dispatch, policy_method, policy_input)
+                policy_refs = self.policy_model.async_run_ray_method(
+                    policy_dispatch, policy_method, policy_input, **policy_kwargs
+                )
                 policy_statuses = collect_actor_results(
                     self.policy_model.actor_infos,
                     policy_refs,
@@ -2957,7 +3070,9 @@ class RayPPOTrainer:
                     self.policy_model.backload_to_gpu(backload_optimizer=True, backload_model=False)
             if self.critic_model is not None:
                 with Timer("policy_critic_overlap_train", self.all_timings):
-                    policy_refs = self.policy_model.async_run_ray_method(policy_dispatch, policy_method, policy_input)
+                    policy_refs = self.policy_model.async_run_ray_method(
+                        policy_dispatch, policy_method, policy_input, **policy_kwargs
+                    )
                     critic_refs = self.critic_model.async_run_ray_method("mesh", "ppo_train", data)
                     all_statuses = collect_actor_results(
                         self.policy_model.actor_infos + self.critic_model.actor_infos,
@@ -2968,7 +3083,9 @@ class RayPPOTrainer:
                     critic_statuses = all_statuses[len(policy_refs) :]
             else:
                 with Timer("policy_train", self.all_timings):
-                    policy_refs = self.policy_model.async_run_ray_method(policy_dispatch, policy_method, policy_input)
+                    policy_refs = self.policy_model.async_run_ray_method(
+                        policy_dispatch, policy_method, policy_input, **policy_kwargs
+                    )
                     policy_statuses = collect_actor_results(
                         self.policy_model.actor_infos,
                         policy_refs,
@@ -2976,6 +3093,11 @@ class RayPPOTrainer:
                     )
 
         empty_cache_refs = []
+        if expected_inputs is not None:
+            for actor, output in zip(self.policy_model.actor_infos, policy_statuses, strict=True):
+                if output.metadata.get("input_digests") != expected_inputs[actor.rank.dp]:
+                    raise ValueError(f"worker training input digest mismatch on DP rank {actor.rank.dp}")
+            logger.info("Worker training input digests verified on {} ranks", len(policy_statuses))
         if self.critic_model is not None:
             critic_status = critic_statuses[0].metadata["train_status"]
             for k, v in critic_status.items():

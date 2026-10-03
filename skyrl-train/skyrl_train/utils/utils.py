@@ -52,7 +52,7 @@ from marinskyrl.distillation import (
     validate_generation_logprobs,
 )
 from marinskyrl.inference_placement import validate_expert_block_transport
-from marinskyrl.runtime_options import GDNBackend, R3Transport, PolicyLossType
+from marinskyrl.runtime_options import GDNBackend, R3Transport, PolicyLossType, AdvantageEstimator
 
 from .constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS
 from .algorithm_registry import (
@@ -502,7 +502,11 @@ def validate_cfg(cfg: DictConfig):
             ("advantage_batch_normalize", algorithm.advantage_batch_normalize),
             ("loop reward credit", shaping.enabled and shaping.loop.advantage_penalty_per_token > 0),
             ("dump_data_batch", batch_builder == "worker" and cfg.trainer.dump_data_batch),
-            ("non-outcome advantage estimator", algorithm.advantage_estimator not in ("rloo", "rloo_n", "grpo")),
+            (
+                "non-outcome advantage estimator",
+                algorithm.advantage_estimator
+                not in (AdvantageEstimator.RLOO, AdvantageEstimator.RLOO_N, AdvantageEstimator.GRPO),
+            ),
         )
         for reason, enabled in restrictions:
             if enabled:
