@@ -37,7 +37,11 @@ from skyrl_train.distributed.dispatch import ActorInfo, Dispatch, DispatchRegist
 from skyrl_train.distributed import collective_phase_diagnostics as _phase_diagnostics
 from skyrl_train.distributed.strategy import DistributedStrategy
 from loguru import logger
-from skyrl_train.distributed.utils import init_custom_process_group, init_worker_process_group_with_device
+from skyrl_train.distributed.utils import (
+    get_free_port,
+    init_custom_process_group,
+    init_worker_process_group_with_device,
+)
 from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
 from skyrl_train.utils.policy_math import ppo_critic_loss
 from skyrl_train.utils.importance_ratio_diagnostics import (
@@ -107,8 +111,6 @@ class DistributedTorchRayActor:
         world_size,
         rank,
         local_rank,
-        master_addr,
-        master_port,
         sequence_parallel_size,
         record_memory=False,
         pin_to_ray_gpu_id=False,
@@ -123,10 +125,8 @@ class DistributedTorchRayActor:
         self._world_size = world_size
         self._rank = rank
         self._local_rank = local_rank
-        self._master_addr = master_addr if master_addr else self._get_current_node_ip()
-        self._master_port = master_port if master_port else self._get_free_port()
-        os.environ["MASTER_ADDR"] = self._master_addr
-        os.environ["MASTER_PORT"] = str(self._master_port)
+        self._master_addr = self._get_current_node_ip() if rank == 0 else None
+        self._master_port = get_free_port() if rank == 0 else None
         os.environ["WORLD_SIZE"] = str(self._world_size)
         os.environ["RANK"] = str(self._rank)
         # Device pinning. `LOCAL_RANK` is consumed by every strategy's
@@ -226,12 +226,14 @@ class DistributedTorchRayActor:
     def get_node_local_rank(self):
         return self._local_rank
 
-    def init_worker_process_group(self):
+    def init_worker_process_group(self, master_addr: str, master_port: int):
         # Device-pinned NCCL PG init via the shared helper — pins set_device(LOCAL_RANK) and
         # passes device_id so ProcessGroupNCCL never guesses the device (fixes the cw-rno2a
         # unmasked-CVD collective deadlock; see init_worker_process_group_with_device).
         init_worker_process_group_with_device(
-            timeout_seconds=int(self.cfg.trainer.distributed.worker_collective_timeout_seconds)
+            master_addr=master_addr,
+            master_port=master_port,
+            timeout_seconds=int(self.cfg.trainer.distributed.worker_collective_timeout_seconds),
         )
 
         # setup device mesh
@@ -287,12 +289,6 @@ class DistributedTorchRayActor:
 
     def get_ray_node_id(self):
         return ray.get_runtime_context().get_node_id()
-
-    @staticmethod
-    def _get_free_port():
-        with socket.socket() as sock:
-            sock.bind(("", 0))
-            return sock.getsockname()[1]
 
     def get_master_addr_port(self):
         return self._master_addr, self._master_port
@@ -619,100 +615,42 @@ class PPORayActorGroup:
                 ),
             )
         with Timer("actor_create", self.startup_timings):
-            if pg:
-                master_actor = self.ray_actor_type.options(
-                    num_cpus=num_gpus_per_actor,
-                    num_gpus=num_gpus_per_actor,
-                    resources=self._resources,
-                    scheduling_strategy=PlacementGroupSchedulingStrategy(
+            self._actor_handlers = []
+            for rank in range(world_size):
+                actor_options = {
+                    "num_cpus": num_gpus_per_actor,
+                    "num_gpus": num_gpus_per_actor,
+                    "resources": self._resources,
+                }
+                if pg:
+                    actor_options["scheduling_strategy"] = PlacementGroupSchedulingStrategy(
                         placement_group=pg,
-                        placement_group_bundle_index=reordered_bundle_indices[0] if reordered_bundle_indices else 0,
-                    ),
-                ).remote(
+                        placement_group_bundle_index=(
+                            reordered_bundle_indices[rank]
+                            if reordered_bundle_indices
+                            else rank // self._num_gpus_per_node
+                        ),
+                    )
+                worker_actor = self.ray_actor_type.options(**actor_options).remote(
                     cfg=self.cfg,
                     world_size=world_size,
-                    rank=0,
-                    local_rank=0,
-                    master_addr=None,
-                    master_port=None,
+                    rank=rank,
+                    local_rank=rank % self._num_gpus_per_node,
                     sequence_parallel_size=self.sequence_parallel_size,
                     record_memory=self.record_memory,
                     pin_to_ray_gpu_id=self._pin_to_ray_gpu_id,
                     force_cvd_mask=self._force_cvd_mask,
                 )
-            else:
-                master_actor = self.ray_actor_type.options(
-                    num_cpus=num_gpus_per_actor,
-                    num_gpus=num_gpus_per_actor,
-                    resources=self._resources,
-                ).remote(
-                    cfg=self.cfg,
-                    world_size=world_size,
-                    rank=0,
-                    local_rank=0,
-                    master_addr=None,
-                    master_port=None,
-                    sequence_parallel_size=self.sequence_parallel_size,
-                    record_memory=self.record_memory,
-                    pin_to_ray_gpu_id=self._pin_to_ray_gpu_id,
-                    force_cvd_mask=self._force_cvd_mask,
-                )
-            self._actor_handlers = [master_actor]
-            # Create worker actors
-            if world_size > 1:
-                master_addr, master_port = ray.get(master_actor.get_master_addr_port.remote())
-                for rank in range(1, world_size):
-                    local_rank = rank % self._num_gpus_per_node
-
-                    if pg:
-                        worker_actor = self.ray_actor_type.options(
-                            num_cpus=num_gpus_per_actor,
-                            num_gpus=num_gpus_per_actor,
-                            resources=self._resources,
-                            scheduling_strategy=PlacementGroupSchedulingStrategy(
-                                placement_group=pg,
-                                placement_group_bundle_index=(
-                                    reordered_bundle_indices[rank]
-                                    if reordered_bundle_indices
-                                    else rank // self._num_gpus_per_node
-                                ),
-                            ),
-                        ).remote(
-                            cfg=self.cfg,
-                            world_size=world_size,
-                            rank=rank,
-                            local_rank=local_rank,
-                            master_addr=master_addr,
-                            master_port=master_port,
-                            sequence_parallel_size=self.sequence_parallel_size,
-                            record_memory=self.record_memory,
-                            pin_to_ray_gpu_id=self._pin_to_ray_gpu_id,
-                            force_cvd_mask=self._force_cvd_mask,
-                        )
-                    else:
-                        worker_actor = self.ray_actor_type.options(
-                            num_cpus=num_gpus_per_actor,
-                            num_gpus=num_gpus_per_actor,
-                            resources=self._resources,
-                        ).remote(
-                            cfg=self.cfg,
-                            world_size=world_size,
-                            rank=rank,
-                            local_rank=local_rank,
-                            master_addr=master_addr,
-                            master_port=master_port,
-                            sequence_parallel_size=self.sequence_parallel_size,
-                            record_memory=self.record_memory,
-                            pin_to_ray_gpu_id=self._pin_to_ray_gpu_id,
-                            force_cvd_mask=self._force_cvd_mask,
-                        )
-                    self._actor_handlers.append(worker_actor)
-            ray.get([actor.get_master_addr_port.remote() for actor in self._actor_handlers])
+                self._actor_handlers.append(worker_actor)
+            addresses = ray.get([actor.get_master_addr_port.remote() for actor in self._actor_handlers])
+            master_addr, master_port = addresses[0]
 
         # Initialize process group
         logger.info("Initializing process group for RayActorGroup")
         with Timer("pg_init", self.startup_timings):
-            ray.get([actor.init_worker_process_group.remote() for actor in self._actor_handlers])
+            ray.get(
+                [actor.init_worker_process_group.remote(master_addr, master_port) for actor in self._actor_handlers]
+            )
         logger.info("Initialized process group for RayActorGroup")
         self.actor_infos = [ActorInfo(actor, ray.get(actor.get_mesh_rank.remote())) for actor in self._actor_handlers]
         logger.info(f"Mesh Ranks: {[actor_info.rank for actor_info in self.actor_infos]}")

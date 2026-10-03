@@ -24,7 +24,7 @@ def test_pins_device_and_passes_device_id(monkeypatch):
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
     monkeypatch.setattr(torch.distributed, "init_process_group", lambda **kw: seen.__setitem__("init", kw))
 
-    init_worker_process_group_with_device(timeout_seconds=1800)
+    init_worker_process_group_with_device(master_addr="localhost", master_port=12345, timeout_seconds=1800)
 
     # device pinned to the resolved LOCAL_RANK ...
     assert seen["set_device"] == 3
@@ -45,7 +45,7 @@ def test_idempotent_when_already_initialized(monkeypatch):
 
     monkeypatch.setattr(torch.distributed, "init_process_group", _must_not_init)
 
-    init_worker_process_group_with_device(timeout_seconds=600)
+    init_worker_process_group_with_device(master_addr="localhost", master_port=12345, timeout_seconds=600)
 
     # still pins the device (idempotent), but does not re-create the PG
     assert seen["set_device"] == 2
