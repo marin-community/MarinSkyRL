@@ -1015,73 +1015,9 @@ def concatenate_trajectory_batches(
         result.get("env_metrics"),
         result.get("env_classes"),
         verification_results=result.get("verification_results"),
+        trajectory_batches=trajectory_batches,
+        tis_lcs_alert_threshold=tis_lcs_alert_threshold,
     )
-
-    # TIS alignment metrics use token-weighted fractions across batches.
-    total_aligned = 0.0
-    sum_exact = sum_lcs = sum_unaligned = 0.0
-    sum_fail = sum_lcs_msgs = 0.0
-    saw_tis = False
-    for output in trajectory_batches:
-        rm = output.get("rollout_metrics") or {}
-        n = rm.get(TIS_ALIGNED_TOKENS_METRIC)
-        if n is None:
-            continue
-        saw_tis = True
-        total_aligned += n
-        sum_exact += rm.get(TIS_EXACT_MATCH_FRACTION_METRIC, 0.0) * n
-        sum_lcs += rm.get(TIS_LCS_FALLBACK_FRACTION_METRIC, 0.0) * n
-        sum_unaligned += rm.get(TIS_UNALIGNED_FRACTION_METRIC, 0.0) * n
-        sum_fail += rm.get(TIS_ALIGNMENT_FAIL_COUNT_METRIC, 0.0)
-        sum_lcs_msgs += rm.get(TIS_LCS_FALLBACK_MESSAGES_METRIC, 0.0)
-    if saw_tis:
-        denom = max(total_aligned, 1.0)
-        rollout_metrics[TIS_ALIGNED_TOKENS_METRIC] = total_aligned
-        rollout_metrics[TIS_EXACT_MATCH_FRACTION_METRIC] = sum_exact / denom
-        rollout_metrics[TIS_LCS_FALLBACK_FRACTION_METRIC] = sum_lcs / denom
-        rollout_metrics[TIS_UNALIGNED_FRACTION_METRIC] = sum_unaligned / denom
-        rollout_metrics[TIS_ALIGNMENT_FAIL_COUNT_METRIC] = sum_fail
-        rollout_metrics[TIS_LCS_FALLBACK_MESSAGES_METRIC] = sum_lcs_msgs
-        lcs_alert = 1.0 if (sum_lcs / denom) > tis_lcs_alert_threshold else 0.0
-        rollout_metrics[TIS_LCS_FALLBACK_ALERT_METRIC] = lcs_alert
-        total_tito_attempts = sum(
-            (output.get("rollout_metrics") or {}).get(TIS_TITO_FULL_ATTEMPTS_METRIC, 0.0)
-            for output in trajectory_batches
-        )
-        total_tito_successes = sum(
-            (output.get("rollout_metrics") or {}).get(TIS_TITO_FULL_SUCCESS_FRACTION_METRIC, 0.0)
-            * (output.get("rollout_metrics") or {}).get(TIS_TITO_FULL_ATTEMPTS_METRIC, 0.0)
-            for output in trajectory_batches
-        )
-        rollout_metrics[TIS_TITO_FULL_ATTEMPTS_METRIC] = total_tito_attempts
-        rollout_metrics[TIS_TITO_FULL_SUCCESS_FRACTION_METRIC] = (
-            total_tito_successes / total_tito_attempts if total_tito_attempts else 0.0
-        )
-        total_tito_declines = sum(
-            (output.get("rollout_metrics") or {}).get(TIS_TITO_FULL_DECLINE_COUNT_METRIC, 0.0)
-            for output in trajectory_batches
-        )
-        rollout_metrics[TIS_TITO_FULL_DECLINE_COUNT_METRIC] = total_tito_declines
-        rollout_metrics[TIS_ALIGNMENT_ALERT_METRIC] = (
-            1.0 if sum_unaligned > 0 or lcs_alert or total_tito_declines > 0 else 0.0
-        )
-        for reason in TitoFullDeclineReason:
-            name = f"{TIS_TITO_FULL_DECLINE_METRIC_PREFIX}{reason.value}"
-            rollout_metrics[name] = sum(
-                (output.get("rollout_metrics") or {}).get(name, 0.0) for output in trajectory_batches
-            )
-
-    rollout_metrics.update(_merge_batch_failure_metrics(trajectory_batches))
-
-    # Retention counts per group, and this rebuilds rollout_metrics from responses and rewards, so
-    # the per-group counters have to be carried across or the archives are written unobserved.
-    for output in trajectory_batches:
-        for name, value in (output.get("rollout_metrics") or {}).items():
-            if name.startswith((RETENTION_METRIC_PREFIX, IDENTITY_AWARE_REWARD_METRIC_PREFIX)) or name in {
-                LITERAL_BRIDGE_CORRELATED_TRIALS_METRIC,
-                LITERAL_BRIDGE_CORRELATED_TURNS_METRIC,
-            }:
-                rollout_metrics[name] = rollout_metrics.get(name, 0.0) + value
 
     result["rollout_metrics"] = rollout_metrics
     refresh_trajectory_reward_shaping_metrics(result)
@@ -1185,6 +1121,8 @@ def get_rollout_metrics(
     env_metrics: Optional[List[Dict[str, Any]]] = None,
     env_classes: Optional[List[str]] = None,
     verification_results: Optional[List[Optional[VerificationResult]]] = None,
+    trajectory_batches: List[TrajectoryBatch] | None = None,
+    tis_lcs_alert_threshold: float = 0.0,
 ):
     """
     Computes rollout metrics including token statistics and optional environment-specific metrics.
@@ -1195,6 +1133,8 @@ def get_rollout_metrics(
         env_metrics: Optional list of environment-specific metrics for each trajectory
         env_classes: Optional list of environment class names for each trajectory
         verification_results: Verifier verdicts that override reward-sign token statistics when present
+        trajectory_batches: Per-group observations for TIS, failure and retention metrics
+        tis_lcs_alert_threshold: Retained-token fraction below which LCS fallback raises an alignment alert
 
     Returns:
         Dictionary of aggregated metrics
@@ -1239,6 +1179,73 @@ def get_rollout_metrics(
             agg = aggregate_for_environment(env_name, metrics)
             for key, value in agg.items():
                 rollout_metrics[f"{ENVIRONMENT_METRIC_PREFIX}{key}"] = value
+
+    if trajectory_batches is not None:
+        # TIS alignment metrics use token-weighted fractions across batches.
+        total_aligned = 0.0
+        sum_exact = sum_lcs = sum_unaligned = 0.0
+        sum_fail = sum_lcs_msgs = 0.0
+        saw_tis = False
+        for output in trajectory_batches:
+            rm = output.get("rollout_metrics") or {}
+            n = rm.get(TIS_ALIGNED_TOKENS_METRIC)
+            if n is None:
+                continue
+            saw_tis = True
+            total_aligned += n
+            sum_exact += rm.get(TIS_EXACT_MATCH_FRACTION_METRIC, 0.0) * n
+            sum_lcs += rm.get(TIS_LCS_FALLBACK_FRACTION_METRIC, 0.0) * n
+            sum_unaligned += rm.get(TIS_UNALIGNED_FRACTION_METRIC, 0.0) * n
+            sum_fail += rm.get(TIS_ALIGNMENT_FAIL_COUNT_METRIC, 0.0)
+            sum_lcs_msgs += rm.get(TIS_LCS_FALLBACK_MESSAGES_METRIC, 0.0)
+        if saw_tis:
+            denom = max(total_aligned, 1.0)
+            rollout_metrics[TIS_ALIGNED_TOKENS_METRIC] = total_aligned
+            rollout_metrics[TIS_EXACT_MATCH_FRACTION_METRIC] = sum_exact / denom
+            rollout_metrics[TIS_LCS_FALLBACK_FRACTION_METRIC] = sum_lcs / denom
+            rollout_metrics[TIS_UNALIGNED_FRACTION_METRIC] = sum_unaligned / denom
+            rollout_metrics[TIS_ALIGNMENT_FAIL_COUNT_METRIC] = sum_fail
+            rollout_metrics[TIS_LCS_FALLBACK_MESSAGES_METRIC] = sum_lcs_msgs
+            lcs_alert = 1.0 if (sum_lcs / denom) > tis_lcs_alert_threshold else 0.0
+            rollout_metrics[TIS_LCS_FALLBACK_ALERT_METRIC] = lcs_alert
+            total_tito_attempts = sum(
+                (output.get("rollout_metrics") or {}).get(TIS_TITO_FULL_ATTEMPTS_METRIC, 0.0)
+                for output in trajectory_batches
+            )
+            total_tito_successes = sum(
+                (output.get("rollout_metrics") or {}).get(TIS_TITO_FULL_SUCCESS_FRACTION_METRIC, 0.0)
+                * (output.get("rollout_metrics") or {}).get(TIS_TITO_FULL_ATTEMPTS_METRIC, 0.0)
+                for output in trajectory_batches
+            )
+            rollout_metrics[TIS_TITO_FULL_ATTEMPTS_METRIC] = total_tito_attempts
+            rollout_metrics[TIS_TITO_FULL_SUCCESS_FRACTION_METRIC] = (
+                total_tito_successes / total_tito_attempts if total_tito_attempts else 0.0
+            )
+            total_tito_declines = sum(
+                (output.get("rollout_metrics") or {}).get(TIS_TITO_FULL_DECLINE_COUNT_METRIC, 0.0)
+                for output in trajectory_batches
+            )
+            rollout_metrics[TIS_TITO_FULL_DECLINE_COUNT_METRIC] = total_tito_declines
+            rollout_metrics[TIS_ALIGNMENT_ALERT_METRIC] = (
+                1.0 if sum_unaligned > 0 or lcs_alert or total_tito_declines > 0 else 0.0
+            )
+            for reason in TitoFullDeclineReason:
+                name = f"{TIS_TITO_FULL_DECLINE_METRIC_PREFIX}{reason.value}"
+                rollout_metrics[name] = sum(
+                    (output.get("rollout_metrics") or {}).get(name, 0.0) for output in trajectory_batches
+                )
+
+        rollout_metrics.update(_merge_batch_failure_metrics(trajectory_batches))
+
+        # Retention counts per group, and this rebuilds rollout_metrics from responses and rewards, so
+        # the per-group counters have to be carried across or the archives are written unobserved.
+        for output in trajectory_batches:
+            for name, value in (output.get("rollout_metrics") or {}).items():
+                if name.startswith((RETENTION_METRIC_PREFIX, IDENTITY_AWARE_REWARD_METRIC_PREFIX)) or name in {
+                    LITERAL_BRIDGE_CORRELATED_TRIALS_METRIC,
+                    LITERAL_BRIDGE_CORRELATED_TURNS_METRIC,
+                }:
+                    rollout_metrics[name] = rollout_metrics.get(name, 0.0) + value
 
     return rollout_metrics
 
