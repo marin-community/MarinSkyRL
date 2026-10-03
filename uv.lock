@@ -3015,8 +3015,8 @@ megatron = [
     { name = "torchvision", marker = "sys_platform == 'linux'" },
     { name = "transformer-engine", extra = ["pytorch"], marker = "(sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "transformer-engine-cu13", marker = "sys_platform == 'linux'" },
-    { name = "transformer-engine-torch", version = "2.11.0", source = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-sm100-aarch64-20260920/transformer_engine_torch-2.11.0-cp312-cp312-linux_aarch64.whl" }, marker = "(platform_machine != 'x86_64' and sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
-    { name = "transformer-engine-torch", version = "2.11.0", source = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-torch2.13-20260910-6d12d7a0/transformer_engine_torch-2.11.0-cp312-cp312-linux_x86_64.whl" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
+    { name = "transformer-engine-torch", version = "2.19.0", source = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/fa4-te219-cu132-20260920-694f3adf/transformer_engine_torch-2.19.0-cp312-cp312-linux_aarch64.whl" }, marker = "(platform_machine != 'x86_64' and sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
+    { name = "transformer-engine-torch", version = "2.19.0", source = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/fa4-te219-cu132-20260920-694f3adf/transformer_engine_torch-2.19.0-cp312-cp312-linux_x86_64.whl" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
 ]
 telemetry = [
     { name = "marin-rigging", extra = ["prometheus"] },
@@ -3172,11 +3172,11 @@ requires-dist = [
     { name = "torchvision", marker = "sys_platform == 'linux' and extra == 'megatron'", specifier = "==0.28.0", index = "https://download.pytorch.org/whl/cu132", conflict = { package = "marinskyrl", extra = "megatron" } },
     { name = "torchvision", marker = "sys_platform == 'linux' and extra == 'vllm'", specifier = "==0.28.0", index = "https://download.pytorch.org/whl/cu132", conflict = { package = "marinskyrl", extra = "vllm" } },
     { name = "tqdm", specifier = ">=4.66" },
-    { name = "transformer-engine", extras = ["pytorch"], marker = "sys_platform == 'linux' and extra == 'megatron'", specifier = "==2.11.0" },
-    { name = "transformer-engine-cu13", marker = "sys_platform == 'linux' and extra == 'megatron'", specifier = "==2.11.0" },
-    { name = "transformer-engine-torch", marker = "platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'megatron'", url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-sm100-aarch64-20260920/transformer_engine_torch-2.11.0-cp312-cp312-linux_aarch64.whl" },
-    { name = "transformer-engine-torch", marker = "platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux' and extra == 'megatron'", specifier = "==2.11.0" },
-    { name = "transformer-engine-torch", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'megatron'", url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-torch2.13-20260910-6d12d7a0/transformer_engine_torch-2.11.0-cp312-cp312-linux_x86_64.whl" },
+    { name = "transformer-engine", extras = ["pytorch"], marker = "sys_platform == 'linux' and extra == 'megatron'", specifier = "==2.19.0" },
+    { name = "transformer-engine-cu13", marker = "sys_platform == 'linux' and extra == 'megatron'", specifier = "==2.19.0" },
+    { name = "transformer-engine-torch", marker = "platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'megatron'", url = "https://github.com/marin-community/MarinSkyRL/releases/download/fa4-te219-cu132-20260920-694f3adf/transformer_engine_torch-2.19.0-cp312-cp312-linux_aarch64.whl" },
+    { name = "transformer-engine-torch", marker = "platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux' and extra == 'megatron'", specifier = "==2.19.0" },
+    { name = "transformer-engine-torch", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'megatron'", url = "https://github.com/marin-community/MarinSkyRL/releases/download/fa4-te219-cu132-20260920-694f3adf/transformer_engine_torch-2.19.0-cp312-cp312-linux_x86_64.whl" },
     { name = "transformers", specifier = "==5.16.1" },
     { name = "uvicorn" },
     { name = "verifiable-instructions", git = "https://github.com/abukharin-nv/verifiable-instructions.git?rev=f46a5ac87b1400a4f8973039844b6be9b56e3faf" },
@@ -3858,6 +3858,18 @@ wheels = [
 ]
 
 [[package]]
+name = "nvdlfw-inspect"
+version = "0.2.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pyyaml", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
+    { name = "torch", version = "2.13.0+cu132", source = { registry = "https://download.pytorch.org/whl/cu132" }, marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8a/86/94188e03e5d4dd7b73c390b0cddcde5618b3799c18e327b2bf15763f6137/nvdlfw_inspect-0.2.2-py3-none-any.whl", hash = "sha256:8a4dc2814c5a4cd19ae304170b9bfa514538ef3c3eb243a45a82404ec3cb279d", size = 30964, upload-time = "2025-12-03T10:52:01.933Z" },
+]
+
+[[package]]
 name = "nvidia-cublas"
 version = "13.1.0.3"
 source = { registry = "https://pypi.org/simple" }
@@ -4034,11 +4046,15 @@ wheels = [
 
 [[package]]
 name = "nvidia-cudnn-frontend"
-version = "1.26.0"
+version = "1.30.0"
 source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "apache-tvm-ffi", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
+    { name = "nvidia-cutlass-dsl", extra = ["cu13"], marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (platform_machine == 'aarch64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine == 'aarch64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine == 'aarch64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine == 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine == 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
+]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/19/c4/3f587b73ac2eb6e391aebffb7a7a9ac9ed70e1e0e6a1d90ec0fdcb1a516f/nvidia_cudnn_frontend-1.26.0-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:ee50df3468f672aa31402fde4c911ad545d08e1d5e133e15bc55c3679d9fd9ca", size = 3471242, upload-time = "2026-07-07T20:55:30.929Z" },
-    { url = "https://files.pythonhosted.org/packages/9b/31/64818fbaa117456349241b42ddfaef3ae6b050f5e99bb0e9d78eb831279b/nvidia_cudnn_frontend-1.26.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:1a1223c4e2e8bbe6f620148d6848f4eb773dd94bef534d5b748e91232b5be618", size = 3627033, upload-time = "2026-07-07T20:55:47.089Z" },
+    { url = "https://files.pythonhosted.org/packages/e4/53/07836d9f74f1416a8768530d428c155f67d7728f283bce3a9b3096b7e18f/nvidia_cudnn_frontend-1.30.0-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:279d227a226429288ae9e4e88db744ce144ae69605f63a286dc84ae180869a6e", size = 8631629, upload-time = "2026-09-23T03:44:15.265Z" },
+    { url = "https://files.pythonhosted.org/packages/ee/95/c92076af7561e6e43da1ee3ac4155202dcd3876e5b999ff0dea5754eb3d2/nvidia_cudnn_frontend-1.30.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:5dda72db38ea0c39f158ebffa9596eefab21ce7cc6a12824490ab8b6cb60e76d", size = 8797507, upload-time = "2026-09-23T03:44:35.051Z" },
 ]
 
 [[package]]
@@ -6912,72 +6928,78 @@ wheels = [
 
 [[package]]
 name = "transformer-engine"
-version = "2.11.0"
+version = "2.19.0"
 source = { registry = "https://pypi.org/simple" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/00/33/44571ec584c88e1715f4c2afefc0ddd45064c7065ac1c6ffc8e832bc3ba3/transformer_engine-2.11.0-py3-none-any.whl", hash = "sha256:7ee1eae8fa6b0cb471c6066aa3555304fda8537174e5019929dc0c8655071df3", size = 723110, upload-time = "2026-01-02T09:58:23.245Z" },
+    { url = "https://files.pythonhosted.org/packages/4a/22/09e9ed5e69ee0c8c955bb6ee6d81748e4384f0cd24308ff1580387d09f7c/transformer_engine-2.19.0-py3-none-any.whl", hash = "sha256:965d78429d287f7db6978bf299cfcecf68c730247f05cc830ecc6983a123bbc7", size = 1135745, upload-time = "2026-09-11T16:18:37.173Z" },
 ]
 
 [package.optional-dependencies]
 pytorch = [
-    { name = "transformer-engine-torch", version = "2.11.0", source = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-sm100-aarch64-20260920/transformer_engine_torch-2.11.0-cp312-cp312-linux_aarch64.whl" }, marker = "(platform_machine != 'x86_64' and sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
-    { name = "transformer-engine-torch", version = "2.11.0", source = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-torch2.13-20260910-6d12d7a0/transformer_engine_torch-2.11.0-cp312-cp312-linux_x86_64.whl" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
+    { name = "transformer-engine-torch", version = "2.19.0", source = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/fa4-te219-cu132-20260920-694f3adf/transformer_engine_torch-2.19.0-cp312-cp312-linux_aarch64.whl" }, marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
+    { name = "transformer-engine-torch", version = "2.19.0", source = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/fa4-te219-cu132-20260920-694f3adf/transformer_engine_torch-2.19.0-cp312-cp312-linux_x86_64.whl" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
 ]
 
 [[package]]
 name = "transformer-engine-cu13"
-version = "2.11.0"
+version = "2.19.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "importlib-metadata", marker = "sys_platform == 'linux'" },
-    { name = "packaging", marker = "sys_platform == 'linux'" },
-    { name = "pydantic", marker = "sys_platform == 'linux'" },
+    { name = "importlib-metadata", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
+    { name = "packaging", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
+    { name = "pydantic", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c8/27/0de6e2f693529e1f735eaf5b9c652e8f68c2eec2f709909f0785f17cfb8d/transformer_engine_cu13-2.11.0-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:0f01df55df1817295385ded989b2d03d72ef32176401ff547fdffa38f93019ea", size = 178536851, upload-time = "2026-01-02T09:55:28.863Z" },
-    { url = "https://files.pythonhosted.org/packages/33/09/9f8c0948aa9561b24717ee05396868e3e784ee67d5c39b24e83c719c1273/transformer_engine_cu13-2.11.0-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:62febd0422cc9003f1048f97be75f4a05d6e43092baf28a5ff6b857b638181c0", size = 179248112, upload-time = "2026-01-02T09:44:26.223Z" },
+    { url = "https://files.pythonhosted.org/packages/fa/87/8bf198c7ec3ec60b021b0b6dadb387d93eb08acfd251872b7c46e59ec723/transformer_engine_cu13-2.19.0-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:54dd7a38437cc3d80b94cf6fb91780d7dc5c34d80e62d79f6d892919f80e40a3", size = 242765590, upload-time = "2026-09-11T00:37:09.465Z" },
+    { url = "https://files.pythonhosted.org/packages/86/3f/d70c96b4e3f2d19cf79ae644a9f8ff451d4c3288a367222d3fa8f0c53ea6/transformer_engine_cu13-2.19.0-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:31a3afd47832160c64653ac4b7b34dfbb3b06a84681eb9474a501b2cd1912756", size = 244604595, upload-time = "2026-09-11T00:36:36.079Z" },
 ]
 
 [[package]]
 name = "transformer-engine-torch"
-version = "2.11.0"
-source = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-sm100-aarch64-20260920/transformer_engine_torch-2.11.0-cp312-cp312-linux_aarch64.whl" }
+version = "2.19.0"
+source = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/fa4-te219-cu132-20260920-694f3adf/transformer_engine_torch-2.19.0-cp312-cp312-linux_aarch64.whl" }
 resolution-markers = [
     "platform_machine == 'aarch64' and sys_platform == 'linux'",
 ]
 dependencies = [
-    { name = "einops", marker = "platform_machine != 'x86_64' and sys_platform == 'linux'" },
-    { name = "onnx", marker = "platform_machine != 'x86_64' and sys_platform == 'linux'" },
-    { name = "onnxscript", marker = "platform_machine != 'x86_64' and sys_platform == 'linux'" },
-    { name = "packaging", marker = "platform_machine != 'x86_64' and sys_platform == 'linux'" },
-    { name = "pydantic", marker = "platform_machine != 'x86_64' and sys_platform == 'linux'" },
-    { name = "torch", version = "2.13.0+cu132", source = { registry = "https://download.pytorch.org/whl/cu132" }, marker = "platform_machine != 'x86_64' and sys_platform == 'linux'" },
-    { name = "transformer-engine-cu13", marker = "platform_machine != 'x86_64' and sys_platform == 'linux'" },
+    { name = "einops", marker = "platform_machine == 'aarch64' and sys_platform == 'linux'" },
+    { name = "nvdlfw-inspect", marker = "platform_machine == 'aarch64' and sys_platform == 'linux'" },
+    { name = "nvidia-cudnn-frontend", marker = "platform_machine == 'aarch64' and sys_platform == 'linux'" },
+    { name = "onnx", marker = "platform_machine == 'aarch64' and sys_platform == 'linux'" },
+    { name = "onnxscript", marker = "platform_machine == 'aarch64' and sys_platform == 'linux'" },
+    { name = "packaging", marker = "platform_machine == 'aarch64' and sys_platform == 'linux'" },
+    { name = "pydantic", marker = "platform_machine == 'aarch64' and sys_platform == 'linux'" },
+    { name = "torch", version = "2.13.0+cu132", source = { registry = "https://download.pytorch.org/whl/cu132" }, marker = "platform_machine == 'aarch64' and sys_platform == 'linux'" },
+    { name = "transformer-engine-cu13", marker = "platform_machine == 'aarch64' and sys_platform == 'linux'" },
 ]
 wheels = [
-    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-sm100-aarch64-20260920/transformer_engine_torch-2.11.0-cp312-cp312-linux_aarch64.whl", hash = "sha256:2536c53932112452e0a2e3486715010d7d104240a239423836c1ce480bf5185f" },
+    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/fa4-te219-cu132-20260920-694f3adf/transformer_engine_torch-2.19.0-cp312-cp312-linux_aarch64.whl", hash = "sha256:185d4dd78a26623351d7ea22ac3a353d6c675bdee47f19b6d8839618473c82ac" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "einops" },
+    { name = "nvdlfw-inspect" },
+    { name = "nvidia-cudnn-frontend", specifier = ">=1.28.0" },
     { name = "onnx" },
     { name = "onnxscript" },
     { name = "packaging" },
     { name = "pydantic" },
     { name = "torch", specifier = ">=2.1" },
-    { name = "transformer-engine-cu13", specifier = "==2.11.0" },
+    { name = "transformer-engine-cu13", specifier = "==2.19.0" },
 ]
 
 [[package]]
 name = "transformer-engine-torch"
-version = "2.11.0"
-source = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-torch2.13-20260910-6d12d7a0/transformer_engine_torch-2.11.0-cp312-cp312-linux_x86_64.whl" }
+version = "2.19.0"
+source = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/fa4-te219-cu132-20260920-694f3adf/transformer_engine_torch-2.19.0-cp312-cp312-linux_x86_64.whl" }
 resolution-markers = [
     "platform_machine == 'x86_64' and sys_platform == 'linux'",
 ]
 dependencies = [
     { name = "einops", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "nvdlfw-inspect", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "nvidia-cudnn-frontend", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "onnx", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "onnxscript", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "packaging", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
@@ -6986,18 +7008,20 @@ dependencies = [
     { name = "transformer-engine-cu13", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
 ]
 wheels = [
-    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-torch2.13-20260910-6d12d7a0/transformer_engine_torch-2.11.0-cp312-cp312-linux_x86_64.whl", hash = "sha256:596070700a714d6c2240dff2c3343f2ebd6fcbff28d9bd5d48e1738a1c1f88e8" },
+    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/fa4-te219-cu132-20260920-694f3adf/transformer_engine_torch-2.19.0-cp312-cp312-linux_x86_64.whl", hash = "sha256:1eb84026d9617aed8c656d91877d19ff70647697d6a2993de90063e6a6c37d56" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "einops" },
+    { name = "nvdlfw-inspect" },
+    { name = "nvidia-cudnn-frontend", specifier = ">=1.28.0" },
     { name = "onnx" },
     { name = "onnxscript" },
     { name = "packaging" },
     { name = "pydantic" },
     { name = "torch", specifier = ">=2.1" },
-    { name = "transformer-engine-cu13", specifier = "==2.11.0" },
+    { name = "transformer-engine-cu13", specifier = "==2.19.0" },
 ]
 
 [[package]]

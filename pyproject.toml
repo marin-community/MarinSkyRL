@@ -102,8 +102,7 @@ megatron = [
     "cuda-toolkit[nvcc,cccl]==13.2.1 ; sys_platform == 'linux'",
     "accelerate>=1.14,<2 ; sys_platform == 'linux'",
     "causal-conv1d>=1.5,<2 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    # Transformer Engine 2.11 rejects flash-attn 2.8.4; CP2 cannot fall back.
-    # See https://github.com/NVIDIA/TransformerEngine/blob/v2.11/transformer_engine/pytorch/attention/dot_product_attention/utils.py
+    # Keep the qualified FlashAttention 2 path for context parallelism.
     "flash-attn==2.8.3 ; sys_platform == 'linux'",
     "flash-linear-attention==0.4.2 ; sys_platform == 'linux'",
     "mamba-ssm>=2.2,<3 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
@@ -116,9 +115,9 @@ megatron = [
     "torch==2.13.0 ; sys_platform == 'linux'",
     "torchdata ; sys_platform == 'linux'",
     "torchvision==0.28.0 ; sys_platform == 'linux'",
-    "transformer-engine[pytorch]==2.11.0 ; sys_platform == 'linux'",
-    "transformer-engine-cu13==2.11.0 ; sys_platform == 'linux'",
-    "transformer-engine-torch==2.11.0 ; sys_platform == 'linux'",
+    "transformer-engine[pytorch]==2.19.0 ; sys_platform == 'linux'",
+    "transformer-engine-cu13==2.19.0 ; sys_platform == 'linux'",
+    "transformer-engine-torch==2.19.0 ; sys_platform == 'linux'",
 ]
 telemetry = [
     "marin-rigging[prometheus]>=0.2.123.dev35633925924",
@@ -233,8 +232,8 @@ vllm = [
     { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260929-39e62869693c/vllm-0.0.0.dev20260929+marin.39e62869693c.cu132-cp38-abi3-manylinux_2_28_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
 ]
 transformer-engine-torch = [
-    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-sm100-aarch64-20260920/transformer_engine_torch-2.11.0-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
-    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-torch2.13-20260910-6d12d7a0/transformer_engine_torch-2.11.0-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/fa4-te219-cu132-20260920-694f3adf/transformer_engine_torch-2.19.0-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/fa4-te219-cu132-20260920-694f3adf/transformer_engine_torch-2.19.0-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
 ]
 causal-conv1d = [
     { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-torch2.13-20260910-6d12d7a0/causal_conv1d-1.6.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
