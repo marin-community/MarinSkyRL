@@ -55,7 +55,12 @@ def test_evaluation_callback_respects_final_evaluation_configuration(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "requirement",
-    [{"minimum": 0.65}, {"minimum": 0.65, "min_improvement": None}, {"min_improvement": 0.4, "minimum": None}],
+    [
+        {"minimum": 0.65},
+        {"min_improvement": 0.4},
+        {"minimum": 0.65, "min_improvement": None},
+        {"min_improvement": 0.4, "minimum": None},
+    ],
 )
 async def test_evaluation_stops_at_the_first_qualifying_score(requirement, callback_schema):
     recipe_type, config = callback_schema
