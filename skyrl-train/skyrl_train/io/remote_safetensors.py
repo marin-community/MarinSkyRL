@@ -9,7 +9,7 @@ import json
 import math
 import time
 from pathlib import Path, PurePosixPath
-from typing import Iterable
+from typing import BinaryIO, Iterable
 
 import torch
 
@@ -72,6 +72,7 @@ class RemoteSafetensorsTensorStore:
         index_path = Path(metadata_dir) / HF_WEIGHT_INDEX_FILENAME
         self._headers: dict[str, tuple[int, dict[str, object]]] = {}
         self.read_stats = ReadStats()
+        self._handles: dict[str, BinaryIO] = {}
         if index_path.exists():
             try:
                 index = json.loads(index_path.read_text())
@@ -84,14 +85,7 @@ class RemoteSafetensorsTensorStore:
             shard_uri = join_resource_path(self.source_uri, shard)
             if not io.exists(shard_uri):
                 raise ValueError(f"Missing safetensors weight index and single-file shard: {index_path}")
-            started = time.monotonic()
-            with io.open_file(shard_uri, "rb") as source:
-                self.read_stats = replace(
-                    self.read_stats,
-                    opens=self.read_stats.opens + 1,
-                    read_seconds=self.read_stats.read_seconds + time.monotonic() - started,
-                )
-                _offset, header = self._header(shard, source)
+            _offset, header = self._header(shard)
             weight_map = {key: shard for key in header if key != "__metadata__"}
         if not isinstance(weight_map, dict) or not weight_map:
             raise ValueError(f"Safetensors weight index has an empty weight_map: {index_path}")
@@ -103,10 +97,21 @@ class RemoteSafetensorsTensorStore:
     def get_all_keys(self) -> list[str]:
         return sorted(self._weight_map)
 
-    def _header(self, shard: str, source) -> tuple[int, dict[str, object]]:
+    def _header(self, shard: str) -> tuple[int, dict[str, object]]:
         cached = self._headers.get(shard)
         if cached is not None:
             return cached
+        shard_uri = join_resource_path(self.source_uri, shard)
+        source = self._handles.get(shard)
+        if source is None:
+            started = time.monotonic()
+            source = io.open_file(shard_uri, "rb", cache_type="none")
+            self._handles[shard] = source
+            self.read_stats = replace(
+                self.read_stats,
+                opens=self.read_stats.opens + 1,
+                read_seconds=self.read_stats.read_seconds + time.monotonic() - started,
+            )
         source.seek(0)
         started = time.monotonic()
         header_bytes, _keys = read_safetensors_header(source, join_resource_path(self.source_uri, shard))
@@ -147,35 +152,29 @@ class RemoteSafetensorsTensorStore:
             raise KeyError(f"Tensor is absent from the safetensors index: {key!r}")
         shard = self._weight_map[key]
         shard_uri = join_resource_path(self.source_uri, shard)
+        data_offset, header = self._header(shard)
+        source = self._handles[shard]
+        dtype, shape, start, _end = self._tensor_descriptor(key, shard, header)
+        if not shape:
+            raise IndexError(f"Cannot slice scalar safetensors tensor {key!r}")
+        normalized_index = index + shape[0] if index < 0 else index
+        if normalized_index < 0 or normalized_index >= shape[0]:
+            raise IndexError(f"First-dimension index {index} is out of bounds for {key!r} with shape {shape}")
+        slice_shape = shape[1:]
+        slice_size = math.prod(slice_shape) * torch.empty((), dtype=dtype).element_size()
+        slice_start = start + normalized_index * slice_size
+        source.seek(data_offset + slice_start)
         started = time.monotonic()
-        with io.open_file(shard_uri, "rb") as source:
-            self.read_stats = replace(
-                self.read_stats,
-                opens=self.read_stats.opens + 1,
-                read_seconds=self.read_stats.read_seconds + time.monotonic() - started,
-            )
-            data_offset, header = self._header(shard, source)
-            dtype, shape, start, _end = self._tensor_descriptor(key, shard, header)
-            if not shape:
-                raise IndexError(f"Cannot slice scalar safetensors tensor {key!r}")
-            normalized_index = index + shape[0] if index < 0 else index
-            if normalized_index < 0 or normalized_index >= shape[0]:
-                raise IndexError(f"First-dimension index {index} is out of bounds for {key!r} with shape {shape}")
-            slice_shape = shape[1:]
-            slice_size = math.prod(slice_shape) * torch.empty((), dtype=dtype).element_size()
-            slice_start = start + normalized_index * slice_size
-            source.seek(data_offset + slice_start)
-            started = time.monotonic()
-            payload = bytearray(source.read(slice_size))
-            self.read_stats = replace(
-                self.read_stats,
-                reads=self.read_stats.reads + 1,
-                bytes_read=self.read_stats.bytes_read + len(payload),
-                read_seconds=self.read_stats.read_seconds + time.monotonic() - started,
-            )
-            if len(payload) != slice_size:
-                raise ValueError(f"Truncated tensor slice {key!r}[{index}] in {shard_uri}")
-            return torch.frombuffer(payload, dtype=dtype).reshape(slice_shape)
+        payload = bytearray(source.read(slice_size))
+        self.read_stats = replace(
+            self.read_stats,
+            reads=self.read_stats.reads + 1,
+            bytes_read=self.read_stats.bytes_read + len(payload),
+            read_seconds=self.read_stats.read_seconds + time.monotonic() - started,
+        )
+        if len(payload) != slice_size:
+            raise ValueError(f"Truncated tensor slice {key!r}[{index}] in {shard_uri}")
+        return torch.frombuffer(payload, dtype=dtype).reshape(slice_shape)
 
     def load_tensors(self, keys: list[str]) -> dict[str, torch.Tensor]:
         missing = [key for key in keys if key not in self._weight_map]
@@ -191,28 +190,22 @@ class RemoteSafetensorsTensorStore:
 
         for shard, shard_keys in by_shard.items():
             shard_uri = join_resource_path(self.source_uri, shard)
-            started = time.monotonic()
-            with io.open_file(shard_uri, "rb") as source:
+            data_offset, header = self._header(shard)
+            source = self._handles[shard]
+            for key in shard_keys:
+                dtype, shape, start, end = self._tensor_descriptor(key, shard, header)
+                source.seek(data_offset + start)
+                started = time.monotonic()
+                payload = bytearray(source.read(end - start))
                 self.read_stats = replace(
                     self.read_stats,
-                    opens=self.read_stats.opens + 1,
+                    reads=self.read_stats.reads + 1,
+                    bytes_read=self.read_stats.bytes_read + len(payload),
                     read_seconds=self.read_stats.read_seconds + time.monotonic() - started,
                 )
-                data_offset, header = self._header(shard, source)
-                for key in shard_keys:
-                    dtype, shape, start, end = self._tensor_descriptor(key, shard, header)
-                    source.seek(data_offset + start)
-                    started = time.monotonic()
-                    payload = bytearray(source.read(end - start))
-                    self.read_stats = replace(
-                        self.read_stats,
-                        reads=self.read_stats.reads + 1,
-                        bytes_read=self.read_stats.bytes_read + len(payload),
-                        read_seconds=self.read_stats.read_seconds + time.monotonic() - started,
-                    )
-                    if len(payload) != end - start:
-                        raise ValueError(f"Truncated tensor {key!r} in {shard_uri}")
-                    tensors[key] = torch.frombuffer(payload, dtype=dtype).reshape(shape)
+                if len(payload) != end - start:
+                    raise ValueError(f"Truncated tensor {key!r} in {shard_uri}")
+                tensors[key] = torch.frombuffer(payload, dtype=dtype).reshape(shape)
         return tensors
 
 

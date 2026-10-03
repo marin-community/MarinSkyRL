@@ -76,6 +76,38 @@ def test_remote_read_statistics_match_file_reads(tmp_path: Path, monkeypatch, in
 
 
 @pytest.mark.parametrize("indexed", [True, False])
+def test_single_key_and_expert_slice_reads_fetch_only_requested_bytes(
+    tmp_path: Path, monkeypatch, indexed: bool
+) -> None:
+    shard = tmp_path / "model.safetensors"
+    tensors = {f"layer.{index}.weight": torch.arange(8 + index, dtype=torch.float32) for index in range(3)}
+    tensors["experts.weight"] = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+    tensors["unrequested.weight"] = torch.ones(1024)
+    save_file(tensors, shard)
+    filesystem = CountingFileSystem(shard.read_bytes())
+    local_filesystem_for = io._get_filesystem
+    monkeypatch.setattr(
+        io, "_get_filesystem", lambda path: filesystem if path.startswith("s3://") else local_filesystem_for(path)
+    )
+    metadata = tmp_path / "metadata"
+    if indexed:
+        _write_index(metadata, {key: shard.name for key in tensors})
+    else:
+        metadata.mkdir()
+    store = RemoteSafetensorsTensorStore("s3://bucket/policy", metadata, lazy_first_dim_patterns=("experts.weight",))
+    for index in (2, 0, 1):
+        key = f"layer.{index}.weight"
+        torch.testing.assert_close(store.load_tensors([key])[key], tensors[key])
+    experts = store.load_tensors(["experts.weight"])["experts.weight"]
+    for index in (2, 0, 1):
+        torch.testing.assert_close(experts[index], tensors["experts.weight"][index])
+    unrequested = tensors["unrequested.weight"]
+    expected_bytes = len(filesystem.payload) - unrequested.numel() * unrequested.element_size()
+    assert store.read_stats.opens == filesystem.opens == 1
+    assert filesystem.fetched_bytes == filesystem.bytes_read == store.read_stats.bytes_read == expected_bytes
+
+
+@pytest.mark.parametrize("indexed", [True, False])
 def test_loads_only_requested_tensor_range_without_local_weight_files(tmp_path: Path, indexed: bool) -> None:
     remote = tmp_path / "remote"
     remote.mkdir()
