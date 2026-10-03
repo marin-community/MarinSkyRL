@@ -1,17 +1,10 @@
-"""Compiled vLLM's kernels and expert-parallel combine, which the Grug trainer runs under
-``Numerics.EXACT``.
+"""Compiled vLLM's kernels and expert-parallel combine, which the Grug trainer runs under ``Numerics.EXACT``.
 
-``fa3_attention_sbhd`` runs vLLM's own FA3 forward (``vllm.vllm_flash_attn``, the build the rollout engine serves with)
-on the trainer's query, key and value, computing every row as a decode-invariant engine
-(``inference_engines.vllm.decode_invariant``) computes it in decode and prefill steps alike: every request with
-``FA3_INVARIANT_SPLITS`` splits, and on sliding-window layers every row past the window as a one-row request.
-``vllm_ep_combine`` adds each token's routed expert outputs the way vLLM's expert-parallel combine does: every EP rank
-sums the token's slots it owns in fp32 and rounds once, and a bf16 ring reduction adds the rank partials, starting after
-the rank that holds the token's request and ending at it. ``vllm_topk_experts`` selects each token's experts with
-vLLM's call, ``vllm_expert_outputs`` computes each token-expert slot with vLLM's fused-MoE Triton kernels,
-``vllm_qkv_projection`` the attention's q, k and v as vLLM's three GEMMs on weights repacked from Megatron's fused
-QKV weight once per trainer forward (``repacked_weights``), and ``vllm_token_logprobs`` the log-probabilities with
-model runner V2's kernel.
+Each function computes its values as a decode-invariant engine (``inference_engines.vllm.decode_invariant``) does:
+``fa3_attention_sbhd`` the attention, ``vllm_qkv_projection`` the q, k and v projections, ``vllm_topk_experts`` the
+router's selection, ``vllm_expert_outputs`` the routed experts, ``vllm_ep_combine`` the expert-parallel combine and
+``vllm_token_logprobs`` the log-probabilities. The combine's order reads each sequence's serving engine rank from
+``serving_engine_ranks``, and ``vllm_qkv_projection`` keeps its repacked weights within ``repacked_weights``.
 """
 
 from __future__ import annotations
@@ -30,10 +23,11 @@ from skyrl_train.models.grug_fa3_invariant import (
     fa3_fixed_split_metadata,
 )
 
-# ``vllm_expert_outputs`` addresses each expert's weights in units of this many elements from the lowest-addressed one.
+# ``vllm_expert_outputs`` addresses each expert's weights in units of this many elements from the lowest-addressed one,
+# a stride that Triton specializes as divisible by 16, as it does the stride of vLLM's own stacked expert weights.
 EXPERT_OFFSET_ELEMENTS = 16
-# ``_expert_offset_table``'s tables by expert-weight addresses; cleared when it holds this many (parameters that move,
-# for example when the model is offloaded and reloaded, leave old entries behind).
+# ``_expert_offset_table``'s tables by expert-weight addresses, cleared at this many since moved parameters leave
+# stale entries.
 _EXPERT_OFFSET_TABLE_LIMIT = 256
 _EXPERT_OFFSET_TABLES: dict[tuple, tuple[int, torch.Tensor]] = {}
 # Each sequence's serving vLLM data-parallel rank and vLLM's expert-parallel size, while ``serving_engine_ranks`` holds
@@ -77,17 +71,11 @@ def _fa3_forward(query, key, value, *, rows: int, requests: int, window: int | N
 
 
 def _fa3_window_rows_forward(query, key, value, *, rows: int, requests: int, window: int, scale: float):
-    """Sliding-window FA3 over ``requests`` sequences of ``rows`` rows as a decode-invariant engine computes each row:
-    every request with ``FA3_INVARIANT_SPLITS`` splits, and each row past the window alone, its 128-key blocks starting
-    at its own window start.
+    """Sliding-window FA3 over ``requests`` sequences of ``rows`` rows, each row computed as a decode-invariant engine
+    computes it.
 
-    The rows before the window read every key from position 0 and run as one local request per sequence. Each later row
-    runs as a one-row request of FA3's causal kernel over exactly its window of keys: ``cu_seqlens_k`` holds the window
-    starts and ``seqused_k`` the window, so the causal kernel walks the same blocks from the same first key, and cuts
-    them into the same splits, as the local kernel's one-row request that a decode step runs, on 64-row tiles where the
-    local kernel runs 128 (FA3 picks one MMA warpgroup for few query rows only off sliding-window layers).
-    ``max_seqlen_q`` is 2: at 1, FA3 runs these requests non-causal, whose 176-key blocks group the keys otherwise. The
-    later rows go in calls of at most ``FA3_DYNAMIC_SPLIT_MAX_BATCH`` requests, the most FA3 splits.
+    The first ``window`` rows of each sequence run as one request; each later row runs as a one-row request of FA3's
+    causal kernel over exactly its window of keys, in calls of at most ``FA3_DYNAMIC_SPLIT_MAX_BATCH`` requests.
     """
     device = query.device
     group, kv_heads = query.shape[1] // key.shape[1], key.shape[1]
@@ -119,7 +107,7 @@ def _fa3_window_rows_forward(query, key, value, *, rows: int, requests: int, win
                 cu_seqlens_q=query_start,  # one row per request
                 cu_seqlens_k=window_starts,  # each request's first key
                 seqused_k=_window_lengths(count, window, device),
-                max_seqlen_q=2,
+                max_seqlen_q=2,  # at 1, FA3 runs the requests non-causal, which blocks the keys differently
                 max_seqlen_k=window,
                 softmax_scale=scale,
                 scheduler_metadata=metadata,
@@ -139,9 +127,7 @@ def fa3_attention_sbhd(
     """vLLM's FA3 forward on Megatron's ``[S, B, heads, dim]`` tensors, every row computed as a decode-invariant engine
     computes it; returns ``[S, B, heads * dim]``.
 
-    Each sequence is one varlen request with ``FA3_INVARIANT_SPLITS`` splits: right padding changes no valid row, since a
-    causal row reads no later key and its key blocks start at key 0. On a sliding-window layer each row past the window
-    is a one-row request (``_fa3_window_rows_forward``).
+    Each sequence is one varlen request, so right padding changes no valid row.
     """
     sequence, batch, heads, head_dim = query.shape
     flat = [t.transpose(0, 1).reshape(batch * sequence, *t.shape[2:]).contiguous() for t in (query, key, value)]
@@ -159,11 +145,11 @@ def vllm_topk_experts(biased_logits: torch.Tensor, top_k: int) -> torch.Tensor:
 
 
 def vllm_token_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Tensor:
-    """Model runner V2's log-probability of ``token_ids[i]`` under row ``i`` of the ``[rows, vocab]`` ``logits``.
+    """Model runner V2's log-probability (``compute_token_logprobs``) of ``token_ids[i]`` under row ``i`` of the
+    ``[rows, vocab]`` ``logits``.
 
-    vLLM's model runner V2 computes every prompt and sampled log-probability with ``compute_token_logprobs``: one
-    Triton program per row takes the row's maximum and the sum of ``exp(logit - max)`` over 1,024-wide vocabulary
-    blocks, and returns ``logit - max - log(sum)``. Each row's value depends on that row alone.
+    Each row's value depends on that row alone. Raises ``ValueError`` unless ``logits`` is 2-D with unit vocabulary
+    stride.
     """
     from vllm.v1.worker.gpu.sample.logprob import compute_token_logprobs
 
@@ -216,14 +202,9 @@ def vllm_ep_combine(
     ``permuted`` holds the weighted expert outputs in Megatron's permuted order (by expert, then token);
     ``routing_map`` is the ``[tokens, experts]`` selection, ``selected`` the ``[tokens, top_k]`` experts in
     vLLM's slot order and ``home_ranks`` the vLLM data-parallel rank holding each token's request. vLLM's
-    EP rank ``r`` owns experts ``[r * E / R, (r + 1) * E / R)``; its ``moe_sum`` adds the token's slots it
-    owns, in slot order, to an fp32 zero and rounds once. NCCL's ring reduce-scatter (a ring reduce per
-    rank when the ranks' token counts differ) adds the rank partials in bf16 from ``home + 1`` round to
-    ``home``; a rank that owns none of the token's experts adds an exact zero.
-
-    The permuted rows run by expert, then by token, so a token-expert pair's row is the number of selected
-    pairs at or before it in that order, less one: one cumulative sum over the expert-major routing map, which
-    never waits on the device. On CUDA one Triton kernel adds every token's slots (``grug_ep_combine_kernel``).
+    EP rank ``r`` owns experts ``[r * E / R, (r + 1) * E / R)`` and adds the token's slots it owns, in slot
+    order, to an fp32 zero and rounds once; the ring reduce-scatter adds the rank partials in bf16 from
+    ``home + 1`` round to ``home``.
     """
     tokens, experts = routing_map.shape
     top_k = selected.shape[1]
@@ -259,22 +240,13 @@ def vllm_expert_outputs(
     fc1_weights: Sequence[torch.Tensor],
     fc2_weights: Sequence[torch.Tensor],
 ) -> torch.Tensor:
-    """Each dispatched row's routed-expert output as vLLM's ``TritonExperts`` computes one token-expert slot.
+    """Each dispatched row's routed-expert output, weighted by its route weight, as vLLM's ``TritonExperts`` computes
+    one token-expert slot.
 
     ``hidden`` ``[rows, hidden]`` holds each local expert's rows in turn (``tokens_per_expert`` of them),
     ``probs`` the rows' fp32 route weights, and ``fc1_weights`` / ``fc2_weights`` each expert's
-    ``[2 * ffn, hidden]`` gate-and-up and ``[hidden, ffn]`` down projection. As ``TritonExperts.apply`` does,
-    this aligns the rows by expert (``moe_align_block_size``), runs ``fused_moe_kernel`` for gate-and-up,
-    ``silu_and_mul``, and ``fused_moe_kernel`` for the down projection with the route weight multiplied into the
-    fp32 accumulator before one bf16 rounding, all with vLLM's launch config for the shapes. Every row is one
-    slot (``top_k`` 1). A slot's bytes depend only on its row, its expert and its weight: the kernel adds the K
-    blocks in order into one fp32 accumulator without split-K, whatever the config or the other rows.
-
-    The kernel reads the experts' weights where the trainer keeps them, one tensor per expert: it addresses a
-    block's expert at ``B + expert_ids[block] * B.stride(0)``, so each block gets its expert's offset from the
-    lowest-addressed expert weight, in units of ``EXPERT_OFFSET_ELEMENTS``, as its expert id, with that unit as
-    the expert stride. Triton specializes a stride divisible by 16, so it can assume the same weight-address
-    alignment as for vLLM's own stacked weights.
+    ``[2 * ffn, hidden]`` gate-and-up and ``[hidden, ffn]`` down projection, laid out as
+    ``expert_weight_offsets`` requires. A slot's bytes depend only on its row, its expert and its route weight.
     """
     from vllm.model_executor.layers.fused_moe.config import FUSED_MOE_UNQUANTIZED_CONFIG
     from vllm.model_executor.layers.fused_moe.fused_moe import try_get_optimal_moe_config
@@ -416,11 +388,8 @@ def vllm_qkv_projection(
 
 
 def _expert_offset_table(weights: Sequence[torch.Tensor], device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
-    """The lowest-addressed expert weight and the experts' ``expert_weight_offsets`` table on ``device``.
-
-    The table depends only on the weights' addresses, which the trainer's expert parameters keep from call to call,
-    so it is built once per set of addresses (and again after the parameters move).
-    """
+    """The lowest-addressed expert weight and the experts' ``expert_weight_offsets`` table on ``device``, cached by
+    the weights' addresses."""
     addresses = tuple(weight.data_ptr() for weight in weights)
     key = (device, addresses, tuple(weights[0].shape), weights[0].dtype)
     cached = _EXPERT_OFFSET_TABLES.get(key)

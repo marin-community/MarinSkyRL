@@ -121,8 +121,8 @@ def _patch_fixed_splits() -> None:
 
 
 def _patch_flash_attention_version() -> None:
-    """Every attention layer runs FA3, the kernel the fixed splits and window starts are written for: vLLM selects
-    another version on a GPU that is not Hopper or under ``attention_config.flash_attn_version``."""
+    """Make each FlashAttention layer's construction raise unless vLLM selected FA3, the version the fixed splits and
+    window starts are written for."""
     original_init = flash_attn.FlashAttentionImpl.__init__
 
     def checked_init(self, *args, **kwargs):

@@ -334,12 +334,11 @@ def from_parallel_logits_to_logprobs(
 
 
 def vllm_prompt_logprobs(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """Each next token's log-probability as vLLM's model runner V2 computes it, without gradients.
+    """Each next token's log-probability as vLLM's model runner V2 computes it (``vllm_token_logprobs``), without
+    gradients.
 
-    vLLM's model runner V2 computes every prompt and sampled log-probability with its own kernel on the unsharded bf16
-    logits (``vllm_token_logprobs``), whose reduction over the vocabulary sums in another order than the trainer's
-    ``_compute_distributed_log_softmax``. ``logits`` is ``[batch, seq_len, vocab]`` and ``target`` the unshifted
-    ``[batch, seq_len]`` tokens; returns ``[batch, seq_len - 1]`` as ``from_parallel_logits_to_logprobs`` does.
+    ``logits`` is the unsharded ``[batch, seq_len, vocab]`` and ``target`` the unshifted ``[batch, seq_len]`` tokens;
+    returns ``[batch, seq_len - 1]`` as ``from_parallel_logits_to_logprobs`` does.
     """
     batch, seq_len, vocab = logits.shape
     target = target.roll(shifts=-1, dims=-1)

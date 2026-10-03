@@ -22,8 +22,8 @@ from tests.gpu.utils import get_test_actor_config
 TOKENIZER = "Qwen/Qwen2.5-0.5B-Instruct"
 POLICY_WORLD_SIZE = 2
 PAD_TOKEN_ID = 0
-# One sequence per micro-batch, from under half the 2,048-token sliding window to over twice it. Two consecutive
-# micro-batches share a length: a freed tensor's storage can come back for the next micro-batch's same-shaped tensor.
+# One sequence per micro-batch, from under half the 2,048-token sliding window to over twice it; two consecutive
+# micro-batches share a length so that a freed tensor's storage can come back for the next micro-batch's tensor.
 BODY_LENGTHS = (900, 1500, 2200, 2200, 3000, 4300)
 RESPONSE_LENGTH = 256
 ENGINE_EXPERT_PARALLEL_SIZE = 2
@@ -240,19 +240,11 @@ def _pooled(distances: dict[str, tuple[float, float]], prefix: str = "") -> tupl
 
 
 def test_exact_gradients_agree_with_and_without_recompute(tmp_path):
-    """Under exact numerics, full activation recompute in one-layer units must give the gradients of the same
+    """Under exact numerics, full activation recompute in one-layer units gives the gradients of the same
     forward-backward without recompute, with six micro-batches in flight on two pipeline stages.
 
-    The recompute rebuilds each layer's graph from values its first forward kept per micro-batch (input-norm
-    statistics and FA3 outputs), so a recompute that read another micro-batch's values, or recomputed a value instead
-    of taking the kept one, changes the gradient. The forward values are the same in every arm: the training
-    log-probabilities equal the eval forward's bit for bit. Two runs of the recompute arm bound the backward's
-    run-to-run noise. A repeatable backward must agree with the no-recompute arm bit for bit. Otherwise the noise is
-    pooled over every gradient, since one tensor's repeat can agree by chance while another run's does not (28 and
-    1,074 of 2,104 tensors differed between repeats in two runs with the attention backward's non-deterministic
-    algorithms allowed), and each stage's gradients must lie within twice the pooled L2 distance and twice the largest
-    entry; handing a recompute another in-flight micro-batch's kept values moved the first stage by 427 times the
-    pooled L2 distance.
+    The gradients must agree bit for bit when the recompute arm is repeatable, and otherwise each stage's must lie
+    within twice the recompute arm's run-to-run noise pooled over every gradient.
     """
     require_hoppers(2 * POLICY_WORLD_SIZE)
     model_path = tmp_path / "model"

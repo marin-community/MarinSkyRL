@@ -18,13 +18,10 @@ half-RoPE, grouped-GEMM experts, GQA) maps onto stock
 Megatron-Core settings chosen by ``GrugModelProvider`` in
 ``grug_megatron_bridge``.
 
-Under ``Numerics.EXACT`` the forward computes the bytes a decode-invariant vLLM engine
-(``inference_engines.vllm.decode_invariant``) computes for every token, region by region: compiled vLLM's Inductor
-kernels for the norms, the q/k chain, XSA with the head gate and the shared expert's activation
-(``grug_inductor_kernels``), vLLM's FA3, fused-MoE experts, dense GEMM shapes and log-probability kernel
-(``grug_vllm_kernels``), the engine's row-invariant router GEMM, and vLLM's expert-parallel addition order, which
-follows each sequence's serving engine (``grug_vllm_kernels.serving_engine_ranks``). Each region's gradient is that of the trainer's
-chain for the same value (``grug_rounding``, computed by ``grug_reference_kernels``), or of the Megatron computation
+Under ``Numerics.EXACT`` the forward computes, with compiled vLLM's kernels (``grug_inductor_kernels``,
+``grug_vllm_kernels``), the bytes a decode-invariant vLLM engine (``inference_engines.vllm.decode_invariant``) computes
+for every token, and needs each sequence's serving engine rank (``grug_vllm_kernels.serving_engine_ranks``). Each
+region's gradient is that of the trainer's chain for the same value (``grug_rounding``), or of the Megatron computation
 it replaces.
 """
 
@@ -111,7 +108,7 @@ from skyrl_train.models.grug_moe import (
     jax_top_k,
 )
 
-# Compiled vLLM pads a GEMM's output width to a multiple of this many columns (the 20-head gate becomes 24).
+# Compiled vLLM pads a GEMM's output width to a multiple of this many columns.
 VLLM_GEMM_OUTPUT_ALIGNMENT = 8
 
 
@@ -177,8 +174,8 @@ class GatedProduct:
     gate: torch.Tensor
 
     def statistic(self) -> torch.Tensor:
-        """Layer 0's input-norm statistic of the unrounded product: compiled vLLM's per-row sum of squares from its fused
-        product and norm kernel (``[rows]``)."""
+        """Layer 0's input-norm statistic of the unrounded product: compiled vLLM's per-row sum of squares from its
+        fused product and norm kernel (``[rows]``)."""
         return vllm_inductor.gated_product_square_sum(self.normalized, self.gate)[1]
 
 
@@ -209,7 +206,8 @@ class CheckpointPass(StrEnum):
 
 
 def checkpoint_pass() -> CheckpointPass:
-    """The first forward of a checkpoint unit runs without gradients; its recompute inside the backward with them."""
+    """The running pass of full activation recompute: a unit's first forward runs without gradients, its recompute
+    with them."""
     if not is_checkpointing():
         return CheckpointPass.NONE
     return CheckpointPass.RECOMPUTE if torch.is_grad_enabled() else CheckpointPass.FIRST
@@ -260,12 +258,11 @@ class _ResidualSumGradient(torch.autograd.Function):
 
 
 def _vllm_residual_sum(parts: ResidualSum, config: TransformerConfig) -> tuple[torch.Tensor, ResidualSum | None]:
-    """The layer output ``residual + (routed + shared)`` from compiled vLLM's fused residual-add and norm kernel, which
-    also forms the next input norm's sum of squares, and the hand-off for that norm (``None`` when no one reads it).
+    """The layer output ``residual + (routed + shared)``, added in fp32 and rounded once by compiled vLLM's fused
+    residual-add and norm kernel, and the hand-off of its sum of squares to the next input norm.
 
-    The kernel adds in fp32 and rounds once, as ``(residual.float() + (routed.float() + shared.float())).to(bf16)``
-    does. Full recompute's second forward of a one-layer unit only rebuilds the layer's graph for its backward, and the
-    layer output is the unit's output, whose value the backward never reads, so that forward forms no value.
+    In full recompute's second forward of a one-layer unit, whose output value the backward never reads, the value is
+    left uninitialized and the hand-off is ``None``.
     """
     if _recomputing_one_layer(config):
         value, handed = torch.empty_like(parts.residual), None
@@ -313,16 +310,11 @@ def _install_residual_hooks(layer: TransformerLayer) -> None:
 
 
 def _install_vllm_experts_hooks(experts: TEGroupedMLP) -> None:
-    """Take the routed experts' values from vLLM's fused-MoE kernels.
+    """Take the routed experts' values from vLLM's fused-MoE kernels (``vllm_expert_outputs``), differentiated as the
+    trainer's grouped-GEMM experts.
 
-    The kernels compute each dispatched row (one token-expert slot) as vLLM does, with the route weight inside the down
-    projection's fp32 accumulator. With gradients enabled the trainer's grouped-GEMM experts also run and give the
-    kernels' bytes their gradient (``vllm_value``); a forward without gradients runs the kernels alone.
-
-    Full recompute's second forward of a one-layer unit runs the grouped-GEMM experts alone: that forward only rebuilds
-    the layer's graph for its backward, and the layer uses the experts' output only in sums (the combine, the shared
-    expert and the residuals), whose gradients do not depend on the summands' values. The gradients equal those of a
-    forward that also runs the kernels; the layer's output, the first forward's, keeps the kernels' bytes.
+    Full recompute's second forward of a one-layer unit runs the grouped-GEMM experts alone, which gives the same
+    gradients because the layer uses their output only in sums.
     """
     if any(linear.tp_size != 1 or linear.use_bias for linear in (experts.linear_fc1, experts.linear_fc2)):
         raise NotImplementedError("Grug's vLLM numerics need unsharded, bias-free expert projections")
@@ -350,9 +342,8 @@ def _install_vllm_experts_hooks(experts: TEGroupedMLP) -> None:
 def _install_vllm_gemm(linear: nn.Module, compute) -> None:
     """Run ``linear`` (a Transformer Engine linear) as ``compute(x)``.
 
-    ``compute`` issues ``torch.mm`` in compiled vLLM's shapes on the module's own weight, so autograd gives the weight
-    its gradient; Megatron's gradient hooks add it to the parameter's main gradient as for any parameter Transformer
-    Engine did not already accumulate.
+    ``compute`` must use the module's own weight, so that autograd gives the weight its gradient and Megatron's gradient
+    hooks add it to the parameter's main gradient.
     """
     if linear.tp_size != 1 or linear.use_bias:
         raise NotImplementedError("Grug's vLLM numerics need unsharded, bias-free projections")
@@ -387,8 +378,7 @@ def _install_vllm_gemm_attention_hooks(attention: "GrugSelfAttention") -> None:
 
 def _install_vllm_shared_expert_hooks(shared: SharedExpertMLP) -> None:
     """Compiled vLLM's shared expert: gate and up projections as two GEMMs, the activation ``silu(gate) * up`` from
-    its activation kernel, then the down projection. The activation's gradient is that of the activation computed in
-    fp32 and rounded once."""
+    its activation kernel, then the down projection."""
     if shared.use_shared_expert_gate or shared.config.moe_shared_expert_overlap:
         raise NotImplementedError("Grug's vLLM numerics need an ungated shared expert outside the dispatcher")
     fc1, fc2 = shared.linear_fc1, shared.linear_fc2
@@ -412,14 +402,11 @@ def _install_vllm_shared_expert_hooks(shared: SharedExpertMLP) -> None:
 
 
 def _install_fa3_attention_hooks(attention: "GrugSelfAttention") -> None:
-    """Take the attention value from vLLM's FA3 forward, computed as the decode-invariant engine computes each row.
+    """Take the attention value from vLLM's FA3 forward (``fa3_attention_sbhd``), differentiated as the trainer's cuDNN
+    attention at the same query, key and value.
 
-    The gradient is the trainer's cuDNN attention backward at the same query, key and value: with gradients enabled the
-    cuDNN forward also runs and gives FA3's bytes its gradient (``vllm_value``). A forward without gradients runs FA3
-    alone.
-
-    Under full recompute with one-layer units, a unit's first forward keeps FA3's output for the unit's recompute,
-    which reproduces the first forward's query, key and value bit for bit and so would compute the same bytes again.
+    Under full recompute with one-layer units, a unit's recompute reuses the FA3 output its first forward kept, which
+    equals what FA3 computes from the recompute's identical inputs.
     """
     core = attention.core_attention
     cudnn_forward = core.forward
@@ -453,15 +440,11 @@ def _install_fa3_attention_hooks(attention: "GrugSelfAttention") -> None:
 
 
 def _install_ep_combine_hooks(layer: TransformerLayer) -> None:
-    """Add the routed expert outputs in vLLM's expert-parallel order (``vllm_ep_combine``).
+    """Add the routed expert outputs in vLLM's expert-parallel order (``vllm_ep_combine``), differentiated as the
+    trainer's own unpermute.
 
-    The gradient is the trainer's own unpermute (each slot's gradient is the token's output gradient in both), through
-    ``vllm_value``. A forward without gradients skips the trainer's unpermute.
-
-    Full recompute's second forward of a one-layer unit takes the trainer's unpermute alone: that forward only rebuilds
-    the layer's graph for its backward, and the layer uses the routed output only in sums and casts (the shared expert
-    and the residuals), whose gradients do not depend on the summands' values. The gradients equal those of a forward
-    that also runs the combine; the layer's output, the first forward's, keeps the combine's bytes.
+    Full recompute's second forward of a one-layer unit runs the trainer's unpermute alone, which gives the same
+    gradients because the layer uses the routed output only in sums and casts.
     """
     dispatcher = layer.mlp.token_dispatcher
     if dispatcher.shared_experts is not None:
@@ -572,7 +555,7 @@ class GrugGatedRMSNorm(nn.Module):
         statistic = self._input_statistic(hidden_states)
         value = vllm_inductor.rms_norm_from_square_sum(hidden_states, statistic, weight).view_as(hidden_states)
         variance = (statistic / hidden_states.shape[-1]).view(*hidden_states.shape[:-1], 1)
-        # Differentiated as rms_norm_hybrid(hidden_states, variance_with_gradient(variance, hidden_states), weight, eps).
+        # Differentiated as rms_norm_hybrid(hidden_states, variance_with_gradient(variance, hidden_states), ...).
         return hybrid_input_norm_value(value, hidden_states, variance, weight, self.eps)
 
     def _input_statistic(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -798,7 +781,7 @@ class GrugSelfAttention(SelfAttention):
         """Compiled vLLM's q/k norm, RoPE and query scale on the raw ``[S, B, heads, dim]`` projections.
 
         The values come from vLLM's Inductor kernels; with gradients enabled they are differentiated as
-        ``rounded_query_key(qk_norm_fp32(query), qk_norm_fp32(key), ...)``, which computes the same values up to rounding.
+        ``rounded_query_key(qk_norm_fp32(query), qk_norm_fp32(key), ...)``.
         """
         sequence, batch = query.shape[:2]
         rotary = rotary_pos_emb is not None and not self.skip_rope
@@ -886,7 +869,8 @@ class GrugTopKRouter(TopKRouter):
     def routing(self, logits: torch.Tensor, padding_mask: torch.Tensor | None = None):
         logits = logits.view(-1, self.config.num_moe_experts).float()
         biased_logits = logits + self.expert_bias
-        # vLLM's selection breaks exact ties in its own order, which native routing must reproduce.
+        # vLLM's selection breaks exact ties in its own order, which the trainer's selection reproduces under exact
+        # numerics.
         select = vllm_topk_experts if self.vllm_numerics else _grug_topk_indices
         if self.router_replay is None:
             selected = select(biased_logits, self.topk)
@@ -923,8 +907,8 @@ class GrugTopKRouter(TopKRouter):
         return self.routing(logits, padding_mask)
 
     def _invariant_logits(self, input: torch.Tensor) -> torch.Tensor:
-        """The router logits a decode-invariant vLLM engine computes: the row-invariant Triton GEMM on the bf16 input
-        and the bf16 weight (exact products, fp32 sums), whatever rows share the call; the gradient is the fp32 GEMM's."""
+        """The router logits a decode-invariant vLLM engine computes with its row-invariant Triton GEMM on the bf16
+        input and weight, whatever rows share the call; the gradient is the fp32 GEMM's."""
         if self.weight.dtype != torch.bfloat16 or input.dtype != torch.bfloat16:
             raise ValueError("the invariant router GEMM multiplies the bf16 router input by the bf16 router weight")
         with torch.no_grad():
@@ -948,8 +932,7 @@ class GrugGPTModel(GPTModel):
 
     Under the vLLM numerics a stage that is not the last appends each token's input-norm statistic (one fp32, as two
     bf16 words) to the hidden states it hands on, and the next stage splits it off for its first layer's input norm
-    (``StageStatistic``). Megatron's pipeline exchanges each micro-batch's tensor shape, so the wider tensor rides the
-    existing point-to-point transfer in the forward and its gradient in the backward.
+    (``StageStatistic``).
     """
 
     def __init__(self, config: TransformerConfig, *args, **kwargs):
@@ -983,9 +966,8 @@ class GrugGPTModel(GPTModel):
         if not self.vllm_numerics:
             return super().forward(*args, **kwargs)
         expect_backward(torch.is_grad_enabled())
-        # Each forward starts without hand-offs: a stage's last residual has no reader, and the entries are keyed by
-        # tensors that a later forward may reuse. The statistics kept for recompute stay: under pipeline parallelism a
-        # micro-batch's backward, and its recompute, runs after later micro-batches' forwards.
+        # Hand-offs never outlive a forward, but values kept for recompute do: under pipeline parallelism a
+        # micro-batch's recompute runs after later micro-batches' forwards.
         clear_hand_offs()
         if self._received is not None:
             hidden, statistic = self._received

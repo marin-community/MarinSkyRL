@@ -1,24 +1,8 @@
 """Gradients of the trainer's reference chains, computed without running the chains' forward.
 
-Under ``Numerics.EXACT`` a region's value comes from compiled vLLM's kernel and its gradient is
-the gradient of the trainer's chain for the same value (``grug_rounding``). The functions here return the kernel's value
-with the gradient that autograd's backward of that chain gives, computed from the chain's bf16 inputs without running
-the chain: elementwise terms in Triton kernels, the reductions that autograd's backward runs as torch sums and GEMMs.
-Each kernel evaluates autograd's op-by-op formulas in their order and roundings: every PyTorch elementwise op becomes the same fp32 operation (IEEE division, libdevice's exponential, no
-fused multiply-add except where nvcc forms one in PyTorch's kernel), and each cast rounds where the chain casts.
-``enable_reflect_ftz`` off keeps libdevice from flushing subnormals, which PyTorch's kernels keep.
-
-- ``gated_product_value``: ``(normalized.float() * torch.sigmoid(gate.float())).to(bf16)``;
-- ``swiglu_value``: ``(F.silu(gate.float()) * up.float()).to(bf16)`` of a fused ``[gate | up]`` projection;
-- ``hybrid_input_norm_value``: ``(hidden.float() * torch.rsqrt(variance + eps) * weight.float()).to(bf16)`` with the
-  variance differentiated as ``hidden.float().pow(2).mean(-1)``; its two broadcast reductions run as autograd's
-  ``sum_to`` runs them, on the same fp32 products;
-- ``xsa_head_gate_value``: XSA and the ``2 * sigmoid`` head gate in fp32 (``xsa_and_gate_single_rounding``), whose
-  per-head reductions run as the same torch sums;
-- ``query_key_values``: the q/k RMS norms, half RoPE with the bf16 table and the query scale in fp32
-  (``rounded_query_key`` of ``qk_norm_fp32``), including the zero-padded slice gradients' sums that turn -0 into +0;
-- ``router_logits_value``: ``F.linear(input.float(), weight.float())``, whose backward is two fp32 GEMMs that run
-  as autograd issues them.
+Each function returns compiled vLLM's value for a region with the gradient that autograd's backward of the trainer's
+chain for that value (``grug_rounding``) gives, bit for bit: Triton kernels evaluate autograd's elementwise formulas in
+its order and roundings, and the reductions run as the same torch sums and GEMMs.
 """
 
 from __future__ import annotations
@@ -30,6 +14,8 @@ from skyrl_train.models.grug_moe import GRUG_ATTN_GATE_SCALE, GRUG_QK_RMS_NORM_E
 _BLOCK = 1024
 # The XSA and q/k gradient kernels index each head's elements in 128-element rows (Grug's head dimension).
 _HEAD_DIM = 128
+# Neither implicit fused multiply-adds nor flushed subnormals, as in PyTorch's elementwise kernels; the kernels call
+# libdevice.fma where PyTorch's kernel has one.
 _EXACT_LAUNCH = {"enable_fp_fusion": False, "enable_reflect_ftz": False, "num_warps": 4}
 
 
@@ -117,8 +103,8 @@ def _kernels():
     def xsa_forward_terms(
         attention_ptr, value_ptr, products_ptr, squares_ptr, numel, GROUP: tl.constexpr, BLOCK: tl.constexpr
     ):
-        """The chain's fp32 products ``attention * v`` and ``v.square()`` over ``[rows, heads, head_dim]``, with ``v`` the
-        value head of each query head's group: element ``i`` of query head ``h`` reads element ``i`` of value head
+        """The chain's fp32 products ``attention * v`` and ``v.square()`` over ``[rows, heads, head_dim]``, with ``v``
+        the value head of each query head's group: element ``i`` of query head ``h`` reads element ``i`` of value head
         ``h // GROUP``."""
         offsets = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
         mask = offsets < numel
@@ -326,9 +312,8 @@ class _Swiglu(torch.autograd.Function):
 class _HybridInputNorm(torch.autograd.Function):
     """``value`` differentiated as ``rms_norm_hybrid(hidden, variance_with_gradient(variance, hidden), weight, eps)``.
 
-    ``hidden`` comes in twice, as the chain reads it twice (``hidden.float()`` in the norm and in the variance's
-    reference); the backward hands each read its own gradient, in the order autograd's engine delivers them (the norm's
-    read first: its node is the later one in the forward), so their sum with the layer's other uses of ``hidden`` adds
+    ``hidden`` comes in twice, as the chain reads it twice; the backward returns each read's gradient in the order
+    autograd's engine delivers them (the norm's read first), so their sum with the layer's other uses of ``hidden`` adds
     in the same order.
     """
 
@@ -382,10 +367,8 @@ class _HybridInputNorm(torch.autograd.Function):
 class _XsaHeadGate(torch.autograd.Function):
     """``value`` differentiated as ``xsa_and_gate_single_rounding(attention, kv_value, gate, head_dim)``.
 
-    The chain's reductions over each head's ``head_dim`` values (the dot product and the value's squared norm in the
-    forward, the scale's and the quotient's broadcast gradients in the backward) run as the same torch sums on the same
-    fp32 products; the repeated value's gradient is summed over each group's query heads as the expand's ``sum_to`` sums
-    it.
+    Each per-head reduction runs as the chain's torch sum on the same fp32 products, and the repeated value's gradient
+    is summed over each group's query heads as the expand's ``sum_to`` sums it.
     """
 
     @staticmethod
@@ -463,10 +446,7 @@ class _XsaHeadGate(torch.autograd.Function):
 class _QueryKeyReference(torch.autograd.Function):
     """``value`` differentiated as one output of ``rounded_query_key(qk_norm_fp32(query), qk_norm_fp32(key), ...)``.
 
-    The query's: ``rotate_neox_fp32`` on its first 64 dims (sliding-window layers), the rotated half's bf16 round trip,
-    then ``* multiplier * multiplier_scale`` and the bf16 cast. The key's: the rotation and the cast. Each norm's
-    reduction (the mean of squares in the forward, the rsqrt's broadcast gradient in the backward) runs as the same
-    torch op on the same fp32 tensor.
+    Each norm's reduction runs as the chain's torch op on the same fp32 tensor.
     """
 
     @staticmethod
@@ -528,10 +508,8 @@ class _RouterLogits(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad):
         input, weight = ctx.saved_tensors
-        # Autograd of F.linear(input.float(), weight.float()) on [S, B, K] input: matmul folds the input to
-        # [S * B, K] rows and runs mm against weight.t(), a column-major view; MmBackward0 then issues
-        # grad.mm(weight) for the rows and, for the column-major operand, grad.t().mm(rows).t(), which TBackward0
-        # transposes back; each ToCopyBackward0 rounds to bf16.
+        # Autograd of F.linear(input.float(), weight.float()) on [S, B, K] input runs MmBackward0 on the [S * B, K]
+        # rows: grad.mm(weight) for the input and grad.t().mm(rows) for the weight, each rounded to bf16.
         rows = input.reshape(-1, input.shape[-1]).float()
         grad_rows = grad.reshape(-1, grad.shape[-1])
         d_input = grad_rows.mm(weight.float()).view(input.shape).to(input.dtype)

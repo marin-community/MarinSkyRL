@@ -1,5 +1,3 @@
-"""Config resolution of ``trainer.algorithm.numerics``: exact by default where it is supported, native elsewhere."""
-
 import sys
 import types
 

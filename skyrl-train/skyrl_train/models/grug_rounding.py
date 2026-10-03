@@ -1,8 +1,7 @@
 """Grug arithmetic with compiled vLLM's rounding points: fp32 through a fused chain, one bf16 rounding.
 
-Under ``Numerics.EXACT`` a region's value comes from compiled vLLM's kernel (``vllm_value``), and
-its gradient is the gradient of the region's chain here: ``grug_reference_kernels`` computes those gradients without
-running the chains, and the H100 tests check them against autograd of the chains.
+Under ``Numerics.EXACT`` a region's value comes from compiled vLLM's kernel (``vllm_value``) and its gradient is the
+gradient of the region's chain here, which ``grug_reference_kernels`` computes without running the chain.
 """
 
 from collections.abc import Callable
@@ -29,8 +28,8 @@ class _ValueWithGradient(torch.autograd.Function):
 def vllm_value(value: torch.Tensor, reference: Callable[[], torch.Tensor]) -> torch.Tensor:
     """A vLLM kernel's ``value``; with gradients enabled, differentiated as the trainer's ``reference()``.
 
-    ``reference()`` computes the same values up to rounding with an autograd graph; it runs only when gradients are
-    enabled. The result holds ``value``'s bytes exactly (no arithmetic touches them).
+    ``reference()`` computes the same values up to rounding and runs only when gradients are enabled; the result holds
+    ``value``'s bytes exactly.
     """
     if not torch.is_grad_enabled():
         return value
@@ -60,7 +59,7 @@ class _AppendStageStatistic(torch.autograd.Function):
 
 
 class _SplitStageStatistic(torch.autograd.Function):
-    """The inverse of ``_AppendStageStatistic``: the ``[S, B, H]`` hidden states and the ``[S, B, 1]`` fp32 statistic."""
+    """The inverse of ``_AppendStageStatistic``: the ``[S, B, H]`` hidden states and ``[S, B, 1]`` fp32 statistic."""
 
     @staticmethod
     def forward(ctx, packed: torch.Tensor, width: int):

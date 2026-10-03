@@ -5,8 +5,8 @@ from typing import Any
 
 # vLLM's attention backend for a decode-invariant engine: the engine patches FA3's calls.
 DECODE_INVARIANT_ATTENTION_BACKEND = "FLASH_ATTN"
-# The FlashAttention version the engine's fixed splits and window starts are written for; vLLM selects it on Hopper
-# unless ``attention_config.flash_attn_version`` says otherwise, and the engine's workers refuse any other.
+# The FlashAttention version the engine's fixed splits and window starts are written for, which vLLM selects on Hopper
+# when ``attention_config.flash_attn_version`` is unset.
 DECODE_INVARIANT_FLASH_ATTN_VERSION = 3
 
 

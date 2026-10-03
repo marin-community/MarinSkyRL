@@ -1,20 +1,15 @@
 """What formed each bf16 tensor a Grug norm will read, handed from the module that formed it to that norm, and the
 values a checkpoint unit's first forward keeps for its recompute.
 
-A layer's residual sum, the embedding gated norm's product and a pipeline stage's received statistic are registered on
-the tensor the next norm reads (``hand_off``) and taken by that norm (``take_hand_off``). Each entry keeps a weak
-reference to its tensor: under pipeline parallelism several micro-batches are in flight and a stage's last residual has
-no reader, so a freed tensor's ``id()`` can come back for an unrelated tensor, which must not receive the entry.
+``take_hand_off`` returns the entry ``hand_off`` registered on the same tensor object, or on a live tensor with the same
+storage, offset and shape, since Megatron's ``make_viewless_tensor`` replaces a view entering a transformer block with a
+new tensor object on the same storage. Entries hold weak references, so a tensor that reuses a freed tensor's ``id()``
+never receives the freed tensor's entry.
 
-Megatron's transformer block replaces a view entering it (the embedding gated norm's output under the vLLM numerics)
-with a new tensor object on the same storage (``make_viewless_tensor``), so a norm whose input is not the registered
-object takes the entry of a registered tensor with the same storage, offset and shape.
-
-Under full activation recompute in one-layer units, a unit's first forward keeps the values its recompute cannot reach
-(``keep_for_recompute``), keyed by the module that computed them and the unit's input, and the recompute, which runs
-inside the backward on detached copies of the unit's inputs, takes them by storage (``take_for_recompute``). A forward
-whose backward does not follow (``expect_backward``) keeps nothing, and a backward takes every kept value
-(``assert_recompute_drained``).
+Under full activation recompute in one-layer units, ``keep_for_recompute`` keeps a value the unit's recompute cannot
+reach and the recompute, which runs on detached copies of the unit's inputs, takes it by storage
+(``take_for_recompute``). A forward whose backward does not follow (``expect_backward``) keeps nothing, and
+``assert_recompute_drained`` raises unless the backward took every kept value.
 """
 
 from __future__ import annotations
@@ -70,7 +65,7 @@ def take_hand_off(receiver: torch.Tensor) -> HandOff | None:
 
 
 def clear_hand_offs() -> None:
-    """Drop every hand-off: each forward starts empty, as a stage's last residual has no reader."""
+    """Drop every hand-off, so that the forward that starts begins with none."""
     _HAND_OFFS.clear()
 
 

@@ -1,22 +1,11 @@
 """Compiled vLLM's Inductor kernels for Grug's norms, q/k chain, XSA and shared-expert activation, run by the trainer.
 
-Compiled vLLM fuses each of these regions into Triton kernels whose reduction trees, fused multiply-adds and
-approximate divisions a hand-written PyTorch chain cannot reproduce. The sources below are copied verbatim from the
-Inductor output code of Snowball's compiled vLLM engines (vLLM ``70ea9ae8f260``, torch ``2.13.0+cu132``, Triton
-``3.7.1``, H100), and are compiled and launched through Inductor's own runtime, as the output code's ``call()`` launches
-them. Each kernel hard-codes Snowball's shapes (hidden 2560, 20 query and 5 KV heads of 128 dims, half-RoPE, a
-65,536-row rotary table); the wrappers refuse other shapes. The sources must be copied again whenever vLLM, torch or
-Triton change.
-
-Three kernels are derived from the copies, each by the edits in ``_with_square_sum_output`` or the loop copied into
-``_NORM_FROM_SQUARE_SUM``: the layer-input norms of compiled vLLM run inside the kernel that forms the residual sum
-(``_RESIDUAL_NORM``, ``_EMBEDDING_PRODUCT_NORM``), which the trainer runs at the next layer's norm; the derived
-kernels also store the kernel's per-row sum of squares, and ``_NORM_FROM_SQUARE_SUM`` normalizes a row from a stored
-sum with the kernels' own second loop, so a recomputed checkpoint unit can reproduce the norm from that sum alone.
-
-Several reduction kernels have more than one launch config, and the configs sum in different orders. Each kernel
-launches the config the decode-invariant engine's autotuner takes (``launcher_preference``). The engine compiles the
-head-gate GEMM padded to 24 columns, and the XSA kernel reads the gate at that row stride.
+The sources are copied verbatim from the Inductor output code of Snowball's compiled vLLM engines (vLLM
+``70ea9ae8f260``, torch ``2.13.0+cu132``, Triton ``3.7.1``, H100), must be copied again whenever vLLM, torch or Triton
+change, and hard-code Snowball's shapes (``config/grug_vllm_shapes.py``). Each kernel launches through Inductor's own
+runtime with the config the decode-invariant engine's autotuner takes (``launcher_preference``).
+``_RESIDUAL_NORM_SQUARE_SUM`` and ``_EMBEDDING_PRODUCT_NORM_SQUARE_SUM`` also store the per-row sum of squares, and
+``_NORM_FROM_SQUARE_SUM`` normalizes a stored row from such a sum with those kernels' own second loop.
 """
 
 from __future__ import annotations
@@ -1177,7 +1166,8 @@ def _rows(tensor: torch.Tensor, width: int) -> torch.Tensor:
 
 
 def xsa_head_gate(attention: torch.Tensor, value: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
-    """Compiled vLLM's XSA and ``2 * sigmoid`` head gate: ``[rows, 2560]`` from attention, ``[rows, 640]`` value, ``[rows, 20]`` gate."""
+    """Compiled vLLM's XSA and ``2 * sigmoid`` head gate: ``[rows, 2560]`` from attention, ``[rows, 640]`` value and
+    ``[rows, 20]`` gate."""
     attention, value = _rows(attention, HIDDEN), _rows(value, KV_HEADS * HEAD_DIM)
     rows = attention.shape[0]
     padded_gate = gate.new_zeros(rows, GATE_COLUMNS)
@@ -1249,7 +1239,8 @@ def query_key_rope(
 
 
 def query_key_full(query: torch.Tensor, key: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compiled vLLM's q/k RMS norm and query scale on a full-attention layer's raw q ``[rows, 2560]`` and k ``[rows, 640]``."""
+    """Compiled vLLM's q/k RMS norm and query scale on a full-attention layer's raw q ``[rows, 2560]`` and k
+    ``[rows, 640]``."""
     query = _rows(query, HIDDEN)
     key_out = _rows(key, KV_HEADS * HEAD_DIM).clone()
     rows = query.shape[0]
@@ -1283,7 +1274,8 @@ def gated_product(normalized: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
 
 
 def shared_activation(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    """Compiled vLLM's shared-expert activation ``silu(gate) * up`` of the two ``[rows, 2560]`` projections, one rounding."""
+    """Compiled vLLM's shared-expert activation ``silu(gate) * up`` of the two ``[rows, 2560]`` projections, one
+    rounding."""
     if gate.shape[-1] != SHARED_WIDTH or up.shape != gate.shape:
         raise ValueError(f"gate and up of width {SHARED_WIDTH} expected, got {tuple(gate.shape)} and {tuple(up.shape)}")
     output = _rows(gate, SHARED_WIDTH).clone()
@@ -1296,9 +1288,8 @@ def residual_square_sum(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """The bf16 layer output ``residual + (routed + shared)`` and the fp32 per-row sum of squares of the unrounded sum.
 
-    Both come from compiled vLLM's fused residual-add and input-norm kernel. The kernel's normalized output is not
-    returned (``rms_norm_from_square_sum`` computes it from the sum), and the norm weight enters only that output, so
-    the kernel normalizes with a unit weight.
+    Both come from compiled vLLM's fused residual-add and input-norm kernel, run with a unit norm weight since its
+    normalized output is discarded.
     """
     output = _rows(residual, HIDDEN).clone()
     rows = output.shape[0]

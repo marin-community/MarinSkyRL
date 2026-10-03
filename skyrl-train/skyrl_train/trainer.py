@@ -315,8 +315,7 @@ class RayPPOTrainer:
         self.colocate_all = cfg.trainer.placement.colocate_all
         self.tracker = tracker
         self.tokenizer = tokenizer
-        # The check's responses carry no captured routes, so it runs under native routing only (router replay under
-        # exact numerics is a mismatch-probe diagnostic).
+        # The check's responses carry no captured routes, so the check runs only without router replay.
         if (
             Numerics(cfg.trainer.algorithm.resolved_numerics) is Numerics.EXACT
             and not cfg.trainer.policy.megatron_config.moe_router_replay

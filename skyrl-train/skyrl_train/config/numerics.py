@@ -1,9 +1,8 @@
 """How the policy's trainer and its rollout engines compute, ``trainer.algorithm.numerics``.
 
-``exact`` is the default. Config resolution (``apply_numerics_resolution``) keeps it only for a setup that the
-decode-invariant engines and the Grug trainer numerics support, and otherwise resolves the run to ``native``, logs a
-warning that names every reason, and records the reasons in ``trainer.algorithm.numerics_fallback_reasons``. A
-configured ``exact`` falls back the same way. Engines and trainer read ``trainer.algorithm.resolved_numerics``, which
+Config resolution (``apply_numerics_resolution``) keeps ``exact`` only for a setup that the decode-invariant engines and
+the Grug trainer numerics support, and otherwise resolves the run to ``native`` and records the reasons in
+``trainer.algorithm.numerics_fallback_reasons``. Engines and trainer read ``trainer.algorithm.resolved_numerics``, which
 only config resolution sets.
 """
 
@@ -37,11 +36,11 @@ from skyrl_train.config.weight_sync_pause import resolve_weight_sync_pause_polic
 NUMERICS_KEY = "trainer.algorithm.numerics"
 # The engine's routed experts run vLLM's Triton fused-MoE kernels, which the trainer computes each slot with.
 TRITON_MOE_BACKEND = "triton"
-# vLLM's expert-parallel combine whose order the trainer reproduces: an all-gather, then a reduce-scatter.
+# vLLM's expert-parallel combine whose order the trainer reproduces.
 ALLGATHER_REDUCESCATTER = "allgather_reducescatter"
 # Megatron's token dispatcher the trainer's expert-parallel numerics run on.
 ALLTOALL_DISPATCHER = "alltoall"
-# The deepest pipeline the trainer's stage statistic hand-off was verified on.
+# The deepest pipeline the trainer's stage statistic hand-off supports.
 MAX_PIPELINE_STAGES = 2
 # The Grug model config attributes that compiled vLLM's kernels hard-code, and their Snowball values.
 COMPILED_MODEL_VALUES = {
@@ -111,16 +110,7 @@ def one_layer_recompute_units(granularity: str | None, method: str | None, num_l
 def exact_setup_problems(cfg: DictConfig, runner_mode: TrajectoryRunnerMode) -> list[str]:
     """Why the settings of ``cfg`` and the trajectory runner are not a setup ``exact`` numerics support.
 
-    ``exact`` needs decode-invariant engines (compiled local vLLM engines with FLASH_ATTN running FA3 at TP 1, Triton
-    MoE kernels, all-gather/reduce-scatter expert parallelism, the model config's rotary table and no speculative
-    decoding) sampling with the behavior-logprob program at temperature 1, sequences within the RoPE kernel's
-    ``ROTARY_POSITIONS``, weight syncs that clear the engines' prefix caches, a trajectory runner that reports each
-    sequence's serving engine rank, and a Megatron trainer on unpacked sequences with one GPU per tensor-, context- and
-    expert tensor-parallel group, at most two pipeline stages, the all-to-all token dispatcher, Transformer Engine's
-    fused attention for the gradient, parameter all-gathers that complete before the forward, activation recompute off
-    or in one-layer units, and no transformer_config_kwargs override of a setting the model config gives
-    (``MODEL_CONFIG_TRANSFORMER_SETTINGS``). An unset attention backend or MoE backend is accepted:
-    ``configure_exact_engines`` sets it.
+    An unset attention backend or MoE backend is accepted, since ``configure_exact_engines`` sets it.
     """
     generator = cfg.generator
     engine = generator.engine_init_kwargs

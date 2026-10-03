@@ -12,7 +12,7 @@ def _megatron_viewless(view: torch.Tensor) -> torch.Tensor:
 
 def test_hand_off_reaches_the_norm_through_the_viewless_copy_of_a_view():
     clear_hand_offs()
-    # The embedding gated norm's output under the vLLM numerics: a kernel's [rows, hidden] output viewed as [S, B, hidden].
+    # The embedding gated norm's output: a kernel's [rows, hidden] output viewed as [S, B, hidden].
     output = torch.arange(24.0).reshape(6, 4).view(3, 2, 4)
     hand_off(output, "embedding product")
     block_input = _megatron_viewless(output)
@@ -31,8 +31,7 @@ def test_hand_off_reaches_only_its_own_tensor():
 
     # Same storage, another offset: not what formed this tensor.
     assert take_hand_off(second) is None
-    # A freed tensor's entry never reaches a new tensor that reuses its id. CPython gives the freed tensor's memory to
-    # one of the next tensors created, so one of eight live candidates has its id.
+    # A freed tensor's entry never reaches a new tensor that reuses its id, as one of the next eight tensors does.
     freed = id(first)
     del first
     candidates = [torch.zeros(3, 4) for _ in range(8)]

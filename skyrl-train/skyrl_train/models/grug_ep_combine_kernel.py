@@ -9,7 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
-# Hidden columns per program; Grug's 2560 is five blocks.
+# Hidden columns per program.
 HIDDEN_BLOCK = 512
 
 
