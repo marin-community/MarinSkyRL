@@ -37,13 +37,23 @@ def test_uncommitted_attempt_is_not_loadable(tmp_path):
         resolve_checkpoint_payload(str(step_path))
 
 
-def test_partial_later_step_does_not_displace_latest_committed_generation(tmp_path):
+@pytest.mark.parametrize("read_failure", [False, True])
+def test_partial_later_step_does_not_displace_latest_committed_generation(tmp_path, monkeypatch, read_failure):
     committed_step = tmp_path / "global_step_1"
     completed = _attempt(committed_step)
     commit_attempt(str(committed_step), str(completed), required_files=_REQUIRED)
     _attempt(tmp_path / "global_step_2")
 
-    assert list_committed_checkpoint_dirs(str(tmp_path)) == ["global_step_1"]
+    if read_failure:
+
+        def unavailable(path):
+            raise OSError("injected object-store read failure")
+
+        monkeypatch.setattr(io, "read_bytes", unavailable)
+        with pytest.raises(OSError, match="injected object-store read failure"):
+            list_committed_checkpoint_dirs(str(tmp_path))
+    else:
+        assert list_committed_checkpoint_dirs(str(tmp_path)) == ["global_step_1"]
 
 
 def test_committed_but_unadvertised_later_step_does_not_block_previous_resume(tmp_path):

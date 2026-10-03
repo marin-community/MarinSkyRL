@@ -173,7 +173,7 @@ class CheckpointSnapshot:
     marker_path: str
 
 
-_DRIVER_RNG_STATE = "driver_rng_state.pt"
+_DRIVER_RNG_STATE_FILENAME = "driver_rng_state.pt"
 _ROLLOUT_STATE_FILENAME = "data.pt"
 
 
@@ -858,7 +858,7 @@ class RayPPOTrainer:
             TRAINER_STATE_FILENAME: self._trainer_checkpoint_state(step),
         }
         if rng_state is not None:
-            states[_DRIVER_RNG_STATE] = rng_state
+            states[_DRIVER_RNG_STATE_FILENAME] = rng_state
         for filename, payload in states.items():
             buffer = stdlib_io.BytesIO()
             torch.save(payload, buffer)
@@ -3295,7 +3295,7 @@ class RayPPOTrainer:
             self._restore_rollout_state(rollout_state)
             logger.info("Successfully loaded rollout state")
             if self._can_replay_driver_rng() and not self.cfg.trainer.get("reset_global_step_on_resume", False):
-                rng_path = os.path.join(checkpoint_path, _DRIVER_RNG_STATE)
+                rng_path = os.path.join(checkpoint_path, _DRIVER_RNG_STATE_FILENAME)
                 if io.exists(rng_path):
                     with io.open_file(rng_path, "rb") as source:
                         self._loaded_driver_rng_state = torch.load(source, map_location="cpu", weights_only=False)

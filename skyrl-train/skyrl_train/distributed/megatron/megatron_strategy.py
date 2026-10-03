@@ -41,7 +41,7 @@ from marinskyrl.remote_io import abort_multipart_uploads
 
 from megatron.core.dist_checkpointing.strategies import base as ckpt_base
 from megatron.core.dist_checkpointing.strategies.async_utils import AsyncCallsQueue
-from megatron.core import dist_checkpointing
+from megatron.core import dist_checkpointing, tensor_parallel
 from megatron.core.dist_checkpointing.serialization import (
     get_default_save_sharded_strategy,
 )
@@ -89,13 +89,6 @@ def _saved_optimizer_sharding_type(common_state: dict) -> str:
     sharding_type = saved_types.pop()
     _optimizer_checkpoint_metadata(sharding_type)
     return sharding_type
-
-
-def _cuda_rng_tracker():
-    # CPU checkpoint tests provide Megatron stubs without tensor_parallel.
-    from megatron.core import tensor_parallel
-
-    return tensor_parallel.get_cuda_rng_tracker()
 
 
 def _rng_parallel_coordinates() -> tuple[int, int, int, int, int, int]:
@@ -171,8 +164,6 @@ class MegatronStrategy(DistributedStrategy):
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
         if torch.cuda.device_count() > 0:
-            from megatron.core import tensor_parallel
-
             tensor_parallel.model_parallel_cuda_manual_seed(seed)
 
     def setup_distributed(self, timeout=timedelta(minutes=30)) -> None:
@@ -347,7 +338,7 @@ class MegatronStrategy(DistributedStrategy):
         local_rng_state = {
             "coordinates": _rng_parallel_coordinates(),
             "generic": generic_rng_state,
-            "cuda_tracker": _cuda_rng_tracker().get_states(),
+            "cuda_tracker": tensor_parallel.get_cuda_rng_tracker().get_states(),
         }
         rank_rng_states = [None] * dist.get_world_size()
         dist.all_gather_object(rank_rng_states, local_rng_state)
@@ -504,7 +495,7 @@ class MegatronStrategy(DistributedStrategy):
                 if "rank_rng_states" in extra_state:
                     rank_rng_state = _select_rank_rng_state(extra_state["rank_rng_states"], rank)
                     self.load_rng_state(rank_rng_state["generic"])
-                    _cuda_rng_tracker().set_states(rank_rng_state["cuda_tracker"])
+                    tensor_parallel.get_cuda_rng_tracker().set_states(rank_rng_state["cuda_tracker"])
                     self.log("Loaded rank-specific Megatron RNG and CUDA RNG tracker state.")
 
         return ckpt_dir, states

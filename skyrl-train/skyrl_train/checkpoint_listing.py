@@ -45,7 +45,7 @@ def list_committed_checkpoint_dirs(checkpoint_base_path: str) -> list[str]:
     for directory in list_checkpoint_dirs(checkpoint_base_path):
         try:
             resolve_checkpoint_payload(os.path.join(checkpoint_base_path, directory))
-        except (FileNotFoundError, OSError, ValueError, KeyError, TypeError) as error:
+        except (FileNotFoundError, ValueError) as error:
             logger.warning(f"Ignoring uncommitted checkpoint directory {directory}: {error}")
         else:
             committed.append(directory)

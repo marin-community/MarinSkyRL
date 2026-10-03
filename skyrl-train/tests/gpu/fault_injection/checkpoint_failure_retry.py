@@ -18,12 +18,10 @@ from skyrl_train.checkpoint_generation import (
 from skyrl_train.distributed.megatron import direct_checkpoint
 from skyrl_train.io import io
 from skyrl_train.workers.megatron.megatron_worker import MegatronPolicyWorkerBase
-from tests.gpu.gpu_ci.test_trainer_full_checkpointing import create_minimal_trainer, get_test_trainer_config
+from tests.gpu.fault_injection.checkpoint_config import CHECKPOINT_S3_PREFIX, checkpoint_config
+from tests.gpu.gpu_ci.test_trainer_full_checkpointing import create_minimal_trainer
 from tests.gpu.test_megatron_worker import get_test_training_batch
 from tests.gpu.utils import import_worker
-
-
-MODEL_REVISION = "c1899de289a04d12100db370d81485cdf75e47ca"
 
 
 class FailingOnceMegatronPolicyWorker(MegatronPolicyWorkerBase):
@@ -42,20 +40,9 @@ class FailingOnceMegatronPolicyWorker(MegatronPolicyWorkerBase):
 
 def _test_root() -> str:
     root = os.environ["CHECKPOINT_TEST_ROOT"].rstrip("/")
-    if not root.startswith("s3://marin-us-east-02a/tmp/ttl=14d/skyrl/users/atqamar/"):
+    if not root.startswith(CHECKPOINT_S3_PREFIX):
         raise ValueError("CHECKPOINT_TEST_ROOT must be a unique east-region TTL prefix")
     return root
-
-
-def _config(root: str, *, resume: bool = False):
-    cfg = get_test_trainer_config("megatron", optimizer_checkpoint_sharding_type="dp_reshardable")
-    cfg.trainer.policy.model.revision = MODEL_REVISION
-    cfg.trainer.ckpt_path = os.path.join(root, "checkpoints")
-    cfg.trainer.export_path = os.path.join(root, "exports")
-    cfg.trainer.max_ckpts_to_keep = -1
-    cfg.trainer.policy.megatron_config.checkpoint_plan_cache = True
-    cfg.trainer.resume_mode = "latest" if resume else "none"
-    return cfg
 
 
 def _step_path(root: str, step: int) -> str:
@@ -76,7 +63,7 @@ def _attempt_ids(step_path: str) -> set[str]:
 def test_megatron_failed_save_preserves_latest_and_retry_commits(ray_init_fixture) -> None:
     root = _test_root()
     assert not io.exists(_latest_path(root)), "Use a fresh CHECKPOINT_TEST_ROOT for the first phase"
-    cfg = _config(root)
+    cfg = checkpoint_config(root)
     trainer = create_minimal_trainer(cfg)
     FaultWorker = ray.remote(num_gpus=1)(FailingOnceMegatronPolicyWorker)
     try:
@@ -137,7 +124,7 @@ def test_megatron_failed_save_preserves_latest_and_retry_commits(ray_init_fixtur
 def test_megatron_fresh_process_resumes_retry_and_saves_next_step(ray_init_fixture) -> None:
     root = _test_root()
     evidence = json.loads(io.read_bytes(os.path.join(root, "fault-evidence.json")))
-    cfg = _config(root, resume=True)
+    cfg = checkpoint_config(root, resume=True)
     trainer = create_minimal_trainer(cfg)
     try:
         trainer.build_models(
