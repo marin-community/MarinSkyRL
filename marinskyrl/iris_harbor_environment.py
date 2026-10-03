@@ -41,6 +41,7 @@ from harbor.trial.errors import EnvironmentStartTimeoutError
 from iris.cli.connect import ControllerEndpoint, connect_controller
 from iris.client import IrisClient, Job
 from iris.cluster.types import Entrypoint, EnvironmentSpec, ResourceSpec
+from iris.resources.state import TaskState
 from iris.rpc import controller_pb2, job_pb2
 from iris.rpc.compression import IRIS_RPC_COMPRESSIONS
 from iris.rpc.controller_connect import ControllerServiceClientSync
@@ -298,16 +299,16 @@ class IrisEnvironment(BaseEnvironment):
             tasks = self._job.tasks()
             if tasks:
                 status = tasks[0].status()
-                if status.state == job_pb2.TASK_STATE_RUNNING:
+                if status.state is TaskState.RUNNING:
                     return tasks[0].task_id.to_wire()
                 if status.state not in (
-                    job_pb2.TASK_STATE_PENDING,
-                    job_pb2.TASK_STATE_BUILDING,
-                    job_pb2.TASK_STATE_ASSIGNED,
+                    TaskState.PENDING,
+                    TaskState.BUILDING,
+                    TaskState.ASSIGNED,
                 ):
                     raise IrisSandboxError(
                         f"Sandbox task {tasks[0].task_id} entered "
-                        f"{job_pb2.TaskState.Name(status.state)} before running: {status.error or 'no error'}"
+                        f"{status.state.value} before running: {status.error_message or 'no error'}"
                     )
             time.sleep(2)
         raise EnvironmentStartTimeoutError(
@@ -322,7 +323,7 @@ class IrisEnvironment(BaseEnvironment):
         try:
             job, self._job = self._job, None
             if job is not None:
-                job.terminate()
+                job.cancel()
         finally:
             self._task_id = None
             self._rpc = None

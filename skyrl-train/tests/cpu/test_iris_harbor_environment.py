@@ -10,6 +10,9 @@ pytest.importorskip("harbor")
 from harbor.environments.base import BaseEnvironment
 from harbor.models.task.config import EnvironmentConfig
 from harbor.models.trial.paths import TrialPaths
+from iris.client import Job
+from iris.client.workload_codec import task_status_from_proto
+from iris.cluster.types import JobName
 from iris.rpc import job_pb2
 
 from marinskyrl import iris_harbor_environment as iris_environment
@@ -34,7 +37,7 @@ def environment(monkeypatch: pytest.MonkeyPatch):
 def test_endpoint_lives_until_environment_stops(environment, monkeypatch: pytest.MonkeyPatch):
     endpoint = SimpleNamespace(url="http://iris-controller:10000", credentials=None, close=Mock())
     client = Mock()
-    job = Mock(job_id="job-1")
+    job = Mock(spec=Job, job_id="job-1")
     client.submit.return_value = job
     monkeypatch.setattr(iris_environment, "connect_controller", Mock(return_value=endpoint))
     monkeypatch.setattr(iris_environment.IrisClient, "remote", Mock(return_value=client))
@@ -49,7 +52,7 @@ def test_endpoint_lives_until_environment_stops(environment, monkeypatch: pytest
 
     environment._stop_sync()
 
-    job.terminate.assert_called_once_with()
+    job.cancel.assert_called_once_with()
     client.shutdown.assert_called_once_with()
     endpoint.close.assert_called_once_with()
 
@@ -66,7 +69,8 @@ def test_start_failure_closes_endpoint(environment, monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.asyncio
-async def test_mapped_dockerfile_image_starts_in_gvisor_and_restores_task_files(tmp_path, monkeypatch):
+@pytest.mark.parametrize("task_state", [job_pb2.TASK_STATE_RUNNING, job_pb2.TASK_STATE_FAILED])
+async def test_mapped_dockerfile_image_starts_in_gvisor_and_restores_task_files(tmp_path, monkeypatch, task_state):
     task_dir = tmp_path / "task"
     task_dir.mkdir()
     dockerfile = b"FROM python:3.10-slim\nWORKDIR /app\nCOPY . /app/\n"
@@ -76,19 +80,15 @@ async def test_mapped_dockerfile_image_starts_in_gvisor_and_restores_task_files(
     (sandbox_dir / "app").mkdir(parents=True)
     (sandbox_dir / "tmp").mkdir()
     submitted = []
-    lifecycle = {"terminated": False}
+    lifecycle = {"cancelled": False}
+    job_name = JobName.from_wire("/test/sandbox-job")
+    status = task_status_from_proto(
+        job_pb2.TaskStatus(task_id=job_name.task(0).to_wire(), state=task_state, error="sandbox failed")
+    )
 
     def submit(**kwargs):
         submitted.append(kwargs)
-        task = SimpleNamespace(
-            status=lambda: SimpleNamespace(state=job_pb2.TASK_STATE_RUNNING),
-            task_id=SimpleNamespace(to_wire=lambda: "sandbox-task"),
-        )
-        return SimpleNamespace(
-            job_id="sandbox-job",
-            tasks=lambda: [task],
-            terminate=lambda: lifecycle.update(terminated=True),
-        )
+        return Job(client, job_name)
 
     def exec_in_container(request, **kwargs):
         # Model the remote exec boundary with a local filesystem rooted under tmp_path.
@@ -100,7 +100,13 @@ async def test_mapped_dockerfile_image_starts_in_gvisor_and_restores_task_files(
         return SimpleNamespace(error="", stdout=stdout, stderr=result.stderr, exit_code=result.returncode)
 
     endpoint = SimpleNamespace(url="http://controller", credentials=None, close=lambda: None)
-    client = SimpleNamespace(submit=submit, shutdown=lambda: None)
+    client = SimpleNamespace(
+        submit=submit,
+        list_tasks=lambda name: [status],
+        task_status=lambda name: status,
+        cancel_job=lambda name: lifecycle.update(cancelled=True),
+        shutdown=lambda: None,
+    )
     monkeypatch.setattr(iris_environment, "connect_controller", lambda **kwargs: endpoint)
     monkeypatch.setattr(iris_environment.IrisClient, "remote", lambda *args, **kwargs: client)
     monkeypatch.setattr(
@@ -120,6 +126,11 @@ async def test_mapped_dockerfile_image_starts_in_gvisor_and_restores_task_files(
         controller_url="http://controller",
         prebuilt_images={hashlib.sha256(dockerfile).hexdigest(): image},
     )
+    if task_state == job_pb2.TASK_STATE_FAILED:
+        with pytest.raises(iris_environment.IrisSandboxError, match="sandbox failed"):
+            await sandbox.start(force_build=False)
+        assert lifecycle["cancelled"]
+        return
     try:
         await sandbox.start(force_build=False)
         assert submitted[0]["task_image"] == image
@@ -129,4 +140,4 @@ async def test_mapped_dockerfile_image_starts_in_gvisor_and_restores_task_files(
         assert task_config.model_dump() == original_config
     finally:
         await sandbox.stop(delete=True)
-    assert lifecycle["terminated"]
+    assert lifecycle["cancelled"]
