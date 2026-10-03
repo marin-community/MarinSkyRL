@@ -414,7 +414,7 @@ def test_judge_length_finish_cannot_be_accepted_as_partial_json(monkeypatch):
             {"choices": [{"finish_reason": "length", "message": {"content": '{"score_1":5}'}}]}
         ),
     )
-    with pytest.raises(ValueError, match="Incomplete judge response"):
+    with pytest.raises(ValueError, match="Truncated judge response"):
         OpenAIJudge(base_url="https://judge.example", model="judge").generate([])
 
 

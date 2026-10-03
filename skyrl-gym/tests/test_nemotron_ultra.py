@@ -21,7 +21,7 @@ from skyrl_gym.envs.nemotron_ultra.genrm_utils import (
     generate_comparison_pairs,
     parse_genrm_output,
 )
-from skyrl_gym.envs.nemotron_ultra.genrm import grade_genrm_group
+from skyrl_gym.envs.nemotron_ultra.genrm import grade_genrm_group, response_object
 from skyrl_gym.envs.nemotron_ultra.instruction_following import grade_instruction_following
 from skyrl_gym.envs.nemotron_ultra.jailbreak import grade_jailbreak
 from skyrl_gym.envs.nemotron_ultra.judge import GenRMResponseTransport, IncompleteJudgeResponse, OpenAIJudge
@@ -642,26 +642,122 @@ def test_math_reward_avoids_forking_the_multithreaded_worker(monkeypatch):
     assert requested_methods == ["forkserver"]
 
 
-def test_math_judge_retries_length_capped_output_with_a_larger_budget():
-    class LengthCappedJudge:
-        def __init__(self):
-            self.calls = []
+class _BudgetedJudgeService:
+    def __init__(
+        self, complete_at: int, *, output: str | None = None, stop: str = "length", strict_invalid: bool = False
+    ):
+        self.complete_at = complete_at
+        self.output = output
+        self.stop = stop
+        self.strict_invalid = strict_invalid
+        self.budgets = []
 
-        def generate(self, messages, *, max_tokens=8192):
-            self.calls.append(max_tokens)
-            if len(self.calls) == 1:
-                raise IncompleteJudgeResponse("finish_reason=length")
-            return "[[A=B]]"
+    def __call__(self, url, **kwargs):
+        payload = kwargs["json"]
+        budget = payload.get("max_completion_tokens", payload.get("max_output_tokens"))
+        self.budgets.append(budget)
+        complete = budget >= self.complete_at
+        output = self.output
+        if output is None:
+            metadata = payload.get("metadata") or json.loads(payload["messages"][-1]["content"])
+            first_is_better = metadata["response_1"] == "better"
+            output = (
+                '{"score_1":5,"score_2":1,"ranking":1}' if first_is_better else '{"score_1":1,"score_2":5,"ranking":6}'
+            )
+        if url.endswith("chat/completions"):
+            finish = "tool_calls" if self.strict_invalid else "stop" if complete else self.stop
+            body = {"choices": [{"finish_reason": finish, "message": {"content": output}}]}
+        else:
+            body = {
+                "status": "queued" if self.strict_invalid else "completed" if complete else "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens" if self.stop == "length" else self.stop},
+                "output": [
+                    {"type": "message", "status": "completed", "content": [{"type": "output_text", "text": output}]}
+                ],
+            }
+        response = requests.Response()
+        response.status_code = 200
+        response._content = json.dumps(body).encode()
+        return response
 
-    judge = LengthCappedJudge()
-    reward, details = grade_math(
+
+@pytest.mark.parametrize("transport", list(GenRMResponseTransport))
+def test_genrm_cohort_is_graded_when_the_judge_truncates_at_the_configured_budget(monkeypatch, transport):
+    service = _BudgetedJudgeService(complete_at=1024)
+    monkeypatch.setattr("skyrl_gym.envs.nemotron_ultra.judge.requests.post", service)
+    judge = OpenAIJudge(base_url="https://judge.example/v1", model="judge-model", response_transport=transport)
+    rewards, _ = grade_genrm_group(
+        conversation_history=[{"role": "user", "content": "q"}],
+        response_objects=[response_object({"content": "better"}), response_object({"content": "worse"})],
+        principle="Prefer correct answers.",
+        judge=judge,
+        config={
+            "max_output_tokens": 512,
+            "genrm_parse_retries": 0,
+            "max_concurrent_comparisons": 1,
+            "reasoning_bonus": 0.0,
+            "answer_bonus": 0.0,
+            "group_reasoning_length_penalty_coeff": 0.0,
+            "group_answer_length_penalty_coeff": 0.0,
+        },
+    )
+    assert rewards == pytest.approx([5.0, 1.0])
+    assert set(service.budgets) == {512, 1024}
+
+
+def test_math_judge_truncated_at_its_budget_is_retried_once_at_twice_the_budget(monkeypatch):
+    service = _BudgetedJudgeService(complete_at=16384, output="[[A=B]]")
+    monkeypatch.setattr("skyrl_gym.envs.nemotron_ultra.judge.requests.post", service)
+    reward, _ = grade_math(
         r"The answer is \boxed{0.25}.",
         {"question": "What is one half?", "expected_answer": r"\frac{1}{2}"},
-        judge=judge,
+        judge=OpenAIJudge(base_url="https://judge.example/v1", model="judge-model"),
     )
-
     assert reward == 1.0
-    assert judge.calls == [8192, 16384, 8192]
+    assert service.budgets == [8192, 16384, 8192, 16384]
+
+
+@pytest.mark.parametrize("transport", list(GenRMResponseTransport))
+def test_judge_truncated_at_twice_the_budget_stays_incomplete(monkeypatch, transport):
+    service = _BudgetedJudgeService(complete_at=10**9, output="partial")
+    monkeypatch.setattr("skyrl_gym.envs.nemotron_ultra.judge.requests.post", service)
+    judge = OpenAIJudge(base_url="https://judge.example/v1", model="judge-model", response_transport=transport)
+    with pytest.raises(IncompleteJudgeResponse):
+        judge.generate_response(
+            [],
+            metadata={"principle": "p", "response_1": "a", "response_2": "b"},
+            max_output_tokens=512,
+            temperature=0.0,
+            top_p=1.0,
+        )
+    assert service.budgets == [512, 1024]
+
+
+@pytest.mark.parametrize(
+    "transport,stop,strict_invalid",
+    [
+        (GenRMResponseTransport.CHAT_COMPLETIONS, "content_filter", False),
+        (GenRMResponseTransport.RESPONSES_METADATA, "content_filter", False),
+        (GenRMResponseTransport.RESPONSES_METADATA, "other", False),
+        (GenRMResponseTransport.CHAT_COMPLETIONS, "length", True),
+        (GenRMResponseTransport.RESPONSES_METADATA, "length", True),
+    ],
+)
+def test_judge_does_not_retry_non_budget_incompleteness(monkeypatch, transport, stop, strict_invalid):
+    service = _BudgetedJudgeService(complete_at=10**9, output="partial", stop=stop, strict_invalid=strict_invalid)
+    monkeypatch.setattr("skyrl_gym.envs.nemotron_ultra.judge.requests.post", service)
+    judge = OpenAIJudge(
+        base_url="https://judge.example/v1", model="judge-model", response_transport=transport, strict_completion=True
+    )
+    with pytest.raises(IncompleteJudgeResponse):
+        judge.generate_response(
+            [],
+            metadata={"principle": "p", "response_1": "a", "response_2": "b"},
+            max_output_tokens=512,
+            temperature=0.0,
+            top_p=1.0,
+        )
+    assert service.budgets == [512]
 
 
 def test_math_judge_persistent_output_cap_keeps_the_attempt_ungraded():
