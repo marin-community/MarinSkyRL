@@ -8,7 +8,14 @@ import skyrl_gym
 import json
 from omegaconf import DictConfig
 
-from skyrl_gym.envs.lcb.livecodebench import VerifierLimits, lcb_execution_result, lcb_test_results
+from skyrl_gym.envs.lcb.livecodebench import (
+    VerifierLimits,
+    VerifierStartFailure,
+    lcb_execution_result,
+    lcb_test_results,
+)
+
+from skyrl_gym.verification import VerificationStatus
 
 SECOND_LARGEST_SOLUTION = """```python
 def main():
@@ -236,14 +243,48 @@ def test_large_verifier_diagnostics_do_not_deadlock_the_child_pipe(monkeypatch):
     assert multiprocessing.active_children() == []
 
 
-def test_verifier_child_crash_retains_exit_status_instead_of_a_candidate_verdict(monkeypatch):
+def test_verifier_child_that_dies_before_running_the_candidate_is_a_verifier_error(monkeypatch):
     monkeypatch.setattr("skyrl_gym.envs.lcb.livecodebench._run_test_in_subprocess", _crashing_verifier_child)
+    with pytest.raises(VerifierStartFailure, match="exit_code=7"):
+        lcb_execution_result(
+            [{"input": "1\n", "output": "1\n", "testtype": "stdin"}],
+            "print(input())",
+            timeout=1,
+            limits=VerifierLimits(total_timeout_seconds=10),
+        )
+    assert multiprocessing.active_children() == []
+
+
+def test_candidate_that_kills_its_process_fails_every_test():
     results, metadata = lcb_execution_result(
-        [{"input": "1\n", "output": "1\n", "testtype": "stdin"}],
-        "print(input())",
+        [
+            {"input": "1\n", "output": "1\n", "testtype": "stdin"},
+            {"input": "2\n", "output": "2\n", "testtype": "stdin"},
+        ],
+        "import os\nos._exit(0)",
         timeout=1,
-        limits=VerifierLimits(total_timeout_seconds=10),
     )
-    assert results == [-1]
-    assert metadata == {"execution_error": "child_crash", "exit_code": 7}
+    assert results == [-1, -1]
+    assert metadata == {"execution_error": "program_crash", "exit_code": 0}
+    assert multiprocessing.active_children() == []
+
+
+def test_lcb_env_reports_a_verifier_that_never_started_as_a_verifier_error(monkeypatch):
+    monkeypatch.setattr("skyrl_gym.envs.lcb.livecodebench._run_test_in_subprocess", _crashing_verifier_child)
+    env = skyrl_gym.make(
+        "lcb",
+        env_config=DictConfig({}),
+        extras={
+            "reward_model": {
+                "ground_truth": json.dumps(
+                    [
+                        {"input": "1\n", "output": "1\n", "testtype": "stdin"},
+                    ]
+                )
+            }
+        },
+    )
+    result = env.step("```python\nprint(input())\n```")
+    assert result["reward"] == 0.0
+    assert result["verification"].status is VerificationStatus.ERROR
     assert multiprocessing.active_children() == []

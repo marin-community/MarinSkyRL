@@ -9,9 +9,12 @@ from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from skyrl_gym.envs.lcb.livecodebench import (
     BINARY_REWARD_MODE,
     LCB_REWARD_MODES,
+    VerifierStartFailure,
     compute_score,
     normalize_lcb_ground_truth,
 )
+
+from skyrl_gym.verification import VerificationResult
 
 logger = logging.getLogger(__name__)
 _INVALID_GROUND_TRUTH_ERROR = "invalid reward_model.ground_truth"
@@ -60,7 +63,6 @@ class LCBEnv(BaseTextEnv):
             from skyrl_gym.envs.lcb.livecodebench import extract_code_from_model
             from skyrl_gym.envs.lcb.verifyit_execution import execute_code_verifyit
             from skyrl_gym.envs.nemotron_ultra.sandbox import SandboxClient
-            from skyrl_gym.verification import VerificationResult
 
             parsed_code = extract_code_from_model(action)
             try:
@@ -82,7 +84,16 @@ class LCBEnv(BaseTextEnv):
                     verification=VerificationResult.error("Code verification unavailable"),
                 )
         else:
-            parsed_code, reward = compute_score(action, self.tests, self.reward_mode)
+            try:
+                parsed_code, reward = compute_score(action, self.tests, self.reward_mode)
+            except VerifierStartFailure as error:
+                return BaseTextEnvStepOutput(
+                    observations=[],
+                    reward=0.0,
+                    done=True,
+                    metadata={},
+                    verification=VerificationResult.error(str(error)),
+                )
 
         # RL on LCB w/ single-turn
         return BaseTextEnvStepOutput(observations=[], reward=reward, done=True, metadata={"parsed_code": parsed_code})

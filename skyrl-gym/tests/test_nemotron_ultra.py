@@ -1016,3 +1016,13 @@ def test_length_stopped_lean_attempt_still_earns_its_correction_turn():
     result = env.step(text)
     assert not result["done"]
     assert result["reset_conversation"]
+
+
+def test_code_gen_program_that_kills_its_process_scores_zero():
+    reward, details = grade_code(
+        "```python\nimport os\nos._exit(0)\n```",
+        {"verifier_metadata": {"unit_tests": [{"input": "1\n", "output": "1\n", "testtype": "stdin"}]}},
+        timeout_seconds=1,
+    )
+    assert reward == 0.0
+    assert details["execution_output"]["execution_error"] == "program_crash"
