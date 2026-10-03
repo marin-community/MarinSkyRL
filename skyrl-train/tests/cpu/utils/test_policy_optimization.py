@@ -35,6 +35,7 @@ from skyrl_train.utils.advantage_estimators import (
     compute_reinforce_plus_plus_outcome_advantage,
     compute_rloo_outcome_advantage,
 )
+from skyrl_train.group_admission import GroupAdvantageInvariant
 from skyrl_train.utils.kl_controllers import AdaptiveKLController
 from skyrl_train.utils.algorithm_registry import (
     AdvantageEstimatorRegistry,
@@ -700,3 +701,55 @@ def test_algorithm_recipe_launch_drives_policy_value_and_gradient(tmp_path: Path
         positive_gradient /= 2
     expected_gradient = torch.tensor([[1.1 * scale / denominator, 0], [positive_gradient, positive_gradient]])
     torch.testing.assert_close(current.grad, expected_gradient, rtol=1e-5, atol=1e-7)
+
+
+GROUP_ESTIMATORS = ["grpo", "rloo", "rloo_n"]
+
+
+def _group_advantages(estimator, rewards, exclusions=None, *, minimum=2):
+    invariant = (
+        GroupAdvantageInvariant.minimum_baseline_eligible(physical_group_size=len(rewards), minimum_group_size=minimum)
+        if estimator == "rloo_n"
+        else GroupAdvantageInvariant.exact_physical(physical_group_size=len(rewards))
+    )
+    rewards = torch.tensor(rewards, dtype=torch.float32).unsqueeze(-1)
+    advantages, returns = compute_advantages_and_returns(
+        token_level_rewards=rewards,
+        response_mask=torch.ones_like(rewards),
+        index=np.array(["g"] * len(rewards)),
+        adv_estimator=estimator,
+        config=OmegaConf.create({}),
+        exclude_from_baseline=np.array(exclusions) if exclusions is not None else None,
+        group_advantage_invariant=invariant,
+    )
+    torch.testing.assert_close(returns, advantages, rtol=0, atol=0)
+    return advantages.squeeze(-1)
+
+
+@pytest.mark.parametrize("estimator", GROUP_ESTIMATORS)
+def test_group_estimators_exclude_masked_rows(estimator):
+    expected = torch.cat([_group_advantages(estimator, [1.0, 0.0, 0.0]), torch.zeros(1)])
+    actual = _group_advantages(estimator, [1.0, 0.0, 0.0, 0.0], [False, False, False, True])
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    singleton = _group_advantages(estimator, [1.0, 0.0, 0.0, 0.0], [False, True, True, True])
+    assert torch.equal(singleton, torch.zeros(4))
+
+
+@pytest.mark.parametrize("estimator", GROUP_ESTIMATORS)
+@pytest.mark.parametrize("near_flat", [False, True])
+def test_group_estimators_zero_identical_and_nearly_flat_rewards(estimator, near_flat):
+    rewards = [0.7] * 7
+    if near_flat:
+        rewards[-1] = float(np.nextafter(np.float32(0.7), np.float32(1.0)))
+    assert torch.equal(_group_advantages(estimator, rewards), torch.zeros(7))
+
+
+def test_rloo_n_zeroes_groups_below_its_configured_minimum():
+    rewards, excluded = [1.0, 0.0, 0.0, 0.0], [False, False, False, True]
+    assert torch.equal(_group_advantages("rloo_n", rewards, excluded, minimum=4), torch.zeros(4))
+    torch.testing.assert_close(
+        _group_advantages("rloo_n", rewards, excluded, minimum=3),
+        torch.tensor([1.0, -0.5, -0.5, 0.0]),
+        rtol=0,
+        atol=1e-6,
+    )
