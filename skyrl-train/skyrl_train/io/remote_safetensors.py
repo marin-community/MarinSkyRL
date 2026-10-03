@@ -115,15 +115,18 @@ class RemoteSafetensorsTensorStore:
         source.seek(0)
         started = time.monotonic()
         header_bytes, _keys = read_safetensors_header(source, join_resource_path(self.source_uri, shard))
-        self.read_stats = replace(
-            self.read_stats,
-            reads=self.read_stats.reads + 1,
-            bytes_read=self.read_stats.bytes_read + len(header_bytes),
-            read_seconds=self.read_stats.read_seconds + time.monotonic() - started,
-        )
+        self._record_read(len(header_bytes), started)
         cached = len(header_bytes), json.loads(header_bytes[SAFETENSORS_LENGTH_PREFIX_BYTES:])
         self._headers[shard] = cached
         return cached
+
+    def _record_read(self, size: int, started: float) -> None:
+        self.read_stats = replace(
+            self.read_stats,
+            reads=self.read_stats.reads + 1,
+            bytes_read=self.read_stats.bytes_read + size,
+            read_seconds=self.read_stats.read_seconds + time.monotonic() - started,
+        )
 
     def _tensor_descriptor(
         self, key: str, shard: str, header: dict[str, object]
@@ -166,12 +169,7 @@ class RemoteSafetensorsTensorStore:
         source.seek(data_offset + slice_start)
         started = time.monotonic()
         payload = bytearray(source.read(slice_size))
-        self.read_stats = replace(
-            self.read_stats,
-            reads=self.read_stats.reads + 1,
-            bytes_read=self.read_stats.bytes_read + len(payload),
-            read_seconds=self.read_stats.read_seconds + time.monotonic() - started,
-        )
+        self._record_read(len(payload), started)
         if len(payload) != slice_size:
             raise ValueError(f"Truncated tensor slice {key!r}[{index}] in {shard_uri}")
         return torch.frombuffer(payload, dtype=dtype).reshape(slice_shape)
@@ -197,12 +195,7 @@ class RemoteSafetensorsTensorStore:
                 source.seek(data_offset + start)
                 started = time.monotonic()
                 payload = bytearray(source.read(end - start))
-                self.read_stats = replace(
-                    self.read_stats,
-                    reads=self.read_stats.reads + 1,
-                    bytes_read=self.read_stats.bytes_read + len(payload),
-                    read_seconds=self.read_stats.read_seconds + time.monotonic() - started,
-                )
+                self._record_read(len(payload), started)
                 if len(payload) != end - start:
                     raise ValueError(f"Truncated tensor {key!r} in {shard_uri}")
                 tensors[key] = torch.frombuffer(payload, dtype=dtype).reshape(shape)
