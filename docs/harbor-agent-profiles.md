@@ -21,9 +21,16 @@ task keeps the same agent, including after batch shuffling or a restart. Changin
 the dataset ordering or profile list changes the assignment.
 
 Preflight checks every configured profile against the training loss's requirements
-for recorded token IDs and model context. Pi and OpenCode currently support this
-capture path. The [FineEnvs multi-harness RL method](https://huggingface.co/spaces/FineEnvs/multi-harness-rl)
+for recorded token IDs and model context. Pi, OpenCode 1.18.2 and Mini-SWE-Agent
+2.1.0 support this capture path. Mini-SWE requires the vLLM backend and
+`collect_rollout_details: true`; Harbor also requires explicit total-context and
+output limits in `model_info`. Its native CLI receives a trial correlation header,
+and each subsequent served prompt extends the preceding served token stream.
+Use full TITO or a loss requiring rollout logprobs to retain this exact context
+in training trajectories.
+
+The [FineEnvs multi-harness RL method](https://huggingface.co/spaces/FineEnvs/multi-harness-rl)
 uses OpenCode, Claude Code, Codex and Mini-SWE-Agent. That panel can be assigned
 with this interface, but training with that panel remains blocked until the
-missing capture adapters are implemented. Profile selection does not add capture
+Claude Code and Codex capture adapters are implemented. Profile selection does not add capture
 support to an agent.

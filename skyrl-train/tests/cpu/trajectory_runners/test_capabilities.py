@@ -2,6 +2,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from skyrl_train.config.trajectory_runner_capabilities import (
+    SUPPORTED_MINI_SWE_LITERAL_VERSION,
     SUPPORTED_OPENCODE_LITERAL_VERSION,
     EntrypointOperation,
     TrajectoryRunnerMode,
@@ -17,6 +18,7 @@ HARBOR_KEY = "terminal_bench_config.harbor"
 NO_ROLLOUT_LOGPROBS = {"trainer.algorithm.off_policy_correction": "none"}
 FULL_TITO = {"trainer.algorithm.off_policy_correction": "none", "trainer.algorithm.tito_full": True}
 OPENCODE = {f"{HARBOR_KEY}.version": SUPPORTED_OPENCODE_LITERAL_VERSION}
+HARBOR_MINI_SWE = {f"{HARBOR_KEY}.version": SUPPORTED_MINI_SWE_LITERAL_VERSION}
 EXACT_CHAT = {
     "generator.chat_template.name_or_path": "qwen2_5_with_generation_tag_simplified",
     "generator.require_exact_chat_transport": True,
@@ -104,6 +106,7 @@ ACCEPTED = [
     pytest.param(HARBOR, "terminus-2", {}, False, id="harbor-terminus-2"),
     pytest.param(HARBOR, "terminus_kira", {}, False, id="harbor-terminus-kira-underscore-alias"),
     pytest.param(HARBOR, "opencode", OPENCODE, False, id="harbor-opencode-tested-version"),
+    pytest.param(HARBOR, "mini-swe-agent", HARBOR_MINI_SWE, False, id="harbor-mini-swe-tested-version"),
     pytest.param(HARBOR, "pi", {}, False, id="harbor-pi"),
     pytest.param(GYM, None, {}, False, id="gym-tis"),
     pytest.param(GYM, None, {"trainer.step_wise_training": True}, False, id="gym-step-wise"),
@@ -128,6 +131,7 @@ ACCEPTED = [
     ),
     pytest.param(HARBOR, "terminus-2", FULL_TITO, False, id="full-tito-harbor-terminus-2"),
     pytest.param(HARBOR, "opencode", {**FULL_TITO, **OPENCODE}, False, id="full-tito-harbor-opencode"),
+    pytest.param(HARBOR, "mini-swe-agent", {**FULL_TITO, **HARBOR_MINI_SWE}, False, id="full-tito-harbor-mini-swe"),
     pytest.param(HARBOR, "pi", FULL_TITO, False, id="full-tito-harbor-pi"),
 ]
 
@@ -195,6 +199,24 @@ REJECTED = [
         "train",
         "generator.backend",
         id="harbor-opencode-sglang",
+    ),
+    pytest.param(
+        HARBOR,
+        "mini-swe-agent",
+        {**HARBOR_MINI_SWE, "generator.backend": "sglang"},
+        False,
+        "train",
+        "generator.backend",
+        id="harbor-mini-swe-sglang",
+    ),
+    pytest.param(
+        HARBOR,
+        "mini-swe-agent",
+        {f"{HARBOR_KEY}.version": "1.0.0"},
+        False,
+        "train",
+        "terminal_bench.harbor.version",
+        id="harbor-mini-swe-legacy-transport",
     ),
     *(
         pytest.param(

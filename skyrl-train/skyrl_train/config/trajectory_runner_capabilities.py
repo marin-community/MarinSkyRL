@@ -20,6 +20,7 @@ from marinskyrl.harbor_agent_names import (
 )
 
 SUPPORTED_OPENCODE_LITERAL_VERSION = "1.18.2"
+SUPPORTED_MINI_SWE_LITERAL_VERSION = "2.1.0"
 SUPPORTED_PI_THINKING_FORMATS = frozenset({"chat-template", "qwen-chat-template"})
 
 
@@ -88,6 +89,7 @@ _HARBOR_EVIDENCE_PROFILES = {
     # the prior literal token prefix.
     TERMINUS_KIRA_HARBOR_AGENT_NAME: _EXACT_COMPLETION_ONLY_HARBOR_EVIDENCE,
     OPENCODE_HARBOR_AGENT_NAME: _EXACT_HARBOR_EVIDENCE,
+    MINI_SWE_HARBOR_AGENT_NAME: _EXACT_HARBOR_EVIDENCE,
     PI_HARBOR_AGENT_NAME: _EXACT_HARBOR_EVIDENCE,
 }
 
@@ -171,13 +173,18 @@ def _harbor_agent_capabilities(cfg: DictConfig, harbor: Mapping[str, Any]) -> Tr
         satisfied=bool(harbor.get("collect_rollout_details", False)),
     )
     requirements = [rollout_details]
-    if agent_name == OPENCODE_HARBOR_AGENT_NAME:
+    if agent_name in {OPENCODE_HARBOR_AGENT_NAME, MINI_SWE_HARBOR_AGENT_NAME}:
+        supported_version = (
+            SUPPORTED_OPENCODE_LITERAL_VERSION
+            if agent_name == OPENCODE_HARBOR_AGENT_NAME
+            else SUPPORTED_MINI_SWE_LITERAL_VERSION
+        )
         requirements.extend(
             (
                 CapabilityRequirement(
                     config_path="terminal_bench.harbor.version",
-                    expected_value=SUPPORTED_OPENCODE_LITERAL_VERSION,
-                    satisfied=str(harbor.get("version", "")).strip() == SUPPORTED_OPENCODE_LITERAL_VERSION,
+                    expected_value=supported_version,
+                    satisfied=str(harbor.get("version", "")).strip() == supported_version,
                 ),
                 CapabilityRequirement(
                     config_path="generator.backend",
