@@ -384,6 +384,28 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         with self._memory.span("forward", step=data.metadata.get("global_step")):
             return super().forward(data, probe_micro_batch_size=probe_micro_batch_size)
 
+    def forward_loaded(self, batch_id: int) -> TrainingOutputBatch:
+        """Give every pipeline stage the last stage's response logprobs."""
+        output = super().forward_loaded(batch_id)
+        if self.mesh_rank.pp_size == 1:
+            return output
+        batch = self._loaded_batches[batch_id]
+        shape = (batch.batch_size, batch.metadata["response_length"])
+        device = self.strategy.collective_device()
+        if mpu.is_pipeline_last_stage(ignore_virtual=True):
+            scores = batch["action_log_probs"].to(device)
+            if scores.dtype != torch.float32 or tuple(scores.shape) != shape:
+                raise ValueError("worker pipeline forward requires float32 response scores with the global width")
+        else:
+            scores = torch.empty(shape, dtype=torch.float32, device=device)
+        torch.distributed.broadcast(
+            scores,
+            src=mpu.get_pipeline_model_parallel_last_rank(),
+            group=mpu.get_pipeline_model_parallel_group(),
+        )
+        batch["action_log_probs"] = scores.cpu()
+        return output
+
     def offload_to_cpu(self, pin_memory=True, non_blocking=True, offload_optimizer=True, offload_model=True):
         self.strategy.offload_to_cpu(
             self.actor_module, self.optimizer, pin_memory, non_blocking, offload_optimizer, offload_model
@@ -869,8 +891,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         raise NotImplementedError()
 
     def _set_pad_token_id(self, pad_token_id):
-        # this already gets set in the init_model method
-        pass
+        self._pad_token_id = pad_token_id
 
 
 class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
