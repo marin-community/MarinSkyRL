@@ -156,7 +156,7 @@ class ExpertBlockSync:
         if any(engine.worker_placements is None for engine in engines):
             raise ValueError(
                 "Expert-block sync requires checked worker placements, which the engine factory records for "
-                "local TP=1 vLLM engines with DP>1"
+                "non-colocated TP=1 vLLM engines using expert-block transport"
             )
         started = time.perf_counter()
         policy_rows, engine_rows = await asyncio.gather(

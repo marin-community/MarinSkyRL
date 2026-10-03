@@ -512,6 +512,7 @@ def create_ray_wrapped_inference_engines(
     max_logprobs: int = 1,
     require_v1_model_runner: bool = False,
     mp_backend: bool = False,
+    require_verified_placements: bool = False,
     placement_group_timeout_seconds: int = DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS,
     weight_sync_pause_policy: WeightSyncPausePolicy = DEFAULT_WEIGHT_SYNC_PAUSE_POLICY,
 ) -> List[InferenceEngineInterface]:
@@ -586,15 +587,16 @@ def create_ray_wrapped_inference_engines(
             "inference engines (trainer.placement.colocate_all=false). Colocated engines need "
             "the ray backend for shared-GPU resource management."
         )
-    # A TP=1 vLLM engine with DP>1 is one replica per engine in its own placement group (below).
-    # Each of its workers reports where it runs, and the report is checked against its bundle.
+    # Expert-block publication needs checked receivers even for a single serving rank.
     verify_workers = (
         backend == "vllm"
         and tensor_parallel_size == 1
-        and data_parallel_size > 1
+        and (data_parallel_size > 1 or require_verified_placements)
         and not (use_hybrid_engine or use_mp_backend or inference_engine_enable_sleep)
     )
-    cross_node_ep = verify_workers and pipeline_parallel_size == 1 and expert_parallel_size == data_parallel_size
+    if require_verified_placements and not verify_workers:
+        raise ValueError("Verified expert-block placements require non-colocated TP=1 vLLM workers")
+    cross_node_ep = verify_workers and pipeline_parallel_size == 1 and expert_parallel_size == data_parallel_size > 1
     node_hosts: dict[str, str] = {}
     node_gpu_capacities: dict[str, int] = {}
     if verify_workers:
@@ -637,12 +639,15 @@ def create_ray_wrapped_inference_engines(
     # Single-GPU engines share a PACK group to leave whole nodes available for training.
     per_engine_pgs: list = []
     owned_placement_groups: list = []
-    needs_per_engine_pg = use_per_engine_pg(
-        use_hybrid_engine=use_hybrid_engine,
-        use_mp_backend=use_mp_backend,
-        tensor_parallel_size=tensor_parallel_size,
-        pipeline_parallel_size=pipeline_parallel_size,
-        data_parallel_size=data_parallel_size,
+    needs_per_engine_pg = (
+        use_per_engine_pg(
+            use_hybrid_engine=use_hybrid_engine,
+            use_mp_backend=use_mp_backend,
+            tensor_parallel_size=tensor_parallel_size,
+            pipeline_parallel_size=pipeline_parallel_size,
+            data_parallel_size=data_parallel_size,
+        )
+        or require_verified_placements
     )
     if not use_hybrid_engine:
         if use_mp_backend:
