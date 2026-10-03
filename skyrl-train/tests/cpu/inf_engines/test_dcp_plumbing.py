@@ -219,6 +219,18 @@ def test_from_config_reserves_enough_rollout_logprobs(monkeypatch, training, eva
     assert captured["max_logprobs"] == expected
 
 
+def test_from_config_matches_inference_nccl_buffers_to_policy(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(rwie, "create_ray_wrapped_inference_engines", lambda **kwargs: captured.update(kwargs) or [])
+    cfg = get_default_config()
+    cfg.trainer.strategy = "megatron"
+    cfg.trainer.policy.nccl_buffer_size_bytes = 262144
+
+    main_base.create_ray_wrapped_inference_engines_from_config(cfg, colocate_pg=None, tokenizer=None)
+
+    assert captured["nccl_buffer_size_bytes"] == 262144
+
+
 def test_policy_tokenizer_uses_configured_revision(monkeypatch):
     captured = {}
     monkeypatch.setattr(tokenizer_module, "create_tokenizer", lambda **kwargs: captured.update(kwargs) or object())
