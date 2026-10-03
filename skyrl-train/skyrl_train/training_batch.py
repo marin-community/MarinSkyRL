@@ -370,7 +370,6 @@ class TrainingInput(TypedDict, total=False):
     # Dense replay targets are used by diagnostic input batches. Generated compact
     # rows live in TrainingInputBatch.routed_expert_rows until worker materialization.
     rollout_routed_experts: Optional[Integer[torch.Tensor, "batch_size seq_len L K"]]
-    # The data-parallel rank of the inference engine that generated each row; one entry per row.
     rollout_engine_dp_ranks: Optional[Integer[torch.Tensor, "batch_size"]]  # noqa: F821
     # Loop-behavior reward shaping (Stage B / F5): per-token additive shaping
     # channel, SEPARATE from `rewards` (the RLOO-N outcome term). Default all-zeros

@@ -8,6 +8,7 @@ from omegaconf import DictConfig
 
 from skyrl_train.distillation import INVALID_TOPK_INDEX
 from skyrl_train.metric_names import TOKEN_PROVENANCE_RECONSTRUCTED_FRACTION_METRIC
+from skyrl_train.training_batch import ENGINE_DP_RANKS_KEY
 from skyrl_gym.verification import RewardResult, TrainingDisposition
 from skyrl_train.trajectory_runners.types import (
     UNKNOWN_ENGINE_DP_RANK,
@@ -207,7 +208,7 @@ def attach_engine_dp_ranks(batch: TrajectoryBatch, outputs: Sequence[AgentLoopOu
     ranks = [output.evidence.engine_dp_rank for output in outputs]
     if all(rank is None for rank in ranks):
         return
-    batch["rollout_engine_dp_ranks"] = [UNKNOWN_ENGINE_DP_RANK if rank is None else rank for rank in ranks]
+    batch[ENGINE_DP_RANKS_KEY] = [UNKNOWN_ENGINE_DP_RANK if rank is None else rank for rank in ranks]
 
 
 def attach_student_topk(

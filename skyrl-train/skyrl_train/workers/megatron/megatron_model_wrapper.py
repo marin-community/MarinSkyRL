@@ -69,7 +69,6 @@ class MegatronForwardMicroBatch:
     position_ids: torch.Tensor
     num_actions: int
     rollout_routed_experts: Optional[torch.Tensor] = None
-    # The data-parallel rank of the inference engine that generated each sequence.
     rollout_engine_dp_ranks: Optional[torch.Tensor] = None
     # The response tokens the loss reads, when the batch carries them.
     loss_mask: Optional[torch.Tensor] = None
@@ -105,7 +104,6 @@ class MegatronPolicyMicroBatch:
     ftpo: FTPOTargets | None = None
     correction_weights: Optional[torch.Tensor] = None
     rollout_routed_experts: Optional[torch.Tensor] = None
-    # The data-parallel rank of the inference engine that generated each sequence.
     rollout_engine_dp_ranks: Optional[torch.Tensor] = None
 
 

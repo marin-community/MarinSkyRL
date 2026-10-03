@@ -6,6 +6,7 @@ from collections import defaultdict
 from enum import StrEnum
 import numpy as np
 from skyrl_train.group_admission import group_is_fully_excluded_from_training
+from skyrl_train.training_batch import ENGINE_DP_RANKS_KEY
 from skyrl_train.trajectory_runners.types import (
     UNKNOWN_ENGINE_DP_RANK,
     TrajectoryBatch,
@@ -895,13 +896,11 @@ def concatenate_trajectory_batches(
             ]
 
     engine_dp_ranks_concat = None
-    if any(output.get("rollout_engine_dp_ranks") is not None for output in trajectory_batches):
+    if any(output.get(ENGINE_DP_RANKS_KEY) is not None for output in trajectory_batches):
         engine_dp_ranks_concat = [
             rank
             for output in trajectory_batches
-            for rank in (
-                output.get("rollout_engine_dp_ranks") or [UNKNOWN_ENGINE_DP_RANK] * len(output["response_ids"])
-            )
+            for rank in (output.get(ENGINE_DP_RANKS_KEY) or [UNKNOWN_ENGINE_DP_RANK] * len(output["response_ids"]))
         ]
 
     baseline_exclusions_concat = None
@@ -984,7 +983,7 @@ def concatenate_trajectory_batches(
     if rollout_routed_experts_concat is not None:
         result["rollout_routed_experts"] = rollout_routed_experts_concat
     if engine_dp_ranks_concat is not None:
-        result["rollout_engine_dp_ranks"] = engine_dp_ranks_concat
+        result[ENGINE_DP_RANKS_KEY] = engine_dp_ranks_concat
     if selected_topk_concat is not None:
         result["student_topk_indices"] = selected_topk_concat
         result["behavior_topk_logprobs"] = behavior_topk_concat

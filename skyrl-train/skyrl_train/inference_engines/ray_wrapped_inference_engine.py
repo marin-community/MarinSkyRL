@@ -90,11 +90,11 @@ _NCCL_FR_ENV_PASSTHROUGH = (
 
 
 WORKER_EXTENSION = "skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap"
-# A decode-invariant engine (``vllm/decode_invariant.py``): its workers import this extension, which installs the
-# patches before the model loads, and Inductor pads the head-gate GEMM in every engine process instead of timing it.
+# Importing this worker extension installs the decode-invariant patches (``vllm/decode_invariant.py``) in each worker.
 DECODE_INVARIANT_WORKER_EXTENSION = (
     "skyrl_train.inference_engines.vllm.decode_invariant_worker.DecodeInvariantWorkerWrap"
 )
+# Inductor pads the head-gate GEMM in every engine process instead of timing the padded and unpadded GEMMs.
 DECODE_INVARIANT_COMPILATION_CONFIG = {"inductor_compile_config": {"force_shape_pad": True}}
 
 
