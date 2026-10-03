@@ -32,10 +32,11 @@ _WORKER_CONFIG = OmegaConf.create(
 
 
 @pytest.fixture(autouse=True)
-def _isolated_rendezvous_environment(monkeypatch):
+def _isolated_rank_environment(monkeypatch):
     # Worker construction sets distributed rank variables.
     for name in ("WORLD_SIZE", "RANK", "LOCAL_RANK"):
-        monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
 
 
 def _build_worker() -> Worker:

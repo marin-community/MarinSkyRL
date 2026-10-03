@@ -123,7 +123,6 @@ def test_requested_local_policy_tokenizer_is_staged_independently(tmp_path, monk
 
 
 def test_main_stages_policy_config_with_the_independent_tokenizer_before_ray(tmp_path, monkeypatch) -> None:
-    # The object store is the external boundary; staging and the launch entrypoint run unchanged.
     s3_class = fsspec.get_filesystem_class("s3")
     fsspec.register_implementation("s3", MemoryFileSystem, clobber=True)
     handlers = {number: signal.getsignal(number) for number in (signal.SIGINT, signal.SIGTERM)}

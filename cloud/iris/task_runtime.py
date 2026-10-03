@@ -1815,7 +1815,6 @@ def run_head(args: argparse.Namespace, config_path: Path, derived_gloo_ifname: s
         rewrite_limiter = RateLimiter(RENDEZVOUS_REFRESH_INTERVAL)
         write_rendezvous(args.rendezvous_dir, head_ip, ray_port, gang_epoch)
         rewrite_limiter.mark_run()
-        # Refresh every five seconds so the rendezvous stays within the freshness slack.
         wait_for_nodes(
             ray_address,
             num_tasks,
