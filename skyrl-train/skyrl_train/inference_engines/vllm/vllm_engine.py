@@ -1433,8 +1433,9 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         else:
             if len(per_prompt_sampling_params) != len(prompt_token_ids):
                 raise ValueError("per-prompt sampling parameters must align with prompt token rows")
-            if any(set(override) != {"prompt_logprob_token_ids"} for override in per_prompt_sampling_params):
-                raise ValueError("per-prompt sampling parameters only support prompt_logprob_token_ids")
+            allowed = ({"prompt_logprob_token_ids"}, {"logprob_token_ids"})
+            if any(set(override) not in allowed for override in per_prompt_sampling_params):
+                raise ValueError("per-prompt sampling parameters require one supported token-ID override")
             sampling_params = [SamplingParams(**{**base_params, **override}) for override in per_prompt_sampling_params]
 
         return prompt_token_ids, sampling_params
@@ -1444,7 +1445,12 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         first = sampling_params[0] if isinstance(sampling_params, list) else sampling_params
         return first.logprobs
 
-    def _postprocess_outputs(self, outputs, response_top_k: int | None = None):
+    def _postprocess_outputs(
+        self,
+        outputs,
+        response_top_k: int | None = None,
+        sampling_params: SamplingParams | list[SamplingParams] | None = None,
+    ):
         responses: List[str] = []
         stop_reasons: List[str] = []
         response_ids: List[List[int]] = []
@@ -1452,8 +1458,10 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         student_topk_indices: List[List[List[int]]] = []
         behavior_topk_logprobs: List[List[List[float]]] = []
         all_prompt_logprobs: Optional[List] = None
-
-        for output in outputs:
+        params_by_prompt = sampling_params if isinstance(sampling_params, list) else [sampling_params] * len(outputs)
+        if len(params_by_prompt) != len(outputs):
+            raise ValueError("vLLM sampling parameters do not align with output rows")
+        for output, row_params in zip(outputs, params_by_prompt, strict=True):
             # TODO(tgriggs): Support n>1 sampling.
             assert len(output.outputs) == 1, (
                 "Each prompt should have only one responses. n>1 sampling is supported by copying prompts."
@@ -1473,9 +1481,13 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
                     logprob = token_logprobs[token_id].logprob
                     _logprobs.append(logprob)
                     if response_top_k is not None and response_top_k > 0:
-                        ids, scores = select_response_topk(
-                            {token_id: value.logprob for token_id, value in token_logprobs.items()}, response_top_k
-                        )
+                        if row_params is not None and row_params.logprob_token_ids:
+                            ids = list(row_params.logprob_token_ids)
+                            scores = [token_logprobs[candidate].logprob for candidate in ids]
+                        else:
+                            ids, scores = select_response_topk(
+                                {token_id: value.logprob for token_id, value in token_logprobs.items()}, response_top_k
+                            )
                         selected_ids.append(ids)
                         selected_scores.append(scores)
                     del token_logprobs
@@ -1744,7 +1756,7 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
                 )
             raise
 
-        return self._postprocess_outputs(outputs, self._response_top_k(sampling_params))
+        return self._postprocess_outputs(outputs, self._response_top_k(sampling_params), sampling_params)
 
     async def wake_up(self, *args: Any, **kwargs: Any):
         await self.llm.wake_up(tags=kwargs.get("tags", None))

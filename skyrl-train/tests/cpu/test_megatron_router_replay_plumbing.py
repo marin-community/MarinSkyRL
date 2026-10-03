@@ -21,6 +21,7 @@ from skyrl_train.models.megatron_router_replay import (  # noqa: E402
     MegatronRouterReplay,
 )
 from skyrl_train.models.megatron_router_replay import SENTINEL_EXPERT_ID  # noqa: E402
+from skyrl_train.models.megatron_router_replay import dense_replay_targets  # noqa: E402
 from skyrl_train.workers.megatron import megatron_model_wrapper as mmw  # noqa: E402
 
 BATCH_SIZE = 2
@@ -152,7 +153,7 @@ def test_routes_present_with_replay_off_leave_the_model_untouched(monkeypatch):
     ("routes_kwargs", "match"),
     [
         (dict(num_layers=NUM_LAYERS - 1), "expected_moe_layers"),
-        (dict(response_len=NUM_ACTIONS - 1), "response_len"),
+        (dict(response_len=NUM_ACTIONS + 1), "response_len"),
     ],
     ids=["layer_count", "response_len"],
 )
@@ -169,6 +170,17 @@ def test_forward_micro_batch_rejects_malformed_routes(monkeypatch, routes_kwargs
             rollout_routed_experts=micro["rollout_routed_experts"],
             num_actions=NUM_ACTIONS,
         )
+
+
+def test_short_local_route_window_matches_full_response_padding():
+    compact = torch.tensor([[[[1, 2]], [[3, 4]]], [[[5, 6]], [[0, 0]]]])
+    padded = torch.cat((compact, torch.zeros((2, 2, 1, 2), dtype=compact.dtype)), dim=1)
+
+    compact_targets = dense_replay_targets(compact, batch_size=2, seq_len=8, num_actions=4)
+    padded_targets = dense_replay_targets(padded, batch_size=2, seq_len=8, num_actions=4)
+
+    for actual, expected in zip(compact_targets, padded_targets, strict=True):
+        torch.testing.assert_close(actual, expected)
 
 
 def test_forward_micro_batch_closes_the_bracket_when_the_model_raises(monkeypatch):

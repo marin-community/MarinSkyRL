@@ -1,4 +1,4 @@
-from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput, ground_truth_from_extras
+from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput, ConversationType, ground_truth_from_extras
 from skyrl_gym.envs.gsm8k import utils
 from typing import Dict, Any
 from omegaconf import DictConfig
@@ -16,6 +16,13 @@ class GSM8kEnv(BaseTextEnv):
         self.ground_truth = ground_truth_from_extras(extras)
         self.reward_method = env_config.get("reward_method", "strict")
         self.stop_reason = None
+        self.structured_chat = env_config.get("structured_chat", False)
+
+    def init(self, prompt: ConversationType) -> tuple[ConversationType, Dict[str, Any]]:
+        metadata = {}
+        if self.structured_chat:
+            metadata["chat_completion_params"] = {}
+        return prompt, metadata
 
     def set_rollout_evidence(self, evidence: RolloutEvidence) -> None:
         self.stop_reason = evidence.stop_reason

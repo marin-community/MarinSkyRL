@@ -23,7 +23,7 @@ from skyrl_train.distillation import (
     TeacherScoreRequest,
     TopKTeacherEvidence,
     prepare_sampled_reverse_kl,
-    prepare_sparse_forward_kl,
+    prepare_teacher_topk,
     prepare_student_topk_policy_surrogate,
 )
 from skyrl_train.teacher_oracle import TeacherOracleCollection
@@ -196,7 +196,7 @@ def _pad_token_rows(token_rows: list[list[int]]) -> tuple[torch.Tensor, torch.Te
     return padded, mask
 
 
-def _collate_student_selected_rollout(
+def collate_student_selected_rollout(
     trajectory_batch: TrajectoryBatch,
     response_token_ids: list[list[int]],
     response_mask: torch.Tensor,
@@ -271,7 +271,7 @@ def build_teacher_scoring_work(
     behavior_logprobs = None
     selected_mask = None
     if evidence is TeacherEvidenceKind.STUDENT_SELECTED_TOPK:
-        selected_indices, behavior_logprobs, selected_mask = _collate_student_selected_rollout(
+        selected_indices, behavior_logprobs, selected_mask = collate_student_selected_rollout(
             trajectory_batch, response_token_ids, response_mask, top_k
         )
 
@@ -356,7 +356,7 @@ class TeacherEvidenceCoordinator:
                 route_weights=work.route_weights,
             )
         elif isinstance(evidence, TopKTeacherEvidence):
-            distillation = prepare_sparse_forward_kl(
+            distillation = prepare_teacher_topk(
                 work.request,
                 evidence,
                 coefficient=work.coefficient,

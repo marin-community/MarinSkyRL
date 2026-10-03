@@ -13,9 +13,11 @@ import asyncio
 import threading
 from abc import ABC
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Optional
 
 from loguru import logger
+
+from .types import CallbackErrorBehavior
 
 
 class AtomicStepCounter:
@@ -117,6 +119,7 @@ class TrainerControl:
     The trainer checks these flags after each event and takes appropriate action.
 
     Attributes:
+        step_limit: Absolute final step requested at training start
         should_training_stop: Set to True to request early stopping
         should_save: Set to True to request a checkpoint save
         should_evaluate: Set to True to request an evaluation run
@@ -124,6 +127,7 @@ class TrainerControl:
         should_save_hf_model: Set to True to request an HF-format export
     """
 
+    step_limit: int | None = None
     should_training_stop: bool = False
     should_save: bool = False
     should_evaluate: bool = False
@@ -132,6 +136,7 @@ class TrainerControl:
 
     def reset(self) -> None:
         """Reset all control flags to their defaults."""
+        self.step_limit = None
         self.should_training_stop = False
         self.should_save = False
         self.should_evaluate = False
@@ -167,7 +172,7 @@ class TrainerCallback(ABC):
         ```
     """
 
-    error_behavior: Literal["raise", "warn", "ignore"] = "warn"
+    error_behavior: CallbackErrorBehavior = CallbackErrorBehavior.WARN
 
     # Sync variants (default implementations)
     def on_train_begin(
@@ -499,11 +504,16 @@ class CallbackHandler:
         """
         for callback in self.callbacks:
             try:
+                step_limit = control.step_limit
                 method = getattr(callback, event, None)
                 if method is not None:
                     result = method(state, control, **kwargs)
                     if result is not None:
                         control = result
+                    if step_limit is not None:
+                        control.step_limit = (
+                            min(step_limit, control.step_limit) if control.step_limit is not None else step_limit
+                        )
             except Exception as e:
                 self._handle_error(callback, event, e)
 
@@ -537,6 +547,7 @@ class CallbackHandler:
 
         for callback in self.callbacks:
             try:
+                step_limit = control.step_limit
                 async_method = getattr(callback, async_event, None)
                 sync_method = getattr(callback, event, None)
 
@@ -551,6 +562,10 @@ class CallbackHandler:
 
                 if result is not None:
                     control = result
+                if step_limit is not None:
+                    control.step_limit = (
+                        min(step_limit, control.step_limit) if control.step_limit is not None else step_limit
+                    )
 
             except Exception as e:
                 self._handle_error(callback, event, e)
@@ -561,10 +576,10 @@ class CallbackHandler:
         """Handle an error from a callback based on its error_behavior setting."""
         callback_name = callback.__class__.__name__
 
-        if callback.error_behavior == "raise":
+        if callback.error_behavior == CallbackErrorBehavior.RAISE:
             logger.error(f"Callback {callback_name}.{event} raised an error")
             raise error
-        elif callback.error_behavior == "warn":
+        elif callback.error_behavior == CallbackErrorBehavior.WARN:
             logger.warning(f"Callback {callback_name}.{event} failed: {error}")
         # "ignore" does nothing
 

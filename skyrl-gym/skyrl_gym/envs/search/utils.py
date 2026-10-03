@@ -18,6 +18,8 @@
 import re
 import string
 
+from verifyit.adapters.skyrl import grade_search_em
+
 
 def normalize_answer(s):
     def remove_articles(text):
@@ -91,7 +93,7 @@ def compute_score(solution_str, ground_truth, method="strict", format_score=0.0,
     if answer is None:
         return 0
     else:
-        if em_check(answer, ground_truth["target"]):
+        if grade_search_em(ground_truth["target"], solution_str).reward:
             return score
         else:
             return format_score

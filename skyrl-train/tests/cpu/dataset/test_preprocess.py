@@ -9,6 +9,7 @@ from omegaconf import OmegaConf
 from skyrl_train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
 )
+from skyrl_train.dataset.routed_expert_batch import RoutedExpertRows
 
 
 @pytest.fixture
@@ -46,7 +47,6 @@ def test_convert_prompts_responses_to_batch_tensors_exact(tokenizer, cfg):
         ret_rewards,
         ret_loss_masks,
         ret_log_probs,
-        ret_routed_experts,
         _tls,
         _rst,
     ) = convert_prompts_responses_to_batch_tensors(
@@ -82,7 +82,6 @@ def test_convert_prompts_responses_to_batch_tensors_different_lengths(cfg, token
         ret_rewards,
         ret_loss_masks,
         ret_log_probs,
-        ret_routed_experts,
         _tls,
         _rst,
     ) = convert_prompts_responses_to_batch_tensors(
@@ -128,10 +127,7 @@ def test_routed_experts_uniform_LK(tokenizer, cfg):
     # sample 0 has 3 generated rows, sample 1 has 5.
     routed_experts = [np.asarray([row] * 3, dtype=np.uint8), np.asarray([row] * 5, dtype=np.uint8)]
 
-    out = convert_prompts_responses_to_batch_tensors(
-        tokenizer, prompts, outputs, rewards, loss_masks, None, routed_experts
-    )
-    re_tensor = out[6]
+    re_tensor = RoutedExpertRows(tuple(routed_experts), response_len=5, num_experts=256).materialize()
     assert re_tensor is not None
     assert re_tensor.shape == (2, 5, L, K)
     # sample 0 padding rows (positions 3,4) are sentinel zeros
@@ -149,10 +145,7 @@ def test_routed_experts_mixed_sentinel_and_real_no_ragged_crash(tokenizer, cfg):
         np.zeros((5, 1, 1), dtype=np.uint8),
     ]
 
-    out = convert_prompts_responses_to_batch_tensors(
-        tokenizer, prompts, outputs, rewards, loss_masks, None, routed_experts
-    )
-    re_tensor = out[6]
+    re_tensor = RoutedExpertRows(tuple(routed_experts), response_len=5, num_experts=256).materialize()
     assert re_tensor is not None
     assert re_tensor.shape == (2, 5, L, K)
     assert torch.equal(re_tensor[1], torch.zeros(5, L, K, dtype=torch.uint8))

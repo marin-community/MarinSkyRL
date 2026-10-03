@@ -83,6 +83,7 @@ class OpenAIJudge:
     timeout_seconds: float = 600.0
     response_transport: GenRMResponseTransport = GenRMResponseTransport.RESPONSES_METADATA
     reasoning_effort: str | None = None
+    strict_completion: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "response_transport", GenRMResponseTransport(self.response_transport))
@@ -138,6 +139,13 @@ class OpenAIJudge:
         choice = body["choices"][0]
         if choice.get("finish_reason") in {"length", "content_filter"}:
             raise IncompleteJudgeResponse(f"Incomplete judge response: {body}")
+        if self.strict_completion and (
+            len(body["choices"]) != 1
+            or choice.get("finish_reason") != "stop"
+            or choice["message"].get("tool_calls")
+            or choice["message"].get("refusal")
+        ):
+            raise IncompleteJudgeResponse("Judge did not return one complete text response")
         content = choice["message"].get("content")
         if not isinstance(content, str):
             raise RuntimeError(f"Judge returned no message content: {body}")
@@ -190,11 +198,17 @@ class OpenAIJudge:
         body: dict[str, Any] = response.json()
         if body.get("status") == "incomplete":
             raise IncompleteJudgeResponse(f"Incomplete judge response: {body}")
+        if self.strict_completion and body.get("status") != "completed":
+            raise IncompleteJudgeResponse("GenRM response did not complete")
         texts = []
         for item in body.get("output", []):
             if item.get("type") != "message":
                 continue
+            if self.strict_completion and item.get("status") != "completed":
+                raise IncompleteJudgeResponse("GenRM message did not complete")
             for content in item.get("content", []):
+                if self.strict_completion and content.get("type") != "output_text":
+                    raise IncompleteJudgeResponse("GenRM response includes non-text output")
                 if content.get("type") == "output_text" and isinstance(content.get("text"), str):
                     texts.append(content["text"])
         if texts:

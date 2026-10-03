@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from omegaconf import OmegaConf
+from skyrl_gym.envs.registration import registry
 from skyrl_gym.verification import VerificationResult
 
 from skyrl_train.evaluate import _calculate_eval_metrics, evaluate
@@ -83,7 +84,8 @@ def test_eval_reports_normalized_verifier_score_alongside_raw_reward():
 
 
 @pytest.mark.asyncio
-async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
+async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path, monkeypatch):
+    monkeypatch.setitem(registry, "custom_env", registry["gsm8k"])
     cfg = configure_eval(dummy_config, tmp_path)
 
     prompts_batch = [
@@ -109,6 +111,8 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
         "loss_masks": [[1], [1]],
         "stop_reasons": ["stop", "stop"],
         "rollout_logprobs": None,
+        "env_classes": ["gsm8k", "custom_env"],
+        "env_metrics": [{"truncated": 1}, {"truncated": 0}],
     }
     runner = DummyRunner(trajectory_batch)
 
@@ -137,6 +141,10 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
         "eval/dataset_b/pass_at_1": 0.0,
         "eval/all/avg_score": 0.5,
         "eval/all/pass_at_1": 0.5,
+        "eval/all/environment/gsm8k/truncated": 1.0,
+        "eval/all/environment/custom_env/truncated": 0.0,
+        "eval/dataset_a/environment/gsm8k/truncated": 1.0,
+        "eval/dataset_b/environment/custom_env/truncated": 0.0,
     }
 
     for key, expected_value in expected_metrics.items():

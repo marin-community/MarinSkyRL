@@ -1,0 +1,101 @@
+{
+  "mcqa": [
+    {
+      "response": "\\boxed{Z}",
+      "record": {
+        "options": [
+          {
+            "A": "apple"
+          },
+          {
+            "Z": "zebra"
+          }
+        ],
+        "expected_answer": "Z",
+        "grading_mode": "strict_single_letter_boxed"
+      }
+    },
+    {
+      "response": "\\boxed{A}",
+      "record": {
+        "options": [
+          {
+            "A": "apple"
+          },
+          {
+            "Z": "zebra"
+          }
+        ],
+        "expected_answer": "Z",
+        "grading_mode": "strict_single_letter_boxed"
+      }
+    },
+    {
+      "response": "Answer: zebra",
+      "record": {
+        "options": [
+          {
+            "A": "apple"
+          },
+          {
+            "Z": "zebra"
+          }
+        ],
+        "expected_answer": "Z",
+        "grading_mode": "lenient_answer_colon"
+      }
+    }
+  ],
+  "reasoning_gym": [
+    {
+      "response": "Answer: 42",
+      "entry": {
+        "answer": "42",
+        "metadata": {
+          "source_dataset": "simple_equations"
+        }
+      }
+    },
+    {
+      "response": "Answer: 41",
+      "entry": {
+        "answer": "42",
+        "metadata": {
+          "source_dataset": "simple_equations"
+        }
+      }
+    },
+    {
+      "response": "42",
+      "entry": {
+        "answer": "42",
+        "metadata": {
+          "source_dataset": "simple_equations"
+        }
+      }
+    }
+  ],
+  "math": [
+    {
+      "response": "\\boxed{\\frac{1}{2}}",
+      "record": {
+        "expected_answer": "0.5",
+        "question": "Compute one half."
+      }
+    },
+    {
+      "response": "\\boxed{2}",
+      "record": {
+        "expected_answer": "2",
+        "question": "Compute 1+1."
+      }
+    },
+    {
+      "response": "\\boxed{3}",
+      "record": {
+        "expected_answer": "2",
+        "question": "Compute 1+1."
+      }
+    }
+  ]
+}

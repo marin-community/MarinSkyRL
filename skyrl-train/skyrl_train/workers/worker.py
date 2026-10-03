@@ -304,8 +304,7 @@ def log_r3_resident_set(rank: int, data: TrainingInputBatch) -> None:
     batch carrying ``rollout_routed_experts`` logs its size on arrival. Strict
     no-op signal when the batch carries no routes.
     """
-    if "rollout_routed_experts" in data.keys() and data["rollout_routed_experts"] is not None:
-        routes = data["rollout_routed_experts"]
+    if (routes := data.routed_experts) is not None:
         logger.info(
             f"R3_RESIDENT_SET rank={rank} nbytes={int(routes.nbytes)} dtype={routes.dtype} shape={tuple(routes.shape)}"
         )
@@ -911,9 +910,7 @@ class PolicyWorkerBase(Worker):
         Timing-only (no tensor is touched) and gated to the R3-decentral path
         with routes present, so every other configuration is unchanged.
         """
-        staggered = (
-            self.cfg.generator.r3_transport == R3Transport.DECENTRAL and "rollout_routed_experts" in train_data.keys()
-        )
+        staggered = self.cfg.generator.r3_transport == R3Transport.DECENTRAL and train_data.routed_experts is not None
         if staggered and self._world_size > 1 and torch.distributed.is_initialized():
             # Ungated per-rank marker: the timestamp cluster at release proves
             # co-arrival; the first shard collective must not time out after it.
@@ -1164,6 +1161,7 @@ class PolicyWorkerBase(Worker):
                     experience.distillation,
                     sparse_student_logprobs,
                     topk_loss_params(self.cfg.trainer.algorithm),
+                    output["logits"].shape[-1],
                 )
             batch = build_objective_micro_batch(
                 action_log_probs=action_log_probs,
@@ -1172,6 +1170,7 @@ class PolicyWorkerBase(Worker):
                 advantages=advantages,
                 loss_mask=loss_mask,
                 rollout_logprobs=rollout_action_logprobs,
+                correction_weights=experience.correction_weights,
                 response_span_tags=response_span_tags,
                 token_entropy=token_entropy,
                 think_token_weight=self.cfg.trainer.algorithm.think_token_weight,
@@ -1323,9 +1322,7 @@ class PolicyWorkerBase(Worker):
         # NATIVE top-k routing while training uses REPLAY routing -> different
         # experts -> a pathological step-1 importance ratio. Absent key (8B /
         # router-replay off) -> None -> stock native forward, unchanged.
-        rollout_routed_experts = (
-            micro_batch["rollout_routed_experts"] if "rollout_routed_experts" in micro_batch.keys() else None
-        )
+        rollout_routed_experts = micro_batch.routed_experts_tensor()
 
         with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type=self.device.type):
             policy_logprob = self.model(
@@ -1538,9 +1535,7 @@ class RefWorkerBase(Worker):
         # constructed with moe_router_replay=true), so its KL-reference logprobs
         # are computed on the same forward path as the policy. Absent key -> None
         # -> stock native forward (8B / flag-off unchanged).
-        rollout_routed_experts = (
-            micro_batch["rollout_routed_experts"] if "rollout_routed_experts" in micro_batch.keys() else None
-        )
+        rollout_routed_experts = micro_batch.routed_experts_tensor()
         with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type=self.device.type):
             log_probs = self.model(
                 sequences,

@@ -10,6 +10,8 @@ from skyrl_train.config.behavior_logprobs import (
     configure_behavior_logprob_sampling,
     validate_behavior_logprob_sampling,
 )
+import skyrl_train.objective.losses  # noqa: F401
+import skyrl_train.utils.advantage_estimators  # noqa: F401
 from skyrl_train.inference_engines.utils import get_vllm_sampling_params
 from skyrl_train.inference_engines.vllm.utils import apply_openai_sampling, pop_vllm_wrapper_kwargs
 from skyrl_train.config.objective_spec import rollout_logprobs_required

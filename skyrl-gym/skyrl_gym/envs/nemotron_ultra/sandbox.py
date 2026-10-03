@@ -10,6 +10,8 @@ from typing import Any
 import requests
 import threading
 
+from skyrl_gym.verification import VERIFIER_RUNTIME_ERROR
+
 
 MAX_VERIFIER_OUTPUT_CHARACTERS = 65536
 # Share the limit across clients so increasing Gym workers cannot exhaust the sandbox.
@@ -52,12 +54,22 @@ class SandboxClient:
         response.raise_for_status()
         value = response.json()
         if not isinstance(value, dict):
-            raise RuntimeError(f"sandbox returned a non-object response: {value!r}")
+            raise requests.RequestException(f"Sandbox returned a non-object response: {value!r}", response=response)
+        if value.get("process_status") not in ("completed", "failed", "error", "timeout"):
+            raise requests.RequestException(f"Sandbox execution unavailable: {value!r}", response=response)
+        if any(not isinstance(value.get(key, ""), str) for key in ("stdout", "stderr")):
+            raise requests.RequestException(f"Sandbox returned malformed output: {value!r}", response=response)
+        if value.get("error_type") == VERIFIER_RUNTIME_ERROR:
+            raise requests.RequestException(f"Sandbox infrastructure failed: {value!r}", response=response)
+        if value.get("process_status") == "error" and not sandbox_output_text(value):
+            raise requests.RequestException(f"Sandbox execution unavailable: {value!r}", response=response)
         if "<output cut>" in value.get("stdout", "") or "<output cut>" in value.get("stderr", ""):
             value["output_truncated"] = True
         if session_id is not None:
             if session_id in self._sessions and value.get("new_session_created") is True:
-                raise RuntimeError(f"Sandbox lost stateful session {session_id}")
+                raise requests.RequestException(
+                    f"Sandbox lost stateful session {session_id}: {value!r}", response=response
+                )
             self._sessions.add(session_id)
         return value
 
