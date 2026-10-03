@@ -1,4 +1,4 @@
-"""Pure scheduling and diagnostic reductions for the SWE pilot."""
+"""Pilot scheduling and diagnostic reductions for reported pivot verifiers."""
 
 from collections import defaultdict
 from collections.abc import Iterable
@@ -48,10 +48,12 @@ def diagnostic_metrics(batch, *, prefix: str, indices: list[int] | None = None) 
     if not usable:
         return {}
     result = {f"{prefix}/graded_fraction": len(usable) / len(indices)}
-    for verifier in VERIFIERS:
-        result[f"{prefix}/{verifier}/accuracy"] = sum(g["scores"][verifier] for _, g in usable) / len(usable)
+    verifiers = sorted({verifier for _, grade in usable for verifier in grade["scores"]})
+    for verifier in verifiers:
+        observed = [(index, grade) for index, grade in usable if verifier in grade["scores"]]
+        result[f"{prefix}/{verifier}/accuracy"] = sum(g["scores"][verifier] for _, g in observed) / len(observed)
         groups = defaultdict(list)
-        for index, grade in usable:
+        for index, grade in observed:
             groups[batch["trajectory_ids"][index].instance_id].append(grade["scores"][verifier])
         complete = [scores for scores in groups.values() if len(scores) == 8]
         if complete:
