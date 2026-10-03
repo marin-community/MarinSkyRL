@@ -1,5 +1,3 @@
-"""Generator compatibility, documentation and freshness through its CLI."""
-
 import json
 from pathlib import Path
 import subprocess

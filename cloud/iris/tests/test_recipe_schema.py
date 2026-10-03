@@ -1,5 +1,3 @@
-"""Public sparse-document and immutable-container contracts."""
-
 import json
 from itertools import permutations
 from pathlib import Path
@@ -56,6 +54,9 @@ def test_open_maps_preserve_sparse_documents_across_mutation_pickle_and_override
     equivalent = Options(options={"samples": [1.0], "weight": 1.0})
     assert numeric == equivalent
     assert hash(numeric) == hash(equivalent)
+    for invalid in (float("nan"), float("inf"), object()):
+        with pytest.raises(ValueError, match="finite JSON value"):
+            Options(options={"schedule": [invalid]})
     routes = Options(options={"math": 1.0, "code": 1.0, "chat": 1.0})
     updated = routes.merge(Options(count=2))
     assert list(updated.to_skyrl()["options"]) == ["math", "code", "chat"]
@@ -98,6 +99,8 @@ def test_named_parts_and_settings_validate_complete_documents_without_changing_r
     structured = expected.with_settings(['context_budget={"max_turns":4}'])
     assert structured.context_budget == updated.context_budget
     assert CompleteOptions.from_document(updated.to_skyrl()) == updated
+    with pytest.raises(ValueError, match="request_window_tokens must exceed"):
+        expected.with_settings(["context_budget.request_window_tokens=64"])
     for routes in ({1: 2}, {1: 2, "1": 3}):
         document = {"options": routes}
         original_routes = list(routes.items())
