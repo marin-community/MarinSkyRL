@@ -333,6 +333,28 @@ def test_data_parallel_workers_without_expert_parallelism_are_checked_with_no_ep
     assert {row.worker.ep_world_size for row in placements} == {1}
 
 
+def test_expert_block_single_worker_has_a_checked_placement_through_normal_config(inference_scheduler):
+    cfg = example_dummy_config()
+    cfg.trainer.placement.colocate_all = False
+    cfg.generator.update(
+        weight_sync_transport="expert_block",
+        num_inference_engines=1,
+        inference_engine_tensor_parallel_size=1,
+        inference_engine_pipeline_parallel_size=1,
+        inference_engine_data_parallel_size=1,
+        inference_engine_expert_parallel_size=1,
+    )
+    cfg.generator.engine_init_kwargs = {"language_model_only": False}
+
+    engines = create_ray_wrapped_inference_engines_from_config(cfg, None, None)
+
+    placement = engines[0].worker_placements[0]
+    assert placement.weight_receiver_rank == 1
+    assert placement.node_id == "node-0"
+    assert placement.worker.gpu_uuid == "GPU-node-0-0"
+    assert placement.worker.dp_world_size == placement.worker.ep_world_size == 1
+
+
 @pytest.mark.parametrize(
     "replicas,dp,tp,pp,strategy",
     [

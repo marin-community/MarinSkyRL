@@ -80,6 +80,7 @@ class ExpertBlockReceiver:
             raise ValueError("Expert-block sync requires TP=1 inference engines")
         if parallel.enable_eplb:
             raise ValueError("Expert-block sync requires a static expert placement (no EPLB)")
+        expert_hidden_size = hf.latent_dim if hf.latent_dim is not None else hf.hidden_size
         # With pipeline parallelism this worker holds only its stage's layers.
         maps = {}
         for name, module in self.model.named_modules():
@@ -115,6 +116,7 @@ class ExpertBlockReceiver:
             "model": {
                 "num_experts": hf.num_experts,
                 "hidden_size": hf.hidden_size,
+                "expert_hidden_size": expert_hidden_size,
                 "intermediate_size": hf.moe_intermediate_size,
                 "num_hidden_layers": hf.num_hidden_layers,
             },

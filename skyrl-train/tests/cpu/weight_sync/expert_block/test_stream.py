@@ -124,7 +124,7 @@ def trainer_sources(topology, trainer):
         trainer,
         num_experts=NUM_EXPERTS,
         expert_parallel_size=topology.trainer_ep,
-        hidden_size=HIDDEN,
+        expert_hidden_size=HIDDEN,
         intermediate_size=INTERMEDIATE,
     )
     return local, {item.entry.name: item for item in experts}
