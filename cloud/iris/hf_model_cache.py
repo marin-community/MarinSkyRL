@@ -575,32 +575,43 @@ def _is_weight(path: str) -> bool:
 
 def stage_model_metadata(model_uri: str, manifest: ModelManifest, local_path: str) -> None:
     """Cache verified model metadata locally while excluding all weight shards."""
-    target = Path(local_path)
-    metadata_files = tuple(entry for entry in manifest.files if not _is_weight(entry.path))
-    if not metadata_files:
+    files = tuple(entry for entry in manifest.files if not _is_weight(entry.path))
+    if not files:
         raise ValueError(f"Model manifest contains no metadata: {model_uri}")
+    _stage_model_files(model_uri, manifest, local_path, files)
+
+
+def stage_model_snapshot(model_uri: str, manifest: ModelManifest, local_path: str) -> None:
+    """Cache a complete manifest-verified model, including weight shards."""
+    _stage_model_files(model_uri, manifest, local_path, manifest.files)
+
+
+def _stage_model_files(
+    model_uri: str, manifest: ModelManifest, local_path: str, files: tuple[ModelManifestFile, ...]
+) -> None:
+    target = Path(local_path)
 
     def matches() -> bool:
-        expected_paths = {entry.path for entry in metadata_files} | {MODEL_MANIFEST_FILENAME}
+        expected_paths = {entry.path for entry in files} | {MODEL_MANIFEST_FILENAME}
         actual_paths = {path.relative_to(target).as_posix() for path in target.rglob("*") if path.is_file()}
         return actual_paths == expected_paths and all(
             (path := target / entry.path).is_file()
             and path.stat().st_size == entry.size
             and sha256_file(path) == entry.sha256
-            for entry in metadata_files
+            for entry in files
         )
 
     if matches():
         return
-    with atomic_directory_update(target, staging_prefix=f".{target.name}.metadata-") as staging:
+    with atomic_directory_update(target, staging_prefix=f".{target.name}.model-") as staging:
         staging.mkdir()
         filesystem, root = fs_and_path(model_uri)
-        for entry in metadata_files:
+        for entry in files:
             destination = staging / entry.path
             destination.parent.mkdir(parents=True, exist_ok=True)
             filesystem.get_file(posixpath.join(root, entry.path), str(destination))
             if destination.stat().st_size != entry.size or sha256_file(destination) != entry.sha256:
-                raise ValueError(f"Model metadata checksum mismatch for {entry.path}: {model_uri}")
+                raise ValueError(f"Model file checksum mismatch for {entry.path}: {model_uri}")
         (staging / MODEL_MANIFEST_FILENAME).write_text(
             json.dumps(manifest.model_dump(mode="json"), indent=2, sort_keys=True) + "\n"
         )

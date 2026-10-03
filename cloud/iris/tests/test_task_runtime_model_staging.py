@@ -65,6 +65,7 @@ def test_hugging_face_draft_mirror_uses_the_policy_tokenizer(monkeypatch) -> Non
         return "s3://models/draft", SimpleNamespace(identity=identity)
 
     monkeypatch.setattr(task_runtime, "ensure_hugging_face_model_cache", ensure)
+    monkeypatch.setattr(task_runtime, "stage_model_snapshot", lambda *_args: None)
 
     prepared = prepare_draft_model(
         SpeculatorModelConfig(source_uri="hf://laion/draft", source_identity=revision),
@@ -72,7 +73,8 @@ def test_hugging_face_draft_mirror_uses_the_policy_tokenizer(monkeypatch) -> Non
         cache_source_prefix="s3://region/run",
     )
 
-    assert prepared == SpeculatorModelConfig(source_uri="s3://models/draft", source_identity=identity)
+    assert prepared.source_kind.value == "local"
+    assert prepared.source_identity == identity
 
 
 def test_requested_local_policy_tokenizer_is_staged_independently(tmp_path, monkeypatch) -> None:

@@ -20,6 +20,7 @@ from cloud.iris.hf_model_cache import (
     stage_artifact_model,
     stage_artifact_model_metadata,
     stage_model_metadata,
+    stage_model_snapshot,
 )
 from marinskyrl.model_manifest import ModelManifest, snapshot_model_manifest
 
@@ -377,6 +378,13 @@ def test_draft_manifest_can_share_the_policy_tokenizer(tmp_path: Path, monkeypat
     assert cache_uri == str(cache)
     assert manifest.tokenizer_mode == "policy"
     assert not any(entry.path.startswith("tokenizer") for entry in manifest.files)
+    local_draft = tmp_path / "local-draft"
+    stage_model_snapshot(cache_uri, manifest, str(local_draft))
+    assert (local_draft / "model.safetensors").read_bytes() == weights
+    assert (local_draft / "config.json").read_bytes() == config
+    (local_draft / "model.safetensors").write_bytes(b"x" * len(weights))
+    stage_model_snapshot(cache_uri, manifest, str(local_draft))
+    assert (local_draft / "model.safetensors").read_bytes() == weights
     assert (
         ModelManifest.from_mapping(json.loads((cache / ".marinskyrl-model-manifest.json").read_text()), str(cache))
         == manifest
