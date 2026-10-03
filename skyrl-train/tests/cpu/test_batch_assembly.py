@@ -1,17 +1,20 @@
+import asyncio
 from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
 from omegaconf import open_dict
 
-from skyrl_train.batch_assembly import assemble_slice, plan_batch
+from skyrl_train.batch_assembly import plan_batch
+from skyrl_train.distributed.dispatch import MeshRank
+from skyrl_train.workers.worker import PolicyWorkerBase
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.dynamic_sampling import GroupSelectionPolicy
 from skyrl_train.group_admission import GroupAdmissionPolicy, GroupAdvantageInvariant, resolve_group_advantage_invariant
 from skyrl_train.rollouts.buffer import AdmittedRollout, RolloutContentPolicy, RolloutGroup
 from skyrl_train.rollouts.context import RolloutBatchMetadata
 from skyrl_train.trainer import RayPPOTrainer
-from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
+from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches, get_outcome_rewards
 
 
 @pytest.mark.parametrize("dp_size", [1, 2, 3, 4, 8])
@@ -52,6 +55,8 @@ def test_dp_slices_with_fields_and_longest_rows_on_other_ranks_match_driver(dp_s
         }
         if index % 2 == 0:
             batch["rewards"] = [[0.0] * (length - 1) + [reward] for length, reward in zip(lengths, batch["rewards"])]
+        if index == 0:
+            batch["rewards"][1] = [1.0, 0.0]
         if index >= 4:
             batch["rollout_logprobs"] = [np.full(length, -1.25, dtype=np.float32) for length in lengths]
             batch["rollout_routed_experts"] = [np.full((length, 3, 2), index, dtype=np.uint8) for length in lengths]
@@ -93,9 +98,22 @@ def test_dp_slices_with_fields_and_longest_rows_on_other_ranks_match_driver(dp_s
     whole.pop("values")
     whole.metadata.pop("metrics")
     for rank, expected in enumerate(whole.chunk(whole.batch_size // dp_size)):
-        rows = plan.rank_rows(rank)
-        owned = [group for index, group in enumerate(groups) if index * 4 < rows.stop and (index + 1) * 4 > rows.start]
-        actual = assemble_slice(plan, rank, owned, pad_token_id=0, algorithm=cfg.trainer.algorithm)
+
+        async def read(batch_id, indices):
+            return [groups[index] for index in indices]
+
+        worker = SimpleNamespace(
+            cfg=cfg, mesh_rank=MeshRank(rank, 0, 0, 0, dp_size, dp_size, 1), _pad_token_id=0, _loaded_batches={}
+        )
+        output = asyncio.run(PolicyWorkerBase.load_batch(worker, plan, SimpleNamespace(selected=admitted, read=read)))
+        for index, observation in output.metadata["batch_observations"]:
+            original = groups[index].trajectory_batch
+            assert get_outcome_rewards(observation) == get_outcome_rewards(original)
+            assert [sum(reward) if isinstance(reward, list) else reward for reward in observation["rewards"]] == [
+                sum(reward) if isinstance(reward, list) else reward for reward in original["rewards"]
+            ]
+            assert all(len(reward) <= 1 for reward in observation["rewards"] if isinstance(reward, list))
+        actual = worker._loaded_batches[plan.batch_id]
         actual = trainer.apply_loop_advantages(actual)
         assert actual.keys() == expected.keys()
         for key, value in expected.items():

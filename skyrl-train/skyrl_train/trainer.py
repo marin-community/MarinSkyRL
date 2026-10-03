@@ -1521,7 +1521,12 @@ class RayPPOTrainer:
                     batches.append(observation)
                 metric_batch = {
                     "response_ids": [row for batch in batches for row in batch["response_ids"]],
-                    "rewards": _concatenate_rewards(batches),
+                    "rewards": _concatenate_rewards(
+                        [
+                            {"rewards": batch["rewards"], "response_ids": [[0]] * len(batch["rewards"])}
+                            for batch in batches
+                        ]
+                    ),
                 }
                 _concatenate_environment_metrics(metric_batch, batches)
                 for key in (
