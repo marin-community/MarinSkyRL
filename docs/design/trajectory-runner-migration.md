@@ -2,7 +2,7 @@
 
 This document records the earlier trajectory-runner migration. The TaskCompendium
 rollout engine supersedes its Gym, MiniSWE, and Harbor execution paths. See the
-[current rollout guide](../../skyrl-train/docs/tutorials/skyrl_gym_runner.rst).
+[current rollout guide](../../skyrl-train/docs/tutorials/task_rollouts.rst).
 
 ## Decision
 
