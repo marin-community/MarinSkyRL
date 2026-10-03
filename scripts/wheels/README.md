@@ -71,7 +71,7 @@ bash scripts/wheels/build_native.sh transformer-engine-torch /tmp/build-te-aarch
 Each directory retains its environment and source build cache. Wheels are written
 to `dist/`, with their SHA-256 digests in `SHA256SUMS`. `BUILD_INFO` records source
 and recipe hashes, submodules, architecture, Python, uv, compiler, glibc, NVCC
-and Torch ABI. `BUILD_REQUIREMENTS.txt` records the pinned build requirement input.
+and Torch ABI. `BUILD_REQUIREMENTS.txt` records the installed build packages before compilation.
 FlashAttention targets SM90; the other projects retain their upstream
 architecture choices. Only Transformer Engine is enabled for aarch64 here.
 
