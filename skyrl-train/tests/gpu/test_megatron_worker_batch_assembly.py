@@ -29,7 +29,7 @@ from skyrl_train.utils import initialize_ray, validate_cfg
 from tests.gpu.grug_gpu_gates import require_hoppers
 from tests.gpu.grug_serving import rank0_validation_snapshot
 from tests.gpu.router_replay_fixtures import random_unique_routes
-from tests.gpu.test_grug_megatron import NUM_EXPERTS, NUM_LAYERS, _config, _write_tiny_checkpoint
+from tests.gpu.test_grug_megatron import NUM_EXPERTS, NUM_LAYERS, TOY_SHAPE, _config, _write_tiny_checkpoint
 from tests.gpu.utils import init_worker_with_type
 
 
@@ -39,7 +39,7 @@ def test_megatron_pp_cp_worker_batches_match_driver_update(tmp_path, corrupt_rou
     require_hoppers(8)
     model_path = tmp_path / "model"
     model_path.mkdir()
-    _write_tiny_checkpoint(model_path, num_experts_per_tok=4)
+    _write_tiny_checkpoint(model_path, num_experts_per_tok=4, shape={**TOY_SHAPE, "global_every": 1})
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     with safe_open(model_path / "model.safetensors", framework="pt", device="cpu") as checkpoint:
         parameter_names = list(checkpoint.keys())
