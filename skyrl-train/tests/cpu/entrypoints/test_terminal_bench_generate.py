@@ -3,12 +3,16 @@ from omegaconf import OmegaConf
 from skyrl_train.config.trajectory_runner_capabilities import EntrypointOperation
 from skyrl_train.entrypoints.terminal_bench_generate import TerminalBenchGenerateExp
 from skyrl_train.trajectory_runners.types import BatchMetadata, TrajectoryRequestBatch
+from skyrl_train.trajectory_runners.trajectory_retention import RetentionSink
 
 
 class RecordingTrajectoryRunner:
     def __init__(self) -> None:
         self.request: TrajectoryRequestBatch | None = None
         self.events: list[str] = []
+
+    def set_trajectory_sink(self, sink: RetentionSink) -> None:
+        sink.bind_runner(type(self).__name__)
 
     async def startup(self) -> None:
         self.events.append("startup")

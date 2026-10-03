@@ -5,8 +5,9 @@
 
 Each sandbox runs as its own CPU-only Iris job on cluster workers (bin-packed
 onto spare host CPU, TPU hosts included). Only prebuilt-image tasks
-(``[environment] docker_image = ...``) are supported; Dockerfile/compose
-builds are not.
+(``[environment] docker_image = ...``) are supported. Dockerfile tasks may instead
+use an explicit mapping from Dockerfile SHA-256 to a previously built image
+digest. Image builds and compose services do not run inside this backend.
 
 The default ``gvisor`` profile submits CONTAINER_PROFILE_GVISOR, so untrusted
 agent code gets full in-container root behind gVisor's intercepted guest
@@ -24,6 +25,7 @@ default. Local callers may instead pass exactly one of ``cluster`` or
 
 import asyncio
 import base64
+import hashlib
 import os
 import re
 import shlex
@@ -31,6 +33,7 @@ import tarfile
 import tempfile
 import time
 from pathlib import Path
+from collections.abc import Mapping
 
 from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.environments.capabilities import EnvironmentCapabilities, EnvironmentResourceCapabilities
@@ -127,6 +130,7 @@ class IrisEnvironment(BaseEnvironment):
         scheduling_timeout: int | str = DEFAULT_SCHEDULING_TIMEOUT,
         container_profile: str = GVISOR_PROFILE,
         sandbox_ttl: int | str = DEFAULT_SANDBOX_TTL,
+        prebuilt_images: Mapping[str, str] | None = None,
         **kwargs,
     ):
         """
@@ -148,7 +152,14 @@ class IrisEnvironment(BaseEnvironment):
             sandbox_ttl: Hard job TTL in seconds after which Iris kills the
                 sandbox even if stop() is never called (leaked-harness safety
                 net). Accepts str like scheduling_timeout.
+            prebuilt_images: Dockerfile SHA-256 to immutable image reference.
+                The caller builds each image from the matching task definition.
+                Task environment files are uploaded after the image starts.
         """
+        self._prebuilt_images = dict(prebuilt_images or {})
+        for digest, image in self._prebuilt_images.items():
+            if re.fullmatch(r"[0-9a-f]{64}", digest) is None or re.fullmatch(r".+@sha256:[0-9a-f]{64}", image) is None:
+                raise ValueError("prebuilt_images requires Dockerfile SHA-256 keys and immutable image digests")
         super().__init__(*args, **kwargs)
         if cluster is None and controller_url is None:
             controller_url = os.environ.get("IRIS_CONTROLLER_URL")
@@ -182,11 +193,22 @@ class IrisEnvironment(BaseEnvironment):
         return EnvironmentResourceCapabilities(cpu_request=True, memory_request=True)
 
     def _validate_definition(self):
-        if not self.task_env_config.docker_image:
+        if self.task_env_config.docker_image:
+            return
+        dockerfile = self.environment_dir / "Dockerfile"
+        if (self.environment_dir / "docker-compose.yaml").exists():
+            raise ValueError("IrisEnvironment does not support compose services")
+        if not dockerfile.is_file() or hashlib.sha256(dockerfile.read_bytes()).hexdigest() not in self._prebuilt_images:
             raise ValueError(
                 "IrisEnvironment only supports prebuilt-image tasks "
-                "([environment] docker_image = ...); Dockerfile builds are not supported."
+                "([environment] docker_image = ...) or a pinned prebuilt_images mapping for the task Dockerfile."
             )
+
+    def _task_image(self) -> str:
+        if self.task_env_config.docker_image:
+            return self.task_env_config.docker_image
+        digest = hashlib.sha256((self.environment_dir / "Dockerfile").read_bytes()).hexdigest()
+        return self._prebuilt_images[digest]
 
     def _job_name(self) -> str:
         sanitized = re.sub(r"[^a-zA-Z0-9_.-]", "-", self.session_id).strip("-")
@@ -214,7 +236,17 @@ class IrisEnvironment(BaseEnvironment):
                     self._ensure_dirs_command(dirs, chmod=True), cwd="/", user=self._reset_dirs_user()
                 )
                 _require_success(result, f"failed to create sandbox dirs {dirs}", IrisSandboxError)
-            await self._upload_environment_dir_after_start()
+            if self.task_env_config.docker_image:
+                await self._upload_environment_dir_after_start()
+            else:
+                # The mapped image supplies Dockerfile build steps; upload restores COPY inputs
+                # from this particular task without modifying its checked-in definition.
+                result = await self.exec("pwd")
+                _require_success(result, "failed to resolve image working directory", IrisSandboxError)
+                workdir = self.task_env_config.workdir or result.stdout.strip()
+                if not workdir:
+                    raise IrisSandboxError("mapped image has no working directory")
+                await self.upload_dir(self.environment_dir, workdir)
         except BaseException:
             await asyncio.shield(asyncio.to_thread(self._stop_sync))
             raise
@@ -244,7 +276,7 @@ class IrisEnvironment(BaseEnvironment):
                     memory=(self.task_env_config.memory_mb or DEFAULT_MEMORY_MB) * 1024 * 1024,
                     disk=(self.task_env_config.storage_mb or DEFAULT_STORAGE_MB) * 1024 * 1024,
                 ),
-                task_image=self.task_env_config.docker_image,
+                task_image=self._task_image(),
                 container_profile=self._container_profile,
                 scheduling_timeout=Duration.from_seconds(self._scheduling_timeout),
                 timeout=Duration.from_seconds(self._sandbox_ttl),

@@ -196,6 +196,10 @@ ENVIRONMENT_SCHEMA = SectionSchema(
         "override_gpus": FieldMapping("override_gpus"),
         "environment_type": FieldMapping("type"),  # Maps to EnvironmentConfig.type
         "import_path": FieldMapping("import_path"),  # Custom environment class
+        # Iris CPU sandboxes resolve unchanged Dockerfile tasks through pinned images.
+        "iris_cluster": FieldMapping("cluster", field_type="kwargs"),
+        "container_profile": FieldMapping("container_profile", field_type="kwargs"),
+        "prebuilt_images": FieldMapping("prebuilt_images", field_type="kwargs"),
         # Pool-based environment kwargs (for PooledDaytonaDinDEnvironment)
         "pool_size": FieldMapping("pool_size", field_type="kwargs"),
         "acquire_timeout": FieldMapping("acquire_timeout", field_type="kwargs"),

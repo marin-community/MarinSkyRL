@@ -108,3 +108,20 @@ def test_daytona_network_policy_reaches_harbor_environment_config():
     trial_config = _trial_config({"env_network_policy": policy})
 
     assert trial_config.environment.kwargs["network_policy"] == policy
+
+
+def test_iris_dockerfile_mapping_reaches_custom_environment():
+    images = {"a" * 64: "ghcr.io/marin-community/iris-task@sha256:" + "b" * 64}
+    trial_config = _trial_config(
+        {
+            "import_path": "marinskyrl.iris_harbor_environment:IrisEnvironment",
+            "iris_cluster": "cw-rno2a",
+            "container_profile": "gvisor",
+            "prebuilt_images": images,
+        }
+    )
+
+    assert trial_config.environment.import_path == "marinskyrl.iris_harbor_environment:IrisEnvironment"
+    assert trial_config.environment.kwargs["cluster"] == "cw-rno2a"
+    assert trial_config.environment.kwargs["container_profile"] == "gvisor"
+    assert trial_config.environment.kwargs["prebuilt_images"] == images

@@ -15,13 +15,18 @@ from skyrl_train.entrypoints.terminal_bench import TerminalBenchExp
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.config.trajectory_runner_capabilities import EntrypointOperation, TrajectoryRunnerMode
 from skyrl_train.trajectory_runners.trajectory_processing import prepare_trajectory_request
+from skyrl_train.trajectory_runners.trajectory_retention import make_trajectory_sink
+from skyrl_train.trajectory_runners.harbor.dataset import TerminalBenchTaskDataset
 
 
 class TerminalBenchGenerateExp(TerminalBenchExp):
+    def get_train_dataset(self) -> TerminalBenchTaskDataset:
+        # Generation has no optimizer batch-size constraint, including for one-task smokes.
+        return TerminalBenchTaskDataset(data_files=self.cfg.data.train_data)
+
     async def _generate(self) -> None:
         inference_engine_client = self.create_inference_engine_client(operation=EntrypointOperation.GENERATE)
         trajectory_runner = self.get_trajectory_runner(self.cfg, self.tokenizer, inference_engine_client)
-
         input_batch, _ = prepare_trajectory_request(
             list(self.train_dataset),
             self.cfg.generator.n_samples_per_prompt,
@@ -31,16 +36,21 @@ class TerminalBenchGenerateExp(TerminalBenchExp):
             0,
         )
 
-        await trajectory_runner.startup()
+        trajectory_sink = make_trajectory_sink(self.cfg.generator, self.tokenizer)
         try:
-            # Generation requests carry the eval phase, which the rollout workers serve only inside an eval session.
-            await trajectory_runner.start_eval_session(run_name=self.cfg.trainer.run_name, eval_step=0)
+            trajectory_runner.set_trajectory_sink(trajectory_sink)
             try:
-                await trajectory_runner.run(input_batch)
+                await trajectory_runner.startup()
+                # Generation requests carry the eval phase, served only inside an eval session.
+                await trajectory_runner.start_eval_session(run_name=self.cfg.trainer.run_name, eval_step=0)
+                try:
+                    await trajectory_runner.run(input_batch)
+                finally:
+                    await trajectory_runner.stop_eval_session()
             finally:
-                await trajectory_runner.stop_eval_session()
+                await trajectory_runner.shutdown()
         finally:
-            await trajectory_runner.shutdown()
+            await asyncio.to_thread(trajectory_sink.close)
 
     def _run(self):
         asyncio.run(self._generate())
