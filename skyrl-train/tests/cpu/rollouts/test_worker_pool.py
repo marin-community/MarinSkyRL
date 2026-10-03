@@ -14,6 +14,7 @@ from omegaconf import DictConfig, OmegaConf
 from tests.cpu.tiny_training.tiny_model import build_tiny_policy
 
 from skyrl_train.rollout_observability import measure_rollout, observe_rollout_call, rollout_wait
+from skyrl_train.utils.algorithm_registry import sync_registries
 from skyrl_train.rollouts.buffer import RolloutLease, RolloutTask
 from skyrl_train.rollouts.workers import (
     RolloutWorkerPool,
@@ -316,6 +317,8 @@ class _FailingBuildSpec:
 @pytest.mark.asyncio
 async def test_shutdown_kills_every_worker_after_parallel_constructor_failure(ray_init, tmp_path):
     model = build_tiny_policy(tmp_path / "model")
+    # The driver owns registries so a failed worker cannot terminate them during imports.
+    sync_registries()
     records = tmp_path / "records"
     records.mkdir()
     spec = _FailingBuildSpec(
@@ -332,8 +335,9 @@ async def test_shutdown_kills_every_worker_after_parallel_constructor_failure(ra
             num_workers=3, cpus_per_worker=1, executor_threads=1, progress_timeout_seconds=30, start_interval_seconds=0
         ),
     )
-    with pytest.raises(ray.exceptions.RayActorError, match="runner build failed"):
-        await asyncio.wait_for(pool.startup(), timeout=30)
+    # The caller can retain the startup error while shutting down its worker pool.
+    with pytest.raises(ray.exceptions.RayActorError, match="runner build failed") as failure:
+        await asyncio.wait_for(pool.startup(), timeout=120)
     async with asyncio.timeout(30):
         while len(list(records.glob("worker-*.json"))) < 3:
             await asyncio.sleep(0.01)
@@ -349,3 +353,4 @@ async def test_shutdown_kills_every_worker_after_parallel_constructor_failure(ra
         except psutil.NoSuchProcess:
             pass
         assert not psutil.pid_exists(pid)
+    assert "runner build failed" in str(failure.value)
