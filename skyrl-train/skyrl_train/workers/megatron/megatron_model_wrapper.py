@@ -234,15 +234,17 @@ class MegatronModelWrapper:
         device = sequences.device
         dense, mask_BS = dense_replay_targets(rollout_routed_experts, batch_size, seq_len, num_actions)
         response_BS = torch.zeros_like(mask_BS)
-        response_BS[:, seq_len - num_actions :] = True
+        response_BS[:, seq_len - num_actions - 1 : seq_len - 1] = True
         probe_positions = None
         if probe_row_indices is not None:
             if probe_row_indices.shape != (batch_size,):
                 raise ValueError("probe row indices must have one entry per sequence")
             # Zero encodes padding through the shared sequence transforms.
             probe_positions = torch.zeros((batch_size, seq_len, 2), dtype=torch.long, device=device)
-            probe_positions[:, seq_len - num_actions :, 0] = probe_row_indices[:, None] + 1
-            probe_positions[:, seq_len - num_actions :, 1] = torch.arange(1, num_actions + 1, device=device)
+            probe_positions[:, seq_len - num_actions - 1 : seq_len - 1, 0] = probe_row_indices[:, None] + 1
+            probe_positions[:, seq_len - num_actions - 1 : seq_len - 1, 1] = torch.arange(
+                1, num_actions + 1, device=device
+            )
 
         if self.use_sample_packing:
             # The routes tensor is ours, not the pipeline's input: always run the
