@@ -4,6 +4,7 @@ from omegaconf import DictConfig
 
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from skyrl_gym.envs.ifeval import utils
+from skyrl_gym.verification import VerificationResult
 
 
 class IFEvalEnv(BaseTextEnv):
@@ -20,13 +21,27 @@ class IFEvalEnv(BaseTextEnv):
         assert "reward_model" in extras, "reward_model field is required"
         assert "ground_truth" in extras["reward_model"], "ground_truth is required in reward_model field"
         self.ground_truth = extras["reward_model"]["ground_truth"]
+        self.verifyit_enabled = bool(env_config.get("verifyit_enabled", False))
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
         done = True  # always done after one step
 
-        score_info = utils.compute_score(action, self.ground_truth)
+        score_info = utils.compute_score(action, self.ground_truth, verifyit_enabled=self.verifyit_enabled)
         reward = score_info["score"]
         metadata = {key: value for key, value in score_info.items() if key != "score"}
 
         # No observation in ifeval, and no tool call
+        if self.verifyit_enabled:
+            verification = (
+                VerificationResult.error("Instruction verifier failed", diagnostics=metadata)
+                if score_info.get("error_type")
+                else VerificationResult.verified(reward, passed=score_info["acc"], diagnostics=metadata)
+            )
+            return BaseTextEnvStepOutput(
+                observations=[],
+                reward=reward,
+                done=done,
+                metadata=metadata,
+                verification=verification,
+            )
         return BaseTextEnvStepOutput(observations=[], reward=reward, done=done, metadata=metadata)

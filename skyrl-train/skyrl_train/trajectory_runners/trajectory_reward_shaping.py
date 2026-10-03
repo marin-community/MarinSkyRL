@@ -23,8 +23,11 @@ REWARD_SHAPING_ROW_KEYS = (
     "loop_advantages",
     "reward_shaping_versions",
     "verifier_tests",
+    "verification_results",
+    "evidence_messages",
     "exception_types",
     "error_treatments",
+    "server_errors",
 )
 DEFAULT_ACCEPTED_STOP_REASONS = ("complete", "end_turn", "eos", "stop")
 
@@ -243,11 +246,25 @@ def _active_segments(token_ids: Sequence[int], loss_mask: Sequence[int]) -> list
     return segments
 
 
-def _tail_loop_span(
+@dataclass(frozen=True)
+class TailLoop:
+    """Token coordinates for a periodic suffix within the last trainable segment."""
+
+    start: int
+    period: int
+    end: int
+
+    @property
+    def repeat_start(self) -> int:
+        return self.start + self.period
+
+
+def tail_loop(
     response_ids: Sequence[int],
     loss_mask: Sequence[int],
     config: LoopCreditConfig,
-) -> RewardShapingLoopSpan | None:
+) -> TailLoop | None:
+    """Find a repeating trainable suffix and return its original token coordinates."""
     segments = _active_segments(response_ids, loss_mask)
     if not segments:
         return None
@@ -274,9 +291,16 @@ def _tail_loop_span(
     periodic_start = len(segment_tokens) - period * config.minimum_occurrences
     while periodic_start > 0 and segment_tokens[periodic_start - 1] == segment_tokens[periodic_start - 1 + period]:
         periodic_start -= 1
-    charged_start = periodic_start + period * (config.minimum_occurrences - 1)
-    span = {"start": segment_positions[charged_start], "end": segment_positions[-1] + 1}
-    return span
+    return TailLoop(segment_positions[periodic_start], period, segment_positions[-1] + 1)
+
+
+def _tail_loop_span(
+    response_ids: Sequence[int], loss_mask: Sequence[int], config: LoopCreditConfig
+) -> RewardShapingLoopSpan | None:
+    hit = tail_loop(response_ids, loss_mask, config)
+    if hit is None:
+        return None
+    return {"start": hit.start + hit.period * (config.minimum_occurrences - 1), "end": hit.end}
 
 
 def _build_loop_credit(

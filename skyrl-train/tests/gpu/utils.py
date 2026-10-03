@@ -19,6 +19,7 @@ from skyrl_train.workers.worker import PPORayActorGroup
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.training_batch import TensorBatch, TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.entrypoints.main_base import config_dir
+from skyrl_train.config.weight_sync_pause import resolve_weight_sync_pause_policy
 from skyrl_train.utils import get_ray_pg_ready_with_timeout
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.trajectory_runners.base import TrajectoryRequestBatch, ConversationType
@@ -104,21 +105,22 @@ def make_dummy_experience(seq_len=10, num_actions=4) -> Experience:
 
 
 def import_worker(strategy: str, worker_type: str):
-    if strategy == "deepspeed":
-        module_path = "skyrl_train.workers.deepspeed.deepspeed_worker"
-    elif strategy in ("fsdp", "fsdp2"):
-        module_path = "skyrl_train.workers.fsdp.fsdp_worker"
-    elif strategy == "megatron":
-        module_path = "skyrl_train.workers.megatron.megatron_worker"
-    else:
+    if strategy != "megatron":
         raise ValueError(f"Unknown strategy type for {worker_type}: {strategy}")
+    module_path = "skyrl_train.workers.megatron.megatron_worker"
 
     module = importlib.import_module(module_path)
     return getattr(module, f"{worker_type.capitalize()}Worker")
 
 
 def init_worker_with_type(
-    worker_type: str, shared_pg=None, colocate_all=False, num_gpus_per_node=1, num_nodes=1, cfg=None
+    worker_type: str,
+    shared_pg=None,
+    colocate_all=False,
+    num_gpus_per_node=1,
+    num_nodes=1,
+    cfg=None,
+    num_training_steps: int | None = None,
 ) -> PPORayActorGroup:
     if cfg is None:
         cfg = get_test_actor_config()
@@ -145,7 +147,8 @@ def init_worker_with_type(
         record_memory=cfg.trainer.policy.record_memory,
     )
     # we use policy model path for all tests (regardless of actor type)
-    ray.get(model.async_init_model(cfg.trainer.policy.model.path))
+    init_kwargs = {} if num_training_steps is None else {"num_training_steps": num_training_steps}
+    ray.get(model.async_init_model(cfg.trainer.policy.model.path, **init_kwargs))
     return model
 
 
@@ -348,7 +351,6 @@ def init_inference_engines(
     cfg,
     model,
     use_local,
-    async_engine,
     tp_size,
     colocate_all,
     backend,
@@ -384,7 +386,6 @@ def init_inference_engines(
         engine_init_timeout_seconds=cfg.generator.engine_init_timeout_seconds,
         gpu_memory_utilization=gpu_memory_utilization,
         inference_engine_enable_sleep=sleep,
-        async_engine=async_engine,
         max_num_batched_tokens=8192,
         max_num_seqs=max_num_seqs,
         tokenizer=tokenizer,
@@ -392,6 +393,7 @@ def init_inference_engines(
         sleep_level=sleep_level,
         enable_lora=enable_lora,
         engine_init_kwargs=engine_init_kwargs or {},
+        weight_sync_pause_policy=resolve_weight_sync_pause_policy(cfg.generator),
     )
     client = InferenceEngineClient(eps, tokenizer, cfg)
     if sleep:

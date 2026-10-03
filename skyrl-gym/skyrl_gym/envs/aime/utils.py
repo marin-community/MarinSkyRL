@@ -14,8 +14,11 @@
 # Adapted from https://github.com/EleutherAI/lm-evaluation-harness/blob/main/lm_eval/tasks/hendrycks_math/utils.py
 # https://github.com/volcengine/verl/blob/1a62568f801ba35ac1f5387e27232a2df7eac488/verl/utils/reward_score/math_dapo.py
 
+from verifyit.adapters.skyrl import grade_aime_candidate, grade_literal_candidate
+
 import math
 import re
+from fractions import Fraction
 from typing import Optional, Dict, Any
 
 
@@ -170,6 +173,28 @@ def normalize_final_answer(final_answer: str) -> str:
     return final_answer.strip()
 
 
+_TEX_FRACTION = re.compile(r"\\[dt]?frac\{(-?\d+(?:\.\d+)?)\}\{(-?\d+(?:\.\d+)?)\}")
+_SLASH_FRACTION = re.compile(r"(-?\d+(?:\.\d+)?)/(-?\d+(?:\.\d+)?)")
+_RATIO = re.compile(r"(-?\d+):(-?\d+)")
+_PLAIN_DECIMAL = re.compile(r"-?\d+(?:\.\d+)?")
+
+
+def rational_value(answer: str) -> Optional[Fraction]:
+    """Parse a normalized answer as an exact rational, accepting TeX fraction and ratio forms."""
+    candidate = answer.replace(r"\left", "").replace(r"\right", "").strip()
+    for pattern in (_TEX_FRACTION, _SLASH_FRACTION, _RATIO):
+        match = pattern.fullmatch(candidate)
+        if match is None:
+            continue
+        try:
+            return Fraction(match.group(1)) / Fraction(match.group(2))
+        except ZeroDivisionError:
+            return None
+    if _PLAIN_DECIMAL.fullmatch(candidate):
+        return Fraction(candidate)
+    return None
+
+
 def is_correct_minerva(
     solution_str: str, gt: str, gt_need_extract: bool = False, answer_pattern: str = r"(?i)Answer\s*:\s*([^\n<]+)"
 ) -> tuple[bool, str]:
@@ -198,7 +223,7 @@ def is_correct_minerva(
     else:
         gt = normalize_final_answer(gt)
 
-    return (pred == gt), pred
+    return grade_aime_candidate(gt, pred).reward == 1.0, pred
 
 
 def is_correct_strict_box(
@@ -225,7 +250,8 @@ def is_correct_strict_box(
     boxed_pred = last_boxed_only_string(pred)
     extracted_pred = remove_boxed(boxed_pred) if boxed_pred is not None else None
 
-    return 1 if (extracted_pred == gt) else -1, extracted_pred
+    reward = grade_literal_candidate(gt, extracted_pred).reward if extracted_pred is not None else 0.0
+    return 2 * int(reward) - 1, extracted_pred
 
 
 def verify(

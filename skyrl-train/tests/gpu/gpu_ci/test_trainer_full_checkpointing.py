@@ -5,12 +5,11 @@ This test validates that the RayPPOTrainer can save and restore ALL training sta
 ensuring that training can resume exactly where it left off.
 
 Run with:
-For FSDP and DeepSpeed, run:
-uv run --isolated --group dev --extra deepspeed --extra vllm pytest tests/gpu/gpu_ci/test_trainer_full_checkpointing.py -m "not megatron"
-
-For Megatron, run:
-uv run --isolated --group dev --extra vllm --extra megatron pytest tests/gpu/gpu_ci/test_trainer_full_checkpointing.py -m "megatron"
+uv run --group dev --extra vllm --extra megatron pytest tests/gpu/gpu_ci/test_trainer_full_checkpointing.py
 """
+
+import asyncio
+from types import SimpleNamespace
 
 import ray
 import pytest
@@ -21,9 +20,11 @@ import shutil
 import tempfile
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import Dataset
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from transformers import AutoTokenizer
 
+from skyrl_train.rollouts.context import TrainingContextState
+from skyrl_train.rollouts.loader import PromptLoaderState
 from skyrl_train.utils.tracking import Tracking
 from skyrl_train.trainer import RayPPOTrainer
 from tests.gpu.utils import import_worker, ray_init_for_tests
@@ -31,6 +32,9 @@ from skyrl_train.entrypoints.main_base import config_dir
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 NUM_GPUS = 2
+ROLLOUT_STATE = TrainingContextState(
+    loader=PromptLoaderState(order={"epoch": 0, "position": 2}, retries=[]), ready=[], object_store_root=None
+)
 
 
 class DummyDataset(Dataset):
@@ -49,27 +53,20 @@ class DummyDataset(Dataset):
         return batch
 
 
-def get_test_trainer_config(
-    strategy: str, fsdp2_cpu_offload: bool = False, optimizer_checkpoint_sharding_type: str | None = None
-) -> DictConfig:
+def get_test_trainer_config(strategy: str, optimizer_checkpoint_sharding_type: str | None = None) -> DictConfig:
     """Create minimal trainer config for testing"""
     with hydra.initialize_config_dir(config_dir=config_dir):
         cfg = hydra.compose(config_name="ppo_base_config")
 
     cfg.trainer.policy.model.path = MODEL_NAME
-    cfg.trainer.critic.model.path = MODEL_NAME  # Enable critic for testing
     cfg.trainer.strategy = strategy
-    if strategy == "fsdp2":
-        cfg.trainer.policy.fsdp_config.cpu_offload = fsdp2_cpu_offload
 
     # Use minimal settings for faster testing
     cfg.trainer.placement.policy_num_gpus_per_node = NUM_GPUS
     cfg.trainer.placement.critic_num_gpus_per_node = NUM_GPUS
     cfg.trainer.placement.policy_num_nodes = 1
     cfg.trainer.placement.critic_num_nodes = 1
-    cfg.trainer.algorithm.use_kl_loss = (
-        False  # disable ref model so we just have policy and critic (NUM_GPUS total GPUs)
-    )
+    cfg.trainer.algorithm.use_kl_loss = False
     cfg.trainer.placement.colocate_all = False  # Disable colocation for simpler testing
     cfg.trainer.train_batch_size = NUM_GPUS
     cfg.trainer.micro_train_batch_size_per_gpu = 1
@@ -89,8 +86,6 @@ def get_test_trainer_config(
         cfg.trainer.placement.policy_num_gpus_per_node = 4
         cfg.trainer.train_batch_size = 4
         cfg.trainer.policy_mini_batch_size = 4
-        # Disable critic for megatron
-        cfg.trainer.critic.model.path = ""
 
     # Use temporary directories
     cfg.trainer.export_path = tempfile.mkdtemp(prefix="trainer_ckpt_test_")
@@ -130,13 +125,16 @@ def create_minimal_trainer(cfg: DictConfig):
         eval_dataset=None,
         inference_engine_client=None,
         trajectory_runner=mock_trajectory_runner,
+        context=SimpleNamespace(
+            config=SimpleNamespace(max_staleness_steps=0, batch_size=cfg.trainer.train_batch_size),
+            state_dict=AsyncMock(return_value=ROLLOUT_STATE),
+        ),
     )
 
     return trainer
 
 
 def saved_optimizer_format(checkpoint_dir: str) -> str:
-    # Megatron is optional for the other strategies in this module.
     from megatron.core import dist_checkpointing
     from skyrl_train.distributed.megatron.megatron_strategy import _saved_optimizer_sharding_type
 
@@ -145,19 +143,13 @@ def saved_optimizer_format(checkpoint_dir: str) -> str:
 
 
 @pytest.mark.parametrize(
-    ("strategy, fsdp2_cpu_offload, initial_sharding_type, resumed_sharding_type"),
+    ("initial_sharding_type, resumed_sharding_type"),
     [
-        ("deepspeed", False, None, None),
-        ("fsdp", False, None, None),
-        ("fsdp2", False, None, None),
-        ("fsdp2", True, None, None),
-        pytest.param("megatron", False, "fully_reshardable", "dp_reshardable", marks=pytest.mark.megatron),
-        pytest.param("megatron", False, "dp_reshardable", "dp_reshardable", marks=pytest.mark.megatron),
+        ("fully_reshardable", "dp_reshardable"),
+        ("dp_reshardable", "dp_reshardable"),
     ],
 )
-def test_trainer_full_checkpointing(
-    ray_init_fixture, strategy, fsdp2_cpu_offload, initial_sharding_type, resumed_sharding_type
-):
+def test_trainer_full_checkpointing(ray_init_fixture, initial_sharding_type, resumed_sharding_type):
     """
     Test full trainer checkpointing by:
     1. Creating trainer and setting it up
@@ -169,7 +161,8 @@ def test_trainer_full_checkpointing(
     7. Verifying all state matches
     8. Continuing training to ensure it works
     """
-    cfg = get_test_trainer_config(strategy, fsdp2_cpu_offload, initial_sharding_type)
+    strategy = "megatron"
+    cfg = get_test_trainer_config(strategy, initial_sharding_type)
 
     checkpoint_dir = None
     try:
@@ -197,7 +190,7 @@ def test_trainer_full_checkpointing(
         trainer1.global_step = 2
 
         # Save checkpoint
-        trainer1.save_checkpoints()
+        asyncio.run(trainer1.save_checkpoints())
 
         # Capture state before teardown
         saved_global_step = trainer1.global_step
@@ -209,9 +202,6 @@ def test_trainer_full_checkpointing(
             os.path.join(checkpoint_dir, "trainer_state.pt"),
             os.path.join(checkpoint_dir, "data.pt"),
         ]
-        # Only expect critic dir for non-megatron strategies
-        if strategy != "megatron":
-            expected_files.append(os.path.join(checkpoint_dir, "critic"))
         for expected_file in expected_files:
             assert os.path.exists(expected_file), f"Expected checkpoint file/dir not found: {expected_file}"
         if strategy == "megatron":
@@ -245,7 +235,7 @@ def test_trainer_full_checkpointing(
         print("Phase 2: Resume from checkpoint")
         ray_init_for_tests()
         # Create new config with resume enabled
-        cfg_resume = get_test_trainer_config(strategy, fsdp2_cpu_offload, resumed_sharding_type)
+        cfg_resume = get_test_trainer_config(strategy, resumed_sharding_type)
         cfg_resume.trainer.resume_mode = "from_path"  # Enable resume
         cfg_resume.trainer.resume_path = checkpoint_dir  # Set resume path
         cfg_resume.trainer.export_path = cfg.trainer.export_path  # Use same export path
@@ -262,13 +252,14 @@ def test_trainer_full_checkpointing(
             f"Expected global_step={saved_global_step}, got {loaded_global_step}"
         )
         assert loaded_checkpoint_dir == checkpoint_dir, "Checkpoint path mismatch"
+        assert trainer2._restored_rollout_state == ROLLOUT_STATE
 
         # ============= PHASE 3: Continue Training =============
         print("Phase 3: Second checkpoint save")
 
         # Try to save another checkpoint to test cleanup logic
         trainer2.global_step = 3
-        trainer2.save_checkpoints()
+        asyncio.run(trainer2.save_checkpoints())
 
         next_checkpoint_dir = os.path.join(cfg.trainer.export_path, f"global_step_{trainer2.global_step}")
         assert os.path.exists(next_checkpoint_dir), "Could not save checkpoint after resume"

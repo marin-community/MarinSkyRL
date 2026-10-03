@@ -2,7 +2,6 @@ import copy
 
 import pytest
 import torch
-import torch.nn.functional as F
 from transformers import Qwen3_5MoeConfig, Qwen3MoeConfig, Qwen3NextConfig
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeTopKRouter
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBlock
@@ -13,9 +12,6 @@ from skyrl_train.models.router_instrumentation import (
     instrument_moe_routers,
     observe_router_forwards,
 )
-from tests.cpu.models.moe_test_imports import import_grouped_moe_module
-
-TokenChoiceTopKRouter = import_grouped_moe_module().TokenChoiceTopKRouter
 
 
 def _grug_config() -> GrugMoeConfig:
@@ -51,67 +47,6 @@ def _qwen_config() -> Qwen3MoeConfig:
         norm_topk_prob=True,
         vocab_size=32,
     )
-
-
-def test_grouped_qwen_router_observation_matches_native_routing() -> None:
-    router = TokenChoiceTopKRouter(dim=4, num_experts=4, top_k=2, route_norm=True)
-    with instrument_moe_routers(router) as instrumentation:
-        assert instrumentation.router_count == 1
-    with torch.no_grad():
-        router.gate.weight.copy_(
-            torch.tensor(
-                [
-                    [1.0, 0.0, 0.0, 0.0],
-                    [0.0, 2.0, 0.0, 0.0],
-                    [0.0, 0.0, 3.0, 0.0],
-                    [0.0, 0.0, 0.0, 4.0],
-                ]
-            )
-        )
-    hidden = torch.tensor([[4.0, 3.0, 2.0, 1.0], [1.0, 2.0, 3.0, 4.0]])
-    observations = []
-
-    with observe_router_forwards(observations.append):
-        combine_weights, selected_experts, _ = router(hidden)
-
-    logits = F.linear(hidden, router.gate.weight)
-    expected_probabilities = logits.softmax(dim=-1)
-    expected_weights, expected_experts = expected_probabilities.topk(2, dim=-1)
-    expected_weights /= expected_weights.sum(dim=-1, keepdim=True)
-
-    assert len(observations) == 1
-    observation = observations[0]
-    torch.testing.assert_close(observation.router_inputs, hidden)
-    torch.testing.assert_close(observation.selection_logits, logits)
-    torch.testing.assert_close(observation.selection_log_probs, logits.log_softmax(dim=-1))
-    torch.testing.assert_close(observation.natural_selected_experts, expected_experts)
-    torch.testing.assert_close(observation.selected_experts, selected_experts)
-    torch.testing.assert_close(observation.combine_weights, combine_weights)
-    torch.testing.assert_close(selected_experts, expected_experts)
-    torch.testing.assert_close(combine_weights, expected_weights)
-
-
-def test_grouped_qwen_router_observation_distinguishes_replayed_route() -> None:
-    router = TokenChoiceTopKRouter(dim=4, num_experts=4, top_k=2, route_norm=True)
-    hidden = torch.randn(3, 4)
-    replayed_experts = torch.tensor([[2, 3], [1, 3], [0, 2]])
-    observations = []
-
-    with observe_router_forwards(observations.append):
-        combine_weights, selected_experts, _ = router(hidden, routed_experts=replayed_experts)
-
-    scores = router.gate(hidden).float().softmax(dim=-1)
-    natural_experts = scores.topk(2, dim=-1).indices
-    replayed_weights = scores.gather(-1, replayed_experts)
-    replayed_weights /= replayed_weights.sum(dim=-1, keepdim=True)
-
-    assert len(observations) == 1
-    observation = observations[0]
-    torch.testing.assert_close(observation.natural_selected_experts, natural_experts)
-    torch.testing.assert_close(observation.selected_experts, replayed_experts)
-    torch.testing.assert_close(observation.combine_weights, replayed_weights)
-    torch.testing.assert_close(selected_experts, replayed_experts)
-    torch.testing.assert_close(combine_weights, replayed_weights)
 
 
 def test_grug_router_observation_uses_biased_selection_and_native_weights() -> None:

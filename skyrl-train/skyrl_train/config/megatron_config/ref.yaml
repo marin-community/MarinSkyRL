@@ -10,3 +10,6 @@ model_config_kwargs: {}
 
 transformer_config_kwargs: {}
 logprob_chunk_size: 1024
+
+# Replay expert choices captured during rollout.
+moe_router_replay: false

@@ -11,9 +11,10 @@ contract, replica pool, and objective payload.
 Supported configurations
 ------------------------
 
-The production gate covers an FSDP2 Qwen3 policy with a separate, unquantized vLLM
-teacher. It runs one optimizer step each night and requires finite distillation loss,
-teacher-scored tokens, and a positive raw gradient norm. The same gate can select an
+The production gate covers a Megatron Qwen3 policy with a separate, unquantized vLLM
+teacher. It runs one optimizer step each night and requires finite teacher-advantage
+metrics, positive teacher-scored and valid-token counts, a nonzero mean absolute
+teacher advantage, and a positive raw gradient norm. The same gate can select an
 OpenAI-compatible endpoint fixture for transport acceptance.
 
 Local teachers currently require the vLLM backend and ``pinned`` or ``rotating``
@@ -28,12 +29,17 @@ vocabularies are fingerprinted from their tokenizer before GPU allocation. Remot
 teachers declare the same SHA-256 vocabulary fingerprint, and every response must echo
 the exact requested token IDs. A matching tokenizer family name is not sufficient.
 
-FSDP/DeepSpeed and Megatron objective adapters have CPU integration coverage. Only
-FSDP2 with an unquantized local vLLM teacher is covered by the recurring production
-model gate. No quantized local-teacher configuration is currently defined or
-production-gated. SGLang teacher scoring is rejected because it cannot provide the
-required prompt logprobs. Other policy/backend combinations should be treated as
-experimental until they gain targeted GPU coverage.
+Megatron objective adapters have CPU integration coverage. The recurring production gate
+uses an unquantized local vLLM teacher. No quantized local-teacher configuration is
+currently defined or production-gated. SGLang teacher scoring is rejected because it
+cannot provide the required prompt logprobs.
+
+Choosing the teacher objective
+------------------------------
+
+See :doc:`objective_guide` for teacher options, ADD and REPLACE setups,
+recipe selection and worked OPD/MOPD setups.
+:doc:`objective` describes how evidence becomes policy credit or a teacher term.
 
 Routing and residency
 ---------------------

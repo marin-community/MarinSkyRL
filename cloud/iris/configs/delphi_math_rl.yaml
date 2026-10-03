@@ -14,7 +14,7 @@ environment:
   env_class: aime
 
 trainer:
-  strategy: fsdp2
+  strategy: megatron
   algorithm:
     advantage_estimator: grpo
     use_kl_loss: false
@@ -28,7 +28,7 @@ trainer:
   train_batch_size: 64
   policy_mini_batch_size: 64
   eval_batch_size: 64
-  micro_forward_batch_size_per_gpu: 4
+  micro_forward_batch_size_per_gpu: 2
   micro_train_batch_size_per_gpu: 2
 
   eval_before_train: false
@@ -41,10 +41,6 @@ trainer:
     optimizer_config:
       lr: 3.0e-6
       max_grad_norm: 0.5
-    fsdp_config:
-      cpu_offload: false
-      reshard_after_forward: true
-
   placement:
     colocate_all: false
     policy_num_nodes: 2
@@ -66,14 +62,14 @@ generator:
 
   run_engines_locally: true
   weight_sync_backend: nccl
-  async_engine: true
 
   sampling_params:
     temperature: 0.7
     top_p: 1.0
 
-  engine_init_kwargs:
-    custom_chat_template_chat_completion_path: chat_templates/delphi_v0.jinja2
+  chat_template:
+    source: file
+    name_or_path: chat_templates/delphi_v0.jinja2
 
 extra_env:
   HF_HUB_OFFLINE: "1"

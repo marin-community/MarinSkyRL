@@ -1,10 +1,15 @@
 from argparse import Namespace
-from types import SimpleNamespace
+import hashlib
+from pathlib import Path
 
+import fsspec
+import numpy as np
 import pytest
 from omegaconf import OmegaConf
+from safetensors.numpy import save
 
-from cloud.iris import task_runtime
+from cloud.iris import hf_model_cache, task_runtime
+from cloud.iris.hf_model_cache import HuggingFaceSnapshot, HuggingFaceSnapshotFile, publish_hugging_face_snapshot
 from cloud.iris.task_runtime import (
     _write_final_config,
     policy_chat_template_model,
@@ -28,66 +33,56 @@ def test_policy_chat_template_selects_materialized_model(
     assert policy_chat_template_model(prestage_model, model_local_path) == expected
 
 
-def test_policy_chat_template_requires_a_materialized_model() -> None:
-    with pytest.raises(ValueError, match="requires --prestage-model or --model-local-path"):
-        policy_chat_template_model("", "")
+def _memory_model_snapshot(root: str) -> HuggingFaceSnapshot:
+    """Write a minimal Hugging Face model (metadata, tokenizer, one weight shard) to the memory filesystem."""
+    filesystem = fsspec.filesystem("memory")
+    payloads = {
+        "config.json": b"{}",
+        "tokenizer.json": b"{}",
+        "tokenizer_config.json": b"{}",
+        "model.safetensors": save({"weight": np.arange(4, dtype=np.float32)}),
+    }
+    files = []
+    for path, payload in payloads.items():
+        with filesystem.open(f"{root}/{path}", "wb") as destination:
+            destination.write(payload)
+        files.append(HuggingFaceSnapshotFile(path=path, size=len(payload), sha256=hashlib.sha256(payload).hexdigest()))
+    return HuggingFaceSnapshot(filesystem=filesystem, root=root, files=tuple(files))
 
 
-def test_s3_policy_stages_metadata_without_materializing_weights(monkeypatch) -> None:
-    identity = "sha256:" + "a" * 64
-    manifest = SimpleNamespace(identity=identity)
-    staged = []
-    monkeypatch.setattr(task_runtime, "load_model_manifest", lambda _uri: manifest)
-    monkeypatch.setattr(
-        task_runtime, "stage_model_metadata", lambda uri, value, path: staged.append((uri, value, path))
+def test_manifest_policy_stages_metadata_without_materializing_weights(tmp_path, monkeypatch) -> None:
+    policy_uri = str(tmp_path / "published-policy")
+    manifest = publish_hugging_face_snapshot(
+        _memory_model_snapshot(f"policy-source/{tmp_path.name}"), policy_uri, model_id="org/policy", revision="a" * 40
     )
+    monkeypatch.setattr(task_runtime.tempfile, "gettempdir", lambda: str(tmp_path / "node"))
     args = Namespace(
-        model_source_uri="s3://models/policy",
-        model_source_identity=identity,
+        model_source_uri=policy_uri,
+        model_source_identity=manifest.identity,
         prestage_model="",
         model_revision="",
         runtime_profile="megatron",
         model_local_path="/tmp/materialized-model",
     )
-    policy_model = prepare_policy_model(args)
-
-    assert policy_model is not None
-    assert staged == [("s3://models/policy", manifest, policy_model.local_path)]
-
-
-def test_fsdp_policy_materializes_weights_at_the_declared_local_path(monkeypatch) -> None:
-    staged = []
-    monkeypatch.setattr(
-        task_runtime,
-        "stage_artifact_model",
-        lambda uri, identity, path: staged.append((uri, identity, path)) or 1024,
-    )
-    args = Namespace(
-        model_source_uri="s3://models/policy",
-        model_source_identity="artifact@v1:abc123",
-        prestage_model="",
-        model_revision="",
-        runtime_profile="fsdp",
-        model_local_path="/tmp/materialized-model",
-    )
 
     policy_model = prepare_policy_model(args)
 
     assert policy_model is not None
-    assert policy_model.local_path == "/tmp/materialized-model"
-    assert staged == [("s3://models/policy", "artifact@v1:abc123", "/tmp/materialized-model")]
+    staged = Path(policy_model.local_path)
+    assert (staged / "config.json").read_text() == "{}"
+    assert (staged / "tokenizer.json").is_file()
+    assert not (staged / "model.safetensors").exists()
 
 
-def test_hugging_face_draft_mirror_uses_the_policy_tokenizer(monkeypatch) -> None:
+def test_hugging_face_draft_mirror_uses_the_policy_tokenizer(tmp_path, monkeypatch) -> None:
     revision = "4bdb47c08e5b5190bea3c7a93c3e14470230e469"
-    identity = "sha256:" + "a" * 64
-
-    def ensure(model_id, requested_revision, **kwargs):
-        assert (model_id, requested_revision) == ("laion/draft", revision)
-        assert kwargs["tokenizer_mode"] == "policy"
-        return "s3://models/draft", SimpleNamespace(identity=identity)
-
-    monkeypatch.setattr(task_runtime, "ensure_hugging_face_model_cache", ensure)
+    cache = tmp_path / "draft-cache"
+    monkeypatch.setattr(hf_model_cache, "marin_temp_bucket", lambda *_args, **_kwargs: str(cache))
+    monkeypatch.setattr(
+        hf_model_cache,
+        "_open_hugging_face_snapshot",
+        lambda _model_id, _revision: _memory_model_snapshot(f"draft-source/{tmp_path.name}"),
+    )
 
     prepared = prepare_draft_model(
         SpeculatorModelConfig(source_uri="hf://laion/draft", source_identity=revision),
@@ -95,7 +90,9 @@ def test_hugging_face_draft_mirror_uses_the_policy_tokenizer(monkeypatch) -> Non
         cache_source_prefix="s3://region/run",
     )
 
-    assert prepared == SpeculatorModelConfig(source_uri="s3://models/draft", source_identity=identity)
+    manifest = hf_model_cache.load_model_manifest(str(cache))
+    assert prepared == SpeculatorModelConfig(source_uri=str(cache), source_identity=manifest.identity)
+    assert manifest.tokenizer_mode == "policy"
 
 
 def test_requested_local_policy_tokenizer_is_staged_independently(tmp_path, monkeypatch) -> None:
@@ -155,3 +152,32 @@ def test_staged_models_are_written_as_structured_config(tmp_path, monkeypatch) -
     assert resolved.skyrl.trainer.ref.model.tokenizer_path == "/tmp/tokenizer-metadata"
     assert resolved.skyrl.trainer.ref.model.tokenizer_revision is None
     assert resolved.skyrl.generator.speculative_decoding.model.source_uri == draft.source_uri
+
+
+def test_staged_policy_model_supplies_its_embedded_tokenizer(tmp_path, monkeypatch) -> None:
+    policy = task_runtime.PreparedPolicyModel("s3://models/policy", "step-630", "/tmp/policy-metadata")
+    launch = OmegaConf.create(
+        {
+            "run": {"id": "run", "attempt_id": "attempt"},
+            "inputs": {"model": {"uri": "s3://models/policy"}},
+            "skyrl": {
+                "trainer": {
+                    "policy": {"model": {"path": "/tmp/stale-model", "tokenizer_path": "/tmp/stale-model"}},
+                    "ref": {"model": {"path": "/tmp/stale-model", "tokenizer_path": "/tmp/stale-model"}},
+                },
+                "generator": {"engine_init_kwargs": {"served_model_name": "policy"}},
+                "data": {"train_data": [], "val_data": [], "terminal_bench_data": []},
+                "terminal_bench_config": {"agent_api_base": None, "literal_log_path": None},
+            },
+        }
+    )
+    monkeypatch.setattr(task_runtime.tempfile, "gettempdir", lambda: str(tmp_path))
+
+    path = _write_final_config(launch, policy_model=policy, policy_tokenizer=None, draft_model=None)
+    resolved = OmegaConf.load(path)
+
+    for role in ("policy", "ref"):
+        model = resolved.skyrl.trainer[role].model
+        assert model.path == "/tmp/policy-metadata"
+        assert model.tokenizer_path == "/tmp/policy-metadata"
+        assert model.tokenizer_revision is None

@@ -22,16 +22,14 @@ MAX_TURNS=6
 # NOTE: we set `generator.retokenize_chat_history` to true so that 
 # chat template is applied to the input each time - this ensures
 # that previous think tokens are removed 
-uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
+uv run --isolated --extra megatron --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.algorithm.advantage_estimator="grpo" \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.policy.model.path="Qwen/Qwen3-4B" \
   trainer.epochs=30 \
   trainer.placement.colocate_all=true \
-  trainer.strategy=fsdp2 \
-  trainer.policy.fsdp_config.cpu_offload=false \
-  trainer.ref.fsdp_config.cpu_offload=true \
+  trainer.strategy=megatron \
   trainer.policy.optimizer_config.max_grad_norm=0.5 \
   trainer.policy.sequence_parallel_size=1 \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
@@ -39,7 +37,7 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.num_inference_engines=$NUM_INFERENCE_ENGINES \
   generator.inference_engine_tensor_parallel_size=$TP_SIZE \
   trainer.train_batch_size=$TRAIN_BATCH_SIZE \
-  trainer.micro_forward_batch_size_per_gpu=4 \
+  trainer.micro_forward_batch_size_per_gpu=1 \
   trainer.micro_train_batch_size_per_gpu=1 \
   trainer.max_prompt_length=6000 \
   generator.max_input_length=$MAX_INPUT_LENGTH \
@@ -53,8 +51,6 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.backend=vllm \
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
-  generator.async_engine=true \
-  generator.batched=false \
   environment.env_class=text2sql \
   generator.use_conversation_multi_turn=true \
   generator.n_samples_per_prompt=5 \

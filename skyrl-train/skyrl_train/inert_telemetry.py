@@ -4,6 +4,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 
+@dataclass(frozen=True)
+class EventBody:
+    fields: Mapping[str, str | int | float | bool]
+
+
 class _Instrument:
     def add(self, value: float = 1.0, *, attributes: Mapping[str, str] | None = None) -> None:
         pass
@@ -42,7 +47,7 @@ def configure(*, endpoint: str, service: str, attributes: Mapping[str, str]) -> 
     pass
 
 
-def event(name: str, fields: Mapping[str, object], *, attributes: Mapping[str, str] | None = None) -> None:
+def event(name: str, body: EventBody, *, attributes: Mapping[str, str] | None = None) -> None:
     pass
 
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import os
 from pathlib import Path
 
 import pytest
@@ -162,7 +163,6 @@ def _config(model_path: str, *, world_size: int, pp: int, ep: int):
     cfg.trainer.policy.optimizer_config.lr = 2.0e-2
     cfg.trainer.policy.optimizer_config.max_grad_norm = 0.0
     cfg.generator.backend = "vllm"
-    cfg.generator.async_engine = True
     cfg.generator.weight_sync_backend = "nccl"
     cfg.generator.inference_engine_tensor_parallel_size = 1
     cfg.generator.inference_engine_data_parallel_size = ROLLOUT_WORLD_SIZE
@@ -229,8 +229,7 @@ def _padded_batch(
     return batch
 
 
-@ray.remote(num_gpus=1)
-def _hf_response_logprobs(model_path: str, batch: TrainingInputBatch) -> torch.Tensor:
+def _hf_response_logprobs_direct(model_path: str, batch: TrainingInputBatch) -> torch.Tensor:
     model = GrugMoeForCausalLM.from_pretrained(model_path, dtype=torch.bfloat16, attn_implementation="eager")
     model.eval().to("cuda")
     sequences = batch["sequences"].to("cuda")
@@ -242,6 +241,11 @@ def _hf_response_logprobs(model_path: str, batch: TrainingInputBatch) -> torch.T
         logits = model(sequences, attention_mask=attention_mask, position_ids=position_ids).logits
         log_probs = logprobs_from_logits(logits, torch.roll(sequences, shifts=-1, dims=1))
     return log_probs[:, -num_actions - 1 : -1].float().cpu()
+
+
+@ray.remote(num_gpus=1)
+def _hf_response_logprobs(model_path: str, batch: TrainingInputBatch) -> torch.Tensor:
+    return _hf_response_logprobs_direct(model_path, batch)
 
 
 def _megatron_response_logprobs(policy, batch: TrainingInputBatch) -> torch.Tensor:
@@ -266,7 +270,7 @@ def _init_policy(cfg, world_size: int):
 
 
 def _train_step(policy, batch: TrainingInputBatch) -> dict[str, float]:
-    train_output = ray.get(policy.async_run_ray_method("pass_through", "ppo_train", batch))[0]
+    train_output = ray.get(policy.async_run_ray_method("mesh", "ppo_train", batch))[0]
     status = train_output.metadata["train_status"]
     assert math.isfinite(status["policy_loss"])
     return status
@@ -330,7 +334,7 @@ def test_grug_megatron_train_forward_matches_eval_forward(
     """The training forward must reproduce the eval-mode log-probs it is scored against.
 
     With one update per batch the PPO ratio is exp(train_logprob - eval_logprob), so any
-    train/eval drift shows up as spurious clipping. FSDP2 reports exactly zero here. Top-4
+    train/eval drift shows up as spurious clipping. Top-4
     routing exposed Megatron's unfused, atomic unpermute (the bridge now forces the fused
     kernels), and Snowball's width exposed cuBLAS kernel selection changing with the
     micro-batch shape (the two passes must use equal micro-batch sizes).
@@ -463,7 +467,8 @@ def test_grug_megatron_pp2_train_step_updates_weights_and_exports(tmp_path):
         for name in names:
             torch.testing.assert_close(exported[name].float(), after[name], rtol=0, atol=0)
         assert all(exported[name].dtype == torch.float32 for name in BIAS_NAMES)
-        reloaded = ray.get(_hf_response_logprobs.remote(str(export_dir), batch))
+        policy.kill_actors()
+        reloaded = _hf_response_logprobs_direct(str(export_dir), batch)
         _assert_logprobs_close(post_update, reloaded, batch["response_mask"])
     finally:
         ray.shutdown()
@@ -522,7 +527,11 @@ def test_grug_megatron_four_gpu_pp2_disaggregated_rollout_train_broadcast_rollou
 
 
 @pytest.mark.vllm
-def test_grug_megatron_two_gpu_colocated_sleep_sync_preserves_grouped_experts(tmp_path):
+@pytest.mark.parametrize(
+    "moe_backend",
+    ["triton"] + (["flashinfer_cutlass"] if os.environ.get("GRUG_CUTLASS_WEEKLY") == "1" else []),
+)
+def test_grug_megatron_two_gpu_colocated_sleep_sync_preserves_grouped_experts(tmp_path, moe_backend):
     """A sleep-level-2 CUDA-IPC sync preserves grouped experts and serving output."""
 
     world_size = 2
@@ -532,9 +541,8 @@ def test_grug_megatron_two_gpu_colocated_sleep_sync_preserves_grouped_experts(tm
     _write_tiny_checkpoint(model_path)
     cfg = _config(str(model_path), world_size=world_size, pp=1, ep=2)
     cfg.trainer.placement.colocate_all = True
-    # A cold FlashInfer-CUTLASS build stays memory-safe by using the frozen
-    # runtime's bounded compiler pool, so allow it to outlive the usual startup window.
-    cfg.generator.engine_init_timeout_seconds = 4200
+    if moe_backend == "flashinfer_cutlass":
+        cfg.generator.engine_init_timeout_seconds = 4200
     # Force each completed tensor into its own transport chunk. Before grouped-export-safe
     # chunking, this threshold split the conversion tasks and silently omitted the experts.
     cfg.generator.weight_transfer_threshold_cuda_ipc_GB = 1e-9
@@ -546,7 +554,7 @@ def test_grug_megatron_two_gpu_colocated_sleep_sync_preserves_grouped_experts(tm
         str(model_path),
         shared_pg=shared_pg,
         inference_engine_enable_sleep=True,
-        moe_backend="flashinfer_cutlass",
+        moe_backend=moe_backend,
     )
     try:
         asyncio.run(client.wake_up())
@@ -572,7 +580,7 @@ def test_grug_megatron_two_gpu_colocated_sleep_sync_preserves_grouped_experts(tm
             num_nodes=1,
             cfg=cfg,
         )
-        # Expert storage is deliberately reordered by FlashInfer-CUTLASS finalization, so raw
+        # Expert storage is reordered by FlashInfer-CUTLASS finalization, so raw
         # readback is not an HF-layout invariant. Serving parity below exercises the experts in
         # their actual kernel layout; keep bytewise readback for layout-neutral weights.
         sync_names = [LM_HEAD_NAME, ROUTER_NAME]

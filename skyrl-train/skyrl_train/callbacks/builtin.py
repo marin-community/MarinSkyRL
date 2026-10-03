@@ -20,21 +20,17 @@ Supports two configuration styles:
 
 import asyncio
 import contextlib
-import dataclasses
+import math
 import os
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Type
 
 from loguru import logger
 from omegaconf import DictConfig
-import torch
 
 from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_export_enabled
 from skyrl_train.distillation import DISTILLATION_SCORED_TOKENS_METRIC
-from skyrl_train.async_rollout_state import GeneratedOutputGroup, GenerationBufferState, GenerationQueuesProvider
-from skyrl_train.trajectory_runners.base import TrajectoryBatch
 from skyrl_train.json_serialization import to_jsonable
-from skyrl_train.utils.data_tracker import DataConsumptionState, DataConsumptionTracker
-from skyrl_train.io import io
 from skyrl_train.inference_engines.vllm.stats import VLLM_NUM_ENGINES_METRIC, IntervalReadMode
 from skyrl_train.inference_observability import (
     InferenceMetricsSink,
@@ -44,8 +40,11 @@ from skyrl_train.inference_observability import (
     trainer_metrics,
 )
 
+from skyrl_train.mismatch_probe.callback import MismatchProbeCallback
+
 from .base import TrainerCallback, TrainerState, TrainerControl, CallbackHandler
 from .types import (
+    CallbackErrorBehavior,
     CHECKPOINT_CALLBACK_TYPE,
     HF_MODEL_SAVE_CALLBACK_TYPE,
 )
@@ -129,7 +128,7 @@ class CheckpointCallback(TrainerCallback):
 class DistillationTokenBudgetCallback(TrainerCallback):
     """Stop either trainer after reaching a cumulative teacher-scored-token budget."""
 
-    error_behavior = "raise"
+    error_behavior = CallbackErrorBehavior.RAISE
 
     def __init__(self, token_budget: int):
         if token_budget <= 0:
@@ -166,29 +165,97 @@ class DistillationTokenBudgetCallback(TrainerCallback):
         return control
 
 
+@dataclass(frozen=True)
+class EvaluationSamplingConfig:
+    sampling_params: Dict[str, Any] | None = None
+    n_samples_per_prompt: int | None = None
+
+
+@dataclass(frozen=True)
+class EvaluationStopConfig:
+    minimum: float | None = None
+    min_improvement: float | None = None
+
+    def __post_init__(self):
+        if (self.minimum is None) == (self.min_improvement is None):
+            raise ValueError("evaluation stop requires exactly minimum or min_improvement")
+        threshold = self.minimum if self.minimum is not None else self.min_improvement
+        if not math.isfinite(threshold):
+            raise ValueError("evaluation stop thresholds must be finite")
+
+
 @register_callback("evaluation")
 class EvaluationCallback(TrainerCallback):
-    """
-    Callback for running evaluation at regular intervals.
-
-    This replaces the inline `eval_interval` logic in the training loop.
-    Evaluation runs on the validation dataset and logs metrics.
+    """Schedule evaluations and stop when configured score requirements are met.
 
     Args:
-        eval_steps: Run evaluation every N steps. Set to -1 or 0 to disable.
-        eval_on_train_end: Whether to run evaluation when training ends.
-        eval_before_train: Whether to run evaluation before training starts.
+        eval_steps: Evaluate every N completed steps; non-positive values disable evaluation.
+        eval_on_train_end: Evaluate the final policy.
+        eval_before_train: Evaluate the initial policy.
+        additional_evaluations: Named sampling overrides passed to the trainer's evaluator.
+        metric_groups: Output metric names mapped to source metrics whose mean is reported.
+        stop_when: Metrics mapped to minimum scores or gains over the initial evaluation.
     """
+
+    error_behavior = CallbackErrorBehavior.RAISE
 
     def __init__(
         self,
         eval_steps: int = 5,
         eval_on_train_end: bool = True,
         eval_before_train: bool = True,
+        additional_evaluations: Dict[str, Dict[str, Any]] | None = None,
+        metric_groups: Dict[str, List[str]] | None = None,
+        stop_when: Dict[str, Dict[str, float]] | None = None,
     ):
         self.eval_steps = eval_steps
         self.eval_on_train_end = eval_on_train_end
         self.eval_before_train = eval_before_train
+        self.additional_evaluations = {
+            name: EvaluationSamplingConfig(**parameters) for name, parameters in (additional_evaluations or {}).items()
+        }
+        self.metric_groups = metric_groups or {}
+        self.stop_when = {name: EvaluationStopConfig(**value) for name, value in (stop_when or {}).items()}
+        self._initial_values: Dict[str, float] = {}
+        self._initial_step: int | None = None
+        if any(not name.isidentifier() for name in self.additional_evaluations):
+            raise ValueError("additional evaluation names must be identifiers")
+        if any(not keys for keys in self.metric_groups.values()):
+            raise ValueError("evaluation metric groups must be nonempty")
+
+    async def on_evaluate_async(
+        self, state: TrainerState, control: TrainerControl, *, metrics: Dict[str, float], trainer, **kwargs
+    ) -> TrainerControl:
+        for name, parameters in self.additional_evaluations.items():
+            additional = await trainer.eval(
+                val_set_name=name,
+                sampling_params=parameters.sampling_params,
+                n_samples_per_prompt=parameters.n_samples_per_prompt,
+            )
+            metrics.update({key.replace("eval/", f"eval/{name}/", 1): value for key, value in additional.items()})
+        for name, members in self.metric_groups.items():
+            metrics[name] = math.fsum(metrics[member] / len(members) for member in members)
+            if not math.isfinite(metrics[name]):
+                raise ValueError(f"nonfinite evaluation metric group {name}")
+        if not self.stop_when:
+            return control
+        if self._initial_step is None:
+            self._initial_values = {name: metrics[name] for name in self.stop_when}
+            self._initial_step = state.global_step
+        improvements = {name: metrics[name] - initial for name, initial in self._initial_values.items()}
+        for name, improvement in improvements.items():
+            if not math.isfinite(improvement):
+                raise ValueError(f"nonfinite evaluation improvement for {name}")
+            metrics[f"{name}_improvement"] = improvement
+        if state.global_step > self._initial_step and all(
+            metrics[name] >= requirement.minimum
+            if requirement.minimum is not None
+            else improvements[name] >= requirement.min_improvement
+            for name, requirement in self.stop_when.items()
+        ):
+            logger.info("Evaluation stop requirements reached at step {}", state.global_step)
+            control.should_training_stop = True
+        return control
 
     def on_train_begin(
         self,
@@ -791,6 +858,8 @@ def create_default_callbacks(cfg: DictConfig) -> List[TrainerCallback]:
         has_logging = any(isinstance(cb, LoggingCallback) for cb in callbacks)
         if not has_logging:
             callbacks.append(LoggingCallback())
+        if cfg.trainer.get("mismatch_probe", {}).get("enabled", False):
+            callbacks.append(MismatchProbeCallback(cfg))
         return callbacks
 
     # Fall back to legacy interval-based configuration
@@ -869,6 +938,8 @@ def create_default_callbacks(cfg: DictConfig) -> List[TrainerCallback]:
     # Logging callback (always enabled)
     callbacks.append(LoggingCallback())
 
+    if cfg.trainer.get("mismatch_probe", {}).get("enabled", False):
+        callbacks.append(MismatchProbeCallback(cfg))
     return callbacks
 
 
@@ -1003,247 +1074,3 @@ def create_callbacks_from_config(cfg: DictConfig) -> List[TrainerCallback]:
 def get_available_callback_types() -> List[str]:
     """Get list of available callback type names for YAML configs."""
     return list(CALLBACK_REGISTRY.keys())
-
-
-@register_callback("data_tracking")
-class DataTrackingCallback(TrainerCallback):
-    """
-    Persists data consumption state as a checkpoint artifact via the callback system.
-
-    This replaces the inline fully_async_state.pt writing/loading that was previously
-    embedded in the fully async trainer. By using the callback system:
-    - Epoch-end UID clearing happens AFTER checkpoint saves (no more race condition)
-    - Data state persistence is decoupled from trainer implementation
-    - Backward compatible with legacy fully_async_state.pt checkpoints
-
-    Hooks used:
-    - on_save: writes data_consumption_state.pt to the checkpoint directory
-    - on_epoch_end_async: clears epoch-scoped UIDs via tracker.on_epoch_end()
-    """
-
-    error_behavior = "raise"  # data tracking errors should stop training
-    ARTIFACT_NAME = "data_consumption_state.pt"
-
-    def __init__(self, tracker: DataConsumptionTracker):
-        assert isinstance(tracker, DataConsumptionTracker)
-        self._tracker = tracker
-
-    def on_save(
-        self,
-        state: TrainerState,
-        control: TrainerControl,
-        **kwargs,
-    ) -> Optional[TrainerControl]:
-        trainer = kwargs.get("trainer")
-        if trainer is None:
-            logger.warning("DataTrackingCallback.on_save: no trainer in kwargs, skipping")
-            return control
-
-        ckpt_path = os.path.join(
-            trainer.cfg.trainer.ckpt_path,
-            f"global_step_{state.global_step}",
-        )
-        data_state = self._tracker.get_state()
-        data_state.global_step = state.global_step
-        artifact_path = os.path.join(ckpt_path, self.ARTIFACT_NAME)
-        with io.open_file(artifact_path, "wb") as f:
-            torch.save(dataclasses.asdict(data_state), f)
-        logger.info(
-            f"Saved data consumption state to {artifact_path} "
-            f"(epoch={data_state.epoch}, consumed_in_epoch={len(data_state.consumed_uids_in_epoch)}, "
-            f"total={data_state.total_samples_consumed})"
-        )
-        return control
-
-    async def on_epoch_end_async(
-        self,
-        state: TrainerState,
-        control: TrainerControl,
-        **kwargs,
-    ) -> Optional[TrainerControl]:
-        await self._tracker.on_epoch_end()
-        return control
-
-    @staticmethod
-    def load_from_checkpoint(
-        ckpt_path: str,
-        tracker: DataConsumptionTracker,
-    ) -> bool:
-        """Load data consumption state from a checkpoint directory.
-
-        Tries the new data_consumption_state.pt first, then falls back to
-        legacy fully_async_state.pt for backward compatibility.
-
-        Returns True if state was loaded, False if no artifact found.
-        """
-
-        # Try new format first
-        artifact_path = os.path.join(ckpt_path, DataTrackingCallback.ARTIFACT_NAME)
-        if io.exists(artifact_path):
-            with io.open_file(artifact_path, "rb") as f:
-                raw = torch.load(f, map_location="cpu", weights_only=False)
-            state = DataConsumptionState(**raw)
-            tracker.load_state(state)
-            return True
-
-        # Fall back to legacy fully_async_state.pt
-        legacy_path = os.path.join(ckpt_path, "fully_async_state.pt")
-        if io.exists(legacy_path):
-            with io.open_file(legacy_path, "rb") as f:
-                legacy = torch.load(f, map_location="cpu", weights_only=False)
-            if "consumed_uids" in legacy:
-                consumed = legacy["consumed_uids"]
-                # Reconstruct a DataConsumptionState from legacy format.
-                # We don't know the exact epoch or total, so estimate from global_step.
-                # Extract global_step from the checkpoint directory name.
-                dir_name = os.path.basename(ckpt_path)
-                global_step = int(dir_name.split("_")[-1]) if "global_step_" in dir_name else 0
-                state = DataConsumptionState(
-                    global_step=global_step,
-                    epoch=global_step // tracker._num_steps_per_epoch,
-                    consumed_uids_in_epoch=list(consumed),
-                    total_samples_consumed=len(consumed)
-                    + (global_step // tracker._num_steps_per_epoch)
-                    * tracker._num_steps_per_epoch
-                    * tracker._mini_batch_size,
-                )
-                tracker.load_state(state)
-                logger.info(f"Loaded legacy fully_async_state.pt with {len(consumed)} consumed UIDs")
-                return True
-
-        return False
-
-
-class BufferCheckpointCallback(TrainerCallback):
-    """Persist async rollout work with each checkpoint and during shutdown.
-
-    Saves completed and admitted output groups plus stale-group retry prompts so
-    resume preserves every dataset row still needed by the current epoch.
-    """
-
-    ARTIFACT_NAME = "generation_buffer_state.pt"
-    error_behavior = "raise"
-
-    def __init__(self) -> None:
-        self._queues: Optional[GenerationQueuesProvider] = None
-
-    def bind_queues(self, queues: GenerationQueuesProvider) -> None:
-        """Select the current epoch's queues for checkpoint persistence."""
-        self._queues = queues
-
-    def has_bound_queues(self) -> bool:
-        """Return whether the current epoch has exposed its generation queues."""
-        return self._queues is not None
-
-    def has_shutdown_state(self) -> bool:
-        """Return whether the bound queues contain work needed after shutdown."""
-        if self._queues is None:
-            return False
-        state = self._queues.shutdown_snapshot()
-        return bool(state.completed_groups or state.admitted_groups or state.retry_prompts)
-
-    @staticmethod
-    def _serialize_groups(groups: List[GeneratedOutputGroup]) -> List[dict]:
-        return [
-            {
-                "trajectory_batch": dict(item.trajectory_batch),
-                "uid": item.uid,
-                "earliest_model_step": item.earliest_model_step,
-                "source_prompts": item.source_prompts,
-            }
-            for item in groups
-        ]
-
-    async def _save_bound_state(
-        self,
-        checkpoint_path: str,
-        buffer_state: GenerationBufferState,
-    ) -> None:
-        completed = self._serialize_groups(buffer_state.completed_groups)
-        admitted = self._serialize_groups(buffer_state.admitted_groups)
-        retry_prompts = buffer_state.retry_prompts
-
-        artifact_path = os.path.join(checkpoint_path, self.ARTIFACT_NAME)
-
-        def save_state() -> None:
-            with io.open_file(artifact_path, "wb") as f:
-                torch.save(
-                    {
-                        "completed_groups": completed,
-                        "admitted_groups": admitted,
-                        "retry_prompts": retry_prompts,
-                    },
-                    f,
-                )
-
-        await asyncio.to_thread(save_state)
-        logger.info(
-            "Saved {} completed, {} admitted generation groups, and {} pending retries to {}",
-            len(completed),
-            len(admitted),
-            len(retry_prompts),
-            artifact_path,
-        )
-
-    async def flush_to_checkpoint(self, checkpoint_path: str) -> None:
-        """Persist all resumable work, including a trained but uncheckpointed batch."""
-        if self._queues is None:
-            raise RuntimeError("BufferCheckpointCallback queues were not bound before shutdown flush")
-        await self._save_bound_state(checkpoint_path, self._queues.shutdown_snapshot())
-
-    async def on_save_async(
-        self,
-        state: TrainerState,
-        control: TrainerControl,
-        **kwargs,
-    ) -> Optional[TrainerControl]:
-        trainer = kwargs.get("trainer")
-        if trainer is None:
-            raise RuntimeError("BufferCheckpointCallback requires trainer context during checkpoint save")
-        if self._queues is None:
-            raise RuntimeError("BufferCheckpointCallback queues were not bound before checkpoint save")
-
-        buffer_state = self._queues.snapshot()
-        if not (buffer_state.completed_groups or buffer_state.admitted_groups or buffer_state.retry_prompts):
-            return control
-
-        ckpt_path = os.path.join(
-            trainer.cfg.trainer.ckpt_path,
-            f"global_step_{state.global_step}",
-        )
-        await self._save_bound_state(ckpt_path, buffer_state)
-
-        return control
-
-    @staticmethod
-    def load_buffer_state(ckpt_path: str) -> GenerationBufferState:
-        """Load completed, admitted, and retryable rollout work from a checkpoint."""
-
-        artifact_path = os.path.join(ckpt_path, BufferCheckpointCallback.ARTIFACT_NAME)
-        if not io.exists(artifact_path):
-            return GenerationBufferState(completed_groups=[], retry_prompts=[])
-
-        with io.open_file(artifact_path, "rb") as f:
-            state = torch.load(f, map_location="cpu", weights_only=False)
-
-        def deserialize_groups(entries: List[dict]) -> List[GeneratedOutputGroup]:
-            groups = []
-            for entry in entries:
-                trajectory_batch: TrajectoryBatch = entry["trajectory_batch"]
-                groups.append(
-                    GeneratedOutputGroup(
-                        trajectory_batch=trajectory_batch,
-                        uid=entry["uid"],
-                        earliest_model_step=entry["earliest_model_step"],
-                        source_prompts=entry["source_prompts"],
-                    )
-                )
-            return groups
-
-        items = deserialize_groups(state["completed_groups"])
-        admitted = deserialize_groups(state.get("admitted_groups", []))
-        return GenerationBufferState(
-            completed_groups=items,
-            retry_prompts=state["retry_prompts"],
-            admitted_groups=admitted,
-        )

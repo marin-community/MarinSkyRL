@@ -1,13 +1,16 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict, TypedDict, Any, Optional, Hashable, NotRequired
 
+import numpy as np
+
 MessageType = Dict[str, str]
 ConversationType = List[MessageType]
 OnlineEagleResult = Dict[str, Any] | List[Dict[str, Any]]
 
 
-class PromptSamplingOverride(TypedDict):
+class PromptSamplingOverride(TypedDict, total=False):
     prompt_logprob_token_ids: List[List[int]]
+    logprob_token_ids: List[int]
 
 
 class ChatContinuation(TypedDict):
@@ -20,8 +23,7 @@ class InferenceEngineInput(TypedDict):
     prompts: Optional[List[ConversationType]]
     prompt_token_ids: Optional[List[List[int]]]
     sampling_params: Optional[Dict[str, Any]]
-    # Per-prompt selected-ID scoring overrides for a teacher batch. Rollout
-    # sampling remains shared; each override contains only prompt_logprob_token_ids.
+    # Per-prompt token scoring overrides. Rollout sampling remains shared.
     sampling_params_per_prompt: NotRequired[List[PromptSamplingOverride]]
     session_ids: Optional[List[Hashable]]
     # Per-sample Responses-API options (tools, parallel_tool_calls, etc.) that
@@ -29,6 +31,8 @@ class InferenceEngineInput(TypedDict):
     chat_completion_params: NotRequired[List[Dict[str, Any]]]
     # Preserve sampled tokens when the backend re-renders a structured assistant turn.
     chat_continuations: NotRequired[List[ChatContinuation | None]]
+    # The request window, including the backend-rendered prompt and new tokens.
+    max_context_length: NotRequired[int]
 
 
 class InferenceEngineOutput(TypedDict):
@@ -55,6 +59,7 @@ class InferenceEngineOutput(TypedDict):
     prompt_logprobs: Optional[List[List[Optional[Dict[int, float]]]]]
     prompt_ids: NotRequired[List[List[int]]]
     assistant_messages: NotRequired[List[Dict[str, Any]]]
+    routed_experts: NotRequired[List[np.ndarray | None]]
 
 
 class NamedWeightsUpdateRequest(TypedDict):

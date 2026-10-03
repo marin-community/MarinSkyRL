@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import torch
+from skyrl_train.config.objective_spec import load_correction
+from skyrl_train.objective.correction import compute_correction
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
-from omegaconf import open_dict
+from omegaconf import DictConfig, open_dict
 
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
 from skyrl_train.config.utils import get_default_config
@@ -16,10 +20,11 @@ from skyrl_train.trajectory_runners.step_wise import clamp_generation_tokens
 
 
 class _RecordingInferenceEngine:
-    def __init__(self, response_logprobs=None, topk=None):
+    def __init__(self, response_logprobs=None, topk=None, routes=None):
         self.requests = []
         self.response_logprobs = response_logprobs
         self.topk = topk
+        self.routes = routes
 
     async def generate(self, request):
         self.requests.append(request)
@@ -27,11 +32,13 @@ class _RecordingInferenceEngine:
             "responses": ["ok"],
             "response_ids": [[7, 8]],
             "stop_reasons": ["stop"],
-            "response_logprobs": [self.response_logprobs],
+            "response_logprobs": [None if self.response_logprobs is None else list(self.response_logprobs)],
         }
         if self.topk is not None:
             output["student_topk_indices"] = [self.topk[0]]
             output["behavior_topk_logprobs"] = [self.topk[1]]
+        if self.routes is not None:
+            output["routed_experts"] = [self.routes]
         return output
 
 
@@ -50,9 +57,9 @@ def test_clamp_generation_tokens_reserves_only_remaining_request_window():
 
 @pytest.mark.asyncio
 @patch("skyrl_gym.make")
-async def test_step_wise_generation_clamps_final_request_to_tokenized_window(mock_make):
+@pytest.mark.parametrize("output_limit,expected_limit", [(None, 2), (1, 1)])
+async def test_step_wise_generation_clamps_final_request_to_tokenized_window(mock_make, output_limit, expected_limit):
     cfg = get_default_config().generator
-    cfg.batched = False
     cfg.use_conversation_multi_turn = True
     cfg.max_turns = 2
     cfg.max_input_length = 4
@@ -70,30 +77,31 @@ async def test_step_wise_generation_clamps_final_request_to_tokenized_window(moc
     tokenizer = _tokenizer()
     runner = SkyRLGymTrajectoryRunner(
         cfg,
-        MagicMock(max_env_workers=0),
+        DictConfig({"max_env_workers": 0}),
         engine,
         tokenizer,
         pipeline=TrajectoryPipeline(StepWiseRolloutCollector, StepWiseTrajectoryProjection(cfg, tokenizer)),
     )
     collector = StepWiseRolloutCollector(runner)
 
-    outputs = await collector.agent_loop(
-        [{"role": "user", "content": "task"}],
-        "test_env",
-        {},
-        max_tokens=16,
-        max_input_length=4,
+    outputs = await collector.collect(
+        {
+            "prompts": [[{"role": "user", "content": "task"}]],
+            "env_classes": ["test_env"],
+            "env_extras": [{}],
+            "sampling_params": {"max_tokens": output_limit} if output_limit is not None else None,
+        },
+        disable_tqdm=True,
     )
 
-    assert outputs[0].evidence.response_token_ids == (7, 8)
-    assert engine.requests[0]["sampling_params"]["max_tokens"] == 2
+    assert outputs[0][0].evidence.response_token_ids == (7, 8)
+    assert engine.requests[0]["sampling_params"]["max_tokens"] == expected_limit
 
 
 @pytest.mark.asyncio
 @patch("skyrl_gym.make")
 async def test_step_wise_stop_eos_keeps_published_behavior_evidence_aligned(mock_make):
     cfg = get_default_config().generator
-    cfg.batched = False
     cfg.use_conversation_multi_turn = True
     cfg.max_turns = 2
     cfg.sampling_params.stop = ["ok"]
@@ -102,14 +110,24 @@ async def test_step_wise_stop_eos_keeps_published_behavior_evidence_aligned(mock
 
     environment = MagicMock()
     environment.init.return_value = ([{"role": "user", "content": "task"}], {})
-    environment.step.return_value = BaseTextEnvStepOutput(observations=[], reward=1.0, done=True, metadata={})
+    environment.step.side_effect = [
+        BaseTextEnvStepOutput(
+            observations=[{"role": "user", "content": "tool output"}], reward=0.0, done=False, metadata={}
+        ),
+        BaseTextEnvStepOutput(observations=[], reward=1.0, done=True, metadata={}),
+    ]
     environment.get_metrics.return_value = {}
     mock_make.return_value = environment
     tokenizer = _tokenizer()
+    tokenizer.apply_chat_template.side_effect = lambda messages, **kwargs: (
+        [1, 2, 3, 4, 11, 12, 13, 14] if messages[-1]["content"] == "tool output" else [1, 2, 3, 4]
+    )
     runner = SkyRLGymTrajectoryRunner(
         cfg,
-        MagicMock(max_env_workers=0),
-        _RecordingInferenceEngine(response_logprobs=[-0.1, -0.2]),
+        DictConfig({"max_env_workers": 0}),
+        _RecordingInferenceEngine(
+            response_logprobs=[-0.1, -0.2], routes=np.asarray([[[1, 2]], [[3, 4]]], dtype=np.uint8)
+        ),
         tokenizer,
         pipeline=TrajectoryPipeline(StepWiseRolloutCollector, StepWiseTrajectoryProjection(cfg, tokenizer)),
     )
@@ -119,20 +137,34 @@ async def test_step_wise_stop_eos_keeps_published_behavior_evidence_aligned(mock
         "test_env",
         {},
         max_tokens=16,
-        max_input_length=4,
+        max_input_length=32,
     )
 
     published = environment.set_rollout_evidence.call_args.args[0]
     assert published.response_token_ids == (7, 8, tokenizer.eos_token_id)
-    assert published.behavior_logprobs == (-0.1, -0.2, 0.0)
-    assert outputs[0].evidence.behavior_logprobs == (-0.1, -0.2, 0.0)
+    np.testing.assert_allclose(published.behavior_logprobs, [-0.1, -0.2, 0.0])
+    assert [output.loss_mask for output in outputs] == [[1, 1, 0, 0, 0, 0, 0], [1, 1, 0]]
+    for output in outputs:
+        np.testing.assert_allclose(
+            output.evidence.behavior_logprobs, [-0.1, -0.2] + [0.0] * (len(output.loss_mask) - 2)
+        )
+        behavior = torch.from_numpy(output.evidence.behavior_logprobs).unsqueeze(0)
+        mask = torch.tensor([output.loss_mask])
+        ratios = torch.full_like(behavior, torch.nan)
+        ratios[0, :2] = torch.tensor([4.0, 0.25])
+        correction = compute_correction(behavior + ratios.log(), behavior, mask, load_correction("seq_mask_tis"))
+        expected = torch.zeros_like(behavior)
+        expected[0, :2] = torch.tensor([2.0, 0.25])
+        torch.testing.assert_close(correction.weights, expected)
+        assert correction.metrics["policy/correction/weight_mean"] == pytest.approx(1.125)
+
+    np.testing.assert_array_equal(outputs[0].evidence.routed_experts, [[[1, 2]], [[3, 4]]] + [[[0, 0]]] * 5)
 
 
 @pytest.mark.asyncio
 @patch("skyrl_gym.make")
 async def test_step_wise_collector_preserves_student_topk(mock_make):
     cfg = get_default_config().generator
-    cfg.batched = False
     cfg.use_conversation_multi_turn = True
     cfg.max_turns = 1
     cfg.sampling_params.logprobs = 2
@@ -149,7 +181,7 @@ async def test_step_wise_collector_preserves_student_topk(mock_make):
     )
     runner = SkyRLGymTrajectoryRunner(
         cfg,
-        MagicMock(max_env_workers=0),
+        DictConfig({"max_env_workers": 0}),
         engine,
         tokenizer,
         pipeline=TrajectoryPipeline(StepWiseRolloutCollector, StepWiseTrajectoryProjection(cfg, tokenizer)),
@@ -159,5 +191,5 @@ async def test_step_wise_collector_preserves_student_topk(mock_make):
         [{"role": "user", "content": "task"}], "test_env", {}, max_tokens=16, max_input_length=4
     )
 
-    assert outputs[0].evidence.student_topk_indices == ((7, 9), (8, 10))
-    assert outputs[0].evidence.behavior_topk_logprobs == ((-0.1, -1.1), (-0.2, -1.2))
+    np.testing.assert_array_equal(outputs[0].evidence.student_topk_indices, [[7, 9], [8, 10]])
+    np.testing.assert_allclose(outputs[0].evidence.behavior_topk_logprobs, [[-0.1, -1.1], [-0.2, -1.2]])

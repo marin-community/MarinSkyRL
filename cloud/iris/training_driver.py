@@ -30,7 +30,7 @@ from cloud.iris.rl_data import (
     resolve_rl_train_data_with_sources,
 )
 from marinskyrl.process_diagnostics import ProcessOutcomeKind, write_process_outcome
-from marinskyrl.resource_locator import model_source_for_path
+from marinskyrl.resource_locator import is_cloud_uri, model_source_for_path
 from cloud.iris.launch_config import RunMode, load_launch_config
 from cloud.iris.rl_config_translation import TaskLocalSkyRLValues, apply_task_local_values
 
@@ -83,14 +83,7 @@ class LocalRLRunner:
         # .remote() boundary as DATA — os.environ mutations here do NOT reach the
         # pre-existing Ray workers where HarborTrajectoryRunner is constructed.
         self._minted_agent_api_base: str | None = None
-        # Set by _ingress_context when record_literal stands up the co-located
-        # RecordProxy. Threaded into the SkyRL Hydra cfg (see run()) for the SAME
-        # process-boundary reason as _minted_agent_api_base: literal_proxy_utils
-        # publishes the log path via os.environ["OTAGENT_LITERAL_LOG_PATH"] in THIS
-        # driver, but the generator (which reads it to correlate opencode rollout
-        # details / rebuild chat_history) runs in a pre-existing Ray worker that never
-        # inherits this env → without the cfg thread every opencode trajectory loses
-        # its logprobs and TIS degrades on 100% of the batch.
+        # The generator's Ray worker reads the shared literal log path from configuration.
         self._literal_log_path: str | None = None
 
     def setup(self) -> None:
@@ -211,11 +204,7 @@ class LocalRLRunner:
             # inside a Ray worker that never inherits this process's HARBOR_MODEL_ENDPOINT
             # env — see _ingress_context / __init__). Snapshot cadence matches the
             # existing design (one api_base string baked for the job's lifetime).
-            # Thread the RecordProxy log path as cfg DATA too (same Ray boundary): the
-            # generator resolves the shared literal log from
-            # terminal_bench_config.literal_log_path (env fallback) to correlate each
-            # opencode trial's token_ids/logprobs + rebuild its chat_history. Without
-            # this the worker's os.environ lacks the path and TIS skips 100% of the batch.
+            # The generator uses this shared log to correlate token IDs, logprobs and chat history.
             skyrl_config = apply_task_local_values(
                 skyrl_config,
                 TaskLocalSkyRLValues(
@@ -277,15 +266,15 @@ class LocalRLRunner:
             register_controller_endpoint,
         )
         from cloud.iris.literal_proxy_utils import (
-            DEFAULT_LITERAL_PROXY_HOST,
+            CONTROLLER_INGRESS_PROXY_HOST,
             maybe_serve_literal_proxy,
             select_literal_proxy_port,
         )
 
-        if not self.config.ingress_host:
+        if self.config.target_cluster and not self.config.ingress_host:
             raise ValueError(
-                "ingress_mode=controller requires --ingress_host (the public "
-                "controller-ingress host; iris.oa.dev for the federated CoreWeave path)."
+                "federated controller ingress (target_cluster set) requires --ingress_host, "
+                "the parent that mints the token (iris.oa.dev)."
             )
         # Federated parent-minting reads the parent (marin) controller config from the
         # env the launcher forwards; surface it here so a misconfig fails loud early.
@@ -301,7 +290,7 @@ class LocalRLRunner:
                     "--parent_controller_config); needed to mint at iris.oa.dev."
                 )
 
-        proxy_port = select_literal_proxy_port(self.config.job_name, host=DEFAULT_LITERAL_PROXY_HOST)
+        proxy_port = select_literal_proxy_port(self.config.job_name, host=CONTROLLER_INGRESS_PROXY_HOST)
         endpoint_name, register_address = controller_registration_plan(
             self.config.job_name,
             record_literal=self.config.record_literal,
@@ -309,7 +298,7 @@ class LocalRLRunner:
             vllm_port=self.config.vllm_http_port,
         )
         vllm_local = f"http://localhost:{self.config.vllm_http_port}/v1"
-        # RecordProxy binds 0.0.0.0 so the (remote) controller reaches it at
+        # The RecordProxy listens on every interface so the remote controller reaches it at
         # IRIS_ADVERTISE_HOST; record_literal off => maybe_serve_literal_proxy is a null
         # CM and the plan registered raw vLLM's port instead.
         with maybe_serve_literal_proxy(
@@ -317,7 +306,7 @@ class LocalRLRunner:
             vllm_local,
             experiments_dir=self.config.experiments_dir,
             job_name=self.config.job_name,
-            host=DEFAULT_LITERAL_PROXY_HOST,
+            host=CONTROLLER_INGRESS_PROXY_HOST,
             port=proxy_port,
         ):
             registration = register_controller_endpoint(endpoint_name, register_address)
@@ -326,7 +315,7 @@ class LocalRLRunner:
                     api_base = federated_capability_api_base(endpoint_name, ingress_host=self.config.ingress_host)
                     mint_where = f"PARENT (federated -> {self.config.target_cluster})"
                 else:
-                    api_base = capability_api_base(self.config.ingress_host, endpoint_name)
+                    api_base = capability_api_base(endpoint_name)
                     mint_where = "local controller"
                 # Publish the capability URL as the harbor-specific HARBOR_MODEL_ENDPOINT.
                 # opencode (harbor agents/installed/opencode.py::_build_register_config_command)
@@ -336,7 +325,7 @@ class LocalRLRunner:
                 # endpoint would silently misroute every judge call to vLLM.
                 os.environ["HARBOR_MODEL_ENDPOINT"] = api_base
                 # Also thread the minted URL through the structured SkyRL config so the
-                # value reaches the Ray tasks/actors (skyrl_entrypoint, RolloutCoordinator)
+                # value reaches the Ray tasks/actors (skyrl_entrypoint, rollout workers)
                 # where HarborTrajectoryRunner is built. The env var alone is insufficient:
                 # this runner ATTACHES to a Ray cluster the controller started BEFORE the
                 # mint, so its workers never inherit HARBOR_MODEL_ENDPOINT from this process
@@ -459,11 +448,13 @@ def main() -> None:
     args = create_parser().parse_args()
     launch_config = load_launch_config(args.config)
     allocation = launch_config.iris.allocation
+    model_uri = str(launch_config.inputs.model.uri)
+    model_is_cloud = is_cloud_uri(model_uri)
     config = LocalRLConfig(
         job_name=str(launch_config.iris.job_name),
         model_path=str(launch_config.skyrl.trainer.policy.model.path),
-        model_source_uri=str(launch_config.inputs.model.uri),
-        model_source_identity=str(launch_config.inputs.model.identity),
+        model_source_uri=model_uri if model_is_cloud else None,
+        model_source_identity=str(launch_config.inputs.model.identity) if model_is_cloud else None,
         train_data=list(launch_config.inputs.train_data),
         val_data=list(launch_config.inputs.validation_data),
         experiments_dir=str(launch_config.runtime.experiments_dir),

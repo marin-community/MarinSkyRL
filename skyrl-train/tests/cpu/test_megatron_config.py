@@ -6,11 +6,11 @@ from skyrl_train.config.utils import get_default_config
 from skyrl_train.utils.utils import validate_cfg
 
 
-def _megatron_replay_cfg() -> None:
+def _megatron_replay_cfg():
     cfg = get_default_config()
     cfg.trainer.strategy = "megatron"
     cfg.trainer.logger = "console"
-    cfg.trainer.policy.fsdp_config.moe_router_replay = True
+    cfg.trainer.policy.megatron_config.moe_router_replay = True
     return cfg
 
 
@@ -24,16 +24,6 @@ def test_megatron_router_replay_reaches_dcp_guard():
         mock.patch("transformers.AutoConfig.from_pretrained", side_effect=OSError("offline")),
         pytest.raises(AssertionError, match="decode context parallel.*R3 router capture"),
     ):
-        validate_cfg(cfg)
-
-
-def test_deepspeed_rejects_router_replay():
-    cfg = get_default_config()
-    cfg.trainer.strategy = "deepspeed"
-    cfg.trainer.logger = "console"
-    cfg.trainer.policy.fsdp_config.moe_router_replay = True
-
-    with pytest.raises(ValueError, match=r"moe_router_replay.*fsdp, fsdp2, megatron"):
         validate_cfg(cfg)
 
 

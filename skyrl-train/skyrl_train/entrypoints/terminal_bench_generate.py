@@ -33,11 +33,16 @@ class TerminalBenchGenerateExp(TerminalBenchExp):
 
         await trajectory_runner.startup()
         try:
-            await trajectory_runner.run(input_batch)
+            # Generation requests carry the eval phase, which the rollout workers serve only inside an eval session.
+            await trajectory_runner.start_eval_session(run_name=self.cfg.trainer.run_name, eval_step=0)
+            try:
+                await trajectory_runner.run(input_batch)
+            finally:
+                await trajectory_runner.stop_eval_session()
         finally:
             await trajectory_runner.shutdown()
 
-    def run(self):
+    def _run(self):
         asyncio.run(self._generate())
 
 

@@ -1,23 +1,6 @@
-"""
-Test save_hf_model and load_hf_model functionality for different strategies.
-
-For FSDP and DeepSpeed, run with:
-uv run --isolated --group dev --extra deepspeed -- pytest tests/gpu/test_save_load_model.py -m "not megatron"
-
-For Megatron, run with:
-uv run --isolated --group dev --extra vllm --extra megatron -- pytest tests/gpu/test_save_load_model.py -m "megatron"
-
-Context-Parallel (CP) resume note: under CP the model weights are FSDP-sharded on
-the ``fsdp`` submesh, which is ORTHOGONAL to the ``cp`` submesh — CP shards only
-the activations/sequence inside the forward, never the parameters. So save/load of
-a CP-trained checkpoint is the SAME code path as fsdp2 here (CP has no effect on
-the state_dict). The dedicated CP resume assertion (save after a cp=2 GRPO step,
-reload into a fresh cp=2 model, scored logprobs byte-identical) is TEST 4 in
-``tests/gpu/test_cp_e2e_grpo.py`` (Stage 6).
-"""
+"""Exercise Megatron training, Hugging Face export, and model reload."""
 
 import ray
-import pytest
 import hydra
 import torch
 import os
@@ -29,7 +12,6 @@ from transformers import AutoTokenizer
 
 from tests.gpu.utils import (
     init_worker_with_type,
-    make_dummy_experience,
     get_model_logits_from_actor,
     ray_init_for_tests,
     validate_cfg,
@@ -59,37 +41,8 @@ def get_test_actor_config(strategy: str) -> DictConfig:
     return cfg
 
 
-def run_one_training_step(
-    actor_group,
-    strategy,
-    experience=None,
-    global_step=None,
-    local_step=None,
-    accumulation_steps=None,
-    megatron_batch=None,
-):
-    if strategy == "megatron":
-        assert megatron_batch is not None, "Megatron requires a TrainingInputBatch for ppo_train"
-        return ray.get(actor_group.async_run_ray_method("mesh", "ppo_train", megatron_batch))
-    else:
-        assert experience is not None, f"{strategy} requires an Experience for training_step"
-        return ray.get(
-            actor_group.async_run_ray_method(
-                "pass_through", "training_step", experience, global_step, local_step, accumulation_steps
-            )
-        )
-
-
-@pytest.mark.parametrize(
-    "strategy",
-    [
-        "deepspeed",
-        "fsdp",
-        "fsdp2",
-        pytest.param("megatron", marks=pytest.mark.megatron),
-    ],
-)
-def test_save_load_hf_model(ray_init_fixture, strategy):
+def test_save_load_hf_model(ray_init_fixture):
+    strategy = "megatron"
     """
     Test save_hf_model functionality by:
     1. Loading a pretrained model into an ActorGroup
@@ -111,32 +64,11 @@ def test_save_load_hf_model(ray_init_fixture, strategy):
         )
 
         # Prepare training input and run one training step
-        global_step, local_step, accumulation_steps = 0, 0, 1
-        if "megatron" in strategy:
-            from tests.gpu.test_megatron_worker import get_test_training_batch
+        from tests.gpu.test_megatron_worker import get_test_training_batch
 
-            dp_size = actor_group_1.actor_infos[0].rank.dp_size
-            train_batch_1 = get_test_training_batch(dp_size if dp_size % NUM_GPUS == 0 else NUM_GPUS)
-            run_one_training_step(
-                actor_group_1,
-                strategy,
-                experience=None,
-                global_step=global_step,
-                local_step=local_step,
-                accumulation_steps=accumulation_steps,
-                megatron_batch=train_batch_1,
-            )
-        else:
-            dummy_experience = make_dummy_experience()
-            run_one_training_step(
-                actor_group_1,
-                strategy,
-                experience=dummy_experience,
-                global_step=global_step,
-                local_step=local_step,
-                accumulation_steps=accumulation_steps,
-                megatron_batch=None,
-            )
+        dp_size = actor_group_1.actor_infos[0].rank.dp_size
+        train_batch = get_test_training_batch(dp_size if dp_size % NUM_GPUS == 0 else NUM_GPUS)
+        ray.get(actor_group_1.async_run_ray_method("mesh", "ppo_train", train_batch))
 
         # Step 2: Create test input and compute logits from trained model
         dp_size = actor_group_1.actor_infos[0].rank.dp_size

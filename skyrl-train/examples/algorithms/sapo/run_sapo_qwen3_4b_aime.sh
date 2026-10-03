@@ -41,7 +41,7 @@ N_SAMPLES_PER_PROMPT=16
 EVAL_N_SAMPLES_PER_PROMPT=32
 LR=1e-6
 
-uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
+uv run --isolated --extra megatron --extra vllm -m examples.algorithms.dapo.main_dapo \
   data.train_data="['$TRAIN_FILE']" \
   data.val_data="['$TEST_FILE']" \
   trainer.algorithm.advantage_estimator="grpo" \
@@ -58,10 +58,9 @@ uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
   trainer.algorithm.clip_ratio_c=$CLIP_RATIO_C \
   trainer.policy.model.path="$MODEL_NAME" \
   trainer.placement.colocate_all=true \
-  trainer.strategy=fsdp2 \
+  trainer.strategy=megatron \
   trainer.placement.policy_num_nodes=$NUM_NODES \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS_PER_NODE \
-  trainer.policy.fsdp_config.fsdp_size=$NUM_GPUS_PER_NODE \
   generator.num_inference_engines=$NUM_INFERENCE_ENGINES \
   generator.inference_engine_tensor_parallel_size=$INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE \
   trainer.epochs=20 \
@@ -73,7 +72,7 @@ uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=$TRAIN_BATCH_SIZE \
   trainer.policy_mini_batch_size=$MINI_BATCH_SIZE \
-  trainer.micro_forward_batch_size_per_gpu=8 \
+  trainer.micro_forward_batch_size_per_gpu=4 \
   trainer.micro_train_batch_size_per_gpu=4 \
   trainer.ckpt_interval=-1 \
   trainer.max_prompt_length=$MAX_PROMPT_LENGTH \
@@ -85,8 +84,6 @@ uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
   generator.backend=vllm \
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
-  generator.async_engine=false \
-  generator.batched=true \
   environment.env_class=aime \
   generator.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
   generator.eval_n_samples_per_prompt=$EVAL_N_SAMPLES_PER_PROMPT \

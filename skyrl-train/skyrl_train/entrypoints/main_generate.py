@@ -19,7 +19,7 @@ from skyrl_train.entrypoints.main_base import (
 from skyrl_train.inference_engines.base import NamedWeightsUpdateRequest, lora_disk_load_request
 from skyrl_train.utils.utils import validate_generator_cfg, initialize_ray
 from skyrl_train.evaluate import evaluate
-from skyrl_train.utils.trainer_utils import build_dataloader
+from skyrl_train.utils.trainer_utils import build_eval_dataloader
 
 
 class PolicyAdapterClient(Protocol):
@@ -46,20 +46,27 @@ class EvalOnlyEntrypoint(BasePPOExp):
         """Override to avoid requiring a train dataset for eval-only runs."""
         return None
 
-    async def run(self) -> dict[str, Any]:
+    def _run(self) -> dict[str, Any]:
+        return asyncio.run(self._evaluate())
+
+    async def _evaluate(self) -> dict[str, Any]:
         assert self.eval_dataset is not None, "The evaluation only entrypoint requires an eval dataset is provided"
 
         inference_engine_client = self.create_inference_engine_client(operation=EntrypointOperation.GENERATE)
         await load_initial_policy_adapter(inference_engine_client, self.cfg)
         trajectory_runner = self.get_trajectory_runner(self.cfg, self.tokenizer, inference_engine_client)
 
-        results: dict[str, Any] = await evaluate(
-            eval_dataloader=build_dataloader(self.cfg, self.eval_dataset, is_train=False),
-            trajectory_runner=trajectory_runner,
-            cfg=self.cfg,
-            global_step=None,
-            tokenizer=self.tokenizer,
-        )
+        await trajectory_runner.startup()
+        try:
+            results: dict[str, Any] = await evaluate(
+                eval_dataloader=build_eval_dataloader(self.cfg, self.eval_dataset),
+                trajectory_runner=trajectory_runner,
+                cfg=self.cfg,
+                global_step=None,
+                tokenizer=self.tokenizer,
+            )
+        finally:
+            await trajectory_runner.shutdown()
 
         tracker = self.get_tracker()
         tracker.log(results, step=0, commit=True)
@@ -70,7 +77,7 @@ class EvalOnlyEntrypoint(BasePPOExp):
 @ray.remote(num_cpus=1)
 def eval_entrypoint(cfg: DictConfig) -> dict:
     exp = EvalOnlyEntrypoint(cfg)
-    return asyncio.run(exp.run())
+    return exp.run()
 
 
 def run(cfg: DictConfig) -> None:

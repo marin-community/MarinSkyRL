@@ -10,44 +10,64 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
-from dataclasses import dataclass
+import requests
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 from uuid import uuid4
 import skyrl_gym
 from typing import Callable, Generic, List, Dict, Any, Optional, Sequence, Tuple, TypeVar
 from concurrent.futures import ThreadPoolExecutor
 from loguru import logger
+import numpy as np
 
-from skyrl_train.trajectory_runners.base import TrajectoryRunner, TrajectoryRequestBatch, TrajectoryBatch, TrajectoryID
+from skyrl_train.trajectory_runners.base import (
+    TrajectoryRunner,
+    TrajectoryRequestBatch,
+    TrajectoryBatch,
+    TrajectoryID,
+    propagate_data_sources,
+)
+from skyrl_train.rollout_observability import rollout_phase, rollout_wait, run_environment, time_tokenization
 from skyrl_train.trajectory_runners.types import AgentLoopOutput, TokenProvenance
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
 from skyrl_train.error_treatment import ErrorTreatment
 from omegaconf import DictConfig
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
+from skyrl_gym.envs.nemotron_ultra.env import NemotronUltraGrading
 from skyrl_gym.envs.nemotron_ultra.genrm import grade_genrm_group, response_object
 from skyrl_gym.envs.nemotron_ultra.judge import OpenAIJudge
-from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDisposition, VerificationResult
+from skyrl_gym.verification import (
+    VERIFIER_RUNTIME_ERROR,
+    RewardResult,
+    RolloutEvidence,
+    TrainingDisposition,
+    VerificationResult,
+    VerificationStatus,
+)
+from skyrl_train.utils.harbor_errors import (
+    ErrorHandlingConfig,
+    classify_exception_type,
+    passthrough_logprob_error_type,
+    treatment_excludes_from_baseline,
+)
 from skyrl_train.trajectory_runners.skyrl_gym_contracts import (
     environment_metrics_from_step,
     fold_verification_results,
     publish_rollout_evidence,
-    reward_from_env_step,
     verification_from_env_step,
 )
 from skyrl_train.trajectory_runners.trajectory_processing import (
+    _re_sentinel_rows,
     _sentinel_routed_experts_row,
     get_custom_chat_template,
     get_generation_prompt_ids,
-    apply_overlong_filtering,
-    get_rollout_metrics,
     normalize_token_ids,
 )
-from skyrl_train.trajectory_runners.model_clients import DirectModelClient, ModelClient
+from skyrl_train.trajectory_runners.model_clients import DirectModelClient, ModelClient, ModelServerError
 from skyrl_train.trajectory_runners.selected_topk import align_student_topk
 from skyrl_train.trajectory_runners.collectors import RolloutCollector, collect_agent_loops
 from skyrl_train.trajectory_runners.projections import (
-    attach_unshaped_rewards,
-    IdentityTrajectoryProjection,
     TrajectoryProjection,
     WholeTrajectoryProjection,
 )
@@ -72,33 +92,6 @@ class WholeTrajectoryCollector:
         )
 
 
-class BatchedTrajectoryCollector:
-    """Collect a batch from the supported single-turn batched environment path."""
-
-    def __init__(self, runner):
-        self._runner = runner
-
-    def validate(self) -> None:
-        pass
-
-    async def collect(self, request: TrajectoryRequestBatch, *, disable_tqdm: bool = False):
-        del disable_tqdm
-        runner = self._runner
-        sampling_params = request.get("sampling_params")
-        max_tokens = runner.trajectory_runner_cfg.sampling_params.max_generate_length
-        if sampling_params is not None:
-            max_tokens = sampling_params.get("max_tokens", sampling_params.get("max_new_tokens", max_tokens))
-        batch = await runner.collect_batched(
-            request["prompts"],
-            request["env_classes"],
-            request["env_extras"],
-            max_tokens,
-            sampling_params,
-            request.get("trajectory_ids"),
-        )
-        return batch
-
-
 PipelineOutputT = TypeVar("PipelineOutputT")
 
 
@@ -111,9 +104,7 @@ class TrajectoryPipeline(Generic[PipelineOutputT]):
 
 
 SkyRLGymPipeline = (
-    TrajectoryPipeline[Sequence[AgentLoopOutput]]
-    | TrajectoryPipeline[Sequence[Sequence[AgentLoopOutput]]]
-    | TrajectoryPipeline[TrajectoryBatch]
+    TrajectoryPipeline[Sequence[AgentLoopOutput]] | TrajectoryPipeline[Sequence[Sequence[AgentLoopOutput]]]
 )
 
 
@@ -126,6 +117,15 @@ class _CanonicalizedChatPrefix:
 
 class ExactChatTransportError(RuntimeError):
     """The configured exact structured-chat contract was violated at runtime."""
+
+
+_NEMOTRON_ULTRA_ENV_CLASS = "nemotron_ultra"
+
+
+def _append_route_sentinels(routes: np.ndarray, count: int) -> np.ndarray:
+    if count <= 0:
+        return routes
+    return np.concatenate((routes, np.zeros((count, *routes.shape[1:]), dtype=routes.dtype)))
 
 
 class SkyRLGymTrajectoryRunner(TrajectoryRunner):
@@ -148,22 +148,21 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             pipeline: optional type-coupled harness collector and projection
         """
         self.trajectory_runner_cfg = trajectory_runner_cfg
+        error_config = trajectory_runner_cfg.get("error_handling", {})
+        self.error_handling = ErrorHandlingConfig.from_mapping(
+            error_config if isinstance(error_config, Mapping) else {}
+        )
         self.skyrl_gym_cfg = skyrl_gym_cfg
         self.model_client = model_client or DirectModelClient(inference_engine_client)
         self.tokenizer = tokenizer
         if pipeline is None:
-            pipeline = (
-                TrajectoryPipeline(BatchedTrajectoryCollector, IdentityTrajectoryProjection())
-                if trajectory_runner_cfg.batched
-                else TrajectoryPipeline(
-                    WholeTrajectoryCollector,
-                    WholeTrajectoryProjection(trajectory_runner_cfg, tokenizer),
-                )
+            pipeline = TrajectoryPipeline(
+                WholeTrajectoryCollector,
+                WholeTrajectoryProjection(trajectory_runner_cfg, tokenizer),
             )
         self.collector = pipeline.collector_type(self)
         self.projection = pipeline.projection
         self.max_turns = trajectory_runner_cfg.max_turns
-        self.batched = trajectory_runner_cfg.batched
         self.require_exact_chat_transport = trajectory_runner_cfg.get("require_exact_chat_transport", False) is True
         self.use_conversation_multi_turn = trajectory_runner_cfg.use_conversation_multi_turn
         # optionally use custom chat template to get loss masks (i.e. for Qwen3)
@@ -177,7 +176,6 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         else:
             self.env_executor = None
 
-        self._validate_cfg(trajectory_runner_cfg)
         self.collector.validate()
 
         # base_conversation is used when `use_conversation_multi_turn==True and custom_chat_template==None` to
@@ -205,20 +203,14 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             )
             self.base_conversation_token_ids = self.base_conversation_token_ids[: last_eos_token_index + 1]
 
-        # Optional callback to get trainer's current global_step (for accurate staleness tracking).
-        # Set by the fully-async trainer before generation workers start.
-        self.global_step_fn: Optional[Callable[[], int]] = None
-
         ultra_config = skyrl_gym_cfg.get("nemotron_ultra", {})
+        self.nemotron_ultra_grading = NemotronUltraGrading(ultra_config.get("grading", NemotronUltraGrading.VERIFY))
+        self._warned_skip_without_ultra_rows = False
         self.genrm_config = dict(ultra_config.get("genrm", {}))
+        if ultra_config.get("verifyit_enabled", False):
+            self.genrm_config["verifyit_enabled"] = True
         genrm_judge = self.genrm_config.get("judge")
         self.genrm_judge = OpenAIJudge(**dict(genrm_judge)) if genrm_judge is not None else None
-
-    def _validate_cfg(self, trajectory_runner_cfg: DictConfig):
-        if len(trajectory_runner_cfg.chat_template_kwargs) and trajectory_runner_cfg.batched:
-            raise ValueError(
-                "`chat_template_kwargs` is not compatible with `batched=True` since the chat templating is handled by the inference engine"
-            )
 
     def failed_agent_loop_output(
         self,
@@ -229,12 +221,20 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         """Mask an ordinary environment failure, or propagate an exact-chat contract violation."""
         if isinstance(error, ExactChatTransportError):
             raise error
-        exception_type = type(error).__name__
+        exception_type, treatment = self._classify_terminal_error(error)
+        diagnostics = {"exception_type": exception_type}
+        if isinstance(error, ModelServerError):
+            diagnostics.update(
+                error_category=error.category,
+                request_id=error.request_id,
+                status_code=error.status_code,
+            )
         trajectory_ids = request.get("trajectory_ids")
         trajectory_id = trajectory_ids[index] if trajectory_ids is not None else None
         logger.warning(
-            "Trajectory {} failed in the SkyRL-Gym agent loop (NOT fatal; masking row): {}: {}",
+            "Trajectory {} failed in the SkyRL-Gym agent loop (NOT fatal; treatment={}): {}: {}",
             trajectory_id.to_string() if trajectory_id is not None else index,
+            treatment.value,
             exception_type,
             error,
         )
@@ -245,33 +245,54 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 generated_token_count=0,
                 prompt_token_ids=(0,),
                 response_token_ids=(0,),
-                behavior_logprobs=(0.0,),
+                behavior_logprobs=np.zeros(1, dtype=np.float32),
             ),
             verification=VerificationResult.error(
                 "SkyRL-Gym agent loop failed",
-                diagnostics={"exception_type": exception_type},
+                diagnostics=diagnostics,
             ),
             reward=RewardResult(
                 unshaped_reward=None,
                 optimization_reward=0.0,
                 token_rewards=token_rewards,
             ),
-            disposition=TrainingDisposition.mask(
-                "SkyRL-Gym agent loop failed",
+            disposition=TrainingDisposition(
+                loss_eligible=False,
+                baseline_eligible=not treatment_excludes_from_baseline(treatment, verifier_available=False),
+                reason="SkyRL-Gym agent loop failed",
                 exception_type=exception_type,
             ),
             loss_mask=[0],
             env_metrics={"agent_loop_error": 1.0},
-            captured_global_step=self.global_step_fn() if self.global_step_fn is not None else None,
-            error_treatment=ErrorTreatment.MASK.value,
+            error_treatment=treatment.value,
         )
 
-    async def _run_in_executor_if_available(self, func, *args, **kwargs):
-        if (executor := self.env_executor) is not None:
-            loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(executor, func, *args, **kwargs)
+    def _classify_terminal_error(self, error: Exception) -> tuple[str, ErrorTreatment]:
+        if isinstance(error, ModelServerError) and error.category == "context_overflow":
+            exception_type = "ContextLengthExceededError"
+        elif isinstance(error, (TimeoutError, asyncio.TimeoutError)):
+            exception_type = "AgentTimeoutError"
         else:
-            return func(*args, **kwargs)
+            exception_type = type(error).__name__
+        config = self.error_handling
+        treatment = (
+            classify_exception_type(exception_type, config)
+            if config.enable_error_classification
+            else ErrorTreatment.MASK
+        )
+        return exception_type, treatment
+
+    def _recover_completed_turn(self, error: Exception, state: tuple | None, *, logprobs_required: bool) -> bool:
+        if isinstance(error, ModelServerError) and error.category != "context_overflow":
+            return False
+        if state is None:
+            return False
+        if logprobs_required and state[2] is None:
+            return False
+        return not isinstance(error, TimeoutError) or self.error_handling.preserve_logprobs_on_timeout
+
+    async def _run_in_executor_if_available(self, func, *args, **kwargs):
+        return await run_environment(self.env_executor, func, *args, **kwargs)
 
     async def agent_loop(
         self,
@@ -282,7 +303,6 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         max_input_length: int,
         sampling_params: Optional[Dict[str, Any]] = None,
         trajectory_id: Optional[TrajectoryID] = None,
-        global_step_fn: Optional[Callable[[], int]] = None,
     ) -> AgentLoopOutput:
         """Run one environment loop and always release its environment."""
         env_extras["max_turns"] = self.max_turns  # TODO(shu): move this to config
@@ -298,7 +318,6 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 max_input_length,
                 sampling_params=sampling_params,
                 trajectory_id=trajectory_id,
-                global_step_fn=global_step_fn,
             )
         finally:
             await self._run_in_executor_if_available(env.close)
@@ -313,7 +332,6 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         max_input_length: int,
         sampling_params: Optional[Dict[str, Any]] = None,
         trajectory_id: Optional[TrajectoryID] = None,
-        global_step_fn: Optional[Callable[[], int]] = None,
     ) -> AgentLoopOutput:
         """
         Multi-turn generation loop that executes a single trajectory.
@@ -366,12 +384,13 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         initial_chat_history_length = len(chat_history)
         chat_end_index = len(chat_history)
         input_ids = normalize_token_ids(
-            self.tokenizer.apply_chat_template(
+            time_tokenization(
+                self.tokenizer.apply_chat_template,
                 chat_history,
                 # If retokenize_chat_history==True, avoid including the generation prompt in both the
                 # prompt_ids and response_ids due to how `response_encodings["input_ids"]` works.
                 add_generation_prompt=not retokenize_chat_history,
-                chat_template=self.custom_chat_template if retokenize_chat_history or chat_completion_params else None,
+                chat_template=self.custom_chat_template,
                 tokenize=True,
                 **self.trajectory_runner_cfg.chat_template_kwargs,
             )
@@ -392,7 +411,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     generated_token_count=0,
                     prompt_token_ids=tuple(input_ids),
                     response_token_ids=(),
-                    behavior_logprobs=(),
+                    behavior_logprobs=np.empty(0, dtype=np.float32),
                 ),
                 verification=VerificationResult.unavailable("initial prompt exceeds the model input limit"),
                 reward=RewardResult(
@@ -415,8 +434,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         )
         collect_logprobs = current_sampling_params.get("logprobs", None) is not None
         rollout_logprobs: Optional[List[float]] = [] if collect_logprobs else None
-        rollout_routes: Optional[List[List[List[int]]]] = None
-        route_sentinel: Optional[List[List[int]]] = None
+        rollout_routes: np.ndarray | None = None
+        route_sentinel: np.ndarray | None = None
         requested_logprobs = current_sampling_params.get("logprobs")
         collect_topk = isinstance(requested_logprobs, int) and requested_logprobs > 0
         selected_capture_possible = collect_topk and not retokenize_chat_history
@@ -426,10 +445,11 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
         per_step_rewards: List[Tuple[float, Optional[int]]] = []
         verification_results: List[VerificationResult] = []
-        # Capture global_step at first inference for accurate staleness tracking
-        captured_global_step: Optional[int] = None
         token_provenance = TokenProvenance.ENGINE
         continuation_assistant_index: int | None = None
+        response_end_idx: int | None = None
+        terminal_error: Exception | None = None
+        last_completed_state = None
 
         while not done:
             if len(input_ids) > max_input_length:
@@ -450,6 +470,9 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     prompts=[copy.deepcopy(chat_history)],
                     session_ids=[session_id],
                     sampling_params=current_sampling_params,
+                    max_context_length=(
+                        max_input_length + int(self.trajectory_runner_cfg.sampling_params.max_generate_length)
+                    ),
                     **(
                         {"chat_completion_params": [chat_completion_params]}
                         if chat_completion_params is not None
@@ -462,14 +485,19 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 engine_input = InferenceEngineInput(
                     prompt_token_ids=[input_ids], session_ids=[session_id], sampling_params=sampling_params
                 )
-            engine_output = await self.model_client.generate(engine_input)
+            with rollout_wait("model_client_await"):
+                try:
+                    engine_output = await self.model_client.generate(engine_input)
+                except (ModelServerError, TimeoutError) as error:
+                    if not self._recover_completed_turn(
+                        error, last_completed_state, logprobs_required=collect_logprobs
+                    ):
+                        raise
+                    terminal_error = error
+                    break
             if engine_output["token_provenance"] == TokenProvenance.RECONSTRUCTED:
                 self._reject_inexact_chat("the model client returned reconstructed token IDs")
                 token_provenance = TokenProvenance.RECONSTRUCTED
-            # Capture global_step after first inference returns — at this point the vLLM
-            # engine has definitively served the request with its current weights.
-            if captured_global_step is None and global_step_fn is not None:
-                captured_global_step = global_step_fn()
             output = engine_output["responses"][0]
             output_ids = engine_output["response_ids"][0]
             topk_ids_batch = engine_output.get("student_topk_indices")
@@ -537,7 +565,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                         if rollout_logprobs is not None:
                             rollout_logprobs += [0.0] * observation_token_count
                         if rollout_routes is not None:
-                            rollout_routes.extend([route_sentinel] * observation_token_count)
+                            rollout_routes = _append_route_sentinels(rollout_routes, observation_token_count)
                 input_ids = rendered_prompt_ids[0]
 
             # Append eos when sampling_params.stop is not None. Does not affect 3.a as chat templates add eos_token.
@@ -550,13 +578,14 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 and self.use_conversation_multi_turn
             ):
                 if output.endswith(tuple(stop_strs)) and output_ids[-1] != self.tokenizer.eos_token_id:
+                    self._reject_inexact_chat("an appended EOS token was not sampled by the engine")
                     output_ids.append(self.tokenizer.eos_token_id)
                     if response_logprobs is not None:
                         response_logprobs.append(0.0)
                     if response_routes is not None:
                         if route_sentinel is None:
                             route_sentinel = _sentinel_routed_experts_row(response_routes[0])
-                        response_routes.append(route_sentinel)
+                        response_routes = _append_route_sentinels(response_routes, 1)
                     added_eos = True
 
             # 2. Environment step
@@ -572,7 +601,13 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     **({"assistant_message": assistant_message} if assistant_message is not None else {}),
                 },
             )
-            env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
+            try:
+                env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
+            except TimeoutError as error:
+                if not self._recover_completed_turn(error, last_completed_state, logprobs_required=collect_logprobs):
+                    raise
+                terminal_error = error
+                break
             new_obs = env_step_output["observations"]
             step_reward: float = env_step_output["reward"]
             verification_results.append(verification_from_env_step(env_step_output))
@@ -609,7 +644,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     "A better solution coming soon."
                 )
                 output = env_step_output["postprocessed_action"]
-                postprocessed_output_ids = self.tokenizer.encode(output, add_special_tokens=False)
+                postprocessed_output_ids = time_tokenization(self.tokenizer.encode, output, add_special_tokens=False)
                 if postprocessed_output_ids != output_ids:
                     self._reject_inexact_chat(
                         "the environment changed sampled token IDs while postprocessing an action"
@@ -639,14 +674,14 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                         rollout_logprobs = None
                     else:
                         rollout_logprobs += response_logprobs
-                if response_routes:
+                if response_routes is not None and len(response_routes):
                     if route_sentinel is None:
                         route_sentinel = _sentinel_routed_experts_row(response_routes[0])
                     if rollout_routes is None:
-                        rollout_routes = [route_sentinel] * (len(loss_mask) - len(output_ids))
-                    rollout_routes.extend(response_routes)
+                        rollout_routes = _re_sentinel_rows(len(loss_mask) - len(output_ids), route_sentinel)
+                    rollout_routes = np.concatenate((rollout_routes, response_routes))
                 elif rollout_routes is not None:
-                    rollout_routes.extend([route_sentinel] * len(output_ids))
+                    rollout_routes = _append_route_sentinels(rollout_routes, len(output_ids))
                 per_step_rewards.append((step_reward, response_end_idx))
                 continuation_assistant_index = len(chat_history)
                 chat_history.append(dict(assistant_message))
@@ -696,21 +731,75 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 if retokenize_chat_history:
                     rollout_routes = None
                     route_sentinel = None
-                elif response_routes:
+                elif response_routes is not None and len(response_routes):
                     if route_sentinel is None:
                         route_sentinel = _sentinel_routed_experts_row(response_routes[0])
                     if rollout_routes is None:
-                        rollout_routes = [route_sentinel] * previous_loss_mask_length
-                    rollout_routes.extend(response_routes)
-                    rollout_routes.extend([route_sentinel] * (len(loss_mask) - len(rollout_routes)))
+                        rollout_routes = _re_sentinel_rows(previous_loss_mask_length, route_sentinel)
+                    rollout_routes = np.concatenate((rollout_routes, response_routes))
+                    rollout_routes = _append_route_sentinels(rollout_routes, len(loss_mask) - len(rollout_routes))
                 elif rollout_routes is not None:
-                    rollout_routes.extend([route_sentinel] * (len(loss_mask) - len(rollout_routes)))
+                    rollout_routes = _append_route_sentinels(rollout_routes, len(loss_mask) - len(rollout_routes))
+
+            # The next model call or environment step may fail after mutating local
+            # chat/route state. Keep only the last fully verified turn as a recovery point.
+            if not done:
+                last_completed_state = await asyncio.to_thread(
+                    copy.deepcopy,
+                    (
+                        input_ids,
+                        loss_mask,
+                        rollout_logprobs,
+                        rollout_routes,
+                        route_sentinel,
+                        per_step_rewards,
+                        verification_results,
+                        chat_history,
+                        initial_prompt_length,
+                        selected_capture_possible,
+                        generated_ids,
+                        generated_topk_ids,
+                        generated_topk_scores,
+                        token_provenance,
+                        continuation_assistant_index,
+                        env_step_output,
+                        new_obs,
+                        output,
+                        stop_reason,
+                        response_end_idx,
+                    ),
+                )
+
+        if terminal_error is not None:
+            (
+                input_ids,
+                loss_mask,
+                rollout_logprobs,
+                rollout_routes,
+                route_sentinel,
+                per_step_rewards,
+                verification_results,
+                chat_history,
+                initial_prompt_length,
+                selected_capture_possible,
+                generated_ids,
+                generated_topk_ids,
+                generated_topk_scores,
+                token_provenance,
+                continuation_assistant_index,
+                env_step_output,
+                new_obs,
+                output,
+                stop_reason,
+                response_end_idx,
+            ) = last_completed_state
 
         # Get environment-specific metrics after the episode is done
         env_metrics = environment_metrics_from_step(env_step_output, env.get_metrics())
         prompt_ids = input_ids[:initial_prompt_length]
         if retokenize_chat_history:
-            response_encodings = self.tokenizer.apply_chat_template(
+            response_encodings = time_tokenization(
+                self.tokenizer.apply_chat_template,
                 chat_history[initial_chat_history_length : len(chat_history) - len(new_obs)],
                 chat_template=self.custom_chat_template,
                 add_generation_prompt=False,
@@ -746,7 +835,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 if rollout_logprobs is not None:
                     rollout_logprobs.append(0.0)
                 if rollout_routes is not None:
-                    rollout_routes.append(route_sentinel)
+                    rollout_routes = _append_route_sentinels(rollout_routes, 1)
 
         assert rollout_logprobs is None or len(rollout_logprobs) == len(response_ids), (
             "rollout_logprobs and response_ids should have the same length"
@@ -772,6 +861,54 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
 
         verification, unshaped_reward = fold_verification_results(verification_results)
 
+        error_treatment = None
+        disposition = TrainingDisposition.train()
+        if verification.status is VerificationStatus.SKIPPED:
+            disposition = TrainingDisposition.train(reason="verification skipped")
+        elif verification.status is not VerificationStatus.VERIFIED:
+            exception_type = (
+                VERIFIER_RUNTIME_ERROR if verification.status is VerificationStatus.ERROR else "VerifierUnavailable"
+            )
+            disposition = TrainingDisposition.mask(
+                f"verification {verification.status.value}", exception_type=exception_type
+            )
+            optimization_reward = 0.0
+            if token_rewards is not None:
+                token_rewards = tuple(0.0 for _ in token_rewards)
+            env_metrics["verifier_error"] = 1.0
+        if terminal_error is not None:
+            exception_type, treatment = self._classify_terminal_error(terminal_error)
+            diagnostics = {**verification.diagnostics, "exception_type": exception_type}
+            if isinstance(terminal_error, ModelServerError):
+                diagnostics.update(
+                    error_category=terminal_error.category,
+                    request_id=terminal_error.request_id,
+                    status_code=terminal_error.status_code,
+                )
+            verification = replace(verification, diagnostics=diagnostics)
+            error_treatment = treatment.value
+            verifier_available = verification.status is VerificationStatus.VERIFIED
+            missing_logprobs = passthrough_logprob_error_type(
+                treatment,
+                has_rollout_logprobs=rollout_logprobs is not None,
+                rollout_logprobs_required=collect_logprobs,
+            )
+            loss_eligible = treatment is not ErrorTreatment.MASK and missing_logprobs is None
+            baseline_eligible = not treatment_excludes_from_baseline(treatment, verifier_available=verifier_available)
+            if missing_logprobs is not None:
+                baseline_eligible = False
+            disposition = TrainingDisposition(
+                loss_eligible=loss_eligible,
+                baseline_eligible=baseline_eligible,
+                reason="SkyRL-Gym terminal error after a completed turn",
+                exception_type=missing_logprobs or exception_type,
+            )
+            if treatment is not ErrorTreatment.PASSTHROUGH or not verifier_available:
+                optimization_reward = 0.0
+                if token_rewards is not None:
+                    token_rewards = tuple(0.0 for _ in token_rewards)
+            env_metrics["agent_loop_error"] = 1.0
+
         evidence = RolloutEvidence(
             messages=tuple(chat_history) if retokenize_chat_history or chat_completion_params is not None else (),
             response=output,
@@ -779,14 +916,11 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             generated_token_count=sum(bool(value) for value in loss_mask),
             prompt_token_ids=tuple(prompt_ids),
             response_token_ids=tuple(response_ids),
-            behavior_logprobs=None if rollout_logprobs is None else tuple(rollout_logprobs),
+            behavior_logprobs=None if rollout_logprobs is None else np.asarray(rollout_logprobs, dtype=np.float32),
             student_topk_indices=None if selected is None else selected.indices,
             behavior_topk_logprobs=None if selected is None else selected.topk_logprobs,
-            routed_experts=(
-                None
-                if rollout_routes is None
-                else tuple(tuple(tuple(layer) for layer in token) for token in rollout_routes)
-            ),
+            routed_experts=rollout_routes,
+            metadata=({"terminal_exception_type": disposition.exception_type} if terminal_error is not None else {}),
         )
         reward_result = RewardResult(
             unshaped_reward=unshaped_reward,
@@ -798,183 +932,45 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             evidence=evidence,
             verification=verification,
             reward=reward_result,
-            disposition=TrainingDisposition.train(),
+            disposition=disposition,
             loss_mask=loss_mask,
             env_metrics=env_metrics,
-            captured_global_step=captured_global_step,
             token_provenance=token_provenance,
+            error_treatment=error_treatment,
         )
-
-    async def collect_batched(
-        self,
-        prompts: List[ConversationType],
-        env_classes: List[str],
-        env_extras: List[Dict[str, Any]],
-        max_tokens: int,
-        sampling_params: Optional[Dict[str, Any]] = None,
-        trajectory_ids: Optional[List[TrajectoryID]] = None,
-    ) -> TrajectoryBatch:
-        """
-        Single-turn batched generation (can use the synchronous offline engine)
-
-        Args:
-            prompts: List[ConversationType]
-            env_classes: List[str]
-            env_extras: List[Dict[str, Any]]
-            max_tokens: int
-            sampling_params: Optional[Dict[str, Any]]
-            trajectory_ids: Stable rollout identities used for sticky serving sessions.
-        Returns:
-            TrajectoryBatch
-        """
-        envs = []
-        init_prompts = []
-        for env_class, env_extra, prompt in zip(env_classes, env_extras, prompts):
-            env_extra["max_turns"] = self.max_turns
-            env_config = self.skyrl_gym_cfg.get(env_class, DictConfig({}))
-            env = skyrl_gym.make(env_class, env_config=env_config, extras=env_extra)
-            init_prompt, _ = await self._run_in_executor_if_available(env.init, prompt)
-            init_prompts.append(init_prompt)
-            envs.append(env)
-
-        # For single-turn generation, we can use text-in-token-out, since we do not need to re-tokenize.
-        session_ids = (
-            [trajectory_id.instance_id for trajectory_id in trajectory_ids] if trajectory_ids is not None else None
-        )
-        engine_input = InferenceEngineInput(
-            prompts=init_prompts,
-            session_ids=session_ids,
-            sampling_params=sampling_params,
-        )
-        engine_output = await self.model_client.generate(engine_input)
-        outputs = engine_output["responses"]
-        responses = engine_output["response_ids"]
-        stop_reasons = engine_output["stop_reasons"]
-        logprobs = engine_output.get("response_logprobs", None)
-        selected_indices = engine_output.get("student_topk_indices")
-        selected_logprobs = engine_output.get("behavior_topk_logprobs")
-        if (selected_indices is None) != (selected_logprobs is None):
-            raise ValueError("Inference engine must return student top-K IDs and behavior scores together")
-        if selected_indices is not None and (
-            len(selected_indices) != len(responses) or len(selected_logprobs) != len(responses)
-        ):
-            raise ValueError("Inference engine student top-K rows must align with responses")
-
-        truncated_responses = []
-        rewards = []
-        unshaped_rewards = []
-        successes = []
-        exclude_from_baseline = []
-        loss_masks = []
-        env_metrics = []
-        truncated_logprobs: Optional[List[List[float]]] = [] if logprobs is not None else None
-        truncated_selected_indices: list[list[list[int]]] = []
-        truncated_selected_logprobs: list[list[list[float]]] = []
-
-        for i, (output, response, env, env_class) in enumerate(zip(outputs, responses, envs, env_classes)):
-            publish_rollout_evidence(
-                env,
-                messages=init_prompts[i],
-                response=output,
-                stop_reason=stop_reasons[i],
-                response_token_ids=response,
-                behavior_logprobs=None if logprobs is None else logprobs[i],
-                metadata={"generation_token_budget": max_tokens},
-            )
-            # step on environment and compute reward
-            env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
-            verification = verification_from_env_step(env_step_output)
-
-            if len(response) > max_tokens:
-                response = response[:max_tokens]
-            loss_masks.append([1] * len(response))
-            truncated_responses.append(response)
-            if selected_indices is not None:
-                if len(selected_indices[i]) < len(response) or len(selected_logprobs[i]) < len(response):
-                    raise ValueError("Inference engine student top-K tokens must align with response tokens")
-                truncated_selected_indices.append(selected_indices[i][: len(response)])
-                truncated_selected_logprobs.append(selected_logprobs[i][: len(response)])
-            if logprobs is not None:
-                sample_logprobs = logprobs[i][: len(response)]
-                truncated_logprobs.append(sample_logprobs)
-
-            evidence = RolloutEvidence(
-                messages=tuple(init_prompts[i]),
-                response=output,
-                stop_reason=stop_reasons[i],
-                generated_token_count=len(response),
-                response_token_ids=tuple(response),
-                behavior_logprobs=None if logprobs is None else tuple(truncated_logprobs[-1]),
-            )
-            reward_result = reward_from_env_step(env_step_output, verification)
-            reward_result.validate_for(evidence)
-            disposition = TrainingDisposition.train()
-            rewards.append(reward_result.optimization_reward)
-            unshaped_rewards.append(reward_result.unshaped_reward)
-            successes.append(
-                verification.passed
-                if verification.passed is not None
-                else verification.score is not None and verification.score > 0.0
-            )
-            exclude_from_baseline.append(not disposition.baseline_eligible)
-
-            # Get environment-specific metrics
-            env_metrics.append(environment_metrics_from_step(env_step_output, env.get_metrics()))
-            # Close the environment
-            await self._run_in_executor_if_available(env.close)
-
-        # init_prompts is a BATCH (list of conversations), so this returns per-sample
-        # rows (list[list[int]]). On transformers 5.x a bare tokenize=True yields a
-        # BatchEncoding (mapping) rather than the list rows; extract input_ids in that
-        # case. normalize_token_ids is NOT used here — its singleton-unwrap would
-        # corrupt a one-element batch — and we key off the mapping interface (not
-        # return_dict) so a tokenizer/mock that already returns list rows is unchanged.
-        prompt_encodings = self.tokenizer.apply_chat_template(
-            init_prompts,
-            add_generation_prompt=True,
-            tokenize=True,
-        )
-        prompt_token_ids = prompt_encodings["input_ids"] if hasattr(prompt_encodings, "keys") else prompt_encodings
-        rollout_metrics = get_rollout_metrics(
-            responses,
-            rewards,
-            env_metrics,
-            env_classes,
-            successes=successes,
-        )
-
-        if self.trajectory_runner_cfg.apply_overlong_filtering:
-            loss_masks = apply_overlong_filtering(loss_masks, responses, self.tokenizer.eos_token_id)
-
-        trajectory_batch: TrajectoryBatch = {
-            "prompt_token_ids": prompt_token_ids,
-            "response_ids": truncated_responses,
-            "rewards": rewards,
-            "loss_masks": loss_masks,
-            "stop_reasons": stop_reasons,
-            "rollout_metrics": rollout_metrics,
-            "rollout_logprobs": truncated_logprobs,
-            "exclude_from_baseline": exclude_from_baseline,
-        }
-        if selected_indices is not None:
-            trajectory_batch["student_topk_indices"] = truncated_selected_indices
-            trajectory_batch["behavior_topk_logprobs"] = truncated_selected_logprobs
-        attach_unshaped_rewards(trajectory_batch, unshaped_rewards)
-
-        return trajectory_batch
 
     async def _run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
         """Run the configured environment loop and project its interaction records."""
-        outputs = await self.collector.collect(input_batch, disable_tqdm=disable_tqdm)
+        self._warn_if_skip_has_no_ultra_rows(input_batch)
+        with rollout_phase("collect"):
+            outputs = await self.collector.collect(input_batch, disable_tqdm=disable_tqdm)
         if isinstance(outputs, list) and outputs and isinstance(outputs[0], AgentLoopOutput):
             await self._apply_genrm_cohort_rewards(outputs, input_batch)
-        return self.projection.project(outputs, input_batch)
+        with rollout_phase("assemble"):
+            batch = self.projection.project(outputs, input_batch)
+            propagate_data_sources(input_batch, batch)
+            return batch
+
+    def _warn_if_skip_has_no_ultra_rows(self, input_batch: TrajectoryRequestBatch) -> None:
+        """Warn once when skipped grading is configured but a batch has no row it applies to."""
+        if self.nemotron_ultra_grading is not NemotronUltraGrading.SKIP or self._warned_skip_without_ultra_rows:
+            return
+        if _NEMOTRON_ULTRA_ENV_CLASS in (input_batch.get("env_classes") or []):
+            return
+        self._warned_skip_without_ultra_rows = True
+        logger.warning(
+            "environment.skyrl_gym.nemotron_ultra.grading=skip is set, but this batch has no {} rows; "
+            "every rollout in it is still graded",
+            _NEMOTRON_ULTRA_ENV_CLASS,
+        )
 
     async def _apply_genrm_cohort_rewards(
         self,
         outputs: list[AgentLoopOutput],
         input_batch: TrajectoryRequestBatch,
     ) -> None:
+        if self.nemotron_ultra_grading is NemotronUltraGrading.SKIP:
+            return
         env_extras = input_batch.get("env_extras") or []
         genrm_agents = {"genrm_simple_agent", "genrm_simple_agent_reasoning_off"}
 
@@ -990,6 +986,13 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         if batch_metadata is not None and batch_metadata.training_phase == "eval":
             for index in genrm_indices:
                 outputs[index].env_metrics["genrm/cohort_skipped_eval"] = 1.0
+                if outputs[index].verification.status is not VerificationStatus.VERIFIED:
+                    continue
+                outputs[index].verification = VerificationResult.unavailable(
+                    "GenRM evaluation needs a comparison cohort"
+                )
+                outputs[index].reward = RewardResult(unshaped_reward=None, optimization_reward=0.0)
+                outputs[index].disposition = TrainingDisposition.mask("GenRM evaluation has no comparison cohort")
             return
         if self.genrm_judge is None:
             raise RuntimeError("Nemotron Ultra GenRM rows require environment.skyrl_gym.nemotron_ultra.genrm.judge")
@@ -1006,6 +1009,21 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 raise ValueError(
                     f"GenRM cohort requires {expected_size} rollouts for a prompt, received {len(indices)}"
                 )
+            indices = [
+                index
+                for index in indices
+                if outputs[index].disposition.loss_eligible
+                and outputs[index].verification.status is VerificationStatus.VERIFIED
+            ]
+            if len(indices) < 2:
+                for index in indices:
+                    outputs[index].verification = VerificationResult.unavailable("Insufficient valid GenRM peers")
+                    outputs[index].reward = RewardResult(unshaped_reward=None, optimization_reward=0.0)
+                    outputs[index].disposition = TrainingDisposition.mask("Insufficient valid GenRM peers")
+                continue
+            histories = [input_batch["prompts"][index] for index in indices]
+            if any(history != histories[0] for history in histories):
+                raise ValueError("GenRM cohort rows must share the same conversation")
             records = [json.loads((ultra_at(index) or {})["record_json"]) for index in indices]
             if not all(isinstance(record, dict) for record in records):
                 raise TypeError("GenRM record_json must decode to an object")
@@ -1019,15 +1037,27 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     (dict(message) for message in reversed(messages) if message.get("role") == "assistant"),
                     {},
                 )
-                response_objects.append(response_object(assistant_message, outputs[index].evidence.response or ""))
-            rewards, metrics = await asyncio.to_thread(
-                grade_genrm_group,
-                conversation_history=input_batch["prompts"][indices[0]],
-                response_objects=response_objects,
-                principle=next(iter(principles)),
-                judge=self.genrm_judge,
-                config=self.genrm_config,
-            )
+                assistant_message["content"] = outputs[index].evidence.response or ""
+                response_objects.append(response_object(assistant_message))
+            try:
+                rewards, metrics = await asyncio.to_thread(
+                    grade_genrm_group,
+                    conversation_history=input_batch["prompts"][indices[0]],
+                    response_objects=response_objects,
+                    principle=next(iter(principles)),
+                    judge=self.genrm_judge,
+                    config=self.genrm_config,
+                )
+            except (RuntimeError, ValueError, requests.RequestException) as error:
+                for index in indices:
+                    outputs[index].verification = VerificationResult.error(
+                        "GenRM comparisons failed",
+                        diagnostics={"error_type": type(error).__name__, "error_message": str(error)},
+                    )
+                    outputs[index].reward = RewardResult(unshaped_reward=None, optimization_reward=0.0)
+                    outputs[index].disposition = TrainingDisposition.mask("GenRM comparisons failed")
+                    outputs[index].env_metrics["genrm/comparison_failure"] = 1.0
+                continue
             for index, reward in zip(indices, rewards, strict=True):
                 old_token_rewards = outputs[index].reward.token_rewards
                 token_rewards = None
@@ -1045,6 +1075,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 outputs[index].verification = VerificationResult.verified(
                     reward,
                     diagnostics={"agent": (ultra_at(index) or {})["agent"], "genrm_metrics": metrics},
+                    score_min=1.0,
+                    score_max=5.0,
                 )
                 outputs[index].env_metrics.update({f"genrm/{name}": value for name, value in metrics.items()})
 

@@ -15,13 +15,13 @@ TP_SIZE=1
 LOGGER=wandb
 
 # We use a smaller batch size here for demonstration
-uv run --isolated --extra vllm --env-file .env.llm_judge -m examples.llm_as_a_judge.main_llm_judge \
+uv run --isolated --extra megatron --extra vllm --env-file .env.llm_judge -m examples.llm_as_a_judge.main_llm_judge \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
   trainer.placement.colocate_all=true \
-  trainer.strategy=fsdp2 \
+  trainer.strategy=megatron \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
   generator.num_inference_engines=$NUM_INFERENCE_ENGINES \
@@ -43,8 +43,6 @@ uv run --isolated --extra vllm --env-file .env.llm_judge -m examples.llm_as_a_ju
   generator.backend=vllm \
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
-  generator.async_engine=true \
-  generator.batched=true \
   generator.n_samples_per_prompt=5 \
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \

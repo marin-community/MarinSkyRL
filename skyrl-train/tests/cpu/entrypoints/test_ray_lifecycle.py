@@ -1,6 +1,8 @@
 import asyncio
 import contextlib
 import signal
+import subprocess
+import sys
 from unittest.mock import Mock
 
 import pytest
@@ -28,111 +30,122 @@ def _wait_until_cancelled(events: Queue) -> None:
     asyncio.run(wait())
 
 
-def test_shutdown_ray_disconnects_locally_owned_cluster(monkeypatch):
-    shutdown = Mock()
-    monkeypatch.delenv("SKYRL_RAY_CLUSTER_OWNER", raising=False)
-    monkeypatch.setattr(ray_lifecycle.ray, "shutdown", shutdown)
-
-    ray_lifecycle.shutdown_ray()
-
-    shutdown.assert_called_once_with()
+EXTERNAL_OWNER = "iris-task-runtime"
 
 
-def test_shutdown_ray_leaves_externally_owned_cluster_connected(monkeypatch):
-    shutdown = Mock()
-    unregister = Mock()
-    monkeypatch.setenv("SKYRL_RAY_CLUSTER_OWNER", "iris-task-runtime")
+class _Stream:
+    def __init__(self, name: str, events: list):
+        self._name = name
+        self._events = events
+
+    def flush(self) -> None:
+        self._events.append(f"{self._name}.flush")
+
+
+@pytest.mark.parametrize(
+    ("owner", "exit_args", "expected_events"),
+    [
+        pytest.param(None, (), ["ray.shutdown"], id="local-owner-shuts-down-and-returns"),
+        pytest.param(
+            EXTERNAL_OWNER,
+            (),
+            ["atexit.unregister(ray.shutdown)", "stdout.flush", "stderr.flush", ("os._exit", 0)],
+            id="external-owner-exits-without-destructors",
+        ),
+        pytest.param(
+            EXTERNAL_OWNER,
+            (128 + signal.SIGTERM,),
+            ["atexit.unregister(ray.shutdown)", "stdout.flush", "stderr.flush", ("os._exit", 128 + signal.SIGTERM)],
+            id="external-owner-preserves-termination-code",
+        ),
+    ],
+)
+def test_ray_teardown_follows_the_cluster_owner(monkeypatch, owner, exit_args, expected_events):
+    events = []
+
+    def shutdown():
+        events.append("ray.shutdown")
+
+    def unregister(function):
+        events.append("atexit.unregister(ray.shutdown)" if function is shutdown else ("atexit.unregister", function))
+
+    if owner is None:
+        monkeypatch.delenv("SKYRL_RAY_CLUSTER_OWNER", raising=False)
+    else:
+        monkeypatch.setenv("SKYRL_RAY_CLUSTER_OWNER", owner)
     monkeypatch.setattr(ray_lifecycle.ray, "shutdown", shutdown)
     monkeypatch.setattr(ray_lifecycle.atexit, "unregister", unregister)
+    monkeypatch.setattr(ray_lifecycle.sys, "stdout", _Stream("stdout", events))
+    monkeypatch.setattr(ray_lifecycle.sys, "stderr", _Stream("stderr", events))
+    monkeypatch.setattr(ray_lifecycle.os, "_exit", lambda code: events.append(("os._exit", code)))
 
     ray_lifecycle.shutdown_ray()
+    ray_lifecycle.exit_without_ray_destructors(*exit_args)
 
-    shutdown.assert_not_called()
-    unregister.assert_called_once_with(shutdown)
-
-
-def test_external_ray_owner_exits_without_ray_destructors(monkeypatch):
-    exit_process = Mock()
-    monkeypatch.setenv("SKYRL_RAY_CLUSTER_OWNER", "iris-task-runtime")
-    monkeypatch.setattr(ray_lifecycle.os, "_exit", exit_process)
-
-    ray_lifecycle.exit_without_ray_destructors()
-
-    exit_process.assert_called_once_with(0)
+    assert events == expected_events
 
 
-def test_external_ray_owner_preserves_termination_exit_code(monkeypatch):
-    exit_process = Mock()
-    monkeypatch.setenv("SKYRL_RAY_CLUSTER_OWNER", "iris-task-runtime")
-    monkeypatch.setattr(ray_lifecycle.os, "_exit", exit_process)
+def test_runner_evidence_rejection_happens_before_ray_initialization():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import pytest
+from skyrl_train.config.utils import get_default_config
+from skyrl_train.entrypoints.main_base import run_ray_driver
+from skyrl_train.config.trajectory_runner_capabilities import TrajectoryRunnerMode
 
-    ray_lifecycle.exit_without_ray_destructors(128 + signal.SIGTERM)
-
-    exit_process.assert_called_once_with(128 + signal.SIGTERM)
-
-
-def test_external_ray_owner_flushes_logs_before_immediate_exit(monkeypatch):
-    exit_process = Mock()
-    stdout = Mock()
-    stderr = Mock()
-    monkeypatch.setenv("SKYRL_RAY_CLUSTER_OWNER", "iris-task-runtime")
-    monkeypatch.setattr(ray_lifecycle.os, "_exit", exit_process)
-    monkeypatch.setattr(ray_lifecycle.sys, "stdout", stdout)
-    monkeypatch.setattr(ray_lifecycle.sys, "stderr", stderr)
-
-    ray_lifecycle.exit_without_ray_destructors(1)
-
-    stdout.flush.assert_called_once_with()
-    stderr.flush.assert_called_once_with()
-    exit_process.assert_called_once_with(1)
-
-
-def test_local_ray_owner_returns_through_normal_process_exit(monkeypatch):
-    exit_process = Mock()
-    monkeypatch.delenv("SKYRL_RAY_CLUSTER_OWNER", raising=False)
-    monkeypatch.setattr(ray_lifecycle.os, "_exit", exit_process)
-
-    ray_lifecycle.exit_without_ray_destructors()
-
-    exit_process.assert_not_called()
+cfg = get_default_config()
+cfg.trainer.logger = "console"
+cfg.trainer.algorithm.off_policy_correction = "tis"
+with pytest.raises(ValueError, match="mini-swe cannot supply exact sampled completion"):
+    run_ray_driver(cfg, None, TrajectoryRunnerMode.MINI_SWE)
+""",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
 
 
-def test_runner_evidence_rejection_happens_before_ray_initialization(monkeypatch):
+@pytest.mark.parametrize("remote_failure", [None, RuntimeError("original remote failure")])
+def test_driver_reports_remote_result_before_external_owner_exit(tmp_path, monkeypatch, remote_failure):
     cfg = get_default_config()
     cfg.trainer.logger = "console"
-    cfg.trainer.algorithm.use_tis = True
-    cfg.trainer.algorithm.tis_imp_ratio_cap = 2.0
-    initialize_ray = Mock()
-    monkeypatch.setattr(trainer_utils, "initialize_ray", initialize_ray)
-
-    with pytest.raises(ValueError, match="mini-swe cannot supply exact sampled completion"):
-        run_ray_driver(cfg, Mock(), TrajectoryRunnerMode.MINI_SWE)
-
-    initialize_ray.assert_not_called()
-
-
-def test_driver_preserves_remote_exception_before_external_owner_exit(tmp_path, monkeypatch):
-    cfg = get_default_config()
-    cfg.trainer.logger = "console"
-    remote_failure = RuntimeError("original remote failure")
     shutdown = Mock()
     immediate_exit = Mock()
     monkeypatch.setenv("SKYRL_DEBUG_ARTIFACT_DIR", str(tmp_path))
     monkeypatch.setattr(trainer_utils, "initialize_ray", Mock())
     monkeypatch.setattr(main_base, "validate_trajectory_runner_capabilities", Mock())
-    monkeypatch.setattr(main_base.EntrypointSupervisor, "wait", Mock(side_effect=remote_failure))
+    monkeypatch.setattr(main_base.EntrypointSupervisor, "wait", Mock(side_effect=remote_failure, return_value=None))
     monkeypatch.setattr(ray_lifecycle, "shutdown_ray", shutdown)
     monkeypatch.setattr(ray_lifecycle, "exit_without_ray_destructors", immediate_exit)
     monkeypatch.setattr(telemetry, "process_telemetry", lambda _role: contextlib.nullcontext())
 
-    with pytest.raises(RuntimeError, match="original remote failure"):
-        run_ray_driver(cfg, Mock(), TrajectoryRunnerMode.SKYRL_GYM)
+    logs = []
+    sink = main_base.logger.add(logs.append, format="{message}")
+    try:
+        if remote_failure is None:
+            run_ray_driver(cfg, Mock(), TrajectoryRunnerMode.SKYRL_GYM)
+        else:
+            with pytest.raises(RuntimeError, match="original remote failure"):
+                run_ray_driver(cfg, Mock(), TrajectoryRunnerMode.SKYRL_GYM)
+    finally:
+        main_base.logger.remove(sink)
 
     shutdown.assert_called_once_with()
-    immediate_exit.assert_called_once_with(1)
     receipts = list((tmp_path / "outcomes").glob("*.exception.json"))
-    assert len(receipts) == 1
-    assert "original remote failure" in receipts[0].read_text()
+    if remote_failure is None:
+        immediate_exit.assert_called_once_with()
+        assert not receipts
+        assert any("Training done!" in line for line in logs)
+    else:
+        immediate_exit.assert_called_once_with(1)
+        assert len(receipts) == 1
+        assert "original remote failure" in receipts[0].read_text()
+        assert not any("Training done!" in line for line in logs)
 
 
 def test_generate_only_distillation_rejection_happens_before_ray_initialization(monkeypatch, local_distillation_config):
@@ -152,7 +165,7 @@ def test_generate_only_distillation_rejection_happens_before_ray_initialization(
     initialize_ray.assert_not_called()
 
 
-@pytest.mark.usefixtures("ray_init")
+@pytest.mark.usefixtures("ray_module")
 def test_entrypoint_node_resolution_selects_live_matching_node():
     node_ip = ray.util.get_node_ip_address()
 
@@ -161,21 +174,22 @@ def test_entrypoint_node_resolution_selects_live_matching_node():
     assert node_id == ray.get_runtime_context().get_node_id()
 
 
-@pytest.mark.usefixtures("ray_init")
+@pytest.mark.usefixtures("ray_module")
 def test_entrypoint_node_resolution_rejects_unknown_node():
     with pytest.raises(ValueError, match="Expected exactly one live Ray node"):
         resolve_entrypoint_node_id("192.0.2.1")
 
 
-@pytest.mark.usefixtures("ray_init")
+@pytest.mark.usefixtures("ray_module")
 def test_entrypoint_supervisor_allows_remote_cleanup_before_returning():
     events = Queue()
     entrypoint_ref = _wait_until_cancelled.remote(events)
-    assert events.get(timeout=10) == "started"
-    supervisor = EntrypointSupervisor(shutdown_timeout_seconds=10)
+    # Timeouts bound hangs only: starting a Ray worker on a loaded host can take tens of seconds.
+    assert events.get(timeout=60) == "started"
+    supervisor = EntrypointSupervisor(shutdown_timeout_seconds=60)
 
     supervisor.request_termination(signal.SIGTERM)
     exit_code = supervisor.wait(entrypoint_ref)
 
     assert exit_code == 128 + signal.SIGTERM
-    assert events.get(timeout=10) == "stopped"
+    assert events.get(timeout=60) == "stopped"

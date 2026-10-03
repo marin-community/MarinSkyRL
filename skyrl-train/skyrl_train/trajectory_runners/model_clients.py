@@ -4,11 +4,12 @@ import asyncio
 from copy import deepcopy
 from dataclasses import dataclass
 from collections.abc import Awaitable, Callable
-from functools import partial
-from typing import Any, Protocol, TypeVar
+from typing import Any, Protocol
+from uuid import uuid4
 
-import aiohttp
-from transformers import PreTrainedTokenizerBase
+import numpy as np
+
+from skyrl_gym.envs.nemotron_ultra.answer_extraction import REASONING_DELIMITERS, final_answer_text
 
 from skyrl_train.inference_engines.base import ChatContinuation, InferenceEngineInput, InferenceEngineOutput
 from skyrl_train.inference_engines.chat_continuation import EXACT_PROMPT_TOKEN_IDS_KEY, render_exact_chat_continuation
@@ -23,8 +24,10 @@ from skyrl_train.trajectory_runners.types import TokenProvenance
 from skyrl_train.trajectory_runners.routed_experts import normalize_routed_experts
 
 
-_CHAT_SAMPLING_EXCLUSIONS = frozenset({"max_generate_length", "logprobs", "stop"})
-_T = TypeVar("_T")
+# The per-turn output limit, as the trainer config (`max_generate_length`) and vLLM (`max_tokens`) spell it. Chat
+# requests carry it only as `max_completion_tokens`, which vLLM prefers over `max_tokens`.
+_OUTPUT_LIMIT_KEYS = ("max_generate_length", "max_tokens")
+_CHAT_SAMPLING_EXCLUSIONS = frozenset({*_OUTPUT_LIMIT_KEYS, "logprobs", "stop"})
 
 
 class ModelClientOutput(InferenceEngineOutput):
@@ -39,6 +42,20 @@ class ModelClient(Protocol):
     async def generate(self, request: InferenceEngineInput) -> ModelClientOutput: ...
 
 
+class ModelServerError(RuntimeError):
+    """A model-serving failure with safe diagnostics for retained trajectories."""
+
+    def __init__(self, category: str, request_id: str | None, status_code: int | None):
+        self.category = category
+        self.request_id = request_id
+        self.status_code = status_code
+        super().__init__(f"Model server error: {category}; request_id={request_id}")
+
+
+class ContextLengthExceededError(ModelServerError):
+    """A serving rejection caused by an overlong model context."""
+
+
 @dataclass(frozen=True)
 class _ChatResult:
     prompt_ids: list[int]
@@ -49,12 +66,10 @@ class _ChatResult:
     text: str
     stop_reason: str
     assistant_message: dict[str, Any]
-    routed_experts: list[list[list[int]]] | None = None
+    routed_experts: np.ndarray | None = None
 
 
-def _choice_routed_experts(
-    choice: dict[str, Any], prompt_ids: list[int], response_ids: list[int]
-) -> list[list[list[int]]] | None:
+def _choice_routed_experts(choice: dict[str, Any], prompt_ids: list[int], response_ids: list[int]) -> np.ndarray | None:
     provider_fields = choice.get("provider_specific_fields") or {}
     routes = choice.get("routed_experts", provider_fields.get("routed_experts"))
     if routes is None:
@@ -166,8 +181,10 @@ class DirectModelClient:
             result.pop("tools", None)
         if "max_output_tokens" in result:
             result["max_completion_tokens"] = result.pop("max_output_tokens")
-        if "max_generate_length" in sampling_params:
-            configured_max = int(sampling_params["max_generate_length"])
+        for key in _OUTPUT_LIMIT_KEYS:
+            if sampling_params.get(key) is None:
+                continue
+            configured_max = int(sampling_params[key])
             requested_max = result.get("max_completion_tokens")
             result["max_completion_tokens"] = (
                 configured_max if requested_max is None else min(configured_max, int(requested_max))
@@ -202,6 +219,13 @@ class DirectModelClient:
                 "headers": {},
             }
             messages, prompt_ids = await _render_chat_prompt(self._client.tokenize, render_request, continuation)
+            max_context_length = request.get("max_context_length")
+            if max_context_length is not None:
+                remaining_tokens = max_context_length - len(prompt_ids)
+                if remaining_tokens <= 0:
+                    raise ContextLengthExceededError(category="context_overflow", request_id=None, status_code=400)
+                requested_tokens = chat_options.get("max_completion_tokens", remaining_tokens)
+                chat_options["max_completion_tokens"] = min(int(requested_tokens), remaining_tokens)
 
             body = {
                 "model": self._client.model_name,
@@ -221,15 +245,31 @@ class DirectModelClient:
                 # vLLM may include the sampled token outside the natural top K.
                 body["top_logprobs"] = requested_top_k + 1
                 body["return_tokens_as_token_ids"] = True
-            response = await self._client.chat_completion({"json": body, "headers": {}})
+            request_id = uuid4().hex
+            response = await self._client.chat_completion({"json": body, "headers": {"x-request-id": request_id}})
             if "choices" not in response:
-                raise RuntimeError(f"vLLM chat completion failed: {response}")
+                error = response.get("error") or {}
+                error_type = (
+                    ContextLengthExceededError
+                    if response.get("error_category") == "context_overflow"
+                    else ModelServerError
+                )
+                raise error_type(
+                    category=response.get("error_category", "server_error"),
+                    request_id=response.get("request_id", request_id),
+                    status_code=error.get("code") if isinstance(error, dict) else None,
+                )
             choice = response["choices"][0]
             response_ids = choice.get("token_ids")
             if not isinstance(response_ids, list) or not all(isinstance(token, int) for token in response_ids):
                 raise RuntimeError("vLLM chat completion did not return exact token IDs")
             message = choice["message"]
-            text = self._client.tokenizer.decode(response_ids, skip_special_tokens=True)
+            text = message.get("content") or ""
+            # Some serving configurations omit reasoning parsers and remove
+            # special delimiters from content. Exact tokens retain the boundary.
+            decoded = self._client.tokenizer.decode(response_ids, skip_special_tokens=False)
+            if any(marker in decoded for pair in REASONING_DELIMITERS for marker in pair):
+                text = final_answer_text(decoded)
             logprob_items = (choice.get("logprobs") or {}).get("content")
             response_logprobs = (
                 [float(item["logprob"]) for item in logprob_items] if logprob_items is not None else None
@@ -260,194 +300,3 @@ class DirectModelClient:
             )
         )
         return _assemble_chat_results(results)
-
-
-class OpenAIHTTPModelClient:
-    """Call an OpenAI-compatible chat endpoint and normalize its response."""
-
-    def __init__(
-        self,
-        *,
-        base_url: str,
-        model_name: str,
-        tokenizer: PreTrainedTokenizerBase,
-        max_concurrent_requests: int,
-    ):
-        self._base_url = base_url.rstrip("/")
-        self._model_name = model_name
-        self._tokenizer = tokenizer
-        self._request_slots = asyncio.Semaphore(max_concurrent_requests)
-
-    async def _with_request_slot(self, operation: Callable[[], Awaitable[_T]]) -> _T:
-        async with self._request_slots:
-            return await operation()
-
-    async def generate(self, request: InferenceEngineInput) -> ModelClientOutput:
-        prompts = request.get("prompts")
-        if prompts is None:
-            raise ValueError("OpenAIHTTPModelClient requires message prompts; token-only requests are unsupported")
-
-        session_ids = request.get("session_ids") or [None] * len(prompts)
-        if len(session_ids) != len(prompts):
-            raise ValueError("session_ids and prompts must have the same batch size")
-        chat_options = request.get("chat_completion_params")
-        if chat_options is not None and len(chat_options) != len(prompts):
-            raise ValueError("chat_completion_params and prompts must have the same batch size")
-        continuations = request.get("chat_continuations") or [None] * len(prompts)
-        if len(continuations) != len(prompts):
-            raise ValueError("chat_continuations and prompts must have the same batch size")
-
-        timeout = aiohttp.ClientTimeout(total=None)
-        connector = aiohttp.TCPConnector(limit=0, limit_per_host=0)
-        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-            if chat_options is not None:
-                results = await asyncio.gather(
-                    *(
-                        self._with_request_slot(
-                            partial(
-                                self._generate_structured_chat,
-                                session,
-                                messages=messages,
-                                session_id=session_id,
-                                sampling_params=request.get("sampling_params") or {},
-                                chat_options=options,
-                                continuation=continuation,
-                            )
-                        )
-                        for messages, session_id, options, continuation in zip(
-                            prompts, session_ids, chat_options, continuations, strict=True
-                        )
-                    )
-                )
-                return _assemble_chat_results(results)
-            responses = await asyncio.gather(
-                *(
-                    self._with_request_slot(
-                        partial(
-                            self._generate_one,
-                            session,
-                            messages=messages,
-                            session_id=session_id,
-                            sampling_params=request.get("sampling_params") or {},
-                        )
-                    )
-                    for messages, session_id in zip(prompts, session_ids)
-                )
-            )
-
-        texts = [response[0] for response in responses]
-        return ModelClientOutput(
-            responses=texts,
-            response_ids=[self._tokenizer.encode(text, add_special_tokens=False) for text in texts],
-            stop_reasons=[response[1] for response in responses],
-            response_logprobs=None,
-            prompt_logprobs=None,
-            token_provenance=TokenProvenance.RECONSTRUCTED,
-        )
-
-    async def _generate_structured_chat(
-        self,
-        session: aiohttp.ClientSession,
-        *,
-        messages: list[dict[str, Any]],
-        session_id: Any,
-        sampling_params: dict[str, Any],
-        chat_options: dict[str, Any],
-        continuation: ChatContinuation | None,
-    ) -> _ChatResult:
-        options = DirectModelClient._chat_options(chat_options, sampling_params)
-        tokenize_options = {key: options[key] for key in ("tools", "tool_choice") if key in options}
-        render_request = {
-            "json": {
-                "model": self._model_name,
-                "messages": messages,
-                **tokenize_options,
-                "add_generation_prompt": True,
-            },
-            "headers": {},
-        }
-
-        async def tokenize(request: dict[str, Any]) -> dict[str, Any]:
-            async with session.post(f"{self._base_url}/tokenize", json=request["json"]) as response:
-                body = await response.json()
-                if response.status >= 400:
-                    raise RuntimeError(f"OpenAI chat tokenization returned HTTP {response.status}: {body}")
-                return body
-
-        messages, prompt_ids = await _render_chat_prompt(tokenize, render_request, continuation)
-
-        payload = {
-            "model": self._model_name,
-            "messages": messages,
-            "session_id": session_id,
-            **{key: value for key, value in sampling_params.items() if key not in _CHAT_SAMPLING_EXCLUSIONS},
-            **options,
-            "return_token_ids": True,
-        }
-        if continuation is not None:
-            payload[EXACT_PROMPT_TOKEN_IDS_KEY] = prompt_ids
-        if sampling_params.get("stop") is not None:
-            payload["stop"] = sampling_params["stop"]
-        if sampling_params.get("logprobs") is not None:
-            payload["logprobs"] = True
-        requested_top_k = sampling_params.get("logprobs")
-        requested_top_k = requested_top_k if isinstance(requested_top_k, int) and requested_top_k > 0 else None
-        if requested_top_k is not None:
-            payload["top_logprobs"] = requested_top_k + 1
-            payload["return_tokens_as_token_ids"] = True
-        async with session.post(f"{self._base_url}/v1/chat/completions", json=payload) as response:
-            body = await response.json()
-            if response.status >= 400:
-                raise RuntimeError(f"OpenAI chat completion returned HTTP {response.status}: {body}")
-        choice = body["choices"][0]
-        response_ids = choice.get("token_ids")
-        if not isinstance(response_ids, list) or not all(isinstance(token, int) for token in response_ids):
-            raise RuntimeError("OpenAI chat completion did not return exact response token IDs")
-        logprob_items = (choice.get("logprobs") or {}).get("content")
-        response_logprobs = [float(item["logprob"]) for item in logprob_items] if logprob_items is not None else None
-        if response_logprobs is not None and len(response_logprobs) != len(response_ids):
-            raise RuntimeError("OpenAI chat completion logprobs do not align with exact response token IDs")
-        selected = None
-        if requested_top_k is not None and logprob_items is not None:
-            selected = [
-                select_chat_response_topk(item.get("top_logprobs") or [], requested_top_k) for item in logprob_items
-            ]
-        return _ChatResult(
-            prompt_ids=prompt_ids,
-            response_ids=response_ids,
-            response_logprobs=response_logprobs,
-            student_topk_indices=None if selected is None else [ids for ids, _ in selected],
-            behavior_topk_logprobs=None if selected is None else [scores for _, scores in selected],
-            text=self._tokenizer.decode(response_ids, skip_special_tokens=True),
-            stop_reason=choice["finish_reason"],
-            assistant_message=choice["message"],
-            routed_experts=_choice_routed_experts(choice, prompt_ids, response_ids),
-        )
-
-    async def _generate_one(
-        self,
-        session: aiohttp.ClientSession,
-        *,
-        messages: list[dict[str, str]],
-        session_id,
-        sampling_params: dict,
-    ) -> tuple[str, str]:
-        request_sampling_params = dict(sampling_params)
-        if "max_generate_length" in request_sampling_params:
-            request_sampling_params["max_completion_tokens"] = request_sampling_params.pop("max_generate_length")
-        payload = {
-            "model": self._model_name,
-            "messages": [{"role": message["role"], "content": message["content"]} for message in messages],
-            "session_id": session_id,
-            **request_sampling_params,
-        }
-        async with session.post(
-            f"{self._base_url}/v1/chat/completions",
-            json=payload,
-            headers={"Content-Type": "application/json"},
-        ) as response:
-            body = await response.json()
-            if response.status >= 400:
-                raise RuntimeError(f"OpenAI chat completion returned HTTP {response.status}: {body}")
-        choice = body["choices"][0]
-        return choice["message"]["content"], choice["finish_reason"]

@@ -12,7 +12,7 @@ from skyrl_gym.envs.nemotron_ultra.lean_proof_utils import (
     build_lean4_proof,
     determine_proof_status,
 )
-from skyrl_gym.envs.nemotron_ultra.sandbox import SandboxClient
+from skyrl_gym.envs.nemotron_ultra.sandbox import MAX_VERIFIER_OUTPUT_CHARACTERS, SandboxClient
 
 
 def verify_lean_attempt(
@@ -21,6 +21,7 @@ def verify_lean_attempt(
     *,
     sandbox: SandboxClient,
     timeout_seconds: float = 30.0,
+    verifyit_enabled: bool = False,
 ) -> tuple[float, dict[str, Any], str | None]:
     if not generation.strip():
         error = "Empty generation received. Please provide a valid Lean 4 proof."
@@ -35,13 +36,20 @@ def verify_lean_attempt(
         {"header": record["header"], "formal_statement": record["formal_statement"]},
         ProofBuildConfig(extract_code_mode="last", restate_formal_statement=True, strip_theorem_from_proof=True),
     )
-    compiler_output = sandbox.execute(
-        predicted_proof,
-        language="lean4",
-        timeout_seconds=timeout_seconds,
-        max_output_characters=1000,
-    )
-    status = determine_proof_status(compiler_output)
+    if verifyit_enabled:
+        from skyrl_gym.envs.nemotron_ultra.lean_verifyit import compile_lean_verifyit
+
+        status, compiler_output = compile_lean_verifyit(predicted_proof, sandbox, timeout_seconds)
+    else:
+        compiler_output = sandbox.execute(
+            predicted_proof,
+            language="lean4",
+            timeout_seconds=timeout_seconds,
+            max_output_characters=MAX_VERIFIER_OUTPUT_CHARACTERS,
+        )
+        status = determine_proof_status(compiler_output)
+    if status in {"error", "unknown", "output_truncated"}:
+        raise RuntimeError(f"Lean verification unavailable: {compiler_output}")
     details = {
         "proof_status": status,
         "predicted_proof": predicted_proof,

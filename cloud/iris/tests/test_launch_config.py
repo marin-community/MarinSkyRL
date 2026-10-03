@@ -3,15 +3,22 @@
 from __future__ import annotations
 
 import base64
-from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
+from omegaconf import OmegaConf
 
-from cloud.iris.launch_config import compose_launch_config, load_launch_config, validate_launch_config
-from cloud.iris.rl_config_translation import RL_CONFIG_PAYLOAD_ENV, materialize_launch_config
+from cloud.iris import training_driver
+from cloud.iris.launch_config import LaunchTopology, load_launch_config, validate_launch_config
+from cloud.iris.rl_config_translation import (
+    RL_CONFIG_PAYLOAD_ENV,
+    compose_skyrl_config,
+    materialize_launch_config,
+    parse_rl_config,
+)
+from skyrl_train.distributed.step_policy import NonfiniteStepPolicy, nonfinite_step_policy
 
 
 def _raw_config() -> dict[str, Any]:
@@ -27,8 +34,8 @@ def _raw_config() -> dict[str, Any]:
         },
         "runtime": {
             "launcher_commit": "a" * 40,
-            "profile": "fsdp",
-            "entrypoint": "skyrl_train.entrypoints.fully_async",
+            "profile": "megatron",
+            "entrypoint": "skyrl_train.entrypoints.main_base",
         },
         "iris": {
             "cluster": "cw-us-east-08a",
@@ -71,7 +78,7 @@ def _raw_config() -> dict[str, Any]:
             "validation_data": [],
         },
         "skyrl": {
-            "entrypoint": "fully_async",
+            "entrypoint": "standard",
             "context_budget": {
                 "request_window_tokens": 1024,
                 "max_new_tokens_per_turn": 256,
@@ -80,7 +87,7 @@ def _raw_config() -> dict[str, Any]:
             "model_num_attention_heads": 8,
             "trainer": {
                 "seed": 42,
-                "strategy": "fsdp2",
+                "strategy": "megatron",
                 "algorithm": {"use_kl_loss": False},
                 "placement": {
                     "colocate_all": True,
@@ -102,38 +109,128 @@ def _raw_config() -> dict[str, Any]:
     }
 
 
-def test_launch_config_composes_and_loads_as_structured_hydra(tmp_path: Path) -> None:
+@pytest.mark.parametrize("storage_prefix", ["s3://runs/smoke", "gs://runs/smoke"])
+@pytest.mark.parametrize(("loss", "reduction"), [("regular", "token_mean"), ("gspo", "sequence_mean")])
+def test_launch_config_composes_and_loads_as_structured_hydra(
+    tmp_path: Path, loss: str, reduction: str, storage_prefix: str
+) -> None:
     path = tmp_path / "resolved-launch.yaml"
-    path.write_text(yaml.safe_dump(_raw_config(), sort_keys=False))
+    raw = _raw_config()
+    raw["skyrl"]["trainer"]["algorithm"].update(policy_loss_type=loss, loss_reduction=reduction)
+    trainer = raw["skyrl"]["trainer"]
+    trainer["resume_mode"] = "from_path"
+    trainer["resume_path"] = f"{storage_prefix}/checkpoints/global_step_1"
+    trainer["mismatch_probe"] = {
+        "archive_uri": f"{storage_prefix}/mismatch_probe",
+        "reuse_probe": f"{storage_prefix}/source/mismatch_probe",
+    }
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
 
     config = load_launch_config(path)
 
     assert config.skyrl.trainer.train_batch_size == 8
     assert validate_launch_config(config).num_nodes == 1
+    assert config.skyrl.trainer.resume_path == f"{storage_prefix}/checkpoints/global_step_1"
+    assert config.skyrl.trainer.mismatch_probe.archive_uri == f"{storage_prefix}/mismatch_probe"
+    assert config.skyrl.trainer.mismatch_probe.reuse_probe == f"{storage_prefix}/source/mismatch_probe"
+    if loss == "gspo":
+        config.skyrl.trainer.algorithm.loss_reduction = "token_mean"
+        with pytest.raises(ValueError, match="gspo requires trainer.algorithm.loss_reduction=sequence_mean"):
+            validate_launch_config(config)
+        raw["skyrl"]["trainer"]["algorithm"]["loss_reduction"] = "token_mean"
+        path.write_text(yaml.safe_dump(raw, sort_keys=False))
+        with pytest.raises(ValueError, match="gspo requires trainer.algorithm.loss_reduction=sequence_mean"):
+            load_launch_config(path)
 
 
-def test_launch_config_rejects_allocation_smaller_than_role_plan() -> None:
+@pytest.mark.parametrize("switch", ["use_abs_kl", "use_kl_estimator_k3"])
+def test_composed_launch_rejects_kl_switches(tmp_path: Path, switch: str) -> None:
+    path = tmp_path / "launch.yaml"
+    path.write_text(yaml.safe_dump(_raw_config()))
+    config = load_launch_config(path)
+    OmegaConf.update(config.skyrl.trainer.algorithm, switch, True, force_add=True)
+    OmegaConf.save(config, path)
+
+    with pytest.raises(ValueError, match="kl_estimator_type"):
+        load_launch_config(path)
+
+
+@pytest.mark.parametrize(
+    ("entrypoint", "max_staleness_steps", "expected"),
+    [
+        ("standard", 0, "sync"),
+        ("standard", 2, "async"),
+        ("terminal_bench", 1, "async"),
+        ("generate", 0, None),
+    ],
+)
+def test_composed_launch_records_whether_training_runs_ahead_of_its_updates(
+    tmp_path: Path, entrypoint: str, max_staleness_steps: int, expected: str | None
+) -> None:
     raw = _raw_config()
-    raw["iris"]["allocation"]["num_nodes"] = 0
+    raw["skyrl"]["entrypoint"] = entrypoint
+    raw["skyrl"]["trainer"]["placement"]["colocate_all"] = False
+    raw["skyrl"]["trainer"]["rollout_buffer"] = {"max_staleness_steps": max_staleness_steps}
+    raw["skyrl"]["trainer"]["algorithm"]["off_policy_correction"] = "none"
+    raw["iris"]["allocation"]["num_nodes"] = 2
+    path = tmp_path / "launch.yaml"
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
 
-    with pytest.raises(ValueError, match="num_nodes"):
-        validate_launch_config(compose_launch_config(raw))
-
-
-def test_fully_async_launch_requires_equal_training_batches() -> None:
-    raw = deepcopy(_raw_config())
-    raw["skyrl"]["trainer"]["policy_mini_batch_size"] = 4
-
-    with pytest.raises(ValueError, match="train_batch_size == trainer.policy_mini_batch_size"):
-        validate_launch_config(compose_launch_config(raw))
+    assert load_launch_config(path).runtime.training_type == expected
 
 
-def test_colocated_rollout_parallelism_must_fit_the_allocated_bundle() -> None:
-    raw = deepcopy(_raw_config())
-    raw["skyrl"]["generator"]["inference_engine_data_parallel_size"] = 2
+def test_object_store_uris_in_skyrl_config_reach_the_task_unchanged(tmp_path: Path) -> None:
+    raw = _raw_config()
+    raw["skyrl"]["trainer"]["rollout_buffer"] = {"object_store_root": "s3://runs/smoke/rollouts"}
+    path = tmp_path / "launch.yaml"
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
 
-    with pytest.raises(ValueError, match="colocated rollout geometry"):
-        validate_launch_config(compose_launch_config(raw))
+    config = load_launch_config(path)
+
+    assert config.skyrl.trainer.rollout_buffer.object_store_root == "s3://runs/smoke/rollouts"
+
+
+def test_qwen_smoke_hugging_face_model_input_reaches_the_runner_without_a_model_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _raw_config()
+    config["skyrl"] = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "configs/qwen_megatron_smoke.yaml").read_text()
+    )
+    config["inputs"]["model"] = {
+        "uri": "Qwen/Qwen3-0.6B",
+        "identity": "main",
+        "local_path": "Qwen/Qwen3-0.6B",
+        "tokenizer_uri": "Qwen/Qwen3-0.6B",
+        "tokenizer_revision": "main",
+    }
+    config["inputs"]["data_kind"] = "parquet"
+    path = tmp_path / "qwen-launch.yaml"
+    path.write_text(yaml.safe_dump(config, sort_keys=False))
+    seen = []
+
+    class RecordingRunner:
+        def __init__(self, run_config):
+            seen.append(run_config)
+
+        def setup(self):
+            pass
+
+        def run(self):
+            return 0
+
+    monkeypatch.setattr(training_driver, "LocalRLRunner", RecordingRunner)
+    monkeypatch.setattr("sys.argv", ["training_driver", "--config", str(path)])
+
+    resolved = load_launch_config(path)
+    with pytest.raises(SystemExit) as result:
+        training_driver.main()
+
+    assert resolved.runtime.entrypoint == "skyrl_train.entrypoints.main_base"
+    assert resolved.skyrl.trainer.policy.model.source_uri is None
+    assert result.value.code == 0
+    assert seen[0].model_path == "Qwen/Qwen3-0.6B"
+    assert seen[0].model_source_uri is None
 
 
 def test_task_materializes_the_forwarded_launch_document(tmp_path: Path) -> None:
@@ -147,3 +244,140 @@ def test_task_materializes_the_forwarded_launch_document(tmp_path: Path) -> None
 
     assert path == str(destination)
     assert destination.read_bytes() == contents
+
+
+def test_evaluation_metric_names_survive_iris_path_resolution(tmp_path: Path) -> None:
+    raw = yaml.safe_load((Path(__file__).resolve().parents[1] / "configs/qwen_megatron_smoke.yaml").read_text())
+    groups = {"eval/train/avg_score": ["eval/cat_count_n1/avg_score", "eval/cat_count_n2/avg_score"]}
+    profiles = {"sampled": {"sampling_params": {"stop": ["./END"]}}}
+    raw["trainer"]["callbacks"] = [{"type": "evaluation", "metric_groups": groups, "additional_evaluations": profiles}]
+    path = tmp_path / "evaluation.yaml"
+    path.write_text(yaml.safe_dump(raw))
+
+    config = compose_skyrl_config(
+        parse_rl_config(str(path)), {}, LaunchTopology(num_nodes=1, gpus_per_node=8, gpu_variant="H100")
+    ).config
+
+    assert config.trainer.callbacks[0].metric_groups == groups
+    assert config.trainer.callbacks[0].additional_evaluations == profiles
+
+
+def test_null_nonfinite_limit_in_launch_fails_on_first_invalid_step(tmp_path: Path) -> None:
+    raw = _raw_config()
+    raw["skyrl"]["trainer"]["policy"] = {"max_consecutive_nonfinite_steps": None}
+    path = tmp_path / "launch.yaml"
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
+
+    config = load_launch_config(path)
+
+    action = nonfinite_step_policy(0, config.skyrl.trainer.policy.max_consecutive_nonfinite_steps)
+    assert action is NonfiniteStepPolicy.FAIL
+
+
+@pytest.mark.parametrize(("key", "value"), [("use_tis", True), ("tis_imp_ratio_cap", 2.0)])
+def test_composed_launch_rejects_tis_selectors(tmp_path: Path, key: str, value) -> None:
+    path = tmp_path / "launch.yaml"
+    path.write_text(yaml.safe_dump(_raw_config()))
+    config = load_launch_config(path)
+    OmegaConf.update(config.skyrl.trainer.algorithm, key, value, force_add=True)
+    OmegaConf.save(config, path)
+
+    with pytest.raises(ValueError, match="off_policy_correction"):
+        load_launch_config(path)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "error"),
+    [
+        ({"rollout_buffer.max_staleness_steps": 1}, "off-policy OLD-anchored"),
+        ({"rollout_buffer.max_staleness_steps": 1, "algorithm.off_policy_correction": "none"}, None),
+        ({"rollout_buffer.max_staleness_steps": 1, "algorithm.policy_loss_type": "behavior_clip"}, None),
+        ({"algorithm.policy_loss_type": "behavior_clip", "algorithm.off_policy_correction": "tis"}, "OLD-anchored"),
+        (
+            {
+                "algorithm.off_policy_correction": "custom",
+                "algorithm.off_policy_correction_rules": [{"action": "truncate", "high": 2.0}],
+            },
+            "kind must be token or sequence",
+        ),
+        (
+            {
+                "algorithm.off_policy_correction": "custom",
+                "algorithm.off_policy_correction_rules": [{"kind": "token", "action": "mask", "low": 2, "high": 1}],
+            },
+            "low <= high",
+        ),
+        (
+            {
+                "algorithm.off_policy_correction": "custom",
+                "algorithm.off_policy_correction_rules": [{"kind": "token", "action": "truncate", "high": 2}] * 2,
+            },
+            "at most one truncate",
+        ),
+        (
+            {
+                "algorithm.off_policy_correction": "custom",
+                "algorithm.off_policy_correction_rules": [{"kind": "token", "action": "truncate", "hig": 2}],
+            },
+            "hig",
+        ),
+        (
+            {
+                "algorithm.off_policy_correction": "custom",
+                "algorithm.off_policy_correction_rules": [{"kind": "token", "action": "clamp", "high": 2}],
+            },
+            "action",
+        ),
+        (
+            {
+                "algorithm.off_policy_correction": "custom",
+                "algorithm.off_policy_correction_rules": [
+                    {"kind": "sequence", "aggregate": "average", "action": "mask", "high": 2}
+                ],
+            },
+            "aggregate",
+        ),
+        (
+            {
+                "algorithm.off_policy_correction": "custom",
+                "algorithm.off_policy_correction_rules": [{"kind": "token", "action": "truncate", "high": "2.0"}],
+            },
+            "high",
+        ),
+        ({"algorithm.dynamic_sampling.max_mean_reward": 0.9}, "requires dynamic_sampling.type=filter"),
+        ({"algorithm.dynamic_sampling.max_mean_reward": 0.9, "algorithm.dynamic_sampling.type": "filter"}, None),
+    ],
+)
+def test_launch_validates_correction_and_selection_contract(tmp_path: Path, overrides: dict, error: str | None):
+    raw = OmegaConf.create(_raw_config())
+    for key, value in overrides.items():
+        OmegaConf.update(raw.skyrl.trainer, key, value, force_add=True)
+    path = tmp_path / "launch.yaml"
+    OmegaConf.save(raw, path)
+    if error is not None:
+        with pytest.raises(ValueError, match=error):
+            load_launch_config(path)
+    else:
+        # Explicitly uncorrected stale policies and active reward filters are valid launch contracts.
+        load_launch_config(path)
+
+
+@pytest.mark.parametrize(
+    ("recipe", "nodes"), [("snowball_mopd_ultra_async_smoke", 8), ("snowball_mopd_ultra_async_32k_smoke", 9)]
+)
+def test_inherited_recipe_round_trips_as_a_self_contained_launch(tmp_path: Path, recipe: str, nodes: int):
+    raw = _raw_config()
+    raw["skyrl"] = {"defaults": [recipe, "_self_"], "trainer": {"max_steps": 2}}
+    raw["iris"]["allocation"]["num_nodes"] = nodes
+    path = tmp_path / "launch.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    config = load_launch_config(path)
+    assert config.skyrl.trainer.max_steps == 2
+    assert config.skyrl.trainer.rollout_buffer.max_staleness_steps == 1
+    assert config.skyrl.trainer.algorithm.off_policy_correction == "tis"
+    assert config.skyrl.data.sampling.kind is None
+    assert config.skyrl.generator.engine_init_kwargs.max_model_len == (8192 if nodes == 8 else 32767)
+    resolved = tmp_path / "resolved.yaml"
+    OmegaConf.save(config, resolved)
+    reloaded = load_launch_config(resolved)
+    assert OmegaConf.to_container(reloaded, resolve=True) == OmegaConf.to_container(config, resolve=True)

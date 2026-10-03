@@ -80,7 +80,7 @@ terminal_bench:
     cleanup: true
 
 trainer:
-  strategy: fsdp2
+  strategy: megatron
   algorithm:
     # This is an infrastructure gate, not a quality run. One rollout for each of
     # eight distinct tasks gives the eight-way policy mesh useful work without
@@ -91,8 +91,7 @@ trainer:
     eps_clip_low: 0.2
     eps_clip_high: 0.05
     loss_reduction: sequence_mean
-    use_tis: true
-    tis_imp_ratio_cap: 2.0
+    off_policy_correction: tis
 
   epochs: 1
   max_steps: 3
@@ -102,7 +101,7 @@ trainer:
   policy_mini_batch_size: 8
   eval_batch_size: 8
 
-  micro_forward_batch_size_per_gpu: 4
+  micro_forward_batch_size_per_gpu: 1
   micro_train_batch_size_per_gpu: 1
 
 
@@ -134,14 +133,10 @@ trainer:
       weight_decay: 0.0
       adam_betas: [0.9, 0.999]
       max_grad_norm: 0.9
-    fsdp_config:
-      cpu_offload: false
-      reshard_after_forward: true
-  ref:
-    fsdp_config:
-      cpu_offload: false
-      reshard_after_forward: true
-
+    megatron_config:
+      # The default format gathers the full optimizer state into one rank's host memory,
+      # which pushes the colocated node past Ray's memory-kill threshold at the final save.
+      optimizer_checkpoint_sharding_type: dp_reshardable
   placement:
     colocate_all: true
     policy_num_nodes: null
@@ -160,7 +155,9 @@ generator:
   n_samples_per_prompt: 1
   eval_n_samples_per_prompt: 1
 
-  gpu_memory_utilization: 0.85
+  # Colocated Megatron keeps more than 25 GiB per H100 after an optimizer step even when
+  # offloaded, so vLLM must wake its KV cache into the remainder.
+  gpu_memory_utilization: 0.5
 
   max_num_seqs: 24
   max_num_batched_tokens: 16384
@@ -170,8 +167,6 @@ generator:
 
   run_engines_locally: true
   weight_sync_backend: nccl
-  async_engine: true
-  batched: false
   enable_http_endpoint: true
   inference_stats_interval: 1
   append_eos_token_after_stop_str_in_multi_turn: true
@@ -181,8 +176,11 @@ generator:
     top_p: 1.0
     top_k: -1
 
+  chat_template:
+    source: file
+    name_or_path: chat_templates/qwen3_thinking_acc.jinja2
+
   engine_init_kwargs:
-    custom_chat_template_chat_completion_path: chat_templates/qwen3_thinking_acc.jinja2
     served_model_name: Qwen3-8B
     enable_auto_tool_choice: true
     tool_call_parser: hermes

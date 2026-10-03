@@ -12,10 +12,6 @@ planned. The Marin coding standards in `.agents/marin-style/AGENTS-core.md` ther
 apply to the whole repository, not to a Marin-authored subset — reformat, refactor, and
 delete dead code freely. There is no upstream diff to keep small.
 
-The one exception is `skyrl-agent/`, which is a dormant snapshot that nothing builds or
-tests. It is excluded from lint (see `[tool.marin-style]` in `pyproject.toml`); leave it
-alone rather than churning it.
-
 ## Repo map
 
 The root `marinskyrl` distribution owns the launcher and trainer dependency graph. It is deliberately a
@@ -24,11 +20,10 @@ lockfiles and virtualenvs.
 
 | package | status | what it is |
 | --- | --- | --- |
-| repository root | **primary** | The `marinskyrl` launcher and trainer distribution. Its frozen lock owns the CPU launcher, vLLM/FSDP2, and Megatron closures. |
+| repository root | **primary** | The `marinskyrl` launcher and trainer distribution. Its frozen lock owns the CPU launcher, vLLM, and Megatron closures. |
 | `skyrl-train/` | bundled | Trainer source, examples, and CPU/GPU tests included in the root wheel. |
 | `skyrl-gym/` | bundled + independent | Gymnasium-style RL environments included in the root wheel; its standalone package remains independently testable. |
 | `skyrl-tx/` | active | A JAX/Flax inference + fine-tuning engine (`tx`), independent of the trainer. Has its own CI. |
-| `skyrl-agent/` | dormant | An older agent-harness snapshot. Not built, not tested, not linted. |
 
 ## Install and test
 
@@ -36,16 +31,14 @@ Run launcher and trainer commands from the repository root. The base install is 
 profile only when resolving a training environment.
 
 ```bash
-# Root launcher + skyrl-train CPU tests (what PR CI runs)
+# Root launcher + skyrl-train CPU tests (what PR CI runs), one pytest-xdist worker per core. loadgroup starts the
+# tests marked slow first and bounds how many run at once by host memory (see skyrl-train/tests/cpu/conftest.py).
 uv sync --frozen --group dev --group harbor-test --extra cpu --extra telemetry
-uv run --frozen pytest cloud/iris/tests/ skyrl-train/tests/cpu/
+uv run --frozen pytest cloud/iris/tests/ skyrl-train/tests/cpu/ -n auto --dist loadgroup
 
-# FSDP2/vLLM runtime closure (GPU tests need an 8-GPU node; not run in PR CI)
-uv sync --frozen --extra fsdp --extra vllm --group dev
-uv run --frozen pytest -s skyrl-train/tests/gpu/gpu_ci -m "not (integrations or megatron)"
-
-# Megatron runtime closure (select it together with the common training closure)
+# Megatron/vLLM runtime closure (GPU tests need an 8-GPU node; not run in PR CI)
 uv sync --frozen --extra vllm --extra megatron --group dev
+uv run --frozen pytest -s skyrl-train/tests/gpu/gpu_ci -m "not integrations"
 
 # skyrl-gym
 cd skyrl-gym
@@ -66,8 +59,8 @@ NUM_GPUS=8 LOGGER=console bash examples/gsm8k/run_gsm8k.sh
 ```
 
 `cpu` and `cuda` are mutually exclusive PyTorch wheel profiles because Python extras cannot replace a base
-dependency. GPU-only component extras such as `vllm`, `megatron`, and `deepspeed` imply `cuda`, so callers name
-the component rather than its hardware consequence. `fsdp` adds TorchTitan for the expert-parallel FSDP path.
+dependency. GPU-only component extras such as `vllm` and `megatron` imply `cuda`, so callers name
+the component rather than its hardware consequence.
 The Iris launcher installs the selected GPU profile from `uv.lock` in the standard task image. Native
 artifacts must be available from the configured wheel sources for every supported architecture; do not
 hide missing wheels in a custom runtime image.

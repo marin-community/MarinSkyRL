@@ -4,6 +4,9 @@ import datasets
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from omegaconf import OmegaConf
+
+from skyrl_gym.envs.mcq.env import MCQEnv
 
 from infra.rl_data.preparation import (
     PreparationOptions,
@@ -15,7 +18,7 @@ from infra.rl_data.preparation import (
 from infra.rl_data.mixtures import MixtureSlice, MixtureSpec, load_mixture_spec, prepare_mixture
 from infra.rl_data.sources import (
     _iter_jsonl_rows,
-    _restore_nemotron_ultra_placeholder,
+    restore_nemotron_ultra_placeholder,
     Source,
     aime_1983_2024_source,
     aime24_source,
@@ -44,7 +47,8 @@ from infra.rl_data.sources import (
     svamp_source,
     verifiable_code_source,
 )
-from skyrl_gym import get_data_contract
+from skyrl_gym import get_data_contract, make as make_gym_env
+from skyrl_train.dataset.dataset import PromptDataset
 from skyrl_gym.envs.ifeval import utils as ifeval_utils
 
 
@@ -300,7 +304,7 @@ def test_nemotron_ultra_placeholder_hydrates_prompt_answer_and_provenance():
         ]
     }
 
-    restored = _restore_nemotron_ultra_placeholder(row, sources)
+    restored = restore_nemotron_ultra_placeholder(row, sources)
 
     assert restored["question"] == "Answer this: 2 + 2 Now."
     assert restored["expected_answer"] == "4"
@@ -678,6 +682,17 @@ def test_gsm8k_rejects_missing_delimiter():
             {"grade": "2"},
         ),
         (
+            asdiv_source(),
+            {
+                "Body": "20 people do not like shopping and 7 people like shopping.",
+                "Question": "What is the ratio of the number of people who do not like shopping to the number of people who like shopping?",
+                "Answer": "20:7",
+                "Grade": "6",
+            },
+            "20:7",
+            {"grade": "6"},
+        ),
+        (
             svamp_source(),
             {"Body": "Sam has four apples.", "Question": "How many?", "Answer": 4.0},
             "4",
@@ -826,20 +841,126 @@ def test_gpqa_preparation_builds_mcq():
     assert "3e8 m/s" in row["prompt"][0]["content"]
 
 
+_OPENSCIENCE_TEN_CHOICE_ROW = {
+    "input": (
+        "Which of the following technological advancements is not typically associated "
+        "with the Second Industrial Revolution?\n"
+        "A: The light bulb\n"
+        "B: The telephone\n"
+        "C: The assembly line\n"
+        "D: The steam engine\n"
+        "E: The automobile\n"
+        "F: The radio\n"
+        "G: The airplane\n"
+        "H: The electric motor\n"
+        "I: The phonograph\n"
+        "J: The refrigerator"
+    ),
+    "output": "Reasoning about each invention.\n\nThe answer is ($\\boxed{H}$)",
+    "subset": "OS-Q2.5-32B-10",
+}
+
+
 def test_openscience_preparation_extracts_letter():
     artifact = prepare_artifact(
         openscience_source(),
         [
             {
                 "input": "What is photosynthesis?\nA: Process of light absorption\nB: Process of DNA replication",
-                "output": "Photosynthesis is about light.\n\\boxed{A}",
+                "output": "Photosynthesis is about light.\n\\boxed{a}",
             }
         ],
-        FakeContract("mcq", "\nAnswer: \\boxed{ANSWER}"),
+        get_data_contract("mcq"),
         token_count=lambda text: len(text.split()),
         options=PreparationOptions(**_OPTS),
     )
     assert artifact.rows[0]["reward_model"]["ground_truth"] == "A"
+
+
+def test_openscience_preparation_accepts_ten_choice_answers_and_keeps_subset_provenance():
+    artifact = prepare_artifact(
+        openscience_source(),
+        [dict(_OPENSCIENCE_TEN_CHOICE_ROW)],
+        get_data_contract("mcq"),
+        token_count=lambda text: len(text.split()),
+        options=PreparationOptions(**{**_OPTS, "max_prompt_tokens": 200}),
+    )
+
+    row = artifact.rows[0]
+    assert row["reward_model"]["ground_truth"] == "H"
+    assert row["extra_info"]["subset"] == "OS-Q2.5-32B-10"
+
+
+def test_openscience_prepared_row_constructs_and_scores_in_the_mcq_env():
+    row = openscience_source().prepare_row(dict(_OPENSCIENCE_TEN_CHOICE_ROW), 4, get_data_contract("mcq"))
+    extras = {key: value for key, value in row.items() if key not in ("prompt", "env_class")}
+
+    env = MCQEnv(OmegaConf.create(), extras=extras)
+
+    assert env.step("The answer is ($\\boxed{H}$)")["reward"] == 1.0
+    assert env.step("The answer is ($\\boxed{J}$)")["reward"] == 0.0
+
+
+def test_openscience_preparation_skips_conflicting_option_prompts_with_recorded_reason():
+    conflicting = {
+        "input": (
+            "Which factor drove late-19th-century urbanization?\n"
+            "A: Railroads\nB: Gold\nC: Mechanization\nD: Factory jobs\n"
+            "H: Urban planning\nI: Consumer culture\nJ: Legal reforms\n\n"
+            "Which factor drove late-19th-century urbanization?\n"
+            "A: Railroads\nB: Gold\nC: Mechanization\nD: Factory jobs\n"
+            "H: Consumer culture\nI: Legal reforms\nJ: Sanitation infrastructure"
+        ),
+        "output": "The answer is ($\\boxed{D}$)",
+        "subset": "OS-Q2.5-32B-10",
+    }
+
+    artifact = prepare_artifact(
+        openscience_source(),
+        [dict(_OPENSCIENCE_TEN_CHOICE_ROW), conflicting],
+        get_data_contract("mcq"),
+        token_count=lambda text: len(text.split()),
+        options=PreparationOptions(**{**_OPTS, "max_prompt_tokens": 200, "minimum_unique_rows": 1}),
+    )
+
+    assert len(artifact.rows) == 1
+    assert artifact.provenance["counts"]["malformed_rows_skipped"] == 1
+    assert "conflicting options" in artifact.provenance["conversion_failures"][0]["error"]
+    assert artifact.provenance["conversion_failures"][0]["index"] == 1
+
+
+def test_openscience_preparation_rejects_answers_outside_the_offered_options():
+    with pytest.raises(ValueError, match="not among the offered options"):
+        openscience_source().prepare_row(
+            {**_OPENSCIENCE_TEN_CHOICE_ROW, "output": "The answer is ($\\boxed{K}$)"},
+            0,
+            get_data_contract("mcq"),
+        )
+
+
+def test_openscience_loader_selects_and_stamps_a_pinned_subset(monkeypatch):
+    def load_dataset(dataset_id, config, *, split, revision, streaming):
+        assert (dataset_id, split, revision, streaming) == ("nvidia/OpenScience", "train", "revision-1", True)
+        assert config == "OS-Q2.5-32B-10"
+        return [{"input": "Which?\nA: one\nB: two", "output": "\\boxed{B}"}]
+
+    monkeypatch.setattr("datasets.load_dataset", load_dataset)
+
+    rows = list(load_source_rows(openscience_source(), "revision-1", {"subset": "OS-Q2.5-32B-10"}))
+
+    assert rows == [
+        {
+            "input": "Which?\nA: one\nB: two",
+            "output": "\\boxed{B}",
+            "subset": "OS-Q2.5-32B-10",
+        }
+    ]
+
+
+@pytest.mark.parametrize("parameters", [{}, {"subset": "OS-Q9-999B-99"}])
+def test_openscience_loader_requires_a_supported_subset(parameters):
+    with pytest.raises(ValueError, match="subset must select one of"):
+        load_source_rows(openscience_source(), "revision-1", parameters)
 
 
 def test_kto_mix_preparation_keeps_preferred():
@@ -1138,3 +1259,44 @@ def test_gretel_text_to_sql_adapter_builds_result_set_ground_truth():
     assert ground_truth["table_names"] == ["Hospitals"]
     assert artifact.provenance["counts"]["malformed_rows_skipped"] == 1
     assert artifact.provenance["verification"] == "two_sided"
+
+
+def test_prepared_rows_construct_their_declared_environment_through_the_loader():
+    cases = [
+        (
+            gsm8k_source(),
+            {
+                "question": "Weng earns $12 an hour. Yesterday she did 50 minutes of babysitting. How much did she earn?",
+                "answer": "12 / 60 * 50 = 10.\n#### 10",
+            },
+            "10",
+        ),
+        (
+            kto_mix_source(),
+            {
+                "prompt": [{"role": "user", "content": "Say something nice."}],
+                "completion": [{"role": "assistant", "content": "You are doing great work."}],
+                "label": True,
+            },
+            "You are doing great work.",
+        ),
+        (
+            hh_rlhf_source(),
+            {
+                "chosen": "\n\nHuman: Say something nice.\n\nAssistant: You are doing great work.",
+                "rejected": "\n\nHuman: Say something nice.\n\nAssistant: Whatever.",
+            },
+            "You are doing great work.",
+        ),
+    ]
+    for source, example, expected_ground_truth in cases:
+        prepared = source.prepare_row(example, 1, get_data_contract(source.env_id))
+        dataset = PromptDataset.__new__(PromptDataset)
+        dataset.dataframe = datasets.Dataset.from_list([prepared])
+        dataset.prompt_key = "prompt"
+        dataset.env_class_key = "env_class"
+        _, env_id, extras, _ = dataset[0]
+
+        env = make_gym_env(env_id, env_config=OmegaConf.create({}), extras=extras)
+
+        assert env.ground_truth == expected_ground_truth, env_id

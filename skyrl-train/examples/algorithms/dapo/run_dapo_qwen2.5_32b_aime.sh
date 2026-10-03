@@ -46,7 +46,7 @@ MICRO_FORWARD_BATCH_SIZE_PER_GPU=2
 MICRO_TRAIN_BATCH_SIZE_PER_GPU=2
 
 
-uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
+uv run --isolated --extra megatron --extra vllm -m examples.algorithms.dapo.main_dapo \
   data.train_data="['$TRAIN_FILE']" \
   data.val_data="['$TEST_FILE']" \
   trainer.algorithm.advantage_estimator="grpo" \
@@ -68,7 +68,7 @@ uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
   trainer.policy.model.path="$MODEL_NAME" \
   trainer.policy.sequence_parallel_size=$SEQUENCE_PARALLEL_SIZE \
   trainer.placement.colocate_all=true \
-  trainer.strategy=fsdp2 \
+  trainer.strategy=megatron \
   trainer.placement.policy_num_nodes=$NUM_NODES \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS_PER_NODE \
   generator.num_inference_engines=$NUM_INFERENCE_ENGINES \
@@ -92,8 +92,6 @@ uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
   generator.backend=vllm \
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
-  generator.async_engine=false \
-  generator.batched=true \
   environment.env_class=aime \
   generator.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
   generator.eval_n_samples_per_prompt=$EVAL_N_SAMPLES_PER_PROMPT \

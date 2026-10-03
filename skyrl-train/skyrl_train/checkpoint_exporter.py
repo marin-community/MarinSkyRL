@@ -21,7 +21,7 @@ from skyrl_train.hf_export_schema import (
     TRAINER_STATE_FILENAME,
 )
 from skyrl_train.hf_publisher import HuggingFacePublisher
-from skyrl_train.tokenizer import create_tokenizer
+from skyrl_train.tokenizer import tokenizer_from_config
 from skyrl_train.utils import get_ray_pg_ready_with_timeout
 from skyrl_train.io import io
 from skyrl_train.utils.utils import (
@@ -173,11 +173,7 @@ def checkpoint_export_plan(cfg: DictConfig) -> CheckpointExportPlan:
 
 def policy_export_workers(cfg: DictConfig) -> RayPolicyExportWorkers:
     """Create exactly one policy worker per saved policy rank."""
-    if cfg.trainer.strategy in ("fsdp", "fsdp2"):
-        from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker
-    elif cfg.trainer.strategy == "deepspeed":
-        from skyrl_train.workers.deepspeed.deepspeed_worker import PolicyWorker
-    elif cfg.trainer.strategy == "megatron":
+    if cfg.trainer.strategy == "megatron":
         from skyrl_train.workers.megatron.megatron_worker import PolicyWorker
     else:
         raise ValueError(f"checkpoint export does not support strategy {cfg.trainer.strategy!r}")
@@ -210,15 +206,6 @@ def policy_export_workers(cfg: DictConfig) -> RayPolicyExportWorkers:
     return RayPolicyExportWorkers(actor_group, placement=policy_placement)
 
 
-def export_tokenizer(cfg: DictConfig) -> PreTrainedTokenizerBase:
-    return create_tokenizer(
-        model_path=cfg.trainer.policy.model.tokenizer_path,
-        disable_fast_tokenizer=cfg.trainer.disable_fast_tokenizer,
-        padding_side="left",
-        revision=cfg.trainer.policy.model.get("tokenizer_revision"),
-    )
-
-
 def hub_publisher(cfg: DictConfig) -> HuggingFacePublisher | None:
     repo_id = cfg.checkpoint_export.get("hf_hub_repo_id")
     if not repo_id:
@@ -236,6 +223,6 @@ def checkpoint_exporter(cfg: DictConfig) -> CheckpointExporter:
     return CheckpointExporter(
         checkpoint_export_plan(cfg),
         policy_export_workers(cfg),
-        export_tokenizer(cfg),
+        tokenizer_from_config(cfg),
         hub_publisher(cfg),
     )

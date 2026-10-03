@@ -8,7 +8,7 @@ from typing import Any, Dict, List
 import ray
 from loguru import logger
 from packaging import version
-from ray.actor import ActorHandle
+from ray.actor import ActorHandle, ActorMethod
 from ray.util.placement_group import PlacementGroupSchedulingStrategy, placement_group, remove_placement_group
 from rigging.timing import ExponentialBackoff, retry_with_backoff
 from transformers import AutoConfig, PretrainedConfig
@@ -19,6 +19,11 @@ from skyrl_train.inference_engines.base import (
     InferenceEngineInput,
     InferenceEngineOutput,
     NamedWeightsUpdateRequest,
+)
+from skyrl_train.config.weight_sync_pause import (
+    DEFAULT_WEIGHT_SYNC_PAUSE_POLICY,
+    WeightSyncPausePolicy,
+    validate_weight_sync_pause_backend,
 )
 from skyrl_train.inference_engines.vllm.stats import IntervalReadMode
 from skyrl_train.inference_engines.utils import (
@@ -190,9 +195,8 @@ def _qwen3_5_vlm_engine_kwargs(pretrain: str, *, revision: str | None = None) ->
     guard (``get_limit_per_prompt(m) == 0`` -> ``no_init_weights``), STUBS the
     vision tower so it is neither built nor expected at ``load_weights`` (no
     ``visual.*`` keys required), while the text ``language_model`` tower is built
-    normally. Combined with the sender-side ``model.X`` ->
-    ``model.language_model.X`` name remap (``qwen3_5_vlm.map_text_name_to_vlm_engine``),
-    the policy's text weights land exactly where the shell reads them.
+    normally. The Megatron weight-sync path maps policy weights into the
+    language-model tower expected by the engine.
 
     Returns ``{"language_model_only": True}`` when ``pretrain`` is a qwen3_5 VLM
     shell, else ``{}`` (byte-identical engine construction for every other model).
@@ -258,6 +262,27 @@ async def _await_actor_task(actor_task: Any) -> Any:
         raise
 
 
+async def _submit_actor_task(
+    remote_method: ActorMethod, *args: Any, **kwargs: Any
+) -> ray.ObjectRef | ray.ObjectRefGenerator:
+    """Submit without blocking the HTTP event loop, including slow Ray submission."""
+    submission = asyncio.create_task(asyncio.to_thread(remote_method.remote, *args, **kwargs))
+    try:
+        return await asyncio.shield(submission)
+    except asyncio.CancelledError:
+
+        async def cancel_late_submission() -> None:
+            try:
+                actor_task = await submission
+            except Exception:
+                logger.exception("Ray submission failed after request cancellation")
+                return
+            await asyncio.to_thread(ray.cancel, actor_task)
+
+        asyncio.create_task(cancel_late_submission())
+        raise
+
+
 class RayWrappedInferenceEngine(InferenceEngineInterface):
     """
     A thin wrapper around a Ray ActorHandle to another InferenceEngineInterface.
@@ -295,7 +320,7 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
         return ray.get(self.inference_engine_actor.dp_size.remote())
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
-        actor_task = self.inference_engine_actor.generate.remote(input_batch=input_batch)
+        actor_task = await _submit_actor_task(self.inference_engine_actor.generate, input_batch=input_batch)
         return await _await_actor_task(actor_task)
 
     async def wake_up(self, *args: Any, **kwargs: Any):
@@ -330,11 +355,11 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
         return await self.inference_engine_actor.reset_prefix_cache.remote()
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
-        actor_task = self.inference_engine_actor.chat_completion.remote(request_payload)
+        actor_task = await _submit_actor_task(self.inference_engine_actor.chat_completion, request_payload)
         return await _await_actor_task(actor_task)
 
     async def tokenize(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
-        actor_task = self.inference_engine_actor.tokenize.remote(request_payload)
+        actor_task = await _submit_actor_task(self.inference_engine_actor.tokenize, request_payload)
         return await _await_actor_task(actor_task)
 
     async def chat_completion_stream(self, request_payload: Dict[str, Any]):
@@ -346,7 +371,7 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
         ``ObjectRef`` objects reach ``StreamingResponse`` and the connection
         dies with ``RemoteProtocolError: incomplete chunked read``.
         """
-        gen = self.inference_engine_actor.chat_completion_stream.remote(request_payload)
+        gen = await _submit_actor_task(self.inference_engine_actor.chat_completion_stream, request_payload)
         try:
             async for ref in gen:
                 yield await ref
@@ -354,7 +379,7 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
             ray.cancel(gen)
 
     async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
-        actor_task = self.inference_engine_actor.completion.remote(request_payload)
+        actor_task = await _submit_actor_task(self.inference_engine_actor.completion, request_payload)
         return await _await_actor_task(actor_task)
 
     async def pause_generation(self) -> None:
@@ -471,7 +496,6 @@ def create_ray_wrapped_inference_engines(
     shared_pg=None,
     gpu_memory_utilization=None,
     inference_engine_enable_sleep=False,
-    async_engine=False,
     max_num_batched_tokens=8192,
     max_num_seqs=1024,
     tokenizer=None,
@@ -489,6 +513,7 @@ def create_ray_wrapped_inference_engines(
     require_v1_model_runner: bool = False,
     mp_backend: bool = False,
     placement_group_timeout_seconds: int = DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS,
+    weight_sync_pause_policy: WeightSyncPausePolicy = DEFAULT_WEIGHT_SYNC_PAUSE_POLICY,
 ) -> List[InferenceEngineInterface]:
     """
     Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface instances.
@@ -505,10 +530,12 @@ def create_ray_wrapped_inference_engines(
         still require the ray backend for shared-GPU resource management.
     """
     engine_init_kwargs = dict(engine_init_kwargs)
+    # Direct factory callers bypass generator config validation.
+    validate_weight_sync_pause_backend(weight_sync_pause_policy, backend=backend, run_engines_locally=True)
     model_metadata_path = engine_init_kwargs.pop(MODEL_METADATA_PATH_KEY, pretrain)
     if backend == "vllm":
         import vllm
-        from skyrl_train.inference_engines.vllm.vllm_engine import VLLMRayActor, AsyncVLLMRayActor
+        from skyrl_train.inference_engines.vllm.vllm_engine import AsyncVLLMRayActor
 
         # if a dev version is being used, skip the version check
         if "dev" not in vllm.__version__:
@@ -519,9 +546,6 @@ def create_ray_wrapped_inference_engines(
         pass
     else:
         raise ValueError(f"Unsupported backend: {backend}")
-
-    if backend == "vllm" and data_parallel_size > 1 and not async_engine:
-        raise ValueError("vLLM data-parallel rollout engines require async_engine=True")
 
     inference_engine_actors = []
     weight_sync_relative_rank_offsets = []
@@ -734,11 +758,6 @@ def create_ray_wrapped_inference_engines(
             rendezvous_reservation = rendezvous.reservation
 
         if backend == "vllm":
-            if async_engine:
-                actor_class = AsyncVLLMRayActor
-            else:
-                actor_class = VLLMRayActor
-
             lora_kwargs = {
                 "enable_lora": enable_lora,
                 "max_lora_rank": max_lora_rank,
@@ -841,7 +860,7 @@ def create_ray_wrapped_inference_engines(
                 )
                 if inference_engine_runtime_env is not None:
                     engine_options["runtime_env"] = inference_engine_runtime_env
-                engine = actor_class.options(**engine_options).remote(
+                engine = AsyncVLLMRayActor.options(**engine_options).remote(
                     model=pretrain,
                     enforce_eager=enforce_eager,
                     worker_extension_cls="skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap",
@@ -854,6 +873,7 @@ def create_ray_wrapped_inference_engines(
                     dtype=model_dtype,
                     trust_remote_code=True,
                     vllm_v1_disable_multiproc=vllm_v1_disable_multiproc,
+                    weight_sync_pause_policy=weight_sync_pause_policy,
                     gpu_memory_utilization=gpu_memory_utilization,
                     bundle_indices=dp_rank_bundles,
                     num_gpus=0.2 if use_hybrid_engine else 1,
@@ -892,7 +912,6 @@ def create_ray_wrapped_inference_engines(
 
             # NOTE(Charlie): We need `torch.cuda.is_available()` to be True to import SGLang. Otherwise, it requires
             # importing vllm. See https://github.com/sgl-project/sglang/blob/v0.4.8.post1/python/sglang/srt/layers/quantization/utils.py#L11-L17
-            # Similar comment: https://github.com/volcengine/verl/blob/9cc307767b0c787e8f5ef581dac929f7bde044ef/verl/workers/fsdp_workers.py#L520-L527
             @ray.remote
             def get_sglang_engine():
                 # A workaround to avoid importing vllm is to give this task a GPU.

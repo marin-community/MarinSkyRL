@@ -2,24 +2,18 @@
 uv run --isolated --group dev --extra cpu pytest tests/cpu/test_trainer_utils.py
 """
 
-from skyrl_train.group_admission import AdmissionRejection, GroupAdvantageInvariant, assert_training_groups_eligible
-from skyrl_train.sync_group_admission import admit_or_collect_replacements
 from skyrl_train.batch_sampling import filter_trajectory_batch
-from skyrl_train.dynamic_sampling import resolve_dynamic_sampling_criteria
 from skyrl_train.utils.trainer_utils import (
     run_on_each_node,
     cleanup_old_checkpoints,
     validate_consistency_for_latest_checkpoint,
     sanitize_data_source,
     calculate_per_dataset_metrics,
+    evaluation_response_metrics,
     dump_per_dataset_eval_results,
-    handle_dynamic_sampling,
-    handle_replace_sampling,
-    handle_filter_sampling,
-    build_dataloader,
+    build_eval_dataloader,
 )
 from skyrl_train.trajectory_runners.base import TrajectoryRequestBatch, TrajectoryBatch
-from skyrl_train.trajectory_runners.projections import attach_unshaped_rewards
 from skyrl_train.trajectory_runners.trajectory_processing import validate_trajectory_batch
 from typing import Union
 import ray
@@ -28,7 +22,6 @@ import tempfile
 import pytest
 import re
 
-from unittest.mock import Mock, patch
 import json
 import fsspec
 from skyrl_train.evaluate import evaluation_dump_dir
@@ -36,6 +29,11 @@ from skyrl_train.io import io
 from tests.cpu.util import example_dummy_config
 
 BasicType = Union[int, float, str, bool, type(None)]
+
+
+class ListTokenizer:
+    def decode(self, tokens):
+        return str(tokens)
 
 
 @pytest.fixture
@@ -147,90 +145,65 @@ def test_cleanup_with_negative_max_checkpoints():
         assert len(remaining_dirs) == 5, "Cleanup should be disabled when max_checkpoints is -1"
 
 
-def test_validate_consistency_for_latest_checkpoint():
-    """
-    Verify that `validate_consistency_for_latest_checkpoint` correctly validates the checkpoint folder.
-    """
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # 1. Setup
-        checkpoint_steps = [1, 2, 3, 4, 5]
-        setup_mock_ckpts(tmpdir, checkpoint_steps=checkpoint_steps)
+@pytest.mark.parametrize(
+    ("checkpoint_steps", "latest_step", "save_interval", "consistent"),
+    [
+        pytest.param([1, 2, 3, 4, 5], 5, 1, True, id="latest-is-highest"),
+        pytest.param([1, 2, 3, 4, 5], 3, 1, False, id="latest-behind-saved-steps"),
+        pytest.param([1, 3, 5], 3, 2, True, id="newer-step-within-save-interval"),
+    ],
+)
+def test_validate_consistency_for_latest_checkpoint(tmp_path, checkpoint_steps, latest_step, save_interval, consistent):
+    setup_mock_ckpts(str(tmp_path), checkpoint_steps=checkpoint_steps)
+    latest_ckpt_file = tmp_path / "latest_ckpt_global_step.txt"
+    latest_ckpt_file.write_text(str(latest_step))
+    arguments = (str(tmp_path), latest_step, str(tmp_path / f"global_step_{latest_step}"), str(latest_ckpt_file))
 
-        latest_ckpt_file = os.path.join(tmpdir, "latest_ckpt_global_step.txt")
-        with open(latest_ckpt_file, "w") as f:
-            f.write("5")
-
-        latest_ckpt_path = os.path.join(tmpdir, "global_step_5")
-        ckpt_iteration = 5
-
-        # 2. Execute
-        validate_consistency_for_latest_checkpoint(
-            tmpdir, ckpt_iteration, latest_ckpt_path, latest_ckpt_file, save_interval=1
-        )
-
-
-def test_validate_consistency_for_latest_checkpoint_with_inconsistent_folder():
-    """
-    Verify that `validate_consistency_for_latest_checkpoint` correctly validates the checkpoint folder.
-    """
-    # Example 1: `latest_ckpt_global_step.txt` points to a lower global step than the highest global step in the folder
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # 1. Setup
-        checkpoint_steps = [1, 2, 3, 4, 5]
-        setup_mock_ckpts(tmpdir, checkpoint_steps=checkpoint_steps)
-
-        # change the latest checkpoint file to point to a lower global step
-        latest_ckpt_file = os.path.join(tmpdir, "latest_ckpt_global_step.txt")
-        with open(latest_ckpt_file, "w") as f:
-            f.write("3")
-
-        latest_ckpt_path = os.path.join(tmpdir, "global_step_3")
-        ckpt_iteration = 3
-        save_interval = 1
-
-        # 2. Execute
-        with pytest.raises(ValueError, match="Inconsistent checkpoint folder"):
-            validate_consistency_for_latest_checkpoint(
-                tmpdir, ckpt_iteration, latest_ckpt_path, latest_ckpt_file, save_interval=save_interval
-            )
-
-    # Example 2: `latest_ckpt_global_step.txt` points to a lower global step but it's within the save interval
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # 1. Setup
-        checkpoint_steps = [1, 3, 5]
-        setup_mock_ckpts(tmpdir, checkpoint_steps=checkpoint_steps)
-
-        # change the latest checkpoint file to point to a lower global step
-        latest_ckpt_file = os.path.join(tmpdir, "latest_ckpt_global_step.txt")
-        with open(latest_ckpt_file, "w") as f:
-            f.write("3")
-
-        save_interval = 2
-        latest_ckpt_path = os.path.join(tmpdir, "global_step_3")
-        ckpt_iteration = 3
-
-        # 2. Execute
-        validate_consistency_for_latest_checkpoint(
-            tmpdir, ckpt_iteration, latest_ckpt_path, latest_ckpt_file, save_interval=save_interval
-        )
+    if consistent:
+        validate_consistency_for_latest_checkpoint(*arguments, save_interval=save_interval)
+        return
+    with pytest.raises(ValueError, match="Inconsistent checkpoint folder"):
+        validate_consistency_for_latest_checkpoint(*arguments, save_interval=save_interval)
 
 
-def test_sanitize_data_source_none():
-    """Test sanitize_data_source with None input."""
-    result = sanitize_data_source(None)
-    assert result == "unknown"
+@pytest.mark.parametrize(
+    ("data_source", "expected"),
+    [(None, "unknown"), ("dataset/with/slashes", "dataset_with_slashes"), ("normal_dataset", "normal_dataset")],
+)
+def test_sanitize_data_source(data_source, expected):
+    assert sanitize_data_source(data_source) == expected
 
 
-def test_sanitize_data_source_slash_replacement():
-    """Test sanitize_data_source replaces slashes with underscores."""
-    result = sanitize_data_source("dataset/with/slashes")
-    assert result == "dataset_with_slashes"
+@pytest.mark.parametrize("mixed_environments", [False, True])
+def test_evaluation_response_metrics_report_work_and_stop_contributions(mixed_environments):
+    batch = {
+        "response_ids": [[1, 2, 3], [4], [5, 6]],
+        "rewards": [1.0, 0.0, 1.0],
+        "stop_reasons": ["stop", "length", "stop"],
+        "env_classes": ["cat_count", "cat_count", "gsm8k" if mixed_environments else "cat_count"],
+        "env_metrics": [{"exact": 1.0}, {"exact": 0.0}, {}],
+    }
+    metrics = evaluation_response_metrics(batch)
+    assert metrics["environment/cat_count/exact"] == pytest.approx(0.5)
+    assert metrics["response_tokens"] == 6
+    assert metrics["response_tokens_mean"] == pytest.approx(2.0)
+    assert metrics["response_tokens_max"] == 3
+    assert metrics["stop_reason_coverage"] == 1
+    assert metrics["completed_stop_fraction"] == pytest.approx(2 / 3)
+    # Contributions divide by every evaluated response.
+    assert metrics["completed_stop_score_contribution"] == pytest.approx(2 / 3)
+    assert metrics["length_stop_score_contribution"] == 0
 
 
-def test_sanitize_data_source_normal_string():
-    """Test sanitize_data_source with normal string."""
-    result = sanitize_data_source("normal_dataset")
-    assert result == "normal_dataset"
+def test_evaluation_response_metrics_suppress_fractions_without_full_stop_coverage():
+    batch = {"response_ids": [[1, 2], [3]], "rewards": [1.0, 1.0], "stop_reasons": ["stop", None]}
+    metrics = evaluation_response_metrics(batch)
+    assert metrics["stop_reason_coverage"] < 1
+    assert "completed_stop_fraction" not in metrics
+    assert "completed_stop_score_contribution" not in metrics
+    assert metrics["response_tokens"] == 3
+    with pytest.raises(ValueError):
+        evaluation_response_metrics({"response_ids": [], "rewards": []})
 
 
 def test_calculate_per_dataset_metrics_single_source():
@@ -283,8 +256,7 @@ def test_calculate_per_dataset_metrics_multiple_sources():
 
 
 def test_dump_per_dataset_eval_results_preserves_dataset_and_metrics(tmp_path):
-    mock_tokenizer = Mock()
-    mock_tokenizer.decode.side_effect = lambda x: f"decoded_{x}"
+    tokenizer = ListTokenizer()
     trajectory_batches = {
         "prompt_token_ids": [[1, 2], [3, 4], [5, 6]],
         "response_ids": [[10, 11], [12, 13], [14, 15]],
@@ -297,11 +269,11 @@ def test_dump_per_dataset_eval_results_preserves_dataset_and_metrics(tmp_path):
     eval_metrics = {"eval/dataset1/avg_score": 0.8, "eval/unknown/avg_score": 0.6}
 
     dump_per_dataset_eval_results(
-        str(tmp_path), mock_tokenizer, trajectory_batches, data_sources, all_envs, env_extras, eval_metrics
+        str(tmp_path), tokenizer, trajectory_batches, data_sources, all_envs, env_extras, eval_metrics
     )
     dataset_rows = [json.loads(line) for line in (tmp_path / "dataset1.jsonl").read_text().splitlines()]
     unknown_rows = [json.loads(line) for line in (tmp_path / "unknown.jsonl").read_text().splitlines()]
-    assert [row["output_response"] for row in dataset_rows] == ["decoded_[10, 11]", "decoded_[14, 15]"]
+    assert [row["output_response"] for row in dataset_rows] == ["[10, 11]", "[14, 15]"]
     assert unknown_rows[0]["data_source"] == "unknown"
     assert json.loads((tmp_path / "aggregated_results.jsonl").read_text()) == eval_metrics
 
@@ -310,8 +282,7 @@ def test_eval_dump_writes_to_cloud_uri_without_corrupting_scheme(monkeypatch):
     directory = evaluation_dump_dir("s3://bucket/users/exports", 2)
     filesystem = fsspec.filesystem("memory")
     monkeypatch.setattr(io, "open_file", lambda path, mode: filesystem.open(path.removeprefix("s3://"), mode))
-    tokenizer = Mock()
-    tokenizer.decode.side_effect = lambda tokens: str(tokens)
+    tokenizer = ListTokenizer()
     batch = {"prompt_token_ids": [[1]], "response_ids": [[2]], "rewards": [1.0]}
 
     dump_per_dataset_eval_results(directory, tokenizer, batch, ["aime_2024"], ["aime"], [{}], {"accuracy": 1.0})
@@ -324,8 +295,7 @@ def test_eval_dump_writes_to_cloud_uri_without_corrupting_scheme(monkeypatch):
 
 
 def test_dump_per_dataset_eval_results_preserves_error_disposition(tmp_path):
-    tokenizer = Mock()
-    tokenizer.decode.side_effect = lambda tokens: str(tokens)
+    tokenizer = ListTokenizer()
     batch = {
         "prompt_token_ids": [[1], [2]],
         "response_ids": [[3], [4]],
@@ -342,480 +312,6 @@ def test_dump_per_dataset_eval_results_preserves_error_disposition(tmp_path):
         (None, None),
         ("TimeoutError", "mask"),
     ]
-
-
-def test_handle_dynamic_sampling_null_strategy():
-    """Test that null strategy returns input unchanged."""
-    trajectory_batch = {
-        "prompt_token_ids": [[1, 2, 3], [4, 5, 6]],
-        "response_ids": [[7, 8], [9, 10]],
-        "rewards": [[1.0, 2.0], [3.0, 4.0]],
-        "loss_masks": [[1, 1], [1, 1]],
-        "stop_reasons": ["stop", "stop"],
-        "rollout_metrics": None,
-        "rollout_logprobs": [[0.16, 0.4], [0.2, 0.3]],
-    }
-    uids = ["uid1", "uid2"]
-    sampling_config = {"type": None}
-
-    result = handle_dynamic_sampling(trajectory_batch, uids, sampling_config)
-
-    assert result.trajectory_batch == trajectory_batch
-    assert result.uids == uids
-    assert result.keep_sampling is False
-    assert result.state is None
-
-
-def test_handle_dynamic_sampling_invalid_strategy():
-    """Test that invalid strategy raises ValueError."""
-    trajectory_batch = {
-        "prompt_token_ids": [[1, 2, 3]],
-        "response_ids": [[7, 8]],
-        "rewards": [[1.0, 2.0]],
-        "loss_masks": [[1, 1]],
-        "rollout_logprobs": [[0.16, 0.4]],
-    }
-    uids = ["uid1"]
-    sampling_config = {"type": "invalid_strategy"}
-
-    with pytest.raises(ValueError, match="Invalid dynamic sampling type: invalid_strategy"):
-        handle_dynamic_sampling(trajectory_batch, uids, sampling_config)
-
-
-def test_handle_replace_sampling_sufficient_good_samples():
-    """Test replace sampling when there are sufficient good samples (>0.3)."""
-    # Create test data with some good UIDs (high variance) and some bad UIDs (zero variance)
-    trajectory_batch = {
-        "prompt_token_ids": [[1, 2], [1, 2], [3, 4], [3, 4], [5, 6], [5, 6]],
-        "response_ids": [[13, 14], [15, 16], [17, 18], [19, 20], [21, 22], [23, 24]],
-        "rewards": [
-            1.0,
-            2.0,
-            1.0,
-            1.0,
-            3.0,
-            4.0,
-        ],  # uid1: [1.0, 2.0] (good), uid2: [1.0, 1.0] (bad), uid3: [3.0, 4.0] (good)
-        "unshaped_rewards": [0.0, 1.0, 0.0, 0.0, 1.0, 0.0],
-        "loss_masks": [[1, 1]] * 6,
-        "stop_reasons": ["length"] * 6,
-        "rollout_metrics": None,
-        "rollout_logprobs": [[0.1, 0.2], [0.3, 0.4], [0.5, 0.25], [0.15, 0.25], [0.1, 0.2], [0.3, 0.4]],
-    }
-    uids = ["uid1", "uid1", "uid2", "uid2", "uid3", "uid3"]  # 2 samples per prompt
-    sampling_config = {"n_samples_per_prompt": 2, "min_replace_ratio": 0.3}
-
-    result = handle_replace_sampling(trajectory_batch, uids, sampling_config)
-    result_output = result.trajectory_batch
-    result_uids = result.uids
-    keep_sampling = result.keep_sampling
-
-    # Should not keep sampling
-    assert keep_sampling is False
-
-    # Output should have same structure but with replacements
-    assert len(result_output["prompt_token_ids"]) == 6
-    assert len(result_output["response_ids"]) == 6
-    assert len(result_output["rewards"]) == 6
-    assert len(result_output["unshaped_rewards"]) == 6
-    assert len(result_output["rollout_logprobs"]) == 6
-    assert len(result_uids) == 6
-
-    # Check that bad uid2 samples were replaced with good samples
-    uid2_indices = [i for i, uid in enumerate(result_uids) if uid == "uid2"]
-    # After replacement, uid2 indices should now contain UIDs from good samples
-    assert len(uid2_indices) == 0  # uid2 should be completely replaced
-    assert result_output["unshaped_rewards"][2:4] in ([0.0, 1.0], [1.0, 0.0])
-
-
-def test_handle_replace_sampling_insufficient_good_samples():
-    """Test replace sampling when there are insufficient good samples (<0.3)."""
-    trajectory_batch = {
-        "prompt_token_ids": [[1, 2], [1, 2], [3, 4], [3, 4]],
-        "response_ids": [[9, 10], [11, 12], [13, 14], [15, 16]],
-        "rewards": [1.0, 1.0, 2.0, 2.0],  # uid1: [1.0, 1.0] (bad), uid2: [2.0, 2.0] (bad)
-        "loss_masks": [[1, 1]] * 4,
-        "stop_reasons": ["length"] * 4,
-        "rollout_metrics": None,
-        "rollout_logprobs": None,
-    }
-    uids = ["uid1", "uid1", "uid2", "uid2"]  # 2 samples per prompt
-    sampling_config = {"n_samples_per_prompt": 2, "min_replace_ratio": 0.3}
-
-    result = handle_replace_sampling(trajectory_batch, uids, sampling_config)
-    result_output = result.trajectory_batch
-    result_uids = result.uids
-    keep_sampling = result.keep_sampling
-
-    # Should keep sampling due to insufficient good samples
-    assert keep_sampling is True
-
-    # Output should be unchanged
-    assert result_output == trajectory_batch
-    assert result_uids == uids
-
-
-def test_handle_replace_sampling_single_sample_per_prompt():
-    """Test replace sampling with single sample per prompt (should always be considered good)."""
-    trajectory_batch = {
-        "prompt_token_ids": [[1, 2], [3, 4]],
-        "response_ids": [[5, 6], [7, 8]],
-        "rewards": [1.0, 1.0],
-        "loss_masks": [[1, 1]] * 2,
-        "stop_reasons": ["stop", "stop"],
-        "rollout_metrics": None,
-        "rollout_logprobs": [[0.1, 0.2]],
-    }
-    uids = ["uid1", "uid2"]
-    sampling_config = {"n_samples_per_prompt": 1, "min_replace_ratio": 0.3}
-
-    result = handle_replace_sampling(trajectory_batch, uids, sampling_config)
-    result_output = result.trajectory_batch
-    result_uids = result.uids
-    keep_sampling = result.keep_sampling
-
-    # Should not keep sampling (single samples are always considered good)
-    assert keep_sampling is False
-
-    # Output should be unchanged since all samples are good
-    assert result_output == trajectory_batch
-    assert result_uids == uids
-
-
-def test_handle_replace_sampling_token_level_rewards():
-    """Test replace sampling with token-level rewards (should sum to sequence level)."""
-    trajectory_batch = {
-        "prompt_token_ids": [[1, 2], [1, 2], [3, 4], [3, 4]],
-        "response_ids": [[9, 10], [11, 12, 13], [14, 15], [16]],
-        "rewards": [[1.0, 2.0], [3.0, 4.0, 5.0], [1.0, 1.0], [1.0]],  # Token-level rewards
-        "loss_masks": [[1, 1]] * 4,
-        "stop_reasons": ["stop"] * 4,
-        "rollout_metrics": None,
-        "rollout_logprobs": None,
-    }
-    uids = ["uid1", "uid1", "uid2", "uid2"]  # uid1: [3.0, 7.0] (good), uid2: [2.0, 2.0] (bad)
-    sampling_config = {"n_samples_per_prompt": 2, "min_replace_ratio": 0.3}
-
-    result = handle_replace_sampling(trajectory_batch, uids, sampling_config)
-    result_output = result.trajectory_batch
-    result_uids = result.uids
-    keep_sampling = result.keep_sampling
-
-    # Should not keep sampling (sufficient good samples)
-    assert keep_sampling is False
-
-    # Check that replacements occurred
-    assert len(result_output["rewards"]) == 4
-    assert len(result_uids) == 4
-
-
-def test_handle_filter_sampling_sufficient_prompts():
-    """Test filter sampling when we get sufficient prompts in one batch."""
-    trajectory_batch = {
-        "prompt_token_ids": [[1, 2], [1, 2], [3, 4], [3, 4]],
-        "response_ids": [[9, 10], [11, 12], [13, 14], [15, 16]],
-        # Shaping varies for uid1, but only uid2 has varying verifier outcomes.
-        "rewards": [1.0, 2.0, 3.0, 3.0],
-        "unshaped_rewards": [0.0, 0.0, 0.0, 1.0],
-        "loss_masks": [[1, 1]] * 4,
-        "stop_reasons": ["stop"] * 4,
-        "rollout_metrics": None,
-        "rollout_logprobs": None,
-    }
-    uids = ["uid1", "uid1", "uid2", "uid2"]
-    sampling_config = {
-        "train_batch_size": 1,  # Only need 1 prompt
-        "n_samples_per_prompt": 2,
-        "max_sample_batches": 20,
-        "criteria": resolve_dynamic_sampling_criteria("unshaped"),
-    }
-
-    result = handle_filter_sampling(trajectory_batch, uids, sampling_config, collected_state={"sample_batch_count": 1})
-    result_output = result.trajectory_batch
-    result_uids = result.uids
-    keep_sampling = result.keep_sampling
-    state = result.state
-
-    # Should not keep sampling (sufficient prompts)
-    assert keep_sampling is False
-    assert state is None
-
-    # Should only keep uid2, whose unshaped outcomes vary.
-    assert len(result_output["prompt_token_ids"]) == 2
-    assert len(result_uids) == 2
-    assert all(uid == "uid2" for uid in result_uids)
-
-
-@pytest.mark.parametrize(
-    ("informative_on", "expected_uid"),
-    [("shaped", "shaped"), ("unshaped", "unshaped")],
-)
-def test_handle_filter_sampling_selects_configured_reward_source(informative_on, expected_uid):
-    trajectory_batch = {
-        "prompt_token_ids": [[1], [1], [2], [2]],
-        "response_ids": [[3], [4], [5], [6]],
-        "rewards": [0.0, 0.25, 0.0, 0.0],
-        "unshaped_rewards": [0.0, 0.0, 0.0, 1.0],
-        "loss_masks": [[1]] * 4,
-        "stop_reasons": ["stop"] * 4,
-        "rollout_metrics": None,
-        "rollout_logprobs": None,
-    }
-    sampling_config = {
-        "train_batch_size": 1,
-        "n_samples_per_prompt": 2,
-        "criteria": resolve_dynamic_sampling_criteria(informative_on),
-    }
-
-    result = handle_filter_sampling(
-        trajectory_batch,
-        ["shaped", "shaped", "unshaped", "unshaped"],
-        sampling_config,
-        collected_state={"sample_batch_count": 1},
-    )
-
-    assert result.uids == [expected_uid, expected_uid]
-
-
-@pytest.mark.parametrize("min_reward_std", [0.0, 0.1])
-def test_handle_filter_sampling_applies_minimum_reward_std(min_reward_std):
-    trajectory_batch = {
-        "prompt_token_ids": [[1]] * 4,
-        "response_ids": [[2]] * 4,
-        "rewards": [0.05, 0.05, 0.10, 0.05],
-        "loss_masks": [[1]] * 4,
-        "stop_reasons": ["stop"] * 4,
-        "rollout_metrics": None,
-        "rollout_logprobs": None,
-    }
-    sampling_config = {
-        "train_batch_size": 1,
-        "n_samples_per_prompt": 4,
-        "criteria": resolve_dynamic_sampling_criteria("shaped", min_reward_std),
-    }
-
-    result = handle_filter_sampling(
-        trajectory_batch,
-        ["uid"] * 4,
-        sampling_config,
-        collected_state={"sample_batch_count": 1},
-    )
-
-    assert result.keep_sampling is (min_reward_std > 0)
-
-
-def test_handle_filter_sampling_insufficient_prompts_continue():
-    """Test filter sampling when we need to continue sampling."""
-    trajectory_batch = {
-        "prompt_token_ids": [[1, 2], [3, 4]],
-        "response_ids": [[5, 6], [7, 8]],
-        "rewards": [1.0, 2.0],  # Only 1 good prompt
-        "unshaped_rewards": [1.0, 2.0],
-        "loss_masks": [[1, 1]] * 2,
-        "stop_reasons": ["stop"] * 2,
-        "rollout_metrics": None,
-        "rollout_logprobs": None,
-    }
-    uids = ["uid1", "uid1"]
-    sampling_config = {
-        "train_batch_size": 2,  # Need 2 prompts
-        "n_samples_per_prompt": 2,
-        "max_sample_batches": 20,
-        "tis_lcs_alert_threshold": 0.005,
-        "criteria": resolve_dynamic_sampling_criteria(),
-    }
-
-    collected_state = {"sample_batch_count": 1}
-
-    result = handle_filter_sampling(trajectory_batch, uids, sampling_config, collected_state=collected_state)
-    result_output = result.trajectory_batch
-    result_uids = result.uids
-    keep_sampling = result.keep_sampling
-    state = result.state
-
-    # Should keep sampling (insufficient prompts)
-    assert keep_sampling is True
-    assert result_output is trajectory_batch
-    assert result_uids is uids
-    assert state is not None
-    assert state["num_prompts_in_batch"] == 1
-    assert state["sample_batch_count"] == 1
-
-
-def test_unshaped_filter_refills_group_with_missing_raw_reward():
-    def batch(rewards):
-        output = {
-            "prompt_token_ids": [[1]] * len(rewards),
-            "response_ids": [[index + 2] for index in range(len(rewards))],
-            "rewards": [float(index % 2) for index in range(len(rewards))],
-            "loss_masks": [[0] if reward is None else [1] for reward in rewards],
-            "stop_reasons": ["stop"] * len(rewards),
-            "rollout_metrics": None,
-            "rollout_logprobs": None,
-        }
-        attach_unshaped_rewards(output, rewards)
-        return output
-
-    config = {
-        "train_batch_size": 2,
-        "n_samples_per_prompt": 2,
-        "tis_lcs_alert_threshold": 0.005,
-        "criteria": resolve_dynamic_sampling_criteria("unshaped"),
-    }
-    state = {"sample_batch_count": 1}
-
-    first = handle_filter_sampling(
-        batch([None, 1.0, 0.0, 1.0]),
-        ["failed", "failed", "original", "original"],
-        config,
-        state,
-    )
-
-    assert first.keep_sampling
-    assert state["num_prompts_in_batch"] == 1
-
-    state["sample_batch_count"] += 1
-    accepted = handle_filter_sampling(batch([0.0, 1.0]), ["replacement"] * 2, config, state)
-
-    assert not accepted.keep_sampling
-    assert accepted.uids == ["original", "original", "replacement", "replacement"]
-    assert accepted.trajectory_batch["unshaped_rewards"] == [0.0, 1.0, 0.0, 1.0]
-
-
-def test_handle_filter_sampling_accumulation():
-    """Test filter sampling accumulation across multiple batches."""
-    # First batch
-    trajectory_batch1 = {
-        "prompt_token_ids": [[1, 2], [3, 4]],
-        "response_ids": [[5, 6], [7, 8]],
-        "rewards": [1.0, 2.0],  # Good prompt
-        "unshaped_rewards": [1.0, 2.0],
-        "loss_masks": [[1, 1]] * 2,
-        "stop_reasons": ["stop"] * 2,
-        "rollout_metrics": None,
-        "rollout_logprobs": None,
-    }
-    uids1 = ["uid1", "uid1"]
-
-    # Second batch
-    trajectory_batch2 = {
-        "prompt_token_ids": [[9, 10], [11, 12]],
-        "response_ids": [[13, 14], [15, 16]],
-        "rewards": [3.0, 4.0],  # Another good prompt
-        "unshaped_rewards": [3.0, 4.0],
-        "loss_masks": [[1, 1]] * 2,
-        "stop_reasons": ["stop"] * 2,
-        "rollout_metrics": None,
-        "rollout_logprobs": None,
-    }
-    uids2 = ["uid2", "uid2"]
-
-    sampling_config = {
-        "train_batch_size": 2,  # Need 2 prompts
-        "n_samples_per_prompt": 2,
-        "max_sample_batches": 20,
-        "tis_lcs_alert_threshold": 0.005,
-        "criteria": resolve_dynamic_sampling_criteria(),
-    }
-
-    collected_state = {"sample_batch_count": 1}
-
-    # Process first batch
-    result1 = handle_filter_sampling(trajectory_batch1, uids1, sampling_config, collected_state=collected_state)
-    keep_sampling1 = result1.keep_sampling
-    state1 = result1.state
-
-    assert keep_sampling1 is True  # Need more prompts
-    assert state1["num_prompts_in_batch"] == 1
-
-    # Process second batch
-    result2 = handle_filter_sampling(trajectory_batch2, uids2, sampling_config, collected_state=state1)
-    result2_output = result2.trajectory_batch
-    result2_uids = result2.uids
-    keep_sampling2 = result2.keep_sampling
-    state2 = result2.state
-
-    assert keep_sampling2 is False  # Now have enough prompts
-    assert state2 is None
-    assert len(result2_output["prompt_token_ids"]) == 4  # Both batches combined
-    assert len(result2_uids) == 4
-
-
-def test_handle_filter_sampling_keeps_repeated_dataset_row_as_distinct_groups():
-    trajectory_batch = {
-        "prompt_token_ids": [[1, 2], [1, 2]],
-        "response_ids": [[3, 4], [5, 6]],
-        "rewards": [0.0, 1.0],
-        "unshaped_rewards": [0.0, 1.0],
-        "loss_masks": [[1, 1], [1, 1]],
-        "stop_reasons": ["stop", "stop"],
-        "rollout_metrics": None,
-        "rollout_logprobs": None,
-    }
-    sampling_config = {
-        "train_batch_size": 2,
-        "n_samples_per_prompt": 2,
-        "max_sample_batches": 20,
-        "tis_lcs_alert_threshold": 0.005,
-        "criteria": resolve_dynamic_sampling_criteria(),
-    }
-
-    first_round = handle_filter_sampling(
-        trajectory_batch,
-        ["2069", "2069"],
-        sampling_config,
-        collected_state={"sample_batch_count": 1},
-    )
-    assert first_round.keep_sampling
-    assert first_round.state is not None
-
-    first_round.state["sample_batch_count"] = 2
-    second_round = handle_filter_sampling(
-        trajectory_batch,
-        ["2069", "2069"],
-        sampling_config,
-        collected_state=first_round.state,
-    )
-
-    assert len(set(second_round.uids)) == 2
-    assert_training_groups_eligible(
-        second_round.trajectory_batch,
-        second_round.uids,
-        GroupAdvantageInvariant.exact_physical(physical_group_size=2),
-    )
-
-
-def test_handle_filter_sampling_single_sample_per_prompt():
-    """Test filter sampling with single sample per prompt."""
-    trajectory_batch = {
-        "prompt_token_ids": [[1, 2], [3, 4]],
-        "response_ids": [[5, 6], [7, 8]],
-        "rewards": [1.0, 1.0],  # Same rewards but single sample per prompt
-        "unshaped_rewards": [1.0, 1.0],
-        "loss_masks": [[1, 1]] * 2,
-        "stop_reasons": ["stop"] * 2,
-        "rollout_metrics": None,
-        "rollout_logprobs": None,
-    }
-    uids = ["uid1", "uid2"]  # Different UIDs, single sample each
-    sampling_config = {
-        "train_batch_size": 2,
-        "n_samples_per_prompt": 1,
-        "max_sample_batches": 20,
-        "criteria": resolve_dynamic_sampling_criteria(),
-    }
-
-    result = handle_filter_sampling(trajectory_batch, uids, sampling_config, collected_state={"sample_batch_count": 1})
-    result_output = result.trajectory_batch
-    result_uids = result.uids
-    keep_sampling = result.keep_sampling
-    state = result.state
-
-    # Should not keep sampling (single samples are always kept)
-    assert keep_sampling is False
-    assert state is None
-    assert len(result_output["prompt_token_ids"]) == 2
-    assert len(result_uids) == 2
 
 
 def test_filter_trajectory_batch():
@@ -868,62 +364,6 @@ def test_filter_trajectory_batch():
     ]
     assert filtered["reward_shaping_versions"] == [2, 2]
     assert [collection["tests"][0]["record_id"] for collection in filtered["verifier_tests"]] == ["a", "c"]
-
-
-def test_sync_group_admission_waits_for_replacement_of_fully_masked_group():
-    first_batch = TrajectoryBatch(
-        prompt_token_ids=[[1], [1], [2], [2]],
-        response_ids=[[3], [3], [4], [4]],
-        rewards=[1.0, 0.0, 0.0, 0.0],
-        loss_masks=[[1], [1], [0], [0]],
-        stop_reasons=["stop", "stop", "error", "error"],
-        rollout_metrics={},
-        rollout_logprobs=[[-0.1], [-0.2], [0.0], [0.0]],
-        exclude_from_baseline=[False, False, True, True],
-    )
-    state = {"sample_batch_count": 1}
-
-    incomplete = admit_or_collect_replacements(
-        first_batch,
-        ["kept", "kept", "masked", "masked"],
-        invariant=GroupAdvantageInvariant.exact_physical(physical_group_size=2),
-        rollout_logprobs_required=True,
-        target_batch_size=2,
-        tis_lcs_alert_threshold=0.005,
-        state=state,
-    )
-
-    assert incomplete.keep_sampling
-    assert incomplete.rejection_counts[AdmissionRejection.FULLY_MASKED] == 1
-
-    replacement_batch = TrajectoryBatch(
-        prompt_token_ids=[[5], [5]],
-        response_ids=[[6], [6]],
-        rewards=[0.0, 1.0],
-        loss_masks=[[1], [1]],
-        stop_reasons=["stop", "stop"],
-        rollout_metrics={},
-        rollout_logprobs=[[-0.3], [-0.4]],
-        exclude_from_baseline=[False, False],
-    )
-    state = incomplete.state
-    assert state is not None
-    state["sample_batch_count"] += 1
-
-    complete = admit_or_collect_replacements(
-        replacement_batch,
-        ["replacement", "replacement"],
-        invariant=GroupAdvantageInvariant.exact_physical(physical_group_size=2),
-        rollout_logprobs_required=True,
-        target_batch_size=2,
-        tis_lcs_alert_threshold=0.005,
-        state=state,
-    )
-
-    assert not complete.keep_sampling
-    assert complete.uids == ["kept", "kept", "replacement", "replacement"]
-    assert complete.trajectory_batch["loss_masks"] == [[1], [1], [1], [1]]
-    assert complete.trajectory_batch["exclude_from_baseline"] == [False, False, False, False]
 
 
 def test_validate_trajectory_batch_valid_case():
@@ -998,29 +438,6 @@ def test_validate_trajectory_batch_mismatched_prompts_responses():
         validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
 
 
-def test_validate_trajectory_batch_all_loss_masked():
-    """Test validate_trajectory_batch logs warning when all outputs are loss masked."""
-    input_batch = TrajectoryRequestBatch(
-        prompts=["prompt1", "prompt2"], env_classes=["env1", "env2"], env_extras=None, sampling_params=None
-    )
-
-    trajectory_batch = TrajectoryBatch(
-        prompt_token_ids=[[1, 2, 3], [4, 5, 6]],
-        response_ids=[[7, 8], [9, 10]],
-        rewards=[0.5, 0.7],
-        loss_masks=[[0, 0], [0, 0]],  # All zeros - completely loss masked
-        stop_reasons=["eos", "eos"],
-        rollout_logprobs=None,
-    )
-
-    # Capture log output to verify warning is issued
-    with patch("skyrl_train.trajectory_runners.trajectory_processing.logger") as mock_logger:
-        validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
-        mock_logger.warning.assert_called_once_with(
-            "All outputs are loss masked, which may lead to NaN loss, please check your generation logic!!"
-        )
-
-
 def test_validate_trajectory_batch_mismatched_list_lengths():
     """Test validate_trajectory_batch rejects mismatched trajectory batch lists."""
     input_batch = TrajectoryRequestBatch(
@@ -1081,9 +498,7 @@ def test_validate_trajectory_batch_element_length_mismatch():
 
 
 class MultiItemDataset:
-    """Distinct items, so a reshuffle is observable. Module scope, not local to the test: the
-    dataloader's worker processes pickle the dataset, and a class defined inside a function
-    cannot be pickled."""
+    """Distinct items, so which prompts a loader selects is observable."""
 
     def __init__(self, size=10):
         self.data = [f"item_{i}" for i in range(size)]
@@ -1098,36 +513,7 @@ class MultiItemDataset:
         return batch
 
 
-def test_build_dataloader_seeding(dummy_config):
-    """Test that build_dataloader correctly seeds the dataloader for reproducible shuffling."""
-    dataset = MultiItemDataset(size=20)
-
-    def first_batch(seed):
-        config = dummy_config.copy()
-        config.trainer.seed = seed
-        config.trainer.train_batch_size = 5
-        # This test covers generator seeding, not multiprocessing. Use the existing
-        # single-process loader mode so a small CI host is not asked for eight workers.
-        config.generator.enable_http_endpoint = True
-        return next(iter(build_dataloader(config, dataset, is_train=True)))
-
-    assert first_batch(42) == first_batch(42)
-    assert first_batch(42) != first_batch(123)
-
-
-def test_build_dataloader_can_preserve_training_source_order(dummy_config):
-    dataset = MultiItemDataset(size=10)
-    config = dummy_config.copy()
-    config.data.shuffle = False
-    config.trainer.train_batch_size = 5
-    config.generator.enable_http_endpoint = True
-
-    batches = list(build_dataloader(config, dataset, is_train=True))
-
-    assert batches == [dataset.data[:5], dataset.data[5:]]
-
-
-def test_build_dataloader_eval_num_prompts_is_bounded_and_reproducible(dummy_config):
+def test_eval_dataloader_num_prompts_is_bounded_and_reproducible(dummy_config):
     dataset = MultiItemDataset(size=20)
 
     def selected_prompts(seed):
@@ -1136,7 +522,7 @@ def test_build_dataloader_eval_num_prompts_is_bounded_and_reproducible(dummy_con
         config.trainer.eval_batch_size = 4
         config.trainer.eval_num_prompts = 6
         config.generator.enable_http_endpoint = True
-        return [item for batch in build_dataloader(config, dataset, is_train=False) for item in batch]
+        return [item for batch in build_eval_dataloader(config, dataset) for item in batch]
 
     first = selected_prompts(42)
 

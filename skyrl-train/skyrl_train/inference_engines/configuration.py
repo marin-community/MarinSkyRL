@@ -8,6 +8,8 @@ from typing import Any
 from omegaconf import DictConfig, OmegaConf
 from transformers import PreTrainedTokenizerBase
 
+from skyrl_train.config.weight_sync_pause import resolve_weight_sync_pause_policy
+
 
 @dataclass(frozen=True)
 class InferenceEngineRoleConfig:
@@ -51,7 +53,6 @@ def inference_engine_kwargs_from_config(
         "engine_init_timeout_seconds": cfg.generator.engine_init_timeout_seconds,
         "gpu_memory_utilization": cfg.generator.gpu_memory_utilization,
         "inference_engine_enable_sleep": role.inference_engine_enable_sleep,
-        "async_engine": cfg.generator.async_engine,
         "max_num_batched_tokens": cfg.generator.max_num_batched_tokens,
         "max_num_seqs": cfg.generator.max_num_seqs,
         "tokenizer": tokenizer,
@@ -61,6 +62,7 @@ def inference_engine_kwargs_from_config(
         "max_logprobs": role.max_logprobs,
         "mp_backend": cfg.generator.get("inference_engine_mp_backend", False),
         "placement_group_timeout_seconds": int(cfg.trainer.distributed.placement_group_timeout_seconds),
+        "weight_sync_pause_policy": resolve_weight_sync_pause_policy(cfg.generator),
     }
     if (rope_scaling := cfg.generator.get("rope_scaling", None)) is not None:
         kwargs["rope_scaling"] = OmegaConf.to_container(rope_scaling, resolve=True)

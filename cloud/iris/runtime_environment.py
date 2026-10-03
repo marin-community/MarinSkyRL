@@ -11,15 +11,16 @@ MARINSKYRL_TASK_ROOT = "/app/marinskyrl"
 MARINSKYRL_ACTIVATION_FILE = f"{MARINSKYRL_TASK_ROOT}/.iris-runtime-env"
 MARINSKYRL_BOOTSTRAP_SCRIPT = "cloud/iris/bootstrap_runtime.sh"
 CHECKPOINT_EXPORT_ENTRYPOINT = "skyrl_train.entrypoints.checkpoint_export"
+# Ray requires the exact Python patch version on every node. Use one multi-arch
+# task image digest so a gang cannot mix cached versions of the mutable tag.
+IRIS_TASK_IMAGE = (
+    "ghcr.io/marin-community/iris-task@sha256:13519c59442bd70ed5ec2902869f15094992d6849d7e34e353f1338dec7ff5f8"
+)
 
 
 class RuntimeProfile(StrEnum):
     """Locked dependency set installed for training or checkpoint conversion."""
 
-    FSDP = "fsdp"
-    FSDP_EXPORT = "fsdp-export"
-    DEEPSPEED = "deepspeed"
-    DEEPSPEED_EXPORT = "deepspeed-export"
     MEGATRON = "megatron"
     MEGATRON_EXPORT = "megatron-export"
 
@@ -38,9 +39,9 @@ def runtime_profile_for_strategy(
     checkpoint_export = mode is RuntimeMode.CHECKPOINT_EXPORT
     if strategy == "megatron":
         return RuntimeProfile.MEGATRON_EXPORT if checkpoint_export else RuntimeProfile.MEGATRON
-    if strategy == "deepspeed":
-        return RuntimeProfile.DEEPSPEED_EXPORT if checkpoint_export else RuntimeProfile.DEEPSPEED
-    return RuntimeProfile.FSDP_EXPORT if checkpoint_export else RuntimeProfile.FSDP
+    if strategy is None:
+        return RuntimeProfile.MEGATRON_EXPORT if checkpoint_export else RuntimeProfile.MEGATRON
+    raise ValueError(f"Unsupported training strategy: {strategy}")
 
 
 def task_setup_script(commit: str, profile: RuntimeProfile) -> str:

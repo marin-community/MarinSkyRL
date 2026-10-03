@@ -12,9 +12,11 @@ Run:
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -22,11 +24,15 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from cloud.iris.iris_backend import validate_controller_ingress_reachability  # noqa: E402
 from cloud.iris.ingress_utils import (  # noqa: E402
-    DEFAULT_PARENT_INGRESS_HOST,
     DEFAULT_VLLM_PORT,
+    PARENT_CONTROLLER_CONFIG_ENV,
+    PARENT_CONTROLLER_CONFIG_YAML_ENV,
+    PARENT_CREDENTIALS_JSON_ENV,
+    PARENT_IAP_TOKEN_ENV,
     TOKEN_REFRESH_MARGIN_SECONDS,
-    CapabilityTokenCache,
+    CapabilityUrlCache,
     FederatedCapabilityTokenCache,
     _ParentControllerClient,
     _parent_client_credentials,
@@ -36,6 +42,8 @@ from cloud.iris.ingress_utils import (  # noqa: E402
     controller_registration_plan,
     encode_endpoint_name,
     federated_capability_api_base,
+    materialize_parent_controller_config,
+    materialize_parent_credentials,
     wait_for_endpoint_mirror,
 )
 
@@ -48,6 +56,16 @@ class _FakeMinter:
     def mint(self, endpoint_name, ttl_hours):
         self.calls += 1
         return f"TKN-{self.calls}", self.expires_at
+
+
+class _FakeUrlMinter:
+    def __init__(self, expires_at: float = 10_000_000_000.0):
+        self.expires_at = expires_at
+        self.calls = 0
+
+    def mint(self, endpoint_name, ttl_hours):
+        self.calls += 1
+        return f"https://iris.oa.dev/proxy/t/cluster=cw-rno2a/TKN-{self.calls}/{endpoint_name}", self.expires_at
 
 
 class _FakeResolver:
@@ -86,23 +104,55 @@ def test_build_capability_api_base_puts_token_in_path():
     assert build_capability_api_base("http://10.0.0.1:8443/", "ep", "TK") == "http://10.0.0.1:8443/proxy/t/TK/ep/v1"
 
 
-def test_capability_api_base_uses_cached_token():
-    class _Fixed:
+def test_capability_api_base_serves_the_controller_minted_relay_url():
+    assert (
+        capability_api_base("otagent-myjob", cache=CapabilityUrlCache(_FakeUrlMinter()))
+        == "https://iris.oa.dev/proxy/t/cluster=cw-rno2a/TKN-1/otagent-myjob/v1"
+    )
+
+
+def test_capability_api_base_rejects_a_controller_without_a_public_route():
+    class _NoRouteMinter:
         def mint(self, endpoint_name, ttl_hours):
-            return "ABC", 10_000_000_000.0
+            return "", 10_000_000_000.0
 
-    url = capability_api_base("ingress.example", "otagent-myjob", cache=CapabilityTokenCache(_Fixed()))
-    assert url == "https://ingress.example/proxy/t/ABC/otagent-myjob/v1"
+    with pytest.raises(RuntimeError, match="federation_public_parent"):
+        capability_api_base("otagent-myjob", cache=CapabilityUrlCache(_NoRouteMinter()))
 
 
-def test_capability_token_cache_reuses_until_margin_then_remints():
-    minter = _FakeMinter(expires_at=1000.0)
-    cache = CapabilityTokenCache(minter)
-    assert cache.token_for("ep", now=0.0) == "TKN-1" and minter.calls == 1
-    assert cache.token_for("ep", now=1000.0 - TOKEN_REFRESH_MARGIN_SECONDS - 1) == "TKN-1"
+def test_capability_url_cache_reuses_until_margin_then_remints():
+    minter = _FakeUrlMinter(expires_at=1000.0)
+    cache = CapabilityUrlCache(minter)
+    assert cache.url_for("ep", now=0.0).endswith("/TKN-1/ep") and minter.calls == 1
+    assert cache.url_for("ep", now=1000.0 - TOKEN_REFRESH_MARGIN_SECONDS - 1).endswith("/TKN-1/ep")
     assert minter.calls == 1
-    assert cache.token_for("ep", now=1000.0 - TOKEN_REFRESH_MARGIN_SECONDS + 1) == "TKN-2"
+    assert cache.url_for("ep", now=1000.0 - TOKEN_REFRESH_MARGIN_SECONDS + 1).endswith("/TKN-2/ep")
     assert minter.calls == 2
+
+
+def _direct_coreweave_args(tmp_path, cluster_config_body):
+    cluster_config = tmp_path / "cw-rno2a.yaml"
+    cluster_config.write_text(cluster_config_body)
+    return SimpleNamespace(
+        ingress_mode="controller",
+        cluster="cw-rno2a",
+        cluster_config=str(cluster_config),
+        ingress_host=None,
+        target_cluster=None,
+    )
+
+
+def test_direct_coreweave_controller_ingress_is_allowed_behind_a_public_parent(tmp_path):
+    args = _direct_coreweave_args(tmp_path, "federation_public_parent: https://iris.oa.dev\n")
+
+    validate_controller_ingress_reachability(args)
+
+
+def test_direct_coreweave_controller_ingress_is_blocked_without_a_public_parent(tmp_path):
+    args = _direct_coreweave_args(tmp_path, "dashboard_url: https://iris-cw-rno2a.oa.dev\n")
+
+    with pytest.raises(SystemExit, match="federation_public_parent"):
+        validate_controller_ingress_reachability(args)
 
 
 def test_controller_registration_plan_picks_proxy_port_when_record_literal():
@@ -177,13 +227,7 @@ def test_federated_capability_api_base_builds_parent_url():
     assert url == "https://iris.oa.dev/proxy/t/TKN-1/otagent-fedjob/v1"
 
 
-def test_default_parent_ingress_host_is_marin():
-    assert DEFAULT_PARENT_INGRESS_HOST == "iris.oa.dev"
-
-
 def test_parent_client_uses_endpoint_service_for_mirror_and_controller_for_mint():
-    from types import SimpleNamespace
-
     class EndpointClient:
         def __init__(self):
             self.request = None
@@ -211,8 +255,6 @@ def test_parent_client_uses_endpoint_service_for_mirror_and_controller_for_mint(
 
 
 def test_parent_client_uses_forwarded_iap_token(monkeypatch):
-    from cloud.iris.ingress_utils import PARENT_IAP_TOKEN_ENV
-
     monkeypatch.setenv(PARENT_IAP_TOKEN_ENV, "forwarded-iap-token")
 
     credentials = _parent_client_credentials("marin", object())
@@ -222,12 +264,6 @@ def test_parent_client_uses_forwarded_iap_token(monkeypatch):
 
 def test_materialize_parent_credentials_writes_forwarded_record(tmp_path, monkeypatch):
     """A forwarded login record is written to the path load_credentials reads (in-pod)."""
-    import json
-    from cloud.iris.ingress_utils import (
-        PARENT_CREDENTIALS_JSON_ENV,
-        materialize_parent_credentials,
-    )
-
     monkeypatch.setenv("HOME", str(tmp_path))
     rec = json.dumps({"cluster": "marin", "endpoint": "https://iris.oa.dev", "edge_refresh_token": "RT"})
     monkeypatch.setenv(PARENT_CREDENTIALS_JSON_ENV, rec)
@@ -239,8 +275,6 @@ def test_materialize_parent_credentials_writes_forwarded_record(tmp_path, monkey
 
 def test_materialize_parent_credentials_noop_without_env(tmp_path, monkeypatch):
     """No forwarded record => no-op (iris falls back to ambient service-account creds)."""
-    from cloud.iris.ingress_utils import PARENT_CREDENTIALS_JSON_ENV, materialize_parent_credentials
-
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv(PARENT_CREDENTIALS_JSON_ENV, raising=False)
     assert materialize_parent_credentials() is None
@@ -249,12 +283,6 @@ def test_materialize_parent_credentials_noop_without_env(tmp_path, monkeypatch):
 
 def test_materialize_parent_controller_config_writes_and_repoints(tmp_path, monkeypatch):
     """Forwarded marin.yaml content is written in-pod and PARENT_CONTROLLER_CONFIG_ENV repointed."""
-    from cloud.iris.ingress_utils import (
-        PARENT_CONTROLLER_CONFIG_ENV,
-        PARENT_CONTROLLER_CONFIG_YAML_ENV,
-        materialize_parent_controller_config,
-    )
-
     monkeypatch.setenv("HOME", str(tmp_path))
     # The launcher forwards a launch-host path that does NOT resolve in-pod ...
     monkeypatch.setenv(PARENT_CONTROLLER_CONFIG_ENV, "/launch-host/marin.yaml")
@@ -270,12 +298,6 @@ def test_materialize_parent_controller_config_writes_and_repoints(tmp_path, monk
 
 def test_materialize_parent_controller_config_noop_returns_existing_path(tmp_path, monkeypatch):
     """No content forwarded => returns the existing path unchanged (baked/synced marin.yaml)."""
-    from cloud.iris.ingress_utils import (
-        PARENT_CONTROLLER_CONFIG_ENV,
-        PARENT_CONTROLLER_CONFIG_YAML_ENV,
-        materialize_parent_controller_config,
-    )
-
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv(PARENT_CONTROLLER_CONFIG_YAML_ENV, raising=False)
     monkeypatch.setenv(PARENT_CONTROLLER_CONFIG_ENV, "/in-pod/baked/marin.yaml")

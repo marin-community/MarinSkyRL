@@ -144,47 +144,37 @@ def test_correlation_excludes_auxiliary_call_from_tito_stream(tmp_path, monkeypa
     assert rollout_details[0]["prompt_token_ids"] == [[1], [1, 10, 2]]
 
 
-def test_noop_when_flag_off(tmp_path, monkeypatch):
-    monkeypatch.setenv(
-        "OTAGENT_LITERAL_LOG_PATH",
-        _write_log(tmp_path, [_entry("A", 1.0, [1], [10], [-0.1])]),
-    )
-    assert _correlate(_fake_self(collect=False), _result("A"), None) is None
+MISSING_LOG = object()
+EXISTING_DETAILS = [{"completion_token_ids": [[99]], "logprobs": [[-0.9]]}]
+CORRELATABLE_LOG = [_entry("A", 1.0, [1], [10], [-0.1])]
 
 
-def test_noop_when_already_populated(tmp_path, monkeypatch):
-    monkeypatch.setenv(
-        "OTAGENT_LITERAL_LOG_PATH",
-        _write_log(tmp_path, [_entry("A", 1.0, [1], [10], [-0.1])]),
-    )
-    existing = [{"completion_token_ids": [[99]], "logprobs": [[-0.9]]}]
-    assert _correlate(_fake_self(), _result("A"), existing) is existing
+def _set_log_env(monkeypatch, tmp_path, entries):
+    """Publish the shared log path; ``None`` unsets it and ``MISSING_LOG`` points at no file."""
+    if entries is None:
+        monkeypatch.delenv("OTAGENT_LITERAL_LOG_PATH", raising=False)
+    elif entries is MISSING_LOG:
+        monkeypatch.setenv("OTAGENT_LITERAL_LOG_PATH", str(tmp_path / "nope.jsonl"))
+    else:
+        monkeypatch.setenv("OTAGENT_LITERAL_LOG_PATH", _write_log(tmp_path, entries))
 
 
-def test_noop_when_no_correlation_id(tmp_path, monkeypatch):
-    monkeypatch.setenv(
-        "OTAGENT_LITERAL_LOG_PATH",
-        _write_log(tmp_path, [_entry("A", 1.0, [1], [10], [-0.1])]),
-    )
-    assert _correlate(_fake_self(), _result(None), None) is None
-
-
-def test_noop_when_env_unset(tmp_path, monkeypatch):
-    monkeypatch.delenv("OTAGENT_LITERAL_LOG_PATH", raising=False)
-    assert _correlate(_fake_self(), _result("A"), None) is None
-
-
-def test_noop_when_log_missing(tmp_path, monkeypatch):
-    monkeypatch.setenv("OTAGENT_LITERAL_LOG_PATH", str(tmp_path / "nope.jsonl"))
-    assert _correlate(_fake_self(), _result("A"), None) is None
-
-
-def test_noop_when_trial_absent_from_log(tmp_path, monkeypatch):
-    monkeypatch.setenv(
-        "OTAGENT_LITERAL_LOG_PATH",
-        _write_log(tmp_path, [_entry("A", 1.0, [1], [10], [-0.1])]),
-    )
-    assert _correlate(_fake_self(), _result("Z"), None) is None
+@pytest.mark.parametrize(
+    ("collect", "log_entries", "trial_id", "existing"),
+    [
+        pytest.param(False, CORRELATABLE_LOG, "A", None, id="flag-off"),
+        pytest.param(True, CORRELATABLE_LOG, "A", EXISTING_DETAILS, id="already-populated"),
+        pytest.param(True, CORRELATABLE_LOG, None, None, id="no-correlation-id"),
+        pytest.param(True, None, "A", None, id="env-unset"),
+        pytest.param(True, MISSING_LOG, "A", None, id="log-missing"),
+        pytest.param(True, CORRELATABLE_LOG, "Z", None, id="trial-absent"),
+    ],
+)
+def test_correlation_leaves_rollout_details_unchanged_without_usable_evidence(
+    tmp_path, monkeypatch, collect, log_entries, trial_id, existing
+):
+    _set_log_env(monkeypatch, tmp_path, log_entries)
+    assert _correlate(_fake_self(collect=collect), _result(trial_id), existing) is existing
 
 
 # --- opencode chat_history reconstruction (feeds _process_trial_result) ---------
@@ -266,47 +256,35 @@ def test_chat_history_single_turn(tmp_path, monkeypatch):
     assert ch == msgs + [{"role": "assistant", "content": "assistant-final:7,8,9"}]
 
 
-def test_chat_history_none_when_flag_off(tmp_path, monkeypatch):
-    monkeypatch.setenv(
-        "OTAGENT_LITERAL_LOG_PATH",
-        _write_log(tmp_path, [_entry_msgs("A", 1.0, [{"role": "user", "content": "t"}], [1])]),
-    )
-    assert _build_chat(_chat_self(collect=False), _result("A")) is None
+def _entry_without_messages():
+    entry = _entry_msgs("A", 1.0, [{"role": "user", "content": "t"}], [1])
+    entry["request"] = {}
+    return entry
 
 
-def test_chat_history_none_when_no_correlation_id(tmp_path, monkeypatch):
-    monkeypatch.setenv(
-        "OTAGENT_LITERAL_LOG_PATH",
-        _write_log(tmp_path, [_entry_msgs("A", 1.0, [{"role": "user", "content": "t"}], [1])]),
-    )
-    assert _build_chat(_chat_self(), _result(None)) is None
+CHAT_LOG = [_entry_msgs("A", 1.0, [{"role": "user", "content": "t"}], [1])]
 
 
-def test_chat_history_none_when_env_unset(tmp_path, monkeypatch):
-    monkeypatch.delenv("OTAGENT_LITERAL_LOG_PATH", raising=False)
-    assert _build_chat(_chat_self(), _result("A")) is None
-
-
-def test_chat_history_none_when_trial_absent(tmp_path, monkeypatch):
-    monkeypatch.setenv(
-        "OTAGENT_LITERAL_LOG_PATH",
-        _write_log(tmp_path, [_entry_msgs("A", 1.0, [{"role": "user", "content": "t"}], [1])]),
-    )
-    assert _build_chat(_chat_self(), _result("Z")) is None
-
-
-def test_chat_history_none_when_no_completion_bearing_record(tmp_path, monkeypatch):
-    # status 200 but empty completion -> not a usable turn -> None (honest drop).
-    e = _entry_msgs("A", 1.0, [{"role": "user", "content": "t"}], [])
-    monkeypatch.setenv("OTAGENT_LITERAL_LOG_PATH", _write_log(tmp_path, [e]))
-    assert _build_chat(_chat_self(), _result("A")) is None
-
-
-def test_chat_history_none_when_request_has_no_messages(tmp_path, monkeypatch):
-    e = _entry_msgs("A", 1.0, [{"role": "user", "content": "t"}], [1])
-    e["request"] = {}  # malformed: no messages
-    monkeypatch.setenv("OTAGENT_LITERAL_LOG_PATH", _write_log(tmp_path, [e]))
-    assert _build_chat(_chat_self(), _result("A")) is None
+@pytest.mark.parametrize(
+    ("collect", "log_entries", "trial_id"),
+    [
+        pytest.param(False, CHAT_LOG, "A", id="flag-off"),
+        pytest.param(True, CHAT_LOG, None, id="no-correlation-id"),
+        pytest.param(True, None, "A", id="env-unset"),
+        pytest.param(True, CHAT_LOG, "Z", id="trial-absent"),
+        # A 200 with an empty completion is not a usable turn: drop honestly.
+        pytest.param(
+            True,
+            [_entry_msgs("A", 1.0, [{"role": "user", "content": "t"}], [])],
+            "A",
+            id="no-completion-bearing-record",
+        ),
+        pytest.param(True, [_entry_without_messages()], "A", id="request-without-messages"),
+    ],
+)
+def test_chat_history_is_none_without_usable_evidence(tmp_path, monkeypatch, collect, log_entries, trial_id):
+    _set_log_env(monkeypatch, tmp_path, log_entries)
+    assert _build_chat(_chat_self(collect=collect), _result(trial_id)) is None
 
 
 def test_chat_history_picks_latest_timestamp_regardless_of_order(tmp_path, monkeypatch):

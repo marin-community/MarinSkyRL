@@ -405,12 +405,16 @@ def check_constraint(response: str, ground_truth: str) -> bool:
         return False
 
 
-def compute_score(response: str, ground_truth: str) -> Dict[str, Any]:
+def compute_score(response: str, ground_truth: str, verifyit_enabled: bool = False) -> Dict[str, Any]:
     """Compute the IFEval constraint-satisfaction reward for a response.
 
     ``score`` is the fraction of constraints satisfied and ``acc`` reports whether all
     constraints passed. Single-constraint artifacts retain binary scoring.
     """
+    if verifyit_enabled:
+        from skyrl_gym.envs.instruction_verifyit import grade_standalone_instructions
+
+        return grade_standalone_instructions(response, ground_truth)
     spec = json.loads(ground_truth) if isinstance(ground_truth, str) else ground_truth
     constraints = spec if isinstance(spec, list) else [spec]
     satisfied = [check_constraint(response, constraint) for constraint in constraints]

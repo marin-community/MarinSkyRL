@@ -11,8 +11,6 @@ import tomllib
 import zipfile
 
 from packaging.requirements import Requirement
-from packaging.specifiers import SpecifierSet
-from packaging.version import Version
 import pytest
 
 
@@ -62,11 +60,10 @@ def test_training_extras_publish_hardware_policy_and_rollout_requirements(built_
     extras = set(metadata.get_all("Provides-Extra", []))
     requirements = metadata.get_all("Requires-Dist", [])
 
-    assert {"cpu", "cuda", "fsdp", "vllm", "megatron", "telemetry"}.issubset(extras)
+    assert {"cpu", "cuda", "vllm", "megatron", "telemetry"}.issubset(extras)
     assert "agentic" not in extras
     assert any(requirement.startswith("torch==") and "extra == 'cpu'" in requirement for requirement in requirements)
     assert any(requirement.startswith("torch==") and "extra == 'cuda'" in requirement for requirement in requirements)
-    assert any(requirement.startswith("torchtitan") and "extra == 'fsdp'" in requirement for requirement in requirements)
     assert any(requirement.startswith("vllm==") and "extra == 'vllm'" in requirement for requirement in requirements)
     assert any(
         requirement.startswith("harbor[analysis,datasets,daytona]") and "extra == 'vllm'" in requirement
@@ -129,7 +126,7 @@ def _exported_requirements(extras: tuple[str, ...]) -> list[Requirement]:
     return [Requirement(line) for line in exported if line and not line.startswith(("#", "-e "))]
 
 
-@pytest.mark.parametrize("extras", [("cuda",), ("deepspeed",), ("fsdp", "vllm"), ("megatron", "vllm")])
+@pytest.mark.parametrize("extras", [("cuda",), ("megatron", "vllm")])
 def test_gpu_profiles_use_one_cuda132_runtime(extras: tuple[str, ...]) -> None:
     platform = {"sys_platform": "linux", "platform_machine": "x86_64"}
     requirements = _exported_requirements(extras)
@@ -146,8 +143,6 @@ def test_gpu_profiles_use_one_cuda132_runtime(extras: tuple[str, ...]) -> None:
 @pytest.mark.parametrize(
     ("extras", "architecture", "required", "forbidden"),
     [
-        (("fsdp", "vllm"), "x86_64", {"flash-attn", "torchtitan"}, set()),
-        (("fsdp", "vllm"), "aarch64", set(), {"flash-attn", "torchtitan"}),
         (
             ("megatron", "vllm"),
             "x86_64",
@@ -171,19 +166,3 @@ def test_policy_closures_match_supported_architectures(
     assert names.isdisjoint(forbidden)
     vllm = next(requirement for requirement in exported if requirement.name == "vllm")
     assert vllm.url is not None and vllm.url.endswith(f"manylinux_2_28_{architecture}.whl")
-
-
-def test_megatron_flash_attention_is_supported_by_transformer_engine() -> None:
-    platform = {"sys_platform": "linux", "platform_machine": "x86_64"}
-    names = {
-        requirement.name
-        for requirement in _exported_requirements(("megatron", "vllm"))
-        if requirement.marker is None or requirement.marker.evaluate(platform)
-    }
-    assert {"flash-attn", "transformer-engine"}.issubset(names)
-
-    lock = tomllib.loads((REPOSITORY_ROOT / "uv.lock").read_text())
-    versions = {package["name"]: package["version"] for package in lock["package"] if package["name"] in names}
-    # TE 2.11's accepted range: https://github.com/NVIDIA/TransformerEngine/blob/v2.11/transformer_engine/pytorch/attention/dot_product_attention/utils.py
-    assert versions["transformer-engine"] == "2.11.0"
-    assert Version(versions["flash-attn"]) in SpecifierSet(">=2.1.1,<=2.8.3")

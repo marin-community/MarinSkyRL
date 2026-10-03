@@ -13,10 +13,14 @@ from urllib.parse import urlsplit
 from omegaconf import DictConfig, OmegaConf
 from rigging.secrets import is_secret_reference
 
+from marinskyrl.runtime_options import PolicyLossType
+
 
 class DistillationObjectiveKind(StrEnum):
     SAMPLED_REVERSE_KL = "sampled_reverse_kl"
     SPARSE_FORWARD_KL = "sparse_forward_kl"
+    SPARSE_REVERSE_KL = "sparse_reverse_kl"
+    SPARSE_JSD = "sparse_jsd"
     STUDENT_TOPK_POLICY_SURROGATE = "student_topk_policy_surrogate"
 
 
@@ -75,6 +79,14 @@ class TeacherResourceSpec:
     colocation_group: str
     max_num_batched_tokens: int | None = None
     gpu_memory_utilization: float | None = None
+    # One engine spans tensor_parallel_size x data_parallel_size GPUs. Expert parallelism shards MoE
+    # experts across that engine's GPUs; the vLLM fork serves GrugMoE only with tensor_parallel_size=1.
+    data_parallel_size: int = 1
+    expert_parallel_size: int = 1
+
+    @property
+    def gpus_per_engine(self) -> int:
+        return self.tensor_parallel_size * self.data_parallel_size
 
 
 class TeacherSpec(Protocol):
@@ -173,6 +185,9 @@ class DistillationPlan:
     routing: TeacherRoutingPlan
     residency: TeacherResidencySpec = TeacherResidencySpec()
     domain_gradient_balance: DomainGradientBalanceSpec | None = None
+    advantage_clip: float | None = None
+    jsd_beta: float | None = None
+    entry_clip: float | None = None
 
 
 def validate_distillation_runtime_support(plan: DistillationPlan | None) -> None:
@@ -198,10 +213,17 @@ def validate_distillation_runtime_support(plan: DistillationPlan | None) -> None
         if teacher.resources is None:
             raise ValueError(f"teachers.{teacher.id}.resources is required for a local teacher runtime")
         total_gpus = teacher.resources.num_nodes * teacher.resources.gpus_per_node
-        if total_gpus % teacher.resources.tensor_parallel_size != 0:
+        if total_gpus % teacher.resources.gpus_per_engine != 0:
             raise ValueError(
                 f"teachers.{teacher.id}.resources reserves {total_gpus} GPUs, which is not divisible by "
-                f"tensor_parallel_size={teacher.resources.tensor_parallel_size}"
+                f"tensor_parallel_size={teacher.resources.tensor_parallel_size} x "
+                f"data_parallel_size={teacher.resources.data_parallel_size}"
+            )
+        expert_parallel = teacher.resources.expert_parallel_size
+        if expert_parallel not in (1, teacher.resources.gpus_per_engine):
+            raise ValueError(
+                f"teachers.{teacher.id}.resources.expert_parallel_size must be 1 or equal to "
+                f"tensor_parallel_size x data_parallel_size ({teacher.resources.gpus_per_engine}); got {expert_parallel}"
             )
 
         group = teacher.resources.colocation_group
@@ -225,6 +247,8 @@ def validate_distillation_runtime_support(plan: DistillationPlan | None) -> None
 _OBJECTIVE_EVIDENCE = {
     DistillationObjectiveKind.SAMPLED_REVERSE_KL: TeacherEvidenceKind.CHOSEN_TOKEN,
     DistillationObjectiveKind.SPARSE_FORWARD_KL: TeacherEvidenceKind.TOPK_DISTRIBUTION,
+    DistillationObjectiveKind.SPARSE_REVERSE_KL: TeacherEvidenceKind.TOPK_DISTRIBUTION,
+    DistillationObjectiveKind.SPARSE_JSD: TeacherEvidenceKind.TOPK_DISTRIBUTION,
     DistillationObjectiveKind.STUDENT_TOPK_POLICY_SURROGATE: TeacherEvidenceKind.STUDENT_SELECTED_TOPK,
 }
 _TOKENIZER_FINGERPRINT_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -333,6 +357,8 @@ def _teacher_resources(config: Mapping[str, object], path: str) -> TeacherResour
                 "colocation_group",
                 "max_num_batched_tokens",
                 "gpu_memory_utilization",
+                "data_parallel_size",
+                "expert_parallel_size",
             }
         ),
         f"{path}.resources",
@@ -351,6 +377,16 @@ def _teacher_resources(config: Mapping[str, object], path: str) -> TeacherResour
             None
             if resources.get("gpu_memory_utilization") is None
             else _gpu_memory_utilization(resources, f"{path}.resources")
+        ),
+        data_parallel_size=(
+            1
+            if resources.get("data_parallel_size") is None
+            else _positive_integer(resources, "data_parallel_size", f"{path}.resources")
+        ),
+        expert_parallel_size=(
+            1
+            if resources.get("expert_parallel_size") is None
+            else _positive_integer(resources, "expert_parallel_size", f"{path}.resources")
         ),
     )
 
@@ -580,7 +616,19 @@ def compile_distillation_plan(config: Mapping[str, object]) -> DistillationPlan 
     distillation = _mapping(raw_distillation, "trainer.algorithm.distillation")
     _reject_unknown(
         distillation,
-        frozenset({"objective", "routing_plan", "coefficient", "reward_mode", "residency", "domain_gradient_balance"}),
+        frozenset(
+            {
+                "objective",
+                "routing_plan",
+                "coefficient",
+                "reward_mode",
+                "residency",
+                "domain_gradient_balance",
+                "advantage_clip",
+                "jsd_beta",
+                "entry_clip",
+            }
+        ),
         "trainer.algorithm.distillation",
     )
     objective = _enum_value(
@@ -596,6 +644,28 @@ def compile_distillation_plan(config: Mapping[str, object]) -> DistillationPlan 
         "trainer.algorithm.distillation",
     )
     coefficient = _positive_float(distillation, "coefficient", "trainer.algorithm.distillation")
+    advantage_clip = (
+        _positive_float(distillation, "advantage_clip", "trainer.algorithm.distillation")
+        if distillation.get("advantage_clip") is not None
+        else None
+    )
+    jsd_beta = (
+        _positive_float(distillation, "jsd_beta", "trainer.algorithm.distillation")
+        if distillation.get("jsd_beta") is not None
+        else None
+    )
+    if objective is DistillationObjectiveKind.SPARSE_JSD:
+        if jsd_beta is None or jsd_beta >= 1:
+            raise ValueError("sparse_jsd requires jsd_beta in (0, 1)")
+    elif jsd_beta is not None:
+        raise ValueError("jsd_beta requires sparse_jsd")
+    entry_clip = (
+        _nonnegative_float(distillation, "entry_clip", "trainer.algorithm.distillation")
+        if distillation.get("entry_clip") is not None
+        else None
+    )
+    if entry_clip is not None and objective is not DistillationObjectiveKind.SPARSE_FORWARD_KL:
+        raise ValueError("entry_clip requires sparse_forward_kl")
     routing_name = _required_string(distillation, "routing_plan", "trainer.algorithm.distillation")
     residency = _teacher_residency(distillation)
 
@@ -637,6 +707,9 @@ def compile_distillation_plan(config: Mapping[str, object]) -> DistillationPlan 
         routing=routing,
         residency=residency,
         domain_gradient_balance=balance,
+        advantage_clip=advantage_clip,
+        jsd_beta=jsd_beta,
+        entry_clip=entry_clip,
     )
 
 
@@ -645,3 +718,27 @@ def compile_distillation_plan_from_config(cfg: DictConfig) -> DistillationPlan |
     resolved = OmegaConf.to_container(cfg, resolve=True)
     assert isinstance(resolved, dict)
     return compile_distillation_plan(resolved)
+
+
+def validate_generation_logprobs(cfg: DictConfig) -> None:
+    """Validate generation log probabilities against the configured distillation plan."""
+    generator = cfg.get("generator", {})
+    logprobs = generator.get("sampling_params", {}).get("logprobs")
+    if logprobs is None:
+        return
+    assert isinstance(logprobs, int)
+    if logprobs > 0 and cfg.get("trainer", {}).get("algorithm", {}).get("policy_loss_type") != PolicyLossType.FTPO:
+        plan = compile_distillation_plan_from_config(cfg)
+        widths = {teacher.top_k for teacher in plan.teachers} if plan is not None else set()
+        if (
+            plan is None
+            or plan.objective is not DistillationObjectiveKind.STUDENT_TOPK_POLICY_SURROGATE
+            or widths != {logprobs}
+            or generator.get("backend") != "vllm"
+        ):
+            raise ValueError(
+                "positive generator.sampling_params.logprobs requires a local vLLM "
+                "student_topk_policy_surrogate plan with matching teacher top_k, or FTPO"
+            )
+    if not generator.get("run_engines_locally", False):
+        raise NotImplementedError("Remote inference mode doesn't support `sampling_params.logprobs`")

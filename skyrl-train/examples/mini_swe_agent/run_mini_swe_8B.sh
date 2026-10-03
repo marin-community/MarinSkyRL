@@ -21,13 +21,13 @@ LOGGER=wandb
 # We use a small batch size here for demonstration
 # NOTE (sumanthrh): The `generator.max_turns` here is actually unused, and we use the `step_limit` from the `swebench.yaml` file. 
 # This simply has to be a value > 1
-uv run --isolated --extra vllm --with "mini-swe-agent>=1.12.0" --with litellm --env-file examples/mini_swe_agent/.env.miniswe -m skyrl_train.entrypoints.mini_swe \
+uv run --isolated --extra megatron --extra vllm --with "mini-swe-agent>=1.12.0" --with litellm --env-file examples/mini_swe_agent/.env.miniswe -m skyrl_train.entrypoints.mini_swe \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.policy.model.path="Qwen/Qwen3-8B" \
   trainer.placement.colocate_all=true \
-  trainer.strategy=fsdp2 \
+  trainer.strategy=megatron \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.policy_num_nodes=$NNODES \
@@ -58,8 +58,6 @@ uv run --isolated --extra vllm --with "mini-swe-agent>=1.12.0" --with litellm --
   generator.http_endpoint_host='127.0.0.1' \
   generator.http_endpoint_port=8001 \
   generator.weight_sync_backend=nccl \
-  generator.async_engine=true \
-  generator.batched=true \
   generator.n_samples_per_prompt=4 \
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \

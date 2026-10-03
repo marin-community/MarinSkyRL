@@ -17,7 +17,7 @@ def _training_config():
     return OmegaConf.create(
         {
             "run": {"id": "run", "attempt_id": "attempt", "mode": "train", "export_hf": True},
-            "runtime": {"entrypoint": "skyrl_train.entrypoints.main_base", "profile": "fsdp"},
+            "runtime": {"entrypoint": "skyrl_train.entrypoints.main_base", "profile": "megatron"},
             "iris": {
                 "job_name": "run",
                 "allocation": {"num_nodes": 2, "gpus_per_node": 8, "gpu_variant": "H100"},
@@ -31,7 +31,7 @@ def _training_config():
             },
             "skyrl": {
                 "trainer": {
-                    "strategy": "fsdp2",
+                    "strategy": "megatron",
                     "placement": {"policy_num_nodes": 2, "policy_num_gpus_per_node": 8},
                     "policy": {"model": {"path": "Qwen/Qwen3-8B"}},
                 },
@@ -73,7 +73,7 @@ def test_checkpoint_export_config_carries_request_fields_as_data() -> None:
 
     assert config.run.mode == "checkpoint_export"
     assert config.runtime.entrypoint == "skyrl_train.entrypoints.checkpoint_export"
-    assert config.runtime.profile == "fsdp-export"
+    assert config.runtime.profile == "megatron-export"
     assert config.iris.timeout == 7200
     assert config.iris.allocation.gpu_variant == "H100"
     assert config.skyrl.trainer.placement.policy_num_nodes == 1

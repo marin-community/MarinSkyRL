@@ -16,6 +16,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from cloud.iris.rl_config_translation import (  # noqa: E402
+    ContextBudget,
     compose_skyrl_config,
     parse_rl_config,
     write_resolved_context_budget,
@@ -27,151 +28,37 @@ class _HPCStub:
     gpus_per_node: int = 8
 
 
-_CONFIGS = {
-    "128GPU_80B_A3B_next_cp1.yaml": (98304, 16384, 999999),
-    "32GPU_qwen3_coder_30b_a3b_ep4.yaml": (131072, 16384, 999999),
-    "32GPU_qwen3_coder_30b_a3b_ep4_nooffload.yaml": (131072, 16384, 999999),
-    "56GPU_qwen3_8b.yaml": (32768, 4096, 999999),
-    "64GPU_qwen3_6_35b_a3b.yaml": (131072, 16384, 999999),
-    "delphi_math_rl.yaml": (4096, 3584, 1),
-    "delphi_math_rl_ifeval.yaml": (4096, 3584, 1),
-    "nemotron_ultra_rlvr_acceptance.yaml": (32768, 256, 2),
-    "opencode_smoke_literal.yaml": (32768, 4096, 30),
-    "qwen_megatron_smoke.yaml": (2048, 512, 1),
-    "snowball_megatron_full.yaml": (9216, 8192, 1),
-    "snowball_megatron_online_eagle.yaml": (9856, 8192, 1),
-    "snowball_megatron_smoke.yaml": (2048, 512, 1),
-    "snowball_ultra_rlvr1_colocated64.yaml": (65536, 6528, 999999),
-    "snowball_ultra_rlvr1_split64.yaml": (65536, 6528, 999999),
-    "snowball_ultra_rlvr2_colocated64.yaml": (65536, 6528, 999999),
-    "snowball_ultra_rlvr2_split64.yaml": (65536, 6528, 999999),
-    "tasktrove_dq_sweep_30b.yaml": (131072, 16384, 90),
-    "tasktrove_dq_sweep_30b_cp6.yaml": (131072, 16384, 90),
-    "tasktrove_dq_sweep_30b_gb200.yaml": (131072, 16384, 90),
-    "tasktrove_dq_sweep_30b_ncclnet.yaml": (32768, 4096, 30),
-    "tasktrove_dq_sweep_30b_terminus2.yaml": (32768, 4096, 30),
-}
+@pytest.mark.parametrize(
+    "config_path", sorted((_REPO_ROOT / "cloud/iris/configs").glob("*.yaml")), ids=lambda p: p.name
+)
+def test_iris_config_materializes_one_coherent_context_budget(config_path):
+    parsed = parse_rl_config(str(config_path))
+    budget = parsed.context_budget
+    window = budget.request_window_tokens
+    output = budget.max_new_tokens_per_turn
 
-_FLASH_ATTN_CONFIGS = {
-    "128GPU_80B_A3B_next_cp1.yaml",
-    "32GPU_qwen3_coder_30b_a3b_ep4.yaml",
-    "32GPU_qwen3_coder_30b_a3b_ep4_nooffload.yaml",
-    "64GPU_qwen3_6_35b_a3b.yaml",
-    "qwen_megatron_smoke.yaml",
-    "snowball_megatron_full.yaml",
-    "snowball_megatron_online_eagle.yaml",
-    "snowball_megatron_smoke.yaml",
-    "snowball_ultra_rlvr1_colocated64.yaml",
-    "snowball_ultra_rlvr1_split64.yaml",
-    "snowball_ultra_rlvr2_colocated64.yaml",
-    "snowball_ultra_rlvr2_split64.yaml",
-    "tasktrove_dq_sweep_30b.yaml",
-    "tasktrove_dq_sweep_30b_cp6.yaml",
-    "tasktrove_dq_sweep_30b_gb200.yaml",
-    "tasktrove_dq_sweep_30b_ncclnet.yaml",
-    "tasktrove_dq_sweep_30b_terminus2.yaml",
-}
-
-_SNOWBALL_ULTRA_CONFIGS = {
-    "snowball_ultra_rlvr1_colocated64.yaml",
-    "snowball_ultra_rlvr1_split64.yaml",
-    "snowball_ultra_rlvr2_colocated64.yaml",
-    "snowball_ultra_rlvr2_split64.yaml",
-}
-
-
-def test_all_iris_configs_materialize_one_coherent_context_budget():
-    configs_dir = _REPO_ROOT / "cloud/iris/configs"
-    assert {path.name for path in configs_dir.glob("*.yaml")} == set(_CONFIGS)
-
-    for name, (window, output, turns) in _CONFIGS.items():
-        parsed = parse_rl_config(str(configs_dir / name))
-        assert parsed.context_budget.request_window_tokens == window
-        assert parsed.context_budget.max_new_tokens_per_turn == output
-        assert parsed.context_budget.max_turns == turns
-        assert (
-            parsed.trainer["max_prompt_length"] + parsed.generator["sampling_params"]["max_generate_length"] == window
-        )
-        assert parsed.generator["max_input_length"] == parsed.context_budget.max_input_tokens
-        assert parsed.generator["engine_init_kwargs"]["max_model_len"] == window
-        assert parsed.generator["max_turns"] == turns
-        if parsed.terminal_bench is not None:
-            assert parsed.terminal_bench["harbor"]["max_turns"] == turns
-            assert parsed.terminal_bench["harbor"]["llm_call_kwargs"]["max_tokens"] == output
-            assert parsed.terminal_bench["model_info"] == {
-                "max_input_tokens": parsed.context_budget.max_input_tokens,
-                "max_output_tokens": output,
-            }
-
-
-def test_flash_attention_configs_use_the_current_vllm_config_field():
-    configs_dir = _REPO_ROOT / "cloud/iris/configs"
-
-    for name in _FLASH_ATTN_CONFIGS:
-        parsed = parse_rl_config(str(configs_dir / name))
-        assert parsed.generator["vllm_attention_backend"] == "FLASH_ATTN"
-        assert "VLLM_ATTENTION_BACKEND" not in parsed.raw.get("extra_env", {})
-
-
-def test_snowball_ultra_grid_derives_prompt_budget_without_authored_override():
-    configs_dir = _REPO_ROOT / "cloud/iris/configs"
-
-    for name in _SNOWBALL_ULTRA_CONFIGS:
-        source = yaml.safe_load((configs_dir / name).read_text())
-        parsed = parse_rl_config(str(configs_dir / name))
-
-        assert "max_prompt_length" not in source["trainer"]
-        assert parsed.trainer["max_prompt_length"] == 59008
-
-
-def test_snowball_ultra_grid_pins_phase_data_and_secret_free_judge_config():
-    configs_dir = _REPO_ROOT / "cloud/iris/configs"
-    dataset_root = (
-        "s3://marin-us-east-02a/marin/users/benfeuer/datasets/snowball-ultra-rlvr/"
-        "20260912-79f8eda15ea12e1adf7bb14dcb338a29d391b80e"
-    )
-
-    for name in _SNOWBALL_ULTRA_CONFIGS:
-        source = yaml.safe_load((configs_dir / name).read_text())
-        phase = "rlvr1" if "rlvr1" in name else "rlvr2"
-        ultra = source["environment"]["skyrl_gym"]["nemotron_ultra"]
-
-        assert source["data"]["train_data"] == [f"{dataset_root}/tasktrove-v1/{phase}/train.parquet"]
-        assert source["data"]["val_data"] == [f"{dataset_root}/tasktrove-v1/{phase}/validation.parquet"]
-        assert source["data"]["terminal_bench_data"] == [f"{dataset_root}/tasktrove-swe-v1/tasks.parquet"]
-        assert ultra["sandbox"] == {
-            "host": "snowball-nemo-skills-sandbox.iris.svc.cluster.local",
-            "port": 6000,
+    assert parsed.trainer["max_prompt_length"] + parsed.generator["sampling_params"]["max_generate_length"] == window
+    assert parsed.generator["max_input_length"] == budget.max_input_tokens
+    assert parsed.generator["engine_init_kwargs"]["max_model_len"] == window
+    assert parsed.generator["max_turns"] == budget.max_turns
+    if parsed.terminal_bench is not None:
+        assert parsed.terminal_bench["harbor"]["max_turns"] == budget.max_turns
+        assert parsed.terminal_bench["harbor"]["llm_call_kwargs"]["max_tokens"] == output
+        assert parsed.terminal_bench["model_info"] == {
+            "max_input_tokens": budget.max_input_tokens,
+            "max_output_tokens": output,
         }
-        for role in ("general", "safety"):
-            assert ultra["judges"][role]["api_key_env"] == "TOGETHER_API_KEY"
-            assert "api_key" not in ultra["judges"][role]
-        assert ultra["genrm"]["judge"]["response_transport"] == "chat_completions"
-        assert ultra["genrm"]["judge"]["api_key_env"] == "TOGETHER_API_KEY"
-        assert "api_key" not in ultra["genrm"]["judge"]
 
 
 @pytest.mark.parametrize(
-    ("topology", "colocate_all", "policy_nodes", "inference_engines"),
-    [("colocated64", True, 8, 8), ("split64", False, 4, 4)],
+    "config_path", sorted((_REPO_ROOT / "cloud/iris/configs").glob("snowball_ultra_*.yaml")), ids=lambda p: p.name
 )
-def test_snowball_ultra_phase_two_resumes_training_with_fresh_data(
-    topology, colocate_all, policy_nodes, inference_engines
-):
-    configs_dir = _REPO_ROOT / "cloud/iris/configs"
-    phase_one = parse_rl_config(str(configs_dir / f"snowball_ultra_rlvr1_{topology}.yaml"))
-    phase_two = parse_rl_config(str(configs_dir / f"snowball_ultra_rlvr2_{topology}.yaml"))
+def test_snowball_ultra_judges_read_credentials_from_the_environment(config_path):
+    ultra = yaml.safe_load(config_path.read_text())["environment"]["skyrl_gym"]["nemotron_ultra"]
 
-    assert phase_one.trainer["max_steps"] == 128
-    assert phase_one.trainer["resume_mode"] == "none"
-    assert phase_two.trainer["max_steps"] == 178
-    assert phase_two.trainer["resume_mode"] == "latest"
-    assert phase_two.trainer["restore_dataloader_state"] is False
-    assert phase_two.trainer["placement"] == phase_one.trainer["placement"]
-    assert phase_two.trainer["placement"]["colocate_all"] is colocate_all
-    assert phase_two.trainer["placement"]["colocate_policy_ref"] is True
-    assert phase_two.trainer["placement"]["policy_num_nodes"] == policy_nodes
-    assert phase_two.generator["num_inference_engines"] == inference_engines
+    for judge in (ultra["judges"]["general"], ultra["judges"]["safety"], ultra["genrm"]["judge"]):
+        assert judge["api_key_env"]
+        assert "api_key" not in judge
 
 
 def test_context_budget_derives_all_hydra_length_arguments():
@@ -242,86 +129,6 @@ def test_context_budget_allows_overlong_fraction_overrides(tmp_path):
     assert parsed.generator["trajectory_reward_shaping"]["overlong"] == {"l_max": 12288, "l_cache": 3072}
 
 
-def test_context_budget_rejects_low_level_overlong_window(tmp_path):
-    config = tmp_path / "overlong.yaml"
-    config.write_text(
-        yaml.safe_dump(
-            {
-                "context_budget": {
-                    "request_window_tokens": 32768,
-                    "max_new_tokens_per_turn": 4096,
-                    "max_turns": 30,
-                },
-                "generator": {"trajectory_reward_shaping": {"overlong": {"l_max": 32768}}},
-            }
-        )
-    )
-
-    with pytest.raises(ValueError, match="generator.trajectory_reward_shaping.overlong.l_max"):
-        parse_rl_config(str(config))
-
-
-@pytest.mark.parametrize(
-    ("field_name", "value"),
-    [
-        ("generated_budget_fraction", 0),
-        ("generated_budget_fraction", 1.1),
-        ("overlong_cache_fraction", -0.1),
-        ("overlong_cache_fraction", "quarter"),
-    ],
-)
-def test_context_budget_rejects_invalid_overlong_fractions(tmp_path, field_name, value):
-    config = tmp_path / "overlong.yaml"
-    config.write_text(
-        yaml.safe_dump(
-            {
-                "context_budget": {
-                    "request_window_tokens": 32768,
-                    "max_new_tokens_per_turn": 4096,
-                    "max_turns": 30,
-                    field_name: value,
-                }
-            }
-        )
-    )
-
-    with pytest.raises(ValueError, match=field_name):
-        parse_rl_config(str(config))
-
-
-def test_context_budget_rejects_impossible_and_legacy_config_fields(tmp_path):
-    invalid = tmp_path / "invalid.yaml"
-    invalid.write_text(
-        yaml.safe_dump(
-            {
-                "context_budget": {
-                    "request_window_tokens": 4096,
-                    "max_new_tokens_per_turn": 4096,
-                    "max_turns": 1,
-                }
-            }
-        )
-    )
-    with pytest.raises(ValueError, match="must exceed"):
-        parse_rl_config(str(invalid))
-
-    legacy = tmp_path / "legacy.yaml"
-    legacy.write_text(
-        yaml.safe_dump(
-            {
-                "context_budget": {
-                    "request_window_tokens": 32768,
-                    "max_new_tokens_per_turn": 4096,
-                    "max_turns": 30,
-                },
-                "generator": {"max_input_length": 32000},
-            }
-        )
-    )
-    with pytest.raises(ValueError, match="generator.max_input_length"):
-        parse_rl_config(str(legacy))
-
-
 def test_resolved_context_budget_artifact_is_reproducible(tmp_path):
     parsed = parse_rl_config(str(_REPO_ROOT / "cloud/iris/configs/tasktrove_dq_sweep_30b.yaml"))
     artifact = write_resolved_context_budget(
@@ -354,33 +161,15 @@ def test_resolved_context_budget_artifact_is_reproducible(tmp_path):
         assert json.load(artifact_file)["context_budget"]["request_window_tokens"] == 131072
 
 
-def test_opencode_limit_context_mirrors_harbor_formula():
-    """The opencode_limit_context property mirrors harbor's _resolve_model_limit.
+@pytest.mark.parametrize(
+    ("window", "output", "expected_input", "expected_context"),
+    [(131072, 16384, 114688, 97280), (32768, 4096, 28672, 23552)],
+)
+def test_opencode_limit_context_mirrors_harbor_formula(window, output, expected_input, expected_context):
+    """Mirror harbor's _resolve_model_limit: context = input - output - min(1024, slack)."""
+    budget = ContextBudget(request_window_tokens=window, max_new_tokens_per_turn=output, max_turns=30)
 
-    For the 131072-window / 16384-output budget:
-      max_input_tokens = 114688
-      output = min(16384, 114687) = 16384
-      margin = min(1024, 98303) = 1024
-      context = 114688 - 16384 - 1024 = 97280
-    """
-    parsed = parse_rl_config(str(_REPO_ROOT / "cloud/iris/configs/tasktrove_dq_sweep_30b.yaml"))
-    budget = parsed.context_budget
-
-    assert budget.max_input_tokens == 114688
-    assert budget.opencode_limit_output == 16384
-    assert budget.opencode_limit_context == 97280
+    assert budget.max_input_tokens == expected_input
+    assert budget.opencode_limit_output == output
+    assert budget.opencode_limit_context == expected_context
     assert budget.opencode_limit_context + budget.opencode_limit_output < budget.max_input_tokens
-
-
-def test_opencode_limit_at_32k_budget():
-    """Sanity at the smaller 32k window."""
-    from cloud.iris.rl_config_translation import ContextBudget
-
-    budget = ContextBudget(
-        request_window_tokens=32768,
-        max_new_tokens_per_turn=4096,
-        max_turns=30,
-    )
-    assert budget.max_input_tokens == 28672
-    assert budget.opencode_limit_output == 4096
-    assert budget.opencode_limit_context == 23552

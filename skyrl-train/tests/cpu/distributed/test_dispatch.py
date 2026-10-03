@@ -3,23 +3,19 @@ import pickle
 import threading
 
 import skyrl_train.distributed.dispatch as dispatch_module
+from skyrl_train.dataset.routed_expert_batch import RoutedExpertRows
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.distributed.dispatch import (
     DispatchSettings,
     WorkerGroupTaskError,
     MeshDispatch,
-    PassThroughDispatch,
     MeshRank,
     ActorInfo,
-    DispatchRegistry,
-    Dispatch,
     collect_actor_results,
 )
 from marinskyrl.runtime_options import R3Transport
 import ray
 import torch
-from typing import List, Optional, Union
-from ray import ObjectRef
 import pytest
 
 
@@ -40,9 +36,6 @@ class RayActor:
         # intentionally create different outputs for each rank
         data["a"] += self.rank
         return data
-
-    def dummy(self, a, b):
-        return
 
     def get_ray_node_id(self):
         # Mirror skyrl_train.workers.worker.Worker.get_ray_node_id so the
@@ -78,34 +71,6 @@ class RayActorGroup:
             )
             for i, actor in enumerate(self.actors)
         ]
-
-    def mesh_dispatch_and_collect(self, data: TrainingInputBatch):
-        object_refs = MeshDispatch.dispatch(self.actor_infos, "do_work", data, settings=_dispatch_settings())
-        ret = MeshDispatch.sync_collect(self.actor_infos, object_refs)
-        return ret
-
-    def pass_through_dispatch(self, a, b):
-        # just pass values as is
-        object_refs = PassThroughDispatch.dispatch(self.actor_infos, "dummy", a, b, settings=_dispatch_settings())
-        ret = PassThroughDispatch.sync_collect(self.actor_infos, object_refs)
-        return ret
-
-
-def test_mesh_dispatch():
-    num_actors = 8
-    actor_group = RayActorGroup(num_actors)
-    data = TrainingInputBatch({"a": torch.tensor([1, 2, 3, 4])})
-    databatch = actor_group.mesh_dispatch_and_collect(data)
-    # only dp rank 0, 1, 2, 3, sp 0 will have the contributed to the output.
-    # In this case, the rank for these are 0, 1, 2, 3.
-    assert torch.equal(databatch["a"], torch.tensor([1, 3, 5, 7]))
-
-
-def test_pass_through_dispatch():
-    num_actors = 8
-    actor_group = RayActorGroup(num_actors)
-    ret = actor_group.pass_through_dispatch(1, 2)
-    assert ret is None
 
 
 @pytest.mark.parametrize("failure_method", ["raise_oom", "exit_process"])
@@ -167,33 +132,19 @@ def test_collect_actor_results_logs_initiating_remote_exception_before_teardown(
     assert all(event == "kill" for event, _, _ in events[1:])
 
 
-def test_mesh_dispatch_with_mixed():
-    num_actors = 8
-    actor_group = RayActorGroup(num_actors)
-    object_refs = MeshDispatch.dispatch(
-        actor_group.actor_infos,
-        "do_work",
-        TrainingInputBatch({"a": torch.tensor([1, 2, 3, 4])}),
-        settings=_dispatch_settings(),
-    )
-    object_refs[0] = ray.put(None)
-    with pytest.raises(AssertionError):
-        MeshDispatch.sync_collect(actor_group.actor_infos, object_refs)
+def _r3_batch(compact: bool = False):
+    """A batch with replay routes, which enables resident or decentral dispatch."""
+    routes = torch.arange(4 * 2 * 3 * 2, dtype=torch.int16).reshape(4, 2, 3, 2)
+    if compact:
+        route_rows = RoutedExpertRows(
+            tuple(routes[index, : index % 2 + 1].numpy().copy() for index in range(4)), 2, 512
+        )
+        return TrainingInputBatch({"a": torch.tensor([1, 2, 3, 4])}, routed_expert_rows=route_rows)
+    return TrainingInputBatch({"a": torch.tensor([1, 2, 3, 4]), "rollout_routed_experts": routes})
 
 
-def _r3_batch():
-    """A batch carrying `rollout_routed_experts` so the resident/decentral R3 path
-    engages (dispatch only decentralizes when the chunk carries R3)."""
-    return TrainingInputBatch(
-        {
-            "a": torch.tensor([1, 2, 3, 4]),
-            # [batch=4, response_len=2, L=3, K=2] int16 (as shipped post-collate).
-            "rollout_routed_experts": torch.arange(4 * 2 * 3 * 2, dtype=torch.int16).reshape(4, 2, 3, 2),
-        }
-    )
-
-
-def test_r3_decentral_byte_identical():
+@pytest.mark.parametrize("compact", [False, True])
+def test_r3_decentral_byte_identical(compact):
     """Decentral transport yields byte-identical output to resident transport."""
     num_actors = 8
 
@@ -202,68 +153,24 @@ def test_r3_decentral_byte_identical():
         object_refs = MeshDispatch.dispatch(
             group.actor_infos,
             "do_work",
-            _r3_batch(),
+            _r3_batch(compact),
             settings=_dispatch_settings(R3Transport.DECENTRAL if decentral else R3Transport.RESIDENT),
         )
-        return MeshDispatch.sync_collect(group.actor_infos, object_refs)
+        return [
+            result for actor, result in zip(group.actor_infos, ray.get(object_refs), strict=True) if actor.rank.sp == 0
+        ]
 
     resident = run(decentral=False)
     decentral = run(decentral=True)
 
-    # "a" collected from dp collection ranks 0..3 (do_work adds self.rank): [1,3,5,7].
-    assert torch.equal(resident["a"], torch.tensor([1, 3, 5, 7]))
-    # Decentral is byte-identical on every key (both "a" and the R3 passthrough).
-    assert set(decentral.keys()) == set(resident.keys())
-    for k in resident.keys():
-        assert torch.equal(decentral[k], resident[k]), f"decentral diverged on key {k}"
-
-
-def test_r3_resident_transport_preserves_values():
-    """Resident transport keeps the existing driver-put behavior."""
-    group = RayActorGroup(8)
-    refs = MeshDispatch.dispatch(
-        group.actor_infos, "do_work", _r3_batch(), settings=_dispatch_settings(R3Transport.RESIDENT)
-    )
-    out = MeshDispatch.sync_collect(group.actor_infos, refs)
-    assert torch.equal(out["a"], torch.tensor([1, 3, 5, 7]))
-    # R3 passes through unchanged.
-    assert out["rollout_routed_experts"].dtype == torch.int16
-
-
-def test_dispatch_registry():
-    # add a custom dispatch type
-    try:
-
-        class CustomDispatch(Dispatch):
-            @classmethod
-            def dispatch(
-                cls,
-                actor_infos: List[ActorInfo],
-                method: str,
-                *args,
-                settings: DispatchSettings,
-                **kwargs,
-            ) -> List[ObjectRef]:
-                pass
-
-            @classmethod
-            def sync_collect(
-                cls, actor_infos: List[ActorInfo], object_refs: List[ObjectRef], nonblocking: bool = False
-            ) -> Union[List[ObjectRef], TrainingInputBatch]:
-                pass
-
-            @classmethod
-            def async_collect(
-                cls, actor_infos: List[ActorInfo], object_refs: List[ObjectRef]
-            ) -> Optional[TrainingInputBatch]:
-                pass
-
-        DispatchRegistry.register("custom", CustomDispatch)
-        assert DispatchRegistry.get("custom") == CustomDispatch
-        assert DispatchRegistry.list_registered() == {
-            "mesh": MeshDispatch,
-            "pass_through": PassThroughDispatch,
-            "custom": CustomDispatch,
-        }
-    finally:
-        DispatchRegistry._registry.pop("custom")
+    # Only sp=0 ranks contribute; dp ranks 0..3 have rank 0..3, and do_work adds the rank: [1,3,5,7].
+    assert [chunk["a"].item() for chunk in resident] == [1, 3, 5, 7]
+    expected_routes = _r3_batch()["rollout_routed_experts"]
+    for index, chunk in enumerate(resident):
+        local_routes = chunk.routed_experts_tensor()
+        expected_width = index % 2 + 1 if compact else 2
+        assert local_routes.shape[1] == expected_width
+        assert local_routes.dtype == expected_routes.dtype
+        torch.testing.assert_close(local_routes[0], expected_routes[index, :expected_width])
+    # Resident and decentral deliver the same tensor fields and route rows.
+    assert decentral == resident

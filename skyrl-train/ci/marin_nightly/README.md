@@ -1,30 +1,19 @@
 # Nightly end-to-end gates
 
-The nightly runs dense Qwen GRPO on one H100, a teacher-sensitive synchronous OPD step on four H100s,
-a tiny Grug RL cycle on four GB200s,
-the Grug Megatron gates on four H100s, and an OpenCode agentic RL step on eight H100s,
-all from the frozen root environment. The
-GSM8K run is scored against a checked-in spec; the GB200 run proves the locked Marin
-vLLM wheel can load Grug, generate rollouts, train the eager FSDP2 policy, synchronize
-mixed-dtype weights, and generate again; the Megatron run checks that the Megatron
-port of Grug matches the HF reference, keeps the training forward bit-identical to
-the recomputed old log-probs, and completes a rollout/train/broadcast/rollout cycle.
-The OpenCode lane runs eight concurrent, three-turn Daytona tasks through the controller
-RecordProxy and requires exact full-TITO/TIS coverage before an FSDP2 policy update.
-These are integration gates, not model-quality experiments.
+The nightly runs synchronous OPD, Grug Megatron training and the asynchronous
+CatCount learning canary on H100s. Colocated synchronous RL is not a production
+mode; CatCount covers learning. OpenCode runs manually through its launcher
+script. All policy updates use Megatron and the frozen root environment.
 
 | file | role |
 | --- | --- |
-| `run_h100.sh` | sync the frozen root environment, slice GSM8K, train, and gate on H100 |
-| `run_opd_h100.sh` | run one sync OPD step with separate Qwen policy, rollout, and teacher roles |
-| `run_grug_vllm.sh` | run a tiny Grug rollout/train/broadcast/rollout cycle on four GB200s |
-| `run_grug_megatron.sh` | run the Grug Megatron parity, training, and serving gates on four H100s |
-| `run_opencode.sh` | submit, wait for, and gate the federated RNO2A OpenCode RL canary |
-| `gate.py` | reads a run's log and decides whether it was healthy (`python -m ci.marin_nightly.gate`) |
-| `specs/gsm8k-qwen3-0.6b-<strategy>.json` | the GSM8K thresholds per training backend, with provenance for why each one is what it is |
-| `specs/opencode-qwen3-8b.json` | exact continuation, literal bridge, TIS, and optimizer thresholds |
-| `dashboard_readiness.py` | reports whether the finished run reached the RL runs dashboard; never fails the lane |
-| `../../../.github/workflows/marin-nightly.yaml` | provisions the GPU gates through Iris and tears them down |
+| `run_opd_h100.sh` | run synchronous OPD with separate policy, rollout, and teacher roles |
+| `run_grug_megatron.sh` | run Grug parity, training, and serving gates on four H100s |
+| `run_opencode.sh` | submit and gate the federated OpenCode RL canary |
+| `run_cat_count_h100.sh` | submit the CatCount coordinator and gate sampled learning on four H100s |
+| `gate.py` | score a training run against its spec |
+| `specs/cat-count-canary-qwen2.5-0.5b-async.json` | CatCount sampled learning and per-step mechanism requirements |
+| `specs/opencode-qwen3-8b.json` | OpenCode continuation and policy update thresholds |
 
 ## How the gate sees the run
 
@@ -35,25 +24,64 @@ metrics are recoverable from its log alone — no wandb, no checkpoint, no clust
 WANDB_MIRROR kind=train step=2 metrics={"policy/policy_loss": 0.41, "reward/avg_raw_reward": 0.25, ...}
 ```
 
-`gate.py` parses those, takes the **final** training step (a run can look healthy for a
-step and then degrade into NaN), and checks it against the spec: the step count was
-reached, the required metrics are present and finite, the bounded ones are inside their
-range, and the run finished inside its wall-clock budget. It exits non-zero with one line
-per violation. `tests/cpu/test_marin_nightly_gate.py` covers it.
+`gate.py` parses those, counts distinct training steps, and checks the final payload
+against the spec's required metrics and bounds. A spec can also require evidence across
+the run: finite values at every step, minimum observation counts, first-to-last-window
+improvement, and a minimum number of observations above or below a threshold. Training and evaluation
+payloads are separate streams. A selected observation must exist. Duplicate
+payloads for one stream and step count once;
+conflicting copies fail. The gate exits non-zero with one line per violation.
+`tests/cpu/test_marin_nightly_gate.py` covers it.
 
-## Which training backend
+## Metric gates
 
-`STRATEGY` selects `fsdp2` (the default) or `megatron`. Both were run over the same 30-step recipe
-on one H100 on 2026-09-10:
+Each `metric_gates` row selects a `kind` (`train` or `eval`) and a metric.
+Every selected payload must contain a finite value. `min_observations` counts
+payloads, so an evaluation every five steps has fewer observations than the
+training stream. `step` selects a numbered step, `first`, or `last`;
+`max_step` includes observations through that completed step.
 
-| backend | end to end | median `train_step` | max |
-| --- | --- | --- | --- |
-| fsdp2 | 667s | 6.94s | 7.38s |
-| megatron | 883s | 7.92s | 10.8s |
+A `bounds` range applies to every observation by default. With `minimum_count`,
+it requires that many observations inside the range. Endpoint inclusion is
+controlled by `inclusive_minimum` and `inclusive_maximum`. A `trend` compares
+the mean of the first and last `window` observations; too few observations fail.
+Negative `min_improvement` values permit a bounded decrease.
+The gate returns typed failures for missing, nonfinite or out-of-range observations. Top-level `finite_metrics`
+and `bounds` check the final training payload.
 
-fsdp2 is the default on that evidence. Megatron at tensor and pipeline size 1 adds coordination and
-buys no parallelism, which is what a single GPU gives it; the numbers say nothing about either
-backend at a topology where Megatron has something to do.
+```json
+[
+  {"kind": "eval", "metric": "eval/train/avg_score",
+   "min_observations": 1, "step": 0},
+  {"kind": "eval", "metric": "eval/train/avg_score",
+   "min_observations": 2, "trend": {"window": 1, "min_improvement": 0.2}}
+]
+```
+
+CatCount requires sampled training-prompt reward in [0.10, 0.45] at step 0,
+then at least one score ≥ 0.65 by step 30. The launcher evaluates every five
+steps and stops at the first qualifying score. It requires
+`policy/dp_weight_checksum_mismatch` = 0 after every optimizer step. The
+synchronous lane is a manual launcher option outside CI.
+
+## CatCount nightly
+
+`cat-count-h100` submits a 4-CPU, 16-GB-memory, 8-GB-disk coordinator and two
+worker tasks with two H100s and 65 CPUs each. It uses seed 17, behavior clipping
+and staleness 2, without checkpoints or HF export. The runner clones Marin main,
+sets the external MarinSkyRL source to the commit under test, and runs Marin's
+`config/update-external.py MarinSkyRL`. That pin supplies both the launcher
+package and the GPU runtime. Scheduled and manually dispatched workflows run
+all three lanes. The CatCount job summary reports dashboard readiness without
+affecting its learning result.
+
+Each attempt has a 20-minute deadline including queue time. A failure with no
+native training row is reported as `INFRASTRUCTURE_FAILURE` and retried once.
+A failed job after training starts, or a failed metric gate, is `GATE_FAILURE`
+and is not retried. The script records each attempt's wall time and exit status;
+`OK against ...cat-count-canary-qwen2.5-0.5b-async.json` is the passing gate line.
+The workflow uploads the combined native log and cancels its own named jobs
+in the shared cleanup step.
 
 ## Two Ray instances cannot share a node
 
@@ -62,41 +90,23 @@ each other's and the second dies: "Session name ... does not match persisted val
 was an error connecting to Redis." Observed on 2026-09-10 between two single-GPU jobs submitted six
 seconds apart.
 
-This is not specific to this lane and it is not new. `gsm8k-h100` starts Ray through
-the standalone SkyRL Hydra entrypoint; `grug-megatron-h100` starts it through `initialize_ray` in
-`tests/gpu/test_grug_megatron.py`; both target `cw-rno2a` and both are launched by the same 09:00
-cron. Marin-managed launches instead enter through the config-native task runtime, which pins the
-ports before starting the same training entrypoint.
-
-No collision has been observed between the scheduled lanes, and Iris placement may well keep them
-apart, but nothing here guarantees it. If one of them fails at `ray start` with that message, this
-is why. Two runs launched by hand seconds apart will do it: run them serially.
+The Grug tests start Ray through `initialize_ray`; CatCount starts it through
+the Marin task runtime. Both target `cw-rno2a`. A Ray startup error with that
+message indicates two instances sharing a host; inspect their placement.
 
 ## Running it by hand
 
 The gate is pure stdlib and runs anywhere, against any run log:
 
 ```bash
-uv run --frozen python -m ci.marin_nightly.gate \
+python3 skyrl-train/ci/marin_nightly/gate.py \
     --log nightly-run.log \
-    --spec ci/marin_nightly/specs/gsm8k-qwen3-0.6b-fsdp2.json \
+    --spec skyrl-train/ci/marin_nightly/specs/cat-count-canary-qwen2.5-0.5b-async.json \
     --wall-clock-seconds 900
 ```
 
-The training run starts from the cluster-configured Iris task image and resolves the
-architecture-specific `vllm` wheel from the root `uv.lock`. It takes its knobs from the
-environment (`MODEL`, `MAX_STEPS`, `DATA_DIR`). Inside an Iris GPU task:
-
-```bash
-MAX_STEPS=2 bash ci/marin_nightly/run_h100.sh
-```
-
-The GB200 lane additionally imports `vllm._C_stable_libtorch` and the cuMem allocator, verifies the
-Grug model registry entry, then runs a real rollout, eager FSDP2 policy update,
-mixed-dtype weight broadcast, and second rollout. The eager policy path keeps this
-gate independent of the optional compiled FlashAttention package.
-
-The Megatron lane runs `tests/gpu/test_grug_megatron.py` and the two-GPU CP2
+The Grug lane runs `tests/gpu/test_grug_megatron.py`, the Levanter parity oracle
+and the two-GPU CP2
 FlashAttention forward/backward smoke with the frozen Megatron runtime closure;
 see `docs/grug-megatron-training.md` for the Grug tests.
 
@@ -117,8 +127,8 @@ LAUNCH_CONFIG=/path/to/resolved-opencode-launch.yaml \
 
 The launch document is the complete Hydra YAML emitted by the Marin artifact. The script submits
 that document synchronously and gates its combined launcher and task log. Its log must contain one finite training
-step, eight correlated trials, at least 16 correlated turns, 100% exact TIS/full-TITO,
-and no fallback, decline, skipped batch, or failed trajectory. A failure before those
+step, eight correlated trials, at least 16 correlated turns, 100% exact behavior-logprob alignment with full token-in/token-out coverage,
+a finite positive correction weight no greater than 2, and no fallback, decline, skipped batch, or failed trajectory. A failure before those
 metrics should be triaged from the uploaded job log in this order: Iris allocation and
 runtime setup, Daytona snapshot/sandbox setup, OpenCode process errors, RecordProxy
 correlation, continuation declines, then policy forward/backward and weight sync.
@@ -154,16 +164,5 @@ To exercise the whole path — provision, train, gate, tear down — trigger the
 
 ```bash
 gh workflow run marin-nightly.yaml \
-  -f max_steps=2 \
-  -f target_cluster=cw-rno2a \
-  -f grug_target_cluster=cw-us-east-08a
+  -f target_cluster=cw-rno2a
 ```
-
-## Tightening the spec
-
-The shipped thresholds are structural: metrics exist, are finite, and `reward/avg_raw_reward`
-is inside `[0, 1]` (gsm8k scores each rollout 0 or 1, so a mean outside that range means the
-reward path is broken). There is deliberately no reward floor above zero — a 0.6B model can
-legitimately score nothing on 16 GSM8K prompts, and a floor would make the nightly flaky
-rather than informative. Once enough nightlies have run green, replace it with a floor drawn
-from the observed distribution and lower the wall-clock budget to the observed p95.

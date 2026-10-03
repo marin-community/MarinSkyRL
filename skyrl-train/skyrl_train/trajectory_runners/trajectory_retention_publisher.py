@@ -18,8 +18,7 @@ class PublicationRequest:
     request_id: str
     operation: PublicationOperation
     output_path: str
-    archive_path: str | None = None
-    archive_payload: bytes | None = None
+    archives: Mapping[str, bytes] | None = None
     ledger: Mapping[str, Any] | None = None
     retention_config: Mapping[str, Any] | None = None
     record_count: int = 0
@@ -46,7 +45,42 @@ class TrajectoryPublisher(Protocol):
     def close(self) -> PublicationResult | None: ...
 
 
-PublisherWorker = Callable[[PublicationRequest, Connection], None]
+PublicationOperationRunner = Callable[[PublicationRequest], PublicationResult]
+
+
+def _send_publication_result(run: PublicationOperationRunner, request: PublicationRequest, sender: Connection) -> None:
+    try:
+        sender.send(run(request))
+    finally:
+        sender.close()
+
+
+class InlineTrajectoryPublisher:
+    """Run each storage operation synchronously in the calling thread, with no deadline.
+
+    A best-effort submission completes before ``submit`` returns, so it suits storage that cannot hang, such as a
+    local filesystem.
+    """
+
+    def __init__(self, run: PublicationOperationRunner):
+        self._run = run
+        self._pending_result: PublicationResult | None = None
+
+    def execute(self, request: PublicationRequest) -> PublicationResult:
+        return self._run(request)
+
+    def submit(self, request: PublicationRequest) -> bool:
+        if self._pending_result is not None:
+            return False
+        self._pending_result = self._run(request)
+        return True
+
+    def poll(self) -> PublicationResult | None:
+        result, self._pending_result = self._pending_result, None
+        return result
+
+    def close(self) -> PublicationResult | None:
+        return self.poll()
 
 
 class ProcessTrajectoryPublisher:
@@ -54,12 +88,12 @@ class ProcessTrajectoryPublisher:
 
     def __init__(
         self,
-        worker: PublisherWorker,
+        run: PublicationOperationRunner,
         *,
         publish_timeout_seconds: float,
         shutdown_timeout_seconds: float,
     ):
-        self._worker = worker
+        self._run = run
         self._publish_timeout_seconds = publish_timeout_seconds
         self._shutdown_timeout_seconds = shutdown_timeout_seconds
         self._lock = threading.Lock()
@@ -113,7 +147,7 @@ class ProcessTrajectoryPublisher:
     def _execute(self, request: PublicationRequest) -> PublicationResult:
         context = multiprocessing.get_context("spawn")
         receiver, sender = context.Pipe(duplex=False)
-        process = context.Process(target=self._worker, args=(request, sender), daemon=True)
+        process = context.Process(target=_send_publication_result, args=(self._run, request, sender), daemon=True)
         with self._lock:
             self._child = process
         try:

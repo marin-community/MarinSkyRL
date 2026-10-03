@@ -36,21 +36,22 @@ from skyrl_train.tensor_math import masked_mean
 from skyrl_train.distributed.dispatch import ActorInfo, Dispatch, DispatchRegistry, DispatchSettings, MeshRank
 from skyrl_train.distributed import collective_phase_diagnostics as _phase_diagnostics
 from skyrl_train.distributed.strategy import DistributedStrategy
-from transformers import PreTrainedModel
 from loguru import logger
-from skyrl_train.distributed.ulysses.utils import set_ulysses_sequence_parallel_group
-from skyrl_train.distributed.ulysses.monkey_patch import apply_monkey_patch
 from skyrl_train.distributed.utils import init_custom_process_group, init_worker_process_group_with_device
 from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
 from skyrl_train.utils.policy_math import ppo_critic_loss
 from skyrl_train.utils.importance_ratio_diagnostics import (
     LogRatioMonitor,
 )
-from skyrl_train.utils.policy_losses import LossScaling, compute_policy_objective
+from skyrl_train.learner_memory import LearnerCudaMetrics
+from skyrl_train.timing_observability import PhaseBreakdown
+from skyrl_train.telemetry import WORKER_ROLE, ProcessTelemetry, TelemetryConfig
+from skyrl_train.config.objective_spec import topk_loss_params
+from skyrl_train.objective.objective import TopKTeacherBatch, build_objective_micro_batch, compute_policy_objective
+from skyrl_train.objective.reduction import StepCounts, policy_data_weights, step_counts
 from skyrl_train.distillation import student_topk_logprobs
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.training_batch import (
-    GLOBAL_LOSS_DENOM_METADATA_KEY,
     TrainingBatchIterator,
     TrainingInputBatch,
     TrainingOutputBatch,
@@ -92,6 +93,10 @@ def _grug_query_bias_updater(
     target_weight = 1.0 if update.mode is GrugQueryBiasUpdateMode.REPLACE else update.interpolation_weight
     assert target_weight is not None
     return GrugQuantileBiasUpdater(model, valid_tokens, target_weight=target_weight)
+
+
+# Rigging's own shutdown waits two seconds; the extra covers the round trip to every rank.
+TELEMETRY_DRAIN_TIMEOUT_SECONDS = 5.0
 
 
 # Adapted from OpenRLHF: https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/trainer/ray/launcher.py#L17
@@ -153,10 +158,10 @@ class DistributedTorchRayActor:
         # Deterministic forced-CVD-mask pin (opt-in via policy_force_cvd_mask).
         # When engaged, mask this actor to its single Ray-assigned PHYSICAL GPU
         # and force PCI_BUS_ID ordering BEFORE any CUDA / EP-device-mesh init,
-        # so set_device(0)/init_device_mesh/FSDP device_id can only resolve that
+        # so set_device(0) and init_device_mesh can only resolve that
         # one physical GPU. This is independent of positional/LOCAL_RANK ordering
-        # and of whether the SIF Ray masked CVD — closing the GH200 EP×FSDP
-        # GPU-0-stacking init-OOM that set_device(LOCAL_RANK) alone could not
+        # and of whether Ray masked CVD — closing the GH200
+        # GPU-0-stacking init OOM that set_device(LOCAL_RANK) alone could not
         # deterministically prevent. IMPORTANT: this must run before
         # torch.cuda.device_count() below touches CUDA (which would latch the
         # unmasked device set). force_cvd_mask only engages with the per-GPU
@@ -229,7 +234,7 @@ class DistributedTorchRayActor:
         )
 
         # setup device mesh
-        # TODO: Support TP / PP for DeepSpeed
+        # Tensor and pipeline parallelism are configured by the Megatron worker.
         # NOTE (sumanthrh): Device mesh and mesh rank are rank specific attributes. For the current way the strategy is defined, it is only meant to interact with worker state; not hold worker state. Thus, this should live outside the strategy object.
         # This device mesh can be common across all the strategies we use
         dp_size = self._world_size // self.sequence_parallel_size
@@ -238,54 +243,9 @@ class DistributedTorchRayActor:
         )
         self.device_mesh = device_mesh
 
-        # --- EP/CP-aware DATA-parallel width for MeshDispatch -------------------------
-        # The MoE EP all-to-all deadlock at SeqNum=145 (CP=2+EP8 131k prod run, 2026-06-22)
-        # and the underlying silent MoE-math corruption both trace to MeshDispatch keying
-        # data shards on (mesh_rank.dp, mesh_rank.dp_size) where dp_size was computed as
-        # world_size // sequence_parallel_size ALONE -- EP/CP-UNAWARE. The FSDP2 device
-        # mesh (fsdp_utils.create_device_mesh) is ["ddp","fsdp","cp","ep"]: only ddp x fsdp
-        # are TRUE data-parallel (distinct-shard) dims. Data MUST be REPLICATED across cp
-        # (CP splits the sequence inside the forward), ep (all EP ranks process the SAME
-        # tokens), and sp (Ulysses likewise). With SP=1 the old formula gave dp_size=32 on
-        # the ep8xfsdp2xcp2 (1,2,2,8) mesh, so all 32 ranks got DISTINCT shards -> EP-group
-        # ranks combined mismatched tokens -> per-expert counts diverged -> the ragged
-        # token all-to-all desynced and hung. CONFIRMED by the EPPROBE run (job 946890):
-        # at gs=1 all 32 ranks reported DISTINCT fp_sum fingerprints (dp=0..31, dp_size=32).
-        #
-        # Fix: dp_size = world_size // (sp * cp * ep) = ddp_size * fsdp_size (= 2 here), and
-        # dp = the rank's position WITHIN its (ddp,fsdp) data-parallel subgroup, derived from
-        # the FSDP2 row-major rank decomposition so that ranks differing ONLY in (sp,cp,ep)
-        # get the SAME dp -> the same shard. The `sp` field is repurposed as the rank's
-        # REPLICATION index within its dp group (0 for exactly one rank per group); it is
-        # consumed only by MeshRank.is_collection_dp_rank (dispatch.py:37, `sp==0`), so this
-        # keeps collection picking exactly one shard per dp group while leaving the dispatch
-        # split logic untouched.
-        #
-        # INVARIANT (verified): when cp==ep==1 this reduces to the ORIGINAL formula
-        # dp_size = world_size // sp, dp = rank // sp, sp = rank % sp -- byte-identical to the
-        # pre-EP/CP path (the non-EP/non-CP a3 production runs are unaffected). We keep the
-        # original mesh-derived computation for that case and only branch when cp/ep are on.
-        cp_size, ep_size = self._resolve_cp_ep_sizes()
-        if cp_size <= 1 and ep_size <= 1:
-            mesh_dp = self.device_mesh.get_local_rank(mesh_dim="dp")
-            mesh_sp = self.device_mesh.get_local_rank(mesh_dim="sp")
-            mesh_dp_size = self.device_mesh.size(0)
-        else:
-            sp_size = self.sequence_parallel_size
-            # FSDP2 mesh is ["ddp","fsdp","cp","ep"] (row-major; ep varies fastest).
-            # SP is NOT a dim of that mesh; in the cp/ep config SP=1. Treat the global rank
-            # as a flat index over (ddp, fsdp, sp, cp, ep) replication block of width
-            # sp*cp*ep, with the data-parallel index = position in the (ddp,fsdp) outer dims.
-            inner = sp_size * cp_size * ep_size
-            assert self._world_size % inner == 0, (
-                f"world_size={self._world_size} not divisible by sp*cp*ep="
-                f"{inner} (sp={sp_size}, cp={cp_size}, ep={ep_size})"
-            )
-            mesh_dp_size = self._world_size // inner
-            # dp = which (ddp,fsdp) data-parallel group this rank belongs to; rep = its
-            # index within that group's replicated (sp,cp,ep) ranks (rep==0 -> collector).
-            mesh_dp = self._rank // inner
-            mesh_sp = self._rank % inner
+        mesh_dp = self.device_mesh.get_local_rank(mesh_dim="dp")
+        mesh_sp = self.device_mesh.get_local_rank(mesh_dim="sp")
+        mesh_dp_size = self.device_mesh.size(0)
         self.mesh_rank = MeshRank(
             dp=mesh_dp,
             sp=mesh_sp,
@@ -295,46 +255,6 @@ class DistributedTorchRayActor:
             dp_size=mesh_dp_size,
             pp_size=1,
         )
-
-    def _resolve_cp_ep_sizes(self):
-        """Resolve the (context_parallel_size, expert_model_parallel_size) for this run.
-
-        EP/CP are configured per training role under ``cfg.trainer.<role>.fsdp_config``
-        (DeepSpeed/Megatron paths leave them at 1; Megatron overrides this method entirely).
-        ``init_worker_process_group`` is shared across policy/critic/ref, so we take the MAX
-        across the present FSDP2 roles -- for a coherent colocated MoE run they agree, and
-        max is the conservative value that reproduces the actual mesh geometry. Returns
-        ``(1, 1)`` (the byte-identical flag-off path) when no fsdp_config advertises EP/CP.
-        """
-        cfg = getattr(self, "cfg", None)
-        if cfg is None:
-            return 1, 1
-        cp_size, ep_size = 1, 1
-        try:
-            trainer = cfg.trainer
-            for role in ("policy", "critic", "ref"):
-                role_cfg = trainer.get(role) if hasattr(trainer, "get") else getattr(trainer, role, None)
-                if role_cfg is None:
-                    continue
-                fc = role_cfg.get("fsdp_config") if hasattr(role_cfg, "get") else getattr(role_cfg, "fsdp_config", None)
-                if fc is None:
-                    continue
-                cp_size = max(cp_size, int(fc.get("context_parallel_size", 1)))
-                ep_size = max(ep_size, int(fc.get("expert_model_parallel_size", 1)))
-        except Exception as _e:
-            logging.warning("[ep-dispatch] _resolve_cp_ep_sizes fell back to (1,1): %r", _e)
-            return 1, 1
-        return cp_size, ep_size
-
-    def _seq_parallel_monkey_patch(self, model: PreTrainedModel, use_parent_class: bool = False):
-        # NOTE (sumanthrh): This sets a global variable that is used during the forward pass for sequence parallelism
-        # This works because each worker is it's own process and thus different worker types are isolated
-        # TODO (sumanthrh): We should re-visit this and see if we should adopt a context-manager pattern for sequence parallelism
-        if self.sequence_parallel_size > 1:
-            set_ulysses_sequence_parallel_group(self.device_mesh["sp"].get_group())
-            apply_monkey_patch(
-                model=model, ulysses_sp_size=self.sequence_parallel_size, use_parent_class=use_parent_class
-            )
 
     def get_mesh_rank(self):
         return self.mesh_rank
@@ -384,8 +304,7 @@ def log_r3_resident_set(rank: int, data: TrainingInputBatch) -> None:
     batch carrying ``rollout_routed_experts`` logs its size on arrival. Strict
     no-op signal when the batch carries no routes.
     """
-    if "rollout_routed_experts" in data.keys() and data["rollout_routed_experts"] is not None:
-        routes = data["rollout_routed_experts"]
+    if (routes := data.routed_experts) is not None:
         logger.info(
             f"R3_RESIDENT_SET rank={rank} nbytes={int(routes.nbytes)} dtype={routes.dtype} shape={tuple(routes.shape)}"
         )
@@ -396,7 +315,21 @@ class Worker(DistributedTorchRayActor):
         super().__init__(*args, **kwargs)
         self.cfg = cfg
         configure_progress(cfg.trainer.progress)
+        # Rigging drops records from a process that never configured it.
+        self._telemetry = contextlib.ExitStack()
+        telemetry_config = TelemetryConfig.from_environment()
+        if telemetry_config.endpoint is not None:
+            self._telemetry.enter_context(ProcessTelemetry(telemetry_config, WORKER_ROLE))
         enable_trainer_batch_invariance(cfg.trainer.algorithm.batch_invariant)
+
+    @property
+    def device(self) -> torch.device:
+        """Device that holds this worker's model and training tensors."""
+        return torch.device("cuda", torch.cuda.current_device())
+
+    def close_telemetry(self) -> None:
+        """Record the terminal event and drain queued telemetry; ray.kill would drop both."""
+        self._telemetry.close()
 
     def init_model(self, *args, **kwargs):
         """Initialize worker state (model, and optimizer if applicable) on worker."""
@@ -405,44 +338,6 @@ class Worker(DistributedTorchRayActor):
     def empty_cache(self) -> None:
         """Empty GPU memory cache on Worker's CUDA device"""
         torch.cuda.empty_cache()
-
-    def get_device_placement_diag(self) -> dict:
-        """Diagnostic: report the PHYSICAL device this rank actually landed on,
-        plus its EP/FSDP device-mesh coordinate. Used by the EP-reproducing
-        placement smoke to assert every EP×FSDP rank is on a distinct physical
-        GPU. Read-only; safe to call after init_model.
-        """
-        import socket as _socket
-
-        idx = torch.cuda.current_device()
-        try:
-            uuid = str(torch.cuda.get_device_properties(idx).uuid)
-        except Exception:
-            uuid = None
-        diag = {
-            "rank": int(os.environ.get("RANK", "-1")),
-            "host": _socket.gethostname(),
-            "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES"),
-            "CUDA_DEVICE_ORDER": os.environ.get("CUDA_DEVICE_ORDER"),
-            "LOCAL_RANK": os.environ.get("LOCAL_RANK"),
-            "ray_gpu_ids": [str(g) for g in ray.get_gpu_ids()],
-            "device_count": torch.cuda.device_count(),
-            "current_device": idx,
-            "phys_uuid": uuid,
-        }
-        # EP/FSDP mesh coordinate, when the strategy built a device mesh.
-        strat = getattr(self, "strategy", None)
-        mesh = getattr(strat, "device_mesh", None) if strat is not None else None
-        if mesh is not None:
-            try:
-                diag["mesh_shape"] = tuple(mesh.mesh.shape)
-                diag["mesh_dim_names"] = tuple(mesh.mesh_dim_names)
-                diag["mesh_coord"] = tuple(int(c) for c in mesh.get_coordinate())
-                diag["ep_size"] = strat.ep_size
-                diag["cp_size"] = int(getattr(strat, "cp_size", 1))
-            except Exception as e:
-                diag["mesh_error"] = repr(e)
-        return diag
 
     def offload_to_cpu(self, pin_memory=True, non_blocking=True):
         """Offload all worker state to CPU.
@@ -583,12 +478,7 @@ class Worker(DistributedTorchRayActor):
 
         This is a wrapper around `_forward_micro_batch` that runs in micro batches of `cfg.trainer.micro_forward_batch_size_per_gpu`.
         """
-        # WORKER_FORWARD_ENTER instrument (diagnosis-confirmation for the async-dispatch
-        # drain fix). The MoE-RL wedge stranded every NON-rank-0 policy shard's `forward`
-        # task behind the prior weight-sync coroutine on the async actor's single event
-        # loop (FR-proven 2026-06-29): pre-fix ONLY rank 0 reached worker.forward at step 1
-        # (peers' tasks never scheduled). With the drain working, ALL FSDP shard ranks
-        # (e.g. 0/8/16/24) must print this. Cheap one-line INFO; keep it.
+        # Record which ranks enter the synchronous forward after weight sync.
         logger.info(f"WORKER_FORWARD_ENTER rank={self._rank}")
         # R3 RESIDENT-SET per-rank marker: lets us SEE the resident routed-experts
         # chunk land on EVERY rank (ungated; no-op when the batch carries no routes).
@@ -606,44 +496,13 @@ class Worker(DistributedTorchRayActor):
         return output
 
     async def barrier_all(self) -> None:
-        """ASYNC pass-through drain barrier (the MoE-RL async-dispatch wedge fix).
+        """Drain each actor event loop before the next synchronous forward.
 
-        FR-proven root cause (2026-06-29, gs-1 MoE wedge on EP8xFSDP2xCP2): the FSDP
-        policy worker is a Ray ASYNC actor (it defines `async def` methods like
-        `broadcast_to_inference_engines`), so EVERY actor method — sync or async — runs
-        on ONE asyncio event-loop thread. `worker.forward` is a plain SYNC `def`: once it
-        starts it runs to completion on the loop thread WITHOUT yielding. After the
-        disaggregated per-step weight-sync, the peer ranks' loops were still occupied by
-        the `broadcast_to_inference_engines` coroutine task (suspended post-:864 barrier,
-        not yet unwound), so the queued sync `forward` task was NEVER scheduled — only
-        rank 0 (whose loop was free) entered the forward, hit the lonely mesh_fsdp unshard
-        `_all_gather_base` alone, and the 1800s NCCL watchdog SIGABRTed the run.
-
-        WHY THIS METHOD MUST BE `async`, NOT `sync` (the prior fix's flaw): the previous
-        `barrier_all` was a plain SYNC `def`. A sync drain method has the IDENTICAL
-        head-of-line-blocking problem as `forward` — if a peer loop is still occupied by
-        the broadcast coroutine (M2) the sync `barrier_all` task is queued-not-scheduled
-        just like `forward`, so it cannot drain the very loop it is blocked behind, and it
-        adds no yield point (M1). That is why the prior post-weight-sync + per-step sync
-        drains relocated but did NOT fix the wedge.
-
-        As an `async def`, this method is itself a coroutine task on the actor loop: Ray
-        cannot resolve its ObjectRef until the loop became free enough to SCHEDULE and RUN
-        it to completion. The `await asyncio.sleep(0)` forces at least one full loop turn
-        so any lingering weight-sync coroutine task is fully retired and the loop reaches
-        idle BEFORE the collective. The barrier itself runs via `asyncio.to_thread` so the
-        blocking NCCL collective does not re-occupy the single event-loop thread. The
-        driver `await`s this drain's refs (gather) before dispatching `forward.remote()`,
-        so EVERY peer's loop is provably drained-to-idle before the sync forward arrives —
-        robust to BOTH M1 (loop busy) and M2 (coroutine not unwound).
-
-        Symmetric on every rank (cannot itself strand), changes no tensor values
-        (correctness/R3-replay neutral), and is a strict no-op for single-rank or
-        uninitialized runs.
+        The weight-sync coroutine can still occupy some rank loops when the
+        driver dispatches a synchronous forward. Yielding once lets those
+        coroutines finish, then the world barrier aligns all ranks before
+        model collectives begin.
         """
-        # UNGATED per-rank marker so we can SEE the drain fire on every rank (mirrors
-        # WORKER_FORWARD_ENTER). Pre-fix only rank 0 reached the forward; post-fix all
-        # FSDP shard ranks (0/8/16/24 ...) must log this immediately before that step.
         logger.info(f"WORKER_DRAIN_BARRIER rank={self._rank}")
         if self._world_size > 1 and torch.distributed.is_initialized():
             # Yield to the event loop so any lingering weight-sync coroutine task is
@@ -705,7 +564,7 @@ class PPORayActorGroup:
         self._pin_to_ray_gpu_id = pin_to_ray_gpu_id
         # When True (and pin_to_ray_gpu_id), each actor additionally MASKS
         # CUDA_VISIBLE_DEVICES to its single physical GPU + forces PCI_BUS_ID
-        # ordering before any CUDA init — the deterministic EP×FSDP pin.
+        # ordering before any CUDA init — the deterministic EP×DP pin.
         self._force_cvd_mask = force_cvd_mask
 
         # custom resources, see https://docs.ray.io/en/latest/ray-core/scheduling/resources.html
@@ -974,6 +833,9 @@ class PPORayActorGroup:
         Args:
             no_restart: If True, prevents Ray from restarting the actors.
         """
+        # ray.kill skips the actor's atexit handlers; a dead actor only costs the timeout.
+        drains = [actor.close_telemetry.remote() for actor in self._actor_handlers]
+        ray.wait(drains, num_returns=len(drains), timeout=TELEMETRY_DRAIN_TIMEOUT_SECONDS)
         for actor in self._actor_handlers:
             try:
                 ray.kill(actor, no_restart=no_restart)
@@ -992,6 +854,9 @@ class PolicyWorkerBase(Worker):
         self.mesh_rank: MeshRank = None
         self.policy_loss_fn: Callable = PolicyLossRegistry.get(self.cfg.trainer.algorithm.policy_loss_type)
         self._grug_query_bias_window: GrugQueryBiasWindow | None = None
+        self._policy_train_spans: bool = self.cfg.trainer.policy_train_spans
+        self._memory = LearnerCudaMetrics(enabled=self._policy_train_spans, rank=self._rank)
+        self._model_version_step: int | None = None
 
     async def _begin_vllm_layerwise_weight_reload(self, inference_engine_client, *, enabled: bool) -> None:
         """Open a rank-synchronized vLLM reload around a streamed weight update."""
@@ -1045,9 +910,7 @@ class PolicyWorkerBase(Worker):
         Timing-only (no tensor is touched) and gated to the R3-decentral path
         with routes present, so every other configuration is unchanged.
         """
-        staggered = (
-            self.cfg.generator.r3_transport == R3Transport.DECENTRAL and "rollout_routed_experts" in train_data.keys()
-        )
+        staggered = self.cfg.generator.r3_transport == R3Transport.DECENTRAL and train_data.routed_experts is not None
         if staggered and self._world_size > 1 and torch.distributed.is_initialized():
             # Ungated per-rank marker: the timestamp cluster at release proves
             # co-arrival; the first shard collective must not time out after it.
@@ -1056,52 +919,36 @@ class PolicyWorkerBase(Worker):
             torch.distributed.barrier()
 
     def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
+        step = int(train_data.metadata["global_step"])
+        with self._memory.span("ppo_train", step=step):
+            timing = PhaseBreakdown("ppo_train", enabled=self._policy_train_spans)
+            outcome = "failure"
+            try:
+                output = self._ppo_train_impl(train_data, timing)
+                outcome = "success"
+            finally:
+                timing.publish(
+                    clock_domain="cpu_dispatch_wall",
+                    attributes={
+                        "backend": "megatron",
+                        "outcome": outcome,
+                        "rank": str(self._rank),
+                        "role": WORKER_ROLE,
+                        "step": str(step),
+                    },
+                )
+        self._model_version_step = step
+        return output
+
+    async def broadcast_to_inference_engines(self, inference_engine_client):
+        with self._memory.span("broadcast_to_inference_engines", step=self._model_version_step):
+            return await self._broadcast_to_inference_engines(inference_engine_client)
+
+    def _ppo_train_impl(self, train_data: TrainingInputBatch, timing: PhaseBreakdown) -> TrainingOutputBatch:
         self._drain_r3_decentral_stagger(train_data)
 
         global_step = train_data.metadata["global_step"]
 
-        # Per-batch stale_min for StaleClip (None for sync RL, populated for async).
-        stale_min = train_data.metadata.get("stale_min")
-        # Lazily instantiate spike-mitigation objects on first call.
-        if not hasattr(self, "_stale_clip"):
-            from skyrl_train.utils.stale_clip import StaleClip
-            from skyrl_train.utils.zclip import ZClip
-
-            sc_cfg = getattr(self.cfg.trainer.algorithm, "stale_clip", None)
-            zc_cfg = getattr(self.cfg.trainer.algorithm, "z_clip", None)
-            self._stale_clip = StaleClip(
-                alpha=getattr(sc_cfg, "alpha", 0.3) if sc_cfg is not None else 0.3,
-                entropy_threshold=getattr(sc_cfg, "entropy_threshold", 0.15) if sc_cfg is not None else 0.15,
-                entropy_window=getattr(sc_cfg, "entropy_window", 10) if sc_cfg is not None else 10,
-                min_lr_scale=getattr(sc_cfg, "min_lr_scale", 0.1) if sc_cfg is not None else 0.1,
-                enabled=getattr(sc_cfg, "enabled", False) if sc_cfg is not None else False,
-            )
-            self._z_clip = ZClip(
-                alpha=getattr(zc_cfg, "alpha", 0.97) if zc_cfg is not None else 0.97,
-                z_thresh=getattr(zc_cfg, "z_thresh", 2.5) if zc_cfg is not None else 2.5,
-                warmup_steps=getattr(zc_cfg, "warmup_steps", 25) if zc_cfg is not None else 25,
-                max_grad_norm=self.cfg.trainer.policy.optimizer_config.max_grad_norm,
-                clip_option=getattr(zc_cfg, "clip_option", "adaptive_scaling")
-                if zc_cfg is not None
-                else "adaptive_scaling",
-                clip_factor=getattr(zc_cfg, "clip_factor", 1.0) if zc_cfg is not None else 1.0,
-                mode=getattr(zc_cfg, "mode", "zscore") if zc_cfg is not None else "zscore",
-                skip_update_on_spike=getattr(zc_cfg, "skip_update_on_spike", False) if zc_cfg is not None else False,
-                enabled=getattr(zc_cfg, "enabled", False) if zc_cfg is not None else False,
-            )
-            # If load_checkpoint() stashed prior ZClip / StaleClip state from a
-            # resumed run, restore it now that the objects exist. This keeps
-            # warmup_buffer + EMA stats coherent across chain-restarts.
-            if hasattr(self, "_z_clip_state_to_restore"):
-                self._z_clip.load_state_dict(self._z_clip_state_to_restore)
-                delattr(self, "_z_clip_state_to_restore")
-            if hasattr(self, "_stale_clip_state_to_restore"):
-                load_fn = getattr(self._stale_clip, "load_state_dict", None)
-                if load_fn is not None:
-                    load_fn(self._stale_clip_state_to_restore)
-                delattr(self, "_stale_clip_state_to_restore")
-        # Stash for training_step to consume (avoids changing its signature).
-        self._current_stale_min = stale_min
         dataloader = TrainingBatchIterator(train_data, self.cfg.trainer.micro_train_batch_size_per_gpu)
 
         # Clear fragmented GPU memory before training to avoid OOM at step boundaries
@@ -1146,6 +993,27 @@ class PolicyWorkerBase(Worker):
                 disable=not self.strategy.is_rank_0(),
             )
             for local_step, experience in enumerate(pbar):
+                if local_step % accumulation_steps == 0:
+                    chunks = dataloader.chunks(local_step, local_step + accumulation_steps)
+                    counts = step_counts(
+                        [
+                            policy_data_weights(
+                                chunk["loss_mask"],
+                                chunk.get("response_span_tags"),
+                                self.cfg.trainer.algorithm.think_token_weight,
+                            )
+                            for chunk in chunks
+                        ],
+                        [chunk["loss_mask"] for chunk in chunks],
+                        [
+                            chunk["loss_mask"] * chunk["teacher_valid_mask"]
+                            for chunk in chunks
+                            if chunk.get("teacher_valid_mask") is not None
+                        ],
+                        [chunk["advantages"] for chunk in chunks],
+                        self.cfg.trainer.algorithm.max_seq_len,
+                        lambda value: self.strategy.all_reduce(value, op="sum"),
+                    )
                 if grug_query_bias_updates_enabled and local_step % accumulation_steps == 0:
                     assert grug_capture_plan is not None
                     assert grug_causal_lm is not None
@@ -1176,6 +1044,7 @@ class PolicyWorkerBase(Worker):
                         global_step,
                         local_step,
                         accumulation_steps,
+                        counts,
                     )
                 policy_update_steps += 1
 
@@ -1215,15 +1084,9 @@ class PolicyWorkerBase(Worker):
         token_ids = experience.distillation.student_token_ids()
         if token_ids is None:
             return None
-        fsdp_config = self.cfg.trainer.policy.get("fsdp_config", {})
-        if (
-            self.cfg.trainer.use_sample_packing
-            or self.sequence_parallel_size != 1
-            or int(fsdp_config.get("context_parallel_size", 1)) != 1
-        ):
+        if self.cfg.trainer.use_sample_packing or self.sequence_parallel_size != 1:
             raise ValueError(
-                "selected-ID distillation on FSDP2/DeepSpeed does not yet support sample packing, "
-                "sequence parallelism, or context parallelism"
+                "selected-ID distillation does not support sample packing, sequence parallelism, or context parallelism"
             )
         response_logits = output["logits"][:, -num_actions - 1 : -1]
         if response_logits.shape[:2] != experience.distillation.valid_mask.shape:
@@ -1240,13 +1103,14 @@ class PolicyWorkerBase(Worker):
         global_step: int,
         local_step: int,
         accumulation_steps: int,
+        counts: StepCounts,
     ) -> Dict[str, float]:
         """
         Perform one micro-batch of training, accumulate gradients, and step the optimizer only after `accumulation_steps` micro-batches.
         """
         _phase_diagnostics.log_phase(_phase_diagnostics.CollectivePhase.TRAINING_STEP_ENTER)
         self.model.train()
-        experience.to_device(torch.cuda.current_device())
+        experience.to_device(self.device)
 
         sequences = experience.sequences
         old_action_log_probs = experience.action_log_probs
@@ -1271,9 +1135,9 @@ class PolicyWorkerBase(Worker):
             )
         )
 
-        # TODO (sumanthrh): don't think this does anything for deepspeed or fsdp rn because autocast happens internally
+        # The model wrapper controls its own internal precision where needed.
         _phase_diagnostics.start_phase(_phase_diagnostics.CollectivePhase.MODEL_FORWARD_ENTER)
-        with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
+        with torch.autocast(dtype=torch.bfloat16, device_type=self.device.type):
             # actor loss
             action_log_probs, output = self.model(
                 sequences,
@@ -1290,40 +1154,43 @@ class PolicyWorkerBase(Worker):
                 grug_query_bias_window.observe_microbatch()
             token_entropy = output["entropy"][:, -num_actions - 1 : -1]
             sparse_student_logprobs = self._distillation_student_logprobs(experience, output, num_actions)
-            objective = compute_policy_objective(
+            teacher = None
+            if experience.distillation is not None:
+                assert sparse_student_logprobs is not None
+                teacher = TopKTeacherBatch(
+                    experience.distillation,
+                    sparse_student_logprobs,
+                    topk_loss_params(self.cfg.trainer.algorithm),
+                    output["logits"].shape[-1],
+                )
+            batch = build_objective_micro_batch(
                 action_log_probs=action_log_probs,
                 old_action_log_probs=old_action_log_probs,
                 base_action_log_probs=base_action_log_probs,
                 advantages=advantages,
                 loss_mask=loss_mask,
                 rollout_logprobs=rollout_action_logprobs,
+                correction_weights=experience.correction_weights,
                 response_span_tags=response_span_tags,
                 token_entropy=token_entropy,
+                think_token_weight=self.cfg.trainer.algorithm.think_token_weight,
+                teacher=teacher,
+            )
+            objective = compute_policy_objective(
+                batch,
+                loss=self.policy_loss_fn,
+                counts=counts,
                 config=self.cfg.trainer.algorithm,
-                policy_loss_fn=self.policy_loss_fn,
-                accumulation_steps=accumulation_steps,
-                scaling=LossScaling.CALLER,
-                global_loss_denom=(experience.metadata or {}).get(GLOBAL_LOSS_DENOM_METADATA_KEY),
-                distillation=experience.distillation,
-                student_topk_logprobs=sparse_student_logprobs,
+                loss_scale=self.mesh_rank.dp_size,
+                report_scale=accumulation_steps * self.mesh_rank.dp_size,
             )
         _phase_diagnostics.log_phase(_phase_diagnostics.CollectivePhase.MODEL_FORWARD_EXIT)
         loss = objective.optimization_loss
-        policy_loss = objective.policy_loss
-        entropy = objective.entropy
-        kl_loss = objective.kl_loss
-        # FIX-6 (#232): wrap backward in the CP ring-SDPA dispatcher span so a CP
-        # training step's gradient-checkpoint recompute dispatches to ring attention
-        # (matching the saved full-length q/k/v) instead of plain SDPA on the
-        # CP-sharded q/k/v -> avoids the "Recomputed values have different metadata"
-        # CheckpointError. Returns a literal nullcontext for CP1 / non-CP / no-grad
-        # backward (byte-identical). Falls back to nullcontext if the model has no
-        # such method (non-HF wrappers).
-        _cp_backward_span = getattr(self.model, "cp_backward_dispatcher_span", None)
-        _cp_span_cm = _cp_backward_span() if _cp_backward_span is not None else contextlib.nullcontext()
+        policy_loss = objective.rows.policy
+        entropy = objective.rows.entropy
+        kl_loss = objective.rows.kl
         _phase_diagnostics.start_phase(_phase_diagnostics.CollectivePhase.BACKWARD_ENTER)
-        with _cp_span_cm:
-            self.strategy.backward(loss, self.model, self.optimizer)
+        self.strategy.backward(loss, self.model, self.optimizer)
         _phase_diagnostics.log_phase(_phase_diagnostics.CollectivePhase.BACKWARD_EXIT)
 
         # Stage-7 P3 recompute-safety: the training forward DEFERS the router-replay
@@ -1339,7 +1206,7 @@ class PolicyWorkerBase(Worker):
         # the end. v4 ran only on the LAST micro-batch, which with
         # `update_epochs_per_batch=1` gave a noisy single-sample view (action_log_probs
         # is always computed BEFORE optimizer_step within a step, so the per-batch
-        # ratio reflects only vLLM↔FSDP precision noise — averaging across all
+        # ratio reflects only vLLM-to-trainer precision noise — averaging across all
         # micro-batches makes that signal more representative). The final scalar
         # dict has the same wandb keys as v4 so the downstream per-key
         # all_reduce(status) stays keyset-compatible.
@@ -1349,25 +1216,13 @@ class PolicyWorkerBase(Worker):
 
         grad_norm = None
         ratio_diag = {}
-        spike_diag = {}
         optimizer_step_succeeded = False
         if (local_step + 1) % accumulation_steps == 0:
-            # StaleClip: read rolling entropy from prior steps' history; decide LR scale
-            # for THIS step's optimizer.step(). The current micro-batch entropy is pushed
-            # to the history AFTER the step so it informs the next step (decoupling
-            # the decision from the value that step itself produced).
-            stale_clip = getattr(self, "_stale_clip", None)
-            z_clip = getattr(self, "_z_clip", None)
-            stale_min = getattr(self, "_current_stale_min", None)
-            lr_scale = stale_clip.compute_lr_scale(stale_min) if stale_clip is not None else 1.0
-
             grad_norm = self.strategy.optimizer_step(
                 self.optimizer,
                 self.model,
                 self.scheduler,
                 name="actor",
-                z_clip=z_clip,
-                stale_clip_lr_scale=lr_scale,
             )
             optimizer_step_succeeded = (
                 bool(self.strategy.last_optimizer_step_succeeded) if grug_causal_lm is not None else True
@@ -1378,30 +1233,6 @@ class PolicyWorkerBase(Worker):
             if grug_query_bias_window is not None:
                 grug_query_bias_window.finish(optimizer_step_succeeded=optimizer_step_succeeded)
                 self._grug_query_bias_window = None
-
-            # Now push this step's entropy to the rolling window for next step.
-            if stale_clip is not None:
-                # All-reduce the entropy across DP ranks so every rank pushes
-                # an IDENTICAL value into its rank-local entropy_history. Without
-                # this, each rank's rolling_entropy diverges from the others,
-                # ranks straddle the entropy_threshold differently, and they
-                # make different `triggered`/`scale` decisions inside the same
-                # optimizer step — drifting the parameter shards apart.
-                # Smoking gun (Perlmutter 52905223): metrics show
-                #   triggered=0.625 / scale=0.8125 at stale_min=1
-                # = 5/8 ranks applying scale=0.7 and 3/8 applying 1.0.
-                entropy_global = self.strategy.all_reduce(entropy.item(), op="mean")
-                stale_clip.update_entropy(entropy_global)
-
-            # Surface decisions for logging.
-            if stale_clip is not None and stale_clip.enabled:
-                for k, v in stale_clip.last_decision.items():
-                    if isinstance(v, (int, float)):
-                        spike_diag[f"stale_clip/{k}"] = float(v)
-            if z_clip is not None and z_clip.enabled:
-                for k, v in z_clip.last_decision.items():
-                    if isinstance(v, (int, float)):
-                        spike_diag[f"z_clip/{k}"] = float(v)
 
             # Finalize the accumulated diagnostics. Every rank must emit identical
             # keys (the full set from _log_ratio_diag_zero_metrics) — the per-key
@@ -1414,7 +1245,7 @@ class PolicyWorkerBase(Worker):
 
         # status
         status = {
-            "final_loss": objective.unscaled_loss.item(),
+            "final_loss": objective.optimization_loss.item() * accumulation_steps,
             "policy_loss": policy_loss.item(),
             "policy_lr": self.scheduler.get_last_lr()[0],
             "policy_entropy": entropy.item(),
@@ -1425,8 +1256,6 @@ class PolicyWorkerBase(Worker):
         # with large probability changes, per-position aggregations).
         # Trainer prefixes these with "policy/" before sending to wandb.
         status.update(ratio_diag)
-        # Spike-mitigation decisions (StaleClip / ZClip). Empty dict when disabled.
-        status.update(spike_diag)
         if self.cfg.trainer.algorithm.use_kl_loss:
             status["policy_kl"] = kl_loss.item()
 
@@ -1447,17 +1276,6 @@ class PolicyWorkerBase(Worker):
         return status
 
     def save_checkpoint(self, ckpt_dir: Path, tokenizer=None):
-        # Persist ZClip / StaleClip state alongside the model so warmup
-        # counters and EMA stats survive chain-restarts. Without this,
-        # warmup_buffer resets to [] on every resume and (with default
-        # warmup_steps=25 + 60-80 step ablations) ZClip never engages.
-        client_state = {}
-        if hasattr(self, "_z_clip") and self._z_clip is not None:
-            client_state["z_clip_state"] = self._z_clip.state_dict()
-        if hasattr(self, "_stale_clip") and self._stale_clip is not None:
-            sc_state = getattr(self._stale_clip, "state_dict", lambda: None)()
-            if sc_state is not None:
-                client_state["stale_clip_state"] = sc_state
         upload = self.strategy.save_checkpoint(
             model=self.model,
             optimizer=self.optimizer,
@@ -1465,7 +1283,7 @@ class PolicyWorkerBase(Worker):
             ckpt_dir=ckpt_dir,
             node_local_rank=self.get_node_local_rank(),
             tokenizer=tokenizer,
-            client_state=client_state,
+            client_state={},
         )
         self._start_checkpoint_upload(upload)
 
@@ -1481,14 +1299,6 @@ class PolicyWorkerBase(Worker):
             ckpt_dir=ckpt_dir,
             load_training_state=load_training_state,
         )
-        # Restore ZClip / StaleClip state if present. The actual ZClip/StaleClip
-        # objects are lazy-instantiated on the first ppo_train() call, so we
-        # stash the loaded state on self and apply it inside ppo_train.
-        client_state = (states or {}).get("client_state") or {}
-        if "z_clip_state" in client_state:
-            self._z_clip_state_to_restore = client_state["z_clip_state"]
-        if "stale_clip_state" in client_state:
-            self._stale_clip_state_to_restore = client_state["stale_clip_state"]
         return states
 
     def save_hf_model(self, export_dir: str, tokenizer):
@@ -1500,7 +1310,7 @@ class PolicyWorkerBase(Worker):
         )
 
     def _forward_micro_batch(self, micro_batch: TrainingInputBatch) -> TrainingOutputBatch:
-        device = torch.cuda.current_device()
+        device = self.device
         micro_batch.to(device)
         self.model.eval()
         sequences = micro_batch["sequences"]
@@ -1512,11 +1322,9 @@ class PolicyWorkerBase(Worker):
         # NATIVE top-k routing while training uses REPLAY routing -> different
         # experts -> a pathological step-1 importance ratio. Absent key (8B /
         # router-replay off) -> None -> stock native forward, unchanged.
-        rollout_routed_experts = (
-            micro_batch["rollout_routed_experts"] if "rollout_routed_experts" in micro_batch.keys() else None
-        )
+        rollout_routed_experts = micro_batch.routed_experts_tensor()
 
-        with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
+        with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type=self.device.type):
             policy_logprob = self.model(
                 sequences,
                 response_length,
@@ -1565,13 +1373,13 @@ class CriticWorkerBase(Worker):
         micro_batch: TrainingInputBatch,
     ) -> TrainingOutputBatch:
         """Generates critic values."""
-        device = torch.cuda.current_device()
+        device = self.device
         micro_batch.to(device)
         sequences = micro_batch["sequences"]
         response_length = micro_batch.metadata["response_length"]
         attention_mask = micro_batch["attention_mask"]
         self.model.eval()
-        with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
+        with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type=self.device.type):
             value = self.model(
                 sequences,
                 response_length,
@@ -1642,7 +1450,7 @@ class CriticWorkerBase(Worker):
         """
         Perform one micro-batch of training, accumulate gradients, and step the optimizer only after `accumulation_steps` micro-batches.
         """
-        experience.to_device(torch.cuda.current_device())
+        experience.to_device(self.device)
 
         sequences = experience.sequences
         old_values = experience.values
@@ -1651,7 +1459,7 @@ class CriticWorkerBase(Worker):
         attention_mask = experience.attention_mask
         loss_mask = experience.loss_mask
 
-        with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
+        with torch.autocast(dtype=torch.bfloat16, device_type=self.device.type):
             # critic loss
             values, output = self.model(
                 sequences,
@@ -1718,7 +1526,7 @@ class RefWorkerBase(Worker):
         self.model: nn.Module = None
 
     def _forward_micro_batch(self, micro_batch: TrainingInputBatch) -> TrainingOutputBatch:
-        device = torch.cuda.current_device()
+        device = self.device
         micro_batch.to(device)
         sequences = micro_batch["sequences"]
         response_length = micro_batch.metadata["response_length"]
@@ -1727,10 +1535,8 @@ class RefWorkerBase(Worker):
         # constructed with moe_router_replay=true), so its KL-reference logprobs
         # are computed on the same forward path as the policy. Absent key -> None
         # -> stock native forward (8B / flag-off unchanged).
-        rollout_routed_experts = (
-            micro_batch["rollout_routed_experts"] if "rollout_routed_experts" in micro_batch.keys() else None
-        )
-        with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
+        rollout_routed_experts = micro_batch.routed_experts_tensor()
+        with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type=self.device.type):
             log_probs = self.model(
                 sequences,
                 response_length,

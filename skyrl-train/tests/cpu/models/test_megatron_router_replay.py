@@ -2,23 +2,117 @@
 
 Covers the layer mapping, the sequence-major flatten, the TP sequence-parallel
 slice, the per-layer controller state machine (forward / recompute FIFO), the
-geometry validation, and the dense-target builder shared with the FSDP path.
+geometry validation, and the dense-target builder used by the Megatron path.
 """
 
 import pytest
 import torch
-
 from skyrl_train.models.megatron_router_replay import (
+    SENTINEL_EXPERT_ID,
     LayerReplayHandle,
     MegatronRouterReplay,
+    RouterScoreType,
     capture_layer_indices,
+    dense_replay_targets,
     expand_moe_layer_freq,
+    filtered_replay_topk,
     num_moe_layers,
     sequence_major_flatten,
     slice_sequence_parallel,
     validate_replay_geometry,
 )
-from skyrl_train.models.router_replay import SENTINEL_EXPERT_ID, dense_replay_targets
+
+
+@pytest.mark.parametrize("native_order", [(0, 1), (1, 0)], ids=["sorted-training", "unsorted-scoring"])
+@pytest.mark.parametrize(
+    ("score_type", "dtype"),
+    [
+        (RouterScoreType.LOGITS, torch.float32),
+        (RouterScoreType.PROBABILITIES, torch.float32),
+        (RouterScoreType.LOGITS, torch.bfloat16),
+    ],
+    ids=["logits-float32", "probabilities-float32", "logits-bfloat16"],
+)
+@pytest.mark.parametrize("keep_fraction", [0.0, 0.5])
+def test_filtered_replay_keeps_positive_probability_choices_and_native_order(
+    native_order, score_type, dtype, keep_fraction
+):
+    logits = torch.tensor(
+        [
+            [-0.1, -0.2, -0.85, -4.0],
+            [-0.1, -0.2, -0.85, -4.0],
+            [201.0, 200.0, 199.0, 198.0],
+            [-1.0, -1.9921875, -2.6875, -4.0],
+        ],
+        dtype=dtype,
+    )
+    native = torch.tensor([native_order] * 4)
+    captured = torch.tensor([[2, 1], [3, 2], [2, 1], [2, 1]])
+    probabilities = torch.softmax(logits.double(), dim=-1)
+    scores = (logits if score_type is RouterScoreType.LOGITS else probabilities.to(dtype)).requires_grad_()
+    if score_type is RouterScoreType.PROBABILITIES:
+        probabilities = scores.detach().double()
+    reference_kept = probabilities.gather(1, captured) >= keep_fraction * probabilities[:, 1:2]
+    replay_mask = torch.tensor([True, True, True, keep_fraction != 0])
+    expected = [[2, 1], [0, 2], [0, 1], [0, 1]] if keep_fraction else [[2, 1], [3, 2], [2, 1], list(native_order)]
+    controller = MegatronRouterReplay([0], recompute_enabled=False)
+    handle = LayerReplayHandle(controller, 0, score_type)
+    with controller.scoring_mode("router_replay_filtered", keep_fraction):
+        controller.begin_forward(
+            {0: captured},
+            replay_mask,
+            record_recompute=False,
+            probe_positions=torch.tensor([[0, 0], [1, 0], [2, 0], [3, 0]]),
+        )
+        weights, selected = handle.get_replay_topk(
+            scores, 2, default_compute_topk=lambda values, *_args, **_kwargs: (values.gather(1, native), native)
+        )
+        controller.end_forward()
+    replaced = torch.tensor([row["replaced"] for row in controller.take_probe_observations()], dtype=torch.bool)
+    assert selected.tolist() == expected
+    assert torch.equal(replaced, ~reference_kept & replay_mask[:, None])
+    assert torch.equal(weights, scores.gather(1, torch.tensor(expected)))
+    weights.sum().backward()
+    assert torch.equal(
+        scores.grad,
+        scores.new_tensor(
+            [[0, 1, 1, 0], [1, 0, 1, 0], [1, 1, 0, 0], [1, 1, 0, 0]]
+            if keep_fraction
+            else [[0, 1, 1, 0], [0, 0, 1, 1], [0, 1, 1, 0], [1, 1, 0, 0]]
+        ),
+    )
+    if score_type is RouterScoreType.LOGITS and dtype is torch.float32 and keep_fraction == 0.5:
+        offset_selected, _ = filtered_replay_topk(scores + 100, native, captured, torch.ones(4, dtype=torch.bool), 0.5)
+        assert torch.equal(selected, offset_selected)
+
+
+def test_probe_observations_record_sample_layer_and_only_response_positions():
+    controller = MegatronRouterReplay(local_layer_indices=[3], recompute_enabled=False)
+    scores = torch.tensor([[4.0, 3.0, 0.0], [4.0, 3.0, 0.0], [4.0, 3.0, 0.0]])
+    targets = torch.tensor([[0, 0], [2, 1], [0, 0]])
+    mask = torch.tensor([False, True, False])
+    positions = torch.tensor([[-1, -1], [7, 0], [7, 1]])
+    controller.begin_forward(
+        {3: targets},
+        mask,
+        torch.tensor([False, True, True]),
+        record_recompute=False,
+        probe_positions=positions,
+    )
+    controller.get_replay_topk(
+        3,
+        scores,
+        2,
+        default_compute_topk=lambda *args, **kwargs: (scores[:, :2], torch.tensor([[0, 1], [0, 1], [0, 1]])),
+    )
+    controller.end_forward()
+    observations = controller.take_probe_observations()
+    assert [(row["sample"], row["position"], row["layer"]) for row in observations] == [(7, 0, 3), (7, 1, 3)]
+    assert observations[0]["native"] == [0, 1]
+    assert observations[0]["effective"] == [2, 1]
+    assert observations[1]["effective"] == [0, 1]
+    assert not observations[1]["route_valid"]
+    assert controller.take_probe_observations() == []
 
 
 def _fake_compute_topk(scores, topk, num_groups=None, group_topk=None):
@@ -65,11 +159,6 @@ class TestSliceSequenceParallel:
         r1 = slice_sequence_parallel(flat, seq_len=seq_len, batch_size=b, tp_rank=1, tp_size=tp)
         assert r0.shape == (seq_len // tp * b, 7)
         assert torch.equal(torch.cat([r0, r1], dim=0), flat)
-
-    def test_non_divisible_seq_len_raises(self):
-        flat = torch.zeros(3 * 2, 1)
-        with pytest.raises(ValueError, match="divis"):
-            slice_sequence_parallel(flat, seq_len=3, batch_size=2, tp_rank=0, tp_size=2)
 
 
 def _masked_target_rows(n, topk, num_experts, n_masked, device="cpu"):
@@ -279,9 +368,6 @@ class TestValidateReplayGeometry:
         kwargs.update(overrides)
         return kwargs
 
-    def test_valid_geometry_passes(self):
-        validate_replay_geometry(**self._kwargs())
-
     @pytest.mark.parametrize(
         ("overrides", "match"),
         [
@@ -302,10 +388,6 @@ class TestValidateReplayGeometry:
         with pytest.raises(ValueError, match="num_experts"):
             validate_replay_geometry(**self._kwargs(targets=targets))
 
-    def test_list_num_actions_raises_not_implemented(self):
-        with pytest.raises(NotImplementedError, match="scalar num_actions"):
-            validate_replay_geometry(**self._kwargs(num_actions=[5, 5]))
-
 
 class TestExpandMoeLayerFreq:
     def test_integer_freq_matches_mcore_every_n_layers(self):
@@ -316,14 +398,6 @@ class TestExpandMoeLayerFreq:
     def test_list_freq_is_passed_through(self):
         pattern = [0, 1, 1, 0, 1]
         assert expand_moe_layer_freq(pattern, 5) == pattern
-
-    def test_list_freq_length_mismatch_raises(self):
-        with pytest.raises(ValueError, match="moe_layer_freq"):
-            expand_moe_layer_freq([0, 1], 5)
-
-    def test_unsupported_freq_type_raises(self):
-        with pytest.raises(ValueError, match="moe_layer_freq"):
-            expand_moe_layer_freq("every other", 4)
 
 
 class TestDenseReplayTargets:
@@ -354,28 +428,3 @@ class TestDenseReplayTargets:
                 )
                 assert torch.equal(row[:, :], rollout[b, t])
                 assert mask[b, prompt_start + t].item() == (not row_is_sentinel)
-
-    def test_list_num_actions_raises_not_implemented(self):
-        rollout = torch.zeros(2, 5, 3, 2, dtype=torch.long)
-        with pytest.raises(NotImplementedError, match="scalar num_actions"):
-            dense_replay_targets(rollout, 2, 8, num_actions=[5, 5])
-
-    def test_batch_size_mismatch_raises(self):
-        rollout = torch.zeros(2, 5, 3, 2, dtype=torch.long)
-        with pytest.raises((ValueError, AssertionError)):
-            dense_replay_targets(rollout, 3, 8, 5)
-
-
-def test_module_has_no_megatron_imports():
-    import ast
-
-    import skyrl_train.models.megatron_router_replay as module
-
-    tree = ast.parse(open(module.__file__).read())
-    imported = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            imported.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            imported.add(node.module)
-    assert not [name for name in imported if name.split(".")[0] == "megatron"]

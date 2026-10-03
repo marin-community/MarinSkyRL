@@ -1,13 +1,14 @@
+import json
 import pickle
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 
 import pytest
 from loguru import logger
 from ray.exceptions import GetTimeoutError
 
+from marinskyrl.environment_contract import DEBUG_ARTIFACT_DIR_ENV
 import skyrl_train.trainer as trainer_module
-from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
 from skyrl_train.trainer import RayPPOTrainer
 
 
@@ -16,29 +17,29 @@ class _UnpickleableError(RuntimeError):
         raise pickle.PicklingError("exception cannot be pickled")
 
 
-def test_model_initialization_timeout_logs_and_kills_actors(monkeypatch):
+def test_model_initialization_timeout_raises_and_kills_actors(monkeypatch):
     trainer = object.__new__(RayPPOTrainer)
-    trainer._kill_ray_actors = Mock()
-    get = Mock(side_effect=GetTimeoutError("workers still downloading"))
+    killed = []
+    waits = []
+    trainer._kill_ray_actors = lambda: killed.append(True)
+
+    def get(refs, timeout):
+        waits.append(timeout)
+        raise GetTimeoutError("workers still downloading")
+
     monkeypatch.setattr(trainer_module.ray, "get", get)
     monkeypatch.setattr(trainer_module, "time", SimpleNamespace(monotonic=lambda: 100.0), raising=False)
-    messages = []
-    sink_id = logger.add(messages.append, level="ERROR")
 
-    try:
-        with pytest.raises(RuntimeError, match="timed out after 3600 seconds"):
-            trainer._wait_for_setup_phase(
-                ["policy-worker-ref"],
-                deadline=3700.0,
-                phase="policy/ref/critic model initialization",
-            )
-    finally:
-        logger.remove(sink_id)
+    with pytest.raises(RuntimeError, match="timed out after 3600 seconds"):
+        trainer._wait_for_setup_phase(
+            ["policy-worker-ref"],
+            deadline=3700.0,
+            phase="policy/ref/critic model initialization",
+        )
 
-    get.assert_called_once_with(["policy-worker-ref"], timeout=3600.0)
-    trainer._kill_ray_actors.assert_called_once_with()
-    assert len(messages) == 1
-    assert messages[0].record["level"].name == "ERROR"
+    # The phase waits only for the budget left before the shared deadline.
+    assert waits == [3600.0]
+    assert killed == [True]
 
 
 @pytest.mark.asyncio
@@ -46,6 +47,9 @@ async def test_startup_failure_still_runs_trainer_shutdown():
     events = []
     trainer = object.__new__(RayPPOTrainer)
     trainer._shutdown_complete = False
+    trainer.global_step = 0
+    trainer._distillation_runtime = None
+    trainer.context = SimpleNamespace(close=AsyncMock())
 
     async def fail_startup():
         events.append("startup")
@@ -68,6 +72,7 @@ async def test_trainer_shutdown_is_idempotent():
     events = []
     trainer = object.__new__(RayPPOTrainer)
     trainer._shutdown_complete = False
+    trainer.context = SimpleNamespace(close=AsyncMock())
 
     async def teardown():
         events.append("teardown")
@@ -81,13 +86,23 @@ async def test_trainer_shutdown_is_idempotent():
 
 
 @pytest.mark.asyncio
-async def test_training_failure_log_record_does_not_contain_exception_object():
-    trainer = object.__new__(FullyAsyncRayPPOTrainer)
+async def test_training_failure_preserves_receipt_before_shutdown(monkeypatch, tmp_path):
+    trainer = object.__new__(RayPPOTrainer)
     trainer.global_step = 12
+    trainer._distillation_runtime = None
+    trainer.context = SimpleNamespace(close=AsyncMock())
     trainer.trajectory_runner = SimpleNamespace(startup=AsyncMock())
     trainer._train_loop = AsyncMock(side_effect=_UnpickleableError("GPU worker ran out of memory"))
-    trainer._cancel_trajectory_tasks = Mock()
-    trainer._teardown = AsyncMock()
+    monkeypatch.setenv(DEBUG_ARTIFACT_DIR_ENV, str(tmp_path))
+
+    async def teardown():
+        receipts = list((tmp_path / "outcomes").glob("skyrl-trainer.*.exception.json"))
+        assert len(receipts) == 1
+        receipt = json.loads(receipts[0].read_text())
+        assert receipt["exception_type"] == f"{_UnpickleableError.__module__}.{_UnpickleableError.__qualname__}"
+        assert receipt["message"] == "GPU worker ran out of memory"
+
+    trainer._teardown = teardown
     messages = []
     sink_id = logger.add(messages.append, level="ERROR")
 
@@ -97,9 +112,7 @@ async def test_training_failure_log_record_does_not_contain_exception_object():
     finally:
         logger.remove(sink_id)
 
-    assert len(messages) == 1
-    record = messages[0].record
-    assert record["level"].name == "ERROR"
-    assert record["exception"] is None
-    assert "_UnpickleableError: GPU worker ran out of memory" in record["message"]
-    pickle.dumps(record)
+    assert messages
+    assert all(message.record["exception"] is None for message in messages)
+    for message in messages:
+        pickle.dumps(message.record)

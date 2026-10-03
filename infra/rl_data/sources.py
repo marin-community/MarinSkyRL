@@ -14,10 +14,12 @@ from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
+import datasets
 import numpy as np
 import reasoning_gym
 import requests
 from skyrl_gym.envs.aime.utils import last_boxed_only_string, remove_boxed
+from skyrl_gym.envs.mcq.utils import extract_mcq_answer
 from skyrl_gym.envs.text_to_sql import scoring as text_to_sql_scoring
 
 from infra.rl_data.contracts import VerifierDataContract
@@ -39,6 +41,7 @@ VERIFIABLE_CODE_DATASET = "open-r1/verifiable-coding-problems-python"
 APPS_DATASET = "codeparrot/apps"
 GPQA_DATASET = "Idavidrein/gpqa"
 OPENSCIENCE_DATASET = "nvidia/OpenScience"
+OPENSCIENCE_SUBSETS = ("OS-Q2.5-32B-10", "OS-Q2.5-32B-4", "OS-Q2.5-72B-10", "OS-Q3-235B-4")
 KTO_MIX_DATASET = "trl-lib/kto-mix-14k"
 HH_RLHF_DATASET = "Anthropic/hh-rlhf"
 EURUS2_DATASET = "PRIME-RL/Eurus-2-RL-Data"
@@ -65,7 +68,7 @@ _HENDRYCKS_MATH_SUBJECTS = (
     "precalculus",
 )
 _ASDIV_XML_URL = "https://raw.githubusercontent.com/chaochun/nlu-asdiv-dataset/{revision}/dataset/ASDiv.xml"
-_PLAIN_NUMERIC_ANSWER = re.compile(r"^-?\d+(?:\.\d+)?(?:/\d+)?$")
+_PLAIN_NUMERIC_ANSWER = re.compile(r"^-?\d+(?:\.\d+)?(?:/\d+)?$|^-?\d+:-?\d+$")
 
 
 PreparedRow = dict[str, Any]
@@ -120,6 +123,11 @@ NEMOTRON_ULTRA_RLVR2_AGENTS = NEMOTRON_ULTRA_RLVR1_AGENTS | {
     "structured_outputs_v3_simple_agent",
 }
 NEMOTRON_ULTRA_SWE_AGENT = "swe_pivot_single_step_tool_use_with_argument_comparison_agent"
+# Row metadata key naming the TaskTrove proxy task bound to a Harbor SWE row.
+TASKTROVE_PROXY_PATH_KEY = "tasktrove_proxy_path"
+# The MOPD blend adds one generator whose verifier has not been ported, so its rows train only
+# under environment.skyrl_gym.nemotron_ultra.grading: skip.
+NEMOTRON_ULTRA_MOPD_AGENTS = NEMOTRON_ULTRA_RLVR2_AGENTS | {"indirect_prompt_injection_simple_agent"}
 _NEMOTRON_PLACEHOLDER_KEY = "_hf_question_placeholder"
 _NEMOTRON_DAPO_PREFIX = (
     "Solve the following math problem step by step. The last line of your response "
@@ -212,6 +220,17 @@ def _nemotron_ultra_messages(raw_input: Any) -> list[dict[str, Any]]:
     return messages
 
 
+def _freeze_instruction_references(example: Mapping[str, Any], index: int, seed: int) -> Mapping[str, Any]:
+    """Resolve hidden instruction references before serializing a task for generation."""
+    if type(seed) is not int:
+        raise ValueError("Instruction reference seed must be an integer")
+    from skyrl_gym.envs.nemotron_ultra.instruction_references import freeze_instruction_references
+
+    record = freeze_instruction_references(dict(example), f"{seed}:{example.get('uuid', index)}:{index}")
+    record["instruction_reference_seed"] = seed
+    return record
+
+
 def _prepare_nemotron_ultra(
     example: Mapping[str, Any],
     index: int,
@@ -219,6 +238,8 @@ def _prepare_nemotron_ultra(
     *,
     agents: frozenset[str],
     blend: str,
+    instruction_reference_seed: int | None = None,
+    math_reference_kind: str | None = None,
 ) -> PreparedRow:
     del contract
     request = example.get("responses_create_params")
@@ -239,10 +260,21 @@ def _prepare_nemotron_ultra(
     # The stored schema name is historical: snapshot-backed SWE rows use the
     # exact TaskTrove archive path as their Harbor task identifier.
     terminal_bench_task_id = (
-        metadata.get("tasktrove_proxy_path", instance_id) if isinstance(metadata, Mapping) else None
+        metadata.get(TASKTROVE_PROXY_PATH_KEY, instance_id) if isinstance(metadata, Mapping) else None
     )
     if _NEMOTRON_PLACEHOLDER_KEY in example:
         raise ValueError("Nemotron Ultra math placeholder was not restored before row preparation.")
+
+    if instruction_reference_seed is not None and agent == "instruction_following_simple_agent":
+        example = _freeze_instruction_references(example, index, instruction_reference_seed)
+
+    if agent in {"math_with_judge_simple_agent", "ns_tools_simple_agent"}:
+        from skyrl_gym.envs.nemotron_ultra.math_references import prepare_math_reference, reference_kind
+
+        if math_reference_kind is not None:
+            example = prepare_math_reference(example, math_reference_kind)
+        else:
+            reference_kind(example)
 
     return {
         "data_source": NEMOTRON_ULTRA_RL_DATASET,
@@ -464,7 +496,7 @@ def _boxed_answer(solution: str) -> str:
 def _plain_numeric_answer(answer: Any) -> str:
     normalized = str(answer).split("(", 1)[0].strip().replace(",", "")
     if not _PLAIN_NUMERIC_ANSWER.fullmatch(normalized):
-        raise ValueError("answer is not a plain number or fraction.")
+        raise ValueError("answer is not a plain number, fraction, or ratio.")
     if normalized.endswith(".0"):
         return normalized[: -len(".0")]
     return normalized
@@ -768,6 +800,23 @@ def _prepare_gpqa(example: Mapping[str, Any], index: int, contract: VerifierData
     }
 
 
+def _mcq_options(prompt: str) -> dict[str, str]:
+    """Map each ``X: text`` option label to its text, or raise on conflicts.
+
+    OpenScience prompts list one option per line. A label repeated with
+    different text makes that option ambiguous, so the row is rejected.
+    """
+    options: dict[str, str] = {}
+    for match in re.finditer(r"^([A-Z]): ?(.+)$", prompt, re.MULTILINE):
+        label, text = match.group(1), match.group(2).strip()
+        previous = options.setdefault(label, text)
+        if previous != text:
+            raise ValueError(f"OpenScience input has conflicting options for label {label}.")
+    if not options:
+        raise ValueError("OpenScience input has no 'X: option' lines.")
+    return options
+
+
 def _prepare_openscience(example: Mapping[str, Any], index: int, contract: VerifierDataContract) -> PreparedRow:
     source = openscience_source()
     prompt_text = example.get("input")
@@ -776,21 +825,30 @@ def _prepare_openscience(example: Mapping[str, Any], index: int, contract: Verif
         raise TypeError("OpenScience row input must be a string.")
     if not isinstance(output, str):
         raise TypeError("OpenScience row output must be a string.")
-    match = re.search(r"\\boxed\{([A-Da-d])\}", output)
-    if not match:
+    match = extract_mcq_answer(output)
+    if match is None:
         raise ValueError("OpenScience output missing \\boxed{X} answer letter.")
-    ground_truth = match.group(1).upper()
+    ground_truth = match
+    if ground_truth not in _mcq_options(prompt_text):
+        raise ValueError(f"OpenScience answer letter {ground_truth} is not among the offered options.")
     instruction = contract.prompt_instruction
     if not instruction:
         raise ValueError(f"{source.name} requires a verifier prompt instruction.")
-    normalized = contract.normalize_ground_truth(ground_truth)
-    return {
+    wrong_letter = chr((ord(ground_truth) - ord("A") + 1) % 26 + ord("A"))
+    normalized = contract.validate_example(
+        ground_truth, f"\\boxed{{{ground_truth}}}", f"\\boxed{{{wrong_letter}}}"
+    )
+    row = {
         "data_source": source.dataset_id,
         "prompt": [{"role": "user", "content": prompt_text + instruction}],
         "env_class": source.env_id,
         "reward_model": {"ground_truth": normalized},
         "extra_info": {"split": "train", "index": index},
     }
+    subset = example.get("subset")
+    if isinstance(subset, str) and subset:
+        row["extra_info"]["subset"] = subset
+    return row
 
 
 # ---------------------------------------------------------------------------
@@ -1055,7 +1113,16 @@ def gpqa_source() -> Source:
 
 
 def openscience_source() -> Source:
-    return Source("openscience", OPENSCIENCE_DATASET, "mcq", "train", True, "two_sided", _prepare_openscience)
+    return Source(
+        "openscience",
+        OPENSCIENCE_DATASET,
+        "mcq",
+        "train",
+        True,
+        "two_sided",
+        _prepare_openscience,
+        _load_openscience_rows,
+    )
 
 
 def kto_mix_source() -> Source:
@@ -1078,7 +1145,7 @@ def gretel_text_to_sql_source() -> Source:
     )
 
 
-def _nemotron_ultra_source(*, name: str, agents: frozenset[str], blend: str) -> Source:
+def _nemotron_ultra_source(*, name: str, agents: frozenset[str], blend: str, instruction_reference_seed: int | None = None, math_reference_kind: str | None = None) -> Source:
     return Source(
         name,
         NEMOTRON_ULTRA_RL_DATASET,
@@ -1086,18 +1153,22 @@ def _nemotron_ultra_source(*, name: str, agents: frozenset[str], blend: str) -> 
         "train",
         True,
         "row_selected",
-        lambda example, index, contract: _prepare_nemotron_ultra(example, index, contract, agents=agents, blend=blend),
+        lambda example, index, contract: _prepare_nemotron_ultra(example, index, contract, agents=agents, blend=blend, instruction_reference_seed=instruction_reference_seed, math_reference_kind=math_reference_kind),
         _load_nemotron_ultra_rows,
         deduplicate_by_prompt=False,
     )
 
 
-def nemotron_ultra_rlvr1_source() -> Source:
-    return _nemotron_ultra_source(name="nemotron_ultra_rlvr1", agents=NEMOTRON_ULTRA_RLVR1_AGENTS, blend="rlvr1")
+def nemotron_ultra_rlvr1_source(*, instruction_reference_seed: int | None = None, math_reference_kind: str | None = None) -> Source:
+    return _nemotron_ultra_source(name="nemotron_ultra_rlvr1", agents=NEMOTRON_ULTRA_RLVR1_AGENTS, blend="rlvr1", instruction_reference_seed=instruction_reference_seed, math_reference_kind=math_reference_kind)
 
 
-def nemotron_ultra_rlvr2_source() -> Source:
-    return _nemotron_ultra_source(name="nemotron_ultra_rlvr2", agents=NEMOTRON_ULTRA_RLVR2_AGENTS, blend="rlvr2")
+def nemotron_ultra_rlvr2_source(*, instruction_reference_seed: int | None = None, math_reference_kind: str | None = None) -> Source:
+    return _nemotron_ultra_source(name="nemotron_ultra_rlvr2", agents=NEMOTRON_ULTRA_RLVR2_AGENTS, blend="rlvr2", instruction_reference_seed=instruction_reference_seed, math_reference_kind=math_reference_kind)
+
+
+def nemotron_ultra_mopd_source(*, instruction_reference_seed: int | None = None, math_reference_kind: str | None = None) -> Source:
+    return _nemotron_ultra_source(name="nemotron_ultra_mopd", agents=NEMOTRON_ULTRA_MOPD_AGENTS, blend="mopd", instruction_reference_seed=instruction_reference_seed, math_reference_kind=math_reference_kind)
 
 
 def generate_reasoning_gym_rows(*, tasks: tuple[str, ...], rows_per_task: int, seed: int, start_index: int = 0):
@@ -1181,8 +1252,6 @@ def _load_asdiv_rows(source: Source, revision: str, parameters: Mapping[str, Any
 
 
 def _load_hugging_face_dataset(source: Source, revision: str, config: str | None = None):
-    import datasets
-
     return datasets.load_dataset(
         source.dataset_id,
         config,
@@ -1214,6 +1283,19 @@ def _load_nemotron_rows(source: Source, revision: str, parameters: Mapping[str, 
     return _skip_source_rows(source, _load_hugging_face_dataset(source, revision, "RL"), parameters)
 
 
+def _load_openscience_rows(source: Source, revision: str, parameters: Mapping[str, Any]):
+    _validate_source_parameters(source.name, parameters, {"subset", "skip"})
+    subset = parameters.get("subset")
+    if subset not in OPENSCIENCE_SUBSETS:
+        raise ValueError(
+            f"{source.name} parameters.subset must select one of {list(OPENSCIENCE_SUBSETS)}; got {subset!r}."
+        )
+    rows = _skip_source_rows(
+        source, _load_hugging_face_dataset(source, revision, subset), {"skip": parameters.get("skip", 0)}
+    )
+    return ({**example, "subset": subset} for example in rows)
+
+
 def _iter_jsonl_rows(path: Path) -> Iterable[Mapping[str, Any]]:
     """Read heterogeneous JSONL records without imposing an inferred Arrow schema."""
     with path.open(encoding="utf-8") as source_file:
@@ -1230,7 +1312,6 @@ def _iter_jsonl_rows(path: Path) -> Iterable[Mapping[str, Any]]:
 
 
 def _load_nemotron_ultra_rows(source: Source, revision: str, parameters: Mapping[str, Any]):
-    import datasets
     from huggingface_hub import hf_hub_download
 
     # Local import breaks the source/sidechannel module cycle while keeping the
@@ -1247,7 +1328,13 @@ def _load_nemotron_ultra_rows(source: Source, revision: str, parameters: Mapping
     rows = _skip_source_rows(source, _iter_jsonl_rows(Path(local_path)), parameters)
     rows = bind_tasktrove_swe_proxies(rows, load_tasktrove_swe_proxy_index())
 
-    placeholder_sources = {
+    placeholder_sources = load_nemotron_ultra_placeholder_sources()
+    return (restore_nemotron_ultra_placeholder(row, placeholder_sources) for row in rows)
+
+
+def load_nemotron_ultra_placeholder_sources() -> dict[tuple[str, str], datasets.Dataset]:
+    """Load the pinned datasets that NVIDIA's math placeholder rows point into."""
+    return {
         (DAPO_MATH_DATASET, "train"): datasets.load_dataset(
             DAPO_MATH_DATASET,
             split="train",
@@ -1259,7 +1346,6 @@ def _load_nemotron_ultra_rows(source: Source, revision: str, parameters: Mapping
             revision=NEMOTRON_ULTRA_SKYWORK_REVISION,
         ),
     }
-    return (_restore_nemotron_ultra_placeholder(row, placeholder_sources) for row in rows)
 
 
 def _unwrap_nemotron_answer(raw: Any) -> str:
@@ -1279,7 +1365,7 @@ def _unwrap_nemotron_answer(raw: Any) -> str:
     return stripped
 
 
-def _restore_nemotron_ultra_placeholder(
+def restore_nemotron_ultra_placeholder(
     row: Mapping[str, Any],
     sources: Mapping[tuple[str, str], Any],
 ) -> Mapping[str, Any]:
@@ -1349,6 +1435,7 @@ SOURCES = {
         gretel_text_to_sql_source(),
         nemotron_ultra_rlvr1_source(),
         nemotron_ultra_rlvr2_source(),
+        nemotron_ultra_mopd_source(),
     )
 }
 

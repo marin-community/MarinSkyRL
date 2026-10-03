@@ -7,9 +7,12 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Mapping, Protocol, TypeAlias
 
+import numpy as np
+
 
 Message: TypeAlias = Mapping[str, Any]
 UNKNOWN_STOP_REASON = "unknown"
+VERIFIER_RUNTIME_ERROR = "VerifierRuntimeError"
 
 
 def _normalize_finite(value: float, *, field_name: str) -> float:
@@ -33,28 +36,32 @@ class RolloutEvidence:
     generated_token_count: int | None = None
     prompt_token_ids: tuple[int, ...] = ()
     response_token_ids: tuple[int, ...] = ()
-    behavior_logprobs: tuple[float, ...] | None = None
-    student_topk_indices: tuple[tuple[int, ...], ...] | None = None
-    behavior_topk_logprobs: tuple[tuple[float, ...], ...] | None = None
-    routed_experts: tuple[tuple[tuple[int, ...], ...], ...] | None = None
+    behavior_logprobs: np.ndarray | None = None
+    student_topk_indices: np.ndarray | None = None
+    behavior_topk_logprobs: np.ndarray | None = None
+    routed_experts: np.ndarray | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.generated_token_count is not None and self.generated_token_count < 0:
             raise ValueError("generated_token_count must be non-negative")
         if self.behavior_logprobs is not None:
-            for index, logprob in enumerate(self.behavior_logprobs):
-                _normalize_finite(logprob, field_name=f"behavior_logprobs[{index}]")
-            if len(self.behavior_logprobs) != len(self.response_token_ids):
+            if not isinstance(self.behavior_logprobs, np.ndarray) or self.behavior_logprobs.ndim != 1:
+                raise ValueError("behavior_logprobs must be a one-dimensional array")
+            if self.behavior_logprobs.shape[0] != len(self.response_token_ids):
                 raise ValueError("behavior_logprobs must align with response_token_ids")
+            if not np.isfinite(self.behavior_logprobs).all():
+                raise ValueError("behavior_logprobs must be finite")
         if (self.student_topk_indices is None) != (self.behavior_topk_logprobs is None):
             raise ValueError("student top-K IDs and behavior scores must be provided together")
         if self.student_topk_indices is not None:
-            if len(self.student_topk_indices) != len(self.response_token_ids):
+            if not isinstance(self.student_topk_indices, np.ndarray) or self.student_topk_indices.ndim != 2:
+                raise ValueError("student top-K IDs must be a two-dimensional array")
+            if not isinstance(self.behavior_topk_logprobs, np.ndarray) or self.behavior_topk_logprobs.ndim != 2:
+                raise ValueError("student top-K behavior scores must be a two-dimensional array")
+            if self.student_topk_indices.shape[0] != len(self.response_token_ids):
                 raise ValueError("student top-K rows must align with response_token_ids")
-            if any(
-                len(ids) != len(scores) for ids, scores in zip(self.student_topk_indices, self.behavior_topk_logprobs)
-            ):
+            if self.student_topk_indices.shape != self.behavior_topk_logprobs.shape:
                 raise ValueError("student top-K IDs and behavior scores must have matching widths")
         if self.routed_experts is not None:
             if len(self.routed_experts) != len(self.response_token_ids):
@@ -67,6 +74,8 @@ class VerificationStatus(StrEnum):
     VERIFIED = "verified"
     UNAVAILABLE = "unavailable"
     ERROR = "error"
+    # The environment was configured not to verify; the trajectory still trains.
+    SKIPPED = "skipped"
 
 
 @dataclass(frozen=True)
@@ -78,8 +87,16 @@ class VerificationResult:
     passed: bool | None = None
     reason: str | None = None
     diagnostics: Mapping[str, Any] = field(default_factory=dict)
+    score_min: float = 0.0
+    score_max: float = 1.0
 
     def __post_init__(self) -> None:
+        minimum = _normalize_finite(self.score_min, field_name="score_min")
+        maximum = _normalize_finite(self.score_max, field_name="score_max")
+        if maximum <= minimum:
+            raise ValueError("Verifier score range must be increasing")
+        object.__setattr__(self, "score_min", minimum)
+        object.__setattr__(self, "score_max", maximum)
         if self.status is VerificationStatus.VERIFIED:
             if self.score is None:
                 raise ValueError("verified results require a score")
@@ -99,12 +116,16 @@ class VerificationResult:
         *,
         passed: bool | None = None,
         diagnostics: Mapping[str, Any] | None = None,
+        score_min: float = 0.0,
+        score_max: float = 1.0,
     ) -> "VerificationResult":
         return cls(
             status=VerificationStatus.VERIFIED,
             score=score,
             passed=passed,
             diagnostics={} if diagnostics is None else diagnostics,
+            score_min=score_min,
+            score_max=score_max,
         )
 
     @classmethod
@@ -116,12 +137,28 @@ class VerificationResult:
         )
 
     @classmethod
+    def skipped(cls, reason: str, *, diagnostics: Mapping[str, Any] | None = None) -> "VerificationResult":
+        return cls(
+            status=VerificationStatus.SKIPPED,
+            reason=reason,
+            diagnostics={} if diagnostics is None else diagnostics,
+        )
+
+    @classmethod
     def error(cls, reason: str, *, diagnostics: Mapping[str, Any] | None = None) -> "VerificationResult":
         return cls(
             status=VerificationStatus.ERROR,
             reason=reason,
             diagnostics={} if diagnostics is None else diagnostics,
         )
+
+
+def normalized_verifier_score(result: VerificationResult) -> float:
+    """Scale a verified score to [0, 1] using its declared native bounds."""
+    if result.status is not VerificationStatus.VERIFIED or result.score is None:
+        raise ValueError("A verified score is required for normalization")
+    minimum, maximum = result.score_min, result.score_max
+    return min(1.0, max(0.0, (result.score - minimum) / (maximum - minimum)))
 
 
 @dataclass(frozen=True)

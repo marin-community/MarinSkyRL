@@ -39,12 +39,15 @@ The [native Tinker reasoning reproduction](skyrl-train/ci/opd/tinker_repro/READM
 records the step-400 SFT adapter, the one-step OPD gate, AIME 2024 evidence, and replay commands.
 
 Python extras cannot replace a base CPU Torch wheel with a CUDA wheel, so `cpu` and `cuda` are mutually
-exclusive wheel profiles. GPU-only component extras imply `cuda`: ordinary training commands select only
-`vllm`, while the standard image adds `fsdp` for its TorchTitan expert-parallel path and optimized attention
-kernels used by hybrid architectures such as Qwen3.5. The Megatron image adds `megatron`. The GPU profiles use
-Torch 2.13.0+cu132, and `vllm` selects immutable Linux x86_64 H100 and aarch64 GB200 wheels. The optional `fsdp`
-native extensions and all `megatron` native wheels remain x86_64-only; the aarch64 Grug policy path uses eager
-attention. Iris installs the frozen root profile before launch. The `cpu` profile remains on Torch 2.11.0.
+exclusive wheel profiles. GPU training selects the `megatron` and `vllm` extras from the frozen root lock.
+Iris installs this profile before launch. The `cpu` profile remains on Torch 2.11.0.
+
+Iris training and checkpoint export select `IRIS_TASK_IMAGE` in
+[the runtime environment](cloud/iris/runtime_environment.py). Update that value to a published
+multi-architecture `iris-task` manifest digest after verifying its Python patch version on every
+selected architecture. Validate frozen-profile installation, two-node H100 Ray admission, and
+checkpoint export with the selected image before publishing the digest; GPU dependency versions
+come from `uv.lock`.
 
 The walkthrough below reproduces the original OpenThoughts-Agent v1 release (kept here for reference), i.e.:
 - Using [open-thoughts/OpenThinker-Agent-v1-SFT](https://huggingface.co/open-thoughts/OpenThinker-Agent-v1-SFT) as base
@@ -116,3 +119,5 @@ The script is designed to run on 8 GPUs single-node. If that is not your setup, 
   generator.num_inference_engines=8 \
   generator.inference_engine_tensor_parallel_size=1 \
 ```
+
+Verifier setup, opt-in configuration and offline comparison commands are documented in [Unified verification](docs/verifyit.md).
