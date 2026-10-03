@@ -12,6 +12,8 @@ from marinskyrl import recipe_schema as schema
 from scripts.generate_recipe_schema import CONFIG_DIR, render_sections, source_documents
 from skyrl_train.config import ftpo
 from skyrl_gym.envs.gsm8k import env as gsm8k
+from skyrl_gym.envs.reasoning_gym import env as reasoning_gym
+from skyrl_gym.verification import VerificationStatus
 
 
 class EngineOptions(schema.Section):
@@ -69,7 +71,8 @@ def test_generated_ftpo_and_gym_options_preserve_runtime_behavior():
     assert Path(schema.__file__).resolve() == root / "marinskyrl/recipe_schema/__init__.py"
     assert Path(ftpo.__file__).resolve() == root / "skyrl-train/skyrl_train/config/ftpo.py"
     assert Path(gsm8k.__file__).resolve() == root / "skyrl-gym/skyrl_gym/envs/gsm8k/env.py"
-    print(f"recipe contract sources: {schema.__file__}; {ftpo.__file__}; {gsm8k.__file__}")
+    assert Path(reasoning_gym.__file__).resolve() == root / "skyrl-gym/skyrl_gym/envs/reasoning_gym/env.py"
+    print(f"recipe contract sources: {schema.__file__}; {ftpo.__file__}; {gsm8k.__file__}; {reasoning_gym.__file__}")
     base, groups, comments = source_documents(CONFIG_DIR)
     sidecar = runpy.run_path(str(root / "marinskyrl/recipe_schema/sidecar.py"))
     generated = render_sections(base, sidecar, {"DERIVED_PATHS": set(), "LAUNCH_PATHS": set()}, comments, groups)
@@ -105,6 +108,41 @@ def test_generated_ftpo_and_gym_options_preserve_runtime_behavior():
         {"reward_spec": {"ground_truth": "42"}},
     )
     assert strict_environment.step("The answer is 42")["reward"] == 0.0
+    verifier_options = {
+        "environment": {
+            "skyrl_gym": {
+                **{name: {"verifyit_enabled": True} for name in ("reasoning_gym", "ifeval", "text_to_sql", "text2sql")},
+                "lcb": {
+                    "verifyit_enabled": True,
+                    "reward_mode": "fractional",
+                    "sandbox": {"host": "localhost", "port": 6001},
+                },
+                "nemotron_ultra": {
+                    "verifyit_enabled": True,
+                    "verifyit_math_total_timeout_seconds": 75,
+                    "verifyit_judge_total_timeout_seconds": 150.5,
+                    "genrm": {
+                        "verifyit_enabled": True,
+                        "verifyit_strict_json": True,
+                        "verifyit_timeout_seconds": 90,
+                        "judge": {"strict_completion": True},
+                    },
+                    "judges": {"general": {"strict_completion": True}, "safety": {"strict_completion": True}},
+                },
+            }
+        }
+    }
+    verified = authored.merge(recipe_type.from_document(verifier_options))
+    rendered = verified.to_skyrl()["environment"]["skyrl_gym"]
+    for name, options in verifier_options["environment"]["skyrl_gym"].items():
+        assert rendered[name] == options
+    verifier = reasoning_gym.ReasoningGymEnv(OmegaConf.create(rendered["reasoning_gym"]), {})
+    assert verifier.step("Answer: 42")["verification"].status is VerificationStatus.ERROR
+    legacy = verified.with_settings(["environment.skyrl_gym.reasoning_gym.verifyit_enabled=false"])
+    unverified = reasoning_gym.ReasoningGymEnv(
+        OmegaConf.create(legacy.to_skyrl()["environment"]["skyrl_gym"]["reasoning_gym"]), {}
+    )
+    assert "verification" not in unverified.step("Answer: 42")
     for setting in ("trainer.algorithm.ftpo.lambda_mes=0.5", "environment.skyrl_gym.gsm8k.reward_methd=strict"):
         with pytest.raises(ValueError):
             authored.with_settings([setting])

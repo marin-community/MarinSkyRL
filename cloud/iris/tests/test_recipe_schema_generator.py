@@ -122,11 +122,6 @@ def test_generator_cli_preserves_group_types_and_adjacent_comments_and_detects_d
     assert recipe_type().to_skyrl() == {}
     sparse = recipe_type.from_document({"trainer": {"algorithm": {"ftpo": {"lambda_mse": 0.25}}}})
     assert sparse.to_skyrl() == {"trainer": {"algorithm": {"ftpo": {"lambda_mse": 0.25}}}}
-    assert sparse.with_settings(["trainer.algorithm.ftpo.lambda_mse=0.5"]).to_skyrl() == {
-        "trainer": {"algorithm": {"ftpo": {"lambda_mse": 0.5}}}
-    }
-    with pytest.raises(ValidationError):
-        recipe_type.from_document({"trainer": {"algorithm": {"ftpo": {"lambda_mes": 0.25}}}})
     for following in ("hf_save_interval", "micro_forward_batch_size_per_gpu"):
         with pytest.raises(ValidationError):
             recipe_type.model_validate_json(json.dumps({"trainer": {following: None}}))

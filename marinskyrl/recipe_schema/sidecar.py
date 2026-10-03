@@ -120,7 +120,22 @@ UNDECLARED = {
     "trainer.hf_hub_repo_id": ("str | None", None),
     "trainer.hf_hub_private": ("bool", False),
     "trainer.hf_hub_revision": ("str", "main"),
-    "environment.skyrl_gym.nemotron_ultra.verifyit_enabled": ("bool", ...),
+    **{
+        f"environment.skyrl_gym.{environment}.verifyit_enabled": ("bool", ...)
+        for environment in ("reasoning_gym", "ifeval", "text_to_sql", "text2sql", "lcb", "nemotron_ultra")
+    },
+    "environment.skyrl_gym.lcb.reward_mode": ('Literal["binary", "fractional"]', ...),
+    "environment.skyrl_gym.lcb.sandbox.host": ("str", ...),
+    "environment.skyrl_gym.lcb.sandbox.port": ("PositiveInt", ...),
+    "environment.skyrl_gym.nemotron_ultra.verifyit_math_total_timeout_seconds": ("int | float", ...),
+    "environment.skyrl_gym.nemotron_ultra.verifyit_judge_total_timeout_seconds": ("int | float", ...),
+    "environment.skyrl_gym.nemotron_ultra.genrm.verifyit_enabled": ("bool", ...),
+    "environment.skyrl_gym.nemotron_ultra.genrm.verifyit_strict_json": ("bool", ...),
+    "environment.skyrl_gym.nemotron_ultra.genrm.verifyit_timeout_seconds": ("int | float", ...),
+    **{
+        f"environment.skyrl_gym.nemotron_ultra.{judge}.strict_completion": ("bool", ...)
+        for judge in ("judges.general", "judges.safety", "genrm.judge")
+    },
     # Sparse FTPO fields; skyrl_train.config.ftpo supplies execution defaults.
     "trainer.algorithm.ftpo.margin": ("int | float", ...),
     "trainer.algorithm.ftpo.lambda_mse": ("int | float", ...),
