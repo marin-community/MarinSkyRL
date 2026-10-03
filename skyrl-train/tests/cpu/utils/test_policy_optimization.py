@@ -544,7 +544,11 @@ def test_validate_cfg_best_of_n_uses_selected_batch_geometry():
     assert cfg.trainer.algorithm.resolved_group_advantage.physical_group_size == 1
 
 
-def test_validate_cfg_applies_custom_loss_contract_to_training():
+@pytest.mark.parametrize(
+    "loss_name,row_advantages,expected_gradient",
+    [("custom_policy", [3.0, -2.0], [-1.5, 1.0]), ("gspo", [3.0, 3.0], [-1.5, -1.5])],
+)
+def test_validate_cfg_applies_sequence_level_loss_contract_to_training(loss_name, row_advantages, expected_gradient):
     def custom_policy_loss(inputs, config):
         return TokenLoss(-inputs.log_probs * inputs.advantages, {})
 
@@ -552,7 +556,7 @@ def test_validate_cfg_applies_custom_loss_contract_to_training():
         "custom_policy", custom_policy_loss, spec=LossSpec(RatioAnchor.NONE, sequence_level=True)
     )
     cfg = _validatable_dummy_config()
-    cfg.trainer.algorithm.policy_loss_type = "custom_policy"
+    cfg.trainer.algorithm.policy_loss_type = loss_name
     cfg.trainer.algorithm.use_kl_loss = False
     cfg.generator.num_inference_engines = 1
     cfg.generator.inference_engine_tensor_parallel_size = 1
@@ -564,8 +568,15 @@ def test_validate_cfg_applies_custom_loss_contract_to_training():
             validate_cfg(cfg)
         cfg.trainer.algorithm.loss_reduction = "sequence_mean"
         validate_cfg(cfg)
+        cfg.trainer.algorithm.enable_token_reward_channel = True
+        shaping = {"enable_token_reward_channel": True, "enable_pbs_shaping": True}
+        OmegaConf.update(cfg, "terminal_bench_config", {"harbor": shaping}, force_add=True)
+        with pytest.raises(ValueError, match="requires sequence-level advantages; use a token-level loss"):
+            validate_cfg(cfg)
+        OmegaConf.update(cfg, "terminal_bench_config.harbor.enable_pbs_shaping", False)
+        validate_cfg(cfg)
         log_probs = torch.tensor([[-0.1, -0.5]], requires_grad=True)
-        advantages = torch.tensor([[3.0, -2.0]])
+        advantages = torch.tensor([row_advantages])
         mask = torch.ones_like(log_probs)
         batch = build_objective_micro_batch(
             action_log_probs=log_probs,
@@ -582,14 +593,14 @@ def test_validate_cfg_applies_custom_loss_contract_to_training():
         counts = step_counts([mask], [mask], [], [advantages], 2, lambda value: value)
         result = compute_policy_objective(
             batch,
-            loss=PolicyLossRegistry.get("custom_policy"),
+            loss=PolicyLossRegistry.get(loss_name),
             counts=counts,
             config=cfg.trainer.algorithm,
             loss_scale=1,
             report_scale=1,
         )
         result.optimization_loss.backward()
-        torch.testing.assert_close(log_probs.grad, torch.tensor([[-1.5, 1.0]]))
+        torch.testing.assert_close(log_probs.grad, torch.tensor([expected_gradient]))
     finally:
         PolicyLossRegistry.unregister("custom_policy")
 
