@@ -40,6 +40,7 @@ trainer:
   micro_forward_batch_size_per_gpu: ${trainer.micro_train_batch_size_per_gpu}
 generator:
   engine_init_kwargs: {}
+  adapter: null
   sampling_params:
     temperature: 1
 """
@@ -51,7 +52,12 @@ SIDECAR = """TYPES = {
     'trainer.critic.model.lora.dropout': 'Annotated[int | float, Field(ge=0, le=1)]',
 }
 OPEN = frozenset({'generator.engine_init_kwargs'})
-UNDECLARED = {'trainer.algorithm.ftpo.lambda_mse': ('int | float', ...)}
+UNDECLARED = {
+    'trainer.algorithm.ftpo.lambda_mse': ('int | float', ...),
+    'generator.adapter.name': ('str', ...),
+    'generator.adapter.parameters': ('Parameters | None', None),
+    'generator.adapter.parameters.count': ('int', ...),
+}
 NAMES = {}
 """
 
@@ -122,6 +128,12 @@ def test_generator_cli_preserves_group_types_and_adjacent_comments_and_detects_d
     assert recipe_type().to_skyrl() == {}
     sparse = recipe_type.from_document({"trainer": {"algorithm": {"ftpo": {"lambda_mse": 0.25}}}})
     assert sparse.to_skyrl() == {"trainer": {"algorithm": {"ftpo": {"lambda_mse": 0.25}}}}
+    adapter = recipe_type.from_document({"generator": {"adapter": {"name": "custom", "parameters": {"count": 2}}}})
+    assert adapter.to_skyrl() == {"generator": {"adapter": {"name": "custom", "parameters": {"count": 2}}}}
+    assert adapter.with_settings(["generator.adapter.parameters=null"]).to_skyrl() == {
+        "generator": {"adapter": {"name": "custom", "parameters": None}}
+    }
+    assert adapter.with_settings(["generator.adapter=null"]).to_skyrl() == {"generator": {"adapter": None}}
     for following in ("hf_save_interval", "micro_forward_batch_size_per_gpu"):
         with pytest.raises(ValidationError):
             recipe_type.model_validate_json(json.dumps({"trainer": {following: None}}))

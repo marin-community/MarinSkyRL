@@ -1,6 +1,7 @@
 """Public immutable schema primitives for typed SkyRL recipes."""
 
 from .model import FrozenMap as FrozenMap
+from .model import NumberMap as NumberMap
 from .model import OpenMap as OpenMap
 from .model import Section as Section
 from .budget import ContextBudget as ContextBudget

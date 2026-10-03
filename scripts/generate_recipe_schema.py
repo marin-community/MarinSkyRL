@@ -261,13 +261,23 @@ def render_sections(
             field_path = f"{path}.{key}"
             if field_path in owned:
                 continue
-            default = lookup(field_path)
-            if field_path in undeclared:
+            default = undeclared[field_path][1] if field_path in undeclared else lookup(field_path)
+            if isinstance(value, dict) and value and field_path not in open_paths:
+                section_name = emit(field_path, value)
+                annotation = types.get(field_path, section_name)
+                if default is None:
+                    if field_path not in types:
+                        annotation += " | None"
+                    expression = "field(None)"
+                elif default is missing or default is Ellipsis:
+                    expression = "unset_field()"
+                else:
+                    expression = f"Field(default_factory={section_name})"
+                if field_path in undeclared and undeclared[field_path][0] != annotation:
+                    raise ValueError(f"UNDECLARED mapping annotation must be {annotation!r}: {field_path}")
+            elif field_path in undeclared:
                 annotation, default = undeclared[field_path]
                 expression = "unset_field()" if default is Ellipsis else f"field({default!r})"
-            elif isinstance(value, dict) and value and field_path not in open_paths:
-                annotation = emit(field_path, value)
-                expression = f"Field(default_factory={annotation})" if default is not missing else "unset_field()"
             else:
                 annotation = annotation_for(field_path, value)
                 if isinstance(value, dict) and not value and field_path not in types:
@@ -303,7 +313,7 @@ from typing import Annotated{any_import}, Literal
 
 from pydantic import Field, NonNegativeInt, PositiveInt
 
-from .model import OpenMap, Section, field, unset_field
+from .model import NumberMap, OpenMap, Section, field, unset_field
 from .operations import RecipeDocument
 
 '''

@@ -9,7 +9,16 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Annotated, Any, Self, get_args
 
-from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, PlainValidator, field_serializer, field_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    PlainSerializer,
+    PlainValidator,
+    field_serializer,
+    field_validator,
+)
 
 
 class FrozenMap(Mapping[str, Any]):
@@ -96,6 +105,7 @@ def _frozen_map(value: Any) -> FrozenMap:
 
 
 OpenMap = Annotated[FrozenMap, PlainValidator(_frozen_map), PlainSerializer(thaw)]
+NumberMap = Annotated[Mapping[str, int | float], AfterValidator(FrozenMap), PlainSerializer(thaw)]
 
 
 class _Unset(Enum):
