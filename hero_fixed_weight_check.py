@@ -12,6 +12,7 @@ import torch
 
 from hero_qualification import s3_client, s3_location
 from skyrl_train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
+from skyrl_train.dataset.routed_expert_batch import RoutedExpertRows
 from skyrl_train.training_batch import TrainingInputBatch
 
 
@@ -59,15 +60,23 @@ def check(trainer, trajectory_batch, output, *, required_tokens=50000):
         select = lambda key: [trajectory_batch[key][i] for i in indices]
         tensors = convert_prompts_responses_to_batch_tensors(
             trainer.tokenizer, select("prompt_token_ids"), select("response_ids"), select("rewards"),
-            select("loss_masks"), select("rollout_logprobs"), select("rollout_routed_experts"), num_experts=experts,
+            select("loss_masks"), select("rollout_logprobs"),
         )
-        sequences, attention, response_mask, _, loss_mask, behavior, routes, _, _ = tensors
+        sequences, attention, response_mask, _, loss_mask, behavior, _, _ = tensors
         mask = (response_mask * loss_mask).bool()
-        selected_routes = routes[mask].long()
-        assert selected_routes.numel() and selected_routes.min() >= 0 and selected_routes.max() < experts
-        assert (selected_routes.sort(dim=-1).values.diff(dim=-1) > 0).all(), "missing or duplicate captured routes"
-        batch = TrainingInputBatch({"sequences": sequences, "attention_mask": attention, "rollout_routed_experts": routes})
+        route_rows = RoutedExpertRows(tuple(select("rollout_routed_experts")), behavior.shape[1], experts)
+        # Validate original IDs before the worker narrows their dtype. Keep validation
+        # and transport response-local, as in the production trainer.
+        for row, row_mask in zip(route_rows.rows, mask.numpy(), strict=True):
+            assert not row_mask[len(row):].any(), "missing captured response routes"
+            selected_routes = row[row_mask[:len(row)]]
+            assert selected_routes.size and selected_routes.min() >= 0 and selected_routes.max() < experts
+            ordered = np.sort(selected_routes, axis=-1)
+            assert (ordered[..., 1:] > ordered[..., :-1]).all(), "missing or duplicate captured routes"
+        batch = TrainingInputBatch({"sequences": sequences, "attention_mask": attention}, routed_expert_rows=route_rows)
         batch.metadata = {"response_length": behavior.shape[1], "global_step": weight_step}
+        # Only this bounded scoring chunk is made dense for its audit artifact.
+        routes = route_rows.materialize()
         saved = {"sequences": sequences.numpy(), "attention": attention.numpy(), "mask": mask.numpy(),
                  "behavior": behavior.numpy(), "routes": routes.numpy(), "indices": np.array(indices)}
         input_artifacts.append(save_arrays(bucket, f"{prefix}/fixed-weight/input-batch-{start:04d}.npz", saved))
@@ -76,7 +85,9 @@ def check(trainer, trajectory_batch, output, *, required_tokens=50000):
                                                "weight_step": weight_step,
                                                "input_artifacts": input_artifacts}).encode())
         for mode in deltas:
-            batch["rollout_routed_experts"] = routes if mode == "response_replay" else torch.zeros_like(routes)
+            batch.routed_expert_rows = route_rows if mode == "response_replay" else RoutedExpertRows(
+                tuple(np.zeros_like(row) for row in route_rows.rows), route_rows.response_len, experts,
+            )
             began = time.monotonic()
             outputs = ray.get(policy.async_run_ray_method("mesh", "forward", data=batch))
             scores = concatenate_outputs_after_mesh_dispatch(policy.actor_infos, outputs)["output"].float().cpu()
