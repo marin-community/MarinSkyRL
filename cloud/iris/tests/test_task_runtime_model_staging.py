@@ -3,7 +3,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import shutil
 import signal
 import subprocess
 import sys
@@ -141,19 +140,15 @@ def test_main_stages_policy_config_with_the_independent_tokenizer_before_ray(tmp
         (tokenizer_source / "tokenizer.json").write_text('{"identity": "requested"}')
         (tokenizer_source / "tokenizer_config.json").write_text('{"chat_template": "requested"}')
 
-        bundle = tmp_path / "bundle"
-        files = []
-        for relative in runtime_bundle.read_manifest_paths(runtime_bundle.PROJECT_ROOT):
-            source = runtime_bundle.PROJECT_ROOT / relative
-            destination = bundle / relative
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, destination)
-            files.append({"path": relative, "sha256": hashlib.sha256(destination.read_bytes()).hexdigest()})
-        (bundle / runtime_bundle.BUNDLE_IDENTITY_FILE).write_text(
-            json.dumps({"launcher_commit": "a" * 40, "files": files})
+        source = runtime_bundle.LauncherSource(
+            root=runtime_bundle.resolve_launcher_source().root,
+            commit="a" * 40,
+            kind=runtime_bundle.LauncherSourceKind.INSTALLED,
         )
-        monkeypatch.setattr(runtime_bundle, "PROJECT_ROOT", bundle)
+        monkeypatch.setattr(runtime_bundle, "resolve_launcher_source", lambda: source)
         monkeypatch.setattr(task_runtime.tempfile, "gettempdir", lambda: str(tmp_path))
+        bundle = runtime_bundle.build_runtime_bundle(source.commit)
+        monkeypatch.setattr(runtime_bundle, "PROJECT_ROOT", bundle)
         monkeypatch.setattr(os, "environ", os.environ.copy())
         for name in (
             "IRIS_TASK_ID",

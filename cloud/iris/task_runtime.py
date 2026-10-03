@@ -2189,9 +2189,10 @@ def main() -> None:
             cache_source_prefix=args.draft_model_cache_source_prefix,
         )
     if policy_tokenizer is not None and policy_local_path is not None:
-        tokenizer_config = Path(policy_tokenizer.local_path) / "config.json"
-        if not tokenizer_config.exists():
-            shutil.copy2(Path(policy_local_path) / "config.json", tokenizer_config)
+        policy_config_path = Path(policy_local_path) / "config.json"
+        model_config_path = Path(policy_tokenizer.local_path) / policy_config_path.name
+        if not model_config_path.exists():
+            shutil.copy2(policy_config_path, model_config_path)
     # Force the policy chat template onto staged metadata or a local model on every
     # node before Ray; the training driver's tokenizer may load anywhere.
     if args.policy_chat_template:
