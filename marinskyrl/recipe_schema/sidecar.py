@@ -10,6 +10,7 @@ TYPES = {
     "trainer.progress.mode": 'Literal["auto", "tqdm", "logging"]',
     "trainer.debug_mode": 'Literal["off", "light", "distributed"]',
     "trainer.preflight_gate.on_failure": 'Literal["abort", "warn"]',
+    "trainer.logger": "LoggingBackend | tuple[LoggingBackend, ...]",
     "trainer.rollout_buffer.batch_policy": 'Literal["full_batch", "rolling"]',
     "trainer.hf_upload_mode": 'Literal["latest", "all"]',
     "checkpoint_export.hf_upload_mode": 'Literal["latest", "all"]',
@@ -32,6 +33,7 @@ TYPES = {
     "generator.backend": 'Literal["vllm", "sglang"]',
     "generator.weight_sync_backend": 'Literal["nccl", "gloo"]',
     "generator.weight_sync_transport": 'Literal["broadcast", "expert_block"]',
+    "generator.override_existing_update_group": 'Literal["auto", "enable", "disable"]',
     "generator.weight_sync_pause.mode": 'Literal["abort", "wait", "keep"]',
     "generator.r3_transport": 'Literal["by_value", "resident", "decentral"]',
     "generator.gdn_backend": 'Literal["torch", "flashqla"]',
@@ -337,6 +339,7 @@ CLASSES = {
 }
 
 ALIASES = {
+    "LoggingBackend": 'Literal["wandb", "mlflow", "swanlab", "tensorboard", "console"]',
     "CorrectionRule": 'Annotated[TokenRule | SequenceRule, Field(discriminator="kind")]',
     "Callback": 'Annotated[CheckpointCallback | DistillationTokenBudgetCallback | EvaluationCallback | HFModelSaveCallback | DatabaseRegistrationCallback | RefModelUpdateCallback | ProgressCallback | LoggingCallback | PreflightGateCallback | InferenceStatsCallback, Field(discriminator="type")]',
 }

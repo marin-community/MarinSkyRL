@@ -80,7 +80,25 @@ def test_validate_cfg_runs_the_transport_check(generated_recipe_schema):
     with pytest.raises(ValueError, match="weight_sync_transport=expert_block requires"):
         validate_cfg(cfg)
     changed = recipe.with_settings([f"generator.weight_sync_transport={WeightSyncTransport.BROADCAST.value}"])
-    validate_cfg(OmegaConf.merge(example_dummy_config(), changed.to_skyrl()))
+    local = OmegaConf.merge(example_dummy_config(), changed.to_skyrl())
+    validate_cfg(local)
+    assert local.generator.override_existing_update_group == "disable"
+    remote_recipe = changed.with_settings(
+        [
+            "generator.run_engines_locally=false",
+            "generator.num_inference_engines=1",
+            'generator.remote_inference_engine_urls=["http://remote-engine"]',
+            f"generator.weight_sync_pause.mode={WeightSyncPauseMode.KEEP.value}",
+            "generator.override_existing_update_group=auto",
+        ]
+    )
+    remote = OmegaConf.merge(example_dummy_config(), remote_recipe.to_skyrl())
+    validate_cfg(remote)
+    assert remote.generator.override_existing_update_group == "enable"
+    fixed = remote_recipe.with_settings(["generator.override_existing_update_group=disable"])
+    remote_fixed = OmegaConf.merge(example_dummy_config(), fixed.to_skyrl())
+    validate_cfg(remote_fixed)
+    assert remote_fixed.generator.override_existing_update_group == "disable"
     incompatible = changed.with_settings(["generator.vllm_v1_disable_multiproc=true"])
     with pytest.raises(ValueError, match="mode=wait requires"):
         validate_cfg(OmegaConf.merge(example_dummy_config(), incompatible.to_skyrl()))
@@ -88,6 +106,7 @@ def test_validate_cfg_runs_the_transport_check(generated_recipe_schema):
     validate_cfg(OmegaConf.merge(example_dummy_config(), compatible.to_skyrl()))
     for path in (
         "generator.weight_sync_transport",
+        "generator.override_existing_update_group",
         "generator.r3_transport",
         "generator.gdn_backend",
         "generator.weight_sync_pause.mode",
