@@ -256,6 +256,11 @@ async def test_batch_metadata_supports_worker_index_fetch(ray_module, start_buff
         assert {group.uid for group in metadata.groups} == {"a", "b"}
         assert all(group.policy_step == 1 and group.sample_count == SAMPLES_PER_PROMPT for group in metadata.groups)
         assert all(group.response_tokens == SAMPLES_PER_PROMPT for group in metadata.groups)
+        for group in metadata.groups:
+            np.testing.assert_array_equal(group.row_facts.prompt_len, [1, 1])
+            np.testing.assert_array_equal(group.row_facts.response_len, [1, 1])
+            np.testing.assert_array_equal(group.row_facts.score, np.asarray([0.0, 1.0], dtype=np.float32))
+            np.testing.assert_array_equal(group.row_facts.loss_tokens, [1, 1])
         assert metadata.metrics["async/rejected_count"] == 0
 
         fetch = ray.remote(fetch_selected_uids)
