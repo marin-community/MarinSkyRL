@@ -41,7 +41,8 @@ def built_wheel(tmp_path_factory: pytest.TempPathFactory) -> BuiltWheel:
 
 
 def test_root_wheel_owns_launcher_and_training_packages(built_wheel: BuiltWheel, tmp_path: Path) -> None:
-    assert Parser().parsestr(built_wheel.metadata)["Name"] == "marinskyrl"
+    metadata = Parser().parsestr(built_wheel.metadata)
+    assert metadata["Name"] == "marinskyrl"
     assert "marinskyrl = cloud.iris.launch:main" in built_wheel.entry_points
     assert "cloud/iris/launch.py" in built_wheel.names
     assert "cloud/iris/runtime_bundle_files.txt" in built_wheel.names
@@ -52,7 +53,10 @@ def test_root_wheel_owns_launcher_and_training_packages(built_wheel: BuiltWheel,
     environment = tmp_path / "schema-environment"
     subprocess.run(["uv", "venv", "--python", "3.12", str(environment)], check=True)
     interpreter = environment / "bin/python"
-    subprocess.run(["uv", "pip", "install", "--python", str(interpreter), "pydantic==2.12.2"], check=True)
+    requirements = (Requirement(raw) for raw in metadata.get_all("Requires-Dist", []))
+    pydantic = next(requirement for requirement in requirements if requirement.name == "pydantic")
+    minimum = next(bound.version for bound in pydantic.specifier if bound.operator == ">=")
+    subprocess.run(["uv", "pip", "install", "--python", str(interpreter), f"pydantic=={minimum}"], check=True)
     subprocess.run(
         ["uv", "pip", "install", "--python", str(interpreter), "--no-deps", str(built_wheel.path)], check=True
     )
@@ -81,10 +85,11 @@ print(json.dumps({"source": schema.__file__, "pydantic": pydantic.__version__, "
         [str(interpreter), "-c", program],
         cwd=tmp_path,
         env={**os.environ, "PYTHONPATH": ""},
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
     )
+    assert result.returncode == 0, result.stderr
     output = json.loads(result.stdout)
     print(f"built-wheel schema source: {output['source']}; pydantic {output['pydantic']}")
 
