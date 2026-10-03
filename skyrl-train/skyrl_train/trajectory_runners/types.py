@@ -10,6 +10,8 @@ from skyrl_train.inference_engines.base import ConversationType
 
 
 TrainingPhase = Literal["train", "eval"]
+# A row's inference-engine data-parallel rank when no model call reported one.
+UNKNOWN_ENGINE_DP_RANK = -1
 REWARD_SHAPING_COMPONENT_NAMES = ("passthrough", "non_termination", "overlong", "successful_length")
 
 
@@ -118,6 +120,8 @@ class TrajectoryBatch(TypedDict):
     student_topk_indices: Optional[List[np.ndarray]]
     behavior_topk_logprobs: Optional[List[np.ndarray]]
     rollout_routed_experts: Optional[List[np.ndarray]]
+    # The data-parallel rank of the inference engine that served each row's last model call.
+    rollout_engine_dp_ranks: Optional[List[int]]
     teacher_evidence: Optional[TeacherEvidenceBatch]
     distillation: Optional[PreparedTeacherInput]
     token_level_shaping: Optional[List[List[float]]]

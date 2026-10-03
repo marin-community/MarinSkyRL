@@ -2,6 +2,9 @@
 uv run --group dev --extra cpu --isolated pytest tests/cpu/trajectory_runners/test_skyrl_gym_runner.py
 """
 
+from types import SimpleNamespace
+
+import ray
 import torch
 from skyrl_train.config.objective_spec import load_correction
 from skyrl_train.objective.correction import compute_correction
@@ -20,6 +23,10 @@ from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDispos
 from marinskyrl.distillation import TeacherEvidenceKind
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.distillation_adapters import build_teacher_scoring_work
+from skyrl_train.distributed.dispatch import MeshRank
+from skyrl_train.group_admission import GroupAdvantageInvariant
+from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.inference_engines.utils import hash_with_sha256
 from skyrl_train.rollout_observability import observe_rollout_call
 from skyrl_train.trajectory_runners.base import TrajectoryID, TrajectoryRequestBatch
 from skyrl_train.trajectory_runners.model_clients import ModelServerError
@@ -29,6 +36,8 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     validate_trajectory_batch as assert_valid_trajectory_batch,
 )
 from skyrl_train.trajectory_runners.types import AgentLoopOutput, BatchMetadata, TokenProvenance
+from skyrl_train.trainer import RayPPOTrainer
+from skyrl_train.training_batch import ENGINE_DP_RANKS_KEY, TrainingBatchIterator, TrainingOutputBatch
 from skyrl_train.utils.utils import validate_cfg
 
 QWEN2_5 = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -1224,3 +1233,84 @@ async def test_cat_count_preserves_sampled_evidence_and_verification(
     assert batch["loss_masks"] == [[1, 1, 1]]
     assert batch["verification_results"][0].passed is True
     assert batch["env_metrics"][0]["exact_n2"] == 1.0
+
+
+class _RankedEngine:
+    """Inference engine that answers every prompt with ``SAMPLED_IDS`` and counts the prompts it served."""
+
+    def __init__(self):
+        self.served = 0
+
+    async def generate(self, request):
+        count = len(request["prompt_token_ids"])
+        self.served += count
+        return {
+            "responses": ["mocked output"] * count,
+            "stop_reasons": ["stop"] * count,
+            "response_logprobs": [[-0.5] * len(SAMPLED_IDS)] * count,
+            "response_ids": [SAMPLED_IDS.copy()] * count,
+        }
+
+
+class _ForwardRecorder:
+    """Policy mesh of four data-parallel ranks that records the batch each forward receives."""
+
+    def __init__(self):
+        self.actor_infos = [
+            SimpleNamespace(rank=MeshRank(dp=dp, sp=0, tp=0, pp=0, world_size=4, dp_size=4, pp_size=1))
+            for dp in range(4)
+        ]
+        self.forwarded = None
+
+    def async_run_ray_method(self, dispatch, method, *, data=None):
+        if method == "empty_cache":
+            return []
+        assert (dispatch, method) == ("mesh", "forward")
+        self.forwarded = data
+        shard = data.batch_size // 4
+        return [TrainingOutputBatch({"output": torch.zeros(shard, data.metadata["response_length"])}) for _ in range(4)]
+
+
+@pytest.mark.asyncio
+async def test_rollout_rows_carry_their_serving_engine_rank_to_training_micro_batches(
+    tokenizer, generator_cfg, skyrl_gym_cfg, use_env, monkeypatch
+):
+    """Rows served by engines 3 and 2 keep their data-parallel ranks through the policy forward and the micro-batches."""
+    use_env(ScriptedEnv(BaseTextEnvStepOutput(observations=[], reward=1.0, done=True, metadata={})))
+    config = get_default_config()
+    config.generator.inference_engine_data_parallel_size = 2
+    engines = [_RankedEngine() for _ in range(4)]
+    client = InferenceEngineClient(engines, tokenizer, config)
+    runner = SkyRLGymTrajectoryRunner(generator_cfg, skyrl_gym_cfg, client, tokenizer)
+    sessions = [
+        next(f"rollout-{i}" for i in range(100) if hash_with_sha256(f"rollout-{i}_0") % 4 == engine)
+        for engine in (3, 2)
+    ]
+    request = TrajectoryRequestBatch(
+        prompts=[[{"role": "user", "content": "question"}]] * 2,
+        env_classes=[ENV_CLASS] * 2,
+        env_extras=[{}, {}],
+        sampling_params=None,
+        trajectory_ids=[TrajectoryID(session, 0) for session in sessions],
+        batch_metadata=BatchMetadata(global_step=1, training_phase="train"),
+    )
+
+    trajectory = await runner.run(request)
+
+    assert [engine.served for engine in engines] == [0, 0, 1, 1]
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = config
+    trainer.group_advantage_invariant = GroupAdvantageInvariant.no_group_advantage(physical_group_size=1)
+    trainer.tokenizer = tokenizer
+    trainer.policy_model = _ForwardRecorder()
+    trainer.critic_model = trainer.ref_model = None
+    trainer.colocate_all = False
+    trainer.global_step = 1
+    trainer._training_metrics_enabled = False
+    trainer.all_metrics = {}
+    monkeypatch.setattr(ray, "get", lambda results: results)
+    batch = trainer.fwd_logprobs_values_reward(trainer.convert_to_training_input(trajectory, sessions))
+
+    assert trainer.policy_model.forwarded[ENGINE_DP_RANKS_KEY].tolist() == [1, 0, 1, 0]
+    micro_batches = list(TrainingBatchIterator(trainer.compute_advantages_and_returns(batch), 1))
+    assert [micro.rollout_engine_dp_ranks.tolist() for micro in micro_batches] == [[1], [0], [1], [0]]

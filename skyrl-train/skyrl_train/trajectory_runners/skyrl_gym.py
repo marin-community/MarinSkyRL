@@ -436,6 +436,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         rollout_logprobs: Optional[List[float]] = [] if collect_logprobs else None
         rollout_routes: np.ndarray | None = None
         route_sentinel: np.ndarray | None = None
+        engine_dp_rank: int | None = None
         requested_logprobs = current_sampling_params.get("logprobs")
         collect_topk = isinstance(requested_logprobs, int) and requested_logprobs > 0
         selected_capture_possible = collect_topk and not retokenize_chat_history
@@ -498,6 +499,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             if engine_output["token_provenance"] == TokenProvenance.RECONSTRUCTED:
                 self._reject_inexact_chat("the model client returned reconstructed token IDs")
                 token_provenance = TokenProvenance.RECONSTRUCTED
+            engine_dp_ranks = engine_output.get("engine_dp_ranks")
+            engine_dp_rank = None if engine_dp_ranks is None else engine_dp_ranks[0]
             output = engine_output["responses"][0]
             output_ids = engine_output["response_ids"][0]
             topk_ids_batch = engine_output.get("student_topk_indices")
@@ -752,6 +755,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                         rollout_logprobs,
                         rollout_routes,
                         route_sentinel,
+                        engine_dp_rank,
                         per_step_rewards,
                         verification_results,
                         chat_history,
@@ -777,6 +781,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 rollout_logprobs,
                 rollout_routes,
                 route_sentinel,
+                engine_dp_rank,
                 per_step_rewards,
                 verification_results,
                 chat_history,
@@ -920,6 +925,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             student_topk_indices=None if selected is None else selected.indices,
             behavior_topk_logprobs=None if selected is None else selected.topk_logprobs,
             routed_experts=rollout_routes,
+            engine_dp_rank=engine_dp_rank,
             metadata=({"terminal_exception_type": disposition.exception_type} if terminal_error is not None else {}),
         )
         reward_result = RewardResult(

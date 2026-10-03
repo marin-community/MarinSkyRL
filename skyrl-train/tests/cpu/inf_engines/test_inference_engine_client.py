@@ -21,7 +21,7 @@ from jinja2 import TemplateError
 from omegaconf import OmegaConf
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.inference_engines.base import InferenceEngineInput, InferenceEngineOutput
-from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.inference_engines.inference_engine_client import ENGINE_DP_RANK_KEY, InferenceEngineClient
 from skyrl_train.inference_engines.inference_engine_client_http_endpoint import (
     ErrorResponse,
 )
@@ -60,6 +60,7 @@ def _make_min_cfg():
                 "http_endpoint_host": "127.0.0.1",
                 "http_endpoint_port": 0,
                 "weight_sync_pause_timeout_seconds": 30.0,
+                "inference_engine_data_parallel_size": 1,
             },
         }
     )
@@ -861,7 +862,7 @@ async def test_chat_completion_retry_resends_original_when_no_tokens_generated_y
 
     # Since finish_reason != abort on the second call and base_response was None,
     # client should return the second response directly (no accumulation)
-    assert out == engines[0].responses[1]
+    assert out == {**engines[0].responses[1], ENGINE_DP_RANK_KEY: 0}
 
 
 @pytest.mark.asyncio
@@ -902,7 +903,7 @@ async def test_chat_completion_accepts_tool_call_response_without_text_content()
         "headers": {},
     }
 
-    assert await client.chat_completion(request) == response
+    assert await client.chat_completion(request) == {**response, ENGINE_DP_RANK_KEY: 0}
 
 
 # -------------------------------------------
@@ -1135,7 +1136,7 @@ async def test_generate_retry_no_gen_finish():
     assert first_call["sampling_params"]["max_tokens"] == 16
     assert second_call["sampling_params"]["max_tokens"] == 16
 
-    assert out == {**engines[0].responses[1], "prompt_logprobs": None}
+    assert out == {**engines[0].responses[1], "prompt_logprobs": None, "engine_dp_ranks": [0]}
 
 
 # -------------------------------------------
@@ -1571,6 +1572,75 @@ async def test_weight_sync_pause_skips_an_engine_that_already_died():
     assert live.scheduler_paused
     await client.resume_generation()
     assert not live.scheduler_paused
+
+
+class _SignedEngine:
+    """Engine that answers with its own index, or fails every call as a dead Ray actor does."""
+
+    def __init__(self, index: int, *, dead: bool):
+        self.index = index
+        self.dead = dead
+
+    async def generate(self, request):
+        if self.dead:
+            raise ray.exceptions.RayActorError()
+        count = len(request["prompt_token_ids"])
+        return InferenceEngineOutput(
+            responses=[str(self.index)] * count,
+            response_ids=[[self.index]] * count,
+            stop_reasons=["stop"] * count,
+            response_logprobs=None,
+        )
+
+    async def chat_completion(self, request_payload):
+        if self.dead:
+            raise ray.exceptions.RayActorError()
+        return {
+            "choices": [
+                {"message": {"role": "assistant", "content": str(self.index)}, "finish_reason": "stop"},
+            ],
+            "usage": {"completion_tokens": 1},
+        }
+
+
+async def _served_ranks(client: InferenceEngineClient, kind: str, session_id: str) -> list[tuple[int, int]]:
+    """``(serving engine index, reported rank)`` for every response of one request of ``kind``."""
+    if kind == "chat":
+        response = await client.chat_completion(
+            {"json": {"messages": [{"role": "user", "content": "hi"}], "session_id": session_id}, "headers": {}}
+        )
+        return [(int(response["choices"][0]["message"]["content"]), response[ENGINE_DP_RANK_KEY])]
+    prompts = [[1, 2]] if kind == "single" else [[1, 2], [3, 4], [5, 6], [7, 8]]
+    output = await client.generate(
+        InferenceEngineInput(
+            prompt_token_ids=prompts,
+            sampling_params={"max_tokens": 1},
+            session_ids=[session_id] if kind == "single" else None,
+        )
+    )
+    return [(int(text), rank) for text, rank in zip(output["responses"], output["engine_dp_ranks"], strict=True)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "expected"),
+    [
+        ("chat", [(3, 1)]),
+        ("single", [(3, 1)]),
+        # The even split sends prompt i to engine i; engine 0's prompt fails over to engine 3.
+        ("batched", [(3, 1), (1, 1), (2, 0), (3, 1)]),
+    ],
+)
+async def test_responses_report_the_data_parallel_rank_of_the_engine_that_served_them(kind, expected, monkeypatch):
+    """Two engine groups of two data-parallel ranks each; engine 0 is dead, so its requests fail over."""
+    monkeypatch.setattr("skyrl_train.inference_engines.inference_engine_client.random.choice", max)
+    cfg = _make_min_cfg()
+    cfg.generator.inference_engine_data_parallel_size = 2
+    engines = [_SignedEngine(index, dead=index == 0) for index in range(4)]
+    client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=cfg)
+    session_id = next(f"trial-{i}" for i in range(100) if hash_with_sha256(f"trial-{i}") % 4 == 0)
+
+    assert await _served_ranks(client, kind, session_id) == expected
 
 
 class _DraftGenerateEngine(_MockGenerateEngine):
