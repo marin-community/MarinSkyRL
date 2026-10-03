@@ -64,7 +64,7 @@ def test_inference_engine_forwards_only_supported_nccl_diagnostics(monkeypatch):
 
 
 def test_inference_engine_uses_policy_nccl_buffer_size_for_weight_sync(monkeypatch):
-    monkeypatch.delenv("NCCL_BUFFSIZE", raising=False)
+    monkeypatch.setenv("NCCL_BUFFSIZE", "4194304")
 
     runtime_env = _build_inference_engine_runtime_env(nccl_buffer_size_bytes=262144)
 
