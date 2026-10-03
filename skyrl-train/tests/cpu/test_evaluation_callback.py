@@ -9,15 +9,17 @@ import marinskyrl.recipe_schema as schema
 from scripts import generate_recipe_schema as generator
 from skyrl_train.callbacks.base import TrainerControl, TrainerState
 from skyrl_train.callbacks import builtin as callbacks
+from skyrl_train.inference_engines import utils as inference
 
 
 @pytest.fixture(scope="module")
-def callback_recipe_type():
+def callback_schema():
     root = Path(__file__).resolve().parents[3]
     assert Path(schema.__file__).resolve() == root / "marinskyrl/recipe_schema/__init__.py"
     assert Path(generator.__file__).resolve() == root / "scripts/generate_recipe_schema.py"
     assert Path(callbacks.__file__).resolve() == root / "skyrl-train/skyrl_train/callbacks/builtin.py"
-    print(f"callback sources: {schema.__file__}; {generator.__file__}; {callbacks.__file__}")
+    assert Path(inference.__file__).resolve() == root / "skyrl-train/skyrl_train/inference_engines/utils.py"
+    print(f"callback sources: {schema.__file__}; {generator.__file__}; {callbacks.__file__}; {inference.__file__}")
     base, groups, comments = generator.source_documents(generator.CONFIG_DIR)
     sidecar = runpy.run_path(str(root / "marinskyrl/recipe_schema/sidecar.py"))
     generated = generator.render_sections(
@@ -25,7 +27,7 @@ def callback_recipe_type():
     )
     namespace = {"__name__": "marinskyrl.recipe_schema._callbacks", "__package__": "marinskyrl.recipe_schema"}
     exec(compile(generated, "generated-callback-sections", "exec"), namespace)
-    return namespace["RecipeSections"]
+    return namespace["RecipeSections"], OmegaConf.create(base)
 
 
 @pytest.mark.parametrize(
@@ -33,9 +35,10 @@ def callback_recipe_type():
     [(True, 5, True), (False, 5, False), (True, 0, False)],
 )
 def test_evaluation_callback_respects_final_evaluation_configuration(
-    eval_on_train_end, eval_steps, expected, callback_recipe_type
+    eval_on_train_end, eval_steps, expected, callback_schema
 ):
-    recipe = callback_recipe_type.from_document(
+    recipe_type, _ = callback_schema
+    recipe = recipe_type.from_document(
         {
             "trainer": {
                 "callbacks": [{"type": "evaluation", "eval_steps": eval_steps, "eval_on_train_end": eval_on_train_end}]
@@ -50,16 +53,23 @@ def test_evaluation_callback_respects_final_evaluation_configuration(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("requirement", [{"minimum": 0.65}, {"min_improvement": 0.4}])
-async def test_evaluation_stops_at_the_first_qualifying_score(requirement, callback_recipe_type):
-    recipe = callback_recipe_type.from_document(
+@pytest.mark.parametrize(
+    "requirement",
+    [{"minimum": 0.65}, {"minimum": 0.65, "min_improvement": None}, {"min_improvement": 0.4, "minimum": None}],
+)
+async def test_evaluation_stops_at_the_first_qualifying_score(requirement, callback_schema):
+    recipe_type, config = callback_schema
+    recipe = recipe_type.from_document(
         {
             "trainer": {
                 "callbacks": [
                     {
                         "type": "evaluation",
                         "additional_evaluations": {
-                            "sampled": {"sampling_params": {"temperature": 0.5}, "n_samples_per_prompt": 2}
+                            "sampled": {
+                                "sampling_params": {"temperature": 0.5, "min_tokens": 0},
+                                "n_samples_per_prompt": 2,
+                            }
                         },
                         "metric_groups": {"eval/mean": ["eval/score", "eval/sampled/score"]},
                         "stop_when": {"eval/score": requirement},
@@ -69,7 +79,7 @@ async def test_evaluation_stops_at_the_first_qualifying_score(requirement, callb
         }
     )
     callback = callbacks.create_callbacks_from_config(OmegaConf.create(recipe.to_skyrl()))[0]
-    evaluator = LocalEvaluator()
+    evaluator = LocalEvaluator(config.generator.eval_sampling_params)
     state = TrainerState(global_step=0, epoch=0, total_steps=30, num_steps_per_epoch=30)
     for step, score, grouped, stopped in ((0, 0.25, 0.275, False), (5, 0.64, 0.665, False), (10, 0.65, 0.675, True)):
         state.global_step = step
@@ -83,14 +93,24 @@ async def test_evaluation_stops_at_the_first_qualifying_score(requirement, callb
 class LocalEvaluator:
     score: float = 0.0
 
+    def __init__(self, sampling_defaults):
+        self.sampling_defaults = sampling_defaults
+
     async def eval(self, *, val_set_name, sampling_params, n_samples_per_prompt):
         assert val_set_name == "sampled"
-        assert sampling_params == {"temperature": 0.5}
+        assert sampling_params == {"temperature": 0.5, "min_tokens": 0}
         assert n_samples_per_prompt == 2
+        translated = inference.get_sampling_params_for_backend(
+            "vllm", OmegaConf.merge(self.sampling_defaults, sampling_params)
+        )
+        assert translated["min_tokens"] == 0
+        assert translated["temperature"] == 0.5
+        assert translated["max_tokens"] == self.sampling_defaults.max_generate_length
         return {"eval/score": self.score + 0.05}
 
 
-def test_callback_recipes_preserve_checkpoint_export_and_reference_controls(callback_recipe_type):
+def test_callback_recipes_preserve_checkpoint_export_and_reference_controls(callback_schema):
+    recipe_type, _ = callback_schema
     document = {
         "trainer": {
             "callbacks": [
@@ -101,7 +121,7 @@ def test_callback_recipes_preserve_checkpoint_export_and_reference_controls(call
             ]
         }
     }
-    recipe = callback_recipe_type.from_document(document)
+    recipe = recipe_type.from_document(document)
     assert recipe.to_skyrl() == document
     configured = callbacks.create_callbacks_from_config(OmegaConf.create(recipe.to_skyrl()))
     state = TrainerState(global_step=7, epoch=0, total_steps=30, num_steps_per_epoch=7)
@@ -121,4 +141,4 @@ def test_callback_recipes_preserve_checkpoint_export_and_reference_controls(call
         {"type": "distillation_token_budget"},
     ):
         with pytest.raises(ValidationError):
-            callback_recipe_type.from_document({"trainer": {"callbacks": [invalid]}})
+            recipe_type.from_document({"trainer": {"callbacks": [invalid]}})

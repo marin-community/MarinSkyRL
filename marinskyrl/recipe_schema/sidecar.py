@@ -122,6 +122,8 @@ UNDECLARED = {
     "trainer.hf_hub_repo_id": ("str | None", None),
     "trainer.hf_hub_private": ("bool", False),
     "trainer.hf_hub_revision": ("str", "main"),
+    "generator.sampling_params.min_tokens": ("NonNegativeInt", ...),
+    "generator.eval_sampling_params.min_tokens": ("NonNegativeInt", ...),
     **{
         f"environment.skyrl_gym.{environment}.verifyit_enabled": ("bool", ...)
         for environment in ("reasoning_gym", "ifeval", "text_to_sql", "text2sql", "lcb", "nemotron_ultra")
@@ -199,8 +201,8 @@ CLASSES = {
         "sampling_params": ("EvalSamplingParams | None", False),
         "n_samples_per_prompt": ("PositiveInt | None", False),
     },
-    "EvaluationMinimum": {"minimum": ("int | float", True)},
-    "EvaluationImprovement": {"min_improvement": ("int | float", True)},
+    "EvaluationMinimum": {"minimum": ("int | float", True), "min_improvement": ("None", False)},
+    "EvaluationImprovement": {"min_improvement": ("int | float", True), "minimum": ("None", False)},
     "CheckpointCallback": {
         "type": ('Literal["checkpoint"]', True),
         "save_steps": ("int", False),
