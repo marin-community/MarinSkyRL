@@ -1,12 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# CPython 3.12, Linux x86_64, H100. Requires git and a CUDA-supported C++ compiler.
+# CPython 3.12, Linux. TE supports x86_64 and aarch64; other recipes target x86_64.
 package="${1:?usage: build_native.sh PACKAGE BUILD_DIRECTORY}"
 build_dir="$(realpath -m "${2:?usage: build_native.sh PACKAGE BUILD_DIRECTORY}")"
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 source_subdir=.
 python_version=3.12.14
+architecture="$(uname -m)"
+case "$architecture" in
+    x86_64) ;;
+    aarch64)
+        if [[ "$package" != transformer-engine-torch ]]; then
+            echo "Only transformer-engine-torch is qualified for aarch64 in this script" >&2
+            exit 2
+        fi
+        ;;
+    *) echo "unsupported build architecture: $architecture" >&2; exit 2 ;;
+esac
 max_jobs=2
 package_environment=()
 case "$package" in
@@ -27,7 +38,7 @@ case "$package" in
         ;;
     transformer-engine-torch)
         repository=NVIDIA/TransformerEngine
-        source_commit=c188b533cc3721ca9c6bbfd26148f5cf60108c25
+        source_commit=5e52befd5262c06289106338c308079d6adb391f
         source_subdir=transformer_engine/pytorch
         package_environment+=(NVTE_PYTORCH_FORCE_BUILD=TRUE NVTE_NO_LOCAL_VERSION=1 NVTE_BUILD_MAX_JOBS=1)
         max_jobs=1
@@ -76,3 +87,16 @@ c++ --version
 env "${build_environment[@]}" uv build --wheel --no-build-isolation --python "$virtual_env/bin/python" \
     --out-dir "$build_dir/dist" "$build_dir/source/$source_subdir"
 (cd "$build_dir/dist" && sha256sum -- *.whl) > "$build_dir/SHA256SUMS"
+{
+    printf 'package=%s\narchitecture=%s\nsource=%s\n' "$package" "$architecture" "$source_commit"
+    sha256sum "$0" "$script_dir/native-cu132.txt"
+    git -C "$build_dir/source" submodule status --recursive
+    "$virtual_env/bin/python" --version
+    uv --version
+    "$cuda_home/bin/nvcc" --version
+    c++ --version
+    ldd --version
+    "$virtual_env/bin/python" -c \
+        'import torch; print("torch=" + torch.__version__); print("cxx11_abi=" + str(torch.compiled_with_cxx11_abi()))'
+} > "$build_dir/BUILD_INFO"
+uv pip freeze --python "$virtual_env/bin/python" > "$build_dir/BUILD_REQUIREMENTS.txt"
