@@ -41,7 +41,7 @@ examples now use those named modules without a compatibility shim. The stale pre
 implementation was deleted.
 
 Both FSDP2 and Megatron forward the complete directional metric key set. Package initialization registers the full
-built-in algorithm set, including `rloo_n_pbs`; config validation and Ray actor restarts preserve local user
+built-in algorithm set; config validation and Ray actor restarts preserve local user
 registrations. The focused policy-loss and backend suites pass with 60 tests. The complete launcher and trainer CPU
 gate passes with 1,300 tests and 20 skips.
 

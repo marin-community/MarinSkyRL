@@ -193,3 +193,18 @@ def test_entrypoint_supervisor_allows_remote_cleanup_before_returning():
 
     assert exit_code == 128 + signal.SIGTERM
     assert events.get(timeout=60) == "stopped"
+
+
+@pytest.mark.parametrize("operation", [EntrypointOperation.TRAIN, EntrypointOperation.GENERATE])
+def test_group_estimator_training_needs_two_samples_per_prompt(monkeypatch, operation):
+    cfg = get_default_config()
+    cfg.trainer.logger = "console"
+    cfg.trainer.algorithm.advantage_estimator = "grpo"
+    cfg.generator.n_samples_per_prompt = 1
+    monkeypatch.setattr(trainer_utils, "initialize_ray", Mock(side_effect=RuntimeError("reached Ray initialization")))
+    if operation is EntrypointOperation.TRAIN:
+        with pytest.raises(ValueError, match="at least 2 samples per prompt"):
+            run_ray_driver(cfg, None, TrajectoryRunnerMode.SKYRL_GYM, operation=operation)
+    else:
+        with pytest.raises(RuntimeError, match="reached Ray initialization"):
+            run_ray_driver(cfg, None, TrajectoryRunnerMode.SKYRL_GYM, operation=operation)

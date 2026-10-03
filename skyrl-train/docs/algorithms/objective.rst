@@ -180,7 +180,7 @@ The driver admits rollout groups and attaches teacher evidence before the old
 policy forward. It obtains old-policy log probabilities, then intersects the
 training mask with teacher validity for REPLACE. Mismatch diagnostics therefore
 retain their original input view. The driver computes environment advantages,
-optionally normalizes them, adds loop credit, and finally applies chosen-token
+optionally normalizes them, adds token credit, and finally applies chosen-token
 teacher credit. Chosen-token evidence is consumed on the driver; top-K evidence
 travels to the learner.
 
@@ -203,7 +203,7 @@ For chosen-token evidence, with route weight :math:`u_i`, coefficient
 All quantities in this advantage are detached. With ``advantage_clip: null``
 the gap is unbounded. The coefficient and route weight multiply the gap once,
 after clipping. ``reward_mode: add`` uses :math:`A=A^{\rm env}+A^T` after
-environment normalization and loop credit. ``reward_mode: replace`` uses
+environment normalization and token credit. ``reward_mode: replace`` uses
 :math:`A=A^T` and trains only teacher-valid positions.
 
 Top-K evidence carries selected token IDs, teacher log probabilities, validity
