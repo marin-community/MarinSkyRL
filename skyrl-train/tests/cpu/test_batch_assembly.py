@@ -97,6 +97,7 @@ def test_dp_slices_with_fields_and_longest_rows_on_other_ranks_match_driver(dp_s
     whole = trainer.apply_loop_advantages(whole)
     whole.pop("values")
     whole.metadata.pop("metrics")
+    whole.metadata["global_step"] = plan.policy_step
     for rank, expected in enumerate(whole.chunk(whole.batch_size // dp_size)):
 
         async def read(batch_id, indices):
