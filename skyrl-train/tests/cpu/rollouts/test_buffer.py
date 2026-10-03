@@ -1,12 +1,14 @@
 """Lease accounting and batch selection of the rollout buffer, exercised in-process without Ray."""
 
 import asyncio
+from pathlib import Path
 
 import pytest
 from skyrl_gym.verification import VerificationResult
 
 from skyrl_train.dynamic_sampling import DynamicSamplingType, GroupSelectionResult
 from skyrl_train.group_admission import AdmissionRejection, GroupAdmissionStalledError
+from skyrl_train.rollouts import buffer as buffer_module
 from skyrl_train.rollouts.buffer import (
     BatchPolicy,
     GroupRewards,
@@ -310,8 +312,19 @@ async def test_snapshot_restores_untaken_groups_and_reports_outstanding_leases(b
     ],
 )
 @pytest.mark.asyncio
-async def test_batch_policy_decides_whether_groups_train_in_lease_or_commit_order(batch_policy, batches):
-    buffer = _buffer(batch_policy, batch_size=2, max_in_flight=4)
+async def test_batch_policy_decides_whether_groups_train_in_lease_or_commit_order(
+    batch_policy, batches, generated_recipe_schema
+):
+    root = Path(__file__).resolve().parents[4]
+    assert Path(buffer_module.__file__).resolve() == root / "skyrl-train/skyrl_train/rollouts/buffer.py"
+    recipe_type, _ = generated_recipe_schema
+    recipe = recipe_type.from_document(
+        {"trainer": {"rollout_buffer": {"batch_policy": BatchPolicy.FULL_BATCH.value}}}
+    ).with_settings([f"trainer.rollout_buffer.batch_policy={batch_policy.value}"])
+    with pytest.raises(ValueError):
+        recipe.with_settings(["trainer.rollout_buffer.batch_policy=unknown-batch-policy"])
+    configured = BatchPolicy(recipe.to_skyrl()["trainer"]["rollout_buffer"]["batch_policy"])
+    buffer = _buffer(configured, batch_size=2, max_in_flight=4)
     await buffer.publish(1)
     leases = [await asyncio.wait_for(buffer.acquire_lease(), PROGRESS_TIMEOUT) for _ in range(4)]
     assert [lease.batch_id for lease in leases] == [1, 1, 2, 2]

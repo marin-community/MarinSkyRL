@@ -1,13 +1,20 @@
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 import torch
+from omegaconf import OmegaConf
 
-from skyrl_train.checkpoint_exporter import CheckpointExportPlan, CheckpointExporter, RayPolicyExportWorkers
+from skyrl_train import checkpoint_exporter as exporter_module
+from skyrl_train.checkpoint_exporter import (
+    CheckpointExportPlan,
+    CheckpointExporter,
+    RayPolicyExportWorkers,
+    hub_publisher,
+)
 from skyrl_train.hf_export_schema import HFUploadMode
 from skyrl_train.hf_model_io import verify_hf_model_export
-from skyrl_train.hf_publisher import HuggingFacePublisher
 
 
 class FakePolicyExportWorkers:
@@ -191,18 +198,29 @@ def test_ray_policy_export_workers_loads_model_state_without_training_state():
     assert group.killed
 
 
-def test_hf_publisher_publishes_root_and_requested_archive(tmp_path, monkeypatch):
+def test_hf_publisher_publishes_root_and_requested_archive(tmp_path, monkeypatch, generated_recipe_schema):
+    root = Path(__file__).resolve().parents[3]
+    assert Path(exporter_module.__file__).resolve() == root / "skyrl-train/skyrl_train/checkpoint_exporter.py"
+    recipe_type, base = generated_recipe_schema
+    recipe = recipe_type.from_document(
+        {
+            "checkpoint_export": {
+                "hf_hub_repo_id": "org/model",
+                "hf_hub_private": True,
+                "hf_hub_revision": "main",
+                "hf_upload_mode": HFUploadMode.LATEST.value,
+            }
+        }
+    ).with_settings([f"checkpoint_export.hf_upload_mode={HFUploadMode.ALL.value}"])
+    with pytest.raises(ValueError):
+        recipe.with_settings(["checkpoint_export.hf_upload_mode=unknown-upload-mode"])
     export_path = tmp_path / "exports" / "global_step_12" / "policy"
     export_path.mkdir(parents=True)
     (export_path / "model.safetensors").write_bytes(b"weights")
     api = FakeHubApi()
-    publisher = HuggingFacePublisher(
-        repo_id="org/model",
-        private=True,
-        revision="main",
-        upload_mode=HFUploadMode.ALL,
-        api=api,
-    )
+    publisher = hub_publisher(OmegaConf.merge(base, recipe.to_skyrl()))
+    assert publisher is not None
+    publisher = replace(publisher, api=api)
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
 
     publisher.publish(str(export_path), step=12)

@@ -1,8 +1,10 @@
 import json
 from pathlib import Path
 
+import pytest
 from omegaconf import OmegaConf
 
+from skyrl_train import debug_mode
 from skyrl_train.debug_mode import apply_debug_mode, debug_environment
 from skyrl_train.env_vars import (
     DEBUG_ARTIFACT_DIR_ENV,
@@ -40,10 +42,17 @@ def test_light_mode_is_the_bounded_default(monkeypatch):
     assert "TORCH_SHOW_CPP_STACKTRACES" not in environment
 
 
-def test_off_mode_disables_default_failure_artifacts(monkeypatch):
+def test_off_mode_disables_default_failure_artifacts(monkeypatch, generated_recipe_schema):
     monkeypatch.delenv(DEBUG_MODE_ENV, raising=False)
-    cfg = example_dummy_config()
-    OmegaConf.update(cfg, "trainer.debug_mode", DebugMode.OFF.value)
+    root = Path(__file__).resolve().parents[4]
+    assert Path(debug_mode.__file__).resolve() == root / "skyrl-train/skyrl_train/debug_mode.py"
+    recipe_type, _ = generated_recipe_schema
+    recipe = recipe_type.from_document({"trainer": {"debug_mode": DebugMode.LIGHT.value}}).with_settings(
+        [f"trainer.debug_mode={DebugMode.OFF.value}"]
+    )
+    with pytest.raises(ValueError):
+        recipe.with_settings(["trainer.debug_mode=unknown-debug-mode"])
+    cfg = OmegaConf.merge(example_dummy_config(), recipe.to_skyrl())
 
     environment = debug_environment(cfg)
 

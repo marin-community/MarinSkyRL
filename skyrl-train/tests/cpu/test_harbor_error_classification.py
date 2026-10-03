@@ -1,7 +1,10 @@
+from pathlib import Path
+
 from omegaconf import OmegaConf
 import pytest
 from harbor_config.errors import ErrorCategory, errors_by_category, known_error_types
 
+from skyrl_train.utils import harbor_errors
 from skyrl_train.config.objective_spec import rollout_logprobs_required
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.utils.harbor_errors import (
@@ -55,13 +58,22 @@ def test_campaign_override_takes_precedence_over_shared_taxonomy():
     assert treatment is ErrorTreatment.ZERO
 
 
-def test_unknown_error_uses_explicit_fallback_treatment():
+def test_unknown_error_uses_explicit_fallback_treatment(generated_recipe_schema):
+    root = Path(__file__).resolve().parents[3]
+    assert Path(harbor_errors.__file__).resolve() == root / "skyrl-train/skyrl_train/utils/harbor_errors.py"
+    recipe_type, _ = generated_recipe_schema
+    recipe = recipe_type.from_document(
+        {"generator": {"error_handling": {"default_error_treatment": ErrorTreatment.ZERO.value}}}
+    ).with_settings([f"generator.error_handling.default_error_treatment={ErrorTreatment.MASK.value}"])
+    with pytest.raises(ValueError):
+        recipe.with_settings(["generator.error_handling.default_error_treatment=unknown-error-treatment"])
     treatment = classify_exception_type(
         "FutureHarborError",
-        ErrorHandlingConfig(default_error_treatment=ErrorTreatment.MASK),
+        ErrorHandlingConfig.from_mapping(recipe.to_skyrl()["generator"]["error_handling"]),
     )
 
     assert treatment is ErrorTreatment.MASK
+    assert treatment_excludes_from_baseline(treatment, verifier_available=True)
 
 
 def test_passthrough_requires_a_verifier_result_to_remain_in_baseline():
