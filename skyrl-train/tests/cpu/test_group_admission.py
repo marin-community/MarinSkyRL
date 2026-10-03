@@ -3,6 +3,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from omegaconf import OmegaConf
 
 from skyrl_train import dynamic_sampling
 from skyrl_train.dynamic_sampling import (
@@ -255,7 +256,7 @@ def test_dynamic_filter_requires_unshaped_outcomes():
 def test_dynamic_filter_can_admit_shaped_reward_variance(generated_recipe_schema):
     root = Path(__file__).resolve().parents[3]
     assert Path(dynamic_sampling.__file__).resolve() == root / "skyrl-train/skyrl_train/dynamic_sampling.py"
-    recipe_type, _ = generated_recipe_schema
+    recipe_type, base = generated_recipe_schema
     recipe = recipe_type.from_document(
         {
             "trainer": {
@@ -281,8 +282,8 @@ def test_dynamic_filter_can_admit_shaped_reward_variance(generated_recipe_schema
         }
     )
 
-    shaped_config = recipe.trainer.algorithm.dynamic_sampling
-    unshaped_config = edited.trainer.algorithm.dynamic_sampling
+    shaped_config = OmegaConf.merge(base, recipe.to_skyrl()).trainer.algorithm.dynamic_sampling
+    unshaped_config = OmegaConf.merge(base, edited.to_skyrl()).trainer.algorithm.dynamic_sampling
     shaped = GroupSelectionPolicy(
         DynamicSamplingType(shaped_config.type),
         criteria=resolve_dynamic_sampling_criteria(shaped_config.informative_on),
