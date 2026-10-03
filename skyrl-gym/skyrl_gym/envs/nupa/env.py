@@ -8,7 +8,7 @@ from typing import Any
 from omegaconf import DictConfig
 
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput, ground_truth_from_extras
-from skyrl_gym.envs.nupa.utils import parse_ground_truth
+from skyrl_gym.envs.nupa.answers import parse_ground_truth
 from skyrl_gym.envs.nupa.verifier import NUPAVerifier
 from skyrl_gym.verification import RolloutEvidence, VerificationStatus
 
@@ -29,7 +29,7 @@ class NUPAEnv(BaseTextEnv):
             ground_truth = ground_truth_from_extras(extras or {})
             parse_ground_truth(ground_truth)
             self.verifier = NUPAVerifier(ground_truth=ground_truth)
-        except (TypeError, ValueError, KeyError, AssertionError) as error:
+        except (ValueError, AssertionError) as error:
             # Malformed rows score zero instead of crashing a distributed worker;
             # builders reject them earlier through the nupa data contract.
             logger.exception("nupa: invalid ground truth %r; scoring 0.", error)

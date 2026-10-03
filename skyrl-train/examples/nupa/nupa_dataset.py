@@ -31,6 +31,7 @@ import pyarrow.parquet as pq
 from huggingface_hub import hf_hub_download
 
 from skyrl_gym import get_data_contract
+from skyrl_gym.envs.nupa.answers import INTEGER
 
 SOURCE_DATASET_NAME = "HaotongYang/NUPA_text"
 SOURCE_DATASET_REVISION = "01e3831ec00dfd618a77d9f6fe7fc0d327ad16d7"
@@ -99,7 +100,9 @@ def unique_texts_by_stratum(source: Path) -> dict[Stratum, dict[str, str]]:
     return unique
 
 
-def build_panel_identities(unique: dict[Stratum, dict[str, str]], *, panel_size: int = PANEL_SIZE) -> list[SourceIdentity]:
+def build_panel_identities(
+    unique: dict[Stratum, dict[str, str]], *, panel_size: int = PANEL_SIZE
+) -> list[SourceIdentity]:
     """Reproduce Evalchemy's NUPA5K panel selection over the same unique strata.
 
     Round-robin over strata sorted by (task name, digit), skipping exhausted
@@ -121,11 +124,7 @@ def build_panel_identities(unique: dict[Stratum, dict[str, str]], *, panel_size:
         round_index += 1
 
     quotas = Counter(allocation)
-    selected = {
-        stratum: sorted(unique[stratum])[:quota]
-        for stratum, quota in quotas.items()
-        if quota
-    }
+    selected = {stratum: sorted(unique[stratum])[:quota] for stratum, quota in quotas.items() if quota}
     offsets: Counter[Stratum] = Counter()
     identities = []
     for stratum in allocation:
@@ -158,7 +157,7 @@ def split_prompt_answer(text: str) -> tuple[str, str]:
 
 def answer_format_from_task_name(task_name: str) -> str:
     answer_format = task_name.split("_")[-1]
-    return "Integer" if answer_format == "int" else answer_format
+    return INTEGER if answer_format == "int" else answer_format
 
 
 def operation_from_task_name(task_name: str) -> str:
@@ -227,13 +226,13 @@ def build_complement_records(
             }
 
 
-def validate_records_against_verifier(records: Iterator[dict[str, Any]]) -> int:
-    """Two-sided verifier preflight of one record per task, as the data contract requires."""
+def validate_records_against_verifier(records: Iterator[dict[str, Any]]) -> tuple[int, int]:
+    """Two-sided verifier preflight of one record per task; return (records, tasks checked)."""
     contract = get_data_contract(ENV_CLASS)
     validated_tasks: set[str] = set()
-    checked = 0
+    record_count = 0
     for record in records:
-        checked += 1
+        record_count += 1
         info = record["extra_info"]
         if info["task_name"] in validated_tasks:
             continue
@@ -244,9 +243,9 @@ def validate_records_against_verifier(records: Iterator[dict[str, Any]]) -> int:
             answer + "0",
         )
         validated_tasks.add(info["task_name"])
-    if not checked:
+    if not record_count:
         raise ValueError("complement contains no records")
-    return checked
+    return record_count, len(validated_tasks)
 
 
 def write_parquet(records: Iterator[dict[str, Any]], output_path: Path, *, batch_size: int = 50_000) -> None:
@@ -299,15 +298,13 @@ def main() -> None:
     print(f"Panel reconstruction matches the published NUPA5K-Loose manifest (sha256={digest})")
 
     records = build_complement_records(unique, panel)
-    checked = validate_records_against_verifier(records)
-    print(f"Verified {checked} complement records; every task passed the two-sided verifier preflight")
+    record_count, task_count = validate_records_against_verifier(records)
+    print(f"Two-sided verifier preflight passed for all {task_count} tasks over {record_count} complement records")
 
     output_path = Path(os.path.expanduser(args.output_dir)) / "train.parquet"
     records = build_complement_records(unique, panel)
     write_parquet(records, output_path)
-    print(
-        f"NUPA RL training set: {checked} records disjoint from the {PANEL_SIZE}-record NUPA5K-Loose eval panel"
-    )
+    print(f"NUPA RL training set: {record_count} records disjoint from the {PANEL_SIZE}-record NUPA5K-Loose eval panel")
 
 
 if __name__ == "__main__":

@@ -5,13 +5,9 @@ import skyrl_gym
 from omegaconf import DictConfig
 
 from skyrl_gym import get_data_contract
-from skyrl_gym.envs.nupa.utils import digit_parts, extract_answer, full_answer
-from skyrl_gym.verification import RolloutEvidence
-
-INTEGER = "Integer"
-FLOAT = "Float"
-FRACTION = "Fraction"
-SCIENTIFIC = "ScientificNotation"
+from skyrl_gym.envs.nupa.answers import FRACTION, FLOAT, INTEGER, SCIENTIFIC, digit_parts, extract_answer, full_answer
+from skyrl_gym.envs.nupa.verifier import NUPAVerifier
+from skyrl_gym.verification import RolloutEvidence, VerificationStatus
 
 
 def make_nupa_env(ground_truth):
@@ -125,9 +121,6 @@ def test_data_contract_rejects_malformed_ground_truth():
 
 
 def test_verifier_uses_rollout_evidence_response():
-    from skyrl_gym.envs.nupa.verifier import NUPAVerifier
-    from skyrl_gym.verification import VerificationStatus
-
     verdict = NUPAVerifier(ground_truth=json.dumps({"answer": "42", "answer_format": INTEGER})).verify(
         RolloutEvidence(response="So the answer is: 42", stop_reason="stop")
     )

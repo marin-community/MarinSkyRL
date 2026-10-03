@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from verifyit.adapters.evalchemy_nupa import grade_nupa_answer
 from verifyit.grade import Status
 
-from skyrl_gym.envs.nupa.utils import extract_answer, full_answer, digit_parts, parse_ground_truth
+from skyrl_gym.envs.nupa.answers import extract_answer, full_answer, digit_parts, parse_ground_truth
 from skyrl_gym.verification import RolloutEvidence, VerificationResult
 
 

@@ -4,6 +4,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from examples.nupa.nupa_dataset import (
+    answer_format_from_task_name,
     build_complement_records,
     build_panel_identities,
     panel_manifest_digest,
@@ -100,8 +101,6 @@ def test_complement_excludes_panel_and_keeps_identity_disjointness(synthetic_sou
     [("add_Float_Float_Float", "Float"), ("mod_int", "Integer"), ("to_Fraction", "Fraction")],
 )
 def test_answer_format_follows_the_task_name(task_name, answer_format):
-    from examples.nupa.nupa_dataset import answer_format_from_task_name
-
     assert answer_format_from_task_name(task_name) == answer_format
 
 
@@ -122,7 +121,7 @@ def test_validate_records_against_verifier_counts_records_and_checks_each_task(s
     unique = unique_texts_by_stratum(synthetic_source)
     panel = build_panel_identities(unique, panel_size=7)
 
-    assert validate_records_against_verifier(build_complement_records(unique, panel)) == 8
+    assert validate_records_against_verifier(build_complement_records(unique, panel)) == (8, 2)
 
 
 def test_write_parquet_round_trips_rows(synthetic_source, tmp_path):

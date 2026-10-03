@@ -23,7 +23,7 @@ from skyrl_gym.envs.lcb.livecodebench import (
     normalize_lcb_ground_truth,
 )
 from skyrl_gym.envs.mcq.utils import extract_mcq_answer
-from skyrl_gym.envs.nupa.utils import parse_ground_truth
+from skyrl_gym.envs.nupa.answers import parse_ground_truth
 from skyrl_gym.envs.nupa.verifier import NUPAVerifier
 from skyrl_gym.envs.reasoning_gym.scoring import normalize_ground_truth as normalize_reasoning_gym_ground_truth
 from skyrl_gym.envs.reasoning_gym.scoring import score_response as score_reasoning_gym_response
