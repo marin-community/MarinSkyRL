@@ -1,0 +1,169 @@
+"""Generation-only annotations for defaults, choices and pass-through mappings."""
+
+POSITIVE = "PositiveInt"
+POSITIVE_OR_NONE = "PositiveInt | None"
+
+TYPES = {
+    # Choices (values from MarinSkyRL's own enums and checks).
+    "trainer.strategy": 'Literal["megatron"]',
+    "trainer.resume_mode": 'Literal["none", "latest", "from_path"]',
+    "trainer.algorithm.advantage_estimator": 'Literal["gae", "grpo", "rloo", "rloo_n", "reinforce++", "uniform", "reward"]',
+    "trainer.algorithm.policy_loss_type": 'Literal["regular", "dual_clip", "behavior_clip", "gspo", "cispo", "clip_cov", "kl_cov", "sapo", "sft", "ftpo", "importance_sampling"]',
+    "trainer.algorithm.loss_reduction": 'Literal["token_mean", "sequence_mean", "seq_mean_token_sum_norm", "seq_mean_token_sum_norm_global"]',
+    "trainer.algorithm.kl_estimator_type": 'Literal["k1", "abs", "k2", "k3", "k3_unbiased_gradient"]',
+    "trainer.algorithm.off_policy_correction": 'Literal["none", "custom", "icepop", "outlier_mask", "seq_mask_tis", "tis"] | None',
+    "trainer.algorithm.off_policy_correction_rules": "tuple[OpenMap, ...] | None",
+    "trainer.algorithm.dynamic_sampling.type": 'Literal["filter", "replace"] | None',
+    "trainer.mismatch_probe.rescore_prefix_cache": 'Literal["off", "on", "both"]',
+    "trainer.mismatch_probe.extra_trainer_modes": 'tuple[Literal["router_replay", "router_replay_filtered"], ...]',
+    "generator.backend": 'Literal["vllm", "sglang"]',
+    "generator.weight_sync_backend": 'Literal["nccl", "gloo"]',
+    "generator.chat_template.source": 'Literal["name", "file"]',
+    # Preserve the numeric forms accepted by Hydra and shipped presets.
+    "trainer.algorithm.cispo.cispo_eps_clip_high": "int | float",
+    "trainer.policy.model.lora.dropout": "Annotated[int | float, Field(ge=0, le=1)]",
+    "trainer.critic.model.lora.dropout": "Annotated[int | float, Field(ge=0, le=1)]",
+    # Positive counts.
+    **dict.fromkeys(
+        (
+            "trainer.train_batch_size",
+            "trainer.policy_mini_batch_size",
+            "trainer.critic_mini_batch_size",
+            "trainer.micro_train_batch_size_per_gpu",
+            "trainer.eval_batch_size",
+            "trainer.update_epochs_per_batch",
+            "trainer.epochs",
+            "generator.n_samples_per_prompt",
+            "generator.inference_engine_tensor_parallel_size",
+            "generator.inference_engine_pipeline_parallel_size",
+            "generator.inference_engine_data_parallel_size",
+            "generator.inference_engine_expert_parallel_size",
+            "trainer.mismatch_probe.prompts.count",
+            "trainer.mismatch_probe.prompts.samples_per_prompt",
+        ),
+        POSITIVE,
+    ),
+    # Filled by the launch document when null.
+    **dict.fromkeys(
+        (
+            "trainer.placement.policy_num_nodes",
+            "trainer.placement.policy_num_gpus_per_node",
+            "trainer.placement.ref_num_nodes",
+            "trainer.placement.ref_num_gpus_per_node",
+            "generator.num_inference_engines",
+        ),
+        POSITIVE_OR_NONE,
+    ),
+    "trainer.run_name": "str | None",
+    "data.train_data": "tuple[str, ...] | None",
+    "data.val_data": "tuple[str, ...] | None",
+    # Null defaults.
+    "trainer.max_steps": "NonNegativeInt | None",
+    "trainer.resume_path": "str | None",
+    "trainer.eval_num_prompts": "PositiveInt | None",
+    "trainer.callbacks": "tuple[OpenMap, ...] | None",
+    "trainer.rollout_buffer.max_in_flight": "PositiveInt | None",
+    "trainer.rollout_buffer.object_store_root": "str | None",
+    "trainer.policy.megatron_config.expert_tensor_parallel_size": "PositiveInt | None",
+    "trainer.critic.model.path": "str | None",
+    "trainer.mismatch_probe.seed": "NonNegativeInt | None",
+    "trainer.mismatch_probe.archive_uri": "str | None",
+    "trainer.mismatch_probe.reuse_probe": "str | None",
+    "trainer.mismatch_probe.filtered_replay.keep_fraction": "Annotated[int | float, Field(ge=0, le=1)] | None",
+    "generator.vllm_attention_backend": "str | None",
+    "generator.chat_template.name_or_path": "str | None",
+    "generator.sampling_params.logprobs": "NonNegativeInt | None",
+    "generator.eval_sampling_params.logprobs": "NonNegativeInt | None",
+    "generator.sampling_params.stop": "tuple[str, ...] | None",
+    "generator.eval_sampling_params.stop": "tuple[str, ...] | None",
+    "data.sampling.kind": "str | None",
+    "data.sampling.seed": "NonNegativeInt | None",
+}
+
+OPEN = frozenset(
+    {
+        "data.sampling.domain_weights",
+        "trainer.policy.optimizer_config.optimizer_kwargs",
+        "trainer.critic.optimizer_config.optimizer_kwargs",
+        "trainer.policy.megatron_config.model_config_kwargs",
+        "trainer.policy.megatron_config.transformer_config_kwargs",
+        "trainer.ref.megatron_config.model_config_kwargs",
+        "trainer.ref.megatron_config.transformer_config_kwargs",
+        "trainer.algorithm.ftpo",
+        "trainer.algorithm.distillation",
+        "generator.engine_init_kwargs",
+        "generator.chat_template_kwargs",
+        "generator.speculative_decoding",
+        "environment.skyrl_gym",
+        "trainer.rope_scaling",
+        "generator.rope_scaling",
+    }
+)
+
+# Declared here because code reads them with a default but ppo_base_config.yaml does not list them.
+UNDECLARED = {
+    "data.kind": ('Literal["tasks", "parquet"]', "tasks"),  # launcher-only: how the launch host stages data
+    "trainer.enable_db_registration": ("bool", True),
+    "trainer.hf_hub_repo_id": ("str | None", None),
+    "trainer.hf_hub_private": ("bool", False),
+    "trainer.hf_hub_revision": ("str", "main"),
+}
+
+NAMES = {
+    "trainer.policy.megatron_config": "PolicyMegatronConfig",
+    "trainer.ref.megatron_config": "RefMegatronConfig",
+    "trainer.policy.model": "PolicyModel",
+    "trainer.ref.model": "RefModel",
+    "trainer.critic.model": "CriticModel",
+    "trainer.policy.optimizer_config": "PolicyOptimizerConfig",
+    "trainer.critic.optimizer_config": "CriticOptimizerConfig",
+    "generator.sampling_params": "SamplingParams",
+    "generator.eval_sampling_params": "EvalSamplingParams",
+    "trainer.policy.model.lora": "PolicyLora",
+    "trainer.critic.model.lora": "CriticLora",
+}
+
+TYPES.update(
+    {
+        "trainer.collective_phase_diagnostics": "bool | None",
+        "generator.error_handling.passthrough_exceptions": "tuple[str, ...]",
+        "generator.error_handling.mask_exceptions": "tuple[str, ...]",
+        "generator.error_handling.zero_exceptions": "tuple[str, ...]",
+        "generator.trajectory_retention.redact_fields": "tuple[str, ...]",
+        "data.terminal_bench_data": "tuple[str, ...]",
+        "trainer.trajectory_selector.type": 'Literal["best_of_n"] | None',
+        "trainer.policy.grug_query_bias_interpolation_weight": "int | float | None",
+        "trainer.policy.grug_query_bias_update_rate": "int | float | None",
+        "trainer.policy.model.revision": "str | None",
+        "trainer.policy.model.source_uri": "str | None",
+        "trainer.policy.model.source_identity": "str | None",
+        "trainer.policy.model.lora.adapter_path": "str | None",
+        "trainer.policy.model.lora.adapter_revision": "str | None",
+        "trainer.policy.model.lora.exclude_modules": "tuple[str, ...] | None",
+        "trainer.critic.model.lora.exclude_modules": "tuple[str, ...] | None",
+        "trainer.policy.megatron_config.torch_profiler_config.ranks": "tuple[int, ...]",
+        "trainer.policy.megatron_config.torch_profiler_config.save_path": "str | None",
+        "trainer.ref.megatron_config.expert_tensor_parallel_size": "PositiveInt | None",
+        "trainer.ref.megatron_config.torch_profiler_config.ranks": "tuple[int, ...]",
+        "trainer.ref.megatron_config.torch_profiler_config.save_path": "str | None",
+        "terminal_bench.prm.name": "str | None",
+        "terminal_bench.agent_api_base": "str | None",
+        "terminal_bench.literal_log_path": "str | None",
+        "trainer.algorithm.group_advantage_min_size": "PositiveInt | None",
+        "trainer.algorithm.resolved_group_advantage.minimum_group_size": "PositiveInt | None",
+        "trainer.algorithm.tito_full": "bool | None",
+        "trainer.algorithm.dynamic_sampling.max_mean_reward": "int | float | None",
+        "trainer.algorithm.group_admission.stall_timeout": "int | float | None",
+        "trainer.distillation_token_budget": "PositiveInt | None",
+        "trainer.rope_theta": "int | float | None",
+        "generator.trajectory_retention.reward_below": "int | float | None",
+        "generator.trajectory_retention.reward_above": "int | float | None",
+        "checkpoint_export.step": "NonNegativeInt | None",
+        "checkpoint_export.checkpoint_path": "str | None",
+        "checkpoint_export.export_root": "str | None",
+        "checkpoint_export.hf_hub_repo_id": "str | None",
+    }
+)
+
+# Explicit third-party OpenMap fields are intentional; generated scalar fields have concrete types.
+ANY_ALLOWED = frozenset()
