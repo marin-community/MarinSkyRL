@@ -1,9 +1,12 @@
 import asyncio
 import concurrent.futures
 import contextlib
+from hashlib import sha256
 import logging
+import math
 import os
 import socket
+import time
 from typing import Dict, Optional, Type, List, Any, Callable
 from skyrl_train.utils.progress import configure_progress, tqdm
 from marinskyrl.runtime_options import R3Transport
@@ -42,7 +45,10 @@ from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
 from skyrl_train.utils.policy_math import ppo_critic_loss
 from skyrl_train.utils.importance_ratio_diagnostics import (
     LogRatioMonitor,
+    mismatch_ratio_metrics,
 )
+from skyrl_train.config.objective_spec import off_policy_correction
+from skyrl_train.objective.correction import compute_correction
 from skyrl_train.learner_memory import LearnerCudaMetrics
 from skyrl_train.timing_observability import PhaseBreakdown
 from skyrl_train.telemetry import WORKER_ROLE, ProcessTelemetry, TelemetryConfig
@@ -58,6 +64,8 @@ from skyrl_train.training_batch import (
     gradient_accumulation_steps,
     per_data_parallel_batch_size,
 )
+from skyrl_train.batch_assembly import BatchPlan, assemble_slice
+from skyrl_train.rollouts.context import RolloutReader
 from skyrl_train.trajectory_selection import optimization_samples_per_prompt
 from skyrl_train.utils.metrics import mean_metrics, policy_progress_metrics, policy_training_metrics
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -865,6 +873,208 @@ class PolicyWorkerBase(Worker):
         self._policy_train_spans: bool = self.cfg.trainer.policy_train_spans
         self._memory = LearnerCudaMetrics(enabled=self._policy_train_spans, rank=self._rank)
         self._model_version_step: int | None = None
+        self._loaded_batches: dict[int, TrainingInputBatch] = {}
+
+    async def load_batch(self, plan: BatchPlan, reader: RolloutReader) -> TrainingOutputBatch:
+        """Fetch and retain the contiguous rows assigned to this policy DP rank."""
+        if plan.batch_id in self._loaded_batches:
+            raise ValueError(f"worker batch {plan.batch_id} is already loaded")
+        started = time.perf_counter()
+        rows = plan.rank_rows(self.mesh_rank.dp)
+        indices = []
+        offset = 0
+        for admitted, count in zip(reader.selected, plan.group_counts, strict=True):
+            if offset < rows.stop and offset + count > rows.start:
+                indices.append(admitted.index)
+            offset += count
+        groups = await reader.read(plan.batch_id, tuple(indices))
+        batch = assemble_slice(
+            plan,
+            self.mesh_rank.dp,
+            groups,
+            pad_token_id=self._pad_token_id,
+            algorithm=self.cfg.trainer.algorithm,
+        )
+        batch.metadata["global_step"] = plan.policy_step
+        self._loaded_batches[plan.batch_id] = batch
+        output = TrainingOutputBatch({})
+        output.metadata = {"batch_load_seconds": time.perf_counter() - started, "dp_rank": self.mesh_rank.dp}
+        observations = []
+        if self.mesh_rank.is_collection_dp_rank():
+            by_uid = {group.uid: group.trajectory_batch for group in groups}
+            offset = 0
+            for admitted, count in zip(reader.selected, plan.group_counts, strict=True):
+                if rows.start <= offset < rows.stop:
+                    group = by_uid[admitted.uid]
+                    observation = {
+                        key: group[key]
+                        for key in (
+                            "rewards",
+                            "env_metrics",
+                            "env_classes",
+                            "verification_results",
+                            "data_sources",
+                            "unshaped_rewards",
+                            "rollout_metrics",
+                        )
+                        if key in group and group[key] is not None
+                    }
+                    observations.append((admitted.index, observation))
+                offset += count
+        output.metadata["batch_observations"] = observations
+        return output
+
+    def forward_loaded(self, batch_id: int, expected_inputs: list[dict] | None = None) -> TrainingOutputBatch:
+        """Run policy forward and keep old-policy response scores on this actor."""
+        batch = self._loaded_batches[batch_id]
+        data = batch.select(keys=["sequences", "attention_mask"], metadata_keys=["response_length", "global_step"])
+        data.routed_expert_rows = batch.routed_expert_rows
+        digests = None
+        if expected_inputs is not None:
+            digests = {
+                "tensors": {
+                    key: None
+                    if value is None
+                    else (
+                        str(value.dtype),
+                        tuple(value.shape),
+                        sha256(value.detach().cpu().contiguous().view(torch.uint8).numpy()).hexdigest(),
+                    )
+                    for key, value in data.items()
+                },
+                "metadata": {key: data.metadata[key] for key in ("response_length", "global_step")},
+                "routes": None
+                if data.routed_expert_rows is None
+                else (
+                    data.routed_expert_rows.response_len,
+                    data.routed_expert_rows.num_experts,
+                    tuple(
+                        (str(row.dtype), tuple(row.shape), sha256(row.tobytes(order="C")).hexdigest())
+                        for row in data.routed_expert_rows.rows
+                    ),
+                ),
+            }
+            mismatch = torch.tensor(int(digests != expected_inputs[self.mesh_rank.dp]))
+            if self.strategy.all_reduce(mismatch, "sum").item():
+                raise ValueError(f"worker forward input digest mismatch on DP rank {self.mesh_rank.dp}")
+        scores = self.forward(data)["output"]
+        if self.mesh_rank.pp == self.mesh_rank.pp_size - 1:
+            batch["action_log_probs"] = scores
+        batch["base_action_log_probs"] = None
+        batch["values"] = None
+        output = TrainingOutputBatch({})
+        output.metadata = {"dp_rank": self.mesh_rank.dp}
+        if digests is not None:
+            output.metadata["input_digests"] = digests
+        return output
+
+    def train_loaded(self, batch_id: int, expected_inputs: list[dict] | None = None) -> TrainingOutputBatch:
+        """Train on this actor's loaded batch through the existing policy path."""
+        from skyrl_train.trainer import RayPPOTrainer
+
+        batch = self._loaded_batches[batch_id]
+        contributes = self.mesh_rank.is_collection_dp_rank()
+        metrics = {}
+        correction = off_policy_correction(self.cfg.trainer.algorithm)
+        if correction.rules:
+            if batch.get("rollout_logprobs") is None:
+                raise ValueError("off_policy_correction requires rollout_logprobs")
+            result = compute_correction(
+                batch["action_log_probs"],
+                batch["rollout_logprobs"],
+                batch["loss_mask"],
+                correction,
+                all_reduce=self.strategy.all_reduce,
+                contributes=contributes,
+            )
+            batch["correction_weights"] = result.weights
+            metrics.update(result.metrics)
+        if self.cfg.trainer.training_metrics and batch.get("rollout_logprobs") is not None:
+            metrics.update(
+                mismatch_ratio_metrics(
+                    batch["action_log_probs"],
+                    batch["rollout_logprobs"],
+                    batch["loss_mask"],
+                    batch["rollout_staleness"],
+                    eps_clip_low=self.cfg.trainer.algorithm.eps_clip_low,
+                    eps_clip_high=self.cfg.trainer.algorithm.eps_clip_high,
+                    all_reduce=self.strategy.all_reduce,
+                    contributes=contributes,
+                )
+            )
+        if self.cfg.generator.sampling_params.logprobs is not None and batch.get("rollout_logprobs") is not None:
+            differences = (batch["rollout_logprobs"] - batch["action_log_probs"])[batch["loss_mask"] > 0].exp().double()
+            moments = torch.stack(
+                [torch.tensor(differences.numel(), dtype=torch.float64), differences.sum(), differences.square().sum()]
+            )
+            if not contributes:
+                moments.zero_()
+            count, total, squared = self.strategy.all_reduce(moments, "sum").tolist()
+            metrics["policy/rollout_train_prob_diff_mean"] = total / count if count else math.nan
+            variance = (squared - total * total / count) / (count - 1) if count > 1 else math.nan
+            metrics["policy/rollout_train_prob_diff_std"] = math.sqrt(max(variance, 0.0))
+        valid = batch["response_mask"].bool()
+        advantages = batch["advantages"][valid].double()
+        moments = torch.stack(
+            [
+                torch.tensor(advantages.numel(), dtype=torch.float64),
+                advantages.sum(),
+                advantages.abs().sum(),
+                batch["rewards"].sum(-1).double().sum(),
+                torch.tensor(batch.batch_size, dtype=torch.float64),
+            ]
+        )
+        if not contributes:
+            moments.zero_()
+        count, total, absolute, rewards, rows = self.strategy.all_reduce(moments, "sum").tolist()
+        metrics.update(
+            {
+                "loss/avg_raw_advantages": total / count if count else math.nan,
+                "loss/avg_raw_advantages_abs": absolute / count if count else math.nan,
+                "loss/avg_final_rewards": rewards / rows,
+            }
+        )
+        batch = RayPPOTrainer.apply_loop_advantages(batch)
+        batch.pop("rewards")
+        batch.pop("loop_advantages", None)
+        batch.metadata.pop("uids")
+        digests = None
+        if expected_inputs is not None:
+            digests = {
+                "tensors": {
+                    key: None
+                    if value is None
+                    else (
+                        str(value.dtype),
+                        tuple(value.shape),
+                        sha256(value.detach().cpu().contiguous().view(torch.uint8).numpy()).hexdigest(),
+                    )
+                    for key, value in batch.items()
+                },
+                "metadata": {key: batch.metadata[key] for key in ("response_length", "global_step")},
+                "routes": None
+                if batch.routed_expert_rows is None
+                else (
+                    batch.routed_expert_rows.response_len,
+                    batch.routed_expert_rows.num_experts,
+                    tuple(
+                        (str(row.dtype), tuple(row.shape), sha256(row.tobytes(order="C")).hexdigest())
+                        for row in batch.routed_expert_rows.rows
+                    ),
+                ),
+            }
+            mismatch = torch.tensor(int(digests != expected_inputs[self.mesh_rank.dp]))
+            if self.strategy.all_reduce(mismatch, "sum").item():
+                raise ValueError(f"worker training input digest mismatch on DP rank {self.mesh_rank.dp}")
+        output = self.ppo_train(batch)
+        output.metadata["batch_metrics"] = metrics
+        if digests is not None:
+            output.metadata["input_digests"] = digests
+        return output
+
+    def unload_batch(self, batch_id: int) -> None:
+        """Release a loaded slice after a completed or failed training step."""
+        self._loaded_batches.pop(batch_id, None)
 
     async def _begin_vllm_layerwise_weight_reload(self, inference_engine_client, *, enabled: bool) -> None:
         """Open a rank-synchronized vLLM reload around a streamed weight update."""
@@ -918,7 +1128,11 @@ class PolicyWorkerBase(Worker):
         Timing-only (no tensor is touched) and gated to the R3-decentral path
         with routes present, so every other configuration is unchanged.
         """
-        staggered = self.cfg.generator.r3_transport == R3Transport.DECENTRAL and train_data.routed_experts is not None
+        staggered = (
+            self.cfg.trainer.get("batch_builder", "driver") == "driver"
+            and self.cfg.generator.r3_transport == R3Transport.DECENTRAL
+            and train_data.routed_experts is not None
+        )
         if staggered and self._world_size > 1 and torch.distributed.is_initialized():
             # Ungated per-rank marker: the timestamp cluster at release proves
             # co-arrival; the first shard collective must not time out after it.

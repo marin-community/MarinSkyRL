@@ -36,3 +36,15 @@ def test_megatron_router_replay_rejects_fused_router():
 
     with pytest.raises(ValueError, match="moe_router_fusion"):
         validate_cfg(cfg)
+
+
+def test_worker_builders_reject_batch_normalization_while_driver_accepts_it():
+    cfg = _megatron_replay_cfg()
+    cfg.trainer.algorithm.use_kl_loss = False
+    cfg.trainer.algorithm.advantage_batch_normalize = True
+    with mock.patch("transformers.AutoConfig.from_pretrained", side_effect=OSError("offline")):
+        validate_cfg(cfg)
+        for builder in ("worker", "verify"):
+            cfg.trainer.batch_builder = builder
+            with pytest.raises(ValueError, match="trainer.batch_builder=.*advantage_batch_normalize"):
+                validate_cfg(cfg)

@@ -168,7 +168,7 @@ class CPUPolicyWorker(PolicyWorkerBase):
         self._normalize_mini_batch_size()
 
     def _set_pad_token_id(self, pad_token_id):
-        """The Hugging Face model reads its pad token from the saved config."""
+        self._pad_token_id = pad_token_id
 
     def offload_to_cpu(self, pin_memory=True, non_blocking=True, **kwargs):
         """State already lives on the CPU."""

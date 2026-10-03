@@ -52,7 +52,7 @@ from marinskyrl.distillation import (
     validate_generation_logprobs,
 )
 from marinskyrl.inference_placement import validate_expert_block_transport
-from marinskyrl.runtime_options import GDNBackend, R3Transport
+from marinskyrl.runtime_options import GDNBackend, R3Transport, PolicyLossType, AdvantageEstimator
 
 from .constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS
 from .algorithm_registry import (
@@ -363,6 +363,11 @@ def validate_batch_sizes(cfg: DictConfig):
         f"train_batch_size {cfg.trainer.train_batch_size} should be divisible by policy_mini_batch_size {cfg.trainer.policy_mini_batch_size}"
     )
     optimization_group_size = optimization_samples_per_prompt(cfg)
+    if cfg.trainer.get("batch_builder", "driver") != "driver":
+        if cfg.trainer.train_batch_size * optimization_group_size % policy_dp_size:
+            raise ValueError(
+                "trainer.batch_builder requires train_batch_size * n_samples_per_prompt divisible by DP size"
+            )
     policy_mini_batch_size_per_gpu = cfg.trainer.policy_mini_batch_size * optimization_group_size // policy_dp_size
     assert policy_mini_batch_size_per_gpu > 0, (
         f"Invalid policy_mini_batch_size_per_gpu: {policy_mini_batch_size_per_gpu}. "
@@ -479,6 +484,32 @@ def validate_hf_export_config(cfg: DictConfig) -> None:
 
 
 def validate_cfg(cfg: DictConfig):
+    batch_builder = cfg.trainer.get("batch_builder", "driver")
+    if batch_builder not in ("driver", "worker", "verify"):
+        raise ValueError("trainer.batch_builder must be driver, worker, or verify")
+    if batch_builder != "driver":
+        algorithm = cfg.trainer.algorithm
+        shaping = parse_trajectory_reward_shaping_config(cfg.generator.get("trajectory_reward_shaping"))
+        restrictions = (
+            ("critic", cfg.trainer.critic.model.path is not None),
+            ("use_kl_in_reward", algorithm.use_kl_in_reward),
+            ("use_kl_loss", algorithm.use_kl_loss),
+            ("FTPO", algorithm.policy_loss_type == PolicyLossType.FTPO),
+            ("distillation", algorithm.get("distillation") is not None),
+            ("trajectory_selector", cfg.trainer.trajectory_selector.type is not None),
+            ("step_wise_training", cfg.trainer.step_wise_training),
+            ("advantage_batch_normalize", algorithm.advantage_batch_normalize),
+            ("loop reward credit", shaping.enabled and shaping.loop.advantage_penalty_per_token > 0),
+            ("dump_data_batch", batch_builder == "worker" and cfg.trainer.dump_data_batch),
+            (
+                "non-outcome advantage estimator",
+                algorithm.advantage_estimator
+                not in (AdvantageEstimator.RLOO, AdvantageEstimator.RLOO_N, AdvantageEstimator.GRPO),
+            ),
+        )
+        for reason, enabled in restrictions:
+            if enabled:
+                raise ValueError(f"trainer.batch_builder={batch_builder} does not support {reason}")
     validate_mismatch_probe_config(cfg)
     if cfg.trainer.strategy != "megatron":
         raise ValueError(f"Unsupported training strategy: {cfg.trainer.strategy}")
