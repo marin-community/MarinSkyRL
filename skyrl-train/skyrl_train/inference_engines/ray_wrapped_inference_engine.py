@@ -39,6 +39,7 @@ from skyrl_train.env_vars import (
     EnvVarScope,
     RUNAI_STREAMER_LOG_TO_STDERR_ENV,
     RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS_ENV,
+    NCCL_BUFFER_SIZE_ENV_VAR,
     VLLM_USE_V2_MODEL_RUNNER_ENV,
     managed_environment_names,
 )
@@ -56,7 +57,6 @@ from skyrl_train.inference_engines.placement import (
 )
 
 MODEL_METADATA_PATH_KEY = "_marinskyrl_metadata_path"
-NCCL_BUFFER_SIZE_ENV_VAR = "NCCL_BUFFSIZE"
 
 # ---------------------------------------------------------------------------
 # #232 FIX B — NCCL flight-recorder observability env -> vLLM engine workers.
@@ -563,7 +563,7 @@ def create_ray_wrapped_inference_engines(
         if backend == "vllm" and "language_model_only" not in engine_init_kwargs
         else {}
     )
-    # Forward managed NCCL settings into the engine actor and its child workers.
+    # Forward managed environment and the policy's NCCL buffer size into engine workers.
     inference_engine_runtime_env = _build_inference_engine_runtime_env(
         require_v1_model_runner=require_v1_model_runner,
         runai_streamer_enabled=engine_init_kwargs.get("load_format") == "runai_streamer",
