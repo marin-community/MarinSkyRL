@@ -15,8 +15,8 @@ from skyrl_train.inference_engines.base import InferenceEngineInput, InferenceEn
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.models.grug_moe import GrugMoeConfig, GrugMoeForCausalLM
-from skyrl_train.models.grug_vllm_kernels import NO_SERVING_RANK
 from skyrl_train.training_batch import ENGINE_DP_RANKS_KEY, TrainingInputBatch
+from skyrl_train.trajectory_runners.types import UNKNOWN_ENGINE_DP_RANK
 from skyrl_train.utils import initialize_ray
 from skyrl_train.utils.utils import validate_cfg
 from tests.gpu.grug_gpu_gates import require_hoppers
@@ -154,7 +154,7 @@ def _batch(prompts: list[list[int]], rollout: InferenceEngineOutput) -> Training
             "values": torch.zeros_like(engine_logprobs),
             "returns": torch.zeros_like(engine_logprobs),
             "advantages": advantages,
-            ENGINE_DP_RANKS_KEY: torch.tensor([*rollout["engine_dp_ranks"], NO_SERVING_RANK], dtype=torch.long),
+            ENGINE_DP_RANKS_KEY: torch.tensor([*rollout["engine_dp_ranks"], UNKNOWN_ENGINE_DP_RANK], dtype=torch.long),
         }
     )
     batch.metadata = {"response_length": RESPONSE_LENGTH, "global_step": 0}

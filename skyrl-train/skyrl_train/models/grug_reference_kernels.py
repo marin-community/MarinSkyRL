@@ -9,11 +9,10 @@ from __future__ import annotations
 
 import torch
 
+from skyrl_train.config.grug_vllm_shapes import HEAD_DIM
 from skyrl_train.models.grug_moe import GRUG_ATTN_GATE_SCALE, GRUG_QK_RMS_NORM_EPS, GRUG_XSA_EPS
 
 _BLOCK = 1024
-# The XSA and q/k gradient kernels index each head's elements in 128-element rows (Grug's head dimension).
-_HEAD_DIM = 128
 # Neither implicit fused multiply-adds nor flushed subnormals, as in PyTorch's elementwise kernels; the kernels call
 # libdevice.fma where PyTorch's kernel has one.
 _EXACT_LAUNCH = {"enable_fp_fusion": False, "enable_reflect_ftz": False, "num_warps": 4}
@@ -382,8 +381,8 @@ class _XsaHeadGate(torch.autograd.Function):
         attention, kv_value, gate = (tensor.contiguous() for tensor in ctx.saved_tensors)
         grad = grad.contiguous()
         head_dim = ctx.head_dim
-        if head_dim != _HEAD_DIM:
-            raise NotImplementedError(f"the XSA gradient kernels address {_HEAD_DIM}-dim heads, got {head_dim}")
+        if head_dim != HEAD_DIM:
+            raise NotImplementedError(f"the XSA gradient kernels address {HEAD_DIM}-dim heads, got {head_dim}")
         rows = kv_value.shape[:-2]
         kv_heads = kv_value.shape[-2]
         heads = attention.shape[-1] // head_dim
@@ -461,8 +460,8 @@ class _QueryKeyReference(torch.autograd.Function):
     def backward(ctx, grad):
         raw, *rest = ctx.saved_tensors
         raw, grad = raw.contiguous(), grad.contiguous()
-        if raw.shape[-1] != _HEAD_DIM:
-            raise NotImplementedError(f"the q/k gradient kernels address {_HEAD_DIM}-dim heads")
+        if raw.shape[-1] != HEAD_DIM:
+            raise NotImplementedError(f"the q/k gradient kernels address {HEAD_DIM}-dim heads")
         rsqrt = torch.rsqrt(raw.float().square().mean(dim=-1, keepdim=True) + GRUG_QK_RMS_NORM_EPS)
         if ctx.rotary:
             (freqs,) = rest

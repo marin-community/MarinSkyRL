@@ -1,14 +1,11 @@
-import pytest
 import torch
 
-from skyrl_train.models.grug_moe import GRUG_XSA_EPS
 from skyrl_train.models.grug_rounding import (
     STAGE_STATISTIC_COLUMNS,
     append_stage_statistic,
     rotate_neox_fp32,
     split_stage_statistic,
     vllm_value,
-    xsa_and_gate_single_rounding,
 )
 
 
@@ -31,22 +28,6 @@ def test_rope_matches_vllm_neox_formula_with_the_bf16_cos_sin_table():
 
     megatron_freqs = torch.cat((angles, angles), dim=-1)[:, None, None, :]
     assert torch.equal(rotate_neox_fp32(query, megatron_freqs), expected)
-
-
-@pytest.mark.parametrize("groups", [1, 2])
-def test_xsa_and_head_gate_round_once_over_grouped_heads(groups):
-    tokens, heads, head_dim = 6, 4, 8
-    attention = _bf16(tokens, heads * head_dim, seed=4)
-    value = _bf16(tokens, groups, head_dim, seed=5)
-    gate = _bf16(tokens, heads, seed=6)
-    a = attention.view(tokens, heads, head_dim).float()
-    v = value.float().repeat_interleave(heads // groups, dim=1)
-    dot = (a * v).sum(-1, keepdim=True)
-    projected = a - dot / (v.square().sum(-1, keepdim=True) + GRUG_XSA_EPS) * v
-    expected = (projected * (2 * torch.sigmoid(gate.float()))[..., None]).to(torch.bfloat16)
-
-    result = xsa_and_gate_single_rounding(attention, value, gate, head_dim)
-    assert torch.equal(result, expected.reshape(tokens, heads * head_dim))
 
 
 def test_vllm_value_keeps_the_kernels_bytes_and_takes_the_trainers_gradient():
