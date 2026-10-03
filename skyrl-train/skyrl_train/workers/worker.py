@@ -533,6 +533,7 @@ class PPORayActorGroup:
             If none, create new placement group automatically. Defaults to None.
         num_gpus_per_actor (float, optional): Number of gpus allocated for each actor.
             If < 1.0, multiple models can share same gpu. Defaults to 1.
+        actor_env_vars: Environment variables applied to each actor before process-group initialization.
     """
 
     def __init__(
@@ -550,6 +551,7 @@ class PPORayActorGroup:
         record_memory: bool = False,
         pin_to_ray_gpu_id: bool = False,
         force_cvd_mask: bool = False,
+        actor_env_vars: Optional[Dict[str, str]] = None,
     ) -> None:
         self.cfg = cfg
         self._num_nodes = num_nodes
@@ -572,6 +574,7 @@ class PPORayActorGroup:
         self.sequence_parallel_size = sequence_parallel_size
         self.record_memory = record_memory
         self.startup_timings = {}
+        self._actor_runtime_env = {"env_vars": actor_env_vars} if actor_env_vars else None
         self._initiate_actors(pg, num_gpus_per_actor)
 
     def _initiate_actors(self, pg: Optional[PlacementGroup], num_gpus_per_actor: float):
@@ -622,6 +625,8 @@ class PPORayActorGroup:
                     "num_gpus": num_gpus_per_actor,
                     "resources": self._resources,
                 }
+                if self._actor_runtime_env:
+                    actor_options["runtime_env"] = self._actor_runtime_env
                 if pg:
                     actor_options["scheduling_strategy"] = PlacementGroupSchedulingStrategy(
                         placement_group=pg,

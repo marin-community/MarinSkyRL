@@ -1700,18 +1700,22 @@ class RayPPOTrainer:
         Initialize the actors for training, and handle colocation logic
 
         Args:
-            policy_pg: Optional pre-reserved placement group dedicated to the
-                policy/training actors. Supplied (non-None) only for the
-                disaggregated, no-ref case when `placement.policy_strict_spread_pg`
-                is enabled — it is a STRICT_SPREAD whole-node placement group
-                reserved BEFORE the inference engines so that policy and
-                inference land on disjoint nodes. When None, the legacy
-                lazy-PACK behavior in `PPORayActorGroup._initiate_actors` is used.
+            policy_pg: Optional placement group reserved before inference
+                startup for the policy and colocated reference actors. When
+                absent, model actors reserve their placement group lazily.
         """
         cfg = self.cfg
         pg = None
 
         use_ref_model = reference_model_required(cfg.trainer.algorithm)
+        ref_actor_env_vars = None
+        if (
+            use_ref_model
+            and cfg.trainer.strategy == "megatron"
+            and (cfg.trainer.placement.colocate_all or cfg.trainer.placement.colocate_policy_ref)
+            and cfg.trainer.ref.nccl_buffer_size_bytes is not None
+        ):
+            ref_actor_env_vars = {"NCCL_BUFFSIZE": str(cfg.trainer.ref.nccl_buffer_size_bytes)}
 
         if cfg.trainer.placement.colocate_all:
             num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
@@ -1752,6 +1756,7 @@ class RayPPOTrainer:
                     num_gpus_per_actor=0.2 if pg else 1,
                     colocate_all=True,
                     sequence_parallel_size=cfg.trainer.ref.sequence_parallel_size,
+                    actor_env_vars=ref_actor_env_vars,
                 )
             else:
                 ref_model = None
@@ -1787,22 +1792,16 @@ class RayPPOTrainer:
                     }
                     for _ in range(cfg.trainer.placement.policy_num_nodes)
                 ]
-                pg = placement_group(bundles, strategy="PACK")
-                get_ray_pg_ready_with_timeout(
-                    pg, timeout=int(self.cfg.trainer.distributed.placement_group_timeout_seconds)
-                )
+                if policy_pg is None:
+                    pg = placement_group(bundles, strategy="PACK")
+                    get_ray_pg_ready_with_timeout(
+                        pg, timeout=int(self.cfg.trainer.distributed.placement_group_timeout_seconds)
+                    )
+                else:
+                    pg = policy_pg
 
-            # Dedicated, pre-reserved STRICT_SPREAD policy placement group
-            # (disaggregated no-ref case only). Supplied (non-None) by the
-            # entrypoint when `placement.policy_strict_spread_pg` is enabled.
-            # It is guaranteed not to coincide with the colocate_policy_ref
-            # branch above because eligibility requires use_ref_model=False.
-            # Each policy actor takes a full GPU within its node's whole-node
-            # bundle (so the inference engines, on disjoint nodes, never share
-            # a physical GPU with a policy worker).
-            if policy_pg is not None:
-                assert not use_ref_model, "dedicated policy_pg is only used when no ref model is present"
-                assert pg is None, "dedicated policy_pg must not coexist with a shared policy/ref pg"
+            # The no-reference policy also uses the group reserved before inference.
+            if pg is None:
                 pg = policy_pg
 
             # Pin each policy actor to its Ray-assigned physical GPU only when
@@ -1821,7 +1820,7 @@ class RayPPOTrainer:
                 cfg.trainer.placement.policy_num_gpus_per_node,
                 PolicyWorker,
                 pg=pg,
-                num_gpus_per_actor=(1 if policy_pg is not None else (0.75 if pg else 1)),
+                num_gpus_per_actor=0.75 if use_ref_model and pg else 1,
                 colocate_all=False,
                 sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,
                 pin_to_ray_gpu_id=_policy_pin_to_ray_gpu_id,
@@ -1837,6 +1836,7 @@ class RayPPOTrainer:
                     num_gpus_per_actor=0.25 if pg else 1,
                     colocate_all=False,
                     sequence_parallel_size=cfg.trainer.ref.sequence_parallel_size,
+                    actor_env_vars=ref_actor_env_vars,
                 )
             else:
                 ref_model = None

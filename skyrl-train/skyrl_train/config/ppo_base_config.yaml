@@ -139,6 +139,9 @@ trainer:
     use_torch_compile: false
     record_memory: false
   ref:
+    # Colocated Megatron reference workers retain NCCL buffers after model offload.
+    # Reduce their per-peer buffer before process-group initialization; null keeps NCCL's default.
+    nccl_buffer_size_bytes: 262144
     model:
       path: ${trainer.policy.model.path}
       revision: ${trainer.policy.model.revision}
