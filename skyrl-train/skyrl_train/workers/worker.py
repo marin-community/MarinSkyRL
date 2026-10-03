@@ -1,6 +1,7 @@
 import asyncio
 import concurrent.futures
 import contextlib
+from hashlib import sha256
 import logging
 import math
 import os
@@ -915,11 +916,39 @@ class PolicyWorkerBase(Worker):
         output.metadata["batch_observations"] = observations
         return output
 
-    def forward_loaded(self, batch_id: int) -> TrainingOutputBatch:
+    def forward_loaded(self, batch_id: int, expected_inputs: list[dict] | None = None) -> TrainingOutputBatch:
         """Run policy forward and keep old-policy response scores on this actor."""
         batch = self._loaded_batches[batch_id]
         data = batch.select(keys=["sequences", "attention_mask"], metadata_keys=["response_length", "global_step"])
         data.routed_expert_rows = batch.routed_expert_rows
+        digests = None
+        if expected_inputs is not None:
+            digests = {
+                "tensors": {
+                    key: None
+                    if value is None
+                    else (
+                        str(value.dtype),
+                        tuple(value.shape),
+                        sha256(value.detach().cpu().contiguous().view(torch.uint8).numpy()).hexdigest(),
+                    )
+                    for key, value in data.items()
+                },
+                "metadata": {key: data.metadata[key] for key in ("response_length", "global_step")},
+                "routes": None
+                if data.routed_expert_rows is None
+                else (
+                    data.routed_expert_rows.response_len,
+                    data.routed_expert_rows.num_experts,
+                    tuple(
+                        (str(row.dtype), tuple(row.shape), sha256(row.tobytes(order="C")).hexdigest())
+                        for row in data.routed_expert_rows.rows
+                    ),
+                ),
+            }
+            mismatch = torch.tensor(int(digests != expected_inputs[self.mesh_rank.dp]))
+            if self.strategy.all_reduce(mismatch, "sum").item():
+                raise ValueError(f"worker forward input digest mismatch on DP rank {self.mesh_rank.dp}")
         scores = self.forward(data)["output"]
         if self.mesh_rank.pp == self.mesh_rank.pp_size - 1:
             batch["action_log_probs"] = scores
@@ -927,9 +956,11 @@ class PolicyWorkerBase(Worker):
         batch["values"] = None
         output = TrainingOutputBatch({})
         output.metadata = {"dp_rank": self.mesh_rank.dp}
+        if digests is not None:
+            output.metadata["input_digests"] = digests
         return output
 
-    def train_loaded(self, batch_id: int) -> TrainingOutputBatch:
+    def train_loaded(self, batch_id: int, expected_inputs: list[dict] | None = None) -> TrainingOutputBatch:
         """Train on this actor's loaded batch through the existing policy path."""
         from skyrl_train.trainer import RayPPOTrainer
 
@@ -999,8 +1030,38 @@ class PolicyWorkerBase(Worker):
         batch.pop("rewards")
         batch.pop("loop_advantages", None)
         batch.metadata.pop("uids")
+        digests = None
+        if expected_inputs is not None:
+            digests = {
+                "tensors": {
+                    key: None
+                    if value is None
+                    else (
+                        str(value.dtype),
+                        tuple(value.shape),
+                        sha256(value.detach().cpu().contiguous().view(torch.uint8).numpy()).hexdigest(),
+                    )
+                    for key, value in batch.items()
+                },
+                "metadata": {key: batch.metadata[key] for key in ("response_length", "global_step")},
+                "routes": None
+                if batch.routed_expert_rows is None
+                else (
+                    batch.routed_expert_rows.response_len,
+                    batch.routed_expert_rows.num_experts,
+                    tuple(
+                        (str(row.dtype), tuple(row.shape), sha256(row.tobytes(order="C")).hexdigest())
+                        for row in batch.routed_expert_rows.rows
+                    ),
+                ),
+            }
+            mismatch = torch.tensor(int(digests != expected_inputs[self.mesh_rank.dp]))
+            if self.strategy.all_reduce(mismatch, "sum").item():
+                raise ValueError(f"worker training input digest mismatch on DP rank {self.mesh_rank.dp}")
         output = self.ppo_train(batch)
         output.metadata["batch_metrics"] = metrics
+        if digests is not None:
+            output.metadata["input_digests"] = digests
         return output
 
     def unload_batch(self, batch_id: int) -> None:

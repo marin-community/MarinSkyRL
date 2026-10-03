@@ -384,9 +384,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         with self._memory.span("forward", step=data.metadata.get("global_step")):
             return super().forward(data, probe_micro_batch_size=probe_micro_batch_size)
 
-    def forward_loaded(self, batch_id: int) -> TrainingOutputBatch:
+    def forward_loaded(self, batch_id: int, expected_inputs: list[dict] | None = None) -> TrainingOutputBatch:
         """Give every pipeline stage the last stage's response logprobs."""
-        output = super().forward_loaded(batch_id)
+        output = super().forward_loaded(batch_id, expected_inputs=expected_inputs)
         if self.mesh_rank.pp_size == 1:
             return output
         batch = self._loaded_batches[batch_id]
