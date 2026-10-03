@@ -138,6 +138,9 @@ trainer:
     sequence_parallel_size: 1
     use_torch_compile: false
     record_memory: false
+    # Limit per-peer NCCL buffers before Megatron policy process-group initialization.
+    # Null preserves NCCL's default; useful when a reference actor shares each GPU.
+    nccl_buffer_size_bytes: null
   ref:
     # Colocated Megatron reference workers retain NCCL buffers after model offload.
     # Reduce their per-peer buffer before process-group initialization; null keeps NCCL's default.
