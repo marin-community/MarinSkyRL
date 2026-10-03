@@ -99,7 +99,7 @@ def validate_inference_replica_topology(
     pipeline_parallel_size: int = 1,
     node_hosts: Mapping[str, str],
 ) -> None:
-    """Check that every worker runs in its bundle and each stage's DP group is on one node.
+    """Check each worker against its bundle, GPU identity and requested parallel groups.
 
     A worker's bundle index is ``dp_rank * PP + pp_rank``, which is also its torch rank in the engine.
     """
@@ -116,6 +116,7 @@ def validate_inference_replica_topology(
         raise ValueError("Inference weight receiver ranks must be unique and cover the broadcast group")
     # A dense model has no EP group: every worker reports size 1.
     expert_parallel = expert_parallel_size > 1 and any(row.worker.ep_world_size != 1 for row in placements)
+    cross_node_ep = expert_parallel and pipeline_parallel_size == 1 and expert_parallel_size == data_parallel_size
     expected_ep_size = data_parallel_size if expert_parallel else 1
     for replica in range(num_replicas):
         rows = [row for row in placements if row.replica == replica]
@@ -123,7 +124,9 @@ def validate_inference_replica_topology(
             raise ValueError(f"Inference replica {replica} has incomplete placement bundles")
         for stage in range(pipeline_parallel_size):
             stage_rows = [row for row in rows if row.worker.pp_rank == stage]
-            if len({row.node_id for row in stage_rows}) != 1 or len({row.worker.host for row in stage_rows}) != 1:
+            if not cross_node_ep and (
+                len({row.node_id for row in stage_rows}) != 1 or len({row.worker.host for row in stage_rows}) != 1
+            ):
                 raise ValueError(f"Inference replica {replica} stage {stage} spans nodes")
         for row in rows:
             worker = row.worker
