@@ -36,6 +36,7 @@ terminal_bench:
     enabled: false
 
 trainer:
+  batch_builder: worker
   strategy: megatron
   seed: 42
   flash_attn: true
