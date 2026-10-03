@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from email.parser import Parser
+import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -18,6 +20,7 @@ REPOSITORY_ROOT = Path(__file__).parents[2]
 PYPROJECT = tomllib.loads((REPOSITORY_ROOT / "pyproject.toml").read_text())
 @dataclass(frozen=True)
 class BuiltWheel:
+    path: Path
     names: set[str]
     metadata: str
     entry_points: str
@@ -34,10 +37,10 @@ def built_wheel(tmp_path_factory: pytest.TempPathFactory) -> BuiltWheel:
         entry_points_name = next(name for name in names if name.endswith(".dist-info/entry_points.txt"))
         metadata = archive.read(metadata_name).decode()
         entry_points = archive.read(entry_points_name).decode()
-    return BuiltWheel(names=names, metadata=metadata, entry_points=entry_points)
+    return BuiltWheel(path=wheel, names=names, metadata=metadata, entry_points=entry_points)
 
 
-def test_root_wheel_owns_launcher_and_training_packages(built_wheel: BuiltWheel) -> None:
+def test_root_wheel_owns_launcher_and_training_packages(built_wheel: BuiltWheel, tmp_path: Path) -> None:
     assert Parser().parsestr(built_wheel.metadata)["Name"] == "marinskyrl"
     assert "marinskyrl = cloud.iris.launch:main" in built_wheel.entry_points
     assert "cloud/iris/launch.py" in built_wheel.names
@@ -46,6 +49,44 @@ def test_root_wheel_owns_launcher_and_training_packages(built_wheel: BuiltWheel)
     assert "skyrl_gym/__init__.py" in built_wheel.names
     assert "skyrl_train/__init__.py" in built_wheel.names
     assert "skyrl_train/config/ppo_base_config.yaml" in built_wheel.names
+    environment = tmp_path / "schema-environment"
+    subprocess.run(["uv", "venv", "--python", "3.12", str(environment)], check=True)
+    interpreter = environment / "bin/python"
+    subprocess.run(["uv", "pip", "install", "--python", str(interpreter), "pydantic==2.12.5"], check=True)
+    subprocess.run(
+        ["uv", "pip", "install", "--python", str(interpreter), "--no-deps", str(built_wheel.path)], check=True
+    )
+    program = """
+import importlib.util
+import json
+from pathlib import Path
+import pickle
+import sys
+import sysconfig
+
+import pydantic
+import marinskyrl.recipe_schema as schema
+
+assert Path(schema.__file__).resolve() == Path(sysconfig.get_path("purelib")) / "marinskyrl/recipe_schema/__init__.py"
+blocked = {"hydra", "omegaconf", "ray", "torch", "yaml"}
+assert all(importlib.util.find_spec(name) is None for name in blocked)
+assert not blocked.intersection(name.split(".")[0] for name in sys.modules)
+budget = schema.ContextBudget(request_window_tokens=256, max_new_tokens_per_turn=64, max_turns=4)
+restored = schema.ContextBudget.model_validate_json(json.dumps(budget.to_skyrl()))
+assert restored == budget and hash(restored) == hash(budget)
+assert pickle.loads(pickle.dumps(restored)) == budget
+print(json.dumps({"source": schema.__file__, "pydantic": pydantic.__version__, "document": restored.to_skyrl()}))
+"""
+    result = subprocess.run(
+        [str(interpreter), "-c", program],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": ""},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    output = json.loads(result.stdout)
+    print(f"built-wheel schema source: {output['source']}; pydantic {output['pydantic']}")
 
 
 def test_base_dependencies_are_cpu_only(built_wheel: BuiltWheel) -> None:
