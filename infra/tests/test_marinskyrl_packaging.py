@@ -18,6 +18,8 @@ import pytest
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
 PYPROJECT = tomllib.loads((REPOSITORY_ROOT / "pyproject.toml").read_text())
+
+
 @dataclass(frozen=True)
 class BuiltWheel:
     path: Path
@@ -96,7 +98,11 @@ print(json.dumps({"source": schema.__file__, "pydantic": pydantic.__version__, "
 
 def test_base_dependencies_are_cpu_only(built_wheel: BuiltWheel) -> None:
     requirements = Parser().parsestr(built_wheel.metadata).get_all("Requires-Dist", [])
-    base_requirements = {requirement.partition(";")[0].strip().split("[")[0].split()[0].lower() for requirement in requirements if "extra ==" not in requirement}
+    base_requirements = {
+        requirement.partition(";")[0].strip().split("[")[0].split()[0].lower()
+        for requirement in requirements
+        if "extra ==" not in requirement
+    }
 
     assert base_requirements.isdisjoint({"flash-attn", "torch", "transformer-engine", "vllm"})
 
@@ -116,14 +122,14 @@ def test_training_extras_publish_hardware_policy_and_rollout_requirements(built_
         for requirement in requirements
     )
     assert any(requirement.startswith("torch==") and "extra == 'vllm'" in requirement for requirement in requirements)
-    assert any(requirement.startswith("memray") and "extra == 'telemetry'" in requirement for requirement in requirements)
     assert any(
-        requirement.startswith("torchvision==") and "extra == 'megatron'" in requirement
-        for requirement in requirements
+        requirement.startswith("memray") and "extra == 'telemetry'" in requirement for requirement in requirements
     )
     assert any(
-        requirement.startswith("megatron-core") and "extra == 'megatron'" in requirement
-        for requirement in requirements
+        requirement.startswith("torchvision==") and "extra == 'megatron'" in requirement for requirement in requirements
+    )
+    assert any(
+        requirement.startswith("megatron-core") and "extra == 'megatron'" in requirement for requirement in requirements
     )
 
     conflict = subprocess.run(
