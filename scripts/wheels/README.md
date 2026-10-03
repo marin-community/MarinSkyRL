@@ -28,7 +28,8 @@ use CPython 3.12's `cp312-cp312` ABI and Torch's C++11 ABI. Their hashes are:
 The [H100 build](https://iris.oa.dev/#/job/%2Fromain%2Ffa4-te219-build2-543a0ba8)
 used [recipe revision 543a0ba8](https://github.com/marin-community/MarinSkyRL/blob/543a0ba8012604104f99c3113632aa8e6c3d9ad0/scripts/wheels/build_native.sh).
 The [GB200 build](https://iris.oa.dev/#/job/%2Fromain%2Ffa4-te219-arm-build-11082662)
-used [revision 11082662](https://github.com/marin-community/MarinSkyRL/blob/11082662/scripts/wheels/build_native.sh).
+used revision `110826620d16722f8ee328b8074a0014b63503b6`.
+Its recipe is identical to the [release-tagged recipe](https://github.com/marin-community/MarinSkyRL/blob/fa4-te219-cu132-20260920-694f3adf/scripts/wheels/build_native.sh).
 Those revisions called the same TE recipe `transformer-engine-torch-2.19`.
 The maintained `transformer-engine-torch` target uses the same source, pinned
 build requirements and compilation command. Architecture checks and
@@ -57,6 +58,9 @@ with CPython `3.12.14`, uv `0.10.3`, GCC/G++ `14.2.0-19` and glibc
 16 GiB memory and 64 GiB disk. Preserve the image digest with the build records;
 select the architecture using the live cluster topology rather than requesting
 a GPU for compilation.
+Those builds used recipe revision `e3e1996a3`. The later change moves provenance
+capture before compilation and prints the captured record; compilation inputs
+and commands are unchanged.
 
 ```bash
 bash scripts/wheels/build_native.sh flash-attn /tmp/build-flash-attn
