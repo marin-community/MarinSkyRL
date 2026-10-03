@@ -23,7 +23,7 @@ from skyrl_train.inference_engines.ray_wrapped_inference_engine import resolve_e
 from skyrl_train.utils.placement_geometry import colocated_engine_bundle_indices
 from skyrl_train.utils.utils import validate_cfg
 from skyrl_train.utils.utils import (
-    use_per_engine_strict_pack_pg,
+    use_per_engine_pg,
 )
 from tests.cpu.util import example_dummy_config
 
@@ -59,7 +59,7 @@ def test_resolve_engine_max_model_len(engine_kwargs, rope_scaling, expected):
 )
 def test_ray_uni_backend_gate(tp, pp, dp, expected):
     assert (
-        use_per_engine_strict_pack_pg(
+        use_per_engine_pg(
             use_hybrid_engine=False,
             use_mp_backend=False,
             tensor_parallel_size=tp,
@@ -74,7 +74,7 @@ def test_ray_uni_backend_gate(tp, pp, dp, expected):
 def test_mp_backend_never_per_engine_strict_pack(tp, pp):
     # The mp executor uses one node-atomic {GPU:tp_pp_size} bundle per engine,
     # so it never needs (and must not use) per-engine STRICT_PACK.
-    assert not use_per_engine_strict_pack_pg(
+    assert not use_per_engine_pg(
         use_hybrid_engine=False,
         use_mp_backend=True,
         tensor_parallel_size=tp,
@@ -87,7 +87,7 @@ def test_mp_backend_never_per_engine_strict_pack(tp, pp):
 def test_hybrid_engine_never_per_engine_strict_pack(tp, pp):
     # colocate_all (hybrid) passes its own shared colocate PG; the per-engine
     # path must never engage.
-    assert not use_per_engine_strict_pack_pg(
+    assert not use_per_engine_pg(
         use_hybrid_engine=True,
         use_mp_backend=False,
         tensor_parallel_size=tp,
@@ -353,24 +353,19 @@ def test_engines_that_are_not_tp1_data_parallel_replicas_are_not_checked(
     assert all(engine.worker_placements is None for engine in engines)
 
 
-def test_wrong_worker_topology_kills_the_replica_gang(inference_scheduler):
-    scheduler = inference_scheduler
-    scheduler.report_changes[1] = {"gpu_uuid": "GPU-node-0-0"}
-    with pytest.raises(ValueError, match="distinct"):
-        scheduler.launch(data_parallel_size=8, expert_parallel_size=8)
-    assert scheduler.killed == scheduler.actors
-    assert len(scheduler.killed) == 16
-    assert scheduler.removed == scheduler.groups
-
-
 @pytest.mark.parametrize(
-    "change,error", [({"host": "wrong-host"}, "worker host"), ({"gpu_uuid": "GPU-node-0-0"}, "distinct")]
+    "replicas,dp,index,change,error",
+    [
+        (2, 8, 1, {"gpu_uuid": "GPU-node-0-0"}, "distinct"),
+        (1, 16, 8, {"host": "wrong-host"}, "worker host"),
+        (1, 16, 8, {"gpu_uuid": "GPU-node-0-0"}, "distinct"),
+    ],
 )
-def test_cross_node_ep_rejects_wrong_worker_placement(inference_scheduler, change, error):
+def test_ep_rejects_wrong_worker_placement_and_cleans_up(inference_scheduler, replicas, dp, index, change, error):
     scheduler = inference_scheduler
-    scheduler.report_changes[8] = change
+    scheduler.report_changes[index] = change
     with pytest.raises(ValueError, match=error):
-        scheduler.launch(num_inference_engines=1, data_parallel_size=16, expert_parallel_size=16)
+        scheduler.launch(num_inference_engines=replicas, data_parallel_size=dp, expert_parallel_size=dp)
     assert len(scheduler.killed) == 16
     assert scheduler.removed == scheduler.groups
 

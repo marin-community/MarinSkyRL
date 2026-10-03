@@ -231,7 +231,7 @@ def policy_spread_bundles(cfg: DictConfig):
     return [{"GPU": num_gpus_per_node, "CPU": num_gpus_per_node} for _ in range(num_nodes)]
 
 
-def use_per_engine_strict_pack_pg(
+def use_per_engine_pg(
     *,
     use_hybrid_engine: bool,
     use_mp_backend: bool,
@@ -239,9 +239,9 @@ def use_per_engine_strict_pack_pg(
     pipeline_parallel_size: int,
     data_parallel_size: int,
 ) -> bool:
-    """Return whether the default placement needs a node-local group per engine.
+    """Return whether placement needs a separate group per multi-GPU engine.
 
-    The engine factory uses PACK for explicit cross-node EP. Single-GPU engines
+    The engine factory uses PACK for supported cross-node EP. Single-GPU engines
     share a PACK group; hybrid placement supplies its own group, and the mp
     backend reserves each tensor/pipeline slice in one node-atomic bundle.
     """

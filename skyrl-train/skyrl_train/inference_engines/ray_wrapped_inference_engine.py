@@ -48,7 +48,7 @@ from skyrl_train.utils import (
     ray_noset_visible_devices,
 )
 from skyrl_train.utils.constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS
-from skyrl_train.utils.utils import use_per_engine_strict_pack_pg
+from skyrl_train.utils.utils import use_per_engine_pg
 from skyrl_train.inference_engines.placement import (
     colocated_engine_bundle_layout,
     inference_bundle_nodes,
@@ -637,7 +637,7 @@ def create_ray_wrapped_inference_engines(
     # Single-GPU engines share a PACK group to leave whole nodes available for training.
     per_engine_pgs: list = []
     owned_placement_groups: list = []
-    use_per_engine_strict_pack = use_per_engine_strict_pack_pg(
+    needs_per_engine_pg = use_per_engine_pg(
         use_hybrid_engine=use_hybrid_engine,
         use_mp_backend=use_mp_backend,
         tensor_parallel_size=tensor_parallel_size,
@@ -662,7 +662,7 @@ def create_ray_wrapped_inference_engines(
             shared_pg = placement_group(bundles, strategy="PACK")
             owned_placement_groups.append(shared_pg)
             get_ray_pg_ready_with_timeout(shared_pg, timeout=placement_group_timeout_seconds)
-        elif use_per_engine_strict_pack:
+        elif needs_per_engine_pg:
             # Each engine owns a group. TP/PP and ordinary DP groups remain node-local.
             # PACK prefers fewer nodes but permits spanning them for verified TP=PP=1 EP replicas.
             for _ in range(num_inference_engines):
