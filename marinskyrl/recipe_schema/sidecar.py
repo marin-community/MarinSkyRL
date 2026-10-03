@@ -12,7 +12,7 @@ TYPES = {
     "trainer.algorithm.loss_reduction": 'Literal["token_mean", "sequence_mean", "seq_mean_token_sum_norm", "seq_mean_token_sum_norm_global"]',
     "trainer.algorithm.kl_estimator_type": 'Literal["k1", "abs", "k2", "k3", "k3_unbiased_gradient"]',
     "trainer.algorithm.off_policy_correction": 'Literal["none", "custom", "icepop", "outlier_mask", "seq_mask_tis", "tis"] | None',
-    "trainer.algorithm.off_policy_correction_rules": "tuple[OpenMap, ...] | None",
+    "trainer.algorithm.off_policy_correction_rules": "tuple[CorrectionRule, ...] | None",
     "trainer.algorithm.dynamic_sampling.type": 'Literal["filter", "replace"] | None',
     "trainer.algorithm.distillation": "Distillation | None",
     "trainer.algorithm.distillation.objective": 'Literal["sampled_reverse_kl", "sparse_forward_kl", "sparse_reverse_kl", "sparse_jsd", "student_topk_policy_surrogate"]',
@@ -117,6 +117,8 @@ OPEN = frozenset(
 # Declared here because code reads them with a default but ppo_base_config.yaml does not list them.
 # Ellipsis keeps code-default fields unset in authored documents.
 UNDECLARED = {
+    "teachers": ("SectionMap[Teacher]", ...),
+    "teacher_routing": ("SectionMap[TeacherRouting]", ...),
     "data.kind": ('Literal["tasks", "parquet"]', "tasks"),  # launcher-only: how the launch host stages data
     "trainer.enable_db_registration": ("bool", True),
     "trainer.hf_hub_repo_id": ("str | None", None),
@@ -197,6 +199,50 @@ NAMES = {
 
 # CLASSES fields pair an annotation with whether the field is required.
 CLASSES = {
+    "TeacherModel": {"path": ("str", True), "revision": ("str", True)},
+    "TeacherEndpoint": {
+        "url": ("str", True),
+        "auth": ("str | None", False),
+        "max_concurrency": ("PositiveInt", True),
+    },
+    "TeacherResources": {
+        "num_nodes": ("PositiveInt", True),
+        "gpus_per_node": ("PositiveInt", True),
+        "tensor_parallel_size": ("PositiveInt", True),
+        "colocation_group": ("str", True),
+        "max_num_batched_tokens": ("PositiveInt | None", False),
+        "gpu_memory_utilization": ("int | float | None", False),
+        "data_parallel_size": ("PositiveInt | None", False),
+        "expert_parallel_size": ("PositiveInt | None", False),
+    },
+    "Teacher": {
+        "source": ('Literal["openai_compatible", "local_inference", "frozen_worker", "resident"]', True),
+        "placement": ('Literal["external", "pinned", "rotating", "co_resident"] | None', False),
+        "model": ("TeacherModel", True),
+        "evidence": ('Literal["chosen_token", "topk_distribution", "student_selected_topk"]', True),
+        "top_k": ("PositiveInt | None", False),
+        "endpoints": ("tuple[TeacherEndpoint, ...]", False),
+        "backend": ("str | None", False),
+        "resources": ("TeacherResources | None", False),
+        "tokenizer_fingerprint": ("str | None", False),
+        "max_sequence_length": ("PositiveInt | None", False),
+        "request_timeout_seconds": ("int | float | None", False),
+    },
+    "TeacherRoute": {"teacher": ("str", True), "weight": ("int | float", True)},
+    "TeacherRouting": {"revision": ("str", True), "routes": ("SectionMap[TeacherRoute]", True)},
+    "TokenRule": {
+        "kind": ('Literal["token"]', True),
+        "action": ('Literal["truncate", "mask"]', True),
+        "low": ("int | float | None", False),
+        "high": ("int | float | None", False),
+    },
+    "SequenceRule": {
+        "kind": ('Literal["sequence"]', True),
+        "aggregate": ('Literal["geometric", "product", "extreme_token"]', True),
+        "action": ('Literal["truncate", "mask"]', True),
+        "low": ("int | float | None", False),
+        "high": ("int | float | None", False),
+    },
     "EvaluationSampling": {
         "sampling_params": ("EvalSamplingParams | None", False),
         "n_samples_per_prompt": ("PositiveInt | None", False),
@@ -259,6 +305,7 @@ CLASSES = {
 }
 
 ALIASES = {
+    "CorrectionRule": 'Annotated[TokenRule | SequenceRule, Field(discriminator="kind")]',
     "Callback": 'Annotated[CheckpointCallback | DistillationTokenBudgetCallback | EvaluationCallback | HFModelSaveCallback | DatabaseRegistrationCallback | RefModelUpdateCallback | ProgressCallback | LoggingCallback | PreflightGateCallback | InferenceStatsCallback, Field(discriminator="type")]',
 }
 

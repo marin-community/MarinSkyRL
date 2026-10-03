@@ -1,8 +1,11 @@
+from pathlib import Path
+
 import pytest
 import torch
 from omegaconf import OmegaConf
 
-from skyrl_train.config.objective_spec import OffPolicyCorrection, load_correction
+from skyrl_train.config import objective_spec
+from skyrl_train.config.objective_spec import load_correction, off_policy_correction
 from skyrl_train.dataset.replay_buffer import NaiveReplayBuffer
 from skyrl_train.objective.correction import compute_correction
 from skyrl_train.training_batch import TrainingBatchIterator, TrainingInputBatch
@@ -31,13 +34,33 @@ from skyrl_train.training_batch import TrainingBatchIterator, TrainingInputBatch
         ),
     ],
 )
-def test_correction_presets_match_importance_weight_oracles(preset, ratios, mask, expected, truncated, masked):
+def test_correction_presets_match_importance_weight_oracles(
+    preset, ratios, mask, expected, truncated, masked, generated_recipe_schema
+):
+    root = Path(__file__).resolve().parents[4]
+    assert Path(objective_spec.__file__).resolve() == root / "skyrl-train/skyrl_train/config/objective_spec.py"
+    print(f"correction compiler source: {objective_spec.__file__}")
+    recipe_type, _ = generated_recipe_schema
+    rule_config = OmegaConf.load(root / "skyrl-train/skyrl_train/config/off_policy_correction" / f"{preset}.yaml")
+    recipe = recipe_type.from_document(
+        {
+            "trainer": {
+                "algorithm": {
+                    "off_policy_correction": "custom",
+                    "off_policy_correction_rules": OmegaConf.to_container(rule_config.rules, resolve=False),
+                }
+            }
+        }
+    )
     ratios = torch.tensor(ratios)
     mask = torch.tensor(mask)
     rollout = torch.full_like(ratios, -3, requires_grad=True)
     old = (ratios.log() + rollout).detach().requires_grad_()
 
-    result = compute_correction(old, rollout, mask, load_correction(preset))
+    result = compute_correction(
+        old, rollout, mask, off_policy_correction(OmegaConf.create(recipe.to_skyrl()).trainer.algorithm)
+    )
+    raw_result = compute_correction(old, rollout, mask, load_correction(preset))
 
     rows, response_length = mask.shape
     batch = TrainingInputBatch(
@@ -62,6 +85,7 @@ def test_correction_presets_match_importance_weight_oracles(preset, ratios, mask
     restored = replay.collate_fn([replay[index] for index in range(len(replay))])
 
     expected = torch.tensor(expected, dtype=torch.float32)
+    torch.testing.assert_close(raw_result.weights, expected)
     torch.testing.assert_close(torch.stack(restored.correction_weights), expected)
     assert not result.weights.requires_grad
     assert result.metrics["policy/correction/weight_mean"] == pytest.approx(expected.sum().item() / mask.sum().item())
@@ -84,12 +108,21 @@ def test_correction_on_policy_is_identity_on_eligible_tokens(preset):
     ("aggregate", "expected"),
     [("geometric", [[2.0, 2.0, 0], [0, 0, 0]]), ("product", [[3.0, 3.0, 0], [0, 0, 0]])],
 )
-def test_sequence_truncation_broadcasts_only_over_trainable_tokens(aggregate, expected):
-    correction = OffPolicyCorrection.from_config(
-        OmegaConf.create(
-            {"name": "custom", "rules": [{"kind": "sequence", "aggregate": aggregate, "action": "truncate", "high": 3}]}
-        )
+def test_sequence_truncation_broadcasts_only_over_trainable_tokens(aggregate, expected, generated_recipe_schema):
+    recipe_type, _ = generated_recipe_schema
+    recipe = recipe_type.from_document(
+        {
+            "trainer": {
+                "algorithm": {
+                    "off_policy_correction": "custom",
+                    "off_policy_correction_rules": [
+                        {"kind": "sequence", "aggregate": aggregate, "action": "truncate", "low": None, "high": 3}
+                    ],
+                }
+            }
+        }
     )
+    correction = off_policy_correction(OmegaConf.create(recipe.to_skyrl()).trainer.algorithm)
     old = torch.tensor([[4.0, 1.0, float("nan")], [float("nan")] * 3]).log()
     mask = torch.tensor([[1, 1, 0], [0, 0, 0]])
 
@@ -99,17 +132,29 @@ def test_sequence_truncation_broadcasts_only_over_trainable_tokens(aggregate, ex
     assert result.metrics["policy/correction/truncated_fraction"] == (0 if aggregate == "geometric" else 1)
 
 
-def test_sequence_product_clamps_log_sum_before_exponentiating():
-    correction = OffPolicyCorrection.from_config(
-        OmegaConf.create(
-            {
-                "name": "custom",
-                "rules": [{"kind": "sequence", "aggregate": "product", "action": "truncate", "high": 1e20}],
+def test_sequence_product_clamps_log_sum_before_exponentiating(generated_recipe_schema):
+    recipe_type, _ = generated_recipe_schema
+    recipe = recipe_type.from_document(
+        {
+            "trainer": {
+                "algorithm": {
+                    "off_policy_correction": "custom",
+                    "off_policy_correction_rules": [
+                        {"kind": "sequence", "aggregate": "product", "action": "truncate", "high": 1e20}
+                    ],
+                }
             }
-        )
+        }
     )
+    correction = off_policy_correction(OmegaConf.create(recipe.to_skyrl()).trainer.algorithm)
     old = torch.tensor([[100.0, 100.0], [-100.0, -100.0]])
 
     result = compute_correction(old, torch.zeros_like(old), torch.ones_like(old), correction)
 
     torch.testing.assert_close(result.weights, torch.tensor([[20.0, 20.0], [-20.0, -20.0]]).exp())
+    with pytest.raises(ValueError):
+        recipe.with_settings(
+            [
+                'trainer.algorithm.off_policy_correction_rules=[{"kind":"token","aggregate":"product","action":"truncate","high":3}]'
+            ]
+        )

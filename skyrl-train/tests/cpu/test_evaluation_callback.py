@@ -1,33 +1,23 @@
 from pathlib import Path
-import runpy
 
 import pytest
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
 import marinskyrl.recipe_schema as schema
-from scripts import generate_recipe_schema as generator
 from skyrl_train.callbacks.base import TrainerControl, TrainerState
 from skyrl_train.callbacks import builtin as callbacks
 from skyrl_train.inference_engines import utils as inference
 
 
 @pytest.fixture(scope="module")
-def callback_schema():
+def callback_schema(generated_recipe_schema):
     root = Path(__file__).resolve().parents[3]
     assert Path(schema.__file__).resolve() == root / "marinskyrl/recipe_schema/__init__.py"
-    assert Path(generator.__file__).resolve() == root / "scripts/generate_recipe_schema.py"
     assert Path(callbacks.__file__).resolve() == root / "skyrl-train/skyrl_train/callbacks/builtin.py"
     assert Path(inference.__file__).resolve() == root / "skyrl-train/skyrl_train/inference_engines/utils.py"
-    print(f"callback sources: {schema.__file__}; {generator.__file__}; {callbacks.__file__}; {inference.__file__}")
-    base, groups, comments = generator.source_documents(generator.CONFIG_DIR)
-    sidecar = runpy.run_path(str(root / "marinskyrl/recipe_schema/sidecar.py"))
-    generated = generator.render_sections(
-        base, sidecar, {"DERIVED_PATHS": set(), "LAUNCH_PATHS": set()}, comments, groups
-    )
-    namespace = {"__name__": "marinskyrl.recipe_schema._callbacks", "__package__": "marinskyrl.recipe_schema"}
-    exec(compile(generated, "generated-callback-sections", "exec"), namespace)
-    return namespace["RecipeSections"], OmegaConf.create(base)
+    print(f"callback sources: {schema.__file__}; {callbacks.__file__}; {inference.__file__}")
+    return generated_recipe_schema
 
 
 @pytest.mark.parametrize(

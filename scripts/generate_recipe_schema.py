@@ -306,9 +306,13 @@ def render_sections(
 
     root_fields = []
     for key, value in schema.items():
-        name = emit(key, value)
-        expression = f"Field(default_factory={name})" if key in base else "unset_field()"
-        root_fields.append(f"    {key}: {name} = {expression}")
+        if key in undeclared:
+            annotation, default = undeclared[key]
+            expression = "unset_field()" if default is Ellipsis else f"field({default!r})"
+        else:
+            annotation = emit(key, value)
+            expression = f"Field(default_factory={annotation})" if key in base else "unset_field()"
+        root_fields.append(f"    {key}: {annotation} = {expression}")
     emitted.append(
         'class RecipeSections(RecipeDocument):\n    """Generated author root sections."""\n\n'
         + "\n".join(root_fields)
