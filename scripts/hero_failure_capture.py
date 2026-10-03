@@ -31,6 +31,7 @@ WORKER_ARTIFACT = "runs/worker-abort.json"
 LOSS_ARTIFACT = "runs/worker-loss.json"
 FAILURE_EXIT_CODE = 42
 WORKER_TIMEOUT = 120
+DEFAULT_DEBUG_ROOT = "/tmp/debug"
 
 
 def failure_marker(identity: dict) -> str:
@@ -41,7 +42,7 @@ def debug_environment(run_id: str) -> EnvVarManager:
     return EnvVarManager.for_debug_launch(
         job_name=run_id,
         mode=DebugMode.LIGHT,
-        artifact_root=os.environ[DEBUG_ARTIFACT_DIR_ENV],
+        artifact_root=os.environ.get(DEBUG_ARTIFACT_DIR_ENV, DEFAULT_DEBUG_ROOT),
     )
 
 
@@ -186,9 +187,14 @@ def check_artifacts(output: str, run_id: str) -> dict:
         raise ValueError("missing final failure upload receipt")
     logs = filesystem.glob(f"{root}/ray-logs/{manifest['node_id']}/session_*/worker-*{identity['pid']}.err")
     marker = failure_marker(identity).encode()
-    matching_logs = [path for path in logs if marker in filesystem.cat(path)]
+    matching_logs = []
+    for path in logs:
+        payload = filesystem.cat(path)
+        offset = payload.find(marker)
+        if offset >= 0 and b"Fatal Python error: Aborted" in payload[offset + len(marker) :]:
+            matching_logs.append(path)
     if not matching_logs:
-        raise ValueError("no retained worker stderr identifies the deliberate abort")
+        raise ValueError("no retained worker stderr identifies the abort and its fatal traceback")
     return {
         "run_id": run_id,
         "identity": identity,

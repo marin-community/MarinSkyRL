@@ -10,17 +10,40 @@ import fsspec
 import pytest
 
 from cloud.iris.task_runtime import sync_debug_artifacts
-from marinskyrl.environment_contract import DEBUG_ARTIFACT_DIR_ENV
-from scripts.hero_failure_capture import LOSS_ARTIFACT, WORKER_ARTIFACT, check_artifacts, failure_marker
+from marinskyrl.environment_contract import DEBUG_ARTIFACT_DIR_ENV, EnvVarScope
+from scripts.hero_failure_capture import (
+    LOSS_ARTIFACT,
+    WORKER_ARTIFACT,
+    check_artifacts,
+    debug_environment,
+    failure_marker,
+)
 
 
 def _retained_failure(tmp_path, monkeypatch):
     source = tmp_path / "debug"
-    (source / "runs").mkdir(parents=True)
-    identity = {"run_id": "abort-test", "worker_id": "worker123", "pid": 456, "debug_root": str(source)}
-    (source / WORKER_ARTIFACT).write_text(json.dumps(identity))
-    (source / LOSS_ARTIFACT).write_text(json.dumps(identity))
     monkeypatch.setenv(DEBUG_ARTIFACT_DIR_ENV, str(source))
+    manager = debug_environment("abort-test")
+    manager.apply_to_process(EnvVarScope.TASK_RUNTIME)
+    # A real CPU child writes into the worker-projected root; the runtime uploader
+    # reads its own ambient root. A split between those roots loses these bytes.
+    worker_code = (
+        "import json,os\n"
+        "from pathlib import Path\n"
+        "root=Path(os.environ['SKYRL_DEBUG_ARTIFACT_DIR'])\n"
+        "identity={'run_id':'abort-test','worker_id':'worker123','pid':456,'debug_root':str(root)}\n"
+        "(root/'runs/worker-abort.json').write_text(json.dumps(identity))\n"
+        "(root/'runs/worker-loss.json').write_text(json.dumps(identity))\n"
+        "print(json.dumps(identity))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", worker_code],
+        env={**os.environ, **manager.environment_for(EnvVarScope.RAY_WORKER)},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    identity = json.loads(result.stdout)
     output = f"memory://{tmp_path.name}"
     sync_debug_artifacts(f"{output}/rendezvous", "rank0-test", "driver exit_code=42 (head rank 0)")
     filesystem = fsspec.filesystem("memory")
@@ -40,11 +63,14 @@ def test_acceptance_reads_failure_bytes_and_final_upload_receipt(tmp_path, monke
     assert receipt["manifest"]["copied_bytes"] > 0
 
 
-@pytest.mark.parametrize("missing", [WORKER_ARTIFACT, LOSS_ARTIFACT, "sync-manifest.json", "stderr"])
+@pytest.mark.parametrize("missing", [WORKER_ARTIFACT, LOSS_ARTIFACT, "sync-manifest.json", "stderr", "fatal-tail"])
 def test_acceptance_rejects_lost_failure_evidence(tmp_path, monkeypatch, missing):
     output, filesystem, log = _retained_failure(tmp_path, monkeypatch)
     path = log if missing == "stderr" else f"{output}/rendezvous/debug_artifacts/rank0-test/{missing}"
-    filesystem.rm(path)
+    if missing == "fatal-tail":
+        filesystem.pipe(log, b"HERO_CAPTURE_ABORT run=abort-test worker=worker123 pid=456\n")
+    else:
+        filesystem.rm(path)
 
     with pytest.raises((ValueError, FileNotFoundError)):
         check_artifacts(output, "abort-test")
@@ -58,17 +84,14 @@ def test_acceptance_rejects_artifacts_from_another_run(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("root,interval", [(None, None), ("/tmp/explicit-debug", "17")])
-def test_custom_launcher_shares_worker_root_and_preserves_overrides(tmp_path, root, interval):
+def test_custom_launcher_sets_checkout_and_preserves_caller_environment(tmp_path, root, interval):
     # Substitute the external Python command to observe the real shell exports.
     python = tmp_path / "python"
     python.write_text(
         f"#!{sys.executable}\n"
         "import json, os\n"
-        "from scripts.hero_failure_capture import debug_environment\n"
-        "from marinskyrl.environment_contract import EnvVarScope\n"
-        "print(json.dumps({'checkout':os.environ['SKYRL_HOME'], 'root':os.environ['SKYRL_DEBUG_ARTIFACT_DIR'],"
-        "'interval':os.environ['OT_AGENT_RAY_LOG_SYNC_INTERVAL_S'],"
-        "'worker':debug_environment('test').environment_for(EnvVarScope.RAY_WORKER)}))\n"
+        "print(json.dumps({'checkout':os.environ['SKYRL_HOME'], 'root':os.environ.get('SKYRL_DEBUG_ARTIFACT_DIR'),"
+        "'interval':os.environ.get('OT_AGENT_RAY_LOG_SYNC_INTERVAL_S')}))\n"
     )
     python.chmod(0o755)
     environment = {
@@ -85,10 +108,9 @@ def test_custom_launcher_shares_worker_root_and_preserves_overrides(tmp_path, ro
     )
     wiring = json.loads(result.stdout)
 
-    assert wiring["root"] == (root or "/tmp/debug")
     assert wiring["checkout"] == str(Path.cwd())
-    assert wiring["worker"][DEBUG_ARTIFACT_DIR_ENV] == wiring["root"]
-    assert wiring["interval"] == (interval or "60")
+    assert wiring["root"] == root
+    assert wiring["interval"] == interval
 
 
 def test_signal_wrapper_waits_for_child_cleanup_before_exiting():

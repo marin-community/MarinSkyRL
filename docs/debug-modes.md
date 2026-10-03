@@ -61,12 +61,15 @@ Each Iris upload writes `sync-manifest.json` with every copied or budget-rejecte
 The opt-in `scripts/hero_failure_capture_task.sh` launcher runs one Ray actor on one GPU, checks a small CUDA
 result, writes a bounded synthetic transport receipt, and calls `os.abort()`. The driver observes the lost worker
 and exits 42. The existing task runtime then uploads worker stderr and managed debug files before stopping Ray.
-The fixture adapts only the training-driver command; it reuses `run_head` and its failure teardown.
+The controller projects the debug environment through `EnvVarManager`, writes its process manifest, and adapts the
+training-driver command. It reuses `run_head` and its failure teardown.
 
-Custom Hero launchers must export `SKYRL_DEBUG_ARTIFACT_DIR` before both the runtime and workers start. The fixture
-defaults to `/tmp/debug` and a 60-second `OT_AGENT_RAY_LOG_SYNC_INTERVAL_S`, preserving explicit overrides. It reuses
-the custom launcher's signal forwarding and waits for the controller to finish its uploads. The normal Iris RL
-launcher already projects the managed debug root and provides this shutdown behavior.
+Custom Hero launchers must project the debug root through `EnvVarManager` before both the runtime and workers
+start. Direct shell exports of derived debug variables violate the repository's environment contract. The fixture
+controller defaults to `/tmp/debug`, preserving an explicit root. Set the 60-second
+`OT_AGENT_RAY_LOG_SYNC_INTERVAL_S` in the Iris job specification. The fixture mirrors the custom launcher's signal
+forwarding and waits for the controller's uploads. The normal Iris RL launcher already projects the managed debug
+root and provides this shutdown behavior.
 
 From a clean checkout, prepare the CPU launcher environment with the root commands in `AGENTS.md`. Configure Iris
 access and CoreWeave S3 credentials through the installed Iris operations guide. Check capacity and preemption
@@ -80,6 +83,8 @@ uv run --no-sync iris --cluster=cw-us-east-08a job run --no-wait \
   --gpu GB200x4 --cpu 8 --memory 32GB --disk 60GB --timeout 1200 \
   --extra cuda --extra telemetry \
   -e OT_AGENT_RAY_OBJECT_STORE_CAP_GIB 1 -e PYTHONUNBUFFERED 1 \
+  -e OT_AGENT_RAY_LOG_SYNC_INTERVAL_S "${OT_AGENT_RAY_LOG_SYNC_INTERVAL_S:-60}" \
+  -e OT_AGENT_RAY_LOG_FINAL_SYNC_TIMEOUT_S 120 -e WANDB_MODE disabled \
   -e RAY_USE_UVLOOP 0 -e UV_USE_IO_URING 0 \
   -- bash scripts/hero_failure_capture_task.sh --output "$OUTPUT" --run-id "$RUN"
 ```
@@ -101,12 +106,15 @@ uv run --no-sync python -m scripts.hero_failure_capture check --output "$OUTPUT"
 
 Acceptance requires the matching worker ID and PID in the debug receipt, the driver's worker-loss receipt, a final
 failure upload manifest with matching byte counts and no skipped files, and retained worker stderr containing that
-worker's abort marker. Missing artifacts or logs fail the check. The CPU tests remove each required artifact as a
+worker's abort marker followed by its fatal Python traceback. Missing artifacts or a lost fatal log tail fail the
+check. The CPU tests remove each required artifact and truncate the fatal tail as a
 negative control. Preserve the printed receipt, task outcome, pod-removal evidence, source revision and GPU type.
 
-This checks a worker abort followed by normal single-node teardown. The debug receipt is synthetic; this fixture
-does not create an NCCL timeout dump. It does not cover abrupt pod deletion, machine loss, multi-node teardown, or
-the cause of the original Hero worker crash.
+This checks a worker abort on the head node followed by the driver's failure exit. The signal-forwarding wrapper
+has a separate CPU handshake test; the Iris SIGTERM paths and non-head worker teardown are untested here. The head
+runtime's failure upload has a 30-second outer budget. Slower storage, larger logs or stalled GPU diagnostics can
+leave partial evidence. The debug receipt is synthetic; this fixture does not create an NCCL timeout dump. It does
+not cover abrupt pod deletion, machine loss, or the cause of the original Hero worker crash.
 
 ## Jupiter acceptance test
 
