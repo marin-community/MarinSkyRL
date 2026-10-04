@@ -84,7 +84,8 @@ def test_eval_reports_normalized_verifier_score_alongside_raw_reward():
 
 
 @pytest.mark.asyncio
-async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path, monkeypatch):
+@pytest.mark.parametrize("evaluation_name", [None, "greedy_repeat"])
+async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path, monkeypatch, evaluation_name):
     monkeypatch.setitem(registry, "custom_env", registry["gsm8k"])
     cfg = configure_eval(dummy_config, tmp_path)
 
@@ -132,6 +133,7 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path, monkey
         global_step=5,
         tokenizer=tokenizer,
         trajectory_sink=sink,
+        val_set_name=evaluation_name,
     )
 
     expected_metrics = {
@@ -156,3 +158,4 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path, monkey
     assert seen_batch["env_classes"] == ["gsm8k", "custom_env"]
     assert seen_batch["env_extras"] == [prompt["env_extras"] for prompt in prompts_batch]
     assert seen_batch["batch_metadata"].training_phase == "eval"
+    assert seen_batch["batch_metadata"].evaluation_name == evaluation_name

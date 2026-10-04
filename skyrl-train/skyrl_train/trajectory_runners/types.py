@@ -47,6 +47,7 @@ class TrajectoryID:
 class BatchMetadata:
     global_step: int
     training_phase: TrainingPhase
+    evaluation_name: str | None = None
 
 
 class TrajectoryRequestBatch(TypedDict):

@@ -50,7 +50,7 @@ from skyrl_train.io import io
 
 RETENTION_METRIC_PREFIX = "generate/trajectory_retention"
 RETENTION_SCHEMA_VERSION = 1
-TRAJECTORY_RECORD_SCHEMA_VERSION = 5
+TRAJECTORY_RECORD_SCHEMA_VERSION = 6
 _LEDGER_NAME = "_retention_ledger.json"
 _SELECTION_COUNT = "count"
 _SELECTION_FRACTION = "fraction"
@@ -218,6 +218,7 @@ class TrajectoryRecord:
     verification_result: VerificationResult | None
     metrics: dict[str, Any]
     provenance: _ProvenanceTrace
+    evaluation_name: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         return to_jsonable(self)
@@ -393,8 +394,8 @@ def build_trajectory_records(
     verifier_tests = output.get("verifier_tests")
     if verifier_tests is not None and len(verifier_tests) != len(output["response_ids"]):
         raise ValueError("verifier tests must have one entry per trajectory row")
-    # A request's step names the policy version being trained, which has completed one fewer update.
-    model_version_step = max(0, metadata.global_step - 1)
+    # Training requests precede their update; evaluation requests use completed weights.
+    model_version_step = max(0, metadata.global_step - (metadata.training_phase == "train"))
 
     records = []
     for group in _group_rows(input_batch, output):
@@ -418,6 +419,7 @@ def build_trajectory_records(
             run_id=config.run_id,
             global_step=metadata.global_step,
             phase=metadata.training_phase,
+            evaluation_name=metadata.evaluation_name,
             trajectory=_TrajectoryIdentity(
                 instance_id=trajectory_id.instance_id,
                 repetition_id=trajectory_id.repetition_id,

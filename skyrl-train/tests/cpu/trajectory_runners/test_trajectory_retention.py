@@ -281,11 +281,12 @@ def test_normalized_output_produces_complete_core_trace_schema():
         "verification_result",
         "metrics",
         "provenance",
+        "evaluation_name",
     }
     assert record["prompt"]["messages"] == [{"role": "user", "content": "first"}]
     assert record["response"]["text"] == "10 11"
     assert record["verifier"] is None
-    assert record["schema_version"] == 5
+    assert record["schema_version"] == 6
     assert record["disposition"] == {"exception_type": None, "error_treatment": None, "server_error": None}
     assert record["provenance"]["runner"] == "SkyRLGymTrajectoryRunner"
 
@@ -674,6 +675,37 @@ def test_record_contains_replay_provenance_and_trainable_boundaries():
         "reward_shaping_schema_version": 2,
     }
     assert record["response"]["trainable_spans"] == [{"start": 0, "end": 2}]
+
+
+def test_evaluation_record_names_completed_weights():
+    record = build_trajectory_records(
+        _input(step=7, phase="eval"),
+        _output(),
+        _config(Path("/unused")),
+        _Tokenizer(),
+        runner_name="SkyRLGymTrajectoryRunner",
+    )[0].to_json()
+    assert record["provenance"]["model_version_step"] == 7
+
+
+def test_identical_named_evaluation_repeats_keep_both_exact_token_records(tmp_path):
+    sink = _sink(_config(tmp_path, phases=["eval"], sample_fraction=1.0))
+    first = _input(step=7, phase="eval")
+    repeat = _input(step=7, phase="eval")
+    repeat["batch_metadata"].evaluation_name = "greedy_repeat"
+    sink.retain(first, _output())
+    sink.retain(repeat, _output())
+    sink.close()
+    records = _records(tmp_path)
+    assert len(records) == 6
+    for name in (None, "greedy_repeat"):
+        rows = [row for row in records if row["evaluation_name"] == name]
+        assert {row["trajectory"]["instance_id"] for row in rows} == {"a", "b", "c"}
+        assert [row["response"]["token_ids"] for row in sorted(rows, key=lambda r: r["trajectory"]["instance_id"])] == [
+            [10, 11],
+            [20, 21, 22],
+            [30, 31],
+        ]
 
 
 def test_best_effort_failure_is_reported_and_required_failure_raises(tmp_path):

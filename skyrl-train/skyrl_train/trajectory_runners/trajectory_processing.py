@@ -1320,6 +1320,8 @@ def prepare_trajectory_request(
     default_env_class: str,
     training_phase: TrainingPhase,
     global_step: int,
+    *,
+    evaluation_name: str | None = None,
 ) -> Tuple[TrajectoryRequestBatch, List[str]]:
     """Prepare a trajectory request for training and eval
 
@@ -1363,7 +1365,9 @@ def prepare_trajectory_request(
         "env_extras": env_extras,
         "sampling_params": sampling_params,
         "trajectory_ids": trajectory_ids,
-        "batch_metadata": BatchMetadata(global_step=global_step, training_phase=training_phase),
+        "batch_metadata": BatchMetadata(
+            global_step=global_step, training_phase=training_phase, evaluation_name=evaluation_name
+        ),
     }
 
     return trajectory_request, uids

@@ -136,6 +136,7 @@ async def _collect_evaluation_rollouts(
                 cfg.environment.env_class,
                 "eval",
                 global_step,
+                evaluation_name=val_set_name,
             )
             batch = await trajectory_runner.run(request)
             trajectory_batches.append(batch)
