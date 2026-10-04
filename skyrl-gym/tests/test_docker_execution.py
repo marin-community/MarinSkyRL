@@ -2,6 +2,7 @@
 
 import asyncio
 import subprocess
+from contextlib import suppress
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
@@ -10,7 +11,7 @@ import pytest
 import pytest_asyncio
 import yaml
 from shellbox.backends.docker.machine import DockerMachineFactory, docker
-from shellbox.machine import DockerImage, ExitReason, MachineSpec
+from shellbox.machine import Command, DockerImage, ExitReason, MachineSpec
 from taskcompendium.environment import EnvironmentSpec
 
 from skyrl_gym.code_execution import execute_code
@@ -79,15 +80,27 @@ async def test_docker_candidate_cannot_read_worker_reference(docker_machine, tmp
 async def test_docker_cancellation_disposes_of_blocked_candidate(docker_machine):
     kernel = PythonKernel(docker_machine)
     await kernel.start()
-    pending = asyncio.create_task(kernel.execute("import signal; signal.pause()", timeout=30.0))
-    async with asyncio.timeout(5.0):
-        while True:
-            running = await docker("top", docker_machine.name, "-eo", "args")
-            if b"call" in running.stdout:
-                break
-            await asyncio.sleep(0)
-    pending.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await pending
-    assert (await docker("inspect", docker_machine.name)).exit_code != 0
-    await kernel.close()
+    ready = f"{kernel.directory}/candidate-ready"
+    pending = asyncio.create_task(
+        kernel.execute(f"import signal\nopen({ready!r}, 'w').close()\nsignal.pause()", timeout=30.0)
+    )
+    try:
+        async with asyncio.timeout(5.0):
+            while True:
+                if pending.done():
+                    await pending
+                    pytest.fail("The candidate exited before cancellation")
+                running = await docker_machine.run(Command(("test", "-f", ready), timeout=5.0))
+                if running.exit_code == 0:
+                    break
+                assert running.exit_code == 1
+                await asyncio.sleep(0)
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        assert (await docker("inspect", docker_machine.name)).exit_code != 0
+    finally:
+        pending.cancel()
+        with suppress(asyncio.CancelledError):
+            await pending
+        await kernel.close()
