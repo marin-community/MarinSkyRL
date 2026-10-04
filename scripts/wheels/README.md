@@ -7,7 +7,8 @@ before adoption.
 
 The recipes include Transformer Engine Torch 2.19, Megatron Core 0.19.2,
 Megatron Bridge 0.6.2, FlashAttention 2.8.3.post1, causal-conv1d 1.7,
-Mamba 2.3.2.post1 and fast-hadamard-transform 1.1. Sources and recursive submodules
+Mamba 2.3.2.post1 and fast-hadamard-transform 1.1 from the stable GitHub tag
+`v1.1.0.post2`. Sources and recursive submodules
 are fetched by exact commit. Upstream prebuilt Torch extensions are bypassed.
 
 Core and Bridge carry explicit patches under `patches/`. Core retains Hero's
@@ -16,9 +17,13 @@ dependency bounds for frontend 1.30, FLA 0.5.2 and OpenTelemetry 1.44. Bridge us
 Transformers through 5.18 and the paired FlashInfer 0.6.18.post1 packages. Both
 wheels have the local version `+marin.torch2141.1`.
 
-The Mamba patch incorporates the upstream TVM FFI upper-bound correction to
-0.1.12 and selects the serving stack's TileLang 0.1.14. Its local version is
-`+marin.cu132torch2141.1`. These are candidate compatibility changes; metadata
+FlashAttention, causal-conv1d and Mamba force C++17 upstream. Their build patches
+select C++20, which Torch 2.14 headers require. These wheels use the local version
+`+marin.cu132torch2141.1`. Fast-hadamard-transform inherits Torch's compiler
+standard without a patch.
+
+The Mamba patch also incorporates the upstream TVM FFI upper-bound correction to
+0.1.12 and selects the serving stack's TileLang 0.1.14. These are candidate compatibility changes; metadata
 resolution alone does not qualify their APIs or kernels.
 
 `build_native.sh` is a manual release tool. CI and runtime installation consume

@@ -14,6 +14,8 @@ def test_ray_workers_inherit_frozen_cuda_library_path(monkeypatch):
     monkeypatch.setenv("LD_LIBRARY_PATH", cuda_libraries)
     monkeypatch.setenv("NVRTC_HOME", cuda_root)
     monkeypatch.setenv("CUDA_HOME", cuda_root)
+    monkeypatch.setenv("TRITON_PTXAS_PATH", f"{cuda_root}/bin/ptxas")
+    monkeypatch.setenv("TRITON_PTXAS_BLACKWELL_PATH", f"{cuda_root}/bin/ptxas")
     monkeypatch.setenv("LIBRARY_PATH", "/app/.venv/lib")
     monkeypatch.setenv("MAX_JOBS", "8")
     monkeypatch.setattr("skyrl_train.utils.utils.peer_access_supported", lambda **_: True)
@@ -23,6 +25,8 @@ def test_ray_workers_inherit_frozen_cuda_library_path(monkeypatch):
     assert runtime_environment["LD_LIBRARY_PATH"] == cuda_libraries
     assert runtime_environment["NVRTC_HOME"] == cuda_root
     assert runtime_environment["CUDA_HOME"] == cuda_root
+    assert runtime_environment["TRITON_PTXAS_PATH"] == f"{cuda_root}/bin/ptxas"
+    assert runtime_environment["TRITON_PTXAS_BLACKWELL_PATH"] == f"{cuda_root}/bin/ptxas"
     assert runtime_environment["LIBRARY_PATH"] == "/app/.venv/lib"
     assert runtime_environment["MAX_JOBS"] == "8"
 
@@ -33,6 +37,9 @@ def test_frozen_cuda_runtime_resolves_one_cuda_root_and_all_library_directories(
     cuda_library = site_packages / "nvidia" / "cu13" / "lib"
     runtime_library.mkdir(parents=True)
     cuda_library.mkdir(parents=True)
+    ptxas = cuda_library.parent / "bin" / "ptxas"
+    ptxas.parent.mkdir()
+    ptxas.touch(mode=0o755)
 
     environment = EnvVarManager.for_frozen_cuda_runtime(
         [str(site_packages)],
@@ -42,6 +49,8 @@ def test_frozen_cuda_runtime_resolves_one_cuda_root_and_all_library_directories(
         "LD_LIBRARY_PATH": f"{cuda_library}:{runtime_library}",
         "NVRTC_HOME": str(cuda_library.parent),
         "CUDA_HOME": str(cuda_library.parent),
+        "TRITON_PTXAS_PATH": str(ptxas),
+        "TRITON_PTXAS_BLACKWELL_PATH": str(ptxas),
         "LIBRARY_PATH": str(tmp_path / "lib"),
         "MAX_JOBS": "8",
     }
@@ -52,20 +61,34 @@ def test_frozen_cuda_activation_preserves_task_shell_library_path(tmp_path):
         {
             "LD_LIBRARY_PATH": "/frozen/lib",
             "NVRTC_HOME": "/frozen/nvrtc",
+            "TRITON_PTXAS_PATH": "/frozen/cuda/bin/ptxas",
+            "TRITON_PTXAS_BLACKWELL_PATH": "/frozen/cuda/bin/ptxas",
         }
     )
     activation = tmp_path / "runtime-env"
     manager.write_shell_activation(activation, EnvVarScope.TASK_RUNTIME)
 
     result = subprocess.run(
-        ["bash", "-c", 'source "$1"; printf "%s\\n%s\\n" "$LD_LIBRARY_PATH" "$NVRTC_HOME"', "bash", activation],
-        env={**os.environ, "LD_LIBRARY_PATH": "/task/lib"},
+        [
+            "bash",
+            "-c",
+            'source "$1"; printf "%s\\n" "$LD_LIBRARY_PATH" "$NVRTC_HOME" '
+            '"$TRITON_PTXAS_PATH" "$TRITON_PTXAS_BLACKWELL_PATH"',
+            "bash",
+            activation,
+        ],
+        env={**os.environ, "LD_LIBRARY_PATH": "/task/lib", "TRITON_PTXAS_PATH": "/stale/ptxas"},
         capture_output=True,
         text=True,
         check=True,
     )
 
-    assert result.stdout.splitlines() == ["/frozen/lib:/task/lib", "/frozen/nvrtc"]
+    assert result.stdout.splitlines() == [
+        "/frozen/lib:/task/lib",
+        "/frozen/nvrtc",
+        "/frozen/cuda/bin/ptxas",
+        "/frozen/cuda/bin/ptxas",
+    ]
 
 
 def test_frozen_cuda_runtime_rejects_multiple_cuda_roots(tmp_path):
