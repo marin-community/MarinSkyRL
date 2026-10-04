@@ -1381,7 +1381,7 @@ class RecipeSections(RecipeDocument):
     generator: Generator = Field(default_factory=Generator)
     environment: Environment = Field(default_factory=Environment)
     trajectory_runner: TrajectoryRunner = Field(default_factory=TrajectoryRunner)
-    terminal_bench: TerminalBench = unset_field()
+    terminal_bench: OpenMap | None = unset_field()
     teachers: SectionMap[Teacher] = unset_field()
     teacher_routing: SectionMap[TeacherRouting] = unset_field()
 

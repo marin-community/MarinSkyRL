@@ -4,6 +4,7 @@ POSITIVE = "PositiveInt"
 POSITIVE_OR_NONE = "PositiveInt | None"
 
 TYPES = {
+    "terminal_bench": "OpenMap | None",
     # Choices (values from MarinSkyRL's own enums and checks).
     "trainer.strategy": 'Literal["megatron"]',
     "trainer.resume_mode": 'Literal["none", "latest", "from_path"]',
