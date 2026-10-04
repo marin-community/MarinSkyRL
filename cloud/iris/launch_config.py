@@ -193,41 +193,49 @@ def _compose_source_recipe(config: DictConfig) -> DictConfig:
     raw_skyrl = OmegaConf.to_container(config.skyrl, resolve=False)
     if not isinstance(raw_skyrl, dict):
         raise TypeError("skyrl must be a mapping")
-    if OmegaConf.is_missing(config.iris.allocation, "num_nodes"):
-        policy_nodes = raw_skyrl.get("trainer", {}).get("placement", {}).get("policy_num_nodes")
-        if policy_nodes is None:
-            raise ValueError("omitted iris.allocation.num_nodes requires trainer.placement.policy_num_nodes")
-    else:
-        policy_nodes = int(config.iris.allocation.num_nodes)
+    nodes_unset = OmegaConf.is_missing(config.iris.allocation, "num_nodes")
     model_uri = str(config.inputs.model.uri)
     model_identity = str(config.inputs.model.identity)
     model_is_cloud = is_cloud_uri(model_uri)
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", encoding="utf-8") as source_file:
         OmegaConf.save(OmegaConf.create(raw_skyrl), source_file.name, resolve=False)
         parsed = parse_rl_config(source_file.name)
+        policy_nodes = (
+            parsed.trainer.get("placement", {}).get("policy_num_nodes")
+            if nodes_unset
+            else int(config.iris.allocation.num_nodes)
+        )
+        if policy_nodes is None:
+            raise ValueError("omitted iris.allocation.num_nodes requires trainer.placement.policy_num_nodes")
+        parameters = {
+            "job_name": str(config.iris.job_name),
+            "experiments_dir": str(config.runtime.experiments_dir),
+            "num_nodes": int(policy_nodes),
+            "gpus_per_node": int(config.iris.allocation.gpus_per_node),
+            "model_path": str(config.inputs.model.local_path),
+            "model_source_uri": model_uri if model_is_cloud else None,
+            "model_source_identity": model_identity if model_is_cloud else None,
+            "model_revision": model_identity,
+            "train_data": list(config.inputs.train_data),
+            "val_data": list(config.inputs.validation_data),
+            "checkpoint_root": str(config.artifacts.checkpoint_root),
+            "export_root": str(config.artifacts.export_root),
+            "resume_checkpoint_count": int(config.artifacts.resume_checkpoint_count),
+            "trace_root": join_resource_path(str(config.artifacts.attempts_root), "trace_jobs"),
+            "trajectory_root": join_resource_path(str(config.artifacts.attempts_root), "trajectories"),
+            "export_hf_artifact": bool(config.run.export_hf),
+            "seed": int(config.run.seed),
+        }
         compiled = compose_skyrl_config(
             parsed,
-            {
-                "job_name": str(config.iris.job_name),
-                "experiments_dir": str(config.runtime.experiments_dir),
-                "num_nodes": int(policy_nodes),
-                "gpus_per_node": int(config.iris.allocation.gpus_per_node),
-                "model_path": str(config.inputs.model.local_path),
-                "model_source_uri": model_uri if model_is_cloud else None,
-                "model_source_identity": model_identity if model_is_cloud else None,
-                "model_revision": model_identity,
-                "train_data": list(config.inputs.train_data),
-                "val_data": list(config.inputs.validation_data),
-                "checkpoint_root": str(config.artifacts.checkpoint_root),
-                "export_root": str(config.artifacts.export_root),
-                "resume_checkpoint_count": int(config.artifacts.resume_checkpoint_count),
-                "trace_root": join_resource_path(str(config.artifacts.attempts_root), "trace_jobs"),
-                "trajectory_root": join_resource_path(str(config.artifacts.attempts_root), "trajectories"),
-                "export_hf_artifact": bool(config.run.export_hf),
-                "seed": int(config.run.seed),
-            },
+            parameters,
             config.iris.allocation,
         )
+        if nodes_unset:
+            skyrl = OmegaConf.to_container(compiled.config, resolve=True)
+            assert isinstance(skyrl, dict)
+            parameters["num_nodes"] = derive_num_nodes(derive_role_plan(skyrl))
+            compiled = compose_skyrl_config(parsed, parameters, config.iris.allocation)
         OmegaConf.resolve(compiled.config)
     resolved = OmegaConf.create(OmegaConf.to_container(config, resolve=False))
     OmegaConf.set_struct(resolved, False)
