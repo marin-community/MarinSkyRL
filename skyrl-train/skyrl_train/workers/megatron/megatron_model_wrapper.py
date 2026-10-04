@@ -74,7 +74,7 @@ class RouterReplayTargets:
 
     per_layer: dict[int, torch.Tensor]
     mask: torch.Tensor
-    response_mask: torch.Tensor
+    prediction_mask: torch.Tensor
     probe_positions: Optional[torch.Tensor]
 
 
@@ -233,16 +233,17 @@ class MegatronModelWrapper:
 
         device = sequences.device
         dense, mask_BS = dense_replay_targets(rollout_routed_experts, batch_size, seq_len, num_actions)
-        response_BS = torch.zeros_like(mask_BS)
-        response_BS[:, seq_len - num_actions :] = True
+        prediction_BS = torch.zeros_like(mask_BS)
+        prediction_window = slice(seq_len - num_actions - 1, seq_len - 1)
+        prediction_BS[:, prediction_window] = True
         probe_positions = None
         if probe_row_indices is not None:
             if probe_row_indices.shape != (batch_size,):
                 raise ValueError("probe row indices must have one entry per sequence")
             # Zero encodes padding through the shared sequence transforms.
             probe_positions = torch.zeros((batch_size, seq_len, 2), dtype=torch.long, device=device)
-            probe_positions[:, seq_len - num_actions :, 0] = probe_row_indices[:, None] + 1
-            probe_positions[:, seq_len - num_actions :, 1] = torch.arange(1, num_actions + 1, device=device)
+            probe_positions[:, prediction_window, 0] = probe_row_indices[:, None] + 1
+            probe_positions[:, prediction_window, 1] = torch.arange(1, num_actions + 1, device=device)
 
         if self.use_sample_packing:
             # The routes tensor is ours, not the pipeline's input: always run the
@@ -250,7 +251,7 @@ class MegatronModelWrapper:
             # derives its own layer targets from the replicated batch.
             dense, _ = preprocess_packed_seqs(dense, attention_mask, pre_process=True)
             mask_BS, _ = preprocess_packed_seqs(mask_BS, attention_mask, pre_process=True)
-            response_BS, _ = preprocess_packed_seqs(response_BS, attention_mask, pre_process=True)
+            prediction_BS, _ = preprocess_packed_seqs(prediction_BS, attention_mask, pre_process=True)
             if probe_positions is not None:
                 probe_positions, _ = preprocess_packed_seqs(probe_positions, attention_mask, pre_process=True)
         else:
@@ -258,7 +259,7 @@ class MegatronModelWrapper:
             position_ids = position_ids.masked_fill(attention_mask == 0, 0)
             dense, _, _ = remove_left_padding(dense, attention_mask, position_ids, pre_process=True)
             mask_BS, _, _ = remove_left_padding(mask_BS, attention_mask, position_ids, pre_process=True)
-            response_BS, _, _ = remove_left_padding(response_BS, attention_mask, position_ids, pre_process=True)
+            prediction_BS, _, _ = remove_left_padding(prediction_BS, attention_mask, position_ids, pre_process=True)
             if probe_positions is not None:
                 probe_positions, _, _ = remove_left_padding(
                     probe_positions, attention_mask, position_ids, pre_process=True
@@ -266,7 +267,7 @@ class MegatronModelWrapper:
 
         flat = sequence_major_flatten(dense)
         mask = sequence_major_flatten(mask_BS)
-        response_mask = sequence_major_flatten(response_BS)
+        prediction_mask = sequence_major_flatten(prediction_BS)
         if probe_positions is not None:
             probe_positions = sequence_major_flatten(probe_positions) - 1
         tp_size = mpu.get_tensor_model_parallel_world_size()
@@ -282,11 +283,11 @@ class MegatronModelWrapper:
             )
             flat = slice_sequence_parallel(flat, **slice_kwargs)
             mask = slice_sequence_parallel(mask, **slice_kwargs)
-            response_mask = slice_sequence_parallel(response_mask, **slice_kwargs)
+            prediction_mask = slice_sequence_parallel(prediction_mask, **slice_kwargs)
             if probe_positions is not None:
                 probe_positions = slice_sequence_parallel(probe_positions, **slice_kwargs)
         per_layer = {idx: flat[:, idx, :].to(device) for idx in layer_indices}
-        return RouterReplayTargets(per_layer, mask.to(device), response_mask.to(device), probe_positions)
+        return RouterReplayTargets(per_layer, mask.to(device), prediction_mask.to(device), probe_positions)
 
     def _forward_micro_batch(
         self,
@@ -322,7 +323,7 @@ class MegatronModelWrapper:
             self.router_replay.begin_forward(
                 targets.per_layer,
                 targets.mask,
-                targets.response_mask,
+                targets.prediction_mask,
                 record_recompute=record_recompute,
                 probe_positions=targets.probe_positions,
             )

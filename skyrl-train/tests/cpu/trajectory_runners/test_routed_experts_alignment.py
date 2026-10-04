@@ -36,15 +36,15 @@ def _route_row(value):
     ("expert_id", "dtype"),
     [(7, np.uint8), (300, np.uint16)],
 )
-def test_wire_routes_slice_prompt_and_append_final_sentinel(expert_id, dtype):
+def test_wire_routes_select_prediction_positions(expert_id, dtype):
     payload = _encoded_routes([_route_row(1), _route_row(2), _route_row(expert_id)])
 
     routes = normalize_routed_experts(payload, [10, 11], [20, 21])
 
     assert routes.shape == (2, 2, 2)
     assert routes.dtype == dtype
-    np.testing.assert_array_equal(routes[0], _route_row(expert_id))
-    np.testing.assert_array_equal(routes[1], np.zeros((2, 2), dtype=dtype))
+    np.testing.assert_array_equal(routes[0], _route_row(2))
+    np.testing.assert_array_equal(routes[1], _route_row(expert_id))
     np.testing.assert_array_equal(pickle.loads(pickle.dumps(routes)), routes)
 
 
@@ -65,9 +65,10 @@ def test_harbor_extract_uses_each_turns_exact_prompt_and_completion_ids():
     routes = extract_routed_experts_from_rollout_details(details)
 
     assert len(routes) == 2
-    np.testing.assert_array_equal(routes[0][0], _route_row(3))
-    np.testing.assert_array_equal(routes[1][0], _route_row(5))
-    assert np.count_nonzero(routes[0][-1]) == np.count_nonzero(routes[1][-1]) == 0
+    np.testing.assert_array_equal(routes[0][0], _route_row(2))
+    np.testing.assert_array_equal(routes[0][1], _route_row(3))
+    np.testing.assert_array_equal(routes[1][0], _route_row(4))
+    np.testing.assert_array_equal(routes[1][1], _route_row(5))
 
 
 def test_lcs_routes_keep_token_positions_and_dtype():

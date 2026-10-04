@@ -59,6 +59,8 @@ class InferenceEngineOutput(TypedDict):
     prompt_logprobs: Optional[List[List[Optional[Dict[int, float]]]]]
     prompt_ids: NotRequired[List[List[int]]]
     assistant_messages: NotRequired[List[Dict[str, Any]]]
+    # One [response token, MoE layer, topk] array per sample. Row i describes
+    # the pass that predicted response_ids[i], starting at the final prompt token.
     routed_experts: NotRequired[List[np.ndarray | None]]
 
 
