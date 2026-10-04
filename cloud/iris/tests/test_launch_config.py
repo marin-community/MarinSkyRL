@@ -381,3 +381,46 @@ def test_inherited_recipe_round_trips_as_a_self_contained_launch(tmp_path: Path,
     OmegaConf.save(config, resolved)
     reloaded = load_launch_config(resolved)
     assert OmegaConf.to_container(reloaded, resolve=True) == OmegaConf.to_container(config, resolve=True)
+
+
+@pytest.mark.parametrize(
+    ("machine", "terminal_data", "error"),
+    [
+        ({"backend": "qemu", "qemu": None}, False, "requires trajectory_runner.machine.qemu"),
+        (
+            {"backend": "qemu", "qemu": {"assets": {"qemu": "/qemu"}}, "runtime_bundle": {"manifest_uri": "manifest"}},
+            False,
+            "either the runtime bundle or explicit paths",
+        ),
+        ({"backend": "qemu", "qemu": {"assets": None}}, True, "cannot override a Harbor backend"),
+    ],
+)
+def test_machine_config_errors_fail_before_launch(tmp_path, machine, terminal_data, error):
+    raw = _raw_config()
+    raw["skyrl"]["trajectory_runner"] = {"machine": machine}
+    if terminal_data:
+        raw["skyrl"]["data"] = {"terminal_bench_data": ["terminal-dataset"]}
+    path = tmp_path / "launch.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ValueError, match=error):
+        load_launch_config(path)
+
+
+def test_prepared_machine_config_round_trips_before_launch(tmp_path):
+    raw = _raw_config()
+    machine = {
+        "backend": "qemu",
+        "qemu": {"acceleration": "tcg", "assets": None},
+        "runtime_bundle": {
+            "manifest_uri": "s3://runs/runtime/manifest.json",
+            "manifest_sha256": "a" * 64,
+            "archive_uri": "s3://runs/runtime/bundle.tar.gz",
+            "archive_sha256": "b" * 64,
+            "installation_parent": "/opt",
+        },
+    }
+    raw["skyrl"]["trajectory_runner"] = {"machine": machine}
+    path = tmp_path / "launch.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    config = load_launch_config(path)
+    assert OmegaConf.to_container(config.skyrl.trajectory_runner.machine) == machine

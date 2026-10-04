@@ -13,6 +13,7 @@ from omegaconf import MISSING, DictConfig, OmegaConf
 
 from skyrl_train.config.mismatch_probe import validate_mismatch_probe_config
 from skyrl_train.config.objective_spec import validate_objective
+from skyrl_train.rollouts.task_machines import TaskMachineBackend
 
 from cloud.iris.ray_storage import RaySpillBackend, resolve_ray_spill_target
 from cloud.iris.role_plan import derive_num_nodes, derive_role_plan
@@ -326,6 +327,17 @@ def validate_launch_config(config: DictConfig) -> LaunchTopology:
     )
     allocation = validate_iris_allocation(raw)
     skyrl = raw["skyrl"]
+    machine = skyrl.get("trajectory_runner", {}).get("machine")
+    if machine is not None:
+        backend = TaskMachineBackend(machine["backend"])
+        if backend is TaskMachineBackend.QEMU:
+            qemu = machine.get("qemu")
+            if qemu is None:
+                raise ValueError("The QEMU task backend requires trajectory_runner.machine.qemu")
+            if machine.get("runtime_bundle") is not None and qemu.get("assets") is not None:
+                raise ValueError("QEMU assets must come from either the runtime bundle or explicit paths")
+            if skyrl.get("data", {}).get("terminal_bench_data") or skyrl.get("entrypoint") == "terminal_bench":
+                raise ValueError("TaskCompendium machine selection cannot override a Harbor backend")
     run = raw["run"]
     if run["mode"] == RunMode.TRAIN:
         validate_objective(config.skyrl)

@@ -795,11 +795,14 @@ def _skyrl_config_sections(
 
 
 _OPEN_CONFIG_ROOTS = frozenset({"teachers", "teacher_routing", "terminal_bench_config"})
+_OPEN_CONFIG_PATHS = ("trajectory_runner.machine.qemu", "trajectory_runner.machine.runtime_bundle")
 
 
 def _path_allows_new_keys(path: str) -> bool:
-    return path.split(".", 1)[0] in _OPEN_CONFIG_ROOTS or any(
-        pattern in f".{path}" for pattern in _OPTIONAL_HYDRA_PATTERNS
+    return (
+        path.split(".", 1)[0] in _OPEN_CONFIG_ROOTS
+        or any(path == root or path.startswith(root + ".") for root in _OPEN_CONFIG_PATHS)
+        or any(pattern in f".{path}" for pattern in _OPTIONAL_HYDRA_PATTERNS)
     )
 
 

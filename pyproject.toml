@@ -11,7 +11,7 @@ version = "0.1.0"
 description = "Marin's typed launcher and RL training runtime"
 requires-python = "==3.12.*"
 dependencies = [
-    "verifyit[answer,schema,reasoning-gym,judge] @ git+https://github.com/marin-community/marin.git@b0ef73f2e471e5354dcd4bf87e655d1b18197ff6#subdirectory=lib/verifyit",
+    "verifyit[answer,schema,reasoning-gym,judge] @ git+https://github.com/marin-community/marin.git@6cb7d763d07690b3cd57ed78d088a0cc927d2ed1#subdirectory=lib/verifyit",
     "aiohttp>=3.13.3",
     "boto3",
     "datasets>=4.0.0",
@@ -33,9 +33,9 @@ dependencies = [
     "marin-finestore>=0.2.135.dev36906221286",
     "marin-iris",
     "marin-iris-native",
-    "marin-rigging[secrets] @ git+https://github.com/marin-community/marin.git@b0ef73f2e471e5354dcd4bf87e655d1b18197ff6#subdirectory=lib/rigging",
-    "marin-rolloutengine @ git+https://github.com/marin-community/marin.git@b0ef73f2e471e5354dcd4bf87e655d1b18197ff6#subdirectory=lib/rolloutengine",
-    "marin-shellbox[daytona,shellsim] @ git+https://github.com/marin-community/marin.git@b0ef73f2e471e5354dcd4bf87e655d1b18197ff6#subdirectory=lib/shellbox",
+    "marin-rigging[secrets] @ git+https://github.com/marin-community/marin.git@6cb7d763d07690b3cd57ed78d088a0cc927d2ed1#subdirectory=lib/rigging",
+    "marin-rolloutengine @ git+https://github.com/marin-community/marin.git@6cb7d763d07690b3cd57ed78d088a0cc927d2ed1#subdirectory=lib/rolloutengine",
+    "marin-shellbox[daytona,shellsim] @ git+https://github.com/marin-community/marin.git@6cb7d763d07690b3cd57ed78d088a0cc927d2ed1#subdirectory=lib/shellbox",
     "ninja",
     "nvidia-ml-py",
     "omegaconf",
@@ -52,7 +52,7 @@ dependencies = [
     "s3fs",
     "smart_open",
     "tensorboard",
-    "taskcompendium @ git+https://github.com/marin-community/marin.git@b0ef73f2e471e5354dcd4bf87e655d1b18197ff6#subdirectory=lib/taskcompendium",
+    "taskcompendium @ git+https://github.com/marin-community/marin.git@6cb7d763d07690b3cd57ed78d088a0cc927d2ed1#subdirectory=lib/taskcompendium",
     "tqdm>=4.66",
     "tokenizers==0.23.1",
     "transformers==5.16.1",
@@ -119,7 +119,7 @@ megatron = [
     "transformer-engine-torch==2.19.0 ; sys_platform == 'linux'",
 ]
 telemetry = [
-    "marin-rigging[prometheus] @ git+https://github.com/marin-community/marin.git@b0ef73f2e471e5354dcd4bf87e655d1b18197ff6#subdirectory=lib/rigging",
+    "marin-rigging[prometheus] @ git+https://github.com/marin-community/marin.git@6cb7d763d07690b3cd57ed78d088a0cc927d2ed1#subdirectory=lib/rigging",
     "memray ; sys_platform == 'linux'",
     "ray[default]",
 ]
@@ -144,7 +144,7 @@ docs = [
 dev = [
     { include-group = "analysis" },
     "litellm",
-    "marin-rigging[prometheus] @ git+https://github.com/marin-community/marin.git@b0ef73f2e471e5354dcd4bf87e655d1b18197ff6#subdirectory=lib/rigging",
+    "marin-rigging[prometheus] @ git+https://github.com/marin-community/marin.git@6cb7d763d07690b3cd57ed78d088a0cc927d2ed1#subdirectory=lib/rigging",
     "marin-style @ git+https://github.com/marin-community/marin-style@727f180cd423246ca1a6164163a5883cda5bf52b",
     "prometheus-client",
     "pytest>=8.4",
@@ -189,7 +189,7 @@ override-dependencies = [
     "transformers==5.16.1",
     "opentelemetry-api==1.44.0 ; sys_platform == 'linux'",
     "opentelemetry-api ; sys_platform != 'linux'",
-    "marin-rigging[prometheus,secrets] @ git+https://github.com/marin-community/marin.git@b0ef73f2e471e5354dcd4bf87e655d1b18197ff6#subdirectory=lib/rigging",
+    "marin-rigging[prometheus,secrets] @ git+https://github.com/marin-community/marin.git@6cb7d763d07690b3cd57ed78d088a0cc927d2ed1#subdirectory=lib/rigging",
 ]
 constraint-dependencies = [
     "botocore==1.42.97 ; sys_platform == 'linux'",

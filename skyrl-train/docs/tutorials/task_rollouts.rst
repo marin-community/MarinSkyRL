@@ -110,6 +110,8 @@ For a verified prepared image bundle, set ``machine.runtime_bundle`` and leave
           acceleration: tcg
           assets: null
 
+All image-backed tasks in one run must use the manifest's exact pinned ``source_image``.
+
 Each node checks the manifest and archive hashes and extracts the prepared bundle
 before Ray starts. Rollout workers check the local bundle before machine creation.
 The manifest supplies ``directory_name`` and the exact pinned ``source_image``;
