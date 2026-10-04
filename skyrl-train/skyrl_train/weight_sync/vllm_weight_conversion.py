@@ -88,6 +88,7 @@ def validate_dummy_weight_coverage(
             bias_padding = layer.get("vocab_bias_padding_numel", 0)
             padding = weight_padding + bias_padding
             required = layer["load_numel_total"] - padding - layer.get("non_persistent_numel", 0)
+            required -= layer.get("generated_numel", 0)
             for tensor_name, (identity, numel) in layer["tensors"].items():
                 if identity in satisfied_storage:
                     tensor_padding = (

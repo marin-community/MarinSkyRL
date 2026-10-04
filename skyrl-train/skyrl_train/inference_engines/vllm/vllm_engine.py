@@ -18,6 +18,12 @@ from vllm.inputs import TokensPrompt
 from vllm.distributed.parallel_state import get_dp_group, get_ep_group, get_pp_group
 from vllm.distributed.weight_transfer.base import WeightTransferUpdateRequest
 from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.model_executor.layers.attention import is_deferred_attention_layer
+from vllm.model_executor.layers.attention.attention import should_load_quant_weights
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
+from vllm.model_executor.model_loader.reload.meta import SKIP_LOAD_TENSORS
+from vllm.model_executor.model_loader.reload.utils import get_layer_params_buffers, get_layer_tensors
 
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
@@ -590,10 +596,6 @@ class WorkerWrap:
             self, "_skyrl_dummy_weights_verified", False
         )
         if dummy_pending:
-            from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
-            from vllm.model_executor.model_loader.reload.meta import SKIP_LOAD_TENSORS
-            from vllm.model_executor.model_loader.reload.utils import get_layer_params_buffers, get_layer_tensors
-
             layers = {}
             skipped_float_aliases = {}
             for layer_name, layer in model.named_modules():
@@ -602,16 +604,21 @@ class WorkerWrap:
                 params, buffers = info.kernel_tensors or get_layer_params_buffers(layer)
                 original = params | buffers
                 non_persistent = info.kernel_non_persistent_buffers | layer._non_persistent_buffers_set
+                generated = set()
+                if is_deferred_attention_layer(layer) and not should_load_quant_weights(
+                    getattr(layer, "quant_method", None)
+                ):
+                    generated = {"_k_scale", "_v_scale", "_q_scale", "_prob_scale"} & buffers.keys()
                 tensors = {
                     name: original.get(name, tensor)
                     for name, tensor in live.items()
-                    if name not in SKIP_LOAD_TENSORS and name not in non_persistent
+                    if name not in SKIP_LOAD_TENSORS and name not in non_persistent and name not in generated
                 }
                 identities = storage_identity(tensors)
-                shard_indices = getattr(layer, "shard_indices", None)
                 padding = 0
                 bias_padding = 0
-                if shard_indices is not None and "weight" in tensors:
+                if isinstance(layer, VocabParallelEmbedding) and "weight" in tensors:
+                    shard_indices = layer.shard_indices
                     weight = tensors["weight"]
                     padding_rows = shard_indices.num_org_vocab_padding + shard_indices.num_added_vocab_padding
                     padding = padding_rows * weight.shape[1]
@@ -628,6 +635,11 @@ class WorkerWrap:
                         tensor.numel()
                         for name, tensor in live.items()
                         if name in non_persistent and name not in SKIP_LOAD_TENSORS
+                    ),
+                    "generated_numel": sum(
+                        tensor.numel()
+                        for name, tensor in live.items()
+                        if name in generated and name not in non_persistent
                     ),
                 }
                 skipped_floats = {

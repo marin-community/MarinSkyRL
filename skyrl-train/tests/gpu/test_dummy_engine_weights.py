@@ -36,7 +36,16 @@ class InspectableEngine(vllm_engine.AsyncVLLMInferenceEngine):
         super().__init__(*args, **kwargs)
 
     async def worker_rpc(self, method, *args):
-        return await self.llm.collective_rpc(method, args=args)
+        results = await self.llm.collective_rpc(method, args=args)
+        if method == "read_snapshot_weights":
+            for result in results:
+                for entry in result.values():
+                    if "tensor" in entry:
+                        data = entry["tensor"]
+                        entry["tensor"] = torch.frombuffer(bytearray(data["bytes"]), dtype=torch.float32).reshape(
+                            data["shape"]
+                        )
+        return results
 
 
 class InspectableWorker(vllm_engine.WorkerWrap):
@@ -118,12 +127,6 @@ def test_dummy_engine_installs_every_tensor_and_holds_requests_until_verified_sy
             if load_format == "auto":
                 real_budget = budget
                 real_weights = ray.get(actor.worker_rpc.remote("read_snapshot_weights", names))[0]
-                for entry in real_weights.values():
-                    if "tensor" in entry:
-                        data = entry["tensor"]
-                        entry["tensor"] = torch.frombuffer(bytearray(data["bytes"]), dtype=torch.float32).reshape(
-                            data["shape"]
-                        )
                 real_output = asyncio.run(client.generate({"prompts": PROMPTS, "sampling_params": SAMPLING}))
                 real_single = asyncio.run(client.generate({"prompts": PROMPTS[:1], "sampling_params": SAMPLING}))
                 for shard in shards:
@@ -171,12 +174,6 @@ def test_dummy_engine_installs_every_tensor_and_holds_requests_until_verified_sy
 
             dummy_output = asyncio.run(verify_and_resume())
             dummy_weights = ray.get(actor.worker_rpc.remote("read_snapshot_weights", names))[0]
-            for entry in dummy_weights.values():
-                if "tensor" in entry:
-                    data = entry["tensor"]
-                    entry["tensor"] = torch.frombuffer(bytearray(data["bytes"]), dtype=torch.float32).reshape(
-                        data["shape"]
-                    )
             assert dummy_output["response_ids"] == real_output["response_ids"]
             for name in names:
                 assert dummy_weights[name]["found"], (name, dummy_weights[name])
