@@ -321,8 +321,9 @@ def render_sections(
             annotation, default = undeclared[key]
             expression = "unset_field()" if default is Ellipsis else f"field({default!r})"
         else:
-            annotation = emit(key, value)
-            expression = f"Field(default_factory={annotation})" if key in base else "unset_field()"
+            section_name = emit(key, value)
+            annotation = types.get(key, section_name)
+            expression = f"Field(default_factory={section_name})" if key in base else "unset_field()"
         root_fields.append(f"    {key}: {annotation} = {expression}")
     emitted.append(
         'class RecipeSections(RecipeDocument):\n    """Generated author root sections."""\n\n'
