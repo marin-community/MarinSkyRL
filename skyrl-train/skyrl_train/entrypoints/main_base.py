@@ -173,12 +173,21 @@ def create_ray_wrapped_inference_engines_from_config(
     if tokenizer_revision is not None:
         engine_init_kwargs["tokenizer_revision"] = tokenizer_revision
     policy_source_uri = cfg.trainer.policy.model.get("source_uri")
-    rollout_model_path = runai_model_uri(policy_source_uri) if policy_source_uri else cfg.trainer.policy.model.path
-    if policy_source_uri is not None:
+    load_format = engine_init_kwargs.get("load_format")
+    if load_format == "dummy":
+        if operation is not EntrypointOperation.TRAIN:
+            raise ValueError("Dummy engine weights require the training entrypoint's initial weight sync")
+        rollout_model_path = cfg.trainer.policy.model.path
+    elif policy_source_uri is not None:
+        if load_format is not None:
+            raise ValueError("Object-store policies accept only an explicit dummy load_format")
+        rollout_model_path = runai_model_uri(policy_source_uri)
         engine_init_kwargs["load_format"] = "runai_streamer"
         model_loader_extra_config = engine_init_kwargs.setdefault("model_loader_extra_config", {})
         model_loader_extra_config.setdefault("distributed", True)
         engine_init_kwargs[MODEL_METADATA_PATH_KEY] = cfg.trainer.policy.model.path
+    else:
+        rollout_model_path = cfg.trainer.policy.model.path
     if speculative_decoding is not None:
         engine_init_kwargs["speculative_config"] = speculative_decoding.vllm_speculative_config()
         if speculative_decoding.training is not None:

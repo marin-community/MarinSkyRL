@@ -150,7 +150,8 @@ def test_from_config_forwards_policy_revision_to_vllm(monkeypatch):
     assert captured["engine_init_kwargs"]["tokenizer_revision"] == "tokenizer-commit"
 
 
-def test_from_config_streams_object_store_policy_weights(monkeypatch):
+@pytest.mark.parametrize("load_format", [None, "dummy"])
+def test_from_config_streams_object_store_policy_weights(monkeypatch, load_format):
     captured = {}
     monkeypatch.setattr(rwie, "create_ray_wrapped_inference_engines", lambda **kwargs: captured.update(kwargs) or [])
     cfg = get_default_config()
@@ -160,12 +161,21 @@ def test_from_config_streams_object_store_policy_weights(monkeypatch):
     cfg.trainer.policy.model.revision = "68c46c4b3498877f3ef123c856ecfde50c39f404"
     cfg.trainer.policy.model.tokenizer_path = "/tmp/tokenizer-metadata"
 
+    if load_format is not None:
+        OmegaConf.update(cfg, "generator.engine_init_kwargs.load_format", load_format, force_add=True)
+
     main_base.create_ray_wrapped_inference_engines_from_config(cfg, colocate_pg=None, tokenizer=None)
 
-    assert captured["pretrain"] == "s3://models/policy"
-    assert captured["engine_init_kwargs"]["load_format"] == "runai_streamer"
-    assert captured["engine_init_kwargs"]["model_loader_extra_config"] == {"distributed": True}
-    assert captured["engine_init_kwargs"]["_marinskyrl_metadata_path"] == "/tmp/model-metadata"
+    if load_format == "dummy":
+        assert captured["pretrain"] == "/tmp/model-metadata"
+        assert captured["engine_init_kwargs"]["load_format"] == "dummy"
+        assert "model_loader_extra_config" not in captured["engine_init_kwargs"]
+        assert "_marinskyrl_metadata_path" not in captured["engine_init_kwargs"]
+    else:
+        assert captured["pretrain"] == "s3://models/policy"
+        assert captured["engine_init_kwargs"]["load_format"] == "runai_streamer"
+        assert captured["engine_init_kwargs"]["model_loader_extra_config"] == {"distributed": True}
+        assert captured["engine_init_kwargs"]["_marinskyrl_metadata_path"] == "/tmp/model-metadata"
     assert captured["engine_init_kwargs"]["tokenizer"] == "/tmp/tokenizer-metadata"
     assert "revision" not in captured["engine_init_kwargs"]
 

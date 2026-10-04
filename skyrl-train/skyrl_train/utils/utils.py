@@ -719,6 +719,32 @@ def validate_generator_cfg(cfg: DictConfig):
         ValueError: when cfg.generator.sampling_params.logprobs > 0
     """
 
+    engine_kwargs = cfg.generator.engine_init_kwargs
+    if engine_kwargs.get("load_format") == "dummy":
+        failures = []
+        if cfg.generator.backend != "vllm":
+            failures.append("generator.backend=vllm")
+        if not cfg.generator.run_engines_locally:
+            failures.append("generator.run_engines_locally=true")
+        if cfg.trainer.placement.colocate_all:
+            failures.append("trainer.placement.colocate_all=false")
+        if cfg.generator.weight_sync_transport != "broadcast":
+            failures.append("generator.weight_sync_transport=broadcast (auto is not accepted)")
+        if cfg.generator.fuse_weights:
+            failures.append("generator.fuse_weights=false")
+        if cfg.generator.get("speculative_decoding") or engine_kwargs.get("speculative_config"):
+            failures.append("no speculative decoding")
+        if engine_kwargs.get("quantization"):
+            failures.append("no engine quantization")
+        if engine_kwargs.get("kv_cache_dtype", "auto") != "auto":
+            failures.append("kv_cache_dtype=auto")
+        if engine_kwargs.get("enable_eplb", False):
+            failures.append("no EPLB")
+        if "model_loader_extra_config" in engine_kwargs:
+            failures.append("no model_loader_extra_config")
+        if failures:
+            raise ValueError("Dummy engine weights require: " + "; ".join(failures))
+
     parse_trajectory_reward_shaping_config(cfg.generator.get("trajectory_reward_shaping"))
     parse_trajectory_retention_config(cfg.generator.get("trajectory_retention"))
 
