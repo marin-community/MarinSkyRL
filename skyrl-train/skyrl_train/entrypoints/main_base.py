@@ -210,6 +210,8 @@ def create_ray_wrapped_inference_engines_from_config(
         role,
         engine_init_kwargs=engine_init_kwargs,
     )
+    if cfg.trainer.strategy == "megatron":
+        engine_kwargs["nccl_buffer_size_bytes"] = cfg.trainer.policy.nccl_buffer_size_bytes
 
     # Conditionally add LoRA parameters if LoRA is enabled
     if cfg.trainer.policy.model.lora.rank > 0:

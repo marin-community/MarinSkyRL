@@ -56,6 +56,7 @@ from skyrl_train.teacher_routing import route_row_metrics
 from skyrl_train.domain_gradient_balance import DomainGradientBalancer
 from skyrl_train.io import io
 from skyrl_train.utils import Timer, get_ray_pg_ready_with_timeout, get_system_memory_metrics
+from skyrl_train.env_vars import NCCL_BUFFER_SIZE_ENV_VAR
 from skyrl_train.tensor_math import masked_mean
 from skyrl_train.utils.policy_math import compute_approx_kl, normalize_advantages_dict
 from skyrl_train.utils.kl_controllers import get_kl_controller, FixedKLController, AdaptiveKLController
@@ -172,7 +173,6 @@ class CheckpointSnapshot:
 _MODEL_INITIALIZATION_TIMEOUT = 60 * 60
 
 MAX_DOMAIN_REWARD_METRICS = 32
-NCCL_BUFFER_SIZE_ENV_VAR = "NCCL_BUFFSIZE"
 
 
 def _domain_metric_source_key(source: str | None) -> str:
