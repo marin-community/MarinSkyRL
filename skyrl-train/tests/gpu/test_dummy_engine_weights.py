@@ -31,31 +31,33 @@ SAMPLING = {"temperature": 0.0, "max_tokens": 16}
 
 
 class InspectableEngine(vllm_engine.AsyncVLLMInferenceEngine):
+    def __init__(self, *args, **kwargs):
+        kwargs["worker_extension_cls"] = "tests.gpu.test_dummy_engine_weights.InspectableWorker"
+        super().__init__(*args, **kwargs)
+
     async def worker_rpc(self, method, *args):
         return await self.llm.collective_rpc(method, args=args)
 
 
-def receive_snapshot_weights(worker, model_path, names):
-    """Load named snapshot tensors through the worker's weight receiver boundary."""
+class InspectableWorker(vllm_engine.WorkerWrap):
+    def receive_snapshot_weights(self, model_path, names):
+        def receive(_request):
+            wanted = set(names)
+            for shard in sorted(Path(model_path).glob("*.safetensors")):
+                with safe_open(shard, framework="pt", device="cpu") as weights:
+                    for name in weights.keys():
+                        if name in wanted:
+                            yield name, weights.get_tensor(name).to(self.device)
 
-    def receive(_request):
-        wanted = set(names)
-        for shard in sorted(Path(model_path).glob("*.safetensors")):
-            with safe_open(shard, framework="pt", device="cpu") as weights:
-                for name in weights.keys():
-                    if name in wanted:
-                        yield name, weights.get_tensor(name).to(worker.device)
+        previous = getattr(self, "_weight_receiver", None)
+        self._weight_receiver = SimpleNamespace(receive_weights=receive)
+        try:
+            self.load_weights({"names": names, "dtypes": [], "shapes": [], "extras": None})
+        finally:
+            self._weight_receiver = previous
 
-    previous = getattr(worker, "_weight_receiver", None)
-    worker._weight_receiver = SimpleNamespace(receive_weights=receive)
-    try:
-        worker.load_weights({"names": names, "dtypes": [], "shapes": [], "extras": None})
-    finally:
-        worker._weight_receiver = previous
-
-
-def available_kv_cache_memory(worker):
-    return int(worker.available_kv_cache_memory_bytes)
+    def available_kv_cache_memory(self):
+        return int(self.available_kv_cache_memory_bytes)
 
 
 @pytest.mark.vllm
@@ -88,7 +90,6 @@ def test_dummy_engine_installs_every_tensor_and_holds_requests_until_verified_sy
     cfg.generator.inference_engine_expert_parallel_size = 1
     cfg.generator.gpu_memory_utilization = 0.6
     cfg.generator.enforce_eager = True
-    cfg.generator.vllm_v1_disable_multiproc = True
     cfg.generator.fuse_weights = False
     cfg.generator.weight_sync_transport = "broadcast"
     OmegaConf.update(cfg, "generator.engine_init_kwargs.max_model_len", 2048, force_add=True)
@@ -104,7 +105,7 @@ def test_dummy_engine_installs_every_tensor_and_holds_requests_until_verified_sy
         try:
             client = experiment.create_inference_engine_client()
             actor = client.engines[0].inference_engine_actor
-            budget = ray.get(actor.worker_rpc.remote(available_kv_cache_memory))[0]
+            budget = ray.get(actor.worker_rpc.remote("available_kv_cache_memory"))[0]
             print(f"X4a {load_format} Available KV cache memory: {budget} bytes", flush=True)
             if load_format == "auto":
                 real_budget = budget
@@ -122,7 +123,7 @@ def test_dummy_engine_installs_every_tensor_and_holds_requests_until_verified_sy
 
             assert budget >= real_budget, (real_budget, budget)
             with pytest.raises(ray.exceptions.RayTaskError, match="bracketed initial weight sync"):
-                ray.get(actor.worker_rpc.remote(receive_snapshot_weights, str(model_path), names[:1]))
+                ray.get(actor.worker_rpc.remote("receive_snapshot_weights", str(model_path), names[:1]))
 
             async def verify_and_resume():
                 # A distinct client sends to the actual paused engine scheduler.
@@ -135,15 +136,15 @@ def test_dummy_engine_installs_every_tensor_and_holds_requests_until_verified_sy
                     assert not done, "A request completed before initial dummy weights were verified"
                     await client.begin_weight_reload()
                     await actor.worker_rpc.remote(
-                        receive_snapshot_weights, str(model_path), [n for n in names if n != missing]
+                        "receive_snapshot_weights", str(model_path), [n for n in names if n != missing]
                     )
                     with pytest.raises(
                         ray.exceptions.RayTaskError, match="Incomplete dummy engine weights.*gate_up_proj"
                     ):
                         await client.finish_weight_reload()
                     with pytest.raises(ray.exceptions.RayTaskError, match="Weight received twice"):
-                        await actor.worker_rpc.remote(receive_snapshot_weights, str(model_path), [names[0]])
-                    await actor.worker_rpc.remote(receive_snapshot_weights, str(model_path), [missing])
+                        await actor.worker_rpc.remote("receive_snapshot_weights", str(model_path), [names[0]])
+                    await actor.worker_rpc.remote("receive_snapshot_weights", str(model_path), [missing])
                     await client.finish_weight_reload()
                     await client.resume_generation()
                     output = await asyncio.wait_for(early, timeout=30)
