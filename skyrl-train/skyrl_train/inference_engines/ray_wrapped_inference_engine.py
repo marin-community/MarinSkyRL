@@ -333,6 +333,9 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def sleep(self, *args: Any, **kwargs: Any):
         return await self.inference_engine_actor.sleep.remote(*args, **kwargs)
 
+    async def set_policy_version(self, version: int):
+        return await self.inference_engine_actor.set_policy_version.remote(version)
+
     async def init_weight_update_communicator(
         self, master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing: bool = False
     ):
@@ -518,6 +521,7 @@ def create_ray_wrapped_inference_engines(
     mp_backend: bool = False,
     placement_group_timeout_seconds: int = DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS,
     weight_sync_pause_policy: WeightSyncPausePolicy = DEFAULT_WEIGHT_SYNC_PAUSE_POLICY,
+    record_token_policy_versions: bool = False,
     nccl_buffer_size_bytes: int | None = None,
 ) -> List[InferenceEngineInterface]:
     """
@@ -860,6 +864,7 @@ def create_ray_wrapped_inference_engines(
                     trust_remote_code=True,
                     vllm_v1_disable_multiproc=vllm_v1_disable_multiproc,
                     weight_sync_pause_policy=weight_sync_pause_policy,
+                    record_token_policy_versions=record_token_policy_versions,
                     gpu_memory_utilization=gpu_memory_utilization,
                     bundle_indices=dp_rank_bundles,
                     num_gpus=0.2 if use_hybrid_engine else 1,

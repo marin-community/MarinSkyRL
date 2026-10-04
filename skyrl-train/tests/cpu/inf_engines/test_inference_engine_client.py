@@ -539,7 +539,8 @@ def test_exact_opencode_continuation_is_terminal_bench_scoped(
 
 
 @pytest.mark.asyncio
-async def test_chat_completion_retry_accumulates_and_sends_continuations():
+@pytest.mark.parametrize("record_versions", [False, True])
+async def test_chat_completion_retry_accumulates_and_sends_continuations(record_versions):
     """
     First response aborts with tokens; second aborts with 0 tokens (ignored);
     third finishes. Assert:
@@ -630,6 +631,9 @@ async def test_chat_completion_retry_accumulates_and_sends_continuations():
             return deepcopy(self.responses[idx])
 
     engines = [MockEngine()]
+    if record_versions:
+        for response, versions in zip(engines[0].responses, ([3], [], [4]), strict=True):
+            response["choices"][0]["token_policy_versions"] = versions
     cfg = _make_min_cfg()
     client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=cfg)
 
@@ -688,6 +692,10 @@ async def test_chat_completion_retry_accumulates_and_sends_continuations():
     assert choice["logprobs"]["content"][0]["token"] == "token_id:11"
     assert choice["logprobs"]["content"][1]["token"] == "token_id:12"
     assert choice["token_ids"] == [11, 12]
+    if record_versions:
+        assert choice["token_policy_versions"] == [3, 4]
+    else:
+        assert "token_policy_versions" not in choice
 
     # usage: prompt_tokens from base (5), completion_tokens summed (2), total 7
     assert out["usage"]["prompt_tokens"] == 5

@@ -117,6 +117,7 @@ class TrajectoryBatch(TypedDict):
     rollout_logprobs: Optional[List[np.ndarray]]
     student_topk_indices: Optional[List[np.ndarray]]
     behavior_topk_logprobs: Optional[List[np.ndarray]]
+    token_policy_versions: NotRequired[List[List[int]]]
     rollout_routed_experts: Optional[List[np.ndarray]]
     teacher_evidence: Optional[TeacherEvidenceBatch]
     distillation: Optional[PreparedTeacherInput]

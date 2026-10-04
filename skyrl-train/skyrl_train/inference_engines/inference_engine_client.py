@@ -247,6 +247,11 @@ class InferenceEngineClient(InferenceEngineInterface):
         """Call one expert-block sync method on every engine. Returns the replies in engine order."""
         return await self._run_on_all_engines("expert_block_rpc", method, *args)
 
+    async def set_policy_version(self, version: int) -> None:
+        """Label generating weights before paused or sleeping engines resume."""
+        async with asyncio.timeout(self.weight_sync_pause_timeout):
+            await self._run_on_all_engines("set_policy_version", version)
+
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
         # 0. Extract input
         prompts = input_batch.get("prompts")
@@ -1221,6 +1226,7 @@ class AccumulatedResponse:
     completion_tokens: int = 0
     routed_experts: np.ndarray | None = None
     route_prompt_ids: List[int] | None = None
+    token_policy_versions: List[int] | None = None
 
 
 def _prepare_retry_request(
@@ -1314,6 +1320,16 @@ def _parse_partial_response_and_inplace_update_accum(
     # If aborted without generating tokens, ignore this partial response.
     aborted_without_generating = finish_reason == ABORT_FINISH_REASON and new_completion_tokens == 0
     if not aborted_without_generating:
+        versions = choice.get("token_policy_versions")
+        if versions is not None or accum.token_policy_versions is not None:
+            ids = choice.get("token_ids")
+            if versions is None or ids is None or len(versions) != len(ids):
+                raise ValueError("token policy versions must cover exact tokens on every chat retry")
+            if accum.token_policy_versions is None:
+                if accum.token_ids:
+                    raise ValueError("token policy version capture began after a chat retry")
+                accum.token_policy_versions = []
+            accum.token_policy_versions.extend(versions)
         provider_fields = choice.get("provider_specific_fields") or {}
         routes = choice.get("routed_experts") or provider_fields.get("routed_experts")
         if routes is not None or accum.routed_experts is not None:
@@ -1373,6 +1389,8 @@ def _build_final_response(
         final_choice["logprobs"]["content"] = accum.logprobs_content
     if final_choice.get("token_ids", None) is not None:
         final_choice["token_ids"] = accum.token_ids
+    if accum.token_policy_versions is not None:
+        final_choice["token_policy_versions"] = accum.token_policy_versions
     if accum.routed_experts is not None:
         route_buffer = io.BytesIO()
         np.save(route_buffer, accum.routed_experts)

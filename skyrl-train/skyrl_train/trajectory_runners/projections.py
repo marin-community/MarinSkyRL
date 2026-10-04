@@ -75,6 +75,7 @@ class WholeTrajectoryProjection:
             exclude_from_baseline=[not output.disposition.baseline_eligible for output in outputs],
         )
         attach_student_topk(batch, outputs, responses, loss_masks)
+        attach_token_policy_versions(batch, outputs, responses, loss_masks)
         attach_routed_experts(batch, outputs, responses)
         attach_terminal_classifications(batch, outputs)
         attach_server_errors(batch, outputs)
@@ -141,6 +142,7 @@ class StepWiseTrajectoryProjection:
             exclude_from_baseline=[not step.disposition.baseline_eligible for step in steps],
         )
         attach_student_topk(batch, steps, responses, loss_masks)
+        attach_token_policy_versions(batch, steps, responses, loss_masks)
         attach_routed_experts(batch, steps, responses)
         attach_terminal_classifications(batch, steps)
         attach_server_errors(batch, steps)
@@ -197,6 +199,28 @@ def attach_routed_experts(
             raise ValueError("routed_experts must align with response token IDs")
         projected.append(np.zeros((len(response), *shape), dtype=dtype) if routes is None else routes)
     batch["rollout_routed_experts"] = projected
+
+
+def attach_token_policy_versions(batch, outputs, responses, loss_masks) -> None:
+    """Keep measured generating versions, using -1 only on masked assembly tokens."""
+    captured = [output.evidence.metadata.get("token_policy_versions") for output in outputs]
+    if not any(row is not None for row in captured):
+        return
+    rows = []
+    for versions, response, mask in zip(captured, responses, loss_masks, strict=True):
+        if versions is None:
+            if any(mask):
+                raise ValueError("token policy versions are missing for a trainable trajectory")
+            versions = [-1] * len(response)
+        if len(versions) != len(response):
+            raise ValueError("token policy versions do not align with response IDs")
+        if any(
+            isinstance(version, bool) or not isinstance(version, int) or version < (0 if keep else -1)
+            for version, keep in zip(versions, mask, strict=True)
+        ):
+            raise ValueError("trainable tokens require a measured nonnegative generating version")
+        rows.append(list(versions))
+    batch["token_policy_versions"] = rows
 
 
 def attach_student_topk(

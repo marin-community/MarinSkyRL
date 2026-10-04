@@ -862,6 +862,16 @@ def concatenate_trajectory_batches(
         raise ValueError("student-selected behavior scores require selected token IDs")
 
     data_sources_concat = None
+    token_versions_concat = None
+    if any(output.get("token_policy_versions") is not None for output in trajectory_batches):
+        token_versions_concat = []
+        for output in trajectory_batches:
+            versions = output.get("token_policy_versions")
+            if versions is None:
+                if any(any(mask) for mask in output["loss_masks"]):
+                    raise ValueError("token policy versions cannot be concatenated with unmeasured loss tokens")
+                versions = [[-1] * len(row) for row in output["response_ids"]]
+            token_versions_concat.extend(versions)
     if any(output.get("data_sources") is not None for output in trajectory_batches):
         data_sources_concat = [
             source
@@ -979,6 +989,8 @@ def concatenate_trajectory_batches(
         result["behavior_topk_logprobs"] = behavior_topk_concat
     if data_sources_concat is not None:
         result["data_sources"] = data_sources_concat
+    if token_versions_concat is not None:
+        result["token_policy_versions"] = token_versions_concat
     if token_level_shaping_concat is not None:
         result["token_level_shaping"] = token_level_shaping_concat
     if response_span_tags_concat is not None:

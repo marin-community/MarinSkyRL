@@ -86,7 +86,8 @@ async def test_direct_chat_client_types_context_overflow_without_leaking_prompt(
 
 
 @pytest.mark.asyncio
-async def test_direct_model_client_uses_vllm_chat_rendering_for_row_request_options():
+@pytest.mark.parametrize("record_versions", [False, True])
+async def test_direct_model_client_uses_vllm_chat_rendering_for_row_request_options(record_versions):
     engine = AsyncMock()
     engine.model_name = "snowball"
     engine.tokenizer = MagicMock()
@@ -112,6 +113,8 @@ async def test_direct_model_client_uses_vllm_chat_rendering_for_row_request_opti
             }
         ]
     }
+    if record_versions:
+        engine.chat_completion.return_value["choices"][0]["token_policy_versions"] = [2, 3]
     client = DirectModelClient(engine)
 
     output = await client.generate(
@@ -172,6 +175,10 @@ async def test_direct_model_client_uses_vllm_chat_rendering_for_row_request_opti
     assert output["response_logprobs"] == [[-0.1, -0.2]]
     assert output["assistant_messages"] == [engine.chat_completion.return_value["choices"][0]["message"]]
     assert output["token_provenance"] == "engine"
+    if record_versions:
+        assert output["token_policy_versions"] == [[2, 3]]
+    else:
+        assert "token_policy_versions" not in output
 
 
 @pytest.mark.asyncio

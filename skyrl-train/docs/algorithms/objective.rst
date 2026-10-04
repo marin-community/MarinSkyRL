@@ -387,6 +387,20 @@ policy :math:`o` is scored at batch preparation; it need not have the weights
 that generated a stale token. Mismatch decomposition requires a separate trainer
 score at those generating weights.
 
+``generator.record_token_policy_versions: true`` records the installed trainer
+step for every accepted token, including requests that resume across weight
+updates. It requires the pinned local multiprocess vLLM runtime
+(``vllm_v1_disable_multiproc: false``) and nonstreaming exact-token requests.
+Before labeling new weights, a FIFO output barrier drains chunks produced before
+the engine's pause acknowledgement. Buffer lease age remains a separate metric.
+
+Set ``trainer.token_policy_version_archive`` to a fresh output directory to save
+consumed response IDs, loss masks, version spans and the number of optimizer
+updates actually applied at each trainer step. Version differences count trainer
+publications; convert them to optimizer ages by summing that update ledger.
+Skipped updates contribute zero. A continuation's ages require the earlier
+ledger as well. The feature is disabled by default and does not alter the loss.
+
 .. _objective-kl-estimator:
 
 KL estimator

@@ -346,6 +346,8 @@ trainer:
   logger: "wandb"
   tracker_commit_each_step: true
   dump_data_batch: false
+  # Optional durable consumed-token spans and applied optimizer-update ledger.
+  token_policy_version_archive: null
   dump_eval_results: true
   log_level: "INFO"
 
@@ -369,6 +371,8 @@ generator:
   backend: "vllm"
   vllm_attention_backend: null
   weight_sync_backend: "nccl"
+  # Record the installed trainer step for each accepted token, including resumed requests.
+  record_token_policy_versions: false
   # vLLM pause policy during weight sync. abort ends in-flight streams; keep preserves them.
   weight_sync_pause:
     mode: keep

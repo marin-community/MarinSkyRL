@@ -1173,6 +1173,8 @@ class RayPPOTrainer:
             )
         # A hard sync point leaves every policy rank free before the next forward.
         await self._drain_policy_event_loops()
+        if self.cfg.generator.get("record_token_policy_versions", False):
+            await self.inference_engine_client.set_policy_version(self.global_step)
 
     async def _drain_policy_event_loops(self):
         """Wait for every actor loop to finish pending weight-sync work.
@@ -1462,6 +1464,9 @@ class RayPPOTrainer:
         ):
             status = await self._run_training(training_input, step_wall=step_wall)
         step_wall.start("group_bookkeeping")
+        if self.cfg.generator.get("record_token_policy_versions", False):
+            with Timer("record_token_policy_versions", self.all_timings):
+                await asyncio.to_thread(self._archive_consumed_policy_versions)
         self._log_optimizer_step_completed(
             epoch=epoch,
             training_input=training_input,
@@ -1672,6 +1677,13 @@ class RayPPOTrainer:
         with Timer("postprocess_trajectory_batch", self.all_timings):
             trajectory_batch = self.postprocess_trajectory_batch(trajectory_batch, uids)
             trajectory_batch, uids = self.select_trajectories(trajectory_batch, uids)
+        if self.cfg.generator.get("record_token_policy_versions", False):
+            from skyrl_train.rollouts.policy_versions import consumed_policy_versions  # noqa: PLC0415
+
+            self._token_policy_version_batch, metrics = consumed_policy_versions(
+                trajectory_batch, uids, self.global_step - 1
+            )
+            self.all_metrics.update(metrics)
         # Built after selection, because select_trajectories may drop rows.
         rollout_staleness = [staleness_by_uid[uid] for uid in uids]
 
@@ -1682,6 +1694,23 @@ class RayPPOTrainer:
         if self._training_metrics_enabled:
             self._record_consumed_staleness(uids, rollout_staleness, training_input["response_mask"][: len(uids)])
         return training_input
+
+    def _archive_consumed_policy_versions(self) -> None:
+        """Keep the applied update count needed to convert publication gaps to optimizer ages."""
+        applied = float(self.all_metrics["policy/policy_update_steps"])
+        if not math.isfinite(applied) or not applied.is_integer() or applied < 0:
+            raise ValueError("token policy versions require an integer applied optimizer-update count")
+        record = self._token_policy_version_batch
+        record["training_step"] = self.global_step
+        record["optimizer_updates_applied"] = int(applied)
+        root = self.cfg.trainer.get("token_policy_version_archive")
+        if root is not None:
+            uri = os.path.join(str(root), f"step-{self.global_step:08d}.json")
+            if io.exists(uri):
+                raise ValueError(f"consumed policy version archive is immutable: {uri}")
+            io.makedirs(str(root), exist_ok=True)
+            with io.open_file(uri, "wb") as output:
+                output.write(json.dumps(record, sort_keys=True).encode())
 
     def _record_consumed_staleness(
         self, uids: List[str], rollout_staleness: List[int], response_masks: torch.Tensor

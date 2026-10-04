@@ -52,6 +52,7 @@ class InferenceEngineOutput(TypedDict):
     # also be returned by vLLM, but is not forced into these top-K rows.
     student_topk_indices: NotRequired[List[List[List[int]]]]
     behavior_topk_logprobs: NotRequired[List[List[List[float]]]]
+    token_policy_versions: NotRequired[List[List[int]]]
     # prompt_logprobs: per-prompt-token top-K logprobs from vLLM (for teacher scoring).
     # Format: List[List[Optional[Dict[int, float]]]] — outer list is batch,
     # inner list is prompt positions, dict maps token_id → logprob.

@@ -442,6 +442,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         generated_ids: list[int] = []
         generated_topk_ids: list[list[int]] = []
         generated_topk_scores: list[list[float]] = []
+        version_token_ids: list[int] = []
+        token_versions: list[int] = []
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
         per_step_rewards: List[Tuple[float, Optional[int]]] = []
         verification_results: List[VerificationResult] = []
@@ -500,6 +502,12 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 token_provenance = TokenProvenance.RECONSTRUCTED
             output = engine_output["responses"][0]
             output_ids = engine_output["response_ids"][0]
+            versions = engine_output.get("token_policy_versions")
+            if versions is not None:
+                if len(versions) != 1 or len(versions[0]) != len(output_ids):
+                    raise ValueError("token policy versions must align with generated token IDs")
+                version_token_ids.extend(output_ids)
+                token_versions.extend(versions[0])
             topk_ids_batch = engine_output.get("student_topk_indices")
             topk_scores_batch = engine_output.get("behavior_topk_logprobs")
             if (topk_ids_batch is None) != (topk_scores_batch is None):
@@ -634,6 +642,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 generated_ids.clear()
                 generated_topk_ids.clear()
                 generated_topk_scores.clear()
+                version_token_ids.clear()
+                token_versions.clear()
                 continue
 
             if env_step_output.get("postprocessed_action", None) is not None:
@@ -760,6 +770,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                         generated_ids,
                         generated_topk_ids,
                         generated_topk_scores,
+                        version_token_ids,
+                        token_versions,
                         token_provenance,
                         continuation_assistant_index,
                         env_step_output,
@@ -785,6 +797,8 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                 generated_ids,
                 generated_topk_ids,
                 generated_topk_scores,
+                version_token_ids,
+                token_versions,
                 token_provenance,
                 continuation_assistant_index,
                 env_step_output,
@@ -909,6 +923,17 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     token_rewards = tuple(0.0 for _ in token_rewards)
             env_metrics["agent_loop_error"] = 1.0
 
+        metadata = {"terminal_exception_type": disposition.exception_type} if terminal_error is not None else {}
+        if token_versions:
+            if version_token_ids == response_ids:
+                aligned_versions = token_versions
+            elif version_token_ids == [token for token, keep in zip(response_ids, loss_mask, strict=True) if keep]:
+                aligned_versions = [-1] * len(response_ids)
+                for position, version in zip(np.flatnonzero(loss_mask), token_versions, strict=True):
+                    aligned_versions[position] = version
+            else:
+                raise ValueError("policy versions cannot be aligned with the assembled response tokens")
+            metadata["token_policy_versions"] = aligned_versions
         evidence = RolloutEvidence(
             messages=tuple(chat_history) if retokenize_chat_history or chat_completion_params is not None else (),
             response=output,
@@ -920,7 +945,7 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             student_topk_indices=None if selected is None else selected.indices,
             behavior_topk_logprobs=None if selected is None else selected.topk_logprobs,
             routed_experts=rollout_routes,
-            metadata=({"terminal_exception_type": disposition.exception_type} if terminal_error is not None else {}),
+            metadata=metadata,
         )
         reward_result = RewardResult(
             unshaped_reward=unshaped_reward,

@@ -62,6 +62,7 @@ from skyrl_train.inference_engines.base import (
     LORA_DISK_PATH_KEY,
 )
 from skyrl_train.inference_engines.response_topk import select_response_topk
+from skyrl_train.inference_engines.vllm.policy_versions import PolicyVersionRecorder
 from skyrl_train.inference_engines.chat_continuation import EXACT_PROMPT_TOKEN_IDS_KEY
 from marinskyrl.inference_placement import InferenceWorkerPlacement
 from skyrl_train.inference_engines.placement import inference_worker_placement
@@ -1377,6 +1378,7 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         self._stats_attributes: Dict[str, str] = {}
         self._rendezvous_port_reservation = kwargs.pop("rendezvous_port_reservation", None)
         self._weight_sync_pause_policy: WeightSyncPausePolicy = kwargs.pop("weight_sync_pause_policy")
+        record_versions = kwargs.pop("record_token_policy_versions", False)
         setup_envvars_for_vllm(kwargs, bundle_indices)
         vllm_v1_disable_multiproc = kwargs.pop("vllm_v1_disable_multiproc", False)
         logger.info(
@@ -1397,7 +1399,13 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         if "rope_scaling" in kwargs:
             kwargs.pop("rope_scaling")
         self.llm = self._create_engine(*args, **kwargs)
+        self._policy_versions = PolicyVersionRecorder(self.llm) if record_versions else None
         self._weight_loader = VLLMWeightLoader(self.llm)
+
+    async def set_policy_version(self, version: int) -> None:
+        if self._policy_versions is None:
+            raise RuntimeError("token policy version recording is disabled")
+        await self._policy_versions.install(version)
 
     def tp_size(self):
         return self._tp_size
@@ -1530,6 +1538,11 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         if response_top_k is not None and response_top_k > 0:
             result["student_topk_indices"] = student_topk_indices
             result["behavior_topk_logprobs"] = behavior_topk_logprobs
+        if self._policy_versions is not None:
+            result["token_policy_versions"] = [
+                self._policy_versions.take(output.request_id, output.outputs[0].index, output.outputs[0].token_ids)
+                for output in outputs
+            ]
         return result
 
     def get_model_max_len(self) -> int:
@@ -1754,6 +1767,9 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
                     e,
                     abort_exc,
                 )
+            finally:
+                if self._policy_versions is not None:
+                    self._policy_versions.discard(request_ids)
             raise
 
         return self._postprocess_outputs(outputs, self._response_top_k(sampling_params), sampling_params)
@@ -1906,6 +1922,11 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         body = request_payload.get("json", {})
         headers = request_payload.get("headers", {})
         request_id = headers.get("x-request-id") or uuid4().hex
+        if self._policy_versions is not None and endpoint != "/chat/completions":
+            raise ValueError("token policy version recording supports the chat endpoint and token-ID generate")
+        if self._policy_versions is not None:
+            headers = dict(headers)
+            headers["x-request-id"] = request_id
         exact_prompt_token_ids = body.pop(EXACT_PROMPT_TOKEN_IDS_KEY, None)
 
         # Apply configured sampling params from generator config.
@@ -1942,9 +1963,19 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
             if isinstance(generator, ErrorResponse):
                 response["request_id"] = request_id
                 response["error_category"] = "server_error"
+                if self._policy_versions is not None:
+                    self._policy_versions.discard([f"chatcmpl-{request_id}"])
+            elif self._policy_versions is not None:
+                for choice in response["choices"]:
+                    ids = choice.get("token_ids")
+                    if not isinstance(ids, list):
+                        raise ValueError("token policy version recording requires exact response token IDs")
+                    choice["token_policy_versions"] = self._policy_versions.take(response["id"], choice["index"], ids)
             return response
 
         except Exception as e:
+            if self._policy_versions is not None:
+                self._policy_versions.discard([f"chatcmpl-{request_id}"])
             # Handle it here so we can surface the error from a ray worker.
             #
             # Input-overflow (VLLMValidationError raised at serving.py during
@@ -2031,6 +2062,8 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         ``provider_specific_fields.token_ids`` is present for harbor's literal
         accumulator.
         """
+        if self._policy_versions is not None:
+            raise ValueError("token policy version recording requires nonstreaming exact-token requests")
         body = request_payload.get("json", {})
         headers = request_payload.get("headers", {})
         exact_prompt_token_ids = body.pop(EXACT_PROMPT_TOKEN_IDS_KEY, None)

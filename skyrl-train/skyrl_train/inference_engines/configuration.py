@@ -36,6 +36,13 @@ def inference_engine_kwargs_from_config(
     engine_init_kwargs: dict[str, Any],
 ) -> dict[str, Any]:
     """Combine shared generator settings with explicit role geometry and ownership."""
+    record_versions = cfg.generator.get("record_token_policy_versions", False)
+    if not isinstance(record_versions, bool):
+        raise ValueError("generator.record_token_policy_versions must be a boolean")
+    if record_versions and (
+        role.backend != "vllm" or not cfg.generator.run_engines_locally or cfg.generator.vllm_v1_disable_multiproc
+    ):
+        raise ValueError("token policy versions require local multiprocess vLLM engines")
     kwargs = {
         "num_inference_engines": role.num_inference_engines,
         "tensor_parallel_size": role.tensor_parallel_size,
@@ -63,6 +70,7 @@ def inference_engine_kwargs_from_config(
         "mp_backend": cfg.generator.get("inference_engine_mp_backend", False),
         "placement_group_timeout_seconds": int(cfg.trainer.distributed.placement_group_timeout_seconds),
         "weight_sync_pause_policy": resolve_weight_sync_pause_policy(cfg.generator),
+        "record_token_policy_versions": record_versions,
     }
     if (rope_scaling := cfg.generator.get("rope_scaling", None)) is not None:
         kwargs["rope_scaling"] = OmegaConf.to_container(rope_scaling, resolve=True)

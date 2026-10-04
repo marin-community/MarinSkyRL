@@ -67,6 +67,7 @@ class _ChatResult:
     stop_reason: str
     assistant_message: dict[str, Any]
     routed_experts: np.ndarray | None = None
+    token_policy_versions: list[int] | None = None
 
 
 def _choice_routed_experts(choice: dict[str, Any], prompt_ids: list[int], response_ids: list[int]) -> np.ndarray | None:
@@ -96,6 +97,11 @@ def _assemble_chat_results(results: list[_ChatResult]) -> ModelClientOutput:
         output["behavior_topk_logprobs"] = selected_scores
     if any(result.routed_experts is not None for result in results):
         output["routed_experts"] = [result.routed_experts for result in results]
+    versions = [result.token_policy_versions for result in results]
+    if any(value is not None for value in versions):
+        if any(value is None for value in versions):
+            raise ValueError("token policy version capture is incomplete across model responses")
+        output["token_policy_versions"] = versions
     return output
 
 
@@ -291,6 +297,7 @@ class DirectModelClient:
                 choice["finish_reason"],
                 message,
                 _choice_routed_experts(choice, prompt_ids, response_ids),
+                choice.get("token_policy_versions"),
             )
 
         results = await asyncio.gather(
