@@ -34,6 +34,10 @@ validates the complete result. JSON arrays and objects are accepted for structur
 explicit null. Fields whose YAML defaults reference another field reject null unless their YAML default
 is null. Open mapping keys keep their insertion order during merge and settings.
 
+Group selections use option names such as `config_groups.algorithm_recipe=grpo`. An unset selection
+contributes nothing; an explicit null is invalid. Structured settings beginning with `{`, `[` or `"`
+require valid JSON. Quote a string beginning with one of those characters as a JSON string.
+
 Use `SkyRLRecipe.from_document` for parsed JSON or YAML mappings. `RecipePatch.from_document` accepts a
 part without a context budget. Python constructors are strict; JSON arrays become immutable tuples.
 Public classes are available from `marinskyrl.recipe_schema`. Tensor-parallel and artifact-identity

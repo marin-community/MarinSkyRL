@@ -127,6 +127,17 @@ def test_public_recipe_round_trip_preserves_parts_and_reports_owned_paths():
     options = schema.RecipePatch(generator=schema.Generator(engine_init_kwargs={"buckets": [1, 2]}))
     parts = {"policy": part, "computed": computed, "options": options}
     expected = schema.SkyRLRecipe.combine(base=base, **parts)
+    grouped = expected.with_settings(
+        ["config_groups.algorithm_recipe=grpo", "config_groups.terminal_bench_config=terminal_bench"]
+    )
+    assert grouped.to_skyrl()["config_groups"] == {
+        "terminal_bench_config": "terminal_bench",
+        "algorithm_recipe": "grpo",
+    }
+    assert schema.SkyRLRecipe.from_document(grouped.to_skyrl()) == grouped
+    for group in ("algorithm_recipe", "terminal_bench_config"):
+        with pytest.raises(ValueError, match=group):
+            grouped.with_settings([f"config_groups.{group}=null"])
     for order in permutations(parts.items()):
         combined = schema.SkyRLRecipe.combine(base=base, **dict(order))
         assert combined == expected

@@ -8,7 +8,7 @@ from pydantic import Field, PositiveInt, ValidationError, model_validator
 
 from .budget import ContextBudget
 from .documents import MISSING, get_path
-from .model import FrozenMap, OpenMap, Section
+from .model import FrozenMap, OpenMap, Section, unset_field
 from .ownership import OWNER_MESSAGES, REMOVED
 from .rules import RLEntrypoint, validate_engine_init_kwargs, validate_tp_divides_heads
 from .sections import RecipeSections
@@ -17,8 +17,8 @@ from .sections import RecipeSections
 class ConfigGroups(Section):
     """Hydra group selections supported by Iris recipes."""
 
-    terminal_bench_config: Literal["terminal_bench"] | None = None
-    algorithm_recipe: Literal["cispo", "dapo", "dr_grpo", "ftpo", "grpo", "gspo", "mopd", "opd"] | None = None
+    terminal_bench_config: Literal["terminal_bench"] = unset_field()
+    algorithm_recipe: Literal["cispo", "dapo", "dr_grpo", "ftpo", "grpo", "gspo", "mopd", "opd"] = unset_field()
 
 
 class RecipePatch(RecipeSections):

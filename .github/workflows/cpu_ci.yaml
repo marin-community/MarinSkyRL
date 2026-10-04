@@ -44,8 +44,6 @@ jobs:
 
   iris_launcher_tests:
     runs-on: ubuntu-latest
-    env:
-      PYTHONPATH: ${{ github.workspace }}/skyrl-train:${{ github.workspace }}/skyrl-gym
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
@@ -56,6 +54,8 @@ jobs:
       - name: Exercise the Iris CLI dependency boundary
         run: uv run --frozen iris --help
       - name: Run iris launcher tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}/skyrl-train:${{ github.workspace }}/skyrl-gym
         run: uv run --frozen pytest cloud/iris/tests/ -q
       - name: Verify the base dependency boundary
         run: uv run --frozen pytest infra/tests/test_marinskyrl_packaging.py -q
