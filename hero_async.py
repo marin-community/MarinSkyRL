@@ -25,7 +25,7 @@ from skyrl_train.utils import validate_cfg
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from tests.gpu.grug_serving import assert_engine_weights, rank0_validation_snapshot
 
-from hero_cycle import publication_expert_indices, publication_validation_names
+from hero_cycle import assert_pretrained_snapshot, publication_expert_indices, publication_validation_names
 from hero_cat import COMPLETION_TEMPLATE, RESPONSE_LIMIT, cat_prompt
 from hero_qualification import measured_worker, pretrained_metadata_identity, s3_client, s3_location
 
@@ -360,6 +360,11 @@ class MeasuredAsyncPPOExp(BasePPOExp):
             publication_and_initial_drain_seconds = time.monotonic() - sync_started
             started = time.monotonic()
             snapshot = await asyncio.to_thread(rank0_validation_snapshot, self.trainer.policy_model, names)
+            if self.trainer.global_step == 0 and self.last_weight_snapshot is None:
+                self.report['pretrained_import_values'] = await asyncio.to_thread(
+                    assert_pretrained_snapshot, self.report['source'], self.cfg.trainer.policy.model.path,
+                    names, bias_names, snapshot,
+                )
             serving_expert_owners = await asyncio.to_thread(
                 assert_engine_weights,
                 self.trainer.inference_engine_client,
