@@ -26,6 +26,12 @@ The Mamba patch also incorporates the upstream TVM FFI upper-bound correction to
 0.1.12 and selects the serving stack's TileLang 0.1.14. These are candidate compatibility changes; metadata
 resolution alone does not qualify their APIs or kernels.
 
+Core checks the separately versioned `flash-attn-4` distribution before importing
+its CuTe implementation. Its upstream import order loads the old CuTe code
+bundled in the stable FA2 wheel even when no eligible FA4 distribution is
+installed. That code cannot import with CUTLASS DSL 4.7. The patch preserves
+Core's existing version gate and attention selection.
+
 `build_native.sh` is a manual release tool. CI and runtime installation consume
 published wheels by URL and SHA-256. Reproducibility here means pinned source,
 dependencies and commands; separate builds can produce different archive bytes.

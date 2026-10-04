@@ -24,7 +24,7 @@ index 24c6794..2269224 100644
 +++ b/megatron/core/package_info.py
 @@ -8 +8 @@ PATCH = 2
 -PRE_RELEASE = ""
-+PRE_RELEASE = "+marin.torch2141.1"
++PRE_RELEASE = "+marin.torch2141.2"
 diff --git a/pyproject.toml b/pyproject.toml
 index b2474f7..eb43dae 100644
 --- a/pyproject.toml
@@ -37,3 +37,9 @@ index b2474f7..eb43dae 100644
 @@ -104 +104 @@ dev = [
 -    "nvidia-cudnn-frontend[cutedsl]==1.26.0",
 +    "nvidia-cudnn-frontend[cutedsl]==1.30.0",
+diff --git a/megatron/core/transformer/attention.py b/megatron/core/transformer/attention.py
+--- a/megatron/core/transformer/attention.py
++++ b/megatron/core/transformer/attention.py
+@@ -100,0 +101,2 @@
++    if HAVE_FA4:
++        from flash_attn.cute import flash_attn_varlen_func as flash_attn4_varlen_func
