@@ -39,6 +39,7 @@ from skyrl_train.env_vars import (
     EnvVarScope,
     RUNAI_STREAMER_LOG_TO_STDERR_ENV,
     RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS_ENV,
+    NCCL_BUFFER_SIZE_ENV_VAR,
     VLLM_USE_V2_MODEL_RUNNER_ENV,
     managed_environment_names,
 )
@@ -222,16 +223,19 @@ def _build_inference_engine_runtime_env(
     *,
     require_v1_model_runner: bool = False,
     runai_streamer_enabled: bool = False,
+    nccl_buffer_size_bytes: int | None = None,
 ) -> Dict[str, Any] | None:
     """Forward managed inference settings into each vLLM engine actor.
 
-    This covers NCCL diagnostics and batch invariance. Selected-ID scoring also
-    forces the V1 model runner. RunAI-backed engines also receive conservative
+    This covers NCCL diagnostics, the policy's weight-sync buffer size, and batch
+    invariance. Selected-ID scoring also forces the V1 model runner. RunAI-backed engines receive conservative
     S3 stall tolerance and stderr diagnostics. Returns ``None`` when no managed
     or derived settings apply.
     """
     passthrough = set(_NCCL_FR_ENV_PASSTHROUGH) | set(managed_environment_names(EnvVarScope.INFERENCE_WORKER))
     env_vars = {key: os.environ[key] for key in passthrough if key in os.environ}
+    if nccl_buffer_size_bytes is not None:
+        env_vars[NCCL_BUFFER_SIZE_ENV_VAR] = str(nccl_buffer_size_bytes)
     if require_v1_model_runner:
         # Selected-ID prompt scoring is implemented in vLLM's V1 GPU runner.
         # Set this before actor import so the EngineCore and TP workers agree.
@@ -514,6 +518,7 @@ def create_ray_wrapped_inference_engines(
     mp_backend: bool = False,
     placement_group_timeout_seconds: int = DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS,
     weight_sync_pause_policy: WeightSyncPausePolicy = DEFAULT_WEIGHT_SYNC_PAUSE_POLICY,
+    nccl_buffer_size_bytes: int | None = None,
 ) -> List[InferenceEngineInterface]:
     """
     Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface instances.
@@ -558,12 +563,11 @@ def create_ray_wrapped_inference_engines(
         if backend == "vllm" and "language_model_only" not in engine_init_kwargs
         else {}
     )
-    # #232 FIX B: NCCL flight-recorder env to forward into the engine actor (and,
-    # via placement_group_capture_child_tasks, its ray-backend TP worker actors).
-    # None for every run that does not set the TORCH_NCCL_* FR vars -> no change.
+    # Forward managed environment and the policy's NCCL buffer size into engine workers.
     inference_engine_runtime_env = _build_inference_engine_runtime_env(
         require_v1_model_runner=require_v1_model_runner,
         runai_streamer_enabled=engine_init_kwargs.get("load_format") == "runai_streamer",
+        nccl_buffer_size_bytes=nccl_buffer_size_bytes,
     )
     noset_visible_devices = ray_noset_visible_devices(ray.get(get_all_env_variables.remote()))
     use_hybrid_engine = shared_pg is not None
