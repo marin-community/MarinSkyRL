@@ -93,7 +93,7 @@ megatron = [
     "fast-hadamard-transform==1.1.0 ; sys_platform == 'linux'",
     "mamba-ssm==2.3.2.post1+marin.cu132torch2141.1 ; sys_platform == 'linux'",
     "megatron-bridge==0.6.2+marin.torch2141.1 ; sys_platform == 'linux'",
-    "megatron-core==0.19.2+marin.torch2141.2 ; sys_platform == 'linux'",
+    "megatron-core==0.19.2+marin.torch2141.3 ; sys_platform == 'linux'",
     "harbor-config ; sys_platform == 'linux'",
     "nvidia-modelopt==0.47.0 ; sys_platform == 'linux'",
     "peft>=0.19 ; sys_platform == 'linux'",
@@ -201,8 +201,8 @@ mamba-ssm = [
     { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/mamba_ssm-2.3.2.post1+marin.cu132torch2141.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
 ]
 megatron-core = [
-    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/megatron_core-0.19.2+marin.torch2141.2-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
-    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/megatron_core-0.19.2+marin.torch2141.2-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/megatron_core-0.19.2+marin.torch2141.3-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/megatron_core-0.19.2+marin.torch2141.3-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
 ]
 megatron-bridge = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/megatron_bridge-0.6.2+marin.torch2141.1-py3-none-any.whl", marker = "sys_platform == 'linux'" }
 fast-hadamard-transform = [

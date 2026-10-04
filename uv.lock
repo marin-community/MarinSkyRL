@@ -2492,8 +2492,8 @@ megatron = [
     { name = "mamba-ssm", version = "2.3.2.post1+marin.cu132torch2141.1", source = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/mamba_ssm-2.3.2.post1+marin.cu132torch2141.1-cp312-cp312-linux_aarch64.whl" }, marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron')" },
     { name = "mamba-ssm", version = "2.3.2.post1+marin.cu132torch2141.1", source = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/mamba_ssm-2.3.2.post1+marin.cu132torch2141.1-cp312-cp312-linux_x86_64.whl" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron')" },
     { name = "megatron-bridge", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
-    { name = "megatron-core", version = "0.19.2+marin.torch2141.2", source = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/megatron_core-0.19.2+marin.torch2141.2-cp312-cp312-linux_aarch64.whl" }, marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron')" },
-    { name = "megatron-core", version = "0.19.2+marin.torch2141.2", source = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/megatron_core-0.19.2+marin.torch2141.2-cp312-cp312-linux_x86_64.whl" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron')" },
+    { name = "megatron-core", version = "0.19.2+marin.torch2141.3", source = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/megatron_core-0.19.2+marin.torch2141.3-cp312-cp312-linux_aarch64.whl" }, marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron')" },
+    { name = "megatron-core", version = "0.19.2+marin.torch2141.3", source = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/megatron_core-0.19.2+marin.torch2141.3-cp312-cp312-linux_x86_64.whl" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron')" },
     { name = "nvidia-cusparselt-cu13", version = "0.8.1", source = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-cusparselt081-armtag-20261004/nvidia_cusparselt_cu13-0.8.1-py3-none-manylinux2014_aarch64.whl" }, marker = "platform_machine == 'aarch64' and sys_platform == 'linux'" },
     { name = "nvidia-cutlass-dsl", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
     { name = "nvidia-modelopt", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
@@ -2595,9 +2595,9 @@ requires-dist = [
     { name = "marin-rigging", extras = ["secrets"], specifier = ">=0.2.123.dev35633925924" },
     { name = "math-verify", specifier = "==0.9.0" },
     { name = "megatron-bridge", marker = "sys_platform == 'linux' and extra == 'megatron'", url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/megatron_bridge-0.6.2+marin.torch2141.1-py3-none-any.whl" },
-    { name = "megatron-core", marker = "platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'megatron'", url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/megatron_core-0.19.2+marin.torch2141.2-cp312-cp312-linux_aarch64.whl" },
-    { name = "megatron-core", marker = "platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux' and extra == 'megatron'", specifier = "==0.19.2+marin.torch2141.2" },
-    { name = "megatron-core", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'megatron'", url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/megatron_core-0.19.2+marin.torch2141.2-cp312-cp312-linux_x86_64.whl" },
+    { name = "megatron-core", marker = "platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'megatron'", url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/megatron_core-0.19.2+marin.torch2141.3-cp312-cp312-linux_aarch64.whl" },
+    { name = "megatron-core", marker = "platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux' and extra == 'megatron'", specifier = "==0.19.2+marin.torch2141.3" },
+    { name = "megatron-core", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'megatron'", url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/megatron_core-0.19.2+marin.torch2141.3-cp312-cp312-linux_x86_64.whl" },
     { name = "memray", marker = "sys_platform == 'linux' and extra == 'telemetry'" },
     { name = "ninja" },
     { name = "nvidia-cusparselt-cu13", marker = "platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'cuda'", url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-cusparselt081-armtag-20261004/nvidia_cusparselt_cu13-0.8.1-py3-none-manylinux2014_aarch64.whl" },
@@ -2795,8 +2795,8 @@ dependencies = [
     { name = "flashinfer-cubin", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
     { name = "flashinfer-python", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
     { name = "hydra-core", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
-    { name = "megatron-core", version = "0.19.2+marin.torch2141.2", source = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/megatron_core-0.19.2+marin.torch2141.2-cp312-cp312-linux_aarch64.whl" }, extra = ["dev", "mlm"], marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron')" },
-    { name = "megatron-core", version = "0.19.2+marin.torch2141.2", source = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/megatron_core-0.19.2+marin.torch2141.2-cp312-cp312-linux_x86_64.whl" }, extra = ["dev", "mlm"], marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron')" },
+    { name = "megatron-core", version = "0.19.2+marin.torch2141.3", source = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/megatron_core-0.19.2+marin.torch2141.3-cp312-cp312-linux_aarch64.whl" }, extra = ["dev", "mlm"], marker = "(platform_machine == 'aarch64' and sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron')" },
+    { name = "megatron-core", version = "0.19.2+marin.torch2141.3", source = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/megatron_core-0.19.2+marin.torch2141.3-cp312-cp312-linux_x86_64.whl" }, extra = ["dev", "mlm"], marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron')" },
     { name = "mistral-common", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
     { name = "mlflow", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
     { name = "nvidia-resiliency-ext", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
@@ -2864,8 +2864,8 @@ provides-extras = ["recipes", "parquet", "tensor-inspect", "te", "ssm", "audio"]
 
 [[package]]
 name = "megatron-core"
-version = "0.19.2+marin.torch2141.2"
-source = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/megatron_core-0.19.2+marin.torch2141.2-cp312-cp312-linux_aarch64.whl" }
+version = "0.19.2+marin.torch2141.3"
+source = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/megatron_core-0.19.2+marin.torch2141.3-cp312-cp312-linux_aarch64.whl" }
 resolution-markers = [
     "platform_machine == 'aarch64' and sys_platform == 'linux'",
 ]
@@ -2875,7 +2875,7 @@ dependencies = [
     { name = "torch", version = "2.14.1+cu132", source = { registry = "https://download.pytorch.org/whl/cu132" }, marker = "platform_machine == 'aarch64' and sys_platform == 'linux'" },
 ]
 wheels = [
-    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/megatron_core-0.19.2+marin.torch2141.2-cp312-cp312-linux_aarch64.whl", hash = "sha256:0c4fb663442363136e1f7ef1e4e38e0938a7d1370cfb55fb538936687864ae52" },
+    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/megatron_core-0.19.2+marin.torch2141.3-cp312-cp312-linux_aarch64.whl", hash = "sha256:e67f99d5229869245036529cec8f3ddd1a31b97ccfc3712f0fb4147656656c10" },
 ]
 
 [package.optional-dependencies]
@@ -2964,8 +2964,8 @@ provides-extras = ["training", "mlm", "dev", "lts", "te", "ssm"]
 
 [[package]]
 name = "megatron-core"
-version = "0.19.2+marin.torch2141.2"
-source = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/megatron_core-0.19.2+marin.torch2141.2-cp312-cp312-linux_x86_64.whl" }
+version = "0.19.2+marin.torch2141.3"
+source = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/megatron_core-0.19.2+marin.torch2141.3-cp312-cp312-linux_x86_64.whl" }
 resolution-markers = [
     "platform_machine == 'x86_64' and sys_platform == 'linux'",
 ]
@@ -2975,7 +2975,7 @@ dependencies = [
     { name = "torch", version = "2.14.1+cu132", source = { registry = "https://download.pytorch.org/whl/cu132" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
 ]
 wheels = [
-    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/megatron_core-0.19.2+marin.torch2141.2-cp312-cp312-linux_x86_64.whl", hash = "sha256:4de9717e1addd0dd86c8b0fd441fc19a5b99ebc523d6fb552c61b881f0e6f002" },
+    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/megatron_core-0.19.2+marin.torch2141.3-cp312-cp312-linux_x86_64.whl", hash = "sha256:8e7fe2d0eb6e483442990ecc7e6728f6f4794d01c80d291b53fcc6ac57cc8ace" },
 ]
 
 [package.optional-dependencies]
