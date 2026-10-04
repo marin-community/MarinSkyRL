@@ -1,5 +1,3 @@
-"""Opt-in X4a: real Qwen weights, reload coverage and requests before initial sync."""
-
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,7 +36,7 @@ class InspectableEngine(vllm_engine.AsyncVLLMInferenceEngine):
 
 
 def receive_snapshot_weights(worker, model_path, names):
-    """Use the real worker loader with a filesystem receiver instead of a second GPU sender."""
+    """Load named snapshot tensors through the worker's weight receiver boundary."""
 
     def receive(_request):
         wanted = set(names)
