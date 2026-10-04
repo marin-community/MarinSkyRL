@@ -7,12 +7,11 @@
 # The sample (infra/rl_data/nemotron_ultra_mopd_subset.py --rows) routes every generator of the
 # blend, so rows keep their teacher_route column and the stock shuffle preserves the blend's mix.
 # grading: skip lets judge-backed rows train without a judge; the distillation loss ignores the
-# reward. ns_tools and Lean rows execute in the in-cluster NeMo Skills sandbox.
+# reward. ns_tools and Lean rows execute in task-local Shellbox machines.
 #
-# Harbor SWE rows (--swe-rows N) run opencode in Daytona and train only when the launch passes the
-# sample's swe-tasks/tasks.parquet as data.terminal_bench_data, sets ingress.mode controller and
-# ingress.record_literal, and provides TOGETHER_API_KEY for the TaskTrove verifiers. Without that
-# task data the Harbor settings below are unused.
+# Harbor SWE rows (--swe-rows N) use TaskRolloutWorker. Supply the sample's
+# swe-tasks/tasks.parquet as data.terminal_bench_data and TOGETHER_API_KEY for the TaskTrove
+# verifiers. Without that task data the Harbor settings below are unused.
 #
 # Pass the student with --model-path (open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92
 # pinned to a commit) and the sample's train.parquet with --train-data.

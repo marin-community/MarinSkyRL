@@ -81,7 +81,7 @@ TRIAL_SCHEMA = SectionSchema(
     }
 )
 
-# Retry config fields (for QueueOrchestrator)
+# Retry settings for the task worker.
 RETRY_SCHEMA = SectionSchema(
     fields={
         "max_retries": FieldMapping("max_retries", default=2),
@@ -380,7 +380,7 @@ class HarborConfigBuilder:
 
     def get_reward_shaping_config(self) -> Dict[str, Any]:
         """
-        Get reward shaping configuration for the Terminal-Bench runner.
+        Get reward shaping configuration for the task worker.
 
         Returns:
             Dict with keys:
