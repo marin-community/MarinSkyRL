@@ -79,7 +79,8 @@ def test_supervisors_share_worker_diagnostics_with_uploader(tmp_path: Path, monk
         if mode is DebugMode.OFF:
             assert not filesystem.exists(f"/{job_name}/debug_artifacts")
         else:
-            receipt = json.loads(filesystem.cat(f"/{job_name}/debug_artifacts/node-0/processes/{manifest_path.name}"))
+            relative_path = manifest_path.relative_to(Path(os.environ[DEBUG_ARTIFACT_DIR_ENV])).as_posix()
+            receipt = json.loads(filesystem.cat(f"/{job_name}/debug_artifacts/node-0/{relative_path}"))
             assert receipt["role"] == "worker"
             assert COLLECTIVE_PHASE_DIAGNOSTICS_ENV not in receipt["environment"]
     finally:
