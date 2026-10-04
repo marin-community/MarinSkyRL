@@ -19,10 +19,6 @@ class Options(RecipeDocument):
     count: int = 1
 
 
-class CompleteOptions(Options):
-    context_budget: ContextBudget
-
-
 @pytest.fixture(autouse=True)
 def source_under_test():
     source = Path(schema.__file__).resolve()
@@ -66,53 +62,23 @@ def test_open_maps_preserve_sparse_documents_across_mutation_pickle_and_override
     assert routes != Options(options={"chat": 1.0, "code": 1.0, "math": 1.0})
 
 
-def test_named_parts_and_settings_validate_complete_documents_without_changing_route_order():
-    base = CompleteOptions(
-        context_budget=ContextBudget(request_window_tokens=256, max_new_tokens_per_turn=64, max_turns=2),
-        options={"math": 1.0, "code": 1.0, "chat": 1.0},
+def test_typed_maps_preserve_numeric_types_and_nested_budget_settings_across_round_trips():
+    base = Options(
         weights={"math": 1.0, "code": 1, "chat": 1.0},
         budgets={"math": ContextBudget(request_window_tokens=256, max_new_tokens_per_turn=64, max_turns=2)},
     )
-    parts = {
-        "optimizer": Options(options={"lr": 1e-6}),
-        "checkpoint": Options(count=2),
-        "data": Options(options={"buckets": [1, 2]}),
-    }
-    expected = CompleteOptions.combine(base=base, **parts)
-    for order in permutations(parts.items()):
-        combined = CompleteOptions.combine(base=base, **dict(order))
-        assert combined == expected
-        assert list(combined.to_skyrl()["options"]) == ["math", "code", "chat", "buckets", "lr"]
-    assert CompleteOptions.combine(base=base, empty=Options(options={"unused": {}})) == base
-    with_parent = base.merge(Options(options={"parent": None}))
-    nested_empty = Options(options={"parent": {"child": {}}})
-    assert CompleteOptions.combine(base=with_parent, empty=nested_empty) == with_parent
-    conflicts = (
-        (Options(options={"buckets": [1, 2]}), Options(options={"buckets": [1, 3]})),
-        (Options(options={"parent": None}), Options(options={"parent": {"child": 2}})),
-        (Options(options={"enabled": True}), Options(options={"enabled": 1})),
-    )
-    for first, second in conflicts:
-        for order in permutations((("first", first), ("second", second), ("unrelated", Options(count=2)))):
-            with pytest.raises(ValueError, match="parts 'first' and 'second'"):
-                CompleteOptions.combine(base=base, **dict(order))
-    updated = expected.with_settings(
+    updated = base.with_settings(
         [
-            "context_budget.max_turns=4",
-            "options.math=2.0",
             "weights.math=2",
             "weights.code=2.0",
             "budgets.math.max_turns=4",
-            "count=3",
         ]
     )
-    assert updated.context_budget.to_skyrl() == {
+    assert updated.budgets["math"].to_skyrl() == {
         "request_window_tokens": 256,
         "max_new_tokens_per_turn": 64,
         "max_turns": 4,
     }
-    assert updated.count == 3
-    assert list(updated.to_skyrl()["options"]) == list(expected.to_skyrl()["options"])
     assert list(updated.to_skyrl()["weights"]) == ["math", "code", "chat"]
     assert type(updated.weights["math"]) is int
     assert type(updated.weights["code"]) is float
@@ -120,25 +86,20 @@ def test_named_parts_and_settings_validate_complete_documents_without_changing_r
     assert restored == updated
     assert hash(restored) == hash(updated)
     assert restored.budgets["math"].max_turns == 4
-    assert restored.budgets["math"].to_skyrl() == updated.context_budget.to_skyrl()
     with pytest.raises(TypeError):
         restored.weights["math"] = 9
     with pytest.raises(TypeError):
-        restored.budgets["math"] = base.context_budget
+        restored.budgets["math"] = base.budgets["math"]
     with pytest.raises(ValueError):
         updated.with_settings(["weights.math=heavy"])
-    structured = expected.with_settings(['context_budget={"max_turns":4}'])
-    assert structured.context_budget == updated.context_budget
-    assert CompleteOptions.from_document(updated.to_skyrl()) == updated
-    with pytest.raises(ValueError, match="request_window_tokens must exceed"):
-        expected.with_settings(["context_budget.request_window_tokens=64"])
+    assert Options.from_document(updated.to_skyrl()) == updated
     for routes in ({1: 2}, {1: 2, "1": 3}):
         document = {"options": routes}
         original_routes = list(routes.items())
         with pytest.raises(ValueError, match="mapping keys must be strings"):
             Options.from_document(document)
         assert list(document["options"].items()) == original_routes
-    assert base.context_budget.max_turns == 2
+    assert base.budgets["math"].max_turns == 2
 
 
 def test_public_recipe_round_trip_preserves_parts_and_reports_owned_paths():
@@ -163,9 +124,35 @@ def test_public_recipe_round_trip_preserves_parts_and_reports_owned_paths():
         }
     )
     computed = schema.RecipePatch(trainer=schema.Trainer(ckpt_interval=4))
-    expected = schema.SkyRLRecipe.combine(base=base, policy=part, computed=computed)
-    for order in permutations((("policy", part), ("computed", computed))):
-        assert schema.SkyRLRecipe.combine(base=base, **dict(order)) == expected
+    options = schema.RecipePatch(generator=schema.Generator(engine_init_kwargs={"buckets": [1, 2]}))
+    parts = {"policy": part, "computed": computed, "options": options}
+    expected = schema.SkyRLRecipe.combine(base=base, **parts)
+    for order in permutations(parts.items()):
+        combined = schema.SkyRLRecipe.combine(base=base, **dict(order))
+        assert combined == expected
+        assert list(combined.to_skyrl()["generator"]["engine_init_kwargs"]) == ["buckets", "user_options"]
+    assert (
+        schema.SkyRLRecipe.combine(
+            base=base, empty=schema.RecipePatch(generator=schema.Generator(engine_init_kwargs={"unused": {}}))
+        )
+        == base
+    )
+    with_parent = base.merge(schema.RecipePatch(generator=schema.Generator(engine_init_kwargs={"parent": None})))
+    nested_empty = schema.RecipePatch(generator=schema.Generator(engine_init_kwargs={"parent": {"child": {}}}))
+    assert schema.SkyRLRecipe.combine(base=with_parent, empty=nested_empty) == with_parent
+    for first, second in (
+        ({"buckets": [1, 2]}, {"buckets": [1, 3]}),
+        ({"parent": None}, {"parent": {"child": 2}}),
+        ({"enabled": True}, {"enabled": 1}),
+    ):
+        conflicts = (
+            ("first", schema.RecipePatch(generator=schema.Generator(engine_init_kwargs=first))),
+            ("second", schema.RecipePatch(generator=schema.Generator(engine_init_kwargs=second))),
+            ("unrelated", computed),
+        )
+        for order in permutations(conflicts):
+            with pytest.raises(ValueError, match="parts 'first' and 'second'"):
+                schema.SkyRLRecipe.combine(base=base, **dict(order))
     edited = expected.with_settings(["context_budget.max_turns=4", "generator.engine_init_kwargs.user_options.math=2"])
     assert edited.context_budget.to_skyrl() == {
         "request_window_tokens": 256,
@@ -176,6 +163,11 @@ def test_public_recipe_round_trip_preserves_parts_and_reports_owned_paths():
     assert edited.to_skyrl()["trainer"] == {**part.to_skyrl()["trainer"], "ckpt_interval": 4}
     assert pickle.loads(pickle.dumps(edited)) == schema.SkyRLRecipe.from_document(edited.to_skyrl())
     assert edited.merge(edited) == edited
+    structured = expected.with_settings(['context_budget={"max_turns":4}'])
+    assert structured.context_budget == edited.context_budget
+    with pytest.raises(ValueError, match="request_window_tokens must exceed"):
+        expected.with_settings(["context_budget.request_window_tokens=64"])
+    assert base.context_budget.max_turns == 2
     with pytest.raises(ValueError, match="computed.*policy"):
         schema.SkyRLRecipe.combine(
             base=base,
@@ -194,6 +186,14 @@ def test_public_recipe_round_trip_preserves_parts_and_reports_owned_paths():
         with pytest.raises(ValueError) as error:
             schema.SkyRLRecipe.from_document(document)
         assert f"{path}: {message}" in str(error.value)
+    removed = {"harbor": {"max_episodes": 1}}
+    for construct in (
+        lambda: schema.RecipePatch(terminal_bench=removed),
+        lambda: schema.SkyRLRecipe(context_budget=base.context_budget, terminal_bench=removed),
+        lambda: schema.SkyRLRecipe.model_validate_json(json.dumps({**base.to_skyrl(), "terminal_bench": removed})),
+    ):
+        with pytest.raises(ValueError, match="use context_budget.max_turns; Harbor reads max_turns"):
+            construct()
     for following in ("hf_save_interval", "micro_forward_batch_size_per_gpu"):
         with pytest.raises(ValueError, match=following):
             edited.with_settings([f"trainer.{following}=null"])
@@ -208,6 +208,24 @@ def test_public_recipe_round_trip_preserves_parts_and_reports_owned_paths():
     }
     artifact = schema.SkyRLRecipe.from_document({**base.to_skyrl(), **draft})
     assert artifact.to_skyrl()["generator"] == draft["generator"]
+    uri_part = schema.RecipePatch.from_document(
+        {"generator": {"speculative_decoding": {"model": {"source_uri": "s3://models/draft"}}}}
+    )
+    identity_part = schema.RecipePatch.from_document(
+        {"generator": {"speculative_decoding": {"model": {"source_identity": "sha256:" + "a" * 64}}}}
+    )
+    options_part = schema.RecipePatch.from_document(
+        {"generator": {"speculative_decoding": {"method": "eagle3", "num_speculative_tokens": 3}}}
+    )
+    assert schema.SkyRLRecipe.combine(base=base, uri=uri_part, identity=identity_part, options=options_part) == artifact
+    with pytest.raises(ValueError, match="artifact sources require sha256"):
+        schema.SkyRLRecipe.combine(base=base, uri=uri_part)
+    heads = schema.RecipePatch(model_num_attention_heads=42)
+    tensor_parallel = schema.RecipePatch(generator=schema.Generator(inference_engine_tensor_parallel_size=2))
+    valid = schema.SkyRLRecipe.combine(base=base, heads=heads, tensor_parallel=tensor_parallel)
+    assert schema.SkyRLRecipe.from_document(valid.to_skyrl()) == valid
+    with pytest.raises(ValueError, match="does not divide model_num_attention_heads=42"):
+        schema.SkyRLRecipe.combine(base=base, heads=heads)
     with pytest.raises(ValueError, match="artifact sources require sha256"):
         artifact.with_settings(["generator.speculative_decoding.model.source_identity=author-identity"])
     for source, identity in (("hf://org/draft", "b" * 40), ("/local/draft", "author-identity")):

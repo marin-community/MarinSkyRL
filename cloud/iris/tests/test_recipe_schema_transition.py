@@ -9,12 +9,12 @@ from pydantic import ValidationError
 
 from cloud.iris import rl_config_translation as launcher
 from cloud.iris import task_runtime
-from cloud.iris.paths import resolve_paths_in_dict
 from cloud.iris.rl_data import resolve_rl_train_data_with_sources
 from marinskyrl import distillation
 from marinskyrl import recipe_schema as schema
 from marinskyrl import speculative_decoding as speculative
 from marinskyrl.recipe_schema.documents import MISSING, get_path, leaves, set_path
+from marinskyrl.recipe_schema.sidecar import OPEN
 from scripts import generate_recipe_schema as generator
 from skyrl_train.config import ftpo
 from skyrl_gym.envs.gsm8k import env as gsm8k
@@ -50,6 +50,8 @@ def test_ownership_sentinels_distinguish_launch_writers_context_writers_and_pend
     base = launcher.compose_skyrl_config(parsed, {}, SimpleNamespace(gpus_per_node=8)).config
     full = OmegaConf.to_container(base, resolve=False)
     full["terminal_bench"] = full.pop("terminal_bench_config")
+    for path in OPEN | {"terminal_bench"}:
+        set_path(full, f"{path}.author_options", {"label": "authored", "items": ["authored", {"enabled": True}]})
     parameters = {
         "job_name": "ownership-launch",
         "experiments_dir": "/launch/runs",
@@ -151,8 +153,6 @@ def test_ownership_sentinels_distinguish_launch_writers_context_writers_and_pend
     }
     assert discards == PENDING_PR3["discard"]
     assert outcomes[0]["data"]["terminal_bench_data"] != outcomes[1]["data"]["terminal_bench_data"]
-    resume = [resolve_paths_in_dict({"resume_path": f"./author-{suffix}.yaml"})["resume_path"] for suffix in ("A", "B")]
-    assert resume[0] != resume[1] and all(Path(value).is_absolute() for value in resume)
     derived = {}
     for path in schema.DERIVED_PATHS:
         set_path(derived, path, 987654)

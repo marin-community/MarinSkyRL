@@ -106,11 +106,12 @@ def test_hugging_face_draft_mirror_uses_the_policy_tokenizer(tmp_path, monkeypat
     )
     outcomes = []
     for index, (uri, identity) in enumerate(sources):
+        resume = local_sources[index % 2] / "checkpoint"
         authored = SkyRLRecipe.from_document(
             {
                 "entrypoint": "standard",
                 "context_budget": {"request_window_tokens": 256, "max_new_tokens_per_turn": 64, "max_turns": 1},
-                "trainer": {"placement": {"colocate_all": False}},
+                "trainer": {"placement": {"colocate_all": False}, "resume_path": os.path.relpath(resume, root)},
                 "generator": {
                     "speculative_decoding": {
                         "method": "eagle3",
@@ -136,11 +137,13 @@ def test_hugging_face_draft_mirror_uses_the_policy_tokenizer(tmp_path, monkeypat
             {
                 "run": {"id": f"draft-{index}", "attempt_id": "1"},
                 "inputs": {"model": {"uri": "/policy"}},
-                "skyrl": {"generator": parsed.generator},
+                "skyrl": {"trainer": parsed.trainer, "generator": parsed.generator},
             }
         )
         output = _write_final_config(launch, policy_model=None, policy_tokenizer=None, draft_model=prepared)
-        persisted = OmegaConf.to_container(OmegaConf.load(output).skyrl.generator.speculative_decoding.model)
+        written = OmegaConf.load(output).skyrl
+        assert written.trainer.resume_path == str(resume)
+        persisted = OmegaConf.to_container(written.generator.speculative_decoding.model)
         assert persisted == {"source_uri": prepared.source_uri, "source_identity": prepared.source_identity}
         outcomes.append(persisted)
     for first, second in ((0, 1), (0, 2)):

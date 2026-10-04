@@ -49,8 +49,11 @@ class RecipePatch(RecipeSections):
             raise
 
     @model_validator(mode="after")
-    def _open_mapping_owners_and_author_rules(self) -> Self:
+    def _open_mapping_owners(self) -> Self:
         document = self.to_skyrl()
+        removed = [f"{path}: {message}" for path, message in REMOVED.items() if get_path(document, path) is not MISSING]
+        if removed:
+            raise ValueError("; ".join(removed))
         # Closed fields are rejected by their generated classes; only open-map owners reach this stage.
         owned = [
             f"{path}: {message}" for path, message in OWNER_MESSAGES.items() if get_path(document, path) is not MISSING
@@ -58,19 +61,6 @@ class RecipePatch(RecipeSections):
         if owned:
             raise ValueError("; ".join(owned))
         validate_engine_init_kwargs(self.generator.engine_init_kwargs)
-        validate_tp_divides_heads(self.generator.inference_engine_tensor_parallel_size, self.model_num_attention_heads)
-        model = get_path(document, "generator.speculative_decoding.model", {})
-        if isinstance(model, Mapping) and urlsplit(model.get("source_uri", "")).scheme in ("s3", "gs", "gcs"):
-            identity = model.get("source_identity", "")
-            digest = identity.removeprefix("sha256:")
-            if (
-                not identity.startswith("sha256:")
-                or len(digest) != 64
-                or any(c not in "0123456789abcdef" for c in digest)
-            ):
-                raise ValueError(
-                    "generator.speculative_decoding.model.source_identity: artifact sources require sha256:<64 lowercase hex digits>"
-                )
         return self
 
     def with_settings(self, settings: Sequence[str]) -> Self:
@@ -87,3 +77,20 @@ class SkyRLRecipe(RecipePatch):
     """A complete sparse recipe with a required rollout context declaration."""
 
     context_budget: ContextBudget
+
+    @model_validator(mode="after")
+    def _complete_author_rules(self) -> Self:
+        validate_tp_divides_heads(self.generator.inference_engine_tensor_parallel_size, self.model_num_attention_heads)
+        model = get_path(self.to_skyrl(), "generator.speculative_decoding.model", {})
+        if isinstance(model, Mapping) and urlsplit(model.get("source_uri", "")).scheme in ("s3", "gs", "gcs"):
+            identity = model.get("source_identity", "")
+            digest = identity.removeprefix("sha256:")
+            if (
+                not identity.startswith("sha256:")
+                or len(digest) != 64
+                or any(c not in "0123456789abcdef" for c in digest)
+            ):
+                raise ValueError(
+                    "generator.speculative_decoding.model.source_identity: artifact sources require sha256:<64 lowercase hex digits>"
+                )
+        return self

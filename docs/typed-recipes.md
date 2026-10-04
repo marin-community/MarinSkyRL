@@ -1,7 +1,7 @@
 # Typed SkyRL recipes
 
 The schema API validates immutable authored recipes. Hydra composes the running configuration, including
-group defaults, following values and the launcher's model, data and output paths.
+group defaults, YAML references such as `${trainer.ckpt_interval}` and the launcher's model, data and output paths.
 
 Schema classes such as `Trainer`, `Generator` and `Data` are generated from the base YAML, config groups
 and the type sidecar. A Recipe combines sparse authored contributions. Defaults remain in YAML; an
@@ -31,12 +31,13 @@ the result and mapping order. Use `merge` for an intended override.
 
 `with_settings` parses dotted paths using the field type, merges settings onto the document, then
 validates the complete result. JSON arrays and objects are accepted for structured values; `null` is an
-explicit null. Following fields reject null unless their YAML default is null. Open mapping keys keep
-their insertion order during merge and settings.
+explicit null. Fields whose YAML defaults reference another field reject null unless their YAML default
+is null. Open mapping keys keep their insertion order during merge and settings.
 
 Use `SkyRLRecipe.from_document` for parsed JSON or YAML mappings. `RecipePatch.from_document` accepts a
 part without a context budget. Python constructors are strict; JSON arrays become immutable tuples.
-Public classes are available from `marinskyrl.recipe_schema`.
+Public classes are available from `marinskyrl.recipe_schema`. Tensor-parallel and artifact-identity
+checks run on `SkyRLRecipe` after its parts have been combined.
 
 Generated author classes omit launch-owned and context-derived keys. Set `context_budget` for token
 limits; supply launch-owned values through the launch document. Owner checks also reach keys inside
