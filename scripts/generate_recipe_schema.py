@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 from pathlib import Path
 import runpy
@@ -381,7 +382,22 @@ def generate(
         check=True,
         cwd=ROOT,
     ).stdout
-    return {"sections.py": formatted}
+    generated = {"sections.py": formatted}
+    public = output_dir / "__init__.py"
+    if public.exists():
+        exports = []
+        for node in ast.parse(formatted).body:
+            if isinstance(node, ast.ClassDef) and node.name != "RecipeSections":
+                exports.append(node.name)
+            elif isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name):
+                exports.append(node.targets[0].id)
+        declarations = "\n".join(
+            line for line in public.read_text().splitlines() if not line.startswith("from .sections import ")
+        ).rstrip()
+        generated["__init__.py"] = (
+            declarations + "\n" + "".join(f"from .sections import {name} as {name}\n" for name in sorted(exports))
+        )
+    return generated
 
 
 def main() -> None:

@@ -78,9 +78,13 @@ blocked = {"hydra", "omegaconf", "ray", "torch", "yaml"}
 assert all(importlib.util.find_spec(name) is None for name in blocked)
 assert not blocked.intersection(name.split(".")[0] for name in sys.modules)
 budget = schema.ContextBudget(request_window_tokens=256, max_new_tokens_per_turn=64, max_turns=4)
-restored = schema.ContextBudget.model_validate_json(json.dumps(budget.to_skyrl()))
-assert restored == budget and hash(restored) == hash(budget)
-assert pickle.loads(pickle.dumps(restored)) == budget
+recipe = schema.SkyRLRecipe.combine(
+    base=schema.SkyRLRecipe(context_budget=budget),
+    arm=schema.RecipePatch(data=schema.Data(sampling=schema.Sampling(domain_weights={"math": 1, "code": 2}))),
+).with_settings(["data.sampling.domain_weights.math=3"])
+restored = schema.SkyRLRecipe.from_document(recipe.to_skyrl())
+assert restored == recipe and hash(restored) == hash(recipe)
+assert pickle.loads(pickle.dumps(restored)) == recipe
 print(json.dumps({"source": schema.__file__, "pydantic": pydantic.__version__, "document": restored.to_skyrl()}))
 """
     result = subprocess.run(

@@ -108,10 +108,14 @@ except ImportIOError:
 
 assert Path(schema.__file__).resolve() == Path.cwd() / "copied_recipe/__init__.py"
 budget = schema.ContextBudget(request_window_tokens=256, max_new_tokens_per_turn=64, max_turns=4)
-restored = schema.ContextBudget.model_validate_json(json.dumps(budget.to_skyrl()))
-assert restored == budget
-assert pickle.loads(pickle.dumps(budget)) == budget
-assert hash(restored) == hash(budget)
+recipe = schema.SkyRLRecipe.combine(
+    base=schema.SkyRLRecipe(context_budget=budget),
+    arm=schema.RecipePatch(data=schema.Data(sampling=schema.Sampling(domain_weights={"math": 1, "code": 2}))),
+).with_settings(["data.sampling.domain_weights.math=3"])
+restored = schema.SkyRLRecipe.from_document(recipe.to_skyrl())
+assert restored == recipe
+assert pickle.loads(pickle.dumps(recipe)) == recipe
+assert hash(restored) == hash(recipe)
 blocked = {"cloud", "hydra", "omegaconf", "ray", "skyrl_train", "torch", "yaml"}
 assert not blocked.intersection(name.split(".")[0] for name in sys.modules)
 print(json.dumps({"source": schema.__file__, "document": restored.to_skyrl()}))
@@ -127,9 +131,8 @@ print(json.dumps({"source": schema.__file__, "document": restored.to_skyrl()}))
     output = json.loads(result.stdout)
     assert Path(output["source"]) == copied / "__init__.py"
     assert output["document"] == {
-        "request_window_tokens": 256,
-        "max_new_tokens_per_turn": 64,
-        "max_turns": 4,
+        "context_budget": {"request_window_tokens": 256, "max_new_tokens_per_turn": 64, "max_turns": 4},
+        "data": {"sampling": {"domain_weights": {"math": 3, "code": 2}}},
     }
     print(f"copied schema source: {output['source']}")
     entrypoint = copied / "__init__.py"

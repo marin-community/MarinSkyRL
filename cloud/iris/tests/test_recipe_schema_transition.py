@@ -1,6 +1,6 @@
-from dataclasses import asdict
+import copy
+from dataclasses import asdict, replace
 from pathlib import Path
-import runpy
 from types import SimpleNamespace
 
 import pytest
@@ -8,9 +8,13 @@ from omegaconf import OmegaConf
 from pydantic import ValidationError
 
 from cloud.iris import rl_config_translation as launcher
+from cloud.iris import task_runtime
+from cloud.iris.paths import resolve_paths_in_dict
+from cloud.iris.rl_data import resolve_rl_train_data_with_sources
 from marinskyrl import distillation
 from marinskyrl import recipe_schema as schema
 from marinskyrl import speculative_decoding as speculative
+from marinskyrl.recipe_schema.documents import MISSING, get_path, leaves, set_path
 from scripts import generate_recipe_schema as generator
 from skyrl_train.config import ftpo
 from skyrl_gym.envs.gsm8k import env as gsm8k
@@ -20,6 +24,142 @@ from skyrl_gym.verification import VerificationStatus
 
 class EngineOptions(schema.Section):
     engine_init_kwargs: schema.OpenMap
+
+
+PENDING_PR3 = {
+    "discard": frozenset({"data.train_data", "data.val_data"}),
+    "clamp": frozenset({"trainer.placement.policy_num_gpus_per_node", "trainer.placement.ref_num_gpus_per_node"}),
+}
+
+FILL_WHEN_UNSET = frozenset(
+    {
+        "trainer.run_name",
+        "trainer.placement.policy_num_nodes",
+        "trainer.placement.ref_num_nodes",
+        "generator.num_inference_engines",
+    }
+)
+
+
+def test_ownership_sentinels_distinguish_launch_writers_context_writers_and_pending_discards(tmp_path, monkeypatch):
+    root = Path(__file__).resolve().parents[3]
+    assert Path(launcher.__file__).resolve() == root / "cloud/iris/rl_config_translation.py"
+    assert Path(task_runtime.__file__).resolve() == root / "cloud/iris/task_runtime.py"
+    print(f"ownership writer sources: {launcher.__file__}; {task_runtime.__file__}")
+    parsed = launcher.parse_rl_config(str(root / "cloud/iris/configs/tasktrove_dq_sweep_30b.yaml"))
+    base = launcher.compose_skyrl_config(parsed, {}, SimpleNamespace(gpus_per_node=8)).config
+    full = OmegaConf.to_container(base, resolve=False)
+    full["terminal_bench"] = full.pop("terminal_bench_config")
+    parameters = {
+        "job_name": "ownership-launch",
+        "experiments_dir": "/launch/runs",
+        "num_nodes": 2,
+        "gpus_per_node": 8,
+        "model_path": "/launch/model",
+        "model_revision": "launch-revision",
+        "model_source_uri": "s3://launch/model",
+        "model_source_identity": "sha256:launch",
+        "train_data": ["/launch/train"],
+        "val_data": ["/launch/validation"],
+        "checkpoint_root": "/launch/checkpoints",
+        "export_root": "/launch/exports",
+        "resume_checkpoint_count": 4,
+        "seed": 41,
+        "trace_root": "/launch/traces",
+        "trajectory_root": "/launch/trajectories",
+        "export_hf_artifact": True,
+    }
+    monkeypatch.setattr(task_runtime.tempfile, "tempdir", str(tmp_path))
+    outcomes = []
+    for suffix, number in (("A", 2), ("B", 4)):
+        seeded = copy.deepcopy(full)
+        for parts, value in leaves(full):
+            sentinel = (
+                not value
+                if isinstance(value, bool)
+                else 31
+                if isinstance(value, int)
+                else 3.125
+                if isinstance(value, float)
+                else [f"/author/{suffix}"]
+                if isinstance(value, list)
+                else f"author-{suffix}"
+            )
+            set_path(seeded, ".".join(parts), sentinel)
+        for path in schema.LAUNCH_PATHS:
+            set_path(seeded, path, False if path == "trainer.export_hf_artifact" else f"author-{suffix}")
+        for path in FILL_WHEN_UNSET | PENDING_PR3["clamp"]:
+            set_path(seeded, path, f"author-{suffix}" if path == "trainer.run_name" else number)
+        section_values = {
+            name: seeded[name]
+            for name in ("trainer", "generator", "data", "environment", "trajectory_runner", "terminal_bench")
+        }
+        injected = replace(parsed, **section_values)
+        filled = launcher._skyrl_config_sections(injected, parameters, SimpleNamespace(gpus_per_node=8))
+        data = resolve_rl_train_data_with_sources(injected.data["terminal_bench_data"], kind="tasks", verbose=False)
+        staged = launcher.apply_task_local_values(
+            OmegaConf.create(filled),
+            launcher.TaskLocalSkyRLValues(
+                train_data=tuple(parameters["train_data"]),
+                validation_data=tuple(parameters["val_data"]),
+                terminal_bench_data=tuple(data.paths),
+                agent_api_base="http://launch/api",
+                literal_log_path="/launch/literal",
+            ),
+        )
+        launch = OmegaConf.create(
+            {
+                "run": {"id": f"ownership-{suffix}", "attempt_id": "1"},
+                "inputs": {"model": {"uri": "/launch/model"}},
+                "skyrl": staged,
+            }
+        )
+        written = task_runtime._write_final_config(
+            launch,
+            policy_model=task_runtime.PreparedPolicyModel("s3://launch/model", "sha256:launch", "/stage/model"),
+            policy_tokenizer=task_runtime.PreparedPolicyTokenizer("/stage/tokenizer"),
+            draft_model=None,
+        )
+        result = OmegaConf.to_container(OmegaConf.load(written).skyrl, resolve=False)
+        result["terminal_bench"] = result.pop("terminal_bench_config")
+        changed = {
+            ".".join(parts) for parts, before in leaves(section_values) if get_path(result, ".".join(parts)) != before
+        }
+        assert schema.LAUNCH_PATHS <= changed
+        assert changed - schema.LAUNCH_PATHS == PENDING_PR3["discard"]
+        for path in FILL_WHEN_UNSET | PENDING_PR3["clamp"]:
+            assert get_path(result, path) == get_path(seeded, path)
+        outcomes.append(result)
+        absent = copy.deepcopy(section_values)
+        for path in FILL_WHEN_UNSET:
+            set_path(absent, path, None)
+        defaults = launcher._skyrl_config_sections(
+            replace(parsed, **absent), parameters, SimpleNamespace(gpus_per_node=8)
+        )
+        for path in FILL_WHEN_UNSET:
+            assert get_path(defaults, path) not in (MISSING, None)
+        oversized = copy.deepcopy(section_values)
+        for path in PENDING_PR3["clamp"]:
+            set_path(oversized, path, 31)
+        clamped = launcher._skyrl_config_sections(
+            replace(parsed, **oversized), parameters, SimpleNamespace(gpus_per_node=8)
+        )
+        for path in PENDING_PR3["clamp"]:
+            assert get_path(clamped, path) == 8
+    discards = {
+        path for path in changed - schema.LAUNCH_PATHS if get_path(outcomes[0], path) == get_path(outcomes[1], path)
+    }
+    assert discards == PENDING_PR3["discard"]
+    assert outcomes[0]["data"]["terminal_bench_data"] != outcomes[1]["data"]["terminal_bench_data"]
+    resume = [resolve_paths_in_dict({"resume_path": f"./author-{suffix}.yaml"})["resume_path"] for suffix in ("A", "B")]
+    assert resume[0] != resume[1] and all(Path(value).is_absolute() for value in resume)
+    derived = {}
+    for path in schema.DERIVED_PATHS:
+        set_path(derived, path, 987654)
+    _, _, _, materialized = launcher._materialize_context_budget(derived, parsed.context_budget)
+    assert {
+        ".".join(parts) for parts, before in leaves(derived) if get_path(materialized, ".".join(parts)) != before
+    } == schema.DERIVED_PATHS
 
 
 def test_recipe_rules_accept_the_same_engine_options_and_entrypoints_as_the_launcher(tmp_path):
@@ -74,14 +214,8 @@ def generated_author_sections():
     assert Path(schema.__file__).resolve() == root / "marinskyrl/recipe_schema/__init__.py"
     assert Path(generator.__file__).resolve() == root / "scripts/generate_recipe_schema.py"
     print(f"generated schema sources: {schema.__file__}; {generator.__file__}")
-    base, groups, comments = generator.source_documents(generator.CONFIG_DIR)
-    sidecar = runpy.run_path(str(root / "marinskyrl/recipe_schema/sidecar.py"))
-    generated = generator.render_sections(
-        base, sidecar, {"DERIVED_PATHS": set(), "LAUNCH_PATHS": set()}, comments, groups
-    )
-    namespace = {"__name__": "marinskyrl.recipe_schema._transition", "__package__": "marinskyrl.recipe_schema"}
-    exec(compile(generated, "generated-author-sections", "exec"), namespace)
-    return namespace["RecipeSections"], base
+    base, _, _ = generator.source_documents(generator.CONFIG_DIR)
+    return schema.RecipePatch, base
 
 
 def test_generated_ftpo_and_gym_options_preserve_runtime_behavior(generated_author_sections):

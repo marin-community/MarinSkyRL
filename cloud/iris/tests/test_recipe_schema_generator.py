@@ -1,4 +1,5 @@
 import json
+import copy
 from pathlib import Path
 import subprocess
 import sys
@@ -8,6 +9,8 @@ from pydantic import ValidationError
 import pytest
 
 import marinskyrl.recipe_schema as schema
+from marinskyrl.recipe_schema.model import thaw
+from scripts import generate_recipe_schema as generator
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -75,6 +78,41 @@ CLASSES = {
 }
 ALIASES = {}
 """
+
+
+def test_repository_generation_matches_hydra_author_defaults_and_all_group_options():
+    assert Path(schema.__file__).resolve() == ROOT / "marinskyrl/recipe_schema/__init__.py"
+    assert Path(generator.__file__).resolve() == SCRIPT
+    print(f"generation sources: {schema.__file__}; {generator.__file__}")
+    for name, generated in generator.generate().items():
+        assert (ROOT / "marinskyrl/recipe_schema" / name).read_text() == generated, f"regenerate {name}"
+    base, groups, _ = generator.source_documents(generator.CONFIG_DIR)
+    defaults = schema.RecipePatch()
+
+    def compare(mapping, actual, prefix=""):
+        for key, expected in mapping.items():
+            path = f"{prefix}.{key}" if prefix else key
+            if path in schema.DERIVED_PATHS | schema.LAUNCH_PATHS or generator.following_source(expected):
+                continue
+            value = getattr(actual, key)
+            if isinstance(expected, dict) and isinstance(value, schema.Section):
+                compare(expected, value, path)
+            else:
+                assert thaw(value) == expected, path
+
+    compare(base, defaults)
+    observed_files = set()
+    for group, options in groups.items():
+        for name, option in options.items():
+            observed_files.add((group.partition("@")[0], name))
+            document = copy.deepcopy(option)
+            for path in schema.DERIVED_PATHS | schema.LAUNCH_PATHS:
+                parent = document
+                for key in path.split(".")[:-1]:
+                    parent = parent.get(key, {})
+                parent.pop(path.rsplit(".", 1)[-1], None)
+            assert schema.RecipePatch.from_document(document).to_skyrl() == document, (group, name)
+    assert observed_files == {(path.parent.name, path.stem) for path in generator.CONFIG_DIR.glob("*/*.yaml")}
 
 
 def test_generator_cli_preserves_group_types_and_adjacent_comments_and_detects_drift(tmp_path: Path):

@@ -1,7 +1,6 @@
 import json
 import os
 from pathlib import Path
-import runpy
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -42,12 +41,8 @@ def generated_recipe_schema():
     assert Path(schema.__file__).resolve() == root / "marinskyrl/recipe_schema/__init__.py"
     assert Path(generator.__file__).resolve() == root / "scripts/generate_recipe_schema.py"
     print(f"CPU recipe sources: {schema.__file__}; {generator.__file__}")
-    base, groups, comments = generator.source_documents(generator.CONFIG_DIR)
-    sidecar = runpy.run_path(str(root / "marinskyrl/recipe_schema/sidecar.py"))
-    source = generator.render_sections(base, sidecar, {"DERIVED_PATHS": set(), "LAUNCH_PATHS": set()}, comments, groups)
-    namespace = {"__name__": "marinskyrl.recipe_schema._cpu_sections", "__package__": "marinskyrl.recipe_schema"}
-    exec(compile(source, "generated-cpu-sections", "exec"), namespace)
-    return namespace["RecipeSections"], OmegaConf.create(base)
+    base, _, _ = generator.source_documents(generator.CONFIG_DIR)
+    return schema.RecipePatch, OmegaConf.create(base)
 
 
 def pytest_configure(config: pytest.Config) -> None:
