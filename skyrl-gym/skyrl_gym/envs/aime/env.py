@@ -1,4 +1,4 @@
-from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
+from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput, ConversationType
 from skyrl_gym.envs.aime.verifier import AIMERewardPolicy, AIMEVerifier
 from skyrl_gym.metrics import default_aggregate_metrics
 from skyrl_gym.verification import RolloutEvidence
@@ -23,6 +23,7 @@ class AIMEEnv(BaseTextEnv):
         assert "reward_model" in extras, "reward_model field is required"
         assert "ground_truth" in extras["reward_model"], "ground_truth is required in reward_model field"
         self.ground_truth = extras["reward_model"]["ground_truth"]
+        self.structured_chat = env_config.get("structured_chat", False)
 
         # ---- Tunable length-penalty config (hydra: environment.skyrl_gym.aime.*) ----
         # weight=0.0 -> legacy reward (backward compatible).
@@ -39,6 +40,10 @@ class AIMEEnv(BaseTextEnv):
             min_response_length=int(env_config.get("min_response_length", 16)),
         )
         self._evidence: RolloutEvidence | None = None
+
+    def init(self, prompt: ConversationType) -> tuple[ConversationType, Dict[str, Any]]:
+        metadata = {"chat_completion_params": {}} if self.structured_chat else {}
+        return prompt, metadata
 
     def set_rollout_evidence(self, evidence: RolloutEvidence) -> None:
         self._evidence = evidence

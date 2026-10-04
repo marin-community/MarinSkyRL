@@ -5,6 +5,22 @@ from skyrl_gym.envs.aime.env import AIMEEnv
 from skyrl_gym.verification import RewardResult, RolloutEvidence, VerificationStatus
 
 
+@pytest.mark.parametrize("structured_chat", [False, True])
+def test_aime_chat_transport_preserves_prompt_and_verification(structured_chat):
+    env = skyrl_gym.make(
+        "aime",
+        env_config=DictConfig({"structured_chat": structured_chat}),
+        extras={"reward_model": {"ground_truth": "42"}},
+    )
+    prompt = [{"role": "user", "content": "What is six times seven?"}]
+    messages, metadata = env.init(prompt)
+    assert messages == prompt
+    assert metadata == ({"chat_completion_params": {}} if structured_chat else {})
+    result = env.step("Answer: \\boxed{42}")
+    assert result["reward"] == 1.0
+    assert result["verification"].passed is True
+
+
 @pytest.mark.parametrize(
     "output, ground_truth, expected",
     [
