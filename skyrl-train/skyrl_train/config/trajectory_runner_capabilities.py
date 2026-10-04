@@ -11,6 +11,8 @@ from marinskyrl.distillation import DistillationObjectiveKind, compile_distillat
 from skyrl_train.config.objective_spec import LossSpec, rollout_logprobs_required
 
 from marinskyrl.harbor_agent_names import (
+    CLAUDE_CODE_HARBOR_AGENT_NAME,
+    CODEX_HARBOR_AGENT_NAME,
     DEFAULT_HARBOR_AGENT_NAME,
     MINI_SWE_HARBOR_AGENT_NAME,
     OPENCODE_HARBOR_AGENT_NAME,
@@ -108,7 +110,12 @@ def harbor_exact_continuation_enabled(cfg: DictConfig) -> bool:
         return False
     agent_name = str(harbor.get("name", DEFAULT_HARBOR_AGENT_NAME)).strip().lower().replace("_", "-")
     profiles = configured_harbor_profiles(harbor)
-    exact_chat_agents = {OPENCODE_HARBOR_AGENT_NAME, MINI_SWE_HARBOR_AGENT_NAME}
+    exact_chat_agents = {
+        OPENCODE_HARBOR_AGENT_NAME,
+        MINI_SWE_HARBOR_AGENT_NAME,
+        CLAUDE_CODE_HARBOR_AGENT_NAME,
+        CODEX_HARBOR_AGENT_NAME,
+    }
     uses_exact_chat = (
         any(
             profile.name in exact_chat_agents

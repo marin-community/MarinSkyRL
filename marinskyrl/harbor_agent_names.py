@@ -9,6 +9,8 @@ TERMINUS_KIRA_HARBOR_AGENT_NAME = "terminus-kira"
 OPENCODE_HARBOR_AGENT_NAME = "opencode"
 PI_HARBOR_AGENT_NAME = "pi"
 MINI_SWE_HARBOR_AGENT_NAME = "mini-swe-agent"
+CLAUDE_CODE_HARBOR_AGENT_NAME = "claude-code"
+CODEX_HARBOR_AGENT_NAME = "codex"
 
 
 @dataclass(frozen=True)
