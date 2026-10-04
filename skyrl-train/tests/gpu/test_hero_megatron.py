@@ -91,21 +91,24 @@ def write_tiny_hero_checkpoint(path: Path):
 
 
 @pytest.mark.parametrize(
-    "tp,pp,ep,cp,packing,optimizer_offload,muonh",
+    "tp,pp,ep,cp,packing,optimizer_offload,muonh,flash_attn",
     [
-        (1, 1, 1, 1, False, None, False),
-        (1, 2, 1, 1, False, None, False),
-        (1, 1, 2, 1, True, None, False),
-        (1, 1, 1, 2, True, None, False),
-        (2, 1, 1, 1, True, None, False),
-        pytest.param(1, 1, 2, 1, True, 0.0, False, id="precision-aware-gpu"),
-        pytest.param(1, 1, 2, 1, True, 0.5, False, id="half-offloaded-adamw"),
-        pytest.param(1, 1, 2, 1, True, 1.0, False, id="cpu-adamw"),
-        pytest.param(1, 2, 2, 1, False, None, True, id="pp2-ep2-muonh-cpu-momentum"),
-        pytest.param(1, 1, 1, 4, True, None, True, id="cp4-muonh-cpu-momentum"),
+        (1, 1, 1, 1, False, None, False, False),
+        (1, 2, 1, 1, False, None, False, False),
+        (1, 1, 2, 1, True, None, False, False),
+        (1, 1, 1, 2, True, None, False, False),
+        (2, 1, 1, 1, True, None, False, False),
+        pytest.param(1, 1, 2, 1, True, 0.0, False, False, id="precision-aware-gpu"),
+        pytest.param(1, 1, 2, 1, True, 0.5, False, False, id="half-offloaded-adamw"),
+        pytest.param(1, 1, 2, 1, True, 1.0, False, False, id="cpu-adamw"),
+        pytest.param(1, 2, 2, 1, False, None, True, False, id="pp2-ep2-muonh-cpu-momentum"),
+        pytest.param(1, 1, 1, 4, True, None, True, False, id="cp4-muonh-cpu-momentum"),
+        pytest.param(1, 1, 1, 4, True, None, True, True, id="cp4-flash-muonh-cpu-momentum"),
     ],
 )
-def test_hero_worker_repeated_updates(tmp_path, monkeypatch, tp, pp, ep, cp, packing, optimizer_offload, muonh):
+def test_hero_worker_repeated_updates(
+    tmp_path, monkeypatch, tp, pp, ep, cp, packing, optimizer_offload, muonh, flash_attn
+):
     world_size = tp * pp * ep * cp
     require_hoppers(world_size)
     model_path = tmp_path / "model"
@@ -114,6 +117,7 @@ def test_hero_worker_repeated_updates(tmp_path, monkeypatch, tp, pp, ep, cp, pac
     cfg = _config(str(model_path), world_size=world_size, pp=pp, ep=ep)
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
     cfg.trainer.policy.megatron_config.context_parallel_size = cp
+    cfg.trainer.flash_attn = flash_attn
     if muonh:
         cfg.trainer.policy.optimizer_config.optimizer = "MuonH"
         cfg.trainer.policy.optimizer_config.weight_decay = 0.0
