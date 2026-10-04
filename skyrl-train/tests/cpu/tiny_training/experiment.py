@@ -177,7 +177,6 @@ class TinyTrainingExp(BasePPOExp):
         return SourceTaskDataset(
             datasets=self.cfg.data.train_data,
             environment_configs=OmegaConf.to_container(self.cfg.environment.task_sessions, resolve=True),
-            cache_dir=Path(self.cfg.trainer.export_path) / "tasks",
             tokenizer=self.tokenizer,
             max_prompt_length=self.cfg.trainer.max_prompt_length,
             num_workers=1,
@@ -189,7 +188,6 @@ class TinyTrainingExp(BasePPOExp):
         return SourceTaskDataset(
             datasets=self.cfg.data.val_data,
             environment_configs=OmegaConf.to_container(self.cfg.environment.task_sessions, resolve=True),
-            cache_dir=Path(self.cfg.trainer.export_path) / "eval_tasks",
             tokenizer=self.tokenizer,
             max_prompt_length=self.cfg.trainer.max_prompt_length,
             num_workers=1,

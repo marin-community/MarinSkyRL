@@ -20,11 +20,16 @@ A task Parquet file contains one serialized ``TaskSpec`` per row in the
 ``task_spec`` column. A task declares its public conversation, executable
 environment, and private grading inputs.
 
-The default SkyRL entrypoint converts source rows to this format through
-``SourceTaskDataset``. It writes reusable files in ``data.task_cache_dir``.
+``skyrl_train.entrypoints.main_base`` converts source rows through
+``SourceTaskDataset`` with Hugging Face ``Dataset.map``.
+It retains serialized tasks in memory without an intermediate Parquet or Arrow cache file.
+Source-row conversion does not use ``data.task_cache_dir``.
 ``skyrl_train.entrypoints.taskcompendium`` reads task Parquet directly.
-The SWE examples use this entrypoint. The Harbor entrypoint converts task
+The SWE examples use this entrypoint. ``skyrl_train.entrypoints.main_harbor`` converts task
 directories and packed sources through ``HarborTaskDataset`` and uses the same worker.
+Harbor caches private task Parquet in ``data.task_cache_dir``.
+Explicit exports use ``skyrl_train.dataset.tasks.write_tasks(Path(...), tasks)``.
+TaskCompendium defines task serialization; SkyRL owns its dataset file format.
 With ``data.terminal_bench_data``, the default entrypoint prepares mixed Nemotron
 rows through ``NemotronTaskDataset``. Terminal rows contain the complete executable
 task. The worker does not require the original task directories.
@@ -74,12 +79,20 @@ behavior log probabilities, token rewards, expert routes, and teacher routes.
 Verifier scores remain separate from optimization rewards. A missing or failed
 verifier excludes the rollout from loss and baseline calculations. Explicitly
 skipped grading retains trainable tokens with zero reward.
-GenRM comparison grading completes before the worker emits a rollout group.
+Nemotron GenRM tasks use a judge model to compare a group of responses against
+a private grading principle. Configure that judge in
+``environment.task_sessions.nemotron_ultra.genrm``.
+Comparison grading completes before the worker emits a rollout group.
 
-``generator.error_handling`` controls mask, zero-reward, and pass-through
-policies. Timeout recovery retains only completed, verified task turns.
+``generator.error_handling`` controls exception policies.
+``mask`` excludes the rollout from loss and baseline calculations.
+``zero`` retains trainable tokens with zero reward.
+``passthrough`` retains the available verifier score.
+Exception lists override the built-in error categories. ``default_error_treatment``
+selects one of these policies for unknown errors.
+Timeout recovery retains only completed, verified task turns.
 It requires behavior log probabilities when the request requires them.
-``preserve_logprobs_on_timeout=false`` disables timeout recovery.
+``generator.error_handling.preserve_logprobs_on_timeout=false`` disables timeout recovery.
 
 ``TaskRolloutWorker.run_task`` projects and finalizes a completed prompt group before one
 buffer write. A failed group cannot commit partial results.

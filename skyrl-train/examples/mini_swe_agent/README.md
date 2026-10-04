@@ -11,7 +11,7 @@ require Mini-SWE-Agent, LiteLLM, a model HTTP proxy, or a separate inference loo
 
 For adjacent `marin` and `MarinSkyRL` checkouts, install the task packages in the
 SkyRL environment. Run these commands from `MarinSkyRL/skyrl-train` after the base
-SkyRL environment setup:
+SkyRL [installation](../../docs/getting-started/installation.rst):
 
 ```bash
 uv pip install --python ../.venv/bin/python \
@@ -54,13 +54,14 @@ List the task images from the materialized files:
 ```bash
 uv run --no-sync --project .. python - <<'PY'
 from pathlib import Path
-from rolloutengine.parquet import read_tasks
+from datasets import Dataset
+from taskcompendium.models import TaskSpec
 
 directory = Path("~/data/swe_gym_subset").expanduser()
 images = {
-    task.environment.image.reference
+    TaskSpec.model_validate_json(row["task_spec"]).environment.image.reference
     for name in ("train.parquet", "validation.parquet")
-    for task in read_tasks(str(directory / name))
+    for row in Dataset.from_parquet(str(directory / name))
 }
 for image in sorted(images):
     print(image)
@@ -75,8 +76,11 @@ bash examples/mini_swe_agent/run_mini_swe_8B.sh
 bash examples/mini_swe_agent/run_mini_swe_30B.sh
 ```
 
-The scripts use `skyrl_train.entrypoints.taskcompendium`. Edit `DATA_DIR` and
-`CKPT_PATH` in the selected script for the target workers. The scripts set the command timeout to 180
+The scripts use `skyrl_train.entrypoints.taskcompendium`. Set `DATA_DIR` to the
+task Parquet directory. Set `CKPT_PATH` to the output directory for training checkpoints.
+The two-node example requires a Ray cluster with eight GPUs per node.
+See the [cluster setup](../../docs/getting-started/installation.rst#initialize-ray-cluster).
+The scripts set the command timeout to 180
 seconds. `generator.max_turns` controls the model turn limit.
 
 To change task setup, add commands to the task's `environment.setup` during

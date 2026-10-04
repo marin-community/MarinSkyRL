@@ -8,7 +8,6 @@ from typing import Any
 
 import pytest
 import yaml
-from datasets import Dataset
 from omegaconf import OmegaConf
 from rolloutengine.contracts import ModelTurn
 from skyrl_gym.answer_tasks import grade_gsm8k
@@ -23,7 +22,7 @@ from cloud.iris.rl_config_translation import (
     parse_rl_config,
 )
 from skyrl_train.distributed.step_policy import NonfiniteStepPolicy, nonfinite_step_policy
-from skyrl_train.dataset.tasks import source_tasks
+from skyrl_train.dataset.tasks import source_row_task
 
 
 def _raw_config() -> dict[str, Any]:
@@ -124,20 +123,15 @@ async def test_custom_session_settings_reach_private_grading_through_the_launch_
     path = tmp_path / "launch.yaml"
     path.write_text(yaml.safe_dump(raw))
     config = load_launch_config(path)
-    task = next(
-        source_tasks(
-            Dataset.from_list(
-                [
-                    {
-                        "prompt": [{"role": "user", "content": "What is six plus six?"}],
-                        "env_class": "custom_math",
-                        "reward_spec": {"ground_truth": "12"},
-                    }
-                ]
-            ),
-            source_name="fixture",
-            environment_configs=OmegaConf.to_container(config.skyrl.environment.task_sessions, resolve=True),
-        )
+    task = source_row_task(
+        {
+            "prompt": [{"role": "user", "content": "What is six plus six?"}],
+            "env_class": "custom_math",
+            "reward_spec": {"ground_truth": "12"},
+        },
+        0,
+        source_name="fixture",
+        environment_configs=OmegaConf.to_container(config.skyrl.environment.task_sessions, resolve=True),
     )
     session = AnswerTaskSession(task, None, grader=grade_gsm8k)
     start = await session.prepare()

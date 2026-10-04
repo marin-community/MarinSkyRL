@@ -68,7 +68,7 @@ Each source row declares its task name and private reference:
        "max_turns": 5,
    }
 
-``SourceTaskDataset`` converts these rows to task Parquet.
+``SourceTaskDataset`` converts these rows directly to serialized tasks in the prepared dataset.
 The prompt contains public messages. The verifier payload contains the private reference and task configuration.
 Keep the reference out of model-visible observations.
 

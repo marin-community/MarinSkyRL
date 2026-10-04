@@ -1,29 +1,34 @@
-"""Unified task Parquet inputs for the rollout loader."""
+"""Convert source rows and stored task specifications for the rollout loader."""
 
 import hashlib
 import json
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+from functools import partial
+from itertools import batched
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 from datasets import Dataset
-from transformers import PreTrainedTokenizerBase
+from rolloutengine.task_session import session_start
 from taskcompendium.environment import EnvironmentSpec, ExternalVerifierSpec
 from taskcompendium.importers.skyrl import source_task
 from taskcompendium.models import Source, TaskSpec, VerifierKind
-from taskcompendium.parquet import write_tasks
-from rolloutengine.task_session import session_start
 from taskcompendium.submission import AnswerFormat, SubmissionConvention
+from transformers import PreTrainedTokenizerBase
 
 from skyrl_train.dataset.dataset import PromptDataset
 from skyrl_train.rollouts.group_grader import task_group_grader
 
 TASKCOMPENDIUM_ENVIRONMENT = "taskcompendium"
+TASK_SCHEMA = pa.schema([pa.field("task_spec", pa.string(), nullable=False)])
+PARQUET_BATCH_SIZE = 1024
 
 
-def task_prompt(row: dict) -> dict:
-    task = TaskSpec.model_validate_json(row["task_spec"])
+def task_prompt(task: TaskSpec) -> dict:
+    """Prepare public messages and private worker inputs from a task."""
     verifier = (
         ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
         if task.verifier.kind == VerifierKind.EXTERNAL
@@ -52,27 +57,25 @@ class TaskDataset(PromptDataset):
     """Prepare the public conversation while retaining the private task for workers."""
 
     def prepare_dataset(self, dataset):
-        return dataset.map(task_prompt, num_proc=self.num_workers)
+        return dataset.map(_stored_task_prompt, num_proc=self.num_workers)
 
 
-def source_tasks(dataset: Dataset, *, source_name: str, environment_configs: Mapping[str, dict]) -> Iterator[TaskSpec]:
-    """Convert source rows with stable provenance and private verifier inputs."""
-    for index, source_row in enumerate(dataset):
-        row = dict(source_row)
-        content = json.dumps(row, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
-        yield _source_task(
-            row,
-            environment_configs,
-            Source(
-                dataset=row.get("data_source") or source_name,
-                revision=f"sha256:{hashlib.sha256(content).hexdigest()}",
-                row=str(index),
-                importer_revision="skyrl-task-session-v1",
-            ),
-        )
+def _stored_task_prompt(row: dict) -> dict:
+    return task_prompt(TaskSpec.model_validate_json(row["task_spec"]))
 
 
-def _source_task(row: dict[str, Any], environment_configs: Mapping[str, dict], source: Source) -> TaskSpec:
+def source_row_task(
+    row: Mapping[str, Any], index: int, *, source_name: str, environment_configs: Mapping[str, dict]
+) -> TaskSpec:
+    """Convert a source row with stable provenance and private verifier inputs."""
+    row = dict(row)
+    content = json.dumps(row, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    source = Source(
+        dataset=row.get("data_source") or source_name,
+        revision=f"sha256:{hashlib.sha256(content).hexdigest()}",
+        row=str(index),
+        importer_revision="skyrl-task-session-v1",
+    )
     prompt = row.pop("prompt")
     environment = row.pop("env_class")
     assert isinstance(environment, str)
@@ -95,12 +98,26 @@ def _source_task(row: dict[str, Any], environment_configs: Mapping[str, dict], s
     )
 
 
-def cache_tasks(tasks: Iterator[TaskSpec], cache_dir: Path) -> Path:
+def _source_task_prompt(row: dict, index: int, *, source_name: str, environment_configs: Mapping[str, dict]) -> dict:
+    task = source_row_task(row, index, source_name=source_name, environment_configs=environment_configs)
+    return {"task_spec": task.model_dump_json(), **task_prompt(task)}
+
+
+def write_tasks(path: Path, tasks: Iterable[TaskSpec]) -> None:
+    """Write a local task dataset in bounded Parquet batches."""
+    with pq.ParquetWriter(path, TASK_SCHEMA) as writer:
+        for batch in batched(tasks, PARQUET_BATCH_SIZE):
+            writer.write_table(
+                pa.Table.from_pydict({"task_spec": [task.model_dump_json() for task in batch]}, TASK_SCHEMA)
+            )
+
+
+def cache_tasks(tasks: Iterable[TaskSpec], cache_dir: Path) -> Path:
     """Write private task Parquet and use its content digest as the filename."""
     cache_dir.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(dir=cache_dir) as directory:
         temporary_path = Path(directory) / "tasks.parquet"
-        write_tasks(str(temporary_path), tasks)
+        write_tasks(temporary_path, tasks)
         with temporary_path.open("rb") as contents:
             digest = hashlib.file_digest(contents, "sha256").hexdigest()
         path = cache_dir / f"{digest}.parquet"
@@ -109,7 +126,7 @@ def cache_tasks(tasks: Iterator[TaskSpec], cache_dir: Path) -> Path:
     return path
 
 
-class SourceTaskDataset(TaskDataset):
+class SourceTaskDataset(PromptDataset):
     """Convert source datasets to portable tasks with explicit session and machine inputs."""
 
     def __init__(
@@ -119,20 +136,20 @@ class SourceTaskDataset(TaskDataset):
         max_prompt_length: int,
         *,
         environment_configs: Mapping[str, dict],
-        cache_dir: Path,
         num_workers: int = 8,
     ):
         self.environment_configs = environment_configs
-        self.cache_dir = cache_dir.expanduser()
         super().__init__(list(datasets), tokenizer, max_prompt_length, num_workers=num_workers)
 
-    def _tasks(self, dataset: Dataset) -> Iterator[TaskSpec]:
-        return source_tasks(
-            dataset,
-            source_name=", ".join(self.datasets),
-            environment_configs=self.environment_configs,
-        )
-
     def prepare_dataset(self, dataset: Dataset) -> Dataset:
-        self.task_path = cache_tasks(self._tasks(dataset), self.cache_dir)
-        return super().prepare_dataset(Dataset.from_parquet(str(self.task_path)))
+        return dataset.map(
+            partial(
+                _source_task_prompt,
+                source_name=", ".join(self.datasets),
+                environment_configs=self.environment_configs,
+            ),
+            with_indices=True,
+            remove_columns=dataset.column_names,
+            num_proc=self.num_workers,
+            keep_in_memory=True,
+        )

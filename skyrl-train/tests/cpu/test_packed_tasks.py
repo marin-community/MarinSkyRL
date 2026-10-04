@@ -32,7 +32,7 @@ from marinskyrl.task_sources import (
 from skyrl_train.dataset.harbor import TerminalBenchTaskDataset, materialize_harbor_tasks
 from taskcompendium.environment import DockerBuild, EnvironmentKind, ShellVerifierSpec
 from taskcompendium.grading import Outcome, skipped_verifier
-from taskcompendium.parquet import read_tasks
+from taskcompendium.models import TaskSpec
 from rolloutengine.contracts import ModelTurn
 from rolloutengine.engine import ShellboxRolloutEngine
 from taskcompendium.submission import AnswerFormat, SubmissionConvention
@@ -194,7 +194,7 @@ def test_packed_selection_becomes_portable_task_parquet(tmp_path: Path) -> None:
     source = _source(dataset_path, TaskTroveSelection(sources=("source-a",)))
     output = materialize_harbor_tasks([asdict(source)], cache_dir=tmp_path / "cache")
     dataset_path.unlink()
-    tasks = list(read_tasks(str(output)))
+    tasks = [TaskSpec.model_validate_json(value) for value in pq.read_table(output)["task_spec"].to_pylist()]
     assert [task.context.events[0].content for task in tasks] == ["Do one", "Do three"]
     assert [task.id for task in tasks] == [
         "tasktrove/clean@fixture:abc123/source-a/task-1",
@@ -273,7 +273,8 @@ async def test_packed_tasks_execute_after_source_removal(tmp_path, staged, regis
         command_timeout=5,
         convention=SubmissionConvention(id="plain", answer_format=AnswerFormat.PLAIN),
     )
-    result = await engine.run(next(read_tasks(str(output))))
+    task = TaskSpec.model_validate_json(pq.read_table(output)["task_spec"][0].as_py())
+    result = await engine.run(task)
     assert (result.grade.status, result.grade.reward) == (
         (Outcome.GRADED, 1.0) if verification else (Outcome.SKIPPED, None)
     )

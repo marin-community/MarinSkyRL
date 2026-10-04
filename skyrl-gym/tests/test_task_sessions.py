@@ -1,4 +1,4 @@
-"""Task Parquet through direct sessions, exact-token execution, and private grading."""
+"""Serialized tasks through direct sessions, exact-token execution, and private grading."""
 
 import json
 
@@ -7,8 +7,7 @@ from rolloutengine.contracts import ModelTurn
 from rolloutengine.engine import ShellboxRolloutEngine
 from taskcompendium.grading import Outcome
 from taskcompendium.importers.skyrl import source_task
-from taskcompendium.models import Source
-from taskcompendium.parquet import read_tasks, write_tasks
+from taskcompendium.models import Source, TaskSpec
 from taskcompendium.submission import AnswerFormat, SubmissionConvention
 
 from skyrl_gym.task_factories import session_factories
@@ -68,13 +67,12 @@ def task(name, extras, config=None):
         ("mcq", {"reward_model": {"ground_truth": "B"}}, "\\boxed{B}", 1.0, 1.0),
     ],
 )
-async def test_answer_task_parquet_preserves_private_grade_and_training_reward(
-    tmp_path, name, extras, response, native_reward, training_reward
+async def test_answer_task_json_preserves_private_grade_and_training_reward(
+    name, extras, response, native_reward, training_reward
 ):
-    path = str(tmp_path / "tasks.parquet")
-    write_tasks(path, [task(name, extras)])
+    specification = TaskSpec.model_validate_json(task(name, extras).model_dump_json())
     model = ReplayModel([response])
-    rollout = await engine(model).run(next(read_tasks(path)))
+    rollout = await engine(model).run(specification)
     assert (rollout.grade.status, rollout.grade.reward) == (Outcome.GRADED, native_reward)
     assert rollout.steps[0].transition.reward == pytest.approx(training_reward)
     assert rollout.prompt_token_ids == (10, 11)

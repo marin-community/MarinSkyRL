@@ -1,27 +1,31 @@
 """Prepare mixed Nemotron rows as portable tasks before rollout execution."""
 
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
+from functools import partial
 from pathlib import Path
 from typing import Any
 
+import pyarrow.parquet as pq
 from datasets import Dataset
 from taskcompendium.environment import ExternalVerifierSpec
 from taskcompendium.models import TaskSpec, VerifierSpec
-from taskcompendium.parquet import read_tasks
 from transformers import PreTrainedTokenizerBase
 
 from skyrl_train.dataset.harbor import materialize_harbor_tasks
-from skyrl_train.dataset.tasks import SourceTaskDataset
+from skyrl_train.dataset.tasks import PARQUET_BATCH_SIZE, SourceTaskDataset, source_row_task, task_prompt
 
 
 def terminal_task_index(path: Path) -> dict[str, TaskSpec]:
     """Index portable Harbor tasks by their directory and source instance IDs."""
     result = {}
-    for task in read_tasks(str(path)):
-        for identifier in {task.id.casefold(), *task.metadata["harbor_task_ids"]}:
-            if identifier in result and result[identifier] != task:
-                raise ValueError(f"Duplicate terminal-bench task ID {identifier!r}")
-            result[identifier] = task
+    with pq.ParquetFile(path) as parquet:
+        for batch in parquet.iter_batches(batch_size=PARQUET_BATCH_SIZE, columns=["task_spec"]):
+            for value in batch.column("task_spec").to_pylist():
+                task = TaskSpec.model_validate_json(value)
+                for identifier in {task.id.casefold(), *task.metadata["harbor_task_ids"]}:
+                    if identifier in result and result[identifier] != task:
+                        raise ValueError(f"Duplicate terminal-bench task ID {identifier!r}")
+                    result[identifier] = task
     return result
 
 
@@ -56,8 +60,22 @@ def resolve_terminal_task(task: TaskSpec, terminals: Mapping[str, TaskSpec]) -> 
     )
 
 
+def _nemotron_task_prompt(
+    row: dict,
+    index: int,
+    *,
+    source_name: str,
+    environment_configs: Mapping[str, dict],
+    terminals: Mapping[str, TaskSpec],
+) -> dict:
+    task = resolve_terminal_task(
+        source_row_task(row, index, source_name=source_name, environment_configs=environment_configs), terminals
+    )
+    return {"task_spec": task.model_dump_json(), **task_prompt(task)}
+
+
 class NemotronTaskDataset(SourceTaskDataset):
-    """Convert answer, tool, and terminal source rows to one task Parquet file."""
+    """Convert answer, tool, and terminal source rows to portable tasks."""
 
     def __init__(
         self,
@@ -80,9 +98,19 @@ class NemotronTaskDataset(SourceTaskDataset):
             tokenizer,
             max_prompt_length,
             environment_configs=environment_configs,
-            cache_dir=cache_dir,
             num_workers=num_workers,
         )
 
-    def _tasks(self, dataset: Dataset) -> Iterator[TaskSpec]:
-        return (resolve_terminal_task(task, self.terminals) for task in super()._tasks(dataset))
+    def prepare_dataset(self, dataset: Dataset) -> Dataset:
+        return dataset.map(
+            partial(
+                _nemotron_task_prompt,
+                source_name=", ".join(self.datasets),
+                environment_configs=self.environment_configs,
+                terminals=self.terminals,
+            ),
+            with_indices=True,
+            remove_columns=dataset.column_names,
+            num_proc=self.num_workers,
+            keep_in_memory=True,
+        )

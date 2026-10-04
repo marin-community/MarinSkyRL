@@ -12,7 +12,7 @@ from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ra
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from taskcompendium.environment import EnvironmentKind
-from skyrl_train.dataset.tasks import source_tasks
+from skyrl_train.dataset.tasks import source_row_task
 from skyrl_train.rollouts.task_worker import TaskRolloutWorker
 from skyrl_train.rollouts.task_projections import WholeTaskProjection
 from skyrl_train.trajectory_runners.projections import WholeTrajectoryProjection
@@ -182,12 +182,15 @@ async def run_trajectory_runner_end_to_end(
         ]
     )
     input_batch["env_extras"] = [
-        {"task_spec": task.model_dump_json()}
-        for task in source_tasks(
-            rows,
-            source_name="gpu-test",
-            environment_configs=OmegaConf.to_container(env_cfg, resolve=True),
-        )
+        {
+            "task_spec": source_row_task(
+                row,
+                index,
+                source_name="gpu-test",
+                environment_configs=OmegaConf.to_container(env_cfg, resolve=True),
+            ).model_dump_json()
+        }
+        for index, row in enumerate(rows)
         for _ in range(n_samples_per_prompt)
     ]
     # Attach request-time sampling params into the trajectory request

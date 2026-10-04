@@ -1,11 +1,10 @@
 import json
 
 from examples.livecodebench.lcb_dataset import LIVECODEBENCH, process_example
-from datasets import Dataset
 from taskcompendium.environment import ExternalVerifierSpec
 from taskcompendium.submission import conversation_messages
 
-from skyrl_train.dataset.tasks import source_tasks
+from skyrl_train.dataset.tasks import source_row_task
 
 
 REVERSE_SOLUTION = """```python
@@ -25,7 +24,7 @@ def test_lcb_example_builder_preserves_executable_reference_tests():
         split="test",
     )
 
-    task = next(source_tasks(Dataset.from_list([row]), source_name=LIVECODEBENCH, environment_configs={}))
+    task = source_row_task(row, 0, source_name=LIVECODEBENCH, environment_configs={})
     public = conversation_messages(task.context)
     verifier = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
     assert "```python" in public[0]["content"]

@@ -14,7 +14,6 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from datasets import Dataset
 from harbor_config.errors import ErrorCategory, error_category
 from omegaconf import OmegaConf
 from skyrl_gym.task_records import fold_grades, grade_result
@@ -47,7 +46,7 @@ from taskcompendium.models import (
 )
 
 from skyrl_train.rollouts.task_projections import StepTaskProjection, WholeTaskProjection
-from skyrl_train.dataset.tasks import SourceTaskDataset, TaskDataset, source_tasks
+from skyrl_train.dataset.tasks import SourceTaskDataset, TaskDataset, source_row_task
 from skyrl_train.dataset.harbor import HarborTaskDataset
 from skyrl_train.dataset.nemotron_ultra import NemotronTaskDataset
 from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection, WholeTrajectoryProjection
@@ -56,7 +55,6 @@ from skyrl_train.rollouts.task_worker import TaskRolloutWorker
 from skyrl_train.rollouts.group_grader import GroupGraderSpec, task_group_grader
 from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
 from taskcompendium.importers.skyrl import source_task
-from taskcompendium.parquet import read_tasks, write_tasks
 from rolloutengine.contracts import ModelTurn, RolloutContractError, SessionStart, Transition
 from skyrl_train.trajectory_runners.types import BatchMetadata, TokenProvenance, TrajectoryID
 from skyrl_train.trajectory_runners.model_clients import DirectModelClient, ModelServerError
@@ -878,7 +876,7 @@ async def test_harbor_concurrency_does_not_queue_gym_tasks(task_inputs, phase):
         ),
     ],
 )
-async def test_mixed_nemotron_tasks_run_from_portable_parquet(
+async def test_mixed_nemotron_tasks_run_without_the_original_sources(
     tmp_path, task_inputs, projection_type, alias_file, alias_metadata, identifier, model_failure
 ):
     source = tmp_path / "source"
@@ -923,8 +921,7 @@ async def test_mixed_nemotron_tasks_run_from_portable_parquet(
     )
     shutil.rmtree(source)
     input_path.unlink()
-    restored = TaskDataset([str(prepared.task_path)], Tokenizer(), 100, num_workers=1)
-    prompts, environments, extras, uids = zip(*[restored[index] for index in range(len(restored))], strict=True)
+    prompts, environments, extras, uids = zip(*[prepared[index] for index in range(len(prepared))], strict=True)
 
     class MixedClient:
         async def generate(self, request):
@@ -1291,7 +1288,7 @@ async def test_overlong_filter_uses_sampled_end_tokens(task_inputs, stop_reason,
 
 
 @pytest.mark.asyncio
-async def test_gym_source_materialization_runs_without_the_original_dataset(tmp_path, task_inputs):
+async def test_source_tasks_run_without_the_original_dataset(tmp_path, task_inputs):
     source = tmp_path / "source.parquet"
     pq.write_table(
         pa.Table.from_pylist(
@@ -1313,12 +1310,10 @@ async def test_gym_source_materialization_runs_without_the_original_dataset(tmp_
         Tokenizer(),
         100,
         environment_configs={"gsm8k": {"reward_method": "strict"}},
-        cache_dir=tmp_path / "tasks",
         num_workers=1,
     )
     source.unlink()
-    restored = TaskDataset([str(prepared.task_path)], Tokenizer(), 100, num_workers=1)
-    prompt, env, extras, uid = restored[0]
+    prompt, env, extras, uid = prepared[0]
     config, _ = task_inputs
     client = ConversationClient(["#### 12"])
     worker = TaskRolloutWorker(
@@ -1671,7 +1666,7 @@ async def test_genrm_final_grades_and_credit_reach_training_batch(
 
 
 @pytest.mark.asyncio
-async def test_task_group_grader_preserves_separate_samples_and_private_inputs(task_inputs, tmp_path):
+async def test_task_group_grader_preserves_separate_samples_and_private_inputs(task_inputs):
     config, request = task_inputs
     task = TaskSpec.model_validate_json(request["env_extras"][0]["task_spec"])
     task = task.model_copy(
@@ -1680,9 +1675,6 @@ async def test_task_group_grader_preserves_separate_samples_and_private_inputs(t
         }
     )
     group_grader = GroupGraderSpec(name="group_total", parameters_json=json.dumps({"private_offset": 10}))
-    path = str(tmp_path / "tasks.parquet")
-    write_tasks(path, iter([task]))
-    task = next(read_tasks(path))
     request.update(
         prompts=request["prompts"] * 4,
         env_classes=["taskcompendium"] * 4,
@@ -1739,24 +1731,14 @@ async def test_task_group_grader_preserves_separate_samples_and_private_inputs(t
         ),
     ],
 )
-async def test_unified_gym_tasks_preserve_grading_and_turn_credit(
-    task_inputs, tmp_path, environment, extras, responses, rewards
-):
+async def test_unified_gym_tasks_preserve_grading_and_turn_credit(task_inputs, environment, extras, responses, rewards):
     config, request = task_inputs
-    raw_path = str(tmp_path / "source.parquet")
-    task_path = str(tmp_path / "tasks.parquet")
-    pq.write_table(
-        pa.Table.from_pylist([{"prompt": request["prompts"][0], "env_class": environment, **extras}]), raw_path
+    task = source_row_task(
+        {"prompt": request["prompts"][0], "env_class": environment, **extras},
+        0,
+        source_name="fixture",
+        environment_configs={environment: {}},
     )
-    write_tasks(
-        task_path,
-        source_tasks(
-            Dataset.from_parquet(raw_path),
-            source_name="fixture",
-            environment_configs={environment: {}},
-        ),
-    )
-    task = next(read_tasks(task_path))
     request["env_extras"] = [{"task_spec": task.model_dump_json()}]
     request["env_classes"] = [environment]
     model = ConversationClient(responses)
@@ -2140,11 +2122,7 @@ async def test_source_machine_selection_controls_tool_results(task_inputs, task_
             }
         },
     }
-    task = next(
-        source_tasks(
-            Dataset.from_list([row]), source_name="source", environment_configs={"nemotron_ultra": environment}
-        )
-    )
+    task = source_row_task(row, 0, source_name="source", environment_configs={"nemotron_ultra": environment})
     request["env_extras"] = [{"task_spec": task.model_dump_json()}]
     request["env_classes"] = ["nemotron_ultra"]
     message = {

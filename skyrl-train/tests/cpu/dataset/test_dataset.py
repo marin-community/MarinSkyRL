@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from unittest.mock import patch
 from datasets import Dataset
@@ -5,6 +7,7 @@ from transformers import BatchEncoding
 from taskcompendium.models import TaskSpec
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.dataset import PromptDataset
+from skyrl_train.dataset.tasks import SourceTaskDataset
 from skyrl_train.entrypoints.main_base import BasePPOExp
 
 
@@ -52,7 +55,6 @@ def test_eval_dataset_filtering(mock_tokenizer, sample_dataset, tmp_path, probe_
     experiment = object.__new__(BasePPOExp)
     experiment.cfg = get_default_config()
     experiment.cfg.data.val_data = [str(path)]
-    experiment.cfg.data.task_cache_dir = str(tmp_path / "tasks")
     experiment.cfg.trainer.max_prompt_length = 150
     experiment.cfg.trainer.eval_interval = -1 if probe_enabled else 1
     experiment.cfg.trainer.mismatch_probe.enabled = probe_enabled
@@ -71,6 +73,36 @@ def test_eval_dataset_filtering(mock_tokenizer, sample_dataset, tmp_path, probe_
     tasks = [TaskSpec.model_validate_json(row["env_extras"]["task_spec"]) for row in rows]
     assert [task.source.row for task in tasks] == ["0", "1"]
     assert all(row["env_class"] == "gsm8k" for row in rows)
+
+
+@pytest.mark.parametrize("num_workers", [1, 2])
+def test_source_tasks_preserve_global_row_indices_without_cache_files(tmp_path, num_workers):
+    rows = [
+        {
+            "prompt": [{"role": "user", "content": content}],
+            "env_class": "gsm8k",
+            "reward_spec": {"ground_truth": "PRIVATE_ANSWER"},
+            "teacher_route": "math",
+            "data_source": "fixture",
+            "extra_info": {"grade": index},
+        }
+        for index, content in enumerate(("First question", "x" * 200, "Last question"))
+    ]
+    source = tmp_path / "source.jsonl"
+    source.write_text("\n".join(json.dumps(row) for row in rows))
+
+    dataset = SourceTaskDataset(
+        [str(source)],
+        _StubTokenizer(),
+        100,
+        environment_configs={},
+        num_workers=num_workers,
+    )
+    prepared = dataset.collate_fn([dataset[index] for index in range(len(dataset))])
+    assert [row["prompt"] for row in prepared] == [rows[0]["prompt"], rows[2]["prompt"]]
+    tasks = [TaskSpec.model_validate_json(row["env_extras"]["task_spec"]) for row in prepared]
+    assert [task.source.row for task in tasks] == ["0", "2"]
+    assert dataset.dataframe.cache_files == []
 
 
 @patch("datasets.load_dataset")

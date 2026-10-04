@@ -385,12 +385,12 @@ class BasePPOExp:
         if terminal_data:
             terminal_options = {
                 "terminal_bench_data": terminal_data,
+                "cache_dir": Path(self.cfg.data.task_cache_dir),
                 "verifier_override": HarborTaskSettings.from_config(self.cfg.terminal_bench_config).verifier_override(),
             }
         return dataset_type(
             datasets=data_files,
             environment_configs=OmegaConf.to_container(self.cfg.environment.task_sessions, resolve=True),
-            cache_dir=Path(self.cfg.data.task_cache_dir),
             tokenizer=self.tokenizer,
             max_prompt_length=self.cfg.trainer.max_prompt_length,
             num_workers=8,
