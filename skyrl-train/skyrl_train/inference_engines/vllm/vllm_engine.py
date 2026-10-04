@@ -1047,6 +1047,31 @@ class WorkerWrap:
         """This worker's host, GPU and ranks, as a plain dict."""
         return asdict(self._device_placement())
 
+    def report_kernel_runtime(self) -> dict:
+        """Read the actual runner and attention implementations for qualification."""
+        from vllm.model_executor.layers.attention.attention import Attention
+
+        runner = self.model_runner
+        attention = []
+        for name, layer in self.get_model().named_modules():
+            if isinstance(layer, Attention):
+                attention.append(
+                    {
+                        "name": name,
+                        "backend": layer.get_attn_backend().get_name(),
+                        "implementation": f"{type(layer.impl).__module__}.{type(layer.impl).__qualname__}",
+                        "flash_attention_version": getattr(layer.impl, "vllm_flash_attn_version", None),
+                    }
+                )
+        if not attention:
+            raise RuntimeError("No attention layers found in the serving model")
+        return {
+            "placement": self.report_device_placement(),
+            "use_v2_model_runner": self.use_v2_model_runner,
+            "runner": f"{type(runner).__module__}.{type(runner).__qualname__}",
+            "attention": attention,
+        }
+
     def _device_placement(self) -> InferenceWorkerPlacement:
         dp, pp = get_dp_group(), get_pp_group()
         ep = get_ep_group() if self.model_config.is_moe else None
@@ -1868,6 +1893,10 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
     async def report_engine_placement(self):
         """Host, GPU and ranks of every worker of this engine."""
         return await self.llm.collective_rpc("report_device_placement")
+
+    async def report_engine_kernel_runtime(self):
+        """Read the actual serving implementations from every worker."""
+        return await self.llm.collective_rpc("report_kernel_runtime")
 
     async def expert_block_rpc(self, method: str, *args) -> list:
         """Call one expert-block sync method on every worker of this engine.

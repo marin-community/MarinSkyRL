@@ -102,6 +102,7 @@ def write_tiny_hero_checkpoint(path: Path):
         pytest.param(1, 1, 2, 1, True, 0.5, False, id="half-offloaded-adamw"),
         pytest.param(1, 1, 2, 1, True, 1.0, False, id="cpu-adamw"),
         pytest.param(1, 2, 2, 1, False, None, True, id="pp2-ep2-muonh-cpu-momentum"),
+        pytest.param(1, 1, 1, 4, True, None, True, id="cp4-muonh-cpu-momentum"),
     ],
 )
 def test_hero_worker_repeated_updates(tmp_path, monkeypatch, tp, pp, ep, cp, packing, optimizer_offload, muonh):
