@@ -59,6 +59,14 @@ class InspectableWorker(vllm_engine.WorkerWrap):
     def available_kv_cache_memory(self):
         return int(self.available_kv_cache_memory_bytes)
 
+    def read_snapshot_weights(self, names):
+        result = self.read_named_weights(names)
+        for entry in result.values():
+            if "tensor" in entry:
+                tensor = entry["tensor"]
+                entry["tensor"] = {"shape": list(tensor.shape), "bytes": tensor.numpy().tobytes()}
+        return result
+
 
 @pytest.mark.vllm
 def test_dummy_engine_installs_every_tensor_and_holds_requests_until_verified_sync(tmp_path, monkeypatch):
@@ -109,7 +117,13 @@ def test_dummy_engine_installs_every_tensor_and_holds_requests_until_verified_sy
             print(f"X4a {load_format} Available KV cache memory: {budget} bytes", flush=True)
             if load_format == "auto":
                 real_budget = budget
-                real_weights = ray.get(actor.worker_rpc.remote("read_named_weights", names))[0]
+                real_weights = ray.get(actor.worker_rpc.remote("read_snapshot_weights", names))[0]
+                for entry in real_weights.values():
+                    if "tensor" in entry:
+                        data = entry["tensor"]
+                        entry["tensor"] = torch.frombuffer(bytearray(data["bytes"]), dtype=torch.float32).reshape(
+                            data["shape"]
+                        )
                 real_output = asyncio.run(client.generate({"prompts": PROMPTS, "sampling_params": SAMPLING}))
                 real_single = asyncio.run(client.generate({"prompts": PROMPTS[:1], "sampling_params": SAMPLING}))
                 for shard in shards:
@@ -156,7 +170,13 @@ def test_dummy_engine_installs_every_tensor_and_holds_requests_until_verified_sy
                     await asyncio.gather(early, return_exceptions=True)
 
             dummy_output = asyncio.run(verify_and_resume())
-            dummy_weights = ray.get(actor.worker_rpc.remote("read_named_weights", names))[0]
+            dummy_weights = ray.get(actor.worker_rpc.remote("read_snapshot_weights", names))[0]
+            for entry in dummy_weights.values():
+                if "tensor" in entry:
+                    data = entry["tensor"]
+                    entry["tensor"] = torch.frombuffer(bytearray(data["bytes"]), dtype=torch.float32).reshape(
+                        data["shape"]
+                    )
             assert dummy_output["response_ids"] == real_output["response_ids"]
             for name in names:
                 assert dummy_weights[name]["found"], (name, dummy_weights[name])
