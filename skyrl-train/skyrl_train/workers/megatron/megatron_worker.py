@@ -13,7 +13,7 @@ from typing import List, Dict, Any, Optional
 from collections import defaultdict
 from loguru import logger
 from skyrl_train.utils.progress import tqdm
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 
 from megatron.bridge import AutoBridge
 import megatron.core.parallel_state as mpu
@@ -183,6 +183,19 @@ class MegatronWorker:
             ddp_config=default_ddp_config, wrap_with_ddp=wrap_with_ddp, bf16=bf16
         )
         return model
+
+    def _load_initial_checkpoint(self, model_config: DictConfig, role: str) -> None:
+        checkpoint_path = model_config.initial_checkpoint_path
+        if checkpoint_path is None:
+            return
+        logger.info("Loading initial {} model weights from {}", role, checkpoint_path)
+        model = MegatronModelWrapper(config=self.cfg, actor_module=self.actor_module)
+        self.strategy.load_checkpoint(
+            model=model,
+            ckpt_dir=checkpoint_path,
+            load_training_state=False,
+        )
+        logger.info("Loaded initial {} model weights; optimizer and trainer state remain fresh", role)
 
     def forward(self, data):
         """
@@ -438,6 +451,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     def init_model(self, model_path, num_training_steps: int = 1e9):
         """Initialize the model, optimizer, and scheduler for the policy worker."""
         self._initialize_policy_modules(model_path, mode=_MegatronInitMode.TRAINING)
+        self._load_initial_checkpoint(self.cfg.trainer.policy.model, "policy")
 
         # create profiler
         if self.cfg.trainer.policy.megatron_config.torch_profiler_config.enable:
@@ -868,6 +882,7 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
                 self.cfg, "trainer.ref.megatron_config.logprob_chunk_size", default=None
             ),
         )
+        self._load_initial_checkpoint(self.cfg.trainer.ref.model, "reference")
         self._maybe_install_router_replay("ref")
 
     def get_weight_statistics(self):

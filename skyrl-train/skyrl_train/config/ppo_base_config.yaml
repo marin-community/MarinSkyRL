@@ -113,6 +113,8 @@ trainer:
       tokenizer_revision: ${trainer.policy.model.revision}
       source_uri: null
       source_identity: null
+      # Load Megatron model weights before creating fresh optimizer state.
+      initial_checkpoint_path: null
       lora:
           rank: 0
           alpha: 16
@@ -145,6 +147,7 @@ trainer:
       tokenizer_revision: ${trainer.policy.model.tokenizer_revision}
       source_uri: ${trainer.policy.model.source_uri}
       source_identity: ${trainer.policy.model.source_identity}
+      initial_checkpoint_path: ${trainer.policy.model.initial_checkpoint_path}
     sequence_parallel_size: 1
   critic:
     model:
