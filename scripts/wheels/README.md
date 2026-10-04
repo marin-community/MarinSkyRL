@@ -66,3 +66,27 @@ native attention checks alone cannot detect a Transformer Engine version cap.
 Publish the source commits, build environment, and checksums with the wheel
 assets. Adoption URLs and wheel hashes belong in the root dependency manifest
 and lock.
+
+## cuSPARSELt ARM platform tag
+
+NVIDIA's cuSPARSELt 0.8.1 aarch64 wheel contains an aarch64 ELF library but declares
+`py3-none-manylinux2014_sbsa` in `WHEEL`. The filename uses
+`py3-none-manylinux2014_aarch64`. This mismatch makes `uv pip check` reject a clean
+ARM installation of Torch 2.14.1+cu132, which requires cuSPARSELt 0.8.1.
+
+`repair_cusparselt_wheel.py` accepts only the upstream wheel with SHA-256
+`4dca476c50bf4780d46cd0bfbd82e2bc10a08e4fef7950917ce8d7578d22a23f`. It verifies
+the native ELF architecture, corrects the internal platform tag, and regenerates
+`RECORD`. All other members, including the native library and license, retain
+their exact bytes. The output includes a provenance JSON file with input and
+output hashes and hashes of every preserved member.
+
+```bash
+python3 scripts/wheels/repair_cusparselt_wheel.py \
+  /tmp/nvidia_cusparselt_cu13-0.8.1-py3-none-manylinux2014_aarch64.whl \
+  /tmp/repaired-wheels
+```
+
+Install and check the repaired wheel on an ARM host before adoption. Pin the
+published wheel by URL and SHA-256. This packaging correction preserves the
+vendor's native code and its compiler provenance.
