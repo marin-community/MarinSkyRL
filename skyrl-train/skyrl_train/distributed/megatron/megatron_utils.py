@@ -196,20 +196,22 @@ def offload_megatron_model_to_cpu(models):
     """
     for model_chunk in models:
         if isinstance(model_chunk, DDP):
-            model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
-            for buffers in model_chunk_all_buffers:
-                for buffer in buffers:
-                    # offload parameters
+            buffers = [*model_chunk.buffers, *model_chunk.expert_parallel_buffers]
+            backed = [buffer for buffer in buffers if buffer.param_data is not None]
+            if backed and len(backed) != len(buffers):
+                raise RuntimeError("Megatron model has mixed sharded and unsharded parameter buffers")
+            if backed:
+                for buffer in backed:
                     if buffer.param_data.storage().size() > 0:
-                        buffer.param_data.cpu_data = buffer.param_data.data.cpu().pin_memory()
+                        buffer.param_data.cpu_data = torch.empty_like(buffer.param_data, device="cpu", pin_memory=True)
+                        buffer.param_data.cpu_data.copy_(buffer.param_data)
                         buffer.param_data_size = buffer.param_data.storage().size()
                         buffer.param_data.storage().resize_(0)
-
                     assert buffer.param_data_size == buffer.param_data.cpu_data.storage().size()
-        else:
-            # we need this for ref module
-            for _, param in model_chunk.named_parameters():
-                param.data = param.data.to("cpu", non_blocking=True)
+                continue
+        # Non-distributed Megatron optimizers and reference modules own parameter storage directly.
+        for param in model_chunk.parameters():
+            param.data = param.data.to("cpu", non_blocking=True)
     gc.collect()
     torch.cuda.empty_cache()
 
@@ -218,19 +220,23 @@ def offload_megatron_model_to_cpu(models):
 def load_megatron_model_to_gpu(models):
     for model_chunk in models:
         if isinstance(model_chunk, DDP):
-            model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
-            for buffers in model_chunk_all_buffers:
-                for buffer in buffers:
+            buffers = [*model_chunk.buffers, *model_chunk.expert_parallel_buffers]
+            backed = [buffer for buffer in buffers if buffer.param_data is not None]
+            if backed and len(backed) != len(buffers):
+                raise RuntimeError("Megatron model has mixed sharded and unsharded parameter buffers")
+            if backed:
+                for buffer in backed:
                     if buffer.param_data.storage().size() == 0:
                         buffer.param_data.storage().resize_(buffer.param_data_size)
-                        # copy data from cpu to cuda
                         buffer.param_data.copy_(buffer.param_data.cpu_data, non_blocking=True)
-        else:
-            # we need this for ref module
-            device_id = torch.cuda.current_device()
-            for _, param in model_chunk.named_parameters():
-                param.data = param.data.to(device_id, non_blocking=True)
+                        del buffer.param_data.cpu_data
+                continue
+        device_id = torch.cuda.current_device()
+        for param in model_chunk.parameters():
+            param.data = param.data.to(device_id, non_blocking=True)
     gc.collect()
+    torch.cuda.synchronize()
+    torch.accelerator.memory.empty_host_cache()
     torch.cuda.empty_cache()
 
 
