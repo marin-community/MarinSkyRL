@@ -108,19 +108,21 @@ def test_load_weights_into_vllm_rejects_invalid_fused_expert_shapes(name, tensor
 
 
 @pytest.mark.parametrize(
-    ("loaded", "total", "padding", "complete", "fails"),
+    ("loaded", "total", "padding", "bias_padding", "complete", "fails"),
     [
-        pytest.param(12, 12, 0, False, False, id="complete-weight"),
-        pytest.param(0, 12, 0, False, True, id="unsent-layer"),
-        pytest.param(8, 12, 0, False, True, id="missing-stacked-part"),
-        pytest.param(12, 15, 0, False, True, id="unsent-bias"),
-        pytest.param(0, None, 0, True, False, id="already-processed"),
-        pytest.param(0, 0, 0, False, False, id="non-persistent-only"),
-        pytest.param(12, 16, 4, False, False, id="vocabulary-padding"),
-        pytest.param(8, 16, 4, False, True, id="padding-does-not-cover-unsent-weight"),
+        pytest.param(12, 12, 0, 0, False, False, id="complete-weight"),
+        pytest.param(0, 12, 0, 0, False, True, id="unsent-layer"),
+        pytest.param(8, 12, 0, 0, False, True, id="missing-stacked-part"),
+        pytest.param(12, 15, 0, 0, False, True, id="unsent-bias"),
+        pytest.param(0, None, 0, 0, True, False, id="already-processed"),
+        pytest.param(0, 0, 0, 0, False, False, id="non-persistent-only"),
+        pytest.param(12, 16, 4, 0, False, False, id="vocabulary-padding"),
+        pytest.param(8, 16, 4, 0, False, True, id="padding-does-not-cover-unsent-weight"),
+        pytest.param(252, 256, 3, 1, False, False, id="padded-vocabulary-bias"),
+        pytest.param(189, 256, 3, 1, False, True, id="unsent-padded-vocabulary-bias"),
     ],
 )
-def test_dummy_weights_require_every_loadable_layer_element(loaded, total, padding, complete, fails):
+def test_dummy_weights_require_every_loadable_layer_element(loaded, total, padding, bias_padding, complete, fails):
     layers = {
         "model.layer": {
             "can_load": not complete,
@@ -128,6 +130,7 @@ def test_dummy_weights_require_every_loadable_layer_element(loaded, total, paddi
             "load_numel_total": total,
             "tensors": {},
             "vocab_padding_numel": padding,
+            "vocab_bias_padding_numel": bias_padding,
         }
     }
     if fails:

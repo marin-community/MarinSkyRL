@@ -84,11 +84,16 @@ def validate_dummy_weight_coverage(
         gaps = []
         satisfied = []
         for name, layer in pending.items():
-            padding = layer["vocab_padding_numel"]
+            weight_padding = layer["vocab_padding_numel"]
+            bias_padding = layer.get("vocab_bias_padding_numel", 0)
+            padding = weight_padding + bias_padding
             required = layer["load_numel_total"] - padding
             for tensor_name, (identity, numel) in layer["tensors"].items():
                 if identity in satisfied_storage:
-                    required -= numel - (padding if tensor_name == "weight" else 0)
+                    tensor_padding = (
+                        weight_padding if tensor_name == "weight" else bias_padding if tensor_name == "bias" else 0
+                    )
+                    required -= numel - tensor_padding
             if layer["load_numel"] < max(0, required):
                 gaps.append(f"{name or '<root>'}: {layer['load_numel']} of {required} elements loaded")
             else:

@@ -607,17 +607,20 @@ class WorkerWrap:
                 identities = storage_identity(tensors)
                 shard_indices = getattr(layer, "shard_indices", None)
                 padding = 0
+                bias_padding = 0
                 if shard_indices is not None and "weight" in tensors:
                     weight = tensors["weight"]
-                    padding = (
-                        shard_indices.num_org_vocab_padding + shard_indices.num_added_vocab_padding
-                    ) * weight.shape[1]
+                    padding_rows = shard_indices.num_org_vocab_padding + shard_indices.num_added_vocab_padding
+                    padding = padding_rows * weight.shape[1]
+                    if "bias" in tensors:
+                        bias_padding = padding_rows
                 layers[layer_name] = {
                     "can_load": info.can_load(),
                     "load_numel_total": info.load_numel_total,
                     "load_numel": info.load_numel,
                     "tensors": {name: (identities[name], tensor.numel()) for name, tensor in tensors.items()},
                     "vocab_padding_numel": padding,
+                    "vocab_bias_padding_numel": bias_padding,
                 }
                 for name, tensor in (original | live).items():
                     if name in SKIP_LOAD_TENSORS and tensor.is_floating_point():
