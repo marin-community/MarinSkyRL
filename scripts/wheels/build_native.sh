@@ -21,7 +21,7 @@ case "$package" in
         repository=Dao-AILab/flash-attention
         source_commit=a8aa52b1ab3e9ca574c8a33b3f35afc017ffa2e2
         source_patch=flash-attn.patch
-        package_environment+=(FLASH_ATTENTION_FORCE_BUILD=TRUE FLASH_ATTENTION_LOCAL_VERSION=marin.cu132torch2141.1 "FLASH_ATTN_CUDA_ARCHS=$cuda_architecture")
+        package_environment+=(FLASH_ATTENTION_FORCE_BUILD=TRUE FLASH_ATTN_LOCAL_VERSION=marin.cu132torch2141.1 "FLASH_ATTN_CUDA_ARCHS=$cuda_architecture")
         ;;
     causal-conv1d)
         repository=Dao-AILab/causal-conv1d
