@@ -245,8 +245,12 @@ class TaskRolloutWorker:
         ]
         metadata = request.get("batch_metadata")
         phase = "train" if metadata is None else metadata.training_phase
-        if self.harbor is not None:
-            tasks = [self.harbor.task(task, phase=phase) if "harbor" in task.metadata else task for task in tasks]
+        harbor_settings = [self.harbor if "harbor" in task.metadata else None for task in tasks]
+        policies = [self.error_handling if harbor is None else harbor.error_handling for harbor in harbor_settings]
+        tasks = [
+            task if harbor is None else harbor.task(task, phase=phase)
+            for task, harbor in zip(tasks, harbor_settings, strict=True)
+        ]
         sampling = get_sampling_params_for_backend(
             self.trajectory_runner_cfg.backend, self.trajectory_runner_cfg.sampling_params
         )
@@ -263,7 +267,7 @@ class TaskRolloutWorker:
         trajectory_ids = request.get("trajectory_ids")
 
         async def run(index, task):
-            harbor = self.harbor if "harbor" in task.metadata else None
+            harbor = harbor_settings[index]
             session_id = trajectory_ids[index].to_string() if trajectory_ids is not None else uuid4().hex
 
             async def model(request):
@@ -305,7 +309,7 @@ class TaskRolloutWorker:
                     result = _failed_rollout(
                         interruption,
                         task,
-                        self.error_handling if harbor is None else harbor.error_handling,
+                        policies[index],
                         logprobs_required=require_logprobs,
                     )
                 if harbor is None:
@@ -331,12 +335,7 @@ class TaskRolloutWorker:
                 else [task.id for task in tasks],
                 self.group_graders,
                 phase,
-                [
-                    self.harbor.error_handling
-                    if self.harbor is not None and "harbor" in task.metadata
-                    else self.error_handling
-                    for task in tasks
-                ],
+                policies,
                 logprobs_required=require_logprobs,
             )
             if self.harbor is not None:
@@ -346,7 +345,7 @@ class TaskRolloutWorker:
                     self.harbor,
                     int(self.trajectory_runner_cfg.sampling_params.max_generate_length),
                     self.projection.projection.tokenizer,
-                    harbor_tasks=["harbor" in task.metadata for task in tasks],
+                    harbor_tasks=[harbor is not None for harbor in harbor_settings],
                 )
         return rollouts
 

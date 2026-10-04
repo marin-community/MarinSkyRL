@@ -46,5 +46,4 @@ METRIC_REDUCERS = {"aime": aime_metrics, "nupa": nupa_metrics, "gsm8k_multi_turn
 
 
 def aggregate_for_task(name: str, metrics: list[dict[str, Any]]) -> dict[str, float]:
-    """Reduce task metrics without a global environment registry."""
     return METRIC_REDUCERS.get(name, mean_metrics)(metrics)

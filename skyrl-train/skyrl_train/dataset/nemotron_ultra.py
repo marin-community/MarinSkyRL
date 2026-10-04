@@ -71,7 +71,7 @@ def _nemotron_task_prompt(
     task = resolve_terminal_task(
         source_row_task(row, index, source_name=source_name, environment_configs=environment_configs), terminals
     )
-    return {"task_spec": task.model_dump_json(), **task_prompt(task)}
+    return task_prompt(task)
 
 
 class NemotronTaskDataset(SourceTaskDataset):
@@ -102,15 +102,12 @@ class NemotronTaskDataset(SourceTaskDataset):
         )
 
     def prepare_dataset(self, dataset: Dataset) -> Dataset:
-        return dataset.map(
+        return self._map_task_rows(
+            dataset,
             partial(
                 _nemotron_task_prompt,
                 source_name=", ".join(self.datasets),
                 environment_configs=self.environment_configs,
                 terminals=self.terminals,
             ),
-            with_indices=True,
-            remove_columns=dataset.column_names,
-            num_proc=self.num_workers,
-            keep_in_memory=True,
         )

@@ -2,7 +2,7 @@
 
 import hashlib
 import json
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import partial
 from itertools import batched
 from pathlib import Path
@@ -41,6 +41,7 @@ def task_prompt(task: TaskSpec) -> dict:
             if verifier is not None and task.environment.interaction is not None
             else task.metadata.get("skyrl_extras", {})
         ),
+        "task_spec": task.model_dump_json(),
         "prompt": session_start(task, convention).messages,
         "env_class": task.environment.interaction or TASKCOMPENDIUM_ENVIRONMENT,
         "data_source": task.source.dataset,
@@ -100,7 +101,7 @@ def source_row_task(
 
 def _source_task_prompt(row: dict, index: int, *, source_name: str, environment_configs: Mapping[str, dict]) -> dict:
     task = source_row_task(row, index, source_name=source_name, environment_configs=environment_configs)
-    return {"task_spec": task.model_dump_json(), **task_prompt(task)}
+    return task_prompt(task)
 
 
 def write_tasks(path: Path, tasks: Iterable[TaskSpec]) -> None:
@@ -142,12 +143,18 @@ class SourceTaskDataset(PromptDataset):
         super().__init__(list(datasets), tokenizer, max_prompt_length, num_workers=num_workers)
 
     def prepare_dataset(self, dataset: Dataset) -> Dataset:
-        return dataset.map(
+        return self._map_task_rows(
+            dataset,
             partial(
                 _source_task_prompt,
                 source_name=", ".join(self.datasets),
                 environment_configs=self.environment_configs,
             ),
+        )
+
+    def _map_task_rows(self, dataset: Dataset, mapper: Callable[[dict, int], dict]) -> Dataset:
+        return dataset.map(
+            mapper,
             with_indices=True,
             remove_columns=dataset.column_names,
             num_proc=self.num_workers,

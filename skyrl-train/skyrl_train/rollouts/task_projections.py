@@ -87,29 +87,9 @@ def _failure_policy(
     )
 
 
-def training_output(
-    rollout: RolloutData,
-    error_handling: ErrorHandlingConfig,
-    *,
-    logprobs_required: bool,
-) -> AgentLoopOutput:
-    """Project token evidence and rewards with the configured training eligibility policy."""
+def _rollout_rewards(rollout: RolloutData) -> RewardResult:
     graded = rollout.grade.status == Outcome.GRADED
     skipped = rollout.grade.status == Outcome.SKIPPED
-    verification = verification_result(rollout.grade)
-    if graded:
-        disposition = TrainingDisposition.train()
-    elif skipped:
-        disposition = TrainingDisposition.train(reason="verification skipped")
-    else:
-        disposition = TrainingDisposition(
-            loss_eligible=False,
-            baseline_eligible=False,
-            reason=rollout.grade.error or rollout.grade.status.value,
-            exception_type="VerifierUnavailable"
-            if rollout.grade.status == Outcome.UNAVAILABLE
-            else VERIFIER_RUNTIME_ERROR,
-        )
     token_rewards = None
     token_credit = None
     components = {}
@@ -135,27 +115,16 @@ def training_output(
                 start = step.response_end + 1 - len(step.turn.response_token_ids)
                 credit[start : step.response_end + 1] = step.transition.token_credit
         token_credit = tuple(credit)
-    error_treatment = None
-    if rollout.failure is not None:
-        failure = rollout.failure
-        treatment, missing_logprobs = _failure_policy(rollout, error_handling, logprobs_required)
-        disposition = TrainingDisposition(
-            loss_eligible=rollout_loss_eligible(rollout, error_handling, logprobs_required=logprobs_required),
-            baseline_eligible=not treatment_excludes_from_baseline(treatment, verifier_available=graded)
-            and missing_logprobs is None,
-            reason="Rollout execution failed",
-            exception_type=missing_logprobs or failure.exception_type,
-        )
-        error_treatment = treatment.value
-        verification = replace(
-            verification,
-            diagnostics={**verification.diagnostics, "exception_type": failure.exception_type, **failure.diagnostics},
-        )
-        if treatment is not ErrorTreatment.PASSTHROUGH or not graded:
-            optimization_reward = 0.0
-            token_rewards = None if token_rewards is None else (0.0,) * len(token_rewards)
-            token_credit = None if token_credit is None else (0.0,) * len(token_credit)
-            components = {}
+    return RewardResult(
+        unshaped_reward=rollout.grade.reward,
+        optimization_reward=optimization_reward,
+        token_rewards=token_rewards,
+        token_credit=token_credit,
+        components=components,
+    )
+
+
+def _model_evidence(rollout: RolloutData) -> RolloutEvidence:
     candidates = [step.turn.metadata.get("student_topk_indices") for step in rollout.steps]
     scores = [step.turn.metadata.get("behavior_topk_logprobs") for step in rollout.steps]
     selected = None
@@ -180,15 +149,6 @@ def training_output(
             admitted_scores,
         )
     routes = [step.turn.metadata.get("routed_experts") for step in rollout.steps]
-    tagged_steps = [step.turn.metadata.get("response_span_tags") for step in rollout.steps]
-    response_span_tags = None
-    if any(tags is not None for tags in tagged_steps):
-        response_span_tags = [0] * len(rollout.response_token_ids)
-        for step, tags in zip(rollout.steps, tagged_steps, strict=True):
-            if tags is not None:
-                if len(tags) != len(step.turn.response_token_ids):
-                    raise ValueError("Span tags must align with generated tokens")
-                response_span_tags[step.response_end + 1 - len(tags) : step.response_end + 1] = tags
     template = next((value for value in routes if value is not None), None)
     routed_experts = None
     if template is not None:
@@ -198,27 +158,80 @@ def training_output(
                 if len(values) != len(step.turn.response_token_ids):
                     raise ValueError("Expert routes must align with generated tokens")
                 routed_experts[step.response_end + 1 - len(values) : step.response_end + 1] = values
+    return RolloutEvidence(
+        messages=rollout.messages,
+        response=rollout.steps[-1].turn.text if rollout.steps else None,
+        stop_reason=rollout.stop_reason,
+        generated_token_count=sum(rollout.loss_mask),
+        prompt_token_ids=rollout.prompt_token_ids,
+        response_token_ids=rollout.response_token_ids,
+        behavior_logprobs=None if rollout.logprobs is None else np.asarray(rollout.logprobs, dtype=np.float32),
+        student_topk_indices=None if selected is None else selected.indices,
+        behavior_topk_logprobs=None if selected is None else selected.topk_logprobs,
+        routed_experts=routed_experts,
+    )
+
+
+def training_output(
+    rollout: RolloutData,
+    error_handling: ErrorHandlingConfig,
+    *,
+    logprobs_required: bool,
+) -> AgentLoopOutput:
+    """Project token evidence and rewards with the configured training eligibility policy."""
+    graded = rollout.grade.status == Outcome.GRADED
+    verification = verification_result(rollout.grade)
+    if graded:
+        disposition = TrainingDisposition.train()
+    elif rollout.grade.status == Outcome.SKIPPED:
+        disposition = TrainingDisposition.train(reason="verification skipped")
+    else:
+        disposition = TrainingDisposition(
+            loss_eligible=False,
+            baseline_eligible=False,
+            reason=rollout.grade.error or rollout.grade.status.value,
+            exception_type="VerifierUnavailable"
+            if rollout.grade.status == Outcome.UNAVAILABLE
+            else VERIFIER_RUNTIME_ERROR,
+        )
+    reward = _rollout_rewards(rollout)
+    error_treatment = None
+    if rollout.failure is not None:
+        failure = rollout.failure
+        treatment, missing_logprobs = _failure_policy(rollout, error_handling, logprobs_required)
+        disposition = TrainingDisposition(
+            loss_eligible=rollout_loss_eligible(rollout, error_handling, logprobs_required=logprobs_required),
+            baseline_eligible=not treatment_excludes_from_baseline(treatment, verifier_available=graded)
+            and missing_logprobs is None,
+            reason="Rollout execution failed",
+            exception_type=missing_logprobs or failure.exception_type,
+        )
+        error_treatment = treatment.value
+        verification = replace(
+            verification,
+            diagnostics={**verification.diagnostics, "exception_type": failure.exception_type, **failure.diagnostics},
+        )
+        if treatment is not ErrorTreatment.PASSTHROUGH or not graded:
+            reward = replace(
+                reward,
+                optimization_reward=0.0,
+                token_rewards=None if reward.token_rewards is None else (0.0,) * len(reward.token_rewards),
+                token_credit=None if reward.token_credit is None else (0.0,) * len(reward.token_credit),
+                components={},
+            )
+    tagged_steps = [step.turn.metadata.get("response_span_tags") for step in rollout.steps]
+    response_span_tags = None
+    if any(tags is not None for tags in tagged_steps):
+        response_span_tags = [0] * len(rollout.response_token_ids)
+        for step, tags in zip(rollout.steps, tagged_steps, strict=True):
+            if tags is not None:
+                if len(tags) != len(step.turn.response_token_ids):
+                    raise ValueError("Span tags must align with generated tokens")
+                response_span_tags[step.response_end + 1 - len(tags) : step.response_end + 1] = tags
     return AgentLoopOutput(
-        evidence=RolloutEvidence(
-            messages=rollout.messages,
-            response=rollout.steps[-1].turn.text if rollout.steps else None,
-            stop_reason=rollout.stop_reason,
-            generated_token_count=sum(rollout.loss_mask),
-            prompt_token_ids=rollout.prompt_token_ids,
-            response_token_ids=rollout.response_token_ids,
-            behavior_logprobs=None if rollout.logprobs is None else np.asarray(rollout.logprobs, dtype=np.float32),
-            student_topk_indices=None if selected is None else selected.indices,
-            behavior_topk_logprobs=None if selected is None else selected.topk_logprobs,
-            routed_experts=routed_experts,
-        ),
+        evidence=_model_evidence(rollout),
         verification=verification,
-        reward=RewardResult(
-            unshaped_reward=rollout.grade.reward,
-            optimization_reward=optimization_reward,
-            token_rewards=token_rewards,
-            token_credit=token_credit,
-            components=components,
-        ),
+        reward=reward,
         disposition=disposition,
         loss_mask=list(rollout.loss_mask),
         env_metrics=dict(rollout.metrics),
