@@ -38,7 +38,7 @@ overrides = [
     { name = "flashinfer-cubin", marker = "sys_platform == 'linux'", specifier = "==0.6.18.post1", index = "https://flashinfer.ai/whl" },
     { name = "flashinfer-python", marker = "sys_platform == 'linux'", specifier = "==0.6.18.post1" },
     { name = "fsspec", specifier = "==2026.4.0" },
-    { name = "marin-rigging", extras = ["prometheus", "secrets"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frigging&rev=6cb7d763d07690b3cd57ed78d088a0cc927d2ed1" },
+    { name = "marin-rigging", extras = ["prometheus", "secrets"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frigging&rev=08f20b50161c85541bb5e88fd5a159070944d0ed" },
     { name = "nvidia-resiliency-ext", marker = "sys_platform == 'never'" },
     { name = "opentelemetry-api", marker = "sys_platform != 'linux'" },
     { name = "opentelemetry-api", marker = "sys_platform == 'linux'", specifier = "==1.44.0" },
@@ -2737,8 +2737,8 @@ provides-extras = ["causal-conv1d", "dev"]
 
 [[package]]
 name = "marin-finelog"
-version = "0.2.28.dev31271949117"
-source = { registry = "https://pypi.org/simple" }
+version = "0.2.11"
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ffinelog&rev=08f20b50161c85541bb5e88fd5a159070944d0ed#08f20b50161c85541bb5e88fd5a159070944d0ed" }
 dependencies = [
     { name = "click" },
     { name = "connect-python" },
@@ -2751,10 +2751,6 @@ dependencies = [
     { name = "pyarrow" },
     { name = "pyyaml" },
     { name = "zstandard" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/a4/d5/1c1e639713ae27a7effe4b6673dc74ef3fe808a1556cf84b457dbac61c22/marin_finelog-0.2.28.dev31271949117.tar.gz", hash = "sha256:d055ef7f50e63fd331302f58c72bd903c53a8cef12ff0e202009be860b9db5e9", size = 110934, upload-time = "2026-08-08T18:59:44.394Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/f3/c0/9c7206c37e7a48ee1b825e6560732edfe82fccfb76d5a8d484408bafc098/marin_finelog-0.2.28.dev31271949117-py3-none-any.whl", hash = "sha256:4590b291ed0f6d618dd28b17e5a26a26d7a802483e0db82886e943e9b173b23a", size = 110730, upload-time = "2026-08-08T18:59:24.709Z" },
 ]
 
 [[package]]
@@ -2771,22 +2767,18 @@ wheels = [
 
 [[package]]
 name = "marin-finestore"
-version = "0.2.135.dev36906221286"
-source = { registry = "https://pypi.org/simple" }
+version = "0.1.0"
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ffinestore&rev=08f20b50161c85541bb5e88fd5a159070944d0ed#08f20b50161c85541bb5e88fd5a159070944d0ed" }
 dependencies = [
     { name = "marin-rigging", extra = ["prometheus", "secrets"] },
     { name = "pyarrow" },
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/fe/a7/b6e31c6f59b5d80b04c489e93d9c3dc780b3d4b10885b9aca4037df9bff9/marin_finestore-0.2.135.dev36906221286.tar.gz", hash = "sha256:c5e0bfff8169a0ec808ed0abc8dad8bd3ebce1c96c9269095ec5b7946bf4dfbe", size = 55095, upload-time = "2026-10-01T18:23:34.683Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/81/82/fc0f88fb5a33e0d07d2b5c6c49671b74dc54f8f4503dd09f30a1713cbf17/marin_finestore-0.2.135.dev36906221286-py3-none-any.whl", hash = "sha256:004fa184339f29b223e27a5e8dde6e6f0f6246bc6962121990ef33e30f2c0ae7", size = 45002, upload-time = "2026-10-01T18:23:20.436Z" },
-]
 
 [[package]]
 name = "marin-iris"
-version = "0.2.135.dev36906221286"
-source = { registry = "https://pypi.org/simple" }
+version = "0.2.0"
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Firis&rev=08f20b50161c85541bb5e88fd5a159070944d0ed#08f20b50161c85541bb5e88fd5a159070944d0ed" }
 dependencies = [
     { name = "click" },
     { name = "cloudpickle" },
@@ -2815,10 +2807,6 @@ dependencies = [
     { name = "uvicorn", extra = ["standard"] },
     { name = "zstandard" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/04/6c/d4a9ceddfcf63fb819eabd451ce90c7801cf42320719390fe19561bffe6e/marin_iris-0.2.135.dev36906221286.tar.gz", hash = "sha256:e59720fdf3991a9f0d2983fd28cc6f3df753803a802d87f4d15483c9fa610573", size = 937374, upload-time = "2026-10-01T18:23:37.942Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/85/07/df47a1a2f076d6271fba25e2fba6eba96b51565bd52dcf1553cbdd821e7b/marin_iris-0.2.135.dev36906221286-py3-none-any.whl", hash = "sha256:bb93a2d58ab4d49bebf896e05843ef8b675a9583794057dd8fbab4db0add41aa", size = 1132500, upload-time = "2026-10-01T18:23:24.686Z" },
-]
 
 [[package]]
 name = "marin-iris-native"
@@ -2835,7 +2823,7 @@ wheels = [
 [[package]]
 name = "marin-rigging"
 version = "0.2.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frigging&rev=6cb7d763d07690b3cd57ed78d088a0cc927d2ed1#6cb7d763d07690b3cd57ed78d088a0cc927d2ed1" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frigging&rev=08f20b50161c85541bb5e88fd5a159070944d0ed#08f20b50161c85541bb5e88fd5a159070944d0ed" }
 dependencies = [
     { name = "aiobotocore", version = "3.7.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux' or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "aiobotocore", version = "3.9.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
@@ -2868,7 +2856,7 @@ secrets = [
 [[package]]
 name = "marin-rolloutengine"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frolloutengine&rev=6cb7d763d07690b3cd57ed78d088a0cc927d2ed1#6cb7d763d07690b3cd57ed78d088a0cc927d2ed1" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frolloutengine&rev=08f20b50161c85541bb5e88fd5a159070944d0ed#08f20b50161c85541bb5e88fd5a159070944d0ed" }
 dependencies = [
     { name = "harbor-config" },
     { name = "marin-rigging", extra = ["prometheus", "secrets"] },
@@ -2879,7 +2867,7 @@ dependencies = [
 [[package]]
 name = "marin-shellbox"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fshellbox&rev=6cb7d763d07690b3cd57ed78d088a0cc927d2ed1#6cb7d763d07690b3cd57ed78d088a0cc927d2ed1" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fshellbox&rev=08f20b50161c85541bb5e88fd5a159070944d0ed#08f20b50161c85541bb5e88fd5a159070944d0ed" }
 dependencies = [
     { name = "httpx" },
 ]
@@ -3096,15 +3084,15 @@ requires-dist = [
     { name = "langdetect", url = "https://huggingface.co/datasets/open-athena/marinskyrl-gpu-wheelhouse/resolve/d761f1e357b6d5a9b80427f4710eb2e04adf1101/linux-x86_64/cp312/20260915-tinker-aime/langdetect-1.0.9-py3-none-any.whl" },
     { name = "loguru" },
     { name = "mamba-ssm", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'megatron'", url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-torch2.13-20260910-6d12d7a0/mamba_ssm-2.3.1-cp312-cp312-linux_x86_64.whl" },
-    { name = "marin-finelog" },
+    { name = "marin-finelog", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ffinelog&rev=08f20b50161c85541bb5e88fd5a159070944d0ed" },
     { name = "marin-finelog-server" },
-    { name = "marin-finestore", specifier = ">=0.2.135.dev36906221286" },
-    { name = "marin-iris" },
+    { name = "marin-finestore", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ffinestore&rev=08f20b50161c85541bb5e88fd5a159070944d0ed" },
+    { name = "marin-iris", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Firis&rev=08f20b50161c85541bb5e88fd5a159070944d0ed" },
     { name = "marin-iris-native" },
-    { name = "marin-rigging", extras = ["prometheus"], marker = "extra == 'telemetry'", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frigging&rev=6cb7d763d07690b3cd57ed78d088a0cc927d2ed1" },
-    { name = "marin-rigging", extras = ["secrets"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frigging&rev=6cb7d763d07690b3cd57ed78d088a0cc927d2ed1" },
-    { name = "marin-rolloutengine", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frolloutengine&rev=6cb7d763d07690b3cd57ed78d088a0cc927d2ed1" },
-    { name = "marin-shellbox", extras = ["daytona", "shellsim"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fshellbox&rev=6cb7d763d07690b3cd57ed78d088a0cc927d2ed1" },
+    { name = "marin-rigging", extras = ["prometheus"], marker = "extra == 'telemetry'", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frigging&rev=08f20b50161c85541bb5e88fd5a159070944d0ed" },
+    { name = "marin-rigging", extras = ["secrets"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frigging&rev=08f20b50161c85541bb5e88fd5a159070944d0ed" },
+    { name = "marin-rolloutengine", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frolloutengine&rev=08f20b50161c85541bb5e88fd5a159070944d0ed" },
+    { name = "marin-shellbox", extras = ["daytona", "shellsim"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fshellbox&rev=08f20b50161c85541bb5e88fd5a159070944d0ed" },
     { name = "math-verify", specifier = "==0.9.0" },
     { name = "megatron-bridge", marker = "sys_platform == 'linux' and extra == 'megatron'", specifier = "==0.6.0" },
     { name = "megatron-core", marker = "sys_platform == 'linux' and extra == 'megatron'", specifier = "==0.18.0" },
@@ -3134,7 +3122,7 @@ requires-dist = [
     { name = "s3fs" },
     { name = "smart-open" },
     { name = "speculators", marker = "sys_platform == 'linux' and extra == 'vllm'", git = "https://github.com/lukedhlee/speculators.git?rev=6496b4db007de00dd4741349643d23b23e29dce8" },
-    { name = "taskcompendium", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=6cb7d763d07690b3cd57ed78d088a0cc927d2ed1" },
+    { name = "taskcompendium", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=08f20b50161c85541bb5e88fd5a159070944d0ed" },
     { name = "tensorboard" },
     { name = "tensordict", marker = "sys_platform == 'linux' and extra == 'cuda'" },
     { name = "tensordict", marker = "sys_platform == 'linux' and extra == 'megatron'" },
@@ -3164,7 +3152,7 @@ requires-dist = [
     { name = "transformers", specifier = "==5.16.1" },
     { name = "uvicorn" },
     { name = "verifiable-instructions", git = "https://github.com/abukharin-nv/verifiable-instructions.git?rev=f46a5ac87b1400a4f8973039844b6be9b56e3faf" },
-    { name = "verifyit", extras = ["answer", "schema", "reasoning-gym", "judge"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fverifyit&rev=6cb7d763d07690b3cd57ed78d088a0cc927d2ed1" },
+    { name = "verifyit", extras = ["answer", "schema", "reasoning-gym", "judge"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fverifyit&rev=08f20b50161c85541bb5e88fd5a159070944d0ed" },
     { name = "vllm", marker = "platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'vllm'", url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260929-39e62869693c/vllm-0.0.0.dev20260929+marin.39e62869693c.cu132-cp38-abi3-manylinux_2_28_aarch64.whl" },
     { name = "vllm", marker = "platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux' and extra == 'vllm'", specifier = "==0.0.0.dev20260929+marin.39e62869693c.cu132" },
     { name = "vllm", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'vllm'", url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260929-39e62869693c/vllm-0.0.0.dev20260929+marin.39e62869693c.cu132-cp38-abi3-manylinux_2_28_x86_64.whl" },
@@ -3181,7 +3169,7 @@ analysis = [
 ]
 dev = [
     { name = "litellm" },
-    { name = "marin-rigging", extras = ["prometheus"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frigging&rev=6cb7d763d07690b3cd57ed78d088a0cc927d2ed1" },
+    { name = "marin-rigging", extras = ["prometheus"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frigging&rev=08f20b50161c85541bb5e88fd5a159070944d0ed" },
     { name = "marin-style", git = "https://github.com/marin-community/marin-style?rev=727f180cd423246ca1a6164163a5883cda5bf52b" },
     { name = "matplotlib" },
     { name = "pandas" },
@@ -6553,7 +6541,7 @@ wheels = [
 [[package]]
 name = "taskcompendium"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=6cb7d763d07690b3cd57ed78d088a0cc927d2ed1#6cb7d763d07690b3cd57ed78d088a0cc927d2ed1" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=08f20b50161c85541bb5e88fd5a159070944d0ed#08f20b50161c85541bb5e88fd5a159070944d0ed" }
 dependencies = [
     { name = "marin-rigging", extra = ["prometheus", "secrets"] },
     { name = "pyarrow" },
@@ -7213,7 +7201,7 @@ dependencies = [
 [[package]]
 name = "verifyit"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fverifyit&rev=6cb7d763d07690b3cd57ed78d088a0cc927d2ed1#6cb7d763d07690b3cd57ed78d088a0cc927d2ed1" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fverifyit&rev=08f20b50161c85541bb5e88fd5a159070944d0ed#08f20b50161c85541bb5e88fd5a159070944d0ed" }
 dependencies = [
     { name = "harbor-config" },
     { name = "tomlkit" },
