@@ -350,6 +350,8 @@ def dump_per_dataset_eval_results(
                 entry = {
                     "input_prompt": input_prompts[i],
                     "output_response": output_responses[i],
+                    "diagnostic_token_ids": [int(token) for token in trajectory_batch["response_ids"][i]],
+                    "diagnostic_logprobs": [float(value) for value in trajectory_batch["rollout_logprobs"][i]],
                     "score": trajectory_batch["rewards"][i],
                     "stop_reason": trajectory_batch.get("stop_reasons", [None] * len(input_prompts))[i],
                     "exception_type": (trajectory_batch.get("exception_types") or [None] * len(input_prompts))[i],
