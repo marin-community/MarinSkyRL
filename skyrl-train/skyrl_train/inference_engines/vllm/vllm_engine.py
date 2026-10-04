@@ -68,7 +68,8 @@ from skyrl_train.inference_engines.placement import inference_worker_placement
 from skyrl_train.inference_engines.vllm.numa import set_async_worker_numa_affinity
 from skyrl_train.weight_sync.expert_block.receiver import ExpertBlockReceiver
 from skyrl_train.weight_sync.weight_loader import WeightLoader
-from skyrl_train.weight_sync.vllm_weight_conversion import load_weights_into_vllm
+from skyrl_train.weight_sync.vllm_weight_conversion import load_weights_into_vllm, validate_dummy_weight_coverage
+from skyrl_train.weight_sync.expert_block.stream import storage_identity
 from skyrl_train.weight_sync.weight_extractor import is_weight_sync_dtype_compatible
 from skyrl_train.inference_engines.vllm.utils import (
     pop_vllm_wrapper_kwargs,
@@ -562,6 +563,8 @@ class WorkerWrap:
         with set_current_vllm_config(self.vllm_config), torch.device(self.device):
             initialize_layerwise_reload(model)
         self._skyrl_weight_update_active = True
+        self._skyrl_received_weight_names = set()
+        self._skyrl_loaded_weight_names = set()
 
     def skyrl_finish_weight_reload(self) -> None:
         """RENAMED from ``finish_weight_update`` + NOW WIRED — see
@@ -583,8 +586,48 @@ class WorkerWrap:
         from vllm.model_executor.model_loader.reload import finalize_layerwise_reload
 
         model = self.model_runner.model
+        dummy_pending = self.vllm_config.load_config.load_format == "dummy" and not getattr(
+            self, "_skyrl_dummy_weights_verified", False
+        )
+        if dummy_pending:
+            from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
+            from vllm.model_executor.model_loader.reload.meta import SKIP_LOAD_TENSORS
+            from vllm.model_executor.model_loader.reload.utils import get_layer_params_buffers, get_layer_tensors
+
+            layers = {}
+            skipped_float_parameters = set()
+            for layer_name, layer in model.named_modules():
+                info = get_layerwise_info(layer)
+                live = get_layer_tensors(layer)
+                params, buffers = info.kernel_tensors or get_layer_params_buffers(layer)
+                original = params | buffers
+                tensors = {
+                    name: original.get(name, tensor) for name, tensor in live.items() if name not in SKIP_LOAD_TENSORS
+                }
+                identities = storage_identity(tensors)
+                shard_indices = getattr(layer, "shard_indices", None)
+                padding = 0
+                if shard_indices is not None and "weight" in tensors:
+                    weight = tensors["weight"]
+                    padding = (
+                        shard_indices.num_org_vocab_padding + shard_indices.num_added_vocab_padding
+                    ) * weight.shape[1]
+                layers[layer_name] = {
+                    "can_load": info.can_load(),
+                    "load_numel_total": info.load_numel_total,
+                    "load_numel": info.load_numel,
+                    "tensors": {name: (identities[name], tensor.numel()) for name, tensor in tensors.items()},
+                    "vocab_padding_numel": padding,
+                }
+                for name, tensor in (original | live).items():
+                    if name in SKIP_LOAD_TENSORS and tensor.is_floating_point():
+                        skipped_float_parameters.add(f"{layer_name}.{name}" if layer_name else name)
+            validate_dummy_weight_coverage(layers, self._skyrl_loaded_weight_names, skipped_float_parameters)
         with set_current_vllm_config(self.vllm_config), torch.device(self.device):
             finalize_layerwise_reload(model, self.model_config)
+        if dummy_pending:
+            self._skyrl_dummy_weights_verified = True
+            logger.info("Dummy engine weights verified")
         self._skyrl_weight_update_active = False
         speculative_config = self.vllm_config.speculative_config
         if speculative_config is not None and speculative_config.method == "eagle3":
@@ -766,7 +809,9 @@ class WorkerWrap:
                 gc.collect()
                 torch.cuda.empty_cache()
             else:
-                load_weights_into_vllm(model, self._accumulated_weights)
+                loaded = load_weights_into_vllm(model, self._accumulated_weights)
+                if getattr(self, "_skyrl_weight_update_active", False):
+                    self._skyrl_loaded_weight_names.update(loaded)
             self._accumulated_weights.clear()
             del self._accumulated_weights
             gc.collect()
@@ -785,8 +830,19 @@ class WorkerWrap:
         Args:
             request: Weight update request with names, dtypes, shapes, etc.
         """
+        active = getattr(self, "_skyrl_weight_update_active", False)
+        if (
+            self.vllm_config.load_config.load_format == "dummy"
+            and not active
+            and not getattr(self, "_skyrl_dummy_weights_verified", False)
+        ):
+            raise RuntimeError("Pending dummy weights require a bracketed initial weight sync")
         weight_list = []
         for name, tensor in self._weight_receiver.receive_weights(request):
+            if active:
+                if name in self._skyrl_received_weight_names:
+                    raise RuntimeError(f"Weight received twice in one reload: {name}")
+                self._skyrl_received_weight_names.add(name)
             weight_list.append((name, tensor))
 
         if hasattr(self, "_accumulated_weights"):
@@ -796,7 +852,9 @@ class WorkerWrap:
             del weight_list
         else:
             # Immediate mode (default): load right away
-            load_weights_into_vllm(self.model_runner.model, weight_list)
+            loaded = load_weights_into_vllm(self.model_runner.model, weight_list)
+            if active:
+                self._skyrl_loaded_weight_names.update(loaded)
             for weight in weight_list:
                 del weight
 
