@@ -15,6 +15,7 @@ from skyrl_train.trajectory_runners.types import (
 )
 from skyrl_train.trajectory_runners.trajectory_retention import RETENTION_METRIC_PREFIX
 from skyrl_train.trajectory_runners.routed_experts import normalize_routed_experts
+from skyrl_train.trajectory_runners.marin_tokenizer_chat_template import MARIN_TOKENIZER_CHAT_TEMPLATE
 from skyrl_train.metric_names import (
     ENVIRONMENT_METRIC_PREFIX,
     IDENTITY_AWARE_REWARD_METRIC_PREFIX,
@@ -415,6 +416,7 @@ def _apply_alignment_validity(
 
 
 CUSTOM_CHAT_TEMPLATES = {
+    "marin_tokenizer": MARIN_TOKENIZER_CHAT_TEMPLATE,
     # chat template for qwen3 that preserves thinking tokens
     "qwen3_with_thinking": (
         "{% for message in messages %}"
