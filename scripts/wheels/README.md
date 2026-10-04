@@ -15,7 +15,8 @@ Core and Bridge carry explicit patches under `patches/`. Core retains Hero's
 registered optimizer routes through its emerging optimizer factory and updates
 dependency bounds for frontend 1.30, FLA 0.5.2 and OpenTelemetry 1.44. Bridge uses
 Transformers through 5.18 and the paired FlashInfer 0.6.18.post1 packages. Both
-wheels have the local version `+marin.torch2141.1`.
+Core uses the local version `+marin.torch2141.3`; Bridge uses
+`+marin.torch2141.1`.
 
 FlashAttention, causal-conv1d and Mamba force C++17 upstream. Their build patches
 select C++20, which Torch 2.14 headers require. These wheels use the local version

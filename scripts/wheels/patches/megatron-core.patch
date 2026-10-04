@@ -24,7 +24,7 @@ index 24c6794..2269224 100644
 +++ b/megatron/core/package_info.py
 @@ -8 +8 @@ PATCH = 2
 -PRE_RELEASE = ""
-+PRE_RELEASE = "+marin.torch2141.2"
++PRE_RELEASE = "+marin.torch2141.3"
 diff --git a/pyproject.toml b/pyproject.toml
 index b2474f7..eb43dae 100644
 --- a/pyproject.toml
@@ -40,6 +40,8 @@ index b2474f7..eb43dae 100644
 diff --git a/megatron/core/transformer/attention.py b/megatron/core/transformer/attention.py
 --- a/megatron/core/transformer/attention.py
 +++ b/megatron/core/transformer/attention.py
-@@ -100,0 +101,2 @@
+@@ -94 +93,0 @@
+-    from flash_attn.cute import flash_attn_varlen_func as flash_attn4_varlen_func
+@@ -100,0 +100,2 @@
 +    if HAVE_FA4:
 +        from flash_attn.cute import flash_attn_varlen_func as flash_attn4_varlen_func
