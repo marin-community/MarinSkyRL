@@ -185,6 +185,14 @@ def load_megatron_grads_to_gpu(models):
     torch.cuda.empty_cache()
 
 
+def _megatron_parameter_buffers(model_chunk: DDP) -> list:
+    buffers = [*model_chunk.buffers, *model_chunk.expert_parallel_buffers]
+    backed = [buffer for buffer in buffers if buffer.param_data is not None]
+    if backed and len(backed) != len(buffers):
+        raise RuntimeError("Megatron model has mixed sharded and unsharded parameter buffers")
+    return backed
+
+
 @torch.no_grad()
 def offload_megatron_model_to_cpu(models):
     """
@@ -196,10 +204,7 @@ def offload_megatron_model_to_cpu(models):
     """
     for model_chunk in models:
         if isinstance(model_chunk, DDP):
-            buffers = [*model_chunk.buffers, *model_chunk.expert_parallel_buffers]
-            backed = [buffer for buffer in buffers if buffer.param_data is not None]
-            if backed and len(backed) != len(buffers):
-                raise RuntimeError("Megatron model has mixed sharded and unsharded parameter buffers")
+            backed = _megatron_parameter_buffers(model_chunk)
             if backed:
                 for buffer in backed:
                     if buffer.param_data.storage().size() > 0:
@@ -220,10 +225,7 @@ def offload_megatron_model_to_cpu(models):
 def load_megatron_model_to_gpu(models):
     for model_chunk in models:
         if isinstance(model_chunk, DDP):
-            buffers = [*model_chunk.buffers, *model_chunk.expert_parallel_buffers]
-            backed = [buffer for buffer in buffers if buffer.param_data is not None]
-            if backed and len(backed) != len(buffers):
-                raise RuntimeError("Megatron model has mixed sharded and unsharded parameter buffers")
+            backed = _megatron_parameter_buffers(model_chunk)
             if backed:
                 for buffer in backed:
                     if buffer.param_data.storage().size() == 0:
