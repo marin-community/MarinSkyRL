@@ -20,6 +20,8 @@ from vllm.distributed.weight_transfer.base import WeightTransferUpdateRequest
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.model_executor.layers.attention import is_deferred_attention_layer
 from vllm.model_executor.layers.attention.attention import should_load_quant_weights
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
 from vllm.model_executor.model_loader.reload.meta import SKIP_LOAD_TENSORS
@@ -624,12 +626,30 @@ class WorkerWrap:
                     padding = padding_rows * weight.shape[1]
                     if "bias" in tensors:
                         bias_padding = padding_rows
+                tensor_padding = {}
+                if isinstance(layer, RoutedExperts) and isinstance(layer.quant_method, UnquantizedFusedMoEMethod):
+                    moe = layer.moe_config
+                    hidden = moe.hidden_dim_unpadded
+                    intermediate = moe.intermediate_size_per_partition_unpadded
+                    assert hidden is not None and intermediate is not None
+                    experts = layer.local_num_experts
+                    gate_parts = 2 if moe.is_act_and_mul else 1
+                    checkpoint_numel = {
+                        "w13_weight": experts * gate_parts * intermediate * hidden,
+                        "w2_weight": experts * hidden * intermediate,
+                        "w13_bias": experts * gate_parts * intermediate,
+                        "w2_bias": experts * hidden,
+                    }
+                    for name, numel in checkpoint_numel.items():
+                        if name in tensors:
+                            tensor_padding[name] = tensors[name].numel() - numel
                 layers[layer_name] = {
                     "can_load": info.can_load(),
                     "load_numel_total": info.load_numel_total,
                     "load_numel": info.load_numel,
                     "tensors": {name: (identities[name], tensor.numel()) for name, tensor in tensors.items()},
                     "vocab_padding_numel": padding,
+                    "tensor_padding_numel": tensor_padding,
                     "vocab_bias_padding_numel": bias_padding,
                     "non_persistent_numel": sum(
                         tensor.numel()
