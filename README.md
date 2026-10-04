@@ -42,6 +42,27 @@ Python extras cannot replace a base CPU Torch wheel with a CUDA wheel, so `cpu` 
 exclusive wheel profiles. GPU training selects the `megatron` and `vllm` extras from the frozen root lock.
 Iris installs this profile before launch. The `cpu` profile remains on Torch 2.11.0.
 
+Iris source recipes declare token limits in `context_budget`. The optional
+`max_prompt_tokens` caps the complete rendered history of each task turn, including
+tool observations. It must leave room for `max_new_tokens_per_turn` within
+`request_window_tokens`. For example:
+
+```yaml
+context_budget:
+  request_window_tokens: 32768
+  max_new_tokens_per_turn: 4096
+  max_turns: 16
+  max_prompt_tokens: 16384
+```
+
+The task worker rejects a prompt above this cap before generation and retains completed
+turns for grading. A null cap permits history up to the context window, with a reduced
+response allowance near its end.
+
+Set `generator.sampling_params.stop_token_ids` for explicit token stops. Evaluation
+inherits these stops unless `generator.eval_sampling_params.stop_token_ids` supplies
+an override. This keeps token stops explicit when training selects vLLM generation defaults.
+
 Iris training and checkpoint export select `IRIS_TASK_IMAGE` in
 [the runtime environment](cloud/iris/runtime_environment.py). Update that value to a published
 multi-architecture `iris-task` manifest digest after verifying its Python patch version on every

@@ -132,6 +132,7 @@ def test_resolved_context_budget_artifact_is_reproducible(tmp_path):
             "generated_tokens_per_trajectory": 65536,
             "max_input_tokens": 114688,
             "max_new_tokens_per_turn": 16384,
+            "max_prompt_tokens": None,
             "max_turns": 90,
             "overlong_cache_fraction": 0.25,
             "overlong_cache_tokens": 16384,

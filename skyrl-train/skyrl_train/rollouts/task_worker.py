@@ -258,6 +258,9 @@ class TaskRolloutWorker:
         require_logprobs = logprobs_requested(request, self.trajectory_runner_cfg)
         context_limit = OmegaConf.select(self.trajectory_runner_cfg, "engine_init_kwargs.max_model_len")
         max_input_length = int(self.trajectory_runner_cfg.max_input_length)
+        max_prompt_length = self.trajectory_runner_cfg.get("max_prompt_tokens")
+        if max_prompt_length is None and context_limit is None:
+            max_prompt_length = max_input_length
         max_context_length = (
             int(context_limit)
             if context_limit is not None
@@ -276,7 +279,7 @@ class TaskRolloutWorker:
                     request,
                     sampling_params=sampling,
                     max_context_length=max_context_length,
-                    max_prompt_length=max_input_length if context_limit is None else None,
+                    max_prompt_length=max_prompt_length,
                     chat_template_kwargs=self.chat_template_kwargs,
                     session_id=session_id,
                 )

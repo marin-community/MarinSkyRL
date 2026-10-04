@@ -108,13 +108,14 @@ _REQUIRED_CONTEXT_BUDGET_FIELDS = frozenset(
     }
 )
 _CONTEXT_BUDGET_FRACTION_FIELDS = frozenset({"generated_budget_fraction", "overlong_cache_fraction"})
-_CONTEXT_BUDGET_FIELDS = _REQUIRED_CONTEXT_BUDGET_FIELDS | _CONTEXT_BUDGET_FRACTION_FIELDS
+_CONTEXT_BUDGET_FIELDS = _REQUIRED_CONTEXT_BUDGET_FIELDS | _CONTEXT_BUDGET_FRACTION_FIELDS | {"max_prompt_tokens"}
 _DEFAULT_GENERATED_BUDGET_FRACTION = 0.5
 _DEFAULT_OVERLONG_CACHE_FRACTION = 0.25
 
 _DERIVED_CONTEXT_FIELDS = (
     ("trainer", "max_prompt_length"),
     ("generator", "max_input_length"),
+    ("generator", "max_prompt_tokens"),
     ("generator", "max_turns"),
     ("generator", "sampling_params", "max_generate_length"),
     ("generator", "engine_init_kwargs", "max_model_len"),
@@ -131,12 +132,15 @@ class ContextBudget:
     request_window_tokens: int
     max_new_tokens_per_turn: int
     max_turns: int
+    max_prompt_tokens: int | None = None
     generated_budget_fraction: float = _DEFAULT_GENERATED_BUDGET_FRACTION
     overlong_cache_fraction: float = _DEFAULT_OVERLONG_CACHE_FRACTION
 
     @property
     def max_input_tokens(self) -> int:
-        """Return the input allowance after reserving one complete response."""
+        """Return the input allowance after the optional prompt cap."""
+        if self.max_prompt_tokens is not None:
+            return self.max_prompt_tokens
         return self.request_window_tokens - self.max_new_tokens_per_turn
 
     @property
@@ -151,12 +155,13 @@ class ContextBudget:
         """Return the soft-overlong transition width."""
         return int(self.generated_tokens_per_trajectory * self.overlong_cache_fraction)
 
-    def as_dict(self) -> Dict[str, int | float]:
+    def as_dict(self) -> Dict[str, int | float | None]:
         """Return the persisted representation, including derived client input."""
         return {
             "request_window_tokens": self.request_window_tokens,
             "max_new_tokens_per_turn": self.max_new_tokens_per_turn,
             "max_turns": self.max_turns,
+            "max_prompt_tokens": self.max_prompt_tokens,
             "generated_budget_fraction": self.generated_budget_fraction,
             "overlong_cache_fraction": self.overlong_cache_fraction,
             "max_input_tokens": self.max_input_tokens,
@@ -218,6 +223,10 @@ def resolve_context_budget(raw: Dict[str, Any], config_path: Path) -> ContextBud
     if missing:
         raise ValueError(f"{config_path}: missing context_budget fields: {', '.join(sorted(missing))}")
 
+    prompt_cap = config.get("max_prompt_tokens")
+    if prompt_cap is not None:
+        prompt_cap = _require_positive_integer(prompt_cap, "max_prompt_tokens", config_path)
+
     budget = ContextBudget(
         request_window_tokens=_require_positive_integer(
             config["request_window_tokens"], "request_window_tokens", config_path
@@ -226,6 +235,7 @@ def resolve_context_budget(raw: Dict[str, Any], config_path: Path) -> ContextBud
             config["max_new_tokens_per_turn"], "max_new_tokens_per_turn", config_path
         ),
         max_turns=_require_positive_integer(config["max_turns"], "max_turns", config_path),
+        max_prompt_tokens=prompt_cap,
         generated_budget_fraction=_require_fraction(
             config.get("generated_budget_fraction", _DEFAULT_GENERATED_BUDGET_FRACTION),
             "generated_budget_fraction",
@@ -239,10 +249,16 @@ def resolve_context_budget(raw: Dict[str, Any], config_path: Path) -> ContextBud
             allow_zero=True,
         ),
     )
-    if budget.max_input_tokens <= 0:
+    input_allowance = budget.request_window_tokens - budget.max_new_tokens_per_turn
+    if input_allowance <= 0:
         raise ValueError(
             f"{config_path}: request_window_tokens ({budget.request_window_tokens}) must exceed "
             f"max_new_tokens_per_turn ({budget.max_new_tokens_per_turn})"
+        )
+    if budget.max_prompt_tokens is not None and budget.max_prompt_tokens > input_allowance:
+        raise ValueError(
+            f"{config_path}: max_prompt_tokens ({budget.max_prompt_tokens}) exceeds the input allowance "
+            f"({budget.request_window_tokens} request tokens - {budget.max_new_tokens_per_turn} response tokens)"
         )
     return budget
 
@@ -258,6 +274,7 @@ def _materialize_context_budget(
 
     trainer["max_prompt_length"] = budget.max_input_tokens
     generator["max_input_length"] = budget.max_input_tokens
+    generator["max_prompt_tokens"] = budget.max_prompt_tokens
     generator["max_turns"] = budget.max_turns
     generator.setdefault("sampling_params", {})["max_generate_length"] = budget.max_new_tokens_per_turn
     generator.setdefault("engine_init_kwargs", {})["max_model_len"] = budget.request_window_tokens

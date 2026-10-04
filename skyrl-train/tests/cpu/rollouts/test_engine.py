@@ -7,6 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import shutil
 import threading
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
@@ -17,6 +18,8 @@ import pytest
 from datasets import Dataset
 from harbor_config.errors import ErrorCategory, error_category
 from omegaconf import OmegaConf
+from cloud.iris.rl_config_translation import compose_skyrl_config, parse_rl_config
+from skyrl_train.config.behavior_logprobs import configure_behavior_logprob_sampling
 from skyrl_gym.envs.base_text_env import BaseTextEnv
 from skyrl_gym.envs.registration import EnvSpec, registry
 from skyrl_gym.verification import RewardResult, VerificationResult, VerificationStatus, normalized_verifier_score
@@ -1896,15 +1899,52 @@ async def test_aime_rollout_preserves_length_reward_and_phase_metrics(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("projection_type", [WholeTaskProjection, StepTaskProjection])
 @pytest.mark.parametrize(
-    "max_model_len,max_input_length,output_limit,expected_budgets",
-    [(5, 100, None, [3]), (5, 100, 2, [2]), (2, 100, None, []), (None, 4, None, [10]), (None, 1, None, [])],
+    "max_model_len,max_input_length,output_limit,max_prompt_tokens,prompt_length,expected_budgets",
+    [
+        (5, 100, None, None, 2, [3]),
+        (5, 100, 2, None, 2, [2]),
+        (2, 100, None, None, 2, []),
+        (None, 4, None, None, 2, [10]),
+        (None, 1, None, None, 2, []),
+        (5, 1, None, None, 2, [3]),
+        (32768, 16384, 4096, 16384, 16384, [4096]),
+        (32768, 16384, 4096, 16384, 16385, []),
+    ],
 )
 async def test_context_limits_preserve_only_completed_gym_turns(
-    task_inputs, projection_type, max_model_len, max_input_length, output_limit, expected_budgets
+    task_inputs,
+    tmp_path,
+    projection_type,
+    max_model_len,
+    max_input_length,
+    output_limit,
+    max_prompt_tokens,
+    prompt_length,
+    expected_budgets,
 ):
     config, request = task_inputs
     config.max_input_length = max_input_length
     config.engine_init_kwargs = {"max_model_len": max_model_len}
+    if max_prompt_tokens is not None:
+        source = tmp_path / "recipe.yaml"
+        OmegaConf.save(
+            OmegaConf.create(
+                {
+                    "context_budget": {
+                        "request_window_tokens": max_model_len,
+                        "max_new_tokens_per_turn": output_limit,
+                        "max_turns": 2,
+                        "max_prompt_tokens": max_prompt_tokens,
+                    },
+                    "generator": {"sampling_params": {"stop_token_ids": [99]}},
+                }
+            ),
+            source,
+        )
+        config = compose_skyrl_config(
+            parse_rl_config(str(source)), {"num_nodes": 1}, SimpleNamespace(gpus_per_node=8)
+        ).config.generator
+        configure_behavior_logprob_sampling(config)
     config.sampling_params.logprobs = 0
     request["sampling_params"] = None if output_limit is None else {"max_tokens": output_limit}
     task = gym_task(
@@ -1921,6 +1961,7 @@ async def test_context_limits_preserve_only_completed_gym_turns(
     engine.tokenizer = MagicMock()
     engine.tokenizer.decode.return_value = "#### 13"
     budgets = []
+    initial_prompt = [1, 2] + [1] * (prompt_length - 2)
 
     async def tokenize(payload):
         tokens = []
@@ -1928,10 +1969,12 @@ async def test_context_limits_preserve_only_completed_gym_turns(
             if message["role"] == "assistant":
                 tokens.extend([3, 4, 99] if message["content"] else [99])
             else:
-                tokens.extend([1, 2] if index == 0 else [90, 91])
+                tokens.extend(initial_prompt if index == 0 else [90, 91])
         return {"tokens": tokens}
 
     async def serve(payload):
+        if max_prompt_tokens is not None:
+            assert payload["json"]["stop_token_ids"] == [99]
         budgets.append(payload["json"]["max_completion_tokens"])
         return {
             "choices": [
@@ -1955,7 +1998,7 @@ async def test_context_limits_preserve_only_completed_gym_turns(
     batch = writer.groups[0][1].trajectory_batch
     assert budgets == expected_budgets
     assert batch["stop_reasons"] == ["length"]
-    assert batch["prompt_token_ids"] == [[1, 2]]
+    assert batch["prompt_token_ids"] == [initial_prompt]
     if expected_budgets:
         assert batch["response_ids"] == [[3, 4]]
         assert batch["loss_masks"] == [[1, 1]]

@@ -394,6 +394,8 @@ generator:
   inference_engine_mp_backend: false
   n_samples_per_prompt: 5
   max_input_length: ${trainer.max_prompt_length}
+  # Optional cap on the complete rendered history of each task turn.
+  max_prompt_tokens: null
   vllm_v1_disable_multiproc: true
   enable_prefix_caching: true
   enable_chunked_prefill: true
@@ -446,6 +448,7 @@ generator:
     top_k: -1
     logprobs: null
     stop: null
+    stop_token_ids: null
 
   eval_sampling_params:
     max_generate_length: ${generator.sampling_params.max_generate_length}
@@ -456,6 +459,7 @@ generator:
     top_k: -1
     logprobs: null
     stop: null
+    stop_token_ids: ${generator.sampling_params.stop_token_ids}
 
   eval_n_samples_per_prompt: 1
 
