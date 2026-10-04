@@ -658,7 +658,15 @@ class BasePPOExp:
             if future is not None:
                 from skyrl_train.trainer import kill_inference_engines  # noqa: PLC0415
 
-                future.add_done_callback(lambda f: f.exception() is None and kill_inference_engines(f.result()))
+                def _discard_inference(f):
+                    if f.exception() is None:
+                        client = f.result()
+                        try:
+                            client.shutdown_http_endpoint()
+                        finally:
+                            kill_inference_engines(client)
+
+                future.add_done_callback(_discard_inference)
             try:
                 if trainer is not None:
                     asyncio.run(trainer.shutdown())
