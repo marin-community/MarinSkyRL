@@ -25,7 +25,7 @@ from skyrl_gym.envs.lcb.livecodebench import (
     normalize_lcb_ground_truth,
 )
 from skyrl_gym.envs.nemotron_ultra.answer_extraction import final_answer_text, last_boxed_answer
-from skyrl_gym.envs.nemotron_ultra import NEMOTRON_ULTRA_MOPD_AGENTS, NEMOTRON_ULTRA_RLVR2_AGENTS
+from skyrl_gym.envs.nemotron_ultra import GENRM_AGENTS, NEMOTRON_ULTRA_MOPD_AGENTS, NEMOTRON_ULTRA_RLVR2_AGENTS
 from skyrl_gym.envs.nemotron_ultra.calendar import grade_calendar
 from skyrl_gym.envs.nemotron_ultra.calendar_verifyit import grade_calendar_verifyit
 from skyrl_gym.envs.nemotron_ultra.code_gen import DEFAULT_PER_TEST_TIMEOUT_SECONDS, has_reasoning_format_violation
@@ -234,7 +234,7 @@ class NemotronTaskSession:
         return observations
 
     def _answer_grade(self, action, message):
-        if self.agent in {"genrm_simple_agent", "genrm_simple_agent_reasoning_off"}:
+        if self.agent in GENRM_AGENTS:
             return float(self.config.get("genrm", {}).get("default_score", 3.0)), {"cohort_reward_pending": True}
         if self.agent in {NS_TOOLS_AGENT, "math_with_judge_simple_agent"}:
             if self.verifyit_enabled:

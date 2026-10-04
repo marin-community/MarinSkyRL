@@ -83,10 +83,12 @@ async def execute_code(
     code: str,
     *,
     timeout: float = 6,
-    fractional: bool = False,
+    reward_mode: str = runtime.BINARY_REWARD_MODE,
     limits: runtime.VerifierLimits = runtime.DEFAULT_LIMITS,
 ) -> tuple[float, dict]:
     """Return source-compatible test results without sending expected answers to candidate execution."""
+    if reward_mode not in runtime.LCB_REWARD_MODES:
+        raise ValueError(f"Unsupported LCB reward_mode: {reward_mode!r}")
     reference = json.loads(runtime.postprocess_lcb_sample(tests)["input_output"])
     function = reference.get("fn_name")
     inputs = reference["inputs"]
@@ -105,12 +107,12 @@ async def execute_code(
     try:
         async with asyncio.timeout(deadline):
             await kernel.start()
-            return await _candidate_results(kernel, inputs, expected, code, function, timeout, fractional)
+            return await _candidate_results(kernel, inputs, expected, code, function, timeout, reward_mode)
     finally:
         await kernel.close()
 
 
-async def _candidate_results(kernel, inputs, expected, code, function, timeout, fractional):
+async def _candidate_results(kernel, inputs, expected, code, function, timeout, reward_mode):
     script = f"{kernel.directory}/code_candidate.py"
     await kernel.machine.upload(CANDIDATE_SCRIPT, script)
     ready = await kernel.execute("from code_candidate import candidate_method, evaluate", timeout=timeout)
@@ -152,11 +154,11 @@ async def _candidate_results(kernel, inputs, expected, code, function, timeout, 
                     json.dumps(actual, ensure_ascii=False),
                 )
                 results.append(True if verdict.reward == 1.0 else -2)
-        if results[-1] is not True and not fractional:
+        if results[-1] is not True and reward_mode == runtime.BINARY_REWARD_MODE:
             break
     reward = (
         sum(result is True for result in results) / len(results)
-        if fractional
+        if reward_mode == runtime.FRACTIONAL_REWARD_MODE
         else float(all(result is True for result in results))
     )
     return reward, {"test_results": results, "total_tests": len(expected)}

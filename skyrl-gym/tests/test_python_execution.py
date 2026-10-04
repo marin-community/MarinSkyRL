@@ -119,7 +119,7 @@ async def test_shellbox_candidate_keeps_state_across_hidden_tests(machine):
     ]
     stateful = "counter=0\ndef solve(x):\n    global counter\n    counter += 1\n    return counter"
     assert (await execute_code(machine, tests, stateful))[0] == 1.0
-    reward, details = await execute_code(machine, tests, "def solve(x): return 1", fractional=True)
+    reward, details = await execute_code(machine, tests, "def solve(x): return 1", reward_mode="fractional")
     assert reward == 0.5
     assert details["test_results"] == [True, -2]
 
@@ -163,7 +163,7 @@ async def test_shellbox_runtime_loss_discards_prior_partial_credit(machine):
     ]
     code = "def solve(x):\n    import os\n    if x: os._exit(0)\n    return 1"
     with pytest.raises(RuntimeError):
-        await execute_code(machine, tests, code, fractional=True)
+        await execute_code(machine, tests, code, reward_mode="fractional")
 
 
 @pytest.mark.asyncio

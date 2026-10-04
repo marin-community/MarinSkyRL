@@ -7,8 +7,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from taskcompendium.environment import ExternalVerifierSpec
 from taskcompendium.models import TaskSpec, VerifierKind
 
+from skyrl_gym.envs.nemotron_ultra import GENRM_AGENTS
+
 GENRM_GROUP_GRADER = "nemotron_genrm"
-GENRM_AGENTS = frozenset({"genrm_simple_agent", "genrm_simple_agent_reasoning_off"})
 
 
 class GroupGraderSpec(BaseModel):

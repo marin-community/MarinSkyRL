@@ -513,14 +513,6 @@ def grade(ground_truth: Any, candidate_sql: str) -> tuple[GradeOutcome, str]:
     return GradeOutcome.MATCH, "result sets match on seeded and perturbed databases"
 
 
-def score(ground_truth: Any, response: str) -> tuple[float, dict[str, Any]]:
-    """Rollout-time reward: ``1.0`` for a match, ``0.0`` otherwise (INFRA also scores 0 and is flagged)."""
-    outcome, detail = grade(ground_truth, extract_sql(response))
-    if outcome is GradeOutcome.INFRA:
-        return 0.0, {"verifier_error": detail}
-    return (1.0 if outcome is GradeOutcome.MATCH else 0.0), {"detail": detail}
-
-
 def is_correct(response: str, normalized_ground_truth: str) -> bool:
     """Contract preflight check: does ``response`` satisfy the (already normalized) verifier input?"""
     return grade(normalized_ground_truth, extract_sql(response))[0] is GradeOutcome.MATCH

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import re
 from collections.abc import Callable
 from concurrent.futures import Executor
@@ -30,6 +31,7 @@ from skyrl_gym.task_records import fold_grades
 from skyrl_gym.tools.search import SearchClient
 
 AnswerGrader = Callable[[ModelTurn, dict[str, Any], dict[str, Any]], Transition]
+logger = logging.getLogger(__name__)
 
 
 async def run_blocking[T](executor: Executor | None, operation: Callable[..., T], *args: Any, **kwargs: Any) -> T:
@@ -182,10 +184,11 @@ class CodeTaskSession:
         reward_mode = specification.parameters["config"].get("reward_mode", BINARY_REWARD_MODE)
         if reward_mode not in LCB_REWARD_MODES:
             raise ValueError(f"Unsupported LCB reward_mode: {reward_mode!r}")
-        self.fractional = reward_mode == "fractional"
+        self.reward_mode = reward_mode
         try:
             self.tests = json.loads(normalize_lcb_ground_truth(ground_truth(specification.parameters["extras"])))
         except (ValueError, TypeError):
+            logger.exception("Invalid LCB ground truth")
             self.tests = None
         if self.tests:
             assert machine is not None
@@ -206,7 +209,7 @@ class CodeTaskSession:
             )
         assert self.machine is not None
         try:
-            reward, details = await execute_code(self.machine, self.tests, code or "", fractional=self.fractional)
+            reward, details = await execute_code(self.machine, self.tests, code or "", reward_mode=self.reward_mode)
         except (OSError, RuntimeError, TypeError, ValueError) as error:
             self.result = GradeResult(
                 Outcome.INFRA_ERROR,
