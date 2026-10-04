@@ -14,7 +14,7 @@ are fetched by exact commit. Upstream prebuilt Torch extensions are bypassed.
 Core and Bridge carry explicit patches under `patches/`. Core retains Hero's
 registered optimizer routes through its emerging optimizer factory and updates
 dependency bounds for frontend 1.30, FLA 0.5.2 and OpenTelemetry 1.44. Bridge uses
-Transformers through 5.18 and the paired FlashInfer 0.6.18.post1 packages. Both
+Transformers through 5.18 and the paired FlashInfer 0.6.18.post1 packages.
 Core uses the local version `+marin.torch2141.3`; Bridge uses
 `+marin.torch2141.1`.
 
