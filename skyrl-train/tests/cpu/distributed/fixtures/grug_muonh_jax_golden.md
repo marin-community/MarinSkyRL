@@ -7,11 +7,14 @@
 
 The fixture contains embeddings, dense attention, attention gates, routers,
 rank-3 routed experts, shared experts, GatedNorms, one-dimensional norms and
-biases, and the output head. It uses seed `20260730`, FP32 parameters and
+biases, and the output head. The grouped-query attention query matrix has
+shape `(12, 4)` and weights from `-0.1` to `0.1`; its fused test has two query
+heads per key/value group. It uses seed `20260730`, FP32 parameters and
 gradients, three steps, MuonH/AdamH LR `0.03`, Adam LR `0.004`, momentum
 `0.95`, Nesterov, five BF16 Newton--Schulz steps, betas `(0.9, 0.95)`, and
-epsilons `1e-8`. Final matrix axes are transposed when saved to match PyTorch
-layout. The recipe applies no weight decay.
+epsilons `1e-8`. The frozen CPU reference uses JAX `0.10.1`, Optax `0.2.6`,
+NumPy `2.3.5` and Equinox `0.13.2`. Final matrix axes are transposed when
+saved to match PyTorch layout. The recipe applies no weight decay.
 
 [`generate_grug_muonh_golden.py`](generate_grug_muonh_golden.py) contains the
 complete parameter tree, routing keys, state extraction, and layout conversion.
@@ -19,15 +22,17 @@ The JAX reference receives nonzero weight decay to confirm that Marin's recipe
 does not apply it. The MarinSkyRL runtime rejects nonzero weight decay so an
 operator cannot mistake the ignored setting for active decay.
 
-Archive the pinned Marin revision to `/tmp/marin-grug-muonh-61a4a8c`, then run:
+Archive the pinned Marin revision to `/tmp/marin-grug-muonh-61a4a8c`, create
+its frozen CPU environment, then run the generator from this fixture directory:
 
 ```sh
-cd skyrl-train/tests/cpu/distributed/fixtures
-PYTHONPATH=/tmp/marin-grug-muonh-61a4a8c:/tmp/marin-grug-muonh-61a4a8c/lib/levanter/src \
+uv sync --project /tmp/marin-grug-muonh-61a4a8c --package marin-core \
+  --extra cpu --frozen --no-dev
+PYTHONPATH=/tmp/marin-grug-muonh-61a4a8c \
   uv run --project /tmp/marin-grug-muonh-61a4a8c --no-sync \
   python generate_grug_muonh_golden.py
 sha256sum grug_muonh_jax_golden.npz
 ```
 
 Expected SHA-256:
-`57a66c2b0d36f1fbaffe1646b016457b7b92773fbc631aac318ceac45c9cb387`.
+`7bf901b47decb293c0e42c18f64af1eded1df69135d101f51899a429790ff871`.
