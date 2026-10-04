@@ -127,8 +127,8 @@ def test_dummy_engine_installs_every_tensor_and_holds_requests_until_verified_sy
             if load_format == "auto":
                 real_budget = budget
                 real_weights = ray.get(actor.worker_rpc.remote("read_snapshot_weights", names))[0]
-                real_output = asyncio.run(client.generate({"prompts": PROMPTS, "sampling_params": SAMPLING}))
                 real_single = asyncio.run(client.generate({"prompts": PROMPTS[:1], "sampling_params": SAMPLING}))
+                real_output = asyncio.run(client.generate({"prompts": PROMPTS, "sampling_params": SAMPLING}))
                 for shard in shards:
                     with safe_open(shard, framework="pt", device="cpu") as weights:
                         for name in weights.keys():
@@ -174,11 +174,13 @@ def test_dummy_engine_installs_every_tensor_and_holds_requests_until_verified_sy
 
             dummy_output = asyncio.run(verify_and_resume())
             dummy_weights = ray.get(actor.worker_rpc.remote("read_snapshot_weights", names))[0]
-            assert dummy_output["response_ids"] == real_output["response_ids"]
             for name in names:
                 assert dummy_weights[name]["found"], (name, dummy_weights[name])
                 torch.testing.assert_close(dummy_weights[name]["tensor"], real_weights[name]["tensor"], rtol=0, atol=0)
-            print(f"X4a verified {len(names)} HF tensors and 8 greedy prompts", flush=True)
+            print(f"X4a verified {len(names)} HF tensors", flush=True)
+            print("X4a greedy token IDs", real_output["response_ids"], dummy_output["response_ids"], flush=True)
+            assert dummy_output["response_ids"] == real_output["response_ids"]
+            print("X4a verified 8 greedy prompts", flush=True)
         finally:
             if client is not None:
                 try:
