@@ -45,7 +45,6 @@ def test_native_adamw_recipe_matches_torch_weight_updates(megatron_overrides):
     from skyrl_train.distributed.megatron.optimizer import (
         get_megatron_optimizer,
         get_megatron_optimizer_param_scheduler,
-        init_megatron_optim_config,
     )
 
     torch.distributed.init_process_group("nccl", store=torch.distributed.HashStore(), rank=0, world_size=1)
@@ -71,7 +70,7 @@ def test_native_adamw_recipe_matches_torch_weight_updates(megatron_overrides):
         if megatron_overrides:
             kwargs.update(adam_beta1=0.6, adam_beta2=0.75, adam_eps=2e-3)
             betas, epsilon = (0.6, 0.75), 2e-3
-        optimizer = get_megatron_optimizer([model], init_megatron_optim_config(recipe, kwargs))
+        optimizer = get_megatron_optimizer([model], recipe, kwargs)
         scheduler = get_megatron_optimizer_param_scheduler(optimizer, OmegaConf.create(recipe), num_training_steps=3)
         adamw = torch.optim.AdamW(reference.parameters(), lr=0.03, betas=betas, eps=epsilon, weight_decay=0.2)
         for step, (amplitude, learning_rate) in enumerate(zip((0.125, -0.25, 0.5), (0.006, 0.018, 0.03), strict=True)):
