@@ -289,7 +289,7 @@ class PolicyMegatronConfig(Section):
 class Policy(Section):
     """Author schema at trainer.policy."""
 
-    max_consecutive_nonfinite_steps: int = field(3)
+    max_consecutive_nonfinite_steps: int | None = field(3)
     host_memory_monitor: HostMemoryMonitor = Field(default_factory=HostMemoryMonitor)
     grug_query_bias_update_mode: Literal["frozen", "interpolate", "loss_free", "replace"] = field(
         "frozen",
