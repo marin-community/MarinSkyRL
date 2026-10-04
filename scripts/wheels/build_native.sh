@@ -1,21 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# CPython 3.12, Linux. TE supports x86_64 and aarch64; other recipes target x86_64.
+# CPython 3.12, Linux. Every new artifact needs qualification on its target GPU.
 package="${1:?usage: build_native.sh PACKAGE BUILD_DIRECTORY}"
 build_dir="$(realpath -m "${2:?usage: build_native.sh PACKAGE BUILD_DIRECTORY}")"
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 source_subdir=.
+source_patch=
 python_version=3.12.14
 architecture="$(uname -m)"
 case "$architecture" in
-    x86_64) ;;
-    aarch64)
-        if [[ "$package" != transformer-engine-torch ]]; then
-            echo "Only transformer-engine-torch is qualified for aarch64 in this script" >&2
-            exit 2
-        fi
-        ;;
+    x86_64) cuda_architecture=90; torch_cuda_architecture=9.0 ;;
+    aarch64) cuda_architecture=100; torch_cuda_architecture=10.0 ;;
     *) echo "unsupported build architecture: $architecture" >&2; exit 2 ;;
 esac
 max_jobs=2
@@ -23,18 +19,19 @@ package_environment=()
 case "$package" in
     flash-attn)
         repository=Dao-AILab/flash-attention
-        source_commit=060c9188beec3a8b62b33a3bfa6d5d2d44975fab
-        package_environment+=(FLASH_ATTENTION_FORCE_BUILD=TRUE FLASH_ATTN_CUDA_ARCHS=90)
+        source_commit=a8aa52b1ab3e9ca574c8a33b3f35afc017ffa2e2
+        package_environment+=(FLASH_ATTENTION_FORCE_BUILD=TRUE "FLASH_ATTN_CUDA_ARCHS=$cuda_architecture")
         ;;
     causal-conv1d)
         repository=Dao-AILab/causal-conv1d
-        source_commit=9e4ace0b1d53ede275308abf25f64a1fc04c5fd4
+        source_commit=cd81f0413cad2fc1e6f17e785ac39f59aae690cd
         package_environment+=(CAUSAL_CONV1D_FORCE_BUILD=TRUE)
         ;;
     mamba-ssm)
         repository=state-spaces/mamba
-        source_commit=c5afbdf3bda1a09d68f65181ae3a43ec71079820
-        package_environment+=(MAMBA_FORCE_BUILD=TRUE)
+        source_commit=a14b1dff0454a3bc27d9eb31355dc01e4b2490ec
+        source_patch=mamba-ssm.patch
+        package_environment+=(MAMBA_FORCE_BUILD=TRUE MAMBA_LOCAL_VERSION=marin.cu132torch2141.1)
         ;;
     transformer-engine-torch)
         repository=NVIDIA/TransformerEngine
@@ -42,6 +39,23 @@ case "$package" in
         source_subdir=transformer_engine/pytorch
         package_environment+=(NVTE_PYTORCH_FORCE_BUILD=TRUE NVTE_NO_LOCAL_VERSION=1 NVTE_BUILD_MAX_JOBS=1)
         max_jobs=1
+        ;;
+    megatron-core)
+        repository=NVIDIA/Megatron-LM
+        source_commit=4b4acac9a1d28ea6829c8d4f566d75698a21249d
+        source_patch=megatron-core.patch
+        package_environment+=(NO_VCS_VERSION=1)
+        ;;
+    megatron-bridge)
+        repository=NVIDIA-NeMo/Megatron-Bridge
+        source_commit=c0e164ed2aedac4ad1c877780e2564a19d5d54ec
+        source_patch=megatron-bridge.patch
+        package_environment+=(NO_VCS_VERSION=1)
+        ;;
+    fast-hadamard-transform)
+        repository=Dao-AILab/fast-hadamard-transform
+        source_commit=f134af63deb2df17e1171a9ec1ea4a7d8604d5ca
+        package_environment+=(FAST_HADAMARD_TRANSFORM_FORCE_BUILD=TRUE)
         ;;
     *) echo "unsupported package: $package" >&2; exit 2 ;;
 esac
@@ -67,6 +81,10 @@ fi
 git -C "$build_dir/source" submodule update --init --recursive
 git -C "$build_dir/source" submodule foreach --quiet --recursive \
     'test -z "$(git status --porcelain --untracked-files=all --ignore-submodules=none)"'
+if [[ -n "$source_patch" ]]; then
+    git -C "$build_dir/source" apply --unidiff-zero --check "$script_dir/patches/$source_patch"
+    git -C "$build_dir/source" apply --unidiff-zero "$script_dir/patches/$source_patch"
+fi
 
 virtual_env="$build_dir/venv"
 site_packages="$virtual_env/lib/python${python_version%.*}/site-packages"
@@ -80,15 +98,21 @@ build_environment=(
     "CPATH=$site_packages/nvidia/cudnn/include:$site_packages/nvidia/nccl/include"
     "NVCC_THREADS=1"
     "MAX_JOBS=$max_jobs"
+    "TORCH_CUDA_ARCH_LIST=$torch_cuda_architecture"
     "${package_environment[@]}"
 )
 {
     printf 'package=%s\narchitecture=%s\nsource=%s\n' "$package" "$architecture" "$source_commit"
     sha256sum "$0" "$script_dir/native-cu132.txt"
+    if [[ -n "$source_patch" ]]; then
+        sha256sum "$script_dir/patches/$source_patch"
+        git -C "$build_dir/source" diff --binary
+    fi
     git -C "$build_dir/source" submodule status --recursive
     "$virtual_env/bin/python" --version
     uv --version
     "$cuda_home/bin/nvcc" --version
+    "$cuda_home/bin/ptxas" --version
     c++ --version
     ldd --version
     "$virtual_env/bin/python" -c \

@@ -1,0 +1,22 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index be45bc8..33404de 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -16 +16 @@
+-requires = ["setuptools<80.0.0", "pybind11", "torch", "wheel"]
++requires = ["setuptools>=80,<81", "pybind11", "torch", "wheel"]
+@@ -74 +74 @@ dependencies = [
+-    "transformers>=5.8,<=5.12.1",
++    "transformers>=5.8,<=5.18.0",
+@@ -101,2 +101,2 @@ dependencies = [
+-    "flashinfer-python==0.6.8.post1",  # keep flashinfer-python and flashinfer-cubin in lockstep:
+-    "flashinfer-cubin==0.6.8.post1",   # the runtime version-match check fails otherwise
++    "flashinfer-python==0.6.18.post1",  # keep flashinfer-python and flashinfer-cubin in lockstep:
++    "flashinfer-cubin==0.6.18.post1",   # the runtime version-match check fails otherwise
+diff --git a/src/megatron/bridge/package_info.py b/src/megatron/bridge/package_info.py
+index b4b20cb..881fb56 100644
+--- a/src/megatron/bridge/package_info.py
++++ b/src/megatron/bridge/package_info.py
+@@ -19 +19 @@ PATCH = 2
+-PRE_RELEASE = ""
++PRE_RELEASE = "+marin.torch2141.1"
