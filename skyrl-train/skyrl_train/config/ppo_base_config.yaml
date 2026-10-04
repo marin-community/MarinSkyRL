@@ -518,6 +518,10 @@ environment:
   env_class: "gsm8k"
 
 trajectory_runner:
+  machine:
+    backend: docker
+    runtime_bundle: null
+    qemu: null
   command_timeout: 120
   max_concurrent_tasks: null
   skopeo: skopeo

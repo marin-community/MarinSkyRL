@@ -6,13 +6,11 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from functools import partial
-from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
-from shellbox.backends.docker.machine import DockerMachineFactory
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
 from shellbox.machine import MachineFactory
 from taskcompendium.environment import EnvironmentKind
@@ -41,6 +39,7 @@ from skyrl_train.rollouts.group_grader import GroupGraderSpec
 from skyrl_train.rollouts.group_grading import GROUP_GRADERS, GroupGrader, grade_groups
 from skyrl_train.rollouts.gym_tasks import GymTaskSession, grade_result
 from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings, harbor_grading_failure, shape_harbor_rollouts
+from skyrl_train.rollouts.task_machines import TaskMachineBackend, task_machine_factory
 from skyrl_train.rollouts.workers import WorkerShard, detached_config
 from skyrl_train.rollouts.finalization import finalize_trajectory_batch, propagate_data_sources
 from skyrl_train.rollout_observability import rollout_phase, rollout_wait
@@ -417,6 +416,11 @@ class TaskRolloutWorkerSpec:
     def build(self, tokenizer, shard: WorkerShard) -> TaskRolloutWorker:
         registry.update(self.environments)
         harbor = None if self.harbor_config is None else HarborTaskSettings.from_config(self.harbor_config)
+        if (
+            harbor is not None
+            and TaskMachineBackend(self.config.trajectory_runner.machine.backend) is not TaskMachineBackend.DOCKER
+        ):
+            raise ValueError("TaskCompendium machine selection cannot override a Harbor backend")
         runner_config = self.config.generator
         client_config = OmegaConf.merge(self.config, {"generator": {"enable_http_endpoint": False}})
         client = DirectModelClient(InferenceEngineClient(self.engines, tokenizer, client_config))
@@ -431,10 +435,7 @@ class TaskRolloutWorkerSpec:
             {
                 EnvironmentKind.DOCKER: harbor.machine_factory(self.config.trajectory_runner)
                 if harbor is not None
-                else DockerMachineFactory(
-                    skopeo=Path(self.config.trajectory_runner.skopeo),
-                    image_cache=Path(self.config.trajectory_runner.image_cache).expanduser(),
-                ),
+                else task_machine_factory(self.config.trajectory_runner),
                 EnvironmentKind.SHELLSIM: ShellSimMachineFactory(),
             },
             command_timeout=float(self.config.trajectory_runner.command_timeout),

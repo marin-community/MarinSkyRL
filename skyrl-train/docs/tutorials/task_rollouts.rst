@@ -86,3 +86,63 @@ The worker returns after the buffer commit.
 
 Rollout telemetry records collection, backend tokenization, batch assembly,
 finalization, model waits, and environment queue and execution times.
+
+Image-backed task machines
+--------------------------
+
+TaskCompendium uses ``trajectory_runner.machine.backend`` to select ``docker``
+(the default) or ``qemu`` for Docker environments. This setting does not change
+Harbor backend selection or task network limits.
+
+For a verified prepared image bundle, set ``machine.runtime_bundle`` and leave
+``machine.qemu.assets`` as ``null``::
+
+    trajectory_runner:
+      machine:
+        backend: qemu
+        runtime_bundle:
+          manifest_uri: s3://<regional-bucket>/<runtime>/manifest.json
+          manifest_sha256: <manifest-sha256>
+          archive_uri: s3://<regional-bucket>/<runtime>/bundle.tar.gz
+          archive_sha256: <archive-sha256>
+          installation_parent: /opt
+        qemu:
+          acceleration: tcg
+          assets: null
+
+Each node checks the manifest and archive hashes and extracts the prepared bundle
+before Ray starts. Rollout workers check the local bundle before machine creation.
+The manifest supplies ``directory_name`` and the exact pinned ``source_image``;
+the factory maps that registry image to the installed bundle. Shellbox checks
+its image metadata before use. This path needs no host compiler, OCI staging
+tools, or host package installation. Runtime manifests must have no host packages.
+
+For on-worker image preparation, supply ``trajectory_runner.skopeo`` and
+``trajectory_runner.image_cache``, plus explicit assets::
+
+    trajectory_runner:
+      machine:
+        backend: qemu
+        qemu:
+          acceleration: tcg
+          bundle_cache: /tmp/task-bundles
+          assets:
+            qemu: /opt/task-runtime/qemu-system-x86_64
+            kernel: /opt/task-runtime/vmlinuz
+            busybox: /opt/task-runtime/busybox
+            firmware: /opt/task-runtime/firmware
+            libraries: /opt/task-runtime/lib
+            umoci: /opt/task-runtime/umoci
+            disk_size_mb: 2048
+            runtime_id: <immutable-runtime-identity>
+
+Provision these assets on each rollout worker before use. Image preparation
+requires ``cc``, ``cpio``, ``mkfs.ext4`` and access to the registry. The task guest
+has no network. QEMU rejects tasks that request network access, GPUs, or a
+storage-size override. ``tcg`` does not need ``/dev/kvm``; ``auto`` can use KVM
+when available.
+
+Run the explicit machine acceptance check before training::
+
+    PYTHONPATH=skyrl-train uv run --frozen python skyrl-train/scripts/check_task_machine.py \
+      <config.yaml> <registry-image@sha256:digest>
