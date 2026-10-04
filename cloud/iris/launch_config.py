@@ -17,15 +17,13 @@ from skyrl_train.config.objective_spec import validate_objective
 from cloud.iris.ray_storage import RaySpillBackend, resolve_ray_spill_target
 from cloud.iris.role_plan import derive_num_nodes, derive_role_plan
 from cloud.iris.rl_config_translation import (
-    RL_ENTRYPOINTS,
-    RLEntrypoint,
     compose_skyrl_config,
     parse_rl_config,
     registered_rl_entrypoint_module,
     training_type_for_entrypoint,
-    validate_tp_divides_heads,
 )
 from cloud.iris.runtime_environment import RuntimeMode, runtime_profile_for_strategy
+from marinskyrl.recipe_schema import RL_ENTRYPOINTS, RLEntrypoint, validate_tp_divides_heads
 from marinskyrl.distillation import validate_generation_logprobs
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from marinskyrl.task_sources import data_source
@@ -122,7 +120,7 @@ class IrisConfig:
 class IngressConfig:
     """Optional controller ingress and literal-recording settings."""
 
-    mode: str = "direct"
+    mode: str = MISSING
     host: str = ""
     record_literal: bool = False
     vllm_http_port: int = 8000
@@ -160,7 +158,7 @@ class InputsConfig:
     """Immutable model and data locators resolved by Marin."""
 
     model: LaunchModelLocator = field(default_factory=LaunchModelLocator)
-    data_kind: str = "tasks"
+    data_kind: str = MISSING
     train_data: list[dict[str, Any]] = field(default_factory=list)
     validation_data: list[dict[str, Any]] = field(default_factory=list)
 
@@ -184,7 +182,6 @@ def compose_launch_config(raw: Mapping[str, Any] | DictConfig) -> DictConfig:
     """Compose a raw mapping into the strict structured launch schema."""
     schema = OmegaConf.structured(SkyRLLaunchConfig)
     composed = OmegaConf.merge(schema, raw)
-    OmegaConf.to_container(composed, resolve=True, throw_on_missing=True)
     return composed
 
 
@@ -196,6 +193,12 @@ def _compose_source_recipe(config: DictConfig) -> DictConfig:
     raw_skyrl = OmegaConf.to_container(config.skyrl, resolve=False)
     if not isinstance(raw_skyrl, dict):
         raise TypeError("skyrl must be a mapping")
+    if OmegaConf.is_missing(config.iris.allocation, "num_nodes"):
+        policy_nodes = raw_skyrl.get("trainer", {}).get("placement", {}).get("policy_num_nodes")
+        if policy_nodes is None:
+            raise ValueError("omitted iris.allocation.num_nodes requires trainer.placement.policy_num_nodes")
+    else:
+        policy_nodes = int(config.iris.allocation.num_nodes)
     model_uri = str(config.inputs.model.uri)
     model_identity = str(config.inputs.model.identity)
     model_is_cloud = is_cloud_uri(model_uri)
@@ -207,7 +210,7 @@ def _compose_source_recipe(config: DictConfig) -> DictConfig:
             {
                 "job_name": str(config.iris.job_name),
                 "experiments_dir": str(config.runtime.experiments_dir),
-                "num_nodes": int(config.iris.allocation.num_nodes),
+                "num_nodes": int(policy_nodes),
                 "gpus_per_node": int(config.iris.allocation.gpus_per_node),
                 "model_path": str(config.inputs.model.local_path),
                 "model_source_uri": model_uri if model_is_cloud else None,
@@ -233,9 +236,41 @@ def _compose_source_recipe(config: DictConfig) -> DictConfig:
         compiled.entrypoint, max_staleness_steps=compiled.config.trainer.rollout_buffer.max_staleness_steps
     )
     resolved.runtime.training_type = None if training_type is None else training_type.value
-    resolved.inputs.data_kind = parsed.data_kind
     resolved.skyrl = compiled.config
+    _fill_launch_fields(resolved, data_kind=parsed.data_kind)
     return compose_launch_config(resolved)
+
+
+def _fill_launch_fields(config: DictConfig, *, data_kind: str | None = None) -> None:
+    """Fill omitted envelope fields and validate the supplied derived values."""
+    skyrl = OmegaConf.to_container(config.skyrl, resolve=True)
+    if not isinstance(skyrl, dict):
+        raise TypeError("skyrl must be a mapping")
+    plan = derive_role_plan(skyrl)
+    checkpoint_export = config.run.mode == RunMode.CHECKPOINT_EXPORT
+    nodes = plan.claim("policy").num_nodes if checkpoint_export else derive_num_nodes(plan)
+    profile = runtime_profile_for_strategy(
+        skyrl.get("trainer", {}).get("strategy"),
+        mode=RuntimeMode.CHECKPOINT_EXPORT if checkpoint_export else RuntimeMode.TRAINING,
+    ).value
+    harbor = (skyrl.get("terminal_bench_config") or {}).get("harbor", {})
+    ingress = "controller" if harbor.get("name") == "opencode" else "direct"
+    expected = {
+        "iris.allocation.num_nodes": nodes,
+        "runtime.profile": profile,
+        "ingress.mode": ingress,
+    }
+    if data_kind is not None:
+        expected["inputs.data_kind"] = data_kind
+    elif OmegaConf.is_missing(config.inputs, "data_kind"):
+        expected["inputs.data_kind"] = "tasks"
+    for path, value in expected.items():
+        parent_path, _, name = path.rpartition(".")
+        parent = OmegaConf.select(config, parent_path)
+        if OmegaConf.is_missing(parent, name):
+            OmegaConf.update(config, path, value)
+        elif path in {"ingress.mode", "inputs.data_kind"} and parent[name] != value:
+            raise ValueError(f"{path}={parent[name]!r} does not match the composed SkyRL value {value!r}")
 
 
 def load_launch_config(path: Path) -> DictConfig:
@@ -245,6 +280,7 @@ def load_launch_config(path: Path) -> DictConfig:
         if config.run.mode != RunMode.TRAIN:
             raise ValueError("checkpoint_export launch configs must already contain a composed SkyRL subtree")
         config = _compose_source_recipe(config)
+    _fill_launch_fields(config)
     probe = config.skyrl.get("trainer", {}).get("mismatch_probe", {})
     if probe.get("enabled") and not probe.get("archive_uri"):
         artifact_root = posixpath.dirname(str(config.artifacts.resolved_config_uri))

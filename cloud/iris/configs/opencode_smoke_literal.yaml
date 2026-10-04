@@ -124,8 +124,6 @@ trainer:
   logger: wandb
 
   run_name: null
-  ckpt_path: null
-  export_path: null
 
   policy:
     optimizer_config:
@@ -181,7 +179,6 @@ generator:
     name_or_path: chat_templates/qwen3_thinking_acc.jinja2
 
   engine_init_kwargs:
-    served_model_name: Qwen3-8B
     enable_auto_tool_choice: true
     tool_call_parser: hermes
 

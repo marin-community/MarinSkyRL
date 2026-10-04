@@ -37,7 +37,6 @@ terminal_bench:
 
 trainer:
   strategy: megatron
-  seed: 42
   flash_attn: true
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: false
@@ -63,7 +62,6 @@ trainer:
   eval_before_train: true
   eval_interval: 16
   ckpt_interval: 8
-  max_ckpts_to_keep: 2
   resume_mode: none
   logger: wandb
   project_name: snowball-ultra-rlvr

@@ -11,17 +11,14 @@ import fsspec
 import pytest
 import yaml
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
-
-from cloud.iris.rl_config_translation import (  # noqa: E402
+from cloud.iris.rl_config_translation import (
     ContextBudget,
     compose_skyrl_config,
     parse_rl_config,
     write_resolved_context_budget,
 )
-from marinskyrl.recipe_schema import ContextBudget as RecipeContextBudget  # noqa: E402
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 @dataclass
@@ -174,8 +171,6 @@ def test_opencode_limit_context_mirrors_harbor_formula(window, output, expected_
     assert budget.opencode_limit_output == output
     assert budget.opencode_limit_context == expected_context
     assert budget.opencode_limit_context + budget.opencode_limit_output < budget.max_input_tokens
-    authored = RecipeContextBudget(request_window_tokens=window, max_new_tokens_per_turn=output, max_turns=30)
-    assert authored.as_dict() == budget.as_dict()
-    source = Path(sys.modules[RecipeContextBudget.__module__].__file__).resolve()
+    source = Path(sys.modules[ContextBudget.__module__].__file__).resolve()
     assert source == _REPO_ROOT / "marinskyrl/recipe_schema/budget.py"
     print(f"context-budget schema source: {source}")

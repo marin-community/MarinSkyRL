@@ -6,6 +6,7 @@ from .model import OpenMap as OpenMap
 from .model import Section as Section
 from .model import SectionMap as SectionMap
 from .budget import ContextBudget as ContextBudget
+from .budget import resolve_context_budget as resolve_context_budget
 from .rules import RL_ENTRYPOINTS as RL_ENTRYPOINTS
 from .rules import SKYRL_INTERNAL_ENGINE_KWARGS as SKYRL_INTERNAL_ENGINE_KWARGS
 from .rules import RLEntrypoint as RLEntrypoint
@@ -18,6 +19,9 @@ from .ownership import REMOVED as REMOVED
 from .recipe import ConfigGroups as ConfigGroups
 from .recipe import RecipePatch as RecipePatch
 from .recipe import SkyRLRecipe as SkyRLRecipe
+from .launch_result import ExportedPolicy as ExportedPolicy
+from .launch_result import LaunchResult as LaunchResult
+from .launch_result import LaunchState as LaunchState
 from .sections import Aime as Aime
 from .sections import Algorithm as Algorithm
 from .sections import Callback as Callback

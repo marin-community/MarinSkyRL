@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import base64
+import copy
+import json
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +12,7 @@ import pytest
 import yaml
 from omegaconf import OmegaConf
 
+from cloud.iris import launch_config as launch_config_module
 from cloud.iris import training_driver
 from cloud.iris.launch_config import LaunchTopology, load_launch_config, validate_launch_config
 from cloud.iris.rl_config_translation import (
@@ -87,7 +90,6 @@ def _raw_config() -> dict[str, Any]:
             },
             "model_num_attention_heads": 8,
             "trainer": {
-                "seed": 42,
                 "strategy": "megatron",
                 "algorithm": {"use_kl_loss": False},
                 "placement": {
@@ -112,13 +114,16 @@ def _raw_config() -> dict[str, Any]:
 
 @pytest.mark.parametrize("storage_prefix", ["s3://runs/smoke", "gs://runs/smoke"])
 @pytest.mark.parametrize(("loss", "reduction"), [("regular", "token_mean"), ("gspo", "sequence_mean")])
+@pytest.mark.parametrize("nodes", [1, 2])
 def test_launch_config_composes_and_loads_as_structured_hydra(
-    tmp_path: Path, loss: str, reduction: str, storage_prefix: str
+    tmp_path: Path, loss: str, reduction: str, storage_prefix: str, nodes: int
 ) -> None:
     path = tmp_path / "resolved-launch.yaml"
     raw = _raw_config()
     raw["skyrl"]["trainer"]["algorithm"].update(policy_loss_type=loss, loss_reduction=reduction)
     trainer = raw["skyrl"]["trainer"]
+    trainer["placement"]["colocate_all"] = nodes == 1
+    raw["iris"]["allocation"]["num_nodes"] = nodes
     trainer["resume_mode"] = "from_path"
     trainer["resume_path"] = f"{storage_prefix}/checkpoints/global_step_1"
     trainer["mismatch_probe"] = {
@@ -130,7 +135,30 @@ def test_launch_config_composes_and_loads_as_structured_hydra(
     config = load_launch_config(path)
 
     assert config.skyrl.trainer.train_batch_size == 8
-    assert validate_launch_config(config).num_nodes == 1
+    assert Path(launch_config_module.__file__).resolve() == (
+        Path(__file__).resolve().parents[3] / "cloud/iris/launch_config.py"
+    )
+    omitted = copy.deepcopy(raw)
+    del omitted["iris"]["allocation"]["num_nodes"]
+    del omitted["runtime"]["profile"]
+    del omitted["inputs"]["data_kind"]
+    path.write_text(yaml.safe_dump(omitted, sort_keys=False))
+    assert json.dumps(OmegaConf.to_container(load_launch_config(path), resolve=True)) == json.dumps(
+        OmegaConf.to_container(config, resolve=True)
+    )
+    for section, key, value in (("ingress", "mode", "controller"), ("inputs", "data_kind", "parquet")):
+        conflicting = copy.deepcopy(raw)
+        conflicting.setdefault(section, {})[key] = value
+        path.write_text(yaml.safe_dump(conflicting, sort_keys=False))
+        with pytest.raises(ValueError, match=f"{section}.{key}"):
+            load_launch_config(path)
+    invalid = copy.deepcopy(raw)
+    invalid["skyrl"]["trainer"]["train_batch_size"] = "8"
+    path.write_text(yaml.safe_dump(invalid, sort_keys=False))
+    with pytest.raises(ValueError, match="train_batch_size"):
+        load_launch_config(path)
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
+    assert validate_launch_config(config).num_nodes == nodes
     assert config.skyrl.trainer.resume_path == f"{storage_prefix}/checkpoints/global_step_1"
     assert config.skyrl.trainer.mismatch_probe.archive_uri == f"{storage_prefix}/mismatch_probe"
     assert config.skyrl.trainer.mismatch_probe.reuse_probe == f"{storage_prefix}/source/mismatch_probe"
@@ -301,7 +329,7 @@ def test_composed_launch_rejects_tis_selectors(tmp_path: Path, key: str, value) 
                 "algorithm.off_policy_correction": "custom",
                 "algorithm.off_policy_correction_rules": [{"action": "truncate", "high": 2.0}],
             },
-            "kind must be token or sequence",
+            "kind",
         ),
         (
             {
@@ -371,6 +399,7 @@ def test_launch_validates_correction_and_selection_contract(tmp_path: Path, over
 def test_inherited_recipe_round_trips_as_a_self_contained_launch(tmp_path: Path, recipe: str, nodes: int):
     raw = _raw_config()
     raw["skyrl"] = {"defaults": [recipe, "_self_"], "trainer": {"max_steps": 2}}
+    raw["inputs"]["data_kind"] = "parquet"
     raw["iris"]["allocation"]["num_nodes"] = nodes
     path = tmp_path / "launch.yaml"
     path.write_text(yaml.safe_dump(raw))

@@ -128,8 +128,6 @@ trainer:
   logger: wandb
 
   run_name: null
-  ckpt_path: null
-  export_path: null
 
   policy:
     optimizer_config:
@@ -148,8 +146,7 @@ trainer:
       expert_tensor_parallel_size: 1
       logprob_chunk_size: 1024
   ref:
-    model:
-      path: Qwen/Qwen3-Next-80B-A3B-Thinking
+    model: {}
     megatron_config:
       moe_router_replay: true
       tensor_model_parallel_size: 8

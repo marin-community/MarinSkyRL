@@ -26,11 +26,6 @@ class EngineOptions(schema.Section):
     engine_init_kwargs: schema.OpenMap
 
 
-PENDING_PR3 = {
-    "discard": frozenset({"data.train_data", "data.val_data"}),
-    "clamp": frozenset({"trainer.placement.policy_num_gpus_per_node", "trainer.placement.ref_num_gpus_per_node"}),
-}
-
 FILL_WHEN_UNSET = frozenset(
     {
         "trainer.run_name",
@@ -41,7 +36,7 @@ FILL_WHEN_UNSET = frozenset(
 )
 
 
-def test_ownership_sentinels_distinguish_launch_writers_context_writers_and_pending_discards(tmp_path, monkeypatch):
+def test_ownership_sentinels_distinguish_launch_writers_context_writers_and_authored_values(tmp_path, monkeypatch):
     root = Path(__file__).resolve().parents[3]
     assert Path(launcher.__file__).resolve() == root / "cloud/iris/rl_config_translation.py"
     assert Path(task_runtime.__file__).resolve() == root / "cloud/iris/task_runtime.py"
@@ -72,6 +67,7 @@ def test_ownership_sentinels_distinguish_launch_writers_context_writers_and_pend
         "export_hf_artifact": True,
     }
     monkeypatch.setattr(task_runtime.tempfile, "tempdir", str(tmp_path))
+    gpu_paths = frozenset({"trainer.placement.policy_num_gpus_per_node", "trainer.placement.ref_num_gpus_per_node"})
     outcomes = []
     for suffix, number in (("A", 2), ("B", 4)):
         seeded = copy.deepcopy(full)
@@ -90,20 +86,30 @@ def test_ownership_sentinels_distinguish_launch_writers_context_writers_and_pend
             set_path(seeded, ".".join(parts), sentinel)
         for path in schema.LAUNCH_PATHS:
             set_path(seeded, path, False if path == "trainer.export_hf_artifact" else f"author-{suffix}")
-        for path in FILL_WHEN_UNSET | PENDING_PR3["clamp"]:
+        for path in FILL_WHEN_UNSET | gpu_paths:
             set_path(seeded, path, f"author-{suffix}" if path == "trainer.run_name" else number)
         section_values = {
             name: seeded[name]
             for name in ("trainer", "generator", "data", "environment", "trajectory_runner", "terminal_bench")
         }
         injected = replace(parsed, **section_values)
-        filled = launcher._skyrl_config_sections(injected, parameters, SimpleNamespace(gpus_per_node=8))
+        authored_parameters = {
+            **parameters,
+            "train_data": seeded["data"]["train_data"],
+            "val_data": seeded["data"]["val_data"],
+        }
+        for key in ("train_data", "val_data"):
+            with pytest.raises(ValueError, match=f"data.{key} conflicts"):
+                launcher._skyrl_config_sections(
+                    injected, {**authored_parameters, key: parameters[key]}, SimpleNamespace(gpus_per_node=8)
+                )
+        filled = launcher._skyrl_config_sections(injected, authored_parameters, SimpleNamespace(gpus_per_node=8))
         data = resolve_rl_train_data_with_sources(injected.data["terminal_bench_data"], kind="tasks", verbose=False)
         staged = launcher.apply_task_local_values(
             OmegaConf.create(filled),
             launcher.TaskLocalSkyRLValues(
-                train_data=tuple(parameters["train_data"]),
-                validation_data=tuple(parameters["val_data"]),
+                train_data=tuple(authored_parameters["train_data"]),
+                validation_data=tuple(authored_parameters["val_data"]),
                 terminal_bench_data=tuple(data.paths),
                 agent_api_base="http://launch/api",
                 literal_log_path="/launch/literal",
@@ -128,30 +134,29 @@ def test_ownership_sentinels_distinguish_launch_writers_context_writers_and_pend
             ".".join(parts) for parts, before in leaves(section_values) if get_path(result, ".".join(parts)) != before
         }
         assert schema.LAUNCH_PATHS <= changed
-        assert changed - schema.LAUNCH_PATHS == PENDING_PR3["discard"]
-        for path in FILL_WHEN_UNSET | PENDING_PR3["clamp"]:
+        assert changed - schema.LAUNCH_PATHS == frozenset()
+        for path in FILL_WHEN_UNSET | gpu_paths:
             assert get_path(result, path) == get_path(seeded, path)
         outcomes.append(result)
         absent = copy.deepcopy(section_values)
         for path in FILL_WHEN_UNSET:
             set_path(absent, path, None)
         defaults = launcher._skyrl_config_sections(
-            replace(parsed, **absent), parameters, SimpleNamespace(gpus_per_node=8)
+            replace(parsed, **absent), authored_parameters, SimpleNamespace(gpus_per_node=8)
         )
         for path in FILL_WHEN_UNSET:
             assert get_path(defaults, path) not in (MISSING, None)
-        oversized = copy.deepcopy(section_values)
-        for path in PENDING_PR3["clamp"]:
+        for path in gpu_paths:
+            oversized = copy.deepcopy(section_values)
             set_path(oversized, path, 31)
-        clamped = launcher._skyrl_config_sections(
-            replace(parsed, **oversized), parameters, SimpleNamespace(gpus_per_node=8)
-        )
-        for path in PENDING_PR3["clamp"]:
-            assert get_path(clamped, path) == 8
+            with pytest.raises(ValueError, match="exceeds the available 8 GPUs"):
+                launcher._skyrl_config_sections(
+                    replace(parsed, **oversized), authored_parameters, SimpleNamespace(gpus_per_node=8)
+                )
     discards = {
         path for path in changed - schema.LAUNCH_PATHS if get_path(outcomes[0], path) == get_path(outcomes[1], path)
     }
-    assert discards == PENDING_PR3["discard"]
+    assert discards == frozenset()
     assert outcomes[0]["data"]["terminal_bench_data"] != outcomes[1]["data"]["terminal_bench_data"]
     derived = {}
     for path in schema.DERIVED_PATHS:
@@ -167,23 +172,17 @@ def test_recipe_rules_accept_the_same_engine_options_and_entrypoints_as_the_laun
     assert Path(schema.__file__).resolve() == root / "marinskyrl/recipe_schema/__init__.py"
     assert Path(launcher.__file__).resolve() == root / "cloud/iris/rl_config_translation.py"
     print(f"recipe transition sources: {schema.__file__}; {launcher.__file__}")
-    assert schema.SKYRL_INTERNAL_ENGINE_KWARGS == launcher.SKYRL_INTERNAL_ENGINE_KWARGS
-    assert {key.value: value for key, value in schema.RL_ENTRYPOINTS.items()} == {
-        key.value: value for key, value in launcher.RL_ENTRYPOINTS.items()
-    }
     for entrypoint, module in schema.RL_ENTRYPOINTS.items():
         assert launcher.resolve_rl_entrypoint(entrypoint.value, config_path=Path("recipe.yaml")) == module
     safe = {"kv_cache_dtype": "auto", "cpu_offload_gb": 1}
-    for check in (schema.validate_engine_init_kwargs, launcher.validate_engine_init_kwargs):
-        check(safe)
-        for key in launcher.SKYRL_INTERNAL_ENGINE_KWARGS:
-            with pytest.raises(ValueError):
-                check({**safe, key: "author value"})
-    for check in (schema.validate_tp_divides_heads, launcher.validate_tp_divides_heads):
-        for tensor_parallel_size, heads in ((1, None), (1, 42), (2, 42), (6, 42), (7, 42)):
-            check(tensor_parallel_size, heads)
-        with pytest.raises(ValueError, match="does not divide"):
-            check(8, 42)
+    schema.validate_engine_init_kwargs(safe)
+    for key in schema.SKYRL_INTERNAL_ENGINE_KWARGS:
+        with pytest.raises(ValueError):
+            schema.validate_engine_init_kwargs({**safe, key: "author value"})
+    for tensor_parallel_size, heads in ((1, None), (1, 42), (2, 42), (6, 42), (7, 42)):
+        schema.validate_tp_divides_heads(tensor_parallel_size, heads)
+    with pytest.raises(ValueError, match="does not divide"):
+        schema.validate_tp_divides_heads(8, 42)
     recipe = tmp_path / "nested-empty.yaml"
     recipe.write_text(
         "context_budget:\n"

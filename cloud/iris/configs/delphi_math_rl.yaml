@@ -6,7 +6,6 @@ context_budget:
   max_new_tokens_per_turn: 3584
   max_turns: 1
 
-policy_chat_template: chat_templates/delphi_v0.jinja2
 
 model_num_attention_heads: 42
 

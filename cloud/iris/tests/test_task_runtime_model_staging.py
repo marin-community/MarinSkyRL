@@ -150,6 +150,18 @@ def test_hugging_face_draft_mirror_uses_the_policy_tokenizer(tmp_path, monkeypat
         assert outcomes[first]["source_uri"] != outcomes[second]["source_uri"]
         assert outcomes[first]["source_identity"] != outcomes[second]["source_identity"]
     assert outcomes[3]["source_uri"] != outcomes[4]["source_uri"]
+    manifest = hf_model_cache.load_model_manifest(outcomes[0]["source_uri"])
+    monkeypatch.setattr(task_runtime, "load_model_manifest", lambda _uri: manifest)
+    artifact_uri = "s3://draft/artifact"
+    for identity in (manifest.identity, "author-identity", "sha256:" + "0" * 64):
+        model = SpeculatorModelConfig(source_uri=artifact_uri, source_identity=identity)
+        if identity != manifest.identity:
+            with pytest.raises(ValueError, match="Draft manifest identity mismatch"):
+                prepare_draft_model(model, cache_ttl_days=14, cache_source_prefix="s3://region/run")
+            continue
+        prepared = prepare_draft_model(model, cache_ttl_days=14, cache_source_prefix="s3://region/run")
+        assert prepared.source_uri == artifact_uri
+        assert prepared.source_identity == identity
 
 
 def test_requested_local_policy_tokenizer_is_staged_independently(tmp_path, monkeypatch) -> None:

@@ -37,7 +37,6 @@ terminal_bench:
 
 trainer:
   strategy: megatron
-  seed: 42
   flash_attn: true
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: false
@@ -65,7 +64,6 @@ trainer:
   eval_before_train: false
   eval_interval: 10
   ckpt_interval: 10
-  max_ckpts_to_keep: 2
   resume_mode: latest
   restore_dataloader_state: false
   logger: wandb
