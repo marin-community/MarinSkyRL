@@ -157,8 +157,8 @@ def _trained_steps(root: Path) -> list[dict]:
     return [record for record in read_metrics(root) if "policy/raw_grad_norm" in record]
 
 
-def test_tiny_policy_trains_while_engines_wait_for_policy_initialization(runs, tmp_path, tiny_policy):
-    run = runs.Process(target=_run_overlapped_training, args=(tmp_path, tiny_policy))
+def _run_in_process(runs, target, *args) -> None:
+    run = runs.Process(target=target, args=args)
     run.start()
     try:
         run.join(RUN_TIMEOUT_SECONDS)
@@ -166,14 +166,17 @@ def test_tiny_policy_trains_while_engines_wait_for_policy_initialization(runs, t
     finally:
         if run.is_alive():
             run.kill()
-            run.join()
+            run.join(timeout=10)
 
+
+def test_tiny_policy_initializes_while_engines_wait_then_trains(runs, tmp_path, tiny_policy):
+    _run_in_process(runs, _run_overlapped_training, tmp_path, tiny_policy)
     _assert_trained_to_max_steps(tmp_path, TrainingMode.ASYNC, RolloutShape.SINGLE_TURN)
     startup = next(record for record in read_metrics(tmp_path) if "startup/engines/create" in record)
     assert startup["startup/engines/create"] >= 0
 
 
-def test_engine_startup_failure_releases_policy_resources(tmp_path, tiny_policy):
+def _run_failed_engine_startup(tmp_path: Path, tiny_policy: Path) -> None:
     cfg = experiment.tiny_training_config(
         tmp_path, tiny_policy, TrainingMode.ASYNC, RolloutShape.SINGLE_TURN, max_steps=1, checkpoint_interval=-1
     )
@@ -200,6 +203,10 @@ def test_engine_startup_failure_releases_policy_resources(tmp_path, tiny_policy)
         assert {key: ray.available_resources().get(key, 0) for key in expected} == expected
     finally:
         ray.shutdown()
+
+
+def test_engine_startup_failure_releases_policy_resources(runs, tmp_path, tiny_policy):
+    _run_in_process(runs, _run_failed_engine_startup, tmp_path, tiny_policy)
 
 
 def _assert_trained_to_max_steps(root: Path, mode: TrainingMode, shape: RolloutShape) -> None:

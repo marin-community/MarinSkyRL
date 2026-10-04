@@ -83,6 +83,7 @@ from skyrl_train.distributed.dispatch import (
 )
 from skyrl_train.workers.worker import PPORayActorGroup
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.inference_engines.ray_wrapped_inference_engine import RayWrappedInferenceEngine
 from skyrl_train.inference_engines.vllm.online_eagle_trainer import (
     OnlineEagleCaptureConfig,
     OnlineEagleUpdateResult,
@@ -275,16 +276,14 @@ def _zero_std_group_fraction(uids: Sequence[str], rewards: torch.Tensor) -> floa
 
 def kill_inference_engines(client: InferenceEngineClient) -> None:
     """Terminate the client's Ray inference actors."""
-    from skyrl_train.inference_engines.ray_wrapped_inference_engine import RayWrappedInferenceEngine
-
     n_killed = 0
     for engine in client.engines:
         if isinstance(engine, RayWrappedInferenceEngine):
             try:
                 ray.kill(engine.inference_engine_actor, no_restart=True)
                 n_killed += 1
-            except Exception:
-                pass  # Actor may already be dead
+            except Exception as error:
+                logger.warning("Failed to kill inference engine actor: {}", error)
     if n_killed:
         logger.info(f"Killed {n_killed} inference engine actor(s)")
 
