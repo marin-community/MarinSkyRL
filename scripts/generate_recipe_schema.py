@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+from dataclasses import dataclass
 import json
 from pathlib import Path
 import runpy
@@ -19,6 +20,15 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_DIR = ROOT / "skyrl-train/skyrl_train/config"
 OUTPUT_DIR = ROOT / "marinskyrl/recipe_schema"
+
+
+@dataclass(frozen=True)
+class SourceDocuments:
+    """Hydra source mappings used during author-schema generation."""
+
+    base: dict
+    groups: dict
+    comments: dict[str, str]
 
 
 def following_source(value: Any) -> str | None:
@@ -72,7 +82,7 @@ def field_comments(source: Path, mount: str = "") -> dict[str, str]:
     return comments
 
 
-def source_documents(config_dir: Path) -> tuple[dict, dict, dict]:
+def source_documents(config_dir: Path) -> SourceDocuments:
     raw = yaml.safe_load((config_dir / "ppo_base_config.yaml").read_text())
     selections: dict[str, list[str]] = {}
     for selection in raw["defaults"]:
@@ -111,7 +121,7 @@ def source_documents(config_dir: Path) -> tuple[dict, dict, dict]:
                     comments.update(field_comments(source, "" if mount == "_global_" else mount))
                 if options:
                     groups[key] = options
-    return base, groups, comments
+    return SourceDocuments(base, groups, comments)
 
 
 def recipe_documents(recipe_dir: Path, config_dir: Path, groups: dict) -> list[dict]:
@@ -356,9 +366,14 @@ def generate(
     """Return repository-formatted author code; the CLI writes or checks it."""
     sidecar = runpy.run_path(str(output_dir / "sidecar.py"))
     owners = runpy.run_path(str(output_dir / "ownership.py"))
-    base, groups, comments = source_documents(config_dir)
+    sources = source_documents(config_dir)
     sections = render_sections(
-        base, sidecar, owners, comments, groups, recipe_documents(recipe_dir, config_dir, groups)
+        sources.base,
+        sidecar,
+        owners,
+        sources.comments,
+        sources.groups,
+        recipe_documents(recipe_dir, config_dir, sources.groups),
     )
     ruff_version = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["marin-style"]["ruff_version"]
     formatted = subprocess.run(

@@ -14,8 +14,11 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    FieldSerializationInfo,
     PlainSerializer,
     PlainValidator,
+    SerializerFunctionWrapHandler,
+    ValidationInfo,
     field_serializer,
     field_validator,
 )
@@ -151,13 +154,17 @@ class Section(BaseModel):
 
     @field_validator("*", mode="after")
     @classmethod
-    def _freeze_untyped_containers(cls, value: Any, info: Any) -> Any:
-        if _contains_any(cls.model_fields[info.field_name].annotation):
+    def _freeze_untyped_containers(cls, value: Any, info: ValidationInfo) -> Any:
+        name = info.field_name
+        assert name is not None
+        if _contains_any(cls.model_fields[name].annotation):
             return freeze(value)
         return value
 
     @field_serializer("*", mode="wrap")
-    def _serialize_untyped_containers(self, value: Any, handler: Any, info: Any) -> Any:
+    def _serialize_untyped_containers(
+        self, value: Any, handler: SerializerFunctionWrapHandler, info: FieldSerializationInfo
+    ) -> Any:
         if _contains_any(type(self).model_fields[info.field_name].annotation):
             return thaw(value)
         return handler(value)

@@ -163,6 +163,13 @@ def test_public_recipe_round_trip_preserves_parts_and_reports_owned_paths():
     assert edited.to_skyrl()["trainer"] == {**part.to_skyrl()["trainer"], "ckpt_interval": 4}
     assert pickle.loads(pickle.dumps(edited)) == schema.SkyRLRecipe.from_document(edited.to_skyrl())
     assert edited.merge(edited) == edited
+    named_option = edited.with_settings(["generator.engine_init_kwargs.user_options.backend=custom-engine"])
+    assert named_option.to_skyrl()["generator"]["engine_init_kwargs"]["user_options"]["backend"] == "custom-engine"
+    for malformed in ('{"items":', "[1,", '"unterminated'):
+        with pytest.raises(json.JSONDecodeError):
+            edited.with_settings([f"generator.engine_init_kwargs.user_options={malformed}"])
+    with pytest.raises(json.JSONDecodeError):
+        edited.with_settings(['trainer.logger=["console",'])
     structured = expected.with_settings(['context_budget={"max_turns":4}'])
     assert structured.context_budget == edited.context_budget
     with pytest.raises(ValueError, match="request_window_tokens must exceed"):

@@ -41,8 +41,7 @@ def generated_recipe_schema():
     assert Path(schema.__file__).resolve() == root / "marinskyrl/recipe_schema/__init__.py"
     assert Path(generator.__file__).resolve() == root / "scripts/generate_recipe_schema.py"
     print(f"CPU recipe sources: {schema.__file__}; {generator.__file__}")
-    base, _, _ = generator.source_documents(generator.CONFIG_DIR)
-    return schema.RecipePatch, OmegaConf.create(base)
+    return schema.RecipePatch, OmegaConf.create(generator.source_documents(generator.CONFIG_DIR).base)
 
 
 def pytest_configure(config: pytest.Config) -> None:

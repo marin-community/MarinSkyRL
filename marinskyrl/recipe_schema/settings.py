@@ -21,6 +21,8 @@ def parse_setting(model: type[Section], key: str, raw: str) -> Any:
             try:
                 return json.loads(raw)
             except json.JSONDecodeError:
+                if raw.lstrip().startswith(("{", "[", '"')):
+                    raise
                 return raw
         mapping = next((option for option in options if get_origin(option) in (dict, Mapping)), None)
         if mapping is not None:
@@ -53,6 +55,8 @@ def _parse_value(annotation: Any, key: str, raw: str) -> Any:
         try:
             return json.loads(raw)
         except json.JSONDecodeError:
+            if raw.lstrip().startswith(("{", "[", '"')):
+                raise
             return adapter.validate_strings(raw)
     parsed = adapter.validate_strings(raw)
     if int in options and float in options:

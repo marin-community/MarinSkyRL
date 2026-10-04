@@ -214,8 +214,7 @@ def generated_author_sections():
     assert Path(schema.__file__).resolve() == root / "marinskyrl/recipe_schema/__init__.py"
     assert Path(generator.__file__).resolve() == root / "scripts/generate_recipe_schema.py"
     print(f"generated schema sources: {schema.__file__}; {generator.__file__}")
-    base, _, _ = generator.source_documents(generator.CONFIG_DIR)
-    return schema.RecipePatch, base
+    return schema.RecipePatch, generator.source_documents(generator.CONFIG_DIR).base
 
 
 def test_generated_ftpo_and_gym_options_preserve_runtime_behavior(generated_author_sections):
