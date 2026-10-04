@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import signal
 import sys
 from pathlib import Path
 
@@ -27,6 +28,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from cloud.iris import ingress_utils, literal_proxy_utils  # noqa: E402
+from cloud.iris.literal_proxy_utils import maybe_serve_literal_proxy  # noqa: E402
 from cloud.iris.training_driver import LocalRLConfig, LocalRLRunner  # noqa: E402
 
 _FAKE_CAP_URL = "https://iris.oa.dev/proxy/t/faketoken/otagent-x/v1"
@@ -116,6 +118,42 @@ def test_controller_ingress_proxy_listens_beyond_loopback(monkeypatch):
         pass
 
     assert bound_hosts == ["0.0.0.0", "0.0.0.0"]
+
+
+def test_runner_setup_preserves_object_store_destination_for_literal_capture(monkeypatch, tmp_path):
+    # Live native trials lost their raw token log because setup treated the S3 URI as a local Path.
+    _patch_ingress(monkeypatch)
+    monkeypatch.setattr(signal, "signal", lambda *args: None)
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    destinations = []
+
+    @contextlib.contextmanager
+    def proxy_service(upstream, log_path, *, remote_uri, **kwargs):
+        Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(log_path).write_text('{"response_ids":[1,2]}\n')
+        destinations.append(remote_uri)
+        yield upstream
+
+    monkeypatch.setattr(literal_proxy_utils, "maybe_serve_literal_proxy", maybe_serve_literal_proxy)
+    monkeypatch.setattr(literal_proxy_utils, "serve_record_proxy", proxy_service)
+    runner = LocalRLRunner(
+        LocalRLConfig(
+            job_name="native-capture",
+            model_path="Qwen/Qwen3-8B",
+            experiments_dir="s3://test-bucket/attempts/literal_capture",
+            ingress_mode="controller",
+            ingress_host="iris.oa.dev",
+            record_literal=True,
+        )
+    )
+    runner.setup()
+    with runner._ingress_context():
+        pass
+    assert len(destinations) == 1
+    assert destinations[0].startswith("s3://test-bucket/attempts/literal_capture/logs/native-capture__")
+    assert destinations[0].endswith("_literal.jsonl")
+    assert not (tmp_path / "s3:").exists()
 
 
 def test_direct_ingress_still_publishes_agent_dummy_key(monkeypatch):

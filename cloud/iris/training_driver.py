@@ -85,6 +85,7 @@ class LocalRLRunner:
         self._minted_agent_api_base: str | None = None
         # The generator's Ray worker reads the shared literal log path from configuration.
         self._literal_log_path: str | None = None
+        self._literal_log_root = config.experiments_dir
 
     def setup(self) -> None:
         """Validate configuration and set up directories."""
@@ -108,7 +109,11 @@ class LocalRLRunner:
         else:
             print("\nWARNING: SKYRL_HOME not found! Set SKYRL_HOME to the MarinSkyRL clone.")
 
-        experiments_dir = Path(self.config.experiments_dir).expanduser().resolve()
+        if is_cloud_uri(self.config.experiments_dir):
+            experiments_dir = Path(tempfile.gettempdir()) / "skyrl-experiments" / self.config.job_name
+        else:
+            experiments_dir = Path(self.config.experiments_dir).expanduser().resolve()
+            self._literal_log_root = str(experiments_dir)
         experiments_dir.mkdir(parents=True, exist_ok=True)
         self.config.experiments_dir = str(experiments_dir)
 
@@ -316,7 +321,7 @@ class LocalRLRunner:
         with maybe_serve_literal_proxy(
             self.config.record_literal,
             vllm_local,
-            experiments_dir=self.config.experiments_dir,
+            experiments_dir=self._literal_log_root,
             job_name=self.config.job_name,
             host=CONTROLLER_INGRESS_PROXY_HOST,
             port=proxy_port,
