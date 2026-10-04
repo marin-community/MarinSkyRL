@@ -519,7 +519,7 @@ class MegatronModelWrapper:
             micro_batch_size: Micro-batch size per forward pass.
             temperature: Optional temperature for logits scaling.
             timings: Optional recorder for the forward-backward scheduler and pipeline metric broadcast.
-            profiler: Optional profiler for the first forward micro-batch.
+            profiler: Optional profiler for the mini-batch's forward and backward scheduler.
 
         Returns:
             List[dict]: one metrics dict per micro-batch in order.
@@ -669,23 +669,25 @@ class MegatronModelWrapper:
         def forward_step(batch_iter, model):
             batch = next(batch_iter)
 
-            with profiler.capture_forward() if profiler is not None else nullcontext():
-                outputs, packed_seq_params = self._forward_micro_batch(
-                    model,
-                    batch.sequences,
-                    batch.attention_mask,
-                    batch.position_ids,
-                    rollout_routed_experts=batch.rollout_routed_experts,
-                    num_actions=batch.num_actions,
-                    record_recompute=True,
-                )
+            outputs, packed_seq_params = self._forward_micro_batch(
+                model,
+                batch.sequences,
+                batch.attention_mask,
+                batch.position_ids,
+                rollout_routed_experts=batch.rollout_routed_experts,
+                num_actions=batch.num_actions,
+                record_recompute=True,
+            )
 
             return outputs, partial(loss_func, data=batch, packed_seq_params=packed_seq_params)
 
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.actor_module))
 
         timing = timings or PhaseBreakdown("ppo_train", enabled=False)
-        with timing.span("megatron_forward_backward_scheduler"):
+        with (
+            timing.span("megatron_forward_backward_scheduler"),
+            profiler.capture_training() if profiler is not None else nullcontext(),
+        ):
             metrics_list = forward_backward_func(
                 forward_step_func=forward_step,
                 data_iterator=batch_generator,

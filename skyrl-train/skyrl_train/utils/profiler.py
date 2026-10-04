@@ -11,7 +11,7 @@ PROFILE_UPDATE_INDEX = 1  # Let one training call warm the kernels before captur
 
 
 class Profiler:
-    """Capture one forward micro-batch on the selected ranks."""
+    """Capture one training mini-batch on the selected ranks."""
 
     def __init__(self, config):
         if not config.save_path:
@@ -37,12 +37,12 @@ class Profiler:
         return None
 
     @contextmanager
-    def capture_forward(self) -> Iterator[None]:
+    def capture_training(self) -> Iterator[None]:
         if self.captured:
             yield
             return
         assert self.prof is not None
-        logger.info(f"[Profiler] Capturing first forward micro-batch of update {self.update_index} on rank {self.rank}")
+        logger.info(f"[Profiler] Capturing first training mini-batch of update {self.update_index} on rank {self.rank}")
         self.prof.start()
         try:
             yield
@@ -58,7 +58,10 @@ class Profiler:
         sort_key = "self_cuda_time_total" if torch.cuda.is_available() else "self_cpu_time_total"
         with open(table_path, "w", encoding="utf-8") as table_file:
             table_file.write(self.prof.key_averages().table(sort_by=sort_key, row_limit=50))
+        trace_path = os.path.join(self.save_path, f"prof_rank_{self.rank}.json")
+        self.prof.export_chrome_trace(trace_path)
         logger.info(f"[Profiler] Saved operator table to {table_path}")
+        logger.info(f"[Profiler] Saved kernel trace to {trace_path}")
         self.prof = None
 
 
