@@ -2,6 +2,7 @@
 
 import multiprocessing
 import json
+import socket
 from multiprocessing.context import ForkServerContext
 from pathlib import Path
 
@@ -64,6 +65,22 @@ class _FailingEngineTinyTrainingExp(experiment.TinyTrainingExp):
 
     def create_inference_engine_client(self, *, operation=experiment.EntrypointOperation.TRAIN):
         raise self.engine_error
+
+
+class _FailingPolicyWorker(_PolicyReadyWorker):
+    def init_model(self, model_path, num_training_steps=None):
+        super().init_model(model_path, num_training_steps)
+        raise RuntimeError("policy initialization failed")
+
+
+class _LateInferenceTinyTrainingExp(_OverlappingTinyTrainingExp):
+    def get_worker_classes(self):
+        return ray.remote(num_gpus=1)(_FailingPolicyWorker), None, None
+
+    def create_inference_engine_client(self, *, operation=experiment.EntrypointOperation.TRAIN):
+        self.completed_client = super().create_inference_engine_client(operation=operation)
+        (Path(self.cfg.trainer.export_path) / "engine-ready").touch()
+        return self.completed_client
 
 
 def _run_overlapped_training(root: Path, model: Path) -> None:
@@ -207,6 +224,52 @@ def _run_failed_engine_startup(tmp_path: Path, tiny_policy: Path) -> None:
 
 def test_engine_startup_failure_releases_policy_resources(runs, tmp_path, tiny_policy):
     _run_in_process(runs, _run_failed_engine_startup, tmp_path, tiny_policy)
+
+
+def _run_failed_policy_startup(root: Path, model: Path, port: int) -> None:
+    cfg = experiment.tiny_training_config(
+        root, model, TrainingMode.ASYNC, RolloutShape.SINGLE_TURN, max_steps=1, checkpoint_interval=-1
+    )
+    cfg.trainer.placement.policy_strict_spread_pg = True
+    cfg.trainer.placement.overlap_init = True
+    cfg.generator.enable_http_endpoint = True
+    cfg.generator.http_endpoint_port = port
+    experiment.validate_cfg(cfg)
+    ray.init(
+        num_cpus=experiment.LOGICAL_CPUS,
+        num_gpus=experiment.LOGICAL_GPUS,
+        runtime_env={"env_vars": experiment.WORKER_ENV_VARS},
+        include_dashboard=False,
+    )
+    try:
+        exp = _LateInferenceTinyTrainingExp(cfg)
+        with pytest.raises(ray.exceptions.RayTaskError):
+            exp.run()
+        wait_for_condition((Path(cfg.trainer.export_path) / "engine-ready").is_file, timeout=60)
+
+        def _port_released():
+            with socket.socket() as endpoint:
+                endpoint.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                try:
+                    endpoint.bind((cfg.generator.http_endpoint_host, port))
+                except OSError:
+                    return False
+                return True
+
+        wait_for_condition(_port_released, timeout=30)
+        expected = {key: ray.cluster_resources()[key] for key in ("CPU", "GPU")}
+        wait_for_condition(
+            lambda: {key: ray.available_resources().get(key, 0) for key in expected} == expected,
+            timeout=30,
+        )
+        assert _port_released()
+        assert {key: ray.available_resources().get(key, 0) for key in expected} == expected
+    finally:
+        ray.shutdown()
+
+
+def test_policy_startup_failure_closes_late_inference_endpoint(runs, tmp_path, tiny_policy, unused_tcp_port):
+    _run_in_process(runs, _run_failed_policy_startup, tmp_path, tiny_policy, unused_tcp_port)
 
 
 def _assert_trained_to_max_steps(root: Path, mode: TrainingMode, shape: RolloutShape) -> None:
