@@ -61,9 +61,10 @@ jobs:
         run: |
           uv build --wheel --out-dir dist
           uv venv --python 3.12 /tmp/marinskyrl-base
-          uv pip install --python /tmp/marinskyrl-base/bin/python dist/marinskyrl-*.whl
+          uv pip install --no-config --prerelease=allow --python /tmp/marinskyrl-base/bin/python dist/marinskyrl-*.whl
           cd /tmp
           /tmp/marinskyrl-base/bin/marinskyrl --help
+          /tmp/marinskyrl-base/bin/python -c "from taskcompendium.models import TaskSpec; from skyrl_gym.nemotron_tasks import NemotronTaskSession"
 
   skyrl_train_tests:
     runs-on: ubuntu-latest

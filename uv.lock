@@ -2757,7 +2757,7 @@ dependencies = [
     { name = "duckdb" },
     { name = "fsspec" },
     { name = "gcsfs" },
-    { name = "marin-rigging", extra = ["prometheus", "secrets"] },
+    { name = "marin-rigging" },
     { name = "protobuf", version = "6.33.6", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux' or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "protobuf", version = "7.35.1", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "pyarrow" },
@@ -2783,21 +2783,21 @@ wheels = [
 
 [[package]]
 name = "marin-finestore"
-version = "0.2.135.dev36906221286"
+version = "0.2.139.dev37117265303"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "marin-rigging", extra = ["prometheus", "secrets"] },
+    { name = "marin-rigging" },
     { name = "pyarrow" },
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/fe/a7/b6e31c6f59b5d80b04c489e93d9c3dc780b3d4b10885b9aca4037df9bff9/marin_finestore-0.2.135.dev36906221286.tar.gz", hash = "sha256:c5e0bfff8169a0ec808ed0abc8dad8bd3ebce1c96c9269095ec5b7946bf4dfbe", size = 55095, upload-time = "2026-10-01T18:23:34.683Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/18/de/49b963d954694142820b34b05afde9e7b3f1dfdbeec7bd7655586865dff2/marin_finestore-0.2.139.dev37117265303.tar.gz", hash = "sha256:a0d418b08a7aeab1bfc5ef8721b7082c07ae0c389c29b054ef1deaa8f466cb5b", size = 55091, upload-time = "2026-10-03T10:43:58.266Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/81/82/fc0f88fb5a33e0d07d2b5c6c49671b74dc54f8f4503dd09f30a1713cbf17/marin_finestore-0.2.135.dev36906221286-py3-none-any.whl", hash = "sha256:004fa184339f29b223e27a5e8dde6e6f0f6246bc6962121990ef33e30f2c0ae7", size = 45002, upload-time = "2026-10-01T18:23:20.436Z" },
+    { url = "https://files.pythonhosted.org/packages/fb/a0/7ac743ca4dd5bb179d2c334d1f1ef792767cf1574fc2d810e2d0ef630c9c/marin_finestore-0.2.139.dev37117265303-py3-none-any.whl", hash = "sha256:b19697a16697e6f7ef96c20d45396663d0b8d4f2b30b0c48f4af770fa63e2604", size = 45001, upload-time = "2026-10-03T10:43:44.297Z" },
 ]
 
 [[package]]
 name = "marin-iris"
-version = "0.2.135.dev36906221286"
+version = "0.2.139.dev37117265303"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
@@ -2814,7 +2814,7 @@ dependencies = [
     { name = "marin-finelog-server" },
     { name = "marin-finestore" },
     { name = "marin-iris-native" },
-    { name = "marin-rigging", extra = ["prometheus", "secrets"] },
+    { name = "marin-rigging" },
     { name = "pydantic" },
     { name = "pyjwt", extra = ["crypto"] },
     { name = "pyqwest" },
@@ -2827,9 +2827,9 @@ dependencies = [
     { name = "uvicorn", extra = ["standard"] },
     { name = "zstandard" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/04/6c/d4a9ceddfcf63fb819eabd451ce90c7801cf42320719390fe19561bffe6e/marin_iris-0.2.135.dev36906221286.tar.gz", hash = "sha256:e59720fdf3991a9f0d2983fd28cc6f3df753803a802d87f4d15483c9fa610573", size = 937374, upload-time = "2026-10-01T18:23:37.942Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c4/8f/a1435e146be81ab18543d6e6c883858d7b28a4695e3ab7112c4bc4891b85/marin_iris-0.2.139.dev37117265303.tar.gz", hash = "sha256:394598d48a0cdf2000529d3e2aeea166c3ceb4e9e3a66ff52d9fa4ce70df02bb", size = 936885, upload-time = "2026-10-03T10:44:01.458Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/85/07/df47a1a2f076d6271fba25e2fba6eba96b51565bd52dcf1553cbdd821e7b/marin_iris-0.2.135.dev36906221286-py3-none-any.whl", hash = "sha256:bb93a2d58ab4d49bebf896e05843ef8b675a9583794057dd8fbab4db0add41aa", size = 1132500, upload-time = "2026-10-01T18:23:24.686Z" },
+    { url = "https://files.pythonhosted.org/packages/43/fd/35cd137501d8cce61f7d8e30a04a6a2637ba295d1ef35a81f3448b996738/marin_iris-0.2.139.dev37117265303-py3-none-any.whl", hash = "sha256:37b84ad62e242d6775e6d0b63bbefcbf9af559b5e946bc074853e57cf1f8a249", size = 1132280, upload-time = "2026-10-03T10:43:48.553Z" },
 ]
 
 [[package]]
@@ -2902,7 +2902,7 @@ dependencies = [
 
 [package.optional-dependencies]
 shellsim = [
-    { name = "marin-rigging", extra = ["prometheus", "secrets"] },
+    { name = "marin-rigging" },
     { name = "shellsim" },
 ]
 
@@ -2945,7 +2945,7 @@ dependencies = [
     { name = "marin-finestore" },
     { name = "marin-iris" },
     { name = "marin-iris-native" },
-    { name = "marin-rigging", extra = ["prometheus", "secrets"] },
+    { name = "marin-rigging", extra = ["secrets"] },
     { name = "marin-rolloutengine" },
     { name = "marin-shellbox" },
     { name = "math-verify" },
@@ -3021,7 +3021,7 @@ megatron = [
     { name = "transformer-engine-torch", version = "2.19.0", source = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/fa4-te219-cu132-20260920-694f3adf/transformer_engine_torch-2.19.0-cp312-cp312-linux_x86_64.whl" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
 ]
 telemetry = [
-    { name = "marin-rigging", extra = ["prometheus", "secrets"] },
+    { name = "marin-rigging", extra = ["prometheus"] },
     { name = "memray", marker = "sys_platform == 'linux' or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "ray", extra = ["default"] },
 ]

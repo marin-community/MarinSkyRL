@@ -1143,8 +1143,8 @@ wheels = [
 
 [[package]]
 name = "marin-rigging"
-version = "0.2.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frigging&rev=545fcc20128cedbbd59d868b133d33e44fda6d06#545fcc20128cedbbd59d868b133d33e44fda6d06" }
+version = "0.2.139.dev37117265303"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiobotocore" },
     { name = "aiohttp" },
@@ -1164,11 +1164,15 @@ dependencies = [
     { name = "starlette" },
     { name = "zstandard" },
 ]
+sdist = { url = "https://files.pythonhosted.org/packages/dc/df/df5f1f367049aef1fb07207ee1a060fd04c8e6f81c8b7158a0a40f6343b3/marin_rigging-0.2.139.dev37117265303.tar.gz", hash = "sha256:429ccf7eec8837e14241fc8922034e8c8646138287fdac06f386703c3ad3aa76", size = 224377, upload-time = "2026-10-03T10:44:04.299Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9f/5c/043a28bc55a885ec3ad78c0e64edd4ff8118aee8926ee96632418257c10c/marin_rigging-0.2.139.dev37117265303-py3-none-any.whl", hash = "sha256:2ce899d34fa102982e7005d78b4bdc36d4faeabf54d176675b8671c11d6017c6", size = 526306, upload-time = "2026-10-03T10:43:52.754Z" },
+]
 
 [[package]]
 name = "marin-rolloutengine"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frolloutengine&rev=545fcc20128cedbbd59d868b133d33e44fda6d06#545fcc20128cedbbd59d868b133d33e44fda6d06" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frolloutengine&rev=c824d2b966b8be5ab6c8157772303ab694e3c004#c824d2b966b8be5ab6c8157772303ab694e3c004" }
 dependencies = [
     { name = "harbor-config" },
     { name = "marin-shellbox" },
@@ -1178,7 +1182,7 @@ dependencies = [
 [[package]]
 name = "marin-shellbox"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fshellbox&rev=545fcc20128cedbbd59d868b133d33e44fda6d06#545fcc20128cedbbd59d868b133d33e44fda6d06" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fshellbox&rev=c824d2b966b8be5ab6c8157772303ab694e3c004#c824d2b966b8be5ab6c8157772303ab694e3c004" }
 dependencies = [
     { name = "httpx" },
 ]
@@ -2237,8 +2241,8 @@ requires-dist = [
     { name = "func-timeout" },
     { name = "ipython", marker = "extra == 'dev'", specifier = "==9.6.0" },
     { name = "loguru" },
-    { name = "marin-rolloutengine", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frolloutengine&rev=545fcc20128cedbbd59d868b133d33e44fda6d06" },
-    { name = "marin-shellbox", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fshellbox&rev=545fcc20128cedbbd59d868b133d33e44fda6d06" },
+    { name = "marin-rolloutengine", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frolloutengine&rev=c824d2b966b8be5ab6c8157772303ab694e3c004" },
+    { name = "marin-shellbox", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fshellbox&rev=c824d2b966b8be5ab6c8157772303ab694e3c004" },
     { name = "math-verify", specifier = "==0.9.0" },
     { name = "numpy" },
     { name = "omegaconf" },
@@ -2250,7 +2254,7 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'" },
     { name = "reasoning-gym", specifier = "==0.1.25" },
     { name = "requests" },
-    { name = "taskcompendium", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=545fcc20128cedbbd59d868b133d33e44fda6d06" },
+    { name = "taskcompendium", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=c824d2b966b8be5ab6c8157772303ab694e3c004" },
     { name = "verifiable-instructions", git = "https://github.com/abukharin-nv/verifiable-instructions.git?rev=f46a5ac87b1400a4f8973039844b6be9b56e3faf" },
     { name = "verifyit", extras = ["answer", "schema", "reasoning-gym", "judge"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fverifyit&rev=232f192a56b013fdc3f6914eb158c7bc2d231f94" },
     { name = "xmltodict" },
@@ -2317,7 +2321,7 @@ wheels = [
 [[package]]
 name = "taskcompendium"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=545fcc20128cedbbd59d868b133d33e44fda6d06#545fcc20128cedbbd59d868b133d33e44fda6d06" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=c824d2b966b8be5ab6c8157772303ab694e3c004#c824d2b966b8be5ab6c8157772303ab694e3c004" }
 dependencies = [
     { name = "marin-rigging" },
     { name = "pyarrow" },
