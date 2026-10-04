@@ -20,12 +20,14 @@ case "$package" in
     flash-attn)
         repository=Dao-AILab/flash-attention
         source_commit=a8aa52b1ab3e9ca574c8a33b3f35afc017ffa2e2
-        package_environment+=(FLASH_ATTENTION_FORCE_BUILD=TRUE "FLASH_ATTN_CUDA_ARCHS=$cuda_architecture")
+        source_patch=flash-attn.patch
+        package_environment+=(FLASH_ATTENTION_FORCE_BUILD=TRUE FLASH_ATTENTION_LOCAL_VERSION=marin.cu132torch2141.1 "FLASH_ATTN_CUDA_ARCHS=$cuda_architecture")
         ;;
     causal-conv1d)
         repository=Dao-AILab/causal-conv1d
         source_commit=cd81f0413cad2fc1e6f17e785ac39f59aae690cd
-        package_environment+=(CAUSAL_CONV1D_FORCE_BUILD=TRUE)
+        source_patch=causal-conv1d.patch
+        package_environment+=(CAUSAL_CONV1D_FORCE_BUILD=TRUE CAUSAL_CONV1D_LOCAL_VERSION=marin.cu132torch2141.1)
         ;;
     mamba-ssm)
         repository=state-spaces/mamba
@@ -54,7 +56,7 @@ case "$package" in
         ;;
     fast-hadamard-transform)
         repository=Dao-AILab/fast-hadamard-transform
-        source_commit=f134af63deb2df17e1171a9ec1ea4a7d8604d5ca
+        source_commit=e7706faf8d1c3b9f241e36860640ad1dac644ede
         package_environment+=(FAST_HADAMARD_TRANSFORM_FORCE_BUILD=TRUE)
         ;;
     *) echo "unsupported package: $package" >&2; exit 2 ;;
