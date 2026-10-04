@@ -186,3 +186,24 @@ def test_dummy_float_weights_excluded_from_layer_counts_still_require_a_load(loa
     else:
         with pytest.raises(RuntimeError, match="e_score_correction_bias"):
             validate_dummy_weight_coverage({}, set(), {name})
+
+
+@pytest.mark.parametrize(
+    ("total", "fails"), [(4, False), (16, True)], ids=["generated-scales", "unsent-weight-with-scales"]
+)
+def test_dummy_generated_attention_scales_do_not_exempt_checkpoint_weights(total, fails):
+    layers = {
+        "model.attn": {
+            "can_load": True,
+            "load_numel": 0,
+            "load_numel_total": total,
+            "tensors": {},
+            "vocab_padding_numel": 0,
+            "generated_numel": 4,
+        }
+    }
+    if fails:
+        with pytest.raises(RuntimeError, match="model.attn"):
+            validate_dummy_weight_coverage(layers, set(), set())
+    else:
+        validate_dummy_weight_coverage(layers, set(), set())
