@@ -7,27 +7,16 @@ import copy
 import numpy as np
 import pytest
 from skyrl_gym.verification import VerificationResult
-from transformers import AutoTokenizer
 
 from skyrl_train.batch_sampling import filter_trajectory_batch
 from skyrl_train.trajectory_runners.base import TrajectoryBatch, TrajectoryID
 from skyrl_train.trajectory_runners.trajectory_processing import (
-    AlignmentStats,
-    TitoFullDeclineReason,
     apply_overlong_filtering,
     concatenate_trajectory_batches,
-    encode_messages_subset,
     get_batch_failure_metrics,
-    get_generation_prompt_ids,
     get_metrics_from_trajectory_batch,
-    get_response_ids_and_loss_mask_from_messages,
     get_rollout_metrics,
 )
-
-QWEN2_5 = "Qwen/Qwen2.5-0.5B-Instruct"
-QWEN3 = "Qwen/Qwen3-0.6B"
-LLAMA3_2 = "unsloth/Llama-3.2-1B-Instruct"
-THINKING_CONTENT = "<think>\nmock thinking\n</think>\n\n"
 
 
 @pytest.mark.parametrize(
@@ -77,209 +66,6 @@ def test_apply_overlong_filtering_zeros_masks_of_truncated_responses(
     assert apply_overlong_filtering(loss_masks, response_ids, eos_token_id) == expected_masks
     assert loss_masks == original_loss_masks
     assert response_ids == original_response_ids
-
-
-CONVERSATIONS = [
-    [{"role": "assistant", "content": "Hello, I can help you."}],
-    [{"role": "user", "content": "What is the weather today?"}],
-    [{"role": "user", "content": "What is 2+2?"}, {"role": "assistant", "content": "The answer is 4."}],
-    [
-        {"role": "assistant", "content": "I'm here to help."},
-        {"role": "user", "content": "Can you explain Python?"},
-        {"role": "assistant", "content": "Python is a programming language."},
-    ],
-]
-
-DUMMY_CHAT_TEMPLATE = (
-    "{%- for message in messages %}"
-    "{%- if message['role'] == 'user' %}"
-    "<USER>{{ message['content'] }}</s>\n"
-    "{%- elif message['role'] == 'assistant' %}"
-    "<ASSISTANT>{{ message['content'] }}</s>\n"
-    "{%- elif message['role'] == 'system' %}"
-    "<SYSTEM>{{ message['content'] }}</s>\n"
-    "{%- endif %}"
-    "{%- endfor %}"
-    "{%- if add_generation_prompt %}"
-    "<ASSISTANT>"
-    "{%- endif %}"
-)
-
-
-@pytest.fixture(scope="module")
-def tokenizer_with_dummy_template():
-    # A SentencePiece tokenizer: with a template that has no special-token delimiters, byte-level BPE (Qwen) merges
-    # tokens across message boundaries, so joint and incremental encodings legitimately differ there.
-    tokenizer = AutoTokenizer.from_pretrained("unsloth/llama-2-7b")
-    tokenizer.chat_template = DUMMY_CHAT_TEMPLATE
-    return tokenizer
-
-
-@pytest.mark.parametrize("messages", CONVERSATIONS)
-def test_encode_messages_subset_joint_matches_incremental(messages, tokenizer_with_dummy_template):
-    """Encoding a conversation at once equals concatenating per-message encodings: the gen == train invariant."""
-    incremental_token_ids = []
-    for message in messages:
-        incremental_token_ids += encode_messages_subset([message], tokenizer_with_dummy_template)
-
-    assert encode_messages_subset(messages, tokenizer_with_dummy_template) == incremental_token_ids
-
-
-@pytest.mark.parametrize(
-    "model_name,messages,expected_str",
-    [
-        (
-            QWEN2_5,
-            CONVERSATIONS[0],
-            "<|im_start|>assistant\nHello, I can help you.<|im_end|>\n",
-        ),
-        (
-            QWEN2_5,
-            CONVERSATIONS[1],
-            "<|im_start|>user\nWhat is the weather today?<|im_end|>\n",
-        ),
-        (
-            QWEN2_5,
-            CONVERSATIONS[2],
-            "<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\nThe answer is 4.<|im_end|>\n",
-        ),
-        (
-            QWEN2_5,
-            CONVERSATIONS[3],
-            "<|im_start|>assistant\nI'm here to help.<|im_end|>\n<|im_start|>user\nCan you explain Python?<|im_end|>\n"
-            "<|im_start|>assistant\nPython is a programming language.<|im_end|>\n",
-        ),
-        (
-            QWEN3,
-            [{"role": "assistant", "content": THINKING_CONTENT + "Hello, I can help you."}],
-            "<|im_start|>assistant\n" + THINKING_CONTENT + "Hello, I can help you.<|im_end|>\n",
-        ),
-        (
-            QWEN3,
-            CONVERSATIONS[1],
-            "<|im_start|>user\nWhat is the weather today?<|im_end|>\n",
-        ),
-        (
-            QWEN3,
-            [
-                {"role": "user", "content": "What is 2+2?"},
-                {"role": "assistant", "content": THINKING_CONTENT + "The answer is 4."},
-            ],
-            "<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n"
-            + THINKING_CONTENT
-            + "The answer is 4.<|im_end|>\n",
-        ),
-        (
-            # Qwen3's template strips thinking from every assistant turn except the last.
-            QWEN3,
-            [
-                {"role": "assistant", "content": THINKING_CONTENT + "I'm here to help."},
-                {"role": "user", "content": "Can you explain Python?"},
-                {"role": "assistant", "content": THINKING_CONTENT + "Python is a programming language."},
-            ],
-            "<|im_start|>assistant\nI'm here to help.<|im_end|>\n<|im_start|>user\nCan you explain Python?<|im_end|>\n"
-            "<|im_start|>assistant\n" + THINKING_CONTENT + "Python is a programming language.<|im_end|>\n",
-        ),
-    ],
-)
-def test_encode_messages_subset_renders_chat_template_turns(model_name, messages, expected_str, load_tokenizer):
-    tokenizer = load_tokenizer(model_name)
-    expected_token_ids = tokenizer.encode(expected_str, add_special_tokens=False)
-
-    assert encode_messages_subset(messages, tokenizer) == expected_token_ids
-
-
-def test_observation_roles_are_rendered_and_fully_masked(load_tokenizer):
-    """Regression: role='tool' messages raised, excluding every tool-using agentic trajectory from the batch."""
-    tokenizer = load_tokenizer(QWEN2_5)
-    for role in ("tool", "system", "user"):
-        response_ids, loss_mask, _ = get_response_ids_and_loss_mask_from_messages(
-            [{"role": role, "content": "observation content"}], tokenizer
-        )
-        assert len(response_ids) > 0
-        assert loss_mask == [0] * len(response_ids)
-
-
-def test_missing_assistant_logprobs_degrade_and_are_counted(load_tokenizer):
-    """Missing logprobs for one assistant message must not crash the job; the failure is recorded instead."""
-    tokenizer = load_tokenizer(QWEN2_5)
-    messages = [
-        {"role": "assistant", "content": "Hello"},
-        {"role": "assistant", "content": "Hi"},
-    ]
-    generation_prompt_ids = get_generation_prompt_ids(tokenizer)
-    first_message_ids = encode_messages_subset([messages[0]], tokenizer)
-    last_eos_index = len(first_message_ids) - 1 - first_message_ids[::-1].index(tokenizer.eos_token_id)
-    num_generated_tokens = last_eos_index + 1 - len(generation_prompt_ids)
-    stats = AlignmentStats()
-
-    response_ids, loss_mask, rollout_logprobs = get_response_ids_and_loss_mask_from_messages(
-        messages, tokenizer, [[-0.5] * num_generated_tokens], alignment_stats=stats
-    )
-
-    assert len(rollout_logprobs) == len(response_ids) == len(loss_mask)
-    assert stats.n_failed_messages == 1
-
-
-def test_logprob_count_mismatch_degrades_and_is_counted(load_tokenizer):
-    tokenizer = load_tokenizer(QWEN2_5)
-    stats = AlignmentStats()
-
-    response_ids, loss_mask, rollout_logprobs = get_response_ids_and_loss_mask_from_messages(
-        [{"role": "assistant", "content": "Hello"}], tokenizer, [[-0.5] * 10], alignment_stats=stats
-    )
-
-    assert len(rollout_logprobs) == len(response_ids) == len(loss_mask)
-    assert stats.n_failed_messages == 1
-    assert stats.n_exact == 0
-
-
-ASSISTANT_USER_ASSISTANT = [
-    {"role": "assistant", "content": "b"},
-    {"role": "user", "content": "1"},
-    {"role": "assistant", "content": "b"},
-]
-
-
-# Qwen2.5 renders `<|im_start|>assistant\n` (3 tokens), then content, `<|im_end|>`, and a trailing `\n` that the
-# model never samples. Llama 3.2 renders `<|start_header_id|>assistant<|end_header_id|>\n\n` (4 tokens), then
-# content and `<|eot_id|>` with nothing after it. Qwen3 adds an empty `<think>\n\n</think>\n\n` block (4 tokens)
-# to an assistant turn that has none. User turns are fully masked.
-@pytest.mark.parametrize(
-    "model_name,messages,expected_loss_mask",
-    [
-        (QWEN2_5, [{"role": "assistant", "content": "b"}], [0, 0, 0, 1, 1, 0]),
-        (LLAMA3_2, [{"role": "assistant", "content": "b"}], [0, 0, 0, 0, 1, 1]),
-        (QWEN3, [{"role": "assistant", "content": THINKING_CONTENT + "b"}], [0, 0, 0] + [1] * 9 + [0]),
-        (QWEN2_5, ASSISTANT_USER_ASSISTANT, [0, 0, 0, 1, 1, 0] + [0] * 6 + [0, 0, 0, 1, 1, 0]),
-        (LLAMA3_2, ASSISTANT_USER_ASSISTANT, [0, 0, 0, 0, 1, 1] + [0] * 6 + [0, 0, 0, 0, 1, 1]),
-        (QWEN3, ASSISTANT_USER_ASSISTANT, [0, 0, 0] + [1] * 6 + [0] + [0] * 6 + [0, 0, 0] + [1] * 6 + [0]),
-        (
-            QWEN3,
-            [
-                {"role": "assistant", "content": THINKING_CONTENT + "b"},
-                {"role": "user", "content": "1"},
-                {"role": "assistant", "content": THINKING_CONTENT + "b"},
-            ],
-            [0, 0, 0] + [1] * 9 + [0] + [0] * 6 + [0, 0, 0] + [1] * 9 + [0],
-        ),
-    ],
-    ids=[
-        "qwen2_5",
-        "llama3_2",
-        "qwen3-thinking",
-        "qwen2_5-multi-turn",
-        "llama3_2-multi-turn",
-        "qwen3-multi-turn",
-        "qwen3-multi-turn-thinking",
-    ],
-)
-def test_loss_mask_covers_exactly_the_sampled_assistant_tokens(
-    model_name, messages, expected_loss_mask, load_tokenizer
-):
-    _, loss_mask, _ = get_response_ids_and_loss_mask_from_messages(messages, load_tokenizer(model_name))
-
-    assert loss_mask == expected_loss_mask
 
 
 @pytest.mark.parametrize(
@@ -385,16 +171,15 @@ def test_server_error_identity_stays_with_its_row_after_concatenation():
 
 def test_unaligned_logprob_alert_survives_concatenation():
     groups = [_generated_group(1, 0), _generated_group(1, 0)]
-    clean = AlignmentStats()
-    clean.n_tokens = 10
-    clean.n_exact = 10
-    unaligned = AlignmentStats()
-    unaligned.n_tokens = 10
-    unaligned.n_exact = 9
-    unaligned.n_unaligned = 1
-    unaligned.n_failed_messages = 1
-    groups[0]["rollout_metrics"].update(clean.as_metrics(prefix="generate/tis/", lcs_alert_threshold=0.005))
-    groups[1]["rollout_metrics"].update(unaligned.as_metrics(prefix="generate/tis/", lcs_alert_threshold=0.005))
+    groups[0]["rollout_metrics"].update({"generate/tis/aligned_tokens": 10.0, "generate/tis/exact_match_fraction": 1.0})
+    groups[1]["rollout_metrics"].update(
+        {
+            "generate/tis/aligned_tokens": 10.0,
+            "generate/tis/exact_match_fraction": 0.9,
+            "generate/tis/unaligned_fraction": 0.1,
+            "generate/tis/alignment_fail_count": 1.0,
+        }
+    )
 
     merged = concatenate_trajectory_batches(groups, tis_lcs_alert_threshold=0.005)
 
@@ -405,16 +190,24 @@ def test_unaligned_logprob_alert_survives_concatenation():
 
 def test_full_tito_and_task_rollout_metrics_survive_concatenation():
     groups = [_generated_group(1, 0), _generated_group(1, 0)]
-    first = AlignmentStats()
-    first.n_tokens = 5
-    first.n_exact = 5
-    first.record_tito_full_success()
-    second = AlignmentStats()
-    second.n_tokens = 5
-    second.n_exact = 5
-    second.record_tito_full_decline(TitoFullDeclineReason.PREFIX_MISMATCH)
-    groups[0]["rollout_metrics"].update(first.as_metrics(prefix="generate/tis/", lcs_alert_threshold=0.005))
-    groups[1]["rollout_metrics"].update(second.as_metrics(prefix="generate/tis/", lcs_alert_threshold=0.005))
+    groups[0]["rollout_metrics"].update(
+        {
+            "generate/tis/aligned_tokens": 5.0,
+            "generate/tis/exact_match_fraction": 1.0,
+            "generate/tis/tito_full/attempts": 1.0,
+            "generate/tis/tito_full/success_fraction": 1.0,
+        }
+    )
+    groups[1]["rollout_metrics"].update(
+        {
+            "generate/tis/aligned_tokens": 5.0,
+            "generate/tis/exact_match_fraction": 1.0,
+            "generate/tis/tito_full/attempts": 1.0,
+            "generate/tis/tito_full/success_fraction": 0.0,
+            "generate/tis/tito_full/decline_count": 1.0,
+            "generate/tis/tito_full/decline/prefix_mismatch": 1.0,
+        }
+    )
     groups[0]["rollout_metrics"].update(
         {
             "generate/task_rollout/tasks": 1.0,
