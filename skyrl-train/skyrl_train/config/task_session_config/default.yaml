@@ -92,7 +92,6 @@ nemotron_ultra:
       timeout_seconds: 600.0
       response_transport: responses_metadata
       reasoning_effort: null
-    num_rollouts_per_prompt: 16
     max_concurrent_comparisons: 4
     default_score: 3.0
     max_output_tokens: 24576

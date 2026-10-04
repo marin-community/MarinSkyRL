@@ -65,9 +65,11 @@ def grade_genrm_rollouts(
     if judge_config is None:
         raise RuntimeError("GenRM tasks require a judge in the group-grader configuration")
     judge = OpenAIJudge(**judge_config)
-    expected_size = int(config["num_rollouts_per_prompt"])
-    if len(rollouts) != expected_size:
-        raise ValueError(f"GenRM cohort requires {expected_size} rollouts for a prompt, received {len(rollouts)}")
+    for index, (rollout, valid) in enumerate(zip(rollouts, eligible, strict=True)):
+        if not valid and rollout.grade.status == Outcome.GRADED:
+            result[index] = _with_grade(
+                rollout, GradeResult(Outcome.UNAVAILABLE, None, "The rollout is ineligible for GenRM comparison"), {}
+            )
     indices = [
         index
         for index, (rollout, valid) in enumerate(zip(rollouts, eligible, strict=True))

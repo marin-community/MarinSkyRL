@@ -52,10 +52,11 @@ from skyrl_train.dataset.nemotron_ultra import NemotronTaskDataset
 from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection, WholeTrajectoryProjection
 from skyrl_train.rollouts.buffer import RolloutGroup, RolloutLease, RolloutTask
 from skyrl_train.rollouts.task_worker import TaskRolloutWorker
-from skyrl_train.rollouts.group_grader import GroupGraderSpec, task_group_grader
+from skyrl_train.rollouts.group_grader import GenRMGroupGraderParameters, GroupGraderSpec, task_group_grader
+from skyrl_train.rollouts.genrm_grading import grade_genrm_rollouts
 from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
 from taskcompendium.importers.skyrl import source_task
-from rolloutengine.contracts import ModelTurn, RolloutContractError, SessionStart, Transition
+from rolloutengine.contracts import ModelTurn, RolloutContractError, RolloutData, RolloutStep, SessionStart, Transition
 from skyrl_train.trajectory_runners.types import BatchMetadata, TokenProvenance, TrajectoryID
 from skyrl_train.trajectory_runners.model_clients import DirectModelClient, ModelServerError
 from skyrl_train.rollout_observability import observe_rollout_call
@@ -1535,6 +1536,54 @@ def genrm_judge_server():
         thread.join()
 
 
+@pytest.mark.parametrize("valid_peers", [0, 2])
+def test_genrm_ineligible_attempts_have_no_provisional_score(task_inputs, genrm_judge_server, valid_peers):
+    _, request = task_inputs
+    task = TaskSpec.model_validate_json(request["env_extras"][0]["task_spec"])
+    specification = GroupGraderSpec(
+        name="nemotron_genrm",
+        parameters_json=GenRMGroupGraderParameters(
+            principle="Prefer the correct answer.",
+            agent="genrm_simple_agent",
+            config={
+                "judge": {"base_url": f"http://127.0.0.1:{genrm_judge_server.server_port}", "model": "judge"},
+                "reasoning_bonus": 0,
+                "answer_bonus": 0,
+                "group_reasoning_length_penalty_coeff": 0,
+                "group_answer_length_penalty_coeff": 0,
+            },
+        ).model_dump_json(),
+    )
+    pending_grade = GradeResult(Outcome.GRADED, 3.0, passed=True, score_min=1.0, score_max=5.0)
+    records = []
+    for text in ("better", "worse", "excluded"):
+        message = {"role": "assistant", "content": text}
+        turn = ModelTurn(message, (1, 2), (3, 4), (-0.1, -0.2), "stop", text=text)
+        records.append(
+            RolloutData(
+                task_id=task.id,
+                messages=(message,),
+                prompt_token_ids=(1, 2),
+                response_token_ids=(3, 4),
+                loss_mask=(1, 1),
+                logprobs=(-0.1, -0.2),
+                grade=pending_grade,
+                stop_reason="stop",
+                steps=(RolloutStep(turn, Transition(done=True, reward=3.0, grade=pending_grade), 1, (message,)),),
+            )
+        )
+    result = grade_genrm_rollouts(task, specification, records, [index < valid_peers for index in range(3)], "train")
+
+    assert [record.grade.reward for record in result] == ([5.0, 1.0, None] if valid_peers else [None] * 3)
+    for record in result[valid_peers:]:
+        assert record.grade.status == Outcome.UNAVAILABLE
+        assert record.steps[0].transition.reward is None
+    assert all(
+        "excluded" not in (comparison["response_1"], comparison["response_2"])
+        for comparison in genrm_judge_server.comparisons
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("verifyit_enabled", [False, True])
 @pytest.mark.parametrize(
@@ -1575,7 +1624,6 @@ async def test_genrm_final_grades_and_credit_reach_training_batch(
             "grading": grading,
             "verifyit_enabled": verifyit_enabled,
             "genrm": {
-                "num_rollouts_per_prompt": count,
                 "genrm_parse_retries": 0,
                 "default_score": 0,
                 "reasoning_bonus": 0,

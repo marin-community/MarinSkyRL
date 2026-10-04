@@ -131,7 +131,6 @@ environment:
           response_transport: chat_completions
           reasoning_effort: low
           timeout_seconds: 600.0
-        num_rollouts_per_prompt: 2
         group_answer_length_penalty_coeff: 0.0
         group_reasoning_length_penalty_coeff: 0.0
         max_output_tokens: 512
