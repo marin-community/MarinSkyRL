@@ -88,6 +88,7 @@ def test_dummy_engine_installs_every_tensor_and_holds_requests_until_verified_sy
     cfg.generator.inference_engine_expert_parallel_size = 1
     cfg.generator.gpu_memory_utilization = 0.6
     cfg.generator.enforce_eager = True
+    cfg.generator.vllm_v1_disable_multiproc = True
     cfg.generator.fuse_weights = False
     cfg.generator.weight_sync_transport = "broadcast"
     OmegaConf.update(cfg, "generator.engine_init_kwargs.max_model_len", 2048, force_add=True)
