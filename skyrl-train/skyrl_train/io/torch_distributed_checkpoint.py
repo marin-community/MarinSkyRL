@@ -22,8 +22,8 @@ from torch.futures import Future
 
 from marinskyrl.remote_io import (
     CommittableStream,
+    MultipartWriteMode,
     OutputStream,
-    S3_MULTIPART_CONCURRENCY,
     S3_MULTIPART_PART_BYTES,
     S3MultipartWriteStream,
     create_output_stream,
@@ -32,6 +32,7 @@ from marinskyrl.remote_io import (
 
 
 DEFAULT_TENSOR_COPY_AHEAD_BYTES = 2**30
+CHECKPOINT_MULTIPART_CONCURRENCY = 8
 
 
 class _DeferredWriteErrorStream(CommittableStream):
@@ -110,8 +111,16 @@ class _AbortableFsspecFileSystem(FsspecFileSystem):
 
         object_path = os.fspath(path)
         if mode == "wb":
-            stream = create_output_stream(self.fs, object_path)
-            if object_path.endswith(DEFAULT_SUFFIX) and isinstance(stream, S3MultipartWriteStream):
+            is_checkpoint_shard = object_path.endswith(DEFAULT_SUFFIX)
+            stream = create_output_stream(
+                self.fs,
+                object_path,
+                multipart_concurrency=CHECKPOINT_MULTIPART_CONCURRENCY if is_checkpoint_shard else None,
+                multipart_mode=(
+                    MultipartWriteMode.COMPLETION_ORDER if is_checkpoint_shard else MultipartWriteMode.SUBMISSION_ORDER
+                ),
+            )
+            if is_checkpoint_shard and isinstance(stream, S3MultipartWriteStream):
                 stream = _DeferredWriteErrorStream(stream)
             with manage_output_stream(stream, object_path) as managed:
                 yield managed
@@ -153,8 +162,8 @@ class StreamingFsspecWriter(FileSystemWriter):
             len(plan.items),
             self.tensor_copy_ahead_bytes,
             S3_MULTIPART_PART_BYTES,
-            S3_MULTIPART_CONCURRENCY,
-            self.tensor_copy_ahead_bytes + S3_MULTIPART_PART_BYTES * (S3_MULTIPART_CONCURRENCY + 1),
+            CHECKPOINT_MULTIPART_CONCURRENCY,
+            self.tensor_copy_ahead_bytes + S3_MULTIPART_PART_BYTES * (CHECKPOINT_MULTIPART_CONCURRENCY + 1),
         )
         return plan
 

@@ -4,6 +4,7 @@ import io as stdlib_io
 import json
 import math
 import os
+import random
 import re
 import shutil
 import threading
@@ -100,11 +101,13 @@ from skyrl_train.group_admission import (
 from marinskyrl.checkpoint_paths import (
     GLOBAL_STEP_PREFIX,
     LATEST_CHECKPOINT_FILE,
+    MEGATRON_EXTRA_STATE_FILENAME,
+    extract_step_from_path,
 )
 from marinskyrl.process_diagnostics import write_exception_receipt
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from marinskyrl.speculative_decoding import SpeculativeDecodingConfig, runai_model_uri
-from skyrl_train.checkpoint_listing import extract_step_from_path
+from skyrl_train.checkpoint_generation import commit_attempt, new_attempt_path, resolve_checkpoint_payload
 from skyrl_train.utils.trainer_utils import (
     async_step_metrics,
     consumed_stop_metrics,
@@ -140,6 +143,7 @@ from skyrl_train.telemetry import (
 from skyrl_train.rollout_observability import async_phase_window, monitor_event_loop_lag
 from skyrl_train.utils.importance_ratio_diagnostics import mismatch_ratio_metrics
 from skyrl_train.timing_observability import StepWallTime, publish_startup_timings, publish_step_timings
+from skyrl_train.timing_observability import checkpoint_phase
 from skyrl_train.hf_export import (
     protected_hf_export_steps,
     read_hf_export_request,
@@ -168,6 +172,20 @@ class CheckpointSnapshot:
     trainer_state_path: str
     trainer_state_payload: bytes
     marker_path: str
+
+
+_DRIVER_RNG_STATE_FILENAME = "driver_rng_state.pt"
+_ROLLOUT_STATE_FILENAME = "data.pt"
+
+
+def _driver_rng_state() -> dict[str, Any]:
+    return {"python": random.getstate(), "numpy": np.random.get_state(), "torch_cpu": torch.get_rng_state()}
+
+
+def _restore_driver_rng_state(state: dict[str, Any]) -> None:
+    random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    torch.set_rng_state(state["torch_cpu"])
 
 
 _MODEL_INITIALIZATION_TIMEOUT = 60 * 60
@@ -340,6 +358,9 @@ class RayPPOTrainer:
         self._last_saved_step: int | None = None
         self._last_evaluated_step: int | None = None
         self._pending_checkpoint_upload: tuple[asyncio.Task[tuple[float, float]], TrainerState] | None = None
+        self._pending_megatron_save: TrainerState | None = None
+        self._pending_megatron_hf_export = False
+        self._loaded_driver_rng_state: dict[str, Any] | None = None
         raw_speculative_decoding = cfg.generator.get("speculative_decoding")
         if raw_speculative_decoding is not None:
             raw_speculative_decoding = OmegaConf.to_container(raw_speculative_decoding, resolve=True)
@@ -697,24 +718,37 @@ class RayPPOTrainer:
                     await self._evaluate_and_log(final_state, commit=True)
                 self._control.should_evaluate = False
         finally:
-            if self.colocate_all:
+            megatron_final_save = (
+                self._megatron_checkpointing()
+                and self._control.should_save
+                and self._last_saved_step != self.global_step
+            )
+            if self.colocate_all and not megatron_final_save:
                 await self.inference_engine_client.sleep()
                 self.policy_model.backload_to_gpu()
 
             # The interval save may have just written this same step; do not write it twice.
+            final_save_succeeded = True
             if self._control.should_save and self._last_saved_step != self.global_step:
-                with Timer("save_checkpoints", self.all_timings):
-                    rollout_state = await self._rollout_state()
-                    snapshot = await asyncio.to_thread(self._snapshot_checkpoint, rollout_state)
-                try:
-                    await self.callback_handler.call_event_async("on_save", final_state, self._control, trainer=self)
-                except BaseException:
-                    await self._await_checkpoint_upload(snapshot)
-                    raise
-                self._start_checkpoint_upload(snapshot, final_state)
-                if await self._drain_checkpoint_upload():
-                    logger.info("Saved final checkpoint.")
-            if self._control.should_save_hf_model:
+                if self._megatron_checkpointing():
+                    final_save_succeeded = await self._save_megatron_checkpoint(final_state)
+                    if final_save_succeeded:
+                        logger.info("Saved final checkpoint.")
+                else:
+                    with Timer("save_checkpoints", self.all_timings):
+                        rollout_state = await self._rollout_state()
+                        snapshot = await asyncio.to_thread(self._snapshot_checkpoint, rollout_state)
+                    try:
+                        await self.callback_handler.call_event_async(
+                            "on_save", final_state, self._control, trainer=self
+                        )
+                    except BaseException:
+                        await self._await_checkpoint_upload(snapshot)
+                        raise
+                    self._start_checkpoint_upload(snapshot, final_state)
+                    if await self._drain_checkpoint_upload():
+                        logger.info("Saved final checkpoint.")
+            if self._control.should_save_hf_model and final_save_succeeded:
                 await asyncio.to_thread(self.handle_hf_export)
 
     async def _save_checkpoints_with_residency(self) -> CheckpointSnapshot:
@@ -736,6 +770,156 @@ class RayPPOTrainer:
         logger.opt(exception=True).error(
             f"Checkpoint save failed at global step {state.global_step}; continuing from the last complete checkpoint"
         )
+
+    def _megatron_checkpointing(self) -> bool:
+        return str(self.cfg.trainer.strategy) == "megatron"
+
+    def _can_replay_driver_rng(self) -> bool:
+        return (
+            self._megatron_checkpointing()
+            and int(self.cfg.trainer.rollout_buffer.max_staleness_steps) == 0
+            and not bool(self.cfg.generator.get("enable_http_endpoint", False))
+        )
+
+    def _restore_loaded_driver_rng(self) -> None:
+        if self._loaded_driver_rng_state is not None:
+            _restore_driver_rng_state(self._loaded_driver_rng_state)
+            self._loaded_driver_rng_state = None
+
+    def _trainer_checkpoint_state(self, step: int) -> dict[str, Any]:
+        return {
+            "global_step": step,
+            "config": self.cfg,
+            "distillation_scored_tokens_total": self.distillation_scored_tokens_total,
+            "ftpo_stopped": self._ftpo_stopped,
+            "domain_gradient_balance_state": self._domain_balancer.state_dict() if self._domain_balancer else None,
+        }
+
+    def _settle_checkpoint_refs(self, refs: list[ObjectRef], *, operation: str) -> None:
+        """Wait for every rank before raising the first worker error."""
+        timeout = int(self.cfg.trainer.distributed.worker_collective_timeout_seconds)
+        deadline = time.monotonic() + timeout
+        pending = list(refs)
+        first_error: Exception | None = None
+        while pending:
+            ready, pending = ray.wait(pending, num_returns=1, timeout=max(0.0, deadline - time.monotonic()))
+            if not ready:
+                raise RuntimeError(f"{operation}: {len(pending)} worker calls did not settle within {timeout}s")
+            for ref in ready:
+                try:
+                    ray.get(ref)
+                except Exception as error:
+                    if first_error is None:
+                        first_error = error
+        if first_error is not None:
+            raise first_error
+
+    def _save_megatron_component(self, component: str, actors: PPORayActorGroup, root: str) -> set[str]:
+        component_path = os.path.join(root, component)
+        refs = actors.async_run_ray_method(
+            "pass_through", "save_checkpoint", ckpt_dir=component_path, tokenizer=self.tokenizer
+        )
+        self._settle_checkpoint_refs(refs, operation=f"{component} save")
+        if not refs:
+            raise RuntimeError(f"{component} has no checkpoint workers")
+        required = {
+            f"{component}/.metadata",
+            f"{component}/common.pt",
+            f"{component}/metadata.json",
+            f"{component}/{MEGATRON_EXTRA_STATE_FILENAME}",
+            f"{component}/huggingface/config.json",
+        }
+        required.update(f"{component}/__{rank}_0.distcp" for rank in range(len(refs)))
+        return required
+
+    def _save_megatron_workers(self, attempt_path: str) -> set[str]:
+        required = self._save_megatron_component(POLICY_CHECKPOINT_SUBDIRECTORY, self.policy_model, attempt_path)
+        if self.critic_model is not None:
+            if self.colocate_all:
+                self.policy_model.offload_to_cpu()
+                self.critic_model.backload_to_gpu()
+            try:
+                required.update(self._save_megatron_component("critic", self.critic_model, attempt_path))
+            finally:
+                if self.colocate_all:
+                    self.critic_model.offload_to_cpu()
+                    self.policy_model.backload_to_gpu()
+        return required
+
+    def _commit_megatron_attempt(
+        self,
+        step: int,
+        attempt_path: str,
+        required: set[str],
+        rollout_state: TrainingContextState,
+        rng_state: dict[str, Any] | None,
+    ) -> None:
+        states = {
+            _ROLLOUT_STATE_FILENAME: rollout_state,
+            TRAINER_STATE_FILENAME: self._trainer_checkpoint_state(step),
+        }
+        if rng_state is not None:
+            states[_DRIVER_RNG_STATE_FILENAME] = rng_state
+        for filename, payload in states.items():
+            buffer = stdlib_io.BytesIO()
+            torch.save(payload, buffer)
+            io.write_bytes_atomic(os.path.join(attempt_path, filename), buffer.getvalue())
+            required.add(filename)
+
+        step_path = os.path.join(self.cfg.trainer.ckpt_path, f"{GLOBAL_STEP_PREFIX}{step}")
+        latest_path = os.path.join(self.cfg.trainer.ckpt_path, LATEST_CHECKPOINT_FILE)
+        previous = int(io.read_bytes(latest_path)) if io.exists(latest_path) else None
+        if previous is not None and previous > step:
+            raise RuntimeError(f"Refusing to replace latest checkpoint step {previous} with older step {step}")
+        commit_attempt(step_path, attempt_path, required_files=required)
+        if previous != step:
+            io.write_bytes_atomic(latest_path, str(step).encode())
+        self._last_saved_step = step
+
+    async def _save_megatron_checkpoint(self, state: TrainerState) -> bool:
+        """Commit one Megatron generation, returning False after a storage failure."""
+        await self._drain_checkpoint_upload()
+        step = state.global_step
+        step_path = os.path.join(self.cfg.trainer.ckpt_path, f"{GLOBAL_STEP_PREFIX}{step}")
+        attempt_path = new_attempt_path(step_path)
+        committed = False
+        try:
+            with (
+                Timer("save_checkpoints", self.all_timings),
+                checkpoint_phase("megatron", "save", "checkpoint_foreground_pause", rank=-1, step=step),
+            ):
+                io.makedirs(attempt_path, exist_ok=True)
+                if self.colocate_all:
+                    await self.inference_engine_client.sleep()
+                    self.policy_model.backload_to_gpu(backload_optimizer=True, backload_model=True)
+                try:
+                    required = await asyncio.to_thread(self._save_megatron_workers, attempt_path)
+                finally:
+                    if self.colocate_all:
+                        await self._sync_policy_for_rollouts(reason="checkpoint_restore")
+                await self.callback_handler.call_event_async("on_save", state, self._control, trainer=self)
+                rollout_state = await self._rollout_state()
+                rng_state = _driver_rng_state() if self._can_replay_driver_rng() else None
+                try:
+                    await asyncio.to_thread(
+                        self._commit_megatron_attempt, step, attempt_path, required, rollout_state, rng_state
+                    )
+                finally:
+                    if rng_state is not None:
+                        _restore_driver_rng_state(rng_state)
+                committed = True
+        except OSError:
+            self._record_checkpoint_save_failure(state)
+        except ray.exceptions.RayTaskError as error:
+            if not isinstance(error.as_instanceof_cause(), OSError):
+                raise
+            self._record_checkpoint_save_failure(state)
+        if committed:
+            try:
+                self._cleanup_old_checkpoints()
+            except OSError as error:
+                logger.warning("Checkpoint retention failed after publication: {}", error)
+        return committed
 
     async def _save_intermediate_checkpoint(self, state: TrainerState) -> None:
         """Save one requested step checkpoint without terminating training on storage failure."""
@@ -815,18 +999,21 @@ class RayPPOTrainer:
         self._control = await self.callback_handler.call_event_async("on_step_end", state, self._control, trainer=self)
 
         if self._control.should_save:
-            if step_wall is not None:
-                step_wall.start("checkpoint_work")
-            await self._save_intermediate_checkpoint(state)
+            if self._megatron_checkpointing():
+                self._pending_megatron_save = state
+            else:
+                if step_wall is not None:
+                    step_wall.start("checkpoint_work")
+                await self._save_intermediate_checkpoint(state)
             self._control.should_save = False
 
         if self._control.should_save_hf_model:
-            if step_wall is not None:
+            if step_wall is not None and self._pending_megatron_save is None:
                 step_wall.start("checkpoint_work")
-            # HF export reads the committed checkpoint. When checkpoint and HF
-            # export share a cadence, wait for the background shard uploads and
-            # marker publication before asking the exporter to consume it.
-            if await self._drain_checkpoint_upload():
+            # HF export reads the committed checkpoint.
+            if self._pending_megatron_save is not None:
+                self._pending_megatron_hf_export = True
+            elif await self._drain_checkpoint_upload():
                 await asyncio.to_thread(self.handle_hf_export)
             self._control.should_save_hf_model = False
 
@@ -1251,6 +1438,7 @@ class RayPPOTrainer:
         await self._sync_policy_for_rollouts(reason="initial")
 
         if self._ftpo_stopped:
+            self._restore_loaded_driver_rng()
             await self._handle_resume_at_max_steps()
             return
 
@@ -1276,10 +1464,12 @@ class RayPPOTrainer:
                 raise ValueError("callback step limit exceeds the available training batches")
             self.total_training_steps = limit
         elif self.resume_mode != ResumeMode.NONE and self.global_step >= self.total_training_steps:
+            self._restore_loaded_driver_rng()
             await self._handle_resume_at_max_steps()
             return
 
         if self._control.should_training_stop:
+            self._restore_loaded_driver_rng()
             await self._finalize_training(
                 completed_step=self.global_step, epoch=self.global_step // self.num_steps_per_epoch
             )
@@ -1289,6 +1479,7 @@ class RayPPOTrainer:
             await self._run_pretraining_evaluation(initial_state)
             self._control.should_evaluate = False
 
+        self._restore_loaded_driver_rng()
         self.context.start()
         await self._publish(self.global_step + 1)
 
@@ -1306,12 +1497,13 @@ class RayPPOTrainer:
                 step_wall.start("step_end_bookkeeping")
                 step_state = self._create_trainer_state(epoch, active_step_duration=step_timer.elapsed)
                 await self._run_step_end_callbacks(step_state, step_wall=step_wall)
-            self.all_metrics.update(
-                step_wall.finish(step_timer.duration, ended_at=step_timer.start_time + step_timer.duration)
-            )
-            self._update_step_performance_metrics(
-                training_input, core_seconds=core_seconds, cycle_started=cycle_started
-            )
+            if self._pending_megatron_save is None:
+                self.all_metrics.update(
+                    step_wall.finish(step_timer.duration, ended_at=step_timer.start_time + step_timer.duration)
+                )
+                self._update_step_performance_metrics(
+                    training_input, core_seconds=core_seconds, cycle_started=cycle_started
+                )
 
             if self._control.should_log:
                 log_payload = {
@@ -1324,20 +1516,49 @@ class RayPPOTrainer:
                 await self.callback_handler.call_event_async(
                     "on_log", step_state, self._control, logs=log_payload, trainer=self
                 )
-            self._log_training_step_completed(epoch=epoch, duration_seconds=step_timer.duration)
-
-            self._step_time_history.append(step_timer.duration)
+            stop = self._control.should_training_stop
+            if step_state.is_epoch_end:
+                await self._end_epoch(epoch)
+                stop = stop or self._control.should_training_stop
+            if self._pending_megatron_save is not None:
+                pending = self._pending_megatron_save
+                self._pending_megatron_save = None
+                step_wall.start("checkpoint_work")
+                committed = await self._save_megatron_checkpoint(pending)
+                stop = stop or self._control.should_training_stop
+                if committed and (self._pending_megatron_hf_export or self._control.should_save_hf_model):
+                    await asyncio.to_thread(self.handle_hf_export)
+                self._pending_megatron_hf_export = False
+                ended_at = time.monotonic()
+                self.all_timings["step"] = ended_at - step_timer.start_time
+                self.all_metrics.update(step_wall.finish(self.all_timings["step"], ended_at=ended_at))
+                self._update_step_performance_metrics(
+                    training_input, core_seconds=core_seconds, cycle_started=cycle_started
+                )
+                if self._control.should_log:
+                    metrics = {
+                        **{f"timing/{key}": value for key, value in self.all_timings.items()},
+                        **{
+                            key: value
+                            for key, value in self.all_metrics.items()
+                            if key.startswith(("timing/", "async/performance/", "trainer/checkpoint_save_failures"))
+                        },
+                    }
+                    rng_state = _driver_rng_state() if self._can_replay_driver_rng() else None
+                    try:
+                        self._log_metrics_stdout(metrics, step=self.global_step, kind="checkpoint")
+                        self.tracker.log(metrics, step=self.global_step, commit=False)
+                    finally:
+                        if rng_state is not None:
+                            _restore_driver_rng_state(rng_state)
+            self._log_training_step_completed(epoch=epoch, duration_seconds=self.all_timings["step"])
+            self._step_time_history.append(self.all_timings["step"])
             self.all_metrics = {}
             publish_step_timings(self.all_timings, self.global_step)
             self.all_timings = {}
             pbar.update(1)
             last_completed_step = self.global_step
             record_policy_step(self.global_step)
-
-            stop = self._control.should_training_stop
-            if step_state.is_epoch_end:
-                await self._end_epoch(epoch)
-                stop = stop or self._control.should_training_stop
             if stop:
                 logger.info("Training stopped early by callback")
                 break
@@ -2865,6 +3086,11 @@ class RayPPOTrainer:
 
     async def save_checkpoints(self) -> None:
         """Save and publish a complete checkpoint before returning."""
+        if self._megatron_checkpointing():
+            state = self._create_trainer_state(epoch=self.global_step // self.num_steps_per_epoch)
+            if not await self._save_megatron_checkpoint(state):
+                raise OSError(f"Megatron checkpoint save failed at step {self.global_step}")
+            return
         snapshot = await asyncio.to_thread(self._snapshot_checkpoint, await self._rollout_state())
         upload_duration, cleanup_duration = await self._finish_checkpoint_upload(snapshot, commit=True)
         self.all_timings["checkpoint_upload"] = self.all_timings.get("checkpoint_upload", 0.0) + upload_duration
@@ -2926,21 +3152,14 @@ class RayPPOTrainer:
                 self.policy_model.backload_to_gpu()
 
         # Serialize rollout data state for publication after the rank uploads complete.
-        rollout_state_path = os.path.join(global_step_folder, "data.pt")
+        rollout_state_path = os.path.join(global_step_folder, _ROLLOUT_STATE_FILENAME)
         rollout_state_buffer = stdlib_io.BytesIO()
         torch.save(rollout_state, rollout_state_buffer)
 
         # Save additional trainer state
-        trainer_state = {
-            "global_step": step,
-            "config": self.cfg,
-            "distillation_scored_tokens_total": self.distillation_scored_tokens_total,
-            "ftpo_stopped": self._ftpo_stopped,
-            "domain_gradient_balance_state": self._domain_balancer.state_dict() if self._domain_balancer else None,
-        }
         trainer_state_path = os.path.join(global_step_folder, TRAINER_STATE_FILENAME)
         trainer_state_buffer = stdlib_io.BytesIO()
-        torch.save(trainer_state, trainer_state_buffer)
+        torch.save(self._trainer_checkpoint_state(step), trainer_state_buffer)
         latest_checkpoint_file = os.path.join(self.cfg.trainer.ckpt_path, LATEST_CHECKPOINT_FILE)
         return CheckpointSnapshot(
             step=step,
@@ -2963,23 +3182,23 @@ class RayPPOTrainer:
 
         protected_steps = protected_hf_export_steps(self.cfg.trainer.ckpt_path)
 
-        if not self._node_ids:
-            self._node_ids = get_node_ids(self.policy_model, self.critic_model, self.ref_model)
-        try:
-            run_on_each_node(
-                self._node_ids,
-                cleanup_old_checkpoints,
-                self.cfg.trainer.ckpt_path,
-                max_ckpts,
-                protected_steps,
-            )
-        except ray.exceptions.RayError as e:
-            # Best-effort: cleanup runs only after a successful checkpoint save,
-            # so any per-node dispatch failure -- worker lease failure, worker or
-            # node death, or a failure raised inside the remote task -- is logged
-            # rather than propagated. The checkpoint is already on disk; cleanup
-            # must not kill the run.
-            logger.warning(f"Per-node checkpoint cleanup failed, continuing: {e}")
+        if max_ckpts == 0:
+            logger.warning("max_ckpts_to_keep=0 cannot retain a recoverable latest checkpoint; keeping one")
+            max_ckpts = 1
+
+        if not io.is_cloud_path(self.cfg.trainer.ckpt_path):
+            if not self._node_ids:
+                self._node_ids = get_node_ids(self.policy_model, self.critic_model, self.ref_model)
+            try:
+                run_on_each_node(
+                    self._node_ids,
+                    cleanup_old_checkpoints,
+                    self.cfg.trainer.ckpt_path,
+                    max_ckpts,
+                    protected_steps,
+                )
+            except ray.exceptions.RayError as e:
+                logger.warning(f"Per-node checkpoint cleanup failed, continuing: {e}")
 
         # Driver-side cleanup. For a shared ckpt_path (GPFS, S3) this alone
         # suffices; the per-node fan-out above only matters for node-local dirs.
@@ -3038,19 +3257,18 @@ class RayPPOTrainer:
         if not io.exists(str(checkpoint_path)):
             raise FileNotFoundError(f"Checkpoint path not found: {checkpoint_path}")
 
-        logger.info(f"Loading checkpoint from: {checkpoint_path}")
-
-        # Extract global step from checkpoint path
         global_step = extract_step_from_path(checkpoint_path)
         if global_step == -1:
             raise ValueError(f"Checkpoint path {checkpoint_path} is not a valid checkpoint path")
+        checkpoint_path = resolve_checkpoint_payload(str(checkpoint_path), verify_files=True)
+        logger.info(f"Loading checkpoint from: {checkpoint_path}")
         logger.info(f"Resuming from global_step: {global_step}")
 
         # Define paths for different checkpoint components
         policy_ckpt_dir = os.path.join(checkpoint_path, POLICY_CHECKPOINT_SUBDIRECTORY)
         critic_ckpt_dir = os.path.join(checkpoint_path, "critic")
         trainer_state_path = os.path.join(checkpoint_path, TRAINER_STATE_FILENAME)
-        rollout_state_path = os.path.join(checkpoint_path, "data.pt")
+        rollout_state_path = os.path.join(checkpoint_path, _ROLLOUT_STATE_FILENAME)
 
         # Validate that required checkpoint files exist
         if not io.exists(trainer_state_path):
@@ -3082,6 +3300,11 @@ class RayPPOTrainer:
                 rollout_state = torch.load(f, map_location="cpu", weights_only=False)
             self._restore_rollout_state(rollout_state)
             logger.info("Successfully loaded rollout state")
+            if self._can_replay_driver_rng() and not self.cfg.trainer.get("reset_global_step_on_resume", False):
+                rng_path = os.path.join(checkpoint_path, _DRIVER_RNG_STATE_FILENAME)
+                if io.exists(rng_path):
+                    with io.open_file(rng_path, "rb") as source:
+                        self._loaded_driver_rng_state = torch.load(source, map_location="cpu", weights_only=False)
         else:
             logger.warning(f"No rollout state found at {rollout_state_path}; the dataset will start from the beginning")
 
@@ -3131,7 +3354,8 @@ class RayPPOTrainer:
 
     def _handle_hf_export(self) -> None:
         checkpoint_path = os.path.join(self.cfg.trainer.ckpt_path, f"{GLOBAL_STEP_PREFIX}{self.global_step}")
-        trainer_state_path = os.path.join(checkpoint_path, TRAINER_STATE_FILENAME)
+        payload_path = resolve_checkpoint_payload(checkpoint_path)
+        trainer_state_path = os.path.join(payload_path, TRAINER_STATE_FILENAME)
         if not io.exists(trainer_state_path):
             raise RuntimeError(
                 f"Cannot request HF export for global_step_{self.global_step}: "

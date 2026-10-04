@@ -7,10 +7,10 @@ import os
 from dataclasses import asdict
 
 from loguru import logger
-from marinskyrl.checkpoint_paths import HF_EXPORT_REQUEST_FILENAME
+from marinskyrl.checkpoint_paths import HF_EXPORT_REQUEST_FILENAME, extract_step_from_path
 
 from skyrl_train.io import io
-from skyrl_train.checkpoint_listing import extract_step_from_path, list_checkpoint_dirs
+from skyrl_train.checkpoint_listing import list_checkpoint_dirs
 from skyrl_train.hf_export_schema import (
     HF_EXPORT_REQUEST_SCHEMA_VERSION,
     HFExportRequest,

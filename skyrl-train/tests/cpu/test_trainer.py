@@ -284,6 +284,7 @@ def test_background_checkpoint_failure_does_not_advance_marker(monkeypatch, tmp_
 )
 def test_step_end_exports_hf_model_only_after_checkpoint_upload_commits(checkpoint_committed, expected_events):
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer._pending_megatron_save = None
     trainer._control = TrainerControl()
     trainer.eval_dataset = None
 
