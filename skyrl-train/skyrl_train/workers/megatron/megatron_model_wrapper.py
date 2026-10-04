@@ -118,10 +118,8 @@ class MegatronModelWrapper:
         self.actor_optimizer = actor_optimizer
         self.policy_loss_fn = policy_loss_fn
         self.use_sample_packing = self.cfg.trainer.use_sample_packing
-        # Sequence chunk size bounds scoring copies. Native TE training at
-        # CUDA BF16/FP32 TP1 uses one full model-dtype gradient buffer and
-        # multiplies derivatives in FP32 before casting. Other paths retain
-        # the legacy chunked computation, or whole-input FP32 when None.
+        # Bound legacy FP32 temporaries and native TE scoring copies.
+        # TE training uses one full model-dtype gradient buffer.
         #
         # Callers pass this EXPLICITLY (the policy worker its own
         # trainer.policy.megatron_config.logprob_chunk_size, the ref worker its own

@@ -271,9 +271,8 @@ def _parallel_logprobs(
         # CPU test profiles import this module without the optional TE package.
         from transformer_engine.pytorch.cross_entropy import parallel_cross_entropy
 
-        # TE computes values and derivatives in FP32 and reuses a model-dtype
-        # copy of the logits for the gradient. Keep scoring copies bounded;
-        # training needs one full model-dtype gradient either way.
+        # TE reuses its model-dtype training workspace as the gradient.
+        # Bound workspace copies during scoring, when no gradient is needed.
         with torch.set_grad_enabled(torch.is_grad_enabled() and not inference_only):
             if not torch.is_grad_enabled() and chunk_size is not None:
                 return torch.cat(
@@ -325,8 +324,6 @@ def from_parallel_logits_to_logprobs(
     """
     target = target.roll(shifts=-1, dims=-1)
     cp_size = 1 if cp_group is None else torch.distributed.get_world_size(cp_group)
-    pad_len = 0
-    # if cp_size > 1:
     # Pad the targets to local size * cp_size
     pad_len = vocab_parallel_logits.shape[1] * cp_size - target.shape[1]
     if pad_len > 0:
