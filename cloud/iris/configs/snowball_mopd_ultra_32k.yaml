@@ -31,16 +31,12 @@ context_budget:
 
 terminal_bench:
   harbor:
-    name: opencode
-    version: "1.18.2"
-    collect_rollout_details: true
     override_setup_timeout_sec: 600
     override_timeout_sec: 600
     verifier_override_timeout_sec: 300
     override_cpus: 1
     override_memory_mb: 4096
     override_storage_mb: 4096
-    auto_snapshot: true
     env_network_policy:
       mode: unrestricted
     max_retries: 3
@@ -48,12 +44,6 @@ terminal_bench:
     enable_reward_shaping: false
     enable_error_classification: true
     default_error_treatment: zero
-  model_info:
-  archiving:
-    enabled: false
-  trace_upload:
-    enabled: false
-
 environment:
   env_class: nemotron_ultra
   skyrl_gym:

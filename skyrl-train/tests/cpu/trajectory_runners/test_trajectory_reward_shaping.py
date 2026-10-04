@@ -2,7 +2,8 @@ from copy import deepcopy
 
 import pytest
 
-from skyrl_train.trajectory_runners.base import TrajectoryRequestBatch, TrajectoryRunner, TrajectoryBatch
+from tests.cpu.trajectory_runners.fixture_runner import FixtureRunner
+from skyrl_train.trajectory_runners.types import TrajectoryRequestBatch, TrajectoryBatch
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import (
     parse_trajectory_reward_shaping_config,
     shape_trajectory_rewards,
@@ -381,7 +382,7 @@ def test_concatenation_preserves_later_passthrough_disposition():
     assert concatenated["error_treatments"] == [None, "passthrough"]
 
 
-class _SharedShapingRunner(TrajectoryRunner):
+class _SharedShapingRunner(FixtureRunner):
     trajectory_runner_cfg = {
         "trajectory_reward_shaping": {
             "enabled": True,
@@ -389,7 +390,7 @@ class _SharedShapingRunner(TrajectoryRunner):
         }
     }
 
-    async def _run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
+    async def _run(self, input_batch: TrajectoryRequestBatch) -> TrajectoryBatch:
         return _output([[1, 2]], [1.0], ["length"])
 
 

@@ -11,7 +11,7 @@ import ray
 from loguru import logger
 from omegaconf import DictConfig
 
-from skyrl_train.config.trajectory_runner_capabilities import EntrypointOperation
+from skyrl_train.config.rollout_validation import EntrypointOperation
 from skyrl_train.entrypoints.main_base import (
     BasePPOExp,
     config_dir,

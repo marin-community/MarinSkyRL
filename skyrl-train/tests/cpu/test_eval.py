@@ -10,7 +10,8 @@ from skyrl_gym.envs.registration import registry
 from skyrl_gym.verification import VerificationResult
 
 from skyrl_train.evaluate import _calculate_eval_metrics, evaluate
-from skyrl_train.trajectory_runners.base import TrajectoryRunner, TrajectoryBatch
+from tests.cpu.trajectory_runners.fixture_runner import FixtureRunner
+from skyrl_train.trajectory_runners.types import TrajectoryBatch
 from skyrl_train.trajectory_runners.trajectory_retention import (
     TrajectorySink,
     execute_publication,
@@ -56,12 +57,12 @@ class DummyStatefulDataLoader:
         return iter(self._batches)
 
 
-class DummyRunner(TrajectoryRunner):
+class DummyRunner(FixtureRunner):
     def __init__(self, output: TrajectoryBatch):
         self.output = output
         self.seen_inputs = []
 
-    async def _run(self, input_batch, disable_tqdm: bool = False):
+    async def _run(self, input_batch):
         self.seen_inputs.append(input_batch)
         return self.output
 

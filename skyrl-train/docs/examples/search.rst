@@ -90,8 +90,6 @@ Let's walk through configuration for running GRPO to train a 4-turn search agent
         generator.n_samples_per_prompt=5 \
         # this is used to set the max turns for the environment
         generator.max_turns=4 \
-        # multi-turn generation format - see `skyrl_train/trajectory_runners/skyrl_gym.py` for more details
-        generator.use_conversation_multi_turn=false \
         generator.sampling_params.temperature=1.0 \
         generator.sampling_params.top_p=1.0 \
         generator.sampling_params.stop='["</search>", "</answer>"]' \
@@ -117,11 +115,8 @@ For more details on environment implementation, see :skyrl_gym_link:`skyrl_gym/e
 Note we add ``stop='["</search>", "</answer>"]'`` for both generation and evaluation sampling parameters
 to adhere to the Search-R1 recipe.
 
-If you are using ``generator.use_conversation_multi_turn=true``,
-you might want to append an EOS token ID to the end of the response after these stop strings to adhere
-to the model's behavior (i.e. ending generation with an EOS token ID rather than say ``</answer>``).
-This can be done by setting ``generator.append_eos_token_after_stop_str_in_multi_turn=true`` in the generator config.
-The full script is available in `examples/search/run_search_conversation_format.sh`.
+Each turn uses the backend chat template. Rollouts retain the sampled token IDs.
+The worker does not append an unsampled EOS token after a stop string.
 
 
 Launching Your Training Run

@@ -15,7 +15,6 @@ import ray
 from loguru import logger
 from omegaconf import DictConfig
 
-from skyrl_train.config.trajectory_runner_capabilities import TrajectoryRunnerMode
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, run_ray_driver
 
 
@@ -122,7 +121,7 @@ def skyrl_entrypoint(cfg: DictConfig) -> None:
 
 @hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
 def main(cfg: DictConfig) -> None:
-    run_ray_driver(cfg, skyrl_entrypoint, TrajectoryRunnerMode.SKYRL_GYM)
+    run_ray_driver(cfg, skyrl_entrypoint)
 
 
 if __name__ == "__main__":

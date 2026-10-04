@@ -29,7 +29,6 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from skyrl_train.inference_engines.inference_http_backend import InferenceHTTPBackend
-from skyrl_train.inference_engines.opencode_continuation import OpenCodeContinuationManager
 from skyrl_train.inference_engines.vllm.stats import HTTPBridgeStatsAccumulator
 
 
@@ -315,7 +314,6 @@ async def handle_openai_request(
     raw_request: Request,
     endpoint: str,
     bridge_stats: HTTPBridgeStatsAccumulator,
-    continuation_manager: OpenCodeContinuationManager | None = None,
 ):
     """Handle a request implemented by the policy model's serving backend.
 
@@ -347,10 +345,7 @@ async def handle_openai_request(
 
         # ── Streaming branch ──────────────────────────────────────────────
         if request_json.get("stream", False) and endpoint == "/chat/completions":
-            lease = await continuation_manager.begin(payload) if continuation_manager is not None else None
             raw_gen = _global_inference_engine_client.chat_completion_stream(payload)
-            if lease is not None:
-                raw_gen = lease.capture(raw_gen)
             return StreamingResponse(
                 content=_safe_sse_stream(raw_gen, endpoint=endpoint, bridge_stats=bridge_stats),
                 media_type="text/event-stream",
@@ -509,17 +504,10 @@ async def handle_models_request(
 def create_app(
     bridge_stats: HTTPBridgeStatsAccumulator | None = None,
     *,
-    backend: InferenceHTTPBackend | None = None,
     event_loop_lag_interval_seconds: float = 0.5,
-    enable_opencode_exact_continuation: bool = False,
 ) -> fastapi.FastAPI:
     """Create the FastAPI application."""
     bridge_stats = bridge_stats or HTTPBridgeStatsAccumulator()
-    continuation_manager = None
-    if enable_opencode_exact_continuation:
-        if backend is None:
-            raise ValueError("OpenCode exact continuation requires an explicit inference backend")
-        continuation_manager = OpenCodeContinuationManager(backend)
 
     @asynccontextmanager
     async def lifespan(app: fastapi.FastAPI):
@@ -577,7 +565,6 @@ def create_app(
             raw_request,
             endpoint="/chat/completions",
             bridge_stats=bridge_stats,
-            continuation_manager=continuation_manager,
         )
 
     @app.post(COMPLETIONS_ENDPOINT)
@@ -648,7 +635,6 @@ def serve(
     port: int = 8000,
     log_level: str = "info",
     bridge_stats: HTTPBridgeStatsAccumulator | None = None,
-    enable_opencode_exact_continuation: bool = False,
 ):
     """
     Start the HTTP endpoint.
@@ -659,13 +645,8 @@ def serve(
         port: Port to bind to (default: 8000)
         log_level: Logging level (default: "info")
         bridge_stats: Shared accumulator for HTTP bridge metrics
-        enable_opencode_exact_continuation: Preserve exact served token prefixes for terminal-bench OpenCode
     """
-    app = create_app(
-        bridge_stats,
-        backend=inference_engine_client,
-        enable_opencode_exact_continuation=enable_opencode_exact_continuation,
-    )
+    app = create_app(bridge_stats)
 
     # Configure logging
     logging.basicConfig(level=getattr(logging, log_level.upper()))

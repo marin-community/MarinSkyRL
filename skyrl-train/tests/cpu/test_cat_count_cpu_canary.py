@@ -21,6 +21,9 @@ from marinskyrl.remote_io import create_s3_filesystem
 from skyrl_train.evaluate import evaluation_dump_dir
 from examples.cat_count.cpu_canary import PROMPT
 from skyrl_train.metric_names import CORRECTION_WEIGHT_MEAN_METRIC
+from skyrl_train.config.utils import get_default_config
+from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.trajectory_runners.model_clients import DirectModelClient
 
 from tests.cpu.tiny_training.cat_count import FAST_STEPS, cat_count_config, run_cat_count
 from tests.cpu.tiny_training.cpu_backend import CPUInferenceEngine
@@ -193,6 +196,21 @@ async def test_cpu_sampling_preserves_trajectory_rng_and_minimum_tokens(cat_coun
                 {"prompt_token_ids": [prompt], "session_ids": [identity], "sampling_params": sampling}
             )
             assert singleton["response_ids"][0] == batch["response_ids"][index]
+
+        config = get_default_config()
+        config.generator.enable_http_endpoint = False
+        client = DirectModelClient(InferenceEngineClient([engine], tokenizer, config))
+        for index in (2, 0, 1):
+            chat = await client.generate(
+                {
+                    "prompts": [[{"role": "user", "content": PROMPT.format(N=7)}]],
+                    "chat_completion_params": [{}],
+                    "session_ids": [("a", "b", "c")[index]],
+                    "sampling_params": sampling,
+                }
+            )
+            assert chat["response_ids"][0] == batch["response_ids"][index]
+            assert chat["response_logprobs"][0] == pytest.approx(batch["response_logprobs"][index], abs=1e-5)
 
         eos_prompt = tokenizer.apply_chat_template(
             [

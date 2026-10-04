@@ -1,5 +1,9 @@
 # Workload-owned trajectory-runner execution
 
+This document records the earlier design. The training entrypoints now use
+the common TaskCompendium engine. See the
+[current rollout guide](../../skyrl-train/docs/tutorials/task_rollouts.rst).
+
 ## Context
 
 MarinSkyRL constructs a `HarborTrajectoryRunner` before it selects a trainer. `FullyAsyncRayPPOTrainer` may then

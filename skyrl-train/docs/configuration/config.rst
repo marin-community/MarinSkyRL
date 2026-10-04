@@ -500,7 +500,6 @@ Generator Configuration
       min_p: 0.0
       top_k: -1
 
-    use_conversation_multi_turn: true
 
     # sampling params for evaluation
     eval_sampling_params:
@@ -620,6 +619,8 @@ Inference Engine Configuration
 Generation Parameters
 ~~~~~~~~~~~~~~~~~~~~~
 
+Multi-turn rollouts use structured conversation turns and retain the exact sampled token IDs.
+
 - ``generator.n_samples_per_prompt``: Number of samples to generate per prompt. Note that the total size of the training batch will be ``trainer.train_batch_size * generator.n_samples_per_prompt``.
 - ``generator.max_input_length``: Maximum input length for the inference engine. For single turn generation, this can be same as ``trainer.max_prompt_length`` (i.e., the initial prompt length). For multi-turn generation, this is the maximum input length used for multi-turn conversations at each turn.
 - ``generator.sampling_params``: Sampling parameters for the inference engine during trajectory generation phase.
@@ -632,7 +633,6 @@ Generation Parameters
 - ``generator.eval_sampling_params``: Sampling parameters for evaluation.
 - ``generator.eval_n_samples_per_prompt``: Number of samples to generate per prompt for evaluation.
 - ``generator.max_turns``: Maximum number of turns for generation with multi-turn RL.
-- ``generator.use_conversation_multi_turn``: Whether to use conversation format for multi-turn generation. If set to ``true`` then observations are appended to the chat history as a new turn. If set to ``false`` then observations are appended as-is to the assistant response in token space and generation is continued  (after removing any EOS token in the response).  We've observed some cases where model can be sensitive to chat history format (ex: in SkyRL-SQL), and thus ``false`` can be used for full control over the exact tokens added after environment interaction.
 - ``generator.engine_init_kwargs``: Inference engine arguments passed directly to the vLLM or SGLang engine. To specify an engine arg in the CLI override, use the format: +generator.engine_init_kwargs.[arg_name]=value. If duplicate kwargs are passed or kwargs clash with existing generator arguments (e.g., ``tensor_parallel_size``), an error is raised.
 - ``generator.chat_template``: Custom chat template configuration if needed.
     - ``generator.chat_template.source``: Source of the chat template. Can be either ``name`` or ``file``.

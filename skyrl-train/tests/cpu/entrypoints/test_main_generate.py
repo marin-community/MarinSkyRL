@@ -1,7 +1,7 @@
 import pytest
 from omegaconf import OmegaConf
 
-from skyrl_train.config.trajectory_runner_capabilities import EntrypointOperation
+from skyrl_train.config.rollout_validation import EntrypointOperation
 from skyrl_train.entrypoints import main_generate
 from skyrl_train.entrypoints.main_generate import EvalOnlyEntrypoint
 
