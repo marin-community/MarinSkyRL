@@ -39,7 +39,11 @@ def task_group_grader(task: TaskSpec) -> GroupGraderSpec | None:
     extras = verifier.parameters["extras"]
     config = verifier.parameters["config"]
     ultra = (extras.get("extra_info") or {}).get("nemotron_ultra") or {}
-    if verifier.name != "nemotron_ultra" or ultra.get("agent") not in GENRM_AGENTS or config.get("grading") == "skip":
+    if (
+        task.environment.interaction != "nemotron_ultra"
+        or ultra.get("agent") not in GENRM_AGENTS
+        or config.get("grading") == "skip"
+    ):
         return None
     record = json.loads(ultra["record_json"])
     principle = record.get("principle")

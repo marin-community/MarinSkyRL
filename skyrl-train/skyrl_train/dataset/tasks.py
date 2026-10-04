@@ -42,7 +42,7 @@ def task_prompt(task: TaskSpec) -> dict:
             else task.metadata.get("skyrl_extras", {})
         ),
         "prompt": session_start(task, convention).messages,
-        "env_class": verifier.name if verifier is not None else TASKCOMPENDIUM_ENVIRONMENT,
+        "env_class": task.environment.interaction or TASKCOMPENDIUM_ENVIRONMENT,
         "data_source": task.source.dataset,
         "group_grader": (
             specification.model_dump_json() if (specification := task_group_grader(task)) is not None else None
