@@ -330,12 +330,9 @@ class HarborConfigBuilder:
         return trial_fields
 
     def build_retry_config(self) -> RetryConfig:
-        """Build the shared worker retry policy.
+        """Build a retry policy that excludes terminal pass-through failures.
 
-        Explicit and Harbor-default exclusions are combined with every exception
-        type that the shared taxonomy and campaign overrides classify as pass-through.
-        Pass-through failures are terminal results that may retain verifier output;
-        retrying would discard that result.
+        Retain explicit exclusions and Harbor-default exclusions.
 
         Returns:
             RetryConfig with exponential backoff and resolved terminal exceptions.

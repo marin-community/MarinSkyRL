@@ -111,11 +111,9 @@ async def finalize_trajectory_batch(
 
 
 def add_alignment_metrics(output: TrajectoryBatch) -> None:
-    """Expose alignment health implied by the ``TrajectoryBatch`` contract.
+    """Add alignment metrics and preserve metrics that the runner supplied.
 
-    A runner that returns rollout logprobs promises they are position-aligned
-    with its response IDs. That direct token-in/token-out path is exact by
-    construction. Preserve metrics that a runner supplied.
+    Callers must supply rollout logprobs aligned with response token IDs.
     """
     rollout_logprobs = output.get("rollout_logprobs")
     if rollout_logprobs is None:
