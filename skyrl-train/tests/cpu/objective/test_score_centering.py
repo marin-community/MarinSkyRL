@@ -245,7 +245,16 @@ def test_composed_ppo_tis_centering_matches_enumerated_value_gradient_and_partit
 
 
 @pytest.mark.parametrize("advantage", [-1.7, 2.3])
-def test_composed_full_vocabulary_centering_cancels_expected_constant_advantage_gradient(advantage):
+@pytest.mark.parametrize(
+    ("old_probabilities", "behavior_probabilities", "current_logits"),
+    [
+        ([0.20, 0.25, 0.30, 0.25], [0.45, 0.08, 0.07, 0.40], [-0.9, 0.8, -0.2, 0.1]),
+        ([1e-15, 0.25, 0.50, 0.25], [0.45, 0.08, 0.07, 0.40], [1.0, 0.0, -60.0, -1.0]),
+    ],
+)
+def test_composed_full_vocabulary_centering_cancels_expected_constant_advantage_gradient(
+    advantage, old_probabilities, behavior_probabilities, current_logits
+):
     config = OmegaConf.create(
         dict(
             loss_reduction="token_mean",
@@ -259,9 +268,9 @@ def test_composed_full_vocabulary_centering_cancels_expected_constant_advantage_
             score_centering_topk=4,
         )
     )
-    old = torch.tensor([0.20, 0.25, 0.30, 0.25], dtype=torch.float64)
-    behavior = torch.tensor([0.45, 0.08, 0.07, 0.40], dtype=torch.float64)
-    logits = torch.tensor([-0.9, 0.8, -0.2, 0.1], dtype=torch.float64, requires_grad=True)
+    old = torch.tensor(old_probabilities, dtype=torch.float64)
+    behavior = torch.tensor(behavior_probabilities, dtype=torch.float64)
+    logits = torch.tensor(current_logits, dtype=torch.float64, requires_grad=True)
     current = logits.log_softmax(-1)
     mask = torch.ones((1, 1), dtype=torch.float64)
     advantages = torch.full_like(mask, advantage)

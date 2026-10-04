@@ -83,10 +83,14 @@ def ppo_tis_score_centering_correction(
     o_tail = (1 - old_mass.sum(dim=-1)).clamp_min(tail_floor)
     q_tail = (1 - behavior_mass.sum(dim=-1)).clamp_min(tail_floor)
 
+    ppo_delta = current - old
     ppo_ratio = _bounded_ratio(current, old)
-    tis_weight = _bounded_ratio(old, behavior).clamp(max=tis_cap)
+    # Match compute_correction's upper truncation without introducing a lower
+    # ratio floor. PPO's bounded exponential has zero gradient outside its bounds.
+    tis_weight = (old - behavior).clamp(max=math.log(tis_cap)).exp()
     positive = advantages.unsqueeze(-1) >= 0
     active = torch.where(positive, ppo_ratio <= 1 + eps_clip_high, ppo_ratio >= 1 - eps_clip_low)
+    active &= ppo_delta.abs() <= LOG_PROB_DELTA_CLIP
     head_coefficient = behavior_mass * tis_weight * ppo_ratio * active
 
     # On the modeled tail, old_v / p_v = o_tail / p_tail and
