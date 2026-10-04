@@ -4,17 +4,61 @@ from pathlib import Path
 import subprocess
 import sys
 import tomllib
+from typing import Any, Literal, get_args, get_origin
 
 from pydantic import ValidationError
 import pytest
 
 import marinskyrl.recipe_schema as schema
 from marinskyrl.recipe_schema.model import thaw
+from marinskyrl.recipe_schema.sidecar import ANY_ALLOWED
 from scripts import generate_recipe_schema as generator
 
 
 ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = ROOT / "scripts/generate_recipe_schema.py"
+OUTPUT_PATH_RECIPES = frozenset(
+    {
+        "128GPU_80B_A3B_next_cp1",
+        "32GPU_qwen3_coder_30b_a3b_ep4",
+        "32GPU_qwen3_coder_30b_a3b_ep4_nooffload",
+        "56GPU_qwen3_8b",
+        "64GPU_qwen3_6_35b_a3b",
+        "opencode_smoke_literal",
+        "tasktrove_dq_sweep_30b",
+        "tasktrove_dq_sweep_30b_cp6",
+        "tasktrove_dq_sweep_30b_ncclnet",
+        "tasktrove_dq_sweep_30b_terminus2",
+    }
+)
+BUNDLED_NORMALIZATION = {
+    "trainer.ckpt_path": OUTPUT_PATH_RECIPES,
+    "trainer.export_path": OUTPUT_PATH_RECIPES,
+    "trainer.seed": frozenset(
+        {
+            "nemotron_ultra_rlvr_acceptance",
+            "snowball_ultra_rlvr1_colocated64",
+            "snowball_ultra_rlvr1_split64",
+            "snowball_ultra_rlvr2_colocated64",
+            "snowball_ultra_rlvr2_split64",
+        }
+    ),
+    "trainer.max_ckpts_to_keep": frozenset(
+        {
+            "snowball_mopd_ultra_32k",
+            "snowball_mopd_ultra_async_32k_smoke",
+            "snowball_ultra_rlvr1_colocated64",
+            "snowball_ultra_rlvr1_split64",
+            "snowball_ultra_rlvr2_colocated64",
+            "snowball_ultra_rlvr2_split64",
+        }
+    ),
+    "policy_chat_template": frozenset({"delphi_math_rl", "delphi_math_rl_ifeval"}),
+    "trainer.ref.model.path": OUTPUT_PATH_RECIPES - {"56GPU_qwen3_8b", "opencode_smoke_literal"},
+    "generator.engine_init_kwargs.served_model_name": frozenset(
+        {"nemotron_ultra_rlvr_acceptance", "opencode_smoke_literal"}
+    ),
+}
 BASE = """defaults:
   - _self_
 data:
@@ -113,6 +157,34 @@ def test_repository_generation_matches_hydra_author_defaults_and_all_group_optio
                 parent.pop(path.rsplit(".", 1)[-1], None)
             assert schema.RecipePatch.from_document(document).to_skyrl() == document, (group, name)
     assert observed_files == {(path.parent.name, path.stem) for path in generator.CONFIG_DIR.glob("*/*.yaml")}
+    recipe_paths = sorted((ROOT / "cloud/iris/configs").glob("*.yaml"))
+    recipes = generator.recipe_documents(ROOT / "cloud/iris/configs", generator.CONFIG_DIR, groups)
+    normalized = set()
+    for source, document in zip(recipe_paths, recipes, strict=True):
+        for path, names in BUNDLED_NORMALIZATION.items():
+            if source.stem not in names:
+                continue
+            parent = document
+            for key in path.split(".")[:-1]:
+                parent = parent[key]
+            del parent[path.rsplit(".", 1)[-1]]
+            normalized.add((source.stem, path))
+        assert schema.SkyRLRecipe.from_document(document).to_skyrl() == document, source.name
+    assert normalized == {(name, path) for path, names in BUNDLED_NORMALIZATION.items() for name in names}
+    any_paths = set()
+
+    def inspect(annotation, path):
+        if annotation is Any:
+            any_paths.add(path)
+        elif isinstance(annotation, type) and issubclass(annotation, schema.Section):
+            for name, field in annotation.model_fields.items():
+                inspect(field.annotation, f"{path}.{name}" if path else name)
+        elif get_origin(annotation) is not Literal:
+            for child in get_args(annotation):
+                inspect(child, path)
+
+    inspect(schema.SkyRLRecipe, "")
+    assert any_paths == ANY_ALLOWED == frozenset()
 
 
 def test_generator_cli_preserves_group_types_and_adjacent_comments_and_detects_drift(tmp_path: Path):
