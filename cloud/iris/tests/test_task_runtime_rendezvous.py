@@ -10,6 +10,7 @@ import pytest
 import ray
 
 from cloud.iris import task_runtime
+from marinskyrl.environment_contract import DEBUG_ARTIFACT_DIR_ENV
 from cloud.iris.task_runtime import (
     DONE_FILENAME,
     RENDEZVOUS_FILENAME,
@@ -132,7 +133,7 @@ def _worker_args(tmp_path):
 
 
 def _isolate_worker_runtime(tmp_path, monkeypatch, payload):
-    monkeypatch.setenv("SKYRL_DEBUG_ARTIFACT_DIR", str(tmp_path / "debug"))
+    monkeypatch.setenv(DEBUG_ARTIFACT_DIR_ENV, str(tmp_path / "debug"))
     handlers = {}
     monkeypatch.setattr(task_runtime, "_rank", lambda: 1)
     monkeypatch.setattr(task_runtime, "_num_tasks", lambda: 2)
