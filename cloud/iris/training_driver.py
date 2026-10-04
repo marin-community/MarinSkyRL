@@ -301,6 +301,18 @@ class LocalRLRunner:
         # The RecordProxy listens on every interface so the remote controller reaches it at
         # IRIS_ADVERTISE_HOST; record_literal off => maybe_serve_literal_proxy is a null
         # CM and the plan registered raw vLLM's port instead.
+        model_info = (
+            OmegaConf.select(self.config.launch_config, "skyrl.terminal_bench_config.model_info")
+            if self.config.record_literal and self.config.launch_config is not None
+            else None
+        )
+        served_model = (
+            OmegaConf.select(self.config.launch_config, "skyrl.generator.engine_init_kwargs.served_model_name")
+            if model_info is not None
+            else None
+        )
+        if model_info is not None and not isinstance(served_model, str):
+            raise ValueError("Native agent APIs require generator.engine_init_kwargs.served_model_name")
         with maybe_serve_literal_proxy(
             self.config.record_literal,
             vllm_local,
@@ -308,6 +320,8 @@ class LocalRLRunner:
             job_name=self.config.job_name,
             host=CONTROLLER_INGRESS_PROXY_HOST,
             port=proxy_port,
+            served_model=served_model,
+            model_info=model_info,
         ):
             registration = register_controller_endpoint(endpoint_name, register_address)
             try:

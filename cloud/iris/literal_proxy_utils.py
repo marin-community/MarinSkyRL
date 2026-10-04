@@ -37,6 +37,7 @@ import re
 import socket
 import tempfile
 import threading
+from collections.abc import Mapping
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -250,6 +251,8 @@ def serve_record_proxy(
     startup_timeout: float = 30.0,
     remote_uri: Optional[str] = None,
     flush_interval: float = 30.0,
+    served_model: str | None = None,
+    model_info: Mapping[str, int] | None = None,
 ) -> Iterator[str]:
     """Serve harbor's RecordProxy in front of ``upstream_endpoint`` on ``host:port``.
 
@@ -277,7 +280,20 @@ def serve_record_proxy(
     # doubles -> vLLM 404). See upstream_origin.
     origin = upstream_origin(upstream_endpoint)
     proxy = RecordProxy(origin, log_path, timeout=timeout)
-    app = proxy.app()
+    if model_info is None:
+        app = proxy.app()
+    else:
+        from harbor.literal.native_api import NativeAPILimits
+
+        if served_model is None:
+            raise ValueError("Native agent APIs require the explicit served model alias")
+        app = proxy.app(
+            NativeAPILimits(
+                served_model=served_model,
+                context_window=model_info["max_input_tokens"],
+                max_output_tokens=model_info["max_output_tokens"],
+            )
+        )
 
     config = uvicorn.Config(app, host=host, port=port, log_level="warning")
     server = uvicorn.Server(config)
@@ -351,6 +367,8 @@ def maybe_serve_literal_proxy(
     job_name: str,
     host: str = DEFAULT_LITERAL_PROXY_HOST,
     port: int = DEFAULT_LITERAL_PROXY_PORT,
+    served_model: str | None = None,
+    model_info: Mapping[str, int] | None = None,
 ) -> Iterator[str]:
     """Flag-gated wrapper around :func:`serve_record_proxy`.
 
@@ -382,5 +400,13 @@ def maybe_serve_literal_proxy(
     # staging path when experiments_dir is remote, else the direct log); the correlator
     # reads it locally, never the gs:// upload. Single source of truth for the path.
     os.environ["OTAGENT_LITERAL_LOG_PATH"] = str(log_path)
-    with serve_record_proxy(upstream_endpoint, log_path, host=host, port=port, remote_uri=remote_uri) as proxy_endpoint:
+    with serve_record_proxy(
+        upstream_endpoint,
+        log_path,
+        host=host,
+        port=port,
+        remote_uri=remote_uri,
+        served_model=served_model,
+        model_info=model_info,
+    ) as proxy_endpoint:
         yield proxy_endpoint
