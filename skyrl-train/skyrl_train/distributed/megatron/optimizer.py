@@ -111,6 +111,8 @@ def _init_megatron_optim_config(optim_config: Mapping, optimizer_config_kwargs: 
     # AdamW (decoupled weight decay via weight_decay), so normalize the common
     # HF-style names to 'adam'.
     _optim_name = str(optim_config.get("optimizer", "adam")).lower()
+    if _optim_name in (_GRUG_MUONH_NAME, *_GRUG_EMERGING_ROUTES):
+        raise ValueError("Use optimizer='MuonH'; internal Megatron route names are not policy recipes")
     if _optim_name == "adamw":
         _optim_name = "adam"
     if _optim_name == "muonh":
