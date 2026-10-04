@@ -207,3 +207,22 @@ def test_dummy_generated_attention_scales_do_not_exempt_checkpoint_weights(total
             validate_dummy_weight_coverage(layers, set(), set())
     else:
         validate_dummy_weight_coverage(layers, set(), set())
+
+
+@pytest.mark.parametrize("missing", [0, 393216, 1536], ids=["complete", "missing-gate", "missing-bias"])
+def test_dummy_moe_backend_padding_preserves_checkpoint_coverage(missing):
+    layers = {
+        "model.experts": {
+            "can_load": True,
+            "load_numel_total": 3150848,
+            "load_numel": 2363392 - missing,
+            "tensors": {},
+            "vocab_padding_numel": 0,
+            "tensor_padding_numel": {"w13_weight": 524288, "w2_weight": 262144, "w2_bias": 1024},
+        }
+    }
+    if missing:
+        with pytest.raises(RuntimeError, match="model.experts"):
+            validate_dummy_weight_coverage(layers, set(), set())
+    else:
+        validate_dummy_weight_coverage(layers, set(), set())
