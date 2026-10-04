@@ -4,23 +4,10 @@ SWE-Gym and SWE-Bench use the shared rollout engine in Marin. The model
 changes repository files through the `shell` tool. The grader applies the Git
 patch in a fresh copy of the task image, then runs the private evaluation script.
 
-The `mini_swe_agent` directory retains the SWE examples. These examples do not
-require Mini-SWE-Agent, LiteLLM, a model HTTP proxy, or a separate inference loop.
-
 ## Prepare task Parquet
 
-For adjacent `marin` and `MarinSkyRL` checkouts, install the task packages in the
-SkyRL environment. Run these commands from `MarinSkyRL/skyrl-train` after the base
-SkyRL [installation](../../docs/getting-started/installation.rst):
-
-```bash
-uv pip install --python ../.venv/bin/python \
-  -e ../../marin/lib/tasktrove-verify \
-  -e '../../marin/lib/shellbox[shellsim]' \
-  -e ../../marin/lib/taskcompendium \
-  -e ../../marin/lib/rolloutengine
-```
-
+The frozen root dependencies include the shared task packages.
+After [installation](../../docs/getting-started/installation.rst), run these commands from `MarinSkyRL/skyrl-train`.
 Materialize the source rows:
 
 ```bash
@@ -47,8 +34,6 @@ The Docker factory requires a Docker daemon and Skopeo on each rollout worker.
 It resolves registry images into `trajectory_runner.image_cache` and reuses them
 for task and verifier machines. Set `trajectory_runner.skopeo` to the executable
 path if Skopeo is not on `PATH`.
-rolloutengine, TaskCompendium, and Shellbox must be installed in the worker environment.
-
 List the task images from the materialized files:
 
 ```bash
@@ -68,16 +53,14 @@ for image in sorted(images):
 PY
 ```
 
-The worker resolves each listed image when a task first uses it.
-
 ```bash
 bash examples/mini_swe_agent/run_mini_swe_8B.sh
 # For the two-node example:
 bash examples/mini_swe_agent/run_mini_swe_30B.sh
 ```
 
-The scripts use `skyrl_train.entrypoints.taskcompendium`. Set `DATA_DIR` to the
-task Parquet directory. Set `CKPT_PATH` to the output directory for training checkpoints.
+The scripts use `skyrl_train.entrypoints.taskcompendium`.
+Edit `DATA_DIR` and `CKPT_PATH` in the script to select task Parquet and checkpoint directories.
 The two-node example requires a Ray cluster with eight GPUs per node.
 See the [cluster setup](../../docs/getting-started/installation.rst#initialize-ray-cluster).
 The scripts set the command timeout to 180

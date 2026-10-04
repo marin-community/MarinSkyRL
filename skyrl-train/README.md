@@ -1,119 +1,59 @@
-# SkyRL-Train: A modular, performant RL framework for post-training LLMs
-<div align="center">
+# SkyRL-Train
 
-[![🌐 NovaSky](https://img.shields.io/badge/-Visit%20Website-5865F2?style=for-the-badge)](https://novasky-ai.github.io/) [![Github](https://img.shields.io/badge/SkyRL-000000?style=for-the-badge&logo=github&logoColor=000&logoColor=white)](https://github.com/NovaSky-AI/SkyRL) [![Twitter](https://img.shields.io/badge/NovaSky-white?style=for-the-badge&logo=X&logoColor=000&color=000&labelColor=white)](https://x.com/NovaSkyAI) [![Hugging Face Collection](https://img.shields.io/badge/NovaSky-fcd022?style=for-the-badge&logo=huggingface&logoColor=000&labelColor)](https://huggingface.co/NovaSky-AI) [![Discord](https://img.shields.io/badge/NovaSky-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/RBAjeWSA) [![Documentation](https://img.shields.io/badge/Documentation-blue?style=for-the-badge&logo=readthedocs&logoColor=white)](https://skyrl.readthedocs.io/en/latest/)
+MarinSkyRL trains language models with GRPO and related policy-gradient objectives.
+It uses Megatron for GPU training and vLLM for inference.
+The CPU profile supports launcher tests and small training tests.
 
-</div>
+[TaskCompendium](https://github.com/marin-community/marin/tree/main/lib/taskcompendium) defines task inputs and private grading rules.
+The shared rollout engine calls the model and retains exact tokens from model responses and observations.
+Each task session executes task actions and grades one attempt.
+MarinSkyRL controls concurrency and retries, grades groups of attempts, and converts rollouts into training batches.
+See the [rollout guide](docs/tutorials/task_rollouts.rst) and [session tutorial](docs/tutorials/new_env.rst).
 
-# Overview
+## Install
 
- With a focus on modularity, `skyrl-train` makes it easy to prototype new training algorithms, environments, and execution plans—without compromising usability or speed. 
+Use Python 3.12 and [uv](https://docs.astral.sh/uv/).
+The GPU profile installs the CUDA 13.2 toolkit on GPU workers. Frozen dependencies select Ray 2.51.1.
 
-`skyrl-train` is **for users who want to modify anything:**
+```bash
+git clone https://github.com/marin-community/MarinSkyRL
+cd MarinSkyRL
+uv sync --frozen --extra megatron --extra vllm
+```
 
-- **Quickly develop new environments** without modifying or understanding the training code.
-- **Modify the training execution plan** such as model placement, colocation or disaggregation of training and generation, and async RL.
-- **Implement custom trajectory generation** specific to your use-case, such as custom sampling methods, tree search, etc.
-- … make any other flexible modifications to the RL workflow!
+All packages share the root environment and lock.
+For CPU tests, select `--extra cpu` instead of the GPU extras.
+The [Iris runtime configuration](../cloud/iris/runtime_environment.py) selects and installs the frozen profile before launch.
+See [installation](docs/getting-started/installation.rst) for worker and cluster setup.
 
+## Run the GSM8K example
 
-## Key Features
-The `skyrl-train` package supports:
-- GRPO and related policy-gradient objectives
-- Megatron training backend
-- Inference backends: vLLM, SGLang, and any custom OpenAI API compatible endpoint that exposes a method to perform weight sync
-- Megatron context and tensor parallelism for long-context training
-- Colocated or disaggregated training and generation (including on heterogeneous hardware)
-- Synchronous or asynchronous RL through one rollout-buffer loop, with bounded policy staleness
-- Per-sample agent loops for single-turn and multi-turn environments
-- Weight sync via NCCL, gloo, or checkpoint-and-load
-- Integration with `skyrl-gym` to run any environment in the gymnasium
-- Sequence packing and Flash Attention 2
+From `skyrl-train`, prepare the dataset and run the four-GPU example:
+
+```bash
+uv run --frozen python examples/gsm8k/gsm8k_dataset.py
+export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook
+LOGGER=console bash examples/gsm8k/run_gsm8k.sh
+```
+
+The Ray hook carries the `uv` environment into worker processes.
+The script accepts configuration overrides as command arguments, such as `trainer.epochs=1`.
+`NUM_GPUS`, `DATA_DIR`, and `LOGGER` set environment-variable defaults.
+Set `WANDB_API_KEY` and use `LOGGER=wandb` for Weights & Biases logging.
 
 ## Documentation
 
-Find `skyrl-train` documentation at: [skyrl.readthedocs.io/en/latest/](https://skyrl.readthedocs.io/en/latest/)
+- [Configuration](docs/configuration/config.rst)
+- [Task rollouts](docs/tutorials/task_rollouts.rst)
+- [New task sessions](docs/tutorials/new_env.rst)
+- [SWE tasks](examples/mini_swe_agent/README.md)
 
-## Quick Start
+## Source and citation
 
-A quick start guide for installation and your first training run is provided below.
+This fork derives from [SkyRL](https://github.com/NovaSky-AI/SkyRL).
+The upstream project was developed at Berkeley Sky Computing Lab with Anyscale and other contributors.
+See the [repository README](../README.md#acknowledgement) for acknowledgements.
 
-### Requirements
-
-The only requirements are:
-
-- CUDA version 13.2
-- [uv](https://docs.astral.sh/uv/)
-
-If you're running on an existing Ray cluster, make sure to use Ray 2.51.1 and Python 3.12. If not, proceed with the installation instructions below.
-
-
-First, clone the repository:
-
-```bash
-git clone --recurse-submodules https://github.com/NovaSky-AI/SkyRL
-cd SkyRL/skyrl-train
-```
-
-Then, create a new virtual environment and install the dependencies:
-
-```bash
-# creates the root project venv at ../.venv/
-uv sync --frozen --extra megatron --extra vllm
-source ../.venv/bin/activate
-```
-
-#### Training profiles and backends
-
-Select `cpu` for CPU launcher tests. GPU training installs the frozen `megatron` and `vllm`
-extras; Iris resolves them from the root lock before launch.
-
-Then, prepare the dataset:
-
-```bash
-uv run -- python examples/gsm8k/gsm8k_dataset.py
-```
-
-Finally, before training, make sure to configure Ray to use `uv`:
-
-```bash
-export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook
-# or add to your .bashrc
-# echo 'export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook' >> ~/.bashrc
-```
-
-You should now be able to run our example script (assumes at least 4 GPUs):
-
-```bash
-export WANDB_API_KEY=<your wandb api key>
-bash examples/gsm8k/run_gsm8k.sh
-```
-
-For detailed installation instructions, as well as more examples, please refer to our [documentation](https://skyrl.readthedocs.io/en/latest/).
-
-## Training on a new task or environment
-
-To implement a new task or environment using the SkyRL-Gym interface, please see our [Walkthrough Docs](https://skyrl.readthedocs.io/en/latest/tutorials/new_env.html).
-
-Represent executable tasks with TaskCompendium's `TaskSpec`. Marin defines the shared `ShellboxRolloutEngine`. SkyRL's [`TaskRolloutWorker`](skyrl_train/rollouts/task_worker.py) supplies inference, converts rollout records to training batches, and writes completed groups to the buffer. A task session supplies environment operations and grading without another inference loop. See the [rollout guide](docs/tutorials/task_rollouts.rst).
-
-Native TaskCompendium records can use the opt-in [`rollout_engine` entrypoint](docs/tutorials/rollout_engine.rst), with configurable failure treatment.
-
-## Reproducing SkyRL-SQL
-We also test SkyRL by reproducing our prior release [SkyRL-SQL](https://novasky-ai.notion.site/skyrl-sql), which enabled efficient Multi-Turn RL for Text2SQL. 
-You can find a link to the wandb report [here](https://wandb.ai/sky-posttraining-uc-berkeley/skyrl-sql/reports/SkyRL-SQL---VmlldzoxMzM0MTAyMw), and a detailed walk through of the reproduction in our [documentation](https://skyrl.readthedocs.io/en/latest/examples/multi_turn_text2sql.html).
-
-# Acknowledgement
-
-This work is done at [**Berkeley Sky Computing Lab**](https://sky.cs.berkeley.edu/) in collaboration with [**Anyscale**](https://www.anyscale.com/), with generous compute support from [**Anyscale**](https://www.anyscale.com/), [**Databricks**](https://www.databricks.com/), [**NVIDIA**](https://developer.nvidia.com/brev), [**Lambda Labs**](https://lambda.ai/), and [**AMD**](https://www.amd.com/en.html).
-
-We adopt many lessons and code from several great projects such as [veRL](https://github.com/volcengine/verl), [OpenRLHF](https://github.com/OpenRLHF/OpenRLHF), [Search-R1](https://github.com/PeterGriffinJin/Search-R1), [OpenReasonerZero](https://github.com/Open-Reasoner-Zero/Open-Reasoner-Zero), and [NeMo-RL](https://github.com/NVIDIA-NeMo/RL). We appreciate each of these teams and their contributions to open-source research!
-
-
-
-# Citation
-
-If you find the work in `skyrl-train` helpful, please consider citing:
 ```bibtex
 @misc{griggs2025skrylv01,
       title={Evolving SkyRL into a Highly-Modular RL Framework},

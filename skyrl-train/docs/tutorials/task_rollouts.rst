@@ -25,12 +25,13 @@ environment, and private grading inputs.
 It retains serialized tasks in memory without an intermediate Parquet or Arrow cache file.
 Source-row conversion does not use ``data.task_cache_dir``.
 ``skyrl_train.entrypoints.taskcompendium`` reads task Parquet directly.
-The SWE examples use this entrypoint. ``skyrl_train.entrypoints.main_harbor`` converts task
+The `SWE example <../../examples/mini_swe_agent/README.md>`_ uses this entrypoint with ``data.train_data`` and ``data.val_data``.
+``skyrl_train.entrypoints.main_harbor`` converts task
 directories and packed sources through ``HarborTaskDataset`` and uses the same worker.
 Harbor caches private task Parquet in ``data.task_cache_dir``.
 Explicit exports use ``skyrl_train.dataset.tasks.write_tasks(Path(...), tasks)``.
-TaskCompendium defines task serialization; SkyRL owns its dataset file format.
-With ``data.terminal_bench_data``, the default entrypoint prepares mixed Nemotron
+TaskCompendium defines task serialization. SkyRL owns its dataset file format.
+With ``data.terminal_bench_data``, ``skyrl_train.entrypoints.main_base`` prepares mixed Nemotron
 rows through ``NemotronTaskDataset``. Terminal rows contain the complete executable
 task. The worker does not require the original task directories.
 Harbor settings apply only to Harbor tasks. Other tasks retain their own turn limits
@@ -61,7 +62,9 @@ It does not reconstruct sampled responses from text or add sampled EOS tokens.
 An environment cannot replace the sampled action with different text.
 Token-contract violations abort the prompt group.
 
-``generator.max_turns`` limits environment transitions.
+One transition follows each model response, including the final response.
+The engine uses ``generator.max_turns`` unless Harbor supplies its own turn limit.
+A session can finish earlier.
 ``generator.engine_init_kwargs.max_model_len`` sets the model context limit when
 configured. Each response fits the space after the exact rendered prompt.
 Without that setting, ``generator.max_input_length`` limits each prompt.
@@ -76,13 +79,20 @@ one row per retained model turn. Select step projection with
 ``trainer.step_wise_training=true``. The two projections preserve exact tokens,
 behavior log probabilities, token rewards, expert routes, and teacher routes.
 
-Verifier scores remain separate from optimization rewards. A missing or failed
-verifier excludes the rollout from loss and baseline calculations. Explicitly
+Sessions can supply per-turn optimization rewards. Otherwise, the whole-task projection uses the task grade.
+Step projection uses each turn's reward, with the task grade on the last turn when no per-turn rewards exist.
+A verifier result without a grade excludes tokens from loss and baseline calculations.
+Recorded execution failures use the exception policy, with zero optimization reward when no grade is available. Explicitly
 skipped grading retains trainable tokens with zero reward.
 Nemotron GenRM tasks use a judge model to compare a group of responses against
 a private grading principle. Configure that judge in
 ``environment.task_sessions.nemotron_ultra.genrm``.
 Comparison grading completes before the worker emits a rollout group.
+Each training prompt group contains ``generator.n_samples_per_prompt`` attempts of one task.
+GenRM compares eligible attempts in that group. The completed rollout group enters the buffer.
+Ineligible attempts receive no comparison score.
+Evaluation exports contain public prompts, responses, labels, scores, and failure fields.
+Private task records and grading configuration remain outside these exports.
 
 ``generator.error_handling`` controls exception policies.
 ``mask`` excludes the rollout from loss and baseline calculations.
@@ -90,14 +100,17 @@ Comparison grading completes before the worker emits a rollout group.
 ``passthrough`` retains the available verifier score.
 Exception lists override the built-in error categories. ``default_error_treatment``
 selects one of these policies for unknown errors.
-Timeout recovery retains only completed, verified task turns.
-It requires behavior log probabilities when the request requires them.
+Timeout recovery retains completed turns with available grades and valid token evidence.
+The effective ``sampling_params.logprobs`` setting determines the probability requirement, including request overrides and automatic TIS setup.
 ``generator.error_handling.preserve_logprobs_on_timeout=false`` disables timeout recovery.
 
 ``TaskRolloutWorker.run_task`` projects and finalizes a completed prompt group before one
 buffer write. A failed group cannot commit partial results.
 ``environment.task_sessions.max_verifier_workers`` limits verifier threads per worker.
 Cancellation waits for active verifier threads before resource cleanup.
+Synchronous HTTP operations must finish before cancellation releases their resources.
+The search task's HTTP client can use ten attempts, each with ``environment.task_sessions.search.timeout``, plus 45 seconds of retry delays.
+Cancellation can wait for these attempts.
 The worker returns after the buffer commit.
 
 Rollout telemetry records collection, backend tokenization, batch assembly,
