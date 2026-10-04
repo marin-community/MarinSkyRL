@@ -81,6 +81,7 @@ SkyRL is a full-stack RL library designed for modularity and extensibility.
    :caption: Checkpointing and Logging
 
    checkpointing-logging/checkpointing
+   telemetry
 
 
 .. toctree::

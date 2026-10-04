@@ -8,7 +8,7 @@ SkyRL uses that engine through ``TaskRolloutWorker`` in
 
 ``ShellboxRolloutEngine.run`` asynchronously executes one task. The worker
 starts one coroutine for each task, and inference runs on the worker's event
-loop. Blocking Gym environment operations use a separate executor.
+loop. Synchronous graders use a separate executor. Shellbox commands use asynchronous machine operations.
 ``trajectory_runner.max_concurrent_tasks`` limits active task coroutines.
 If that setting is absent, the concurrency limit uses
 ``trajectory_runner.rollout_workers.executor_threads``.
@@ -20,24 +20,27 @@ A task Parquet file contains one serialized ``TaskSpec`` per row in the
 ``task_spec`` column. A task declares its public conversation, executable
 environment, and private grading inputs.
 
-The default SkyRL entrypoint converts Gym source rows to this format through
-``GymTaskDataset``. It writes reusable files in ``data.task_cache_dir``.
+The default SkyRL entrypoint converts source rows to this format through
+``SourceTaskDataset``. It writes reusable files in ``data.task_cache_dir``.
 ``skyrl_train.entrypoints.taskcompendium`` reads task Parquet directly.
 The SWE examples use this entrypoint. The Harbor entrypoint converts task
 directories and packed sources through ``HarborTaskDataset`` and uses the same worker.
 With ``data.terminal_bench_data``, the default entrypoint prepares mixed Nemotron
 rows through ``NemotronTaskDataset``. Terminal rows contain the complete executable
 task. The worker does not require the original task directories.
-Harbor settings apply only to Harbor tasks. Gym tasks retain their own turn limits
+Harbor settings apply only to Harbor tasks. Other tasks retain their own turn limits
 and error policies. Whole-trajectory and per-step output preserve task order,
 teacher routes, and source labels.
 
-``GymTaskSession`` creates the environment, calls ``init`` and ``step``, grades
-the result, and closes its resources. It does not call the model.
+The worker supplies explicit factories from ``skyrl_gym/task_factories.py``.
+Each factory creates a direct implementation of Marin's ``TaskSession`` protocol.
+The session prepares the task, executes model actions, returns observations, and grades the result.
+The engine creates its Shellbox machine and closes the session before the machine.
+Pure answer graders use null environments and do not create a machine.
 The canonical engine owns the inference loop for single-turn and multi-turn tasks.
 It also owns conversation and token accumulation. Each session returns its
 initial messages and model options in a typed ``SessionStart`` record.
-New task sessions implement environment operations without another rollout loop.
+New task sessions implement task operations without another rollout loop.
 
 Exact tokens
 ------------
@@ -74,15 +77,15 @@ skipped grading retains trainable tokens with zero reward.
 GenRM comparison grading completes before the worker emits a rollout group.
 
 ``generator.error_handling`` controls mask, zero-reward, and pass-through
-policies. Timeout recovery retains only completed, verified Gym turns.
+policies. Timeout recovery retains only completed, verified task turns.
 It requires behavior log probabilities when the request requires them.
 ``preserve_logprobs_on_timeout=false`` disables timeout recovery.
 
 ``TaskRolloutWorker.run_task`` projects and finalizes a completed prompt group before one
 buffer write. A failed group cannot commit partial results.
-``environment.skyrl_gym.max_env_workers`` limits environment threads per worker.
-Cancellation waits for active environment operations before resource cleanup.
+``environment.task_sessions.max_verifier_workers`` limits verifier threads per worker.
+Cancellation waits for active verifier threads before resource cleanup.
 The worker returns after the buffer commit.
 
 Rollout telemetry records collection, backend tokenization, batch assembly,
-finalization, model waits, and environment queue and execution times.
+finalization, and model waits.

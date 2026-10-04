@@ -1,32 +1,18 @@
-# SkyRL-Gym
+# SkyRL task sessions
 
-A library of RL environments for LLMs implemented with the Gymnasium API.
+This package supplies task sessions and graders for MarinSkyRL. The package name remains `skyrl-gym`.
 
-## Key Features
+The common [TaskSession interface](https://github.com/marin-community/marin/blob/main/lib/rolloutengine/src/rolloutengine/contracts.py) defines `prepare`, `advance`, `grade`, and `close`. Sessions hold task state. Marin's rollout engine calls the model and records exact tokens. Shellbox supplies machines for executable tasks.
 
-- Simple `Environment` interface following the Gymnasium API. 
-- Library of ready-built environments for math, code, search, and text-to-SQL.
-- A reusable `tool` interface. Developers can implement a tool once, and use it across any environment.
-- Supports multi-tool environments
+Pure answer tasks do not create a machine. Python, SQL, Lean, and OpenEnv tasks use the machine declared in their TaskSpec. Private reference answers stay on the grading worker.
 
-## Installation
-
-You can install the latest release from PyPI:
+From the repository root:
 
 ```bash
-pip install skyrl-gym
+uv sync --project skyrl-gym --frozen --extra dev
+uv run --project skyrl-gym --frozen pytest skyrl-gym/tests/
 ```
 
-or install from source:
+The CPU tests execute trusted programs through local subprocesses. These fixtures do not provide container isolation.
 
-```bash
-git clone https://github.com/NovaSky-AI/SkyRL.git
-cd SkyRL/skyrl-gym
-pip install -e .
-```
-
-## Documentation
-
-To build your first environment, see our [Walkthrough Docs](https://skyrl.readthedocs.io/en/latest/tutorials/new_env.html).
-
-All docs are available at [https://skyrl.readthedocs.io/en/latest/](https://skyrl.readthedocs.io/en/latest/).
+See [custom task sessions](../skyrl-train/docs/tutorials/new_env.rst) and [canonical task rollouts](../skyrl-train/docs/tutorials/task_rollouts.rst).

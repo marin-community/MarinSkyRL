@@ -4,7 +4,7 @@ Multi-Turn RL for Search with SkyRL
 In this example, we walk through an example for training a multi-turn search agent with Qwen2.5-3B-Instruct and GRPO (with VLLM async rollouts), using the dataset and recipe
 from `Search-R1 <https://arxiv.org/pdf/2503.09516>`_.
 
-The full implementation of the search environment can be found in :skyrl_gym_link:`skyrl_gym/envs/search/env.py`.
+The direct search task session is in :skyrl_gym_link:`skyrl_gym/task_sessions.py`.
 
 You can find the exact step by step commands to reproduce our results in the :doc:`../recipes/searchr1` recipe, and you can find a link to our training runs 
 with 2, 3, and 4 turns for comparison at our `WandB report <https://api.wandb.ai/links/sky-posttraining-uc-berkeley/5kvkzdzr>`_.
@@ -96,10 +96,10 @@ Let's walk through configuration for running GRPO to train a 4-turn search agent
 
         # - Environment: environment class, max env workers, search env settings
         environment.env_class="search" \
-        environment.skyrl_gym.max_env_workers=16 \
-        environment.skyrl_gym.search.log_requests=false \
-        environment.skyrl_gym.search.search_url="http://127.0.0.1:8000/retrieve" \
-        environment.skyrl_gym.search.topk=3 \
+        environment.task_sessions.max_verifier_workers=16 \
+        environment.task_sessions.search.log_requests=false \
+        environment.task_sessions.search.search_url="http://127.0.0.1:8000/retrieve" \
+        environment.task_sessions.search.topk=3 \
 
         # - Evaluation: batch size, intervals, sampling params
         trainer.eval_batch_size=256 \
@@ -110,7 +110,7 @@ Let's walk through configuration for running GRPO to train a 4-turn search agent
         ... # logging + checkpointing configuration (see `examples/search/run_search.sh` for the full script)
     
 To change the number of turns, you can simply change the ``generator.max_turns`` setting.
-For more details on environment implementation, see :skyrl_gym_link:`skyrl_gym/envs/search/env.py`.
+For the session implementation, see :skyrl_gym_link:`skyrl_gym/task_sessions.py`.
 
 Note we add ``stop='["</search>", "</answer>"]'`` for both generation and evaluation sampling parameters
 to adhere to the Search-R1 recipe.

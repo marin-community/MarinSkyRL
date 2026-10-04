@@ -1,5 +1,5 @@
 SWE tasks with Shellbox
-======================
+=======================
 
 SWE-Gym and SWE-Bench use ``skyrl_train.entrypoints.taskcompendium`` and the
 common Shellbox rollout engine. The model calls the shell tool to change the

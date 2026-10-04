@@ -49,7 +49,7 @@ step target is absolute after resume, so a replacement artifact with fewer than 
 the intended cumulative step 178. The SWE rows also require the task directories produced by
 `infra/rl_data/nemotron_ultra_swe.py` in `data.terminal_bench_data`. Populate that field with an immutable artifact
 selector before launch. Non-SWE rows use the configured Nemotron Ultra gym router and require the external sandbox
-and judge endpoints described by `skyrl-train/skyrl_train/config/skyrl_gym_config/default.yaml`; do not use its
+and judge endpoints described by `skyrl-train/skyrl_train/config/task_session_config/default.yaml`; do not use its
 loopback placeholders in a production run.
 
 Use the same Iris job name and checkpoint path for each topology's two phases so `resume_mode: latest` finds the

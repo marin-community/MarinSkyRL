@@ -24,12 +24,12 @@ Performs the optimization steps based on configured RL algorithm. Updates model 
 
 Rollout worker
 ~~~~~~~~~~~~~~
-Marin's TaskCompendium package defines the shared Shellbox rollout engine.
+Marin's rolloutengine package defines the shared Shellbox rollout engine.
 SkyRL supplies inference, converts its records to training batches, and writes completed groups to the rollout buffer.
-Gym environments supply task operations and grading through a task session.
+Direct task sessions supply task operations and grading. Shellbox machines execute task tools.
 
 - ``TaskRolloutWorker`` in ``skyrl_train/rollouts/task_worker.py``
-- ``GymTaskSession`` in ``skyrl_train/rollouts/gym_tasks.py``
+- ``TaskSession`` in Marin's ``rolloutengine/contracts.py``
 
 InferenceEngine
 ~~~~~~~~~~~~~~~
@@ -41,14 +41,14 @@ Executes inference on the policy model to produce model outputs (i.e., the RL ag
 - `SGLang backend <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/skyrl_train/inference_engines/sglang/sglang_server.py>`_
 
 
-Environment
-~~~~~~~~~~~
-Presents a task for the policy model to solve, and provides the logic for executing the policy's actions (i.e., model outputs) and computing the resulting observations and rewards.
+Task session
+~~~~~~~~~~~~
+A task session holds task state, executes model actions, and returns observations and grades.
+The engine owns model inference and the exact conversation/token record.
+Shellbox supplies the execution machine when the task requires one.
 
-- `Base Environment interface <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-gym/skyrl_gym/core.py>`_
-- `SkyRL-Gym <https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-gym>`_, our ready-built library of tool-use environments
-
-  - `Example environments <https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-gym/skyrl_gym/envs>`_
+- :doc:`Task session API <../api/env>`
+- :doc:`Create a task session <../tutorials/new_env>`
 
 
 Controller

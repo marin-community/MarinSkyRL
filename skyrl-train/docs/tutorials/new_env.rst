@@ -1,305 +1,106 @@
-Creating a New Environment or Task
-=====================================
+Create a task session
+=====================
 
-To demonstrate how to create custom environments in SkyRL-Gym and train with SkyRL, let's build a simple multiplication environment!
+A task session holds task state and defines the response to each model turn.
+The rollout engine calls the model and records the conversation and exact tokens.
+Shellbox supplies an execution machine when the task requires one.
 
-We'll walk through the complete process: implementing the environment, registering it, preparing training data, and running your first training session.
+The multiplication example requires no machine. It reads a private reference answer
+and returns correction prompts until the model gives the correct answer or reaches the turn limit.
 
-**What we're building:** An environment that asks the model to multiply numbers and checks if the answer is correct. The completed code is available at `examples/multiply <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/multiply>`_.
+Session interface
+-----------------
 
-Environment Interface
----------------------
+Implement the four operations in Marin's ``TaskSession`` protocol:
 
-SkyRL-Gym includes a simple text-in/text-out environment interface for LLM tasks, ``BaseTextEnv``, which looks like this:
+- ``prepare()`` returns the initial messages and model options in ``SessionStart``.
+- ``advance(turn)`` returns a ``Transition`` with observations, a reward, and terminal state.
+- ``grade(messages)`` returns the final ``GradeResult``.
+- ``close()`` releases session resources. The engine then closes the supplied machine.
 
-.. code-block:: python
-   :linenos:
-   :caption: Base text environment interface at `skyrl_gym/envs/base_text_env.py <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-gym/skyrl_gym/envs/base_text_env.py>`_
+A ``ModelTurn`` contains the sampled assistant message, exact token IDs, and log probabilities.
+Use its message or text for task actions. Do not replace the sampled tokens.
+A session can return ``reset_conversation`` when the next attempt requires a fresh conversation.
 
-   class BaseTextEnv(Env[ConversationType, str]):
-      def step(self, action: str) -> BaseTextEnvStepOutput:
-         """
-         Runs one environment step.
+The multiplication implementation is:
 
-         Args:
-            action: The LLM's response as a string
+.. literalinclude:: ../../examples/multiply/task_session.py
+   :language: python
+   :pyobject: MultiplyTaskSession
 
-         Returns:
-            BaseTextEnvStepOutput containing:
-            - observations: New messages from the environment
-            - reward: Float reward for the action  
-            - done: Whether the episode is finished
-            - metadata: Additional info (optional)
-         """
-         pass
+Intermediate turns receive zero reward and a correction prompt.
+A terminal correct answer in ``\boxed{42}`` format receives 1.0.
+A terminal wrong boxed answer receives 0.5.
+An answer with no box receives zero.
+The final grade is the mean of all completed turn grades, including intermediate zeros.
+For example, turn grades of 0.0 and 1.0 give a final grade of 0.5.
+The training projection retains the individual turn rewards.
 
-      def init(self, prompt: ConversationType) -> Tuple[ConversationType, Dict[str, Any]]:
-         return prompt, {}
+Supply the factory
+------------------
 
-      def close(self):
-         pass
-
-This class inherits from ``Env``, which is a generic environment interface (i.e., not specific to text-based tasks). An API reference for ``Env`` can be found in :doc:`../api/env`.
-
-For our multiplication environment, we only need to implement the ``step`` method above because we don't have any initialization or cleanup to do.
-
-
-Simple Single-Turn Environment
--------------------------------
-
-Let's start with a basic version that gives the model only one chance to get the answer right. 
-
-The prompt and response format expected by the ``multiply`` environment is as follows:
-
-- The model prompt will be a multiplication problem of 2 n-digit numbers, such as "123 * 456" or "999 * 999". 
-- The model output should be in the format of ``\\boxed{answer}``, where ``answer`` is the product of the two numbers. 
-
-So, the environment ``step`` must simply parse the answer out of ``\\boxed{answer}`` and check if it matches the ground truth.
-
-.. code-block:: python
-   :linenos:
-   :caption: Simple multiplication environment
-
-   class MultiplyEnv(BaseTextEnv):
-      def _parse_action(self, action: str) -> str:
-         """Extract answer from \\boxed{answer} format"""
-         match = re.search(r"\\boxed\{([^}]+)\}", action)
-         return match.group(1) if match else None
-         
-      def step(self, action: str) -> BaseTextEnvStepOutput:
-         answer = self._parse_action(action)
-         is_correct = answer is not None and answer.strip() == str(self.ground_truth).strip()
-
-         return BaseTextEnvStepOutput(
-            observations=[],
-            reward=1.0 if is_correct else 0.0,
-            done=True,
-            metadata={"parsed_answer": answer}
-         )
-
-That's it! The environment checks if the model's answer matches the ground truth and gives a reward of 1.0 for correct answers, 0.0 for incorrect ones.
-
-Multi-Turn Environment
-----------------------
-
-Want to give the model multiple attempts? Let's extend our environment to allow multiple turns.
-
-We will make a few simple extensions to our ``step()`` method:
-
-- Keep track of the number of turns (``self.turns``) and indicate the trajectory is ``done`` after a configured maximum number of turns (``self.max_turns``)
-- If the turns expire or the model provides a correct answer, we indicate the trajectory is ``done`` and return a reward as follows:
-
-  - Correct answer: 1.0.
-  - Incorrect answer, but in format of ``\\boxed{...}``: 0.5.
-  - Incorrect answer, and not in format of ``\\boxed{...}``: 0.0.
-- If the model is incorrect and has more turns remaining, we also provide feedback as a new ``observation``.
-
-.. code-block:: python
-   :linenos:
-   :caption: Multi-turn multiplication environment in `examples/multiply/env.py <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/multiply/env.py>`_
-
-   def step(self, action: str) -> BaseTextEnvStepOutput:
-        self.turns += 1
-        answer = self._parse_action(action)
-        is_correct = answer is not None and answer.strip() == str(self.ground_truth).strip()
-        found_boxed = answer is not None
-
-        # Episode ends if max turns reached or correct answer found
-        done = self.turns >= self.max_turns or is_correct
-        
-        # Reward structure:
-        # - Correct answer: 1.0
-        # - Wrong answer in correct format: 0.5  
-        # - No boxed answer: 0.0
-        if is_correct:
-            reward = 1.0
-        elif found_boxed:
-            reward = 0.5
-        else:
-            reward = 0.0
-
-        if done:
-            return BaseTextEnvStepOutput(
-                observations=[],
-                reward=reward,
-                done=True,
-                metadata={"parsed_answer": answer}
-            )
-            
-        # Give feedback for another attempt
-        if answer is not None:
-            feedback = f"Your answer '{answer}' is incorrect. Please try again."
-        else:
-            feedback = "Please provide your answer in the format \\boxed{your_answer}."
-            
-        return BaseTextEnvStepOutput(
-            observations=[{"role": "user", "content": feedback}],
-            reward=0.0,
-            done=False,
-            metadata={"parsed_answer": answer}
-        )
-
-The multi-turn version gives partial credit for formatting the answer correctly, even if it's wrong. This helps the model learn the expected output format.
-
-The final implementation is available in `examples/multiply/env.py <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/multiply/env.py>`_.
-
-(Turn-level) Rewards And Metrics
---------------------------------
-
-In the example above, unless ``done=True``, the reward is ``0.0``. That is, the model only receives a single reward for the entire trajectory.
-You can experiment with turn-level rewards by returning a non-zero reward in any turn. Otherwise, if you only want to use outcome rewards, you can simply return ``reward=0.0`` for all intermediate turns.
-
-SkyRL automatically computes the following metrics for logging purposes:
-
-- ``pass_at_n``: The ``n`` in ``pass_at_n`` is the number of trajectories we generate for each example. ``pass_at_n`` is 1 if any trajectory succeeded, and 0 otherwise. For each trajectory, we assume that the last turn's reward signifies the entire trajectory's reward, and any positive value is considered a "pass".
-- ``mean_raw_reward``: for each trajectory, we sum over all the turns' rewards. We then take the average over all the trajectories.
-
-When a Gym environment's ``env_extras`` includes ``data_source``, training also logs ``reward/domain/<source>/avg_raw_reward``
-at each optimizer step using the same reward values as ``reward/avg_raw_reward``. Step-wise training uses each trajectory's final step.
-Lowercase ASCII source names stay readable. Other names use lowercase UTF-8 byte escapes under ``_source_``:
-``a/b`` becomes ``_source_a_2fb``, while ``a_b`` stays ``a_b``. Missing metadata uses ``_missing``.
-The first 32 encoded names in sorted order get separate metrics per batch; remaining names are grouped under
-``reward/domain_overflow/avg_raw_reward``. This is not a run-wide key limit.
-
-Whether you use turn-level rewards or outcome rewards, the rewards used to train the model will be translated to per-token rewards. For example, if there are 3 turns with 4 response tokens each and the turn-level rewards are ``[1.0, 2.0, 3.0]``, the resulting per-token rewards are:
+Pass the session class to the experiment:
 
 .. code-block:: python
 
-   [
-      0.0, 0.0, 0.0, 1.0,
-      0.0, 0.0, 0.0, 2.0,
-      0.0, 0.0, 0.0, 3.0,
-   ]
+   from examples.multiply.task_session import MultiplyTaskSession
+   from skyrl_train.entrypoints.main_base import BasePPOExp
 
-If there is only an outcome reward of ``1.0`` (i.e. intermediate turns' rewards are all ``0.0``), the per-token rewards are:
+   experiment = BasePPOExp(cfg, sessions={"multiply": MultiplyTaskSession})
+   experiment.run()
 
-.. code-block:: python
+A factory accepts ``(TaskSpec, Machine | None)`` and returns a fresh session.
+The worker sends this explicit factory map to its Ray workers.
+There is no environment registry or separate episode controller.
 
-   [
-      0.0, 0.0, 0.0, 0.0,
-      0.0, 0.0, 0.0, 0.0,
-      0.0, 0.0, 0.0, 1.0,
-   ]
-
-Registering Your New Environment
---------------------------------
-
-Finally, we need to ``register`` the new environment so the training stack can find it by name (which we refer to as ``env_class``). We will name this environment ``multiply``.
-
-We will create a new entrypoint for training with the ``multiply`` environment by creating a file at ``examples/multiply/main_multiply.py`` that looks like this:
-
-.. code-block:: python
-   :linenos:
-   :caption: Environment registration at `examples/multiply/main_multiply.py <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/multiply/main_multiply.py>`_
-
-   @ray.remote(num_cpus=1)
-   def skyrl_entrypoint(cfg: DictConfig):
-      # Register the multiply environment
-      # this needs to be done inside the entrypoint task
-      register(
-         id="multiply",  # <-- The name of the environment.
-         entry_point="examples.multiply.env:MultiplyEnv",  # <-- The path to the environment class.
-      )
-
-      # make sure that the training loop is not run on the head node.
-      exp = BasePPOExp(cfg)
-      exp.run()
-
-   @hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
-   def main(cfg: DictConfig) -> None:
-      # validate the arguments
-      validate_cfg(cfg)
-
-      initialize_ray(cfg)
-      ray.get(skyrl_entrypoint.remote(cfg))
-
-   if __name__ == "__main__":
-      main()
-
-Now, the training stack can simply build the new environment with ``skyrl_gym.make("multiply")``!
-
-.. note::
-   All example code written in this document is *outside* of the ``skyrl-train`` and ``skyrl-gym`` packages. There is no need to fork and edit ``skyrl-train`` or ``skyrl-gym`` code -- just implement and register your environment, and the training stack can find the environment seamlessly!
-
-Preparing Training Data
------------------------
-
-Before we can train, we need a dataset of problems to train on.
-
-We can generate a dataset of multiplication problems using `examples/multiply/multiply_dataset.py <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/multiply/multiply_dataset.py>`_. See the file for more details, but the core idea is to generate random multiplication problems of n-digit numbers, and ensure the dataset example is in the correct format:
-
-.. code-block:: python
-   :linenos:
-   :caption: Generating a dataset of random multiplication problems.
-
-   for idx in range(num_examples):
-        question, answer = generate_multiplication_problem(num_digits)
-        
-        data = {
-            "data_source": "synthetic_multiply",
-            "prompt": [
-                system_prompt,
-                {
-                    "role": "user",
-                    "content": question,
-                }
-            ],
-            "env_class": "multiply",
-            "reward_spec": {
-                "method": "rule",
-                "ground_truth": answer,
-            },
-            "extra_info": {
-                "num_digits": num_digits,
-                "split": split_name,
-            },
-        }
-        examples.append(data)
-
-
-Note that the ``env_class`` here should match the name of the environment we registered. In this case, it is ``multiply``. You can optionally omit the ``env_class`` here and instead set it in the training configuration to apply to all training samples, but setting ``env_class`` per-sample allows for multi-environment training so it is the recommended practice.
-
-See the doc on :doc:`../datasets/dataset-preparation` for more details on the required dataset format and how to prepare your own dataset.
-
-Now we can generate the datsaet:
-
-.. code-block:: bash
-   :linenos:
-   :caption: Generate training data
-
-   uv run --isolated examples/multiply/multiply_dataset.py \
-     --output_dir $HOME/data/multiply \
-     --num_digits 4 \
-     --train_size 10000 \
-     --test_size 200
-
-This creates ``train.parquet`` and ``validation.parquet`` files in the ``$HOME/data/multiply`` directory.
-
-Training Your Model
+Prepare source rows
 -------------------
 
-Time to train! 🚀
+Each source row declares its task name and private reference:
 
-We will use the ``run_multiply.sh`` script to train the model. This script is located in `examples/multiply/run_multiply.sh <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/multiply/run_multiply.sh>`_, which sets up the training configuration and calls ``main_multiply.py``.
+.. code-block:: python
 
-**Common Configuration Parameters**
+   row = {
+       "prompt": [{"role": "user", "content": "6 * 7"}],
+       "env_class": "multiply",
+       "reward_spec": {"method": "rule", "ground_truth": "42"},
+       "data_source": "synthetic_multiply",
+       "max_turns": 5,
+   }
 
-First, ensure sure your config matches your available GPUs. You may need to adjust the following parameters to match your GPU count (which we set via an environment variable `NUM_GPUS`):
+``SourceTaskDataset`` converts these rows to task Parquet.
+The prompt contains public messages. The verifier payload contains the private reference and task configuration.
+Keep the reference out of model-visible observations.
 
-- ``trainer.placement.policy_num_gpus_per_node``
-- ``generator.num_inference_engines``
+``TaskSpec.context`` holds the public conversation.
+``TaskSpec.environment`` contains an ``EnvironmentSpec`` that selects the machine and named session factory.
+The session parses ``TaskSpec.verifier.parameters_json`` as an ``ExternalVerifierSpec``.
+Its ``parameters["config"]`` contains task settings, and ``parameters["extras"]`` contains the source row's private fields.
+The multiplication session reads ``extras["reward_spec"]["ground_truth"]``.
+See :doc:`../api/env` for these types and :doc:`task_rollouts` for the Parquet format.
 
-**Launch Training**
+From ``skyrl-train/``, prepare the example data and run the supplied entrypoint:
 
 .. code-block:: bash
-   :linenos:
-   :caption: Run training
 
-   export WANDB_API_KEY=your_wandb_api_key  # or set trainer.logger="console" to print to stdout
+   uv run --project .. examples/multiply/multiply_dataset.py --output_dir "$HOME/data/multiply"
    bash examples/multiply/run_multiply.sh
 
-**Next Steps:** Want to make multiplication easier? Try integrating a calculator tool into your environment! Check out the :doc:`tools_guide` documentation for details.
+Execution and rewards
+---------------------
 
-That's it! You've created a custom environment, prepared training data, and started training. The same pattern works for any text-based task you want to train on.
+For an executable task, declare ``machine`` in
+``environment.task_sessions.<task_name>``.
+Use ``Machine.run``, ``upload``, and ``download`` for task execution.
+The engine owns the machine lifecycle. See :doc:`tools_guide`.
 
-Now watch your model become a multiplication master!
+A transition reward contributes to the final token of that model turn.
+Observation tokens have zero loss mask and zero log probability.
+A missing or failed grade excludes the rollout from training.
+Explicitly skipped grading retains trainable model tokens.
+
+The source label also supplies ``reward/domain/<source>/avg_raw_reward`` metrics.
+Missing labels use ``_missing``. Each batch records at most 32 source keys.
+Additional sources contribute to ``reward/domain_overflow/avg_raw_reward``.
+
+See :doc:`task_rollouts` for exact-token and failure policies.

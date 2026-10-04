@@ -3,7 +3,7 @@ Multi-Turn GRPO Text2SQL with Async Rollouts
 
 In this example, we walk through how to train an effective multi-turn Text2SQL model (beating GPT-4o) with SkyRL using async rollouts.
 
-We provide an implementation of a multi-turn Text2SQL environment at :skyrl_gym_link:`skyrl_gym/envs/sql/env.py`.
+The multi-turn SQL task session is in :skyrl_gym_link:`skyrl_gym/sql_tasks.py`.
 
 You can find the exact recipe for reproducing our prior `SkyRL-SQL-7B <https://novasky-ai.notion.site/skyrl-sql>`_ release at :doc:`../recipes/skyrl-sql`.
 
@@ -84,7 +84,7 @@ Now that we have our dataset and database files, let's walk through the some of 
     uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
         #### Environment configuration
         environment.env_class=text2sql \
-        environment.skyrl_gym.text2sql.db_path=$DB_PATH \
+        environment.task_sessions.text2sql.db_path=$DB_PATH \
       
         #### Multi-turn Async Rollouts configuration
         # this is used to set the max turns for the environment
