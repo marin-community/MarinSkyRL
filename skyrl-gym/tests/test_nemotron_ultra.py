@@ -809,3 +809,42 @@ def test_terminal_release_verifier_checks_commands_and_completion_in_one_turn():
         assert result["reward"] == reward
         assert result["verification"].status == VerificationStatus.VERIFIED
         env.close()
+
+
+@pytest.mark.parametrize("probability, expected_reward", [(0.9, 1.0), (0.1, 0.0)])
+def test_terminal_hybrid_rewards_semantic_equivalence_not_schema_alone(monkeypatch, probability, expected_reward):
+    monkeypatch.setenv("TERMINAL_TEST_KEY", "test")
+
+    def post(url, **kwargs):
+        response = requests.Response()
+        response.status_code = 200
+        response._content = json.dumps(
+            {"answers": {"equivalent": {"noul": probability}}, "usage": {"cost": 0.0001}}
+        ).encode()
+        return response
+
+    monkeypatch.setattr(requests, "post", post)
+    reference = {"analysis": "", "plan": "", "commands": [{"keystrokes": "pwd"}]}
+    action = json.dumps({**reference, "commands": [{"keystrokes": f"printf test-{probability}"}]})
+    env = _ultra_env(
+        "terminus_judge_string_only_simple_agent",
+        {
+            "require_completed_action": True,
+            "pivot_reward": "string_or_jev",
+            "pivot_arm": "rl_string_or_jev",
+            "terminal_judge": {
+                "base_url": "http://judge.invalid",
+                "model": "test",
+                "api_key_env": "TERMINAL_TEST_KEY",
+                "threshold": 0.5,
+            },
+        },
+        {"metadata": {"harness": "terminus_2"}, "expected_answer": json.dumps(reference)},
+    )
+    env.set_rollout_evidence(RolloutEvidence(response=action, stop_reason="stop"))
+    result = env.step(action)
+    assert result["reward"] == expected_reward
+    assert result["verification"].diagnostics["pivot"]["scores"]["string_90"] == 0.0
+    # Truncated generations cannot receive a semantic reward even when their JSON parses.
+    env.set_rollout_evidence(RolloutEvidence(response=action, stop_reason="length"))
+    assert env.step(action)["reward"] == 0.0

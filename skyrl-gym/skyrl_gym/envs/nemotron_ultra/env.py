@@ -32,6 +32,7 @@ from skyrl_gym.envs.nemotron_ultra.rdkit_chemistry import grade_rdkit_chemistry
 from skyrl_gym.envs.nemotron_ultra.sandbox import SandboxClient
 from skyrl_gym.envs.nemotron_ultra.structured_outputs import grade_structured_output
 from skyrl_gym.envs.nemotron_ultra.terminal import grade_terminal, grade_terminal_verifiers, TERMINAL_PIVOT_VERIFIERS
+from skyrl_gym.envs.nemotron_ultra.terminal_judge import TerminalJudge
 from skyrl_gym.envs.nemotron_ultra.tool_call import grade_expected_action, grade_pivot_verifiers, PIVOT_VERIFIERS
 from skyrl_gym.verification import RolloutEvidence, VerificationResult
 
@@ -93,9 +94,13 @@ class NemotronUltraEnv(BaseTextEnv):
         self.pivot_reward = env_config.get("pivot_reward")
         self.pivot_arm = env_config.get("pivot_arm")
         self.require_completed_action = env_config.get("require_completed_action", False)
+        terminal_judge = env_config.get("terminal_judge")
+        self.terminal_judge = TerminalJudge(**dict(terminal_judge)) if terminal_judge is not None else None
         self.pivot_verifiers = (
             TERMINAL_PIVOT_VERIFIERS if self.agent == "terminus_judge_string_only_simple_agent" else PIVOT_VERIFIERS
         )
+        if self.agent == "terminus_judge_string_only_simple_agent" and self.terminal_judge is not None:
+            self.pivot_verifiers = (*self.pivot_verifiers, "string_or_jev")
         if self.pivot_reward is not None and self.pivot_reward not in self.pivot_verifiers:
             raise ValueError(f"Unknown pivot reward: {self.pivot_reward}")
         self.record = self._decode_mapping(ultra.get("record_json"), "record_json")
@@ -262,7 +267,7 @@ class NemotronUltraEnv(BaseTextEnv):
                 reward, details = grade_terminal(action, self.record)
                 diagnostics.update(details)
             else:
-                grades = grade_terminal_verifiers(action, self.record)
+                grades = grade_terminal_verifiers(action, self.record, judge=self.terminal_judge)
                 diagnostics["pivot"] = {
                     **grades,
                     "training_reward": self.pivot_reward if self.pivot_arm.startswith("rl_") else None,

@@ -29,6 +29,7 @@ nemotron_ultra:
   grading: verify
   # Capped single-action runs can reject responses that did not terminate normally.
   require_completed_action: false
+  terminal_judge: null
   sandbox:
     host: "127.0.0.1"
     port: 6000
