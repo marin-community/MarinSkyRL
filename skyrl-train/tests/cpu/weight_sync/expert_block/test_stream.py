@@ -22,7 +22,8 @@ import torch.multiprocessing as mp
 
 from skyrl_train.weight_sync.expert_block.groups import Rendezvous, create_groups, destroy_groups, warm_groups
 from skyrl_train.weight_sync.expert_block.schedule import Group, ReceiverRank, TrainerRank, build_schedule
-from skyrl_train.weight_sync.expert_block.source_views import local_expert_sources, local_source_slices
+from skyrl_train.weight_sync.expert_block.megatron_source import local_source_slices
+from skyrl_train.weight_sync.expert_block.source_views import local_expert_sources
 from skyrl_train.weight_sync.expert_block.stream import Stream
 from skyrl_train.weight_sync.expert_block.verify_weights import compare_replicas, replay
 from tests.cpu.weight_sync.expert_block.megatron_layout import (
@@ -124,7 +125,7 @@ def trainer_sources(topology, trainer):
         trainer,
         num_experts=NUM_EXPERTS,
         expert_parallel_size=topology.trainer_ep,
-        hidden_size=HIDDEN,
+        expert_hidden_size=HIDDEN,
         intermediate_size=INTERMEDIATE,
     )
     return local, {item.entry.name: item for item in experts}

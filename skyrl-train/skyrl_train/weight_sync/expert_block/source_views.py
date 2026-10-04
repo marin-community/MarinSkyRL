@@ -1,15 +1,13 @@
-"""Views of the parameters an expert-block sync reads on the trainer and writes on the receiver.
+"""Resolve publication records to live trainer and receiver storage.
 
-On the trainer, Megatron-Bridge conversion tasks say which HF tensor each Megatron parameter
-holds. At TP=1 each Grug expert matrix is one whole parameter, and each dense HF tensor is
-one or more runs of one parameter, so a broadcast reads parameter storage directly. On the
-receiver, vLLM's fused expert parameters hold one contiguous ``[2I, H]`` or ``[H, I]`` slot per
-local expert, and dense tensors are replicated, so a broadcast writes into a run of a flat
-parameter.
+The Megatron adapter supplies expert identities and dense runs. These views
+validate whole expert matrices and receiver slots without interpreting Bridge
+mapping classes or expert checkpoint schemas.
 """
 
 from dataclasses import dataclass
 import re
+from typing import Literal
 
 import torch
 
@@ -22,12 +20,9 @@ from skyrl_train.weight_sync.expert_block.schedule import (
     TrainerRank,
 )
 
-EXPERT_HF_NAME = re.compile(r"model\.layers\.(\d+)\.mlp\.experts\.(gate|up|down)_proj\.weight")
 LAYER_PREFIX = re.compile(r"model\.layers\.(\d+)\.")
 ROUTED_EXPERTS = "mlp.experts.routed_experts"
 ROUTER_WEIGHT_SUFFIX = ".mlp.router.weight"
-EXPERT_MAPPINGS = ("GrugStackedExpertMapping", "GrugStackedGatedExpertMapping")
-WIRE_DTYPES = frozenset(WIRE_DTYPE_BYTES)
 
 
 def dtype_name(dtype: torch.dtype) -> str:
@@ -42,11 +37,11 @@ def is_widened_router(hf_name: str, wire_dtype: str, installed_dtype: str) -> bo
 
 @dataclass(frozen=True)
 class ExpertSlice:
-    """One of ``gate``, ``up`` or ``down`` of an expert, and the trainer parameter that stores it."""
+    """One normalized expert projection and the live trainer parameter that stores it."""
 
-    hf_name: str
+    layer: int
     expert: int
-    part: str
+    part: Literal["gate", "up", "down"]
     source_key: str
 
 
@@ -68,71 +63,6 @@ class LocalSources:
     sources: dict[str, torch.Tensor]
 
 
-def local_source_slices(tasks, config, *, pp: int) -> LocalSources:
-    """Turn a rank's conversion tasks into expert slices, dense slices and the parameters that store them."""
-    expert, dense, sources = [], [], {}
-    for task in tasks:
-        # Keep the parameter, not a detached view, so the sender's storage check sees a
-        # reassigned ``param.data``.
-        source = task.param_weight
-        if source is None:
-            continue
-        key = task.global_param_name
-        dtype = dtype_name(source.dtype)
-        if key in sources or not source.is_contiguous() or dtype not in WIRE_DTYPES:
-            raise ValueError(f"Parameter {key} must be unique, contiguous and BF16 or FP32")
-        sources[key] = source
-        mapping = task.mapping
-        kind = type(mapping).__name__
-        # For an expert mapping, tp_size is the expert-tensor-parallel size.
-        if mapping.tp_size != 1:
-            raise ValueError(f"Parameter {key} is tensor-parallel; expert-block sync requires trainer TP=1 and ETP=1")
-        if kind in EXPERT_MAPPINGS:
-            match = re.search(r"\.weight(\d+)$", key)
-            if match is None or source.ndim != 2:
-                raise ValueError(f"Expert parameter {key} is not a single per-expert matrix")
-            expert_id = int(match.group(1))
-            if kind == "GrugStackedExpertMapping":
-                expert.append(ExpertSlice(mapping.hf_param, expert_id, "down", key))
-            else:
-                if source.shape[0] % 2 or set(mapping.hf_param) != {"gate", "up"}:
-                    raise ValueError(f"Gated expert parameter {key} is not a complete [gate;up] matrix")
-                for part in ("gate", "up"):
-                    expert.append(ExpertSlice(mapping.hf_param[part], expert_id, part, key))
-            continue
-
-        def add(name, hf_offset, numel, source_offset):
-            if source_offset < 0 or numel <= 0 or source_offset + numel > source.numel():
-                raise ValueError(f"Slice of {key} exceeds its storage")
-            dense.append(DenseSlice(name, hf_offset, numel, dtype, key, source_offset, pp))
-
-        if kind in ("AutoMapping", "ReplicatedMapping"):
-            add(mapping.hf_param, 0, source.numel(), 0)
-        elif kind == "GatedMLPMapping":
-            if source.ndim != 2 or source.shape[0] % 2 or set(mapping.hf_param) != {"gate", "up"}:
-                raise ValueError(f"Gated parameter {key} is not a complete [gate;up] matrix")
-            half = source.numel() // 2
-            for position, part in enumerate(("gate", "up")):
-                add(mapping.hf_param[part], 0, half, position * half)
-        elif kind == "QKVMapping":
-            # Megatron interleaves [q..., k, v] per KV group; HF keeps q, k and v as separate tensors.
-            heads, groups, head_dim = config.num_attention_heads, config.num_query_groups, config.kv_channels
-            if heads % groups:
-                raise ValueError(f"QKV parameter {key}: {heads} heads do not split across {groups} KV groups")
-            queries = heads // groups
-            expected_shape = (groups * (queries + 2) * head_dim, config.hidden_size)
-            if tuple(source.shape) != expected_shape or set(mapping.hf_param) != {"q", "k", "v"}:
-                raise ValueError(f"QKV parameter {key} differs from the configured interleaved layout")
-            for group in range(groups):
-                for part, offset, count in (("q", 0, queries), ("k", queries, 1), ("v", queries + 1, 1)):
-                    numel = count * head_dim * config.hidden_size
-                    source_offset = (group * (queries + 2) + offset) * head_dim * config.hidden_size
-                    add(mapping.hf_param[part], group * numel, numel, source_offset)
-        else:
-            raise ValueError(f"Unsupported weight mapping for expert-block sync: {kind}")
-    return LocalSources(expert, dense, sources)
-
-
 def local_expert_sources(
     expert_slices: list[ExpertSlice],
     sources: dict[str, torch.Tensor],
@@ -140,22 +70,19 @@ def local_expert_sources(
     *,
     num_experts: int,
     expert_parallel_size: int,
-    hidden_size: int,
+    expert_hidden_size: int,
     intermediate_size: int,
 ) -> list[ExpertSource]:
     """Group expert slices into whole matrices. Check that each is one contiguous BF16 parameter."""
     per_block = num_experts // expert_parallel_size
     grouped: dict[tuple[int, int, str], dict[str, ExpertSlice]] = {}
     for item in expert_slices:
-        match = EXPERT_HF_NAME.fullmatch(item.hf_name)
-        if match is None or match[2] != item.part:
-            raise ValueError(f"Expert slice {item.hf_name} is not a Grug expert projection")
-        layer = int(match[1])
+        layer = item.layer
         if not trainer.ep * per_block <= item.expert < (trainer.ep + 1) * per_block:
             raise ValueError(f"Expert {item.expert} of layer {layer} is not owned by EP rank {trainer.ep}")
         parts = grouped.setdefault((layer, item.expert, "fc2" if item.part == "down" else "fc1"), {})
         if item.part in parts:
-            raise ValueError(f"Duplicate expert slice {item.hf_name} for expert {item.expert}")
+            raise ValueError(f"Duplicate {item.part} slice for expert {item.expert} of layer {layer}")
         parts[item.part] = item
     result = []
     for (layer, expert, projection), parts in sorted(grouped.items()):
@@ -166,7 +93,11 @@ def local_expert_sources(
             )
         first = next(iter(parts.values()))
         source = sources[first.source_key]
-        shape = (hidden_size, intermediate_size) if projection == "fc2" else (2 * intermediate_size, hidden_size)
+        shape = (
+            (expert_hidden_size, intermediate_size)
+            if projection == "fc2"
+            else (2 * intermediate_size, expert_hidden_size)
+        )
         if tuple(source.shape) != shape or source.dtype != torch.bfloat16:
             raise ValueError(f"Parameter {first.source_key} is not the {shape} BF16 matrix of expert {expert}")
         entry = ExpertEntry(

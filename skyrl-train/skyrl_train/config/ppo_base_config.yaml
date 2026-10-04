@@ -372,7 +372,7 @@ generator:
   # How weights reach the engines. "broadcast": trainer rank 0 sends every tensor to every engine.
   # "expert_block": each MoE expert matrix is broadcast from a Megatron rank that holds it to the vLLM
   # workers that serve it. Needs engines that are not colocated with training, a Grug MoE on the megatron
-  # strategy at TP=1 and ETP=1, local vLLM engines at TP=1 with EP=DP>1, the NCCL weight-sync backend and
+  # strategy at TP=1 and ETP=1, local vLLM engines at TP=1 with EP=DP>=1, the NCCL weight-sync backend and
   # vLLM's TRITON MoE backend.
   weight_sync_transport: "broadcast"
   expert_block_sync:
