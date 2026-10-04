@@ -26,6 +26,7 @@ default. Local callers may instead pass exactly one of ``cluster`` or
 import asyncio
 import base64
 import hashlib
+import math
 import os
 import re
 import shlex
@@ -94,7 +95,7 @@ def _require_success(result: ExecResult, message: str, exc_type: type[Exception]
     return result
 
 
-def _local_download_target(target: Path | str) -> Path | None:
+def _local_path(target: Path | str) -> Path | None:
     """Return a local ``Path`` for *target*, or ``None`` if it is remote.
 
     Harbor passes trial-dir download targets as ``UPath`` and the trial dir may
@@ -107,11 +108,12 @@ def _local_download_target(target: Path | str) -> Path | None:
     return None
 
 
-def _copy_local_tree_to_remote(local_root: Path, remote_root: UPath) -> None:
-    for local_file in local_root.rglob("*"):
-        if local_file.is_file():
-            remote_file = remote_root / local_file.relative_to(local_root).as_posix()
-            remote_file.write_bytes(local_file.read_bytes())
+def _copy_tree(source_root: UPath, target_root: UPath) -> None:
+    for source_file in source_root.rglob("*"):
+        if source_file.is_file():
+            target_file = target_root / source_file.relative_to(source_root).as_posix()
+            target_file.parent.mkdir(parents=True, exist_ok=True)
+            target_file.write_bytes(source_file.read_bytes())
 
 
 def _owned_by_root(info: tarfile.TarInfo) -> tarfile.TarInfo:
@@ -347,6 +349,8 @@ class IrisEnvironment(BaseEnvironment):
         user: str | int | None = None,
     ) -> ExecResult:
         effective_cwd = cwd or self.task_env_config.workdir
+        if timeout_sec is None and self.agent_timeout_sec is not None:
+            timeout_sec = math.ceil(self.agent_timeout_sec)
         script = self._build_script(command, cwd=effective_cwd, env=env, user=user)
         return await asyncio.to_thread(self._exec_sync, script, timeout_sec)
 
@@ -376,7 +380,9 @@ class IrisEnvironment(BaseEnvironment):
         if self._rpc is None or self._task_id is None:
             raise RuntimeError("IrisEnvironment is not started")
         if timeout_sec is None:
-            container_timeout, rpc_timeout_ms = -1, UNLIMITED_EXEC_RPC_TIMEOUT_MS
+            # Kubernetes exec substitutes its 60-second default for an unlimited
+            # timeout. The sandbox TTL bounds commands outside an agent phase.
+            container_timeout, rpc_timeout_ms = self._sandbox_ttl, UNLIMITED_EXEC_RPC_TIMEOUT_MS
         else:
             container_timeout = timeout_sec
             rpc_timeout_ms = (timeout_sec + EXEC_RPC_PADDING) * 1000
@@ -393,7 +399,7 @@ class IrisEnvironment(BaseEnvironment):
         return ExecResult(stdout=response.stdout, stderr=response.stderr, return_code=response.exit_code)
 
     async def upload_file(self, source_path: Path | str, target_path: str):
-        data = Path(source_path).read_bytes()
+        data = UPath(str(source_path)).read_bytes()
         quoted = shlex.quote(target_path)
         parent = shlex.quote(str(Path(target_path).parent))
         await self._check_exec(f"mkdir -p {parent} && rm -f {quoted} && touch {quoted}")
@@ -402,6 +408,11 @@ class IrisEnvironment(BaseEnvironment):
             await self._check_exec(f"printf '%s' {encoded} | base64 -d >> {quoted}")
 
     async def upload_dir(self, source_dir: Path | str, target_dir: str):
+        if _local_path(source_dir) is None:
+            with tempfile.TemporaryDirectory() as staging:
+                _copy_tree(UPath(str(source_dir)), UPath(staging))
+                await self.upload_dir(staging, target_dir)
+            return
         remote_tar = f"/tmp/.hb-upload-{Path(str(source_dir)).name}.tar.gz"
         with tempfile.NamedTemporaryFile(suffix=".tar.gz") as local_tar:
             with tarfile.open(local_tar.name, "w:gz") as tf:
@@ -416,7 +427,7 @@ class IrisEnvironment(BaseEnvironment):
         )
 
     async def download_file(self, source_path: str, target_path: Path | str):
-        target = _local_download_target(target_path)
+        target = _local_path(target_path)
         if target is None:
             # Remote (e.g. gs://) trial dir: stage locally, then copy the bytes out.
             with tempfile.NamedTemporaryFile() as staging:
@@ -439,12 +450,12 @@ class IrisEnvironment(BaseEnvironment):
                     break
 
     async def download_dir(self, source_dir: str, target_dir: Path | str):
-        target = _local_download_target(target_dir)
+        target = _local_path(target_dir)
         if target is None:
             # Remote (e.g. gs://) trial dir: extract locally, then copy the tree out.
             with tempfile.TemporaryDirectory() as staging:
                 await self.download_dir(source_dir, staging)
-                _copy_local_tree_to_remote(Path(staging), UPath(str(target_dir)))
+                _copy_tree(UPath(staging), UPath(str(target_dir)))
             return
         remote_tar = f"/tmp/.hb-download-{Path(source_dir).name}.tar.gz"
         await self._check_exec(
