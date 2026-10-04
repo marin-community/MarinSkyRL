@@ -212,6 +212,10 @@ trainer:
     clip_ratio_c: 3.0
     off_policy_correction: null
     off_policy_correction_rules: null
+    # Add PPO/TIS score centering on the captured behavior top-K support. Zero disables it.
+    score_centering_topk: 0
+    # False retains the same probability capture and rescoring for a matched TIS control.
+    score_centering_enabled: true
     tito_full: null
     tis_splice: true
     tis_lcs_alert_threshold: 0.005

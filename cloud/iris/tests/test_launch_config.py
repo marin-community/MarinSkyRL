@@ -19,6 +19,7 @@ from cloud.iris.rl_config_translation import (
     parse_rl_config,
 )
 from skyrl_train.distributed.step_policy import NonfiniteStepPolicy, nonfinite_step_policy
+from skyrl_train.config.objective_spec import score_centering_tis_cap
 
 
 def _raw_config() -> dict[str, Any]:
@@ -283,6 +284,55 @@ def test_composed_launch_rejects_tis_selectors(tmp_path: Path, key: str, value) 
     OmegaConf.save(config, path)
 
     with pytest.raises(ValueError, match="off_policy_correction"):
+        load_launch_config(path)
+
+
+@pytest.mark.parametrize("cap", [1.05, 2.0])
+def test_launch_preserves_score_centering_truncation_cap(tmp_path: Path, cap: float) -> None:
+    raw = OmegaConf.create(_raw_config())
+    raw.skyrl.trainer.policy = {
+        "sequence_parallel_size": 1,
+        "megatron_config": {"tensor_model_parallel_size": 1, "context_parallel_size": 1},
+    }
+    raw.skyrl.trainer.use_sample_packing = False
+    raw.skyrl.trainer.algorithm.update(
+        score_centering_topk=32,
+        off_policy_correction="tis" if cap == 2.0 else "custom",
+        off_policy_correction_rules=[] if cap == 2.0 else [{"kind": "token", "action": "truncate", "high": cap}],
+    )
+    raw.skyrl.generator.sampling_params = {"logprobs": 32}
+    path = tmp_path / "launch.yaml"
+    OmegaConf.save(raw, path)
+
+    composed = load_launch_config(path)
+    assert score_centering_tis_cap(composed.skyrl.trainer.algorithm) == cap
+    assert composed.skyrl.generator.sampling_params.logprobs == 32
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "error"),
+    [
+        ("trainer.algorithm.off_policy_correction", "icepop", "exactly one token-level"),
+        ("trainer.algorithm.policy_loss_type", "gspo", "regular PPO"),
+        ("trainer.use_sample_packing", True, "unpacked Megatron"),
+        ("trainer.policy.megatron_config.tensor_model_parallel_size", 2, "unpacked Megatron"),
+        ("generator.sampling_params.logprobs", 31, "matching score_centering_topk"),
+        ("generator.run_engines_locally", False, "local vLLM"),
+    ],
+)
+def test_launch_rejects_unsupported_score_centering_contract(tmp_path: Path, key: str, value: Any, error: str) -> None:
+    raw = OmegaConf.create(_raw_config())
+    raw.skyrl.trainer.policy = {
+        "sequence_parallel_size": 1,
+        "megatron_config": {"tensor_model_parallel_size": 1, "context_parallel_size": 1},
+    }
+    raw.skyrl.trainer.use_sample_packing = False
+    raw.skyrl.trainer.algorithm.update(score_centering_topk=32, off_policy_correction="tis")
+    raw.skyrl.generator.sampling_params = {"logprobs": 32}
+    OmegaConf.update(raw.skyrl, key, value, force_add=True)
+    path = tmp_path / "launch.yaml"
+    OmegaConf.save(raw, path)
+    with pytest.raises(ValueError, match=error):
         load_launch_config(path)
 
 

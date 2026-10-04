@@ -163,6 +163,15 @@ def off_policy_correction(algorithm: DictConfig) -> OffPolicyCorrection:
     return load_correction("none" if name is None else str(name))
 
 
+def score_centering_tis_cap(algorithm: DictConfig) -> float:
+    """Return the single token truncation cap supported by PPO score centering."""
+    rules = off_policy_correction(algorithm).rules
+    if len(rules) != 1 or not isinstance(rules[0], TokenRule) or rules[0].action is not CorrectionAction.TRUNCATE:
+        raise ValueError("score centering requires exactly one token-level TIS truncation rule")
+    assert rules[0].high is not None
+    return float(rules[0].high)
+
+
 @dataclass(frozen=True)
 class TopKLossParams:
     objective: DistillationObjectiveKind
@@ -236,6 +245,30 @@ def validate_objective(cfg: DictConfig, *, loss_spec: LossSpec | None = None) ->
     correction = off_policy_correction(algorithm)
     plan = compile_distillation_plan_from_config(cfg)
     topk = plan is not None and plan.objective is not DistillationObjectiveKind.SAMPLED_REVERSE_KL
+    centering_width = algorithm.get("score_centering_topk", 0)
+    if type(algorithm.get("score_centering_enabled", True)) is not bool:
+        raise ValueError("trainer.algorithm.score_centering_enabled must be a boolean")
+    if type(centering_width) is not int or centering_width < 0:
+        raise ValueError("trainer.algorithm.score_centering_topk must be a nonnegative integer")
+    if centering_width:
+        score_centering_tis_cap(algorithm)
+        if algorithm.policy_loss_type != PolicyLossType.REGULAR or plan is not None:
+            raise ValueError("score centering requires regular PPO without distillation")
+        policy = cfg.trainer.policy
+        if (
+            cfg.trainer.strategy != "megatron"
+            or cfg.trainer.use_sample_packing
+            or policy.sequence_parallel_size != 1
+            or policy.megatron_config.tensor_model_parallel_size != 1
+            or policy.megatron_config.context_parallel_size != 1
+        ):
+            raise ValueError(
+                "score centering requires unpacked Megatron with tensor, context, and sequence parallel size one"
+            )
+        if cfg.generator.backend != "vllm" or not cfg.generator.run_engines_locally:
+            raise ValueError("score centering requires local vLLM behavior top-K capture")
+        if cfg.generator.sampling_params.logprobs != centering_width:
+            raise ValueError("score centering requires sampling_params.logprobs matching score_centering_topk")
     policy_trains = not (topk and plan.reward_mode is DistillationRewardMode.REPLACE)
     if correction.rules:
         if not policy_trains:

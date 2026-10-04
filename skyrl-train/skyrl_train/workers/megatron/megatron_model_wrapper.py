@@ -18,10 +18,15 @@ from skyrl_train.distributed.megatron.model_utils import (
 )
 from skyrl_train.distributed.megatron.megatron_utils import get_model_config
 from skyrl_train.ftpo import FTPOTargets, FTPOInputs, boundary_values, compact_boundary_logits, ftpo_counts
-from skyrl_train.distillation import TopKEvidence, student_topk_logprobs
+from skyrl_train.distillation import (
+    TopKEvidence,
+    student_topk_logprobs,
+    student_topk_logprobs_from_sampled_action_logprobs,
+)
 from skyrl_train.models.megatron_router_replay import MegatronRouterReplay
 from skyrl_train.config.objective_spec import topk_loss_params
 from skyrl_train.objective.objective import (
+    ScoreCenteringBatch,
     TopKTeacherBatch,
     build_objective_micro_batch,
     compute_policy_objective,
@@ -66,6 +71,13 @@ class MegatronForwardMicroBatch:
     rollout_routed_experts: Optional[torch.Tensor] = None
     ftpo_chosen_mask: torch.Tensor | None = None
     probe_row_indices: Optional[torch.Tensor] = None
+    score_topk_indices: Optional[torch.Tensor] = None
+
+
+@dataclass(frozen=True)
+class MegatronForwardResult:
+    scores: torch.Tensor
+    selected_logprobs: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -96,6 +108,9 @@ class MegatronPolicyMicroBatch:
     ftpo: FTPOTargets | None = None
     correction_weights: Optional[torch.Tensor] = None
     rollout_routed_experts: Optional[torch.Tensor] = None
+    score_topk_indices: Optional[torch.Tensor] = None
+    score_old_logprobs: Optional[torch.Tensor] = None
+    score_behavior_logprobs: Optional[torch.Tensor] = None
 
 
 class MegatronModelWrapper:
@@ -371,7 +386,7 @@ class MegatronModelWrapper:
         seq_len: int,
         micro_batch_size: int,
         temperature: float = 1.0,
-    ) -> torch.Tensor:
+    ) -> MegatronForwardResult:
         """
         Score response tokens, or return raw vocabulary logits at FTPO boundaries.
 
@@ -382,8 +397,8 @@ class MegatronModelWrapper:
             temperature: Optional temperature scaling for logits.
 
         Returns:
-            Concatenated response log-probabilities [B,T], or FTPO boundary logits [B,V].
-            Valid on the pipeline last stage only.
+            Response scores [B,T], or FTPO boundary logits [B,V], and optional
+            aligned selected log probabilities. Valid on the pipeline last stage only.
         """
         forward_backward_func = get_forward_backward_func()
 
@@ -399,7 +414,16 @@ class MegatronModelWrapper:
                 logits.div_(temperature)
 
             token_logprobs = self._token_logprobs(logits, sequences, data.attention_mask.to(bool), packed_seq_params)
-            return torch.tensor(0.0, device=token_logprobs.device), {"scores": token_logprobs}
+            result = {"scores": token_logprobs}
+            if data.score_topk_indices is not None:
+                result["selected_logprobs"] = student_topk_logprobs_from_sampled_action_logprobs(
+                    logits,
+                    data.score_topk_indices,
+                    sequences[:, -data.num_actions :],
+                    token_logprobs[:, -data.num_actions :],
+                    data.attention_mask,
+                )
+            return token_logprobs.new_zeros(()), result
 
         def forward_step(batch_iter, model):
             batch = next(batch_iter)
@@ -441,11 +465,21 @@ class MegatronModelWrapper:
             num_actions = micro_batches[0].num_actions
             if micro_batches[0].ftpo_chosen_mask is None:
                 scores = scores[:, -num_actions:]
+            selected_logprobs = (
+                torch.cat([o["selected_logprobs"] for o in output], dim=0)
+                if micro_batches[0].score_topk_indices is not None
+                else None
+            )
         else:
             # return dummy tensor for non-last pp stages
             device = micro_batches[0].sequences.device
             scores = torch.zeros(size=(1, 1), dtype=torch.bfloat16, device=device)
-        return scores
+            selected_logprobs = (
+                torch.zeros_like(micro_batches[0].score_topk_indices, dtype=torch.float32)
+                if micro_batches[0].score_topk_indices is not None
+                else None
+            )
+        return MegatronForwardResult(scores, selected_logprobs)
 
     def _distillation_student_logprobs(
         self,
@@ -554,6 +588,23 @@ class MegatronModelWrapper:
             token_logprobs = self._token_logprobs(logits, sequences, data.attention_mask.to(bool), packed_seq_params)
 
             action_log_probs = token_logprobs[:, -num_actions:]
+            score_centering = None
+            if self.cfg.trainer.algorithm.get("score_centering_topk", 0):
+                if any(
+                    value is None
+                    for value in (data.score_topk_indices, data.score_old_logprobs, data.score_behavior_logprobs)
+                ):
+                    raise ValueError("score centering requires behavior IDs and old and behavior log probabilities")
+                current_selected = student_topk_logprobs_from_sampled_action_logprobs(
+                    logits,
+                    data.score_topk_indices,
+                    sequences[:, -num_actions:],
+                    action_log_probs,
+                    data.attention_mask,
+                )
+                score_centering = ScoreCenteringBatch(
+                    current_selected, data.score_old_logprobs, data.score_behavior_logprobs
+                )
 
             sparse_student_logprobs = self._distillation_student_logprobs(logits, data)
 
@@ -583,6 +634,7 @@ class MegatronModelWrapper:
                 think_token_weight=self.cfg.trainer.algorithm.think_token_weight,
                 teacher=teacher,
                 ftpo=ftpo_inputs,
+                score_centering=score_centering,
             )
             objective = compute_policy_objective(
                 batch,

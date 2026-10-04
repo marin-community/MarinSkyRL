@@ -331,6 +331,62 @@ dependence on microbatch statistics and zero-advantage behavior. These
 declarations determine which configurations are valid before training starts. See
 :doc:`custom_algorithms` for the registration example.
 
+PPO/TIS score centering
+----------------------
+
+``score_centering_topk`` enables the additive score-centering term for ``regular``
+PPO with one token-level TIS truncation rule. Zero disables it. Capture the same
+number of behavior candidates with ``generator.sampling_params.logprobs``.
+With a positive width, ``score_centering_enabled: false`` retains the same
+behavior capture and stored-policy rescoring but trains the TIS objective.
+This provides a control for measuring the correction separately from probability
+capture. A zero width also removes capture and rescoring from the learner.
+The implementation requires local vLLM and unpacked Megatron training with
+tensor, context and sequence parallel size one. Pipeline, expert and data
+parallelism remain available. Distillation and other correction rules or policy
+losses are unsupported.
+
+Let :math:`p` be the current trainer policy, :math:`o` the stored policy at the
+start of the training batch, and :math:`q` the actual policy that generated a
+token. On each captured candidate, the expected score coefficient is
+:math:`q\min(o/q,c)(p/o)I`, where :math:`I` is one when directional PPO clipping
+is inactive. The correction adds the advantage times the expectation of that
+coefficient times :math:`\log p`, with the coefficient detached. On omitted
+candidates it approximates :math:`o` and :math:`q` as proportional to :math:`p`,
+preserving their tail masses, and eliminates the tail score using
+:math:`\sum_v p_v\nabla\log p_v=0`.
+
+The shared objective reduces this additive term with the policy's data weights,
+counts and distributed scaling. Its coefficient already includes TIS, so the
+sampled-action correction weight does not multiply it again. Capture and trainer
+rescoring preserve candidate IDs at each exact response position, including
+left-padding compaction. Current scores reuse the sampled-action log normalizer
+to avoid another full-vocabulary tensor in backward.
+
+The ``tis`` preset uses cap 2. To select cap 1.05 explicitly:
+
+.. code-block:: yaml
+
+   trainer:
+     algorithm:
+       policy_loss_type: regular
+       loss_reduction: token_mean
+       off_policy_correction: custom
+       off_policy_correction_rules:
+         - kind: token
+           action: truncate
+           high: 1.05
+       score_centering_topk: 32
+   generator:
+     sampling_params:
+       logprobs: 32
+
+This composes with whole-step normalization and current KL semantics. It does
+not restore historical normalization or rollout scheduling. The stored old
+policy :math:`o` is scored at batch preparation; it need not have the weights
+that generated a stale token. Mismatch decomposition requires a separate trainer
+score at those generating weights.
+
 .. _objective-kl-estimator:
 
 KL estimator
