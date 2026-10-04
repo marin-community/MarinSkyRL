@@ -595,14 +595,17 @@ class WorkerWrap:
             from vllm.model_executor.model_loader.reload.utils import get_layer_params_buffers, get_layer_tensors
 
             layers = {}
-            skipped_float_parameters = set()
+            skipped_float_aliases = {}
             for layer_name, layer in model.named_modules():
                 info = get_layerwise_info(layer)
                 live = get_layer_tensors(layer)
                 params, buffers = info.kernel_tensors or get_layer_params_buffers(layer)
                 original = params | buffers
+                non_persistent = info.kernel_non_persistent_buffers | layer._non_persistent_buffers_set
                 tensors = {
-                    name: original.get(name, tensor) for name, tensor in live.items() if name not in SKIP_LOAD_TENSORS
+                    name: original.get(name, tensor)
+                    for name, tensor in live.items()
+                    if name not in SKIP_LOAD_TENSORS and name not in non_persistent
                 }
                 identities = storage_identity(tensors)
                 shard_indices = getattr(layer, "shard_indices", None)
@@ -621,10 +624,24 @@ class WorkerWrap:
                     "tensors": {name: (identities[name], tensor.numel()) for name, tensor in tensors.items()},
                     "vocab_padding_numel": padding,
                     "vocab_bias_padding_numel": bias_padding,
+                    "non_persistent_numel": sum(
+                        tensor.numel()
+                        for name, tensor in live.items()
+                        if name in non_persistent and name not in SKIP_LOAD_TENSORS
+                    ),
                 }
-                for name, tensor in (original | live).items():
-                    if name in SKIP_LOAD_TENSORS and tensor.is_floating_point():
-                        skipped_float_parameters.add(f"{layer_name}.{name}" if layer_name else name)
+                skipped_floats = {
+                    name: tensor
+                    for name, tensor in (original | live).items()
+                    if name in SKIP_LOAD_TENSORS and tensor.is_floating_point()
+                }
+                for name, identity in storage_identity(skipped_floats).items():
+                    skipped_float_aliases.setdefault(identity, set()).add(
+                        f"{layer_name}.{name}" if layer_name else name
+                    )
+            skipped_float_parameters = {
+                min(names) for names in skipped_float_aliases.values() if not names & self._skyrl_loaded_weight_names
+            }
             validate_dummy_weight_coverage(layers, self._skyrl_loaded_weight_names, skipped_float_parameters)
         with set_current_vllm_config(self.vllm_config), torch.device(self.device):
             finalize_layerwise_reload(model, self.model_config)

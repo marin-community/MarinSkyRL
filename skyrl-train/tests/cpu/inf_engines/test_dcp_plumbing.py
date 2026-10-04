@@ -151,7 +151,7 @@ def test_from_config_forwards_policy_revision_to_vllm(monkeypatch):
 
 
 @pytest.mark.parametrize("load_format", [None, "dummy"])
-def test_from_config_streams_object_store_policy_weights(monkeypatch, load_format):
+def test_from_config_selects_weight_load_mode_for_object_store_policy(monkeypatch, load_format):
     captured = {}
     monkeypatch.setattr(rwie, "create_ray_wrapped_inference_engines", lambda **kwargs: captured.update(kwargs) or [])
     cfg = get_default_config()
