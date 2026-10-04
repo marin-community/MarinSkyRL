@@ -1420,9 +1420,7 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         request_sampling_params = input_batch.get("sampling_params")
         per_prompt_sampling_params = input_batch.get("sampling_params_per_prompt")
         if self._validate_rollout_logprob_sampling and request_sampling_params is not None:
-            # The X2 diagnostic records eval probabilities with the canary's
-            # min_tokens=1; these probabilities are not used for training.
-            if request_sampling_params.get("logprobs") is not None and request_sampling_params.get("min_tokens") != 1:
+            if request_sampling_params.get("logprobs") is not None:
                 validate_behavior_logprob_sampling(request_sampling_params)
 
         assert prompts is None and prompt_token_ids is not None, (
