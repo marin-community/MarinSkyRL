@@ -4,6 +4,8 @@ import logging
 
 import httpx
 import pytest
+from harbor.literal.native_api import NativeAPILimits
+from harbor.literal.proxy import RecordProxy
 from marinskyrl.harbor_agent_names import MINI_SWE_HARBOR_AGENT_NAME
 from skyrl_train.inference_engines.inference_engine_client_http_endpoint import create_app, set_global_state
 from skyrl_train.inference_engines.harbor_continuation import (
@@ -11,6 +13,10 @@ from skyrl_train.inference_engines.harbor_continuation import (
     TRIAL_ID_HEADER,
     TASK_AGENT_HEADER,
     HarborContinuationManager,
+)
+from skyrl_train.trajectory_runners.trajectory_processing import (
+    AlignmentStats,
+    get_response_ids_and_loss_mask_from_messages,
 )
 
 TOOLS = [{"type": "function", "function": {"name": "bash", "parameters": {"type": "object"}}}]
@@ -104,6 +110,135 @@ class _MiniContinuationBackend(_ContinuationBackend):
         if request["json"].get("add_generation_prompt", True):
             tokens.extend([60, 61])
         return {"tokens": tokens, "count": len(tokens), "max_model_len": 128}
+
+
+class _NativeToolBackend(_ContinuationBackend):
+    async def chat_completion(self, request):
+        response = await super().chat_completion(request)
+        choice = response["choices"][0]
+        choice["logprobs"] = {"content": [{"token": "sampled", "logprob": -0.25}]}
+        if len(self.chat_requests) == 1:
+            choice["finish_reason"] = "tool_calls"
+            choice["message"] = {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call-one",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": '{"command":"echo ok"}'},
+                    }
+                ],
+            }
+        return response
+
+    async def chat_completion_stream(self, request):
+        response = await self.chat_completion(request)
+        choice = response["choices"][0]
+        delta = dict(choice["message"])
+        for index, call in enumerate(delta.get("tool_calls", [])):
+            call["index"] = index
+        delta["provider_specific_fields"] = {"token_ids": choice["token_ids"]}
+        chunk = {
+            "id": response["id"],
+            "model": response["model"],
+            "prompt_token_ids": response["prompt_token_ids"],
+            "choices": [
+                {"index": 0, "delta": delta, "logprobs": choice["logprobs"], "finish_reason": choice["finish_reason"]}
+            ],
+        }
+        yield f"data: {json.dumps(chunk)}\n\n"
+        yield "data: [DONE]\n\n"
+
+
+@pytest.mark.parametrize("agent", ["claude-code", "codex"])
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.asyncio
+async def test_native_tool_roundtrip_preserves_served_context_and_learner_mask(tmp_path, agent, stream):
+    backend = _NativeToolBackend()
+    set_global_state(backend, None)
+    serving = create_app(backend=backend, enable_harbor_exact_continuation=True)
+    log_path = tmp_path / "literal.jsonl"
+    proxy = RecordProxy("http://serving", log_path)
+    headers = {TRIAL_ID_HEADER: "native-trial", TASK_AGENT_HEADER: agent}
+    schema = {"type": "object", "properties": {"command": {"type": "string"}}}
+    messages = [{"role": "user", "content": "run it"}]
+    if agent == "claude-code":
+        endpoint = "/v1/messages"
+        first_body = {
+            "model": backend.model_name,
+            "messages": messages,
+            "max_tokens": 8,
+            "tools": [{"name": "bash", "input_schema": schema}],
+        }
+        continuation = [
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "call-one", "name": "bash", "input": {"command": "echo ok"}}],
+            },
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call-one", "content": "ok"}]},
+        ]
+        second_body = {**first_body, "messages": [*messages, *continuation]}
+    else:
+        endpoint = "/v1/responses"
+        first_body = {
+            "model": backend.model_name,
+            "input": messages,
+            "max_output_tokens": 8,
+            "tools": [{"type": "function", "name": "bash", "parameters": schema}],
+        }
+        continuation = [
+            {"type": "function_call", "call_id": "call-one", "name": "bash", "arguments": '{"command":"echo ok"}'},
+            {"type": "function_call_output", "call_id": "call-one", "output": "ok"},
+        ]
+        second_body = {**first_body, "input": [*messages, *continuation]}
+    first_body["stream"] = stream
+    second_body["stream"] = stream
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=serving)) as upstream:
+        proxy._client = upstream
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=proxy.app(NativeAPILimits(backend.model_name, 128, 8))),
+            base_url="http://native",
+        ) as client:
+            for body in (first_body, second_body):
+                response = await client.post(endpoint, headers=headers, json=body)
+                assert response.status_code == 200, response.text
+    expected_prompt = [1, 2, 99, 77, 40, 41]
+    assert backend.chat_requests[1]["json"][EXACT_PROMPT_TOKEN_IDS_KEY] == expected_prompt
+    records = [json.loads(line) for line in log_path.read_text().splitlines()]
+    assert all(record["trial_id"] == "native-trial" for record in records)
+    assert [record["literal"]["prompt_token_ids"] for record in records] == [[1, 2], expected_prompt]
+
+    class Tokenizer:
+        eos_token_id = 9999
+
+        def apply_chat_template(self, *args, add_generation_prompt=False, **kwargs):
+            return [1, 2] if add_generation_prompt else [1]
+
+        def decode(self, ids, **kwargs):
+            return "sampled"
+
+    stats = AlignmentStats()
+    ids, mask, logprobs = get_response_ids_and_loss_mask_from_messages(
+        [
+            *messages,
+            {"role": "assistant", "content": "sampled"},
+            {"role": "tool", "content": "ok"},
+            {"role": "assistant", "content": "ok"},
+        ],
+        Tokenizer(),
+        assistant_token_ids=[record["literal"]["completion_token_ids"] for record in records],
+        assistant_prompt_token_ids=[record["literal"]["prompt_token_ids"] for record in records],
+        assistant_logprobs=[record["literal"]["logprobs"] for record in records],
+        alignment_stats=stats,
+        rollout_logprobs_required=True,
+        tito_full=True,
+    )
+    assert stats.n_tito_full_successes == 1
+    assert ids == [2, 99, 77, 40, 41, 100]
+    assert mask == [0, 1, 0, 0, 0, 1]
+    assert [token for token, trainable in zip(ids, mask, strict=True) if trainable] == [99, 100]
+    assert [value for value, trainable in zip(logprobs, mask, strict=True) if trainable] == [-0.25, -0.25]
 
 
 @pytest.mark.parametrize("discarded_response", [False, True])

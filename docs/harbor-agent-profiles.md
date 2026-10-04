@@ -21,16 +21,18 @@ task keeps the same agent, including after batch shuffling or a restart. Changin
 the dataset ordering or profile list changes the assignment.
 
 Preflight checks every configured profile against the training loss's requirements
-for recorded token IDs and model context. Pi, OpenCode 1.18.2 and Mini-SWE-Agent
-2.1.0 support this capture path. Mini-SWE requires the vLLM backend and
-`collect_rollout_details: true`; Harbor also requires explicit total-context and
-output limits in `model_info`. Its native CLI receives a trial correlation header,
-and each subsequent served prompt extends the preceding served token stream.
-Use full TITO or a loss requiring rollout logprobs to retain this exact context
-in training trajectories.
+for recorded token IDs and model context. Pi, OpenCode 1.18.2, Mini-SWE-Agent 2.1.0,
+Claude Code 2.1.284 and Codex 0.118.0 support this capture path. The four CLI agents
+require the vLLM backend, their listed versions and `collect_rollout_details: true`.
+Set `model_info.max_input_tokens` to the total context limit and
+`model_info.max_output_tokens` to the output limit.
+Native API adapters preserve sampled completion IDs, served prompt IDs and
+logprobs across tool turns. Each subsequent served prompt extends the preceding
+served token stream. Set `trainer.algorithm.tito_full: true` to assemble training
+trajectories from the complete served token streams. A loss requiring rollout
+logprobs also enables this assembly.
 
 The [FineEnvs multi-harness RL method](https://huggingface.co/spaces/FineEnvs/multi-harness-rl)
-uses OpenCode, Claude Code, Codex and Mini-SWE-Agent. That panel can be assigned
-with this interface, but training with that panel remains blocked until the
-Claude Code and Codex capture adapters are implemented. Profile selection does not add capture
-support to an agent.
+uses OpenCode, Claude Code, Codex and Mini-SWE-Agent. Configure those four profiles
+with their pinned versions to train with that panel. Other agents still require
+capture support before they can supply exact behavior-policy evidence.

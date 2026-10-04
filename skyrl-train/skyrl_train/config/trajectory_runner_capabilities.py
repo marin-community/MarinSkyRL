@@ -23,6 +23,8 @@ from marinskyrl.harbor_agent_names import (
 
 SUPPORTED_OPENCODE_LITERAL_VERSION = "1.18.2"
 SUPPORTED_MINI_SWE_LITERAL_VERSION = "2.1.0"
+SUPPORTED_CLAUDE_CODE_LITERAL_VERSION = "2.1.284"
+SUPPORTED_CODEX_LITERAL_VERSION = "0.118.0"
 SUPPORTED_PI_THINKING_FORMATS = frozenset({"chat-template", "qwen-chat-template"})
 
 
@@ -93,6 +95,8 @@ _HARBOR_EVIDENCE_PROFILES = {
     OPENCODE_HARBOR_AGENT_NAME: _EXACT_HARBOR_EVIDENCE,
     MINI_SWE_HARBOR_AGENT_NAME: _EXACT_HARBOR_EVIDENCE,
     PI_HARBOR_AGENT_NAME: _EXACT_HARBOR_EVIDENCE,
+    CLAUDE_CODE_HARBOR_AGENT_NAME: _EXACT_HARBOR_EVIDENCE,
+    CODEX_HARBOR_AGENT_NAME: _EXACT_HARBOR_EVIDENCE,
 }
 
 
@@ -180,12 +184,14 @@ def _harbor_agent_capabilities(cfg: DictConfig, harbor: Mapping[str, Any]) -> Tr
         satisfied=bool(harbor.get("collect_rollout_details", False)),
     )
     requirements = [rollout_details]
-    if agent_name in {OPENCODE_HARBOR_AGENT_NAME, MINI_SWE_HARBOR_AGENT_NAME}:
-        supported_version = (
-            SUPPORTED_OPENCODE_LITERAL_VERSION
-            if agent_name == OPENCODE_HARBOR_AGENT_NAME
-            else SUPPORTED_MINI_SWE_LITERAL_VERSION
-        )
+    supported_versions = {
+        OPENCODE_HARBOR_AGENT_NAME: SUPPORTED_OPENCODE_LITERAL_VERSION,
+        MINI_SWE_HARBOR_AGENT_NAME: SUPPORTED_MINI_SWE_LITERAL_VERSION,
+        CLAUDE_CODE_HARBOR_AGENT_NAME: SUPPORTED_CLAUDE_CODE_LITERAL_VERSION,
+        CODEX_HARBOR_AGENT_NAME: SUPPORTED_CODEX_LITERAL_VERSION,
+    }
+    if agent_name in supported_versions:
+        supported_version = supported_versions[agent_name]
         requirements.extend(
             (
                 CapabilityRequirement(
