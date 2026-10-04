@@ -190,9 +190,11 @@ def test_dummy_engine_installs_every_tensor_and_holds_requests_until_verified_sy
             ]
             print("X4a dummy batch", dummy_output, flush=True)
             print("X4a dummy serial", dummy_serial, flush=True)
+            # Single requests hold batch composition fixed for exact real/dummy parity.
             assert [out["response_ids"] for out in dummy_serial] == [out["response_ids"] for out in real_serial]
-            print("X4a greedy token IDs", real_output["response_ids"], dummy_output["response_ids"], flush=True)
-            assert dummy_output["response_ids"] == real_output["response_ids"]
+            assert [out["response_logprobs"] for out in dummy_serial] == [
+                out["response_logprobs"] for out in real_serial
+            ]
             print("X4a verified 8 greedy prompts", flush=True)
         finally:
             if client is not None:
