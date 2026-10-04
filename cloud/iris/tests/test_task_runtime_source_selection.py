@@ -97,6 +97,7 @@ def _runtime_args(
 
 
 def _isolate_head_runtime(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("SKYRL_DEBUG_ARTIFACT_DIR", str(tmp_path / "debug"))
     monkeypatch.setattr(task_runtime, "DRIVER_WATCHDOG_POLL_INTERVAL", 0.01)
     monkeypatch.setattr(task_runtime, "FAILURE_ARTIFACT_TIMEOUT", 2)
     monkeypatch.setattr(task_runtime, "_num_tasks", lambda: 1)

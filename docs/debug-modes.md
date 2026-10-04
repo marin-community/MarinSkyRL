@@ -56,44 +56,6 @@ the Iris task runtime periodically and finally uploads it under:
 Each Iris upload writes `sync-manifest.json` with every copied or budget-rejected file. A single file is capped at
 512 MiB and one node sync at 2 GiB. Full process core dumps remain disabled.
 
-## Iris worker-abort acceptance test
-
-`scripts/hero_failure_capture.py` runs one GPU actor, writes a small synthetic receipt, and calls `os.abort()`.
-It substitutes the driver command in the existing Iris `run_head`; that runtime owns failure uploads, signals
-and Ray shutdown. The tool projects the debug root through `EnvVarManager`. The normal RL launcher already does this.
-
-From a clean checkout with the root CPU launcher environment and Iris/CoreWeave access configured, check capacity
-and submit one Interactive dev node with a unique run ID and output prefix. Cancel only this job if still queued
-after 15 minutes; retries default to zero:
-
-```bash
-RUN=hero-worker-abort-$(date -u +%Y%m%dT%H%M%SZ)
-OUTPUT="s3://<regional-bucket>/debug-contracts/$RUN"
-uv run --no-sync iris --cluster=cw-us-east-08a job run --no-wait \
-  --job-name "$RUN" --priority interactive --enable-extra-resources \
-  --gpu GB200x4 --cpu 8 --memory 32GB --disk 60GB --timeout 1200 \
-  --extra cuda --extra telemetry \
-  -e OT_AGENT_RAY_OBJECT_STORE_CAP_GIB 1 -e PYTHONUNBUFFERED 1 \
-  -e OT_AGENT_RAY_LOG_SYNC_INTERVAL_S "${OT_AGENT_RAY_LOG_SYNC_INTERVAL_S:-60}" \
-  -e RAY_USE_UVLOOP 0 -e UV_USE_IO_URING 0 -e WANDB_MODE disabled \
-  -- python -m scripts.hero_failure_capture run --output "$OUTPUT" --run-id "$RUN"
-```
-
-H100x8 also works. The expected outcome is FAILED with exit 42. Confirm both task and uploader containers stopped,
-then remove only the exact terminal fixture pod with ordinary deletion and verify it is absent. No force or grace
-period override. The provider retains terminal pods for about an hour; this does not test automatic garbage collection.
-Read back the retained bytes after removal, using workstation CoreWeave S3 credentials and the external endpoint:
-
-```bash
-uv run --no-sync python -m scripts.hero_failure_capture check --output "$OUTPUT" --run-id "$RUN"
-```
-
-The check requires the matching run, worker ID and PID, its fatal abort traceback, and a final upload receipt covering
-the synthetic debug file. Missing evidence fails. Keep this output with the job outcome, source revision, GPU type
-and pod-removal evidence. This covers head-node driver failure only. Iris SIGTERM and non-head teardown are untested.
-The existing 30-second failure-upload budget can leave partial evidence. No NCCL timeout dump, abrupt pod deletion,
-machine loss or explanation of the original Hero crash is claimed.
-
 ## Jupiter acceptance test
 
 The opt-in contract runs two sequential two-node, one-GPU-per-node gangs. The healthy gang must complete. The
