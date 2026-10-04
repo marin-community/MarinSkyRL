@@ -645,6 +645,17 @@ class BasePPOExp:
                 if policy_nodes & engine_nodes:
                     logger.warning("Overlapped init placement shares policy and engine nodes")
 
+            from skyrl_train import evaluate as diagnostic_evaluate  # noqa: PLC0415
+            from skyrl_train.utils import trainer_utils as diagnostic_dump  # noqa: PLC0415
+
+            print(
+                "STARTUP_DIAGNOSTIC_SOURCE",
+                diagnostic_evaluate.__file__,
+                diagnostic_dump.__file__,
+                "probability_capture=",
+                "diagnostic_logprobs" in repr(diagnostic_dump.dump_per_dataset_eval_results.__code__.co_consts),
+                flush=True,
+            )
             trainer.all_startup_timings.update(self.startup_timings)
             logger.info(
                 "Policy workers ready: strategy={} count={}",
