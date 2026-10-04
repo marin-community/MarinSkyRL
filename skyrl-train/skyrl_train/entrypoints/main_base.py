@@ -24,6 +24,7 @@ import asyncio
 import multiprocessing as mp
 
 from skyrl_train.config.objective_spec import rollout_logprobs_required
+from marinskyrl.resource_locator import RolloutModelLoading
 from skyrl_train.config.trajectory_runner_capabilities import (
     EntrypointOperation,
     TrajectoryRunnerMode,
@@ -157,12 +158,17 @@ def create_ray_wrapped_inference_engines_from_config(
     if tokenizer_revision is not None:
         engine_init_kwargs["tokenizer_revision"] = tokenizer_revision
     policy_source_uri = cfg.trainer.policy.model.get("source_uri")
-    rollout_model_path = runai_model_uri(policy_source_uri) if policy_source_uri else cfg.trainer.policy.model.path
-    if policy_source_uri is not None:
+    model_loading = RolloutModelLoading(cfg.generator.model_loading)
+    stream_policy = policy_source_uri is not None and model_loading is RolloutModelLoading.STREAM
+    rollout_model_path = runai_model_uri(policy_source_uri) if stream_policy else cfg.trainer.policy.model.path
+    if stream_policy:
         engine_init_kwargs["load_format"] = "runai_streamer"
         model_loader_extra_config = engine_init_kwargs.setdefault("model_loader_extra_config", {})
         model_loader_extra_config.setdefault("distributed", True)
         engine_init_kwargs[MODEL_METADATA_PATH_KEY] = cfg.trainer.policy.model.path
+    elif model_loading is RolloutModelLoading.STAGE_LOCAL:
+        engine_init_kwargs["load_format"] = "safetensors"
+        engine_init_kwargs.pop("model_loader_extra_config", None)
     if speculative_decoding is not None:
         engine_init_kwargs["speculative_config"] = speculative_decoding.vllm_speculative_config()
         if speculative_decoding.training is not None:
@@ -230,7 +236,7 @@ def create_ray_wrapped_inference_engines_from_config(
             )
             engine_kwargs["enforce_eager"] = False
 
-    if policy_source_uri is not None and rollout_model_path.startswith("s3://") and cfg.generator.backend == "vllm":
+    if stream_policy and rollout_model_path.startswith("s3://") and cfg.generator.backend == "vllm":
         retry = cfg.trainer.model_load_retry
 
         def create_engines(remaining_timeout_seconds: float):

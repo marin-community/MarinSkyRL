@@ -52,6 +52,7 @@ from cloud.iris.hf_model_cache import (
     download_hugging_face_snapshot,
     ensure_hugging_face_model_cache,
     load_model_manifest,
+    stage_artifact_model,
     stage_artifact_model_metadata,
     stage_model_metadata,
 )
@@ -69,7 +70,7 @@ from marinskyrl.environment_contract import (
 from marinskyrl.hf_model import immutable_model_cache_key, validate_hf_model_weights
 from marinskyrl.model_manifest import MODEL_MANIFEST_FILENAME
 from cloud.iris.telemetry_env import telemetry_environment
-from marinskyrl.resource_locator import is_cloud_uri, is_hugging_face_repo_id, join_resource_path
+from marinskyrl.resource_locator import RolloutModelLoading, is_cloud_uri, is_hugging_face_repo_id, join_resource_path
 from marinskyrl.speculative_decoding import SpeculatorModelConfig, SpeculatorModelSourceKind
 from marinskyrl.distillation import TeacherModelSpec, TeacherSource, compile_distillation_plan_from_config
 from marinskyrl.process_diagnostics import (
@@ -327,6 +328,14 @@ def prepare_policy_model(args: argparse.Namespace) -> PreparedPolicyModel | None
     assert source_uri and source_identity
     RuntimeProfile(args.runtime_profile)
     local_path = _metadata_path(source_uri, source_identity)
+    if args.rollout_model_loading is RolloutModelLoading.STAGE_LOCAL:
+        staged_bytes = stage_artifact_model(source_uri, source_identity, local_path)
+        validate_hf_model_weights({path.name for path in Path(local_path).iterdir()}, source_uri)
+        _log(
+            f"Policy checkpoint staged on rank {_rank()}/{_num_tasks()}: {source_uri} -> {local_path} "
+            f"(identity={source_identity}; local_disk_high_water_bytes={staged_bytes})"
+        )
+        return PreparedPolicyModel(source_uri, source_identity, local_path)
     if manifest is None:
         metadata_bytes = stage_artifact_model_metadata(source_uri, source_identity, local_path)
     else:
@@ -2028,6 +2037,7 @@ def _runtime_namespace(config: DictConfig) -> argparse.Namespace:
         model_local_path=str(model.local_path),
         model_source_identity=model_identity if is_cloud_uri(model_uri) else "",
         runtime_profile=str(config.runtime.profile),
+        rollout_model_loading=RolloutModelLoading(generator.get("model_loading", RolloutModelLoading.STREAM)),
         policy_tokenizer=str(model.tokenizer_uri),
         policy_tokenizer_revision=str(model.tokenizer_revision),
         policy_chat_template=str(model.chat_template or ""),
