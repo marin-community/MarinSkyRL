@@ -97,6 +97,7 @@ TYPES = {
         POSITIVE_OR_NONE,
     ),
     "trainer.run_name": "str | None",
+    "trainer.policy.max_consecutive_nonfinite_steps": "int | None",
     "trainer.policy.nccl_buffer_size_bytes": "PositiveInt | None",
     "trainer.ref.nccl_buffer_size_bytes": "PositiveInt | None",
     "data.train_data": "tuple[str, ...] | None",
