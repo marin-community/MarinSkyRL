@@ -20,6 +20,7 @@ environment:
       pivot_reward: string_or_jev
       require_completed_action: true
       terminal_judge:
+        enabled: true
         base_url: https://openrouter.ai/api/alpha/decisions
         model: typesafe/jev-1.13
         expected_model: typesafe/jev-1.13-20260917

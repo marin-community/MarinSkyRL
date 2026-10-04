@@ -95,7 +95,11 @@ class NemotronUltraEnv(BaseTextEnv):
         self.pivot_arm = env_config.get("pivot_arm")
         self.require_completed_action = env_config.get("require_completed_action", False)
         terminal_judge = env_config.get("terminal_judge")
-        self.terminal_judge = TerminalJudge(**dict(terminal_judge)) if terminal_judge is not None else None
+        self.terminal_judge = (
+            TerminalJudge(**{key: value for key, value in terminal_judge.items() if key != "enabled"})
+            if terminal_judge is not None and terminal_judge.get("enabled", True)
+            else None
+        )
         self.pivot_verifiers = (
             TERMINAL_PIVOT_VERIFIERS if self.agent == "terminus_judge_string_only_simple_agent" else PIVOT_VERIFIERS
         )

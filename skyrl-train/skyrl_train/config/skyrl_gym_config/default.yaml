@@ -29,7 +29,15 @@ nemotron_ultra:
   grading: verify
   # Capped single-action runs can reject responses that did not terminate normally.
   require_completed_action: false
-  terminal_judge: null
+  terminal_judge:
+    enabled: false
+    base_url: https://openrouter.ai/api/alpha/decisions
+    model: typesafe/jev-1.13
+    expected_model: typesafe/jev-1.13-20260917
+    api_key_env: OPENROUTER_API_KEY
+    threshold: 0.5
+    requests_per_second: 4
+    timeout_seconds: 90
   sandbox:
     host: "127.0.0.1"
     port: 6000
