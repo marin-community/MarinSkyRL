@@ -16,6 +16,7 @@ from skyrl_train.entrypoints.main_base import config_dir
 from skyrl_train.rollouts.workers import WorkerShard
 from skyrl_train.rollouts.task_worker import TaskRolloutWorkerSpec
 from skyrl_train.trajectory_runners.types import TrajectoryID
+from skyrl_train.utils.utils import validate_cfg
 from tests.cpu.tiny_training.cpu_backend import CPUInferenceEngine
 from tests.cpu.tiny_training.tiny_model import build_tiny_policy
 from examples.multiply.task_session import MultiplyTaskSession
@@ -30,12 +31,16 @@ async def test_pickled_worker_runs_real_cpu_inference_with_direct_sessions(tmp_p
     with hydra.initialize_config_dir(config_dir=config_dir, version_base=None):
         cfg = hydra.compose(config_name="ppo_base_config")
     cfg.trainer.policy.model.path = str(model_path)
+    cfg.trainer.logger = "console"
+    cfg.trainer.algorithm.off_policy_correction = "tis"
     cfg.trainer.step_wise_training = True
     cfg.generator.max_turns = max_turns
     cfg.generator.max_input_length = 256
-    cfg.generator.sampling_params.temperature = 0
+    cfg.trainer.max_prompt_length = 256
+    cfg.generator.sampling_params.temperature = 0.01
     cfg.generator.sampling_params.max_generate_length = 16
-    cfg.generator.sampling_params.logprobs = 0
+    cfg.generator.sampling_params.logprobs = None
+    validate_cfg(cfg)
     task = source_task(
         [{"role": "user", "content": "What is two? End with #### 2."}],
         session,
