@@ -10,6 +10,7 @@ from ray.util.placement_group import placement_group
 from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
+from skyrl_train.io.remote_safetensors import RemoteSafetensorsTensorStore
 from skyrl_train.models.grug_moe import GRUG_STACKED_EXPERT_SCHEMA_VERSION, GrugMoeConfig
 from tests.gpu.grug_serving import assert_engine_weights, rank0_validation_snapshot
 
@@ -99,6 +100,30 @@ def publication_expert_indices(names):
         for name in names
         if ".experts." in name
     }
+
+
+def assert_pretrained_snapshot(source, model, names, bias_names, snapshot):
+    """Compare selected import values with independent source tensor range reads."""
+    store = RemoteSafetensorsTensorStore(source, model)
+    keys = set(store.get_all_keys())
+    source_dtypes = {}
+    for name in names:
+        if name in keys:
+            tensor = store.load_tensors([name])[name]
+        else:
+            before, after = name.split('.experts.', 1)
+            expert, projection = after.split('.', 1)
+            tensor = store.load_first_dim_slice(f'{before}.experts.{projection}', int(expert))
+        source_dtypes[name] = str(tensor.dtype)
+        if name in bias_names:
+            assert tensor.dtype == snapshot[name].dtype == torch.float32
+            expected = tensor
+        else:
+            # The existing import recipe computes in BF16. Readback is FP32.
+            expected = tensor.to(torch.bfloat16).float()
+        torch.testing.assert_close(snapshot[name], expected, rtol=0, atol=0)
+    return {'selected_weights_and_all_biases_exact': True,
+            'source_dtypes': source_dtypes, 'requested_source_tensor_bytes': store.bytes_read}
 
 
 class GroupedPublication:
