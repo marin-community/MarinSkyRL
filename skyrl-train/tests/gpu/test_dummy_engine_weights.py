@@ -109,7 +109,7 @@ def test_dummy_engine_installs_every_tensor_and_holds_requests_until_verified_sy
             print(f"X4a {load_format} Available KV cache memory: {budget} bytes", flush=True)
             if load_format == "auto":
                 real_budget = budget
-                real_weights = asyncio.run(client.engines[0].read_engine_weights(names))[0]
+                real_weights = ray.get(actor.worker_rpc.remote("read_named_weights", names))[0]
                 real_output = asyncio.run(client.generate({"prompts": PROMPTS, "sampling_params": SAMPLING}))
                 real_single = asyncio.run(client.generate({"prompts": PROMPTS[:1], "sampling_params": SAMPLING}))
                 for shard in shards:
@@ -156,7 +156,7 @@ def test_dummy_engine_installs_every_tensor_and_holds_requests_until_verified_sy
                     await asyncio.gather(early, return_exceptions=True)
 
             dummy_output = asyncio.run(verify_and_resume())
-            dummy_weights = asyncio.run(client.engines[0].read_engine_weights(names))[0]
+            dummy_weights = ray.get(actor.worker_rpc.remote("read_named_weights", names))[0]
             assert dummy_output["response_ids"] == real_output["response_ids"]
             for name in names:
                 assert dummy_weights[name]["found"], (name, dummy_weights[name])
