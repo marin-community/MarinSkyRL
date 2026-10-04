@@ -198,6 +198,17 @@ def _dump_eval_results(
 ) -> None:
     if not cfg.trainer.dump_eval_results:
         return
+    if global_step == 0:
+        for index, source in enumerate(data_sources):
+            if source in {"cat_count_n6", "cat_count_n10"}:
+                logger.info(
+                    "X2_DIAGNOSTIC_EVAL step={} source={} temperature={} token_ids={} logprobs={}",
+                    global_step,
+                    source,
+                    cfg.generator.eval_sampling_params.temperature,
+                    list(rollouts.batch["response_ids"][index]),
+                    [float(value) for value in rollouts.batch["rollout_logprobs"][index]],
+                )
     with Timer("dump_eval_results"):
         data_save_dir = evaluation_dump_dir(str(cfg.trainer.export_path), global_step)
         with io.local_work_dir(data_save_dir) as local_dir:
