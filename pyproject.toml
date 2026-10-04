@@ -213,7 +213,7 @@ flash-attn = [
     { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-fa283-20260920/flash_attn-2.8.3-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
     { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-fa283-20260920/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
 ]
-harbor = { git = "https://github.com/marin-community/harbor.git", rev = "36b5ae0a3adc44e06bb62a7793bb20bce430f4a7" }
+harbor = { git = "https://github.com/marin-community/harbor.git", rev = "14f1caa0e9ee60a411bd60396d77206a62e87cc5" }
 hs-connectors = { git = "https://github.com/lukedhlee/speculators.git", rev = "6496b4db007de00dd4741349643d23b23e29dce8", subdirectory = "hs_connectors" }
 speculators = { git = "https://github.com/lukedhlee/speculators.git", rev = "6496b4db007de00dd4741349643d23b23e29dce8" }
 torch = [
