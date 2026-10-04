@@ -128,14 +128,10 @@ def test_dummy_engine_installs_every_tensor_and_holds_requests_until_verified_sy
                 real_budget = budget
                 real_weights = ray.get(actor.worker_rpc.remote("read_snapshot_weights", names))[0]
                 real_single = asyncio.run(client.generate({"prompts": PROMPTS[:1], "sampling_params": SAMPLING}))
-                real_output = asyncio.run(client.generate({"prompts": PROMPTS, "sampling_params": SAMPLING}))
-                real_repeat = asyncio.run(client.generate({"prompts": PROMPTS, "sampling_params": SAMPLING}))
                 real_serial = [
                     asyncio.run(client.generate({"prompts": [prompt], "sampling_params": SAMPLING}))
                     for prompt in PROMPTS
                 ]
-                print("X4a real repeated batch", real_output, real_repeat, flush=True)
-                print("X4a real serial", real_serial, flush=True)
                 for shard in shards:
                     with safe_open(shard, framework="pt", device="cpu") as weights:
                         for name in weights.keys():
@@ -173,13 +169,12 @@ def test_dummy_engine_installs_every_tensor_and_holds_requests_until_verified_sy
                     await client.resume_generation()
                     output = await asyncio.wait_for(early, timeout=30)
                     assert output["response_ids"] == real_single["response_ids"]
-                    return await client.generate({"prompts": PROMPTS, "sampling_params": SAMPLING})
                 finally:
                     if not early.done():
                         early.cancel()
                     await asyncio.gather(early, return_exceptions=True)
 
-            dummy_output = asyncio.run(verify_and_resume())
+            asyncio.run(verify_and_resume())
             dummy_weights = ray.get(actor.worker_rpc.remote("read_snapshot_weights", names))[0]
             for name in names:
                 assert dummy_weights[name]["found"], (name, dummy_weights[name])
@@ -188,13 +183,12 @@ def test_dummy_engine_installs_every_tensor_and_holds_requests_until_verified_sy
             dummy_serial = [
                 asyncio.run(client.generate({"prompts": [prompt], "sampling_params": SAMPLING})) for prompt in PROMPTS
             ]
-            print("X4a dummy batch", dummy_output, flush=True)
-            print("X4a dummy serial", dummy_serial, flush=True)
             # Single requests hold batch composition fixed for exact real/dummy parity.
             assert [out["response_ids"] for out in dummy_serial] == [out["response_ids"] for out in real_serial]
             assert [out["response_logprobs"] for out in dummy_serial] == [
                 out["response_logprobs"] for out in real_serial
             ]
+            print("X4a greedy token IDs", [out["response_ids"][0] for out in dummy_serial], flush=True)
             print("X4a verified 8 greedy prompts", flush=True)
         finally:
             if client is not None:
