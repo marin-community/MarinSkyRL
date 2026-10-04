@@ -6,14 +6,16 @@ from multiprocessing.context import ForkServerContext
 from pathlib import Path
 
 import pytest
+import ray
 import torch
+from ray._private.test_utils import wait_for_condition
 from transformers import AutoModelForCausalLM
 from omegaconf import OmegaConf
 from skyrl_train.callbacks.base import TrainerCallback
 from skyrl_train.callbacks.builtin import register_callback
 
 from marinskyrl.checkpoint_paths import POLICY_CHECKPOINT_SUBDIRECTORY
-from tests.cpu.tiny_training.cpu_backend import CHECKPOINT_FILE_TEMPLATE, CausalLMPolicy
+from tests.cpu.tiny_training.cpu_backend import CHECKPOINT_FILE_TEMPLATE, CausalLMPolicy, CPUPolicyWorker
 from tests.cpu.tiny_training.fixed_batch import fixed_training_batch, run_fixed_update
 from skyrl_train.rollouts.payloads import ROLLOUT_OBJECT_SUFFIX
 from skyrl_train.training_batch import TrainingInputBatch
@@ -38,6 +40,49 @@ RESUMED_STEP = 1
 # A run takes under half a minute on an idle host. The margin absorbs slower CI hosts and concurrent pytest-xdist
 # workers, and stays above the experiment's admission stall timeout so a stall reports its own error.
 RUN_TIMEOUT_SECONDS = 300
+POLICY_READY_FILE = "policy-ready"
+
+
+class _PolicyReadyWorker(CPUPolicyWorker):
+    def init_model(self, model_path, num_training_steps=None):
+        super().init_model(model_path, num_training_steps)
+        (Path(self.cfg.trainer.export_path) / POLICY_READY_FILE).touch()
+
+
+class _OverlappingTinyTrainingExp(experiment.TinyTrainingExp):
+    def get_worker_classes(self):
+        return ray.remote(num_gpus=1)(_PolicyReadyWorker), None, None
+
+    def create_inference_engine_client(self, *, operation=experiment.EntrypointOperation.TRAIN):
+        marker = Path(self.cfg.trainer.export_path) / POLICY_READY_FILE
+        wait_for_condition(marker.is_file, timeout=60)
+        return super().create_inference_engine_client(operation=operation)
+
+
+class _FailingEngineTinyTrainingExp(experiment.TinyTrainingExp):
+    engine_error: RuntimeError
+
+    def create_inference_engine_client(self, *, operation=experiment.EntrypointOperation.TRAIN):
+        raise self.engine_error
+
+
+def _run_overlapped_training(root: Path, model: Path) -> None:
+    cfg = experiment.tiny_training_config(
+        root, model, TrainingMode.ASYNC, RolloutShape.SINGLE_TURN, max_steps=NUM_STEPS, checkpoint_interval=-1
+    )
+    cfg.trainer.placement.policy_strict_spread_pg = True
+    cfg.trainer.placement.overlap_init = True
+    experiment.validate_cfg(cfg)
+    ray.init(
+        num_cpus=experiment.LOGICAL_CPUS,
+        num_gpus=experiment.LOGICAL_GPUS,
+        runtime_env={"env_vars": experiment.WORKER_ENV_VARS},
+        include_dashboard=False,
+    )
+    try:
+        _OverlappingTinyTrainingExp(cfg).run()
+    finally:
+        ray.shutdown()
 
 
 @register_callback("test_step_limit")
@@ -110,6 +155,51 @@ def _train(
 
 def _trained_steps(root: Path) -> list[dict]:
     return [record for record in read_metrics(root) if "policy/raw_grad_norm" in record]
+
+
+def test_tiny_policy_trains_while_engines_wait_for_policy_initialization(runs, tmp_path, tiny_policy):
+    run = runs.Process(target=_run_overlapped_training, args=(tmp_path, tiny_policy))
+    run.start()
+    try:
+        run.join(RUN_TIMEOUT_SECONDS)
+        assert run.exitcode == 0
+    finally:
+        if run.is_alive():
+            run.kill()
+            run.join()
+
+    _assert_trained_to_max_steps(tmp_path, TrainingMode.ASYNC, RolloutShape.SINGLE_TURN)
+    startup = next(record for record in read_metrics(tmp_path) if "startup/engines/create" in record)
+    assert startup["startup/engines/create"] >= 0
+
+
+def test_engine_startup_failure_releases_policy_resources(tmp_path, tiny_policy):
+    cfg = experiment.tiny_training_config(
+        tmp_path, tiny_policy, TrainingMode.ASYNC, RolloutShape.SINGLE_TURN, max_steps=1, checkpoint_interval=-1
+    )
+    cfg.trainer.placement.policy_strict_spread_pg = True
+    cfg.trainer.placement.overlap_init = True
+    experiment.validate_cfg(cfg)
+    ray.init(
+        num_cpus=experiment.LOGICAL_CPUS,
+        num_gpus=experiment.LOGICAL_GPUS,
+        runtime_env={"env_vars": experiment.WORKER_ENV_VARS},
+        include_dashboard=False,
+    )
+    try:
+        exp = _FailingEngineTinyTrainingExp(cfg)
+        exp.engine_error = RuntimeError("engine startup failed")
+        with pytest.raises(RuntimeError) as failure:
+            exp.run()
+        assert failure.value is exp.engine_error
+        expected = {key: ray.cluster_resources()[key] for key in ("CPU", "GPU")}
+        wait_for_condition(
+            lambda: {key: ray.available_resources().get(key, 0) for key in expected} == expected,
+            timeout=30,
+        )
+        assert {key: ray.available_resources().get(key, 0) for key in expected} == expected
+    finally:
+        ray.shutdown()
 
 
 def _assert_trained_to_max_steps(root: Path, mode: TrainingMode, shape: RolloutShape) -> None:

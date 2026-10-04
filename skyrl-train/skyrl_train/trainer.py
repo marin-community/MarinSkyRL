@@ -273,6 +273,22 @@ def _zero_std_group_fraction(uids: Sequence[str], rewards: torch.Tensor) -> floa
     return flat_groups / len(group_rewards)
 
 
+def kill_inference_engines(client: InferenceEngineClient) -> None:
+    """Terminate the client's Ray inference actors."""
+    from skyrl_train.inference_engines.ray_wrapped_inference_engine import RayWrappedInferenceEngine
+
+    n_killed = 0
+    for engine in client.engines:
+        if isinstance(engine, RayWrappedInferenceEngine):
+            try:
+                ray.kill(engine.inference_engine_actor, no_restart=True)
+                n_killed += 1
+            except Exception:
+                pass  # Actor may already be dead
+    if n_killed:
+        logger.info(f"Killed {n_killed} inference engine actor(s)")
+
+
 class RayPPOTrainer:
     """The rollout-buffer training loop.
 
@@ -295,8 +311,8 @@ class RayPPOTrainer:
         tracker: Tracking,
         tokenizer: AutoTokenizer,
         train_dataset: Optional[PromptDataset],
-        inference_engine_client: InferenceEngineClient,
-        trajectory_runner: TrajectoryRunner,
+        inference_engine_client: InferenceEngineClient | None,
+        trajectory_runner: TrajectoryRunner | None,
         context: TrainingContext,
         colocate_pg: Optional[PlacementGroup] = None,
         eval_dataset: Optional[PromptDataset] = None,
@@ -319,7 +335,8 @@ class RayPPOTrainer:
         self.trajectory_runner = trajectory_runner
         self.trajectory_selector = trajectory_selector_from_config(cfg)
         self.trajectory_sink = make_trajectory_sink(cfg.generator, tokenizer)
-        self.trajectory_runner.set_trajectory_sink(self.trajectory_sink)
+        if self.trajectory_runner is not None:
+            self.trajectory_runner.set_trajectory_sink(self.trajectory_sink)
         self.total_training_steps = None
         self._configure_training_schedule()
 
@@ -397,6 +414,15 @@ class RayPPOTrainer:
             raise RuntimeError("the distillation runtime is already configured")
         self._distillation_runtime = runtime
         self._domain_balancer = runtime.domain_balancer
+
+    def attach_inference(self, client: InferenceEngineClient, runner: TrajectoryRunner) -> None:
+        """Attach inference and rollout workers once before training."""
+        if self.inference_engine_client is not None or self.trajectory_runner is not None:
+            raise RuntimeError("inference is already attached")
+        self.context.attach_workers(runner)
+        runner.set_trajectory_sink(self.trajectory_sink)
+        self.inference_engine_client = client
+        self.trajectory_runner = runner
 
     def _configure_training_schedule(self):
         """Count steps in batches of prompt groups; one pass over the dataset is one epoch."""
@@ -533,18 +559,7 @@ class RayPPOTrainer:
         # Kill inference engine actors.  These are not covered by the model
         # actor groups above.
         if self.inference_engine_client is not None:
-            from skyrl_train.inference_engines.ray_wrapped_inference_engine import RayWrappedInferenceEngine
-
-            n_killed = 0
-            for engine in self.inference_engine_client.engines:
-                if isinstance(engine, RayWrappedInferenceEngine):
-                    try:
-                        ray.kill(engine.inference_engine_actor, no_restart=True)
-                        n_killed += 1
-                    except Exception:
-                        pass  # Actor may already be dead
-            if n_killed:
-                logger.info(f"Killed {n_killed} inference engine actor(s)")
+            kill_inference_engines(self.inference_engine_client)
 
     async def _teardown(self) -> None:
         """Best-effort cleanup after training ends (normal or abnormal).
@@ -579,11 +594,12 @@ class RayPPOTrainer:
                 self.inference_engine_client.shutdown_http_endpoint,
                 label="HTTP endpoint shutdown",
             )
-        await self._guarded_async(
-            self.trajectory_runner.shutdown(),
-            timeout=60,
-            label="Trajectory runner shutdown",
-        )
+        if self.trajectory_runner is not None:
+            await self._guarded_async(
+                self.trajectory_runner.shutdown(),
+                timeout=60,
+                label="Trajectory runner shutdown",
+            )
         self._guarded_sync(self.trajectory_sink.close, label="Trajectory retention shutdown")
         self._draft_trainer_update_ref = None
         if self._speculator_refresh_task is not None:
@@ -593,11 +609,12 @@ class RayPPOTrainer:
                 label="Draft refresh completion",
             )
             self._speculator_refresh_task = None
-        await self._guarded_async(
-            self.inference_engine_client.teardown(),
-            timeout=30,
-            label="Inference engine teardown",
-        )
+        if self.inference_engine_client is not None:
+            await self._guarded_async(
+                self.inference_engine_client.teardown(),
+                timeout=30,
+                label="Inference engine teardown",
+            )
         self._guarded_sync(self._kill_ray_actors, label="Ray actor cleanup")
 
     async def shutdown(self) -> None:
@@ -627,6 +644,7 @@ class RayPPOTrainer:
 
     async def train(self):
         """Run the rollout-buffer training loop, then release every resource it started."""
+        assert self.inference_engine_client is not None and self.trajectory_runner is not None
         loop_monitor = (
             asyncio.create_task(monitor_event_loop_lag(step_fn=lambda: self.global_step, mode=self.context.mode))
             if self._rollout_spans_enabled

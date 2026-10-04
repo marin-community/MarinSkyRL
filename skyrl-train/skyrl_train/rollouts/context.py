@@ -143,7 +143,7 @@ class TrainingContext:
         buffer: ActorHandle,
         content_policy: RolloutContentPolicy,
         request_spec: RolloutRequestSpec,
-        workers: RolloutWorkers,
+        workers: RolloutWorkers | None,
         payloads: PayloadStore,
         *,
         rollout_spans: bool,
@@ -166,7 +166,9 @@ class TrainingContext:
         self._failure: asyncio.Future | None = None
 
     @classmethod
-    def from_config(cls, config: DictConfig, dataset: PromptGroupDataset, workers: RolloutWorkers) -> TrainingContext:
+    def from_config(
+        cls, config: DictConfig, dataset: PromptGroupDataset, workers: RolloutWorkers | None
+    ) -> TrainingContext:
         algorithm = config.trainer.algorithm
         dynamic_sampling = algorithm.dynamic_sampling
         selection = GroupSelectionPolicy(
@@ -213,8 +215,15 @@ class TrainingContext:
             rollout_spans=config.trainer.rollout_spans,
         )
 
+    def attach_workers(self, workers: RolloutWorkers) -> None:
+        """Attach rollout workers once before dispatch starts."""
+        if self._workers is not None:
+            raise RuntimeError("rollout workers are already attached")
+        self._workers = workers
+
     def start(self) -> None:
         """Start dispatching; the buffer grants no lease before the first ``publish``."""
+        assert self._workers is not None, "rollout workers must be attached before dispatch"
         self._failure = asyncio.get_running_loop().create_future()
         self._dispatcher = asyncio.create_task(self._dispatch())
 

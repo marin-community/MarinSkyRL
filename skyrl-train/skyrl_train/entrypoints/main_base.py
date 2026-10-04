@@ -5,6 +5,9 @@ Main entrypoint for training.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from collections.abc import Callable
+from concurrent.futures import Future, wait
+from threading import Thread
 
 from ray.util.placement_group import placement_group, PlacementGroup
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
@@ -47,6 +50,19 @@ mp.set_start_method("spawn", force=True)
 
 config_dir = str(Path(__file__).parent.parent / "config")
 __all__ = ["BasePPOExp", "config_dir"]
+
+
+def _start_in_daemon_thread(fn: Callable[[], InferenceEngineClient], name: str) -> Future[InferenceEngineClient]:
+    future: Future[InferenceEngineClient] = Future()
+
+    def _run():
+        try:
+            future.set_result(fn())
+        except BaseException as error:
+            future.set_exception(error)
+
+    Thread(target=_run, name=name, daemon=True).start()
+    return future
 
 
 def resolve_entrypoint_node_id(node_ip: str) -> str:
@@ -498,7 +514,7 @@ class BasePPOExp:
         train_dataset,
         eval_dataset,
         inference_engine_client,
-        trajectory_runner: TrajectoryRunner,
+        trajectory_runner: TrajectoryRunner | None,
         colocate_pg,
     ):
         """Initializes the trainer, with the trajectory runner as its rollout workers.
@@ -552,46 +568,83 @@ class BasePPOExp:
         Returns:
             RayPPOTrainer: The trainer.
         """
-        from skyrl_train.utils.utils import Timer  # noqa: PLC0415
+        from skyrl_train.utils.utils import Timer, configure_ray_worker_logging, overlap_init_eligible  # noqa: PLC0415
 
         logger.info(self.get_cfg_as_str(self.cfg))
         os.makedirs(self.cfg.trainer.export_path, exist_ok=True)
         os.makedirs(self.cfg.trainer.ckpt_path, exist_ok=True)
 
-        with Timer("driver/worker_classes", self.startup_timings):
-            PolicyWorker, CriticWorker, RefWorker = self.get_worker_classes()
+        def _create_inference_engine_client():
+            with Timer("engines/create", self.startup_timings):
+                return self.create_inference_engine_client()
 
-        # NOTE (sumanthrh): Instantiate tracker before trainer init.
-        # We have custom validation before this step to give better error messages.
-        with Timer("driver/tracker", self.startup_timings):
-            tracker = self.get_tracker()
+        overlap = self.cfg.trainer.placement.overlap_init and overlap_init_eligible(self.cfg)
+        future = None
+        trainer = None
+        try:
+            if overlap:
+                assert self.policy_pg is not None
+                configure_ray_worker_logging()
+                initial_pg_ids = set(ray.util.placement_group_table())
+                future = _start_in_daemon_thread(_create_inference_engine_client, "engine-startup")
 
-        tokenizer = self.tokenizer
-        from skyrl_train.teacher_runtime import prepare_distillation_runtime, start_distillation_runtime  # noqa: PLC0415
+            with Timer("driver/worker_classes", self.startup_timings):
+                PolicyWorker, CriticWorker, RefWorker = self.get_worker_classes()
 
-        prepared_distillation = prepare_distillation_runtime(self.cfg, tokenizer)
-        with Timer("engines/create", self.startup_timings):
-            inference_engine_client = self.create_inference_engine_client()
+            with Timer("driver/tracker", self.startup_timings):
+                tracker = self.get_tracker()
 
-        trajectory_runner: TrajectoryRunner = self.get_trajectory_runner(self.cfg, tokenizer, inference_engine_client)
-
-        with Timer("driver/get_trainer", self.startup_timings):
-            trainer = self.get_trainer(
-                cfg=self.cfg,
-                tracker=tracker,
-                tokenizer=tokenizer,
-                train_dataset=self.train_dataset,
-                eval_dataset=self.eval_dataset,
-                inference_engine_client=inference_engine_client,
-                trajectory_runner=trajectory_runner,
-                colocate_pg=self.colocate_pg,
+            tokenizer = self.tokenizer
+            from skyrl_train.teacher_runtime import (  # noqa: PLC0415
+                prepare_distillation_runtime,
+                start_distillation_runtime,
             )
 
-        # Pass the policy placement group reserved before inference startup.
-        logger.info("Starting policy workers: strategy={}", self.cfg.trainer.strategy)
-        try:
+            prepared_distillation = prepare_distillation_runtime(self.cfg, tokenizer)
+            inference_engine_client = _create_inference_engine_client() if future is None else None
+            trajectory_runner = (
+                self.get_trajectory_runner(self.cfg, tokenizer, inference_engine_client) if future is None else None
+            )
+
+            with Timer("driver/get_trainer", self.startup_timings):
+                trainer = self.get_trainer(
+                    cfg=self.cfg,
+                    tracker=tracker,
+                    tokenizer=tokenizer,
+                    train_dataset=self.train_dataset,
+                    eval_dataset=self.eval_dataset,
+                    inference_engine_client=inference_engine_client,
+                    trajectory_runner=trajectory_runner,
+                    colocate_pg=self.colocate_pg,
+                )
+
+            logger.info("Starting policy workers: strategy={}", self.cfg.trainer.strategy)
             with Timer("policy/build_models", self.startup_timings):
                 trainer.build_models(PolicyWorker, CriticWorker, RefWorker, policy_pg=self.policy_pg)
+
+            if future is not None:
+                while not future.done():
+                    wait([future], timeout=1)
+                inference_engine_client = future.result()
+                trajectory_runner = self.get_trajectory_runner(self.cfg, tokenizer, inference_engine_client)
+                trainer.attach_inference(inference_engine_client, trajectory_runner)
+
+                pg_table = ray.util.placement_group_table()
+                policy_nodes = set(pg_table[self.policy_pg.id.hex()]["bundles_to_node_id"].values())
+                engine_nodes = {
+                    node_id
+                    for pg_id, info in pg_table.items()
+                    if pg_id not in initial_pg_ids and info["state"] == "CREATED"
+                    for node_id in info["bundles_to_node_id"].values()
+                }
+                logger.info(
+                    "Overlapped init placement: policy_nodes={} engine_nodes={}",
+                    sorted(policy_nodes),
+                    sorted(engine_nodes),
+                )
+                if policy_nodes & engine_nodes:
+                    logger.warning("Overlapped init placement shares policy and engine nodes")
+
             trainer.all_startup_timings.update(self.startup_timings)
             logger.info(
                 "Policy workers ready: strategy={} count={}",
@@ -602,7 +655,16 @@ class BasePPOExp:
             if distillation_runtime is not None:
                 trainer.configure_distillation(distillation_runtime)
         except BaseException:
-            asyncio.run(trainer.shutdown())
+            if future is not None:
+                from skyrl_train.trainer import kill_inference_engines  # noqa: PLC0415
+
+                future.add_done_callback(lambda f: f.exception() is None and kill_inference_engines(f.result()))
+            try:
+                if trainer is not None:
+                    asyncio.run(trainer.shutdown())
+            finally:
+                if overlap and self.policy_pg is not None:
+                    ray.util.remove_placement_group(self.policy_pg)
             raise
         return trainer
 
