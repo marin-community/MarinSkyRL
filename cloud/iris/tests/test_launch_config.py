@@ -154,8 +154,9 @@ async def test_custom_session_settings_reach_private_grading_through_the_launch_
 
 @pytest.mark.parametrize("storage_prefix", ["s3://runs/smoke", "gs://runs/smoke"])
 @pytest.mark.parametrize(("loss", "reduction"), [("regular", "token_mean"), ("gspo", "sequence_mean")])
+@pytest.mark.parametrize("probe_enabled", [False, True])
 def test_launch_config_composes_and_loads_as_structured_hydra(
-    tmp_path: Path, loss: str, reduction: str, storage_prefix: str
+    tmp_path: Path, loss: str, reduction: str, storage_prefix: str, probe_enabled: bool
 ) -> None:
     path = tmp_path / "resolved-launch.yaml"
     raw = _raw_config()
@@ -167,6 +168,15 @@ def test_launch_config_composes_and_loads_as_structured_hydra(
         "archive_uri": f"{storage_prefix}/mismatch_probe",
         "reuse_probe": f"{storage_prefix}/source/mismatch_probe",
     }
+    if probe_enabled:
+        # The direct engine returns exact model tokens without a transport flag.
+        trainer["mismatch_probe"].update(
+            enabled=True, prompts={"count": 2, "samples_per_prompt": 1}, seed=17, updates=0
+        )
+        raw["skyrl"]["generator"].update(
+            sampling_params={"temperature": 1.0, "logprobs": 0},
+            engine_init_kwargs={"logprobs_mode": "processed_logprobs", "generation_config": "vllm"},
+        )
     path.write_text(yaml.safe_dump(raw, sort_keys=False))
 
     config = load_launch_config(path)
