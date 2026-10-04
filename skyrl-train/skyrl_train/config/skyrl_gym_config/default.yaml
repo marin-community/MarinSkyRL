@@ -6,6 +6,9 @@ gsm8k:
   # Select final_line when only a completed response's last #### line should earn reward.
   reward_method: strict
 
+reasoning_gym:
+  structured_chat: false
+
 text2sql:
   db_path: "/home/ray/default/sql_data"
 
@@ -81,6 +84,7 @@ nemotron_ultra:
     group_answer_length_penalty_coeff: 0.1
 
 aime:
+  structured_chat: false
   evaluation_token_budget: 8192
   strict_box_verify: false
   length_penalty_weight: 0.0
