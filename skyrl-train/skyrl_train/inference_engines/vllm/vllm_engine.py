@@ -642,12 +642,12 @@ class WorkerWrap:
                     }
                     for name, numel in checkpoint_numel.items():
                         if name in tensors:
-                            tensor_padding[name] = tensors[name].numel() - numel
+                            tensor_padding[name] = live[name].numel() - numel
                 layers[layer_name] = {
                     "can_load": info.can_load(),
                     "load_numel_total": info.load_numel_total,
                     "load_numel": info.load_numel,
-                    "tensors": {name: (identities[name], tensor.numel()) for name, tensor in tensors.items()},
+                    "tensors": {name: (identities[name], live[name].numel()) for name in tensors},
                     "vocab_padding_numel": padding,
                     "tensor_padding_numel": tensor_padding,
                     "vocab_bias_padding_numel": bias_padding,

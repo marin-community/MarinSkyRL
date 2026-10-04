@@ -27,7 +27,7 @@ PROMPTS = [
     [{"role": "user", "content": f"How many cats are in this list? {'cat ' * count}Answer with a number."}]
     for count in range(1, 9)
 ]
-SAMPLING = {"temperature": 0.0, "max_tokens": 16}
+SAMPLING = {"temperature": 0.0, "max_tokens": 16, "logprobs": 0}
 
 
 class InspectableEngine(vllm_engine.AsyncVLLMInferenceEngine):
@@ -129,6 +129,13 @@ def test_dummy_engine_installs_every_tensor_and_holds_requests_until_verified_sy
                 real_weights = ray.get(actor.worker_rpc.remote("read_snapshot_weights", names))[0]
                 real_single = asyncio.run(client.generate({"prompts": PROMPTS[:1], "sampling_params": SAMPLING}))
                 real_output = asyncio.run(client.generate({"prompts": PROMPTS, "sampling_params": SAMPLING}))
+                real_repeat = asyncio.run(client.generate({"prompts": PROMPTS, "sampling_params": SAMPLING}))
+                real_serial = [
+                    asyncio.run(client.generate({"prompts": [prompt], "sampling_params": SAMPLING}))
+                    for prompt in PROMPTS
+                ]
+                print("X4a real repeated batch", real_output, real_repeat, flush=True)
+                print("X4a real serial", real_serial, flush=True)
                 for shard in shards:
                     with safe_open(shard, framework="pt", device="cpu") as weights:
                         for name in weights.keys():
@@ -178,6 +185,12 @@ def test_dummy_engine_installs_every_tensor_and_holds_requests_until_verified_sy
                 assert dummy_weights[name]["found"], (name, dummy_weights[name])
                 torch.testing.assert_close(dummy_weights[name]["tensor"], real_weights[name]["tensor"], rtol=0, atol=0)
             print(f"X4a verified {len(names)} HF tensors", flush=True)
+            dummy_serial = [
+                asyncio.run(client.generate({"prompts": [prompt], "sampling_params": SAMPLING})) for prompt in PROMPTS
+            ]
+            print("X4a dummy batch", dummy_output, flush=True)
+            print("X4a dummy serial", dummy_serial, flush=True)
+            assert [out["response_ids"] for out in dummy_serial] == [out["response_ids"] for out in real_serial]
             print("X4a greedy token IDs", real_output["response_ids"], dummy_output["response_ids"], flush=True)
             assert dummy_output["response_ids"] == real_output["response_ids"]
             print("X4a verified 8 greedy prompts", flush=True)
