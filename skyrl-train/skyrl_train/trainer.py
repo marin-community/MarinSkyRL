@@ -1162,7 +1162,9 @@ class RayPPOTrainer:
                     self._offload_policy_optimizer, timings, timer_label="offload_policy_optimizer_to_cpu"
                 )
                 await self.sync_policy_weights_to_inference_engines()
-                if pause:
+                if pause or (
+                    reason == "initial" and self.cfg.generator.engine_init_kwargs.get("load_format") == "dummy"
+                ):
                     await self.inference_engine_client.resume_generation()
         self._log_weight_update_completed(reason=reason, duration_seconds=update_timer.duration)
 

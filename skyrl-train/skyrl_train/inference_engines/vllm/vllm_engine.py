@@ -948,6 +948,35 @@ class WorkerWrap:
                     out[name] = entry
                     continue
 
+                packed = re.match(
+                    r"^(model\.layers\.\d+)\.(self_attn\.(q|k|v)_proj|mlp\.(gate|up)_proj)\.(weight|bias)$",
+                    name,
+                )
+                if packed is not None:
+                    prefix, _projection, qkv, mlp, kind = packed.groups()
+                    if qkv is not None:
+                        module_name = f"{prefix}.self_attn.qkv_proj"
+                        module = model.get_submodule(module_name)
+                        sizes = (
+                            module.num_heads * module.head_size,
+                            module.num_kv_heads * module.head_size,
+                            module.num_kv_heads * module.v_head_size,
+                        )
+                        index = ("q", "k", "v").index(qkv)
+                    else:
+                        module_name = f"{prefix}.mlp.gate_up_proj"
+                        module = model.get_submodule(module_name)
+                        sizes = tuple(size // tp_size for size in module.output_sizes)
+                        index = ("gate", "up").index(mlp)
+                    tensor = all_params[f"{module_name}.{kind}"].narrow(0, sum(sizes[:index]), sizes[index])
+                    out[name] = {
+                        "found": True,
+                        "mode": "packed",
+                        "dtype": torch_dtype_to_str(tensor.dtype),
+                        "tensor": _cpu(tensor),
+                    }
+                    continue
+
                 # 2. Routed expert -> FusedMoE fused weights.
                 m = expert_re.match(name)
                 if m is not None:

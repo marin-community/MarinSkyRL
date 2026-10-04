@@ -340,7 +340,22 @@ class BasePPOExp:
         else:
             inference_engines = create_remote_inference_engines_from_config(self.cfg, self.tokenizer)
         logger.info("Inference engines ready: mode={} count={}", engine_mode, len(inference_engines))
-        return InferenceEngineClient(inference_engines, self.tokenizer, self.cfg)
+        client = InferenceEngineClient(inference_engines, self.tokenizer, self.cfg)
+        if (
+            operation is EntrypointOperation.TRAIN
+            and self.cfg.generator.engine_init_kwargs.get("load_format") == "dummy"
+        ):
+            try:
+                asyncio.run(client.pause_generation())
+            except BaseException:
+                from skyrl_train.trainer import kill_inference_engines  # noqa: PLC0415
+
+                try:
+                    client.shutdown_http_endpoint()
+                finally:
+                    kill_inference_engines(client)
+                raise
+        return client
 
     def _configure_log_level(self):
         """Configure loguru log level from trainer config."""
