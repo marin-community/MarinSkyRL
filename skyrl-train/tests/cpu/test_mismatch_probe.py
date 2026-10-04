@@ -27,12 +27,21 @@ from skyrl_train.trainer import RayPPOTrainer
 class _InferenceEndpoint:
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer
+        self.weights_valid = True
+
+    async def sleep(self):
+        self.weights_valid = False
+
+    async def wake_up(self):
+        # Level-two vLLM sleep releases weights; waking allocates empty buffers.
+        pass
 
     async def reset_prefix_cache(self):
         pass
 
     async def generate(self, request):
-        probabilities = torch.log_softmax(torch.arange(32, dtype=torch.float32), dim=0)
+        logits = torch.arange(32, dtype=torch.float32) if self.weights_valid else torch.zeros(32)
+        probabilities = torch.log_softmax(logits, dim=0)
         return {
             "prompt_logprobs": [
                 [None] + [{token: float(probabilities[token])} for token in sequence[1:]]
@@ -49,6 +58,12 @@ class _InferenceEndpoint:
 
 
 class _PolicyEndpoint:
+    def backload_to_gpu(self, **kwargs):
+        pass
+
+    def offload_to_cpu(self, **kwargs):
+        pass
+
     def __init__(self):
         self.actor_infos = [
             SimpleNamespace(rank=MeshRank(dp=dp, sp=0, tp=0, pp=0, world_size=2, dp_size=2, pp_size=1))
@@ -91,8 +106,11 @@ class _PolicyEndpoint:
 
 
 @pytest.mark.parametrize("explicit_callbacks", [False, True])
+@pytest.mark.parametrize("colocate_all", [False, True])
 @pytest.mark.asyncio
-async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_path, monkeypatch, explicit_callbacks):
+async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(
+    tmp_path, monkeypatch, explicit_callbacks, colocate_all
+):
     uri = str(tmp_path / "probe")
     tokenizer = PreTrainedTokenizerFast(
         tokenizer_object=Tokenizer(models.WordLevel({str(i): i for i in range(32)}, unk_token="0")),
@@ -194,7 +212,13 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
     cfg.trainer.mismatch_probe.updates = 2
     trainer.total_training_steps = 9
     trainer.global_step = 7
-    trainer.colocate_all = False
+    trainer.colocate_all = colocate_all
+
+    async def restore_serving_weights(*, reason):
+        assert reason == "mismatch_probe"
+        trainer.inference_engine_client.weights_valid = True
+
+    trainer._sync_policy_for_rollouts = restore_serving_weights
     trainer.all_timings = {}
     cfg.trainer.mismatch_probe.enabled = True
     OmegaConf.update(cfg, "trainer.callbacks", [{"type": "logging"}] if explicit_callbacks else None, force_add=True)
@@ -206,6 +230,12 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
     control = TrainerControl(step_limit=8)
     control.reset()
     control = await handler.call_event_async("on_train_begin", TrainerState(7, 0, 9, 9), control, trainer=trainer)
+    next_generation = await trainer.inference_engine_client.generate(
+        {"prompt_token_ids": [[1, 2]], "sampling_params_per_prompt": [{"logprob_token_ids": [3]}]}
+    )
+    assert next_generation["behavior_topk_logprobs"][0][0][0] == float(
+        torch.log_softmax(torch.arange(32, dtype=torch.float32), dim=0)[3]
+    )
     for step in (8, 9):
         trainer.global_step = step
         await handler.call_event_async("on_step_end", TrainerState(step, 0, 9, 9), control, trainer=trainer)

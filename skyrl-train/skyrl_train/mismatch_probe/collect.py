@@ -602,14 +602,14 @@ async def collect(probe: ProbeCollector, trainer, *, update: int) -> list[mismat
         try:
             if trainer.colocate_all:
                 trainer.policy_model.backload_to_gpu(backload_optimizer=False, backload_model=True)
-            try:
-                trainer_rows = probe._trainer_scores(trainer, update)
-            finally:
-                if trainer.colocate_all:
-                    trainer.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
+            trainer_rows = probe._trainer_scores(trainer, update)
         finally:
             if trainer.colocate_all:
-                await trainer.inference_engine_client.wake_up()
+                # Level-two sleep releases the serving weights. Waking alone
+                # allocates empty buffers and makes subsequent sampling uniform.
+                # Sync while the policy remains resident, then release it and
+                # wake the serving KV cache using the normal training path.
+                await trainer._sync_policy_for_rollouts(reason="mismatch_probe")
 
         scores = rescore_rows + trainer_rows
         if update == 0:
