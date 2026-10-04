@@ -41,7 +41,7 @@ def grug_engine_client(
         seed=23,
         vllm_v1_disable_multiproc=True,
         enable_prefix_caching=False,
-        enforce_eager=False,
+        enforce_eager=cfg.generator.enforce_eager,
         engine_init_timeout_seconds=cfg.generator.engine_init_timeout_seconds,
         shared_pg=shared_pg,
         gpu_memory_utilization=cfg.generator.gpu_memory_utilization,
