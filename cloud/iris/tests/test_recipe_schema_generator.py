@@ -209,7 +209,11 @@ def test_generator_cli_preserves_group_types_and_adjacent_comments_and_detects_d
     for following in ("hf_save_interval", "micro_forward_batch_size_per_gpu"):
         with pytest.raises(ValidationError):
             recipe_type.model_validate_json(json.dumps({"trainer": {following: None}}))
-    integer.merge(recipe_type(generator={"engine_init_kwargs": {"custom": [1, 2]}}))
+    merged = integer.merge(recipe_type(generator={"engine_init_kwargs": {"custom": [1, 2]}}))
+    assert merged.to_skyrl() == {
+        "trainer": {"algorithm": {"cispo": {"cispo_eps_clip_high": 5}}},
+        "generator": {"engine_init_kwargs": {"custom": [1, 2]}},
+    }
 
     formatted = generated.read_text()
     version = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["marin-style"]["ruff_version"]

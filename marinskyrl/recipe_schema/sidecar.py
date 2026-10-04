@@ -1,9 +1,11 @@
 """Generation-only annotations for defaults, choices and pass-through mappings."""
 
+from types import MappingProxyType
+
 POSITIVE = "PositiveInt"
 POSITIVE_OR_NONE = "PositiveInt | None"
 
-TYPES = {
+_TYPES = {
     "terminal_bench": "OpenMap | None",
     # Choices (values from MarinSkyRL's own enums and checks).
     "trainer.strategy": 'Literal["megatron"]',
@@ -159,7 +161,7 @@ OPEN = frozenset(
 
 # Declared here because code reads them with a default but ppo_base_config.yaml does not list them.
 # Ellipsis keeps code-default fields unset in authored documents.
-UNDECLARED = {
+_UNDECLARED = {
     "teachers": ("SectionMap[Teacher]", ...),
     "teacher_routing": ("SectionMap[TeacherRouting]", ...),
     "data.kind": ('Literal["tasks", "parquet"]', "tasks"),  # launcher-only: how the launch host stages data
@@ -226,7 +228,7 @@ UNDECLARED = {
     "generator.speculative_decoding.training.reserved_gpu_memory_gib": ("int | float", ...),
 }
 
-NAMES = {
+_NAMES = {
     "trainer.policy.megatron_config": "PolicyMegatronConfig",
     "trainer.ref.megatron_config": "RefMegatronConfig",
     "trainer.policy.model": "PolicyModel",
@@ -241,7 +243,7 @@ NAMES = {
 }
 
 # CLASSES fields pair an annotation with whether the field is required.
-CLASSES = {
+_CLASSES = {
     "TeacherModel": {"path": ("str", True), "revision": ("str", True)},
     "TeacherEndpoint": {
         "url": ("str", True),
@@ -347,13 +349,13 @@ CLASSES = {
     },
 }
 
-ALIASES = {
+_ALIASES = {
     "LoggingBackend": 'Literal["wandb", "mlflow", "swanlab", "tensorboard", "console"]',
     "CorrectionRule": 'Annotated[TokenRule | SequenceRule, Field(discriminator="kind")]',
     "Callback": 'Annotated[CheckpointCallback | DistillationTokenBudgetCallback | EvaluationCallback | HFModelSaveCallback | DatabaseRegistrationCallback | RefModelUpdateCallback | ProgressCallback | LoggingCallback | PreflightGateCallback | InferenceStatsCallback, Field(discriminator="type")]',
 }
 
-TYPES.update(
+_TYPES.update(
     {
         "trainer.collective_phase_diagnostics": "bool | None",
         "generator.error_handling.passthrough_exceptions": "tuple[str, ...]",
@@ -397,3 +399,9 @@ TYPES.update(
 
 # Explicit third-party OpenMap fields are intentional; generated scalar fields have concrete types.
 ANY_ALLOWED = frozenset()
+
+TYPES = MappingProxyType(_TYPES)
+UNDECLARED = MappingProxyType(_UNDECLARED)
+NAMES = MappingProxyType(_NAMES)
+CLASSES = MappingProxyType(_CLASSES)
+ALIASES = MappingProxyType(_ALIASES)

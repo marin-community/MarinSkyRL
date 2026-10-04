@@ -567,7 +567,7 @@ def _skyrl_config_sections(
 
 
 _OPEN_CONFIG_ROOTS = frozenset({"teachers", "teacher_routing", "terminal_bench_config"})
-_SCHEMA_CONFIG_PATHS = UNDECLARED.keys() | TYPES.keys()
+_SCHEMA_CONFIG_PATHS = frozenset(UNDECLARED.keys() | TYPES.keys())
 _MAPPING_CONFIG_PATHS = (
     OPEN
     | {path for path, annotation in TYPES.items() if annotation == "NumberMap"}

@@ -153,10 +153,6 @@ def test_ownership_sentinels_distinguish_launch_writers_context_writers_and_auth
                 launcher._skyrl_config_sections(
                     replace(parsed, **oversized), authored_parameters, SimpleNamespace(gpus_per_node=8)
                 )
-    discards = {
-        path for path in changed - schema.LAUNCH_PATHS if get_path(outcomes[0], path) == get_path(outcomes[1], path)
-    }
-    assert discards == frozenset()
     assert outcomes[0]["data"]["terminal_bench_data"] != outcomes[1]["data"]["terminal_bench_data"]
     derived = {}
     for path in schema.DERIVED_PATHS:

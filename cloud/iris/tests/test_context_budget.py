@@ -127,8 +127,20 @@ def test_context_budget_allows_overlong_fraction_overrides(tmp_path):
     assert parsed.generator["trajectory_reward_shaping"]["overlong"] == {"l_max": 12288, "l_cache": 3072}
 
 
-def test_resolved_context_budget_artifact_is_reproducible(tmp_path):
-    parsed = parse_rl_config(str(_REPO_ROOT / "cloud/iris/configs/tasktrove_dq_sweep_30b.yaml"))
+@pytest.mark.parametrize(
+    ("generated_fraction", "cache_fraction", "generated_tokens", "cache_tokens"),
+    [(0.5, 0.25, 65536, 16384), (1, 0, 131072, 0)],
+)
+def test_resolved_context_budget_artifact_is_reproducible(
+    tmp_path, generated_fraction, cache_fraction, generated_tokens, cache_tokens
+):
+    source = yaml.safe_load((_REPO_ROOT / "cloud/iris/configs/tasktrove_dq_sweep_30b.yaml").read_text())
+    source["context_budget"].update(
+        generated_budget_fraction=generated_fraction, overlong_cache_fraction=cache_fraction
+    )
+    source_path = tmp_path / "recipe.yaml"
+    source_path.write_text(yaml.safe_dump(source))
+    parsed = parse_rl_config(str(source_path))
     artifact = write_resolved_context_budget(
         parsed.context_budget, tmp_path / "resolved-context-budget.json", parsed.config_path
     )
@@ -136,18 +148,21 @@ def test_resolved_context_budget_artifact_is_reproducible(tmp_path):
     assert json.loads(artifact.read_text()) == {
         "config_path": str(parsed.config_path),
         "context_budget": {
-            "generated_budget_fraction": 0.5,
-            "generated_tokens_per_trajectory": 65536,
+            "generated_budget_fraction": float(generated_fraction),
+            "generated_tokens_per_trajectory": generated_tokens,
             "max_input_tokens": 114688,
             "max_new_tokens_per_turn": 16384,
             "max_turns": 90,
             "opencode_limit_context": 97280,
             "opencode_limit_output": 16384,
-            "overlong_cache_fraction": 0.25,
-            "overlong_cache_tokens": 16384,
+            "overlong_cache_fraction": float(cache_fraction),
+            "overlong_cache_tokens": cache_tokens,
             "request_window_tokens": 131072,
         },
     }
+    persisted = json.loads(artifact.read_text())["context_budget"]
+    assert type(persisted["generated_budget_fraction"]) is float
+    assert type(persisted["overlong_cache_fraction"]) is float
 
     remote_artifact = write_resolved_context_budget(
         parsed.context_budget,

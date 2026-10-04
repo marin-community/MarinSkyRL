@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 import posixpath
@@ -23,7 +23,7 @@ from cloud.iris.rl_config_translation import (
     training_type_for_entrypoint,
 )
 from cloud.iris.runtime_environment import RuntimeMode, runtime_profile_for_strategy
-from marinskyrl.recipe_schema import RL_ENTRYPOINTS, RLEntrypoint, validate_tp_divides_heads
+from marinskyrl.recipe_schema import RL_ENTRYPOINTS, Placement, RLEntrypoint, validate_tp_divides_heads
 from marinskyrl.distillation import validate_generation_logprobs
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from marinskyrl.task_sources import data_source
@@ -201,12 +201,10 @@ def _compose_source_recipe(config: DictConfig) -> DictConfig:
         OmegaConf.save(OmegaConf.create(raw_skyrl), source_file.name, resolve=False)
         parsed = parse_rl_config(source_file.name)
         policy_nodes = (
-            parsed.trainer.get("placement", {}).get("policy_num_nodes")
+            parsed.trainer.get("placement", {}).get("policy_num_nodes") or Placement().policy_num_nodes
             if nodes_unset
             else int(config.iris.allocation.num_nodes)
         )
-        if policy_nodes is None:
-            raise ValueError("omitted iris.allocation.num_nodes requires trainer.placement.policy_num_nodes")
         parameters = {
             "job_name": str(config.iris.job_name),
             "experiments_dir": str(config.runtime.experiments_dir),
@@ -235,7 +233,18 @@ def _compose_source_recipe(config: DictConfig) -> DictConfig:
             skyrl = OmegaConf.to_container(compiled.config, resolve=True)
             assert isinstance(skyrl, dict)
             parameters["num_nodes"] = derive_num_nodes(derive_role_plan(skyrl))
-            compiled = compose_skyrl_config(parsed, parameters, config.iris.allocation)
+            inferred = replace(
+                parsed,
+                trainer={
+                    **parsed.trainer,
+                    "placement": {
+                        **parsed.trainer.get("placement", {}),
+                        "policy_num_nodes": skyrl["trainer"]["placement"]["policy_num_nodes"],
+                    },
+                },
+                generator={**parsed.generator, "num_inference_engines": skyrl["generator"]["num_inference_engines"]},
+            )
+            compiled = compose_skyrl_config(inferred, parameters, config.iris.allocation)
         OmegaConf.resolve(compiled.config)
     resolved = OmegaConf.create(OmegaConf.to_container(config, resolve=False))
     OmegaConf.set_struct(resolved, False)
@@ -270,8 +279,6 @@ def _fill_launch_fields(config: DictConfig, *, data_kind: str | None = None) -> 
     }
     if data_kind is not None:
         expected["inputs.data_kind"] = data_kind
-    elif OmegaConf.is_missing(config.inputs, "data_kind"):
-        expected["inputs.data_kind"] = "tasks"
     for path, value in expected.items():
         parent_path, _, name = path.rpartition(".")
         parent = OmegaConf.select(config, parent_path)

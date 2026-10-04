@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 import yaml
 from omegaconf import OmegaConf
+from omegaconf.errors import MissingMandatoryValue
 
 from cloud.iris import launch_config as launch_config_module
 from cloud.iris import training_driver
@@ -146,6 +147,47 @@ def test_launch_config_composes_and_loads_as_structured_hydra(
     assert json.dumps(OmegaConf.to_container(load_launch_config(path), resolve=True)) == json.dumps(
         OmegaConf.to_container(config, resolve=True)
     )
+    sparse_geometry = copy.deepcopy(omitted)
+    if nodes == 1:
+        del sparse_geometry["skyrl"]["trainer"]["placement"]["policy_num_nodes"]
+    else:
+        del sparse_geometry["skyrl"]["generator"]["num_inference_engines"]
+    path.write_text(yaml.safe_dump(sparse_geometry, sort_keys=False))
+    assert json.dumps(OmegaConf.to_container(load_launch_config(path), resolve=True)) == json.dumps(
+        OmegaConf.to_container(config, resolve=True)
+    )
+    for recipe_key, envelope_key in (("train_data", "train_data"), ("val_data", "validation_data")):
+        conflicting = copy.deepcopy(raw)
+        conflicting["skyrl"]["data"] = {recipe_key: ["/authored/data"]}
+        conflicting["inputs"][envelope_key] = [
+            {
+                "uri": "s3://data/gsm8k",
+                "identity": "sha256:gsm8k",
+                "local_path": "/tmp/data/gsm8k",
+                "relative_path": "train.parquet",
+                "kind": "directory",
+            }
+        ]
+        path.write_text(yaml.safe_dump(conflicting, sort_keys=False))
+        with pytest.raises(ValueError, match=f"data.{recipe_key} conflicts"):
+            load_launch_config(path)
+    for role in ("policy", "ref"):
+        oversized = copy.deepcopy(raw)
+        oversized["skyrl"]["trainer"]["placement"][f"{role}_num_gpus_per_node"] = 32
+        path.write_text(yaml.safe_dump(oversized, sort_keys=False))
+        with pytest.raises(ValueError, match="exceeds the available 8 GPUs"):
+            load_launch_config(path)
+    parquet = copy.deepcopy(omitted)
+    parquet["skyrl"]["data"] = {"kind": "parquet"}
+    path.write_text(yaml.safe_dump(parquet, sort_keys=False))
+    parquet_config = load_launch_config(path)
+    assert parquet_config.inputs.data_kind == "parquet"
+    OmegaConf.save(parquet_config, path)
+    assert load_launch_config(path).inputs.data_kind == "parquet"
+    del parquet_config.inputs.data_kind
+    OmegaConf.save(parquet_config, path)
+    with pytest.raises(MissingMandatoryValue, match="data_kind"):
+        load_launch_config(path)
     for section, key, value in (("ingress", "mode", "controller"), ("inputs", "data_kind", "parquet")):
         conflicting = copy.deepcopy(raw)
         conflicting.setdefault(section, {})[key] = value

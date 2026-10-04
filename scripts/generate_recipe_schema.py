@@ -20,6 +20,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_DIR = ROOT / "skyrl-train/skyrl_train/config"
 OUTPUT_DIR = ROOT / "marinskyrl/recipe_schema"
+BASE_CONFIG_NAME = "ppo_base_config"
 
 
 @dataclass(frozen=True)
@@ -83,16 +84,16 @@ def field_comments(source: Path, mount: str = "") -> dict[str, str]:
 
 
 def source_documents(config_dir: Path) -> SourceDocuments:
-    raw = yaml.safe_load((config_dir / "ppo_base_config.yaml").read_text())
+    raw = yaml.safe_load((config_dir / f"{BASE_CONFIG_NAME}.yaml").read_text())
     selections: dict[str, list[str]] = {}
     for selection in raw["defaults"]:
         if isinstance(selection, dict):
             for key in selection:
                 selections.setdefault(key.partition("@")[0], []).append(key)
     groups = {}
-    comments = field_comments(config_dir / "ppo_base_config.yaml")
+    comments = field_comments(config_dir / f"{BASE_CONFIG_NAME}.yaml")
     with initialize_config_dir(version_base=None, config_dir=str(config_dir.resolve())):
-        base = OmegaConf.to_container(compose(config_name="ppo_base_config"), resolve=False)
+        base = OmegaConf.to_container(compose(config_name=BASE_CONFIG_NAME), resolve=False)
         for folder in sorted(path for path in config_dir.iterdir() if path.is_dir()):
             for key in selections.get(folder.name, [folder.name]):
                 options = {}
