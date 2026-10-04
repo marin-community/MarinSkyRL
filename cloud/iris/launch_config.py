@@ -15,7 +15,7 @@ from skyrl_train.config.mismatch_probe import validate_mismatch_probe_config
 from skyrl_train.config.objective_spec import validate_objective
 
 from cloud.iris.ray_storage import RaySpillBackend, resolve_ray_spill_target
-from cloud.iris.role_plan import derive_num_nodes, derive_role_plan
+from cloud.iris.role_plan import ModelRoleKind, derive_num_nodes, derive_role_plan
 from cloud.iris.rl_config_translation import (
     compose_skyrl_config,
     parse_rl_config,
@@ -232,16 +232,18 @@ def _compose_source_recipe(config: DictConfig) -> DictConfig:
         if nodes_unset:
             skyrl = OmegaConf.to_container(compiled.config, resolve=True)
             assert isinstance(skyrl, dict)
-            parameters["num_nodes"] = derive_num_nodes(derive_role_plan(skyrl))
+            plan = derive_role_plan(skyrl)
+            parameters["num_nodes"] = derive_num_nodes(plan)
+            placement = {
+                **parsed.trainer.get("placement", {}),
+                "policy_num_nodes": skyrl["trainer"]["placement"]["policy_num_nodes"],
+            }
+            for claim in plan.claims:
+                if claim.kind is ModelRoleKind.REFERENCE:
+                    placement["ref_num_nodes"] = claim.num_nodes
             inferred = replace(
                 parsed,
-                trainer={
-                    **parsed.trainer,
-                    "placement": {
-                        **parsed.trainer.get("placement", {}),
-                        "policy_num_nodes": skyrl["trainer"]["placement"]["policy_num_nodes"],
-                    },
-                },
+                trainer={**parsed.trainer, "placement": placement},
                 generator={**parsed.generator, "num_inference_engines": skyrl["generator"]["num_inference_engines"]},
             )
             compiled = compose_skyrl_config(inferred, parameters, config.iris.allocation)

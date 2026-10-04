@@ -147,6 +147,20 @@ def test_launch_config_composes_and_loads_as_structured_hydra(
     assert json.dumps(OmegaConf.to_container(load_launch_config(path), resolve=True)) == json.dumps(
         OmegaConf.to_container(config, resolve=True)
     )
+    if nodes == 2:
+        for shared_reference in (True, False):
+            reference = copy.deepcopy(raw)
+            reference["skyrl"]["trainer"]["algorithm"]["use_kl_loss"] = True
+            reference["skyrl"]["trainer"]["placement"].update(colocate_policy_ref=shared_reference, ref_num_nodes=1)
+            reference["iris"]["allocation"]["num_nodes"] = 2 if shared_reference else 3
+            path.write_text(yaml.safe_dump(reference, sort_keys=False))
+            explicit_reference = OmegaConf.to_container(load_launch_config(path), resolve=True)
+            del reference["iris"]["allocation"]["num_nodes"]
+            del reference["skyrl"]["trainer"]["placement"]["ref_num_nodes"]
+            path.write_text(yaml.safe_dump(reference, sort_keys=False))
+            assert json.dumps(OmegaConf.to_container(load_launch_config(path), resolve=True)) == json.dumps(
+                explicit_reference
+            )
     sparse_geometry = copy.deepcopy(omitted)
     if nodes == 1:
         del sparse_geometry["skyrl"]["trainer"]["placement"]["policy_num_nodes"]

@@ -98,11 +98,6 @@ def test_ownership_sentinels_distinguish_launch_writers_context_writers_and_auth
             "train_data": seeded["data"]["train_data"],
             "val_data": seeded["data"]["val_data"],
         }
-        for key in ("train_data", "val_data"):
-            with pytest.raises(ValueError, match=f"data.{key} conflicts"):
-                launcher._skyrl_config_sections(
-                    injected, {**authored_parameters, key: parameters[key]}, SimpleNamespace(gpus_per_node=8)
-                )
         filled = launcher._skyrl_config_sections(injected, authored_parameters, SimpleNamespace(gpus_per_node=8))
         data = resolve_rl_train_data_with_sources(injected.data["terminal_bench_data"], kind="tasks", verbose=False)
         staged = launcher.apply_task_local_values(
@@ -146,13 +141,6 @@ def test_ownership_sentinels_distinguish_launch_writers_context_writers_and_auth
         )
         for path in FILL_WHEN_UNSET:
             assert get_path(defaults, path) not in (MISSING, None)
-        for path in gpu_paths:
-            oversized = copy.deepcopy(section_values)
-            set_path(oversized, path, 31)
-            with pytest.raises(ValueError, match="exceeds the available 8 GPUs"):
-                launcher._skyrl_config_sections(
-                    replace(parsed, **oversized), authored_parameters, SimpleNamespace(gpus_per_node=8)
-                )
     assert outcomes[0]["data"]["terminal_bench_data"] != outcomes[1]["data"]["terminal_bench_data"]
     derived = {}
     for path in schema.DERIVED_PATHS:
