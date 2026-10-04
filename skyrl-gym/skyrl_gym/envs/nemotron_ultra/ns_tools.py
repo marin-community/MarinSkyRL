@@ -40,10 +40,6 @@ def execute_python_calls(
                     timeout_seconds=timeout_seconds,
                     session_id=session_id,
                 )
-                if result.get("process_status") == "unknown" or (
-                    result.get("process_status") == "error" and not sandbox_output_text(result)
-                ):
-                    raise RuntimeError(f"Sandbox execution unavailable: {result}")
                 output = sandbox_output_text(result)
         observations.append({"role": "tool", "tool_call_id": str(call_id), "content": output})
     return observations

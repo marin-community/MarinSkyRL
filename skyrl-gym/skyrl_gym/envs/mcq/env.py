@@ -1,5 +1,8 @@
 from typing import Any
 
+from verifyit.modes.grade_mcq import grade_mcq_candidate
+from verifyit.spec import McqSpec
+
 from omegaconf import DictConfig
 
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
@@ -23,5 +26,6 @@ class MCQEnv(BaseTextEnv):
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
         answer = extract_mcq_answer(action)
-        reward = 1.0 if answer is not None and answer == self.ground_truth else 0.0
+        verdict = grade_mcq_candidate(McqSpec(expected=self.ground_truth, options=26), answer or "")
+        reward = verdict.reward
         return BaseTextEnvStepOutput(observations=[], reward=reward, done=True, metadata={})

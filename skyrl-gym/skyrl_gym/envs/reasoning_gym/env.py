@@ -19,6 +19,7 @@ class ReasoningGymEnv(BaseTextEnv):
 
     def __init__(self, env_config: DictConfig, extras: dict[str, Any] | None = None):
         super().__init__()
+        self.verifyit_enabled = bool(env_config.get("verifyit_enabled", False))
         reward_model = (extras or {}).get("reward_model")
         ground_truth = reward_model.get("ground_truth") if isinstance(reward_model, Mapping) else None
         try:
@@ -29,11 +30,34 @@ class ReasoningGymEnv(BaseTextEnv):
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
         if self.ground_truth is None:
+            if self.verifyit_enabled:
+                from skyrl_gym.verification import VerificationResult
+
+                return BaseTextEnvStepOutput(
+                    observations=[],
+                    reward=0.0,
+                    done=True,
+                    metadata={},
+                    verification=VerificationResult.error("invalid Reasoning Gym task"),
+                )
             return BaseTextEnvStepOutput(
                 observations=[],
                 reward=0.0,
                 done=True,
                 metadata={"verifier_error": "invalid reward_model.ground_truth"},
             )
-        reward = score_response(action, self.ground_truth)
+        try:
+            reward = score_response(action, self.ground_truth, verifyit_enabled=self.verifyit_enabled)
+        except (RuntimeError, ValueError) as error:
+            from skyrl_gym.verification import VerificationResult
+
+            return BaseTextEnvStepOutput(
+                observations=[],
+                reward=0.0,
+                done=True,
+                metadata={},
+                verification=VerificationResult.error(
+                    "verifier failed", diagnostics={"error_type": type(error).__name__}
+                ),
+            )
         return BaseTextEnvStepOutput(observations=[], reward=reward, done=True, metadata={})

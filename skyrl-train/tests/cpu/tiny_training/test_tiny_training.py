@@ -1,17 +1,22 @@
 """End-to-end CPU training through the production entrypoints on a tiny policy."""
 
 import multiprocessing
+import json
 from multiprocessing.context import ForkServerContext
 from pathlib import Path
 
 import pytest
 import torch
 from transformers import AutoModelForCausalLM
+from omegaconf import OmegaConf
+from skyrl_train.callbacks.base import TrainerCallback
+from skyrl_train.callbacks.builtin import register_callback
 
 from marinskyrl.checkpoint_paths import POLICY_CHECKPOINT_SUBDIRECTORY
 from tests.cpu.tiny_training.cpu_backend import CHECKPOINT_FILE_TEMPLATE, CausalLMPolicy
 from tests.cpu.tiny_training.fixed_batch import fixed_training_batch, run_fixed_update
 from skyrl_train.rollouts.payloads import ROLLOUT_OBJECT_SUFFIX
+from skyrl_train.training_batch import TrainingInputBatch
 from tests.cpu.tiny_training import experiment
 from tests.cpu.tiny_training.experiment import (
     MAX_STALENESS_STEPS,
@@ -33,6 +38,33 @@ RESUMED_STEP = 1
 # A run takes under half a minute on an idle host. The margin absorbs slower CI hosts and concurrent pytest-xdist
 # workers, and stays above the experiment's admission stall timeout so a stall reports its own error.
 RUN_TIMEOUT_SECONDS = 300
+
+
+@register_callback("test_step_limit")
+class _StepLimit(TrainerCallback):
+    def __init__(self, limit: int):
+        self.limit = limit
+
+    def on_train_begin(self, state, control, **kwargs):
+        control.step_limit = self.limit
+        trainer = kwargs["trainer"]
+        path = Path(trainer.cfg.trainer.export_path) / f"start-{state.global_step}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"checkpoint_path": trainer.loaded_checkpoint_path}))
+        return control
+
+
+def _run_limited_training(root: Path, model: Path, limits: tuple[int, ...]) -> None:
+    cfg = experiment.tiny_training_config(
+        root, model, TrainingMode.SYNC, RolloutShape.SINGLE_TURN, max_steps=1, checkpoint_interval=1
+    )
+    OmegaConf.update(
+        cfg,
+        "trainer.callbacks",
+        [{"type": "test_step_limit", "limit": limit} for limit in limits] + [{"type": "checkpoint", "save_steps": 1}],
+        force_add=True,
+    )
+    experiment.run_tiny_training(cfg)
 
 
 @pytest.fixture(scope="module")
@@ -61,7 +93,11 @@ def _train(
     run = runs.Process(
         target=run_experiment,
         args=(root, model, mode, shape),
-        kwargs={"max_steps": steps, "checkpoint_interval": checkpoint_interval},
+        kwargs={
+            "max_steps": steps,
+            "checkpoint_interval": checkpoint_interval,
+            "dump_data_batch": mode is TrainingMode.SYNC,
+        },
     )
     run.start()
     run.join(RUN_TIMEOUT_SECONDS)
@@ -82,6 +118,20 @@ def _assert_trained_to_max_steps(root: Path, mode: TrainingMode, shape: RolloutS
     # A batch whose samples all score alike, which happens by chance, leaves no advantage to train on.
     assert any(record["policy/raw_grad_norm"] > 0 for record in steps)
     assert max(record["async/staleness_max"] for record in steps) <= MAX_STALENESS_STEPS[mode]
+    if mode is TrainingMode.SYNC:
+        for step in range(1, NUM_STEPS + 1):
+            batch = TrainingInputBatch().load(root / f"exports/dumped_data/global_step_{step}_training_input.pkl")
+            eligible = batch["loss_mask"].bool()
+            expected = torch.zeros_like(batch["action_log_probs"], dtype=torch.float32)
+            expected[eligible] = (
+                (batch["action_log_probs"][eligible].float() - batch["rollout_logprobs"][eligible].float())
+                .exp()
+                .clamp(max=2)
+            )
+            torch.testing.assert_close(batch["correction_weights"], expected)
+            assert steps[step - 1]["policy/correction/weight_mean"] == pytest.approx(
+                expected.sum().item() / eligible.sum().item()
+            )
     if shape is RolloutShape.STEP_WISE:
         # A trajectory that answers wrongly on its first turn trains one sample per turn.
         trajectories = NUM_STEPS * TRAIN_BATCH_SIZE * N_SAMPLES_PER_PROMPT
@@ -128,12 +178,33 @@ def test_async_training_resumes_with_committed_groups(runs: ForkServerContext, t
     _assert_trained_to_max_steps(tmp_path, mode, shape)
 
 
+def test_callback_limits_resume_at_max_steps_and_keep_the_smallest_limit(runs, tmp_path, tiny_policy):
+    for limits in ((1,), (3, 4), (3,)):
+        run = runs.Process(target=_run_limited_training, args=(tmp_path, tiny_policy, limits))
+        run.start()
+        run.join(RUN_TIMEOUT_SECONDS)
+        if run.exitcode is None:
+            run.kill()
+            run.join()
+            pytest.fail("callback-limited training did not finish")
+        assert run.exitcode == 0
+    assert [record["trainer/global_step"] for record in _trained_steps(tmp_path)] == [1, 2, 3]
+    checkpoint = tmp_path / "ckpts" / "global_step_3" / "trainer_state.pt"
+    assert checkpoint.exists()
+    for step in (1, 3):
+        provenance = json.loads((tmp_path / "exports" / f"start-{step}.json").read_text())
+        assert provenance["checkpoint_path"] == str(tmp_path / "ckpts" / f"global_step_{step}")
+
+
 def test_one_step_is_independent_of_micro_batch_size(runs: ForkServerContext, tmp_path: Path, tiny_policy: Path):
     batch = fixed_training_batch(str(tiny_policy))
     model = CausalLMPolicy(AutoModelForCausalLM.from_pretrained(tiny_policy, dtype=torch.float32))
     log_probs = model(batch["sequences"], num_actions=4, attention_mask=batch["attention_mask"])
     ratios = (log_probs - batch["action_log_probs"]).exp()
-    loss = -(ratios * batch["advantages"] * batch["loss_mask"]).sum() / batch["loss_mask"].sum()
+    loss = (
+        -(ratios * batch["advantages"] * batch["correction_weights"] * batch["loss_mask"]).sum()
+        / batch["loss_mask"].sum()
+    )
     loss.backward()
     reference_norm = torch.linalg.vector_norm(
         torch.stack([parameter.grad.norm() for parameter in model.parameters() if parameter.grad is not None])

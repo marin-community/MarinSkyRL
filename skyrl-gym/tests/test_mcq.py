@@ -54,3 +54,22 @@ def test_env_agrees_with_the_preparation_contract(ground_truth, response):
     expected = 1.0 if contract.is_correct(response, ground_truth) else 0.0
 
     assert _env(ground_truth).step(response)["reward"] == expected
+
+
+@pytest.mark.parametrize(
+    ("response", "expected_reward"),
+    [
+        (r"\boxed{A} revised to \boxed{B}", 1.0),
+        (r"\boxed{B} revised to \boxed{A}", 0.0),
+        (r"\boxed{a}", 1.0),
+        (r"\boxed{AA}", 0.0),
+        (r"\boxed{A", 0.0),
+        ("Answer: A", 0.0),
+    ],
+)
+def test_env_preserves_first_box_extraction(response, expected_reward):
+    assert _env("A").step(response)["reward"] == expected_reward
+
+
+def test_env_rewards_last_alphabet_option():
+    assert _env("Z").step(r"\boxed{Z}")["reward"] == 1.0

@@ -83,14 +83,7 @@ class LocalRLRunner:
         # .remote() boundary as DATA — os.environ mutations here do NOT reach the
         # pre-existing Ray workers where HarborTrajectoryRunner is constructed.
         self._minted_agent_api_base: str | None = None
-        # Set by _ingress_context when record_literal stands up the co-located
-        # RecordProxy. Threaded into the SkyRL Hydra cfg (see run()) for the SAME
-        # process-boundary reason as _minted_agent_api_base: literal_proxy_utils
-        # publishes the log path via os.environ["OTAGENT_LITERAL_LOG_PATH"] in THIS
-        # driver, but the generator (which reads it to correlate opencode rollout
-        # details / rebuild chat_history) runs in a pre-existing Ray worker that never
-        # inherits this env → without the cfg thread every opencode trajectory loses
-        # its logprobs and TIS degrades on 100% of the batch.
+        # The generator's Ray worker reads the shared literal log path from configuration.
         self._literal_log_path: str | None = None
 
     def setup(self) -> None:
@@ -211,11 +204,7 @@ class LocalRLRunner:
             # inside a Ray worker that never inherits this process's HARBOR_MODEL_ENDPOINT
             # env — see _ingress_context / __init__). Snapshot cadence matches the
             # existing design (one api_base string baked for the job's lifetime).
-            # Thread the RecordProxy log path as cfg DATA too (same Ray boundary): the
-            # generator resolves the shared literal log from
-            # terminal_bench_config.literal_log_path (env fallback) to correlate each
-            # opencode trial's token_ids/logprobs + rebuild its chat_history. Without
-            # this the worker's os.environ lacks the path and TIS skips 100% of the batch.
+            # The generator uses this shared log to correlate token IDs, logprobs and chat history.
             skyrl_config = apply_task_local_values(
                 skyrl_config,
                 TaskLocalSkyRLValues(
@@ -282,10 +271,10 @@ class LocalRLRunner:
             select_literal_proxy_port,
         )
 
-        if not self.config.ingress_host:
+        if self.config.target_cluster and not self.config.ingress_host:
             raise ValueError(
-                "ingress_mode=controller requires --ingress_host (the public "
-                "controller-ingress host; iris.oa.dev for the federated CoreWeave path)."
+                "federated controller ingress (target_cluster set) requires --ingress_host, "
+                "the parent that mints the token (iris.oa.dev)."
             )
         # Federated parent-minting reads the parent (marin) controller config from the
         # env the launcher forwards; surface it here so a misconfig fails loud early.
@@ -326,7 +315,7 @@ class LocalRLRunner:
                     api_base = federated_capability_api_base(endpoint_name, ingress_host=self.config.ingress_host)
                     mint_where = f"PARENT (federated -> {self.config.target_cluster})"
                 else:
-                    api_base = capability_api_base(self.config.ingress_host, endpoint_name)
+                    api_base = capability_api_base(endpoint_name)
                     mint_where = "local controller"
                 # Publish the capability URL as the harbor-specific HARBOR_MODEL_ENDPOINT.
                 # opencode (harbor agents/installed/opencode.py::_build_register_config_command)

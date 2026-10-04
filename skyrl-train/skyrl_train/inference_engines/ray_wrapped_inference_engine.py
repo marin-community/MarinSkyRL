@@ -39,6 +39,7 @@ from skyrl_train.env_vars import (
     EnvVarScope,
     RUNAI_STREAMER_LOG_TO_STDERR_ENV,
     RUNAI_STREAMER_S3_REQUEST_TIMEOUT_MS_ENV,
+    NCCL_BUFFER_SIZE_ENV_VAR,
     VLLM_USE_V2_MODEL_RUNNER_ENV,
     managed_environment_names,
 )
@@ -48,10 +49,10 @@ from skyrl_train.utils import (
     ray_noset_visible_devices,
 )
 from skyrl_train.utils.constants import DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS
-from skyrl_train.utils.utils import use_per_engine_strict_pack_pg
+from skyrl_train.utils.utils import use_per_engine_pg
 from skyrl_train.inference_engines.placement import (
     colocated_engine_bundle_layout,
-    node_local_bundle_nodes,
+    inference_bundle_nodes,
     verified_inference_replica_placements,
 )
 
@@ -222,16 +223,19 @@ def _build_inference_engine_runtime_env(
     *,
     require_v1_model_runner: bool = False,
     runai_streamer_enabled: bool = False,
+    nccl_buffer_size_bytes: int | None = None,
 ) -> Dict[str, Any] | None:
     """Forward managed inference settings into each vLLM engine actor.
 
-    This covers NCCL diagnostics and batch invariance. Selected-ID scoring also
-    forces the V1 model runner. RunAI-backed engines also receive conservative
+    This covers NCCL diagnostics, the policy's weight-sync buffer size, and batch
+    invariance. Selected-ID scoring also forces the V1 model runner. RunAI-backed engines receive conservative
     S3 stall tolerance and stderr diagnostics. Returns ``None`` when no managed
     or derived settings apply.
     """
     passthrough = set(_NCCL_FR_ENV_PASSTHROUGH) | set(managed_environment_names(EnvVarScope.INFERENCE_WORKER))
     env_vars = {key: os.environ[key] for key in passthrough if key in os.environ}
+    if nccl_buffer_size_bytes is not None:
+        env_vars[NCCL_BUFFER_SIZE_ENV_VAR] = str(nccl_buffer_size_bytes)
     if require_v1_model_runner:
         # Selected-ID prompt scoring is implemented in vLLM's V1 GPU runner.
         # Set this before actor import so the EngineCore and TP workers agree.
@@ -297,7 +301,7 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     ):
         self.inference_engine_actor = inference_engine_actor
         self.weight_sync_relative_rank_offset = weight_sync_relative_rank_offset
-        # The verified placement of each worker of a node-local replica, in worker order.
+        # The verified placement of each worker of a replica, in worker order.
         self.worker_placements: list[InferenceReplicaPlacement] | None = None
 
     def tp_size(self):
@@ -514,6 +518,7 @@ def create_ray_wrapped_inference_engines(
     mp_backend: bool = False,
     placement_group_timeout_seconds: int = DEFAULT_RAY_PLACEMENT_GROUP_TIMEOUT_SECONDS,
     weight_sync_pause_policy: WeightSyncPausePolicy = DEFAULT_WEIGHT_SYNC_PAUSE_POLICY,
+    nccl_buffer_size_bytes: int | None = None,
 ) -> List[InferenceEngineInterface]:
     """
     Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface instances.
@@ -558,12 +563,11 @@ def create_ray_wrapped_inference_engines(
         if backend == "vllm" and "language_model_only" not in engine_init_kwargs
         else {}
     )
-    # #232 FIX B: NCCL flight-recorder env to forward into the engine actor (and,
-    # via placement_group_capture_child_tasks, its ray-backend TP worker actors).
-    # None for every run that does not set the TORCH_NCCL_* FR vars -> no change.
+    # Forward managed environment and the policy's NCCL buffer size into engine workers.
     inference_engine_runtime_env = _build_inference_engine_runtime_env(
         require_v1_model_runner=require_v1_model_runner,
         runai_streamer_enabled=engine_init_kwargs.get("load_format") == "runai_streamer",
+        nccl_buffer_size_bytes=nccl_buffer_size_bytes,
     )
     noset_visible_devices = ray_noset_visible_devices(ray.get(get_all_env_variables.remote()))
     use_hybrid_engine = shared_pg is not None
@@ -594,6 +598,7 @@ def create_ray_wrapped_inference_engines(
         and data_parallel_size > 1
         and not (use_hybrid_engine or use_mp_backend or inference_engine_enable_sleep)
     )
+    cross_node_ep = verify_workers and pipeline_parallel_size == 1 and expert_parallel_size == data_parallel_size
     node_hosts: dict[str, str] = {}
     node_gpu_capacities: dict[str, int] = {}
     if verify_workers:
@@ -631,30 +636,12 @@ def create_ray_wrapped_inference_engines(
         num_gpus_per_actor = 0.2
 
     per_engine_gpu_count = tensor_parallel_size * pipeline_parallel_size * data_parallel_size
-    # #232 ROOT-CAUSE FIX (cross-node TP all-reduce decode deadlock): when an engine
-    # spans MORE THAN ONE GPU (TP*PP > 1), create one PG PER ENGINE with STRICT_PACK,
-    # NOT a single flat PACK PG over all engines.
-    #
-    # The flat `placement_group(<all bundles>, strategy="PACK")` is SOFT — Ray packs
-    # bundles greedily to minimize node count but gives NO per-engine node-affinity:
-    # a single engine's `tp_pp_size` contiguous {GPU:1} bundles can land split across
-    # TWO nodes (observed: job 923995, a TP=4 engine straddling jpbo-091-30 + -38).
-    # When that happens, vLLM detects the TP process group spans nodes, DISABLES
-    # custom_all_reduce ("Custom allreduce is disabled because this process group
-    # spans across nodes"), and every per-decode-step TP all-reduce goes over the IB
-    # RDMA fabric instead of on-node NVLink. Under sustained 131k-context decode that
-    # cross-node NCCL all-reduce deadlocks (rank spins count-32768 AllReduce while its
-    # cross-node peers block on the RDMA transport) — exactly the Option-B wedge.
-    #
-    # Per-engine STRICT_PACK forces every engine's bundles onto ONE node (a STRICT_PACK
-    # PG is atomic-per-node), restoring the intended "TP=4 = one 4-GPU node, on-node
-    # NVLink all-reduce" guarantee. Bundle indices become engine-local (0..n-1).
-    # Multi-GPU engine ranks exchange collectives and must remain node-local. A
-    # single-GPU engine instead shares one flat PACK group so rollout allocation
-    # does not fragment nodes needed by the policy workers.
+    # Keep each multi-GPU engine node-local to avoid cross-node TP decode hangs (#232).
+    # TP=PP=1 expert parallelism can span nodes with every worker's placement checked.
+    # Single-GPU engines share a PACK group to leave whole nodes available for training.
     per_engine_pgs: list = []
     owned_placement_groups: list = []
-    use_per_engine_strict_pack = use_per_engine_strict_pack_pg(
+    needs_per_engine_pg = use_per_engine_pg(
         use_hybrid_engine=use_hybrid_engine,
         use_mp_backend=use_mp_backend,
         tensor_parallel_size=tensor_parallel_size,
@@ -679,15 +666,13 @@ def create_ray_wrapped_inference_engines(
             shared_pg = placement_group(bundles, strategy="PACK")
             owned_placement_groups.append(shared_pg)
             get_ray_pg_ready_with_timeout(shared_pg, timeout=placement_group_timeout_seconds)
-        elif use_per_engine_strict_pack:
-            # ray/uni backend, multi-GPU engines (TP*PP*DP > 1): one STRICT_PACK PG per
-            # engine so each engine's per_engine_gpu_count {GPU:1} bundles are
-            # guaranteed co-located on a single node (no cross-node TP all-reduce in
-            # decode). #232 fix.
+        elif needs_per_engine_pg:
+            # Each engine owns a group. TP/PP and ordinary DP groups remain node-local.
+            # PACK prefers fewer nodes but permits spanning them for verified TP=PP=1 EP replicas.
             for _ in range(num_inference_engines):
                 pg = placement_group(
                     [{"GPU": 1, "CPU": 1} for _ in range(per_engine_gpu_count)],
-                    strategy="STRICT_PACK",
+                    strategy="PACK" if cross_node_ep else "STRICT_PACK",
                 )
                 per_engine_pgs.append(pg)
                 owned_placement_groups.append(pg)
@@ -715,14 +700,15 @@ def create_ray_wrapped_inference_engines(
     else:
         placement_mode = EnginePlacementMode.SHARED
 
-    stage_nodes: list[list[str]] = []
+    bundle_nodes: list[list[str]] = []
     if verify_workers:
         try:
-            stage_nodes = node_local_bundle_nodes(
+            bundle_nodes = inference_bundle_nodes(
                 per_engine_pgs,
                 data_parallel_size=data_parallel_size,
                 node_gpu_capacities=node_gpu_capacities,
                 pipeline_parallel_size=pipeline_parallel_size,
+                expert_parallel_size=expert_parallel_size,
             )
         except Exception:
             _release_node_local_gang([], per_engine_pgs)
@@ -742,7 +728,7 @@ def create_ray_wrapped_inference_engines(
             placement_mode=placement_mode,
             colocated_engine_bundles=colocated_engine_bundles,
         )
-        if data_parallel_size > 1:
+        if data_parallel_size > 1 and not cross_node_ep:
             _validate_node_local_dp_ranks(i, engine_pg, dp_rank_bundle_indices)
 
         rendezvous = _reserve_engine_rendezvous(
@@ -1021,7 +1007,7 @@ def create_ray_wrapped_inference_engines(
             if verify_workers:
                 placements = verified_inference_replica_placements(
                     startup_results,
-                    stage_nodes=stage_nodes,
+                    bundle_nodes=bundle_nodes,
                     node_hosts=node_hosts,
                     relative_rank_offsets=weight_sync_relative_rank_offsets,
                     data_parallel_size=data_parallel_size,

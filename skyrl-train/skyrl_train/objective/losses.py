@@ -11,6 +11,8 @@ import torch
 from omegaconf import DictConfig
 
 from marinskyrl.runtime_options import PolicyLossType
+from skyrl_train.ftpo import FTPOInputs, ftpo_loss
+from skyrl_train.config.ftpo import ftpo_config
 from skyrl_train.tensor_math import masked_mean, safe_exp_delta
 from skyrl_train.utils.algorithm_registry import register_policy_loss
 
@@ -22,6 +24,7 @@ class PolicyLossInputs:
     rollout_log_probs: torch.Tensor | None
     advantages: torch.Tensor
     loss_mask: torch.Tensor
+    ftpo: FTPOInputs | None = None
 
 
 @dataclass(frozen=True)
@@ -97,17 +100,11 @@ def _ppo_terms(inputs: PolicyLossInputs, config: DictConfig) -> tuple[torch.Tens
     )
 
 
-def _tis_weights(inputs: PolicyLossInputs, config: DictConfig) -> torch.Tensor | float:
-    if not config.use_tis or inputs.rollout_log_probs is None:
-        return 1.0
-    return safe_exp_delta(inputs.old_log_probs - inputs.rollout_log_probs).clamp(max=config.tis_imp_ratio_cap)
-
-
 @register_policy_loss(PolicyLossType.REGULAR)
 def ppo_policy_loss(inputs: PolicyLossInputs, config: DictConfig) -> TokenLoss:
     """Return the pessimistic clipped policy surrogate against the old policy."""
     values, metrics = _ppo_terms(inputs, config)
-    return _token_loss(values * _tis_weights(inputs, config), inputs, metrics)
+    return _token_loss(values, inputs, metrics)
 
 
 @register_policy_loss(PolicyLossType.DUAL_CLIP)
@@ -116,7 +113,7 @@ def dual_clip_policy_loss(inputs: PolicyLossInputs, config: DictConfig) -> Token
     values, metrics = _ppo_terms(inputs, config)
     bound = torch.minimum(-inputs.advantages * config.clip_ratio_c, values)
     values = torch.where(inputs.advantages < 0, bound, values)
-    return _token_loss(values * _tis_weights(inputs, config), inputs, metrics)
+    return _token_loss(values, inputs, metrics)
 
 
 @register_policy_loss(PolicyLossType.IMPORTANCE_SAMPLING)
@@ -136,8 +133,6 @@ def behavior_clipped_policy_loss(inputs: PolicyLossInputs, config: DictConfig) -
     """Return pessimistic PPO clipping against the policy that generated each token."""
     if inputs.rollout_log_probs is None:
         raise ValueError("rollout_logprobs are required for behavior_clip policy loss")
-    if config.use_tis:
-        raise ValueError("behavior_clip cannot be combined with use_tis")
     ratio = safe_exp_delta(inputs.log_probs - inputs.rollout_log_probs)
     unclipped = -inputs.advantages * ratio
     clipped = -inputs.advantages * ratio.clamp(1 - config.eps_clip_low, 1 + config.eps_clip_high)
@@ -256,3 +251,13 @@ def compute_policy_loss_kl_cov(inputs: PolicyLossInputs, config: DictConfig) -> 
         penalty_mask[selected] = 1
         values = values + penalty_mask.reshape_as(values) * config.kl_cov.ppo_kl_coef * delta.abs()
     return _token_loss(values, inputs, {})
+
+
+@register_policy_loss(PolicyLossType.FTPO)
+def ftpo_policy_loss(inputs: PolicyLossInputs, config: DictConfig) -> TokenLoss:
+    """Optimize chosen alternatives at detected loop boundaries."""
+    params = ftpo_config(config)
+    if inputs.ftpo is None or params is None:
+        raise ValueError("FTPO requires candidate masks and raw reference logits")
+    values, metrics = ftpo_loss(inputs.ftpo, params)
+    return TokenLoss(values, metrics)

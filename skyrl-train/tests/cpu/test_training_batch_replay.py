@@ -7,6 +7,7 @@ import pytest
 import torch
 from omegaconf import OmegaConf
 
+from skyrl_train.dataset.routed_expert_batch import RoutedExpertRows
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.training_batch import TrainingInputBatch
 from tests.training_batch_replay import (
@@ -85,6 +86,22 @@ def test_training_batch_artifact_round_trips_tensors_metadata_and_manifest(tmp_p
         "rollout_routed_experts": {"dtype": "torch.int16", "shape": [2, 3, 2, 2]},
         "sequences": {"dtype": "torch.int64", "shape": [2, 3]},
     }
+
+
+def test_training_batch_artifact_preserves_compact_router_targets(tmp_path: Path):
+    original = _batch()
+    dense = original.pop("rollout_routed_experts")
+    rows = (dense[0, :2].numpy().copy(), dense[1, :1].numpy().copy())
+    original.routed_expert_rows = RoutedExpertRows(rows, response_len=3, num_experts=512)
+    artifact_path = tmp_path / "step-7-pre-forward"
+
+    save_training_batch_artifact(artifact_path, original, _provenance())
+    restored = load_training_batch_artifact(artifact_path, expected=_provenance())
+
+    expected = torch.zeros((2, 2, 2, 2), dtype=dense.dtype)
+    expected[0] = dense[0, :2]
+    expected[1, 0] = dense[1, 0]
+    torch.testing.assert_close(restored.routed_experts_tensor(), expected)
 
 
 def test_training_batch_artifact_is_not_published_when_serialization_fails(tmp_path: Path):

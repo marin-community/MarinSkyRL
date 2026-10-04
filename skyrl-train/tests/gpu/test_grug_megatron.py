@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import os
 from pathlib import Path
 
 import pytest
@@ -526,7 +527,11 @@ def test_grug_megatron_four_gpu_pp2_disaggregated_rollout_train_broadcast_rollou
 
 
 @pytest.mark.vllm
-def test_grug_megatron_two_gpu_colocated_sleep_sync_preserves_grouped_experts(tmp_path):
+@pytest.mark.parametrize(
+    "moe_backend",
+    ["triton"] + (["flashinfer_cutlass"] if os.environ.get("GRUG_CUTLASS_WEEKLY") == "1" else []),
+)
+def test_grug_megatron_two_gpu_colocated_sleep_sync_preserves_grouped_experts(tmp_path, moe_backend):
     """A sleep-level-2 CUDA-IPC sync preserves grouped experts and serving output."""
 
     world_size = 2
@@ -536,9 +541,8 @@ def test_grug_megatron_two_gpu_colocated_sleep_sync_preserves_grouped_experts(tm
     _write_tiny_checkpoint(model_path)
     cfg = _config(str(model_path), world_size=world_size, pp=1, ep=2)
     cfg.trainer.placement.colocate_all = True
-    # A cold FlashInfer-CUTLASS build stays memory-safe by using the frozen
-    # runtime's bounded compiler pool, so allow it to outlive the usual startup window.
-    cfg.generator.engine_init_timeout_seconds = 4200
+    if moe_backend == "flashinfer_cutlass":
+        cfg.generator.engine_init_timeout_seconds = 4200
     # Force each completed tensor into its own transport chunk. Before grouped-export-safe
     # chunking, this threshold split the conversion tasks and silently omitted the experts.
     cfg.generator.weight_transfer_threshold_cuda_ipc_GB = 1e-9
@@ -550,7 +554,7 @@ def test_grug_megatron_two_gpu_colocated_sleep_sync_preserves_grouped_experts(tm
         str(model_path),
         shared_pg=shared_pg,
         inference_engine_enable_sleep=True,
-        moe_backend="flashinfer_cutlass",
+        moe_backend=moe_backend,
     )
     try:
         asyncio.run(client.wake_up())
@@ -576,7 +580,7 @@ def test_grug_megatron_two_gpu_colocated_sleep_sync_preserves_grouped_experts(tm
             num_nodes=1,
             cfg=cfg,
         )
-        # Expert storage is deliberately reordered by FlashInfer-CUTLASS finalization, so raw
+        # Expert storage is reordered by FlashInfer-CUTLASS finalization, so raw
         # readback is not an HF-layout invariant. Serving parity below exercises the experts in
         # their actual kernel layout; keep bytewise readback for layout-neutral weights.
         sync_names = [LM_HEAD_NAME, ROUTER_NAME]

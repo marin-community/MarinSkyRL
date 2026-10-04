@@ -3,15 +3,14 @@ name: Marin Nightly E2E
 
 on:
   schedule:
-    - cron: "0 9 * * *"
+    - cron: "0 9 * * 1-6"
+    - cron: "0 9 * * 0"
   workflow_dispatch:
     inputs:
-      model:
-        description: "HF model id to train"
-        default: Qwen/Qwen3-0.6B
-      max_steps:
-        description: "Training steps to run"
-        default: "30"
+      grug_cutlass:
+        description: Include the weekly Grug CUTLASS case alongside nightly Triton
+        type: boolean
+        default: false
       target_cluster:
         description: "Iris cluster to federate the job to"
         default: cw-rno2a
@@ -27,17 +26,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - lane: gsm8k-h100
-            target_cluster: ${{ github.event.inputs.target_cluster || 'cw-rno2a' }}
-            gpu: H100x1
-            cpu: 8
-            memory: 64GB
-            iris_timeout: 5400
-            workflow_timeout_minutes: 100
-            task_script: skyrl-train/ci/marin_nightly/run_h100.sh
-            log: nightly.log
           - lane: opd-sync-h100
-            target_cluster: ${{ github.event.inputs.target_cluster || 'cw-rno2a' }}
             gpu: H100x4
             cpu: 32
             memory: 192GB
@@ -46,14 +35,18 @@ jobs:
             task_script: skyrl-train/ci/marin_nightly/run_opd_h100.sh
             log: opd-nightly.log
           - lane: grug-megatron-h100
-            target_cluster: ${{ github.event.inputs.target_cluster || 'cw-rno2a' }}
             gpu: H100x4
             cpu: 32
             memory: 256GB
             iris_timeout: 7200
-            workflow_timeout_minutes: 140
+            workflow_timeout_minutes: ${{ (github.event.schedule == '0 9 * * 0' || inputs.grug_cutlass) && 140 || 100 }}
             task_script: skyrl-train/ci/marin_nightly/run_grug_megatron.sh
             log: grug-megatron.log
+          - lane: cat-count-h100
+            workflow_timeout_minutes: 55
+            submit: runner
+            task_script: skyrl-train/ci/marin_nightly/run_cat_count_h100.sh
+            log: cat-count-nightly.log
     runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.workflow_timeout_minutes }}
     permissions:
@@ -61,53 +54,22 @@ jobs:
       id-token: write
     env:
       JOB_NAME: marinskyrl-nightly-${{ matrix.lane }}-${{ github.run_id }}-${{ github.run_attempt }}
-      MAX_STEPS: ${{ github.event.inputs.max_steps || '30' }}
-      MODEL: ${{ github.event.inputs.model || 'Qwen/Qwen3-0.6B' }}
-      STRATEGY: megatron
-      TARGET_CLUSTER: ${{ matrix.target_cluster }}
+      TARGET_CLUSTER: ${{ github.event.inputs.target_cluster || 'cw-rno2a' }}
+      GRUG_CUTLASS_WEEKLY: ${{ (github.event.schedule == '0 9 * * 0' || inputs.grug_cutlass) && '1' || '0' }}
     steps:
       - uses: actions/checkout@v7
 
       - name: Trim the Iris bundle
-        run: git rm -r --quiet skyrl-train/docs skyrl-agent
-
-      # task_runtime.py refuses to start without a runtime-bundle identity, and the pod cannot
-      # write one: Iris strips .git from the bundle, and the identity comes from a git checkout.
-      # Stamp it here, where the real launcher stamps it.
-      #
-      # The file MUST stay untracked and unignored. Committing it freezes hashes that go stale at
-      # the next edit to a bundled file; gitignoring it drops it from the bundle, because Iris
-      # collects with `git ls-files --exclude-standard`, and the pod then refuses to start.
-      - name: Stamp the runtime bundle identity
-        if: matrix.lane == 'gsm8k-h100'
-        run: |
-          PYTHONPATH=. python3 - <<'PY'
-          import shutil
-          import subprocess
-          from pathlib import Path
-
-          from cloud.iris.runtime_bundle import BUNDLE_IDENTITY_FILE, build_runtime_bundle
-
-          commit = subprocess.run(
-              ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True
-          ).stdout.strip()
-          workspace = build_runtime_bundle(commit)
-          shutil.copy2(workspace / BUNDLE_IDENTITY_FILE, Path(BUNDLE_IDENTITY_FILE))
-          print(f"stamped {BUNDLE_IDENTITY_FILE} for {commit}")
-          PY
+        run: git rm -r --quiet skyrl-train/docs
 
       - uses: ./.github/actions/setup-iris
 
       - name: Run ${{ matrix.lane }}
         run: |
           set -o pipefail
-          TASK_ENV=()
-          if [[ "${{ matrix.lane }}" == "gsm8k-h100" ]]; then
-            # The attempt matters: a re-run reuses the workflow run id, and two runs sharing a
-            # telemetry identity overlay each other on the dashboard.
-            RUN_ID="nightly-${{ matrix.lane }}-$STRATEGY-$(date -u +%Y.%m.%d)-${{ github.run_id }}-${{ github.run_attempt }}"
-            echo "RUN_ID=$RUN_ID" >> "$GITHUB_ENV"
-            TASK_ENV=(-e MODEL "$MODEL" -e MAX_STEPS "$MAX_STEPS" -e RUN_ID "$RUN_ID" -e STRATEGY "$STRATEGY")
+          if [[ "${{ matrix.submit }}" == "runner" ]]; then
+            bash "${{ matrix.task_script }}" 2>&1 | tee "${{ matrix.log }}"
+            exit
           fi
           iris --cluster marin job run \
             --target-cluster "$TARGET_CLUSTER" \
@@ -116,20 +78,20 @@ jobs:
             --cpu "${{ matrix.cpu }}" --memory "${{ matrix.memory }}" --disk 200GB \
             --no-sync \
             --timeout "${{ matrix.iris_timeout }}" \
-            "${TASK_ENV[@]}" \
+            -e GRUG_CUTLASS_WEEKLY "$GRUG_CUTLASS_WEEKLY" \
             -- bash "${{ matrix.task_script }}" 2>&1 | tee "${{ matrix.log }}"
 
       - name: Cancel any Iris job the run left behind
         if: always()
-        run: iris --cluster marin job cancel "/runner/$JOB_NAME" || true
+        run: |
+          iris --cluster marin job cancel --prefix "/runner/$JOB_NAME" || true
 
       # The report reaches the runner only through the streamed log, so a missing report means the
       # lane never got that far.
       - name: Summarize the run's dashboard
-        # Absent RUN_ID means the job failed in setup, so there is nothing to summarize.
-        if: always() && matrix.lane == 'gsm8k-h100' && env.RUN_ID != ''
+        if: always() && matrix.lane == 'cat-count-h100'
         run: |
-          python3 - "${{ matrix.log }}" "$RUN_ID" "$TARGET_CLUSTER" <<'PY'
+          python3 - "${{ matrix.log }}" "$TARGET_CLUSTER" <<'PY'
           import json
           import os
           import pathlib
@@ -137,12 +99,7 @@ jobs:
 
           # `::warning::` is read from stdout; the summary is a file. One stream loses the other.
           summary = open(os.environ["GITHUB_STEP_SUMMARY"], "a")
-          log, run_id, cluster = sys.argv[1], sys.argv[2], sys.argv[3]
-          url = (
-              f"https://grafana.oa.dev/d/marin-rl-runs?var-cluster={cluster}"
-              f"&var-run={run_id}&from=now-24h&to=now"
-          )
-          print(f"### RL run view\n\n[{run_id}]({url})\n", file=summary)
+          log, cluster = sys.argv[1], sys.argv[2]
 
           marker = "NIGHTLY_TELEMETRY_READINESS"
           if not pathlib.Path(log).exists():
@@ -155,6 +112,12 @@ jobs:
               raise SystemExit(0)
 
           report = json.loads(lines[-1].split(marker, 1)[1])
+          run_id = report["run_id"]
+          url = (
+              f"https://grafana.oa.dev/d/marin-rl-runs?var-cluster={cluster}"
+              f"&var-run={run_id}&from=now-24h&to=now"
+          )
+          print(f"### RL run view\n\n[{run_id}]({url})\n", file=summary)
           if "error" in report:
               print(f"Readiness could not be checked: `{report['error']}`", file=summary)
               raise SystemExit(0)
@@ -193,8 +156,11 @@ jobs:
           trigger-token: ${{ secrets.LOOM_TRIGGER_GH_TOKEN }}
           slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
           triage-notes: >-
-            The nightly runs dense H100 GRPO and a Grug Megatron rollout/train/broadcast
-            cycle through WIF-authenticated Iris jobs. Separate Iris or cluster failures
-            from lock, native-extension, and training regressions. A repository-local PR
+            The nightly runs OPD, Grug Megatron and the asynchronous
+            CatCount learning gate through WIF-authenticated Iris jobs. CatCount reports
+            INFRASTRUCTURE_FAILURE and retries once when no native training row reached
+            the log. Failures after training starts and metric violations are GATE_FAILURE.
+            Inspect the native log to distinguish placement, connection, lock,
+            native-extension and training failures. A repository-local PR
             that fixes the tracked failure must end its body with a Fixes link to this
             issue. Use Part of only when the PR does not restore the lane.

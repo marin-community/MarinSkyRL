@@ -99,7 +99,6 @@ def record_training_metrics(metrics: Mapping[str, object], *, step: int, kind: s
                 "eval/",
                 "env/",
                 ENVIRONMENT_METRIC_PREFIX,
-                "tis/",
             )
         ):
             continue

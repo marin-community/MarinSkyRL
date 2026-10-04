@@ -31,7 +31,7 @@ def test_step_reduction_matches_full_batch_for_any_split(mode, row, micro_batch,
                 term = term / row_weight
             reference = reference + term
     denominator = {
-        LossReduction.TOKEN_MEAN: max(token_count, 1),
+        LossReduction.TOKEN_MEAN: (token_count or 1),
         LossReduction.SEQUENCE_MEAN: max(row_count, 1),
         LossReduction.SEQ_MEAN_TOKEN_SUM_NORM: max(row_count, 1) * 4,
         LossReduction.SEQ_MEAN_TOKEN_SUM_NORM_GLOBAL: max(nonzero_rows, 1) * 4,
@@ -98,7 +98,7 @@ def test_empty_and_masked_positions_have_zero_value_and_gradient(mode):
     )
     result.backward()
     expected = {
-        LossReduction.TOKEN_MEAN: 1.5,
+        LossReduction.TOKEN_MEAN: 6.0,
         LossReduction.SEQUENCE_MEAN: 6.0,
         LossReduction.SEQ_MEAN_TOKEN_SUM_NORM: 0.75,
         LossReduction.SEQ_MEAN_TOKEN_SUM_NORM_GLOBAL: 0.75,

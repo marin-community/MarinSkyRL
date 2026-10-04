@@ -10,7 +10,7 @@ from skyrl_train.distillation import (
     TeacherTopKInput,
     TeacherScoreRequest,
     TopKTeacherEvidence,
-    prepare_sparse_forward_kl,
+    prepare_teacher_topk,
 )
 from skyrl_train.distillation_adapters import (
     AdmittedGroupDistillationAdapter,
@@ -165,7 +165,7 @@ def test_routed_sparse_evidence_reassembles_original_row_order():
         scored.append(
             ScoredDistillationBatch(
                 evidence,
-                prepare_sparse_forward_kl(request, evidence, coefficient=0.5, route_weights=torch.ones(1, 2)),
+                prepare_teacher_topk(request, evidence, coefficient=0.5, route_weights=torch.ones(1, 2)),
             )
         )
     routed_work = RoutedTeacherScoringWork(

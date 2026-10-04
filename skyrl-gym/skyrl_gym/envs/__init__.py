@@ -76,3 +76,8 @@ register(
     id="nemotron_ultra",
     entry_point="skyrl_gym.envs.nemotron_ultra.env:NemotronUltraEnv",
 )
+
+register(
+    id="nupa",
+    entry_point="skyrl_gym.envs.nupa.env:NUPAEnv",
+)

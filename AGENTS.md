@@ -12,10 +12,6 @@ planned. The Marin coding standards in `.agents/marin-style/AGENTS-core.md` ther
 apply to the whole repository, not to a Marin-authored subset — reformat, refactor, and
 delete dead code freely. There is no upstream diff to keep small.
 
-The one exception is `skyrl-agent/`, which is a dormant snapshot that nothing builds or
-tests. It is excluded from lint (see `[tool.marin-style]` in `pyproject.toml`); leave it
-alone rather than churning it.
-
 ## Repo map
 
 The root `marinskyrl` distribution owns the launcher and trainer dependency graph. It is deliberately a
@@ -28,7 +24,6 @@ lockfiles and virtualenvs.
 | `skyrl-train/` | bundled | Trainer source, examples, and CPU/GPU tests included in the root wheel. |
 | `skyrl-gym/` | bundled + independent | Gymnasium-style RL environments included in the root wheel; its standalone package remains independently testable. |
 | `skyrl-tx/` | active | A JAX/Flax inference + fine-tuning engine (`tx`), independent of the trainer. Has its own CI. |
-| `skyrl-agent/` | dormant | An older agent-harness snapshot. Not built, not tested, not linted. |
 
 ## Install and test
 

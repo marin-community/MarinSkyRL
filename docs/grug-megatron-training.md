@@ -148,3 +148,25 @@ at PP1, PP2, and PP2+EP2, a PP2 training step with an export round trip, and a
 four-H100 disaggregated cycle with Marin vLLM. Run it on Iris with
 `skyrl-train/ci/marin_nightly/run_grug_megatron.sh`, which resolves the frozen
 `megatron` runtime profile.
+
+## Restore memory and deadlines
+
+Megatron training restore accepts CoreWeave `s3://` checkpoints in untransformed
+`torch_dist` format. The resolved filesystem endpoint must be `cwobject.com`
+(off-cluster) or `cwlota.com` (in-cluster). Other sources fail before loading.
+
+Each worker buffers one complete saved record, copies the requested slice into
+its destination, and releases the decoded CPU tensor before reading the next
+record. Uncached S3 streams avoid retaining read-ahead blocks between records.
+Workers read independently. The checkpoint format is unchanged.
+
+Temporary read memory scales with the number of workers per pod and the largest
+saved record, even when a rank only needs a small slice. Leave host-memory room
+for the serialized buffers and decoded tensors alongside model and optimizer
+destinations, restored non-tensor state, metadata, allocator caches, Ray's object
+store, and Megatron's subsequent replica exchange. A record that exceeds this
+headroom can still cause an OOM.
+
+Large restores can take longer than the default collective deadline. Set
+`trainer.distributed.worker_collective_timeout_seconds` before starting workers;
+WORLD and Megatron's model-parallel subgroups use the same configured deadline.

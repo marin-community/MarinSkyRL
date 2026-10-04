@@ -1,0 +1,6 @@
+FROM us-east1-docker.pkg.dev/hai-gcp-models/marin/nemo-skills-sandbox@sha256:280e0871b02f5dc935c1b3fdfbf75c394cceb087a0a284b13918aeb22e10b104
+
+COPY nemo-skills-sandbox.patch /tmp/nemo-skills-sandbox.patch
+RUN patch --batch --fuzz=0 /app/main.py /tmp/nemo-skills-sandbox.patch
+COPY test_nemo_skills_sessions.py /app/test_nemo_skills_sessions.py
+RUN python /app/test_nemo_skills_sessions.py

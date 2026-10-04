@@ -17,6 +17,7 @@ from skyrl_train.distributed.megatron.model_utils import (
     vocab_parallel_entropy,
 )
 from skyrl_train.distributed.megatron.megatron_utils import get_model_config
+from skyrl_train.ftpo import FTPOTargets, FTPOInputs, boundary_values, compact_boundary_logits, ftpo_counts
 from skyrl_train.distillation import TopKEvidence, student_topk_logprobs
 from skyrl_train.models.megatron_router_replay import MegatronRouterReplay
 from skyrl_train.config.objective_spec import topk_loss_params
@@ -63,6 +64,18 @@ class MegatronForwardMicroBatch:
     position_ids: torch.Tensor
     num_actions: int
     rollout_routed_experts: Optional[torch.Tensor] = None
+    ftpo_chosen_mask: torch.Tensor | None = None
+    probe_row_indices: Optional[torch.Tensor] = None
+
+
+@dataclass(frozen=True)
+class RouterReplayTargets:
+    """Per-layer router targets and aligned row masks for one forward."""
+
+    per_layer: dict[int, torch.Tensor]
+    mask: torch.Tensor
+    response_mask: torch.Tensor
+    probe_positions: Optional[torch.Tensor]
 
 
 @dataclass(frozen=True)
@@ -80,6 +93,8 @@ class MegatronPolicyMicroBatch:
     rollout_action_logprobs: Optional[torch.Tensor]
     response_span_tags: Optional[torch.Tensor]
     distillation: Optional[TopKEvidence] = None
+    ftpo: FTPOTargets | None = None
+    correction_weights: Optional[torch.Tensor] = None
     rollout_routed_experts: Optional[torch.Tensor] = None
 
 
@@ -95,8 +110,10 @@ class MegatronModelWrapper:
         actor_optimizer: Optional[torch.optim.Optimizer] = None,
         policy_loss_fn: Optional[Callable] = None,
         logprob_chunk_size: Any = _UNSET,
+        vocabulary_size: int | None = None,
     ):
         self.cfg = config
+        self.vocabulary_size = vocabulary_size
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
         self.policy_loss_fn = policy_loss_fn
@@ -184,6 +201,7 @@ class MegatronModelWrapper:
         rollout_routed_experts: torch.Tensor,
         num_actions: int,
         layer_indices: tuple[int, ...],
+        probe_row_indices: Optional[torch.Tensor] = None,
     ):
         """Build per-layer router targets in the exact token order the routers see.
 
@@ -192,8 +210,8 @@ class MegatronModelWrapper:
         (packing or left-pad removal, with the CP chunk split), flattens
         sequence-major (``s*B + b``, mirroring the router view), and slices to
         this TP rank's contiguous sequence chunk under sequence parallelism.
-        Returns ``(per_layer, mask, response_mask)`` keyed by capture index for
-        the layers the model chunk about to run owns.
+        The result contains per-layer targets, replay and response masks, and
+        optional probe positions aligned to the model chunk's router rows.
         """
         controller = self.router_replay
         assert controller is not None
@@ -214,7 +232,15 @@ class MegatronModelWrapper:
         device = sequences.device
         dense, mask_BS = dense_replay_targets(rollout_routed_experts, batch_size, seq_len, num_actions)
         response_BS = torch.zeros_like(mask_BS)
-        response_BS[:, seq_len - response_len :] = True
+        response_BS[:, seq_len - num_actions :] = True
+        probe_positions = None
+        if probe_row_indices is not None:
+            if probe_row_indices.shape != (batch_size,):
+                raise ValueError("probe row indices must have one entry per sequence")
+            # Zero encodes padding through the shared sequence transforms.
+            probe_positions = torch.zeros((batch_size, seq_len, 2), dtype=torch.long, device=device)
+            probe_positions[:, seq_len - num_actions :, 0] = probe_row_indices[:, None] + 1
+            probe_positions[:, seq_len - num_actions :, 1] = torch.arange(1, num_actions + 1, device=device)
 
         if self.use_sample_packing:
             # The routes tensor is ours, not the pipeline's input: always run the
@@ -223,16 +249,24 @@ class MegatronModelWrapper:
             dense, _ = preprocess_packed_seqs(dense, attention_mask, pre_process=True)
             mask_BS, _ = preprocess_packed_seqs(mask_BS, attention_mask, pre_process=True)
             response_BS, _ = preprocess_packed_seqs(response_BS, attention_mask, pre_process=True)
+            if probe_positions is not None:
+                probe_positions, _ = preprocess_packed_seqs(probe_positions, attention_mask, pre_process=True)
         else:
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids = position_ids.masked_fill(attention_mask == 0, 0)
             dense, _, _ = remove_left_padding(dense, attention_mask, position_ids, pre_process=True)
             mask_BS, _, _ = remove_left_padding(mask_BS, attention_mask, position_ids, pre_process=True)
             response_BS, _, _ = remove_left_padding(response_BS, attention_mask, position_ids, pre_process=True)
+            if probe_positions is not None:
+                probe_positions, _, _ = remove_left_padding(
+                    probe_positions, attention_mask, position_ids, pre_process=True
+                )
 
         flat = sequence_major_flatten(dense)
         mask = sequence_major_flatten(mask_BS)
         response_mask = sequence_major_flatten(response_BS)
+        if probe_positions is not None:
+            probe_positions = sequence_major_flatten(probe_positions) - 1
         tp_size = mpu.get_tensor_model_parallel_world_size()
         if tp_size > 1:
             # Under TP sequence parallelism the router sees this rank's
@@ -247,8 +281,10 @@ class MegatronModelWrapper:
             flat = slice_sequence_parallel(flat, **slice_kwargs)
             mask = slice_sequence_parallel(mask, **slice_kwargs)
             response_mask = slice_sequence_parallel(response_mask, **slice_kwargs)
+            if probe_positions is not None:
+                probe_positions = slice_sequence_parallel(probe_positions, **slice_kwargs)
         per_layer = {idx: flat[:, idx, :].to(device) for idx in layer_indices}
-        return per_layer, mask.to(device), response_mask.to(device)
+        return RouterReplayTargets(per_layer, mask.to(device), response_mask.to(device), probe_positions)
 
     def _forward_micro_batch(
         self,
@@ -257,6 +293,7 @@ class MegatronModelWrapper:
         attention_mask,
         position_ids,
         rollout_routed_experts: Optional[torch.Tensor] = None,
+        probe_row_indices: Optional[torch.Tensor] = None,
         num_actions: Optional[int] = None,
         record_recompute: bool = False,
     ):
@@ -277,10 +314,16 @@ class MegatronModelWrapper:
             layer_indices = self.router_replay.local_indices_for_module.get(
                 id(model), self.router_replay.local_layer_indices
             )
-            per_layer, mask, response_mask = self._build_router_replay_targets(
-                sequences, attention_mask, rollout_routed_experts, num_actions, layer_indices
+            targets = self._build_router_replay_targets(
+                sequences, attention_mask, rollout_routed_experts, num_actions, layer_indices, probe_row_indices
             )
-            self.router_replay.begin_forward(per_layer, mask, response_mask, record_recompute=record_recompute)
+            self.router_replay.begin_forward(
+                targets.per_layer,
+                targets.mask,
+                targets.response_mask,
+                record_recompute=record_recompute,
+                probe_positions=targets.probe_positions,
+            )
             armed = True
         try:
             if self.use_sample_packing:
@@ -328,7 +371,7 @@ class MegatronModelWrapper:
         temperature: float = 1.0,
     ) -> torch.Tensor:
         """
-        Forward-only inference to compute log-probs over a full mini-batch consisting of multiple micro-batches.
+        Score response tokens, or return raw vocabulary logits at FTPO boundaries.
 
         Args:
             micro_batches: Typed forward micro-batches.
@@ -337,18 +380,24 @@ class MegatronModelWrapper:
             temperature: Optional temperature scaling for logits.
 
         Returns:
-            torch.Tensor of concatenated log-probs across micro-batches (valid on pipeline last stage only).
+            Concatenated response log-probabilities [B,T], or FTPO boundary logits [B,V].
+            Valid on the pipeline last stage only.
         """
         forward_backward_func = get_forward_backward_func()
 
         def collection_func(logits, data, packed_seq_params):
             sequences = data.sequences
+            if data.ftpo_chosen_mask is not None:
+                boundary_logits = compact_boundary_logits(
+                    logits[..., : self.vocabulary_size], data.attention_mask, data.ftpo_chosen_mask
+                )
+                return boundary_logits.new_zeros(()), {"scores": boundary_logits}
 
             if temperature != 1.0:
                 logits.div_(temperature)
 
             token_logprobs = self._token_logprobs(logits, sequences, data.attention_mask.to(bool), packed_seq_params)
-            return torch.tensor(0.0, device=token_logprobs.device), {"log_probs": token_logprobs}
+            return torch.tensor(0.0, device=token_logprobs.device), {"scores": token_logprobs}
 
         def forward_step(batch_iter, model):
             batch = next(batch_iter)
@@ -358,6 +407,7 @@ class MegatronModelWrapper:
                 batch.attention_mask,
                 batch.position_ids,
                 rollout_routed_experts=batch.rollout_routed_experts,
+                probe_row_indices=batch.probe_row_indices,
                 num_actions=batch.num_actions,
             )
 
@@ -382,17 +432,18 @@ class MegatronModelWrapper:
             self.router_replay.pop_metrics()
 
         if mpu.is_pipeline_last_stage(ignore_virtual=True):
-            log_probs = [o["log_probs"] for o in output]
-            log_probs = torch.cat(log_probs, dim=0)
+            scores = [o["scores"] for o in output]
+            scores = torch.cat(scores, dim=0)
             # take last num_actions tokens per micro; concatenate later
             # Assume all micros have same num_actions
             num_actions = micro_batches[0].num_actions
-            log_probs = log_probs[:, -num_actions:]
+            if micro_batches[0].ftpo_chosen_mask is None:
+                scores = scores[:, -num_actions:]
         else:
             # return dummy tensor for non-last pp stages
             device = micro_batches[0].sequences.device
-            log_probs = torch.zeros(size=(1, 1), dtype=torch.bfloat16, device=device)
-        return log_probs
+            scores = torch.zeros(size=(1, 1), dtype=torch.bfloat16, device=device)
+        return scores
 
     def _distillation_student_logprobs(
         self,
@@ -462,6 +513,11 @@ class MegatronModelWrapper:
             self.cfg.trainer.algorithm.max_seq_len,
             sum_data_parallel,
         )
+        ftpo_normalization = None
+        if micro_batches[0].ftpo is not None:
+            ftpo_normalization = ftpo_counts(
+                [micro.ftpo for micro in micro_batches], [micro.loss_mask for micro in micro_batches], sum_data_parallel
+            )
         scale = megatron_loss_scale(
             len(micro_batches),
             torch.distributed.get_world_size(mpu.get_data_parallel_group(with_context_parallel=False)),
@@ -478,8 +534,19 @@ class MegatronModelWrapper:
             rollout_action_logprobs = data.rollout_action_logprobs
             response_span_tags = data.response_span_tags
 
-            # temperature normalization
-            if temperature != 1.0:
+            ftpo_inputs = None
+            if data.ftpo is not None:
+                assert ftpo_normalization is not None
+                ftpo_inputs = FTPOInputs(
+                    compact_boundary_logits(
+                        logits[..., : self.vocabulary_size], data.attention_mask, data.ftpo.chosen_mask
+                    ),
+                    data.ftpo,
+                    boundary_values(sequences[:, -num_actions:], data.ftpo.chosen_mask),
+                    ftpo_normalization,
+                )
+            # FTPO's logit margin and reference tether use unscaled model logits.
+            if data.ftpo is None and temperature != 1.0:
                 logits.div_(temperature)
 
             token_logprobs = self._token_logprobs(logits, sequences, data.attention_mask.to(bool), packed_seq_params)
@@ -499,6 +566,7 @@ class MegatronModelWrapper:
                     data.distillation,
                     sparse_student_logprobs,
                     topk_loss_params(self.cfg.trainer.algorithm),
+                    logits.shape[-1],
                 )
             batch = build_objective_micro_batch(
                 action_log_probs=action_log_probs,
@@ -507,10 +575,12 @@ class MegatronModelWrapper:
                 advantages=advantages,
                 loss_mask=loss_mask,
                 rollout_logprobs=rollout_action_logprobs,
+                correction_weights=data.correction_weights,
                 response_span_tags=response_span_tags,
                 token_entropy=token_entropies[:, -num_actions - 1 : -1],
                 think_token_weight=self.cfg.trainer.algorithm.think_token_weight,
                 teacher=teacher,
+                ftpo=ftpo_inputs,
             )
             objective = compute_policy_objective(
                 batch,

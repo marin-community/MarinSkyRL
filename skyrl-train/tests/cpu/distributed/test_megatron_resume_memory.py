@@ -40,8 +40,10 @@ def _load_with_fakes(monkeypatch, tmp_path):
         megatron_strategy, "offload_megatron_grads_to_cpu", lambda model: setattr(grads, "resident", False)
     )
     monkeypatch.setattr(megatron_strategy, "load_megatron_grads_to_gpu", lambda model: setattr(grads, "resident", True))
-    monkeypatch.setattr(megatron_strategy.io, "exists", lambda path: path == str(tmp_path))
-    monkeypatch.setattr(megatron_strategy.io, "node_cached_read_dir", lambda path, cache: contextlib.nullcontext(path))
+    source = "s3://bucket/checkpoint"
+    monkeypatch.setattr(megatron_strategy.io, "exists", lambda path: path == source)
+    monkeypatch.setattr(megatron_strategy, "remote_checkpoint_metadata", lambda path: contextlib.nullcontext(tmp_path))
+    monkeypatch.setattr(megatron_strategy, "DirectS3TorchDistLoadShardedStrategy", lambda path: None)
     monkeypatch.setattr(
         megatron_strategy.dist_checkpointing,
         "load_common_state_dict",
@@ -52,7 +54,6 @@ def _load_with_fakes(monkeypatch, tmp_path):
         "load",
         lambda **kwargs: {"model": {}, "optimizer": {}, "lr_scheduler": {}},
     )
-    monkeypatch.setattr(megatron_strategy, "get_default_load_sharded_strategy", lambda read_dir: None)
     monkeypatch.setattr(megatron_strategy, "FullyParallelLoadStrategyWrapper", lambda strategy, group: strategy)
     monkeypatch.setattr(
         megatron_strategy.mpu, "get_data_parallel_group", lambda with_context_parallel: None, raising=False
@@ -63,7 +64,7 @@ def _load_with_fakes(monkeypatch, tmp_path):
     model = SimpleNamespace(actor_module=[module])
     optimizer = _Optimizer(grads)
     scheduler = SimpleNamespace(state_dict=lambda: {}, load_state_dict=lambda state: None)
-    strategy.load_checkpoint(model, str(tmp_path), optimizer=optimizer, scheduler=scheduler)
+    strategy.load_checkpoint(model, source, optimizer=optimizer, scheduler=scheduler)
     return optimizer, grads
 
 

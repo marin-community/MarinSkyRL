@@ -34,6 +34,7 @@ from marinskyrl.rollout_grading import validate_nemotron_ultra_grading
 SKYRL_CONFIG_DIR = Path(__file__).parent / "configs"
 RL_CONFIG_TASK_DIR = "/tmp/marin-rl-configs"
 RL_CONFIG_PAYLOAD_ENV = "MARIN_RL_CONFIG_B64"
+TRAINER_NON_PATH_KEYS = frozenset({"policy.model.path", "callbacks.metric_groups", "callbacks.additional_evaluations"})
 
 
 class RLEntrypoint(StrEnum):
@@ -521,21 +522,38 @@ def materialize_launch_config(
     return str(destination)
 
 
+def load_rl_recipe(config_path: str) -> DictConfig:
+    """Compose a source recipe with Hydra defaults before deriving launch settings."""
+    path = resolve_rl_config_path(config_path)
+    raw = OmegaConf.load(path)
+    if "defaults" not in raw:
+        return raw
+    with initialize_config_dir(version_base=None, config_dir=str(path.parent)):
+        return compose(
+            config_name=path.name,
+            overrides=[f"hydra.searchpath=[file://{SKYRL_CONFIG_DIR.resolve()}]"],
+        )
+
+
 def parse_rl_config(
     config_path: str,
     model_override: Optional[str] = None,
 ) -> ParsedRLConfig:
     """Parse an RL config YAML and extract all settings."""
     path = resolve_rl_config_path(config_path)
-    raw = OmegaConf.to_container(OmegaConf.load(path), resolve=False) or {}
+    raw = OmegaConf.to_container(load_rl_recipe(str(path)), resolve=False) or {}
     if not isinstance(raw, dict):
         raise ValueError(f"{path}: RL config must contain a mapping at the document root")
 
+    config_groups = raw.get("config_groups", {})
+    if "algorithm_recipe" in config_groups:
+        recipe = _compose_config_groups({"algorithm_recipe": config_groups["algorithm_recipe"]}, config_name=None)
+        raw = OmegaConf.to_container(OmegaConf.merge(OmegaConf.to_container(recipe, resolve=False), raw), resolve=False)
+        assert isinstance(raw, dict)
     distillation_plan = compile_distillation_plan(raw)
     context_budget = resolve_context_budget(raw, path)
 
     entrypoint = resolve_rl_entrypoint(raw.get("entrypoint"), config_path=path)
-    config_groups = raw.get("config_groups", {})
     trainer, generator, terminal_bench, materialized_raw = _materialize_context_budget(raw, context_budget)
     data = dict(raw.get("data", {}))
     environment = raw.get("environment", {})
@@ -550,7 +568,7 @@ def parse_rl_config(
     # Resolve relative paths in config sections to absolute paths so they work
     # regardless of the working directory at runtime. Skip data.train_data /
     # data.val_data as they may be HF repo IDs.
-    trainer = resolve_paths_in_dict(trainer, skip_keys={"policy.model.path"})
+    trainer = resolve_paths_in_dict(trainer, skip_keys=TRAINER_NON_PATH_KEYS)
     generator = resolve_paths_in_dict(generator)
 
     parse_speculative_decoding_config(
@@ -603,7 +621,7 @@ def parse_checkpoint_export_config(
     if not isinstance(raw, dict):
         raise ValueError(f"{path}: RL config must contain a mapping at the document root")
 
-    trainer = resolve_paths_in_dict(copy.deepcopy(raw.get("trainer", {})), skip_keys={"policy.model.path"})
+    trainer = resolve_paths_in_dict(copy.deepcopy(raw.get("trainer", {})), skip_keys=TRAINER_NON_PATH_KEYS)
     trainer.setdefault("policy", {}).setdefault("model", {})["path"] = model_override
     return ParsedCheckpointExportConfig(
         config_path=path,
@@ -879,11 +897,11 @@ def _merge_config_mapping(config: DictConfig, values: Mapping[str, Any], prefix:
         OmegaConf.update(config, path, copy.deepcopy(value), merge=False, force_add=_path_allows_new_keys(path))
 
 
-def _compose_base_config(config_groups: Mapping[str, str]) -> DictConfig:
+def _compose_config_groups(config_groups: Mapping[str, str], *, config_name: str | None) -> DictConfig:
     config_dir = Path(str(files("skyrl_train.config"))).resolve()
     group_overrides = [f"+{group_name}={config_name}" for group_name, config_name in config_groups.items()]
     with initialize_config_dir(version_base=None, config_dir=str(config_dir)):
-        config = compose(config_name="ppo_base_config", overrides=group_overrides)
+        config = compose(config_name=config_name, overrides=group_overrides)
     OmegaConf.set_struct(config, True)
     return config
 
@@ -894,7 +912,7 @@ def compose_skyrl_config(
     hpc: HPCGeometry,
 ) -> CompiledSkyRLConfig:
     """Compose the final SkyRL subtree from its config groups and launch values."""
-    config = _compose_base_config(parsed.config_groups)
+    config = _compose_config_groups(parsed.config_groups, config_name="ppo_base_config")
     _merge_config_mapping(config, _skyrl_config_sections(parsed, exp_args, hpc))
     validate_nemotron_ultra_grading(config, parsed.distillation_plan)
     validate_objective(config)
@@ -910,7 +928,7 @@ def compose_checkpoint_export_config(
     hpc: HPCGeometry,
 ) -> CompiledSkyRLConfig:
     """Compose the policy-only checkpoint-export SkyRL subtree."""
-    config = _compose_base_config(parsed.config_groups)
+    config = _compose_config_groups(parsed.config_groups, config_name="ppo_base_config")
     _merge_config_mapping(config, {"trainer": _checkpoint_export_trainer(parsed, exp_args, hpc)})
     return CompiledSkyRLConfig(
         entrypoint=CHECKPOINT_EXPORT_ENTRYPOINT,

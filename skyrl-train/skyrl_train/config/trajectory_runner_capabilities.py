@@ -5,7 +5,7 @@ from enum import StrEnum
 
 from omegaconf import DictConfig
 
-from marinskyrl.distillation import compile_distillation_plan_from_config
+from marinskyrl.distillation import DistillationObjectiveKind, compile_distillation_plan_from_config
 from skyrl_train.config.objective_spec import LossSpec, rollout_logprobs_required
 
 from marinskyrl.harbor_agent_names import (
@@ -267,6 +267,12 @@ def validate_trajectory_runner_capabilities(
     loss_spec: LossSpec | None = None,
 ) -> None:
     """Reject operation and runner combinations that cannot supply required training evidence."""
+    if mode is not TrajectoryRunnerMode.SKYRL_GYM and any(
+        callback.get("type") == "evaluation" and callback.get("additional_evaluations")
+        for callback in (cfg.trainer.get("callbacks") or [])
+    ):
+        raise ValueError(f"{mode.value} does not support additional evaluation sampling profiles")
+
     distillation_plan = compile_distillation_plan_from_config(cfg)
     capabilities = trajectory_runner_capabilities(cfg, mode)
     if cfg.generator.get("require_exact_chat_transport", False):
@@ -279,7 +285,11 @@ def validate_trajectory_runner_capabilities(
     algorithm = cfg.trainer.algorithm
     behavior_logprobs_required = rollout_logprobs_required(algorithm, loss_spec=loss_spec)
     full_tito_required = bool(algorithm.get("tito_full", False))
-    if not behavior_logprobs_required and not full_tito_required:
+    student_topk_required = (
+        distillation_plan is not None
+        and distillation_plan.objective is DistillationObjectiveKind.STUDENT_TOPK_POLICY_SURROGATE
+    )
+    if not (behavior_logprobs_required or student_topk_required or full_tito_required):
         return
 
     _validate_exact_sampled_completion(capabilities, consumer="behavior-policy evidence")

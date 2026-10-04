@@ -45,6 +45,16 @@ def grade_genrm_group(
     judge: OpenAIJudge,
     config: dict[str, Any],
 ) -> tuple[list[float], dict[str, float]]:
+    if config.get("verifyit_enabled", False):
+        from skyrl_gym.envs.nemotron_ultra.genrm_verifyit import grade_genrm_verifyit
+
+        return grade_genrm_verifyit(
+            conversation_history=conversation_history,
+            response_objects=response_objects,
+            principle=principle,
+            judge=judge,
+            config=config,
+        )
     default_score = float(config.get("default_score", 3.0))
     pairs = generate_comparison_pairs("circular", len(response_objects))
     max_workers = int(config.get("max_concurrent_comparisons", len(pairs)))
@@ -69,7 +79,7 @@ def grade_genrm_group(
                     temperature=float(config.get("temperature", 1.0)),
                     top_p=float(config.get("top_p", 0.95)),
                 )
-                return parse_genrm_output(output)
+                return parse_genrm_output(output, strict_json=bool(config.get("verifyit_strict_json", False)))
             except Exception as error:
                 last_error = error
                 logger.warning("GenRM comparison attempt {} failed: {}", attempt + 1, error)

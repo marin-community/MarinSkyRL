@@ -171,10 +171,15 @@ def create_ray_wrapped_inference_engines_from_config(
             engine_init_kwargs["async_scheduling"] = False
             engine_init_kwargs["weight_transfer_config"] = {"backend": "runai_streamer"}
 
+    requested_logprobs = [cfg.generator.sampling_params.logprobs, cfg.generator.eval_sampling_params.logprobs]
+    for callback in cfg.trainer.get("callbacks") or []:
+        if callback.get("type") == "evaluation":
+            requested_logprobs.extend(
+                (profile.get("sampling_params") or {}).get("logprobs")
+                for profile in (callback.get("additional_evaluations") or {}).values()
+            )
     requested_logprobs = [
-        value
-        for value in (cfg.generator.sampling_params.logprobs, cfg.generator.eval_sampling_params.logprobs)
-        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+        value for value in requested_logprobs if isinstance(value, int) and not isinstance(value, bool) and value > 0
     ]
 
     role = InferenceEngineRoleConfig(
@@ -205,6 +210,8 @@ def create_ray_wrapped_inference_engines_from_config(
         role,
         engine_init_kwargs=engine_init_kwargs,
     )
+    if cfg.trainer.strategy == "megatron":
+        engine_kwargs["nccl_buffer_size_bytes"] = cfg.trainer.policy.nccl_buffer_size_bytes
 
     # Conditionally add LoRA parameters if LoRA is enabled
     if cfg.trainer.policy.model.lora.rank > 0:
@@ -276,10 +283,8 @@ class BasePPOExp:
         self.colocate_pg = self.get_colocate_pg()
         # Reserve the policy/training placement group BEFORE the inference
         # engines (which are created later, in `_setup_trainer`), so that in the
-        # disaggregated no-ref case the policy claims its dedicated whole nodes
-        # first and the inference engines are forced onto the disjoint
-        # remainder. None unless `policy_strict_spread_pg` is enabled for an
-        # eligible (disaggregated, no-ref) run.
+        # disaggregated case the policy (and optional colocated reference)
+        # claims GPU slots before inference engines use the remainder.
         self.policy_pg = self.get_policy_pg()
 
     def create_inference_engine_client(
@@ -353,12 +358,10 @@ class BasePPOExp:
         return prompts_dataset
 
     def get_eval_dataset(self):
-        """Initializes the evaluation dataset.
-
-        Returns:
-            PromptDataset: The evaluation dataset.
-        """
-        if self.cfg.trainer.eval_interval > 0 and self.cfg.data.val_data:
+        """Load validation prompts for evaluation or new mismatch-probe generation."""
+        probe = self.cfg.trainer.mismatch_probe
+        needs_probe_prompts = probe.enabled and probe.reuse_probe is None
+        if (self.cfg.trainer.eval_interval > 0 or needs_probe_prompts) and self.cfg.data.val_data:
             from skyrl_train.dataset import PromptDataset  # noqa: PLC0415
 
             prompts_dataset = PromptDataset(
@@ -399,18 +402,15 @@ class BasePPOExp:
             return None
 
     def get_policy_pg(self, timeout: int | None = None):
-        """Reserve a dedicated whole-node placement group for the policy.
+        """Reserve policy GPU slots before starting inference engines.
 
-        Uses STRICT_SPREAD so each policy node gets exactly one bundle holding
-        all of that node's GPUs — guaranteeing the policy occupies a set of
-        whole, dedicated nodes that the (PACK) inference-engine placement group
-        cannot share. Returns None when not eligible (see
-        `policy_strict_spread_eligible`), in which case the legacy lazy-PACK
-        path in `PPORayActorGroup._initiate_actors` is used unchanged.
+        Whole-node bundles use STRICT_SPREAD; per-GPU bundles use PACK. Both
+        reserve the policy footprint before the inference placement group.
+        Returns None when not eligible (see `policy_strict_spread_eligible`),
+        leaving model actors to reserve their placement group lazily.
 
-        When a ref model is present in the disaggregated path, policy and ref
-        share a single placement group built inside `build_models`; that path
-        is left entirely untouched (eligibility requires use_ref_model=False).
+        A colocated reference model shares this group with the policy. Reserving
+        it here prevents inference actors from fragmenting the required nodes.
         """
         from skyrl_train.utils.utils import (
             get_ray_pg_ready_with_timeout,
@@ -573,9 +573,7 @@ class BasePPOExp:
             colocate_pg=self.colocate_pg,
         )
 
-        # Build the models. Pass the pre-reserved dedicated policy placement
-        # group (None unless `policy_strict_spread_pg` is enabled for an
-        # eligible disaggregated no-ref run).
+        # Pass the policy placement group reserved before inference startup.
         logger.info("Starting policy workers: strategy={}", self.cfg.trainer.strategy)
         try:
             trainer.build_models(PolicyWorker, CriticWorker, RefWorker, policy_pg=self.policy_pg)
@@ -703,6 +701,8 @@ def run_ray_driver(
         failure: Exception | None = None
         try:
             exit_code = supervisor.wait(entrypoint.remote(cfg))
+            if exit_code in (None, 0) and operation is EntrypointOperation.TRAIN:
+                logger.info("Training done!")
         except Exception as e:
             log_exception_as_text(failure_message, e)
             receipt = write_exception_receipt(

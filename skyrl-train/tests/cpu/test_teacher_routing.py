@@ -33,7 +33,7 @@ from skyrl_train.teacher_oracle import (
     TeacherOracleFleet,
     TeacherOracleOwner,
 )
-from skyrl_train.teacher_routing import PlanTeacherRouter, route_trajectory_batch
+from skyrl_train.teacher_routing import PlanTeacherRouter, TeacherRoute, route_row_metrics, route_trajectory_batch
 from skyrl_train.trajectory_runners.types import TrajectoryID
 
 
@@ -483,3 +483,14 @@ async def test_fixed_teacher_bypasses_rotating_residency_slots():
     assert len(rotating.requests) == 2
     assert fixed.close_count == 1
     assert rotating.close_count == 1
+
+
+def test_route_row_metrics_count_trained_trajectories_per_route():
+    def route(route_id: str) -> TeacherRoute:
+        return TeacherRoute(
+            route_id=route_id, teacher_id=f"{route_id}-teacher", objective_id="opd", weight=1.0, plan_version="v1"
+        )
+
+    metrics = route_row_metrics([route("math"), route("terminal"), route("math"), route("math")])
+
+    assert metrics == {"distillation/route_rows/math": 3.0, "distillation/route_rows/terminal": 1.0}

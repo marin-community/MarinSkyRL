@@ -114,7 +114,13 @@ def import_worker(strategy: str, worker_type: str):
 
 
 def init_worker_with_type(
-    worker_type: str, shared_pg=None, colocate_all=False, num_gpus_per_node=1, num_nodes=1, cfg=None
+    worker_type: str,
+    shared_pg=None,
+    colocate_all=False,
+    num_gpus_per_node=1,
+    num_nodes=1,
+    cfg=None,
+    num_training_steps: int | None = None,
 ) -> PPORayActorGroup:
     if cfg is None:
         cfg = get_test_actor_config()
@@ -141,7 +147,8 @@ def init_worker_with_type(
         record_memory=cfg.trainer.policy.record_memory,
     )
     # we use policy model path for all tests (regardless of actor type)
-    ray.get(model.async_init_model(cfg.trainer.policy.model.path))
+    init_kwargs = {} if num_training_steps is None else {"num_training_steps": num_training_steps}
+    ray.get(model.async_init_model(cfg.trainer.policy.model.path, **init_kwargs))
     return model
 
 

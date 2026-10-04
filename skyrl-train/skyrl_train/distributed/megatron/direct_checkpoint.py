@@ -1,4 +1,5 @@
 from pathlib import Path
+from urllib.parse import urlparse
 
 from megatron.core.dist_checkpointing.dict_utils import nested_values
 from megatron.core.dist_checkpointing.mapping import ShardedStateDict, ShardedTensor
@@ -14,11 +15,11 @@ from megatron.core.dist_checkpointing.strategies.torch import (
     mcore_to_pyt_state_dict,
 )
 from torch.distributed import checkpoint
-from torch.distributed.checkpoint import FileSystemReader
 from torch.distributed.checkpoint._fsspec_filesystem import FileSystem as FsspecFileSystem
 
 from marinskyrl.remote_io import create_s3_filesystem
 from skyrl_train.io.torch_distributed_checkpoint import StreamingFsspecWriter
+from skyrl_train.io.checkpoint_reader import RecordCheckpointReader
 
 
 # MCore 0.18 does not expose a storage-writer hook. Keep the adapter narrow: it
@@ -49,10 +50,25 @@ class DirectS3TorchDistSaveShardedStrategy(TorchDistSaveShardedStrategy):
 
 
 class DirectS3TorchDistLoadShardedStrategy(TorchDistLoadShardedStrategy):
-    """Read only the DCP tensor byte ranges assigned to this rank from S3."""
+    """Read the DCP records needed by this rank directly from S3."""
 
     def __init__(self, checkpoint_dir: str) -> None:
         super().__init__()
+        source = urlparse(checkpoint_dir)
+        if source.scheme != "s3" or not source.netloc or not source.path.strip("/") or source.query or source.fragment:
+            raise ValueError("Megatron restore requires a CoreWeave S3 training checkpoint")
+        self.filesystem = create_s3_filesystem(default_cache_type="none")
+        endpoint = self.filesystem.endpoint_url or self.filesystem.client_kwargs.get("endpoint_url", "")
+        resolved = urlparse(endpoint)
+        if (
+            resolved.scheme not in ("http", "https")
+            or resolved.hostname not in ("cwobject.com", "cwlota.com")
+            or resolved.path not in ("", "/")
+            or resolved.username
+            or resolved.query
+            or resolved.fragment
+        ):
+            raise ValueError("Megatron restore requires a resolved cwobject.com or cwlota.com storage endpoint")
         self.checkpoint_dir = checkpoint_dir
 
     def load(self, sharded_state_dict: ShardedStateDict, _checkpoint_dir: Path, async_strategy: str = "mcore"):
@@ -62,10 +78,9 @@ class DirectS3TorchDistLoadShardedStrategy(TorchDistLoadShardedStrategy):
         converted, flat_mapping, rename_mapping = _replace_state_dict_keys_with_sharded_keys(original)
         pytorch_state_dict = mcore_to_pyt_state_dict(converted, True)
 
-        filesystem = create_s3_filesystem()
-        reader = FileSystemReader(self.checkpoint_dir)
+        reader = RecordCheckpointReader(self.checkpoint_dir)
         reader.fs = FsspecFileSystem()
-        reader.fs.fs = filesystem
+        reader.fs.fs = self.filesystem
         reader.path = self.checkpoint_dir
         checkpoint.load(
             pytorch_state_dict,
