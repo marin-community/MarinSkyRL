@@ -11,7 +11,7 @@ from taskcompendium.parquet import read_tasks
 from transformers import PreTrainedTokenizerBase
 
 from skyrl_train.dataset.harbor import materialize_harbor_tasks
-from skyrl_train.dataset.tasks import GymTaskDataset
+from skyrl_train.dataset.tasks import SourceTaskDataset
 
 
 def terminal_task_index(path: Path) -> dict[str, TaskSpec]:
@@ -56,8 +56,8 @@ def resolve_terminal_task(task: TaskSpec, terminals: Mapping[str, TaskSpec]) -> 
     )
 
 
-class NemotronTaskDataset(GymTaskDataset):
-    """Convert Gym and terminal source rows to one task Parquet file."""
+class NemotronTaskDataset(SourceTaskDataset):
+    """Convert answer, tool, and terminal source rows to one task Parquet file."""
 
     def __init__(
         self,

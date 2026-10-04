@@ -33,8 +33,11 @@ import json
 import math
 import re
 import sqlite3
+import sys
 import time
 from enum import StrEnum
+from fractions import Fraction
+from pathlib import Path
 from typing import Any
 
 
@@ -45,7 +48,7 @@ class GradeOutcome(StrEnum):
 
 
 INFRA = GradeOutcome.INFRA  # re-exported for callers and tests that only care about the sentinel
-_QUERY_DEADLINE = 5.0
+QUERY_TIMEOUT = 5.0
 _MAX_RESULT_ROWS = 100_000
 _PROGRESS_HANDLER_OPS = 100_000  # SQLite VM instructions between deadline checks
 
@@ -268,11 +271,10 @@ def _read_only_authorizer(action, _a1, _a2, _db, _src):
     return sqlite3.SQLITE_OK if action in _ALLOWED_ACTIONS else sqlite3.SQLITE_DENY
 
 
-def _run_query(conn: sqlite3.Connection, sql: str, *, read_only: bool) -> tuple[int, list[tuple]]:
-    """Execute ``sql`` under the deadline handler; ``read_only`` adds the authorizer for candidate queries."""
-    if read_only:
-        conn.set_authorizer(_read_only_authorizer)
-    conn.set_progress_handler(_deadline_handler(time.monotonic() + _QUERY_DEADLINE), _PROGRESS_HANDLER_OPS)
+def query_result(conn: sqlite3.Connection, sql: str, *, timeout: float = QUERY_TIMEOUT) -> tuple[int, list[tuple]]:
+    """Return bounded query rows with a read-only authorizer and an execution deadline."""
+    conn.set_authorizer(_read_only_authorizer)
+    conn.set_progress_handler(_deadline_handler(time.monotonic() + timeout), _PROGRESS_HANDLER_OPS)
     try:
         cur = conn.cursor()
         cur.execute(sql)
@@ -280,8 +282,7 @@ def _run_query(conn: sqlite3.Connection, sql: str, *, read_only: bool) -> tuple[
         ncols = len(cur.description) if cur.description else 0
     finally:
         conn.set_progress_handler(None, 0)
-        if read_only:
-            conn.set_authorizer(None)
+        conn.set_authorizer(None)
     return ncols, rows
 
 
@@ -301,7 +302,7 @@ def _norm_value(v: Any) -> tuple:
     return ("~str", str(v))
 
 
-def _norm_rows(rows: list[tuple]) -> list[tuple]:
+def normalized_rows(rows: list[tuple]) -> list[tuple]:
     return [tuple(_norm_value(c) for c in row) for row in rows]
 
 
@@ -317,8 +318,8 @@ def results_equivalent(
     cand_ncols, cand_rows = candidate
     if ref_ncols != cand_ncols:
         return False, f"column count: reference {ref_ncols}, candidate {cand_ncols}"
-    ref_n = _norm_rows(ref_rows)
-    cand_n = _norm_rows(cand_rows)
+    ref_n = normalized_rows(ref_rows)
+    cand_n = normalized_rows(cand_rows)
     if len(ref_n) != len(cand_n):
         return False, f"row count: reference {len(ref_n)}, candidate {len(cand_n)}"
     if order_significant:
@@ -326,6 +327,27 @@ def results_equivalent(
     if sorted(ref_n) != sorted(cand_n):
         return False, "row multiset differs"
     return True, "ok (unordered)"
+
+
+def canonical_rows(rows: list[tuple], *, multiset: bool, ordered: bool) -> str:
+    """Encode SQLite values for exact comparison without loss of integer precision."""
+    encoded = []
+    for row in rows:
+        values = []
+        for value in row:
+            if isinstance(value, (int, float)):
+                number = Fraction(value)
+                values.append(["number", str(number.numerator), str(number.denominator)])
+            elif isinstance(value, bytes):
+                values.append(["bytes", value.hex()])
+            else:
+                values.append([type(value).__name__, value])
+        encoded.append(json.dumps(values, ensure_ascii=False, separators=(",", ":")))
+    if not multiset:
+        encoded = list(set(encoded))
+    if not ordered:
+        encoded.sort()
+    return json.dumps(encoded, ensure_ascii=False, separators=(",", ":"))
 
 
 def guard_candidate_sql(sql: str) -> tuple[bool, str]:
@@ -359,13 +381,13 @@ def _compare_on(
     ``MISMATCH`` for a candidate error or a result-set mismatch — and ``None`` when the two agree.
     """
     try:
-        reference = _run_query(conn, reference_sql, read_only=True)
+        reference = query_result(conn, reference_sql)
     except sqlite3.Error as exc:
         return GradeOutcome.INFRA, f"reference query failed on {label} db: {exc}"
     if len(reference[1]) > _MAX_RESULT_ROWS:
         return GradeOutcome.INFRA, f"reference result exceeds {_MAX_RESULT_ROWS} rows on {label} db"
     try:
-        candidate = _run_query(conn, candidate_stmt, read_only=True)
+        candidate = query_result(conn, candidate_stmt)
     except sqlite3.Error as exc:
         return GradeOutcome.MISMATCH, f"candidate query failed on {label} db: {exc}"
     if len(candidate[1]) > _MAX_RESULT_ROWS:
@@ -502,3 +524,32 @@ def score(ground_truth: Any, response: str) -> tuple[float, dict[str, Any]]:
 def is_correct(response: str, normalized_ground_truth: str) -> bool:
     """Contract preflight check: does ``response`` satisfy the (already normalized) verifier input?"""
     return grade(normalized_ground_truth, extract_sql(response))[0] is GradeOutcome.MATCH
+
+
+def _wire_value(value: Any) -> Any:
+    if isinstance(value, bytes):
+        return {"bytes": value.hex()}
+    if isinstance(value, float) and not math.isfinite(value):
+        return {"float": repr(value)}
+    return value
+
+
+def _query_main() -> None:
+    """Execute one candidate query with no reference query or expected result."""
+    request = json.loads(sys.stdin.buffer.read())
+    connection = sqlite3.connect(Path(sys.argv[1]).resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        try:
+            columns, rows = query_result(connection, request["sql"], timeout=request["timeout"])
+            if len(rows) > _MAX_RESULT_ROWS:
+                raise ValueError("Candidate result exceeds the row limit")
+            result = {"columns": columns, "rows": [[_wire_value(value) for value in row] for row in rows]}
+        except (sqlite3.Error, ValueError) as error:
+            result = {"error": str(error)}
+    finally:
+        connection.close()
+    sys.stdout.write(json.dumps(result, allow_nan=False))
+
+
+if __name__ == "__main__":
+    _query_main()

@@ -1,28 +1,23 @@
-"""Real SQLite fixtures exercise trusted execution and independent exact composition."""
+"""Shellbox query execution and private exact comparison on real SQLite databases."""
 
 import json
-import sqlite3
 
 import pytest
-from omegaconf import OmegaConf
-
-import skyrl_gym
-from skyrl_gym.envs.sqlite_verifyit import score_legacy_sql, score_seeded_sql
-from skyrl_gym.envs.text_to_sql.scoring import score
+from taskcompendium.grading import Outcome
 
 
 @pytest.fixture
 def reference():
-    return json.dumps(
-        {
-            "schema_sql": "CREATE TABLE t(x INTEGER)",
-            "insert_sql": "INSERT INTO t VALUES(1),(1),(2),(3)",
-            "reference_sql": "SELECT x FROM t",
-            "order_significant": False,
-        }
-    )
+    return {
+        "schema_sql": "CREATE TABLE t(x INTEGER)",
+        "insert_sql": "INSERT INTO t VALUES(1),(1),(2),(3)",
+        "reference_sql": "SELECT x FROM t",
+        "order_significant": False,
+    }
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verifyit", [False, True])
 @pytest.mark.parametrize(
     "query,expected",
     [
@@ -32,57 +27,53 @@ def reference():
         ("DELETE FROM t", 0),
     ],
 )
-def test_seeded_sql_preserves_duplicates_perturbation_and_readonly(reference, query, expected):
-    assert score_seeded_sql(reference, query)[0] == score(reference, query)[0] == expected
-
-
-def test_sql_rounding_and_column_count_remain_source_owned(reference):
-    task = json.loads(reference)
-    task["reference_sql"] = "SELECT 1.0/3"
-    assert score_seeded_sql(json.dumps(task), "SELECT 0.333333")[0] == 1
-    assert score_seeded_sql(reference, "SELECT x,x FROM t")[0] == 0
-
-
-def test_seeded_sql_actual_environment_reports_wrong_candidate_and_verifier_failure(reference):
-    extras = {"reward_model": {"ground_truth": reference}}
-    env = skyrl_gym.make("text_to_sql", env_config=OmegaConf.create({"verifyit_enabled": True}), extras=extras)
-    assert env.step("SELECT x FROM t")["reward"] == 1
-    assert env.step("SELECT 99")["reward"] == 0
-    task = json.loads(reference)
-    task["reference_sql"] = "SELECT absent_column FROM t"
-    bad = skyrl_gym.make(
+async def test_seeded_sql_preserves_duplicates_perturbation_and_readonly(
+    rollout_session, reference, query, expected, verifyit
+):
+    rollout = await rollout_session(
         "text_to_sql",
-        env_config=OmegaConf.create({"verifyit_enabled": True}),
-        extras={"reward_model": {"ground_truth": json.dumps(task)}},
+        [query],
+        {"reward_model": {"ground_truth": json.dumps(reference)}},
+        {"verifyit_enabled": verifyit},
     )
-    result = bad.step("SELECT x FROM t")
-    assert result["reward"] == 0
-    assert result["verification"].score is None
+    assert (rollout.grade.status, rollout.grade.reward) == (Outcome.GRADED, expected)
+    assert rollout.steps[0].transition.reward == expected
 
 
-def test_legacy_sql_keeps_set_semantics_format_projection_and_original_database(tmp_path):
-    database = tmp_path / "fixture.sqlite"
-    with sqlite3.connect(database) as connection:
-        connection.executescript("CREATE TABLE t(x INTEGER); INSERT INTO t VALUES(1),(1),(2);")
-    response = "<think>query</think><solution>SELECT DISTINCT x FROM t</solution>"
-    assert score_legacy_sql(response, "SELECT x FROM t", str(database)) == 1
-    assert score_legacy_sql("wrong format", "SELECT x FROM t", str(database)) == -1
-    with pytest.raises(RuntimeError, match="verification failed"):
-        score_legacy_sql("wrong format", "SELECT missing FROM t", str(database))
-    with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT count(*) FROM t").fetchone()[0] == 3
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reference_sql,candidate,expected",
+    [
+        ("SELECT 1.0/3", "SELECT 0.333333", 1),
+        ("SELECT x FROM t", "SELECT x,x FROM t", 0),
+        ("SELECT x FROM t", "SELECT 1e999", 0),
+        ("SELECT x'00ff' FROM t", "SELECT x'00ff' FROM t", 1),
+    ],
+)
+async def test_exact_sql_preserves_rounding_columns_and_value_types(
+    rollout_session, reference, reference_sql, candidate, expected
+):
+    reference["reference_sql"] = reference_sql
+    rollout = await rollout_session(
+        "text_to_sql",
+        [candidate],
+        {"reward_model": {"ground_truth": json.dumps(reference)}},
+        {"verifyit_enabled": True},
+    )
+    assert rollout.grade.reward == expected
 
 
-def test_invalid_reference_precedes_rejected_candidate(reference):
-    task = json.loads(reference)
-    task["reference_sql"] = "SELECT absent_column FROM t"
-    with pytest.raises(RuntimeError, match="verification failed"):
-        score_seeded_sql(json.dumps(task), "DELETE FROM t")
-
-
-def test_nonfinite_sql_results_fail_closed(reference):
-    task = json.loads(reference)
-    task["reference_sql"] = "SELECT 1e999"
-    with pytest.raises(RuntimeError, match="verification failed"):
-        score_seeded_sql(json.dumps(task), "SELECT 1e999")
-    assert score_seeded_sql(reference, "SELECT 1e999")[0] == 0
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reference_sql", ["SELECT absent_column FROM t", "SELECT 1e999"])
+async def test_invalid_reference_has_no_grade_even_when_candidate_is_rejected(
+    rollout_session, reference, reference_sql
+):
+    reference["reference_sql"] = reference_sql
+    rollout = await rollout_session(
+        "text_to_sql",
+        ["DELETE FROM t"],
+        {"reward_model": {"ground_truth": json.dumps(reference)}},
+        {"verifyit_enabled": True},
+    )
+    assert (rollout.grade.status, rollout.grade.reward) == (Outcome.INFRA_ERROR, None)
+    assert rollout.steps[0].transition.reward == 0.0

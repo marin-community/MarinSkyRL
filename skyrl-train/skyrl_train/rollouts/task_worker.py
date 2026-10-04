@@ -4,8 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
-from dataclasses import dataclass, replace
-from functools import partial
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -14,7 +13,7 @@ from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from shellbox.backends.docker.machine import DockerMachineFactory
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
-from shellbox.machine import MachineFactory
+from shellbox.machine import Machine, MachineFactory
 from taskcompendium.environment import EnvironmentKind
 from taskcompendium.grading import GradeResult, Outcome
 from taskcompendium.models import TaskSpec
@@ -27,19 +26,19 @@ from rolloutengine.contracts import (
     RolloutFailure,
     RolloutInterrupted,
     RolloutOperation,
+    TaskSession,
 )
 from rolloutengine.engine import ShellboxRolloutEngine
 from taskcompendium.submission import AnswerFormat, SubmissionConvention
-from skyrl_gym.envs.registration import EnvSpec, registry
+from skyrl_gym.task_factories import session_factories
+from skyrl_gym.task_records import fold_grades
 
 from skyrl_train.inference_engines.base import ChatContinuation, InferenceEngineInterface, InferenceEngineInput
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.rollouts.buffer import RolloutGroup, RolloutTask, RolloutWriter
-from taskcompendium.importers.skyrl import GYM_INTERACTION
 from skyrl_train.rollouts.group_grader import GroupGraderSpec
 from skyrl_train.rollouts.group_grading import GROUP_GRADERS, GroupGrader, grade_groups
-from skyrl_train.rollouts.gym_tasks import GymTaskSession, grade_result
 from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings, harbor_grading_failure, shape_harbor_rollouts
 from skyrl_train.rollouts.workers import WorkerShard, detached_config
 from skyrl_train.rollouts.finalization import finalize_trajectory_batch, propagate_data_sources
@@ -59,9 +58,7 @@ from skyrl_train.trajectory_runners.projections import (
 from skyrl_train.rollouts.task_projections import (
     StepTaskProjection,
     WholeTaskProjection,
-    verification_result,
 )
-from skyrl_train.trajectory_runners.skyrl_gym_contracts import fold_verification_results
 from skyrl_train.utils.harbor_errors import ErrorHandlingConfig
 from skyrl_train.trajectory_runners.types import (
     TokenProvenance,
@@ -85,8 +82,6 @@ async def _model_turn(
     template_kwargs = {**chat_template_kwargs, **options.get("chat_template_kwargs", {})}
     if template_kwargs:
         options["chat_template_kwargs"] = template_kwargs
-    if "tools" in options:
-        options["tools"] = [{"type": "function", **tool["function"]} for tool in options["tools"]]
     continuation = None
     if request.assistant_message_index is not None:
         continuation = ChatContinuation(
@@ -168,19 +163,15 @@ def _failed_rollout(
         and (
             not isinstance(error, TimeoutError)
             or config.preserve_logprobs_on_timeout
-            or (task.environment.interaction != GYM_INTERACTION and rollout.grade.status == Outcome.GRADED)
+            or (task.environment.interaction is None and rollout.grade.status == Outcome.GRADED)
         )
         and (not isinstance(error, ModelServerError) or error.category == "context_overflow")
     )
     grade = GradeResult(Outcome.INFRA_ERROR, None, "Rollout execution failed")
-    if recover and interruption.operation != RolloutOperation.GRADE and task.environment.interaction == GYM_INTERACTION:
-        verifications = [
-            verification_result(step.transition.grade) for step in rollout.steps if step.transition.grade is not None
-        ]
-        verification, _ = fold_verification_results(verifications)
-        grade = grade_result(verification)
-    elif recover and interruption.operation != RolloutOperation.GRADE:
+    if recover and interruption.operation != RolloutOperation.GRADE:
         grade = rollout.grade
+        if grade.status == Outcome.UNAVAILABLE:
+            grade = fold_grades([step.transition.grade for step in rollout.steps if step.transition.grade is not None])
     if not recover:
         rollout = replace(rollout, response_token_ids=(), loss_mask=(), logprobs=(), steps=(), metrics={})
     logger.warning("Task {} interrupted during {}: {}", task.id, interruption.operation, exception_type)
@@ -202,12 +193,13 @@ class TaskRolloutWorker:
         model_client: ModelClient,
         factories: Mapping[EnvironmentKind, MachineFactory],
         command_timeout: float,
-        max_env_workers: int = 0,
+        max_verifier_workers: int = 0,
         harbor: HarborTaskSettings | None = None,
         concurrent_tasks: int | None = None,
         concurrent_harbor_tasks: int | None = None,
         retry_wait: Callable[[float], Awaitable[None]] = asyncio.sleep,
         group_graders: Mapping[str, GroupGrader] = GROUP_GRADERS,
+        sessions: Mapping[str, Callable[[TaskSpec, Machine | None], TaskSession]] | None = None,
     ):
         self.trajectory_runner_cfg = trajectory_runner_cfg
         self.model_client = model_client
@@ -232,11 +224,14 @@ class TaskRolloutWorker:
             error_handling=self.error_handling,
             harbor_error_handling=None if harbor is None else harbor.error_handling,
         )
-        self.environment_executor = (
-            ThreadPoolExecutor(max_workers=max_env_workers, thread_name_prefix="task-environment")
-            if max_env_workers > 0
+        self.verifier_executor = (
+            ThreadPoolExecutor(max_workers=max_verifier_workers, thread_name_prefix="task-verifier")
+            if max_verifier_workers > 0
             else None
         )
+        self.sessions = session_factories(max_turns=trajectory_runner_cfg.max_turns, executor=self.verifier_executor)
+        if sessions is not None:
+            self.sessions.update(sessions)
         self.trajectory_sink: RetentionSink | None = None
 
     async def generate(self, request: TrajectoryRequestBatch) -> list[RolloutData]:
@@ -292,13 +287,7 @@ class TaskRolloutWorker:
                 ),
                 command_timeout=self.command_timeout,
                 convention=SubmissionConvention(id="plain", answer_format=AnswerFormat.PLAIN),
-                sessions={
-                    GYM_INTERACTION: partial(
-                        GymTaskSession,
-                        max_turns=self.trajectory_runner_cfg.max_turns,
-                        executor=self.environment_executor,
-                    )
-                },
+                sessions=self.sessions,
             )
             harbor_slots = (
                 nullcontext()
@@ -380,8 +369,8 @@ class TaskRolloutWorker:
 
     async def shutdown(self) -> None:
         """Release environment threads after all task sessions close."""
-        if self.environment_executor is not None:
-            await asyncio.to_thread(self.environment_executor.shutdown, wait=True)
+        if self.verifier_executor is not None:
+            await asyncio.to_thread(self.verifier_executor.shutdown, wait=True)
 
     async def start_eval_session(self, *, run_name: str, eval_step: int, val_set_name: str | None) -> None:
         pass
@@ -402,20 +391,26 @@ class TaskRolloutWorker:
 class TaskRolloutWorkerSpec:
     config: DictConfig
     engines: list[InferenceEngineInterface]
-    environments: dict[str, EnvSpec]
+    sessions: dict[str, Callable[[TaskSpec, Machine | None], TaskSession]] = field(default_factory=dict)
     harbor_config: DictConfig | None = None
 
     @classmethod
-    def from_config(cls, config, engines, *, harbor_config: DictConfig | None = None):
+    def from_config(
+        cls,
+        config,
+        engines,
+        *,
+        harbor_config: DictConfig | None = None,
+        sessions: Mapping[str, Callable[[TaskSpec, Machine | None], TaskSession]] | None = None,
+    ):
         return cls(
             detached_config(config),
             list(engines),
-            dict(registry),
+            {} if sessions is None else dict(sessions),
             None if harbor_config is None else detached_config(harbor_config),
         )
 
     def build(self, tokenizer, shard: WorkerShard) -> TaskRolloutWorker:
-        registry.update(self.environments)
         harbor = None if self.harbor_config is None else HarborTaskSettings.from_config(self.harbor_config)
         runner_config = self.config.generator
         client_config = OmegaConf.merge(self.config, {"generator": {"enable_http_endpoint": False}})
@@ -438,7 +433,7 @@ class TaskRolloutWorkerSpec:
                 EnvironmentKind.SHELLSIM: ShellSimMachineFactory(),
             },
             command_timeout=float(self.config.trajectory_runner.command_timeout),
-            max_env_workers=int(self.config.environment.skyrl_gym.max_env_workers),
+            max_verifier_workers=int(self.config.environment.task_sessions.max_verifier_workers),
             harbor=harbor,
             concurrent_tasks=(
                 self.config.trajectory_runner.rollout_workers.executor_threads
@@ -446,4 +441,5 @@ class TaskRolloutWorkerSpec:
                 else self.config.trajectory_runner.max_concurrent_tasks
             ),
             concurrent_harbor_tasks=None if harbor is None else max(1, harbor.concurrent_trials // shard.count),
+            sessions=self.sessions,
         )

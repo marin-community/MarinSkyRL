@@ -120,7 +120,7 @@ megatron = [
     "transformer-engine-torch==2.19.0 ; sys_platform == 'linux'",
 ]
 telemetry = [
-    "marin-rigging[prometheus] @ git+https://github.com/marin-community/marin.git@249dbb8da8d6bdb4a759a2cbffb852a66603e496#subdirectory=lib/rigging",
+    "marin-rigging[prometheus] @ git+https://github.com/marin-community/marin.git@545fcc20128cedbbd59d868b133d33e44fda6d06#subdirectory=lib/rigging",
     "memray ; sys_platform == 'linux'",
     "ray[default]",
 ]
@@ -193,7 +193,7 @@ override-dependencies = [
     "transformers==5.16.1",
     "opentelemetry-api==1.44.0 ; sys_platform == 'linux'",
     "opentelemetry-api ; sys_platform != 'linux'",
-    "marin-rigging[prometheus,secrets] @ git+https://github.com/marin-community/marin.git@249dbb8da8d6bdb4a759a2cbffb852a66603e496#subdirectory=lib/rigging",
+    "marin-rigging[prometheus,secrets] @ git+https://github.com/marin-community/marin.git@545fcc20128cedbbd59d868b133d33e44fda6d06#subdirectory=lib/rigging",
 ]
 constraint-dependencies = [
     "botocore==1.42.97 ; sys_platform == 'linux'",
@@ -281,9 +281,10 @@ ignore = [
 "skyrl-train/tests/cpu/test_ray_metrics.py" = ["E402"]
 
 [tool.pytest.ini_options]
-addopts = "-v -s"
+addopts = "-v -s -m 'not docker'"
 testpaths = ["skyrl-train/tests", "cloud/iris/tests"]
 markers = [
+    "docker: local Docker execution; run explicitly in the container test lane",
     "nightly: extended CPU learning and checkpoint-resume coverage",
     "vllm",
     "integrations",

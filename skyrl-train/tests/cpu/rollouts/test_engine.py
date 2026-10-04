@@ -3,6 +3,7 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
+from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import shutil
@@ -12,18 +13,17 @@ from unittest.mock import AsyncMock, MagicMock
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
-import requests
 import pytest
 from datasets import Dataset
 from harbor_config.errors import ErrorCategory, error_category
 from omegaconf import OmegaConf
-from skyrl_gym.envs.base_text_env import BaseTextEnv
-from skyrl_gym.envs.registration import EnvSpec, registry
-from skyrl_gym.verification import RewardResult, VerificationResult, VerificationStatus, normalized_verifier_score
+from skyrl_gym.task_records import fold_grades, grade_result
+from skyrl_gym.task_sessions import AnswerTaskSession
+from skyrl_gym.verification import VerificationResult, VerificationStatus, normalized_verifier_score
 from taskcompendium.grading import GradeResult, Outcome, numeric_answer, skipped_verifier
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
 from shellbox.image import DockerfileSource
-from shellbox.machine import Command, ShellSimBuiltins
+from shellbox.machine import Command, ExitReason, Result, ShellSimBuiltins
 from taskcompendium.environment import (
     EnvironmentKind,
     EnvironmentSpec,
@@ -47,7 +47,7 @@ from taskcompendium.models import (
 )
 
 from skyrl_train.rollouts.task_projections import StepTaskProjection, WholeTaskProjection
-from skyrl_train.dataset.tasks import GymTaskDataset, TaskDataset, gym_tasks
+from skyrl_train.dataset.tasks import SourceTaskDataset, TaskDataset, source_tasks
 from skyrl_train.dataset.harbor import HarborTaskDataset
 from skyrl_train.dataset.nemotron_ultra import NemotronTaskDataset
 from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection, WholeTrajectoryProjection
@@ -55,10 +55,9 @@ from skyrl_train.rollouts.buffer import RolloutGroup, RolloutLease, RolloutTask
 from skyrl_train.rollouts.task_worker import TaskRolloutWorker
 from skyrl_train.rollouts.group_grader import GroupGraderSpec, task_group_grader
 from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
-from taskcompendium.importers.skyrl import gym_task
+from taskcompendium.importers.skyrl import source_task
 from taskcompendium.parquet import read_tasks, write_tasks
-from rolloutengine.contracts import ModelTurn, RolloutContractError
-from skyrl_train.rollouts.gym_tasks import GymTaskSession
+from rolloutengine.contracts import ModelTurn, RolloutContractError, SessionStart, Transition
 from skyrl_train.trajectory_runners.types import BatchMetadata, TokenProvenance, TrajectoryID
 from skyrl_train.trajectory_runners.model_clients import DirectModelClient, ModelServerError
 from skyrl_train.rollout_observability import observe_rollout_call
@@ -93,19 +92,14 @@ class InferenceClient:
         (VerificationResult.error("sandbox lost state"), False, "VerifierRuntimeError"),
     ],
 )
-async def test_gym_verifier_failures_reach_training_eligibility(
-    task_inputs, monkeypatch, projection_type, verification, eligible, exception_type
+async def test_session_verifier_failures_reach_training_eligibility(
+    task_inputs, projection_type, verification, eligible, exception_type
 ):
-    class VerifierEnv(BaseTextEnv):
-        def __init__(self, env_config, extras):
-            super().__init__()
+    def grader(turn, config, extras):
+        return Transition(done=True, reward=1.0, grade=grade_result(verification))
 
-        def step(self, action):
-            return {"observations": [], "reward": 1.0, "done": True, "metadata": {}, "verification": verification}
-
-    monkeypatch.setitem(registry, "verifier", EnvSpec("verifier", entry_point=VerifierEnv))
     config, request = task_inputs
-    task = gym_task(
+    task = source_task(
         request["prompts"][0],
         "verifier",
         {},
@@ -117,7 +111,14 @@ async def test_gym_verifier_failures_reach_training_eligibility(
     projection = (
         WholeTrajectoryProjection if projection_type is WholeTaskProjection else StepWiseTrajectoryProjection
     )(config, Tokenizer())
-    worker = TaskRolloutWorker(config, projection_type(projection), InferenceClient(), {}, command_timeout=5)
+    worker = TaskRolloutWorker(
+        config,
+        projection_type(projection),
+        InferenceClient(),
+        {},
+        command_timeout=5,
+        sessions={"verifier": partial(AnswerTaskSession, grader=grader)},
+    )
     writer = Writer()
     try:
         await worker.run_task(RolloutTask(RolloutLease("lease", 0, 1), {"uid": task.id}, request), writer)
@@ -1112,32 +1113,35 @@ async def test_staged_tasks_keep_valid_credit_and_candidates_in_the_buffer(task_
     ],
 )
 async def test_interrupted_tasks_keep_verified_turns_and_apply_training_policy(
-    task_inputs, monkeypatch, projection_type, phase, treatment, preserve, retain, exclude
+    task_inputs, projection_type, phase, treatment, preserve, retain, exclude
 ):
     closed = []
 
-    class InterruptedEnv(BaseTextEnv):
-        def __init__(self, env_config, extras):
-            super().__init__()
+    class InterruptedSession:
+        def __init__(self, task, machine):
             self.turn = 0
+            self.task = task
+            self.grades = []
 
-        def init(self, prompt):
+        async def prepare(self):
             if phase == "prepare":
                 raise TimeoutError("private initialization details")
-            return prompt, {}
+            return SessionStart(tuple(request["prompts"][0]), {})
 
-        def step(self, action):
+        async def advance(self, turn):
             self.turn += 1
             if phase == "step" and self.turn == 2:
                 raise TimeoutError("private environment details")
-            return {
-                "observations": [{"role": "user", "content": "Continue"}],
-                "reward": 1.0,
-                "done": False,
-                "metadata": {},
-            }
+            grade = GradeResult(Outcome.GRADED, 1.0)
+            self.grades.append(grade)
+            return Transition(
+                done=False, observations=({"role": "user", "content": "Continue"},), reward=1.0, grade=grade
+            )
 
-        def close(self):
+        async def grade(self, messages):
+            return fold_grades(self.grades)
+
+        async def close(self):
             closed.append(True)
 
     class InterruptedClient(ConversationClient):
@@ -1154,7 +1158,6 @@ async def test_interrupted_tasks_keep_verified_turns_and_apply_training_policy(
                 output["response_logprobs"] = None
             return output
 
-    monkeypatch.setitem(registry, "interrupted", EnvSpec("interrupted", entry_point=InterruptedEnv))
     config, request = task_inputs
     exception_type = {
         "model_context": "ContextLengthExceededError",
@@ -1169,7 +1172,7 @@ async def test_interrupted_tasks_keep_verified_turns_and_apply_training_policy(
         f"{treatment}_exceptions": [exception_type],
         "preserve_logprobs_on_timeout": preserve,
     }
-    task = gym_task(
+    task = source_task(
         request["prompts"][0],
         "interrupted",
         {},
@@ -1183,7 +1186,12 @@ async def test_interrupted_tasks_keep_verified_turns_and_apply_training_policy(
         WholeTrajectoryProjection if projection_type is WholeTaskProjection else StepWiseTrajectoryProjection
     )(config, Tokenizer())
     worker = TaskRolloutWorker(
-        config, projection_type(projection), InterruptedClient(["first", "unverified"]), {}, command_timeout=5
+        config,
+        projection_type(projection),
+        InterruptedClient(["first", "unverified"]),
+        {},
+        command_timeout=5,
+        sessions={"interrupted": InterruptedSession},
     )
     writer = Writer()
     await worker.run_task(RolloutTask(RolloutLease("lease", 0, 1), {"uid": task.id}, request), writer)
@@ -1233,7 +1241,7 @@ async def test_invalid_model_evidence_aborts_the_group_even_with_error_masking(t
 
     config, request = task_inputs
     config.error_handling = {"enable_error_classification": True, "default_error_treatment": "mask"}
-    task = gym_task(
+    task = source_task(
         request["prompts"][0],
         "gsm8k_multi_turn",
         {"reward_spec": {"ground_truth": "12"}},
@@ -1253,51 +1261,6 @@ async def test_invalid_model_evidence_aborts_the_group_even_with_error_masking(t
         await worker.run_task(RolloutTask(RolloutLease("lease", 0, 1), {"uid": task.id}, request), writer)
     assert isinstance(failure.value.exceptions[0], RolloutContractError)
     assert writer.groups == []
-
-
-@pytest.mark.asyncio
-async def test_environment_action_rewrite_cannot_replace_sampled_tokens(task_inputs, monkeypatch):
-    closed = []
-
-    class RewritingEnv(BaseTextEnv):
-        def __init__(self, env_config, extras):
-            super().__init__()
-
-        def step(self, action):
-            return {
-                "observations": [],
-                "reward": 1.0,
-                "done": True,
-                "metadata": {},
-                "postprocessed_action": "A different answer",
-            }
-
-        def close(self):
-            closed.append(True)
-
-    monkeypatch.setitem(registry, "rewrite", EnvSpec("rewrite", entry_point=RewritingEnv))
-    config, request = task_inputs
-    task = gym_task(
-        request["prompts"][0],
-        "rewrite",
-        {},
-        {},
-        Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
-    )
-    request["env_extras"] = [{"task_spec": task.model_dump_json()}]
-    worker = TaskRolloutWorker(
-        config,
-        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
-        InferenceClient(),
-        {},
-        command_timeout=5,
-    )
-    writer = Writer()
-    with pytest.raises(ExceptionGroup) as failure:
-        await worker.run_task(RolloutTask(RolloutLease("lease", 0, 1), {"uid": task.id}, request), writer)
-    assert isinstance(failure.value.exceptions[0], RolloutContractError)
-    assert writer.groups == []
-    assert closed == [True]
 
 
 @pytest.mark.asyncio
@@ -1345,7 +1308,7 @@ async def test_gym_source_materialization_runs_without_the_original_dataset(tmp_
         ),
         source,
     )
-    prepared = GymTaskDataset(
+    prepared = SourceTaskDataset(
         [str(source)],
         Tokenizer(),
         100,
@@ -1600,13 +1563,13 @@ async def test_genrm_final_grades_and_credit_reach_training_batch(
             genrm_judge_server.http_status = 400
     config, request = task_inputs
     count = 3 if failed_peer else 2
-    task = gym_task(
+    task = source_task(
         request["prompts"][0],
-        environment="nemotron_ultra",
+        session="nemotron_ultra",
         extras={
             "extra_info": {
                 "nemotron_ultra": {
-                    "route": "skyrl_gym",
+                    "route": "task_session",
                     "agent": "genrm_simple_agent",
                     "record_json": json.dumps({"principle": "Prefer the correct answer."}),
                     "request_json": "{}",
@@ -1787,7 +1750,7 @@ async def test_unified_gym_tasks_preserve_grading_and_turn_credit(
     )
     write_tasks(
         task_path,
-        gym_tasks(
+        source_tasks(
             Dataset.from_parquet(raw_path),
             source_name="fixture",
             environment_configs={environment: {}},
@@ -1822,9 +1785,9 @@ async def test_aime_rollout_preserves_length_reward_and_phase_metrics(
 ):
     config, request = task_inputs
     config.chat_template_kwargs = {"enable_thinking": enable_thinking}
-    task = gym_task(
+    task = source_task(
         request["prompts"][0],
-        environment="aime",
+        session="aime",
         extras={reward_key: {"ground_truth": "12"}},
         config={"length_penalty_weight": 1.0, "min_response_length": 0, "evaluation_token_budget": 1},
         source=Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
@@ -1864,7 +1827,7 @@ async def test_aime_rollout_preserves_length_reward_and_phase_metrics(
         DirectModelClient(engine),
         {},
         command_timeout=5,
-        max_env_workers=1,
+        max_verifier_workers=1,
     )
     try:
         with observe_rollout_call(step=3, mode="async", enabled=True):
@@ -1890,7 +1853,7 @@ async def test_aime_rollout_preserves_length_reward_and_phase_metrics(
         "rollout_call_residual": "rollout_call",
     }
     waits = {row["attributes"]["wait"]: row["value"] for row in delivered_telemetry.select("rollout_waits", step="3")}
-    assert waits == {"model_client_await": 1, "env_await": 3, "env_queue": 3, "env_exec": 3, "env_resume": 3}
+    assert waits["model_client_await"] == 1
 
 
 @pytest.mark.asyncio
@@ -1907,7 +1870,7 @@ async def test_context_limits_preserve_only_completed_gym_turns(
     config.engine_init_kwargs = {"max_model_len": max_model_len}
     config.sampling_params.logprobs = 0
     request["sampling_params"] = None if output_limit is None else {"max_tokens": output_limit}
-    task = gym_task(
+    task = source_task(
         request["prompts"][0],
         "gsm8k_multi_turn",
         {"reward_spec": {"ground_truth": "12"}},
@@ -1973,34 +1936,37 @@ async def test_context_limits_preserve_only_completed_gym_turns(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("projection_type", [WholeTaskProjection, StepTaskProjection])
-async def test_native_rewards_and_credit_remain_aligned_across_tool_observations(
-    task_inputs, monkeypatch, projection_type
-):
-    class CreditEnv(BaseTextEnv):
-        def __init__(self, env_config, extras):
-            super().__init__()
+async def test_native_rewards_and_credit_remain_aligned_across_tool_observations(task_inputs, projection_type):
+    class CreditSession:
+        def __init__(self, task, machine):
             self.turn = 0
+            self.grades = []
 
-        def step(self, action):
+        async def prepare(self):
+            return SessionStart(tuple(request["prompts"][0]), {})
+
+        async def advance(self, turn):
             self.turn += 1
-            return {
-                "observations": [{"role": "user", "content": "Continue"}],
-                "done": self.turn == 2,
-                "metadata": {},
-                "reward": 0.0,
-                "verification": VerificationResult.verified(float(self.turn)),
-                "reward_result": RewardResult(
-                    unshaped_reward=float(self.turn),
-                    optimization_reward=0.5 * self.turn,
-                    token_rewards=(0.2 * self.turn, 0.3 * self.turn),
-                    token_credit=(-0.1 * self.turn, 0.0),
-                    components={"penalty": -0.5 * self.turn},
-                ),
-            }
+            grade = GradeResult(Outcome.GRADED, float(self.turn))
+            self.grades.append(grade)
+            return Transition(
+                observations=({"role": "user", "content": "Continue"},),
+                done=self.turn == 2,
+                grade=grade,
+                reward=0.5 * self.turn,
+                token_rewards=(0.2 * self.turn, 0.3 * self.turn),
+                token_credit=(-0.1 * self.turn, 0.0),
+                reward_components={"penalty": -0.5 * self.turn},
+            )
 
-    monkeypatch.setitem(registry, "credit", EnvSpec("credit", entry_point=CreditEnv))
+        async def grade(self, messages):
+            return fold_grades(self.grades)
+
+        async def close(self):
+            pass
+
     config, request = task_inputs
-    task = gym_task(
+    task = source_task(
         request["prompts"][0],
         "credit",
         {},
@@ -2012,7 +1978,12 @@ async def test_native_rewards_and_credit_remain_aligned_across_tool_observations
         WholeTrajectoryProjection if projection_type is WholeTaskProjection else StepWiseTrajectoryProjection
     )(config, Tokenizer())
     runner = TaskRolloutWorker(
-        config, projection_type(projection), ConversationClient(["first", "second"]), {}, command_timeout=5
+        config,
+        projection_type(projection),
+        ConversationClient(["first", "second"]),
+        {},
+        command_timeout=5,
+        sessions={"credit": CreditSession},
     )
     batch = await runner.run(request)
     if projection_type is WholeTaskProjection:
@@ -2028,51 +1999,50 @@ async def test_native_rewards_and_credit_remain_aligned_across_tool_observations
 
 
 @pytest.mark.asyncio
-async def test_lean_refinement_discards_the_failed_attempt(task_inputs, monkeypatch):
-    def compiler_response(*args, **kwargs):
-        response = requests.Response()
-        response.status_code = 200
-        response._content = b'{"process_status":"completed","stdout":"","stderr":""}'
-        return response
-
-    monkeypatch.setattr(requests, "post", compiler_response)
+async def test_lean_refinement_discards_the_failed_attempt(task_inputs, task_machine):
     config, request = task_inputs
     extras = {
         "extra_info": {
             "nemotron_ultra": {
-                "route": "skyrl_gym",
+                "route": "task_session",
                 "agent": "math_formal_lean_refinement_agent",
                 "record_json": json.dumps({"header": "", "formal_statement": "theorem equality : 1 = 1 := by sorry"}),
                 "request_json": "{}",
             }
         }
     }
-    task = gym_task(
+    task = source_task(
         request["prompts"][0],
         "nemotron_ultra",
         extras,
         {},
         Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
+        environment=EnvironmentSpec(kind=EnvironmentKind.SHELLSIM),
     )
     request["env_extras"] = [{"task_spec": task.model_dump_json()}]
     request["env_classes"] = ["nemotron_ultra"]
     client = ConversationClient(["", "by rfl"])
     runner = TaskRolloutWorker(
-        config, WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())), client, {}, command_timeout=5
+        config,
+        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        client,
+        {EnvironmentKind.SHELLSIM: task_machine},
+        command_timeout=5,
     )
     batch = await runner.run(request)
     assert batch["response_ids"] == [[5, 6]]
     assert batch["loss_masks"] == [[1, 1]]
     assert batch["rewards"] == [[0.0, 1.0]]
     assert client.requests[1]["chat_continuations"] == [None]
+    assert task_machine.closed
 
 
 @pytest.mark.asyncio
 async def test_step_projection_preserves_served_prompts_grades_and_teacher_routes(task_inputs):
     config, request = task_inputs
-    task = gym_task(
+    task = source_task(
         request["prompts"][0],
-        environment="gsm8k_multi_turn",
+        session="gsm8k_multi_turn",
         extras={"reward_spec": {"ground_truth": "12"}},
         config={},
         source=Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
@@ -2105,15 +2075,117 @@ async def test_step_projection_preserves_served_prompts_grades_and_teacher_route
 
 
 @pytest.fixture
+def task_machine():
+    """Supply compiler and interpreter I/O for the training-projection tests."""
+
+    class Machine:
+        closed = False
+        output = "4"
+
+        async def create(self, spec):
+            self.output = spec.env.get("PYTHON_OUTPUT", "4")
+            return self
+
+        async def upload(self, source, target):
+            pass
+
+        async def run(self, command):
+            data = json.loads(command.stdin) if command.stdin else {}
+            if "proof" in data:
+                output = {
+                    "exit_code": 0,
+                    "stdout": "",
+                    "stderr": "",
+                    "reason": "exited",
+                    "stdout_truncated": False,
+                    "stderr_truncated": False,
+                }
+            elif "code" in data:
+                output = {
+                    "exit_code": 0,
+                    "stdout": self.output,
+                    "stderr": "",
+                    "reason": "exited",
+                    "stdout_truncated": False,
+                    "stderr_truncated": False,
+                }
+            else:
+                output = {}
+            return Result(0, json.dumps(output).encode(), b"", False, False, ExitReason.EXITED)
+
+        async def close(self):
+            self.closed = True
+
+    return Machine()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("per_agent", [False, True])
+async def test_source_machine_selection_controls_tool_results(task_inputs, task_machine, per_agent):
+    config, request = task_inputs
+    environment = {
+        "machine": {"kind": "shellsim", "env": {"PYTHON_OUTPUT": "4"}},
+        "machines": {"ns_tools_simple_agent": {"kind": "shellsim", "env": {"PYTHON_OUTPUT": "7"}}} if per_agent else {},
+    }
+    expected = "7" if per_agent else "4"
+    row = {
+        "prompt": request["prompts"][0],
+        "env_class": "nemotron_ultra",
+        "extra_info": {
+            "nemotron_ultra": {
+                "route": "task_session",
+                "agent": "ns_tools_simple_agent",
+                "record_json": json.dumps({"expected_answer": expected}),
+                "request_json": "{}",
+            }
+        },
+    }
+    task = next(
+        source_tasks(
+            Dataset.from_list([row]), source_name="source", environment_configs={"nemotron_ultra": environment}
+        )
+    )
+    request["env_extras"] = [{"task_spec": task.model_dump_json()}]
+    request["env_classes"] = ["nemotron_ultra"]
+    message = {
+        "role": "assistant",
+        "tool_calls": [
+            {"id": "python-1", "function": {"name": "stateful_python_code_exec", "arguments": '{"code":"2+2"}'}}
+        ],
+    }
+    model = ConversationClient(["", expected], messages=[message, {"role": "assistant", "content": expected}])
+    worker = TaskRolloutWorker(
+        config,
+        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        model,
+        {EnvironmentKind.SHELLSIM: task_machine},
+        command_timeout=5,
+    )
+    try:
+        batch = await worker.run(request)
+    finally:
+        await worker.shutdown()
+    assert model.requests[1]["prompts"][0][-1] == {
+        "role": "tool",
+        "tool_call_id": "python-1",
+        "content": expected,
+    }
+    assert batch["verification_results"][0].score == 1.0
+    assert batch["exclude_from_baseline"] == [False]
+    assert batch["loss_masks"] == [[1, 1, 0, 0, 1, 1]]
+    assert task_machine.closed
+
+
+@pytest.fixture
 def python_tool_task(task_inputs):
     config, request = task_inputs
-    task = gym_task(
+    task = source_task(
         request["prompts"][0],
-        environment="nemotron_ultra",
+        session="nemotron_ultra",
         extras={
             "extra_info": {
                 "nemotron_ultra": {
-                    "route": "skyrl_gym",
+                    "route": "task_session",
                     "agent": "ns_tools_simple_agent",
                     "record_json": json.dumps({"question": "What is 2 + 2?", "expected_answer": "4"}),
                     "request_json": "{}",
@@ -2122,6 +2194,7 @@ def python_tool_task(task_inputs):
         },
         config={},
         source=Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
+        environment=EnvironmentSpec(kind=EnvironmentKind.SHELLSIM),
     )
     message = {
         "role": "assistant",
@@ -2141,25 +2214,8 @@ def python_tool_task(task_inputs):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("projection_type", [WholeTaskProjection, StepTaskProjection])
 async def test_python_tool_observations_preserve_training_and_release_session(
-    python_tool_task, task_inputs, monkeypatch, projection_type
+    python_tool_task, task_inputs, task_machine, projection_type
 ):
-    sessions = set()
-
-    def execute(url, **kwargs):
-        sessions.add(kwargs["headers"]["X-Session-ID"])
-        response = requests.Response()
-        response.status_code = 200
-        response._content = b'{"process_status":"completed","stdout":"4","stderr":""}'
-        return response
-
-    def close(url, **kwargs):
-        sessions.remove(kwargs["headers"]["X-Session-ID"])
-        response = requests.Response()
-        response.status_code = 204
-        return response
-
-    monkeypatch.setattr(requests, "post", execute)
-    monkeypatch.setattr(requests, "delete", close)
     config, request = task_inputs
     _, message = python_tool_task
     model = ConversationClient(["", "4"], messages=[message, {"role": "assistant", "content": "4"}])
@@ -2168,9 +2224,15 @@ async def test_python_tool_observations_preserve_training_and_release_session(
         if projection_type is WholeTaskProjection
         else StepWiseTrajectoryProjection(config, Tokenizer())
     )
-    runner = TaskRolloutWorker(config, projection_type(projection), model, {}, command_timeout=5)
+    runner = TaskRolloutWorker(
+        config,
+        projection_type(projection),
+        model,
+        {EnvironmentKind.SHELLSIM: task_machine},
+        command_timeout=5,
+    )
     batch = await runner.run(request)
-    assert sessions == set()
+    assert task_machine.closed
     assert model.requests[1]["prompts"][0][-1] == {"role": "tool", "tool_call_id": "python-1", "content": "4"}
     if projection_type is WholeTaskProjection:
         assert batch["loss_masks"] == [[1, 1, 0, 0, 1, 1]]
@@ -2183,7 +2245,7 @@ async def test_python_tool_observations_preserve_training_and_release_session(
 
 
 @pytest.fixture(params=[0, 1])
-def environment_executor(request):
+def verifier_executor(request):
     if request.param == 0:
         yield None
     else:
@@ -2193,34 +2255,26 @@ def environment_executor(request):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancellations", [1, 2])
-async def test_cancellation_waits_for_the_tool_before_session_cleanup(
-    python_tool_task, monkeypatch, environment_executor, cancellations
+@pytest.mark.parametrize("verifier_fails", [False, True])
+async def test_cancellation_waits_for_the_verifier_before_session_cleanup(
+    python_tool_task, verifier_executor, cancellations, verifier_fails
 ):
     loop = asyncio.get_running_loop()
     started = asyncio.Event()
     release = threading.Event()
     events = []
 
-    def execute(url, **kwargs):
+    def execute(turn, config, extras):
         events.append("start")
         loop.call_soon_threadsafe(started.set)
         assert release.wait(timeout=5)
         events.append("finish")
-        response = requests.Response()
-        response.status_code = 200
-        response._content = b'{"process_status":"completed","stdout":"4","stderr":""}'
-        return response
+        if verifier_fails:
+            raise RuntimeError("Verifier failed after cancellation")
+        return Transition(done=True, reward=1.0, grade=GradeResult(Outcome.GRADED, 1.0))
 
-    def close(url, **kwargs):
-        events.append("close")
-        response = requests.Response()
-        response.status_code = 204
-        return response
-
-    monkeypatch.setattr(requests, "post", execute)
-    monkeypatch.setattr(requests, "delete", close)
     task, message = python_tool_task
-    session = GymTaskSession(task, max_turns=2, executor=environment_executor)
+    session = AnswerTaskSession(task, None, grader=execute, executor=verifier_executor)
     await session.prepare()
     operation = asyncio.create_task(session.advance(ModelTurn(message, (1, 2), (3, 4), None, "stop")))
     try:
@@ -2228,17 +2282,20 @@ async def test_cancellation_waits_for_the_tool_before_session_cleanup(
         for _ in range(cancellations):
             operation.cancel()
             completion_at_cancel = loop.create_future()
-            # Let cancellation propagate through the environment task while HTTP remains blocked.
+            # Let cancellation reach the session while the verifier thread remains blocked.
             loop.call_soon(loop.call_soon, lambda: completion_at_cancel.set_result(operation.done()))
             assert not await completion_at_cancel
     finally:
         release.set()
         try:
-            with pytest.raises(asyncio.CancelledError):
+            with pytest.raises(asyncio.CancelledError) as cancellation:
                 await operation
         finally:
             await session.close()
+            events.append("close")
     assert events == ["start", "finish", "close"]
+    if verifier_fails:
+        assert isinstance(cancellation.value.__cause__, RuntimeError)
 
 
 @pytest.mark.asyncio

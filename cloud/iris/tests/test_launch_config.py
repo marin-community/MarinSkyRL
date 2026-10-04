@@ -8,7 +8,11 @@ from typing import Any
 
 import pytest
 import yaml
+from datasets import Dataset
 from omegaconf import OmegaConf
+from rolloutengine.contracts import ModelTurn
+from skyrl_gym.answer_tasks import grade_gsm8k
+from skyrl_gym.task_sessions import AnswerTaskSession
 
 from cloud.iris import training_driver
 from cloud.iris.launch_config import LaunchTopology, load_launch_config, validate_launch_config
@@ -19,6 +23,7 @@ from cloud.iris.rl_config_translation import (
     parse_rl_config,
 )
 from skyrl_train.distributed.step_policy import NonfiniteStepPolicy, nonfinite_step_policy
+from skyrl_train.dataset.tasks import source_tasks
 
 
 def _raw_config() -> dict[str, Any]:
@@ -107,6 +112,44 @@ def _raw_config() -> dict[str, Any]:
             },
         },
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text,reward", [("#### 12", 1.0), ("#### 12\nMore reasoning.", 0.0)])
+async def test_custom_session_settings_reach_private_grading_through_the_launch_config(
+    tmp_path: Path, text: str, reward: float
+) -> None:
+    raw = _raw_config()
+    raw["skyrl"]["environment"] = {"task_sessions": {"custom_math": {"reward_method": "final_line"}}}
+    path = tmp_path / "launch.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    config = load_launch_config(path)
+    task = next(
+        source_tasks(
+            Dataset.from_list(
+                [
+                    {
+                        "prompt": [{"role": "user", "content": "What is six plus six?"}],
+                        "env_class": "custom_math",
+                        "reward_spec": {"ground_truth": "12"},
+                    }
+                ]
+            ),
+            source_name="fixture",
+            environment_configs=OmegaConf.to_container(config.skyrl.environment.task_sessions, resolve=True),
+        )
+    )
+    session = AnswerTaskSession(task, None, grader=grade_gsm8k)
+    start = await session.prepare()
+    try:
+        transition = await session.advance(
+            ModelTurn({"role": "assistant", "content": text}, (), (1,), None, "stop", text)
+        )
+        assert transition.done and transition.grade.reward == reward
+        assert (await session.grade(())).reward == reward
+        assert start.messages == ({"role": "user", "content": "What is six plus six?"},)
+    finally:
+        await session.close()
 
 
 @pytest.mark.parametrize("storage_prefix", ["s3://runs/smoke", "gs://runs/smoke"])

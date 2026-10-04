@@ -92,4 +92,4 @@ def test_snowball_mopd_32k_recipe_composes_against_the_base_config():
     ).config
 
     assert cfg.trainer.policy.megatron_config.context_parallel_size == 1
-    assert cfg.environment.skyrl_gym.nemotron_ultra.grading == "skip"
+    assert cfg.environment.task_sessions.nemotron_ultra.grading == "skip"

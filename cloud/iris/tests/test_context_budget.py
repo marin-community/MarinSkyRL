@@ -47,7 +47,7 @@ def test_iris_config_materializes_one_coherent_context_budget(config_path):
     "config_path", sorted((_REPO_ROOT / "cloud/iris/configs").glob("snowball_ultra_*.yaml")), ids=lambda p: p.name
 )
 def test_snowball_ultra_judges_read_credentials_from_the_environment(config_path):
-    ultra = yaml.safe_load(config_path.read_text())["environment"]["skyrl_gym"]["nemotron_ultra"]
+    ultra = yaml.safe_load(config_path.read_text())["environment"]["task_sessions"]["nemotron_ultra"]
 
     for judge in (ultra["judges"]["general"], ultra["judges"]["safety"], ultra["genrm"]["judge"]):
         assert judge["api_key_env"]

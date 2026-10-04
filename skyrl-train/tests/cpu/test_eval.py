@@ -6,7 +6,6 @@ from unittest.mock import MagicMock
 
 import pytest
 from omegaconf import OmegaConf
-from skyrl_gym.envs.registration import registry
 from skyrl_gym.verification import VerificationResult
 
 from skyrl_train.evaluate import _calculate_eval_metrics, evaluate
@@ -85,8 +84,7 @@ def test_eval_reports_normalized_verifier_score_alongside_raw_reward():
 
 
 @pytest.mark.asyncio
-async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path, monkeypatch):
-    monkeypatch.setitem(registry, "custom_env", registry["gsm8k"])
+async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
     cfg = configure_eval(dummy_config, tmp_path)
 
     prompts_batch = [

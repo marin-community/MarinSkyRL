@@ -22,7 +22,7 @@ import ray
 from omegaconf import DictConfig, OmegaConf
 from skyrl_train.config.rollout_validation import validate_rollout_launch
 from skyrl_train.config.utils import get_default_config
-from skyrl_train.dataset.tasks import GymTaskDataset
+from skyrl_train.dataset.tasks import SourceTaskDataset
 from skyrl_train.entrypoints.main_base import BasePPOExp, EntrypointOperation
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import RayWrappedInferenceEngine
@@ -174,9 +174,9 @@ class TinyTrainingExp(BasePPOExp):
 
     def get_train_dataset(self):
         # Filtering a few dozen prompts in one process beats spawning preprocessing workers.
-        return GymTaskDataset(
+        return SourceTaskDataset(
             datasets=self.cfg.data.train_data,
-            environment_configs=OmegaConf.to_container(self.cfg.environment.skyrl_gym, resolve=True),
+            environment_configs=OmegaConf.to_container(self.cfg.environment.task_sessions, resolve=True),
             cache_dir=Path(self.cfg.trainer.export_path) / "tasks",
             tokenizer=self.tokenizer,
             max_prompt_length=self.cfg.trainer.max_prompt_length,
@@ -186,9 +186,9 @@ class TinyTrainingExp(BasePPOExp):
     def get_eval_dataset(self):
         if self.cfg.trainer.eval_interval <= 0 or not self.cfg.data.val_data:
             return None
-        return GymTaskDataset(
+        return SourceTaskDataset(
             datasets=self.cfg.data.val_data,
-            environment_configs=OmegaConf.to_container(self.cfg.environment.skyrl_gym, resolve=True),
+            environment_configs=OmegaConf.to_container(self.cfg.environment.task_sessions, resolve=True),
             cache_dir=Path(self.cfg.trainer.export_path) / "eval_tasks",
             tokenizer=self.tokenizer,
             max_prompt_length=self.cfg.trainer.max_prompt_length,

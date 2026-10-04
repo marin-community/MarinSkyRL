@@ -1,0 +1,289 @@
+"""Direct task sessions for synchronous answer graders."""
+
+import asyncio
+import json
+import re
+from collections.abc import Callable
+from concurrent.futures import Executor
+from functools import partial
+from typing import Any
+
+from rolloutengine.contracts import ModelTurn, SessionStart, Transition
+from shellbox.machine import ExitReason, Machine
+from taskcompendium.environment import ExternalVerifierSpec
+from taskcompendium.grading import GradeResult, Outcome
+from taskcompendium.models import TaskSpec
+from taskcompendium.submission import conversation_messages
+
+from skyrl_gym.answer_tasks import ground_truth
+from skyrl_gym.code_execution import execute_code
+from skyrl_gym.envs.gsm8k.utils import compute_score as math_score
+from skyrl_gym.envs.lcb.livecodebench import (
+    BINARY_REWARD_MODE,
+    LCB_REWARD_MODES,
+    extract_code_from_model,
+    normalize_lcb_ground_truth,
+)
+from skyrl_gym.envs.search.utils import compute_score as search_score
+from skyrl_gym.python_execution import PythonKernel
+from skyrl_gym.task_records import fold_grades
+from skyrl_gym.tools.search import SearchClient
+
+AnswerGrader = Callable[[ModelTurn, dict[str, Any], dict[str, Any]], Transition]
+
+
+async def run_blocking[T](executor: Executor | None, operation: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+    """Let a started thread operation finish before cancellation releases its resources."""
+    pending = asyncio.get_running_loop().run_in_executor(executor, partial(operation, *args, **kwargs))
+    try:
+        return await asyncio.shield(pending)
+    except asyncio.CancelledError as cancellation:
+        while not pending.done():
+            try:
+                await asyncio.shield(pending)
+            except asyncio.CancelledError:
+                continue
+            except Exception as error:
+                raise cancellation from error
+        if error := pending.exception():
+            raise cancellation from error
+        raise
+
+
+class AnswerTaskSession:
+    """Grade one model turn without a separate episode controller."""
+
+    def __init__(
+        self,
+        task: TaskSpec,
+        machine: Machine | None,
+        *,
+        grader: AnswerGrader,
+        executor: Executor | None = None,
+    ):
+        self.task = task
+        specification = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
+        self.config = specification.parameters["config"]
+        self.extras = specification.parameters["extras"]
+        self.grader = grader
+        self.executor = executor
+        self.result = GradeResult(Outcome.UNAVAILABLE, None, "The task has no completed turn")
+
+    async def prepare(self) -> SessionStart:
+        return SessionStart(tuple(conversation_messages(self.task.context)), {})
+
+    async def advance(self, turn: ModelTurn) -> Transition:
+        transition = await run_blocking(self.executor, self.grader, turn, self.config, self.extras)
+        assert transition.done and transition.grade is not None
+        self.result = transition.grade
+        return transition
+
+    async def grade(self, messages: tuple[dict[str, Any], ...]) -> GradeResult:
+        return self.result
+
+    async def close(self) -> None:
+        pass
+
+
+class MathTaskSession:
+    """Return per-turn math rewards and correction prompts until success or the turn limit."""
+
+    def __init__(self, task: TaskSpec, machine: Machine | None, *, max_turns: int):
+        specification = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
+        self.task = task
+        self.expected = ground_truth(specification.parameters["extras"])
+        self.max_turns = max_turns
+        self.grades: list[GradeResult] = []
+
+    async def prepare(self) -> SessionStart:
+        return SessionStart(tuple(conversation_messages(self.task.context)), {})
+
+    async def advance(self, turn: ModelTurn) -> Transition:
+        reward = math_score(turn.text, self.expected, method="strict", format_score=0.2 / self.max_turns)
+        grade = GradeResult(Outcome.GRADED, reward)
+        self.grades.append(grade)
+        remaining = self.max_turns - len(self.grades)
+        done = remaining == 0 or reward == 1.0
+        observations = ()
+        if not done:
+            prompt = (
+                "Please provide your step-by-step reasoning, "
+                "and also include a tentative numeric answer at the end in the exact format: '#### ANSWER'."
+                if remaining > 1
+                else "Now provide only the final numeric answer in the exact format: '#### ANSWER'."
+            )
+            observations = ({"role": "user", "content": prompt},)
+        return Transition(
+            done=done, observations=observations, reward=reward, grade=grade, metrics={"steps": len(self.grades)}
+        )
+
+    async def grade(self, messages: tuple[dict[str, Any], ...]) -> GradeResult:
+        return fold_grades(self.grades)
+
+    async def close(self) -> None:
+        pass
+
+
+class SearchTaskSession:
+    """Execute search actions and grade the task transcript on completion."""
+
+    def __init__(self, task: TaskSpec, machine: Machine | None, *, max_turns: int, executor: Executor | None = None):
+        specification = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
+        config = specification.parameters["config"]
+        self.task = task
+        self.expected = ground_truth(specification.parameters["extras"])
+        self.max_turns = max_turns
+        self.executor = executor
+        self.tool = SearchClient(**{key: config[key] for key in ("search_url", "topk", "timeout", "log_requests")})
+        self.transcript: list[str] = []
+        self.grades: list[GradeResult] = []
+
+    async def prepare(self) -> SessionStart:
+        return SessionStart(tuple(conversation_messages(self.task.context)), {})
+
+    async def advance(self, turn: ModelTurn) -> Transition:
+        for tag in ("</search>", "</answer>"):
+            if tag in turn.text and turn.text.split(tag, 1)[1]:
+                raise ValueError(f"The model response must end at {tag}")
+        self.transcript.append(turn.text)
+        done = len(self.grades) + 1 >= self.max_turns or ("<answer>" in turn.text and "</answer>" in turn.text)
+        reward = search_score("".join(self.transcript), self.expected) if done else 0.0
+        grade = GradeResult(Outcome.GRADED, reward)
+        self.grades.append(grade)
+        if done:
+            return Transition(done=True, reward=reward, grade=grade)
+        match = re.search(r"<search>(.*?)</search>", turn.text, re.DOTALL)
+        query = match.group(1) if match else None
+        output = await run_blocking(self.executor, self.tool.search, query)
+        observation = "\n<information>" + output + "</information>\n"
+        self.transcript.append(observation)
+        return Transition(
+            done=False,
+            observations=({"role": "user", "content": observation},),
+            reward=0.0,
+            grade=grade,
+            metrics={"tool_name": "search", "tool_input": [query]},
+        )
+
+    async def grade(self, messages: tuple[dict[str, Any], ...]) -> GradeResult:
+        return fold_grades(self.grades)
+
+    async def close(self) -> None:
+        await run_blocking(self.executor, self.tool.close)
+
+
+class CodeTaskSession:
+    """Grade one candidate program in Shellbox, with hidden test outputs on the worker."""
+
+    def __init__(self, task: TaskSpec, machine: Machine | None):
+        specification = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
+        self.task = task
+        self.machine = machine
+        reward_mode = specification.parameters["config"].get("reward_mode", BINARY_REWARD_MODE)
+        if reward_mode not in LCB_REWARD_MODES:
+            raise ValueError(f"Unsupported LCB reward_mode: {reward_mode!r}")
+        self.fractional = reward_mode == "fractional"
+        try:
+            self.tests = json.loads(normalize_lcb_ground_truth(ground_truth(specification.parameters["extras"])))
+        except (ValueError, TypeError):
+            self.tests = None
+        if self.tests:
+            assert machine is not None
+        self.result = GradeResult(Outcome.UNAVAILABLE, None, "The task has no completed turn")
+
+    async def prepare(self) -> SessionStart:
+        return SessionStart(tuple(conversation_messages(self.task.context)), {})
+
+    async def advance(self, turn: ModelTurn) -> Transition:
+        code = extract_code_from_model(turn.text)
+        if not self.tests:
+            self.result = GradeResult(Outcome.GRADED, 0.0)
+            return Transition(
+                done=True,
+                reward=0.0,
+                grade=self.result,
+                metrics={"parsed_code": None, "verifier_error": "invalid reward_model.ground_truth"},
+            )
+        assert self.machine is not None
+        try:
+            reward, details = await execute_code(self.machine, self.tests, code or "", fractional=self.fractional)
+        except (OSError, RuntimeError, TypeError, ValueError) as error:
+            self.result = GradeResult(
+                Outcome.INFRA_ERROR,
+                None,
+                "Code verification unavailable",
+                diagnostics={"error_type": type(error).__name__},
+            )
+            return Transition(done=True, reward=0.0, grade=self.result)
+        self.result = GradeResult(Outcome.GRADED, reward)
+        return Transition(done=True, reward=reward, grade=self.result, metrics={"parsed_code": code, **details})
+
+    async def grade(self, messages: tuple[dict[str, Any], ...]) -> GradeResult:
+        return self.result
+
+    async def close(self) -> None:
+        pass
+
+
+class SearchCodeTaskSession:
+    """Execute search and Python actions, then grade the completed task transcript.
+
+    Each Python action receives a fresh namespace.
+    """
+
+    def __init__(self, task: TaskSpec, machine: Machine | None, *, max_turns: int, executor: Executor | None = None):
+        assert machine is not None
+        specification = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
+        self.task = task
+        self.expected = ground_truth(specification.parameters["extras"])
+        self.max_turns = max_turns
+        self.executor = executor
+        self.search = SearchClient(**specification.parameters["config"].get("search", {}))
+        self.python = PythonKernel(machine)
+        self.transcript: list[str] = []
+        self.grades: list[GradeResult] = []
+
+    async def prepare(self) -> SessionStart:
+        await self.python.start()
+        return SessionStart(tuple(conversation_messages(self.task.context)), {})
+
+    async def advance(self, turn: ModelTurn) -> Transition:
+        self.transcript.append(turn.text)
+        done = len(self.grades) + 1 >= self.max_turns or ("<solution>" in turn.text and "</solution>" in turn.text)
+        reward = math_score("\n".join(self.transcript), self.expected) if done else 0.0
+        grade = GradeResult(Outcome.GRADED, reward)
+        self.grades.append(grade)
+        if done:
+            return Transition(done=True, reward=reward, grade=grade)
+        match = re.search(r"<tool>(.*?)</tool>", turn.text, re.DOTALL)
+        tool = re.search(r"<(\w+)>(.*?)</\1>", match.group(1), re.DOTALL) if match else None
+        if tool is None:
+            output = "No valid tool block found in action string."
+        elif tool.group(1) == "search":
+            output = await run_blocking(self.executor, self.search.search, tool.group(2).strip())
+        elif tool.group(1) == "python":
+            result = await self.python.execute("exec(" + repr(tool.group(2).strip()) + ", {})", timeout=10)
+            if result.reason == ExitReason.TIMED_OUT:
+                output = "Error executing Python code: Execution timed out after 10.0 seconds."
+            elif result.exit_code != 0 or result.stderr:
+                output = "Error executing Python code: " + (result.stdout + result.stderr).decode().strip()
+            else:
+                output = result.stdout.decode().strip()
+        else:
+            output = f"Unknown tool: {tool.group(1)}"
+        self.transcript.append(output)
+        return Transition(
+            done=False,
+            observations=({"role": "user", "content": output},) if output else (),
+            reward=0.0,
+            grade=grade,
+        )
+
+    async def grade(self, messages: tuple[dict[str, Any], ...]) -> GradeResult:
+        return fold_grades(self.grades)
+
+    async def close(self) -> None:
+        try:
+            await self.python.close()
+        finally:
+            await run_blocking(self.executor, self.search.close)

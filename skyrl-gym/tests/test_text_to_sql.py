@@ -1,9 +1,7 @@
 import json
 
 import pytest
-from omegaconf import DictConfig
-
-import skyrl_gym
+from taskcompendium.grading import Outcome
 from skyrl_gym.envs.text_to_sql import scoring
 
 # question: "How many hospitals are there in each state?"
@@ -34,14 +32,7 @@ _LARGE_INTEGER = {
 }
 
 
-def _make(ground_truth: dict) -> object:
-    return skyrl_gym.make(
-        "text_to_sql",
-        env_config=DictConfig({"env_class": "text_to_sql"}),
-        extras={"reward_model": {"ground_truth": json.dumps(ground_truth)}},
-    )
-
-
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "ground_truth, response, expected",
     [
@@ -71,28 +62,24 @@ def _make(ground_truth: dict) -> object:
         (_LARGE_INTEGER, "<solution>SELECT 1152921504606846977</solution>", 0.0),
     ],
 )
-def test_step_reward(ground_truth, response, expected):
-    env = _make(ground_truth)
-    out = env.step(response)
-    assert out["reward"] == expected
-    assert out["done"] is True
-
-
-def test_malformed_ground_truth_scores_zero_without_crashing():
-    env = skyrl_gym.make(
-        "text_to_sql",
-        env_config=DictConfig({"env_class": "text_to_sql"}),
-        extras={"reward_model": {"ground_truth": "not json"}},
+async def test_query_reward(rollout_session, ground_truth, response, expected):
+    rollout = await rollout_session(
+        "text_to_sql", [response], {"reward_model": {"ground_truth": json.dumps(ground_truth)}}
     )
-    out = env.step("<solution>SELECT 1</solution>")
-    assert out["reward"] == 0.0
-    assert out["done"] is True
-    assert out["metadata"].get("verifier_error")
+    assert rollout.grade.reward == expected
+    assert rollout.steps[0].transition.done is True
+    assert rollout.loss_mask == (1, 1)
 
-    env = _make({**_HOSPITALS, "schema_sql": 42})
-    out = env.step("<solution>SELECT 1</solution>")
-    assert out["reward"] == 0.0
-    assert out["metadata"].get("verifier_error")
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ground_truth", ["not json", json.dumps({**_HOSPITALS, "schema_sql": 42})])
+async def test_malformed_ground_truth_scores_zero_without_crashing(rollout_session, ground_truth):
+    rollout = await rollout_session(
+        "text_to_sql", ["<solution>SELECT 1</solution>"], {"reward_model": {"ground_truth": ground_truth}}
+    )
+    assert (rollout.grade.status, rollout.grade.reward) == (Outcome.GRADED, 0.0)
+    assert rollout.steps[0].transition.done is True
+    assert "verifier_error" in rollout.grade.diagnostics
 
 
 def test_grade_reports_infra_for_a_broken_task():

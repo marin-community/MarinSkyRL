@@ -4,9 +4,9 @@ import datasets
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from omegaconf import OmegaConf
 
-from skyrl_gym.envs.mcq.env import MCQEnv
+from rolloutengine.contracts import ModelTurn
+from skyrl_gym.answer_tasks import grade_mcq
 
 from infra.rl_data.preparation import (
     PreparationOptions,
@@ -47,8 +47,7 @@ from infra.rl_data.sources import (
     svamp_source,
     verifiable_code_source,
 )
-from skyrl_gym import get_data_contract, make as make_gym_env
-from skyrl_train.dataset.dataset import PromptDataset
+from skyrl_gym import get_data_contract
 from skyrl_gym.envs.ifeval import utils as ifeval_utils
 
 
@@ -166,7 +165,7 @@ def test_nemotron_ultra_adapter_preserves_responses_semantics_and_routes_by_agen
     ]
     ultra = row["extra_info"]["nemotron_ultra"]
     assert ultra["agent"] == "toolcall_schema_single_step_tool_use_with_argument_comparison_agent"
-    assert ultra["route"] == "skyrl_gym"
+    assert ultra["route"] == "task_session"
     assert json.loads(ultra["request_json"])["tools"][0]["name"] == "read_file"
     assert json.loads(ultra["record_json"])["expected_action"]["name"] == "write_file"
 
@@ -428,7 +427,6 @@ def test_dapo_preparation_strips_boilerplate_deduplicates_and_records_provenance
         "emitted_rows": 1,
     }
     assert artifact.provenance["verification"] == "two_sided"
-
 
 def test_preparation_rejects_overlength_prompts_before_artifact_write(tmp_path):
     with pytest.raises(ValueError, match="max_prompt_tokens"):
@@ -891,14 +889,13 @@ def test_openscience_preparation_accepts_ten_choice_answers_and_keeps_subset_pro
     assert row["extra_info"]["subset"] == "OS-Q2.5-32B-10"
 
 
-def test_openscience_prepared_row_constructs_and_scores_in_the_mcq_env():
+def test_openscience_prepared_row_reaches_the_mcq_task_grader():
     row = openscience_source().prepare_row(dict(_OPENSCIENCE_TEN_CHOICE_ROW), 4, get_data_contract("mcq"))
     extras = {key: value for key, value in row.items() if key not in ("prompt", "env_class")}
 
-    env = MCQEnv(OmegaConf.create(), extras=extras)
-
-    assert env.step("The answer is ($\\boxed{H}$)")["reward"] == 1.0
-    assert env.step("The answer is ($\\boxed{J}$)")["reward"] == 0.0
+    for response, expected in [(r"The answer is ($\boxed{H}$)", 1.0), (r"The answer is ($\boxed{J}$)", 0.0)]:
+        turn = ModelTurn({"role": "assistant", "content": response}, (), (1,), None, "stop", text=response)
+        assert grade_mcq(turn, {}, extras).reward == expected
 
 
 def test_openscience_preparation_skips_conflicting_option_prompts_with_recorded_reason():
@@ -1177,6 +1174,7 @@ def test_reasoning_gym_generation_is_deterministic_verifiable_and_disjoint():
     assert rebuilt_rows == train_rows
     assert {row["question"] for row in train_rows}.isdisjoint(row["question"] for row in holdout_rows)
     contract = get_data_contract("reasoning_gym")
+    assert contract.is_correct is not None
     artifact = prepare_artifact(
         source=source_by_name("reasoning_gym"),
         examples=train_rows,
@@ -1259,44 +1257,3 @@ def test_gretel_text_to_sql_adapter_builds_result_set_ground_truth():
     assert ground_truth["table_names"] == ["Hospitals"]
     assert artifact.provenance["counts"]["malformed_rows_skipped"] == 1
     assert artifact.provenance["verification"] == "two_sided"
-
-
-def test_prepared_rows_construct_their_declared_environment_through_the_loader():
-    cases = [
-        (
-            gsm8k_source(),
-            {
-                "question": "Weng earns $12 an hour. Yesterday she did 50 minutes of babysitting. How much did she earn?",
-                "answer": "12 / 60 * 50 = 10.\n#### 10",
-            },
-            "10",
-        ),
-        (
-            kto_mix_source(),
-            {
-                "prompt": [{"role": "user", "content": "Say something nice."}],
-                "completion": [{"role": "assistant", "content": "You are doing great work."}],
-                "label": True,
-            },
-            "You are doing great work.",
-        ),
-        (
-            hh_rlhf_source(),
-            {
-                "chosen": "\n\nHuman: Say something nice.\n\nAssistant: You are doing great work.",
-                "rejected": "\n\nHuman: Say something nice.\n\nAssistant: Whatever.",
-            },
-            "You are doing great work.",
-        ),
-    ]
-    for source, example, expected_ground_truth in cases:
-        prepared = source.prepare_row(example, 1, get_data_contract(source.env_id))
-        dataset = PromptDataset.__new__(PromptDataset)
-        dataset.dataframe = datasets.Dataset.from_list([prepared])
-        dataset.prompt_key = "prompt"
-        dataset.env_class_key = "env_class"
-        _, env_id, extras, _ = dataset[0]
-
-        env = make_gym_env(env_id, env_config=OmegaConf.create({}), extras=extras)
-
-        assert env.ground_truth == expected_ground_truth, env_id

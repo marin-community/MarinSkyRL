@@ -802,8 +802,10 @@ _OPEN_CONFIG_ROOTS = frozenset({"teachers", "teacher_routing", "terminal_bench_c
 
 
 def _path_allows_new_keys(path: str) -> bool:
-    return path.split(".", 1)[0] in _OPEN_CONFIG_ROOTS or any(
-        pattern in f".{path}" for pattern in _OPTIONAL_HYDRA_PATTERNS
+    return (
+        path.startswith("environment.task_sessions.")
+        or path.split(".", 1)[0] in _OPEN_CONFIG_ROOTS
+        or any(pattern in f".{path}" for pattern in _OPTIONAL_HYDRA_PATTERNS)
     )
 
 

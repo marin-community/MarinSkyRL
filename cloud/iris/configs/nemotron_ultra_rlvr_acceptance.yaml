@@ -108,11 +108,8 @@ generator:
     tool_call_parser: hermes
 
 environment:
-  skyrl_gym:
+  task_sessions:
     nemotron_ultra:
-      sandbox:
-        host: snowball-nemo-skills-sandbox.iris.svc.cluster.local
-        port: 6000
       judges:
         general:
           base_url: https://api.together.xyz/v1

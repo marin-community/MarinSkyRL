@@ -46,12 +46,9 @@ terminal_bench:
     default_error_treatment: zero
 environment:
   env_class: nemotron_ultra
-  skyrl_gym:
+  task_sessions:
     nemotron_ultra:
       grading: skip
-      sandbox:
-        host: snowball-nemo-skills-sandbox.iris.svc.cluster.local
-        port: 6000
 
 trainer:
   strategy: megatron

@@ -1,9 +1,7 @@
-"""Stable dataset-preparation contracts for verifier-backed environments.
+"""Dataset normalization and in-process verifier preflight.
 
-An environment's rollout implementation remains permissive: malformed examples
-score zero instead of crashing a distributed worker. Builders should use this
-module before writing data to normalize ground truth and validate a known-good
-and known-bad response against the exact runtime verifier.
+Code preflight requires a supplied Shellbox machine and uses validate_code_example.
+Nemotron preflight requires the complete source row and its task session.
 """
 
 from __future__ import annotations
@@ -13,21 +11,16 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from skyrl_gym import error
 from skyrl_gym.envs.aime import utils as aime_utils
 from skyrl_gym.envs.aime.verifier import AIMEVerifier
 from skyrl_gym.envs.gsm8k import utils as gsm8k_utils
 from skyrl_gym.envs.ifeval import utils as ifeval_utils
-from skyrl_gym.envs.lcb.livecodebench import (
-    compute_score,
-    normalize_lcb_ground_truth,
-)
+from skyrl_gym.envs.lcb.livecodebench import normalize_lcb_ground_truth
 from skyrl_gym.envs.mcq.utils import extract_mcq_answer
 from skyrl_gym.envs.nupa.answers import parse_ground_truth
 from skyrl_gym.envs.nupa.verifier import NUPAVerifier
 from skyrl_gym.envs.reasoning_gym.scoring import normalize_ground_truth as normalize_reasoning_gym_ground_truth
 from skyrl_gym.envs.reasoning_gym.scoring import score_response as score_reasoning_gym_response
-from skyrl_gym.envs.registration import spec
 from skyrl_gym.envs.text_to_sql import scoring as text_to_sql_scoring
 from skyrl_gym.verification import RolloutEvidence
 
@@ -42,11 +35,13 @@ class VerifierDataContract:
 
     env_id: str
     normalize_ground_truth: NormalizeGroundTruth
-    is_correct: IsCorrect
+    is_correct: IsCorrect | None = None
     prompt_instruction: str | None = None
 
     def validate_example(self, ground_truth: Any, positive_response: str, negative_response: str) -> str:
         """Return normalized ground truth after a two-sided verifier preflight."""
+        if self.is_correct is None:
+            raise ValueError(f"{self.env_id} preflight requires task execution with its private verifier inputs.")
         normalized = self.normalize_ground_truth(ground_truth)
         if not self.is_correct(positive_response, normalized):
             raise ValueError(f"{self.env_id} positive response does not satisfy its verifier.")
@@ -91,10 +86,6 @@ def _nemotron_ultra_ground_truth(value: Any) -> str:
     return value
 
 
-def _nemotron_ultra_is_correct(response: str, ground_truth: str) -> bool:
-    raise NotImplementedError("Nemotron Ultra correctness depends on the complete source row.")
-
-
 # ---------------------------------------------------------------------------
 # GSM8K
 # ---------------------------------------------------------------------------
@@ -114,11 +105,6 @@ def _gsm8k_is_correct(response: str, ground_truth: str) -> bool:
 # ---------------------------------------------------------------------------
 # LCB / code
 # ---------------------------------------------------------------------------
-
-
-def _code_is_correct(response: str, ground_truth: str) -> bool:
-    _, reward = compute_score(response, json.loads(ground_truth))
-    return reward == 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +184,6 @@ CONTRACTS = {
     "lcb": VerifierDataContract(
         env_id="lcb",
         normalize_ground_truth=normalize_lcb_ground_truth,
-        is_correct=_code_is_correct,
         prompt_instruction=LCB_PROMPT_INSTRUCTION,
     ),
     "reasoning_gym": VerifierDataContract(
@@ -209,7 +194,6 @@ CONTRACTS = {
     "nemotron_ultra": VerifierDataContract(
         env_id="nemotron_ultra",
         normalize_ground_truth=_nemotron_ultra_ground_truth,
-        is_correct=_nemotron_ultra_is_correct,
     ),
     "mcq": VerifierDataContract(
         env_id="mcq",
@@ -237,18 +221,8 @@ CONTRACTS = {
 
 
 def get_data_contract(env_id: str) -> VerifierDataContract:
-    """Return the preparation contract for a registered verifier environment.
-
-    The registration lookup makes misspelled or unavailable environment ids fail
-    before a training job starts. A registered environment without a contract is
-    intentionally rejected until it defines one.
-    """
-    try:
-        spec(env_id)
-    except error.Error as exc:
-        raise ValueError(f"Unknown environment id: {env_id!r}.") from exc
-
+    """Return the dataset preparation contract for a supported task."""
     contract = CONTRACTS.get(env_id)
     if contract is None:
-        raise ValueError(f"Environment {env_id!r} has no verifier data contract.")
+        raise ValueError(f"Task {env_id!r} has no verifier data contract.")
     return contract

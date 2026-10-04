@@ -652,28 +652,15 @@ class InferenceEngineClient(InferenceEngineInterface):
     async def _chat_completion_with_retry(
         self, engine_idx: int, original_request_payload: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """
-        Keep sending `chat_completion` requests (with previous responses accumulated) until the finish_reason is not "abort".
+        """Continue an aborted chat response after generation resumes.
 
-        The retry mechanism is intended to be used in combination with `pause_generation()` and `resume_generation()` for
-        in-flight weight updates and partial rollouts.
+        Retry requests reuse accumulated assistant content. They disable the
+        generation prompt and reduce the remaining token budget. A retry with
+        no generated tokens uses the original request unchanged.
 
-        This method is equivalent to a single `chat_completion()` call if we do not use `pause_generation()`.
-
-        For subsequent retry requests, we can reuse the original request with the following exceptions:
-        - Update the last assistant message content to accumulated content, where the role uses the first non-empty response's role.
-        - Set continue_final_message=True and add_generation_prompt=False.
-        - Adjust remaining max tokens if `max_tokens` or `max_completion_tokens` is present.
-        - If no tokens have been generated yet, resend the original request unchanged.
-
-        For the final response, we maintain all the first non-empty response's fields (i.e. prefilled already),
-        with the following exceptions:
-        - Accumulate the following across retry requests:
-          - `choices[0]["logprobs"]["content"]`
-          - `choices[0]["token_ids"]`
-          - `choices[0]["message"]["content"]`
-          - `choices[0]["routed_experts"]` when router replay is enabled
-        - Use the last response's finish_reason and stop_reason
+        The final response retains the first nonempty response's fields.
+        Token IDs, log probabilities, content, and routed experts accumulate
+        across requests. Finish and stop reasons come from the last response.
         """
         original_request_json: Dict[str, Any] = original_request_payload.get("json", {}).copy()
         headers: Dict[str, str] = original_request_payload.get("headers", {}).copy()

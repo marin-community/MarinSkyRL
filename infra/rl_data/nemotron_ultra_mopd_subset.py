@@ -7,7 +7,7 @@ slice. Math rows that NVIDIA ships as Hugging Face placeholders are restored fro
 datasets. SWE rows are bound to TaskTrove proxy tasks, and SWE states TaskTrove lacks are skipped.
 
 Every generator is routed, so rows whose verifier needs a judge only train under
-``environment.skyrl_gym.nemotron_ultra.grading: skip``.
+``environment.task_sessions.nemotron_ultra.grading: skip``.
 """
 
 from __future__ import annotations

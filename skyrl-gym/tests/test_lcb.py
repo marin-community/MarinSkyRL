@@ -1,14 +1,7 @@
-import os
 import multiprocessing
-import platform
-import time
 
 import pytest
-import skyrl_gym
 import json
-from omegaconf import DictConfig
-
-from skyrl_gym.envs.lcb.livecodebench import VerifierLimits, lcb_execution_result, lcb_test_results
 
 SECOND_LARGEST_SOLUTION = """```python
 def main():
@@ -23,6 +16,7 @@ if __name__ == "__main__":
 ```"""
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_response, tests, expected_reward",
     [
@@ -89,15 +83,9 @@ def main():
         ),
     ],
 )
-def test_compute_score(model_response, tests, expected_reward):
-    env = skyrl_gym.make(
-        "lcb",
-        env_config=DictConfig({"env_class": "lcb"}),
-        extras={"reward_model": {"method": "rule", "ground_truth": tests}},
-    )
-    # Skip init() since it's not used in this test
-    step_output = env.step(model_response)
-    assert step_output["reward"] == expected_reward
+async def test_task_executes_candidate_code_in_shellbox(rollout_session, model_response, tests, expected_reward):
+    rollout = await rollout_session("lcb", [model_response], {"reward_model": {"ground_truth": tests}})
+    assert rollout.grade.reward == expected_reward
 
 
 @pytest.fixture
@@ -110,21 +98,22 @@ def spawn_start_method():
 
 
 @pytest.mark.usefixtures("spawn_start_method")
-def test_compute_score_under_spawn():
-    """Scoring runs the tests in a child process, whose target `spawn` re-imports rather than inherits."""
-    env = skyrl_gym.make(
+@pytest.mark.asyncio
+async def test_task_execution_remains_valid_when_the_trainer_uses_spawn(rollout_session):
+    rollout = await rollout_session(
         "lcb",
-        env_config=DictConfig({"env_class": "lcb"}),
-        extras={
+        [SECOND_LARGEST_SOLUTION],
+        {
             "reward_model": {
                 "method": "rule",
                 "ground_truth": json.dumps([{"input": "4\n8 2 5 1\n", "output": "3\n", "testtype": "stdin"}]),
             }
         },
     )
-    assert env.step(SECOND_LARGEST_SOLUTION)["reward"] == 1.0
+    assert rollout.grade.reward == 1.0
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "extras",
     [
@@ -136,20 +125,14 @@ def test_compute_score_under_spawn():
         {"reward_model": {"ground_truth": "[1]"}},
     ],
 )
-def test_malformed_reward_model_scores_zero(extras):
-    env = skyrl_gym.make(
-        "lcb",
-        env_config=DictConfig({"env_class": "lcb"}),
-        extras=extras,
-    )
-
-    output = env.step(SECOND_LARGEST_SOLUTION)
-
-    assert output["reward"] == 0.0
-    assert output["metadata"]["verifier_error"]
+async def test_malformed_reward_model_scores_zero(rollout_session, extras):
+    rollout = await rollout_session("lcb", [SECOND_LARGEST_SOLUTION], extras)
+    assert rollout.grade.reward == 0.0
+    assert "verifier_error" in rollout.steps[0].transition.metrics
 
 
-def test_fractional_reward_reports_fraction_of_tests_passed_while_binary_remains_all_or_nothing():
+@pytest.mark.asyncio
+async def test_fractional_reward_reports_fraction_of_tests_passed_while_binary_remains_all_or_nothing(rollout_session):
     tests = json.dumps(
         [
             {"input": "1\n", "output": "1\n", "testtype": "stdin"},
@@ -162,88 +145,8 @@ def test_fractional_reward_reports_fraction_of_tests_passed_while_binary_remains
 print(int(input()))
 ```"""
 
-    fractional = skyrl_gym.make(
-        "lcb",
-        env_config=DictConfig({"reward_mode": "fractional"}),
-        extras={"reward_model": {"ground_truth": tests}},
-    )
-    binary = skyrl_gym.make(
-        "lcb",
-        env_config=DictConfig({"reward_mode": "binary"}),
-        extras={"reward_model": {"ground_truth": tests}},
-    )
-
-    assert fractional.step(response)["reward"] == 0.5
-    assert binary.step(response)["reward"] == 0.0
-
-
-def test_verifier_child_hits_wall_clock_deadline_and_is_reaped():
-    """A wall-clock cap bounds the join window; without it the formula allows (1+1)*50+5 = 105s."""
-    tests = [
-        {"input": "1\n", "output": "1\n", "testtype": "stdin"},
-    ] * 50
-    sleeper = "import time\nprint(int(input()))\ntime.sleep(5)"
-
-    started = time.monotonic()
-    results = lcb_test_results(
-        tests,
-        sleeper,
-        timeout=1,
-        limits=VerifierLimits(total_timeout_seconds=3),
-    )
-    elapsed = time.monotonic() - started
-
-    assert results == [-1] * 50
-    assert elapsed < 15
-    assert multiprocessing.active_children() == []
-
-
-@pytest.mark.skipif(platform.system() == "Darwin", reason="RLIMIT_AS is not enforced on macOS")
-def test_verifier_child_allocating_past_the_memory_cap_scores_zero():
-    tests = [{"input": "1\n", "output": "1\n", "testtype": "stdin"}]
-    bomb = "print(int(input()))\nbytearray(2 * 1024**3)"
-
-    results = lcb_test_results(
-        tests,
-        bomb,
-        timeout=5,
-        limits=VerifierLimits(max_memory_bytes=512 * 1024**2, total_timeout_seconds=60),
-    )
-
-    assert all(result is not True for result in results)
-    assert multiprocessing.active_children() == []
-
-
-def _large_diagnostic_child(sample, generation, debug, sender, timeout, execution_mode, memory):
-    sender.send(([False], {"error_message": "diagnostic:" + "x" * (128 * 1024)}))
-    sender.close()
-
-
-def _crashing_verifier_child(*args):
-    os._exit(7)
-
-
-def test_large_verifier_diagnostics_do_not_deadlock_the_child_pipe(monkeypatch):
-    monkeypatch.setattr("skyrl_gym.envs.lcb.livecodebench._run_test_in_subprocess", _large_diagnostic_child)
-    results, metadata = lcb_execution_result(
-        [{"input": "1\n", "output": "1\n", "testtype": "stdin"}],
-        "print(input())",
-        timeout=1,
-        limits=VerifierLimits(total_timeout_seconds=10),
-    )
-    assert results == [False]
-    assert metadata["error_message"] == "diagnostic:" + "x" * (128 * 1024)
-    assert multiprocessing.active_children() == []
-
-
-def test_verifier_child_crash_retains_exit_status_instead_of_a_candidate_verdict(monkeypatch):
-    monkeypatch.setattr("skyrl_gym.envs.lcb.livecodebench._run_test_in_subprocess", _crashing_verifier_child)
-    results, metadata = lcb_execution_result(
-        [{"input": "1\n", "output": "1\n", "testtype": "stdin"}],
-        "print(input())",
-        timeout=1,
-        limits=VerifierLimits(total_timeout_seconds=10),
-    )
-    assert results == [-1]
-    assert metadata == {"execution_error": "child_crash", "exit_code": 7}
-    assert multiprocessing.active_children() == []
+    for mode, reward in [("fractional", 0.5), ("binary", 0.0)]:
+        rollout = await rollout_session(
+            "lcb", [response], {"reward_model": {"ground_truth": tests}}, {"reward_mode": mode}
+        )
+        assert rollout.grade.reward == reward

@@ -3,19 +3,18 @@
 import json
 
 import pytest
-from omegaconf import OmegaConf
-
-import skyrl_gym
+from taskcompendium.grading import Outcome
+from skyrl_gym.answer_tasks import grade_reasoning_gym
 from skyrl_gym.envs.nemotron_ultra.mcqa import grade_mcqa
 
 
 @pytest.mark.parametrize("response", ["Answer: 42", "Answer: wrong\nAnswer: x = 42", "42"])
-def test_reasoning_client_preserves_native_fractional_score(response):
+def test_reasoning_client_preserves_native_fractional_score(model_turn, response):
     entry = {"answer": "42", "metadata": {"source_dataset": "simple_equations"}}
     extras = {"reward_model": {"ground_truth": {"task": "simple_equations", "entry": entry}}}
-    native = skyrl_gym.make("reasoning_gym", env_config=OmegaConf.create({}), extras=extras)
-    client = skyrl_gym.make("reasoning_gym", env_config=OmegaConf.create({"verifyit_enabled": True}), extras=extras)
-    assert client.step(response)["reward"] == native.step(response)["reward"]
+    native = grade_reasoning_gym(model_turn(response), {}, extras)
+    client = grade_reasoning_gym(model_turn(response), {"verifyit_enabled": True}, extras)
+    assert client.reward == native.reward
 
 
 @pytest.mark.parametrize(
@@ -34,19 +33,19 @@ def test_mcqa_client_preserves_source_extraction_noncontiguous_options(mode, res
     assert grade_mcqa(response.replace("Z", "B").replace("zebra", "apple"), record, verifyit_enabled=True)[0] == 0
 
 
-def test_invalid_reference_does_not_become_successful_verification():
+@pytest.mark.asyncio
+async def test_invalid_reference_does_not_become_successful_verification(rollout_session):
     record = {"options": [{"A": "apple"}], "expected_answer": "Z"}
     extras = {
         "extra_info": {
             "nemotron_ultra": {
-                "route": "skyrl_gym",
+                "route": "task_session",
                 "agent": "mcqa_simple_agent",
                 "record_json": json.dumps(record),
                 "request_json": "{}",
             }
         }
     }
-    env = skyrl_gym.make("nemotron_ultra", env_config=OmegaConf.create({"verifyit_enabled": True}), extras=extras)
-    result = env.step(r"\boxed{Z}")
-    assert result["reward"] == 0
-    assert result["verification"].score is None
+    rollout = await rollout_session("nemotron_ultra", [r"\boxed{Z}"], extras, {"verifyit_enabled": True})
+    assert rollout.steps[0].transition.reward == 0
+    assert (rollout.grade.status, rollout.grade.reward) == (Outcome.INFRA_ERROR, None)

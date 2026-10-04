@@ -9,8 +9,8 @@ from typing import Any
 
 from datasets import Dataset
 from transformers import PreTrainedTokenizerBase
-from taskcompendium.environment import ExternalVerifierSpec
-from taskcompendium.importers.skyrl import GYM_INTERACTION, gym_task
+from taskcompendium.environment import EnvironmentSpec, ExternalVerifierSpec
+from taskcompendium.importers.skyrl import source_task
 from taskcompendium.models import Source, TaskSpec, VerifierKind
 from taskcompendium.parquet import write_tasks
 from rolloutengine.task_session import session_start
@@ -33,7 +33,7 @@ def task_prompt(row: dict) -> dict:
     result = {
         **(
             verifier.parameters["extras"]
-            if verifier is not None and task.environment.interaction == GYM_INTERACTION
+            if verifier is not None and task.environment.interaction is not None
             else task.metadata.get("skyrl_extras", {})
         ),
         "prompt": session_start(task, convention).messages,
@@ -55,28 +55,44 @@ class TaskDataset(PromptDataset):
         return dataset.map(task_prompt, num_proc=self.num_workers)
 
 
-def gym_tasks(dataset: Dataset, *, source_name: str, environment_configs: Mapping[str, dict]) -> Iterator[TaskSpec]:
+def source_tasks(dataset: Dataset, *, source_name: str, environment_configs: Mapping[str, dict]) -> Iterator[TaskSpec]:
     """Convert source rows with stable provenance and private verifier inputs."""
     for index, source_row in enumerate(dataset):
         row = dict(source_row)
         content = json.dumps(row, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
-        yield _gym_task(
+        yield _source_task(
             row,
             environment_configs,
             Source(
                 dataset=row.get("data_source") or source_name,
                 revision=f"sha256:{hashlib.sha256(content).hexdigest()}",
                 row=str(index),
-                importer_revision="skyrl-gym-v1",
+                importer_revision="skyrl-task-session-v1",
             ),
         )
 
 
-def _gym_task(row: dict[str, Any], environment_configs: Mapping[str, dict], source: Source) -> TaskSpec:
+def _source_task(row: dict[str, Any], environment_configs: Mapping[str, dict], source: Source) -> TaskSpec:
     prompt = row.pop("prompt")
     environment = row.pop("env_class")
     assert isinstance(environment, str)
-    return gym_task(prompt, environment, row, environment_configs.get(environment, {}), source)
+    config = dict(environment_configs.get(environment, {}))
+    machine = config.pop("machine", None)
+    machines = config.pop("machines", {})
+    if environment == "nemotron_ultra":
+        ultra = row["extra_info"]["nemotron_ultra"]
+        agent = ultra["agent"]
+        machine = machines.get(agent, machine)
+    elif environment == "openenv":
+        machine = machines.get(row["env_name"], machine)
+    return source_task(
+        prompt,
+        environment,
+        row,
+        config,
+        source,
+        environment=None if machine is None else EnvironmentSpec.model_validate(machine),
+    )
 
 
 def cache_tasks(tasks: Iterator[TaskSpec], cache_dir: Path) -> Path:
@@ -93,8 +109,8 @@ def cache_tasks(tasks: Iterator[TaskSpec], cache_dir: Path) -> Path:
     return path
 
 
-class GymTaskDataset(TaskDataset):
-    """Convert Gym source datasets to the same task format used by other importers."""
+class SourceTaskDataset(TaskDataset):
+    """Convert source datasets to portable tasks with explicit session and machine inputs."""
 
     def __init__(
         self,
@@ -111,7 +127,7 @@ class GymTaskDataset(TaskDataset):
         super().__init__(list(datasets), tokenizer, max_prompt_length, num_workers=num_workers)
 
     def _tasks(self, dataset: Dataset) -> Iterator[TaskSpec]:
-        return gym_tasks(
+        return source_tasks(
             dataset,
             source_name=", ".join(self.datasets),
             environment_configs=self.environment_configs,

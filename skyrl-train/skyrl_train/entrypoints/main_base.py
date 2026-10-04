@@ -5,6 +5,11 @@ Main entrypoint for training.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from collections.abc import Callable, Mapping
+
+from rolloutengine.contracts import TaskSession
+from shellbox.machine import Machine
+from taskcompendium.models import TaskSpec
 
 from ray.util.placement_group import placement_group, PlacementGroup
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
@@ -268,13 +273,19 @@ def create_remote_inference_engines_from_config(cfg: DictConfig, tokenizer: PreT
 
 
 class BasePPOExp:
-    def __init__(self, cfg: DictConfig):
+    def __init__(
+        self,
+        cfg: DictConfig,
+        *,
+        sessions: Mapping[str, Callable[[TaskSpec, Machine | None], TaskSession]] | None = None,
+    ):
         """
         Initializes a PPO experiment.
 
         The `cfg` passed here will be the final config from Hydra, including CLI overrides.
         """
         self.cfg = cfg
+        self.sessions = {} if sessions is None else dict(sessions)
         self._configure_log_level()
         self.tokenizer = self.get_tokenizer()
         self.train_dataset = self.get_train_dataset()
@@ -365,11 +376,11 @@ class BasePPOExp:
 
     def task_dataset(self, data_files):
         from skyrl_train.dataset.nemotron_ultra import NemotronTaskDataset  # noqa: PLC0415
-        from skyrl_train.dataset.tasks import GymTaskDataset  # noqa: PLC0415
+        from skyrl_train.dataset.tasks import SourceTaskDataset  # noqa: PLC0415
         from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings  # noqa: PLC0415 - optional training dependencies
 
         terminal_data = list(self.cfg.data.get("terminal_bench_data", []))
-        dataset_type = NemotronTaskDataset if terminal_data else GymTaskDataset
+        dataset_type = NemotronTaskDataset if terminal_data else SourceTaskDataset
         terminal_options = {}
         if terminal_data:
             terminal_options = {
@@ -378,7 +389,7 @@ class BasePPOExp:
             }
         return dataset_type(
             datasets=data_files,
-            environment_configs=OmegaConf.to_container(self.cfg.environment.skyrl_gym, resolve=True),
+            environment_configs=OmegaConf.to_container(self.cfg.environment.task_sessions, resolve=True),
             cache_dir=Path(self.cfg.data.task_cache_dir),
             tokenizer=self.tokenizer,
             max_prompt_length=self.cfg.trainer.max_prompt_length,
@@ -496,6 +507,7 @@ class BasePPOExp:
                 cfg,
                 inference_engine_client.engines,
                 harbor_config=cfg.terminal_bench_config if terminal_data else None,
+                sessions=self.sessions,
             ),
             resources,
         )

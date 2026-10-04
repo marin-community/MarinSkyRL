@@ -1,0 +1,78 @@
+"""Convert model evidence and verifier results to the task execution records."""
+
+from collections.abc import Sequence
+
+import numpy as np
+from rolloutengine.contracts import ModelTurn, Transition
+from taskcompendium.grading import GradeResult, Outcome
+
+from skyrl_gym.verification import RewardResult, RolloutEvidence, VerificationResult, VerificationStatus
+
+
+def rollout_evidence(turn: ModelTurn) -> RolloutEvidence:
+    return RolloutEvidence(
+        messages=(turn.message,),
+        response=turn.text,
+        stop_reason=turn.stop_reason,
+        generated_token_count=len(turn.response_token_ids),
+        prompt_token_ids=turn.prompt_token_ids,
+        response_token_ids=turn.response_token_ids,
+        behavior_logprobs=None if turn.logprobs is None else np.asarray(turn.logprobs, dtype=np.float32),
+        metadata=turn.metadata,
+    )
+
+
+def grade_result(verification: VerificationResult) -> GradeResult:
+    if verification.status == VerificationStatus.VERIFIED:
+        return GradeResult(
+            Outcome.GRADED,
+            verification.score,
+            passed=verification.passed,
+            diagnostics=dict(verification.diagnostics),
+            score_min=verification.score_min,
+            score_max=verification.score_max,
+        )
+    statuses = {
+        VerificationStatus.SKIPPED: Outcome.SKIPPED,
+        VerificationStatus.UNAVAILABLE: Outcome.UNAVAILABLE,
+        VerificationStatus.ERROR: Outcome.INFRA_ERROR,
+    }
+    return GradeResult(
+        statuses[verification.status], None, verification.reason, diagnostics=dict(verification.diagnostics)
+    )
+
+
+def graded_transition(
+    turn: ModelTurn, verification: VerificationResult, reward: RewardResult, metrics: dict
+) -> Transition:
+    reward.validate_for(rollout_evidence(turn))
+    return Transition(
+        done=True,
+        reward=reward.optimization_reward,
+        token_rewards=reward.token_rewards,
+        token_credit=reward.token_credit,
+        reward_components=dict(reward.components),
+        grade=grade_result(verification),
+        metrics=metrics,
+    )
+
+
+def fold_grades(results: Sequence[GradeResult]) -> GradeResult:
+    """Preserve one verdict or average the normalized scores from completed turns."""
+    if not results:
+        return GradeResult(Outcome.UNAVAILABLE, None, "The task produced no grade")
+    if len(results) == 1 or results[-1].reward is None:
+        return results[-1]
+    scored = [result for result in results if result.reward is not None]
+    normalized = [
+        min(1.0, max(0.0, (result.reward - result.score_min) / (result.score_max - result.score_min)))
+        for result in scored
+    ]
+    return GradeResult(
+        Outcome.GRADED,
+        sum(normalized) / len(scored),
+        passed=all(
+            result.passed if result.passed is not None else score >= 1.0 for result, score in zip(scored, normalized)
+        ),
+        diagnostics={"steps": tuple(result.diagnostics for result in results), "num_scored_steps": len(scored)},
+    )

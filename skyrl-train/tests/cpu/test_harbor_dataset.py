@@ -2,7 +2,7 @@ from pathlib import Path
 import json
 
 import pytest
-from taskcompendium.importers.skyrl import gym_task
+from taskcompendium.importers.skyrl import source_task
 from taskcompendium.models import Source
 
 from skyrl_train.dataset.harbor import TerminalBenchTaskDataset, materialize_harbor_tasks
@@ -48,7 +48,7 @@ def test_terminal_task_selection_fails_before_execution(tmp_path, selection):
         with pytest.raises(ValueError, match="Duplicate terminal-bench task ID"):
             terminal_task_index(path)
         return
-    task = gym_task(
+    task = source_task(
         [{"role": "user", "content": "Repair the task."}],
         "nemotron_ultra",
         {

@@ -39,7 +39,7 @@ from skyrl_train.trajectory_runners.trajectory_reward_shaping import (
 from skyrl_train.metric_names import ROLLOUT_FAILURE_FRACTION_METRIC
 from skyrl_train.inference_engines.base import ConversationType
 from loguru import logger
-from skyrl_gym.metrics import aggregate_for_environment
+from skyrl_gym.metrics import aggregate_for_task
 from skyrl_gym.verification import VerificationResult, VerificationStatus, normalized_verifier_score
 
 
@@ -1136,7 +1136,7 @@ def get_rollout_metrics(
                 env_to_metrics[env_classes[i]].append(metrics)
         for env_name, metrics in env_to_metrics.items():
             # Aggregate metrics across all trajectories for the same environment
-            agg = aggregate_for_environment(env_name, metrics)
+            agg = aggregate_for_task(env_name, metrics)
             for key, value in agg.items():
                 rollout_metrics[f"{ENVIRONMENT_METRIC_PREFIX}{key}"] = value
 
