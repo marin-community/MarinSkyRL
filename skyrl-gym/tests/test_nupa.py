@@ -1,9 +1,9 @@
 import json
 
 import pytest
-from taskcompendium.grading import Outcome
+from taskcompendium.grading_result import Outcome
 
-from skyrl_gym import get_data_contract
+from skyrl_gym.envs.data_contracts import get_data_contract
 from skyrl_gym.answer_tasks import grade_nupa
 from skyrl_gym.envs.nupa.answers import FRACTION, FLOAT, INTEGER, SCIENTIFIC, digit_parts, extract_answer, full_answer
 from skyrl_gym.envs.nupa.verifier import NUPAVerifier

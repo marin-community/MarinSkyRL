@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from skyrl_gym import get_data_contract
+from skyrl_gym.envs.data_contracts import get_data_contract
 from skyrl_gym.code_execution import validate_code_example
 
 

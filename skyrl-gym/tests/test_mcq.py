@@ -1,6 +1,6 @@
 import pytest
 
-from skyrl_gym import get_data_contract
+from skyrl_gym.envs.data_contracts import get_data_contract
 from skyrl_gym.answer_tasks import grade_mcq
 
 
