@@ -23,8 +23,8 @@ progress handler bounds runaway queries.
 ``grade`` returns a ``GradeOutcome`` — ``MATCH`` / ``MISMATCH`` / ``INFRA``.
 ``INFRA`` marks a broken task or a verifier fault (missing keys, un-loadable
 schema, a reference query that will not run) — the dataset-preparation contract
-rejects those rows up front, and the rollout environment scores them ``0``
-without crashing a worker.
+rejects those rows before execution. Task sessions report a verifier failure
+with no grade if a broken row reaches execution.
 """
 
 from __future__ import annotations
@@ -38,13 +38,20 @@ import time
 from enum import StrEnum
 from fractions import Fraction
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 
 class GradeOutcome(StrEnum):
     MATCH = "match"
     MISMATCH = "mismatch"
     INFRA = "infra"  # broken task or a reference that will not run
+
+
+class QueryRows(NamedTuple):
+    """The column count and rows returned by a bounded SQL query."""
+
+    columns: int
+    rows: list[tuple]
 
 
 INFRA = GradeOutcome.INFRA  # re-exported for callers and tests that only care about the sentinel
@@ -271,7 +278,7 @@ def _read_only_authorizer(action, _a1, _a2, _db, _src):
     return sqlite3.SQLITE_OK if action in _ALLOWED_ACTIONS else sqlite3.SQLITE_DENY
 
 
-def query_result(conn: sqlite3.Connection, sql: str, *, timeout: float = QUERY_TIMEOUT) -> tuple[int, list[tuple]]:
+def query_result(conn: sqlite3.Connection, sql: str, *, timeout: float = QUERY_TIMEOUT) -> QueryRows:
     """Return bounded query rows with a read-only authorizer and an execution deadline."""
     conn.set_authorizer(_read_only_authorizer)
     conn.set_progress_handler(_deadline_handler(time.monotonic() + timeout), _PROGRESS_HANDLER_OPS)
@@ -283,7 +290,7 @@ def query_result(conn: sqlite3.Connection, sql: str, *, timeout: float = QUERY_T
     finally:
         conn.set_progress_handler(None, 0)
         conn.set_authorizer(None)
-    return ncols, rows
+    return QueryRows(ncols, rows)
 
 
 def _norm_value(v: Any) -> tuple:
@@ -384,13 +391,13 @@ def _compare_on(
         reference = query_result(conn, reference_sql)
     except sqlite3.Error as exc:
         return GradeOutcome.INFRA, f"reference query failed on {label} db: {exc}"
-    if len(reference[1]) > _MAX_RESULT_ROWS:
+    if len(reference.rows) > _MAX_RESULT_ROWS:
         return GradeOutcome.INFRA, f"reference result exceeds {_MAX_RESULT_ROWS} rows on {label} db"
     try:
         candidate = query_result(conn, candidate_stmt)
     except sqlite3.Error as exc:
         return GradeOutcome.MISMATCH, f"candidate query failed on {label} db: {exc}"
-    if len(candidate[1]) > _MAX_RESULT_ROWS:
+    if len(candidate.rows) > _MAX_RESULT_ROWS:
         return GradeOutcome.MISMATCH, f"candidate result exceeds {_MAX_RESULT_ROWS} rows on {label} db"
     equal, detail = results_equivalent(reference, candidate, order_significant=order_significant)
     if not equal:

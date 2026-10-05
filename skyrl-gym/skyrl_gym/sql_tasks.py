@@ -27,7 +27,7 @@ from skyrl_gym.task_records import fold_grades
 from skyrl_gym.task_sessions import run_blocking
 
 QUERY_OUTPUT_LIMIT_BYTES = 4 * 1024 * 1024
-LEGACY_QUERY_TIMEOUT = 30.0
+SQL_QUERY_TIMEOUT = 30.0
 SQL_DATABASE_DIRECTORIES = {
     "synsql": "SynSQL-2.5M/databases",
     "spider": "spider/database",
@@ -44,16 +44,16 @@ class QueryResult:
 
 def _reference_result(
     connection: sqlite3.Connection, sql: str, *, verifyit: bool, timeout: float = scoring.QUERY_TIMEOUT
-) -> tuple[int, list[tuple]]:
+) -> scoring.QueryRows:
     result = scoring.query_result(connection, sql, timeout=timeout)
-    if len(result[1]) > scoring._MAX_RESULT_ROWS:
+    if len(result.rows) > scoring._MAX_RESULT_ROWS:
         raise ValueError("Reference result exceeds the row limit")
-    if verifyit and any(isinstance(value, float) and not math.isfinite(value) for row in result[1] for value in row):
+    if verifyit and any(isinstance(value, float) and not math.isfinite(value) for row in result.rows for value in row):
         raise ValueError("Reference result contains a nonfinite value")
     return result
 
 
-def _seeded_databases(spec: dict, root: Path, *, verifyit: bool) -> list[tuple[Path, tuple[int, list[tuple]]]]:
+def _seeded_databases(spec: dict, root: Path, *, verifyit: bool) -> list[tuple[Path, scoring.QueryRows]]:
     connection = scoring.build_db(
         scoring.split_statements(spec["schema_sql"]), scoring.split_statements(spec["insert_sql"])
     )
@@ -72,14 +72,14 @@ def _seeded_databases(spec: dict, root: Path, *, verifyit: bool) -> list[tuple[P
         connection.close()
 
 
-def _database_snapshot(database: Path, reference_sql: str, root: Path, *, verifyit: bool) -> tuple[int, list[tuple]]:
+def _database_snapshot(database: Path, reference_sql: str, root: Path, *, verifyit: bool) -> scoring.QueryRows:
     if not database.is_file():
         raise FileNotFoundError(database)
     connection = sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)
     try:
         with sqlite3.connect(root / "fixture.sqlite") as snapshot:
             connection.backup(snapshot)
-            return _reference_result(snapshot, reference_sql, verifyit=verifyit, timeout=LEGACY_QUERY_TIMEOUT)
+            return _reference_result(snapshot, reference_sql, verifyit=verifyit, timeout=SQL_QUERY_TIMEOUT)
     finally:
         connection.close()
 
@@ -129,7 +129,7 @@ def _exact_equal(reference: str, candidate: str) -> bool:
     return grade_exact_candidate(specification, candidate).reward == 1.0
 
 
-def _seeded_equal(reference: tuple[int, list[tuple]], candidate: QueryResult, *, ordered: bool, verifyit: bool) -> bool:
+def _seeded_equal(reference: scoring.QueryRows, candidate: QueryResult, *, ordered: bool, verifyit: bool) -> bool:
     actual = (candidate.columns, list(candidate.rows))
     if not verifyit:
         return scoring.results_equivalent(reference, actual, order_significant=ordered)[0]
@@ -144,7 +144,7 @@ def _seeded_equal(reference: tuple[int, list[tuple]], candidate: QueryResult, *,
     return _exact_equal(*encoded)
 
 
-def _legacy_equal(reference: list[tuple], candidate: QueryResult, *, verifyit: bool) -> bool:
+def _set_equal(reference: list[tuple], candidate: QueryResult, *, verifyit: bool) -> bool:
     if candidate.error is not None:
         return False
     if not verifyit:
@@ -175,7 +175,7 @@ class SeededSQLTaskSession:
             specification.parameters["extras"].get("reward_model", {}).get("ground_truth")
         )
         self.directory = ""
-        self.cases: list[tuple[str, tuple[int, list[tuple]]]] = []
+        self.cases: list[tuple[str, scoring.QueryRows]] = []
         self.result = GradeResult(Outcome.UNAVAILABLE, None, "The task has no completed query")
 
     async def prepare(self) -> SessionStart:
@@ -247,7 +247,7 @@ class SQLTaskSession:
         self.verifyit = bool(config.get("verifyit_enabled", False))
         self.max_turns = max_turns
         self.directory = ""
-        self.reference: tuple[int, list[tuple]] = (0, [])
+        self.reference = scoring.QueryRows(0, [])
         self.failure: GradeResult | None = None
         self.transcript: list[str] = []
         self.grades: list[GradeResult] = []
@@ -280,9 +280,9 @@ class SQLTaskSession:
             reward = -1.0
             if query is not None:
                 candidate = await _query(
-                    self.machine, self.directory, "fixture.sqlite", query, timeout=LEGACY_QUERY_TIMEOUT
+                    self.machine, self.directory, "fixture.sqlite", query, timeout=SQL_QUERY_TIMEOUT
                 )
-                reward = float(_legacy_equal(self.reference[1], candidate, verifyit=self.verifyit))
+                reward = float(_set_equal(self.reference.rows, candidate, verifyit=self.verifyit))
             grade = GradeResult(Outcome.GRADED, reward)
             self.grades.append(grade)
             return Transition(done=True, reward=reward, grade=grade)
