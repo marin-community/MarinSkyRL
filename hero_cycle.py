@@ -102,7 +102,7 @@ def publication_expert_indices(names):
     }
 
 
-def assert_pretrained_snapshot(source, model, names, bias_names, snapshot):
+def assert_pretrained_snapshot(source, model, names, bias_names, snapshot, *, bf16_import=True):
     """Compare selected import values with independent source tensor range reads."""
     store = RemoteSafetensorsTensorStore(source, model)
     keys = set(store.get_all_keys())
@@ -118,9 +118,11 @@ def assert_pretrained_snapshot(source, model, names, bias_names, snapshot):
         if name in bias_names:
             assert tensor.dtype == snapshot[name].dtype == torch.float32
             expected = tensor
-        else:
+        elif bf16_import:
             # The existing import recipe computes in BF16. Readback is FP32.
             expected = tensor.to(torch.bfloat16).float()
+        else:
+            expected = tensor.float()
         torch.testing.assert_close(snapshot[name], expected, rtol=0, atol=0)
     return {'selected_weights_and_all_biases_exact': True,
             'source_dtypes': source_dtypes, 'requested_source_tensor_bytes': store.bytes_read}

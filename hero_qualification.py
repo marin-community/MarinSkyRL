@@ -70,7 +70,7 @@ def download(source, destination, filenames=None):
         list(pool.map(copy, objects.items()))
 
 
-def pretrained_metadata_identity(model):
+def pretrained_metadata_identity(model, *, verify_expected=True):
     records = {}
     for filename, variable in (
         ("config.json", "HERO_CONFIG_SHA256"),
@@ -79,10 +79,10 @@ def pretrained_metadata_identity(model):
     ):
         path = Path(model) / filename
         if not path.exists():
-            assert not os.environ.get(variable), filename
+            assert not verify_expected or not os.environ.get(variable), filename
             continue
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        if os.environ.get(variable):
+        if verify_expected and os.environ.get(variable):
             assert digest == os.environ[variable], (filename, digest, os.environ[variable])
         records[filename] = {"bytes": path.stat().st_size, "sha256": digest}
     return records
