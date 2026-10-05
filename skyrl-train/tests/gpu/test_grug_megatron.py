@@ -23,6 +23,7 @@ import ray
 import torch
 from omegaconf import open_dict
 from ray.util.placement_group import placement_group
+from safetensors.torch import load_file, save_file
 from transformers import AutoTokenizer
 
 from hero_fixed_weight_check import audit_captured_routes
@@ -599,6 +600,15 @@ def run_grug_serving_update_cycles(
     model_path, *, model_family, names, bias_names, sync_names, expert_indices, changed_names
 ):
     """Check real rollout, training and transport across three successive updates."""
+    # Match the BF16 export used by the learner. Keep router biases in FP32:
+    # vLLM's FP32 router storage must preserve these unrounded values exactly.
+    checkpoint = model_path / "model.safetensors"
+    state = load_file(str(checkpoint))
+    state = {
+        name: tensor.float() if name.endswith(GRUG_ROUTER_BIAS_SUFFIX) else tensor.to(torch.bfloat16)
+        for name, tensor in state.items()
+    }
+    save_file(state, str(checkpoint), metadata={"format": "pt"})
     policy_world_size = 2
     cfg = _config(str(model_path), world_size=policy_world_size, pp=2, ep=1)
     cfg.trainer.algorithm.batch_invariant = True
