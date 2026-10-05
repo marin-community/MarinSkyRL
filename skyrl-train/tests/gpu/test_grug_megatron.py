@@ -479,7 +479,7 @@ def test_grug_megatron_pp2_train_step_updates_weights_and_exports(tmp_path):
         ray.shutdown()
 
 
-def test_grug_megatron_muonh_pp2_ep2_checkpoint_continues_exactly(tmp_path):
+def test_grug_megatron_muonh_pp2_ep2_checkpoint_continues_exactly(tmp_path, megatron_checkpoint_path):
     require_hoppers(4)
     model_path = tmp_path / "model"
     model_path.mkdir()
@@ -534,7 +534,7 @@ def test_grug_megatron_muonh_pp2_ep2_checkpoint_continues_exactly(tmp_path):
             assert not torch.equal(saved[name], before[name]), name
         torch.testing.assert_close(saved[names[-1]], before[names[-1]], rtol=0, atol=0)
 
-        checkpoint = str(tmp_path / "checkpoint")
+        checkpoint = megatron_checkpoint_path
         ray.get(
             policy.async_run_ray_method("pass_through", "save_checkpoint", ckpt_dir=checkpoint, tokenizer=tokenizer)
         )

@@ -10,7 +10,7 @@ import torch
 from safetensors.torch import load_file, save_file
 from transformers import AutoTokenizer
 
-from skyrl_train.models.grug_moe import GrugMoeConfig
+from skyrl_train.models.grug_moe import GrugMoeConfig, GrugMoeForCausalLM
 from skyrl_train.utils import initialize_ray
 from tests.gpu.grug_gpu_gates import require_hoppers
 from tests.gpu.grug_serving import rank0_validation_snapshot
@@ -107,7 +107,7 @@ def write_tiny_hero_checkpoint(path: Path):
     ],
 )
 def test_hero_worker_repeated_updates(
-    tmp_path, monkeypatch, tp, pp, ep, cp, packing, optimizer_offload, muonh, flash_attn
+    tmp_path, monkeypatch, megatron_checkpoint_path, tp, pp, ep, cp, packing, optimizer_offload, muonh, flash_attn
 ):
     world_size = tp * pp * ep * cp
     require_hoppers(world_size)
@@ -196,7 +196,7 @@ def test_hero_worker_repeated_updates(
         assert torch.isfinite(final_scores).all()
         assert not torch.equal(initial_scores, final_scores)
         batch["action_log_probs"] = (final_scores * batch["response_mask"]).float()
-        checkpoint = str(tmp_path / "checkpoint")
+        checkpoint = megatron_checkpoint_path
         ray.get(
             policy.async_run_ray_method("pass_through", "save_checkpoint", ckpt_dir=checkpoint, tokenizer=tokenizer)
         )
@@ -216,5 +216,10 @@ def test_hero_worker_repeated_updates(
             resumed = rank0_validation_snapshot(policy, names)
             for name in names:
                 torch.testing.assert_close(resumed[name], expected[name], rtol=0, atol=0)
+        export_dir = tmp_path / "export"
+        ray.get(policy.async_run_ray_method("pass_through", "save_hf_model", str(export_dir), tokenizer))
+        exported = GrugMoeForCausalLM.from_pretrained(export_dir, dtype=torch.float32).state_dict()
+        for name in names:
+            torch.testing.assert_close(exported[name].float(), resumed[name], rtol=0, atol=0)
     finally:
         ray.shutdown()
