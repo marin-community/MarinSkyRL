@@ -113,7 +113,7 @@ trainer:
       tokenizer_path: ${trainer.policy.model.path}
       tokenizer_revision: ${trainer.policy.model.revision}
       source_uri: null
-      remote_read_mode: per_key
+      remote_read_mode: prefetch
       source_identity: null
       lora:
           rank: 0
