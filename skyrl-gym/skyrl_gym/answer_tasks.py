@@ -111,7 +111,7 @@ def grade_nupa(turn: ModelTurn, config: dict, extras: dict) -> Transition:
         parse_ground_truth(expected)
     except ValueError:
         logger.exception("Invalid NUPA ground truth")
-        return Transition(done=True, reward=0.0, grade=GradeResult(Outcome.GRADED, 0.0))
+        return Transition(done=True, reward=0.0, grade=GradeResult(Outcome.INFRA_ERROR, None, "Invalid NUPA task"))
     verification = NUPAVerifier(ground_truth=expected).verify(rollout_evidence(turn))
     if verification.status != VerificationStatus.VERIFIED:
         return Transition(
@@ -141,16 +141,10 @@ def grade_reasoning_gym(turn: ModelTurn, config: dict, extras: dict) -> Transiti
         expected = normalize_ground_truth(expected)
     except (TypeError, ValueError):
         logger.exception("Invalid Reasoning Gym ground truth")
-        if use_verifyit:
-            return Transition(
-                done=True,
-                reward=0.0,
-                grade=GradeResult(Outcome.INFRA_ERROR, None, "Invalid Reasoning Gym task"),
-            )
         return Transition(
             done=True,
             reward=0.0,
-            grade=GradeResult(Outcome.GRADED, 0.0),
+            grade=GradeResult(Outcome.INFRA_ERROR, None, "Invalid Reasoning Gym task"),
             metrics={"verifier_error": "invalid reward_model.ground_truth"},
         )
     try:

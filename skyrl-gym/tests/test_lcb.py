@@ -2,6 +2,7 @@ import multiprocessing
 
 import pytest
 import json
+from taskcompendium.grading import Outcome
 
 SECOND_LARGEST_SOLUTION = """```python
 def main():
@@ -125,9 +126,9 @@ async def test_task_execution_remains_valid_when_the_trainer_uses_spawn(rollout_
         {"reward_model": {"ground_truth": "[1]"}},
     ],
 )
-async def test_malformed_reward_model_scores_zero(rollout_session, extras):
+async def test_malformed_reward_model_has_no_grade(rollout_session, extras):
     rollout = await rollout_session("lcb", [SECOND_LARGEST_SOLUTION], extras)
-    assert rollout.grade.reward == 0.0
+    assert (rollout.grade.status, rollout.grade.reward) == (Outcome.INFRA_ERROR, None)
     assert "verifier_error" in rollout.steps[0].transition.metrics
 
 

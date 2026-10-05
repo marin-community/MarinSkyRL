@@ -70,16 +70,14 @@ async def test_sql_invalid_format_retains_negative_reward(rollout_session, datab
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("verifyit,status,reward", [(False, Outcome.GRADED, 0.0), (True, Outcome.INFRA_ERROR, None)])
+@pytest.mark.parametrize("verifyit", [False, True])
 @pytest.mark.parametrize("response", ["wrong format", "<sql>SELECT 1</sql>trailing text"])
-async def test_broken_sql_reference_preserves_source_failure_policy(
-    rollout_session, database, verifyit, status, reward, response
-):
+async def test_broken_sql_reference_has_no_grade(rollout_session, database, verifyit, response):
     _, config = database
     rollout = await rollout_session(
         "text2sql", [response], extras("SELECT missing FROM t"), {**config, "verifyit_enabled": verifyit}
     )
-    assert (rollout.grade.status, rollout.grade.reward) == (status, reward)
+    assert (rollout.grade.status, rollout.grade.reward) == (Outcome.INFRA_ERROR, None)
 
 
 @pytest.mark.parametrize(

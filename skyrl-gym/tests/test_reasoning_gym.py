@@ -1,6 +1,7 @@
 import json
 
 import pytest
+from taskcompendium.grading import Outcome
 
 from skyrl_gym.envs.reasoning_gym.scoring import score_response
 
@@ -28,3 +29,12 @@ CHAIN_SUM_GROUND_TRUTH = json.dumps(
 )
 def test_score_response_extracts_final_answer(response, expected):
     assert score_response(response, CHAIN_SUM_GROUND_TRUTH) == expected
+
+
+@pytest.mark.parametrize("verifyit", [False, True])
+@pytest.mark.asyncio
+async def test_malformed_ground_truth_has_no_grade(rollout_session, verifyit):
+    rollout = await rollout_session(
+        "reasoning_gym", ["Answer: 6"], {"reward_model": {"ground_truth": "not JSON"}}, {"verifyit_enabled": verifyit}
+    )
+    assert (rollout.grade.status, rollout.grade.reward) == (Outcome.INFRA_ERROR, None)

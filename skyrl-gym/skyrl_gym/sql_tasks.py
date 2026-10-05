@@ -157,11 +157,9 @@ def _legacy_equal(reference: list[tuple], candidate: QueryResult, *, verifyit: b
     )
 
 
-def _reference_failure(error: sqlite3.Error | ValueError, *, verifyit: bool) -> GradeResult:
+def _reference_failure(error: sqlite3.Error | ValueError) -> GradeResult:
     diagnostics = {"verifier_error": str(error)}
-    if verifyit:
-        return GradeResult(Outcome.INFRA_ERROR, None, "SQL verification failed", diagnostics=diagnostics)
-    return GradeResult(Outcome.GRADED, 0.0, diagnostics=diagnostics)
+    return GradeResult(Outcome.INFRA_ERROR, None, "SQL verification failed", diagnostics=diagnostics)
 
 
 class SeededSQLTaskSession:
@@ -183,7 +181,10 @@ class SeededSQLTaskSession:
     async def prepare(self) -> SessionStart:
         if self.spec is None:
             self.result = GradeResult(
-                Outcome.GRADED, 0.0, diagnostics={"verifier_error": "invalid reward_model.ground_truth"}
+                Outcome.INFRA_ERROR,
+                None,
+                "Invalid SQL task",
+                diagnostics={"verifier_error": "invalid reward_model.ground_truth"},
             )
             return SessionStart(tuple(conversation_messages(self.task.context)), {})
         assert self.machine is not None
@@ -192,7 +193,7 @@ class SeededSQLTaskSession:
             try:
                 cases = await run_blocking(self.executor, _seeded_databases, self.spec, root, verifyit=self.verifyit)
             except (sqlite3.Error, ValueError) as error:
-                self.result = _reference_failure(error, verifyit=self.verifyit)
+                self.result = _reference_failure(error)
             else:
                 self.directory = await _upload_queries(self.machine, [path for path, _ in cases])
                 self.cases = [(path.name, reference) for path, reference in cases]
@@ -259,7 +260,7 @@ class SQLTaskSession:
                     self.executor, _database_snapshot, self.database, self.reference_sql, root, verifyit=self.verifyit
                 )
             except (sqlite3.Error, ValueError) as error:
-                self.failure = _reference_failure(error, verifyit=self.verifyit)
+                self.failure = _reference_failure(error)
             else:
                 self.directory = await _upload_queries(self.machine, [root / "fixture.sqlite"])
         return SessionStart(tuple(conversation_messages(self.task.context)), {})

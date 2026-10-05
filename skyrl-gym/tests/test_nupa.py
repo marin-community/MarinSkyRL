@@ -1,6 +1,7 @@
 import json
 
 import pytest
+from taskcompendium.grading import Outcome
 
 from skyrl_gym import get_data_contract
 from skyrl_gym.answer_tasks import grade_nupa
@@ -73,10 +74,11 @@ def test_task_reports_no_answer_metrics_for_unparseable_responses(model_turn):
     assert result.metrics["dlength"] == 2.0
 
 
-def test_task_scores_zero_on_malformed_ground_truth_instead_of_crashing(model_turn):
+def test_malformed_ground_truth_has_no_grade(model_turn):
     for bad in ("not json", json.dumps({"answer": "1", "answer_format": "Roman"}), json.dumps({"answer": ""})):
         result = grade_nupa(model_turn("123"), {}, {"reward_spec": {"ground_truth": bad}})
         assert result.reward == 0.0
+        assert (result.grade.status, result.grade.reward) == (Outcome.INFRA_ERROR, None)
 
 
 def test_task_aggregates_metric_means(model_turn):

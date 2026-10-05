@@ -200,7 +200,7 @@ class CodeTaskSession:
     async def advance(self, turn: ModelTurn) -> Transition:
         code = extract_code_from_model(turn.text)
         if not self.tests:
-            self.result = GradeResult(Outcome.GRADED, 0.0)
+            self.result = GradeResult(Outcome.INFRA_ERROR, None, "Invalid LCB task")
             return Transition(
                 done=True,
                 reward=0.0,

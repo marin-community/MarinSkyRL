@@ -73,11 +73,11 @@ async def test_query_reward(rollout_session, ground_truth, response, expected):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("ground_truth", ["not json", json.dumps({**_HOSPITALS, "schema_sql": 42})])
-async def test_malformed_ground_truth_scores_zero_without_crashing(rollout_session, ground_truth):
+async def test_malformed_ground_truth_has_no_grade(rollout_session, ground_truth):
     rollout = await rollout_session(
         "text_to_sql", ["<solution>SELECT 1</solution>"], {"reward_model": {"ground_truth": ground_truth}}
     )
-    assert (rollout.grade.status, rollout.grade.reward) == (Outcome.GRADED, 0.0)
+    assert (rollout.grade.status, rollout.grade.reward) == (Outcome.INFRA_ERROR, None)
     assert rollout.steps[0].transition.done is True
     assert "verifier_error" in rollout.grade.diagnostics
 
