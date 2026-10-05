@@ -337,7 +337,7 @@ def main(args):
     from tests.gpu import utils
     from tests.gpu.test_grug_megatron import _config, _megatron_response_logprobs, _padded_batch
     from tests.gpu.test_hero_megatron import _train_step
-    from transformers import AutoTokenizer
+    from skyrl_train.tokenizer import create_tokenizer
 
     policy_nodes = args.nodes - args.serving_nodes
     cfg = _config(args.model, world_size=policy_nodes * args.gpus, pp=args.pp, ep=args.ep)
@@ -395,7 +395,7 @@ def main(args):
             mg.transformer_config_kwargs.bias_activation_fusion = True
         if os.environ.get("HERO_DETERMINISTIC") == "1":
             mg.transformer_config_kwargs.deterministic_mode = True
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    tokenizer = create_tokenizer(args.model, disable_fast_tokenizer=cfg.trainer.disable_fast_tokenizer)
     if args.cycle:
         import hero_cycle
         os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
