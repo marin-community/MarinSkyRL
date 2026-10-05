@@ -66,7 +66,10 @@ def _write_index(metadata_dir: Path, weight_map: dict[str, str]) -> None:
     (metadata_dir / "model.safetensors.index.json").write_text(json.dumps({"weight_map": weight_map}))
 
 
-def test_conversion_task_prefetch_preserves_rank_owned_tensors_and_reduces_range_fetches(tmp_path, monkeypatch):
+@pytest.mark.parametrize("header_metadata_bytes", [0, 9 * 1024**2], ids=["small-header", "multi-read-header"])
+def test_conversion_task_prefetch_preserves_rank_owned_tensors_and_reduces_range_fetches(
+    tmp_path, monkeypatch, header_metadata_bytes
+):
     assert Path(remote_safetensors.__file__).is_relative_to(Path.cwd() / "skyrl-train")
     tensors = {f"dense.{index}": torch.arange(8, dtype=torch.float32) + index for index in range(24)}
     tensors["dense.1"] = tensors["dense.1"].to(torch.bfloat16)
@@ -78,6 +81,7 @@ def test_conversion_task_prefetch_preserves_rank_owned_tensors_and_reduces_range
         save_file(
             {key: value for key, value in tensors.items() if key.startswith("dense.") == (name == "a.safetensors")},
             shard,
+            metadata={"annotation": "x" * header_metadata_bytes},
         )
         shards[f"bucket/policy/{name}"] = shard.read_bytes()
     metadata = tmp_path / "metadata"

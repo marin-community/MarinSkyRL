@@ -17,6 +17,7 @@ from fsspec.utils import merge_offset_ranges
 
 from marinskyrl.resource_locator import join_resource_path
 from marinskyrl.model_manifest import (
+    _HEADER_READ_CHUNK_BYTES,
     HF_WEIGHT_INDEX_FILENAME,
     SAFETENSORS_LENGTH_PREFIX_BYTES,
     read_safetensors_header,
@@ -237,7 +238,8 @@ class RemoteSafetensorsTensorStore:
         started = time.monotonic()
         header_bytes, _keys = read_safetensors_header(source, join_resource_path(self.source_uri, shard))
         self._record_read(len(header_bytes), started)
-        self.read_stats = replace(self.read_stats, gets=self.read_stats.gets + 2)
+        header_reads = 1 + math.ceil((len(header_bytes) - SAFETENSORS_LENGTH_PREFIX_BYTES) / _HEADER_READ_CHUNK_BYTES)
+        self.read_stats = replace(self.read_stats, gets=self.read_stats.gets + header_reads)
         cached = len(header_bytes), json.loads(header_bytes[SAFETENSORS_LENGTH_PREFIX_BYTES:])
         self._headers[shard] = cached
         return cached
