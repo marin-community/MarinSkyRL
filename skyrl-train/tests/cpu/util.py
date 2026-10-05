@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from datetime import timedelta
 from unittest.mock import patch
 
+import torch
 import torch.distributed as dist
 from skyrl_train.config.utils import get_default_config
 from omegaconf import OmegaConf
@@ -99,6 +100,7 @@ def stub_megatron_modules() -> None:
         },
         "megatron.core.transformer": {},
         "megatron.core.transformer.module": {"Float16Module": type("Float16Module", (), {})},
+        "megatron.core.transformer.utils": {"cat_with_oom_fallback": torch.cat},
         "megatron.core.optimizer": {
             "ChainedOptimizer": type("ChainedOptimizer", (), {}),
             "DistributedOptimizer": type("DistributedOptimizer", (), {}),
@@ -119,10 +121,14 @@ def stub_megatron_modules() -> None:
             "save": lambda *args, **kwargs: None,
             "load_common_state_dict": lambda *args, **kwargs: {},
         },
-        "megatron.core.dist_checkpointing.dict_utils": {"nested_values": lambda value: value.values()},
+        "megatron.core.dist_checkpointing.dict_utils": {
+            "nested_values": lambda value: value.values(),
+            "dict_list_map_inplace": lambda function, value: None,
+        },
         "megatron.core.dist_checkpointing.mapping": {
             "ShardedStateDict": dict,
             "ShardedTensor": type("ShardedTensor", (), {}),
+            "ShardedTensorFactory": type("ShardedTensorFactory", (), {}),
         },
         "megatron.core.dist_checkpointing.serialization": {
             "get_default_load_sharded_strategy": lambda *args, **kwargs: None,

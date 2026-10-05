@@ -32,6 +32,7 @@ from skyrl_train.distributed.megatron.direct_checkpoint import (
     DirectS3TorchDistLoadShardedStrategy,
     DirectS3TorchDistSaveShardedStrategy,
 )
+from skyrl_train.distributed.megatron.checkpoint_factories import reuse_checkpoint_factory_buffers
 from skyrl_train.distributed.megatron.checkpoint_metadata import remote_checkpoint_metadata
 from marinskyrl.remote_io import abort_multipart_uploads
 
@@ -428,11 +429,9 @@ class MegatronStrategy(DistributedStrategy):
                     if muonh
                     else _saved_optimizer_sharding_type(common_state)
                 )
-                # Gradients are not checkpointed. Free their GPU buffers now: building the
-                # optimizer's sharded state dict for loading allocates a full set of moments
-                # before optimizer.load_state_dict allocates the checkpointed ones, and with the
-                # gradients resident that second copy is what OOMs a policy that trains fine.
-                # The empty buffers come back after the optimizer state is restored below.
+                # Gradients are not checkpointed. Free their GPU buffers while the optimizer
+                # initializes its load destinations and DCP decodes checkpoint records.
+                # The empty buffers come back after optimizer restore.
                 offload_megatron_grads_to_cpu(model)
                 sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(
                     model_sharded_state_dict,
@@ -442,6 +441,7 @@ class MegatronStrategy(DistributedStrategy):
                 if muonh:
                     _muonh_fp32_groups_as_mapping(sharded_state_dict["optimizer"])
             # Load the checkpoint in parallel.
+            reuse_checkpoint_factory_buffers(sharded_state_dict)
             if not muonh:
                 load_strategy = FullyParallelLoadStrategyWrapper(
                     load_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
