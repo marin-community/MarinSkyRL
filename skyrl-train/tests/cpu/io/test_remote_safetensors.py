@@ -103,6 +103,9 @@ def test_conversion_task_prefetch_preserves_rank_owned_tensors_and_reduces_range
     ]
     tasks += [
         SimpleNamespace(megatron_module=None, mapping=SimpleNamespace(hf_param="outside", megatron_param="other_pp")),
+        SimpleNamespace(
+            megatron_module=object(), mapping=SimpleNamespace(hf_param="synthesized", megatron_param="synthesized")
+        ),
         tasks[0],
     ]
     results = []
