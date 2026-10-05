@@ -348,7 +348,9 @@ def _step_training_outputs(
                 messages=step.messages,
                 prompt_token_ids=turn.prompt_token_ids,
                 response_token_ids=turn.response_token_ids,
-                loss_mask=(1,) * len(turn.response_token_ids),
+                loss_mask=rollout.loss_mask[
+                    step.response_end + 1 - len(turn.response_token_ids) : step.response_end + 1
+                ],
                 logprobs=turn.logprobs,
                 grade=grade,
                 stop_reason=rollout.stop_reason if last else turn.stop_reason,

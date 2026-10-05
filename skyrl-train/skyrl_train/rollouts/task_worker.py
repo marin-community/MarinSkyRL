@@ -141,11 +141,13 @@ def _failed_rollout(
     if interruption.operation == RolloutOperation.MODEL and not isinstance(error, (ModelServerError, TimeoutError)):
         raise error
     exception_type = type(error).__name__
-    diagnostics = {}
+    existing_failure = interruption.rollout.failure
+    diagnostics = {} if existing_failure is None else dict(existing_failure.diagnostics)
     if isinstance(error, ModelServerError):
         if error.category == "context_overflow":
             exception_type = "ContextLengthExceededError"
         diagnostics = {
+            **diagnostics,
             "error_category": error.category,
             "request_id": error.request_id,
             "status_code": error.status_code,
@@ -180,7 +182,12 @@ def _failed_rollout(
         grade = grade_result(verification)
     elif recover and interruption.operation != RolloutOperation.GRADE:
         grade = rollout.grade
-    if not recover:
+    if interruption.operation == RolloutOperation.ADVANCE and "pending_turn" in diagnostics:
+        if not recover:
+            if rollout.grade.status == Outcome.UNAVAILABLE:
+                grade = rollout.grade
+            rollout = replace(rollout, loss_mask=(0,) * len(rollout.response_token_ids))
+    elif not recover:
         rollout = replace(rollout, response_token_ids=(), loss_mask=(), logprobs=(), steps=(), metrics={})
     logger.warning("Task {} interrupted during {}: {}", task.id, interruption.operation, exception_type)
     return replace(

@@ -31,7 +31,8 @@ from marinskyrl.task_sources import (
 )
 from skyrl_train.dataset.harbor import TerminalBenchTaskDataset, materialize_harbor_tasks
 from taskcompendium.environment import DockerBuild, EnvironmentKind, ShellVerifierSpec
-from taskcompendium.grading import Outcome, skipped_verifier
+from taskcompendium.grading import Outcome
+from taskcompendium.models import SkippedVerifierSpec, VerifierKind, VerifierSpec
 from taskcompendium.parquet import read_tasks
 from rolloutengine.contracts import ModelTurn
 from rolloutengine.engine import ShellboxRolloutEngine
@@ -252,7 +253,12 @@ async def test_packed_tasks_execute_after_source_removal(tmp_path, staged, regis
     output = materialize_harbor_tasks(
         [asdict(source)],
         cache_dir=cache,
-        verifier_override=None if verification else skipped_verifier("Verification is disabled"),
+        verifier_override=None
+        if verification
+        else VerifierSpec(
+            kind=VerifierKind.SKIPPED,
+            parameters_json=SkippedVerifierSpec(reason="Verification is disabled").model_dump_json(),
+        ),
     )
     dataset_path.unlink()
     shutil.rmtree(cache / "archives")

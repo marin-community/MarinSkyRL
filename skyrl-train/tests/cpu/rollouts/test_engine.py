@@ -23,7 +23,7 @@ from skyrl_train.config.behavior_logprobs import configure_behavior_logprob_samp
 from skyrl_gym.envs.base_text_env import BaseTextEnv
 from skyrl_gym.envs.registration import EnvSpec, registry
 from skyrl_gym.verification import RewardResult, VerificationResult, VerificationStatus, normalized_verifier_score
-from taskcompendium.grading import GradeResult, Outcome, numeric_answer, skipped_verifier
+from taskcompendium.grading import GradeResult, Outcome, numeric_answer
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
 from shellbox.image import DockerfileSource
 from shellbox.machine import Command, ShellSimBuiltins
@@ -39,6 +39,7 @@ from taskcompendium.models import (
     AnswerType,
     ConversationInput,
     Source,
+    SkippedVerifierSpec,
     StageRewardStrategy,
     StageVerifierSpec,
     EnvironmentRequirements,
@@ -325,6 +326,105 @@ class ConversationClient:
             "behavior_topk_logprobs": [[[-0.1, -0.2], [-0.2, -0.3]]],
             "routed_experts": [np.ones((2, 1, 1), dtype=np.uint8)],
         }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("completed_turns,staged", [(0, False), (1, False), (1, True)])
+async def test_advance_failure_retains_model_evidence_with_only_verified_credit(task_inputs, completed_turns, staged):
+    class Machine:
+        def __init__(self, machine):
+            self.machine = machine
+
+        async def run(self, command):
+            if command.argv == ("sh", "-c", "lose-guest"):
+                raise OSError("Guest unavailable")
+            return await self.machine.run(command)
+
+        async def upload(self, source, target):
+            await self.machine.upload(source, target)
+
+        async def download(self, source, target):
+            await self.machine.download(source, target)
+
+        async def close(self):
+            await self.machine.close()
+
+    class Factory:
+        async def create(self, spec):
+            return Machine(await ShellSimMachineFactory().create(spec))
+
+    commands = ["true"] * completed_turns + ["lose-guest"]
+    client = ConversationClient(
+        [f"exact text {index}" for index in range(len(commands))],
+        messages=[
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": f"call-{index}",
+                        "type": "function",
+                        "function": {"name": "shell", "arguments": json.dumps({"command": command})},
+                    }
+                ],
+            }
+            for index, command in enumerate(commands)
+        ],
+    )
+    config, request = task_inputs
+    task = TaskSpec.model_validate_json(request["env_extras"][0]["task_spec"])
+    task = task.model_copy(update={"environment": EnvironmentSpec(kind=EnvironmentKind.SHELLSIM)})
+    if staged:
+        client.messages[0] = {"role": "assistant", "content": "12"}
+        task = task.model_copy(
+            update={
+                "verifier": VerifierSpec(
+                    kind=VerifierKind.STAGED,
+                    parameters_json=StageVerifierSpec(strategy=StageRewardStrategy.MEAN).model_dump_json(),
+                ),
+                "stages": (
+                    TaskStage(name="first", verifier=task.verifier),
+                    TaskStage(
+                        name="second",
+                        verifier=task.verifier,
+                        context=ConversationInput(events=(TextMessage(role="user", content="Continue."),)),
+                    ),
+                ),
+            }
+        )
+    request["env_extras"][0]["task_spec"] = task.model_dump_json()
+    worker = TaskRolloutWorker(
+        config,
+        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        client,
+        {EnvironmentKind.SHELLSIM: Factory()},
+        command_timeout=5,
+    )
+    try:
+        outputs = await worker.generate(request)
+        batch = await worker.training_batch(request, outputs)
+    finally:
+        await worker.shutdown()
+    rollout = outputs[0]
+    expected = (3, 4) if completed_turns == 0 else (3, 4, 90, 91, 5, 6)
+    assert rollout.response_token_ids == expected
+    assert rollout.loss_mask == ((1, 1, 0, 0, 0, 0) if staged else (0,) * len(expected))
+    if staged:
+        assert rollout.steps[0].transition.grade.status == Outcome.GRADED
+        assert rollout.steps[0].transition.grade.reward == 1.0
+    else:
+        assert rollout.grade.status == Outcome.UNAVAILABLE
+        assert rollout.grade.reward is None
+    assert len(rollout.steps) == completed_turns
+    assert rollout.failure is not None
+    pending = rollout.failure.diagnostics["pending_turn"]
+    assert pending["text"] == f"exact text {completed_turns}"
+    assert pending["message"] == client.messages[-1]
+    assert pending["response_token_ids"] == tuple(expected[-2:])
+    assert pending["logprobs"] == (-0.1, -0.2)
+    np.testing.assert_array_equal(pending["metadata"]["routed_experts"], np.ones((2, 1, 1), dtype=np.uint8))
+    assert batch["response_ids"] == [list(expected)]
+    assert batch["loss_masks"] == [[0] * len(expected)]
+    assert batch["exclude_from_baseline"] == [True]
 
 
 @pytest.mark.asyncio
@@ -1196,18 +1296,26 @@ async def test_interrupted_tasks_keep_verified_turns_and_apply_training_policy(
     assert batch["exception_types"] == [exception_type]
     assert batch["exclude_from_baseline"] == [exclude]
     assert "private" not in str(batch["verification_results"])
+    pending = phase == "step"
+    whole_pending = pending and projection_type is WholeTaskProjection
+    if pending:
+        assert batch["verification_results"][0].diagnostics["pending_turn"]["text"] == "unverified"
     if retain:
-        assert batch["response_ids"] == [[3, 4]]
-        np.testing.assert_allclose(batch["rollout_logprobs"], [[-0.1, -0.2]])
-        assert batch["loss_masks"] == ([[0, 0]] if treatment == "mask" else [[1, 1]])
+        expected_ids = [3, 4, 90, 91, 5, 6] if whole_pending else [3, 4]
+        assert batch["response_ids"] == [expected_ids]
+        expected_logprobs = [-0.1, -0.2, 0, 0, -0.1, -0.2] if whole_pending else [-0.1, -0.2]
+        np.testing.assert_allclose(batch["rollout_logprobs"], [expected_logprobs])
+        expected_mask = ([0, 0] if treatment == "mask" else [1, 1]) + [0] * (len(expected_ids) - 2)
+        assert batch["loss_masks"] == [expected_mask]
         assert batch["unshaped_rewards"] == [1.0]
-        assert batch["rewards"] == [[0.0, 1.0 if treatment == "passthrough" else 0.0]]
-        assert batch["evidence_messages"][0][-1]["content"] == "first"
-        np.testing.assert_array_equal(batch["student_topk_indices"], [[[3, 99], [4, 99]]])
-        assert batch["rollout_routed_experts"][0][:, 0, 0].tolist() == [1, 1]
+        assert batch["rewards"] == [[0.0, 1.0 if treatment == "passthrough" else 0.0] + [0.0] * (len(expected_ids) - 2)]
+        assert batch["evidence_messages"][0][-1]["content"] == ("unverified" if whole_pending else "first")
+        np.testing.assert_array_equal(batch["student_topk_indices"][0][:2], [[3, 99], [4, 99]])
+        assert batch["rollout_routed_experts"][0][:2, 0, 0].tolist() == [1, 1]
     else:
-        assert batch["response_ids"] == [[]]
-        assert batch["loss_masks"] == [[]]
+        expected_ids = ([3, 4, 90, 91, 5, 6] if whole_pending else [3, 4]) if pending else []
+        assert batch["response_ids"] == [expected_ids]
+        assert batch["loss_masks"] == [[0] * len(expected_ids)]
         assert batch["verification_results"][0].score is None
     if phase in {"model_context", "model_server", "missing_logprobs"}:
         assert batch["server_errors"] == [
@@ -1716,7 +1824,10 @@ async def test_task_group_grader_preserves_separate_samples_and_private_inputs(t
     task = TaskSpec.model_validate_json(request["env_extras"][0]["task_spec"])
     task = task.model_copy(
         update={
-            "verifier": skipped_verifier("Group grading supplies the final score"),
+            "verifier": VerifierSpec(
+                kind=VerifierKind.SKIPPED,
+                parameters_json=SkippedVerifierSpec(reason="Group grading supplies the final score").model_dump_json(),
+            ),
         }
     )
     group_grader = GroupGraderSpec(name="group_total", parameters_json=json.dumps({"private_offset": 10}))

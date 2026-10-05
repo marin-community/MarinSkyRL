@@ -11,8 +11,8 @@ from shellbox.backends.daytona.machine import DaytonaMachineFactory, DaytonaNetw
 from shellbox.backends.docker.machine import DockerMachineFactory
 from shellbox.machine import MachineFactory
 from taskcompendium.environment import EnvironmentSpec, ShellVerifierSpec
-from taskcompendium.models import TaskSpec, VerifierKind, VerifierSpec
-from taskcompendium.grading import GradingFailure, Outcome, skipped_verifier
+from taskcompendium.models import SkippedVerifierSpec, TaskSpec, VerifierKind, VerifierSpec
+from taskcompendium.grading import GradingFailure, Outcome
 from rolloutengine.contracts import RolloutData, RolloutFailure
 
 from skyrl_train.trajectory_runners.harbor.configuration import HarborConfigBuilder
@@ -84,7 +84,12 @@ class HarborTaskSettings:
         return min(self.retry.min_wait_sec * self.retry.wait_multiplier**retries, self.retry.max_wait_sec)
 
     def verifier_override(self) -> VerifierSpec | None:
-        return skipped_verifier("Harbor verification is disabled") if self.verifier.disable else None
+        if not self.verifier.disable:
+            return None
+        return VerifierSpec(
+            kind=VerifierKind.SKIPPED,
+            parameters_json=SkippedVerifierSpec(reason="Harbor verification is disabled").model_dump_json(),
+        )
 
     def machine_factory(self, runner_config: DictConfig) -> MachineFactory:
         match self.environment.type:
