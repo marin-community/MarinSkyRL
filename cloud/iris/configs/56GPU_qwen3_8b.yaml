@@ -125,8 +125,6 @@ trainer:
   logger: wandb
 
   run_name: null
-  ckpt_path: null
-  export_path: null
 
   policy:
     optimizer_config:

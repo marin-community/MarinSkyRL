@@ -51,7 +51,6 @@ terminal_bench:
 
 trainer:
   strategy: megatron
-  seed: 1729
   algorithm:
     advantage_estimator: reinforce++
     use_kl_loss: false
@@ -125,7 +124,6 @@ generator:
     name_or_path: chat_templates/qwen3_thinking_acc.jinja2
 
   engine_init_kwargs:
-    served_model_name: Qwen3-8B
     enable_auto_tool_choice: true
     tool_call_parser: hermes
 

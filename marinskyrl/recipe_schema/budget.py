@@ -1,10 +1,14 @@
 """The authored context declaration and its launch-side token limits."""
 
-from typing import Annotated, Self
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Annotated, Any, Self
 
 from pydantic import Field, PositiveInt, model_validator
 
+from .documents import MISSING, get_path
 from .model import Section
+from .ownership import DERIVED_PATHS, REMOVED
 
 
 class ContextBudget(Section):
@@ -55,3 +59,26 @@ class ContextBudget(Section):
             "opencode_limit_context": self.opencode_limit_context,
             "opencode_limit_output": self.opencode_limit_output,
         }
+
+
+def resolve_context_budget(raw: Mapping[str, Any], config_path: Path) -> ContextBudget:
+    """Validate authored context fields and return their launch token budget."""
+    for path, message in REMOVED.items():
+        if get_path(raw, path) is not MISSING:
+            raise ValueError(f"{config_path}: {path}: {message}")
+    declared = sorted(path for path in DERIVED_PATHS if get_path(raw, path) is not MISSING)
+    if declared:
+        raise ValueError(
+            f"{config_path} declares derived context fields: {', '.join(declared)}; set context_budget instead"
+        )
+    config = raw.get("context_budget")
+    if not isinstance(config, Mapping):
+        raise ValueError(f"{config_path}: context_budget must be a mapping")
+    budget = ContextBudget.model_validate(config)
+    return ContextBudget(
+        request_window_tokens=budget.request_window_tokens,
+        max_new_tokens_per_turn=budget.max_new_tokens_per_turn,
+        max_turns=budget.max_turns,
+        generated_budget_fraction=float(budget.generated_budget_fraction),
+        overlong_cache_fraction=float(budget.overlong_cache_fraction),
+    )
