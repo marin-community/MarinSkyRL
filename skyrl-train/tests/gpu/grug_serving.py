@@ -25,10 +25,13 @@ def grug_engine_client(
     shared_pg=None,
     inference_engine_enable_sleep: bool = False,
     moe_backend: str | None = None,
+    enable_return_routed_experts: bool = False,
 ) -> InferenceEngineClient:
     """Start vLLM engines for a tiny Grug checkpoint."""
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     engine_init_kwargs = {"max_model_len": MAX_MODEL_LEN}
+    if enable_return_routed_experts:
+        engine_init_kwargs["enable_return_routed_experts"] = True
     if moe_backend is not None:
         engine_init_kwargs["kernel_config"] = {"moe_backend": moe_backend}
     engines = create_ray_wrapped_inference_engines(
@@ -120,7 +123,7 @@ def assert_engine_weights(
                     continue
                 assert entry["found"], (name, entry)
                 found[name] = True
-                expected_dtype = "float32" if name in bias_names or name == ROUTER_NAME else "bfloat16"
+                expected_dtype = "float32" if name in bias_names or name.endswith(".mlp.router.weight") else "bfloat16"
                 assert entry["dtype"] == expected_dtype, (name, entry["dtype"])
                 expert_index = serving_expert_index_by_name.get(name)
                 if expert_index is not None:

@@ -20,6 +20,7 @@ from tests.gpu.test_grug_megatron import (
     _megatron_response_logprobs,
     _padded_batch,
     _write_tiny_checkpoint,
+    run_grug_serving_update_cycles,
 )
 
 
@@ -88,6 +89,50 @@ def write_tiny_hero_checkpoint(path: Path):
     config.save_pretrained(path)
     save_file(state, str(path / "model.safetensors"), metadata={"format": "pt"})
     return state
+
+
+@pytest.mark.vllm
+def test_hero_four_gpu_pp2_rollout_repeated_muonh_updates_preserve_capture_and_weights(tmp_path, monkeypatch):
+    require_hoppers(4)
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    model_path = tmp_path / "model"
+    model_path.mkdir()
+    original = write_tiny_hero_checkpoint(model_path)
+    bias_names = [name for name in original if name.endswith(".mlp.router.bias")]
+    router_names = [name for name in original if name.endswith(".mlp.router.weight")]
+    experts = {
+        "model.layers.0.mlp.experts.3.gate_proj.weight": 3,
+        "model.layers.0.mlp.experts.15.down_proj.weight": 15,
+    }
+    changed_names = [
+        "lm_head.weight",
+        "model.layers.0.mlp.latent_down_proj.weight",
+        "model.layers.0.sconv_mlp.weight",
+        "model.layers.0.self_attn.sconv_k.weight",
+        "model.layers.0.shared_experts.1.up_proj.weight",
+    ]
+    sync_names = list(
+        dict.fromkeys(
+            [
+                *bias_names,
+                *router_names,
+                *experts,
+                *changed_names,
+                "model.layers.0.mlp.latent_up_proj.weight",
+                "model.layers.0.sconv_attn.weight",
+                "model.layers.3.self_attn.q_proj.weight",
+            ]
+        )
+    )
+    run_grug_serving_update_cycles(
+        model_path,
+        model_family="hero",
+        names=sync_names,
+        bias_names=bias_names,
+        sync_names=sync_names,
+        expert_indices=experts,
+        changed_names=changed_names,
+    )
 
 
 @pytest.mark.parametrize(

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import math
 import os
 from pathlib import Path
@@ -24,6 +25,7 @@ from omegaconf import open_dict
 from ray.util.placement_group import placement_group
 from transformers import AutoTokenizer
 
+from hero_fixed_weight_check import audit_captured_routes
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.distributed.megatron.grug_muonh import MegatronGrugMuonH, _offloaded_muon_direction_in_grad_
 from skyrl_train.distributed.megatron.megatron_utils import load_megatron_optimizer, offload_megatron_optimizer
@@ -564,17 +566,58 @@ def test_grug_megatron_muonh_pp2_ep2_checkpoint_continues_exactly(tmp_path, mega
 
 
 @pytest.mark.vllm
-def test_grug_megatron_four_gpu_pp2_disaggregated_rollout_train_broadcast_rollout(tmp_path):
-    """Rollout, PP2 Megatron update, mixed-dtype broadcast, serving readback, rollout."""
-    policy_world_size = 2
-    require_hoppers(policy_world_size + ROLLOUT_WORLD_SIZE)
+def test_grug_megatron_four_gpu_pp2_disaggregated_rollout_train_broadcast_rollout(tmp_path, monkeypatch):
+    """Three MuonH/AdamH updates preserve capture, FP32 biases and serving parity."""
+    require_hoppers(4)
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     model_path = tmp_path / "model"
     model_path.mkdir()
     _write_tiny_checkpoint(model_path)
+    router_names = [f"model.layers.{idx}.mlp.router.weight" for idx in range(NUM_LAYERS)]
+    sync_names = [
+        *BIAS_NAMES,
+        *router_names,
+        *SERVING_EXPERT_INDEX_BY_NAME,
+        LM_HEAD_NAME,
+        ATTN_GATE_NAME,
+        GATED_NORM_NAME,
+    ]
+    run_grug_serving_update_cycles(
+        model_path,
+        model_family="snowball",
+        names=list(dict.fromkeys([*PARAMETER_NAMES, *sync_names])),
+        bias_names=BIAS_NAMES,
+        sync_names=sync_names,
+        expert_indices=SERVING_EXPERT_INDEX_BY_NAME,
+        changed_names=[STACKED_EXPERT_NAME, LM_HEAD_NAME, ROUTER_NAME],
+    )
+
+
+def run_grug_serving_update_cycles(
+    model_path, *, model_family, names, bias_names, sync_names, expert_indices, changed_names
+):
+    """Check real rollout, training and transport across three successive updates."""
+    policy_world_size = 2
     cfg = _config(str(model_path), world_size=policy_world_size, pp=2, ep=1)
+    cfg.trainer.algorithm.batch_invariant = True
+    cfg.trainer.policy.optimizer_config.optimizer = "MuonH"
+    cfg.trainer.policy.optimizer_config.weight_decay = 0.0
+    cfg.trainer.policy.optimizer_config.adam_betas = [0.9, 0.95]
+    cfg.trainer.policy.optimizer_config.optimizer_kwargs = {"adam_lr": 2.0e-2}
+    cfg.trainer.policy.optimizer_config.max_grad_norm = 1.0 if model_family == "snowball" else 0.0
+    cfg.trainer.policy.optimizer_config.num_warmup_steps = 10 if model_family == "snowball" else 0
+    if model_family == "snowball":
+        with open_dict(cfg.trainer.policy.optimizer_config):
+            cfg.trainer.policy.optimizer_config.lr_warmup_init = 2.0e-3
+    model_config = GrugMoeConfig.from_pretrained(model_path)
+    capture_config = {
+        "num_hidden_layers": model_config.num_hidden_layers,
+        "num_experts_per_tok": model_config.num_experts_per_tok,
+        "num_experts": model_config.num_local_experts,
+    }
     initialize_ray(cfg)
-    client = grug_engine_client(cfg, str(model_path))
     try:
+        client = grug_engine_client(cfg, str(model_path), enable_return_routed_experts=True)
         prompt_pattern = [[1, 17, 29, 5, 11, 3], [1, 19, 31, 7, 13, 3]]
         prompts = [prompt_pattern[idx % 2] for idx in range(cfg.trainer.train_batch_size)]
         sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
@@ -589,28 +632,57 @@ def test_grug_megatron_four_gpu_pp2_disaggregated_rollout_train_broadcast_rollou
         first_logprob = asyncio.run(client.generate(score_input))["prompt_logprobs"][0][-1][first_token]
 
         policy = _init_policy(cfg, policy_world_size)
-        names = [*PARAMETER_NAMES, *BIAS_NAMES, GATED_NORM_NAME]
         before = rank0_validation_snapshot(policy, names)
-        _train_step(policy, rollout_training_batch(prompts, first_rollout))
-        training = rank0_validation_snapshot(policy, names)
-        for name in PARAMETER_NAMES:
-            assert not torch.equal(training[name], before[name]), f"{name} did not update"
-
         ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
-        ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
-        sync_names = [
-            *BIAS_NAMES,
-            *SERVING_EXPERT_INDEX_BY_NAME,
-            LM_HEAD_NAME,
-            ROUTER_NAME,
-            ATTN_GATE_NAME,
-            GATED_NORM_NAME,
-        ]
-        assert_engine_weights(client, sync_names, training, BIAS_NAMES, SERVING_EXPERT_INDEX_BY_NAME)
-
-        asyncio.run(client.reset_prefix_cache())
+        assert_engine_weights(client, sync_names, before, bias_names, expert_indices)
+        rollout = first_rollout
+        captures = []
+        for step in range(4):
+            captures.append(
+                audit_captured_routes(
+                    {
+                        "response_ids": rollout["response_ids"],
+                        "loss_masks": [[1] * len(row) for row in rollout["response_ids"]],
+                        "rollout_routed_experts": rollout["routed_experts"],
+                    },
+                    capture_config,
+                )
+            )
+            batch = rollout_training_batch(prompts, rollout)
+            batch.metadata["global_step"] = step
+            scores = _megatron_response_logprobs(policy, batch)
+            assert torch.isfinite(scores).all()
+            _assert_logprobs_close(scores, batch["rollout_logprobs"], batch["response_mask"])
+            if step == 3:
+                break
+            status = _train_step(policy, batch)
+            assert status["policy_update_steps"] == 1
+            assert math.isfinite(status["raw_grad_norm"]) and status["raw_grad_norm"] > 0
+            training = rank0_validation_snapshot(policy, names)
+            for name in names:
+                assert torch.isfinite(training[name]).all(), name
+            for name in bias_names:
+                torch.testing.assert_close(training[name], before[name], rtol=0, atol=0)
+            ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
+            assert_engine_weights(client, sync_names, training, bias_names, expert_indices)
+            asyncio.run(client.reset_prefix_cache())
+            rollout = asyncio.run(
+                client.generate(InferenceEngineInput(prompt_token_ids=prompts, sampling_params=sampling_params))
+            )
+        for name in changed_names:
+            assert not torch.equal(training[name], before[name]), f"{name} did not update"
         second_logprob = asyncio.run(client.generate(score_input))["prompt_logprobs"][0][-1][first_token]
+        assert math.isfinite(first_logprob) and math.isfinite(second_logprob)
         assert abs(second_logprob - first_logprob) > 1e-7
+        runtime = ray.get(
+            [engine.inference_engine_actor.report_engine_kernel_runtime.remote() for engine in client.engines]
+        )
+        workers = [worker for engine in runtime for worker in engine]
+        assert len(workers) == ROLLOUT_WORLD_SIZE
+        for worker in workers:
+            assert len(worker["attention"]) == model_config.num_hidden_layers
+            assert all(layer["head_size"] == model_config.head_dim for layer in worker["attention"])
+        print(json.dumps({"model_family": model_family, "updates": 3, "captures": captures, "runtime": runtime}))
     finally:
         ray.shutdown()
 

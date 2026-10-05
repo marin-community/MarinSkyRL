@@ -1061,6 +1061,9 @@ class WorkerWrap:
                         "backend": layer.get_attn_backend().get_name(),
                         "implementation": f"{type(layer.impl).__module__}.{type(layer.impl).__qualname__}",
                         "flash_attention_version": getattr(layer.impl, "vllm_flash_attn_version", None),
+                        "head_size": layer.head_size,
+                        "num_heads": layer.num_heads,
+                        "num_kv_heads": layer.num_kv_heads,
                     }
                 )
         if not attention:
