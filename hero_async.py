@@ -26,9 +26,14 @@ from skyrl_train.config.utils import get_default_config
 from skyrl_train.entrypoints.main_base import BasePPOExp, run_ray_driver
 from skyrl_train.utils import validate_cfg
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from tests.gpu.grug_serving import assert_engine_weights, rank0_validation_snapshot
+from tests.gpu.grug_serving import assert_engine_weights
 
-from hero_cycle import assert_pretrained_snapshot, publication_expert_indices, publication_validation_names
+from hero_cycle import (
+    assert_pretrained_snapshot,
+    publication_expert_indices,
+    publication_validation_names,
+    publication_validation_snapshot,
+)
 from hero_cat import COMPLETION_TEMPLATE, RESPONSE_LIMIT, cat_prompt
 from hero_qualification import download, measured_worker, pretrained_metadata_identity, s3_client, s3_location
 
@@ -233,7 +238,9 @@ class MeasuredAsyncPPOExp(BasePPOExp):
                     "resumed_from": self.report.get("resume_path"),
                 }
                 save_report(self.output, self.report)
-                snapshot = await asyncio.to_thread(rank0_validation_snapshot, self.trainer.policy_model, names)
+                snapshot = await asyncio.to_thread(
+                    publication_validation_snapshot, self.trainer.policy_model, self.cfg.trainer.policy.model.path, names
+                )
                 started = time.monotonic()
                 await asyncio.to_thread(
                     lambda: ray.get(self.trainer.policy_model.async_run_ray_method(
@@ -404,7 +411,9 @@ class MeasuredAsyncPPOExp(BasePPOExp):
             await sync_weights()
             publication_and_initial_drain_seconds = time.monotonic() - sync_started
             started = time.monotonic()
-            snapshot = await asyncio.to_thread(rank0_validation_snapshot, self.trainer.policy_model, names)
+            snapshot = await asyncio.to_thread(
+                publication_validation_snapshot, self.trainer.policy_model, self.cfg.trainer.policy.model.path, names
+            )
             if self.trainer.global_step == 0 and self.last_weight_snapshot is None:
                 self.report['pretrained_import_values'] = await asyncio.to_thread(
                     assert_pretrained_snapshot, self.report['source'], self.cfg.trainer.policy.model.path,

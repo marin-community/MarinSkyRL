@@ -102,6 +102,26 @@ def publication_expert_indices(names):
     }
 
 
+def publication_validation_snapshot(policy, model, names):
+    """Request Bridge's stored names and return the selected logical expert slices."""
+    config = GrugMoeConfig.from_pretrained(model)
+    stacked = config.grugmoe_artifact_schema_version == GRUG_STACKED_EXPERT_SCHEMA_VERSION
+    stored_names = {}
+    for name in names:
+        if stacked and ".experts." in name:
+            prefix, suffix = name.split(".experts.", 1)
+            expert, projection = suffix.split(".", 1)
+            stored_names[name] = (f"{prefix}.experts.{projection}", int(expert))
+        else:
+            stored_names[name] = (name, None)
+    snapshot = rank0_validation_snapshot(policy, sorted({stored for stored, _ in stored_names.values()}))
+    # Clone slices so the full stacked expert arrays can be released after this call.
+    return {
+        name: snapshot[stored] if expert is None else snapshot[stored][expert].clone()
+        for name, (stored, expert) in stored_names.items()
+    }
+
+
 def assert_pretrained_snapshot(source, model, names, bias_names, snapshot, *, bf16_import=True):
     """Compare selected import values with independent source tensor range reads."""
     store = RemoteSafetensorsTensorStore(source, model)
@@ -137,7 +157,8 @@ class GroupedPublication:
         self.report = report["grouped_publication"] = {}
         self.save_report = save_report
         self.colocated = colocated
-        self.names, self.bias_names = publication_validation_names(report["arguments"]["model"])
+        self.model = report["arguments"]["model"]
+        self.names, self.bias_names = publication_validation_names(self.model)
         self.before = None
         self.prompt = None
 
@@ -193,7 +214,7 @@ class GroupedPublication:
         self.report["probe_prompt_tokens"] = len(self.prompt)
         self.report["stage"] = "initial_snapshot"
         self.save_report()
-        self.before = rank0_validation_snapshot(self.policy, self.names)
+        self.before = publication_validation_snapshot(self.policy, self.model, self.names)
         self.report["stage"] = "weight_sync_initialization"
         self.save_report()
         self._call("init_weight_sync_state", inference_engine_client=self.client)
@@ -206,7 +227,7 @@ class GroupedPublication:
         assert self.before is not None
         self.report["stage"] = "updated_snapshot"
         self.save_report()
-        after = rank0_validation_snapshot(self.policy, self.names)
+        after = publication_validation_snapshot(self.policy, self.model, self.names)
         for name in self.bias_names:
             torch.testing.assert_close(after[name], self.before[name], rtol=0, atol=0)
         changed = [name for name in self.names if not torch.equal(self.before[name], after[name])]
