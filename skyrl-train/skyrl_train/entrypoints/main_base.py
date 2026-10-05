@@ -454,11 +454,7 @@ class BasePPOExp:
         return pg
 
     def get_trajectory_runner(self, cfg, tokenizer, inference_engine_client):
-        """Run all task families through the common rollout worker.
-
-        Returns:
-            TrajectoryRunner: The runner.
-        """
+        """Return a rollout worker pool for the configured task families."""
         del tokenizer
         from skyrl_train.rollouts.workers import RolloutWorkerPool, RolloutWorkerResources  # noqa: PLC0415
         from skyrl_train.rollouts.task_worker import TaskRolloutWorkerSpec  # noqa: PLC0415
