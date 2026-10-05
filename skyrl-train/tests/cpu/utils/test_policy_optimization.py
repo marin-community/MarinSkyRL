@@ -24,10 +24,6 @@ from skyrl_train.objective.losses import PolicyLossInputs, TokenLoss, ppo_policy
 from skyrl_train.objective.objective import build_objective_micro_batch, compute_policy_objective
 from skyrl_train.objective.reduction import step_counts
 from skyrl_train.config.objective_spec import LossSpec, RatioAnchor
-from skyrl_train.config.trajectory_runner_capabilities import (
-    TrajectoryRunnerMode,
-    validate_trajectory_runner_capabilities,
-)
 from skyrl_train.utils.advantage_estimators import (
     compute_gae_advantage_return,
     compute_grpo_outcome_advantage,
@@ -440,15 +436,6 @@ def test_registry_cross_ray_process():
         def test_ray_registry_access(name: str):
             policy_loss = PolicyLossRegistry.get(name)
             adv_estimator = AdvantageEstimatorRegistry.get("cross_process_adv_test")
-
-            if name == "cross_process_test_2":
-                config = example_dummy_config()
-                config.trainer.algorithm.policy_loss_type = name
-                config.trainer.algorithm.off_policy_correction = "none"
-                spec = PolicyLossRegistry.spec(name)
-                validate_trajectory_runner_capabilities(config, TrajectoryRunnerMode.SKYRL_GYM, loss_spec=spec)
-                with pytest.raises(ValueError, match="cannot supply exact sampled completion"):
-                    validate_trajectory_runner_capabilities(config, TrajectoryRunnerMode.MINI_SWE, loss_spec=spec)
 
             log_probs = torch.tensor([[-0.4]], requires_grad=True)
             loss = policy_loss(

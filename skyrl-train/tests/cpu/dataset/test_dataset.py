@@ -2,6 +2,7 @@ import pytest
 from unittest.mock import patch
 from datasets import Dataset
 from transformers import BatchEncoding
+from taskcompendium.models import TaskSpec
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.entrypoints.main_base import BasePPOExp
@@ -16,7 +17,7 @@ class _StubTokenizer:
     """
 
     def apply_chat_template(self, messages, add_generation_prompt):
-        return messages
+        return messages if isinstance(messages, str) else "".join(message["content"] for message in messages)
 
 
 @pytest.fixture
@@ -41,10 +42,17 @@ def sample_dataset():
 @pytest.mark.parametrize("probe_enabled", [False, True], ids=["evaluation", "probe_without_evaluation"])
 def test_eval_dataset_filtering(mock_tokenizer, sample_dataset, tmp_path, probe_enabled):
     path = tmp_path / "validation.parquet"
-    sample_dataset.to_parquet(path)
+    sample_dataset.map(
+        lambda row: {
+            "prompt": [{"role": "user", "content": row["prompt"]}],
+            "env_class": "gsm8k",
+            "reward_spec": {"ground_truth": row["answer"]},
+        }
+    ).to_parquet(path)
     experiment = object.__new__(BasePPOExp)
     experiment.cfg = get_default_config()
     experiment.cfg.data.val_data = [str(path)]
+    experiment.cfg.data.task_cache_dir = str(tmp_path / "tasks")
     experiment.cfg.trainer.max_prompt_length = 150
     experiment.cfg.trainer.eval_interval = -1 if probe_enabled else 1
     experiment.cfg.trainer.mismatch_probe.enabled = probe_enabled
@@ -54,10 +62,15 @@ def test_eval_dataset_filtering(mock_tokenizer, sample_dataset, tmp_path, probe_
 
     assert dataset is not None
     assert len(dataset) == 2
-    assert dataset.collate_fn([dataset[0], dataset[1]]) == [
-        {"prompt": "short prompt", "env_class": None, "env_extras": {"answer": "a1"}, "uid": "0"},
-        {"prompt": "a" * 120, "env_class": None, "env_extras": {"answer": "a2"}, "uid": "1"},
+    rows = dataset.collate_fn([dataset[0], dataset[1]])
+    assert [row["prompt"] for row in rows] == [
+        [{"role": "user", "content": "short prompt"}],
+        [{"role": "user", "content": "a" * 120}],
     ]
+    assert [row["uid"] for row in rows] == ["0", "1"]
+    tasks = [TaskSpec.model_validate_json(row["env_extras"]["task_spec"]) for row in rows]
+    assert [task.source.row for task in tasks] == ["0", "1"]
+    assert all(row["env_class"] == "gsm8k" for row in rows)
 
 
 @patch("datasets.load_dataset")

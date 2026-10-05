@@ -2,7 +2,7 @@ set -x
 
 # Colocated GRPO training+generation for Qwen/Qwen3-Coder-30B-A3B-Instruct on the SWE-Bench task.
 # Uses 2 node with 8 GPUs each.
-# uv run --isolated examples/mini_swe_agent/preprocess_swegym.py --output_dir ~/data/swe_gym_subset
+# See README.md for task materialization with pinned dataset revisions.
 # bash examples/mini_swe_agent/run_mini_swe_30B.sh
 
 # ensure that all worker nodes can access this data directory
@@ -10,9 +10,6 @@ DATA_DIR="$DATA/data/swe_gym_subset"
 
 CKPT_PATH="$DATA/ckpts/llm_mini_swe"
 
-# Save trajectories here for debugging.
-# NOTE: For a multi-node cluster, ensure that this is on NFS so that you can save all trajectories in the same path
-MINISWE_TRAJ_DIR="$HOME/mini_swe_agent_trajs_32B"
 
 NUM_GPUS=8
 NNODES=2
@@ -21,9 +18,7 @@ TP_SIZE=4
 LOGGER=wandb
 
 # We use a small batch size here for demonstration
-# NOTE (sumanthrh): The `generator.max_turns` here is actually unused, and we use the `step_limit` from the `swebench.yaml` file. 
-# This simply has to be a value > 1
-uv run --isolated --extra megatron --extra vllm --with "mini-swe-agent>=1.12.0" --with litellm --env-file examples/mini_swe_agent/.env.miniswe -m skyrl_train.entrypoints.mini_swe \
+uv run --project .. --extra megatron --extra vllm -m skyrl_train.entrypoints.taskcompendium \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
@@ -55,9 +50,6 @@ uv run --isolated --extra megatron --extra vllm --with "mini-swe-agent>=1.12.0" 
   trainer.algorithm.use_kl_loss=true \
   generator.backend=vllm \
   generator.run_engines_locally=True \
-  generator.enable_http_endpoint=True \
-  generator.http_endpoint_host='127.0.0.1' \
-  generator.http_endpoint_port=8001 \
   generator.weight_sync_backend=nccl \
   generator.n_samples_per_prompt=4 \
   generator.gpu_memory_utilization=0.8 \
@@ -66,6 +58,5 @@ uv run --isolated --extra megatron --extra vllm --with "mini-swe-agent>=1.12.0" 
   trainer.run_name="mini_swe_32B_swe_gym" \
   trainer.resume_mode=null \
   trainer.ckpt_path="$CKPT_PATH" \
-  +generator.miniswe_config_path="examples/mini_swe_agent/swebench.yaml" \
-  +generator.miniswe_traj_dir=$MINISWE_TRAJ_DIR
-  $@
+  trajectory_runner.command_timeout=180 \
+  "$@"

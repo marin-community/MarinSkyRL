@@ -14,12 +14,10 @@ from skyrl_train.trajectory_runners.types import (
     TrainingPhase,
 )
 from skyrl_train.trajectory_runners.trajectory_retention import RETENTION_METRIC_PREFIX
-from skyrl_train.trajectory_runners.routed_experts import normalize_routed_experts
 from skyrl_train.metric_names import (
     ENVIRONMENT_METRIC_PREFIX,
     IDENTITY_AWARE_REWARD_METRIC_PREFIX,
-    LITERAL_BRIDGE_CORRELATED_TRIALS_METRIC,
-    LITERAL_BRIDGE_CORRELATED_TURNS_METRIC,
+    TASK_ROLLOUT_METRIC_PREFIX,
     TIS_ALIGNED_TOKENS_METRIC,
     TIS_ALIGNMENT_ALERT_METRIC,
     TIS_METRIC_PREFIX,
@@ -40,7 +38,6 @@ from skyrl_train.trajectory_runners.trajectory_reward_shaping import (
 )
 from skyrl_train.metric_names import ROLLOUT_FAILURE_FRACTION_METRIC
 from skyrl_train.inference_engines.base import ConversationType
-from omegaconf import DictConfig
 from loguru import logger
 from skyrl_gym.metrics import aggregate_for_environment
 from skyrl_gym.verification import VerificationResult, VerificationStatus, normalized_verifier_score
@@ -412,102 +409,6 @@ def _apply_alignment_validity(
     """Exclude an invalid behavior-logprob span from behavior-referenced training."""
     if rollout_logprobs_required and not alignment_valid:
         loss_mask[span_start : span_start + span_length] = [0] * span_length
-
-
-CUSTOM_CHAT_TEMPLATES = {
-    # chat template for qwen3 that preserves thinking tokens
-    "qwen3_with_thinking": (
-        "{% for message in messages %}"
-        "{% if (message['role'] != 'assistant') %}"
-        "{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}"
-        "{% elif (message['role'] == 'assistant')%}"
-        "{{'<|im_start|>' + message['role'] + '\n'}}"
-        "{% generation %}"
-        "{{message['content'] + '<|im_end|>'}}"
-        "{% endgeneration %}"
-        "{{'\n'}}"
-        "{% endif %}"
-        "{% endfor %}"
-    ),
-    # chat template for qwen3 that strips non-last-turn thinking tokens (same as the official Qwen3 chat
-    # template but we add `generation` and `endgeneration` tags)
-    "qwen3_without_thinking": (
-        "{% for message in messages %}"
-        "{% if (message['role'] != 'assistant') %}"
-        "{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}"
-        "{% elif (message['role'] == 'assistant')%}"
-        "{{'<|im_start|>' + message['role'] + '\n'}}"
-        "{% generation %}"
-        "{% set full_content = message['content'] %}"
-        "{% set mycontent = message['content'] %}"
-        "{% set is_last_message = loop.last and messages[-1]['role'] == 'assistant' %}"
-        "{% if '</think>' in full_content and not is_last_message %}"
-        "{% set mycontent = full_content.split('</think>')[-1].lstrip('\n') %}"
-        "{% endif %}"
-        "{{mycontent + '<|im_end|>'}}"
-        "{% endgeneration %}"
-        "{{'\n'}}"
-        "{% endif %}"
-        "{% endfor %}"
-    ),
-    # Qwen2.5 chat template but with `generation` and `endgeneration` tags, and simplified
-    "qwen2_5_with_generation_tag_simplified": (
-        "{% for message in messages %}"
-        "{% if (message.role == 'user') or (message.role == 'system' and not loop.first) %}"
-        "{{ '<|im_start|>' + message.role + '\n' + message.content + '<|im_end|>' + '\n' }}"
-        "{% elif message.role == 'assistant' %}"
-        "{{ '<|im_start|>' + message.role + '\n'}}"
-        "{% generation %}"
-        "{{ message.content + '<|im_end|>'}}"
-        "{% endgeneration %}"
-        "{{ '\n' }}"
-        "{% endif %}"
-        "{% endfor %}"
-        "{% if add_generation_prompt %}"
-        "{{ '<|im_start|>assistant\n' }}"
-        "{% endif %}"
-    ),
-}
-
-
-def get_custom_chat_template(chat_template_config: Optional[Union[dict, DictConfig]] = None) -> Optional[str]:
-    """
-    Get custom chat template based on the new config structure.
-
-    Args:
-        chat_template_config: Config dict with 'source' and 'name_or_path' fields.
-
-    Returns:
-        Chat template string or None
-    """
-    if chat_template_config is None:
-        return None
-
-    source = chat_template_config.get("source")
-    if not source:
-        raise ValueError("'source' is required in chat_template_config")
-
-    name_or_path = chat_template_config.get("name_or_path")
-    if not name_or_path:
-        return None  # if name_or_path is not provided, use the default chat template from the tokenizer
-
-    if source == "name":
-        if name_or_path in CUSTOM_CHAT_TEMPLATES:
-            return CUSTOM_CHAT_TEMPLATES[name_or_path]
-        else:
-            raise ValueError(
-                f"Template name '{name_or_path}' not found. Available templates: {list(CUSTOM_CHAT_TEMPLATES.keys())}"
-            )
-    elif source == "file":
-        try:
-            with open(name_or_path, "r", encoding="utf-8") as f:
-                return f.read()
-        except FileNotFoundError as e:
-            raise ValueError(f"Template file '{name_or_path}' not found") from e
-        except OSError as e:
-            raise ValueError(f"Error reading template file '{name_or_path}': {e}") from e
-    else:
-        raise ValueError(f"Invalid source '{source}'. Must be 'name' or 'file'")
 
 
 def normalize_token_ids(encoded) -> List[int]:
@@ -1077,10 +978,9 @@ def concatenate_trajectory_batches(
     # the per-group counters have to be carried across or the archives are written unobserved.
     for output in trajectory_batches:
         for name, value in (output.get("rollout_metrics") or {}).items():
-            if name.startswith((RETENTION_METRIC_PREFIX, IDENTITY_AWARE_REWARD_METRIC_PREFIX)) or name in {
-                LITERAL_BRIDGE_CORRELATED_TRIALS_METRIC,
-                LITERAL_BRIDGE_CORRELATED_TURNS_METRIC,
-            }:
+            if name.startswith(
+                (RETENTION_METRIC_PREFIX, IDENTITY_AWARE_REWARD_METRIC_PREFIX, TASK_ROLLOUT_METRIC_PREFIX)
+            ):
                 rollout_metrics[name] = rollout_metrics.get(name, 0.0) + value
 
     result["rollout_metrics"] = rollout_metrics
@@ -1419,215 +1319,6 @@ def encode_messages_subset(messages: ConversationType, tokenizer, custom_chat_te
     )
     conversation_token_ids = full_conversation_token_ids[len(base_conversation_token_ids) :]
     return conversation_token_ids
-
-
-def extract_logprobs_from_rollout_details(
-    rollout_details: Optional[List[Dict[str, Any]]],
-) -> Optional[List[List[Dict[str, Any]]]]:
-    """
-    Extract per-turn logprobs (with token strings) from Harbor's rollout_details structure.
-
-    Harbor stores rollout details as a list of RolloutDetail dicts. Each RolloutDetail
-    contains per-turn data for a conversation trajectory:
-        - prompt_token_ids: list[list[int]] - prompt tokens per turn
-        - completion_token_ids: list[list[int]] - completion tokens per turn
-        - logprobs: list[list[dict]] - logprobs per turn, where each dict has
-            {"token": str, "logprob": float} for LCS alignment
-
-    For agents with subagents or summarization, multiple RolloutDetail objects may exist.
-    By convention, the first RolloutDetail contains the main agent's conversation.
-
-    Args:
-        rollout_details: List of RolloutDetail dicts from Harbor's AgentContext.
-            Can be None or empty if rollout details weren't collected.
-
-    Returns:
-        Per-turn logprobs, or None if rollout_details is empty/missing or doesn't
-        contain logprobs. Two inner formats are accepted and both are now
-        supported (the float format is the canonical Harbor format and pairs
-        index-for-index with ``completion_token_ids``):
-            - float format: [[float, float, ...]_turn1, ...]
-            - dict  format: [[{"token": str, "logprob": float}, ...]_turn1, ...]
-        The float format is preferred: combined with the per-turn
-        ``completion_token_ids`` (see :func:`extract_token_ids_from_rollout_details`)
-        it enables the EXACT token-id alignment path, which needs no LCS guessing.
-
-    Example:
-        >>> rollout_details = result.agent_result.rollout_details
-        >>> assistant_logprobs = extract_logprobs_from_rollout_details(rollout_details)
-        >>> assistant_token_ids = extract_token_ids_from_rollout_details(rollout_details)
-        >>> response_ids, loss_mask, rollout_logprobs, _stats = get_response_ids_and_loss_mask_from_messages(
-        ...     messages, tokenizer, assistant_logprobs, assistant_token_ids=assistant_token_ids
-        ... )
-    """
-    if not rollout_details or len(rollout_details) == 0:
-        return None
-
-    # First rollout_detail contains the main agent's conversation
-    main_rollout = rollout_details[0]
-
-    # Handle both dict and object-like access patterns
-    if isinstance(main_rollout, dict):
-        logprobs = main_rollout.get("logprobs")
-    else:
-        logprobs = getattr(main_rollout, "logprobs", None)
-
-    if not logprobs:
-        return None
-
-    # Validate structure: should be list of lists
-    if not isinstance(logprobs, list):
-        logger.warning(f"Unexpected logprobs type: {type(logprobs)}, expected list")
-        return None
-
-    if len(logprobs) > 0 and not isinstance(logprobs[0], list):
-        logger.warning(
-            f"Unexpected logprobs[0] type: {type(logprobs[0])}, expected list. "
-            f"rollout_details may have unexpected structure."
-        )
-        return None
-
-    # Float format ([[float, ...], ...]) is now FULLY supported via the exact
-    # token-id alignment path (it rides index-for-index with completion_token_ids),
-    # so we no longer disable TIS for it. Dict format ([[{token, logprob}], ...])
-    # is still accepted for the LCS fallback path. We pass either format through
-    # untouched; the downstream alignment layer detects which it received.
-    logger.debug(f"Extracted logprobs from rollout_details: {len(logprobs)} turns")
-    return logprobs
-
-
-def extract_token_ids_from_rollout_details(
-    rollout_details: Optional[List[Dict[str, Any]]],
-) -> Optional[List[List[int]]]:
-    """Extract per-turn ``completion_token_ids`` from Harbor's rollout_details.
-
-    These are the EXACT token ids vLLM generated for each assistant turn,
-    index-aligned with the per-turn ``logprobs`` floats. Carrying them into
-    :func:`get_response_ids_and_loss_mask_from_messages` lets TIS map logprobs to
-    training tokens by token id (exact, no re-tokenization guess) instead of
-    string-LCS. Mirrors :func:`extract_logprobs_from_rollout_details`.
-
-    Returns per-turn ids ``[[id, ...]_turn1, ...]`` or None when absent.
-    """
-    if not rollout_details or len(rollout_details) == 0:
-        return None
-
-    main_rollout = rollout_details[0]
-    if isinstance(main_rollout, dict):
-        token_ids = main_rollout.get("completion_token_ids")
-    else:
-        token_ids = getattr(main_rollout, "completion_token_ids", None)
-
-    if not token_ids:
-        return None
-    if not isinstance(token_ids, list):
-        logger.warning(f"Unexpected completion_token_ids type: {type(token_ids)}, expected list")
-        return None
-    if len(token_ids) > 0 and not isinstance(token_ids[0], list):
-        logger.warning(f"Unexpected completion_token_ids[0] type: {type(token_ids[0])}, expected list.")
-        return None
-    return token_ids
-
-
-def extract_prompt_token_ids_from_rollout_details(
-    rollout_details: Optional[List[Dict[str, Any]]],
-) -> Optional[List[List[int]]]:
-    """Extract per-turn ``prompt_token_ids`` from Harbor's rollout_details.
-
-    Sibling of :func:`extract_token_ids_from_rollout_details` (which reads the
-    per-turn *completion* ids). ``prompt_token_ids[t]`` is the EXACT token id
-    sequence the inference engine tokenized as the prompt for turn ``t`` — the
-    full growing context (system + user + every prior assistant completion + every
-    tool observation, plus the assistant generation prompt). Harbor accumulates it
-    per turn in ``chat.py`` (``_prompt_token_ids_list``). By construction it
-    satisfies the prefix invariant
-
-        ``prompt_token_ids[t] == prompt_token_ids[t-1] + completion_token_ids[t-1] + observation[t-1]``
-
-    so consuming it lets the trainer assemble the MASKED context from the exact
-    served ids instead of re-tokenizing it (full TITO — see
-    :func:`_tito_full_enabled`). Returns per-turn ids ``[[id, ...]_turn0, ...]`` or
-    None when absent (None-safe, mirrors the completion extractor).
-    """
-    if not rollout_details or len(rollout_details) == 0:
-        return None
-
-    main_rollout = rollout_details[0]
-    if isinstance(main_rollout, dict):
-        token_ids = main_rollout.get("prompt_token_ids")
-    else:
-        token_ids = getattr(main_rollout, "prompt_token_ids", None)
-
-    if not token_ids:
-        return None
-    if not isinstance(token_ids, list):
-        logger.warning(f"Unexpected prompt_token_ids type: {type(token_ids)}, expected list")
-        return None
-    if len(token_ids) > 0 and not isinstance(token_ids[0], list):
-        logger.warning(f"Unexpected prompt_token_ids[0] type: {type(token_ids[0])}, expected list.")
-        return None
-    return token_ids
-
-
-def extract_routed_experts_from_rollout_details(
-    rollout_details: Optional[List[Dict[str, Any]]],
-) -> list[np.ndarray | None] | None:
-    """Extract per-turn MoE ``routed_experts`` from Harbor's rollout_details.
-
-    Harbor groups vLLM's base64 NumPy payloads in
-    ``RolloutDetail.extra["routed_experts"]`` by turn. Decode each payload and
-    select the response rows using that turn's exact prompt and completion IDs.
-
-    This records the R3 capture rail. No MoE
-    math here — pure data-plane extraction. Returns None when absent so the field
-    is treated as a sentinel-filled sample downstream (preempted requests, quant
-    paths, and disabled-capture modes silently drop routing — see
-    notes/skyrl/stage1_capture_rail_scope.md Q1).
-
-    Args:
-        rollout_details: List of RolloutDetail dicts from Harbor's AgentContext.
-
-    Returns:
-        Per-turn routed_experts ``[[gen_len, L, K]_turn1, ...]``, or None if
-        rollout_details is empty/missing or doesn't carry routed_experts.
-    """
-    if not rollout_details or len(rollout_details) == 0:
-        return None
-
-    # First rollout_detail contains the main agent's conversation.
-    main_rollout = rollout_details[0]
-
-    if isinstance(main_rollout, dict):
-        extra = main_rollout.get("extra")
-    else:
-        extra = getattr(main_rollout, "extra", None)
-
-    if not extra or not isinstance(extra, dict):
-        return None
-
-    routed_experts = extra.get("routed_experts")
-    if not routed_experts:
-        return None
-
-    if not isinstance(routed_experts, list):
-        logger.warning(f"Unexpected routed_experts type: {type(routed_experts)}, expected list")
-        return None
-
-    logger.debug(f"Extracted routed_experts from rollout_details: {len(routed_experts)} turns")
-    prompt_ids = extract_prompt_token_ids_from_rollout_details(rollout_details)
-    completion_ids = extract_token_ids_from_rollout_details(rollout_details)
-    out = []
-    for index, turn_re in enumerate(routed_experts):
-        if turn_re is not None and len(turn_re) > 0:
-            if completion_ids is None or index >= len(completion_ids):
-                raise ValueError("routed_experts requires exact completion token IDs for each turn")
-            turn_prompt_ids = prompt_ids[index] if prompt_ids is not None and index < len(prompt_ids) else None
-            if turn_prompt_ids is None:
-                raise ValueError("routed_experts requires exact prompt token IDs for each turn")
-            out.append(normalize_routed_experts(turn_re, turn_prompt_ids, completion_ids[index]))
-        else:
-            out.append(None)
-    return out
 
 
 def align_routed_experts_with_lcs(

@@ -1,6 +1,8 @@
 from omegaconf import OmegaConf
+from taskcompendium.models import TaskSpec
 
-from skyrl_train.config.trajectory_runner_capabilities import EntrypointOperation
+from skyrl_train.config.rollout_validation import EntrypointOperation
+from skyrl_train.dataset.harbor import HarborTaskDataset
 from skyrl_train.entrypoints.terminal_bench_generate import TerminalBenchGenerateExp
 from skyrl_train.trajectory_runners.types import BatchMetadata, TrajectoryRequestBatch
 
@@ -27,7 +29,7 @@ class RecordingTrajectoryRunner:
         self.events.append("shutdown")
 
 
-def test_terminal_bench_generate_builds_complete_evaluation_request():
+def test_terminal_bench_generate_builds_complete_evaluation_request(tmp_path):
     runner = RecordingTrajectoryRunner()
     experiment = object.__new__(TerminalBenchGenerateExp)
     experiment.cfg = OmegaConf.create(
@@ -58,11 +60,22 @@ def test_terminal_bench_generate_builds_complete_evaluation_request():
             },
         }
     )
-    experiment.train_dataset = [
-        {"uid": "task-a", "prompt": "task-a-path", "env_class": None, "env_extras": {"split": "train"}},
-        {"uid": "task-b", "prompt": "task-b-path", "env_class": None, "env_extras": {"split": "train"}},
-    ]
-    experiment.tokenizer = object()
+    sources = tmp_path / "sources"
+    for name in ("task-a", "task-b"):
+        source = sources / name
+        (source / "tests").mkdir(parents=True)
+        (source / "instruction.md").write_text(name)
+        (source / "task.toml").write_text('[environment]\ndocker_image = "fixture"\n')
+        (source / "tests/test.sh").write_text("echo 1 > /logs/verifier/reward.txt\n")
+
+    class Tokenizer:
+        def apply_chat_template(self, messages, add_generation_prompt):
+            return [1, 2]
+
+    experiment.tokenizer = Tokenizer()
+    experiment.train_dataset = HarborTaskDataset(
+        [str(sources)], experiment.tokenizer, 100, cache_dir=tmp_path / "cache", num_workers=1
+    )
     inference_client = object()
 
     def create_inference_engine_client(*, operation: EntrypointOperation):
@@ -76,11 +89,14 @@ def test_terminal_bench_generate_builds_complete_evaluation_request():
 
     assert runner.events == ["startup", "start_eval generate 0", "run", "stop_eval", "shutdown"]
     assert runner.request is not None
-    assert runner.request["prompts"] == ["task-a-path"] * 8 + ["task-b-path"] * 8
+    assert [prompt[0]["content"] for prompt in runner.request["prompts"]] == ["task-a"] * 8 + ["task-b"] * 8
     trajectory_ids = runner.request["trajectory_ids"]
     assert trajectory_ids is not None
     assert [trajectory_id.to_string() for trajectory_id in trajectory_ids] == [
         f"task-{task}_{repetition_id}" for task in ("a", "b") for repetition_id in range(8)
     ]
-    assert runner.request["env_classes"] == ["terminal_bench"] * 16
+    assert runner.request["env_classes"] == ["taskcompendium"] * 16
+    assert [TaskSpec.model_validate_json(extra["task_spec"]).id for extra in runner.request["env_extras"]] == (
+        ["task-a"] * 8 + ["task-b"] * 8
+    )
     assert runner.request["batch_metadata"] == BatchMetadata(global_step=0, training_phase="eval")

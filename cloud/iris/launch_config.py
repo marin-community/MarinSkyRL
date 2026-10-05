@@ -13,6 +13,7 @@ from omegaconf import MISSING, DictConfig, OmegaConf
 
 from skyrl_train.config.mismatch_probe import validate_mismatch_probe_config
 from skyrl_train.config.objective_spec import validate_objective
+from skyrl_train.rollouts.task_machines import TaskMachineBackend
 
 from cloud.iris.ray_storage import RaySpillBackend, resolve_ray_spill_target
 from cloud.iris.role_plan import derive_num_nodes, derive_role_plan
@@ -119,16 +120,6 @@ class IrisConfig:
 
 
 @dataclass
-class IngressConfig:
-    """Optional controller ingress and literal-recording settings."""
-
-    mode: str = "direct"
-    host: str = ""
-    record_literal: bool = False
-    vllm_http_port: int = 8000
-
-
-@dataclass
 class RayConfig:
     """Ray bootstrap settings shared by every task replica."""
 
@@ -173,7 +164,6 @@ class SkyRLLaunchConfig:
     run: RunConfig = field(default_factory=RunConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     iris: IrisConfig = field(default_factory=IrisConfig)
-    ingress: IngressConfig = field(default_factory=IngressConfig)
     ray: RayConfig = field(default_factory=RayConfig)
     artifacts: ArtifactsConfig = field(default_factory=ArtifactsConfig)
     inputs: InputsConfig = field(default_factory=InputsConfig)
@@ -218,7 +208,6 @@ def _compose_source_recipe(config: DictConfig) -> DictConfig:
                 "checkpoint_root": str(config.artifacts.checkpoint_root),
                 "export_root": str(config.artifacts.export_root),
                 "resume_checkpoint_count": int(config.artifacts.resume_checkpoint_count),
-                "trace_root": join_resource_path(str(config.artifacts.attempts_root), "trace_jobs"),
                 "trajectory_root": join_resource_path(str(config.artifacts.attempts_root), "trajectories"),
                 "export_hf_artifact": bool(config.run.export_hf),
                 "seed": int(config.run.seed),
@@ -317,8 +306,6 @@ def validate_launch_config(config: DictConfig) -> LaunchTopology:
         raise ValueError(f"unsupported run.submission: {raw['run']['submission']!r}")
     if raw["inputs"]["data_kind"] not in {"tasks", "parquet"}:
         raise ValueError(f"unsupported inputs.data_kind: {raw['inputs']['data_kind']!r}")
-    if raw["ingress"]["mode"] not in {"direct", "controller"}:
-        raise ValueError(f"unsupported ingress.mode: {raw['ingress']['mode']!r}")
     if raw["iris"]["timeout"] < 0:
         raise ValueError("iris.timeout cannot be negative")
     _validate_inputs(raw["inputs"])
@@ -340,6 +327,17 @@ def validate_launch_config(config: DictConfig) -> LaunchTopology:
     )
     allocation = validate_iris_allocation(raw)
     skyrl = raw["skyrl"]
+    machine = skyrl.get("trajectory_runner", {}).get("machine")
+    if machine is not None:
+        backend = TaskMachineBackend(machine["backend"])
+        if backend is TaskMachineBackend.QEMU:
+            qemu = machine.get("qemu")
+            if qemu is None:
+                raise ValueError("The QEMU task backend requires trajectory_runner.machine.qemu")
+            if machine.get("runtime_bundle") is not None and qemu.get("assets") is not None:
+                raise ValueError("QEMU assets must come from either the runtime bundle or explicit paths")
+            if skyrl.get("data", {}).get("terminal_bench_data") or skyrl.get("entrypoint") == "terminal_bench":
+                raise ValueError("TaskCompendium machine selection cannot override a Harbor backend")
     run = raw["run"]
     if run["mode"] == RunMode.TRAIN:
         validate_objective(config.skyrl)

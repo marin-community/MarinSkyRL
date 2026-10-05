@@ -46,6 +46,8 @@ import uuid
 from typing import Any, Protocol
 
 from omegaconf import DictConfig, OmegaConf
+from rigging.runtime_bundle import RuntimeBundle, install_runtime_bundle
+from skyrl_train.rollouts.task_machines import TaskMachineBackend
 
 from cloud.iris.artifacts import ArtifactSource, atomic_directory_update, file_inventory, fs_and_path, materialize
 from cloud.iris.hf_model_cache import (
@@ -2064,8 +2066,6 @@ def _write_final_config(
         train_data=(),
         validation_data=(),
         terminal_bench_data=(),
-        agent_api_base=None,
-        literal_log_path=None,
         policy_model_path=policy_model.local_path if policy_model else None,
         draft_model_uri=draft_model.source_uri if draft_model else None,
     )
@@ -2137,6 +2137,10 @@ def main() -> None:
     launch_config = load_launch_config(config_path)
     args = _runtime_namespace(launch_config)
     os.environ.update(args.task_env)
+    machine = launch_config.skyrl.get("trajectory_runner", {}).get("machine", {})
+    bundle = machine.get("runtime_bundle")
+    if machine.get("backend") == TaskMachineBackend.QEMU and bundle is not None:
+        install_runtime_bundle(RuntimeBundle(**dict(bundle)))
     _print_env_snapshot()
     # Pin virtual-hosted S3 addressing for the boto3 path (Ray object-spill IO workers)
     # BEFORE any `ray start`, on head + every worker — CoreWeave R2 rejects path-style.

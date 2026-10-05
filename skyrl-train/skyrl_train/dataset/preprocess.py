@@ -5,6 +5,9 @@ from transformers import AutoTokenizer
 from jaxtyping import Float, Integer
 
 
+EMPTY_ROW_CONTEXT_TOKENS = 2
+
+
 def _verify_inputs(
     prompts: List[List[int]],
     responses: List[List[int]],
@@ -132,6 +135,10 @@ def convert_prompts_responses_to_batch_tensors(
         max_input_len = max(max_input_len, prompt_token_len)
         max_output_len = max(max_output_len, response_token_len)
 
+    empty_rows = [i for i, (prompt, response) in enumerate(zip(prompts, responses)) if not prompt and not response]
+    if empty_rows:
+        max_input_len = max(max_input_len, EMPTY_ROW_CONTEXT_TOKENS)
+
     # Copy each row's tokens into preallocated tensors. Building the padded batch from nested Python lists would
     # walk every padding element under the GIL, and padding dominates a batch with a long response window.
     batch_size = len(prompts)
@@ -144,6 +151,10 @@ def convert_prompts_responses_to_batch_tensors(
         sequences[i, prompt_start:max_input_len] = torch.as_tensor(prompt, dtype=torch.long)
         sequences[i, max_input_len:response_end] = torch.as_tensor(response, dtype=torch.long)
         attention_mask[i, prompt_start:response_end] = 1
+    # A rollout can fail before its first model request. Two inert prompt tokens keep its masked forward
+    # nonempty and its shifted logprobs connected to autograd, without changes to the saved rollout evidence.
+    for i in empty_rows:
+        attention_mask[i, max_input_len - EMPTY_ROW_CONTEXT_TOKENS : max_input_len] = 1
     action_mask = attention_mask[:, max_input_len:].clone()
 
     # initialize ret loss masks to be the same as action mask

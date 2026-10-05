@@ -4,15 +4,24 @@ import asyncio
 from copy import deepcopy
 from dataclasses import dataclass
 from collections.abc import Awaitable, Callable
-from typing import Any, Protocol
+from typing import Any, NotRequired, Protocol
 from uuid import uuid4
 
 import numpy as np
 
 from skyrl_gym.envs.nemotron_ultra.answer_extraction import REASONING_DELIMITERS, final_answer_text
 
-from skyrl_train.inference_engines.base import ChatContinuation, InferenceEngineInput, InferenceEngineOutput
-from skyrl_train.inference_engines.chat_continuation import EXACT_PROMPT_TOKEN_IDS_KEY, render_exact_chat_continuation
+from skyrl_train.inference_engines.base import (
+    SESSION_ID_HEADER,
+    ChatContinuation,
+    InferenceEngineInput,
+    InferenceEngineOutput,
+)
+from skyrl_train.inference_engines.chat_continuation import (
+    CHAT_TOKENIZE_FIELDS,
+    EXACT_PROMPT_TOKEN_IDS_KEY,
+    render_exact_chat_continuation,
+)
 from skyrl_train.inference_engines.chat_template import (
     SINGLE_TOOL_CALL_TEMPLATE_ERROR,
     sequentialize_multi_tool_call_turns,
@@ -22,10 +31,12 @@ from skyrl_train.inference_engines.inference_engine_client import InferenceEngin
 from skyrl_train.inference_engines.response_topk import select_chat_response_topk
 from skyrl_train.trajectory_runners.types import TokenProvenance
 from skyrl_train.trajectory_runners.routed_experts import normalize_routed_experts
+from skyrl_train.rollout_observability import rollout_phase
 
 
 # The per-turn output limit, as the trainer config (`max_generate_length`) and vLLM (`max_tokens`) spell it. Chat
 # requests carry it only as `max_completion_tokens`, which vLLM prefers over `max_tokens`.
+CONTEXT_OVERFLOW_CATEGORY = "context_overflow"
 _OUTPUT_LIMIT_KEYS = ("max_generate_length", "max_tokens")
 _CHAT_SAMPLING_EXCLUSIONS = frozenset({*_OUTPUT_LIMIT_KEYS, "logprobs", "stop"})
 
@@ -34,6 +45,7 @@ class ModelClientOutput(InferenceEngineOutput):
     """Normalized model output with explicit token provenance."""
 
     token_provenance: TokenProvenance
+    generation_token_budgets: NotRequired[list[int | None]]
 
 
 class ModelClient(Protocol):
@@ -56,6 +68,14 @@ class ContextLengthExceededError(ModelServerError):
     """A serving rejection caused by an overlong model context."""
 
 
+class GenerationBudgetExceededError(ContextLengthExceededError):
+    """A local token limit stopped the request before inference."""
+
+    def __init__(self, prompt_token_ids: list[int]):
+        self.prompt_token_ids = tuple(prompt_token_ids)
+        super().__init__(category=CONTEXT_OVERFLOW_CATEGORY, request_id=None, status_code=None)
+
+
 @dataclass(frozen=True)
 class _ChatResult:
     prompt_ids: list[int]
@@ -66,6 +86,7 @@ class _ChatResult:
     text: str
     stop_reason: str
     assistant_message: dict[str, Any]
+    generation_token_budget: int | None
     routed_experts: np.ndarray | None = None
 
 
@@ -90,6 +111,7 @@ def _assemble_chat_results(results: list[_ChatResult]) -> ModelClientOutput:
         prompt_logprobs=None,
         assistant_messages=[result.assistant_message for result in results],
         token_provenance=TokenProvenance.ENGINE,
+        generation_token_budgets=[result.generation_token_budget for result in results],
     )
     if all(rows is not None for rows in selected_indices):
         output["student_topk_indices"] = selected_indices
@@ -208,7 +230,7 @@ class DirectModelClient:
 
         async def generate_one(messages, row_options, session_id, continuation):
             chat_options = self._chat_options(row_options, sampling_params)
-            tokenize_options = {key: chat_options[key] for key in ("tools", "tool_choice") if key in chat_options}
+            tokenize_options = {key: value for key, value in chat_options.items() if key in CHAT_TOKENIZE_FIELDS}
             render_request = {
                 "json": {
                     "model": self._client.model_name,
@@ -218,12 +240,16 @@ class DirectModelClient:
                 },
                 "headers": {},
             }
-            messages, prompt_ids = await _render_chat_prompt(self._client.tokenize, render_request, continuation)
+            with rollout_phase("tokenize"):
+                messages, prompt_ids = await _render_chat_prompt(self._client.tokenize, render_request, continuation)
+            max_prompt_length = request.get("max_prompt_length")
+            if max_prompt_length is not None and len(prompt_ids) > max_prompt_length:
+                raise GenerationBudgetExceededError(prompt_ids)
             max_context_length = request.get("max_context_length")
             if max_context_length is not None:
                 remaining_tokens = max_context_length - len(prompt_ids)
                 if remaining_tokens <= 0:
-                    raise ContextLengthExceededError(category="context_overflow", request_id=None, status_code=400)
+                    raise GenerationBudgetExceededError(prompt_ids)
                 requested_tokens = chat_options.get("max_completion_tokens", remaining_tokens)
                 chat_options["max_completion_tokens"] = min(int(requested_tokens), remaining_tokens)
 
@@ -234,9 +260,9 @@ class DirectModelClient:
                 **{key: value for key, value in sampling_params.items() if key not in _CHAT_SAMPLING_EXCLUSIONS},
                 **chat_options,
                 "return_token_ids": True,
+                "include_stop_str_in_output": False,
             }
-            if continuation is not None:
-                body[EXACT_PROMPT_TOKEN_IDS_KEY] = prompt_ids
+            body[EXACT_PROMPT_TOKEN_IDS_KEY] = prompt_ids
             if sampling_params.get("stop") is not None:
                 body["stop"] = sampling_params["stop"]
             if sampling_params.get("logprobs") is not None:
@@ -246,12 +272,15 @@ class DirectModelClient:
                 body["top_logprobs"] = requested_top_k + 1
                 body["return_tokens_as_token_ids"] = True
             request_id = uuid4().hex
-            response = await self._client.chat_completion({"json": body, "headers": {"x-request-id": request_id}})
+            headers = {"x-request-id": request_id}
+            if session_id is not None:
+                headers[SESSION_ID_HEADER] = str(session_id)
+            response = await self._client.chat_completion({"json": body, "headers": headers})
             if "choices" not in response:
                 error = response.get("error") or {}
                 error_type = (
                     ContextLengthExceededError
-                    if response.get("error_category") == "context_overflow"
+                    if response.get("error_category") == CONTEXT_OVERFLOW_CATEGORY
                     else ModelServerError
                 )
                 raise error_type(
@@ -267,7 +296,11 @@ class DirectModelClient:
             text = message.get("content") or ""
             # Some serving configurations omit reasoning parsers and remove
             # special delimiters from content. Exact tokens retain the boundary.
-            decoded = self._client.tokenizer.decode(response_ids, skip_special_tokens=False)
+            tokenizer = self._client.tokenizer
+            semantic_ids = (
+                response_ids[:-1] if response_ids and response_ids[-1] == tokenizer.eos_token_id else response_ids
+            )
+            decoded = tokenizer.decode(semantic_ids, skip_special_tokens=False)
             if any(marker in decoded for pair in REASONING_DELIMITERS for marker in pair):
                 text = final_answer_text(decoded)
             logprob_items = (choice.get("logprobs") or {}).get("content")
@@ -290,6 +323,7 @@ class DirectModelClient:
                 text,
                 choice["finish_reason"],
                 message,
+                chat_options.get("max_completion_tokens"),
                 _choice_routed_experts(choice, prompt_ids, response_ids),
             )
 
