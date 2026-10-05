@@ -1,12 +1,14 @@
 """Exclusive optimizer-step accounting and its boundaries."""
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 from omegaconf import OmegaConf
 
+from skyrl_train import timing_observability
 from skyrl_train.timing_observability import (
     STEP_WALL_PHASES,
     StepWallTime,
@@ -32,9 +34,16 @@ def _wall(clock):
     return StepWallTime({phase: 1.0 for phase in STEP_WALL_PHASES}, clock=clock)
 
 
-def test_ordinary_step_is_exclusive_and_reports_each_budget_and_overrun():
+def test_ordinary_step_is_exclusive_and_reports_each_budget_and_overrun(generated_recipe_schema):
+    root = Path(__file__).resolve().parents[3]
+    assert Path(timing_observability.__file__).resolve() == root / "skyrl-train/skyrl_train/timing_observability.py"
+    recipe_type, base = generated_recipe_schema
+    recipe = recipe_type.from_document(
+        {"trainer": {"step_phase_budgets": {phase: 1.0 for phase in STEP_WALL_PHASES}}}
+    ).with_settings(["trainer.step_phase_budgets.group_admission=1.5"])
+    config = OmegaConf.merge(base, recipe.to_skyrl())
     clock = Clock()
-    wall = _wall(clock)
+    wall = StepWallTime(OmegaConf.to_container(config.trainer.step_phase_budgets), clock=clock)
     wall.start("group_admission")
     clock.advance(2)
     wall.start("batch_assembly")
@@ -58,6 +67,7 @@ def test_ordinary_step_is_exclusive_and_reports_each_budget_and_overrun():
     assert metrics["timing/step_wall/unaccounted"] == 1
     assert metrics["timing/step_wall_overrun/unaccounted"] == 0
     assert metrics["timing/step_wall_overrun/policy_training"] == 5
+    assert metrics["timing/step_wall_overrun/group_admission"] == 0.5
     assert {
         key.removeprefix("timing/step_wall_budget/") for key in metrics if key.startswith("timing/step_wall_budget/")
     } == set(STEP_WALL_PHASES)

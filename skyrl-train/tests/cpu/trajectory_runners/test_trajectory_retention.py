@@ -10,6 +10,7 @@ import zipfile
 import pytest
 
 from skyrl_train.config.utils import get_default_config
+from skyrl_train.trajectory_runners import trajectory_retention as retention
 from skyrl_train.trajectory_runners.base import (
     BatchMetadata,
     TrajectoryRequestBatch,
@@ -479,8 +480,21 @@ def test_step_wise_retention_aggregates_final_row_overlong_penalty():
     }
 
 
-def test_train_phase_retains_sample_and_anomalies(tmp_path):
-    sink = _sink(_config(tmp_path))
+def test_train_phase_retains_sample_and_anomalies(tmp_path, generated_recipe_schema):
+    root = Path(__file__).resolve().parents[4]
+    assert (
+        Path(retention.__file__).resolve()
+        == root / "skyrl-train/skyrl_train/trajectory_runners/trajectory_retention.py"
+    )
+    recipe_type, _ = generated_recipe_schema
+    recipe = recipe_type.from_document({"generator": {"trajectory_retention": {"phases": ["eval"]}}})
+    with pytest.raises(ValueError):
+        recipe.with_settings(['generator.trajectory_retention.phases=["unknown-phase"]'])
+    eval_sink = _sink(_config(tmp_path, **recipe.to_skyrl()["generator"]["trajectory_retention"]))
+    assert eval_sink.retain(_input(phase="train"), _output()) == {}
+    assert _records(tmp_path) == []
+    recipe = recipe.with_settings(['generator.trajectory_retention.phases=["train"]'])
+    sink = _sink(_config(tmp_path, **recipe.to_skyrl()["generator"]["trajectory_retention"]))
 
     metrics = sink.retain(_input(phase="train"), _output())
 

@@ -54,6 +54,8 @@ jobs:
       - name: Exercise the Iris CLI dependency boundary
         run: uv run --frozen iris --help
       - name: Run iris launcher tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/skyrl-train:${{ github.workspace }}/skyrl-gym
         run: uv run --frozen pytest cloud/iris/tests/ -q
       - name: Verify the base dependency boundary
         run: uv run --frozen pytest infra/tests/test_marinskyrl_packaging.py -q
@@ -64,6 +66,24 @@ jobs:
           uv pip install --python /tmp/marinskyrl-base/bin/python dist/marinskyrl-*.whl
           cd /tmp
           /tmp/marinskyrl-base/bin/marinskyrl --help
+
+  recipe_schema_tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - name: Exercise the schema at the supported dependency floor
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          uv run --isolated --no-project --python ${{ matrix.python-version }} \
+            --with pydantic==2.12.2 --with pytest --with hydra-core==1.3.2 --with PyYAML \
+            python -m pytest cloud/iris/tests/test_recipe_schema.py \
+              cloud/iris/tests/test_recipe_schema_generator.py \
+              cloud/iris/tests/test_packaging_boundary.py::test_recipe_schema_copies_and_round_trips_without_launcher_dependencies_or_import_io -q
 
   skyrl_train_tests:
     runs-on: ubuntu-latest
@@ -82,17 +102,17 @@ jobs:
         run: uv lock --check
       - name: Run cpu tests
         env:
-          PYTHONPATH: ${{ github.workspace }}/skyrl-train:${{ github.workspace }}/skyrl-gym
+          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/skyrl-train:${{ github.workspace }}/skyrl-gym
         run: uv run --frozen pytest skyrl-train/tests/cpu/ -m "not slow and not nightly" -n auto --dist loadgroup
       - name: Run existing Ray training tests serially
         env:
-          PYTHONPATH: ${{ github.workspace }}/skyrl-train:${{ github.workspace }}/skyrl-gym
+          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/skyrl-train:${{ github.workspace }}/skyrl-gym
         run: |
           nproc
           uv run --frozen pytest skyrl-train/tests/cpu/ --ignore=skyrl-train/tests/cpu/test_cat_count_cpu_canary.py -m "slow and not nightly" -n 0
       - name: Check CatCount learning on seed 0
         env:
-          PYTHONPATH: ${{ github.workspace }}/skyrl-train:${{ github.workspace }}/skyrl-gym
+          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/skyrl-train:${{ github.workspace }}/skyrl-gym
           AWS_ACCESS_KEY_ID: ${{ secrets.CW_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.CW_SECRET_ACCESS_KEY }}
           AWS_ENDPOINT_URL: https://cwobject.com

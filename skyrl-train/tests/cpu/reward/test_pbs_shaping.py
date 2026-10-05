@@ -9,14 +9,21 @@ Validates:
 """
 
 from types import SimpleNamespace
+from pathlib import Path
 
 import numpy as np
 import torch
+from omegaconf import OmegaConf
 
 from skyrl_train.utils.span_tagger import SPAN_OTHER, SPAN_THINK, SPAN_ACTION, SPAN_EDIT
 from skyrl_train.utils.pbs_shaping import compute_pbs_token_shaping
 from skyrl_train.utils.test_delta_parser import TestRunResult
-from skyrl_train.utils.advantage_estimators import compute_rloo_n_outcome_advantage, compute_rloo_n_pbs_advantage
+from skyrl_train.utils import advantage_estimators
+from skyrl_train.utils.advantage_estimators import (
+    compute_advantages_and_returns,
+    compute_rloo_n_outcome_advantage,
+    compute_rloo_n_pbs_advantage,
+)
 from skyrl_train.group_admission import GroupAdvantageInvariant
 
 
@@ -124,7 +131,17 @@ def test_estimator_none_shaping_is_pure_rloo_n():
     assert torch.equal(ret, base)
 
 
-def test_estimator_adds_shaping_at_exact_tokens():
+def test_estimator_adds_shaping_at_exact_tokens(generated_recipe_schema):
+    root = Path(__file__).resolve().parents[4]
+    assert (
+        Path(advantage_estimators.__file__).resolve() == root / "skyrl-train/skyrl_train/utils/advantage_estimators.py"
+    )
+    print(f"advantage dispatcher source: {advantage_estimators.__file__}")
+    recipe_type, _ = generated_recipe_schema
+    recipe = recipe_type.from_document(
+        {"trainer": {"algorithm": {"advantage_estimator": "rloo_n_pbs", "rloo_n_filter_zero_reward_groups": False}}}
+    )
+    algorithm = OmegaConf.create(recipe.to_skyrl()["trainer"]["algorithm"])
     tlr, rm, idx = _setup_batch()
     base, _ = compute_rloo_n_outcome_advantage(
         token_level_rewards=tlr, response_mask=rm, index=idx, config=_cfg(), group_advantage_invariant=_invariant()
@@ -132,11 +149,12 @@ def test_estimator_adds_shaping_at_exact_tokens():
     shaping = torch.zeros_like(rm)
     shaping[0, 2] = 0.3
     shaping[2, 4] = -0.1
-    adv, _ = compute_rloo_n_pbs_advantage(
+    adv, _ = compute_advantages_and_returns(
         token_level_rewards=tlr,
         response_mask=rm,
         index=idx,
-        config=_cfg(),
+        adv_estimator=algorithm.advantage_estimator,
+        config=algorithm,
         group_advantage_invariant=_invariant(),
         token_level_shaping=shaping,
     )

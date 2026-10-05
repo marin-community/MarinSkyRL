@@ -1,5 +1,8 @@
+from pathlib import Path
+
 import pytest
 
+from marinskyrl import distillation
 from marinskyrl.distillation import (
     validate_distillation_runtime_support,
     DistillationObjectiveKind,
@@ -54,7 +57,11 @@ def _mopd_config() -> dict:
     }
 
 
-def test_compile_distillation_plan_compiles_full_multi_teacher_config():
+def test_compile_distillation_plan_compiles_full_multi_teacher_config(generated_recipe_schema):
+    root = Path(__file__).resolve().parents[3]
+    assert Path(distillation.__file__).resolve() == root / "marinskyrl/distillation.py"
+    print(f"teacher compiler source: {distillation.__file__}")
+    recipe_type, _ = generated_recipe_schema
     config = _mopd_config()
     del config["teachers"]["math"]["placement"]
     config["trainer"]["algorithm"]["distillation"]["residency"] = {
@@ -72,7 +79,9 @@ def test_compile_distillation_plan_compiles_full_multi_teacher_config():
         "gpu_memory_utilization": 0.65,
     }
 
-    plan = compile_distillation_plan(config)
+    recipe = recipe_type.from_document(config)
+    assert recipe.to_skyrl() == config
+    plan = compile_distillation_plan(recipe.to_skyrl())
 
     assert plan is not None
     assert plan.objective is DistillationObjectiveKind.SAMPLED_REVERSE_KL
@@ -105,6 +114,40 @@ def test_compile_distillation_plan_compiles_full_multi_teacher_config():
     assert (resources.max_num_batched_tokens, resources.gpu_memory_utilization) == (4096, 0.65)
     # One engine spans tensor_parallel_size x data_parallel_size GPUs; expert parallelism runs inside it.
     assert (resources.data_parallel_size, resources.expert_parallel_size, resources.gpus_per_engine) == (4, 8, 8)
+    sparse = recipe.to_skyrl()
+    del sparse["teachers"]["swe"]["resources"]["data_parallel_size"]
+    del sparse["teachers"]["swe"]["resources"]["expert_parallel_size"]
+    sparse_plan = compile_distillation_plan(recipe_type.from_document(sparse).to_skyrl())
+    validate_distillation_runtime_support(sparse_plan)
+    resources = sparse_plan.teachers[1].resources
+    assert (resources.data_parallel_size, resources.expert_parallel_size, resources.gpus_per_engine) == (1, 1, 2)
+    changed = recipe.with_settings(
+        [
+            "teachers.math.placement=null",
+            "teachers.math.backend=null",
+            "teachers.swe.resources.data_parallel_size=null",
+            "teachers.swe.resources.expert_parallel_size=null",
+            "teachers.swe.top_k=null",
+            "teachers.swe.endpoints=[]",
+            "teachers.swe.tokenizer_fingerprint=null",
+            "teachers.swe.max_sequence_length=null",
+            "teachers.swe.request_timeout_seconds=null",
+            "teacher_routing.mopd_v1.routes.math.weight=0.7",
+        ]
+    )
+    changed_plan = compile_distillation_plan(changed.to_skyrl())
+    validate_distillation_runtime_support(changed_plan)
+    assert changed_plan.teachers[0].placement is TeacherPlacement.EXTERNAL
+    resources = changed_plan.teachers[1].resources
+    assert (resources.data_parallel_size, resources.expert_parallel_size, resources.gpus_per_engine) == (1, 1, 2)
+    assert [(route.key, route.weight) for route in changed_plan.routing.routes] == [("math", 0.7), ("swe", 0.6)]
+    for invalid in (
+        "teachers.swe.modle.path=teacher",
+        "teacher_routing.mopd_v1.routes.math.teachre=swe",
+        "teachers.swe.backend=sglang",
+    ):
+        with pytest.raises(ValueError):
+            recipe.with_settings([invalid])
 
 
 def test_compile_distillation_plan_accepts_sparse_forward_kl_with_topk_teachers():

@@ -1,9 +1,13 @@
 """Tests for adaptive curriculum sampling (skyrl_train.curriculum)."""
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 from datasets import Dataset
+from omegaconf import OmegaConf
 
+from skyrl_train import curriculum
 from skyrl_train.curriculum import CurriculumConfig, CurriculumOrder, SamplingKind, WeightingKind, dataset_bins
 from skyrl_train.rollouts.loader import JudgedGroup
 
@@ -277,14 +281,33 @@ def test_draws_are_unique_within_each_window():
         assert len(set(batch)) == len(batch)
 
 
-def test_group_informative_weights_low_pass_bin_near_mid_bin():
+def test_group_informative_weights_low_pass_bin_near_mid_bin(generated_recipe_schema):
     """At n=16, a 1-in-16 bin is nearly as informative as a 50% bin; both dwarf the extremes.
 
     pass-variance would give the low bin ~23% of the mid bin's weight; the
     group-informative curve keeps it above 60%.
     """
+    root = Path(__file__).resolve().parents[3]
+    assert Path(curriculum.__file__).resolve() == root / "skyrl-train/skyrl_train/curriculum.py"
+    recipe_type, base = generated_recipe_schema
+    recipe = recipe_type.from_document(
+        {
+            "data": {
+                "sampling": {"kind": SamplingKind.LEARNABILITY.value, "weighting": WeightingKind.PASS_VARIANCE.value}
+            }
+        }
+    ).with_settings([f"data.sampling.weighting={WeightingKind.GROUP_INFORMATIVE.value}"])
+    for field in ("kind", "weighting"):
+        with pytest.raises(ValueError):
+            recipe.with_settings([f"data.sampling.{field}=unknown-sampling-choice"])
+    sampling = OmegaConf.merge(base, recipe.to_skyrl()).data.sampling
     bins = {"g0-easy": (0, 1), "g1-low": (1, 1), "g2-mid": (2, 1), "g3-dead": (3, 1)}
-    order = _order(bins, "learnability", seed=0, weighting=WeightingKind.GROUP_INFORMATIVE, group_size=16)
+    order = CurriculumOrder(
+        _StubCurriculumDataset(bins),
+        CurriculumConfig.from_dict_config(sampling, group_size=16),
+        seed=0,
+        window_size=2,
+    )
     low = [1.0] + [0.0] * 15
     mid = [1.0] * 8 + [0.0] * 8
     for _ in range(60):

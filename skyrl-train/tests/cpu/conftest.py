@@ -1,5 +1,6 @@
 import json
 import os
+from pathlib import Path
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -8,6 +9,9 @@ from types import SimpleNamespace
 
 import pytest
 from omegaconf import OmegaConf
+
+import marinskyrl.recipe_schema as schema
+from scripts import generate_recipe_schema as generator
 
 # CPU tests already run in the locked uv environment. Ray's uv hook would package
 # this checkout and create another environment for every local Ray session.
@@ -29,6 +33,15 @@ from skyrl_train.trajectory_runners.types import TrajectoryID, VerifierTestColle
 # pytest-xdist sets this in each worker process.
 XDIST_WORKER_COUNT_ENV = "PYTEST_XDIST_WORKER_COUNT"
 HOST_MEMORY_PER_SLOW_TEST_BYTES = 12 * 2**30
+
+
+@pytest.fixture(scope="session")
+def generated_recipe_schema():
+    root = Path(__file__).resolve().parents[3]
+    assert Path(schema.__file__).resolve() == root / "marinskyrl/recipe_schema/__init__.py"
+    assert Path(generator.__file__).resolve() == root / "scripts/generate_recipe_schema.py"
+    print(f"CPU recipe sources: {schema.__file__}; {generator.__file__}")
+    return schema.RecipePatch, OmegaConf.create(generator.source_documents(generator.CONFIG_DIR).base)
 
 
 def pytest_configure(config: pytest.Config) -> None:

@@ -816,6 +816,26 @@ def _batch_size_config(
     ("overrides", "error"),
     [
         ({}, None),
+        (
+            {
+                "train_batch_size": 6,
+                "policy_mini_batch_size": 3,
+                "micro_train_batch_size_per_gpu": 2,
+                "n_samples_per_prompt": 8,
+                "policy_dp": 4,
+            },
+            None,
+        ),
+        (
+            {
+                "train_batch_size": 32,
+                "policy_mini_batch_size": 16,
+                "micro_train_batch_size_per_gpu": 4,
+                "n_samples_per_prompt": 1,
+                "policy_dp": 8,
+            },
+            "policy_mini_batch_size_per_gpu .* should be divisible by micro_train_batch_size_per_gpu",
+        ),
         # A mini-batch larger than the train batch fails the first (unmessaged) assertion.
         ({"train_batch_size": 8, "policy_mini_batch_size": 16}, "^$"),
         ({"train_batch_size": 100}, "train_batch_size .* should be divisible by policy_mini_batch_size"),
@@ -874,6 +894,9 @@ def _batch_size_config(
     ],
 )
 def test_validate_batch_sizes_requires_even_division_across_ranks(default_config, overrides, error):
+    source = Path(validate_batch_sizes.__code__.co_filename).resolve()
+    assert source == Path(__file__).resolve().parents[2] / "skyrl_train/utils/utils.py"
+    print(f"batch validation source: {source}")
     cfg = _batch_size_config(default_config, **overrides)
 
     if error is None:

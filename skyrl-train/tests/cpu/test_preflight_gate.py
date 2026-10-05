@@ -1,8 +1,12 @@
 """Pre-flight reward gate: the pure band check and the callback fed by a real trainer step."""
 
+from pathlib import Path
+
 import pytest
 from loguru import logger as loguru_logger
+from omegaconf import OmegaConf
 
+from skyrl_train.callbacks import builtin as callbacks
 from skyrl_train.callbacks.base import TrainerControl, TrainerState
 from skyrl_train.callbacks.builtin import PreflightGateCallback, PreflightGateError
 from skyrl_train.config.utils import get_default_config
@@ -55,8 +59,26 @@ def _trainer_after_first_step(rewards: list[float]) -> RayPPOTrainer:
     return trainer
 
 
-def test_preflight_callback_aborts_sparse_first_step_and_checks_only_once():
-    callback = PreflightGateCallback(enabled=True, num_trials=8, on_failure="abort")
+def test_preflight_callback_aborts_sparse_first_step_and_checks_only_once(generated_recipe_schema):
+    root = Path(__file__).resolve().parents[3]
+    assert Path(callbacks.__file__).resolve() == root / "skyrl-train/skyrl_train/callbacks/builtin.py"
+    recipe_type, base = generated_recipe_schema
+    recipe = recipe_type.from_document(
+        {
+            "trainer": {
+                "enable_db_registration": False,
+                "preflight_gate": {"enabled": True, "num_trials": 8, "on_failure": "warn"},
+            },
+            "generator": {"inference_stats_interval": 0},
+        }
+    ).with_settings(["trainer.preflight_gate.on_failure=abort"])
+    with pytest.raises(ValueError):
+        recipe.with_settings(["trainer.preflight_gate.on_failure=unknown-failure-policy"])
+    callback = next(
+        callback
+        for callback in callbacks.create_default_callbacks(OmegaConf.merge(base, recipe.to_skyrl()))
+        if isinstance(callback, PreflightGateCallback)
+    )
 
     with pytest.raises(PreflightGateError, match="sparse"):
         callback.on_step_end(STEP_ONE, TrainerControl(), trainer=_trainer_after_first_step([0.0] * 8))
@@ -72,8 +94,24 @@ def test_preflight_callback_aborts_sparse_first_step_and_checks_only_once():
         pytest.param([0.0] * 8, "warn", id="sparse-warn-continues"),
     ],
 )
-def test_preflight_callback_lets_training_continue(rewards, on_failure):
-    callback = PreflightGateCallback(enabled=True, num_trials=8, on_failure=on_failure)
+def test_preflight_callback_lets_training_continue(rewards, on_failure, generated_recipe_schema):
+    root = Path(__file__).resolve().parents[3]
+    assert Path(callbacks.__file__).resolve() == root / "skyrl-train/skyrl_train/callbacks/builtin.py"
+    recipe_type, base = generated_recipe_schema
+    recipe = recipe_type.from_document(
+        {
+            "trainer": {
+                "enable_db_registration": False,
+                "preflight_gate": {"enabled": True, "num_trials": 8, "on_failure": "abort"},
+            },
+            "generator": {"inference_stats_interval": 0},
+        }
+    ).with_settings([f"trainer.preflight_gate.on_failure={on_failure}"])
+    callback = next(
+        callback
+        for callback in callbacks.create_default_callbacks(OmegaConf.merge(base, recipe.to_skyrl()))
+        if isinstance(callback, PreflightGateCallback)
+    )
     control = TrainerControl()
 
     assert callback.on_step_end(STEP_ONE, control, trainer=_trainer_after_first_step(rewards)) is control

@@ -1,5 +1,6 @@
 from argparse import Namespace
 import hashlib
+import os
 from pathlib import Path
 
 import fsspec
@@ -10,6 +11,7 @@ from safetensors.numpy import save
 
 from cloud.iris import hf_model_cache, task_runtime
 from cloud.iris.hf_model_cache import HuggingFaceSnapshot, HuggingFaceSnapshotFile, publish_hugging_face_snapshot
+from cloud.iris.rl_config_translation import parse_rl_config
 from cloud.iris.task_runtime import (
     _write_final_config,
     policy_chat_template_model,
@@ -18,6 +20,7 @@ from cloud.iris.task_runtime import (
     prepare_policy_tokenizer,
 )
 from marinskyrl.speculative_decoding import SpeculatorModelConfig
+from marinskyrl.recipe_schema import SkyRLRecipe
 
 
 @pytest.mark.parametrize(
@@ -77,22 +80,76 @@ def test_manifest_policy_stages_metadata_without_materializing_weights(tmp_path,
 def test_hugging_face_draft_mirror_uses_the_policy_tokenizer(tmp_path, monkeypatch) -> None:
     revision = "4bdb47c08e5b5190bea3c7a93c3e14470230e469"
     cache = tmp_path / "draft-cache"
-    monkeypatch.setattr(hf_model_cache, "marin_temp_bucket", lambda *_args, **_kwargs: str(cache))
+    monkeypatch.setattr(hf_model_cache, "marin_temp_bucket", lambda _ttl, *, prefix, source_prefix: str(cache / prefix))
     monkeypatch.setattr(
         hf_model_cache,
         "_open_hugging_face_snapshot",
         lambda _model_id, _revision: _memory_model_snapshot(f"draft-source/{tmp_path.name}"),
     )
 
-    prepared = prepare_draft_model(
-        SpeculatorModelConfig(source_uri="hf://laion/draft", source_identity=revision),
-        cache_ttl_days=14,
-        cache_source_prefix="s3://region/run",
+    monkeypatch.setattr(task_runtime.tempfile, "tempdir", str(tmp_path))
+    root = Path(__file__).resolve().parents[3]
+    assert Path(task_runtime.__file__).resolve() == root / "cloud/iris/task_runtime.py"
+    assert Path(hf_model_cache.__file__).resolve() == root / "cloud/iris/hf_model_cache.py"
+    local_sources = []
+    for suffix in ("A", "B"):
+        source = tmp_path / f"local-{suffix}"
+        source.mkdir()
+        (source / "config.json").write_text("{}")
+        (source / "model.safetensors").write_bytes(save({"weight": np.arange(4, dtype=np.float32)}))
+        local_sources.append(source)
+    sources = (
+        ("hf://laion/draft", revision),
+        ("hf://laion/other-draft", revision),
+        ("hf://laion/draft", "b" * 40),
+        *((os.path.relpath(source, root), "author-identity") for source in local_sources),
     )
-
-    manifest = hf_model_cache.load_model_manifest(str(cache))
-    assert prepared == SpeculatorModelConfig(source_uri=str(cache), source_identity=manifest.identity)
-    assert manifest.tokenizer_mode == "policy"
+    outcomes = []
+    for index, (uri, identity) in enumerate(sources):
+        resume = local_sources[index % 2] / "checkpoint"
+        authored = SkyRLRecipe.from_document(
+            {
+                "entrypoint": "standard",
+                "context_budget": {"request_window_tokens": 256, "max_new_tokens_per_turn": 64, "max_turns": 1},
+                "trainer": {"placement": {"colocate_all": False}, "resume_path": os.path.relpath(resume, root)},
+                "generator": {
+                    "speculative_decoding": {
+                        "method": "eagle3",
+                        "model": {"source_uri": uri, "source_identity": identity},
+                        "num_speculative_tokens": 3,
+                    }
+                },
+            }
+        )
+        recipe_path = tmp_path / f"draft-{index}.yaml"
+        OmegaConf.save(OmegaConf.create(authored.to_skyrl()), recipe_path)
+        parsed = parse_rl_config(str(recipe_path))
+        model = SpeculatorModelConfig.from_mapping(parsed.generator["speculative_decoding"]["model"], context="draft")
+        prepared = prepare_draft_model(model, cache_ttl_days=14, cache_source_prefix="s3://region/run")
+        if index < 3:
+            manifest = hf_model_cache.load_model_manifest(prepared.source_uri)
+            assert prepared.source_identity == manifest.identity
+            assert manifest.tokenizer_mode == "policy"
+        else:
+            assert prepared.source_uri == str(local_sources[index - 3])
+            assert prepared.source_identity == "author-identity"
+        launch = OmegaConf.create(
+            {
+                "run": {"id": f"draft-{index}", "attempt_id": "1"},
+                "inputs": {"model": {"uri": "/policy"}},
+                "skyrl": {"trainer": parsed.trainer, "generator": parsed.generator},
+            }
+        )
+        output = _write_final_config(launch, policy_model=None, policy_tokenizer=None, draft_model=prepared)
+        written = OmegaConf.load(output).skyrl
+        assert written.trainer.resume_path == str(resume)
+        persisted = OmegaConf.to_container(written.generator.speculative_decoding.model)
+        assert persisted == {"source_uri": prepared.source_uri, "source_identity": prepared.source_identity}
+        outcomes.append(persisted)
+    for first, second in ((0, 1), (0, 2)):
+        assert outcomes[first]["source_uri"] != outcomes[second]["source_uri"]
+        assert outcomes[first]["source_identity"] != outcomes[second]["source_identity"]
+    assert outcomes[3]["source_uri"] != outcomes[4]["source_uri"]
 
 
 def test_requested_local_policy_tokenizer_is_staged_independently(tmp_path, monkeypatch) -> None:
