@@ -55,7 +55,7 @@ from skyrl_train.distillation_runtime import DistillationRuntime
 from skyrl_train.teacher_routing import route_row_metrics
 from skyrl_train.domain_gradient_balance import DomainGradientBalancer
 from skyrl_train.io import io
-from rigging.filesystem import prefix_join
+from rigging.filesystem.storage_path import prefix_join
 from skyrl_train.utils import Timer, get_ray_pg_ready_with_timeout, get_system_memory_metrics
 from skyrl_train.env_vars import NCCL_BUFFER_SIZE_ENV_VAR
 from skyrl_train.tensor_math import masked_mean
