@@ -5,6 +5,8 @@ set -euo pipefail
 package="${1:?usage: build_native.sh PACKAGE BUILD_DIRECTORY}"
 build_dir="$(realpath -m "${2:?usage: build_native.sh PACKAGE BUILD_DIRECTORY}")"
 script_dir="$(cd "$(dirname "$0")" && pwd)"
+native_local_version="$(python3.12 -c 'import json, sys; print(json.load(open(sys.argv[1]))["local_version"])' "$script_dir/native_versions.json")"
+flash_attn_upstream_version="$(python3.12 -c 'import json, sys; print(json.load(open(sys.argv[1]))["flash_attn_upstream_version"])' "$script_dir/native_versions.json")"
 source_subdir=.
 source_patch=
 python_version=3.12.14
@@ -27,13 +29,13 @@ case "$package" in
         repository=Dao-AILab/causal-conv1d
         source_commit=cd81f0413cad2fc1e6f17e785ac39f59aae690cd
         source_patch=causal-conv1d.patch
-        package_environment+=(CAUSAL_CONV1D_FORCE_BUILD=TRUE CAUSAL_CONV1D_LOCAL_VERSION=marin.cu132torch2141.1)
+        package_environment+=(CAUSAL_CONV1D_FORCE_BUILD=TRUE "CAUSAL_CONV1D_LOCAL_VERSION=$native_local_version")
         ;;
     mamba-ssm)
         repository=state-spaces/mamba
         source_commit=a14b1dff0454a3bc27d9eb31355dc01e4b2490ec
         source_patch=mamba-ssm.patch
-        package_environment+=(MAMBA_FORCE_BUILD=TRUE MAMBA_LOCAL_VERSION=marin.cu132torch2141.1)
+        package_environment+=(MAMBA_FORCE_BUILD=TRUE "MAMBA_LOCAL_VERSION=$native_local_version")
         ;;
     transformer-engine-torch)
         repository=NVIDIA/TransformerEngine
@@ -105,7 +107,7 @@ build_environment=(
 )
 {
     printf 'package=%s\narchitecture=%s\nsource=%s\n' "$package" "$architecture" "$source_commit"
-    sha256sum "$0" "$script_dir/native-cu132.txt"
+    sha256sum "$0" "$script_dir/native-cu132.txt" "$script_dir/native_versions.json"
     if [[ -n "$source_patch" ]]; then
         sha256sum "$script_dir/patches/$source_patch"
         git -C "$build_dir/source" diff --binary
@@ -125,7 +127,7 @@ cat "$build_dir/BUILD_INFO"
 env "${build_environment[@]}" uv build --wheel --no-build-isolation --python "$virtual_env/bin/python" \
     --out-dir "$build_dir/dist" "$build_dir/source/$source_subdir"
 if [[ "$package" == flash-attn ]]; then
-    upstream_wheel="$build_dir/dist/flash_attn-2.8.3.post1-cp312-cp312-linux_$architecture.whl"
+    upstream_wheel="$build_dir/dist/flash_attn-$flash_attn_upstream_version-cp312-cp312-linux_$architecture.whl"
     source_sha256="$(sha256sum "$upstream_wheel" | cut -d ' ' -f 1)"
     "$virtual_env/bin/python" "$script_dir/retag_flash_attn.py" "$upstream_wheel" \
         --source-sha256 "$source_sha256" --output "$build_dir/dist" --proof "$build_dir/RETAG_PROOF.json"

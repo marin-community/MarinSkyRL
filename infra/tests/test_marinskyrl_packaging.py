@@ -140,35 +140,19 @@ def test_gpu_profiles_use_one_cuda132_runtime(extras: tuple[str, ...]) -> None:
     assert runtimes == {("nvidia-cuda-runtime", "==13.2.86")}
 
 
-@pytest.mark.parametrize(
-    ("extras", "architecture", "required", "forbidden"),
-    [
-        (
-            ("megatron", "vllm"),
-            "x86_64",
-            {"causal-conv1d", "flash-attn", "mamba-ssm", "megatron-core", "transformer-engine-torch", "fast-hadamard-transform"},
-            set(),
-        ),
-        (
-            ("megatron", "vllm"),
-            "aarch64",
-            {"causal-conv1d", "flash-attn", "mamba-ssm", "megatron-core", "transformer-engine-torch", "fast-hadamard-transform"},
-            set(),
-        ),
-    ],
-)
-def test_policy_closures_match_supported_architectures(
-    extras: tuple[str, ...], architecture: str, required: set[str], forbidden: set[str]
-) -> None:
+@pytest.mark.parametrize("architecture", ["x86_64", "aarch64"])
+def test_policy_closures_match_supported_architectures(architecture: str) -> None:
     platform = {"sys_platform": "linux", "platform_machine": architecture}
     exported = [
         requirement
-        for requirement in _exported_requirements(extras)
+        for requirement in _exported_requirements(("megatron", "vllm"))
         if requirement.marker is None or requirement.marker.evaluate(platform)
     ]
     names = {requirement.name for requirement in exported}
 
-    assert {"vllm", "torch", "torchaudio", "flashinfer-python", "nvidia-cuda-nvcc", *required}.issubset(names)
-    assert names.isdisjoint(forbidden)
+    assert {
+        "vllm", "torch", "torchaudio", "flashinfer-python", "nvidia-cuda-nvcc", "causal-conv1d", "flash-attn",
+        "mamba-ssm", "megatron-core", "transformer-engine-torch", "fast-hadamard-transform",
+    }.issubset(names)
     vllm = next(requirement for requirement in exported if requirement.name == "vllm")
     assert vllm.url is not None and vllm.url.endswith(f"manylinux_2_28_{architecture}.whl")

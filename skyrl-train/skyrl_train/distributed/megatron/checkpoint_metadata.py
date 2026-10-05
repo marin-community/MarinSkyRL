@@ -7,12 +7,11 @@ import tempfile
 
 import torch
 from torch.distributed import checkpoint
-from torch.distributed.checkpoint._fsspec_filesystem import FileSystem as FsspecFileSystem
 
 from marinskyrl.remote_io import create_s3_filesystem
 from marinskyrl.resource_locator import join_resource_path, relative_resource_path
 from skyrl_train.io import io
-from skyrl_train.io.checkpoint_reader import RecordCheckpointReader
+from skyrl_train.io.checkpoint_reader import s3_checkpoint_reader
 
 
 def _stage_common_state(checkpoint_dir: str, destination: Path) -> None:
@@ -21,10 +20,7 @@ def _stage_common_state(checkpoint_dir: str, destination: Path) -> None:
     # its containing rank shard would also download the model and optimizer tensors.
     key = "common_state/shard_0_1"
     state = {key: BytesIO()}
-    reader = RecordCheckpointReader(checkpoint_dir)
-    reader.fs = FsspecFileSystem()
-    reader.fs.fs = create_s3_filesystem(default_cache_type="none")
-    reader.path = checkpoint_dir
+    reader = s3_checkpoint_reader(checkpoint_dir, create_s3_filesystem(default_cache_type="none"))
     checkpoint.load(state, storage_reader=reader, no_dist=True)
     value = state[key]
     if isinstance(value, BytesIO):

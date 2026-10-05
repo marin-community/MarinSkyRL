@@ -135,10 +135,6 @@ def stub_megatron_modules() -> None:
             "get_default_save_sharded_strategy": lambda *args, **kwargs: None,
         },
         "megatron.core.dist_checkpointing.strategies": {},
-        "megatron.core.dist_checkpointing.strategies.base": {},
-        "megatron.core.dist_checkpointing.strategies.async_utils": {
-            "AsyncCallsQueue": type("AsyncCallsQueue", (), {"__init__": lambda self, **kwargs: None})
-        },
         "megatron.core.dist_checkpointing.strategies.fully_parallel": {
             "FullyParallelLoadStrategyWrapper": type("FullyParallelLoadStrategyWrapper", (), {}),
             "FullyParallelSaveStrategyWrapper": type("FullyParallelSaveStrategyWrapper", (), {}),

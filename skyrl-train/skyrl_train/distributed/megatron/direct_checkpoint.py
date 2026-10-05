@@ -15,11 +15,10 @@ from megatron.core.dist_checkpointing.strategies.torch import (
     mcore_to_pyt_state_dict,
 )
 from torch.distributed import checkpoint
-from torch.distributed.checkpoint._fsspec_filesystem import FileSystem as FsspecFileSystem
 
 from marinskyrl.remote_io import create_s3_filesystem
 from skyrl_train.io.torch_distributed_checkpoint import StreamingFsspecWriter
-from skyrl_train.io.checkpoint_reader import RecordCheckpointReader
+from skyrl_train.io.checkpoint_reader import s3_checkpoint_reader
 
 
 # MCore 0.18 does not expose a storage-writer hook. Keep the adapter narrow: it
@@ -78,10 +77,7 @@ class DirectS3TorchDistLoadShardedStrategy(TorchDistLoadShardedStrategy):
         converted, flat_mapping, rename_mapping = _replace_state_dict_keys_with_sharded_keys(original)
         pytorch_state_dict = mcore_to_pyt_state_dict(converted, True)
 
-        reader = RecordCheckpointReader(self.checkpoint_dir)
-        reader.fs = FsspecFileSystem()
-        reader.fs.fs = self.filesystem
-        reader.path = self.checkpoint_dir
+        reader = s3_checkpoint_reader(self.checkpoint_dir, self.filesystem)
         checkpoint.load(
             pytorch_state_dict,
             storage_reader=reader,
