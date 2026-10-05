@@ -15,7 +15,8 @@ from shellbox.backends.docker.machine import DockerMachineFactory
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
 from shellbox.machine import Machine, MachineFactory
 from taskcompendium.environment import EnvironmentKind
-from taskcompendium.grading import GradeResult, Outcome
+from taskcompendium.execution import TaskExecution
+from taskcompendium.grading_result import GradeResult, Outcome
 from taskcompendium.models import TaskSpec
 from rolloutengine.contracts import (
     GenerationLimitReached,
@@ -242,6 +243,12 @@ class TaskRolloutWorker:
         if extras is None or len(extras) != len(request["prompts"]):
             raise ValueError("Each rollout request must contain one task_spec per prompt")
         tasks = [TaskSpec.model_validate_json(row["task_spec"]) for row in extras]
+        executions = [
+            TaskExecution()
+            if row.get("task_execution") is None
+            else TaskExecution.model_validate_json(row["task_execution"])
+            for row in extras
+        ]
         group_graders = [
             GroupGraderSpec.model_validate_json(row["group_grader"]) if row.get("group_grader") is not None else None
             for row in extras
@@ -251,8 +258,11 @@ class TaskRolloutWorker:
         harbor_settings = [self.harbor if "harbor" in task.metadata else None for task in tasks]
         policies = [self.error_handling if harbor is None else harbor.error_handling for harbor in harbor_settings]
         tasks = [
-            task if harbor is None else harbor.task(task, phase=phase)
-            for task, harbor in zip(tasks, harbor_settings, strict=True)
+            task if harbor is None else harbor.task(task) for task, harbor in zip(tasks, harbor_settings, strict=True)
+        ]
+        executions = [
+            execution if harbor is None else harbor.execution(execution, phase=phase)
+            for execution, harbor in zip(executions, harbor_settings, strict=True)
         ]
         sampling = get_sampling_params_for_backend(
             self.trajectory_runner_cfg.backend, self.trajectory_runner_cfg.sampling_params
@@ -308,7 +318,7 @@ class TaskRolloutWorker:
             while True:
                 try:
                     async with harbor_slots, self.task_slots:
-                        result = await engine.run(task)
+                        result = await engine.run(task, execution=executions[index])
                 except RolloutInterrupted as interruption:
                     result = _failed_rollout(
                         interruption,

@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from rolloutengine.contracts import ModelTurn, Transition
-from taskcompendium.grading import GradeResult, Outcome
+from taskcompendium.grading_result import GradeResult, Outcome
 from verifyit.modes.grade_mcq import grade_mcq_candidate
 from verifyit.spec import McqSpec
 

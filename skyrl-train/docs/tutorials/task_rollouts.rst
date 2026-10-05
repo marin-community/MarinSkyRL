@@ -6,7 +6,7 @@ Marin defines ``ShellboxRolloutEngine`` in
 SkyRL uses that engine through ``TaskRolloutWorker`` in
 ``skyrl_train/rollouts/task_worker.py``.
 
-``ShellboxRolloutEngine.run`` asynchronously executes one task. The worker
+``ShellboxRolloutEngine.run(task, execution=...)`` asynchronously executes one task. The worker
 starts one coroutine for each task, and inference runs on the worker's event
 loop. Synchronous graders use a separate executor. Shellbox commands use asynchronous machine operations.
 ``trajectory_runner.max_concurrent_tasks`` limits active task coroutines.
@@ -29,13 +29,20 @@ The `SWE example <../../examples/mini_swe_agent/README.md>`_ uses this entrypoin
 ``skyrl_train.entrypoints.main_harbor`` converts task
 directories and packed sources through ``HarborTaskDataset`` and uses the same worker.
 Harbor caches private task Parquet in ``data.task_cache_dir``.
-Explicit exports use ``skyrl_train.dataset.tasks.write_tasks(Path(...), tasks)``.
+Explicit exports use ``skyrl_train.dataset.tasks.write_tasks(Path(...), records)``.
+Each ``TaskRecord`` pairs a ``TaskSpec`` with separate ``TaskExecution`` settings.
+The ``task_execution`` column stores deadlines, agent users, and stage preparation.
+Task-only datasets can omit this column. Their execution settings have no time limits.
+Staged tasks require an execution record with one entry for every stage.
+The worker rejects a missing or unknown stage entry before inference.
 TaskCompendium defines task serialization. SkyRL owns its dataset file format.
 With ``data.terminal_bench_data``, ``skyrl_train.entrypoints.main_base`` prepares mixed Nemotron
-rows through ``NemotronTaskDataset``. Terminal rows contain the complete executable
-task. The worker does not require the original task directories.
-Harbor settings apply only to Harbor tasks. Other tasks retain their own turn limits
-and error policies. Whole-trajectory and per-step output preserve task order,
+rows through ``NemotronTaskDataset``. Terminal rows contain the executable task and its execution settings.
+The worker does not require the original task directories.
+``harbor.max_turns`` and Harbor exception settings apply only to Harbor tasks.
+These exception settings include ``harbor.mask_exceptions`` and ``harbor.default_error_treatment``.
+Other tasks use ``generator.max_turns`` and ``generator.error_handling``.
+Whole-trajectory and per-step output preserve task order,
 teacher routes, and source labels.
 
 The worker supplies explicit factories from ``skyrl_gym/task_factories.py``.
@@ -84,12 +91,15 @@ Step projection uses each turn's reward, with the task grade on the last turn wh
 A verifier result without a grade excludes tokens from loss and baseline calculations.
 Recorded execution failures use the exception policy, with zero optimization reward when no grade is available. Explicitly
 skipped grading retains trainable tokens with zero reward.
+``harbor.verifier_disable=true`` skips grading for Harbor tasks, including all their stages.
 Nemotron GenRM tasks use a judge model to compare a group of responses against
 a private grading principle. Configure that judge in
 ``environment.task_sessions.nemotron_ultra.genrm``.
 Comparison grading completes before the worker emits a rollout group.
 Each training prompt group contains ``generator.n_samples_per_prompt`` attempts of one task.
-GenRM compares eligible attempts in that group. The completed rollout group enters the buffer.
+GenRM compares attempts that the exception policy permits for loss calculations.
+An attempt with an execution failure also requires retained trainable tokens and the requested log probabilities.
+The completed rollout group enters the buffer.
 Ineligible attempts receive no comparison score.
 Evaluation exports contain public prompts, responses, labels, scores, and failure fields.
 Private task records and grading configuration remain outside these exports.
@@ -101,7 +111,8 @@ Private task records and grading configuration remain outside these exports.
 Exception lists override the built-in error categories. ``default_error_treatment``
 selects one of these policies for unknown errors.
 Timeout recovery retains completed turns with available grades and valid token evidence.
-The effective ``sampling_params.logprobs`` setting determines the probability requirement, including request overrides and automatic TIS setup.
+The effective ``sampling_params.logprobs`` setting determines the probability requirement, including request overrides.
+When that setting requests log probabilities, recovery requires one log probability per retained generated token.
 ``generator.error_handling.preserve_logprobs_on_timeout=false`` disables timeout recovery.
 
 ``TaskRolloutWorker.run_task`` projects and finalizes a completed prompt group before one

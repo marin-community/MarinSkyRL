@@ -3,7 +3,7 @@
 import json
 
 import pytest
-from taskcompendium.grading import Outcome
+from taskcompendium.grading_result import Outcome
 
 
 @pytest.fixture

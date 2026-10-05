@@ -3,7 +3,7 @@
 import sqlite3
 
 import pytest
-from taskcompendium.grading import Outcome
+from taskcompendium.grading_result import Outcome
 
 from skyrl_gym.envs.sql.utils import final_sql
 

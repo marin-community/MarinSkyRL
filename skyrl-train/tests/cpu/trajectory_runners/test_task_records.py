@@ -1,5 +1,5 @@
 from skyrl_gym.task_records import fold_grades
-from taskcompendium.grading import GradeResult, Outcome
+from taskcompendium.grading_result import GradeResult, Outcome
 
 
 def test_multiturn_verification_averages_scored_turns_and_requires_all_to_pass():

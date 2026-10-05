@@ -21,6 +21,7 @@ from rolloutengine.contracts import ModelTurn
 from rolloutengine.engine import ShellboxRolloutEngine
 from shellbox.machine import Command, ExitReason, Result
 from taskcompendium.environment import EnvironmentKind, EnvironmentSpec
+from taskcompendium.execution import TaskExecution
 from taskcompendium.importers.skyrl import source_task
 from taskcompendium.models import Source
 from taskcompendium.submission import AnswerFormat, SubmissionConvention
@@ -274,7 +275,7 @@ async def rollout_session():
                 convention=SubmissionConvention(id="plain", answer_format=AnswerFormat.PLAIN),
                 sessions=session_factories(max_turns=max_turns),
             )
-            return await engine.run(task)
+            return await engine.run(task, execution=TaskExecution())
 
         try:
             yield run

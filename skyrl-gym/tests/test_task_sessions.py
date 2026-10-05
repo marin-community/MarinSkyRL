@@ -5,7 +5,8 @@ import json
 import pytest
 from rolloutengine.contracts import ModelTurn
 from rolloutengine.engine import ShellboxRolloutEngine
-from taskcompendium.grading import Outcome
+from taskcompendium.grading_result import Outcome
+from taskcompendium.execution import TaskExecution
 from taskcompendium.importers.skyrl import source_task
 from taskcompendium.models import Source, TaskSpec
 from taskcompendium.submission import AnswerFormat, SubmissionConvention
@@ -73,7 +74,7 @@ async def test_answer_task_json_preserves_private_grade_and_training_reward(
 ):
     specification = TaskSpec.model_validate_json(task(name, extras).model_dump_json())
     model = ReplayModel([response])
-    rollout = await engine(model).run(specification)
+    rollout = await engine(model).run(specification, execution=TaskExecution())
     assert (rollout.grade.status, rollout.grade.reward) == (Outcome.GRADED, native_reward)
     assert rollout.steps[0].transition.reward == pytest.approx(training_reward)
     assert rollout.prompt_token_ids == (10, 11)
@@ -91,7 +92,8 @@ async def test_aime_session_preserves_native_grade_under_length_shaping():
             "aime",
             {"reward_model": {"ground_truth": "42"}},
             {"length_penalty_weight": 0.5, "target_length": 2, "min_response_length": 0, "evaluation_token_budget": 4},
-        )
+        ),
+        execution=TaskExecution(),
     )
     assert rollout.grade.reward == 1.0
     assert rollout.grade.passed is True
@@ -105,7 +107,8 @@ async def test_aime_session_preserves_native_grade_under_length_shaping():
 async def test_final_line_requires_a_completed_model_response(stop_reason, reward):
     model = ReplayModel(["#### 12"], stop_reason=stop_reason)
     rollout = await engine(model).run(
-        task("gsm8k", {"reward_model": {"ground_truth": "12"}}, {"reward_method": "final_line"})
+        task("gsm8k", {"reward_model": {"ground_truth": "12"}}, {"reward_method": "final_line"}),
+        execution=TaskExecution(),
     )
     assert rollout.grade.reward == reward
 
@@ -113,7 +116,9 @@ async def test_final_line_requires_a_completed_model_response(stop_reason, rewar
 @pytest.mark.asyncio
 async def test_math_correction_preserves_per_turn_credit_and_masks_only_observation_tokens():
     model = ReplayModel(["#### 11", "#### 12"])
-    rollout = await engine(model).run(task("gsm8k_multi_turn", {"reward_spec": {"ground_truth": "12"}}))
+    rollout = await engine(model).run(
+        task("gsm8k_multi_turn", {"reward_spec": {"ground_truth": "12"}}), execution=TaskExecution()
+    )
     assert [step.transition.reward for step in rollout.steps] == pytest.approx([0.2 / 3, 1.0])
     assert rollout.grade.reward == pytest.approx((0.2 / 3 + 1.0) / 2)
     assert rollout.response_token_ids == (20, 21, 90, 91, 20, 21)
@@ -131,7 +136,8 @@ async def test_search_observation_reaches_model_without_entering_the_loss_mask(r
             "search",
             {"reward_spec": {"ground_truth": {"target": ["Paris"]}}},
             {"search_url": url, "topk": 3, "timeout": 5, "log_requests": False},
-        )
+        ),
+        execution=TaskExecution(),
     )
     assert requests == [{"query": "France capital", "topk": 3, "return_scores": True}]
     observation = model.requests[1].messages[-1]

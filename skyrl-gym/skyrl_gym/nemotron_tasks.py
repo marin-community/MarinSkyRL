@@ -12,7 +12,7 @@ import requests
 from rolloutengine.contracts import ModelTurn, SessionStart, Transition
 from shellbox.machine import ExitReason, Machine
 from taskcompendium.environment import ExternalVerifierSpec
-from taskcompendium.grading import GradeResult, Outcome
+from taskcompendium.grading_result import GradeResult, Outcome
 from taskcompendium.models import TaskSpec
 from taskcompendium.submission import conversation_messages
 from verifyit.adapters.skyrl import grade_grid_candidate

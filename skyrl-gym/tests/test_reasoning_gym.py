@@ -1,7 +1,7 @@
 import json
 
 import pytest
-from taskcompendium.grading import Outcome
+from taskcompendium.grading_result import Outcome
 
 from skyrl_gym.envs.reasoning_gym.scoring import score_response
 

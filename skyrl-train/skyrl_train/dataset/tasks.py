@@ -3,6 +3,7 @@
 import hashlib
 import json
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from functools import partial
 from itertools import batched
 from pathlib import Path
@@ -14,6 +15,7 @@ import pyarrow.parquet as pq
 from datasets import Dataset
 from rolloutengine.task_session import session_start
 from taskcompendium.environment import EnvironmentSpec, ExternalVerifierSpec
+from taskcompendium.execution import TaskExecution
 from taskcompendium.importers.skyrl import source_task
 from taskcompendium.models import Source, TaskSpec, VerifierKind
 from taskcompendium.submission import AnswerFormat, SubmissionConvention
@@ -23,11 +25,22 @@ from skyrl_train.dataset.dataset import PromptDataset
 from skyrl_train.rollouts.group_grader import task_group_grader
 
 TASKCOMPENDIUM_ENVIRONMENT = "taskcompendium"
-TASK_SCHEMA = pa.schema([pa.field("task_spec", pa.string(), nullable=False)])
+TASK_SCHEMA = pa.schema(
+    [
+        pa.field("task_spec", pa.string(), nullable=False),
+        pa.field("task_execution", pa.string()),
+    ]
+)
 PARQUET_BATCH_SIZE = 1024
 
 
-def task_prompt(task: TaskSpec) -> dict:
+@dataclass(frozen=True)
+class TaskRecord:
+    task: TaskSpec
+    execution: TaskExecution
+
+
+def task_prompt(task: TaskSpec, execution: TaskExecution) -> dict:
     """Prepare public messages and private worker inputs from a task."""
     verifier = (
         ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
@@ -42,6 +55,7 @@ def task_prompt(task: TaskSpec) -> dict:
             else task.metadata.get("skyrl_extras", {})
         ),
         "task_spec": task.model_dump_json(),
+        "task_execution": execution.model_dump_json(),
         "prompt": session_start(task, convention).messages,
         "env_class": task.environment.interaction or TASKCOMPENDIUM_ENVIRONMENT,
         "data_source": task.source.dataset,
@@ -62,7 +76,9 @@ class TaskDataset(PromptDataset):
 
 
 def _stored_task_prompt(row: dict) -> dict:
-    return task_prompt(TaskSpec.model_validate_json(row["task_spec"]))
+    settings = row.get("task_execution")
+    execution = TaskExecution() if settings is None else TaskExecution.model_validate_json(settings)
+    return task_prompt(TaskSpec.model_validate_json(row["task_spec"]), execution)
 
 
 def source_row_task(
@@ -101,24 +117,30 @@ def source_row_task(
 
 def _source_task_prompt(row: dict, index: int, *, source_name: str, environment_configs: Mapping[str, dict]) -> dict:
     task = source_row_task(row, index, source_name=source_name, environment_configs=environment_configs)
-    return task_prompt(task)
+    return task_prompt(task, TaskExecution())
 
 
-def write_tasks(path: Path, tasks: Iterable[TaskSpec]) -> None:
+def write_tasks(path: Path, records: Iterable[TaskRecord]) -> None:
     """Write a local task dataset in bounded Parquet batches."""
     with pq.ParquetWriter(path, TASK_SCHEMA) as writer:
-        for batch in batched(tasks, PARQUET_BATCH_SIZE):
+        for batch in batched(records, PARQUET_BATCH_SIZE):
             writer.write_table(
-                pa.Table.from_pydict({"task_spec": [task.model_dump_json() for task in batch]}, TASK_SCHEMA)
+                pa.Table.from_pydict(
+                    {
+                        "task_spec": [record.task.model_dump_json() for record in batch],
+                        "task_execution": [record.execution.model_dump_json() for record in batch],
+                    },
+                    TASK_SCHEMA,
+                )
             )
 
 
-def cache_tasks(tasks: Iterable[TaskSpec], cache_dir: Path) -> Path:
+def cache_tasks(records: Iterable[TaskRecord], cache_dir: Path) -> Path:
     """Write private task Parquet and use its content digest as the filename."""
     cache_dir.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(dir=cache_dir) as directory:
         temporary_path = Path(directory) / "tasks.parquet"
-        write_tasks(temporary_path, tasks)
+        write_tasks(temporary_path, records)
         with temporary_path.open("rb") as contents:
             digest = hashlib.file_digest(contents, "sha256").hexdigest()
         path = cache_dir / f"{digest}.parquet"

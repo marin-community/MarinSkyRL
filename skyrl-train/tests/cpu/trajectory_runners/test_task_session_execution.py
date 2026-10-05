@@ -7,7 +7,7 @@ from skyrl_gym.answer_tasks import grade_gsm8k
 from skyrl_gym.task_sessions import AnswerTaskSession
 from skyrl_gym.verification import VerificationStatus
 from rolloutengine.contracts import ModelTurn
-from taskcompendium.grading import Outcome
+from taskcompendium.grading_result import Outcome
 from transformers import AutoTokenizer
 from taskcompendium.importers.skyrl import source_task
 from taskcompendium.models import Source

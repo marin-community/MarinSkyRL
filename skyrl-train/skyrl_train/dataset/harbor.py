@@ -10,12 +10,12 @@ from typing import Any
 
 from loguru import logger
 from transformers import PreTrainedTokenizerBase
-from taskcompendium.importers.harbor import harbor_task
+from taskcompendium.importers.harbor import harbor_execution, harbor_task
 from taskcompendium.models import Source, TaskSpec, VerifierSpec
 
 from marinskyrl.packed_tasks import PackedTaskMaterializer, PackedTaskReference, select_task_references
 from marinskyrl.task_sources import DirectoryDataSource, TaskTroveParquetSource, data_source
-from skyrl_train.dataset.tasks import TaskDataset, cache_tasks
+from skyrl_train.dataset.tasks import TaskDataset, TaskRecord, cache_tasks
 
 MATERIALIZATION_BATCH_SIZE = 64
 
@@ -126,7 +126,7 @@ def materialize_harbor_tasks(
     if not len(sources):
         raise ValueError("No Harbor tasks matched the configured sources")
 
-    def tasks() -> Iterator[TaskSpec]:
+    def tasks() -> Iterator[TaskRecord]:
         with closing(PackedTaskMaterializer(cache_dir / "archives")) as materializer:
             for batch in batched(sources, MATERIALIZATION_BATCH_SIZE):
                 references = [item for item in batch if isinstance(item, PackedTaskReference)]
@@ -151,14 +151,17 @@ def materialize_harbor_tasks(
                         ),
                     )
                     content = json.dumps(task.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
-                    yield task.model_copy(
-                        update={
-                            "id": uid,
-                            "metadata": {**task.metadata, "harbor_task_ids": sorted(harbor_task_ids(directory))},
-                            "source": task.source.model_copy(
-                                update={"revision": f"sha256:{hashlib.sha256(content).hexdigest()}"}
-                            ),
-                        }
+                    yield TaskRecord(
+                        task.model_copy(
+                            update={
+                                "id": uid,
+                                "metadata": {**task.metadata, "harbor_task_ids": sorted(harbor_task_ids(directory))},
+                                "source": task.source.model_copy(
+                                    update={"revision": f"sha256:{hashlib.sha256(content).hexdigest()}"}
+                                ),
+                            }
+                        ),
+                        harbor_execution(directory),
                     )
 
     return cache_tasks(tasks(), cache_dir)

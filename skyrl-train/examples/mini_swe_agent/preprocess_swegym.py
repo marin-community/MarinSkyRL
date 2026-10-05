@@ -5,9 +5,10 @@ from pathlib import Path
 
 import datasets
 from taskcompendium.environment import EnvironmentKind, EnvironmentSpec, RegistryImage
+from taskcompendium.execution import TaskExecution
 from taskcompendium.importers.swe import SWEInstance, swe_image, swe_task
 from taskcompendium.models import Source
-from skyrl_train.dataset.tasks import write_tasks
+from skyrl_train.dataset.tasks import TaskRecord, write_tasks
 
 TRAIN_DATASET = "SumanthRH/SWE-Gym-Subset"
 EVAL_DATASET = "SumanthRH/SWE-bench_Verified"
@@ -38,7 +39,7 @@ def materialize(dataset: str, revision: str, split: str, output: Path) -> None:
         )
         for index, row in enumerate(instances)
     )
-    write_tasks(output, tasks)
+    write_tasks(output, (TaskRecord(task, TaskExecution()) for task in tasks))
 
 
 def main() -> None:

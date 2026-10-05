@@ -3,7 +3,7 @@
 import re
 
 from rolloutengine.contracts import ModelTurn, Transition
-from taskcompendium.grading import GradeResult, Outcome
+from taskcompendium.grading_result import GradeResult, Outcome
 
 from skyrl_gym.answer_tasks import ground_truth
 from skyrl_gym.envs.nemotron_ultra.judge import OpenAIJudge

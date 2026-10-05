@@ -22,7 +22,7 @@ from tests.gpu.utils import Timer, get_test_trajectory_request
 from omegaconf import DictConfig, OmegaConf
 from skyrl_train.utils.utils import initialize_ray
 from rolloutengine.contracts import SessionStart, Transition
-from taskcompendium.grading import GradeResult, Outcome
+from taskcompendium.grading_result import GradeResult, Outcome
 from taskcompendium.submission import conversation_messages
 from loguru import logger
 from skyrl_train.config.utils import get_default_config

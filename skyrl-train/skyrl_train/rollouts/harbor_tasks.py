@@ -11,8 +11,10 @@ from shellbox.backends.daytona.machine import DaytonaMachineFactory, DaytonaNetw
 from shellbox.backends.docker.machine import DockerMachineFactory
 from shellbox.machine import MachineFactory
 from taskcompendium.environment import EnvironmentSpec, ShellVerifierSpec
+from taskcompendium.execution import TaskExecution
 from taskcompendium.models import TaskSpec, VerifierKind, VerifierSpec
-from taskcompendium.grading import GradingFailure, Outcome, skipped_verifier
+from taskcompendium.grading import skipped_verifier
+from taskcompendium.grading_result import GradingFailure, Outcome
 from rolloutengine.contracts import RolloutData, RolloutFailure
 
 from skyrl_train.trajectory_runners.harbor.configuration import HarborConfigBuilder
@@ -106,17 +108,8 @@ class HarborTaskSettings:
             case other:
                 raise ValueError(f"No Shellbox factory is configured for Harbor backend {other!r}")
 
-    def task(self, task: TaskSpec, *, phase: str) -> TaskSpec:
-        """Resolve task resources and deadlines without changing the source specification."""
-        agent_override = self.eval_timeout if phase == "eval" else self.agent_timeout
-
-        def agent_timeout(original):
-            value = original if agent_override is None else agent_override
-            if value is None:
-                return None
-            value *= self.timeout_multiplier
-            ceiling = self.max_agent_timeout
-            return value if ceiling is None else min(value, ceiling)
+    def task(self, task: TaskSpec) -> TaskSpec:
+        """Apply machine and verifier overrides without changing the source specification."""
 
         def environment(original: EnvironmentSpec) -> EnvironmentSpec:
             updates = {
@@ -132,8 +125,11 @@ class HarborTaskSettings:
             override = self.verifier_override()
             if override is not None and original.kind != VerifierKind.STAGED:
                 return override
+            updates: dict[str, object] = {
+                "environment": None if original.environment is None else environment(original.environment),
+            }
             if original.kind != VerifierKind.SHELL:
-                return original
+                return original.model_copy(update=updates)
             specification = ShellVerifierSpec.model_validate_json(original.parameters_json)
             timeout = (
                 specification.timeout
@@ -142,31 +138,46 @@ class HarborTaskSettings:
             ) * self.timeout_multiplier
             if self.verifier.max_timeout_sec is not None:
                 timeout = min(timeout, self.verifier.max_timeout_sec)
-            specification = specification.model_copy(
-                update={
-                    "timeout": timeout,
-                    "environment": None
-                    if specification.environment is None
-                    else environment(specification.environment),
-                }
-            )
-            return original.model_copy(update={"parameters_json": specification.model_dump_json()})
+            specification = specification.model_copy(update={"timeout": timeout})
+            updates["parameters_json"] = specification.model_dump_json()
+            return original.model_copy(update=updates)
 
         return task.model_copy(
             update={
                 "environment": environment(task.environment),
-                "agent_timeout": agent_timeout(task.agent_timeout),
-                "attempt_timeout": task.attempt_timeout if self.attempt_timeout is None else self.attempt_timeout,
                 "verifier": verifier(task.verifier),
                 "stages": tuple(
-                    stage.model_copy(
+                    stage.model_copy(update={"verifier": verifier(stage.verifier)}) for stage in task.stages
+                ),
+            }
+        )
+
+    def execution(self, execution: TaskExecution, *, phase: str) -> TaskExecution:
+        """Apply deployment deadlines to the imported execution settings."""
+        agent_override = self.eval_timeout if phase == "eval" else self.agent_timeout
+
+        def agent_timeout(original: float | None) -> float | None:
+            value = original if agent_override is None else agent_override
+            if value is None:
+                return None
+            value *= self.timeout_multiplier
+            ceiling = self.max_agent_timeout
+            return value if ceiling is None else min(value, ceiling)
+
+        return execution.model_copy(
+            update={
+                "agent_timeout": agent_timeout(execution.agent_timeout),
+                "attempt_timeout": execution.attempt_timeout if self.attempt_timeout is None else self.attempt_timeout,
+                "stages": {
+                    name: stage.model_copy(
                         update={
-                            "agent_timeout": agent_timeout(stage.agent_timeout or task.agent_timeout),
-                            "verifier": verifier(stage.verifier),
+                            "agent_timeout": agent_timeout(
+                                execution.agent_timeout if stage.agent_timeout is None else stage.agent_timeout
+                            ),
                         }
                     )
-                    for stage in task.stages
-                ),
+                    for name, stage in execution.stages.items()
+                },
             }
         )
 

@@ -10,6 +10,7 @@ import pytest
 import pytest_asyncio
 from rolloutengine.engine import ShellboxRolloutEngine
 from taskcompendium.environment import EnvironmentKind, EnvironmentSpec
+from taskcompendium.execution import TaskExecution
 from taskcompendium.importers.skyrl import source_task
 from taskcompendium.models import Source
 from taskcompendium.submission import AnswerFormat, SubmissionConvention
@@ -167,7 +168,7 @@ async def test_openenv_engine_preserves_tokens_and_releases_server(openenv_sessi
         cleanup_timeout=5,
         convention=SubmissionConvention(id="plain", answer_format=AnswerFormat.PLAIN),
     )
-    rollout = await engine.run(task)
+    rollout = await engine.run(task, execution=TaskExecution())
     assert rollout.grade.reward == 0.25
     assert rollout.response_token_ids == (20, 21)
     assert rollout.loss_mask == (1, 1)

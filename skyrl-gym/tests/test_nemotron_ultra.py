@@ -5,7 +5,7 @@ import threading
 
 import pytest
 import requests
-from taskcompendium.grading import Outcome
+from taskcompendium.grading_result import Outcome
 
 from skyrl_gym.envs.nemotron_ultra.calendar import grade_calendar
 from skyrl_gym.envs.nemotron_ultra.format_verification import grade_format

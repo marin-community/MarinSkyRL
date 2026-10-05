@@ -1,7 +1,7 @@
 import json
 
 import pytest
-from taskcompendium.grading import Outcome
+from taskcompendium.grading_result import Outcome
 from skyrl_gym.envs.text_to_sql import scoring
 
 # question: "How many hospitals are there in each state?"

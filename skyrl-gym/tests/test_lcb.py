@@ -2,7 +2,7 @@ import multiprocessing
 
 import pytest
 import json
-from taskcompendium.grading import Outcome
+from taskcompendium.grading_result import Outcome
 
 SECOND_LARGEST_SOLUTION = """```python
 def main():

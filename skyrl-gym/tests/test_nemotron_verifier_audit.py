@@ -5,7 +5,7 @@ import json
 import pytest
 import requests
 from shellbox.machine import ExitReason, Result
-from taskcompendium.grading import Outcome
+from taskcompendium.grading_result import Outcome
 
 from skyrl_gym.envs.nemotron_ultra.answer_extraction import final_answer_text
 from skyrl_gym.envs.nemotron_ultra.genrm import grade_genrm_group

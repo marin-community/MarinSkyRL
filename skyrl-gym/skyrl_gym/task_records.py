@@ -4,7 +4,7 @@ from collections.abc import Sequence
 
 import numpy as np
 from rolloutengine.contracts import ModelTurn, Transition
-from taskcompendium.grading import GradeResult, Outcome
+from taskcompendium.grading_result import GradeResult, Outcome
 
 from skyrl_gym.verification import RewardResult, RolloutEvidence, VerificationResult, VerificationStatus
 

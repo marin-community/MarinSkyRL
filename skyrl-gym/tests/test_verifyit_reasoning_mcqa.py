@@ -3,7 +3,7 @@
 import json
 
 import pytest
-from taskcompendium.grading import Outcome
+from taskcompendium.grading_result import Outcome
 from skyrl_gym.answer_tasks import grade_reasoning_gym
 from skyrl_gym.envs.nemotron_ultra.mcqa import grade_mcqa
 

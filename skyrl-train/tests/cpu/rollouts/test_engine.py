@@ -19,7 +19,9 @@ from omegaconf import OmegaConf
 from skyrl_gym.task_records import fold_grades, grade_result
 from skyrl_gym.task_sessions import AnswerTaskSession
 from skyrl_gym.verification import VerificationResult, VerificationStatus, normalized_verifier_score
-from taskcompendium.grading import GradeResult, Outcome, numeric_answer, skipped_verifier
+from taskcompendium.grading import numeric_answer, skipped_verifier
+from taskcompendium.grading_result import GradeResult, Outcome
+from taskcompendium.execution import StageExecution, TaskExecution
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
 from shellbox.image import DockerfileSource
 from shellbox.machine import Command, ExitReason, Result, ShellSimBuiltins
@@ -390,8 +392,9 @@ async def test_task_grade_and_exact_tokens_reach_the_leased_buffer(task_inputs, 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("projection_type", [WholeTaskProjection, StepTaskProjection])
 @pytest.mark.parametrize("timeout_phase", ["model", "advance"])
+@pytest.mark.parametrize("deadline_source", ["task", "train", "eval", "stage", "inherited_stage"])
 async def test_agent_deadlines_grade_the_workspace_and_commit_training_tokens(
-    task_inputs, projection_type, timeout_phase
+    task_inputs, projection_type, timeout_phase, deadline_source
 ):
     config, request = task_inputs
     config.error_handling = {
@@ -404,7 +407,6 @@ async def test_agent_deadlines_grade_the_workspace_and_commit_training_tokens(
         context=ConversationInput(events=(TextMessage(role="user", content="Write the answer file."),)),
         environment_requirements=EnvironmentRequirements(),
         environment=EnvironmentSpec(kind=EnvironmentKind.SHELLSIM),
-        agent_timeout=1,
         answer_type=AnswerType.FILE,
         verifier=VerifierSpec(
             kind=VerifierKind.SHELL,
@@ -414,7 +416,55 @@ async def test_agent_deadlines_grade_the_workspace_and_commit_training_tokens(
         ),
         source=Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
     )
-    request["env_extras"] = [{"task_spec": task.model_dump_json()}]
+    execution = TaskExecution(agent_timeout=1)
+    settings = None
+    if deadline_source != "task":
+        task = task.model_copy(update={"metadata": {"harbor": {}}})
+        settings = HarborTaskSettings.from_config(
+            OmegaConf.create(
+                {
+                    "harbor": {
+                        "override_timeout_sec": 1 if deadline_source == "train" else None,
+                        "eval_timeout_override_sec": 1 if deadline_source == "eval" else 900,
+                        "timeout_multiplier": 2,
+                        "max_timeout_sec": 1,
+                        "max_retries": 0,
+                    }
+                }
+            )
+        )
+        request["batch_metadata"] = BatchMetadata(0, "eval" if deadline_source == "eval" else "train")
+        execution = TaskExecution()
+    if deadline_source in {"stage", "inherited_stage"}:
+        task = task.model_copy(
+            update={
+                "verifier": VerifierSpec(
+                    kind=VerifierKind.STAGED,
+                    parameters_json=StageVerifierSpec(strategy=StageRewardStrategy.FINAL).model_dump_json(),
+                ),
+                "stages": (
+                    TaskStage(name="write", verifier=task.verifier),
+                    TaskStage(
+                        name="unreached",
+                        context=ConversationInput(events=(TextMessage(role="user", content="Continue."),)),
+                        verifier=task.verifier,
+                    ),
+                ),
+            }
+        )
+        execution = TaskExecution(
+            agent_timeout=1 if deadline_source == "inherited_stage" else None,
+            stages={
+                "write": StageExecution(agent_timeout=1 if deadline_source == "stage" else None),
+                "unreached": StageExecution(),
+            },
+        )
+    request["env_extras"] = [
+        {
+            "task_spec": task.model_dump_json(),
+            "task_execution": execution.model_dump_json(),
+        }
+    ]
     machines = []
 
     class Machine:
@@ -475,6 +525,7 @@ async def test_agent_deadlines_grade_the_workspace_and_commit_training_tokens(
         {EnvironmentKind.SHELLSIM: Factory()},
         command_timeout=5,
         cleanup_timeout=5,
+        harbor=settings,
     )
     writer = Writer()
     await worker.run_task(RolloutTask(RolloutLease("lease", 0, 1), {"uid": task.id}, request), writer)
@@ -591,6 +642,9 @@ async def test_disabled_harbor_verification_keeps_stage_tokens_without_a_score(
     )
     request["env_extras"][0]["task_spec"] = task.model_dump_json()
     request["batch_metadata"] = BatchMetadata(0, phase)
+    request["env_extras"][0]["task_execution"] = TaskExecution(
+        stages={stage.name: StageExecution() for stage in task.stages}
+    ).model_dump_json()
     client = ConversationClient(["Done", "Done"] if staged else ["Done"])
     settings = HarborTaskSettings.from_config(OmegaConf.create({"harbor": {"verifier_disable": True}}))
     projection = (
@@ -676,6 +730,9 @@ async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected
         )
     request["env_extras"][0]["task_spec"] = task.model_dump_json()
     attempts = 0
+    request["env_extras"][0]["task_execution"] = TaskExecution(
+        stages={stage.name: StageExecution() for stage in task.stages}
+    ).model_dump_json()
     machines = []
     waits = []
     backoff = asyncio.Event()
@@ -852,14 +909,18 @@ async def test_harbor_retry_policy_preserves_terminal_grades(task_inputs, phase,
     # Use stdout grading to exercise the retry limit for verifier execution errors.
     if failure == "exhausted":
         verifier = ShellVerifierSpec(argv=("false",), timeout=5)
-    if failure.startswith("grade_timeout"):
-        verifier = verifier.model_copy(update={"environment": EnvironmentSpec(kind=EnvironmentKind.SHELLSIM)})
     task = task.model_copy(
         update={
             "answer_type": AnswerType.STATE,
             "environment": EnvironmentSpec(kind=EnvironmentKind.SHELLSIM),
             "metadata": {"harbor": {}},
-            "verifier": VerifierSpec(kind=VerifierKind.SHELL, parameters_json=verifier.model_dump_json()),
+            "verifier": VerifierSpec(
+                kind=VerifierKind.SHELL,
+                parameters_json=verifier.model_dump_json(),
+                environment=EnvironmentSpec(kind=EnvironmentKind.SHELLSIM)
+                if failure.startswith("grade_timeout")
+                else None,
+            ),
         }
     )
     request["env_extras"][0]["task_spec"] = task.model_dump_json()
@@ -1343,7 +1404,14 @@ async def test_staged_task_failures_mask_training_and_preserve_candidates_in_the
             }
         )
     request["prompts"] = [[{"role": "user", "content": "Complete the first stage."}]]
-    request["env_extras"] = [{"task_spec": task.model_dump_json()}]
+    request["env_extras"] = [
+        {
+            "task_spec": task.model_dump_json(),
+            "task_execution": TaskExecution(
+                stages={stage.name: StageExecution() for stage in task.stages}
+            ).model_dump_json(),
+        }
+    ]
     projection = (
         WholeTrajectoryProjection(config, Tokenizer())
         if projection_type is WholeTaskProjection

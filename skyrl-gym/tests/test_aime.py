@@ -2,7 +2,7 @@ import pytest
 
 from skyrl_gym.answer_tasks import grade_aime
 from skyrl_gym.metrics import aggregate_for_task
-from taskcompendium.grading import Outcome
+from taskcompendium.grading_result import Outcome
 
 
 @pytest.mark.parametrize(

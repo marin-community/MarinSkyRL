@@ -3,7 +3,7 @@
 import pytest
 from shellbox.machine import ExitReason
 from taskcompendium.environment import EnvironmentKind, EnvironmentSpec
-from taskcompendium.grading import Outcome
+from taskcompendium.grading_result import Outcome
 
 from skyrl_gym.lean_execution import compile_lean
 

@@ -7,7 +7,7 @@ import requests
 from rolloutengine.contracts import RolloutData
 from skyrl_gym.envs.nemotron_ultra.genrm import grade_genrm_group, response_object
 from skyrl_gym.envs.nemotron_ultra.judge import OpenAIJudge
-from taskcompendium.grading import GradeResult, Outcome
+from taskcompendium.grading_result import GradeResult, Outcome
 from taskcompendium.models import TaskSpec
 from taskcompendium.submission import conversation_messages
 

@@ -12,7 +12,7 @@ from skyrl_gym.verification import (
     TrainingDisposition,
     VerificationResult,
 )
-from taskcompendium.grading import GradeResult, Outcome
+from taskcompendium.grading_result import GradeResult, Outcome
 from rolloutengine.contracts import RolloutData
 
 from skyrl_train.error_treatment import ErrorTreatment

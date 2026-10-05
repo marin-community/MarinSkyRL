@@ -30,8 +30,10 @@ from marinskyrl.task_sources import (
     TaskTroveTagMatch,
 )
 from skyrl_train.dataset.harbor import TerminalBenchTaskDataset, materialize_harbor_tasks
-from taskcompendium.environment import DockerBuild, EnvironmentKind, ShellVerifierSpec
-from taskcompendium.grading import Outcome, skipped_verifier
+from taskcompendium.environment import DockerBuild, EnvironmentKind
+from taskcompendium.grading import skipped_verifier
+from taskcompendium.grading_result import Outcome
+from taskcompendium.execution import TaskExecution
 from taskcompendium.models import TaskSpec
 from rolloutengine.contracts import ModelTurn
 from rolloutengine.engine import ShellboxRolloutEngine
@@ -206,8 +208,7 @@ def test_packed_selection_becomes_portable_task_parquet(tmp_path: Path) -> None:
         assert {file.path: file.content for file in task.environment.image.files} == {
             "/Dockerfile": b"FROM python:3.12-slim\n"
         }
-        verifier = ShellVerifierSpec.model_validate_json(task.verifier.parameters_json)
-        assert {file.path: file.content for file in verifier.files} == {"/tests/test.sh": b"#!/bin/sh\nexit 0\n"}
+        assert {file.path: file.content for file in task.verifier.files} == {"/tests/test.sh": b"#!/bin/sh\nexit 0\n"}
 
 
 @pytest.mark.asyncio
@@ -274,8 +275,10 @@ async def test_packed_tasks_execute_after_source_removal(tmp_path, staged, regis
         cleanup_timeout=5,
         convention=SubmissionConvention(id="plain", answer_format=AnswerFormat.PLAIN),
     )
-    task = TaskSpec.model_validate_json(pq.read_table(output)["task_spec"][0].as_py())
-    result = await engine.run(task)
+    row = pq.read_table(output).to_pylist()[0]
+    task = TaskSpec.model_validate_json(row["task_spec"])
+    execution = TaskExecution.model_validate_json(row["task_execution"])
+    result = await engine.run(task, execution=execution)
     assert (result.grade.status, result.grade.reward) == (
         (Outcome.GRADED, 1.0) if verification else (Outcome.SKIPPED, None)
     )
