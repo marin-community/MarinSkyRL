@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 import math
 from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
@@ -9,7 +10,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Protocol
 
-from skyrl_train.telemetry import TRAINER_ROLE, phase_attributes, phase_duration
+from loguru import logger
+from skyrl_train.telemetry import TRAINER_ROLE, WORKER_ROLE, phase_attributes, phase_duration
 
 
 TIMING_PARENTS: dict[str, str | None] = {
@@ -50,6 +52,53 @@ class PhaseTiming:
     duration_seconds: float
     root: str
     parent: str | None
+
+
+@contextmanager
+def checkpoint_phase(
+    backend: str,
+    operation: str,
+    phase: str,
+    *,
+    rank: int,
+    step: int | None,
+) -> Iterator[None]:
+    """Record a rank-local wall span without synchronizing CUDA."""
+    started = time.perf_counter()
+    outcome = "success"
+    try:
+        yield
+    except BaseException:
+        outcome = "failure"
+        raise
+    finally:
+        duration = time.perf_counter() - started
+        attributes = {
+            "backend": backend,
+            "operation": operation,
+            "phase": phase,
+            "rank": str(rank),
+            "step": str(step),
+            "outcome": outcome,
+            "clock_domain": "inclusive_wall",
+            "role": WORKER_ROLE if rank >= 0 else TRAINER_ROLE,
+        }
+        try:
+            phase_duration.record(duration, attributes=attributes)
+            logger.info(
+                "checkpoint_observation {}",
+                json.dumps(
+                    {
+                        "schema": "checkpoint_phase_v1",
+                        **attributes,
+                        "duration_seconds": duration,
+                        "counters": {},
+                    },
+                    sort_keys=True,
+                ),
+            )
+        except Exception:
+            logger.opt(exception=True).warning("Could not publish checkpoint timing")
 
 
 class PhaseBreakdown:

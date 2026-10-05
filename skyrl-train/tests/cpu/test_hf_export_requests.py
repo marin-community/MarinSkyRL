@@ -90,7 +90,9 @@ def test_export_request_preserves_durable_source_for_task_local_model(tmp_path):
 
 def test_checkpoint_cleanup_retains_pending_export_source(tmp_path):
     for step in (5, 10, 15):
-        (tmp_path / f"global_step_{step}").mkdir()
+        checkpoint = tmp_path / f"global_step_{step}"
+        checkpoint.mkdir()
+        (checkpoint / "trainer_state.pt").write_bytes(b"complete")
 
     cleanup_old_checkpoints(str(tmp_path), max_checkpoints=1, protected_steps={5})
 

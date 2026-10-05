@@ -113,6 +113,15 @@ class CPUStrategy(DistributedStrategy):
             "rng": self.get_rng_state(),
         }
         torch.save(states, os.path.join(ckpt_dir, CHECKPOINT_FILE_TEMPLATE.format(rank=dist.get_rank())))
+        # The trainer commits Megatron checkpoints only when every DCP shard and
+        # its shared metadata are present. This CPU stand-in keeps its own state
+        # format while exercising that end-to-end publication contract.
+        io.write_bytes_atomic(os.path.join(ckpt_dir, f"__{dist.get_rank()}_0.distcp"), b"cpu fixture")
+        if dist.get_rank() == 0:
+            for name in (".metadata", "common.pt", "metadata.json", "extra_state.pt"):
+                io.write_bytes_atomic(os.path.join(ckpt_dir, name), b"cpu fixture")
+            io.makedirs(os.path.join(ckpt_dir, "huggingface"), exist_ok=True)
+            io.write_bytes_atomic(os.path.join(ckpt_dir, "huggingface", "config.json"), b"{}")
         dist.barrier()
 
     def load_checkpoint(

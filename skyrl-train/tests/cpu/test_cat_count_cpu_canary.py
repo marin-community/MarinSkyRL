@@ -16,6 +16,7 @@ import skyrl_gym
 import skyrl_train
 import torch
 import zstandard
+from skyrl_train.checkpoint_generation import resolve_checkpoint_payload
 from omegaconf import OmegaConf
 from marinskyrl.remote_io import create_s3_filesystem
 from skyrl_train.evaluate import evaluation_dump_dir
@@ -240,7 +241,8 @@ def assert_cpu_learning(positive, root: Path, telemetry):
     assert any(row["policy/ppo_clip_ratio"] > 0 for row in training)
     assert all("environment/exact" in row for row in training)
     assert any("environment/exact_n20" in row for row in training)
-    checkpoint = torch.load(root / f"ckpts/global_step_{FAST_STEPS}/policy/rank_0.pt", weights_only=False)
+    step_path = root / "ckpts" / f"global_step_{FAST_STEPS}"
+    checkpoint = torch.load(Path(resolve_checkpoint_payload(str(step_path))) / "policy/rank_0.pt", weights_only=False)
     optimizer_steps = [state["step"].item() for state in checkpoint["optimizer"]["state"].values()]
     assert optimizer_steps and set(optimizer_steps) == {2 * FAST_STEPS}
     names = {row["name"] for row in telemetry}
@@ -339,5 +341,6 @@ def test_cat_count_async_resumes_and_converges(tmp_path, cat_count_policy, cat_c
     assert any(row["async/staleness_mean"] > 0 for row in training)
     initial_mean = sum(scores(resumed)[0]) / 2
     assert any(sum(pair) / 2 >= max(0.65, initial_mean + 0.3) for pair in scores(resumed))
-    checkpoint = torch.load(root / "ckpts/global_step_100/policy/rank_0.pt", weights_only=False)
+    step_path = root / "ckpts" / "global_step_100"
+    checkpoint = torch.load(Path(resolve_checkpoint_payload(str(step_path))) / "policy/rank_0.pt", weights_only=False)
     assert {state["step"].item() for state in checkpoint["optimizer"]["state"].values()} == {200}

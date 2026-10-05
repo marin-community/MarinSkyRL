@@ -67,6 +67,8 @@ def _write_checkpoint(root: str, dirname: str) -> None:
     io.makedirs(os.path.dirname(path))
     with io.open_file(path, "wb") as f:
         f.write(b"weights")
+    with io.open_file(f"{root}/{dirname}/trainer_state.pt", "wb") as f:
+        f.write(b"trainer")
 
 
 @pytest.mark.parametrize(

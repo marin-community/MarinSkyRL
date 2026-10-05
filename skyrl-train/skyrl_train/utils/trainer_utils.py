@@ -18,10 +18,11 @@ from skyrl_train.trajectory_runners.base import TrajectoryBatch
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import DEFAULT_ACCEPTED_STOP_REASONS
 from transformers import AutoTokenizer
 from skyrl_train.io import io
+from skyrl_train.checkpoint_generation import COMMIT_FILENAME
 from skyrl_train.metric_names import ENVIRONMENT_METRIC_PREFIX
 from marinskyrl.resource_locator import join_resource_path
-from skyrl_train.checkpoint_listing import extract_step_from_path, list_checkpoint_dirs
-from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX
+from skyrl_train.checkpoint_listing import list_checkpoint_dirs, list_committed_checkpoint_dirs
+from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, LATEST_CHECKPOINT_FILE, extract_step_from_path
 from skyrl_train.dataset import PromptDataset
 from torchdata.stateful_dataloader import StatefulDataLoader
 
@@ -108,28 +109,24 @@ def cleanup_old_checkpoints(
     if len(checkpoint_dirs) <= max_checkpoints:
         return
 
-    # Sort by step number (extract number from global_step_N)
-    def extract_step(dirname):
-        try:
-            return int(dirname.split("global_step_")[1])
-        except (IndexError, ValueError):
-            return 0
+    checkpoint_dirs.sort(key=extract_step_from_path)
 
-    checkpoint_dirs.sort(key=extract_step)
-
-    protected_steps = protected_steps or set()
+    protected_steps = set(protected_steps or ())
+    latest_path = os.path.join(checkpoint_base_path, LATEST_CHECKPOINT_FILE)
+    if io.exists(latest_path):
+        protected_steps.add(int(io.read_bytes(latest_path)))
     recent = set(checkpoint_dirs[-max_checkpoints:]) if max_checkpoints > 0 else set()
     dirs_to_remove = [
         directory
         for directory in checkpoint_dirs
-        if directory not in recent and extract_step(directory) not in protected_steps
+        if directory not in recent and extract_step_from_path(directory) not in protected_steps
     ]
 
     for dir_name in dirs_to_remove:
         full_path = os.path.join(checkpoint_base_path, dir_name)
         try:
             io.remove(full_path)
-            step_num = extract_step(dir_name)
+            step_num = extract_step_from_path(dir_name)
             logger.info(f"Cleaned up old checkpoint: global_step_{step_num} at {full_path}")
         except Exception as e:
             logger.warning(f"Failed to remove old checkpoint {full_path}: {e}")
@@ -140,15 +137,20 @@ def validate_consistency_for_latest_checkpoint(
 ):
     """Validate that the checkpoint folder is consistent with the latest checkpoint file.
 
-    Asserts that the folder with the highest global step is the latest checkpoint tracked by `latest_checkpoint_file`.
-    Otherwise, the folder state is inconsistent and the user should delete other checkpoints.
+    Reject a newer legacy flat checkpoint that exceeds the allowed save interval.
+
+    Generation commits are safe to ignore until the latest pointer advertises them.
     """
     if io.exists(root_ckpt_folder):
-        checkpoint_dirs = list_checkpoint_dirs(root_ckpt_folder)
+        checkpoint_dirs = list_committed_checkpoint_dirs(root_ckpt_folder)
         if checkpoint_dirs:
-            global_step_values = [extract_step_from_path(d) for d in checkpoint_dirs]
-            max_global_step_in_folder = max(global_step_values)
-            # NOTE (sumanthrh): We allow a checkpoint folder to be `save_interval` steps ahead of the latest checkpoint in `latest_checkpoint_file`. This is because the last checkpoint can be an incomplete checkpoint.
+            # Only the latest pointer selects a generation for recovery.
+            legacy_steps = [
+                extract_step_from_path(directory)
+                for directory in checkpoint_dirs
+                if not io.exists(os.path.join(root_ckpt_folder, directory, COMMIT_FILENAME))
+            ]
+            max_global_step_in_folder = max(legacy_steps, default=ckpt_iteration)
             if max_global_step_in_folder - ckpt_iteration > save_interval:
                 max_global_step_in_folder_path = os.path.join(
                     root_ckpt_folder, f"{GLOBAL_STEP_PREFIX}{max_global_step_in_folder}"

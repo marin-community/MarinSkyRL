@@ -1,0 +1,138 @@
+"""Immutable checkpoint attempts and their single-object commit record.
+
+Legacy checkpoints have payloads directly below ``global_step_N``. New attempts
+live below ``global_step_N/_attempts/<id>``; readers never enter that prefix
+until the step-level commit record points to a completed attempt.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import time
+import uuid
+
+from marinskyrl.checkpoint_paths import GLOBAL_STEP_PREFIX, extract_step_from_path
+
+from skyrl_train.hf_export_schema import TRAINER_STATE_FILENAME
+from skyrl_train.io import io
+
+ATTEMPTS_DIRECTORY = "_attempts"
+COMMIT_FILENAME = "checkpoint_commit.json"
+MANIFEST_FILENAME = "checkpoint_manifest.json"
+_ATTEMPT_ID = re.compile(r"^[0-9a-f]{32}$")
+_STEP_DIRECTORY = re.compile(rf"{re.escape(GLOBAL_STEP_PREFIX)}\d+")
+_SCHEMA_VERSION = 1
+
+
+def new_attempt_path(step_path: str) -> str:
+    """Return a fresh attempt path without mutating the step's committed state."""
+    if not _STEP_DIRECTORY.fullmatch(os.path.basename(step_path.rstrip("/"))):
+        raise ValueError(f"Not a global-step checkpoint path: {step_path}")
+    return os.path.join(step_path.rstrip("/"), ATTEMPTS_DIRECTORY, uuid.uuid4().hex)
+
+
+def _attempt_id(step_path: str, attempt_path: str) -> str:
+    step_path = step_path.rstrip("/")
+    attempt_id = os.path.basename(attempt_path.rstrip("/"))
+    expected = os.path.join(step_path, ATTEMPTS_DIRECTORY, attempt_id)
+    if not _ATTEMPT_ID.fullmatch(attempt_id) or attempt_path.rstrip("/") != expected:
+        raise ValueError(f"Attempt path is outside step checkpoint: {attempt_path}")
+    return attempt_id
+
+
+def _json_bytes(payload: dict) -> bytes:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _valid_file_size(path: str, size: int) -> bool:
+    # DCP ranks with no assigned records write an empty shard.
+    return size > 0 or (size == 0 and path.endswith(".distcp"))
+
+
+def _inventory(attempt_path: str) -> dict[str, int]:
+    """Inventory exact object names/sizes; cloud find may return scheme-less keys."""
+
+    def without_scheme(path: str) -> str:
+        return path.split("://", 1)[1] if "://" in path else path
+
+    normalized_root = without_scheme(attempt_path).rstrip("/")
+    prefix = f"{normalized_root}/"
+    files = {}
+    for path, size in io.find_files(attempt_path).items():
+        normalized_path = without_scheme(path)
+        if not normalized_path.startswith(prefix):
+            raise ValueError(f"Checkpoint object escaped attempt prefix: {path}")
+        relative = normalized_path[len(prefix) :]
+        if not relative or relative.startswith("/") or ".." in relative.split("/"):
+            raise ValueError(f"Invalid checkpoint object name: {path}")
+        files[relative] = int(size)
+    return files
+
+
+def commit_attempt(step_path: str, attempt_path: str, *, required_files: set[str]) -> dict:
+    """Publish an attempt only after required files and its inventory are durable."""
+    step = extract_step_from_path(step_path)
+    attempt_id = _attempt_id(step_path, attempt_path)
+    files = _inventory(attempt_path)
+    missing = sorted(required_files - files.keys())
+    empty = sorted(path for path in required_files if path in files and not _valid_file_size(path, files[path]))
+    if missing or empty:
+        raise RuntimeError(f"Checkpoint attempt incomplete: missing={missing}, empty={empty}")
+    manifest = {
+        "schema_version": _SCHEMA_VERSION,
+        "step": step,
+        "attempt_id": attempt_id,
+        "created_at_unix_seconds": time.time(),
+        "required_files": sorted(required_files),
+        "files": dict(sorted(files.items())),
+    }
+    manifest_bytes = _json_bytes(manifest)
+    io.write_bytes_atomic(os.path.join(attempt_path, MANIFEST_FILENAME), manifest_bytes)
+    commit = {
+        "schema_version": _SCHEMA_VERSION,
+        "step": step,
+        "attempt_id": attempt_id,
+        "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+    }
+    io.write_bytes_atomic(os.path.join(step_path, COMMIT_FILENAME), _json_bytes(commit))
+    return commit
+
+
+def resolve_checkpoint_payload(step_path: str, *, verify_files: bool = False) -> str:
+    """Resolve the selected committed attempt or an existing flat checkpoint."""
+    commit_path = os.path.join(step_path, COMMIT_FILENAME)
+    if not io.exists(commit_path):
+        if io.exists(os.path.join(step_path, TRAINER_STATE_FILENAME)):
+            return step_path
+        raise FileNotFoundError(f"No committed checkpoint at {step_path}")
+
+    commit = json.loads(io.read_bytes(commit_path))
+    if commit.get("schema_version") != _SCHEMA_VERSION or commit.get("step") != extract_step_from_path(step_path):
+        raise ValueError(f"Invalid checkpoint commit record at {commit_path}")
+    attempt_id = commit.get("attempt_id")
+    if not isinstance(attempt_id, str) or not _ATTEMPT_ID.fullmatch(attempt_id):
+        raise ValueError(f"Invalid checkpoint attempt ID at {commit_path}")
+    attempt_path = os.path.join(step_path, ATTEMPTS_DIRECTORY, attempt_id)
+    manifest_bytes = io.read_bytes(os.path.join(attempt_path, MANIFEST_FILENAME))
+    if hashlib.sha256(manifest_bytes).hexdigest() != commit.get("manifest_sha256"):
+        raise ValueError(f"Checkpoint manifest digest mismatch at {attempt_path}")
+    manifest = json.loads(manifest_bytes)
+    if manifest.get("schema_version") != _SCHEMA_VERSION or manifest.get("step") != commit["step"]:
+        raise ValueError(f"Invalid checkpoint manifest at {attempt_path}")
+    if manifest.get("attempt_id") != attempt_id:
+        raise ValueError(f"Checkpoint attempt mismatch at {attempt_path}")
+    required_files = manifest.get("required_files")
+    files = manifest.get("files")
+    if not isinstance(required_files, list) or not isinstance(files, dict):
+        raise ValueError(f"Invalid checkpoint inventory at {attempt_path}")
+    if any(not isinstance(path, str) or not _valid_file_size(path, files.get(path, -1)) for path in required_files):
+        raise ValueError(f"Checkpoint manifest omits a required file at {attempt_path}")
+    if verify_files:
+        actual_files = _inventory(attempt_path)
+        for path, expected_size in files.items():
+            if actual_files.get(path) != expected_size:
+                raise ValueError(f"Checkpoint object missing or size changed: {attempt_path}/{path}")
+    return attempt_path
