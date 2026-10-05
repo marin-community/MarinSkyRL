@@ -127,7 +127,7 @@ class RemoteSafetensorsTensorStore:
 
     def plan_prefetch(self, items: Iterable[tuple[str, int | None]]) -> None:
         """Fetch requested tensor ranges in bounded windows as the reader consumes them."""
-        self._prefetch_plan = deque(dict.fromkeys(items))
+        self._prefetch_plan = deque(dict.fromkeys(item for item in items if item[0] in self._weight_map))
 
     def _source(self, shard: str) -> BinaryIO:
         source = self._handles.get(shard)
