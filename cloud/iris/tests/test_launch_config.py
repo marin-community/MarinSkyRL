@@ -152,6 +152,7 @@ def test_launch_config_composes_and_loads_as_structured_hydra(
     native_defaults["skyrl"]["trainer"]["placement"]["policy_num_gpus_per_node"] = None
     del native_defaults["skyrl"]["trainer"]["micro_train_batch_size_per_gpu"]
     native_defaults["skyrl"]["trainer"]["algorithm"] = {}
+    del native_defaults["skyrl"]["generator"]["backend"]
     native_defaults["skyrl"]["trainer"]["placement"]["colocate_policy_ref"] = False
     native_defaults["iris"]["allocation"]["num_nodes"] = 1 if nodes == 1 else 3
     path.write_text(yaml.safe_dump(native_defaults, sort_keys=False))

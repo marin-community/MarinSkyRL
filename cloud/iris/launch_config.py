@@ -230,6 +230,7 @@ def _compose_source_recipe(config: DictConfig) -> DictConfig:
             generator_defaults = Generator()
             generator = {**parsed.generator}
             for key in (
+                "backend",
                 "run_engines_locally",
                 "inference_engine_tensor_parallel_size",
                 "inference_engine_pipeline_parallel_size",
