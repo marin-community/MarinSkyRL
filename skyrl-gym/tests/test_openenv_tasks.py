@@ -164,6 +164,7 @@ async def test_openenv_engine_preserves_tokens_and_releases_server(openenv_sessi
         sessions={"openenv": lambda task, machine: session},
         max_turns=2,
         command_timeout=5.0,
+        cleanup_timeout=5,
         convention=SubmissionConvention(id="plain", answer_format=AnswerFormat.PLAIN),
     )
     rollout = await engine.run(task)

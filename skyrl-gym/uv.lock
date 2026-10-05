@@ -1172,7 +1172,7 @@ wheels = [
 [[package]]
 name = "marin-rolloutengine"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frolloutengine&rev=7d97cfd93c7442ff348232beb8c4638ac49514fd#7d97cfd93c7442ff348232beb8c4638ac49514fd" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frolloutengine&rev=bd6cb48a19084c30a2a33699e0b619e550538c3c#bd6cb48a19084c30a2a33699e0b619e550538c3c" }
 dependencies = [
     { name = "harbor-config" },
     { name = "marin-shellbox" },
@@ -1182,7 +1182,7 @@ dependencies = [
 [[package]]
 name = "marin-shellbox"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fshellbox&rev=7d97cfd93c7442ff348232beb8c4638ac49514fd#7d97cfd93c7442ff348232beb8c4638ac49514fd" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fshellbox&rev=bd6cb48a19084c30a2a33699e0b619e550538c3c#bd6cb48a19084c30a2a33699e0b619e550538c3c" }
 dependencies = [
     { name = "httpx" },
 ]
@@ -2219,8 +2219,8 @@ requires-dist = [
     { name = "func-timeout" },
     { name = "ipython", marker = "extra == 'dev'", specifier = "==9.6.0" },
     { name = "loguru" },
-    { name = "marin-rolloutengine", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frolloutengine&rev=7d97cfd93c7442ff348232beb8c4638ac49514fd" },
-    { name = "marin-shellbox", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fshellbox&rev=7d97cfd93c7442ff348232beb8c4638ac49514fd" },
+    { name = "marin-rolloutengine", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frolloutengine&rev=bd6cb48a19084c30a2a33699e0b619e550538c3c" },
+    { name = "marin-shellbox", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fshellbox&rev=bd6cb48a19084c30a2a33699e0b619e550538c3c" },
     { name = "math-verify", specifier = "==0.9.0" },
     { name = "numpy" },
     { name = "omegaconf" },
@@ -2232,7 +2232,7 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'" },
     { name = "reasoning-gym", specifier = "==0.1.25" },
     { name = "requests" },
-    { name = "taskcompendium", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=7d97cfd93c7442ff348232beb8c4638ac49514fd" },
+    { name = "taskcompendium", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=bd6cb48a19084c30a2a33699e0b619e550538c3c" },
     { name = "verifiable-instructions", git = "https://github.com/abukharin-nv/verifiable-instructions.git?rev=f46a5ac87b1400a4f8973039844b6be9b56e3faf" },
     { name = "verifyit", extras = ["answer", "schema", "reasoning-gym", "judge"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fverifyit&rev=232f192a56b013fdc3f6914eb158c7bc2d231f94" },
     { name = "xmltodict" },
@@ -2299,7 +2299,7 @@ wheels = [
 [[package]]
 name = "taskcompendium"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=7d97cfd93c7442ff348232beb8c4638ac49514fd#7d97cfd93c7442ff348232beb8c4638ac49514fd" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=bd6cb48a19084c30a2a33699e0b619e550538c3c#bd6cb48a19084c30a2a33699e0b619e550538c3c" }
 dependencies = [
     { name = "marin-rigging" },
     { name = "pydantic" },

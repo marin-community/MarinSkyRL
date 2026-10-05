@@ -270,6 +270,7 @@ async def rollout_session():
                 {EnvironmentKind.SHELLSIM: Factory()},
                 max_turns=max_turns,
                 command_timeout=5,
+                cleanup_timeout=5,
                 convention=SubmissionConvention(id="plain", answer_format=AnswerFormat.PLAIN),
                 sessions=session_factories(max_turns=max_turns),
             )

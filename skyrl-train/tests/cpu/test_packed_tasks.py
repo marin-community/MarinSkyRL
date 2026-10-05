@@ -271,6 +271,7 @@ async def test_packed_tasks_execute_after_source_removal(tmp_path, staged, regis
         {EnvironmentKind.DOCKER: Factory()},
         max_turns=1,
         command_timeout=5,
+        cleanup_timeout=5,
         convention=SubmissionConvention(id="plain", answer_format=AnswerFormat.PLAIN),
     )
     task = TaskSpec.model_validate_json(pq.read_table(output)["task_spec"][0].as_py())

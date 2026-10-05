@@ -151,6 +151,7 @@ def _failed_rollout(
             RolloutOperation.ATTEMPT: "TrialTimeoutError",
             RolloutOperation.START: "EnvironmentStartTimeoutError",
             RolloutOperation.GRADE: "VerifierTimeoutError",
+            RolloutOperation.CLEANUP: "CleanupTimeoutError",
         }.get(interruption.operation, "AgentTimeoutError")
     rollout = interruption.rollout
     recover = (
@@ -193,6 +194,7 @@ class TaskRolloutWorker:
         model_client: ModelClient,
         factories: Mapping[EnvironmentKind, MachineFactory],
         command_timeout: float,
+        cleanup_timeout: float,
         max_verifier_workers: int = 0,
         harbor: HarborTaskSettings | None = None,
         concurrent_tasks: int | None = None,
@@ -205,6 +207,7 @@ class TaskRolloutWorker:
         self.model_client = model_client
         self.factories = factories
         self.command_timeout = command_timeout
+        self.cleanup_timeout = cleanup_timeout
         self.chat_template_kwargs = dict(trajectory_runner_cfg.get("chat_template_kwargs", {}))
         self.harbor = harbor
         self.retry_wait = retry_wait
@@ -290,6 +293,7 @@ class TaskRolloutWorker:
                     else self.trajectory_runner_cfg.max_turns
                 ),
                 command_timeout=self.command_timeout,
+                cleanup_timeout=self.cleanup_timeout,
                 convention=SubmissionConvention(id="plain", answer_format=AnswerFormat.PLAIN),
                 sessions=self.sessions,
             )
@@ -432,6 +436,7 @@ class TaskRolloutWorkerSpec:
                 EnvironmentKind.SHELLSIM: ShellSimMachineFactory(),
             },
             command_timeout=float(self.config.trajectory_runner.command_timeout),
+            cleanup_timeout=float(self.config.trajectory_runner.cleanup_timeout),
             max_verifier_workers=int(self.config.environment.task_sessions.max_verifier_workers),
             harbor=harbor,
             concurrent_tasks=(

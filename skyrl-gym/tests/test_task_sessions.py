@@ -42,6 +42,7 @@ def engine(model, *, max_turns=3):
         {},
         max_turns=max_turns,
         command_timeout=5,
+        cleanup_timeout=5,
         convention=SubmissionConvention(id="plain", answer_format=AnswerFormat.PLAIN),
         sessions=session_factories(max_turns=max_turns),
     )

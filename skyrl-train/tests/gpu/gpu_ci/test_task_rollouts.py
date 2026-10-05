@@ -159,6 +159,7 @@ async def run_trajectory_runner_end_to_end(
         model_client=DirectModelClient(inference_engine_client),
         factories={EnvironmentKind.DOCKER: DockerMachineFactory()},
         command_timeout=120,
+        cleanup_timeout=30,
         max_verifier_workers=max_verifier_workers,
         sessions={"test_env": ThreeTurnSession},
     )
