@@ -6,6 +6,7 @@ import ray
 import asyncio
 import hydra
 from omegaconf import DictConfig
+from torchdata.stateful_dataloader import StatefulDataLoader
 
 from skyrl_train.entrypoints.main_base import (
     config_dir,
@@ -27,13 +28,16 @@ class TerminalBenchGenerateExp(TerminalBenchExp):
     async def _generate(self) -> None:
         inference_engine_client = self.create_inference_engine_client(operation=EntrypointOperation.GENERATE)
         trajectory_runner = self.get_trajectory_runner(self.cfg, self.tokenizer, inference_engine_client)
-        input_batch, _ = prepare_trajectory_request(
-            list(self.train_dataset),
-            self.cfg.generator.n_samples_per_prompt,
-            get_sampling_params_for_backend(self.cfg.generator.backend, self.cfg.generator.sampling_params),
-            self.cfg.environment.env_class,
-            "eval",
-            0,
+        dataloader = StatefulDataLoader(
+            self.train_dataset,
+            batch_size=self.cfg.trainer.eval_batch_size,
+            collate_fn=self.train_dataset.collate_fn,
+            shuffle=False,
+            num_workers=0,
+            drop_last=False,
+        )
+        sampling_params = get_sampling_params_for_backend(
+            self.cfg.generator.backend, self.cfg.generator.sampling_params
         )
 
         trajectory_sink = make_trajectory_sink(self.cfg.generator, self.tokenizer)
@@ -44,7 +48,17 @@ class TerminalBenchGenerateExp(TerminalBenchExp):
                 # Generation requests carry the eval phase, served only inside an eval session.
                 await trajectory_runner.start_eval_session(run_name=self.cfg.trainer.run_name, eval_step=0)
                 try:
-                    await trajectory_runner.run(input_batch)
+                    # Completed requests refresh worker liveness and publish retained trajectories.
+                    for prompts in dataloader:
+                        input_batch, _ = prepare_trajectory_request(
+                            prompts,
+                            self.cfg.generator.n_samples_per_prompt,
+                            sampling_params,
+                            self.cfg.environment.env_class,
+                            "eval",
+                            0,
+                        )
+                        await trajectory_runner.run(input_batch)
                 finally:
                     await trajectory_runner.stop_eval_session()
             finally:
