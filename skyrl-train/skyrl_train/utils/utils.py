@@ -497,7 +497,7 @@ def validate_cfg(cfg: DictConfig):
     if cfg.trainer.critic.model.path:
         raise ValueError("Megatron does not support a critic worker")
     for worker_type in ("policy", "ref"):
-        mode = cfg.trainer[worker_type].model.get("remote_read_mode", "per_key")
+        mode = cfg.trainer[worker_type].model.remote_read_mode
         if mode not in ("per_key", "prefetch"):
             raise ValueError(f"trainer.{worker_type}.model.remote_read_mode must be per_key or prefetch; got {mode!r}")
     distillation_plan = compile_distillation_plan_from_config(cfg)
