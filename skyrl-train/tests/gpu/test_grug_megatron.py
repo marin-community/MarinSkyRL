@@ -585,7 +585,9 @@ def test_grug_megatron_four_gpu_pp2_disaggregated_rollout_train_broadcast_rollou
     run_grug_serving_update_cycles(
         model_path,
         model_family="snowball",
-        names=list(dict.fromkeys([*PARAMETER_NAMES, *sync_names])),
+        # This Snowball fixture exports stacked experts. Serving reads the
+        # individual expert slices through sync_names below.
+        names=list(dict.fromkeys([*PARAMETER_NAMES, *BIAS_NAMES, *router_names])),
         bias_names=BIAS_NAMES,
         sync_names=sync_names,
         expert_indices=SERVING_EXPERT_INDEX_BY_NAME,
