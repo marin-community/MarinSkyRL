@@ -14,7 +14,7 @@ CHECKPOINT_EXPORT_ENTRYPOINT = "skyrl_train.entrypoints.checkpoint_export"
 # Ray requires the exact Python patch version on every node. Use one multi-arch
 # task image digest so a gang cannot mix cached versions of the mutable tag.
 IRIS_TASK_IMAGE = (
-    "ghcr.io/marin-community/iris-task@sha256:13519c59442bd70ed5ec2902869f15094992d6849d7e34e353f1338dec7ff5f8"
+    "ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990"
 )
 
 
