@@ -39,7 +39,7 @@ class MismatchArchive:
         scores: Sequence[mismatch.ScoreRow] | None = None,
         manifest: mismatch.ManifestRow | None = None,
     ) -> None:
-        with self.store.transaction() as transaction:
+        with self.store.transaction(max_bytes=512 * 1024 * 1024) as transaction:
             for table, rows in (
                 (mismatch.PROBE_TABLE, probes),
                 (mismatch.SCORES_TABLE, scores),
