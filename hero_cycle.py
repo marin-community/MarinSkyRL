@@ -136,8 +136,14 @@ def assert_pretrained_snapshot(source, model, names, bias_names, snapshot, *, bf
             tensor = store.load_first_dim_slice(f'{before}.experts.{projection}', int(expert))
         source_dtypes[name] = str(tensor.dtype)
         if name in bias_names:
-            assert tensor.dtype == snapshot[name].dtype == torch.float32
-            expected = tensor
+            assert snapshot[name].dtype == torch.float32
+            if bf16_import:
+                # Existing BF16 exports store these frozen biases in BF16 too.
+                # Import promotes them exactly; FP32 source biases remain unrounded.
+                assert tensor.dtype in (torch.bfloat16, torch.float32)
+            else:
+                assert tensor.dtype == torch.float32
+            expected = tensor.float()
         elif bf16_import:
             # The existing import recipe computes in BF16. Readback is FP32.
             expected = tensor.to(torch.bfloat16).float()
