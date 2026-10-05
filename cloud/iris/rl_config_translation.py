@@ -831,7 +831,7 @@ def _skyrl_config_sections(
     placement["policy_strict_spread_pg"] = True
     placement.setdefault("overlap_init", True)
     trainer["placement"] = placement
-    trainer.setdefault("policy", {}).setdefault("model", {})["remote_read_mode"] = "prefetch"
+    trainer.setdefault("policy", {}).setdefault("model", {}).setdefault("remote_read_mode", "prefetch")
     generator.setdefault("engine_init_kwargs", {})["load_format"] = "dummy"
     generator["weight_sync_transport"] = "broadcast"
 
