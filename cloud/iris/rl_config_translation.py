@@ -832,7 +832,7 @@ def _skyrl_config_sections(
     placement.setdefault("overlap_init", True)
     trainer["placement"] = placement
     trainer.setdefault("policy", {}).setdefault("model", {})["remote_read_mode"] = "prefetch"
-    generator.setdefault("engine_init_kwargs", {})["load_format"] = "dummy"
+    generator.setdefault("engine_init_kwargs", {})["load_format"] = "auto"
     generator["weight_sync_transport"] = "broadcast"
 
     if generator.get("num_inference_engines") is None:
