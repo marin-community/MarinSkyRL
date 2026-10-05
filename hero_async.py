@@ -245,6 +245,10 @@ class MeasuredAsyncPPOExp(BasePPOExp):
                 with tempfile.TemporaryDirectory(prefix="trainer-export-metadata-") as metadata_dir:
                     await asyncio.to_thread(download, export_path, metadata_dir)
                     record["metadata_identity"] = pretrained_metadata_identity(metadata_dir, verify_expected=False)
+                    from hero_qualification import assert_hf_config_preserved
+                    record["config_fields_preserved"] = assert_hf_config_preserved(
+                        self.cfg.trainer.policy.model.path, metadata_dir
+                    )
                     record["values"] = await asyncio.to_thread(
                         assert_pretrained_snapshot, export_path, metadata_dir, names, bias_names, snapshot,
                         bf16_import=False,

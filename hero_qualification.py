@@ -88,6 +88,30 @@ def pretrained_metadata_identity(model, *, verify_expected=True):
     return records
 
 
+def assert_hf_config_preserved(original_model, exported_model):
+    """Compare every original config field after Transformers normalizes defaults."""
+    from transformers import AutoConfig
+
+    source_fields = json.loads((Path(original_model) / "config.json").read_text())
+    exported_fields = json.loads((Path(exported_model) / "config.json").read_text())
+    original = AutoConfig.from_pretrained(original_model).to_dict()
+    exported = AutoConfig.from_pretrained(exported_model).to_dict()
+    checked = []
+    for field in source_fields:
+        if field in {"_name_or_path", "transformers_version", "_commit_hash"}:
+            continue
+        if field not in original:
+            assert field in exported_fields, field
+            assert source_fields[field] == exported_fields[field], field
+            checked.append(field)
+            continue
+        field = "dtype" if field == "torch_dtype" and "dtype" in original else field
+        assert field in original and field in exported, field
+        assert original[field] == exported[field], (field, original[field], exported[field])
+        checked.append(field)
+    return sorted(checked)
+
+
 def measured_worker(source):
     import psutil
     import ray
