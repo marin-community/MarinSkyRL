@@ -35,6 +35,8 @@ from marinskyrl.speculative_decoding import (
     runai_model_uri,
 )
 
+from skyrl_train.group_admission import GroupAdvantageInvariant, validate_group_baseline
+
 if TYPE_CHECKING:
     from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
     from skyrl_train.trajectory_runners.base import TrajectoryRunner
@@ -676,6 +678,8 @@ def run_ray_driver(
     from skyrl_train.utils.algorithm_registry import PolicyLossRegistry  # noqa: PLC0415
 
     validate_cfg(cfg)
+    if operation is EntrypointOperation.TRAIN:
+        validate_group_baseline(GroupAdvantageInvariant.from_config(cfg.trainer.algorithm.resolved_group_advantage))
     validate_trajectory_runner_capabilities(
         cfg, runner_mode, operation, loss_spec=PolicyLossRegistry.spec(cfg.trainer.algorithm.policy_loss_type)
     )

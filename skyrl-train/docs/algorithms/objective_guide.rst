@@ -202,6 +202,10 @@ Advantage estimators and filtering
 Set ``trainer.algorithm.advantage_estimator``. Implementation:
 `utils/advantage_estimators.py`_.
 
+A group estimator computes each prompt group's baseline from its final, baseline-eligible responses.
+Excluded responses, groups below the estimator's eligible minimum, and groups whose eligible rewards differ
+by at most 1e-6 get zero advantage. Per-token loop credit and reward shaping are added after the estimator.
+
 .. list-table::
    :header-rows: 1
 
@@ -216,15 +220,13 @@ Set ``trainer.algorithm.advantage_estimator``. Implementation:
    * - ``rloo``
      - Use a leave-one-out baseline over a complete prompt group. `Back to Basics`_.
    * - ``rloo_n``
-     - Exclude infrastructure failures; set ``group_advantage_min_size`` between 2 and the physical group size.
-   * - ``rloo_n_pbs``
-     - Add potential-based token shaping to an eligible-response baseline; requires an explicit group minimum of at least 2.
+     - Use ``rloo`` and require ``group_advantage_min_size`` eligible responses, set between 2 and the physical group size.
    * - ``reinforce++``
      - Use critic-free discounted returns; ``gamma: 1.0`` gives undiscounted returns. `REINFORCE++`_.
    * - ``gae``
      - Use temporal credit with a critic; configure ``trainer.critic.model.path``, ``gamma`` and ``lambd``.
 
-Use dynamic sampling to retain informative final trial groups; the mean-reward
+Use dynamic sampling to retain groups whose final, baseline-eligible rewards are informative; the mean-reward
 ceiling is exclusive. Implementation: `dynamic_sampling.py`_.
 
 .. code-block:: yaml

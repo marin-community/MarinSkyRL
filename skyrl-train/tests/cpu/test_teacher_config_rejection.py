@@ -11,7 +11,7 @@ from cloud.iris.tests.test_nemotron_ultra_grading_config import _HPCStub, _skipp
 from skyrl_train.objective.losses import PolicyLossInputs
 from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
 from skyrl_train.config.objective_spec import topk_loss_params
-from skyrl_train.distillation import StudentTopKInput
+from skyrl_train.distillation import StudentTopKInput, TeacherTopKInput
 from skyrl_train.objective.teacher import topk_teacher_loss
 from cloud.iris.launch_config import load_launch_config
 from cloud.iris.tests.test_launch_config import _raw_config
@@ -192,6 +192,42 @@ def test_selected_topk_rollouts_require_matching_teacher_width():
     cfg.generator.sampling_params.logprobs = 8
     with pytest.raises(ValueError, match="matching teacher top_k"):
         validate_cfg(cfg)
+
+
+def test_teacher_only_topk_training_accepts_pbs_with_sequence_loss():
+    cfg = selected_topk_config()
+    cfg.generator.sampling_params.logprobs = 0
+    cfg.trainer.algorithm.distillation.objective = "sparse_forward_kl"
+    cfg.teachers.primary.evidence = "topk_distribution"
+    cfg.trainer.algorithm.policy_loss_type = "gspo"
+    cfg.trainer.algorithm.loss_reduction = "sequence_mean"
+    cfg.trainer.algorithm.enable_token_reward_channel = True
+    OmegaConf.update(
+        cfg,
+        "terminal_bench_config.harbor",
+        {"enable_token_reward_channel": True, "enable_pbs_shaping": True},
+        force_add=True,
+    )
+    validate_cfg(cfg)
+
+    transported = OmegaConf.create(OmegaConf.to_yaml(cfg))
+    current = torch.full((1, 1, 16), 1 / 32).log().requires_grad_()
+    evidence = TeacherTopKInput(
+        torch.arange(16).reshape(1, 1, 16),
+        torch.full_like(current, 1 / 16).log(),
+        torch.ones(1, 1),
+        torch.ones(1, 1, dtype=torch.bool),
+        torch.ones(1, 1),
+    )
+    result = topk_teacher_loss(
+        evidence,
+        current,
+        topk_loss_params(transported.trainer.algorithm),
+        vocabulary_size=32,
+    )
+    result.values.sum().backward()
+    torch.testing.assert_close(result.values, torch.tensor(2.0).log().reshape(1, 1))
+    torch.testing.assert_close(current.grad, torch.full_like(current, -1 / 16))
 
 
 @pytest.mark.parametrize(
