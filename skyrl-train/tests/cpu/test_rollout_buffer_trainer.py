@@ -28,7 +28,10 @@ def _group(uid: str, policy_step: int, *, rewards: list[float] | None = None) ->
 @pytest.mark.parametrize("offload_enabled", [False, True])
 def test_weight_sync_respects_optimizer_offload_policy(reason, offload_enabled):
     trainer = object.__new__(RayPPOTrainer)
-    trainer.cfg = SimpleNamespace(trainer=SimpleNamespace(offload_optimizer_during_rollouts=offload_enabled))
+    trainer.cfg = SimpleNamespace(
+        trainer=SimpleNamespace(offload_optimizer_during_rollouts=offload_enabled),
+        generator=SimpleNamespace(engine_init_kwargs={}),
+    )
     trainer.colocate_all = False
     trainer.global_step = 0
     trainer.all_startup_timings = {}
