@@ -7,6 +7,7 @@ import hashlib
 import importlib.metadata
 import json
 import os
+import tempfile
 import time
 import traceback
 from pathlib import Path
@@ -15,6 +16,8 @@ import ray
 import torch
 from omegaconf import OmegaConf, open_dict
 from skyrl_train import objective  # noqa: F401 - register the current runtime's built-in losses
+from skyrl_train import hf_model_io
+from marinskyrl.checkpoint_paths import policy_export_path
 from skyrl_train.config.trajectory_runner_capabilities import (
     TrajectoryRunnerMode,
     validate_trajectory_runner_capabilities,
@@ -27,7 +30,7 @@ from tests.gpu.grug_serving import assert_engine_weights, rank0_validation_snaps
 
 from hero_cycle import assert_pretrained_snapshot, publication_expert_indices, publication_validation_names
 from hero_cat import COMPLETION_TEMPLATE, RESPONSE_LIMIT, cat_prompt
-from hero_qualification import measured_worker, pretrained_metadata_identity, s3_client, s3_location
+from hero_qualification import download, measured_worker, pretrained_metadata_identity, s3_client, s3_location
 
 
 def config(args):
@@ -218,6 +221,44 @@ class MeasuredAsyncPPOExp(BasePPOExp):
         evaluate = self.trainer.eval
         run_trajectories = self.trainer.trajectory_runner.run
         names, bias_names = publication_validation_names(self.cfg.trainer.policy.model.path)
+
+        if os.environ.get("HERO_EXPORT_FINAL", "0") == "1":
+            finalize_training = self.trainer._finalize_training
+
+            async def finalize_with_hf_export(*, completed_step, epoch):
+                await finalize_training(completed_step=completed_step, epoch=epoch)
+                export_path = policy_export_path(self.cfg.trainer.export_path, completed_step)
+                record = self.report["hf_export"] = {
+                    "step": completed_step, "path": export_path, "status": "saving",
+                    "resumed_from": self.report.get("resume_path"),
+                }
+                save_report(self.output, self.report)
+                snapshot = await asyncio.to_thread(rank0_validation_snapshot, self.trainer.policy_model, names)
+                started = time.monotonic()
+                await asyncio.to_thread(
+                    lambda: ray.get(self.trainer.policy_model.async_run_ray_method(
+                        "pass_through", "save_hf_model", export_path, self.trainer.tokenizer
+                    ))
+                )
+                record["save_seconds"] = time.monotonic() - started
+                await asyncio.to_thread(hf_model_io.verify_hf_model_export, export_path)
+                with tempfile.TemporaryDirectory(prefix="trainer-export-metadata-") as metadata_dir:
+                    await asyncio.to_thread(download, export_path, metadata_dir)
+                    record["metadata_identity"] = pretrained_metadata_identity(metadata_dir, verify_expected=False)
+                    record["values"] = await asyncio.to_thread(
+                        assert_pretrained_snapshot, export_path, metadata_dir, names, bias_names, snapshot,
+                        bf16_import=False,
+                    )
+                    from transformers import AutoTokenizer
+                    exported_tokenizer = AutoTokenizer.from_pretrained(metadata_dir)
+                    assert exported_tokenizer.get_vocab() == self.trainer.tokenizer.get_vocab()
+                    assert exported_tokenizer.all_special_ids == self.trainer.tokenizer.all_special_ids
+                    assert exported_tokenizer.chat_template == self.trainer.tokenizer.chat_template
+                record["tokenizer_preserved"] = True
+                record["status"] = "passed"
+                save_report(self.output, self.report)
+
+            self.trainer._finalize_training = finalize_with_hf_export
 
         def record_metrics(payload, step, kind="train"):
             if kind == "train":
@@ -501,6 +542,7 @@ def main(args):
         "serving_eager": cfg.generator.enforce_eager,
         "optimizer": args.optimizer,
         "resume_path": args.resume_path or None,
+        "export_final": os.environ.get("HERO_EXPORT_FINAL", "0") == "1",
         "vllm_source_revision": os.environ.get("HERO_VLLM_REVISION"),
         "vllm_wheel_sha256": os.environ.get("HERO_VLLM_WHEEL_SHA256"),
         "runtime_packages": {
@@ -552,6 +594,7 @@ def main(args):
                 "HERO_VLLM_REVISION": os.environ["HERO_VLLM_REVISION"],
                 "HERO_VLLM_WHEEL_SHA256": os.environ["HERO_VLLM_WHEEL_SHA256"],
                 "VLLM_BATCH_INVARIANT": "1",
+                "HERO_EXPORT_FINAL": os.environ.get("HERO_EXPORT_FINAL", "0"),
             }
         }
     )
