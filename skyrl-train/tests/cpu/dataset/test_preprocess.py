@@ -2,6 +2,8 @@
 uv run --isolated --group dev --extra cpu pytest tests/cpu/dataset/test_preprocess.py
 """
 
+from copy import deepcopy
+
 import numpy as np
 import pytest
 import torch
@@ -150,3 +152,33 @@ def test_routed_experts_mixed_sentinel_and_real_no_ragged_crash(tokenizer, cfg):
     assert re_tensor.shape == (2, 5, L, K)
     assert torch.equal(re_tensor[1], torch.zeros(5, L, K, dtype=torch.uint8))
     assert torch.equal(re_tensor[0, 0], torch.full((L, K), 2, dtype=torch.uint8))
+
+
+@pytest.mark.parametrize("prompt", [[11], [11, 12, 13]])
+def test_empty_startup_row_has_inert_context_and_preserves_real_response_channels(tokenizer, prompt):
+    prompts = [prompt, []]
+    responses = [[14, 15], []]
+    rewards = [[0.0, 1.0], []]
+    loss_masks = [[1, 1], []]
+    logprobs = [np.array([-0.5, -0.7]), np.array([])]
+    original = deepcopy((prompts, responses, rewards, loss_masks))
+    normal = convert_prompts_responses_to_batch_tensors(
+        tokenizer, [prompt], responses[:1], rewards[:1], loss_masks[:1], logprobs[:1]
+    )
+    mixed = convert_prompts_responses_to_batch_tensors(tokenizer, prompts, responses, rewards, loss_masks, logprobs)
+    sequences, attention, response_mask, reward_tensor, loss, behavior, _, _ = mixed
+    assert (prompts, responses, rewards, loss_masks) == original
+    assert sequences[0, attention[0].bool()].tolist() == prompt + responses[0]
+    assert sequences[1, attention[1].bool()].tolist() == [tokenizer.pad_token_id] * 2
+    _, _, normal_response_mask, normal_rewards, normal_loss, normal_behavior, _, _ = normal
+    for actual, expected in (
+        (response_mask, normal_response_mask),
+        (reward_tensor, normal_rewards),
+        (loss, normal_loss),
+        (behavior, normal_behavior),
+    ):
+        torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=0)
+    assert not response_mask[1].any()
+    assert not reward_tensor[1].any()
+    assert not loss[1].any()
+    assert not behavior[1].any()

@@ -914,3 +914,31 @@ def test_grpo_reports_one_flat_and_one_varied_reward_group():
     assert trainer.all_metrics["reward/zero_std_group_fraction"] == pytest.approx(0.5)
     assert torch.equal(result["advantages"][:2], torch.zeros(2, 1))
     assert torch.isfinite(result["advantages"]).all()
+
+
+def test_startup_failure_collation_preserves_group_and_baseline_exclusion(dummy_config, dummy_tokenizer):
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = dummy_config
+    trainer.group_advantage_invariant = GroupAdvantageInvariant.minimum_baseline_eligible(
+        physical_group_size=3, minimum_group_size=2
+    )
+    trainer.tokenizer = dummy_tokenizer
+    trainer.pad_batch = lambda batch: batch
+    trajectory = {
+        "prompt_token_ids": [[1, 2], [], [3, 4]],
+        "response_ids": [[5], [], [6]],
+        "rewards": [[1.0], [], [0.0]],
+        "loss_masks": [[1], [], [1]],
+        "rollout_logprobs": None,
+        "exclude_from_baseline": [False, True, False],
+    }
+    original = copy.deepcopy(trajectory)
+    batch = trainer.convert_to_training_input(trajectory, ["task", "task", "task"])
+    assert trajectory == original
+    assert batch.batch_size == 3
+    assert batch.metadata["uids"] == ["task", "task", "task"]
+    assert batch.metadata["exclude_from_baseline"].tolist() == [False, True, False]
+    assert batch["sequences"][1, batch["attention_mask"][1].bool()].tolist() == [0, 0]
+    assert not batch["response_mask"][1].any()
+    assert not batch["loss_mask"][1].any()
+    assert not batch["rewards"][1].any()

@@ -21,6 +21,7 @@ import torch
 from ray.util.placement_group import placement_group
 from transformers import AutoTokenizer
 
+from skyrl_train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
@@ -432,7 +433,8 @@ def test_grug_megatron_eval_forward_is_independent_of_peer_rank_batch(
         ray.shutdown()
 
 
-def test_grug_megatron_pp2_train_step_updates_weights_and_exports(tmp_path):
+@pytest.mark.parametrize("empty_startup_row", [False, True], ids=["normal", "empty_startup"])
+def test_grug_megatron_pp2_train_step_updates_weights_and_exports(tmp_path, empty_startup_row):
     world_size = 2
     require_hoppers(world_size)
     model_path = tmp_path / "model"
@@ -441,6 +443,34 @@ def test_grug_megatron_pp2_train_step_updates_weights_and_exports(tmp_path):
     cfg = _config(str(model_path), world_size=world_size, pp=2, ep=1)
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     batch = _padded_batch(tokenizer.pad_token_id)
+    if empty_startup_row:
+        cfg.trainer.micro_forward_batch_size_per_gpu = 1
+        cfg.trainer.micro_train_batch_size_per_gpu = 1
+        prompts = []
+        responses = []
+        for row in range(batch.batch_size):
+            prompt = batch["sequences"][row, :-RESPONSE_LENGTH]
+            response = batch["sequences"][row, -RESPONSE_LENGTH:]
+            prompts.append(prompt[batch["attention_mask"][row, :-RESPONSE_LENGTH].bool()].tolist())
+            responses.append(response[batch["response_mask"][row].bool()].tolist())
+        prompts[-1] = []
+        responses[-1] = []
+        rewards = [[0.0] * len(response) for response in responses]
+        losses = [[1] * len(response) for response in responses]
+        sequences, attention, response_mask, rewards_tensor, loss_mask, _, _, _ = (
+            convert_prompts_responses_to_batch_tensors(tokenizer, prompts, responses, rewards, losses)
+        )
+        response_length = response_mask.shape[1]
+        for key in ("action_log_probs", "base_action_log_probs", "rollout_logprobs", "values", "returns", "advantages"):
+            batch[key] = batch[key][:, :response_length].clone()
+            batch[key][-1] = 0
+        batch["sequences"] = sequences
+        batch["attention_mask"] = attention
+        batch["response_mask"] = response_mask
+        batch["loss_mask"] = loss_mask
+        batch["rewards"] = rewards_tensor
+        batch.metadata["response_length"] = response_length
+        batch.metadata["exclude_from_baseline"] = [False, False, False, True]
     export_dir = tmp_path / "export"
     initialize_ray(cfg)
     try:
@@ -454,6 +484,10 @@ def test_grug_megatron_pp2_train_step_updates_weights_and_exports(tmp_path):
         for name in BIAS_NAMES:
             torch.testing.assert_close(before[name], original[name].float(), rtol=0, atol=0)
 
+        if empty_startup_row:
+            pre_update = _megatron_response_logprobs(policy, batch)
+            assert torch.isfinite(pre_update).all()
+            batch["action_log_probs"] = (pre_update * batch["response_mask"]).float()
         _train_step(policy, batch)
         after = rank0_validation_snapshot(policy, names)
         for name in PARAMETER_NAMES:
@@ -462,6 +496,7 @@ def test_grug_megatron_pp2_train_step_updates_weights_and_exports(tmp_path):
             torch.testing.assert_close(after[name], before[name], rtol=0, atol=0)
 
         post_update = _megatron_response_logprobs(policy, batch)
+        assert torch.isfinite(post_update).all()
         ray.get(policy.async_run_ray_method("pass_through", "save_hf_model", str(export_dir), tokenizer))
         exported = GrugMoeForCausalLM.from_pretrained(export_dir, dtype=torch.float32).state_dict()
         for name in names:
