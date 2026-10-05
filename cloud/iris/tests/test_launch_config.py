@@ -148,6 +148,17 @@ def test_launch_config_composes_and_loads_as_structured_hydra(
     assert json.dumps(OmegaConf.to_container(load_launch_config(path), resolve=True)) == json.dumps(
         OmegaConf.to_container(config, resolve=True)
     )
+    native_defaults = copy.deepcopy(raw)
+    native_defaults["skyrl"]["trainer"]["placement"]["policy_num_gpus_per_node"] = None
+    del native_defaults["skyrl"]["trainer"]["micro_train_batch_size_per_gpu"]
+    native_defaults["skyrl"]["trainer"]["algorithm"] = {}
+    native_defaults["skyrl"]["trainer"]["placement"]["colocate_policy_ref"] = False
+    native_defaults["iris"]["allocation"]["num_nodes"] = 1 if nodes == 1 else 3
+    path.write_text(yaml.safe_dump(native_defaults, sort_keys=False))
+    explicit_defaults = OmegaConf.to_container(load_launch_config(path), resolve=True)
+    del native_defaults["iris"]["allocation"]["num_nodes"]
+    path.write_text(yaml.safe_dump(native_defaults, sort_keys=False))
+    assert json.dumps(OmegaConf.to_container(load_launch_config(path), resolve=True)) == json.dumps(explicit_defaults)
     if nodes == 2:
         for shared_reference in (True, False):
             reference = copy.deepcopy(raw)

@@ -20,10 +20,11 @@ from cloud.iris.rl_config_translation import (
     compose_skyrl_config,
     parse_rl_config,
     registered_rl_entrypoint_module,
+    role_gpus_per_node,
     training_type_for_entrypoint,
 )
 from cloud.iris.runtime_environment import RuntimeMode, runtime_profile_for_strategy
-from marinskyrl.recipe_schema import RL_ENTRYPOINTS, RLEntrypoint, validate_tp_divides_heads
+from marinskyrl.recipe_schema import Generator, RL_ENTRYPOINTS, RLEntrypoint, Trainer, validate_tp_divides_heads
 from marinskyrl.distillation import validate_generation_logprobs
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from marinskyrl.task_sources import data_source
@@ -212,7 +213,33 @@ def _compose_source_recipe(config: DictConfig) -> DictConfig:
                 raise ValueError(
                     "iris.allocation.num_nodes is unset; the expanded recipe must set " + ", ".join(missing)
                 )
-            num_nodes = derive_num_nodes(derive_role_plan(parsed.raw))
+            trainer_defaults = Trainer()
+            trainer = {**parsed.trainer}
+            for key in ("train_batch_size", "policy_mini_batch_size", "micro_train_batch_size_per_gpu"):
+                trainer.setdefault(key, getattr(trainer_defaults, key))
+            trainer["algorithm"] = {
+                "use_kl_loss": trainer_defaults.algorithm.use_kl_loss,
+                "use_kl_in_reward": trainer_defaults.algorithm.use_kl_in_reward,
+                **trainer.get("algorithm", {}),
+            }
+            authored_placement = trainer.get("placement", {})
+            placement = {**trainer_defaults.placement.model_dump(mode="json"), **authored_placement}
+            for key in ("policy_num_gpus_per_node", "ref_num_gpus_per_node"):
+                placement[key] = role_gpus_per_node(authored_placement, key, int(config.iris.allocation.gpus_per_node))
+            trainer["placement"] = placement
+            generator_defaults = Generator()
+            generator = {**parsed.generator}
+            for key in (
+                "run_engines_locally",
+                "inference_engine_tensor_parallel_size",
+                "inference_engine_pipeline_parallel_size",
+                "inference_engine_data_parallel_size",
+                "inference_engine_expert_parallel_size",
+                "inference_engine_mp_backend",
+                "n_samples_per_prompt",
+            ):
+                generator.setdefault(key, getattr(generator_defaults, key))
+            num_nodes = derive_num_nodes(derive_role_plan({**parsed.raw, "trainer": trainer, "generator": generator}))
         else:
             num_nodes = int(config.iris.allocation.num_nodes)
         parameters = {
