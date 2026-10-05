@@ -54,6 +54,7 @@ def _write_tiny_checkpoint(path: Path) -> None:
         num_key_value_heads=1,
         head_dim=32,
         sliding_window=64,
+        qk_mult=1.37,
     )
     torch.manual_seed(17)
     GrugMoeForCausalLM(config).save_pretrained(path, safe_serialization=True)

@@ -52,6 +52,14 @@ chosen by the provider (`window_size`, `window_attn_skip_freq`, `no_rope_freq`,
 Attention runs through Transformer Engine's fused backend; `trainer.flash_attn`
 selects the flash backend instead.
 
+## Checkpoint configuration
+
+A Grug checkpoint's `config.json` must state `qk_mult`, `sliding_window`, the maximum sequence length
+(`max_position_embeddings` or `max_seq_len`) and the experts per token (`num_experts_per_tok` or
+`num_experts_per_token`). The Marin vLLM build defaults these keys differently from the trainer, so
+`GrugMoeConfig` raises when one is missing. RoPE theta is read from `rope_theta`, then `rope_parameters`,
+then `rope`, the order vLLM uses; without any of them both sides use 10000.
+
 ## Weights
 
 Snowball HF checkpoints keep stacked `[E, ...]` expert tensors. The bridge maps
@@ -148,6 +156,13 @@ at PP1, PP2, and PP2+EP2, a PP2 training step with an export round trip, and a
 four-H100 disaggregated cycle with Marin vLLM. Run it on Iris with
 `skyrl-train/ci/marin_nightly/run_grug_megatron.sh`, which resolves the frozen
 `megatron` runtime profile.
+
+`skyrl-train/tests/gpu/test_grug_sampler_trainer.py` serves a tiny Grug checkpoint from Marin vLLM
+and scores its sampled chat responses with a Megatron policy on three H100s. It checks that the
+trainer's and vLLM's config classes resolve the same numerics, that log-probabilities agree with
+response routes replayed and prompt positions routed natively, that each replayed expert set matches
+Megatron's native choice at that position, and that correction weights scale the policy loss and
+gradient norm through the worker. The nightly Grug lane runs this module.
 
 ## Restore memory and deadlines
 

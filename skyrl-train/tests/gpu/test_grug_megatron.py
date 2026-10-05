@@ -108,6 +108,7 @@ def _write_tiny_checkpoint(
     num_experts_per_tok: int = 2,
     shape: dict | None = None,
     vocab_size_multiple: int = 1,
+    router_weight_std: float | None = None,
 ) -> None:
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
     shape = TOY_SHAPE if shape is None else shape
@@ -131,6 +132,8 @@ def _write_tiny_checkpoint(
         for layer in model.model.layers:
             layer.self_attn.attn_gate.weight.normal_(std=0.2)
             layer.mlp.router.bias.copy_(torch.linspace(-0.3, 0.3, config.num_local_experts))
+            if router_weight_std is not None:
+                layer.mlp.router.weight.normal_(std=router_weight_std)
     model.save_pretrained(path, safe_serialization=True)
     tokenizer.save_pretrained(path)
 
