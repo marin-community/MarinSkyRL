@@ -32,7 +32,7 @@ from skyrl_train.distributed.megatron.optimizer import (
     get_megatron_optimizer_param_scheduler,
     init_megatron_optim_config,
 )
-from skyrl_train.distributed.megatron.remote_model import install_remote_hf_state
+from skyrl_train.distributed.megatron.remote_model import install_remote_hf_state, make_prefetch_hook
 from skyrl_train.distributed.utils import init_worker_process_group_with_device
 from skyrl_train.mismatch_probe.modes import TRAINER_MODES
 from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE, validate_grug_training_strategy
@@ -115,6 +115,7 @@ class MegatronWorker:
         flash_attn=False,
         model_revision: str | None = None,
         model_source_uri: str | None = None,
+        remote_read_mode: str = "per_key",
     ):
         """
         Initialize the Megatron-Bridge bridge and provider objects + hf_config and tokenizer
@@ -149,6 +150,8 @@ class MegatronWorker:
             if model_source_uri:
                 self.remote_hf_state = install_remote_hf_state(bridge, model_source_uri, model_path)
             provider = bridge.to_megatron_provider()
+            if self.remote_hf_state is not None and remote_read_mode == "prefetch":
+                provider.register_pre_wrap_hook(make_prefetch_hook(bridge, self.remote_hf_state), prepend=True)
             provider.tensor_model_parallel_size = megatron_config.tensor_model_parallel_size
             provider.pipeline_model_parallel_size = megatron_config.pipeline_model_parallel_size
             provider.pipeline_dtype = torch.bfloat16 if bf16 else torch.float32
@@ -458,6 +461,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             flash_attn=self.cfg.trainer.flash_attn,
             model_revision=self.cfg.trainer.policy.model.get("revision"),
             model_source_uri=self.cfg.trainer.policy.model.get("source_uri"),
+            remote_read_mode=self.cfg.trainer.policy.model.get("remote_read_mode", "per_key"),
             tokenizer_path=self.cfg.trainer.policy.model.get("tokenizer_path"),
             tokenizer_revision=self.cfg.trainer.policy.model.get("tokenizer_revision"),
         )
@@ -472,16 +476,21 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         torch.distributed.barrier()
 
         if self.remote_hf_state is not None:
+            self.remote_hf_state.store.close()
             stats = self.remote_hf_state.store.read_stats
             logger.info(
                 "Loaded Megatron policy weights directly from {} "
-                "(rank range bytes read: {}; opens={} reads={} read_seconds={:.2f} MB_per_s={:.2f})",
+                "(rank range bytes read: {}; opens={} reads={} read_seconds={:.2f} MB_per_s={:.2f}; "
+                "gets={} prefetch_misses={} prefetch_unused={})",
                 self.cfg.trainer.policy.model.source_uri,
                 stats.bytes_read,
                 stats.opens,
                 stats.reads,
                 stats.read_seconds,
                 stats.bytes_read / 1_000_000 / stats.read_seconds if stats.read_seconds else 0.0,
+                stats.gets,
+                stats.prefetch_misses,
+                stats.prefetch_unused,
             )
 
         if self._rank == 0:
@@ -945,6 +954,7 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             flash_attn=self.cfg.trainer.flash_attn,
             model_revision=self.cfg.trainer.ref.model.get("revision"),
             model_source_uri=self.cfg.trainer.ref.model.get("source_uri"),
+            remote_read_mode=self.cfg.trainer.ref.model.get("remote_read_mode", "per_key"),
             tokenizer_path=self.cfg.trainer.ref.model.get("tokenizer_path"),
             tokenizer_revision=self.cfg.trainer.ref.model.get("tokenizer_revision"),
         )
@@ -954,6 +964,8 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             ddp_config=None,
             bf16=self.cfg.trainer.bf16,
         )
+        if self.remote_hf_state is not None:
+            self.remote_hf_state.store.close()
 
         self._download_hf_snapshot_if_needed(model_path, self.cfg.trainer.ref.model)
         torch.distributed.barrier()
