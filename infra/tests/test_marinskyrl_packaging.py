@@ -137,7 +137,7 @@ def test_gpu_profiles_use_one_cuda132_runtime(extras: tuple[str, ...]) -> None:
         and (requirement.marker is None or requirement.marker.evaluate(platform))
     }
 
-    assert runtimes == {("nvidia-cuda-runtime", "==13.2.75")}
+    assert runtimes == {("nvidia-cuda-runtime", "==13.2.86")}
 
 
 @pytest.mark.parametrize(
@@ -146,8 +146,14 @@ def test_gpu_profiles_use_one_cuda132_runtime(extras: tuple[str, ...]) -> None:
         (
             ("megatron", "vllm"),
             "x86_64",
-            {"causal-conv1d", "flash-attn", "mamba-ssm", "megatron-core", "transformer-engine-torch"},
-            {"fast-hadamard-transform"},
+            {"causal-conv1d", "flash-attn", "mamba-ssm", "megatron-core", "transformer-engine-torch", "fast-hadamard-transform"},
+            set(),
+        ),
+        (
+            ("megatron", "vllm"),
+            "aarch64",
+            {"causal-conv1d", "flash-attn", "mamba-ssm", "megatron-core", "transformer-engine-torch", "fast-hadamard-transform"},
+            set(),
         ),
     ],
 )
