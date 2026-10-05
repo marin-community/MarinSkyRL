@@ -3,11 +3,15 @@
 The teacher knows the right answer, so it is not a language model. For each prompt it reads N, then gives every
 response token one log-probability:
 
-- ``correct_logprob`` while the response is still a prefix of ``cat`` repeated N times, and for end of sequence
-  once the response is exactly that;
-- ``wrong_logprob`` for the first token that leaves that prefix;
-- after that first error, ``correct_logprob`` for end of sequence and ``wrong_logprob`` for everything else, so
-  a student that went wrong is taught to stop.
+- log ``correct_probability`` while the response is still a prefix of ``cat`` repeated N times, and for a stop
+  token (any special token) once the response is exactly that;
+- for the first token that leaves that prefix, the log of the remaining probability spread evenly over the rest of
+  the vocabulary, as if the teacher were a full distribution;
+- after that first error, the correct score for a stop token and the wrong score for everything else, so a student
+  that went wrong is taught to stop.
+
+The wrong score must scale with the vocabulary. A fixed 0.001 suits a tiny word-level vocabulary but is above the
+student's own probability for most of a 150k-token vocabulary, so it would push rarely sampled junk tokens up.
 
 Noise makes the teacher imperfect:
 
@@ -18,8 +22,9 @@ Noise is causal and deterministic. Each response is seeded from ``seed`` and its
 first, and each response token then consumes one jitter draw, so a token's score depends only on the prompt and
 the tokens before it, as a language model's would, and a retried request gets the same scores.
 
-Only the tokenizer's end-of-sequence token stops a reply. Any other special token the student writes, such as a
-chat-template header, is a wrong token. ``flipped`` swaps the correct and wrong log-probabilities; a student trained on a flipped teacher should
+Only end-of-sequence tokens stop a reply: the tokenizer's by default, or the ones the inference engine stops on
+(``stop_token_ids``; the server adds the model's generation-config EOS ids, such as Qwen's <|endoftext|> beside
+<|im_end|>). Any other special token the student writes, such as a chat-template header, is a wrong token. ``flipped`` swaps the correct and wrong log-probabilities; a student trained on a flipped teacher should
 get worse, which tests that learning depends on the teacher's signal.
 
 Serve it for a training run on the policy's tokenizer::
@@ -34,13 +39,13 @@ import hashlib
 import math
 import random
 import re
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from aiohttp import web
 from skyrl_gym.envs.cat_count.reward import TARGET_WORD
-from transformers import AutoTokenizer, PreTrainedTokenizerBase
+from transformers import AutoTokenizer, GenerationConfig, PreTrainedTokenizerBase
 
 # Tokenizers that split digits decode "12" as "1 2".
 _N_PATTERN = re.compile(r"exactly (\d[\d ]*) times")
@@ -48,16 +53,15 @@ _N_PATTERN = re.compile(r"exactly (\d[\d ]*) times")
 
 @dataclass(frozen=True)
 class TeacherNoise:
-    correct_logprob: float = math.log(0.95)
-    wrong_logprob: float = math.log(1e-3)
+    correct_probability: float = 0.95
     jitter: float = 0.0
     error_rate: float = 0.0
     flipped: bool = False
     seed: int = 0
 
     def __post_init__(self):
-        if not (self.correct_logprob <= 0 and self.wrong_logprob <= 0):
-            raise ValueError("teacher log-probabilities must be at most 0")
+        if not 0 < self.correct_probability < 1:
+            raise ValueError("correct_probability must be in (0, 1)")
         if self.jitter < 0 or not 0 <= self.error_rate <= 1:
             raise ValueError("jitter must be non-negative and error_rate must be in [0, 1]")
 
@@ -65,10 +69,12 @@ class TeacherNoise:
 class CatCountTeacher:
     """Score CatCount responses token by token against the known answer."""
 
-    def __init__(self, tokenizer: PreTrainedTokenizerBase, noise: TeacherNoise):
+    def __init__(self, tokenizer: PreTrainedTokenizerBase, noise: TeacherNoise, stop_token_ids: Iterable[int] = ()):
         self.tokenizer = tokenizer
         self.noise = noise
-        self.eos_token_id = tokenizer.eos_token_id
+        self.correct_logprob = math.log(noise.correct_probability)
+        self.wrong_logprob = math.log((1 - noise.correct_probability) / (len(tokenizer) - 1))
+        self.stop_token_ids = frozenset(stop_token_ids) if stop_token_ids else frozenset({tokenizer.eos_token_id})
         self.special_token_ids = frozenset(tokenizer.all_special_ids)
         message = [{"role": "user", "content": "x"}]
         with_header = tokenizer.apply_chat_template(
@@ -107,7 +113,7 @@ class CatCountTeacher:
         verdicts = []
         on_track = True
         for index, token_id in enumerate(response_ids):
-            if token_id == self.eos_token_id:
+            if token_id in self.stop_token_ids:
                 text = self.tokenizer.decode(response_ids[:index], skip_special_tokens=True).strip()
                 verdicts.append(not on_track or text == target)
                 on_track = False
@@ -129,7 +135,7 @@ class CatCountTeacher:
         identity = repr((self.noise.seed, list(sequence[:start]))).encode()
         rng = random.Random(int.from_bytes(hashlib.sha256(identity).digest()[:8], "big"))
         n = self.target_count(sequence[:start], rng)
-        high, low = self.noise.correct_logprob, self.noise.wrong_logprob
+        high, low = self.correct_logprob, self.wrong_logprob
         if self.noise.flipped:
             high, low = low, high
         scores: list[float | None] = [None, *([0.0] * (start - 1))]
@@ -139,6 +145,17 @@ class CatCountTeacher:
                 value = min(0.0, value + rng.gauss(0.0, self.noise.jitter))
             scores.append(value)
         return scores
+
+
+def engine_stop_token_ids(model: str, tokenizer: PreTrainedTokenizerBase) -> frozenset[int]:
+    """Return the EOS ids vLLM stops on: the tokenizer's and any in the model's generation config."""
+    ids = {tokenizer.eos_token_id}
+    try:
+        eos = GenerationConfig.from_pretrained(model).eos_token_id
+    except OSError:
+        return frozenset(ids)
+    ids.update(eos if isinstance(eos, list) else [eos] if eos is not None else [])
+    return frozenset(ids)
 
 
 def completion_choice(index: int, sequence: Sequence[int], scores: Sequence[float | None]) -> dict[str, Any]:
@@ -182,22 +199,21 @@ def main() -> None:
     parser.add_argument("--tokenizer", required=True, help="the student policy's tokenizer directory or HF name")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, required=True)
-    parser.add_argument("--correct-logprob", type=float, default=TeacherNoise.correct_logprob)
-    parser.add_argument("--wrong-logprob", type=float, default=TeacherNoise.wrong_logprob)
+    parser.add_argument("--correct-probability", type=float, default=TeacherNoise.correct_probability)
     parser.add_argument("--jitter", type=float, default=0.0)
     parser.add_argument("--error-rate", type=float, default=0.0)
     parser.add_argument("--flipped", action="store_true")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
     noise = TeacherNoise(
-        correct_logprob=args.correct_logprob,
-        wrong_logprob=args.wrong_logprob,
+        correct_probability=args.correct_probability,
         jitter=args.jitter,
         error_rate=args.error_rate,
         flipped=args.flipped,
         seed=args.seed,
     )
-    teacher = CatCountTeacher(AutoTokenizer.from_pretrained(args.tokenizer), noise)
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
+    teacher = CatCountTeacher(tokenizer, noise, engine_stop_token_ids(args.tokenizer, tokenizer))
     web.run_app(application(teacher), host=args.host, port=args.port, print=None)
 
 

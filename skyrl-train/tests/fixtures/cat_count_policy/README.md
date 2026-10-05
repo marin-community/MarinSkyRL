@@ -39,7 +39,8 @@ The immutable S3 manifest records byte counts and SHA256 for every file.
 `tests/cpu/test_cat_count_cpu_opd.py` trains the same policy with single-teacher OPD
 instead of RL. The teacher is `examples/cat_count/synthetic_teacher.py`, a program
 served as an `openai_compatible` teacher. It knows the answer and gives each student
-token log 0.95 if the answer is still on track and log 0.001 if not, plus Gaussian
+token log 0.95 if the answer is still on track; a wrong token gets the remaining 0.05
+spread over the rest of the vocabulary (about 0.0014 here), plus Gaussian
 noise. Training uses only the teacher signal (`reward_mode=replace`); the CatCount
 reward is only evaluated. PR CI runs 20 steps and requires a greedy train and held-out
 score of at least 0.9, one teacher, and teacher-scored tokens on every step. Nightly

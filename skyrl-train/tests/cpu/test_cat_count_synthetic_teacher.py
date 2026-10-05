@@ -5,7 +5,8 @@ from examples.cat_count.cpu_canary import PROMPT, build_tokenizer
 from examples.cat_count.synthetic_teacher import CatCountTeacher, TeacherNoise
 
 HIGH = math.log(0.95)
-LOW = math.log(1e-3)
+# The tiny word-level vocabulary has 38 tokens; the other 0.05 is spread over 37 of them.
+LOW = math.log(0.05 / 37)
 
 
 @pytest.fixture(scope="module")
@@ -65,7 +66,7 @@ def test_jitter_is_deterministic_and_capped(tokenizer):
 def test_error_rate_moves_the_target_count(tokenizer):
     teacher = CatCountTeacher(tokenizer, TeacherNoise(error_rate=1.0))
     scores = response_scores(teacher, tokenizer, 4, "cat cat cat cat")
-    assert LOW in scores
+    assert min(scores) == pytest.approx(LOW)
 
 
 def test_teacher_rejects_a_sequence_without_a_response_header(tokenizer):
@@ -91,3 +92,16 @@ def test_jitter_depends_only_on_the_prompt_and_earlier_tokens(tokenizer):
     assert same_prefix[0] == other_suffix[0]
     longer = response_scores(teacher, tokenizer, 2, "cat cat cat", eos=False)
     assert longer[:2] == same_prefix
+
+
+def test_wrong_score_scales_with_the_vocabulary(tokenizer):
+    teacher = CatCountTeacher(tokenizer, TeacherNoise())
+    assert len(tokenizer) == 38
+    assert teacher.wrong_logprob == pytest.approx(LOW)
+
+
+def test_generation_config_stop_tokens_end_a_reply(tokenizer):
+    pad = tokenizer.pad_token_id
+    teacher = CatCountTeacher(tokenizer, TeacherNoise(), stop_token_ids=(tokenizer.eos_token_id, pad))
+    full, start = sequence(tokenizer, 2, "cat cat", eos=False)
+    assert teacher.score([*full, pad])[start:] == pytest.approx([HIGH, HIGH, HIGH])
