@@ -7,7 +7,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
-from skyrl_gym import get_data_contract
+from skyrl_gym.envs.data_contracts import get_data_contract
 
 from infra.rl_data.mixtures import load_mixture_spec, prepare_mixture
 from infra.rl_data.nemotron_ultra_swe import (

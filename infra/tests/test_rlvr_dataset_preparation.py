@@ -47,7 +47,7 @@ from infra.rl_data.sources import (
     svamp_source,
     verifiable_code_source,
 )
-from skyrl_gym import get_data_contract
+from skyrl_gym.envs.data_contracts import get_data_contract
 from skyrl_gym.envs.ifeval import utils as ifeval_utils
 
 
