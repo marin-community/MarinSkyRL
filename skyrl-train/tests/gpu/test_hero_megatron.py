@@ -10,7 +10,7 @@ import torch
 from safetensors.torch import load_file, save_file
 from transformers import AutoTokenizer
 
-from skyrl_train.models.grug_moe import GrugMoeConfig, GrugMoeForCausalLM
+from skyrl_train.models.grug_moe import GrugMoeConfig
 from skyrl_train.utils import initialize_ray
 from tests.gpu.grug_gpu_gates import require_hoppers
 from tests.gpu.grug_serving import rank0_validation_snapshot
@@ -218,7 +218,12 @@ def test_hero_worker_repeated_updates(
                 torch.testing.assert_close(resumed[name], expected[name], rtol=0, atol=0)
         export_dir = tmp_path / "export"
         ray.get(policy.async_run_ray_method("pass_through", "save_hf_model", str(export_dir), tokenizer))
-        exported = GrugMoeForCausalLM.from_pretrained(export_dir, dtype=torch.float32).state_dict()
+        exported = {
+            name: tensor
+            for shard in sorted(export_dir.glob("*.safetensors"))
+            for name, tensor in load_file(str(shard)).items()
+        }
+        assert set(exported) == set(names)
         for name in names:
             torch.testing.assert_close(exported[name].float(), resumed[name], rtol=0, atol=0)
     finally:
