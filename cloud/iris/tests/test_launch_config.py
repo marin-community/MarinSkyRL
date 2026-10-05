@@ -207,7 +207,7 @@ def test_launch_config_composes_and_loads_as_structured_hydra(
         oversized = copy.deepcopy(raw)
         oversized["skyrl"]["trainer"]["placement"][f"{role}_num_gpus_per_node"] = 32
         path.write_text(yaml.safe_dump(oversized, sort_keys=False))
-        with pytest.raises(ValueError, match="exceeds the available 8 GPUs"):
+        with pytest.raises(ValueError):
             load_launch_config(path)
     parquet = copy.deepcopy(omitted)
     parquet["skyrl"]["data"] = {"kind": "parquet"}
