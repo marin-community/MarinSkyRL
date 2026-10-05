@@ -396,7 +396,9 @@ async def test_disabled_harbor_verification_keeps_stage_tokens_without_a_score(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure_stage", ["startup", "model", "verifier", "attempt", "cancel", "cancel_model"])
+@pytest.mark.parametrize(
+    "failure_stage", ["startup", "model", "verifier", "staged_verifier", "attempt", "cancel", "cancel_model"]
+)
 async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected_result(task_inputs, failure_stage):
     config, request = task_inputs
     task = TaskSpec.model_validate_json(request["env_extras"][0]["task_spec"])
@@ -414,6 +416,33 @@ async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected
             ),
         }
     )
+    if failure_stage == "staged_verifier":
+        task = task.model_copy(
+            update={
+                "verifier": VerifierSpec(
+                    kind=VerifierKind.STAGED,
+                    parameters_json=StageVerifierSpec(strategy=StageRewardStrategy.MEAN).model_dump_json(),
+                ),
+                "stages": (
+                    TaskStage(
+                        name="first",
+                        verifier=VerifierSpec(
+                            kind=VerifierKind.SHELL,
+                            parameters_json=ShellVerifierSpec(
+                                argv=("cat", "/workspace/first_reward"), timeout=5
+                            ).model_dump_json(),
+                        ),
+                    ),
+                    TaskStage(
+                        name="second",
+                        verifier=task.verifier,
+                        context=ConversationInput(
+                            events=(TextMessage(role="user", content="Complete the second stage."),)
+                        ),
+                    ),
+                ),
+            }
+        )
     request["env_extras"][0]["task_spec"] = task.model_dump_json()
     attempts = 0
     machines = []
@@ -428,7 +457,9 @@ async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected
                 raise TimeoutError("Sandbox startup timed out")
             machine = await ShellSimMachineFactory().create(spec)
             machines.append(machine)
-            if failure_stage not in {"verifier", "cancel"} or attempts == 3:
+            if failure_stage == "staged_verifier":
+                await machine.run(Command(("sh", "-c", f"echo {attempts / 3} > /workspace/first_reward")))
+            if failure_stage not in {"verifier", "staged_verifier", "cancel"} or attempts == 3:
                 await machine.run(Command(("sh", "-c", "echo 1 > /workspace/reward")))
             return machine
 
@@ -536,7 +567,7 @@ async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected
     batch = writer.groups[0][1].trajectory_batch
     assert batch["unshaped_rewards"] == [1.0]
     assert batch["rollout_metrics"]["rollout_retries"] == 2
-    if failure_stage == "model":
+    if failure_stage in {"model", "staged_verifier"}:
         assert batch["response_ids"] == [[33, 34, 90, 91, 35, 36]]
         assert batch["loss_masks"] == [[1, 1, 0, 0, 1, 1]]
     else:
@@ -1007,8 +1038,19 @@ async def test_mixed_nemotron_tasks_run_without_the_original_sources(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("projection_type", [WholeTaskProjection, StepTaskProjection])
-@pytest.mark.parametrize("last_grade", ["0", "invalid", "timeout"])
-async def test_staged_tasks_keep_valid_credit_and_candidates_in_the_buffer(task_inputs, projection_type, last_grade):
+@pytest.mark.parametrize(
+    "last_grade,expected_rewards,eligible",
+    [
+        ("0", [[0, 0], [0, 0.5]], True),
+        ("invalid", [[0, 0], [0, 0]], False),
+        ("verifier_timeout", [[0, 0], [0, 0]], False),
+        ("skipped", [[0, 1], [0, 0]], True),
+        ("timeout", None, False),
+    ],
+)
+async def test_staged_task_failures_mask_training_and_preserve_candidates_in_the_buffer(
+    task_inputs, projection_type, last_grade, expected_rewards, eligible
+):
     config, request = task_inputs
     config.max_turns = 1
     config.error_handling = {
@@ -1041,11 +1083,28 @@ async def test_staged_tasks_keep_valid_credit_and_candidates_in_the_buffer(task_
                 verifier=VerifierSpec(
                     kind=VerifierKind.SHELL,
                     parameters_json=ShellVerifierSpec(argv=("echo", last_grade), timeout=5).model_dump_json(),
-                ),
+                )
+                if last_grade != "skipped"
+                else skipped_verifier("No second-stage grader"),
             ),
         ),
         source=Source(dataset="fixture", revision="1", row="staged", importer_revision="1"),
     )
+    if last_grade in {"invalid", "verifier_timeout"}:
+        task = task.model_copy(
+            update={
+                "stages": (
+                    *task.stages,
+                    TaskStage(
+                        name="third",
+                        verifier=task.stages[0].verifier,
+                        context=ConversationInput(
+                            events=(TextMessage(role="user", content="Complete the third stage."),)
+                        ),
+                    ),
+                ),
+            }
+        )
     request["prompts"] = [[{"role": "user", "content": "Complete the first stage."}]]
     request["env_extras"] = [{"task_spec": task.model_dump_json()}]
     projection = (
@@ -1060,36 +1119,69 @@ async def test_staged_tasks_keep_valid_credit_and_candidates_in_the_buffer(task_
                 raise TimeoutError("Model request timed out")
             return await super().generate(request)
 
+    class Machine:
+        def __init__(self, machine):
+            self.machine = machine
+
+        async def run(self, command):
+            if command.argv == ("echo", "verifier_timeout"):
+                return Result(
+                    exit_code=None,
+                    stdout=b"",
+                    stderr=b"",
+                    stdout_truncated=False,
+                    stderr_truncated=False,
+                    reason=ExitReason.TIMED_OUT,
+                )
+            return await self.machine.run(command)
+
+        async def upload(self, source, target):
+            await self.machine.upload(source, target)
+
+        async def download(self, source, target):
+            await self.machine.download(source, target)
+
+        async def close(self):
+            await self.machine.close()
+
+    class Factory:
+        async def create(self, spec):
+            return Machine(await ShellSimMachineFactory().create(spec))
+
     runner = TaskRolloutWorker(
         config,
         projection_type(projection),
         StageClient(["Completed first.", "Completed second."]),
-        {EnvironmentKind.SHELLSIM: ShellSimMachineFactory()},
+        {EnvironmentKind.SHELLSIM: Factory()},
         command_timeout=5,
     )
     writer = Writer()
     await runner.run_task(RolloutTask(RolloutLease("lease", 0, 1), {"uid": "staged"}, request), writer)
     batch = writer.groups[0][1].trajectory_batch
     if last_grade == "timeout":
-        assert batch["response_ids"] == [[3, 4]]
-        assert batch["loss_masks"] == [[1, 1]]
-        assert batch["rewards"] == [[0, 1]]
-        np.testing.assert_array_equal(batch["student_topk_indices"], [[[3, 99], [4, 99]]])
-        assert batch["exclude_from_baseline"] == [False]
+        assert batch["response_ids"] == [[]]
+        assert batch["loss_masks"] == [[]]
+        assert batch["rewards"] == [0.0]
+        assert batch["exclude_from_baseline"] == [True]
         return
-    valid = last_grade == "0"
     if projection_type is WholeTaskProjection:
         assert batch["response_ids"] == [[3, 4, 90, 91, 5, 6]]
-        assert batch["loss_masks"] == [[1, 1, 0, 0, int(valid), int(valid)]]
-        assert batch["rewards"] == ([[0, 0, 0, 0, 0, 0.5]] if valid else [[0, 1, 0, 0, 0, 0]])
+        assert batch["loss_masks"] == ([[1, 1, 0, 0, 1, 1]] if eligible else [[0] * 6])
+        assert batch["rewards"] == [[*expected_rewards[0], 0, 0, *expected_rewards[1]]]
         np.testing.assert_array_equal(batch["student_topk_indices"][0][:2], [[3, 99], [4, 99]])
-        assert batch["exclude_from_baseline"] == [False]
+        assert batch["exclude_from_baseline"] == [not eligible]
     else:
         assert batch["response_ids"] == [[3, 4], [5, 6]]
         assert batch["prompt_token_ids"] == [[1, 2], [1, 2, 3, 4, 90, 91]]
-        assert batch["loss_masks"] == [[1, 1], [int(valid), int(valid)]]
-        assert batch["rewards"] == ([[0, 0], [0, 0.5]] if valid else [[0, 1], [0, 0]])
-        assert batch["exclude_from_baseline"] == [False, not valid]
+        assert batch["loss_masks"] == ([[1, 1], [1, 1]] if eligible else [[0, 0], [0, 0]])
+        assert batch["rewards"] == expected_rewards
+        assert batch["exclude_from_baseline"] == [not eligible, not eligible]
+        np.testing.assert_array_equal(batch["student_topk_indices"][0], [[3, 99], [4, 99]])
+    if not eligible:
+        assert all(result.status == VerificationStatus.ERROR for result in batch["verification_results"])
+        stages = batch["verification_results"][0].diagnostics["stages"]
+        assert [stage["status"] for stage in stages] == ["graded", "infra_error"]
+        assert [stage["reward"] for stage in stages] == [1.0, None]
 
 
 @pytest.mark.asyncio
