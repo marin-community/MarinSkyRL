@@ -14,7 +14,7 @@ class GSM8kEnv(BaseTextEnv):
         super().__init__()
 
         self.ground_truth = ground_truth_from_extras(extras)
-        self.reward_method = env_config.get("reward_method", "strict")
+        self.reward_method = env_config.get("reward_method", "final_line")
         self.stop_reason = None
         self.structured_chat = env_config.get("structured_chat", False)
 

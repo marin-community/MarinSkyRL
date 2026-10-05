@@ -1,12 +1,66 @@
 """Adapters between SkyRL-Gym environments and shared verifier contracts."""
 
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
 
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
-from skyrl_gym.verification import RewardResult, RolloutEvidence, VerificationResult, normalized_verifier_score
+from skyrl_gym.verification import (
+    VERIFIER_RUNTIME_ERROR,
+    RewardResult,
+    RolloutEvidence,
+    TrainingDisposition,
+    VerificationResult,
+    VerificationStatus,
+    normalized_verifier_score,
+)
+from skyrl_train.trajectory_runners.types import AgentLoopOutput
+
+
+def with_validated_reward(
+    output: AgentLoopOutput,
+    *,
+    unshaped_reward: float | None,
+    optimization_reward: float,
+    token_rewards: tuple[float, ...] | None,
+) -> AgentLoopOutput:
+    """Return a rollout with valid reward channels while preserving existing masked or skipped verdicts."""
+    if not output.disposition.loss_eligible or output.verification.status is VerificationStatus.SKIPPED:
+        return replace(
+            output,
+            reward=RewardResult(
+                unshaped_reward=unshaped_reward,
+                optimization_reward=0.0,
+                token_rewards=None if token_rewards is None else tuple(0.0 for _ in output.evidence.response_token_ids),
+            ),
+        )
+    try:
+        if not output.evidence.response_token_ids or not any(output.loss_mask):
+            raise ValueError("reward placement requires a response action token")
+        reward = RewardResult(
+            unshaped_reward=unshaped_reward,
+            optimization_reward=optimization_reward,
+            token_rewards=token_rewards,
+        )
+        reward.validate_for(output.evidence)
+    except ValueError as error:
+        return replace(
+            output,
+            verification=VerificationResult.error(
+                "invalid reward channels",
+                diagnostics={"error_type": type(error).__name__, "error_message": str(error)},
+            ),
+            reward=RewardResult(
+                unshaped_reward=None,
+                optimization_reward=0.0,
+                token_rewards=None if token_rewards is None else tuple(0.0 for _ in output.evidence.response_token_ids),
+            ),
+            disposition=TrainingDisposition.mask("invalid reward channels", exception_type=VERIFIER_RUNTIME_ERROR),
+            env_metrics={**output.env_metrics, "verifier_error": 1.0},
+        )
+    return replace(output, reward=reward)
 
 
 def verification_from_env_step(step_output: BaseTextEnvStepOutput) -> VerificationResult:

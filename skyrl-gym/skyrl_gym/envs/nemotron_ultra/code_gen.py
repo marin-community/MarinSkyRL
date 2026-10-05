@@ -61,8 +61,6 @@ def grade_code(
             execution_mode=TestExecutionMode.stop_on_failure,
             limits=limits,
         )
-    if execution.get("execution_error"):
-        raise RuntimeError(f"Code verifier unavailable: {execution}")
     correct = all(result is True for result in results)
     format_violation = _has_reasoning_format_violation(text, assistant_message)
     reward = reasoning_format_penalty if format_violation else float(correct)

@@ -15,7 +15,14 @@ from harbor_config.errors import ErrorCategory, error_category
 from loguru import logger
 from omegaconf import DictConfig
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
-from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDisposition, VerificationResult
+from skyrl_gym.verification import (
+    VERIFIER_RUNTIME_ERROR,
+    RewardResult,
+    RolloutEvidence,
+    TrainingDisposition,
+    VerificationResult,
+    VerificationStatus,
+)
 
 from marinskyrl.distillation import TeacherEvidenceKind
 from skyrl_train.config.utils import get_default_config
@@ -24,6 +31,7 @@ from skyrl_train.rollout_observability import observe_rollout_call
 from skyrl_train.trajectory_runners.base import TrajectoryID, TrajectoryRequestBatch
 from skyrl_train.trajectory_runners.model_clients import ModelServerError
 from skyrl_train.trajectory_runners.skyrl_gym import ExactChatTransportError, SkyRLGymTrajectoryRunner
+from skyrl_train.trajectory_runners.skyrl_gym_contracts import with_validated_reward
 from skyrl_train.trajectory_runners.trajectory_processing import (
     normalize_token_ids,
     validate_trajectory_batch as assert_valid_trajectory_batch,
@@ -336,7 +344,8 @@ def test_tis_config_does_not_select_a_generation_strategy():
 
 
 @pytest.mark.asyncio
-async def test_genrm_rewards_replace_provisional_rewards_by_prompt_cohort(generator_cfg, tokenizer):
+@pytest.mark.parametrize("provisional_reward", [3.0, 0.0])
+async def test_genrm_rewards_replace_provisional_rewards_by_prompt_cohort(generator_cfg, tokenizer, provisional_reward):
     skyrl_gym_cfg = DictConfig(
         {
             "max_env_workers": 0,
@@ -372,12 +381,16 @@ async def test_genrm_rewards_replace_provisional_rewards_by_prompt_cohort(genera
                     {"role": "assistant", "content": "unparsed reasoning then " + answer},
                 ),
                 response=answer,
-                response_token_ids=(10, 11),
+                response_token_ids=(10, 11, EOS),
             ),
-            verification=VerificationResult.verified(3.0),
-            reward=RewardResult(unshaped_reward=3.0, optimization_reward=3.0, token_rewards=(0.0, 3.0)),
+            verification=VerificationResult.verified(provisional_reward),
+            reward=RewardResult(
+                unshaped_reward=provisional_reward,
+                optimization_reward=provisional_reward,
+                token_rewards=(0.0, provisional_reward, 0.0),
+            ),
             disposition=TrainingDisposition.train(),
-            loss_mask=[1, 1],
+            loss_mask=[1, 1, 0],
             env_metrics={},
         )
 
@@ -398,7 +411,7 @@ async def test_genrm_rewards_replace_provisional_rewards_by_prompt_cohort(genera
     await runner._apply_genrm_cohort_rewards(outputs, request)
 
     assert [item.reward.optimization_reward for item in outputs] == pytest.approx([5.0, 1.0])
-    assert [item.reward.token_rewards for item in outputs] == [(0.0, 5.0), (0.0, 1.0)]
+    assert [item.reward.token_rewards for item in outputs] == [(0.0, 5.0, 0.0), (0.0, 1.0, 0.0)]
     assert outputs[0].evidence.messages[-1]["content"] == "unparsed reasoning then better"
 
 
@@ -1224,3 +1237,76 @@ async def test_cat_count_preserves_sampled_evidence_and_verification(
     assert batch["loss_masks"] == [[1, 1, 1]]
     assert batch["verification_results"][0].passed is True
     assert batch["env_metrics"][0]["exact_n2"] == 1.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "verification",
+    [
+        VerificationResult.verified(0.0),
+        VerificationResult.error("judge unavailable", diagnostics={"service": "judge"}),
+        VerificationResult.skipped("grading disabled", diagnostics={"mode": "skip"}),
+    ],
+    ids=["verified", "verifier-error", "skipped"],
+)
+async def test_zero_token_response_masks_and_counts_the_verifier_error(
+    tokenizer,
+    generator_cfg,
+    skyrl_gym_cfg,
+    use_env,
+    verification,
+):
+    generator_cfg.use_conversation_multi_turn = False
+    use_env(
+        ScriptedEnv(
+            BaseTextEnvStepOutput(observations=[], reward=0.0, done=True, metadata={}, verification=verification)
+        )
+    )
+    engine = engine_returning(
+        {
+            "responses": ["answer"],
+            "stop_reasons": ["length"],
+            "response_ids": [[]],
+        }
+    )
+    runner = SkyRLGymTrajectoryRunner(generator_cfg, skyrl_gym_cfg, engine, tokenizer)
+    output = await runner.agent_loop(
+        [{"role": "user", "content": "Question"}],
+        ENV_CLASS,
+        {},
+        max_tokens=8,
+        max_input_length=512,
+    )
+    if verification.status is VerificationStatus.SKIPPED:
+        assert output.verification == verification
+        assert output.disposition.loss_eligible
+        assert output.disposition.reason == "verification skipped"
+        assert "verifier_error" not in output.env_metrics
+    else:
+        assert output.verification.status is VerificationStatus.ERROR
+        assert not output.disposition.loss_eligible
+        assert not output.disposition.baseline_eligible
+        assert output.disposition.exception_type == VERIFIER_RUNTIME_ERROR
+        assert output.env_metrics["verifier_error"] == 1.0
+        if verification.status is VerificationStatus.ERROR:
+            assert output.verification == verification
+            assert output.disposition.reason == "verification error"
+    assert output.reward.optimization_reward == 0.0
+    assert sum(output.reward.token_rewards) == 0.0
+
+
+def test_mismatched_token_rewards_mask_and_count_the_verifier_error():
+    original = _successful_trajectory_output()
+
+    output = with_validated_reward(original, unshaped_reward=1.0, optimization_reward=1.0, token_rewards=(0.0,))
+
+    assert output.verification.status is VerificationStatus.ERROR
+    assert not output.disposition.loss_eligible
+    assert not output.disposition.baseline_eligible
+    assert output.disposition.exception_type == VERIFIER_RUNTIME_ERROR
+    assert output.env_metrics["verifier_error"] == 1.0
+    assert output.reward.optimization_reward == 0.0
+    assert sum(output.reward.token_rewards) == 0.0
+    assert original.verification.status is VerificationStatus.VERIFIED
+    assert original.reward.optimization_reward == 1.0
+    assert "verifier_error" not in original.env_metrics
