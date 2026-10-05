@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 import posixpath
@@ -15,7 +15,7 @@ from skyrl_train.config.mismatch_probe import validate_mismatch_probe_config
 from skyrl_train.config.objective_spec import validate_objective
 
 from cloud.iris.ray_storage import RaySpillBackend, resolve_ray_spill_target
-from cloud.iris.role_plan import ModelRoleKind, derive_num_nodes, derive_role_plan
+from cloud.iris.role_plan import derive_num_nodes, derive_role_plan
 from cloud.iris.rl_config_translation import (
     compose_skyrl_config,
     parse_rl_config,
@@ -23,7 +23,7 @@ from cloud.iris.rl_config_translation import (
     training_type_for_entrypoint,
 )
 from cloud.iris.runtime_environment import RuntimeMode, runtime_profile_for_strategy
-from marinskyrl.recipe_schema import RL_ENTRYPOINTS, Placement, RLEntrypoint, validate_tp_divides_heads
+from marinskyrl.recipe_schema import RL_ENTRYPOINTS, RLEntrypoint, validate_tp_divides_heads
 from marinskyrl.distillation import validate_generation_logprobs
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from marinskyrl.task_sources import data_source
@@ -200,15 +200,25 @@ def _compose_source_recipe(config: DictConfig) -> DictConfig:
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", encoding="utf-8") as source_file:
         OmegaConf.save(OmegaConf.create(raw_skyrl), source_file.name, resolve=False)
         parsed = parse_rl_config(source_file.name)
-        policy_nodes = (
-            parsed.trainer.get("placement", {}).get("policy_num_nodes") or Placement().policy_num_nodes
-            if nodes_unset
-            else int(config.iris.allocation.num_nodes)
-        )
+        if nodes_unset:
+            required_counts = (
+                "trainer.placement.policy_num_nodes",
+                "trainer.placement.ref_num_nodes",
+                "generator.num_inference_engines",
+            )
+            expanded = OmegaConf.create(parsed.raw)
+            missing = [path for path in required_counts if OmegaConf.select(expanded, path) is None]
+            if missing:
+                raise ValueError(
+                    "iris.allocation.num_nodes is unset; the expanded recipe must set " + ", ".join(missing)
+                )
+            num_nodes = derive_num_nodes(derive_role_plan(parsed.raw))
+        else:
+            num_nodes = int(config.iris.allocation.num_nodes)
         parameters = {
             "job_name": str(config.iris.job_name),
             "experiments_dir": str(config.runtime.experiments_dir),
-            "num_nodes": int(policy_nodes),
+            "num_nodes": num_nodes,
             "gpus_per_node": int(config.iris.allocation.gpus_per_node),
             "model_path": str(config.inputs.model.local_path),
             "model_source_uri": model_uri if model_is_cloud else None,
@@ -229,24 +239,6 @@ def _compose_source_recipe(config: DictConfig) -> DictConfig:
             parameters,
             config.iris.allocation,
         )
-        if nodes_unset:
-            skyrl = OmegaConf.to_container(compiled.config, resolve=True)
-            assert isinstance(skyrl, dict)
-            plan = derive_role_plan(skyrl)
-            parameters["num_nodes"] = derive_num_nodes(plan)
-            placement = {
-                **parsed.trainer.get("placement", {}),
-                "policy_num_nodes": skyrl["trainer"]["placement"]["policy_num_nodes"],
-            }
-            for claim in plan.claims:
-                if claim.kind is ModelRoleKind.REFERENCE:
-                    placement["ref_num_nodes"] = claim.num_nodes
-            inferred = replace(
-                parsed,
-                trainer={**parsed.trainer, "placement": placement},
-                generator={**parsed.generator, "num_inference_engines": skyrl["generator"]["num_inference_engines"]},
-            )
-            compiled = compose_skyrl_config(inferred, parameters, config.iris.allocation)
         OmegaConf.resolve(compiled.config)
     resolved = OmegaConf.create(OmegaConf.to_container(config, resolve=False))
     OmegaConf.set_struct(resolved, False)

@@ -96,6 +96,7 @@ def _raw_config() -> dict[str, Any]:
                 "placement": {
                     "colocate_all": True,
                     "policy_num_nodes": 1,
+                    "ref_num_nodes": 1,
                     "policy_num_gpus_per_node": 8,
                 },
                 "train_batch_size": 8,
@@ -156,20 +157,25 @@ def test_launch_config_composes_and_loads_as_structured_hydra(
             path.write_text(yaml.safe_dump(reference, sort_keys=False))
             explicit_reference = OmegaConf.to_container(load_launch_config(path), resolve=True)
             del reference["iris"]["allocation"]["num_nodes"]
-            del reference["skyrl"]["trainer"]["placement"]["ref_num_nodes"]
             path.write_text(yaml.safe_dump(reference, sort_keys=False))
             assert json.dumps(OmegaConf.to_container(load_launch_config(path), resolve=True)) == json.dumps(
                 explicit_reference
             )
-    sparse_geometry = copy.deepcopy(omitted)
-    if nodes == 1:
-        del sparse_geometry["skyrl"]["trainer"]["placement"]["policy_num_nodes"]
-    else:
-        del sparse_geometry["skyrl"]["generator"]["num_inference_engines"]
-    path.write_text(yaml.safe_dump(sparse_geometry, sort_keys=False))
-    assert json.dumps(OmegaConf.to_container(load_launch_config(path), resolve=True)) == json.dumps(
-        OmegaConf.to_container(config, resolve=True)
-    )
+    for section, field in (
+        ("trainer.placement", "policy_num_nodes"),
+        ("trainer.placement", "ref_num_nodes"),
+        ("generator", "num_inference_engines"),
+    ):
+        for explicit_null in (False, True):
+            sparse_geometry = OmegaConf.create(copy.deepcopy(omitted))
+            parent = OmegaConf.select(sparse_geometry.skyrl, section)
+            if explicit_null:
+                parent[field] = None
+            else:
+                del parent[field]
+            OmegaConf.save(sparse_geometry, path)
+            with pytest.raises(ValueError, match=f"{section}.{field}"):
+                load_launch_config(path)
     for recipe_key, envelope_key in (("train_data", "train_data"), ("val_data", "validation_data")):
         conflicting = copy.deepcopy(raw)
         conflicting["skyrl"]["data"] = {recipe_key: ["/authored/data"]}
