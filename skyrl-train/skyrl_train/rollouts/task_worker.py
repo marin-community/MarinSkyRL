@@ -45,6 +45,7 @@ from skyrl_train.rollouts.finalization import finalize_trajectory_batch, propaga
 from skyrl_train.rollout_observability import rollout_phase, rollout_wait
 from skyrl_train.trajectory_runners.trajectory_retention import RetentionSink
 from skyrl_train.trajectory_runners.model_clients import (
+    CONTEXT_OVERFLOW_CATEGORY,
     DirectModelClient,
     GenerationBudgetExceededError,
     ModelClient,
@@ -144,7 +145,7 @@ def _failed_rollout(
     existing_failure = interruption.rollout.failure
     diagnostics = {} if existing_failure is None else dict(existing_failure.diagnostics)
     if isinstance(error, ModelServerError):
-        if error.category == "context_overflow":
+        if error.category == CONTEXT_OVERFLOW_CATEGORY:
             exception_type = "ContextLengthExceededError"
         diagnostics = {
             **diagnostics,
@@ -171,7 +172,7 @@ def _failed_rollout(
             or config.preserve_logprobs_on_timeout
             or (task.environment.interaction != GYM_INTERACTION and rollout.grade.status == Outcome.GRADED)
         )
-        and (not isinstance(error, ModelServerError) or error.category == "context_overflow")
+        and (not isinstance(error, ModelServerError) or error.category == CONTEXT_OVERFLOW_CATEGORY)
     )
     grade = GradeResult(Outcome.INFRA_ERROR, None, "Rollout execution failed")
     if recover and interruption.operation != RolloutOperation.GRADE and task.environment.interaction == GYM_INTERACTION:

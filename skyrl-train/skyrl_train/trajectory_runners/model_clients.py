@@ -36,6 +36,7 @@ from skyrl_train.rollout_observability import rollout_phase
 
 # The per-turn output limit, as the trainer config (`max_generate_length`) and vLLM (`max_tokens`) spell it. Chat
 # requests carry it only as `max_completion_tokens`, which vLLM prefers over `max_tokens`.
+CONTEXT_OVERFLOW_CATEGORY = "context_overflow"
 _OUTPUT_LIMIT_KEYS = ("max_generate_length", "max_tokens")
 _CHAT_SAMPLING_EXCLUSIONS = frozenset({*_OUTPUT_LIMIT_KEYS, "logprobs", "stop"})
 
@@ -72,7 +73,7 @@ class GenerationBudgetExceededError(ContextLengthExceededError):
 
     def __init__(self, prompt_token_ids: list[int]):
         self.prompt_token_ids = tuple(prompt_token_ids)
-        super().__init__(category="context_overflow", request_id=None, status_code=None)
+        super().__init__(category=CONTEXT_OVERFLOW_CATEGORY, request_id=None, status_code=None)
 
 
 @dataclass(frozen=True)
@@ -279,7 +280,7 @@ class DirectModelClient:
                 error = response.get("error") or {}
                 error_type = (
                     ContextLengthExceededError
-                    if response.get("error_category") == "context_overflow"
+                    if response.get("error_category") == CONTEXT_OVERFLOW_CATEGORY
                     else ModelServerError
                 )
                 raise error_type(
