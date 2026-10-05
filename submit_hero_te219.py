@@ -11,6 +11,7 @@ from iris.cluster.constraints import Constraint, ConstraintOp
 from iris.cluster.platforms.k8s.coreweave_topology import gpu_gang_coscheduling_level
 from iris.cluster.types import CoschedulingConfig, Entrypoint, EnvironmentSpec, ResourceSpec, gpu_device
 from iris.rpc import job_pb2
+from rigging.timing import Duration
 
 from task_runtime_identity import SOURCE_MANIFEST, manifest_identity, verify_source_manifest
 
@@ -65,6 +66,7 @@ def main():
             task_image=plan['task_image'],
             priority_band=job_pb2.PRIORITY_BAND_INTERACTIVE,
             max_retries_failure=0, max_task_failures=0, max_retries_preemption=3,
+            timeout=Duration.from_seconds(int(plan.get('timeout_seconds', 7200))),
         )
         print('JOB_ID=' + str(job.job_id), flush=True)
 
