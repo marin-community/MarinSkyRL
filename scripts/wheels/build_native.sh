@@ -21,7 +21,7 @@ case "$package" in
         repository=Dao-AILab/flash-attention
         source_commit=a8aa52b1ab3e9ca574c8a33b3f35afc017ffa2e2
         source_patch=flash-attn.patch
-        package_environment+=(FLASH_ATTENTION_FORCE_BUILD=TRUE FLASH_ATTN_LOCAL_VERSION=marin.cu132torch2141.1 "FLASH_ATTN_CUDA_ARCHS=$cuda_architecture")
+        package_environment+=(FLASH_ATTENTION_FORCE_BUILD=TRUE FLASH_ATTN_LOCAL_VERSION= "FLASH_ATTN_CUDA_ARCHS=$cuda_architecture")
         ;;
     causal-conv1d)
         repository=Dao-AILab/causal-conv1d
@@ -124,4 +124,12 @@ uv pip freeze --python "$virtual_env/bin/python" > "$build_dir/BUILD_REQUIREMENT
 cat "$build_dir/BUILD_INFO"
 env "${build_environment[@]}" uv build --wheel --no-build-isolation --python "$virtual_env/bin/python" \
     --out-dir "$build_dir/dist" "$build_dir/source/$source_subdir"
+if [[ "$package" == flash-attn ]]; then
+    upstream_wheel="$build_dir/dist/flash_attn-2.8.3.post1-cp312-cp312-linux_$architecture.whl"
+    source_sha256="$(sha256sum "$upstream_wheel" | cut -d ' ' -f 1)"
+    "$virtual_env/bin/python" "$script_dir/retag_flash_attn.py" "$upstream_wheel" \
+        --source-sha256 "$source_sha256" --output "$build_dir/dist" --proof "$build_dir/RETAG_PROOF.json"
+    mkdir -p "$build_dir/upstream-wheel"
+    mv "$upstream_wheel" "$build_dir/upstream-wheel/"
+fi
 (cd "$build_dir/dist" && sha256sum -- *.whl) > "$build_dir/SHA256SUMS"

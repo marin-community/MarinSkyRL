@@ -65,6 +65,14 @@ applying its declared patch; it rejects unexpected tracked or untracked changes.
 Unpatched sources may retain Git-ignored build caches. Wheels appear in `dist/`,
 with digests in `SHA256SUMS`.
 
+FlashAttention is built with its upstream version, then `retag_flash_attn.py`
+applies the qualified local version. It rewrites the METADATA version and
+RECORD paths and checks that every other payload, including native libraries,
+keeps its exact bytes. `RETAG_PROOF.json` records the original and retagged
+hashes. The original wheel remains in `upstream-wheel/`. Applying this step to
+the original qualified wheels reproduces the published archive bytes on both
+architectures.
+
 FlashAttention selects SM90 on x86_64 and SM100 on aarch64. The other recipes set
 `TORCH_CUDA_ARCH_LIST` to the corresponding target, though upstream build scripts
 can add their own architectures. Inspect device code and run the actual selected
