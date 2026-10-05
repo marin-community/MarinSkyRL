@@ -57,6 +57,9 @@ from cloud.iris.hf_model_cache import (
 )
 from marinskyrl.environment_contract import (
     DEBUG_ARTIFACT_DIR_ENV,
+    DebugMode,
+    EnvVarManager,
+    EnvVarScope,
     FR_DUMP_TEMP_FILE_ENV,
     NCCL_DEBUG_INFO_TEMP_FILE_ENV,
     RUN_ID_ENV,
@@ -757,6 +760,20 @@ def ensure_fr_dump_dir() -> None:
             f"WARNING: could not create FR dump dir {dump_dir} ({exc}); "
             f"NCCL flight-recorder dumps may fail to write on a collective timeout."
         )
+
+
+def ensure_task_debug_artifact_directory(debug_mode: DebugMode = DebugMode.LIGHT) -> None:
+    """Give the task uploader and its Ray workers the same artifact root."""
+    if debug_mode is DebugMode.OFF:
+        return
+    environment = EnvVarManager.for_debug_launch(
+        job_name=os.environ.get(RUN_ID_ENV, "run"),
+        artifact_root=os.environ.get(DEBUG_ARTIFACT_DIR_ENV),
+    ).environment_for(EnvVarScope.TASK_RUNTIME)
+    # The trainer resolves its diagnostic preset; the supervisor only owns the root.
+    EnvVarManager({DEBUG_ARTIFACT_DIR_ENV: environment[DEBUG_ARTIFACT_DIR_ENV]}).apply_to_process(
+        EnvVarScope.TASK_RUNTIME
+    )
 
 
 def _rendezvous_uri(rendezvous_dir: str) -> str:
@@ -1737,7 +1754,14 @@ def _persist_failure_artifacts_bounded(action, timeout: float) -> None:
         _log(f"Failure artifact upload exceeded {timeout}s; continuing task teardown")
 
 
-def run_head(args: argparse.Namespace, config_path: Path, derived_gloo_ifname: str | None = None) -> int:
+def run_head(
+    args: argparse.Namespace,
+    config_path: Path,
+    derived_gloo_ifname: str | None = None,
+    *,
+    debug_mode: DebugMode = DebugMode.LIGHT,
+) -> int:
+    ensure_task_debug_artifact_directory(debug_mode)
     num_tasks = _num_tasks()
     gang_epoch = uuid.uuid4().hex
     head_ip = _own_ip()
@@ -1887,7 +1911,8 @@ def run_head(args: argparse.Namespace, config_path: Path, derived_gloo_ifname: s
     return exit_code
 
 
-def run_worker(args: argparse.Namespace) -> int:
+def run_worker(args: argparse.Namespace, *, debug_mode: DebugMode = DebugMode.LIGHT) -> int:
+    ensure_task_debug_artifact_directory(debug_mode)
     worker_start = time.time()
     rank = _rank()
     num_tasks = _num_tasks()
@@ -2191,6 +2216,7 @@ def main() -> None:
         )
         apply_policy_chat_template(model_path, args.policy_chat_template)
     rank = _rank()
+    debug_mode = DebugMode(str(launch_config.skyrl.get("trainer", {}).get("debug_mode", DebugMode.LIGHT.value)))
     if rank == 0:
         final_config_path = _write_final_config(
             launch_config,
@@ -2198,9 +2224,9 @@ def main() -> None:
             policy_tokenizer=policy_tokenizer,
             draft_model=draft_model,
         )
-        exit_code = run_head(args, final_config_path, derived_gloo_ifname)
+        exit_code = run_head(args, final_config_path, derived_gloo_ifname, debug_mode=debug_mode)
     else:
-        exit_code = run_worker(args)
+        exit_code = run_worker(args, debug_mode=debug_mode)
     if exit_code != 0:
         sys.exit(exit_code)
 
