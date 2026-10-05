@@ -665,12 +665,7 @@ def student_topk_logprobs_from_sampled_action_logprobs(
     sampled_action_logprobs: torch.Tensor,
     attention_mask: torch.Tensor,
 ) -> torch.Tensor:
-    """Reuse sampled-token log normalizers instead of copying all vocabulary logits.
-
-    For each response position, log p(selected) equals log p(sampled) plus the
-    difference between their logits. The sampled logprob already has a bounded
-    memory backward, so score centering only needs to gather its selected logits.
-    """
+    """Return selected response logprobs after left-padding compaction, with NaN sentinels."""
     if (
         logits.ndim != 3
         or topk_indices.ndim != 3
@@ -708,6 +703,8 @@ def student_topk_logprobs_from_sampled_action_logprobs(
         raise ValueError("sampled token IDs are outside the student vocabulary")
 
     compact_positions = compact_positions.masked_fill(~valid_rows, 0)
+    # Reuse the sampled logprob's normalizer and bounded-memory backward;
+    # converting all vocabulary logits to float32 would retain a second large tensor.
     batch_positions = torch.arange(logits.shape[0], device=logits.device)[:, None, None]
     selected_logits = logits[
         batch_positions, compact_positions[:, :, None], topk_indices.masked_fill(~valid, 0).long()

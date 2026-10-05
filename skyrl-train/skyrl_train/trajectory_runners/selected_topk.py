@@ -9,6 +9,7 @@ import torch
 from skyrl_train.trajectory_runners.base import TrajectoryBatch
 
 from skyrl_train.distillation import INVALID_TOPK_INDEX
+from skyrl_train.tensor_math import PROBABILITY_MASS_TOLERANCE
 
 
 class AlignedStudentTopK(NamedTuple):
@@ -114,7 +115,7 @@ def collate_behavior_topk(
             raise ValueError("trainable behavior top-k token IDs must be unique")
         if not torch.isfinite(selected_scores).all() or torch.any(selected_scores > 0):
             raise ValueError("trainable behavior top-k logprobs must be finite and nonpositive")
-        if torch.any(selected_scores.exp().sum(dim=-1) > 1 + 1e-4):
+        if torch.any(selected_scores.exp().sum(dim=-1) > 1 + PROBABILITY_MASS_TOLERANCE):
             raise ValueError("behavior top-k probabilities must be normalized over the full vocabulary")
         if sampled_logprobs is not None:
             padded_response = torch.zeros(loss_mask.shape, dtype=torch.long)

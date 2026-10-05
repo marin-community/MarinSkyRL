@@ -55,6 +55,7 @@ from skyrl_train.distillation_runtime import DistillationRuntime
 from skyrl_train.teacher_routing import route_row_metrics
 from skyrl_train.domain_gradient_balance import DomainGradientBalancer
 from skyrl_train.io import io
+from rigging.filesystem import prefix_join
 from skyrl_train.utils import Timer, get_ray_pg_ready_with_timeout, get_system_memory_metrics
 from skyrl_train.env_vars import NCCL_BUFFER_SIZE_ENV_VAR
 from skyrl_train.tensor_math import masked_mean
@@ -1705,7 +1706,7 @@ class RayPPOTrainer:
         record["optimizer_updates_applied"] = int(applied)
         root = self.cfg.trainer.get("token_policy_version_archive")
         if root is not None:
-            uri = os.path.join(str(root), f"step-{self.global_step:08d}.json")
+            uri = prefix_join(str(root), f"step-{self.global_step:08d}.json")
             if io.exists(uri):
                 raise ValueError(f"consumed policy version archive is immutable: {uri}")
             io.makedirs(str(root), exist_ok=True)

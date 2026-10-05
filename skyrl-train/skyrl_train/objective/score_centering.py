@@ -14,7 +14,7 @@ import math
 
 import torch
 
-from skyrl_train.tensor_math import LOG_PROB_DELTA_CLIP
+from skyrl_train.tensor_math import LOG_PROB_DELTA_CLIP, PROBABILITY_MASS_TOLERANCE
 
 
 def _bounded_ratio(numerator_logprob: torch.Tensor, denominator_logprob: torch.Tensor) -> torch.Tensor:
@@ -74,9 +74,11 @@ def ppo_tis_score_centering_correction(
     current_mass = current.exp()
     old_mass = old.exp()
     behavior_mass = behavior.exp()
-    if torch.any(current_mass.sum(dim=-1) > 1 + 1e-4) or torch.any(old_mass.sum(dim=-1) > 1 + 1e-4):
+    if torch.any(current_mass.sum(dim=-1) > 1 + PROBABILITY_MASS_TOLERANCE) or torch.any(
+        old_mass.sum(dim=-1) > 1 + PROBABILITY_MASS_TOLERANCE
+    ):
         raise ValueError("trainer top-k probabilities exceed full-vocabulary mass")
-    if torch.any(behavior_mass.sum(dim=-1) > 1 + 1e-4):
+    if torch.any(behavior_mass.sum(dim=-1) > 1 + PROBABILITY_MASS_TOLERANCE):
         raise ValueError("behavior top-k probabilities exceed full-vocabulary mass")
 
     p_tail = (1 - current_mass.sum(dim=-1)).clamp_min(tail_floor)

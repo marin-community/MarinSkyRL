@@ -246,9 +246,9 @@ def validate_objective(cfg: DictConfig, *, loss_spec: LossSpec | None = None) ->
     plan = compile_distillation_plan_from_config(cfg)
     topk = plan is not None and plan.objective is not DistillationObjectiveKind.SAMPLED_REVERSE_KL
     centering_width = algorithm.get("score_centering_topk", 0)
-    if type(algorithm.get("score_centering_enabled", True)) is not bool:
+    if not isinstance(algorithm.get("score_centering_enabled", True), bool):
         raise ValueError("trainer.algorithm.score_centering_enabled must be a boolean")
-    if type(centering_width) is not int or centering_width < 0:
+    if isinstance(centering_width, bool) or not isinstance(centering_width, int) or centering_width < 0:
         raise ValueError("trainer.algorithm.score_centering_topk must be a nonnegative integer")
     if centering_width:
         score_centering_tis_cap(algorithm)

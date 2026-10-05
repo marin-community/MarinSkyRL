@@ -47,6 +47,7 @@ class BaseTextEnv(Env[ConversationType, str]):
         # Metadata
         self.turns = 0
         self.max_turns = 1
+        self.structured_chat = False
 
         # Tool groups
         self.tool_groups = []
@@ -97,7 +98,7 @@ class BaseTextEnv(Env[ConversationType, str]):
         """
         Return the first prompt to be given to the model and optional metadata.
         """
-        return prompt, {}
+        return prompt, {"chat_completion_params": {}} if self.structured_chat else {}
 
     def close(self):
         """
