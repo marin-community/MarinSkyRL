@@ -174,7 +174,7 @@ def test_native_factory_clips_all_routes_by_the_global_norm(distributed_parallel
         success, norm, _ = _step(optimizer, model)
         assert success
         assert norm > 1.0
-        assert norm == pytest.approx(expected_norm.item(), rel=1e-6)
+        assert float(norm) == pytest.approx(expected_norm.item(), rel=1e-6)
         _assert_weights(model, reference)
 
 
