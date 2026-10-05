@@ -1,4 +1,3 @@
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -679,15 +678,6 @@ class WorkerWrap:
         with set_current_vllm_config(self.vllm_config), torch.device(self.device):
             finalize_layerwise_reload(model, self.model_config)
         if dummy_pending:
-            initial_digest = hashlib.sha256()
-            initial_tensors = 0
-            for name, tensor in (*model.named_parameters(), *model.named_buffers()):
-                initial_digest.update(f"{name}:{tensor.dtype}:{tuple(tensor.shape)}".encode())
-                initial_digest.update(
-                    tensor.detach().cpu().contiguous().reshape(-1).view(torch.uint8).numpy().tobytes()
-                )
-                initial_tensors += 1
-            logger.info("X3_INITIAL_ENGINE_TENSORS tensors={} sha256={}", initial_tensors, initial_digest.hexdigest())
             self._skyrl_dummy_weights_verified = True
             logger.info("Dummy engine weights verified")
         self._skyrl_weight_update_active = False

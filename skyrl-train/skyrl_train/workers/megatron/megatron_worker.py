@@ -1,6 +1,5 @@
 import asyncio
 import copy
-import hashlib
 import importlib.util
 import os
 from collections import defaultdict
@@ -493,23 +492,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 stats.prefetch_misses,
                 stats.prefetch_unused,
             )
-
-        initial_digest = hashlib.sha256()
-        initial_tensors = 0
-        for model_index, model_chunk in enumerate(self.actor_module):
-            for name, tensor in (*model_chunk.named_parameters(), *model_chunk.named_buffers()):
-                initial_digest.update(f"{model_index}:{name}:{tensor.dtype}:{tuple(tensor.shape)}".encode())
-                initial_digest.update(
-                    tensor.detach().cpu().contiguous().reshape(-1).view(torch.uint8).numpy().tobytes()
-                )
-                initial_tensors += 1
-        logger.info(
-            "X3_INITIAL_MODEL_TENSORS rank={} mode={} tensors={} sha256={}",
-            self._rank,
-            self.cfg.trainer.policy.model.remote_read_mode,
-            initial_tensors,
-            initial_digest.hexdigest(),
-        )
 
         if self._rank == 0:
             print_model_size(self.actor_module[0])
