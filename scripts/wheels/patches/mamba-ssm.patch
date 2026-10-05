@@ -1,0 +1,30 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index a3d4d1a..52056c4 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -20,2 +20,2 @@ dependencies = [
+-    "tilelang==0.1.8",
+-    "apache-tvm-ffi<=0.1.9",
++    "tilelang==0.1.14",
++    "apache-tvm-ffi<=0.1.12",
+diff --git a/setup.py b/setup.py
+index f9c3320..99c74aa 100644
+--- a/setup.py
++++ b/setup.py
+@@ -213 +213 @@ if not SKIP_CUDA_BUILD:
+-            "cxx": ["-O3", "-std=c++17"],
++            "cxx": ["-O3", "-std=c++20"],
+@@ -216 +216 @@ if not SKIP_CUDA_BUILD:
+-                "-std=c++17",
++                "-std=c++20",
+@@ -226 +226 @@ if not SKIP_CUDA_BUILD:
+-            "cxx": ["-O3", "-std=c++17"],
++            "cxx": ["-O3", "-std=c++20"],
+@@ -230 +230 @@ if not SKIP_CUDA_BUILD:
+-                    "-std=c++17",
++                    "-std=c++20",
+@@ -402,2 +402,2 @@ setup(
+-        "tilelang==0.1.8",
+-        "apache-tvm-ffi<=0.1.9",
++        "tilelang==0.1.14",
++        "apache-tvm-ffi<=0.1.12",

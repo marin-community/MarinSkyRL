@@ -42,6 +42,7 @@ def _fake_frozen_runtime(
         "harbor/utils",
         "megatron/bridge",
         "nvidia/cu13/lib",
+        "nvidia/cu13/bin",
         "quack",
         "skyrl_train/models",
         "transformer_engine/common",
@@ -78,6 +79,9 @@ def _fake_frozen_runtime(
     _write_module(site_packages, "vllm/__init__.py", "__version__ = 'test'\n")
     _write_module(site_packages, "vllm/_C_stable_libtorch.py")
     _write_module(site_packages, "vllm/cumem_allocator.py")
+    ptxas = site_packages / "nvidia/cu13/bin/ptxas"
+    ptxas.write_text("#!/bin/sh\nexit 0\n")
+    ptxas.chmod(0o755)
     _write_module(
         site_packages,
         "transformer_engine/common/__init__.py",

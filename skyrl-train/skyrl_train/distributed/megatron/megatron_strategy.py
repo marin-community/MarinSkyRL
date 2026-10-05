@@ -32,11 +32,10 @@ from skyrl_train.distributed.megatron.direct_checkpoint import (
     DirectS3TorchDistLoadShardedStrategy,
     DirectS3TorchDistSaveShardedStrategy,
 )
+from skyrl_train.distributed.megatron.checkpoint_factories import reuse_checkpoint_factory_buffers
 from skyrl_train.distributed.megatron.checkpoint_metadata import remote_checkpoint_metadata
 from marinskyrl.remote_io import abort_multipart_uploads
 
-from megatron.core.dist_checkpointing.strategies import base as ckpt_base
-from megatron.core.dist_checkpointing.strategies.async_utils import AsyncCallsQueue
 from megatron.core import dist_checkpointing
 from megatron.core.dist_checkpointing.serialization import (
     get_default_save_sharded_strategy,
@@ -105,10 +104,6 @@ class MegatronStrategy(DistributedStrategy):
         self.hf_config = None  # Set by the megatron worker once configs are initialized.
         if optimizer_config is not None:
             _optimizer_checkpoint_metadata(megatron_config.optimizer_checkpoint_sharding_type)
-
-        # NOTE: Set Megatron dist checkpoint async backend to persistent to avoid `os.fork()`-ing
-        # short-lived background workers, which does not work well with Ray.
-        ckpt_base.async_calls = AsyncCallsQueue(persistent=True)
 
     def set_seed(self, seed: int) -> None:
         random.seed(seed)
@@ -326,8 +321,6 @@ class MegatronStrategy(DistributedStrategy):
                     torch.save({"client_state": client_state, "tag": tag}, f)
 
         dist.barrier()
-        ckpt_base.async_calls.close()
-        ckpt_base.async_calls = AsyncCallsQueue(persistent=True)
         self.log(f"Checkpoint successfully saved to {ckpt_dir}")
 
     def load_checkpoint(
@@ -362,11 +355,9 @@ class MegatronStrategy(DistributedStrategy):
             if optimizer and load_training_state:
                 common_state = dist_checkpointing.load_common_state_dict(read_dir)
                 saved_type = _saved_optimizer_sharding_type(common_state)
-                # Gradients are not checkpointed. Free their GPU buffers now: building the
-                # optimizer's sharded state dict for loading allocates a full set of moments
-                # before optimizer.load_state_dict allocates the checkpointed ones, and with the
-                # gradients resident that second copy is what OOMs a policy that trains fine.
-                # The empty buffers come back after the optimizer state is restored below.
+                # Gradients are not checkpointed. Free their GPU buffers while the optimizer
+                # initializes its load destinations and DCP decodes checkpoint records.
+                # The empty buffers come back after optimizer restore.
                 offload_megatron_grads_to_cpu(model)
                 sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(
                     model_sharded_state_dict,
@@ -374,6 +365,7 @@ class MegatronStrategy(DistributedStrategy):
                     metadata=_optimizer_checkpoint_metadata(saved_type),
                 )
             # Load the checkpoint in parallel.
+            reuse_checkpoint_factory_buffers(sharded_state_dict)
             load_strategy = FullyParallelLoadStrategyWrapper(
                 load_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
             )

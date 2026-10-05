@@ -89,6 +89,8 @@ TRANSFORMERS_OFFLINE_ENV = "TRANSFORMERS_OFFLINE"
 LD_LIBRARY_PATH_ENV = "LD_LIBRARY_PATH"
 NVRTC_HOME_ENV = "NVRTC_HOME"
 CUDA_HOME_ENV = "CUDA_HOME"
+TRITON_PTXAS_PATH_ENV = "TRITON_PTXAS_PATH"
+TRITON_PTXAS_BLACKWELL_PATH_ENV = "TRITON_PTXAS_BLACKWELL_PATH"
 LIBRARY_PATH_ENV = "LIBRARY_PATH"
 MAX_JOBS_ENV = "MAX_JOBS"
 CUDA_WHEEL_NAMESPACE = "cu13"
@@ -236,6 +238,18 @@ ENV_VAR_SPECS = (
     ),
     EnvVarSpec(
         CUDA_HOME_ENV,
+        "runtime.bootstrap",
+        EnvVarSource.EXTERNAL,
+        frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.TASK_RUNTIME}),
+    ),
+    EnvVarSpec(
+        TRITON_PTXAS_PATH_ENV,
+        "runtime.bootstrap",
+        EnvVarSource.EXTERNAL,
+        frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.TASK_RUNTIME}),
+    ),
+    EnvVarSpec(
+        TRITON_PTXAS_BLACKWELL_PATH_ENV,
         "runtime.bootstrap",
         EnvVarSource.EXTERNAL,
         frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.TASK_RUNTIME}),
@@ -501,6 +515,8 @@ class EnvVarManager:
             LD_LIBRARY_PATH_ENV,
             NVRTC_HOME_ENV,
             CUDA_HOME_ENV,
+            TRITON_PTXAS_PATH_ENV,
+            TRITON_PTXAS_BLACKWELL_PATH_ENV,
             LIBRARY_PATH_ENV,
             MAX_JOBS_ENV,
             TELEMETRY_ENDPOINT_ENV,
@@ -577,11 +593,16 @@ class EnvVarManager:
 
         library_path = os.pathsep.join(str(path) for path in library_paths)
         cuda_root = cuda_roots[0]
+        ptxas = cuda_root / "bin" / "ptxas"
+        if not ptxas.is_file() or not os.access(ptxas, os.X_OK):
+            raise RuntimeError(f"The frozen GPU runtime has no executable CUDA assembler: {ptxas}")
         return cls(
             {
                 LD_LIBRARY_PATH_ENV: library_path,
                 NVRTC_HOME_ENV: str(cuda_root),
                 CUDA_HOME_ENV: str(cuda_root),
+                TRITON_PTXAS_PATH_ENV: str(ptxas),
+                TRITON_PTXAS_BLACKWELL_PATH_ENV: str(ptxas),
                 LIBRARY_PATH_ENV: str(cuda_root.parents[3]),
                 MAX_JOBS_ENV: DEFAULT_CUDA_JIT_MAX_JOBS,
             }

@@ -1,3 +1,5 @@
+import json
+import os
 import random
 from abc import ABC, abstractmethod
 
@@ -134,7 +136,25 @@ class DistributedStrategy(ABC):
         io.makedirs(hf_dir, exist_ok=True)
 
         with io.local_work_dir(hf_dir) as work_dir:
+            source_config = {}
+            if model_config.name_or_path:
+                source_path = os.path.join(model_config.name_or_path, "config.json")
+                if io.exists(source_path):
+                    with io.open_file(source_path, "r") as source:
+                        source_config = json.load(source)
             model_config.save_pretrained(work_dir)
+            # Transformers 5 drops legacy generation fields from model configs.
+            # Keep the original export's values when serialization omits them.
+            if source_config:
+                config_path = os.path.join(work_dir, "config.json")
+                with open(config_path) as source:
+                    exported_config = json.load(source)
+                for field in GenerationConfig().to_dict():
+                    if field in source_config:
+                        exported_config.setdefault(field, source_config[field])
+                with open(config_path, "w") as target:
+                    json.dump(exported_config, target, indent=2)
+                    target.write("\n")
             if tokenizer:
                 tokenizer.save_pretrained(work_dir)
 

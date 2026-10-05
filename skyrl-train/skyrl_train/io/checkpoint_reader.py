@@ -6,7 +6,9 @@ from pathlib import PurePosixPath
 import time
 
 from loguru import logger
+from fsspec import AbstractFileSystem
 from torch.distributed.checkpoint import FileSystemReader, LoadPlan, LoadPlanner
+from torch.distributed.checkpoint._fsspec_filesystem import FileSystem as FsspecFileSystem
 from torch.distributed.checkpoint.filesystem import _StorageInfo
 from torch.distributed.checkpoint.metadata import Metadata
 from torch.futures import Future
@@ -57,3 +59,12 @@ class RecordCheckpointReader(FileSystemReader):
         future: Future[None] = Future()
         future.set_result(None)
         return future
+
+
+def s3_checkpoint_reader(checkpoint_dir: str, filesystem: AbstractFileSystem) -> RecordCheckpointReader:
+    """Read bounded DCP records through the caller's resolved S3 filesystem."""
+    reader = RecordCheckpointReader(checkpoint_dir)
+    reader.fs = FsspecFileSystem()
+    reader.fs.fs = filesystem
+    reader.path = checkpoint_dir
+    return reader

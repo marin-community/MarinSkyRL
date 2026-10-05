@@ -1,0 +1,16 @@
+diff --git a/setup.py b/setup.py
+index d180c18..9a59ee7 100644
+--- a/setup.py
++++ b/setup.py
+@@ -201 +201 @@ if not SKIP_CUDA_BUILD and not IS_ROCM:
+-    "-std=c++17",
++    "-std=c++20",
+@@ -220 +220 @@ if not SKIP_CUDA_BUILD and not IS_ROCM:
+-    compiler_c17_flag=["-O3", "-std=c++17"]
++    compiler_c17_flag=["-O3", "-std=c++20"]
+@@ -377 +377 @@ elif not SKIP_CUDA_BUILD and IS_ROCM:
+-        cc_flag += ["-O3","-std=c++17",
++        cc_flag += ["-O3","-std=c++20",
+@@ -409 +409 @@ elif not SKIP_CUDA_BUILD and IS_ROCM:
+-            "cxx": ["-O3", "-std=c++17"] + generator_flag,
++            "cxx": ["-O3", "-std=c++20"] + generator_flag,

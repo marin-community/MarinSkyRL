@@ -1,0 +1,47 @@
+diff --git a/megatron/core/optimizer/__init__.py b/megatron/core/optimizer/__init__.py
+index 70f757f..ca57766 100644
+--- a/megatron/core/optimizer/__init__.py
++++ b/megatron/core/optimizer/__init__.py
+@@ -884,4 +884,8 @@ def _get_megatron_emerging_optimizer(
+-        # Only the primary emerging optimizer (stored in ``eopt_name``, e.g., Muon) is
+-        # constructed via ``_create_emerging_optimizer``. Scalar optimizers that also appear
+-        # in ``_EMERGING_OPTIMIZERS`` (e.g., Lion) fall through to the standard fallback path.
+-        if opt_name == eopt_name and opt_name in _EMERGING_OPTIMIZERS:
++        # Routes registered with the primary optimizer's class use its factory.
++        # Different classes (e.g., Lion alongside Muon) retain the standard
++        # fallback path.
++        if (
++            opt_name in _EMERGING_OPTIMIZERS
++            and _EMERGING_OPTIMIZERS[opt_name].optimizer_cls
++            is _EMERGING_OPTIMIZERS[eopt_name].optimizer_cls
++        ):
+@@ -889 +893 @@ def _get_megatron_emerging_optimizer(
+-                config, groups, eopt_name, model_chunks, pg_collection
++                config, groups, opt_name, model_chunks, pg_collection
+diff --git a/megatron/core/package_info.py b/megatron/core/package_info.py
+index 24c6794..2269224 100644
+--- a/megatron/core/package_info.py
++++ b/megatron/core/package_info.py
+@@ -8 +8 @@ PATCH = 2
+-PRE_RELEASE = ""
++PRE_RELEASE = "+marin.torch2141.3"
+diff --git a/pyproject.toml b/pyproject.toml
+index b2474f7..eb43dae 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -99,2 +99,2 @@ dev = [
+-    "opentelemetry-api~=1.43.0",
+-    "flash-linear-attention~=0.4.0",
++    "opentelemetry-api>=1.43.0,<2",
++    "flash-linear-attention>=0.5.2,<0.6",
+@@ -104 +104 @@ dev = [
+-    "nvidia-cudnn-frontend[cutedsl]==1.26.0",
++    "nvidia-cudnn-frontend[cutedsl]==1.30.0",
+diff --git a/megatron/core/transformer/attention.py b/megatron/core/transformer/attention.py
+--- a/megatron/core/transformer/attention.py
++++ b/megatron/core/transformer/attention.py
+@@ -94 +93,0 @@
+-    from flash_attn.cute import flash_attn_varlen_func as flash_attn4_varlen_func
+@@ -100,0 +100,2 @@
++    if HAVE_FA4:
++        from flash_attn.cute import flash_attn_varlen_func as flash_attn4_varlen_func
