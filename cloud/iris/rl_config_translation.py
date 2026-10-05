@@ -828,7 +828,12 @@ def _skyrl_config_sections(
         placement["ref_num_nodes"] = policy_num_nodes if policy_num_nodes is not None else num_nodes
     placement["policy_num_gpus_per_node"] = _role_gpus_per_node(placement, "policy_num_gpus_per_node", gpus_per_node)
     placement["ref_num_gpus_per_node"] = _role_gpus_per_node(placement, "ref_num_gpus_per_node", gpus_per_node)
+    placement["policy_strict_spread_pg"] = True
+    placement.setdefault("overlap_init", True)
     trainer["placement"] = placement
+    trainer.setdefault("policy", {}).setdefault("model", {})["remote_read_mode"] = "prefetch"
+    generator.setdefault("engine_init_kwargs", {})["load_format"] = "dummy"
+    generator["weight_sync_transport"] = "broadcast"
 
     if generator.get("num_inference_engines") is None:
         generator["num_inference_engines"] = (num_nodes * gpus_per_node) // parsed.tensor_parallel_size
