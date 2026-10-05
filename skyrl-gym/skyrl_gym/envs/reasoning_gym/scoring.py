@@ -12,13 +12,20 @@ import reasoning_gym
 ANSWER_MARKER = "Answer:"
 
 
-def normalize_ground_truth(ground_truth: Any) -> str:
+def normalize_ground_truth(ground_truth: Any, *, verifyit_enabled: bool = False) -> str:
     """Validate and serialize a task name with its complete generated entry."""
     if isinstance(ground_truth, str):
         try:
-            ground_truth = json.loads(ground_truth)
+            if verifyit_enabled:
+                from verifyit.json_objects import unique_object
+
+                ground_truth = json.loads(ground_truth, object_pairs_hook=unique_object)
+            else:
+                ground_truth = json.loads(ground_truth)
         except json.JSONDecodeError as exc:
             raise ValueError("Reasoning Gym ground_truth must be valid JSON.") from exc
+    if verifyit_enabled:
+        json.dumps(ground_truth, allow_nan=False)
     if not isinstance(ground_truth, Mapping):
         raise TypeError("Reasoning Gym ground_truth must be a mapping.")
     task = ground_truth.get("task")
@@ -50,7 +57,7 @@ def extract_answer(response: str) -> str:
 
 def score_response(response: str, ground_truth: str, *, verifyit_enabled: bool = False) -> float:
     """Score a response's extracted final answer with the generated task's package verifier."""
-    spec = json.loads(normalize_ground_truth(ground_truth))
+    spec = json.loads(normalize_ground_truth(ground_truth, verifyit_enabled=verifyit_enabled))
     if verifyit_enabled:
         from skyrl_gym.envs.verifyit_clients import grade_reasoning_entry
 

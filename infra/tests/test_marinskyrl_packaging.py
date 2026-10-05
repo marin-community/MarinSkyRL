@@ -5,10 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from email.parser import Parser
 from pathlib import Path
-import re
 import subprocess
 import tomllib
 import zipfile
+from urllib.parse import parse_qs, urlsplit
 
 from packaging.requirements import Requirement
 import pytest
@@ -91,25 +91,22 @@ def test_training_extras_publish_hardware_policy_and_rollout_requirements(built_
     assert "Extras `cpu` and `cuda` are incompatible" in conflict.stderr
 
 
-def test_rollout_runtime_resolves_harbor_main_into_the_frozen_lock() -> None:
+def test_harbor_runtime_and_config_resolve_the_same_immutable_revision() -> None:
     sources = PYPROJECT["tool"]["uv"]["sources"]
     lock = tomllib.loads((REPOSITORY_ROOT / "uv.lock").read_text())
-
-    assert sources["harbor"] == {"git": "https://github.com/marin-community/harbor.git"}
-    harbor = next(package for package in lock["package"] if package["name"] == "harbor")
-    assert harbor["source"]["git"].startswith("https://github.com/marin-community/harbor.git#")
-    assert len(harbor["source"]["git"].rsplit("#", 1)[-1]) == 40
-
-
-def test_harbor_config_release_matches_the_locked_harbor_commit() -> None:
-    lock = tomllib.loads((REPOSITORY_ROOT / "uv.lock").read_text())
     packages = {package["name"]: package for package in lock["package"]}
-    harbor_commit = packages["harbor"]["source"]["git"].rsplit("#", 1)[-1]
-    config_url = packages["harbor-config"]["source"]["url"]
-    config_release = re.search(r"/harbor-config-([0-9a-f]{40})/", config_url)
+    runtime = urlsplit(packages["harbor"]["source"]["git"])
+    config = urlsplit(packages["harbor-config"]["source"]["git"])
 
-    assert config_release is not None
-    assert config_release.group(1) == harbor_commit
+    assert len(runtime.fragment) == 40
+    assert runtime.fragment == config.fragment == sources["harbor"]["rev"] == sources["harbor-config"]["rev"]
+    assert runtime.hostname == config.hostname == "github.com"
+    assert runtime.path.removesuffix(".git") == config.path.removesuffix(".git") == "/marin-community/harbor"
+    assert parse_qs(runtime.query)["rev"] == [runtime.fragment]
+    assert parse_qs(config.query) == {
+        "rev": [runtime.fragment],
+        "subdirectory": ["packages/harbor-config"],
+    }
 
 
 def _exported_requirements(extras: tuple[str, ...]) -> list[Requirement]:

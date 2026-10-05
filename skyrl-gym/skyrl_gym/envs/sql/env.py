@@ -6,6 +6,7 @@ from skyrl_gym.envs.sql.utils import compute_score_single
 import os
 from typing import Dict
 from omegaconf import DictConfig
+from skyrl_gym.verification import VerificationResult, VerificationStatus
 
 
 class SQLEnv(BaseTextEnv):
@@ -14,8 +15,7 @@ class SQLEnv(BaseTextEnv):
     """
 
     def __init__(self, env_config: DictConfig, extras: Dict[str, Any] = {}):
-        super().__init__()
-        self.verifyit_enabled = bool(env_config.get("verifyit_enabled", False))
+        super().__init__(env_config)
 
         # Initialize the environment
         assert "db_id" in extras, "db_id field is required"
@@ -54,7 +54,7 @@ class SQLEnv(BaseTextEnv):
         self.max_turns = extras["max_turns"] if "max_turns" in extras else 5
 
         # Initialize the tools
-        self.tool_group = SQLCodeExecutorToolGroup(db_file_path=self.db_path)
+        self.tool_group = SQLCodeExecutorToolGroup(db_file_path=self.db_path, verifyit_enabled=self.verifyit_enabled)
         self.init_tool_groups([self.tool_group])
 
         # Chat history
@@ -104,23 +104,95 @@ class SQLEnv(BaseTextEnv):
                 )
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
+        if self.verifyit_enabled:
+            try:
+                return self._step(action)
+            except Exception as error:
+                from skyrl_gym.envs.sqlite_verifyit import _failure
+
+                verdict = _failure(error, "sql_environment")
+                return BaseTextEnvStepOutput(
+                    observations=[],
+                    reward=-1.0,
+                    done=True,
+                    metadata={},
+                    verification=VerificationResult(
+                        status=VerificationStatus.ERROR,
+                        score_min=-1.0 if self.verifyit_enabled else 0.0,
+                        score_max=1.0,
+                        reason="SQL verification failed",
+                        diagnostics={
+                            "verifyit_status": "invalid_task"
+                            if verdict.status.value == "invalid_task"
+                            else "infrastructure_error",
+                            "verdict": {key: value for key, value in verdict.detail.items() if key != "error"},
+                        },
+                    ),
+                )
+        return self._step(action)
+
+    def _step(self, action: str) -> BaseTextEnvStepOutput:
         self.turns += 1
         self._validate_action(action)
         self.chat_history.append({"role": "assistant", "content": action})
 
         error = None
         done = self._is_done(action)
+        if self.verifyit_enabled:
+            from verifyit.grade import InvalidTask, Status
+            from skyrl_gym.envs.sqlite_verifyit import grade_sql, project_sql_reward, SQLPolicy
+
+            if done:
+                result = grade_sql(
+                    self.gold_sql,
+                    "".join(item["content"] for item in self.chat_history),
+                    self.db_file,
+                    policy=SQLPolicy.LEGACY,
+                )
+                diagnostics = result.diagnostics()
+                verification = (
+                    VerificationResult.verified(
+                        project_sql_reward(result), diagnostics=diagnostics, score_min=-1.0, score_max=1.0
+                    )
+                    if result.verdict.status is Status.SCORED
+                    else VerificationResult(
+                        status=VerificationStatus.ERROR,
+                        score_min=-1.0 if self.verifyit_enabled else 0.0,
+                        score_max=1.0,
+                        reason="SQL verification failed",
+                        diagnostics=diagnostics,
+                    )
+                )
+                return BaseTextEnvStepOutput(
+                    observations=[],
+                    reward=project_sql_reward(result),
+                    done=True,
+                    metadata=diagnostics,
+                    verification=verification,
+                )
+
+        error_types = (RuntimeError, InvalidTask) if self.verifyit_enabled else (RuntimeError,)
         try:
             reward = self._get_reward(action, done)
-        except RuntimeError:
-            from skyrl_gym.verification import VerificationResult
-
+        except error_types as grading_error:
             return BaseTextEnvStepOutput(
                 observations=[],
-                reward=0.0,
+                reward=-1.0 if self.verifyit_enabled else 0.0,
                 done=True,
                 metadata={},
-                verification=VerificationResult.error("SQL verification failed"),
+                verification=VerificationResult(
+                    status=VerificationStatus.ERROR,
+                    score_min=-1.0 if self.verifyit_enabled else 0.0,
+                    score_max=1.0,
+                    reason=str(grading_error) if self.verifyit_enabled else "SQL verification failed",
+                    diagnostics={
+                        "verifyit_status": "invalid_task"
+                        if self.verifyit_enabled and isinstance(grading_error, InvalidTask)
+                        else "infrastructure_error"
+                    }
+                    if self.verifyit_enabled
+                    else {},
+                ),
             )
 
         if done:
@@ -130,6 +202,8 @@ class SQLEnv(BaseTextEnv):
             tool_group_name, tool_name, tool_input = self._parse_action(action)
             observation = self._execute_tool(tool_group_name, tool_name, tool_input)
         except Exception as e:
+            if self.verifyit_enabled:
+                raise
             error = str(e)
             observation = None
             tool_group_name = None

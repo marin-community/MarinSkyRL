@@ -14,8 +14,6 @@
 # Adapted from https://github.com/EleutherAI/lm-evaluation-harness/blob/main/lm_eval/tasks/hendrycks_math/utils.py
 # https://github.com/volcengine/verl/blob/1a62568f801ba35ac1f5387e27232a2df7eac488/verl/utils/reward_score/math_dapo.py
 
-from verifyit.adapters.skyrl import grade_aime_candidate, grade_literal_candidate
-
 import math
 import re
 from fractions import Fraction
@@ -195,8 +193,32 @@ def rational_value(answer: str) -> Optional[Fraction]:
     return None
 
 
+def extract_minerva_answers(
+    solution_str: str,
+    gt: str,
+    gt_need_extract: bool = False,
+    answer_pattern: str = r"(?i)Answer\s*:\s*([^\n<]+)",
+) -> tuple[str, str]:
+    """Apply the source last-answer and normalization policy to both answers."""
+    # Extract answer from solution
+    match = re.findall(answer_pattern, solution_str)
+    extracted_answer = match[-1] if match else "[INVALID]"
+    pred = normalize_final_answer(extracted_answer)
+
+    # Process ground truth
+    if gt_need_extract:
+        gt = normalize_final_answer(remove_boxed(last_boxed_only_string(gt)))
+    else:
+        gt = normalize_final_answer(gt)
+
+    return gt, pred
+
+
 def is_correct_minerva(
-    solution_str: str, gt: str, gt_need_extract: bool = False, answer_pattern: str = r"(?i)Answer\s*:\s*([^\n<]+)"
+    solution_str: str,
+    gt: str,
+    gt_need_extract: bool = False,
+    answer_pattern: str = r"(?i)Answer\s*:\s*([^\n<]+)",
 ) -> tuple[bool, str]:
     """Check if the solution is correct according to Minerva criteria.
 
@@ -212,18 +234,28 @@ def is_correct_minerva(
     NOTE(shu): parsing the answer before the last character "<"
     Later refactor this into the tokenizer
     """
-    # Extract answer from solution
-    match = re.findall(answer_pattern, solution_str)
-    extracted_answer = match[-1] if match else "[INVALID]"
-    pred = normalize_final_answer(extracted_answer)
+    gt, pred = extract_minerva_answers(solution_str, gt, gt_need_extract, answer_pattern)
 
-    # Process ground truth
-    if gt_need_extract:
-        gt = normalize_final_answer(remove_boxed(last_boxed_only_string(gt)))
+    if pred == gt:
+        return True, pred
+    pred_value = rational_value(pred)
+    gt_value = rational_value(gt)
+    return pred_value is not None and pred_value == gt_value, pred
+
+
+def extract_strict_box(pred: str, pause_tokens_index: Optional[list[int]] = None) -> Optional[str]:
+    """Apply the source final-window and last-box extraction policy."""
+    # Extract the relevant part of the prediction
+    if pause_tokens_index is not None:
+        assert len(pause_tokens_index) == 4
+        pred = pred[pause_tokens_index[-1] - 100 :]
     else:
-        gt = normalize_final_answer(gt)
+        pred = pred[-100:]
 
-    return grade_aime_candidate(gt, pred).reward == 1.0, pred
+    boxed_pred = last_boxed_only_string(pred)
+    extracted_pred = remove_boxed(boxed_pred) if boxed_pred is not None else None
+
+    return extracted_pred
 
 
 def is_correct_strict_box(
@@ -239,23 +271,17 @@ def is_correct_strict_box(
     Returns:
         Tuple of (score, extracted_prediction)
     """
-    # Extract the relevant part of the prediction
-    if pause_tokens_index is not None:
-        assert len(pause_tokens_index) == 4
-        pred = pred[pause_tokens_index[-1] - 100 :]
-    else:
-        pred = pred[-100:]
+    extracted_pred = extract_strict_box(pred, pause_tokens_index)
 
-    # Extract and check the boxed answer
-    boxed_pred = last_boxed_only_string(pred)
-    extracted_pred = remove_boxed(boxed_pred) if boxed_pred is not None else None
-
-    reward = grade_literal_candidate(gt, extracted_pred).reward if extracted_pred is not None else 0.0
+    reward = float(extracted_pred is not None and extracted_pred == gt)
     return 2 * int(reward) - 1, extracted_pred
 
 
 def verify(
-    solution_str: str, answer: str, strict_box_verify: bool = False, pause_tokens_index: Optional[list[int]] = None
+    solution_str: str,
+    answer: str,
+    strict_box_verify: bool = False,
+    pause_tokens_index: Optional[list[int]] = None,
 ) -> bool:
     """Verify if the solution is correct.
 

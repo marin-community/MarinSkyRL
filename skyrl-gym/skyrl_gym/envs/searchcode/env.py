@@ -13,7 +13,7 @@ class SearchCodeEnv(BaseTextEnv):
     """
 
     def __init__(self, env_config: DictConfig, extras: Dict[str, Any] = {}):
-        super().__init__()
+        super().__init__(env_config)
 
         assert "reward_spec" in extras, "reward_spec field is required"
         assert "ground_truth" in extras["reward_spec"], "ground_truth is required in reward_spec field"
@@ -57,7 +57,7 @@ class SearchCodeEnv(BaseTextEnv):
         if done:
             # Concat all chat history into a single string and compute reward
             chat_history_str = "\n".join([item["content"] for item in self.chat_history])
-            return utils.compute_score(chat_history_str, self.ground_truth)
+            return utils.compute_score(chat_history_str, self.ground_truth, verifyit_enabled=self.verifyit_enabled)
         else:
             return 0
 
@@ -78,10 +78,10 @@ class SearchCodeEnv(BaseTextEnv):
 
         error = None
         done = self._is_done(action)
-        reward = self._get_reward(action, done)
-
-        if done:
-            return BaseTextEnvStepOutput(observations=[], reward=reward, done=done, metadata={})
+        reward_step = self._reward_step(lambda: self._get_reward(action, done), done=done, minimum_reward=0.0)
+        if reward_step["done"]:
+            return reward_step
+        reward = reward_step["reward"]
 
         try:
             tool_group_name, tool_name, tool_input = self._parse_action(action)

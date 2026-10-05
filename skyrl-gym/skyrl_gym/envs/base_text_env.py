@@ -1,3 +1,4 @@
+from collections.abc import Callable, Mapping
 from typing import Any, Dict, List, NotRequired, Optional, TypedDict
 from skyrl_gym import Env
 from skyrl_gym.verification import RewardResult, RolloutEvidence, VerificationResult
@@ -29,6 +30,19 @@ class BaseTextEnvStepOutput(TypedDict):
     reset_conversation: NotRequired[ConversationType]
 
 
+def verification_error_step(
+    reason: str, *, minimum_reward: float, diagnostics: Dict[str, Any]
+) -> BaseTextEnvStepOutput:
+    """Translate a framework error into its caller-declared minimum reward."""
+    return BaseTextEnvStepOutput(
+        observations=[],
+        reward=minimum_reward,
+        done=True,
+        metadata={},
+        verification=VerificationResult.error(reason, diagnostics=diagnostics),
+    )
+
+
 class BaseTextEnv(Env[ConversationType, str]):
     """
     Base environment class for all text-in / text-out environments.
@@ -41,8 +55,9 @@ class BaseTextEnv(Env[ConversationType, str]):
         - ActType: str (LLM output)
     """
 
-    def __init__(self):
+    def __init__(self, env_config: Mapping[str, Any] | None = None):
         super().__init__()
+        self.verifyit_enabled = bool(env_config.get("verifyit_enabled", False)) if env_config is not None else False
 
         # Metadata
         self.turns = 0
@@ -51,6 +66,31 @@ class BaseTextEnv(Env[ConversationType, str]):
         # Tool groups
         self.tool_groups = []
         self.tool_to_toolgroup = {}
+
+    def _reward_step(
+        self, reward_function: Callable[[], float], *, done: bool, minimum_reward: float
+    ) -> BaseTextEnvStepOutput:
+        """Finalize a reward call, preserving native exceptions when verification is disabled."""
+        error_types = (RuntimeError, ImportError) if self.verifyit_enabled else ()
+        invalid_task_types = ()
+        try:
+            if self.verifyit_enabled:
+                from verifyit.grade import InvalidTask
+
+                invalid_task_types = (InvalidTask,)
+                error_types += invalid_task_types
+            reward = reward_function()
+        except error_types as error:
+            return verification_error_step(
+                str(error),
+                minimum_reward=minimum_reward,
+                diagnostics={
+                    "verifyit_status": "invalid_task"
+                    if isinstance(error, invalid_task_types)
+                    else "infrastructure_error"
+                },
+            )
+        return BaseTextEnvStepOutput(observations=[], reward=reward, done=done, metadata={})
 
     def init_tool_groups(self, tool_groups: List = []) -> None:
         """

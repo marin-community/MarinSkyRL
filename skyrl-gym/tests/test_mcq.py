@@ -1,3 +1,7 @@
+import json
+import subprocess
+import sys
+
 import pytest
 from omegaconf import OmegaConf
 
@@ -5,8 +9,11 @@ from skyrl_gym import get_data_contract
 from skyrl_gym.envs.mcq.env import MCQEnv
 
 
-def _env(ground_truth: str) -> MCQEnv:
-    return MCQEnv(OmegaConf.create(), extras={"reward_model": {"ground_truth": ground_truth}})
+def _env(ground_truth: str, *, verifyit_enabled=False) -> MCQEnv:
+    return MCQEnv(
+        OmegaConf.create({"verifyit_enabled": verifyit_enabled}),
+        extras={"reward_model": {"ground_truth": ground_truth}},
+    )
 
 
 @pytest.mark.parametrize("letter", ["D", "F", "H", "J"])
@@ -67,9 +74,45 @@ def test_env_agrees_with_the_preparation_contract(ground_truth, response):
         ("Answer: A", 0.0),
     ],
 )
-def test_env_preserves_first_box_extraction(response, expected_reward):
-    assert _env("A").step(response)["reward"] == expected_reward
+@pytest.mark.parametrize("verifyit_enabled", [False, True])
+def test_env_preserves_first_box_extraction(response, expected_reward, verifyit_enabled):
+    assert _env("A", verifyit_enabled=verifyit_enabled).step(response)["reward"] == expected_reward
 
 
 def test_env_rewards_last_alphabet_option():
     assert _env("Z").step(r"\boxed{Z}")["reward"] == 1.0
+
+
+def test_default_verifier_grading_runs_without_verifyit():
+    program = r"""
+import importlib.abc
+import json
+import sys
+class MissingVerifyit(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "verifyit" or fullname.startswith("verifyit."):
+            raise ModuleNotFoundError(fullname)
+sys.meta_path.insert(0, MissingVerifyit())
+from omegaconf import OmegaConf
+import skyrl_gym
+results = []
+for route, expected, correct, wrong in [
+    ("mcq", "H", r"\boxed{h}", r"\boxed{A}"),
+    ("aime", "42", r"Answer: \boxed{42}", r"Answer: \boxed{43}"),
+    ("gsm8k", "42", "#### 42", "#### 43"),
+]:
+    env = skyrl_gym.make(route, env_config=OmegaConf.create(), extras={"reward_model": {"ground_truth": expected}})
+    results.append([env.step(correct)["reward"], env.step(wrong)["reward"]])
+print(json.dumps(results))
+"""
+    result = subprocess.run([sys.executable, "-c", program], capture_output=True, text=True, check=True)
+    assert json.loads(result.stdout) == [[1.0, 0.0], [1.0, -1.0], [1.0, 0.0]]
+
+
+@pytest.mark.parametrize("reference", ["AB", "", None])
+@pytest.mark.parametrize("response", [r"\boxed{A}", "No answer"])
+def test_enabled_mcq_reports_invalid_reference_without_credit(reference, response):
+    result = _env(reference, verifyit_enabled=True).step(response)
+    assert result["reward"] == 0.0
+    assert result["verification"].status.value == "error"
+    assert result["verification"].diagnostics["verifyit_status"] == "invalid_task"

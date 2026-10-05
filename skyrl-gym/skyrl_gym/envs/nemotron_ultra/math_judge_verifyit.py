@@ -3,18 +3,30 @@
 from __future__ import annotations
 
 import dataclasses
+from copy import deepcopy
+from enum import StrEnum
+import hashlib
 import json
 import math
 import os
 from pathlib import Path
 import re
-import shlex
-import sys
 import tempfile
+import time
 from typing import Any
 
-from verifyit.grade import Status, run
-from verifyit.spec import JudgeSpec, MathProfile, MathSpec, ScriptSpec, render_spec
+from harbor_config.errors import ErrorCategory, error_category
+from verifyit.execution.worker import call_bounded
+from verifyit.grade import (
+    Aggregation,
+    Reward,
+    Status,
+    _validated_reward,
+    aggregate_rewards,
+    finalize_preparation_failure,
+    run,
+)
+from verifyit.spec import JudgeSpec, MathProfile, MathSpec, render_spec
 
 from skyrl_gym.envs.nemotron_ultra.answer_extraction import (
     final_answer_text,
@@ -26,6 +38,65 @@ from skyrl_gym.envs.nemotron_ultra.math_with_judge import (
     _JUDGE_SYSTEM,
     _strip_delimiters,
 )
+
+
+class MathJudgePolicy(StrEnum):
+    SOURCE = "nemotron_math_judge_source_v1"
+
+
+@dataclasses.dataclass(frozen=True)
+class MathJudgeInputs:
+    text: str
+    record: dict[str, Any]
+
+
+def structure_math_judge(text: str, record: dict[str, Any]) -> MathJudgeInputs:
+    """Retain candidate text and a detached trusted record before policy selection."""
+    return MathJudgeInputs(text, deepcopy(record))
+
+
+def prepare_math_judge(inputs: MathJudgeInputs, policy: MathJudgePolicy) -> dict[str, Any]:
+    """Apply the source final-answer, admission, reference, and question policies."""
+    if policy is not MathJudgePolicy.SOURCE:
+        raise ValueError("Unsupported math/judge preparation policy")
+    kind = reference_kind(inputs.record)
+    text = final_answer_text(inputs.text)
+    boxed = last_boxed_answer(text)
+    pure = bool(re.fullmatch(r"[\\\w\s{}()+*/^.,=+\-]+", text) and not re.search(r"\b[A-Za-z]{3,}\b", text))
+    return {
+        "policy": policy.value,
+        "raw": dataclasses.asdict(inputs),
+        "extraction": "source_final_answer_text_v1",
+        "admission": "source_last_boxed_or_pure_expression_v1",
+        "reference_policy": "declared_kind_or_source_hybrid_v1",
+        "reference_admission": "source_parse_or_balanced_typographic_symbolic_v1",
+        "additive_constant_policy": "source_question_indefinite_antiderivative_primitive_v1",
+        "symbolic_success_policy": "core_math_reward_above_half_v1",
+        "text": text,
+        "boxed": boxed,
+        "pure": pure,
+        "reference_kind": kind,
+        "allow_additive_constant": bool(
+            re.search(r"indefinite|antiderivative|primitive", inputs.record["question"], re.I)
+        ),
+    }
+
+
+def _verdict(result: Reward, **detail: Any) -> dict[str, Any]:
+    return {"schema_version": 1, **dataclasses.asdict(dataclasses.replace(result, detail={**result.detail, **detail}))}
+
+
+def _failure(status: Status, message: str) -> dict[str, Any]:
+    error_type = "InvalidTask" if status is Status.INVALID_TASK else "RuntimeError"
+    return _verdict(
+        finalize_preparation_failure(
+            status=status,
+            category=error_category(error_type),
+            error_type=error_type,
+            message=message,
+            stage="math_judge_preparation",
+        )
+    )
 
 
 def _balanced_reference_delimiters(reference: str) -> bool:
@@ -52,28 +123,19 @@ def _balanced_reference_delimiters(reference: str) -> bool:
 
 def _evaluate(data: dict[str, Any], root: Path) -> dict[str, Any]:
     record = data["record"]
-    text = final_answer_text(data["text"])
     try:
-        kind = reference_kind(record)
+        preparation = prepare_math_judge(structure_math_judge(data["text"], record), MathJudgePolicy.SOURCE)
+        kind = preparation["reference_kind"]
+        text = preparation["text"]
     except (ValueError, UnicodeError) as error:
-        return {
-            "schema_version": 1,
-            "status": "invalid_task",
-            "reward": 0.0,
-            "detail": {"reason": str(error)},
-        }
+        return _failure(Status.INVALID_TASK, str(error))
     if (
         not isinstance(record.get("expected_answer"), str)
         or not record["expected_answer"].strip()
         or not isinstance(record.get("question"), str)
         or (kind == "symbolic" and not _balanced_reference_delimiters(record["expected_answer"]))
     ):
-        return {
-            "schema_version": 1,
-            "status": "invalid_task",
-            "reward": 0.0,
-            "detail": {"reason": "Malformed math reference"},
-        }
+        return _failure(Status.INVALID_TASK, "Malformed math reference")
     from math_verify import parse
     from math_verify.parser import LatexExtractionConfig
 
@@ -88,12 +150,7 @@ def _evaluate(data: dict[str, Any], root: Path) -> dict[str, Any]:
         except Exception:
             # Normal syntax rejection is an empty/string parse. Raised failures
             # are not distinguishable from parser infrastructure errors here.
-            return {
-                "schema_version": 1,
-                "status": "infra_error",
-                "reward": 0.0,
-                "detail": {"reason": "Mathematical reference parser failed"},
-            }
+            return _failure(Status.INFRA_ERROR, "Mathematical reference parser failed")
     symbolic_reference = any(not isinstance(value, str) for value in reference_values)
     # The pinned source is a semantic-reference judge with a symbolic shortcut.
     # A parser miss in the legacy route remains subject to the actual symmetric
@@ -115,28 +172,23 @@ def _evaluate(data: dict[str, Any], root: Path) -> dict[str, Any]:
             )
             typographic_reference = any(not isinstance(value, str) for value in normalized_values)
     if not symbolic_reference and not prose_reference and not typographic_reference:
-        return {
-            "schema_version": 1,
-            "status": "invalid_task",
-            "reward": 0.0,
-            "detail": {"reason": "Unparsed mathematical reference"},
-        }
+        return _failure(Status.INVALID_TASK, "Unparsed mathematical reference")
     if not text:
-        return {
-            "schema_version": 1,
-            "status": "scored",
-            "reward": 0.0,
-            "detail": {
-                "source_feedback": {
-                    "result": "missing_final_answer",
-                    "extracted_answer": None,
-                }
-            },
-        }
+        return _verdict(
+            finalize_preparation_failure(
+                status=Status.SCORED,
+                category=ErrorCategory.AGENT,
+                error_type="MissingFinalAnswer",
+                message="Missing final answer",
+                stage="math_judge_preparation",
+            ),
+            source_feedback={"result": "missing_final_answer", "extracted_answer": None},
+            preparation=preparation,
+        )
     candidate_path = root / "answer.txt"
     spec_path = root / "verifier.toml"
-    boxed = last_boxed_answer(text)
-    pure = re.fullmatch(r"[\\\w\s{}()+*/^.,=+\-]+", text) and not re.search(r"\b[A-Za-z]{3,}\b", text)
+    boxed = preparation["boxed"]
+    pure = preparation["pure"]
     reward = 0.0
     extracted = None
     if (prose_reference or typographic_reference) and (boxed is not None or pure):
@@ -154,7 +206,7 @@ def _evaluate(data: dict[str, Any], root: Path) -> dict[str, Any]:
     if symbolic_reference and (boxed is not None or pure):
         candidate = r"\boxed{" + boxed + "}" if boxed is not None else text
         candidate_path.write_text(candidate)
-        integration = bool(re.search(r"indefinite|antiderivative|primitive", record["question"], re.I))
+        integration = preparation["allow_additive_constant"]
         spec_path.write_text(
             render_spec(
                 MathSpec(
@@ -167,33 +219,15 @@ def _evaluate(data: dict[str, Any], root: Path) -> dict[str, Any]:
         )
         result = run(spec_path, root)
         if result.status is not Status.SCORED:
-            return {
-                "schema_version": 1,
-                "status": result.status.value,
-                "reward": 0.0,
-                "detail": {
-                    "reason": "Math verifier failed",
-                    "math_verdict": dataclasses.asdict(result),
-                },
-            }
+            return _verdict(result, preparation=preparation)
         reward = result.reward
         extracted = result.detail.get("parsed_candidate")
     diagnostics = {"library_reward": reward, "extracted_answer": extracted}
     if reward > 0.5:
-        return {
-            "schema_version": 1,
-            "status": "scored",
-            "reward": reward,
-            "detail": {"source_feedback": diagnostics},
-        }
+        return _verdict(result, source_feedback=diagnostics, preparation=preparation)
     judge = data.get("judge")
     if not judge:
-        return {
-            "schema_version": 1,
-            "status": "infra_error",
-            "reward": 0.0,
-            "detail": {"reason": "General judge is required"},
-        }
+        return _failure(Status.INFRA_ERROR, "General judge is required")
     os.environ["VERIFYIT_JUDGE_BASE_URL"] = judge["base_url"]
     os.environ["VERIFYIT_JUDGE_MODEL"] = judge["model"]
     os.environ["VERIFYIT_JUDGE_API_KEY"] = os.environ.get(
@@ -201,6 +235,7 @@ def _evaluate(data: dict[str, Any], root: Path) -> dict[str, Any]:
     )
     diagnostics["judge_outputs"] = []
     template = _JUDGE_PROMPT.replace("{first}", "{reference}").replace("{second}", "{candidate}")
+    components = []
     for reference, candidate in (
         (record["expected_answer"], text),
         (text, record["expected_answer"]),
@@ -225,133 +260,89 @@ def _evaluate(data: dict[str, Any], root: Path) -> dict[str, Any]:
             )
         )
         result = run(spec_path, root)
+        components.append(result)
         if result.status is not Status.SCORED:
-            return {
-                "schema_version": 1,
-                "status": result.status.value,
-                "reward": 0.0,
-                "detail": {
-                    "reason": "Judge verifier failed",
-                    "judge_verdict": dataclasses.asdict(result),
-                },
-            }
+            break
         diagnostics["judge_outputs"].append(result.detail["completion"])
+        # Source scheduling stops on the first negative, before another provider call.
         if result.reward == 0.0:
-            return {
-                "schema_version": 1,
-                "status": "scored",
-                "reward": 0.0,
-                "detail": {"source_feedback": diagnostics},
-            }
-    return {
-        "schema_version": 1,
-        "status": "scored",
-        "reward": 1.0,
-        "detail": {"source_feedback": diagnostics},
-    }
+            break
+    return _verdict(
+        aggregate_rewards(components, policy=Aggregation.ALL, expected_total=2),
+        source_feedback=diagnostics,
+        preparation=preparation,
+        judge_verdicts=[dataclasses.asdict(component) for component in components],
+    )
+
+
+def _evaluate_bounded(data: dict, directory: str) -> Reward:
+    try:
+        verdict = _evaluate(data, Path(directory))
+    except Exception as error:
+        verdict = _failure(Status.INFRA_ERROR, type(error).__name__)
+    verdict["detail"].setdefault(
+        "preparation", {"policy": MathJudgePolicy.SOURCE.value, "raw": {"text": data["text"], "record": data["record"]}}
+    )
+    return Reward(verdict["reward"], Status(verdict["status"]), verdict["detail"])
 
 
 def grade_math_verifyit(
     text: str, record: dict[str, Any], *, judge, timeout_seconds: float = 60.0
 ) -> tuple[float, dict[str, Any]]:
+    started = time.monotonic()
     if (
         isinstance(timeout_seconds, bool)
         or not isinstance(timeout_seconds, (int, float))
         or not 0 < timeout_seconds <= 3600
         or not math.isfinite(timeout_seconds)
     ):
-        return 0.0, {
-            "error_type": "schema_error",
-            "error_message": "Invalid total verifier deadline",
-        }
-    with tempfile.TemporaryDirectory(prefix="skyrl-math-judge-") as directory:
-        root = Path(directory)
-        payload = root / "input.json"
-        try:
-            payload.write_text(
-                json.dumps(
-                    {
-                        "text": text,
-                        "record": record,
-                        "judge": dataclasses.asdict(judge) if judge else None,
-                    },
-                    allow_nan=False,
-                )
-            )
-        except (TypeError, ValueError):
-            return 0.0, {
-                "error_type": "schema_error",
-                "error_message": "Invalid math verifier reference/configuration",
-            }
-        checker = root / "check.sh"
-        checker.write_text(
-            "set -eu\nexec "
-            + shlex.quote(sys.executable)
-            + " "
-            + "-m skyrl_gym.envs.nemotron_ultra.math_judge_verifyit"
-            + " --check "
-            + shlex.quote(str(payload))
-            + "\n"
-        )
-        spec_path = root / "outer.toml"
-        spec_path.write_text(
-            render_spec(
-                ScriptSpec(
-                    path=checker.name,
-                    timeout=float(timeout_seconds),
-                    verdict_file="math-judge-verdict.json",
-                )
-            )
-        )
-        result = run(spec_path, root)
-        if result.status is not Status.SCORED:
-            return 0.0, {
-                "error_type": ("schema_error" if result.status is Status.INVALID_TASK else "verification_error"),
-                "error_message": "Math/judge verification failed",
-                "verifyit_verdict": dataclasses.asdict(result),
-            }
-        return result.reward, result.detail["source_feedback"]
-
-
-def _main() -> None:
-    data = json.loads(Path(sys.argv[2]).read_text())
-    calls = []
-    active = {}
-
-    def observe(frame, event, arg):
-        if frame.f_code.co_name != "grade" or not frame.f_code.co_filename.endswith(
-            ("/verifyit/modes/grade_math.py", "/verifyit/modes/grade_judge.py")
-        ):
-            return
-        if event == "call":
-            item = {
-                "path": frame.f_code.co_filename,
-                "spec": dataclasses.asdict(frame.f_locals["spec"]),
-                "candidate": Path(frame.f_locals["spec"].output).read_text(),
-            }
-            calls.append(item)
-            active[id(frame)] = item
-        elif event == "return" and id(frame) in active:
-            active.pop(id(frame))["verdict"] = dataclasses.asdict(arg) if arg else None
-
-    sys.setprofile(observe)
-    directory = Path(sys.argv[2]).parent / "inner"
-    directory.mkdir()
+        return 0.0, {"error_type": "schema_error", "error_message": "Invalid total verifier deadline"}
     try:
-        verdict = _evaluate(data, directory)
+        payload = json.dumps(
+            {"text": text, "record": record, "judge": dataclasses.asdict(judge) if judge else None}, allow_nan=False
+        )
+    except (TypeError, ValueError):
+        return 0.0, {"error_type": "schema_error", "error_message": "Invalid math verifier reference/configuration"}
+    try:
+        data = json.loads(payload)
+        with tempfile.TemporaryDirectory(prefix="skyrl-math-judge-") as directory:
+            remaining = timeout_seconds - (time.monotonic() - started)
+            result = _validated_reward(call_bounded(_evaluate_bounded, data, directory, timeout=remaining))
     except Exception as error:
-        verdict = {
-            "schema_version": 1,
-            "status": "infra_error",
-            "reward": 0.0,
-            "detail": {"reason": type(error).__name__},
+        result = Reward(0, Status.INFRA_ERROR, {"error": type(error).__name__})
+    try:
+        if result.status is Status.SCORED:
+            feedback = dict(result.detail["source_feedback"])
+            if "judge_outputs" in feedback:
+                feedback["judge_outputs"] = [
+                    component["detail"]["verdict"] for component in result.detail["judge_verdicts"]
+                ]
+        if time.monotonic() - started >= timeout_seconds:
+            raise TimeoutError("Math/judge verification exceeded its deadline")
+    except (KeyError, TypeError, ValueError, TimeoutError) as error:
+        result = Reward(0, Status.INFRA_ERROR, {"error": type(error).__name__})
+    # Full primitive inputs stay in the transport receipt, never agent-visible metadata.
+    preparation = result.detail.get("preparation", {})
+    public_preparation = {key: value for key, value in preparation.items() if key != "raw"}
+    public_preparation["raw_sha256"] = hashlib.sha256(payload.encode()).hexdigest()
+    public_verdict = {
+        "reward": result.reward,
+        "status": result.status.value,
+        "detail": {key: result.detail[key] for key in ("passed", "total", "missing") if key in result.detail},
+    }
+    public_detail = (
+        {**feedback, "verifyit_verdict": public_verdict, "preparation": public_preparation}
+        if result.status is Status.SCORED
+        else {}
+    )
+    if time.monotonic() - started >= timeout_seconds:
+        result = Reward(0, Status.INFRA_ERROR, {})
+        public_verdict = {"reward": 0.0, "status": Status.INFRA_ERROR.value, "detail": {}}
+    if result.status is not Status.SCORED:
+        return 0.0, {
+            "error_type": ("schema_error" if result.status is Status.INVALID_TASK else "verification_error"),
+            "error_message": "Math/judge verification failed",
+            "verifyit_verdict": public_verdict,
+            "preparation": public_preparation,
         }
-    finally:
-        sys.setprofile(None)
-    verdict["detail"]["primitive_calls"] = calls
-    destination = Path(os.environ["VERIFYIT_LOGS_DIR"]) / "math-judge-verdict.json"
-    destination.write_text(json.dumps(verdict, allow_nan=False))
-
-
-if __name__ == "__main__":
-    _main()
+    return result.reward, public_detail

@@ -14,7 +14,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 
 dependencies = [
-    "verifyit[answer,schema,reasoning-gym,judge] @ git+https://github.com/marin-community/verifyit@a04f28fd8c00879f949031e58ce9fbe5f4d5da6e",
+    "verifyit[answer,schema,reasoning-gym,judge] @ git+https://github.com/marin-community/verifyit@5cc623fa8bdd229421a12e1b3745320a492ad704",
     "func_timeout",
     "loguru",
     "numpy",
@@ -30,6 +30,9 @@ dependencies = [
 
 [project.urls]
 Repository = "https://github.com/NovaSky-AI/SkyRL"
+
+[tool.setuptools.package-data]
+"skyrl_gym.envs.nemotron_ultra" = ["abstention_prompt.txt", "jailbreak_verifiers.yaml"]
 
 [tool.setuptools.packages.find]
 include = ["skyrl_gym*"]

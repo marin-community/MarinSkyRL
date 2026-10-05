@@ -12,10 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from verifyit.grade import InvalidTask, Status
-from verifyit.adapters.skyrl import grade_gsm8k_final_line, grade_gsm8k_extracted
+from decimal import Decimal, InvalidOperation
 
 import re
+
+COMPLETED_STOP_REASONS = frozenset({"stop", "complete", "eos", "end_turn"})
 
 FINAL_ANSWER = re.compile(r"#### (-?(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)(?:\.[0-9]+)?)")
 
@@ -50,7 +51,7 @@ def extract_solution(solution_str, method="strict"):
     return final_answer
 
 
-def compute_score(solution_str, ground_truth, method="strict", format_score=0.0, score=1.0):
+def compute_score(solution_str, ground_truth, method="strict", format_score=0.0, score=1.0, *, verifyit_enabled=False):
     """The scoring function for GSM8k.
 
     Reference: Trung, Luong, et al. "Reft: Reasoning with reinforced fine-tuning." Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers). 2024.
@@ -63,21 +64,31 @@ def compute_score(solution_str, ground_truth, method="strict", format_score=0.0,
         format_score: the score for the format
         score: the score for the correct answer
     """
-    if method == "final_line":
-        try:
-            verdict = grade_gsm8k_final_line(ground_truth, solution_str)
-        except InvalidTask:
+    if not verifyit_enabled:
+        if not isinstance(ground_truth, str):
             return 0
-        if verdict.status != Status.SCORED or verdict.detail.get("reason") == "missing_final_answer":
+        answer = extract_solution(solution_str=solution_str, method=method)
+        if answer is None:
             return 0
-        return score if verdict.reward == 1.0 else format_score
-    answer = extract_solution(solution_str=solution_str, method=method)
-    if answer is None:
-        return 0
-    try:
-        verdict = grade_gsm8k_extracted(ground_truth, answer)
-    except InvalidTask:
-        return 0
-    if verdict.status != Status.SCORED:
+        if method == "final_line":
+            try:
+                return score if Decimal(answer) == Decimal(ground_truth) else format_score
+            except InvalidOperation:
+                return 0
+        return score if answer == ground_truth else format_score
+    from verifyit.grade import InvalidTask, Status
+    from skyrl_gym.envs.math_verifyit import MathPolicy, grade_math_response
+
+    policy = {
+        "strict": MathPolicy.GSM_STRICT,
+        "flexible": MathPolicy.GSM_FLEXIBLE,
+        "final_line": MathPolicy.GSM_FINAL_LINE,
+    }.get(method, method)
+    verdict = grade_math_response(solution_str, ground_truth, policy=policy)
+    if verdict.status is Status.INVALID_TASK:
+        raise InvalidTask(verdict.detail["error"])
+    if verdict.status is not Status.SCORED:
+        raise RuntimeError(verdict.detail["error"])
+    if verdict.detail["prediction"] is None:
         return 0
     return score if verdict.reward else format_score

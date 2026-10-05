@@ -1,7 +1,7 @@
-from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
+from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput, verification_error_step
 from skyrl_gym.envs.aime.verifier import AIMERewardPolicy, AIMEVerifier
 from skyrl_gym.metrics import default_aggregate_metrics
-from skyrl_gym.verification import RolloutEvidence
+from skyrl_gym.verification import RolloutEvidence, VerificationStatus
 from typing import Dict, Any
 from omegaconf import DictConfig
 
@@ -18,7 +18,7 @@ class AIMEEnv(BaseTextEnv):
     """
 
     def __init__(self, env_config: DictConfig, extras: Dict[str, Any] = {}):
-        super().__init__()
+        super().__init__(env_config)
 
         assert "reward_model" in extras, "reward_model field is required"
         assert "ground_truth" in extras["reward_model"], "ground_truth is required in reward_model field"
@@ -30,6 +30,8 @@ class AIMEEnv(BaseTextEnv):
             ground_truth=self.ground_truth,
             evaluation_token_budget=int(env_config.get("evaluation_token_budget", 8192)),
             strict_box_verify=bool(env_config.get("strict_box_verify", False)),
+            verifyit_enabled=self.verifyit_enabled,
+            verifyit_timeout=env_config.get("verifyit_timeout", 10.0),
         )
         self.reward_policy = AIMERewardPolicy(
             length_penalty_weight=float(env_config.get("length_penalty_weight", 0.0)),
@@ -47,7 +49,23 @@ class AIMEEnv(BaseTextEnv):
         done = True  # always done after one step
 
         evidence = self._evidence or RolloutEvidence(response=action)
-        verification = self.verifier.verify(evidence)
+        if self.verifier.verifyit_enabled:
+            try:
+                verification = self.verifier.verify(evidence)
+            except Exception as error:
+                return verification_error_step(
+                    str(error),
+                    minimum_reward=-1.0,
+                    diagnostics={"verifyit_status": "infra_error", "error_type": type(error).__name__},
+                )
+        else:
+            verification = self.verifier.verify(evidence)
+        if verification.status is VerificationStatus.ERROR:
+            return verification_error_step(
+                verification.reason or "Math verification failed",
+                minimum_reward=-1.0,
+                diagnostics=dict(verification.diagnostics),
+            )
         reward_result, reward_diagnostics = self.reward_policy.evaluate(evidence, verification)
         metadata = {
             "acc": verification.passed is True,

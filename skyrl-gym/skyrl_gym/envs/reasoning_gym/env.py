@@ -18,12 +18,11 @@ class ReasoningGymEnv(BaseTextEnv):
     """Score one generated task with its task-native verifier."""
 
     def __init__(self, env_config: DictConfig, extras: dict[str, Any] | None = None):
-        super().__init__()
-        self.verifyit_enabled = bool(env_config.get("verifyit_enabled", False))
+        super().__init__(env_config)
         reward_model = (extras or {}).get("reward_model")
         ground_truth = reward_model.get("ground_truth") if isinstance(reward_model, Mapping) else None
         try:
-            self.ground_truth = normalize_ground_truth(ground_truth)
+            self.ground_truth = normalize_ground_truth(ground_truth, verifyit_enabled=self.verifyit_enabled)
         except (TypeError, ValueError):
             logger.exception("reasoning_gym: invalid reward_model.ground_truth=%r; scoring 0.", ground_truth)
             self.ground_truth = None

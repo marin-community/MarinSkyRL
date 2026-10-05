@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import skyrl_gym
 import pytest
 from omegaconf import DictConfig
@@ -31,10 +33,11 @@ from skyrl_gym.verification import RewardResult, RolloutEvidence, VerificationSt
         ("Answer: \\boxed{42}|eot_id|>", "42", -1.0),
     ],
 )
-def test_compute_score(output, ground_truth, expected):
+@pytest.mark.parametrize("verifyit_enabled", [False, True])
+def test_compute_score(output, ground_truth, expected, verifyit_enabled):
     env = skyrl_gym.make(
         "aime",
-        env_config=DictConfig({"env_class": "aime"}),
+        env_config=DictConfig({"env_class": "aime", "verifyit_enabled": verifyit_enabled}),
         extras={"reward_model": {"method": "rule", "ground_truth": ground_truth}},
     )
     step_output = env.step(output)
@@ -135,3 +138,24 @@ def test_aime_reward_policy_uses_generation_budget_from_evidence():
     assert step_output["verification"].score == 1.0
     assert step_output["reward"] == pytest.approx(0.5)
     assert step_output["reward_result"].components["length"] == pytest.approx(-0.5)
+
+
+@pytest.mark.parametrize("reference", ["", "nan", r"\frac{1}{0}"])
+@pytest.mark.parametrize("response", ["No answer", r"Answer: \boxed{42}"])
+def test_enabled_aime_reports_invalid_task_before_candidate(reference, response):
+    env = AIMEEnv(DictConfig({"verifyit_enabled": True}), extras={"reward_model": {"ground_truth": reference}})
+    result = env.step(response)
+    assert result["reward"] == -1.0
+    assert result["verification"].status is VerificationStatus.ERROR
+    assert result["verification"].diagnostics["verifyit_status"] == "invalid_task"
+
+
+def test_enabled_aime_worker_failure_cannot_reuse_previous_credit():
+    env = AIMEEnv(DictConfig({"verifyit_enabled": True}), extras={"reward_model": {"ground_truth": "42"}})
+    assert env.step(r"Answer: \boxed{42}")["reward"] == 1.0
+
+    env.verifier = replace(env.verifier, verifyit_timeout=0.000001)
+    result = env.step(r"Answer: \boxed{42}")
+    assert result["reward"] == -1.0
+    assert result["verification"].status is VerificationStatus.ERROR
+    assert result["verification"].diagnostics["verifyit_status"] == "infra_error"

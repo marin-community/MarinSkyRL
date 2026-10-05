@@ -11,6 +11,7 @@ import asyncio
 import copy
 import json
 import requests
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from uuid import uuid4
@@ -965,6 +966,59 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
         )
 
     async def _apply_genrm_cohort_rewards(
+        self, outputs: list[AgentLoopOutput], input_batch: TrajectoryRequestBatch
+    ) -> None:
+        if not self.genrm_config.get("verifyit_enabled", False):
+            await self._apply_genrm_cohort_rewards_impl(outputs, input_batch)
+            return
+        from verifyit.grade import InvalidTask
+
+        try:
+            await self._apply_genrm_cohort_rewards_impl(outputs, input_batch)
+        except (
+            InvalidTask,
+            RuntimeError,
+            ValueError,
+            TypeError,
+            KeyError,
+            IndexError,
+            requests.RequestException,
+        ) as error:
+            failure = getattr(error, "failure", None)
+            extras = input_batch.get("env_extras") or []
+            for index, output in enumerate(outputs):
+                extra = extras[index] if index < len(extras) else {}
+                info = extra.get("extra_info") if isinstance(extra, dict) else None
+                ultra = info.get("nemotron_ultra") if isinstance(info, dict) else None
+                if not isinstance(ultra, dict) or ultra.get("agent") not in {
+                    "genrm_simple_agent",
+                    "genrm_simple_agent_reasoning_off",
+                }:
+                    continue
+                output.verification = VerificationResult.error(
+                    "Invalid GenRM comparison cohort",
+                    diagnostics={
+                        "error_type": type(error).__name__,
+                        "error_message": str(error),
+                        "invalid_task": isinstance(error, InvalidTask),
+                        **(
+                            {
+                                "verifyit_status": failure.status.value,
+                                "error_category": failure.category.value,
+                                "preparation_stage": failure.stage,
+                            }
+                            if failure is not None
+                            else {
+                                "verifyit_status": "invalid_task" if isinstance(error, InvalidTask) else "infra_error"
+                            }
+                        ),
+                    },
+                )
+                output.reward = RewardResult(unshaped_reward=None, optimization_reward=0.0)
+                output.disposition = TrainingDisposition.mask("Invalid GenRM comparison cohort")
+                output.env_metrics["genrm/comparison_failure"] = 1.0
+
+    async def _apply_genrm_cohort_rewards_impl(
         self,
         outputs: list[AgentLoopOutput],
         input_batch: TrajectoryRequestBatch,
@@ -1005,60 +1059,128 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
             groups.setdefault(trajectory_ids[index].instance_id, []).append(index)
         expected_size = int(self.genrm_config.get("num_rollouts_per_prompt", 16))
         for indices in groups.values():
+            cohort_started = time.monotonic()
+            enabled = self.genrm_config.get("verifyit_enabled", False)
             if len(indices) != expected_size:
                 raise ValueError(
                     f"GenRM cohort requires {expected_size} rollouts for a prompt, received {len(indices)}"
                 )
+            cohort_evidence = (
+                {
+                    "peers": [
+                        {
+                            "id": trajectory_ids[index].to_string(),
+                            "loss_eligible": outputs[index].disposition.loss_eligible,
+                            "verification_status": outputs[index].verification.status.value,
+                            "messages": outputs[index].evidence.messages,
+                            "response": outputs[index].evidence.response,
+                        }
+                        for index in indices
+                    ],
+                }
+                if enabled
+                else None
+            )
+            full_indices = list(indices)
             indices = [
                 index
                 for index in indices
                 if outputs[index].disposition.loss_eligible
                 and outputs[index].verification.status is VerificationStatus.VERIFIED
             ]
+            if self.genrm_config.get("verifyit_enabled", False):
+                from verifyit.grade import InvalidTask
+
+                policy = self.genrm_config.get("verifyit_peer_policy", "source_valid_peers_v1")
+                if policy not in {"source_valid_peers_v1", "require_all_peers_v1"}:
+                    raise InvalidTask("GenRM peer policy is unsupported")
+                if policy == "require_all_peers_v1" and indices != full_indices:
+                    raise InvalidTask("GenRM peer policy requires the complete cohort")
+            if cohort_evidence is not None:
+                cohort_evidence["effective_ids"] = [trajectory_ids[index].to_string() for index in indices]
             if len(indices) < 2:
                 for index in indices:
                     outputs[index].verification = VerificationResult.unavailable("Insufficient valid GenRM peers")
                     outputs[index].reward = RewardResult(unshaped_reward=None, optimization_reward=0.0)
                     outputs[index].disposition = TrainingDisposition.mask("Insufficient valid GenRM peers")
                 continue
-            histories = [input_batch["prompts"][index] for index in indices]
-            if any(history != histories[0] for history in histories):
-                raise ValueError("GenRM cohort rows must share the same conversation")
-            records = [json.loads((ultra_at(index) or {})["record_json"]) for index in indices]
-            if not all(isinstance(record, dict) for record in records):
-                raise TypeError("GenRM record_json must decode to an object")
-            principles = {record.get("principle") for record in records}
-            if len(principles) != 1 or None in principles:
-                raise ValueError("GenRM cohort rows must agree on a non-empty principle")
+            try:
+                histories = [input_batch["prompts"][index] for index in indices]
+                if any(history != histories[0] for history in histories):
+                    raise ValueError("GenRM cohort rows must share the same conversation")
+                records = [json.loads((ultra_at(index) or {})["record_json"]) for index in indices]
+                if not all(isinstance(record, dict) for record in records):
+                    raise TypeError("GenRM record_json must decode to an object")
+                principles = {record.get("principle") for record in records}
+                if len(principles) != 1 or None in principles:
+                    raise ValueError("GenRM cohort rows must agree on a non-empty principle")
+            except (ValueError, TypeError, KeyError) as error:
+                if not self.genrm_config.get("verifyit_enabled", False):
+                    raise
+                from verifyit.grade import InvalidTask
+
+                raise InvalidTask(f"Invalid GenRM trusted cohort: {error}") from error
             response_objects = []
+            raw_assistants = []
             for index in indices:
                 messages = outputs[index].evidence.messages
                 assistant_message = next(
                     (dict(message) for message in reversed(messages) if message.get("role") == "assistant"),
                     {},
                 )
+                if enabled:
+                    raw_assistants.append(dict(assistant_message))
                 assistant_message["content"] = outputs[index].evidence.response or ""
                 response_objects.append(response_object(assistant_message))
             try:
-                rewards, metrics = await asyncio.to_thread(
-                    grade_genrm_group,
+                grade_cohort = grade_genrm_group
+                preparation_args = {}
+                if self.genrm_config.get("verifyit_enabled", False):
+                    from skyrl_gym.envs.nemotron_ultra.genrm_verifyit import grade_genrm_cohort
+
+                    grade_cohort = grade_genrm_cohort
+                    preparation_args = {
+                        "raw_assistants": raw_assistants,
+                        "cohort_evidence": cohort_evidence,
+                        "started_at": cohort_started,
+                    }
+                cohort_result = await asyncio.to_thread(
+                    grade_cohort,
                     conversation_history=input_batch["prompts"][indices[0]],
                     response_objects=response_objects,
                     principle=next(iter(principles)),
                     judge=self.genrm_judge,
                     config=self.genrm_config,
+                    **preparation_args,
                 )
+                if self.genrm_config.get("verifyit_enabled", False):
+                    rewards, metrics = cohort_result.rewards, cohort_result.metrics
+                else:
+                    rewards, metrics = cohort_result
             except (RuntimeError, ValueError, requests.RequestException) as error:
+                failure = getattr(error, "failure", None)
                 for index in indices:
                     outputs[index].verification = VerificationResult.error(
                         "GenRM comparisons failed",
-                        diagnostics={"error_type": type(error).__name__, "error_message": str(error)},
+                        diagnostics={
+                            "error_type": type(error).__name__,
+                            "error_message": str(error),
+                            **(
+                                {
+                                    "verifyit_status": failure.status.value,
+                                    "error_category": failure.category.value,
+                                    "preparation_stage": failure.stage,
+                                }
+                                if failure is not None
+                                else {}
+                            ),
+                        },
                     )
                     outputs[index].reward = RewardResult(unshaped_reward=None, optimization_reward=0.0)
                     outputs[index].disposition = TrainingDisposition.mask("GenRM comparisons failed")
                     outputs[index].env_metrics["genrm/comparison_failure"] = 1.0
                 continue
-            for index, reward in zip(indices, rewards, strict=True):
+            for cohort_index, (index, reward) in enumerate(zip(indices, rewards, strict=True)):
                 old_token_rewards = outputs[index].reward.token_rewards
                 token_rewards = None
                 if old_token_rewards is not None:
@@ -1072,11 +1194,17 @@ class SkyRLGymTrajectoryRunner(TrajectoryRunner):
                     optimization_reward=reward,
                     token_rewards=token_rewards,
                 )
+                enabled = bool(self.genrm_config.get("verifyit_enabled", False))
+                verification_reward = metrics[f"verification_reward_{cohort_index}"] if enabled else reward
                 outputs[index].verification = VerificationResult.verified(
-                    reward,
-                    diagnostics={"agent": (ultra_at(index) or {})["agent"], "genrm_metrics": metrics},
-                    score_min=1.0,
-                    score_max=5.0,
+                    verification_reward,
+                    diagnostics={
+                        "agent": (ultra_at(index) or {})["agent"],
+                        "genrm_metrics": metrics,
+                        **({"preparation": cohort_result.preparation} if enabled else {}),
+                    },
+                    score_min=0.0 if enabled else 1.0,
+                    score_max=1.0 if enabled else 5.0,
                 )
                 outputs[index].env_metrics.update({f"genrm/{name}": value for name, value in metrics.items()})
 
