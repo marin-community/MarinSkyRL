@@ -97,6 +97,42 @@ class RolloutBatchMetadata:
     batch_id: int
     groups: tuple[AdmittedRollout, ...]
     metrics: dict[str, float]
+    moe_router_replay: bool = False
+    num_experts: int | None = None
+
+
+@dataclass(frozen=True)
+class RolloutReader:
+    """Read selected rollout payloads with their admitted identity and size checks."""
+
+    buffer: ActorHandle
+    payloads: PayloadStore
+    selected: tuple[AdmittedRollout, ...]
+    stall_timeout: float
+
+    async def read(self, batch_id: int, indices: tuple[int, ...]) -> list[RolloutGroup]:
+        by_index = {group.index: group for group in self.selected}
+        selected = tuple(by_index[index] for index in indices)
+        try:
+            async with asyncio.timeout(self.stall_timeout):
+                refs = await self.buffer.payload_refs.remote(batch_id, indices)
+                groups = await self.payloads.fetch(refs)
+        except TimeoutError as error:
+            raise GroupAdmissionStalledError(
+                f"{len(selected)} selected rollout payloads did not arrive within "
+                f"{self.stall_timeout:.0f}s: batch_id={batch_id} indices={list(indices)}"
+            ) from error
+        if len(groups) != len(selected):
+            raise ValueError("payload store returned the wrong number of selected rollout groups")
+        for expected, group in zip(selected, groups, strict=True):
+            if group.uid != expected.uid or group.policy_step != expected.policy_step:
+                raise ValueError(f"selected rollout payload does not match batch metadata for {expected.uid}")
+            work = GeneratedWork.from_batch(
+                group.trajectory_batch["response_ids"], group.trajectory_batch.get("is_last_step")
+            )
+            if work.sample_count != expected.sample_count or work.generated_token_count != expected.response_tokens:
+                raise ValueError(f"selected rollout payload size does not match batch metadata for {expected.uid}")
+        return groups
 
 
 def prompt_order_from_config(config: DictConfig, dataset: PromptGroupDataset) -> PromptOrder:
@@ -258,28 +294,8 @@ class TrainingContext:
     async def _fetch_groups(
         self, batch_id: int, selected: tuple[AdmittedRollout, ...], *, stall_timeout: float
     ) -> list[RolloutGroup]:
-        try:
-            async with asyncio.timeout(stall_timeout):
-                refs = await self._until_failure(
-                    self._buffer.payload_refs.remote(batch_id, tuple(group.index for group in selected))
-                )
-                groups = await self._until_failure(self._payloads.fetch(refs))
-        except TimeoutError as error:
-            raise GroupAdmissionStalledError(
-                f"{len(selected)} selected rollout payloads did not arrive within "
-                f"{stall_timeout:.0f}s: batch_id={batch_id} indices={[group.index for group in selected]}"
-            ) from error
-        if len(groups) != len(selected):
-            raise ValueError("payload store returned the wrong number of selected rollout groups")
-        for expected, group in zip(selected, groups, strict=True):
-            if group.uid != expected.uid or group.policy_step != expected.policy_step:
-                raise ValueError(f"selected rollout payload does not match batch metadata for {expected.uid}")
-            work = GeneratedWork.from_batch(
-                group.trajectory_batch["response_ids"], group.trajectory_batch.get("is_last_step")
-            )
-            if work.sample_count != expected.sample_count or work.generated_token_count != expected.response_tokens:
-                raise ValueError(f"selected rollout payload size does not match batch metadata for {expected.uid}")
-        return groups
+        reader = RolloutReader(self._buffer, self._payloads, selected, stall_timeout)
+        return await self._until_failure(reader.read(batch_id, tuple(group.index for group in selected)))
 
     async def next_batch_metadata(
         self,

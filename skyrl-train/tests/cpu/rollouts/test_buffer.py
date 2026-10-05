@@ -1,18 +1,27 @@
 """Lease accounting and batch selection of the rollout buffer, exercised in-process without Ray."""
 
 import asyncio
+import pickle
 
+import numpy as np
 import pytest
 from skyrl_gym.verification import VerificationResult
 
-from skyrl_train.dynamic_sampling import DynamicSamplingType, GroupSelectionResult
-from skyrl_train.group_admission import AdmissionRejection, GroupAdmissionStalledError
+from skyrl_train.dynamic_sampling import DynamicSamplingType, GroupSelectionPolicy, GroupSelectionResult
+from skyrl_train.group_admission import (
+    AdmissionRejection,
+    GroupAdmissionPolicy,
+    GroupAdmissionStalledError,
+    GroupAdvantageInvariant,
+)
 from skyrl_train.rollouts.buffer import (
     BatchPolicy,
     GroupRewards,
     PayloadReference,
     RolloutBuffer,
     RolloutBufferConfig,
+    RolloutContentPolicy,
+    RolloutGroup,
     RolloutVerdict,
 )
 from skyrl_train.rollouts.loader import JudgedGroup
@@ -284,22 +293,58 @@ async def test_admission_without_progress_raises_a_stall_error(batch_policy):
     ],
 )
 @pytest.mark.asyncio
-async def test_snapshot_restores_untaken_groups_and_reports_outstanding_leases(batch_policy, first_batch):
+@pytest.mark.parametrize("verdict_format", ["current", "without_row_facts"])
+async def test_snapshot_restores_untaken_groups_and_reports_outstanding_leases(
+    batch_policy, first_batch, verdict_format
+):
     buffer = _buffer(batch_policy, batch_size=2)
     await buffer.publish(1)
     outstanding = await asyncio.wait_for(buffer.acquire_lease(), PROGRESS_TIMEOUT)
-    await _generate(buffer, "admitted")
-    await buffer.admit(PROGRESS_TIMEOUT)
-    await _generate(buffer, "extra")
+    content_policy = RolloutContentPolicy(
+        GroupAdmissionPolicy(
+            GroupAdvantageInvariant.exact_physical(physical_group_size=2), rollout_logprobs_required=False
+        ),
+        GroupSelectionPolicy(None),
+    )
+    for uid in ("admitted", "extra"):
+        lease = await buffer.acquire_lease()
+        group = RolloutGroup(
+            {
+                "prompt_token_ids": [[1], [1, 2]],
+                "response_ids": [[], [2, 3]],
+                "loss_masks": [[], [1, 1]],
+                "rewards": [9.0, 1.25],
+            },
+            uid,
+            lease.policy_step,
+            {"uid": uid},
+        )
+        await buffer.commit(lease.lease_id, group.prompt, content_policy.verdict(group), PayloadReference(uid))
+        if uid == "admitted":
+            await buffer.admit(PROGRESS_TIMEOUT)
 
     snapshot = buffer.snapshot()
     assert snapshot.leases == {outstanding.lease_id}
+    if verdict_format == "without_row_facts":
+        for rollout in snapshot.ready:
+            object.__delattr__(rollout.verdict, "row_facts")
+    snapshot = pickle.loads(pickle.dumps(snapshot))
 
     restored = _buffer(batch_policy, batch_size=2)
     await restored.restore(snapshot)
     await restored.publish(1)
     await _generate(restored, "regenerated")
-    assert (await _take_batch(restored))[0] == first_batch
+    admission = await restored.admit(PROGRESS_TIMEOUT)
+    assert admission.selection is not None
+    assert restored.payload_refs(admission.batch_id, [group.index for group in admission.admitted]) == first_batch
+    admitted = next(group for group in admission.admitted if group.uid == "admitted")
+    if verdict_format == "without_row_facts":
+        assert admitted.row_facts is None
+    else:
+        np.testing.assert_array_equal(admitted.row_facts.prompt_len, [1, 2])
+        np.testing.assert_array_equal(admitted.row_facts.response_len, [0, 2])
+        np.testing.assert_array_equal(admitted.row_facts.score, np.asarray([0.0, 1.25], dtype=np.float32))
+        np.testing.assert_array_equal(admitted.row_facts.loss_tokens, [0, 2])
 
 
 @pytest.mark.parametrize(
