@@ -9,7 +9,7 @@ from s3fs import S3FileSystem
 import torch
 
 from cloud.iris.hf_model_cache import stage_model_metadata
-from marinskyrl.model_manifest import snapshot_model_manifest
+from marinskyrl.model_manifest import _HEADER_READ_CHUNK_BYTES, snapshot_model_manifest
 from skyrl_train.io import io
 import skyrl_train.io.remote_safetensors as remote_safetensors
 from skyrl_train.io.remote_safetensors import (
@@ -67,7 +67,9 @@ def _write_index(metadata_dir: Path, weight_map: dict[str, str]) -> None:
     (metadata_dir / "model.safetensors.index.json").write_text(json.dumps({"weight_map": weight_map}))
 
 
-@pytest.mark.parametrize("header_metadata_bytes", [0, 9 * 1024**2], ids=["small-header", "multi-read-header"])
+@pytest.mark.parametrize(
+    "header_metadata_bytes", [0, _HEADER_READ_CHUNK_BYTES + 1024**2], ids=["small-header", "multi-read-header"]
+)
 def test_conversion_task_prefetch_preserves_rank_owned_tensors_and_reduces_range_fetches(
     tmp_path, monkeypatch, header_metadata_bytes
 ):
@@ -162,14 +164,23 @@ def test_prefetch_large_tensors_split_ranges_and_keep_windows_bounded(tmp_path, 
 @pytest.mark.parametrize("failure", [False, True], ids=["fallback", "range-error"])
 def test_prefetch_unplanned_key_reads_through_and_range_errors_propagate(tmp_path, monkeypatch, failure):
     shard = tmp_path / "model.safetensors"
-    tensors = {"planned": torch.arange(8, dtype=torch.float32), "outside": torch.arange(8, dtype=torch.float32) + 10}
+    tensors = {
+        "planned": torch.arange(8, dtype=torch.float32),
+        "outside": torch.arange(8, dtype=torch.float32) + 10,
+        "oversized": torch.arange(16, dtype=torch.float32),
+        "later": torch.arange(8, dtype=torch.float32) + 20,
+    }
     save_file(tensors, shard)
     metadata = tmp_path / "metadata"
     _write_index(metadata, {key: shard.name for key in tensors})
     filesystem = CountingFileSystem(shard.read_bytes())
     monkeypatch.setattr(io, "_get_filesystem", lambda path: filesystem)
+    payload_budget = tensors["planned"].numel() * tensors["planned"].element_size()
+    monkeypatch.setattr(
+        remote_safetensors, "_PREFETCH_WINDOW_BYTES", remote_safetensors._PREFETCH_MAX_GAP + payload_budget
+    )
     store = RemoteSafetensorsTensorStore("s3://bucket/policy", metadata)
-    store.plan_prefetch([("planned", None)])
+    store.plan_prefetch([("planned", None), ("oversized", None), ("later", None)])
     try:
         if failure:
             monkeypatch.setattr(
@@ -180,9 +191,13 @@ def test_prefetch_unplanned_key_reads_through_and_range_errors_propagate(tmp_pat
         else:
             assert torch.equal(store.load_tensors(["outside"])["outside"], tensors["outside"])
             assert torch.equal(store.load_tensors(["planned"])["planned"], tensors["planned"])
-            assert store.read_stats.prefetch_misses == 1
+            assert torch.equal(store.load_tensors(["oversized"])["oversized"], tensors["oversized"])
+            assert torch.equal(store.load_tensors(["later"])["later"], tensors["later"])
+            assert store.read_stats.prefetch_misses == 2
     finally:
         store.close()
+    if not failure:
+        assert store.read_stats.prefetch_unused == 0
 
 
 @pytest.mark.parametrize("indexed", [True, False])

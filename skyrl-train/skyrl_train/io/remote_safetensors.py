@@ -41,6 +41,7 @@ _TORCH_DTYPES = {
 _PREFETCH_WINDOW_BYTES = 1024**3
 _PREFETCH_MAX_BLOCK = 64 * 1024**2
 _PREFETCH_MAX_GAP = 1024**2
+_PREFETCH_BATCH_SIZE = 16
 
 
 def prefetch_items_from_tasks(
@@ -73,7 +74,7 @@ def _safe_relative_path(value: str) -> str:
 
 @dataclass(frozen=True)
 class ReadStats:
-    """Count shard opens and logical header or tensor reads with their bytes and elapsed time."""
+    """Count shard opens, logical reads and bytes, range requests, read time and prefetch misses or unused items."""
 
     opens: int = 0
     reads: int = 0
@@ -158,6 +159,7 @@ class RemoteSafetensorsTensorStore:
                 end = start + slice_size
             cost = end - start + _PREFETCH_MAX_GAP
             if cost > _PREFETCH_WINDOW_BYTES:
+                # Oversized items use per-key reads and count as prefetch misses.
                 self._prefetch_plan.popleft()
                 continue
             if budget + cost > _PREFETCH_WINDOW_BYTES:
@@ -179,7 +181,7 @@ class RemoteSafetensorsTensorStore:
             paths, starts, ends, max_gap=_PREFETCH_MAX_GAP, max_block=_PREFETCH_MAX_BLOCK
         )
         started = time.monotonic()
-        payloads = filesystem.cat_ranges(paths, starts, ends, batch_size=16)
+        payloads = filesystem.cat_ranges(paths, starts, ends, batch_size=_PREFETCH_BATCH_SIZE)
         self.read_stats = replace(
             self.read_stats,
             gets=self.read_stats.gets + len(paths),
