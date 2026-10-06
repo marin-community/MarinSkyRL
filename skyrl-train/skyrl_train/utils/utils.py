@@ -603,7 +603,9 @@ def validate_cfg(cfg: DictConfig):
     # per batch can be variable based on the prompt length. This is used to normalize the loss for
     # seq_mean_token_sum_norm loss reduction. Potentially revisit this if we update to use a
     # fixed max response budget.
-    algorithm_config.max_seq_len = cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
+    algorithm_config.max_seq_len = cfg.generator.engine_init_kwargs.get(
+        "max_model_len", cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
+    )
 
     cfg.trainer.algorithm = algorithm_config
 
@@ -1193,6 +1195,9 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
 
     # TODO: this can be removed if we standardize on env files.
     # But it's helpful for a quickstart
+    if os.environ.get("OPENROUTER_API_KEY"):
+        env_vars["OPENROUTER_API_KEY"] = os.environ["OPENROUTER_API_KEY"]
+
     if os.environ.get("WANDB_API_KEY"):
         logger.info("Exporting wandb api key to ray runtime env")
         env_vars["WANDB_API_KEY"] = os.environ["WANDB_API_KEY"]

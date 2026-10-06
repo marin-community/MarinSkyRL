@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Direct port of NeMo Gym's single-step tool-call comparison reward."""
+"""Strict Ultra tool-call grading and released Pivot action comparison."""
 
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ class StepRewardCategory(StrEnum):
     )
     ARGUMENT_VALUE_DIFFERENT = "An argument value in a tool call is different than the expected value"
     EXPECTED_TOOL_CALL = "A tool call that matches the expected tool call was found"
+    UNEXPECTED_CALL_COUNT = "The response must contain exactly one tool call"
 
 
 def _compare_arguments(
@@ -106,3 +107,96 @@ def grade_expected_action(
         return 1.0, StepRewardCategory.EXPECTED_TOOL_CALL
     assert category is not None
     return 0.0, category
+
+
+def _argument_mismatch(expected: Any, actual: Any) -> StepRewardCategory | None:
+    pending = [(expected, actual)]
+    while pending:
+        reference, candidate = pending.pop()
+        # Preserve the reference verifier's isinstance semantics, including bool/int asymmetry.
+        if not isinstance(candidate, type(reference)):
+            return StepRewardCategory.ARGUMENT_VALUE_TYPE_DIFFERENT
+        if isinstance(reference, dict):
+            if reference.keys() != candidate.keys():
+                return StepRewardCategory.ARGUMENT_OBJECT_KEYS_DIFFERENT
+            pending.extend((value, candidate[key]) for key, value in reversed(reference.items()))
+        elif isinstance(reference, list):
+            if len(reference) != len(candidate):
+                return StepRewardCategory.ARGUMENT_LIST_LENGTH_DIFFERENT
+            pending.extend(reversed(list(zip(reference, candidate))))
+        elif isinstance(reference, float):
+            if not abs(reference - candidate) < 1e-6:
+                return StepRewardCategory.ARGUMENT_VALUE_DIFFERENT
+        elif isinstance(reference, str):
+            # The released threshold is zero: any two multiword strings match.
+            if min(len(reference.split()), len(candidate.split())) < 2 and reference != candidate:
+                return StepRewardCategory.ARGUMENT_VALUE_DIFFERENT
+        elif reference != candidate:
+            return StepRewardCategory.ARGUMENT_VALUE_DIFFERENT
+    return None
+
+
+def _grade_nemo_action(
+    expected_action: dict[str, Any],
+    assistant_message: dict[str, Any],
+) -> tuple[float, StepRewardCategory]:
+    """Compare one action with the released NeMo word-similarity threshold of zero."""
+    calls = assistant_message.get("tool_calls") or []
+    if not calls and not isinstance(assistant_message.get("content"), str):
+        return 0.0, StepRewardCategory.NO_ACTION_FOUND
+    if expected_action["type"] == "message":
+        return (
+            (0.0, StepRewardCategory.NO_EXPECTED_CHAT_MESSAGE)
+            if calls
+            else (1.0, StepRewardCategory.EXPECTED_CHAT_MESSAGE_FOUND)
+        )
+    # The caller validates the single demonstrated action and generated call count.
+    expected_arguments = json.loads(expected_action["arguments"])
+    actual = calls[0].get("function", {})
+    if expected_action["name"] != actual.get("name"):
+        return 0.0, StepRewardCategory.UNEXPECTED_TOOL
+    try:
+        actual_arguments = json.loads(actual.get("arguments"))
+    except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+        return 0.0, StepRewardCategory.ARGUMENTS_DECODE_ERROR
+    mismatch = _argument_mismatch(expected_arguments, actual_arguments)
+    if mismatch is not None:
+        return 0.0, mismatch
+    return 1.0, StepRewardCategory.EXPECTED_TOOL_CALL
+
+
+PIVOT_VERIFIERS = ("tool_name", "nemo", "exact")
+
+
+def grade_pivot_verifiers(expected_action: dict[str, Any], assistant_message: dict[str, Any]) -> dict[str, Any]:
+    """Score one saved or online response with the three SWE next-action verifiers."""
+    calls = assistant_message.get("tool_calls") or []
+    if expected_action["type"] not in {"message", "function_call"}:
+        raise ValueError("SWE verification requires a single demonstrated action")
+    if expected_action["type"] == "function_call" and len(calls) != 1:
+        return {
+            "scores": dict.fromkeys(PIVOT_VERIFIERS, 0.0),
+            "categories": dict.fromkeys(PIVOT_VERIFIERS, StepRewardCategory.UNEXPECTED_CALL_COUNT.value),
+            "tool_call_count": len(calls),
+            "extra_tool_calls": max(0, len(calls) - 1),
+        }
+    names = (
+        calls[0].get("function", {}).get("name") == expected_action["name"]
+        if expected_action["type"] == "function_call"
+        else not calls
+    )
+    exact, exact_category = grade_expected_action(expected_action, assistant_message)
+    nemo, nemo_category = _grade_nemo_action(expected_action, assistant_message)
+    malformed = 0
+    for call in calls:
+        try:
+            json.loads(call.get("function", {}).get("arguments"))
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+            malformed += 1
+    return {
+        "scores": {"tool_name": float(names), "nemo": nemo, "exact": exact},
+        "categories": {"exact": exact_category.value, "nemo": nemo_category.value},
+        "malformed_tool_calls": malformed,
+        "tool_call_count": len(calls),
+        "extra_tool_calls": max(0, len(calls) - int(expected_action["type"] == "function_call")),
+    }
