@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import torch
+from skyrl_train.batch_metrics import LocalReduction
 from skyrl_train.config.objective_spec import load_correction
 from skyrl_train.objective.correction import compute_correction
 from unittest.mock import MagicMock, patch
@@ -152,7 +153,9 @@ async def test_step_wise_stop_eos_keeps_published_behavior_evidence_aligned(mock
         mask = torch.tensor([output.loss_mask])
         ratios = torch.full_like(behavior, torch.nan)
         ratios[0, :2] = torch.tensor([4.0, 0.25])
-        correction = compute_correction(behavior + ratios.log(), behavior, mask, load_correction("seq_mask_tis"))
+        correction = compute_correction(
+            behavior + ratios.log(), behavior, mask, load_correction("seq_mask_tis"), reduction=LocalReduction()
+        )
         expected = torch.zeros_like(behavior)
         expected[0, :2] = torch.tensor([2.0, 0.25])
         torch.testing.assert_close(correction.weights, expected)

@@ -8,7 +8,7 @@ import shutil
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 from jaxtyping import Float
 from pathlib import Path
 import ray
@@ -25,6 +25,13 @@ import numpy as np
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
+from skyrl_train.batch_metrics import (
+    LocalReduction,
+    advantage_metrics,
+    consumed_work,
+    probability_difference_metrics,
+    zero_std_group_fraction,
+)
 from skyrl_train.rollouts.buffer import RolloutGroup
 from skyrl_train.rollouts.context import TrainingContext, TrainingContextState
 from skyrl_train.trajectory_selection import trajectory_selector_from_config
@@ -58,7 +65,6 @@ from skyrl_train.utils.policy_math import compute_approx_kl, normalize_advantage
 from skyrl_train.utils.kl_controllers import get_kl_controller, FixedKLController, AdaptiveKLController
 from skyrl_train.utils.algorithm_registry import AdvantageEstimator
 from skyrl_train.utils.advantage_estimators import (
-    GRPO_FLAT_REWARD_STD_TOLERANCE,
     compute_advantages_and_returns,
     apply_loop_advantages,
     finalize_outcome_batch,
@@ -130,7 +136,6 @@ from skyrl_train.callbacks.base import TrainerCallback, TrainerState, TrainerCon
 from skyrl_train.callbacks.builtin import DefaultCallbackHandler, RefModelUpdateCallback
 from skyrl_train.telemetry import (
     TRAINER_ROLE,
-    ConsumedWork,
     critical_phase,
     record_consumed_work,
     record_event,
@@ -208,29 +213,6 @@ def _validated_distillation_tensors(
         response_mask=response_mask.to(torch.bool),
     )
     return distillation.training_tensors()
-
-
-def consumed_work(training_input: TrainingInputBatch) -> ConsumedWork:
-    """Count the rows and tokens an optimizer step consumed, excluding data-parallel padding."""
-    real_rows = training_input.batch_size - training_input.metadata.get("pad_size", 0)
-    return ConsumedWork(
-        sequences=real_rows,
-        response_tokens=int(training_input["response_mask"][:real_rows].sum().item()),
-        loss_tokens=int(training_input["loss_mask"][:real_rows].sum().item()),
-    )
-
-
-def _zero_std_group_fraction(uids: Sequence[str], rewards: torch.Tensor) -> float:
-    group_rewards: dict[str, list[torch.Tensor]] = {}
-    for uid, reward in zip(uids, rewards, strict=True):
-        group_rewards.setdefault(uid, []).append(reward)
-    if not group_rewards:
-        return 0.0
-    flat_groups = sum(
-        len(group) > 1 and torch.std(torch.stack(group)).item() <= GRPO_FLAT_REWARD_STD_TOLERANCE
-        for group in group_rewards.values()
-    )
-    return flat_groups / len(group_rewards)
 
 
 class RayPPOTrainer:
@@ -1520,7 +1502,11 @@ class RayPPOTrainer:
             if rollout_logprobs is None:
                 raise ValueError("off_policy_correction requires rollout_logprobs")
             result = compute_correction(
-                training_input["action_log_probs"], rollout_logprobs, training_input["loss_mask"], correction
+                training_input["action_log_probs"],
+                rollout_logprobs,
+                training_input["loss_mask"],
+                correction,
+                reduction=LocalReduction(),
             )
             training_input["correction_weights"] = result.weights
             self.all_metrics.update(result.metrics)
@@ -2284,50 +2270,17 @@ class RayPPOTrainer:
         data["returns"] = returns
         data["advantages"] = advantages
 
-        # remove padding while calculating metrics
-        pad_size = data.metadata.get("pad_size", 0)
-        num_samples = len(token_level_rewards)
-
-        return_sums = token_level_rewards.sum(dim=-1)[: num_samples - pad_size]
+        rows = data.batch_size - data.metadata.get("pad_size", 0)
         if (
             self.cfg.trainer.algorithm.advantage_estimator == AdvantageEstimator.GRPO
             and not self.cfg.trainer.step_wise_training
         ):
-            self.all_metrics["reward/zero_std_group_fraction"] = _zero_std_group_fraction(
-                data.metadata["uids"][: num_samples - pad_size], return_sums
+            self.all_metrics["reward/zero_std_group_fraction"] = zero_std_group_fraction(
+                data.metadata["uids"][:rows], token_level_rewards.sum(-1)[:rows]
             )
-        if self.cfg.trainer.step_wise_training:
-            avg_rewards: float = return_sums[data["is_last_step"][: num_samples - pad_size]].mean().item()
-        else:
-            avg_rewards: float = return_sums.mean().item()
-
-        avg_response_length = data.metadata["avg_response_length"]
         data = data.to("cpu")
-
-        valid_advantages = torch.masked_select(
-            data["advantages"][: num_samples - pad_size, ...], data["response_mask"][: num_samples - pad_size].bool()
-        )
-        avg_advantages: float = valid_advantages.mean().item()
-        avg_advantages_abs: float = valid_advantages.abs().mean().item()
-
-        if "metrics" not in data.metadata:
-            data.metadata["metrics"] = {}
-        data.metadata["metrics"].update(
-            {
-                "avg_final_rewards": avg_rewards,
-                "avg_response_length": avg_response_length,
-                "avg_advantages": avg_advantages,
-                "avg_advantages_abs": avg_advantages_abs,
-            }
-        )
-
-        logger.info(f"avg_final_rewards: {avg_rewards}, avg_response_length: {avg_response_length}")
         self.all_metrics.update(
-            {
-                "loss/avg_final_rewards": avg_rewards,
-                "loss/avg_raw_advantages": avg_advantages,
-                "loss/avg_raw_advantages_abs": avg_advantages_abs,
-            }
+            advantage_metrics(data, reduction=LocalReduction(), step_wise=self.cfg.trainer.step_wise_training)
         )
         return data
 
@@ -2565,25 +2518,14 @@ class RayPPOTrainer:
                     training_input["rollout_logprobs"],
                     training_input["loss_mask"],
                     training_input["rollout_staleness"],
+                    reduction=LocalReduction(),
                     eps_clip_low=self.cfg.trainer.algorithm.eps_clip_low,
                     eps_clip_high=self.cfg.trainer.algorithm.eps_clip_high,
                 )
             )
 
         if self.cfg.generator.sampling_params.logprobs is not None and training_input["rollout_logprobs"] is not None:
-            logprobs_diff = (
-                training_input["rollout_logprobs"][training_input["loss_mask"] > 0]
-                - action_log_probs[training_input["loss_mask"] > 0]
-            )
-            prob_diff = logprobs_diff.exp().abs()
-            prob_diff_mean = prob_diff.mean().item()
-            prob_diff_std = prob_diff.std().item()
-            self.all_metrics.update(
-                {
-                    "policy/rollout_train_prob_diff_mean": prob_diff_mean,
-                    "policy/rollout_train_prob_diff_std": prob_diff_std,
-                }
-            )
+            self.all_metrics.update(probability_difference_metrics(training_input, reduction=LocalReduction()))
         # Always log KL divergence as a diagnostic, even when not used as penalty
         if base_log_probs is not None:
             _kl = compute_approx_kl(

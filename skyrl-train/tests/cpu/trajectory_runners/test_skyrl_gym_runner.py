@@ -3,6 +3,7 @@ uv run --group dev --extra cpu --isolated pytest tests/cpu/trajectory_runners/te
 """
 
 import torch
+from skyrl_train.batch_metrics import LocalReduction
 from skyrl_train.config.objective_spec import load_correction
 from skyrl_train.objective.correction import compute_correction
 from concurrent.futures import Executor, Future
@@ -905,7 +906,11 @@ async def test_multi_turn_assembly_aligns_per_token_fields_across_observations(
     behavior = torch.from_numpy(np.stack(output["rollout_logprobs"]))
     ratios = torch.tensor([[1.5, 4.0] + [torch.nan] * gap + [1.0, 0.5]])
     correction = compute_correction(
-        behavior + ratios.log(), behavior, torch.tensor(output["loss_masks"]), load_correction("tis")
+        behavior + ratios.log(),
+        behavior,
+        torch.tensor(output["loss_masks"]),
+        load_correction("tis"),
+        reduction=LocalReduction(),
     )
     torch.testing.assert_close(correction.weights, torch.tensor([[1.5, 2.0] + [0.0] * gap + [1.0, 0.5]]))
     assert correction.metrics["policy/correction/weight_mean"] == pytest.approx(1.25)

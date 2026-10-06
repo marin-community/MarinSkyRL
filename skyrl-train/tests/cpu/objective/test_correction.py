@@ -2,6 +2,7 @@ import pytest
 import torch
 from omegaconf import OmegaConf
 
+from skyrl_train.batch_metrics import LocalReduction
 from skyrl_train.config.objective_spec import OffPolicyCorrection, load_correction
 from skyrl_train.dataset.replay_buffer import NaiveReplayBuffer
 from skyrl_train.objective.correction import compute_correction
@@ -37,7 +38,7 @@ def test_correction_presets_match_importance_weight_oracles(preset, ratios, mask
     rollout = torch.full_like(ratios, -3, requires_grad=True)
     old = (ratios.log() + rollout).detach().requires_grad_()
 
-    result = compute_correction(old, rollout, mask, load_correction(preset))
+    result = compute_correction(old, rollout, mask, load_correction(preset), reduction=LocalReduction())
 
     rows, response_length = mask.shape
     batch = TrainingInputBatch(
@@ -74,7 +75,7 @@ def test_correction_on_policy_is_identity_on_eligible_tokens(preset):
     logprobs = torch.tensor([[-1.0, float("nan"), -3.0], [float("nan")] * 3])
     mask = torch.tensor([[1, 0, 1], [0, 0, 0]])
 
-    result = compute_correction(logprobs, logprobs, mask, load_correction(preset))
+    result = compute_correction(logprobs, logprobs, mask, load_correction(preset), reduction=LocalReduction())
 
     torch.testing.assert_close(result.weights, mask.float())
     assert all(torch.isfinite(torch.tensor(value)) for value in result.metrics.values())
@@ -93,7 +94,7 @@ def test_sequence_truncation_broadcasts_only_over_trainable_tokens(aggregate, ex
     old = torch.tensor([[4.0, 1.0, float("nan")], [float("nan")] * 3]).log()
     mask = torch.tensor([[1, 1, 0], [0, 0, 0]])
 
-    result = compute_correction(old, torch.zeros_like(old), mask, correction)
+    result = compute_correction(old, torch.zeros_like(old), mask, correction, reduction=LocalReduction())
 
     torch.testing.assert_close(result.weights, torch.tensor(expected))
     assert result.metrics["policy/correction/truncated_fraction"] == (0 if aggregate == "geometric" else 1)
@@ -110,6 +111,8 @@ def test_sequence_product_clamps_log_sum_before_exponentiating():
     )
     old = torch.tensor([[100.0, 100.0], [-100.0, -100.0]])
 
-    result = compute_correction(old, torch.zeros_like(old), torch.ones_like(old), correction)
+    result = compute_correction(
+        old, torch.zeros_like(old), torch.ones_like(old), correction, reduction=LocalReduction()
+    )
 
     torch.testing.assert_close(result.weights, torch.tensor([[20.0, 20.0], [-20.0, -20.0]]).exp())

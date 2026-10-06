@@ -17,6 +17,7 @@ import pytest
 import torch
 from transformers import AutoTokenizer
 
+from skyrl_train.batch_metrics import LocalReduction
 from skyrl_train.config.objective_spec import load_correction
 from skyrl_train.objective.correction import compute_correction
 
@@ -337,7 +338,9 @@ def test_valid_multi_turn_full_tito_preserves_all_training_logprobs():
     behavior = torch.tensor([rollout_logprobs])
     ratios = torch.full_like(behavior, torch.nan)
     ratios[mask.bool()] = 1.5
-    correction = compute_correction(behavior + ratios.log(), behavior, mask, load_correction("icepop"))
+    correction = compute_correction(
+        behavior + ratios.log(), behavior, mask, load_correction("icepop"), reduction=LocalReduction()
+    )
     torch.testing.assert_close(correction.weights, mask.float() * 1.5)
     assert correction.metrics["policy/correction/weight_mean"] == pytest.approx(1.5)
     assert correction.metrics["policy/correction/masked_fraction"] == 0

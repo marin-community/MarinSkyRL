@@ -6,24 +6,25 @@ import numpy
 import pytest
 import torch
 
+from skyrl_train.batch_metrics import LocalReduction
 from skyrl_train.utils.importance_ratio_diagnostics import (
     LogRatioMonitor,
     linear_quantiles,
     mismatch_ratio_metrics,
-    ratio_statistics,
+    exact_ratio_statistics,
     gather_ratio_tensor,
 )
 
 
 def test_ratio_statistics_match_hand_values_and_clamp_only_exponentials():
     values = [0, math.log(2), -math.log(2), math.log(4), math.log(1e-6), 0]
-    result = ratio_statistics(torch.tensor(values, dtype=torch.float64))
+    result = exact_ratio_statistics(torch.tensor(values, dtype=torch.float64))
     assert result["frac_outside_0_5_2"] == pytest.approx(2 / 6)
     assert result["frac_below_1e_5"] == pytest.approx(1 / 6)
     assert result["kl_k1"] == pytest.approx(-sum(values) / 6, abs=1e-9)
     assert result["kl_k3"] == pytest.approx(sum(math.exp(x) - x - 1 for x in values) / 6, abs=1e-9)
     assert result["chi2"] == pytest.approx(sum(math.exp(2 * x) for x in values) / 6 - 1, abs=1e-9)
-    extreme = ratio_statistics(torch.tensor([1000.0], dtype=torch.float64))
+    extreme = exact_ratio_statistics(torch.tensor([1000.0], dtype=torch.float64))
     assert extreme["log_ratio_abs_mean"] == 1000
     assert extreme["log_ratio_mean_squared"] == 1e6
     assert extreme["ess_fraction"] == 1
@@ -36,7 +37,7 @@ def test_mismatch_metrics_bucket_by_staleness_and_absolute_position():
     delta = torch.tensor([0.1, 0.2, 0.3, 0.9], dtype=torch.float64).unsqueeze(1).expand(4, 700)
     rollout = torch.zeros_like(delta)
     rollout[~mask] = math.nan
-    result = mismatch_ratio_metrics(delta, rollout, mask, torch.tensor([0, 0, 3, 9]))
+    result = mismatch_ratio_metrics(delta, rollout, mask, torch.tensor([0, 0, 3, 9]), reduction=LocalReduction())
     assert result["policy/mismatch/staleness0/log_ratio_abs_mean"] == pytest.approx((300 * 0.1 + 600 * 0.2) / 900)
     assert result["policy/mismatch/staleness8+/log_ratio_abs_mean"] == pytest.approx(0.9)
     assert result["policy/mismatch/staleness0/pos_last256/selected_tokens"] == 512
@@ -47,7 +48,7 @@ def test_mismatch_metrics_bucket_by_staleness_and_absolute_position():
     # Put a single mismatch exactly at the 600-token row's last-window boundary.
     changed = torch.zeros_like(delta)
     changed[1, 343:345] = torch.tensor([10.0, 20.0])
-    boundary = mismatch_ratio_metrics(changed, rollout, mask, torch.tensor([0, 0, 3, 9]))
+    boundary = mismatch_ratio_metrics(changed, rollout, mask, torch.tensor([0, 0, 3, 9]), reduction=LocalReduction())
     assert boundary["policy/mismatch/staleness0/pos_last256/log_ratio_abs_mean"] == pytest.approx(20 / 512)
 
 
@@ -90,11 +91,13 @@ DASHBOARD_MISMATCH_KEYS = (
 def test_mismatch_metrics_emit_every_key_the_dashboard_reads(staleness):
     mask = torch.ones(6, 800)
     learner = torch.randn(6, 800, dtype=torch.float64)
-    result = mismatch_ratio_metrics(learner, torch.zeros_like(learner), mask, torch.tensor(staleness))
+    result = mismatch_ratio_metrics(
+        learner, torch.zeros_like(learner), mask, torch.tensor(staleness), reduction=LocalReduction()
+    )
     read = {f"policy/mismatch/{key}" for key in DASHBOARD_MISMATCH_KEYS if staleness[-1] or "staleness0" in key}
     assert read - result.keys() == set()
     assert all(math.isfinite(result[key]) for key in read)
-    staleness0 = ratio_statistics(learner[torch.tensor(staleness) == 0].reshape(-1))
+    staleness0 = exact_ratio_statistics(learner[torch.tensor(staleness) == 0].reshape(-1))
     assert {key: result[f"policy/mismatch/staleness0/{key}"] for key in staleness0} == pytest.approx(staleness0)
 
 
@@ -104,7 +107,7 @@ def test_worker_accumulator_matches_pooled_ess_and_tail_under_unequal_microbatch
     for shard in (values[:100], values[100:1200], values[1200:]):
         shard = shard.unsqueeze(0)
         monitor.add(shard, torch.zeros_like(shard), torch.ones_like(shard))
-    actual, expected = monitor.metrics(), ratio_statistics(values)
+    actual, expected = monitor.metrics(), exact_ratio_statistics(values)
     assert actual["log_ratio_ess_fraction"] == pytest.approx(expected["ess_fraction"], abs=1e-10)
     assert actual["log_ratio_abs_p999"] == pytest.approx(expected["log_ratio_abs_p999"], abs=1e-5)
     assert actual["log_ratio_mean"] == pytest.approx(expected["log_ratio_mean"], abs=1e-10)
@@ -162,7 +165,7 @@ def test_two_actual_gloo_ranks_emit_identical_token_pooled_statistics(tmp_path):
     torch.multiprocessing.spawn(_distributed_ratio_worker, args=(str(tmp_path),), nprocs=2, join=True)
     left, right = [json.loads((tmp_path / f"rank{rank}.json").read_text()) for rank in range(2)]
     assert left == right
-    expected = ratio_statistics(torch.cat([torch.arange(1, 101, dtype=torch.float64) / 10, torch.zeros(19_900)]))
+    expected = exact_ratio_statistics(torch.cat([torch.arange(1, 101, dtype=torch.float64) / 10, torch.zeros(19_900)]))
     assert left["pooled"]["log_ratio_mean"] == pytest.approx(expected["log_ratio_mean"], abs=1e-10)
     assert left["pooled"]["log_ratio_ess_fraction"] == pytest.approx(expected["ess_fraction"], rel=1e-10)
     assert left["pooled"]["log_ratio_abs_p999"] == pytest.approx(expected["log_ratio_abs_p999"], abs=1e-5)

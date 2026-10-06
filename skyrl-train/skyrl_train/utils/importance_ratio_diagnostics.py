@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from skyrl_train.metric_reduction import MetricReduction
+
 from dataclasses import dataclass, fields
 import math
 
@@ -56,8 +58,13 @@ def linear_quantiles(values: torch.Tensor, probabilities: tuple[float, ...]) -> 
     return (below + (above - below) * (positions - lower)).tolist()
 
 
-def ratio_statistics(delta: torch.Tensor, *, eps_clip_low: float = 0.2, eps_clip_high: float = 0.2) -> dict[str, float]:
-    """Summarize per-token trainer-minus-sampler log-ratios over the finite tokens."""
+def exact_ratio_statistics(
+    delta: torch.Tensor,
+    *,
+    eps_clip_low: float = 0.2,
+    eps_clip_high: float = 0.2,
+) -> dict[str, float]:
+    """Compute exact finite-token ratio quantiles and moments."""
     delta = delta.detach().double().reshape(-1)
     selected = delta.numel()
     finite = torch.isfinite(delta)
@@ -141,6 +148,7 @@ def mismatch_ratio_metrics(
     *,
     eps_clip_low: float = 0.2,
     eps_clip_high: float = 0.2,
+    reduction: MetricReduction,
 ) -> dict[str, float]:
     """Trainer-minus-vLLM log-ratio statistics by staleness bucket and response position."""
     mask = loss_mask.detach().cpu() > 0
@@ -163,15 +171,16 @@ def mismatch_ratio_metrics(
         key: total.view(len(MISMATCH_STALENESS_BUCKETS), 4)
         for key, total in _grouped_moments(values, groups, 4 * len(MISMATCH_STALENESS_BUCKETS)).items()
     }
+    grid = {key: reduction.combine(total, "sum") for key, total in grid.items()}
     position_classes = {f"first{POSITION_WINDOW}": [1, 3], f"last{POSITION_WINDOW}": [2, 3], "middle": [0]}
-    # Only these two buckets get the sorted statistics; the others take moments from the grid.
+    # The global grid makes this branch uniform across all collective participants.
     staleness0 = groups < 4
-    pooled = ratio_statistics(values, eps_clip_low=eps_clip_low, eps_clip_high=eps_clip_high)
+    pooled = reduction.ratios(values, eps_clip_low=eps_clip_low, eps_clip_high=eps_clip_high)
     full_statistics = {
         "pooled": pooled,
         "staleness0": pooled
-        if bool(staleness0.all())
-        else ratio_statistics(values[staleness0], eps_clip_low=eps_clip_low, eps_clip_high=eps_clip_high),
+        if grid["selected"][1:].sum().item() == 0
+        else reduction.ratios(values[staleness0], eps_clip_low=eps_clip_low, eps_clip_high=eps_clip_high),
     }
     bucket_rows = {"pooled": slice(None)}
     bucket_rows.update({name: slice(index, index + 1) for index, (name, _) in enumerate(MISMATCH_STALENESS_BUCKETS)})
