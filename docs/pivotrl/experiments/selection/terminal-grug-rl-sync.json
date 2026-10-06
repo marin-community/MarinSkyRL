@@ -1,0 +1,38 @@
+{
+  "key": "terminal-grug-base",
+  "candidate_rows": 19567,
+  "selected_rows": 3063,
+  "initial_policy": {
+    "identity": "b8c07f7df1df65525abbfdbcd1572318ba11c42f",
+    "local_path": "open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21",
+    "tokenizer_revision": "b8c07f7df1df65525abbfdbcd1572318ba11c42f",
+    "tokenizer_uri": "open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21",
+    "uri": "open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21"
+  },
+  "reward": "string_or_jev",
+  "cap": 2048,
+  "selection": "Eight existing initial-policy draws, including a known pass and a known failure under this reward and capped completion rule; hence 1..7 successes regardless of any unknown cached judgments",
+  "new_generation_requests": 0,
+  "new_judge_requests": 0,
+  "selection_violations": 0,
+  "exclusions": {
+    "ambiguous_cap_boundary": 5,
+    "prompt_over_63488_tokens": 2,
+    "unknown_rewards_without_both_witnesses": 7082
+  },
+  "candidate_path": "/Users/dml/src/marin/pivotrl-artifacts/terminal-behavior-pilot/split-seed42-intersection/grug/all_train.parquet",
+  "candidate_sha256": "c67db5782308198cdc46c30a34417ed7ab70a1c038e9d9ae3873e7598b634dbd",
+  "selected_sha256": "4651d3098b9f9dbcd92a13aab0d26f6102c8122366ea8e070d0c2e5fd02908af",
+  "statistics_sha256": "e11a89e9374b39da02181972ccf19c2ae174e7c09934d7bfd95054339a623dd8",
+  "provenance": {
+    "scores_path": "/Users/dml/src/marin/artifacts/terminal-matched-verifier-comparison/grug-pivot-scores.jsonl",
+    "scores_sha256": "c4289ff71cded28f197410c8654ce70c42e4423520f538e099fd88527724d1ad",
+    "judge_model": "typesafe/jev-1.13-20260917",
+    "judge_threshold": 0.5,
+    "judge_results_sha256": "2cfc918ece1538ae024c5b33e5492e8e7acaab0385c6252da52c9609eeaa7658",
+    "judge_attempts_sha256": "6c9f15d0d79ce40aeeef0ea3b1813a89c8d48318434f15955a9b1a8f6781fe24"
+  },
+  "selected_with_unknown_rewards": 939,
+  "cap_interpretation": "Reuse initial-policy outcomes; responses over the cap fail require_completed_action. Exclude exact cap/EOS boundaries and prompts exceeding the new prompt limit.",
+  "limitations": "This establishes mixed rewards in the saved eight-draw groups. New stochastic training groups need not be mixed. Historical prompt tokenization and sampling parameters are retained; no new sampling was performed."
+}

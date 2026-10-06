@@ -1,0 +1,41 @@
+{
+  "key": "swe-grug-base",
+  "candidate_rows": 3711,
+  "selected_rows": 1844,
+  "initial_policy": {
+    "identity": "b8c07f7df1df65525abbfdbcd1572318ba11c42f",
+    "local_path": "open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21",
+    "tokenizer_revision": "b8c07f7df1df65525abbfdbcd1572318ba11c42f",
+    "tokenizer_uri": "open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21",
+    "uri": "open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21"
+  },
+  "reward": "nemo",
+  "cap": 2048,
+  "selection": "Eight existing initial-policy draws, including a known pass and a known failure under this reward and capped completion rule; hence 1..7 successes regardless of any unknown cached judgments",
+  "new_generation_requests": 0,
+  "new_judge_requests": 0,
+  "selection_violations": 0,
+  "exclusions": {
+    "prompt_over_63488_tokens": 2
+  },
+  "candidate_path": "/Users/dml/src/marin/pivotrl-artifacts/swe-behavior-pilot/grug-frozen/all_train.parquet",
+  "candidate_sha256": "1acc443ad1bd5ee23ddded147d26c92bb43d2fca8edee998e5e52c639153ffed",
+  "selected_sha256": "2b68f59be95d66b65c4c4220f973f77de278433fa1ef3de6af11eb4a7d19cb71",
+  "statistics_sha256": "fdebd0d7a9c48efe175bdecdded1ab928099db42098ef3a0f7b5d4e85d60f294",
+  "provenance": {
+    "profiles": [
+      {
+        "path": "../artifacts/swe-matched-verifier-comparison/grug-rescored.jsonl",
+        "sha256": "f0ad5baa7de78689eaa68afaa71091e6481288cb28659c51dcb64160980d37c8"
+      },
+      {
+        "path": "../pivotrl-artifacts/swe-behavior-pilot/grug-missing-rescored.jsonl",
+        "sha256": "2dcc3d18e3a829f9da630b81ddec1299b0af0671f7c186d651a1ffdf605a296a"
+      }
+    ],
+    "verifier": "saved NeMo rescoring of retained initial-policy draws"
+  },
+  "selected_with_unknown_rewards": 0,
+  "cap_interpretation": "Reuse initial-policy outcomes; responses over the cap fail require_completed_action. Exclude exact cap/EOS boundaries and prompts exceeding the new prompt limit.",
+  "limitations": "This establishes mixed rewards in the saved eight-draw groups. New stochastic training groups need not be mixed. Historical prompt tokenization and sampling parameters are retained; no new sampling was performed."
+}

@@ -1,0 +1,42 @@
+{
+  "key": "swe-snowball-base",
+  "candidate_rows": 3709,
+  "selected_rows": 1199,
+  "initial_policy": {
+    "identity": "fdc3c3c5fff489d3fb04dcbc2387c179b1bf3fab",
+    "local_path": "open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92",
+    "tokenizer_revision": "fdc3c3c5fff489d3fb04dcbc2387c179b1bf3fab",
+    "tokenizer_uri": "open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92",
+    "uri": "open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92"
+  },
+  "reward": "nemo",
+  "cap": 2048,
+  "selection": "Eight existing initial-policy draws, including a known pass and a known failure under this reward and capped completion rule; hence 1..7 successes regardless of any unknown cached judgments",
+  "new_generation_requests": 0,
+  "new_judge_requests": 0,
+  "selection_violations": 0,
+  "exclusions": {
+    "ambiguous_cap_boundary": 1,
+    "prompt_over_63488_tokens": 4
+  },
+  "candidate_path": "/Users/dml/src/marin/pivotrl-artifacts/swe-behavior-pilot/snowball-frozen/all_train.parquet",
+  "candidate_sha256": "538105c4d9d9d7019cf254f91cb31a9d9215cbabc46e45f6166660694498b798",
+  "selected_sha256": "e674f7648db1e888cdc2afd18d6741ee97d54584830835b04d77245a127c5fbb",
+  "statistics_sha256": "cf6b56798f8ec6e1d2ff678ec327016321b97a3b4987cdef392ae273e066bbe4",
+  "provenance": {
+    "profiles": [
+      {
+        "path": "../artifacts/swe-matched-verifier-comparison/snowball-rescored.jsonl",
+        "sha256": "1c223f2ca060430899cbdf279ddc0c6dba63f961f3bfb639e3dc373966583408"
+      },
+      {
+        "path": "../pivotrl-artifacts/swe-behavior-pilot/snowball-missing-rescored.jsonl",
+        "sha256": "85b29ac74aa5b7c6778fb8af252f174f5f9057dbe431e975aa3eea8995b70080"
+      }
+    ],
+    "verifier": "saved NeMo rescoring of retained initial-policy draws"
+  },
+  "selected_with_unknown_rewards": 0,
+  "cap_interpretation": "Reuse initial-policy outcomes; responses over the cap fail require_completed_action. Exclude exact cap/EOS boundaries and prompts exceeding the new prompt limit.",
+  "limitations": "This establishes mixed rewards in the saved eight-draw groups. New stochastic training groups need not be mixed. Historical prompt tokenization and sampling parameters are retained; no new sampling was performed."
+}

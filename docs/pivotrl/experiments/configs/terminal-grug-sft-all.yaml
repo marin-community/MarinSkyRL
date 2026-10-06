@@ -1,0 +1,301 @@
+artifacts:
+  attempts_root: s3://marin-us-east-02a/marin/users/dml/skyrl/terminal-behavior-pilot/runs/terminal-grug-sft-all-20261003-231651/attempts
+  checkpoint_root: s3://marin-us-east-02a/marin/users/dml/skyrl/terminal-behavior-pilot/runs/terminal-grug-sft-all-20261003-231651/checkpoint
+  export_root: s3://marin-us-east-02a/marin/users/dml/skyrl/terminal-behavior-pilot/runs/terminal-grug-sft-all-20261003-231651/export
+  resolved_config_uri: s3://marin-us-east-02a/marin/users/dml/skyrl/terminal-behavior-pilot/runs/terminal-grug-sft-all-20261003-231651/resolved.yaml
+  terminal_manifest_uri: s3://marin-us-east-02a/marin/users/dml/skyrl/terminal-behavior-pilot/runs/terminal-grug-sft-all-20261003-231651/terminal.json
+inputs:
+  data_kind: parquet
+  model:
+    identity: b8c07f7df1df65525abbfdbcd1572318ba11c42f
+    local_path: open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21
+    tokenizer_revision: b8c07f7df1df65525abbfdbcd1572318ba11c42f
+    tokenizer_uri: open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21
+    uri: open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21
+  train_data:
+  - kind: directory
+    identity: 33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3
+    local_path: /tmp/terminal-pilot-data/33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3
+    relative_path: grug/all_train.parquet
+    uri: s3://marin-us-east-02a/marin/users/dml/skyrl/terminal-behavior-pilot/prepared/33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3
+  validation_data:
+  - kind: directory
+    identity: 33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3
+    local_path: /tmp/terminal-pilot-data/33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3
+    relative_path: validation.parquet
+    uri: s3://marin-us-east-02a/marin/users/dml/skyrl/terminal-behavior-pilot/prepared/33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3
+iris:
+  allocation:
+    cpu: 48
+    disk: 2TB
+    gpu_variant: H100
+    gpus_per_node: 8
+    memory: 700GB
+    num_nodes: 8
+  cluster: marin-contractor-adc
+  cluster_config: /tmp/marin-contractor-adc.yaml
+  job_name: terminal-grug-sft-all-20261003-231651
+  max_retries: 0
+  parent_cluster_config: /tmp/marin-contractor-adc.yaml
+  priority: interactive
+  target_cluster: cw-us-east-02a
+  timeout: 86400
+  wandb_entity: marin-community
+ray:
+  driver_liveness_timeout: 3600
+  log_dir: s3://marin-us-east-02a/marin/users/dml/skyrl/terminal-behavior-pilot/runs/terminal-grug-sft-all-20261003-231651/ray-logs
+  rendezvous_dir: s3://marin-us-east-02a/marin/users/dml/skyrl/terminal-behavior-pilot/runs/terminal-grug-sft-all-20261003-231651/rendezvous
+  spill_backend: local
+  spill_dir: /tmp/skyrl-ray-spill
+run:
+  attempt_id: a1
+  export_hf: false
+  id: terminal-grug-sft-all-20261003-231651
+  mode: train
+  seed: 42
+  submission: detach
+runtime:
+  launcher_commit: 34b813525c70a47737aa35ec896f19f7e9a2acef
+  profile: megatron
+  task_env:
+    PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+schema_version: 1
+skyrl:
+  entrypoint: standard
+  context_budget:
+    request_window_tokens: 65536
+    max_new_tokens_per_turn: 1024
+    max_turns: 1
+  trainer:
+    strategy: megatron
+    seed: 42
+    flash_attn: true
+    gradient_checkpointing: true
+    gradient_checkpointing_use_reentrant: false
+    offload_optimizer_during_rollouts: true
+    algorithm:
+      advantage_estimator: grpo
+      group_advantage_min_size: null
+      advantage_batch_normalize: false
+      eps_clip_low: 0.2
+      eps_clip_high: 0.2
+      use_entropy_loss: false
+      use_kl_loss: true
+      use_kl_in_reward: false
+      loss_reduction: sequence_mean
+      grpo_norm_by_std: true
+      kl_loss_coef: 0.01
+      kl_estimator_type: forward
+      dynamic_sampling:
+        type: null
+        max_sample_batches: 30
+        informative_on: unshaped
+        min_reward_std: 0.0
+    epochs: 100000
+    max_steps: 100000
+    update_epochs_per_batch: 1
+    train_batch_size: 64
+    policy_mini_batch_size: 64
+    eval_batch_size: 16
+    micro_forward_batch_size_per_gpu: 1
+    micro_train_batch_size_per_gpu: 1
+    use_sample_packing: true
+    eval_before_train: true
+    eval_interval: -1
+    ckpt_interval: 100000
+    max_ckpts_to_keep: -1
+    resume_mode: none
+    logger: wandb
+    project_name: pivot-rl
+    policy:
+      optimizer_config:
+        optimizer: AdamW
+        lr: 4.0e-06
+        weight_decay: 0.0
+        max_grad_norm: 0.5
+        num_warmup_steps: 0
+        scheduler: constant_with_warmup
+      megatron_config:
+        tensor_model_parallel_size: 1
+        pipeline_model_parallel_size: 6
+        context_parallel_size: 1
+        expert_model_parallel_size: 8
+        expert_tensor_parallel_size: 1
+        logprob_chunk_size: 128
+        optimizer_config_kwargs:
+          optimizer_cpu_offload: true
+          optimizer_offload_fraction: 1.0
+        transformer_config_kwargs:
+          num_layers_in_first_pipeline_stage: 4
+          num_layers_in_last_pipeline_stage: 2
+        optimizer_checkpoint_sharding_type: dp_reshardable
+        ddp_config:
+          overlap_grad_reduce: true
+          overlap_param_gather: true
+          grad_reduce_in_fp32: false
+      model:
+        path: open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21
+        revision: b8c07f7df1df65525abbfdbcd1572318ba11c42f
+    ref:
+      megatron_config:
+        tensor_model_parallel_size: 1
+        pipeline_model_parallel_size: 4
+        context_parallel_size: 1
+        expert_model_parallel_size: 8
+        expert_tensor_parallel_size: 1
+        logprob_chunk_size: 128
+        transformer_config_kwargs:
+          num_layers_in_first_pipeline_stage: 6
+          num_layers_in_last_pipeline_stage: 6
+    placement:
+      colocate_all: false
+      colocate_policy_ref: false
+      policy_num_nodes: 6
+      policy_num_gpus_per_node: 8
+      ref_num_nodes: 4
+      ref_num_gpus_per_node: 8
+    loss_token_budget: 1000000
+    eval_loss_token_interval: null
+    dump_data_batch: true
+    pivot_pilot:
+      arm: sft_all
+      quick_source_ids:
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:10016
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:10102
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:1021
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:10486
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:10623
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:10797
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:1111
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:11230
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:11385
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:12476
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:12938
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:13223
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:14382
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:14780
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:15536
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:15594
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:1601
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:16178
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:16199
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:17779
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:18619
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:19033
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:20002
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:20601
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:20735
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:21621
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:21736
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:21829
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:22340
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:23166
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:23240
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:23779
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:2415
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:24562
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:25003
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:25890
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:26656
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:26857
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:27767
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:27836
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:28039
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:28502
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:29031
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:30535
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:31073
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:3768
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:4199
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:4848
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:4864
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:5634
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:5709
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:5981
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:6334
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:6750
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:7723
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:7759
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:7949
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:8144
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:8157
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:8222
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:8754
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:8897
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:8946
+      - terminal:eaef26944643644c8a3dbbf361ce6128142f5976:9212
+      split_hash: 33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3
+      quick_hash: 3a512af2ca1255303aa3a6e64b5e04240e752bfc0918ca78f70f37b482c035bd
+      baseline_cache: null
+      archive_root: s3://marin-us-east-02a/marin/users/dml/skyrl/terminal-behavior-pilot/runs/terminal-grug-sft-all-20261003-231651/attempts/trajectories
+      grade_table_root: null
+      train_data_sha256: c67db5782308198cdc46c30a34417ed7ab70a1c038e9d9ae3873e7598b634dbd
+      validation_data_sha256: 5305b438683a22df2a6e51258ce551106ebcbb866898e2f670f1bda4ed6ee355
+      quick_data_sha256: f903ef9f3cea6a373501c399c44cbdd2014480a13ba10c544e360d904daa9daa
+      selected_data_uri: s3://marin-us-east-02a/marin/users/dml/skyrl/terminal-behavior-pilot/prepared/33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3/grug/train.parquet
+      selected_data_sha256: 5d8634a577a1ee8825b4059c245046a0fade527d5abd6e04639a3944be8d8096
+      verifier_tool_name_id: null
+      verifier_nemo_id: null
+      verifier_exact_id: null
+  generator:
+    backend: vllm
+    model_dtype: bfloat16
+    vllm_attention_backend: FLASH_ATTN
+    inference_engine_tensor_parallel_size: 1
+    inference_engine_data_parallel_size: 8
+    inference_engine_expert_parallel_size: 8
+    num_inference_engines: 2
+    n_samples_per_prompt: 8
+    eval_n_samples_per_prompt: 1
+    gpu_memory_utilization: 0.85
+    max_num_seqs: 64
+    max_num_batched_tokens: 32768
+    enable_prefix_caching: true
+    enable_chunked_prefill: true
+    enforce_eager: false
+    run_engines_locally: true
+    weight_sync_backend: nccl
+    enable_http_endpoint: true
+    sampling_params:
+      temperature: 1.0
+      top_p: 1.0
+      top_k: -1
+    engine_init_kwargs:
+      enable_auto_tool_choice: true
+      tool_call_parser: hermes
+    trajectory_retention:
+      phases:
+      - train
+      - eval
+      sample_fraction: 1.0
+      max_bytes_per_step: null
+      max_bytes_per_run: null
+      required: true
+      enabled: true
+      grade_table: false
+      output_path: s3://marin-us-east-02a/marin/users/dml/skyrl/terminal-behavior-pilot/runs/terminal-grug-sft-all-20261003-231651/attempts/trajectories
+      model_source_identity: b8c07f7df1df65525abbfdbcd1572318ba11c42f
+    trajectory_reward_shaping:
+      enabled: false
+    eval_sampling_params:
+      temperature: 0.0
+      top_p: 1.0
+      top_k: -1
+  environment:
+    skyrl_gym:
+      nemotron_ultra:
+        pivot_arm: sft_all
+        pivot_reward: schema_completion
+        require_completed_action: true
+  data:
+    kind: parquet
+    train_data:
+    - s3://marin-us-east-02a/marin/users/dml/skyrl/terminal-behavior-pilot/prepared/33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3/grug/all_train.parquet
+    val_data:
+    - s3://marin-us-east-02a/marin/users/dml/skyrl/terminal-behavior-pilot/prepared/33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3/validation.parquet
+    shuffle: true
+  extra_env:
+    PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+  pivot:
+    mode: sft
+    profiling_samples: 8

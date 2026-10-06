@@ -1,0 +1,38 @@
+{
+  "key": "terminal-snowball-base",
+  "candidate_rows": 19567,
+  "selected_rows": 265,
+  "initial_policy": {
+    "identity": "fdc3c3c5fff489d3fb04dcbc2387c179b1bf3fab",
+    "local_path": "open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92",
+    "tokenizer_revision": "fdc3c3c5fff489d3fb04dcbc2387c179b1bf3fab",
+    "tokenizer_uri": "open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92",
+    "uri": "open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92"
+  },
+  "reward": "string_or_jev",
+  "cap": 2048,
+  "selection": "Eight existing initial-policy draws, including a known pass and a known failure under this reward and capped completion rule; hence 1..7 successes regardless of any unknown cached judgments",
+  "new_generation_requests": 0,
+  "new_judge_requests": 0,
+  "selection_violations": 0,
+  "exclusions": {
+    "ambiguous_cap_boundary": 5,
+    "prompt_over_63488_tokens": 2,
+    "unknown_rewards_without_both_witnesses": 678
+  },
+  "candidate_path": "/Users/dml/src/marin/pivotrl-artifacts/terminal-behavior-pilot/split-seed42-intersection/snowball/all_train.parquet",
+  "candidate_sha256": "c67db5782308198cdc46c30a34417ed7ab70a1c038e9d9ae3873e7598b634dbd",
+  "selected_sha256": "ae42bf77322c396866299dd4863d4d9128af1db45d0635d1b8b1824b03d7bf07",
+  "statistics_sha256": "d0faa03766937bf8ca1b12a2098b485bc2c611c4ecd4b3a668df6a337b87f385",
+  "provenance": {
+    "scores_path": "/Users/dml/src/marin/artifacts/terminal-matched-verifier-comparison/snowball-pivot-scores.jsonl",
+    "scores_sha256": "aa1ae85db426215907bbb98f048cbdb444b96ab3adb083c7c8752cf77f3e9b89",
+    "judge_model": "typesafe/jev-1.13-20260917",
+    "judge_threshold": 0.5,
+    "judge_results_sha256": "2cfc918ece1538ae024c5b33e5492e8e7acaab0385c6252da52c9609eeaa7658",
+    "judge_attempts_sha256": "6c9f15d0d79ce40aeeef0ea3b1813a89c8d48318434f15955a9b1a8f6781fe24"
+  },
+  "selected_with_unknown_rewards": 36,
+  "cap_interpretation": "Reuse initial-policy outcomes; responses over the cap fail require_completed_action. Exclude exact cap/EOS boundaries and prompts exceeding the new prompt limit.",
+  "limitations": "This establishes mixed rewards in the saved eight-draw groups. New stochastic training groups need not be mixed. Historical prompt tokenization and sampling parameters are retained; no new sampling was performed."
+}

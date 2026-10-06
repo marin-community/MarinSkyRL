@@ -1,0 +1,2066 @@
+{
+  "validation_sha256": "886696609b201b96161b946a7f5d16d0cf9903102baf6a1303a85a765ba1817c",
+  "tokenizers": {
+    "grug": {
+      "revision": "b8c07f7df1df65525abbfdbcd1572318ba11c42f",
+      "tokenizer_sha256": "6a61ca2105a54e9984169b409581f31cc50330d1b47104af13c221b05e462e45",
+      "config_sha256": "f7f56f12eb85c29eb64b9aa418c5fcd12990916afac2df48edfb79c7ba02f764"
+    },
+    "snowball": {
+      "revision": "fdc3c3c5fff489d3fb04dcbc2387c179b1bf3fab",
+      "tokenizer_sha256": "881c9c36c359e1617afef6f7583403567931b7b4f43f6552d2b2155a131650a2",
+      "config_sha256": "7c11be094d34bd4bb5cf704584fb71b1164220bcfcc5963321bc6ec03d7ec853"
+    }
+  },
+  "definition": "Released expected_action rendered by the training demonstration_tokens function: completion tokens extending the exact generation prefix, including action formatting and end markers; no generated response or prompt tokens counted.",
+  "rows": [
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:350",
+      "task_id": "biolab__orange3-9212a767e0a634f7779dd9539a258451a341f1de",
+      "target_tokens": {
+        "grug": 61,
+        "snowball": 73
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:781",
+      "task_id": "tornadoweb__tornado-b2f8f9970d142fdd2ed91c2f25f34605c6ba29bc",
+      "target_tokens": {
+        "grug": 144,
+        "snowball": 156
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:856",
+      "task_id": "numpy__numpy-e0577251672dd2ceb905a6589beb1bf6825f98fc",
+      "target_tokens": {
+        "grug": 57,
+        "snowball": 70
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:876",
+      "task_id": "aio-libs__aiohttp-c65a77cfc9d2f6a1550b20ca65e1342188f96f28",
+      "target_tokens": {
+        "grug": 54,
+        "snowball": 67
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:899",
+      "task_id": "pandas-dev__pandas-49877",
+      "target_tokens": {
+        "grug": 724,
+        "snowball": 737
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:1068",
+      "task_id": "python-pillow__Pillow-1d9c931626b3cd08b9fa19c9e9e2d8c79604046e",
+      "target_tokens": {
+        "grug": 283,
+        "snowball": 295
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:1175",
+      "task_id": "Project-MONAI__MONAI-4344",
+      "target_tokens": {
+        "grug": 242,
+        "snowball": 254
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:1241",
+      "task_id": "python-pillow__Pillow-5dfe5f0fa631a6c3635308eca998ec435de1a42f",
+      "target_tokens": {
+        "grug": 38,
+        "snowball": 51
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:1477",
+      "task_id": "Project-MONAI__MONAI-3478",
+      "target_tokens": {
+        "grug": 40,
+        "snowball": 53
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:1525",
+      "task_id": "numpy__numpy-05a88ad2aacd16f8e38a44fece6588f6ee840a32",
+      "target_tokens": {
+        "grug": 278,
+        "snowball": 291
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:1542",
+      "task_id": "tornadoweb__tornado-51c9796b10b8b141454f8fe4d080e76962a9ad57",
+      "target_tokens": {
+        "grug": 59,
+        "snowball": 72
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:1545",
+      "task_id": "getmoto__moto-6107",
+      "target_tokens": {
+        "grug": 62,
+        "snowball": 75
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:1631",
+      "task_id": "Pylons__pyramid-c7bff5045ad928166695fb6bb8154443387e4184",
+      "target_tokens": {
+        "grug": 60,
+        "snowball": 73
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:1703",
+      "task_id": "datalad__datalad-0174e66d85d0fa42d25f1231039a7889ef964237",
+      "target_tokens": {
+        "grug": 165,
+        "snowball": 178
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:1855",
+      "task_id": "getmoto__moto-5478",
+      "target_tokens": {
+        "grug": 99,
+        "snowball": 111
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:2077",
+      "task_id": "bokeh__bokeh-13757",
+      "target_tokens": {
+        "grug": 119,
+        "snowball": 132
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:2078",
+      "task_id": "pandas-dev__pandas-545a942424a26c4163e1f959ac6130984fc3fb41",
+      "target_tokens": {
+        "grug": 361,
+        "snowball": 374
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:2127",
+      "task_id": "Pylons__pyramid-4a7029f6b313b65ba94d0726042ea3adbad38e81",
+      "target_tokens": {
+        "grug": 76,
+        "snowball": 89
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:2270",
+      "task_id": "numpy__numpy-144197146dec4097baa2783fdd28762015d0e32b",
+      "target_tokens": {
+        "grug": 35,
+        "snowball": 48
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:46348",
+      "task_id": "numpy__numpy-24f1b3b7638377ce3474c459851db6a123c5da6f",
+      "target_tokens": {
+        "grug": 52,
+        "snowball": 65
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:3518",
+      "task_id": "biolab__orange3-9212a767e0a634f7779dd9539a258451a341f1de",
+      "target_tokens": {
+        "grug": 56,
+        "snowball": 68
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:3619",
+      "task_id": "pandas-dev__pandas-aad85ad1e39568f87cdae38fece41cd2370234a7",
+      "target_tokens": {
+        "grug": 46,
+        "snowball": 58
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:3785",
+      "task_id": "Pylons__pyramid-7b58c0f003107aba5fde6cde57f13491d5248c76",
+      "target_tokens": {
+        "grug": 49,
+        "snowball": 62
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:3902",
+      "task_id": "pandas-dev__pandas-52180",
+      "target_tokens": {
+        "grug": 728,
+        "snowball": 741
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:4718",
+      "task_id": "pandas-dev__pandas-50844",
+      "target_tokens": {
+        "grug": 44,
+        "snowball": 57
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:5220",
+      "task_id": "pandas-dev__pandas-db6a491aacca46e892c990d42e839cef31ba07a2",
+      "target_tokens": {
+        "grug": 44,
+        "snowball": 57
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:5516",
+      "task_id": "Pylons__pyramid-c3c83eb71ff3352cee754b404ad4d65ab02fa464",
+      "target_tokens": {
+        "grug": 57,
+        "snowball": 70
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:5701",
+      "task_id": "python-pillow__Pillow-87092ad4f8e55444ec3134ed857e4de5d19cd175",
+      "target_tokens": {
+        "grug": 275,
+        "snowball": 288
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:5736",
+      "task_id": "pandas-dev__pandas-eec200dbc8d3986f00c54a4b0b99541dfcefd5e8",
+      "target_tokens": {
+        "grug": 30,
+        "snowball": 43
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:5812",
+      "task_id": "numpy__numpy-4f8d9523ef29267932c933bd7e06b0a4e59b1df0",
+      "target_tokens": {
+        "grug": 188,
+        "snowball": 201
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:5831",
+      "task_id": "pandas-dev__pandas-ce4720575f65df38e59472d7f4d8543ffe7a0c13",
+      "target_tokens": {
+        "grug": 92,
+        "snowball": 104
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:5867",
+      "task_id": "python-pillow__Pillow-a7eb2ea9ccdf4f55ae97c0c65cb353af033cebfb",
+      "target_tokens": {
+        "grug": 43,
+        "snowball": 56
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:6711",
+      "task_id": "pandas-dev__pandas-2af56d4e23a1220e9f6bde2869621fe6fcd5d448",
+      "target_tokens": {
+        "grug": 195,
+        "snowball": 208
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:6813",
+      "task_id": "pandas-dev__pandas-4ca4fca839ced3483f37b3ae2434033e2721e1d5",
+      "target_tokens": {
+        "grug": 144,
+        "snowball": 157
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:7023",
+      "task_id": "aio-libs__aiohttp-6e9ecc78e23cfbf592339243acc28e8e1d3c8fcc",
+      "target_tokens": {
+        "grug": 57,
+        "snowball": 70
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:7196",
+      "task_id": "python-pillow__Pillow-87092ad4f8e55444ec3134ed857e4de5d19cd175",
+      "target_tokens": {
+        "grug": 198,
+        "snowball": 210
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:7351",
+      "task_id": "numpy__numpy-24f1b3b7638377ce3474c459851db6a123c5da6f",
+      "target_tokens": {
+        "grug": 32,
+        "snowball": 45
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:7469",
+      "task_id": "python-pillow__Pillow-a6a843e5482345ffcd6cb45a534a11e839fcef43",
+      "target_tokens": {
+        "grug": 144,
+        "snowball": 157
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:7527",
+      "task_id": "Pylons__pyramid-3063246aa418ae2008adb48ab9e5090a88be42d4",
+      "target_tokens": {
+        "grug": 60,
+        "snowball": 73
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:7798",
+      "task_id": "pandas-dev__pandas-5d0ff69544d41b5be66d58f1cc1907af676f828c",
+      "target_tokens": {
+        "grug": 254,
+        "snowball": 267
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:8004",
+      "task_id": "pandas-dev__pandas-5d0ff69544d41b5be66d58f1cc1907af676f828c",
+      "target_tokens": {
+        "grug": 230,
+        "snowball": 243
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:8205",
+      "task_id": "aio-libs__aiohttp-e2631c7c058796ac8fab88722cffd582300cdc0e",
+      "target_tokens": {
+        "grug": 59,
+        "snowball": 72
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:8963",
+      "task_id": "scrapy__scrapy-c31fb8733599b3dea3f6a72265e49b39c3750ba1",
+      "target_tokens": {
+        "grug": 51,
+        "snowball": 64
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:8979",
+      "task_id": "Pylons__pyramid-3803d92fc0da5282656d4229e063a1908ec5522a",
+      "target_tokens": {
+        "grug": 46,
+        "snowball": 59
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:9011",
+      "task_id": "pandas-dev__pandas-7839305968e2a47ae3e4a17ad9b156fdf7f04fd7",
+      "target_tokens": {
+        "grug": 57,
+        "snowball": 70
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:9068",
+      "task_id": "getmoto__moto-5478",
+      "target_tokens": {
+        "grug": 47,
+        "snowball": 60
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:9087",
+      "task_id": "numpy__numpy-0ec2a4f581c32979862468b727cc96df4910d5ed",
+      "target_tokens": {
+        "grug": 171,
+        "snowball": 183
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:9119",
+      "task_id": "biolab__orange3-ea8c3b0ce9ff87f849b1462aab0b34bd3e35d4ed",
+      "target_tokens": {
+        "grug": 212,
+        "snowball": 225
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:9449",
+      "task_id": "Pylons__pyramid-3063246aa418ae2008adb48ab9e5090a88be42d4",
+      "target_tokens": {
+        "grug": 40,
+        "snowball": 53
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:9567",
+      "task_id": "tornadoweb__tornado-b2f8f9970d142fdd2ed91c2f25f34605c6ba29bc",
+      "target_tokens": {
+        "grug": 45,
+        "snowball": 57
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:9582",
+      "task_id": "python-pillow__Pillow-e7fab6abf44faf3bdf45b99c239bf38569a1ece4",
+      "target_tokens": {
+        "grug": 236,
+        "snowball": 249
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:9819",
+      "task_id": "pandas-dev__pandas-52236",
+      "target_tokens": {
+        "grug": 632,
+        "snowball": 644
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:9922",
+      "task_id": "numpy__numpy-57225485fe72ca059e8c7d9fa17a07c3a31ba009",
+      "target_tokens": {
+        "grug": 40,
+        "snowball": 53
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:10001",
+      "task_id": "python-pillow__Pillow-9fa421923c7a46827f5f79bca788c44cb57f14c7",
+      "target_tokens": {
+        "grug": 59,
+        "snowball": 71
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:10061",
+      "task_id": "nedbat__coveragepy-25311c6caabed2f13da991dae52352c3c896a3e9",
+      "target_tokens": {
+        "grug": 377,
+        "snowball": 389
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:10244",
+      "task_id": "numpy__numpy-3cc797e5107d5f3fe812b0ccdc9bc96f107f0b20",
+      "target_tokens": {
+        "grug": 678,
+        "snowball": 691
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:10392",
+      "task_id": "python-pillow__Pillow-87092ad4f8e55444ec3134ed857e4de5d19cd175",
+      "target_tokens": {
+        "grug": 314,
+        "snowball": 327
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:10404",
+      "task_id": "numpy__numpy-57225485fe72ca059e8c7d9fa17a07c3a31ba009",
+      "target_tokens": {
+        "grug": 44,
+        "snowball": 57
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:10571",
+      "task_id": "pandas-dev__pandas-52236",
+      "target_tokens": {
+        "grug": 47,
+        "snowball": 60
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:10851",
+      "task_id": "tornadoweb__tornado-b2f8f9970d142fdd2ed91c2f25f34605c6ba29bc",
+      "target_tokens": {
+        "grug": 58,
+        "snowball": 71
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:29624",
+      "task_id": "pandas-dev__pandas-c688a0f4e39f362d1d88c35ab6093bc7963fc525",
+      "target_tokens": {
+        "grug": 207,
+        "snowball": 220
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:11257",
+      "task_id": "numpy__numpy-16331cc1cf9b2cf3505d0c4742a854dc00923d9d",
+      "target_tokens": {
+        "grug": 113,
+        "snowball": 126
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:11298",
+      "task_id": "pandas-dev__pandas-f334fcc681574f5b35b86a6eda17058d6a9505f2",
+      "target_tokens": {
+        "grug": 194,
+        "snowball": 207
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:11583",
+      "task_id": "datalad__datalad-1b5e56bd4e1507298f72780e3c27dced3fe1f06d",
+      "target_tokens": {
+        "grug": 43,
+        "snowball": 56
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:11605",
+      "task_id": "getmoto__moto-5812",
+      "target_tokens": {
+        "grug": 322,
+        "snowball": 335
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:11825",
+      "task_id": "bokeh__bokeh-13636",
+      "target_tokens": {
+        "grug": 39,
+        "snowball": 52
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:12224",
+      "task_id": "python__mypy-12741",
+      "target_tokens": {
+        "grug": 65,
+        "snowball": 78
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:12315",
+      "task_id": "aio-libs__aiohttp-210bcbb8ee0c3ce34664836403a07a0b97123696",
+      "target_tokens": {
+        "grug": 256,
+        "snowball": 269
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:2963",
+      "task_id": "pandas-dev__pandas-9bd8b5d8d05f9513886e26765e7cf2d9998eb344",
+      "target_tokens": {
+        "grug": 215,
+        "snowball": 228
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:12532",
+      "task_id": "python-pillow__Pillow-a6a843e5482345ffcd6cb45a534a11e839fcef43",
+      "target_tokens": {
+        "grug": 129,
+        "snowball": 142
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:12587",
+      "task_id": "numpy__numpy-4c2ad8a4a23524f422f476c1596c973c4308e5da",
+      "target_tokens": {
+        "grug": 43,
+        "snowball": 55
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:13013",
+      "task_id": "biolab__orange3-c54cfcb7d2ea34382124ecbeb0c290b45c62a8f8",
+      "target_tokens": {
+        "grug": 33,
+        "snowball": 46
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:13091",
+      "task_id": "pandas-dev__pandas-52422",
+      "target_tokens": {
+        "grug": 51,
+        "snowball": 63
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:13140",
+      "task_id": "python__mypy-12741",
+      "target_tokens": {
+        "grug": 173,
+        "snowball": 186
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:13365",
+      "task_id": "pandas-dev__pandas-9db86be8f6d4e4795a8f25366a3af1f8356e95b5",
+      "target_tokens": {
+        "grug": 47,
+        "snowball": 59
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:13659",
+      "task_id": "pandas-dev__pandas-855696cde0ef5d80a7d4bd3f6a2940c5a2fecb3f",
+      "target_tokens": {
+        "grug": 238,
+        "snowball": 250
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:13867",
+      "task_id": "tornadoweb__tornado-cc3ca857a0d5d92309c655a37a60160abc51679b",
+      "target_tokens": {
+        "grug": 60,
+        "snowball": 73
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:13892",
+      "task_id": "getmoto__moto-7035",
+      "target_tokens": {
+        "grug": 116,
+        "snowball": 129
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:13989",
+      "task_id": "tornadoweb__tornado-8fdd57d272cb0885e3803d923f480ad483bc43d1",
+      "target_tokens": {
+        "grug": 62,
+        "snowball": 75
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:14001",
+      "task_id": "Pylons__pyramid-c7bff5045ad928166695fb6bb8154443387e4184",
+      "target_tokens": {
+        "grug": 62,
+        "snowball": 75
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:14016",
+      "task_id": "pandas-dev__pandas-2af56d4e23a1220e9f6bde2869621fe6fcd5d448",
+      "target_tokens": {
+        "grug": 45,
+        "snowball": 58
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:15578",
+      "task_id": "python-pillow__Pillow-f34360d1e3c8f29f1a0b0ccae62b5f7c95700440",
+      "target_tokens": {
+        "grug": 32,
+        "snowball": 45
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:15612",
+      "task_id": "numpy__numpy-16331cc1cf9b2cf3505d0c4742a854dc00923d9d",
+      "target_tokens": {
+        "grug": 726,
+        "snowball": 739
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:15751",
+      "task_id": "pandas-dev__pandas-1f135eb94eac1d5cb41ad7d149a44c6f51358fc7",
+      "target_tokens": {
+        "grug": 54,
+        "snowball": 67
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:15805",
+      "task_id": "pandas-dev__pandas-16ccbca475695acf85f2aef00b74fe533b2c37c5",
+      "target_tokens": {
+        "grug": 147,
+        "snowball": 160
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:15925",
+      "task_id": "numpy__numpy-24f1b3b7638377ce3474c459851db6a123c5da6f",
+      "target_tokens": {
+        "grug": 39,
+        "snowball": 52
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:16043",
+      "task_id": "getmoto__moto-5920",
+      "target_tokens": {
+        "grug": 218,
+        "snowball": 230
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:16096",
+      "task_id": "python-pillow__Pillow-de6158f5f1d0b464d1f3817790d6a299dcf4b19c",
+      "target_tokens": {
+        "grug": 59,
+        "snowball": 72
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:16586",
+      "task_id": "getmoto__moto-5812",
+      "target_tokens": {
+        "grug": 45,
+        "snowball": 58
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:16682",
+      "task_id": "numpy__numpy-5ba2007c0b4cbe0bfb66f5a7e1928785c9449800",
+      "target_tokens": {
+        "grug": 303,
+        "snowball": 316
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:16708",
+      "task_id": "pandas-dev__pandas-2451b420d7bd783763971230726616e94ff24904",
+      "target_tokens": {
+        "grug": 48,
+        "snowball": 61
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:16741",
+      "task_id": "numpy__numpy-65e91e4d711b86fe2705202251791a2e30a3c075",
+      "target_tokens": {
+        "grug": 226,
+        "snowball": 239
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:16894",
+      "task_id": "python__mypy-15306",
+      "target_tokens": {
+        "grug": 217,
+        "snowball": 229
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:37168",
+      "task_id": "pandas-dev__pandas-545a942424a26c4163e1f959ac6130984fc3fb41",
+      "target_tokens": {
+        "grug": 39,
+        "snowball": 52
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:17417",
+      "task_id": "biolab__orange3-6722bb8af9aafce143effcc202e7a4d780cd750e",
+      "target_tokens": {
+        "grug": 44,
+        "snowball": 56
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:17624",
+      "task_id": "numpy__numpy-4c2ad8a4a23524f422f476c1596c973c4308e5da",
+      "target_tokens": {
+        "grug": 52,
+        "snowball": 65
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:17976",
+      "task_id": "Pylons__pyramid-3063246aa418ae2008adb48ab9e5090a88be42d4",
+      "target_tokens": {
+        "grug": 59,
+        "snowball": 72
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:18116",
+      "task_id": "pandas-dev__pandas-b617beef0f70d5f97a2faef174f511b212d4085a",
+      "target_tokens": {
+        "grug": 46,
+        "snowball": 58
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:18128",
+      "task_id": "pandas-dev__pandas-5bf5ae80f4292d16c0ad90318ee5d41a1870fa62",
+      "target_tokens": {
+        "grug": 45,
+        "snowball": 57
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:18223",
+      "task_id": "pandas-dev__pandas-47547",
+      "target_tokens": {
+        "grug": 54,
+        "snowball": 66
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:18341",
+      "task_id": "numpy__numpy-0ec2a4f581c32979862468b727cc96df4910d5ed",
+      "target_tokens": {
+        "grug": 44,
+        "snowball": 57
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:18630",
+      "task_id": "pandas-dev__pandas-56d0934092b8296c90f940c56fce3b731e0de81b",
+      "target_tokens": {
+        "grug": 46,
+        "snowball": 59
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:18650",
+      "task_id": "getmoto__moto-6726",
+      "target_tokens": {
+        "grug": 43,
+        "snowball": 56
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:18775",
+      "task_id": "aio-libs__aiohttp-8e330d4c28e115858abbe9900c76e73c9efab71a",
+      "target_tokens": {
+        "grug": 329,
+        "snowball": 341
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:18813",
+      "task_id": "pandas-dev__pandas-4e553464f97a83dd2d827d559b74e17603695ca7",
+      "target_tokens": {
+        "grug": 266,
+        "snowball": 279
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:19229",
+      "task_id": "numpy__numpy-b89849b1213e3384dfd72838672f5869321768db",
+      "target_tokens": {
+        "grug": 42,
+        "snowball": 54
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:19317",
+      "task_id": "pandas-dev__pandas-dc703ce2462b5fe22c05de12cf805c3dd8d261a1",
+      "target_tokens": {
+        "grug": 405,
+        "snowball": 418
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:19339",
+      "task_id": "Pylons__pyramid-c7bff5045ad928166695fb6bb8154443387e4184",
+      "target_tokens": {
+        "grug": 45,
+        "snowball": 58
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:19416",
+      "task_id": "pandas-dev__pandas-15b8898356c0ac213feaa99a734e865eb1fcf300",
+      "target_tokens": {
+        "grug": 41,
+        "snowball": 54
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:20347",
+      "task_id": "pandas-dev__pandas-b617beef0f70d5f97a2faef174f511b212d4085a",
+      "target_tokens": {
+        "grug": 46,
+        "snowball": 58
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:20385",
+      "task_id": "numpy__numpy-4f8d9523ef29267932c933bd7e06b0a4e59b1df0",
+      "target_tokens": {
+        "grug": 286,
+        "snowball": 299
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:20399",
+      "task_id": "iterative__dvc-6284",
+      "target_tokens": {
+        "grug": 45,
+        "snowball": 58
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:6774",
+      "task_id": "pandas-dev__pandas-db6a491aacca46e892c990d42e839cef31ba07a2",
+      "target_tokens": {
+        "grug": 63,
+        "snowball": 76
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:20450",
+      "task_id": "getmoto__moto-6107",
+      "target_tokens": {
+        "grug": 76,
+        "snowball": 89
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:27901",
+      "task_id": "tornadoweb__tornado-598ffdace41c4ed96eceb98cfcd27388d2f11657",
+      "target_tokens": {
+        "grug": 313,
+        "snowball": 326
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:21080",
+      "task_id": "getmoto__moto-6107",
+      "target_tokens": {
+        "grug": 44,
+        "snowball": 56
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:21971",
+      "task_id": "nedbat__coveragepy-25311c6caabed2f13da991dae52352c3c896a3e9",
+      "target_tokens": {
+        "grug": 60,
+        "snowball": 73
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:22496",
+      "task_id": "pandas-dev__pandas-50316",
+      "target_tokens": {
+        "grug": 194,
+        "snowball": 207
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:18681",
+      "task_id": "datalad__datalad-b0cfdbb1b24a0a36fa48be6f7a2c68ed88d029a9",
+      "target_tokens": {
+        "grug": 68,
+        "snowball": 80
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:22970",
+      "task_id": "numpy__numpy-5911fea9a2e880fe4c655af4d667d57d45121f91",
+      "target_tokens": {
+        "grug": 55,
+        "snowball": 68
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:23999",
+      "task_id": "aio-libs__aiohttp-8e330d4c28e115858abbe9900c76e73c9efab71a",
+      "target_tokens": {
+        "grug": 35,
+        "snowball": 48
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:24476",
+      "task_id": "pandas-dev__pandas-bf375608c10a6021c8933939a00c3b733cfee287",
+      "target_tokens": {
+        "grug": 43,
+        "snowball": 56
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:25057",
+      "task_id": "tornadoweb__tornado-cab39beba263e68647d54d68d18cab4f52c7a802",
+      "target_tokens": {
+        "grug": 785,
+        "snowball": 798
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:25172",
+      "task_id": "pandas-dev__pandas-48637",
+      "target_tokens": {
+        "grug": 113,
+        "snowball": 126
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:25418",
+      "task_id": "python-pillow__Pillow-c42e6bab1c60c667e997ecde3e90eae074c3b7c3",
+      "target_tokens": {
+        "grug": 214,
+        "snowball": 227
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:25583",
+      "task_id": "python-pillow__Pillow-312abf7c1a06d5d954d5b0dfab5235b3196fa98d",
+      "target_tokens": {
+        "grug": 415,
+        "snowball": 427
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:42921",
+      "task_id": "Pylons__pyramid-3063246aa418ae2008adb48ab9e5090a88be42d4",
+      "target_tokens": {
+        "grug": 38,
+        "snowball": 51
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:25732",
+      "task_id": "pandas-dev__pandas-aad85ad1e39568f87cdae38fece41cd2370234a7",
+      "target_tokens": {
+        "grug": 66,
+        "snowball": 78
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:26093",
+      "task_id": "aio-libs__aiohttp-8e330d4c28e115858abbe9900c76e73c9efab71a",
+      "target_tokens": {
+        "grug": 37,
+        "snowball": 50
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:26248",
+      "task_id": "numpy__numpy-65e91e4d711b86fe2705202251791a2e30a3c075",
+      "target_tokens": {
+        "grug": 43,
+        "snowball": 55
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:26536",
+      "task_id": "pandas-dev__pandas-4e553464f97a83dd2d827d559b74e17603695ca7",
+      "target_tokens": {
+        "grug": 87,
+        "snowball": 100
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:26591",
+      "task_id": "datalad__datalad-b0cfdbb1b24a0a36fa48be6f7a2c68ed88d029a9",
+      "target_tokens": {
+        "grug": 49,
+        "snowball": 61
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:26598",
+      "task_id": "datalad__datalad-073036402f40275768316a07336298e280644927",
+      "target_tokens": {
+        "grug": 120,
+        "snowball": 133
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:29096",
+      "task_id": "numpy__numpy-af6cb03920f3ae62cb8a8c871edeccbcd8609955",
+      "target_tokens": {
+        "grug": 148,
+        "snowball": 160
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:26973",
+      "task_id": "biolab__orange3-945e235a69847d01e4c8f2800da36f29ec0a4ea4",
+      "target_tokens": {
+        "grug": 87,
+        "snowball": 99
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:27259",
+      "task_id": "pandas-dev__pandas-47586",
+      "target_tokens": {
+        "grug": 218,
+        "snowball": 231
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:27531",
+      "task_id": "pandas-dev__pandas-90f638f28153435e219cf3b4a1e651f6ef399294",
+      "target_tokens": {
+        "grug": 44,
+        "snowball": 56
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:27751",
+      "task_id": "datalad__datalad-4969148f58c3a40ac05f33e714879a637d846aef",
+      "target_tokens": {
+        "grug": 67,
+        "snowball": 79
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:27986",
+      "task_id": "pandas-dev__pandas-c271d4dd0b014c41bd91048fa6e8d33c5bf27b44",
+      "target_tokens": {
+        "grug": 40,
+        "snowball": 53
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:28051",
+      "task_id": "python-pillow__Pillow-8a9bd2cdcdd7fc9ecd89fa79323463f4d24f53b8",
+      "target_tokens": {
+        "grug": 55,
+        "snowball": 68
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:28209",
+      "task_id": "datalad__datalad-073036402f40275768316a07336298e280644927",
+      "target_tokens": {
+        "grug": 43,
+        "snowball": 55
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:28320",
+      "task_id": "numpy__numpy-65e91e4d711b86fe2705202251791a2e30a3c075",
+      "target_tokens": {
+        "grug": 54,
+        "snowball": 67
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:28536",
+      "task_id": "python-pillow__Pillow-7d97fa8b86a9f61069579fbedb2cc09fb437b12f",
+      "target_tokens": {
+        "grug": 69,
+        "snowball": 82
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:28694",
+      "task_id": "Project-MONAI__MONAI-2010",
+      "target_tokens": {
+        "grug": 45,
+        "snowball": 58
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:29142",
+      "task_id": "python__mypy-15306",
+      "target_tokens": {
+        "grug": 37,
+        "snowball": 50
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:29262",
+      "task_id": "tornadoweb__tornado-b2f8f9970d142fdd2ed91c2f25f34605c6ba29bc",
+      "target_tokens": {
+        "grug": 47,
+        "snowball": 60
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:29306",
+      "task_id": "numpy__numpy-16331cc1cf9b2cf3505d0c4742a854dc00923d9d",
+      "target_tokens": {
+        "grug": 168,
+        "snowball": 181
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:29589",
+      "task_id": "aio-libs__aiohttp-cdfed8b884ced3231b01c68a2f85bf2fbb94d30f",
+      "target_tokens": {
+        "grug": 46,
+        "snowball": 58
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:30016",
+      "task_id": "pandas-dev__pandas-50316",
+      "target_tokens": {
+        "grug": 258,
+        "snowball": 271
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:30130",
+      "task_id": "pandas-dev__pandas-eec200dbc8d3986f00c54a4b0b99541dfcefd5e8",
+      "target_tokens": {
+        "grug": 73,
+        "snowball": 86
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:30254",
+      "task_id": "pandas-dev__pandas-ccf951962bb0d24dde76602ebe40a99d0ef68432",
+      "target_tokens": {
+        "grug": 215,
+        "snowball": 228
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:30401",
+      "task_id": "iterative__dvc-2254",
+      "target_tokens": {
+        "grug": 51,
+        "snowball": 64
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:5123",
+      "task_id": "Project-MONAI__MONAI-4344",
+      "target_tokens": {
+        "grug": 52,
+        "snowball": 64
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:30791",
+      "task_id": "python-pillow__Pillow-c42e6bab1c60c667e997ecde3e90eae074c3b7c3",
+      "target_tokens": {
+        "grug": 45,
+        "snowball": 58
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:31098",
+      "task_id": "numpy__numpy-65e91e4d711b86fe2705202251791a2e30a3c075",
+      "target_tokens": {
+        "grug": 248,
+        "snowball": 261
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:31351",
+      "task_id": "pandas-dev__pandas-545a942424a26c4163e1f959ac6130984fc3fb41",
+      "target_tokens": {
+        "grug": 47,
+        "snowball": 59
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:32078",
+      "task_id": "tornadoweb__tornado-b2f8f9970d142fdd2ed91c2f25f34605c6ba29bc",
+      "target_tokens": {
+        "grug": 302,
+        "snowball": 315
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:37573",
+      "task_id": "pandas-dev__pandas-dc703ce2462b5fe22c05de12cf805c3dd8d261a1",
+      "target_tokens": {
+        "grug": 117,
+        "snowball": 130
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:32222",
+      "task_id": "scrapy__scrapy-b6a023ce987a064b222b1aa2de03a50991f387fe",
+      "target_tokens": {
+        "grug": 52,
+        "snowball": 65
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:32307",
+      "task_id": "numpy__numpy-b08ce1ad3705b1cfbdb89b3be50c1756c74982c3",
+      "target_tokens": {
+        "grug": 43,
+        "snowball": 55
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:32546",
+      "task_id": "iterative__dvc-10218",
+      "target_tokens": {
+        "grug": 55,
+        "snowball": 67
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:30860",
+      "task_id": "pandas-dev__pandas-9db86be8f6d4e4795a8f25366a3af1f8356e95b5",
+      "target_tokens": {
+        "grug": 282,
+        "snowball": 295
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:32814",
+      "task_id": "scrapy__scrapy-6fbd6f941f00037ae4718805352e0fa86a781e41",
+      "target_tokens": {
+        "grug": 137,
+        "snowball": 150
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:33120",
+      "task_id": "numpy__numpy-dd8a2a8e29b0dc85dca4d2964c92df3604acc212",
+      "target_tokens": {
+        "grug": 54,
+        "snowball": 67
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:33229",
+      "task_id": "getmoto__moto-6204",
+      "target_tokens": {
+        "grug": 50,
+        "snowball": 62
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:33468",
+      "task_id": "pandas-dev__pandas-1f135eb94eac1d5cb41ad7d149a44c6f51358fc7",
+      "target_tokens": {
+        "grug": 47,
+        "snowball": 60
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:33666",
+      "task_id": "pandas-dev__pandas-2451b420d7bd783763971230726616e94ff24904",
+      "target_tokens": {
+        "grug": 189,
+        "snowball": 202
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:33852",
+      "task_id": "Pylons__pyramid-4a7029f6b313b65ba94d0726042ea3adbad38e81",
+      "target_tokens": {
+        "grug": 62,
+        "snowball": 75
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:33893",
+      "task_id": "pandas-dev__pandas-16ccbca475695acf85f2aef00b74fe533b2c37c5",
+      "target_tokens": {
+        "grug": 81,
+        "snowball": 93
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:34069",
+      "task_id": "numpy__numpy-a5322429c56fb2f906e49e4ae5b87533269d8150",
+      "target_tokens": {
+        "grug": 165,
+        "snowball": 178
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:34174",
+      "task_id": "pandas-dev__pandas-855696cde0ef5d80a7d4bd3f6a2940c5a2fecb3f",
+      "target_tokens": {
+        "grug": 147,
+        "snowball": 160
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:34262",
+      "task_id": "tornadoweb__tornado-bb00b7edc82c63227dab1d2c19ab1e76f1a7c572",
+      "target_tokens": {
+        "grug": 47,
+        "snowball": 59
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:34561",
+      "task_id": "numpy__numpy-3071778e37112377b592b180769f0a44496dc2da",
+      "target_tokens": {
+        "grug": 44,
+        "snowball": 57
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:34913",
+      "task_id": "pandas-dev__pandas-f61deb962ac0853595a43ad024c482b018d1792b",
+      "target_tokens": {
+        "grug": 74,
+        "snowball": 87
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:35431",
+      "task_id": "aio-libs__aiohttp-274c54e46c11e6f527326a3574eb984f90e0f740",
+      "target_tokens": {
+        "grug": 199,
+        "snowball": 212
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:35713",
+      "task_id": "pandas-dev__pandas-855696cde0ef5d80a7d4bd3f6a2940c5a2fecb3f",
+      "target_tokens": {
+        "grug": 48,
+        "snowball": 60
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:35983",
+      "task_id": "scrapy__scrapy-461682fc3dca72d9a34ddc22ad1896787c9dc518",
+      "target_tokens": {
+        "grug": 37,
+        "snowball": 50
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:36265",
+      "task_id": "numpy__numpy-bf20e3034085716c4559ec4bf31b23b6016f266c",
+      "target_tokens": {
+        "grug": 44,
+        "snowball": 56
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:36349",
+      "task_id": "iterative__dvc-2254",
+      "target_tokens": {
+        "grug": 43,
+        "snowball": 56
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:36505",
+      "task_id": "pandas-dev__pandas-bf375608c10a6021c8933939a00c3b733cfee287",
+      "target_tokens": {
+        "grug": 241,
+        "snowball": 253
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:36752",
+      "task_id": "pandas-dev__pandas-49877",
+      "target_tokens": {
+        "grug": 52,
+        "snowball": 64
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:36759",
+      "task_id": "python-pillow__Pillow-87092ad4f8e55444ec3134ed857e4de5d19cd175",
+      "target_tokens": {
+        "grug": 77,
+        "snowball": 90
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:36832",
+      "task_id": "pandas-dev__pandas-1f135eb94eac1d5cb41ad7d149a44c6f51358fc7",
+      "target_tokens": {
+        "grug": 123,
+        "snowball": 136
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:36970",
+      "task_id": "python-pillow__Pillow-312abf7c1a06d5d954d5b0dfab5235b3196fa98d",
+      "target_tokens": {
+        "grug": 328,
+        "snowball": 341
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:37169",
+      "task_id": "scrapy__scrapy-729580dae26c00812ed6326a6b95cfb2d56b3c81",
+      "target_tokens": {
+        "grug": 33,
+        "snowball": 46
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:37338",
+      "task_id": "datalad__datalad-8a300d306e3040eb34ce0e973be526f210df1863",
+      "target_tokens": {
+        "grug": 49,
+        "snowball": 61
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:37564",
+      "task_id": "Project-MONAI__MONAI-4344",
+      "target_tokens": {
+        "grug": 136,
+        "snowball": 149
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:37855",
+      "task_id": "pandas-dev__pandas-52180",
+      "target_tokens": {
+        "grug": 91,
+        "snowball": 104
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:37910",
+      "task_id": "python-pillow__Pillow-a7eb2ea9ccdf4f55ae97c0c65cb353af033cebfb",
+      "target_tokens": {
+        "grug": 44,
+        "snowball": 57
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:37945",
+      "task_id": "aio-libs__aiohttp-b7e3b300369d2b8c1a1bd1e269bf23b51dc0d8ce",
+      "target_tokens": {
+        "grug": 59,
+        "snowball": 72
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:38572",
+      "task_id": "biolab__orange3-84acb936f40a40a1f21775becc5566902b8fa4d2",
+      "target_tokens": {
+        "grug": 50,
+        "snowball": 62
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:38699",
+      "task_id": "Pylons__pyramid-4a7029f6b313b65ba94d0726042ea3adbad38e81",
+      "target_tokens": {
+        "grug": 59,
+        "snowball": 72
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:38876",
+      "task_id": "python-pillow__Pillow-541d2605b9235a427379e3df51c9cdd4ffe59998",
+      "target_tokens": {
+        "grug": 43,
+        "snowball": 56
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:38881",
+      "task_id": "python-pillow__Pillow-312abf7c1a06d5d954d5b0dfab5235b3196fa98d",
+      "target_tokens": {
+        "grug": 144,
+        "snowball": 157
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:21578",
+      "task_id": "aio-libs__aiohttp-e2631c7c058796ac8fab88722cffd582300cdc0e",
+      "target_tokens": {
+        "grug": 59,
+        "snowball": 72
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:39028",
+      "task_id": "bokeh__bokeh-13757",
+      "target_tokens": {
+        "grug": 196,
+        "snowball": 209
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:39337",
+      "task_id": "facebookresearch__hydra-892",
+      "target_tokens": {
+        "grug": 74,
+        "snowball": 86
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:39353",
+      "task_id": "numpy__numpy-3cc797e5107d5f3fe812b0ccdc9bc96f107f0b20",
+      "target_tokens": {
+        "grug": 62,
+        "snowball": 74
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:40296",
+      "task_id": "getmoto__moto-7085",
+      "target_tokens": {
+        "grug": 48,
+        "snowball": 61
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:40363",
+      "task_id": "pandas-dev__pandas-03a49813074c84665c9ea611c56bb0059f434227",
+      "target_tokens": {
+        "grug": 343,
+        "snowball": 355
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:40853",
+      "task_id": "Pylons__pyramid-3803d92fc0da5282656d4229e063a1908ec5522a",
+      "target_tokens": {
+        "grug": 119,
+        "snowball": 132
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:40974",
+      "task_id": "nedbat__coveragepy-e6df5b39be55c44205ea67811bb812e085599d5e",
+      "target_tokens": {
+        "grug": 33,
+        "snowball": 46
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:41008",
+      "task_id": "aio-libs__aiohttp-210bcbb8ee0c3ce34664836403a07a0b97123696",
+      "target_tokens": {
+        "grug": 205,
+        "snowball": 218
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:41038",
+      "task_id": "Pylons__pyramid-c7bff5045ad928166695fb6bb8154443387e4184",
+      "target_tokens": {
+        "grug": 47,
+        "snowball": 60
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:41490",
+      "task_id": "getmoto__moto-5478",
+      "target_tokens": {
+        "grug": 163,
+        "snowball": 176
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:41570",
+      "task_id": "getmoto__moto-5999",
+      "target_tokens": {
+        "grug": 46,
+        "snowball": 59
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:2191",
+      "task_id": "pandas-dev__pandas-50316",
+      "target_tokens": {
+        "grug": 71,
+        "snowball": 84
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:41792",
+      "task_id": "Pylons__pyramid-40d71e805bfcf8522c6af71995c05c496f1c4b4f",
+      "target_tokens": {
+        "grug": 86,
+        "snowball": 98
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:42007",
+      "task_id": "pandas-dev__pandas-5bf5ae80f4292d16c0ad90318ee5d41a1870fa62",
+      "target_tokens": {
+        "grug": 45,
+        "snowball": 57
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:42031",
+      "task_id": "Project-MONAI__MONAI-4344",
+      "target_tokens": {
+        "grug": 46,
+        "snowball": 59
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:42044",
+      "task_id": "pandas-dev__pandas-a42441d9e6ac1b0645d7cb0cf1d2cc4757511e2c",
+      "target_tokens": {
+        "grug": 199,
+        "snowball": 212
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:42099",
+      "task_id": "biolab__orange3-cbe18566e0554244e6b237116e3da6ee61b28def",
+      "target_tokens": {
+        "grug": 194,
+        "snowball": 207
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:42115",
+      "task_id": "pandas-dev__pandas-16ccbca475695acf85f2aef00b74fe533b2c37c5",
+      "target_tokens": {
+        "grug": 262,
+        "snowball": 274
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:42243",
+      "task_id": "pandas-dev__pandas-47586",
+      "target_tokens": {
+        "grug": 972,
+        "snowball": 985
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:42468",
+      "task_id": "numpy__numpy-a5322429c56fb2f906e49e4ae5b87533269d8150",
+      "target_tokens": {
+        "grug": 47,
+        "snowball": 60
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:42515",
+      "task_id": "Project-MONAI__MONAI-3062",
+      "target_tokens": {
+        "grug": 54,
+        "snowball": 66
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:42776",
+      "task_id": "numpy__numpy-cdef8d3e408899f7e0cc1037d358ece8d9cc3324",
+      "target_tokens": {
+        "grug": 63,
+        "snowball": 76
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:42937",
+      "task_id": "Project-MONAI__MONAI-6147",
+      "target_tokens": {
+        "grug": 40,
+        "snowball": 53
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:43002",
+      "task_id": "tornadoweb__tornado-cc3ca857a0d5d92309c655a37a60160abc51679b",
+      "target_tokens": {
+        "grug": 38,
+        "snowball": 51
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:43037",
+      "task_id": "pandas-dev__pandas-69b25ee82aeca1fc94a04cfa0159c70ad2a625b4",
+      "target_tokens": {
+        "grug": 40,
+        "snowball": 53
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:43182",
+      "task_id": "Pylons__pyramid-171c2dca2776e9b9642bcf8b0d4a30ba97ab5724",
+      "target_tokens": {
+        "grug": 183,
+        "snowball": 196
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:43525",
+      "task_id": "getmoto__moto-6726",
+      "target_tokens": {
+        "grug": 71,
+        "snowball": 84
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:23028",
+      "task_id": "numpy__numpy-c9d61533f0a5a40ec0a38c69e19615d375af166e",
+      "target_tokens": {
+        "grug": 58,
+        "snowball": 71
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:44014",
+      "task_id": "pandas-dev__pandas-f2dcd24d014063617a56585a34b93a2c1736de9b",
+      "target_tokens": {
+        "grug": 552,
+        "snowball": 564
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:44445",
+      "task_id": "pandas-dev__pandas-aad85ad1e39568f87cdae38fece41cd2370234a7",
+      "target_tokens": {
+        "grug": 39,
+        "snowball": 52
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:44456",
+      "task_id": "pandas-dev__pandas-15b8898356c0ac213feaa99a734e865eb1fcf300",
+      "target_tokens": {
+        "grug": 44,
+        "snowball": 57
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:44543",
+      "task_id": "numpy__numpy-3cc797e5107d5f3fe812b0ccdc9bc96f107f0b20",
+      "target_tokens": {
+        "grug": 42,
+        "snowball": 55
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:44759",
+      "task_id": "iterative__dvc-6284",
+      "target_tokens": {
+        "grug": 51,
+        "snowball": 64
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:44900",
+      "task_id": "numpy__numpy-af6cb03920f3ae62cb8a8c871edeccbcd8609955",
+      "target_tokens": {
+        "grug": 32,
+        "snowball": 45
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:45023",
+      "task_id": "Pylons__pyramid-171c2dca2776e9b9642bcf8b0d4a30ba97ab5724",
+      "target_tokens": {
+        "grug": 107,
+        "snowball": 119
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:45050",
+      "task_id": "tornadoweb__tornado-51c9796b10b8b141454f8fe4d080e76962a9ad57",
+      "target_tokens": {
+        "grug": 61,
+        "snowball": 74
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:45128",
+      "task_id": "pandas-dev__pandas-9de4cc1bc6b719eea183419fd6343fa691139139",
+      "target_tokens": {
+        "grug": 47,
+        "snowball": 59
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:45262",
+      "task_id": "pandas-dev__pandas-c298a60a5cabd029c1e643ff4c68c424b5791f38",
+      "target_tokens": {
+        "grug": 64,
+        "snowball": 76
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:45348",
+      "task_id": "Project-MONAI__MONAI-5119",
+      "target_tokens": {
+        "grug": 152,
+        "snowball": 164
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:45710",
+      "task_id": "biolab__orange3-f6b7dde95ebc4782b304a9175e4c7df34cb85f17",
+      "target_tokens": {
+        "grug": 52,
+        "snowball": 64
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:45957",
+      "task_id": "numpy__numpy-cdef8d3e408899f7e0cc1037d358ece8d9cc3324",
+      "target_tokens": {
+        "grug": 52,
+        "snowball": 65
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:6275",
+      "task_id": "scrapy__scrapy-6fbd6f941f00037ae4718805352e0fa86a781e41",
+      "target_tokens": {
+        "grug": 58,
+        "snowball": 71
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:46447",
+      "task_id": "pandas-dev__pandas-cbe88f3c231308b91c68c866a103f10fc0dc13be",
+      "target_tokens": {
+        "grug": 74,
+        "snowball": 86
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:46796",
+      "task_id": "biolab__orange3-99e4510b1fdda1eba9a7e91997ec9a9f1ca710c8",
+      "target_tokens": {
+        "grug": 45,
+        "snowball": 57
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:47119",
+      "task_id": "pandas-dev__pandas-48637",
+      "target_tokens": {
+        "grug": 50,
+        "snowball": 62
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:47282",
+      "task_id": "tornadoweb__tornado-a015429def80caeed9944a6450095483cc58e870",
+      "target_tokens": {
+        "grug": 62,
+        "snowball": 75
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:47490",
+      "task_id": "pandas-dev__pandas-7839305968e2a47ae3e4a17ad9b156fdf7f04fd7",
+      "target_tokens": {
+        "grug": 46,
+        "snowball": 59
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:47937",
+      "task_id": "Project-MONAI__MONAI-3478",
+      "target_tokens": {
+        "grug": 55,
+        "snowball": 68
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:48804",
+      "task_id": "biolab__orange3-cbe18566e0554244e6b237116e3da6ee61b28def",
+      "target_tokens": {
+        "grug": 38,
+        "snowball": 51
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:48892",
+      "task_id": "python-pillow__Pillow-71b7f3daf388e7657f58bc05d2105dce0cdf12f0",
+      "target_tokens": {
+        "grug": 239,
+        "snowball": 252
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:48981",
+      "task_id": "pandas-dev__pandas-bf375608c10a6021c8933939a00c3b733cfee287",
+      "target_tokens": {
+        "grug": 58,
+        "snowball": 71
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:49363",
+      "task_id": "aio-libs__aiohttp-ffb66cb0d1908bcc9b12fabd637d07b8a765430c",
+      "target_tokens": {
+        "grug": 48,
+        "snowball": 60
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:49526",
+      "task_id": "getmoto__moto-5920",
+      "target_tokens": {
+        "grug": 61,
+        "snowball": 74
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:49762",
+      "task_id": "biolab__orange3-b5a965e31d82da4134b21b15a62d708cd48e03f4",
+      "target_tokens": {
+        "grug": 48,
+        "snowball": 61
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:49844",
+      "task_id": "biolab__orange3-047400d85b287de8ed624974d0da890626c141b2",
+      "target_tokens": {
+        "grug": 219,
+        "snowball": 232
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:49912",
+      "task_id": "pandas-dev__pandas-52422",
+      "target_tokens": {
+        "grug": 52,
+        "snowball": 65
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:50058",
+      "task_id": "numpy__numpy-57225485fe72ca059e8c7d9fa17a07c3a31ba009",
+      "target_tokens": {
+        "grug": 184,
+        "snowball": 197
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:50129",
+      "task_id": "numpy__numpy-3071778e37112377b592b180769f0a44496dc2da",
+      "target_tokens": {
+        "grug": 39,
+        "snowball": 52
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:50282",
+      "task_id": "pandas-dev__pandas-9db86be8f6d4e4795a8f25366a3af1f8356e95b5",
+      "target_tokens": {
+        "grug": 49,
+        "snowball": 61
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:50348",
+      "task_id": "getmoto__moto-6107",
+      "target_tokens": {
+        "grug": 181,
+        "snowball": 194
+      }
+    },
+    {
+      "source_id": "swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:50358",
+      "task_id": "aio-libs__aiohttp-032fb571f2c73605d855d4f17026b303c7441823",
+      "target_tokens": {
+        "grug": 108,
+        "snowball": 121
+      }
+    }
+  ]
+}

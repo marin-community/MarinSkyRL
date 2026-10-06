@@ -1,0 +1,309 @@
+artifacts:
+  attempts_root: s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/runs/swe-pilot-snowball-sft-random-20261001-195833-allocfix/attempts
+  checkpoint_root: s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/runs/swe-pilot-snowball-sft-random-20261001-195833-allocfix/checkpoint
+  export_root: s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/runs/swe-pilot-snowball-sft-random-20261001-195833-allocfix/export
+  resolved_config_uri: s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/runs/swe-pilot-snowball-sft-random-20261001-195833-allocfix/resolved.yaml
+  terminal_manifest_uri: s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/runs/swe-pilot-snowball-sft-random-20261001-195833-allocfix/terminal.json
+inputs:
+  data_kind: parquet
+  model:
+    identity: fdc3c3c5fff489d3fb04dcbc2387c179b1bf3fab
+    local_path: open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92
+    tokenizer_revision: fdc3c3c5fff489d3fb04dcbc2387c179b1bf3fab
+    tokenizer_uri: open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92
+    uri: open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92
+  train_data:
+  - identity: b6e9c7502131ec7b6dc3576b7dc2fcdf1db892cc8b9fa3fbcd7f1ac93b77ffdf
+    kind: directory
+    local_path: /tmp/swe-pilot-data/snowball-frozen
+    relative_path: random_train.parquet
+    uri: s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/profiles/swe/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92/fdc3c3c5fff489d3fb04dcbc2387c179b1bf3fab/b6e9c7502131ec7b6dc3576b7dc2fcdf1db892cc8b9fa3fbcd7f1ac93b77ffdf
+  validation_data:
+  - identity: ece2903ce8cec42afa0dc9e97142cbaec794a8f8ab195264d26c9a29d9581097
+    kind: directory
+    local_path: /tmp/swe-pilot-data/split
+    relative_path: validation.parquet
+    uri: s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/prepared/swe/4947a3c8ea803413a65f9eca14a96ef521b2ddf5/ece2903ce8cec42afa0dc9e97142cbaec794a8f8ab195264d26c9a29d9581097
+iris:
+  allocation:
+    cpu: 48
+    disk: 2TB
+    gpu_variant: H100
+    gpus_per_node: 8
+    memory: 700GB
+    num_nodes: 8
+  cluster: marin-contractor-adc
+  cluster_config: /tmp/marin-contractor-adc.yaml
+  job_name: swe-pilot-snowball-sft-random-20261001-195833-allocfix
+  max_retries: 0
+  parent_cluster_config: /tmp/marin-contractor-adc.yaml
+  priority: interactive
+  target_cluster: cw-rno2a
+  timeout: 86400
+  wandb_entity: marin-community
+ray:
+  driver_liveness_timeout: 3600
+  log_dir: s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/runs/swe-pilot-snowball-sft-random-20261001-195833-allocfix/ray-logs
+  rendezvous_dir: s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/runs/swe-pilot-snowball-sft-random-20261001-195833-allocfix/rendezvous
+  spill_backend: local
+  spill_dir: /tmp/skyrl-ray-spill
+run:
+  attempt_id: a1
+  export_hf: false
+  id: swe-pilot-snowball-sft-random-20261001-195833-allocfix
+  mode: train
+  seed: 42
+  submission: detach
+runtime:
+  launcher_commit: d2d04c8183c1e2d41fdfe7f22aab9b05de67b207
+  profile: megatron
+  task_env:
+    PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+schema_version: 1
+skyrl:
+  context_budget:
+    max_new_tokens_per_turn: null
+    max_turns: 1
+    request_window_tokens: 65536
+  data:
+    kind: parquet
+    shuffle: true
+    train_data:
+    - s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/profiles/swe/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92/fdc3c3c5fff489d3fb04dcbc2387c179b1bf3fab/b6e9c7502131ec7b6dc3576b7dc2fcdf1db892cc8b9fa3fbcd7f1ac93b77ffdf/random_train.parquet
+    val_data:
+    - s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/prepared/swe/4947a3c8ea803413a65f9eca14a96ef521b2ddf5/ece2903ce8cec42afa0dc9e97142cbaec794a8f8ab195264d26c9a29d9581097/validation.parquet
+  entrypoint: standard
+  environment:
+    skyrl_gym:
+      nemotron_ultra:
+        pivot_arm: sft_random
+        pivot_reward: tool_name
+  extra_env:
+    PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+  generator:
+    backend: vllm
+    enable_chunked_prefill: true
+    enable_http_endpoint: true
+    enable_prefix_caching: true
+    enforce_eager: false
+    engine_init_kwargs:
+      enable_auto_tool_choice: true
+      tool_call_parser: hermes
+    eval_n_samples_per_prompt: 1
+    eval_sampling_params:
+      temperature: 0.0
+      top_k: -1
+      top_p: 1.0
+    gpu_memory_utilization: 0.8
+    inference_engine_data_parallel_size: 8
+    inference_engine_expert_parallel_size: 8
+    inference_engine_tensor_parallel_size: 1
+    max_num_batched_tokens: 16384
+    max_num_seqs: 16
+    model_dtype: bfloat16
+    n_samples_per_prompt: 8
+    num_inference_engines: 2
+    run_engines_locally: true
+    sampling_params:
+      temperature: 1.0
+      top_k: -1
+      top_p: 1.0
+    trajectory_retention:
+      enabled: true
+      grade_table: true
+      max_bytes_per_run: null
+      max_bytes_per_step: null
+      model_source_identity: fdc3c3c5fff489d3fb04dcbc2387c179b1bf3fab
+      output_path: s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/runs/swe-pilot-snowball-sft-random-20261001-195833-allocfix/attempts/trajectories
+      phases:
+      - train
+      - eval
+      required: true
+      sample_fraction: 1.0
+    trajectory_reward_shaping:
+      enabled: false
+    vllm_attention_backend: FLASH_ATTN
+    weight_sync_backend: nccl
+  pivot:
+    evaluation_rows: 256
+    mode: sft
+    profiling_samples: 8
+    quick_rows: 64
+    selected_data_hash: 1cb58ffca95a022309d07e1d0a07b1dfe93c48109d553c1e7c10e5487cede3e6
+    selected_data_uri: s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/profiles/swe/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92/fdc3c3c5fff489d3fb04dcbc2387c179b1bf3fab/b6e9c7502131ec7b6dc3576b7dc2fcdf1db892cc8b9fa3fbcd7f1ac93b77ffdf/train.parquet
+    train_data_uri: s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/profiles/swe/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92/fdc3c3c5fff489d3fb04dcbc2387c179b1bf3fab/b6e9c7502131ec7b6dc3576b7dc2fcdf1db892cc8b9fa3fbcd7f1ac93b77ffdf/random_train.parquet
+    verifier_identities:
+      exact: strict_recursive_arguments:v1
+      nemo: word_count_similarity_threshold=0:v1
+      tool_name: expected_tool_name_match:v1
+  trainer:
+    algorithm:
+      advantage_batch_normalize: false
+      advantage_estimator: grpo
+      dynamic_sampling:
+        informative_on: unshaped
+        max_sample_batches: 30
+        min_reward_std: 0.0
+        type: null
+      eps_clip_high: 0.2
+      eps_clip_low: 0.2
+      group_advantage_min_size: null
+      grpo_norm_by_std: true
+      kl_estimator_type: forward
+      kl_loss_coef: 0.001
+      loss_reduction: token_mean
+      use_entropy_loss: false
+      use_kl_in_reward: false
+      use_kl_loss: true
+    ckpt_interval: -1
+    dump_data_batch: true
+    epochs: 100000
+    eval_batch_size: 16
+    eval_before_train: true
+    eval_interval: -1
+    eval_loss_token_interval: null
+    flash_attn: true
+    gradient_checkpointing: true
+    gradient_checkpointing_use_reentrant: false
+    logger: wandb
+    loss_token_budget: 1000000
+    max_ckpts_to_keep: 3
+    max_steps: 100000
+    micro_forward_batch_size_per_gpu: 1
+    micro_train_batch_size_per_gpu: 1
+    offload_optimizer_during_rollouts: true
+    pivot_pilot:
+      archive_root: s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/runs/swe-pilot-snowball-sft-random-20261001-195833-allocfix/attempts/trajectories
+      arm: sft_random
+      baseline_cache: s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/baseline-cache/snowball-784b88ac49006bc3395f66229ce04f95247f9e87c5372c8a7bb38f3c80b658f3.json
+      grade_table_root: s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/runs/swe-pilot-snowball-sft-random-20261001-195833-allocfix/attempts/trajectories/schema_v5/grades
+      quick_data_sha256: f0cc293bb374c9c652d3a3cce01edbec04465c87fe8f06aef21d55f02df42334
+      quick_hash: 4d9bbdf4f5fa22322a57fdcdb08d61601e291148d7ca39686e05b3c9a268d787
+      quick_source_ids:
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:11298
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:15578
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:22496
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:50058
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:7351
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:50282
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:50358
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:43182
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:2270
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:39337
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:21971
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:27986
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:1241
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:29624
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:18223
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:16708
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:41490
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:37169
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:9819
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:34262
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:36505
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:31351
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:44759
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:33229
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:46447
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:36265
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:10001
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:43525
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:44456
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:17417
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:23999
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:23028
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:13013
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:32222
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:35983
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:13659
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:2963
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:12315
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:32307
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:49844
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:27259
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:19229
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:49912
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:21578
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:40363
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:45710
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:3785
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:47282
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:28536
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:44543
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:10851
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:9119
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:29306
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:28051
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:48804
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:27751
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:1703
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:49526
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:33120
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:29096
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:13892
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:36970
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:34561
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:28320
+      selected_data_sha256: 96abf6698a5628b37328a68c648138f5115a9a82b21dcf89b18a7a8d2c424e75
+      selected_data_uri: s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/profiles/swe/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92/fdc3c3c5fff489d3fb04dcbc2387c179b1bf3fab/b6e9c7502131ec7b6dc3576b7dc2fcdf1db892cc8b9fa3fbcd7f1ac93b77ffdf/train.parquet
+      split_hash: 784b88ac49006bc3395f66229ce04f95247f9e87c5372c8a7bb38f3c80b658f3
+      train_data_sha256: 4d9ae9b14338327b9351bf29540f3caf0711609c3e269435608fbad7db1b28dd
+      validation_data_sha256: 886696609b201b96161b946a7f5d16d0cf9903102baf6a1303a85a765ba1817c
+      verifier_exact_id: strict_recursive_arguments:v1
+      verifier_nemo_id: word_count_similarity_threshold=0:v1
+      verifier_tool_name_id: expected_tool_name_match:v1
+    placement:
+      colocate_all: false
+      colocate_policy_ref: false
+      policy_num_gpus_per_node: 8
+      policy_num_nodes: 6
+      ref_num_gpus_per_node: 8
+      ref_num_nodes: 4
+    policy:
+      megatron_config:
+        context_parallel_size: 1
+        ddp_config:
+          grad_reduce_in_fp32: false
+          overlap_grad_reduce: true
+          overlap_param_gather: true
+        expert_model_parallel_size: 8
+        expert_tensor_parallel_size: 1
+        logprob_chunk_size: 128
+        optimizer_checkpoint_sharding_type: dp_reshardable
+        optimizer_config_kwargs:
+          optimizer_cpu_offload: true
+          optimizer_offload_fraction: 1.0
+        pipeline_model_parallel_size: 6
+        tensor_model_parallel_size: 1
+        transformer_config_kwargs:
+          num_layers_in_first_pipeline_stage: 4
+          num_layers_in_last_pipeline_stage: 2
+      model:
+        path: open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92
+        revision: fdc3c3c5fff489d3fb04dcbc2387c179b1bf3fab
+      optimizer_config:
+        lr: 4.0e-06
+        max_grad_norm: 0.5
+        num_warmup_steps: 0
+        optimizer: AdamW
+        scheduler: constant_with_warmup
+        weight_decay: 0.0
+    policy_mini_batch_size: 64
+    project_name: pivot-rl
+    ref:
+      megatron_config:
+        context_parallel_size: 1
+        expert_model_parallel_size: 8
+        expert_tensor_parallel_size: 1
+        logprob_chunk_size: 128
+        pipeline_model_parallel_size: 4
+        tensor_model_parallel_size: 1
+        transformer_config_kwargs:
+          num_layers_in_first_pipeline_stage: 6
+          num_layers_in_last_pipeline_stage: 6
+    resume_mode: none
+    seed: 42
+    strategy: megatron
+    train_batch_size: 64
+    update_epochs_per_batch: 1
+    use_sample_packing: true
