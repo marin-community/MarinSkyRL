@@ -721,6 +721,8 @@ def validate_generator_cfg(cfg: DictConfig):
     """
 
     engine_kwargs = cfg.generator.engine_init_kwargs
+    if cfg.generator.backend == "vllm" and engine_kwargs.get("load_format") is not None:
+        engine_kwargs["load_format"] = engine_kwargs["load_format"].lower()
     if engine_kwargs.get("load_format") == "dummy":
         failures = []
         if cfg.generator.backend != "vllm":

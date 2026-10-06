@@ -40,6 +40,7 @@ from skyrl_train.inference_engines.utils import (
     route_prompts_to_engines,
 )
 from skyrl_train.trajectory_runners.routed_experts import normalize_routed_experts
+from skyrl_train.utils.utils import validate_generator_cfg
 from transformers import AutoTokenizer
 
 # (num_engines, num_prompts, with_session_ids): a single engine, an uneven even-split, session-id
@@ -1494,7 +1495,10 @@ class _MockGenerateEngine:
         self.scheduler_paused = False
 
 
-def test_dummy_training_factory_serves_http_only_after_engines_acknowledge_pause(monkeypatch, unused_tcp_port):
+@pytest.mark.parametrize("load_format", ["dummy", "Dummy"])
+def test_dummy_training_factory_serves_http_only_after_engines_acknowledge_pause(
+    monkeypatch, unused_tcp_port, load_format
+):
     entered = threading.Event()
     release = threading.Event()
 
@@ -1507,12 +1511,14 @@ def test_dummy_training_factory_serves_http_only_after_engines_acknowledge_pause
     engine = DelayedPauseEngine()
     monkeypatch.setattr(main_base, "create_ray_wrapped_inference_engines_from_config", lambda *args, **kwargs: [engine])
     cfg = get_default_config()
+    cfg.trainer.logger = "console"
     cfg.trainer.placement.colocate_all = False
     cfg.generator.enable_http_endpoint = True
     cfg.generator.http_endpoint_port = unused_tcp_port
     cfg.generator.fuse_weights = False
     cfg.generator.weight_sync_transport = "broadcast"
-    OmegaConf.update(cfg, "generator.engine_init_kwargs.load_format", "dummy", force_add=True)
+    OmegaConf.update(cfg, "generator.engine_init_kwargs.load_format", load_format, force_add=True)
+    validate_generator_cfg(cfg)
     experiment = main_base.BasePPOExp.__new__(main_base.BasePPOExp)
     experiment.cfg, experiment.colocate_pg, experiment.tokenizer = cfg, None, object()
     url = f"http://127.0.0.1:{unused_tcp_port}/v1/models"

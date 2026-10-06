@@ -220,11 +220,12 @@ def test_teacher_objective_is_validated_before_launch(tmp_path, key, value, erro
 
 
 @pytest.mark.parametrize("local_teacher", [True, False], ids=["local", "external"])
-def test_dummy_student_weights_require_teachers_with_independent_loading(local_teacher):
+@pytest.mark.parametrize("load_format", ["dummy", "Dummy"])
+def test_dummy_student_weights_require_teachers_with_independent_loading(local_teacher, load_format):
     cfg = selected_topk_config() if local_teacher else replace_mode_config()
     cfg.trainer.placement.colocate_all = False
     cfg.generator.fuse_weights = False
-    OmegaConf.update(cfg, "generator.engine_init_kwargs.load_format", "dummy", force_add=True)
+    OmegaConf.update(cfg, "generator.engine_init_kwargs.load_format", load_format, force_add=True)
 
     if local_teacher:
         with pytest.raises(ValueError, match="no local-inference distillation teachers"):
