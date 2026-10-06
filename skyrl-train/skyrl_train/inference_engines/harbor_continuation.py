@@ -9,7 +9,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
-from marinskyrl.harbor_agent_names import MINI_SWE_HARBOR_AGENT_NAME
+from marinskyrl.harbor_agent_names import is_harbor_task_request
 from skyrl_train.inference_engines.chat_continuation import (
     CHAT_TOKENIZE_FIELDS,
     EXACT_PROMPT_TOKEN_IDS_KEY,
@@ -181,7 +181,7 @@ class HarborContinuationManager:
             # OpenCode's title and compaction agents share the trial header but call
             # the model with no tools. They are auxiliary generations, not turns in
             # the task agent's causal action chain, and must not replace its state.
-            or (not body.get("tools") and headers.get(TASK_AGENT_HEADER) != MINI_SWE_HARBOR_AGENT_NAME)
+            or not is_harbor_task_request(body, headers.get(TASK_AGENT_HEADER, ""))
         ):
             return None
 

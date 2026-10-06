@@ -30,3 +30,8 @@ def configured_harbor_profiles(harbor: Mapping[str, Any]) -> tuple[HarborAgentPr
     if len({profile.name for profile in profiles}) != len(profiles):
         raise ValueError("Harbor agent profile names must be distinct")
     return tuple(profiles)
+
+
+def is_harbor_task_request(body: Mapping[str, Any], agent_name: str) -> bool:
+    """Distinguish task-agent calls from tool-free auxiliary title or compaction calls."""
+    return bool(body.get("tools")) or agent_name == MINI_SWE_HARBOR_AGENT_NAME

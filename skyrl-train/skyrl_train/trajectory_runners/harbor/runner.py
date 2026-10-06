@@ -58,6 +58,7 @@ from skyrl_train.utils.span_tagger import tag_response_spans
 from skyrl_train.utils.pbs_shaping import compute_pbs_token_shaping
 from omegaconf import DictConfig
 from pathlib import Path
+from marinskyrl.harbor_agent_names import is_harbor_task_request
 from marinskyrl.packed_tasks import PackedTaskMaterializer, PackedTaskReference
 
 # Harbor orchestrator and trial imports.
@@ -107,7 +108,7 @@ def _materialized_prompts(
     ]
 
 
-def _select_cli_literal_chain(entries: List[Dict[str, Any]], trial_id: str) -> List[Dict[str, Any]]:
+def _select_cli_literal_chain(entries: List[Dict[str, Any]], trial_id: str, agent_name: str) -> List[Dict[str, Any]]:
     """Return the final continuous agent-call chain for one CLI-agent trial.
 
     The controller RecordProxy captures every request carrying the trial header.
@@ -115,7 +116,7 @@ def _select_cli_literal_chain(entries: List[Dict[str, Any]], trial_id: str) -> L
     summary-seeded conversation. Neither belongs in the causal sequence assembled
     from the final request's chat history. A real next agent turn has the previous
     served prompt and completion as an exact prefix of its prompt, so retain the
-    longest such route ending at the final captured call.
+    longest such route ending at the final captured task-agent call.
 
     Entries without complete token-id streams keep the existing all-entry fallback:
     they can still support the re-tokenized TIS path but cannot prove a TITO route.
@@ -127,6 +128,7 @@ def _select_cli_literal_chain(entries: List[Dict[str, Any]], trial_id: str) -> L
         and entry.get("status_code") == 200
         and isinstance(entry.get("literal"), dict)
         and entry["literal"].get("completion_token_ids")
+        and is_harbor_task_request(entry.get("request", {}), agent_name)
     ]
     candidates.sort(key=lambda entry: entry.get("timestamp") or 0.0)
     if len(candidates) < 2:
@@ -1504,7 +1506,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 from harbor.literal.rollout_build import build_rollout_details_from_pairs
             except Exception:  # harbor without the bridge → no-op
                 return rollout_details
-            selected_entries = _select_cli_literal_chain(entries, trial_id)
+            selected_entries = _select_cli_literal_chain(entries, trial_id, result.agent_info.name)
             built = build_rollout_details_from_pairs([entry["literal"] for entry in selected_entries])
             if not built:
                 return rollout_details
@@ -1589,7 +1591,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         ]
         if not matched:
             return None
-        matched = _select_cli_literal_chain(matched, trial_id)
+        matched = _select_cli_literal_chain(matched, trial_id, result.agent_info.name)
         if not matched:
             return None
         last = matched[-1]

@@ -54,7 +54,7 @@ def _fake_self(collect=True, literal_log_path=None):
 def _result(trial_id, rollout_details=None):
     md = {"rollout_correlation_id": trial_id} if trial_id else None
     agent_result = types.SimpleNamespace(rollout_details=rollout_details, metadata=md)
-    return types.SimpleNamespace(agent_result=agent_result)
+    return types.SimpleNamespace(agent_result=agent_result, agent_info=types.SimpleNamespace(name="opencode"))
 
 
 def _entry(trial_id, ts, pids, cids, lps):
@@ -62,7 +62,10 @@ def _entry(trial_id, ts, pids, cids, lps):
         "timestamp": ts,
         "status_code": 200,
         "trial_id": trial_id,
-        "request": {"messages": [{"role": "user", "content": "same task"}]},
+        "request": {
+            "messages": [{"role": "user", "content": "same task"}],
+            "tools": [{"type": "function", "function": {"name": "bash"}}],
+        },
         "literal": {
             "prompt_token_ids": pids,
             "completion_token_ids": cids,
@@ -111,7 +114,7 @@ def test_selects_final_continuous_chain_around_auxiliary_call():
         _entry("A", 3.0, [1, 10, 2, 11, 3], [12], [-0.4]),
     ]
 
-    selected = _select_chain(entries, "A")
+    selected = _select_chain(entries, "A", "opencode")
 
     assert [entry["literal"]["completion_token_ids"] for entry in selected] == [[10], [11], [12]]
 
@@ -125,7 +128,7 @@ def test_selects_only_final_session_after_context_reset():
         _entry("A", 4.0, [50, 60, 3], [61], [-0.4]),
     ]
 
-    selected = _select_chain(entries, "A")
+    selected = _select_chain(entries, "A", "opencode")
 
     assert [entry["literal"]["completion_token_ids"] for entry in selected] == [[60], [61]]
 
@@ -142,6 +145,25 @@ def test_correlation_excludes_auxiliary_call_from_tito_stream(tmp_path, monkeypa
 
     assert rollout_details[0]["completion_token_ids"] == [[10], [11]]
     assert rollout_details[0]["prompt_token_ids"] == [[1], [1, 10, 2]]
+
+
+@pytest.mark.parametrize("agent_name", ["opencode", "mini-swe-agent"])
+def test_correlation_keeps_task_route_when_tool_free_call_finishes_last(tmp_path, monkeypatch, agent_name):
+    entries = [
+        _entry("A", 1.0, [1], [10], [-0.1]),
+        _entry("A", 2.0, [1, 10, 2], [11], [-0.2]),
+        _entry("A", 3.0, [99], [90], [-0.3]),
+    ]
+    for entry in entries:
+        if agent_name == "mini-swe-agent" or entry is entries[-1]:
+            entry["request"]["tools"] = []
+    monkeypatch.setenv("OTAGENT_LITERAL_LOG_PATH", _write_log(tmp_path, entries))
+    result = _result("A")
+    result.agent_info.name = agent_name
+
+    details = _correlate(_fake_self(), result, None)
+
+    assert details[0]["completion_token_ids"] == ([[10], [11]] if agent_name == "opencode" else [[90]])
 
 
 MISSING_LOG = object()
@@ -222,7 +244,7 @@ def _entry_msgs(trial_id, ts, messages, cids):
         "timestamp": ts,
         "status_code": 200,
         "trial_id": trial_id,
-        "request": {"messages": messages},
+        "request": {"messages": messages, "tools": [{"type": "function", "function": {"name": "bash"}}]},
         "literal": {"prompt_token_ids": [1], "completion_token_ids": cids, "logprobs": [-0.1] * len(cids)},
     }
 

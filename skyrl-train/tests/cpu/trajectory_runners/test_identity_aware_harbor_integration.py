@@ -394,12 +394,16 @@ def test_opencode_preserves_recorded_evidence_without_verifier_reward(tmp_path, 
         "timestamp": 1.0,
         "status_code": 200,
         "trial_id": "timed-out-trial",
-        "request": {"messages": [{"role": "user", "content": "solve it"}]},
+        "request": {
+            "messages": [{"role": "user", "content": "solve it"}],
+            "tools": [{"type": "function", "function": {"name": "bash"}}],
+        },
         "literal": {"prompt_token_ids": [7, 8, 2], "completion_token_ids": [10], "logprobs": [-0.25]},
     }
     log.write_text(json.dumps(entry) + "\n" if recorded else "")
     runner._literal_log_path = str(log)
     result = SimpleNamespace(
+        agent_info=SimpleNamespace(name="opencode"),
         verifier_result=None,
         exception_info=SimpleNamespace(exception_type="AgentTimeoutError") if timed_out else None,
         agent_result=SimpleNamespace(
