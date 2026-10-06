@@ -48,6 +48,7 @@ from marinskyrl.runtime_options import reference_model_required
 from marinskyrl.rollout_grading import validate_nemotron_ultra_grading
 from marinskyrl.process_diagnostics import initialize_process_diagnostics
 from marinskyrl.distillation import (
+    TeacherSource,
     compile_distillation_plan_from_config,
     validate_distillation_runtime_support,
     validate_generation_logprobs,
@@ -729,7 +730,7 @@ def validate_generator_cfg(cfg: DictConfig):
         if cfg.trainer.placement.colocate_all:
             failures.append("trainer.placement.colocate_all=false")
         if cfg.generator.weight_sync_transport != "broadcast":
-            failures.append("generator.weight_sync_transport=broadcast (auto is not accepted)")
+            failures.append("generator.weight_sync_transport=broadcast")
         if cfg.generator.fuse_weights:
             failures.append("generator.fuse_weights=false")
         if cfg.generator.get("speculative_decoding") or engine_kwargs.get("speculative_config"):
@@ -742,6 +743,11 @@ def validate_generator_cfg(cfg: DictConfig):
             failures.append("no EPLB")
         if "model_loader_extra_config" in engine_kwargs:
             failures.append("no model_loader_extra_config")
+        distillation_plan = compile_distillation_plan_from_config(cfg)
+        if distillation_plan is not None and any(
+            teacher.source is TeacherSource.LOCAL_INFERENCE for teacher in distillation_plan.teachers
+        ):
+            failures.append("no local-inference distillation teachers")
         if failures:
             raise ValueError("Dummy engine weights require: " + "; ".join(failures))
 
