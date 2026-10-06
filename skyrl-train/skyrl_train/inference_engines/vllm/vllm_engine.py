@@ -918,31 +918,7 @@ class WorkerWrap:
         destroy_process_group(self._model_update_group)
 
     def read_named_weights(self, hf_names, dump_inventory: bool = False):
-        """TEST-ONLY (Stage 6 weight-equality gate): read engine-side weights back
-        from the live vLLM model, reconstructed under the HF parameter names the
-        trainer broadcasts.
-
-        This is the symmetric inverse of ``load_weights`` (vLLM consumes HF-named
-        tensors in ``model.load_weights`` and maps them into its internal
-        fused/sharded params; here we read those internal params back and rebuild
-        the HF view so the trainer's post-step HF tensors can be compared
-        tensor-by-tensor). Returns, per requested HF name, this worker's
-        contribution as a CPU fp32 tensor plus the live engine dtype and rank
-        coordinates so the caller can assemble across TP/EP shards.
-
-        Supported HF name forms (Qwen1.5-MoE / Qwen2MoE vLLM layout):
-          * ``model.embed_tokens.weight``                       -> VocabParallelEmbedding (TP vocab-sharded)
-          * ``model.layers.{i}.mlp.gate.weight`` (router)       -> ReplicatedLinear (full copy every rank)
-          * ``model.layers.{i}.self_attn.o_proj.weight``        -> RowParallelLinear (TP input-sharded)
-          * ``model.layers.{i}.mlp.experts.{j}.gate_proj.weight`` -> RoutedExperts w13_weight[local_e, :I]
-          * ``...experts.{j}.up_proj.weight``                   -> RoutedExperts w13_weight[local_e, I:]
-          * ``...experts.{j}.down_proj.weight``                 -> RoutedExperts w2_weight[local_e]
-
-        Args:
-            hf_names: list of HF parameter names to read back.
-            dump_inventory: if True, also returns the full ``named_parameters()``
-                name->shape inventory under key ``__inventory__`` (first run aid).
-        """
+        """Return HF-named CPU float32 weights, engine dtypes and shard coordinates, with an optional parameter inventory."""
         import re
         import torch as _torch
 

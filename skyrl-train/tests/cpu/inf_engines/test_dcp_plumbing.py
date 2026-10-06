@@ -170,12 +170,12 @@ def test_from_config_selects_weight_load_mode_for_object_store_policy(monkeypatc
         assert captured["pretrain"] == "/tmp/model-metadata"
         assert captured["engine_init_kwargs"]["load_format"] == "dummy"
         assert "model_loader_extra_config" not in captured["engine_init_kwargs"]
-        assert "_marinskyrl_metadata_path" not in captured["engine_init_kwargs"]
+        assert rwie.MODEL_METADATA_PATH_KEY not in captured["engine_init_kwargs"]
     else:
         assert captured["pretrain"] == "s3://models/policy"
         assert captured["engine_init_kwargs"]["load_format"] == "runai_streamer"
         assert captured["engine_init_kwargs"]["model_loader_extra_config"] == {"distributed": True}
-        assert captured["engine_init_kwargs"]["_marinskyrl_metadata_path"] == "/tmp/model-metadata"
+        assert captured["engine_init_kwargs"][rwie.MODEL_METADATA_PATH_KEY] == "/tmp/model-metadata"
     assert captured["engine_init_kwargs"]["tokenizer"] == "/tmp/tokenizer-metadata"
     assert "revision" not in captured["engine_init_kwargs"]
 

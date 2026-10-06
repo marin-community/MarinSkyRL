@@ -108,23 +108,71 @@ def test_load_weights_into_vllm_rejects_invalid_fused_expert_shapes(name, tensor
 
 
 @pytest.mark.parametrize(
-    ("loaded", "total", "padding", "bias_padding", "non_persistent", "complete", "fails"),
+    (
+        "loaded",
+        "total",
+        "padding",
+        "bias_padding",
+        "non_persistent",
+        "generated",
+        "tensor_padding",
+        "complete",
+        "fails",
+    ),
     [
-        pytest.param(12, 12, 0, 0, 0, False, False, id="complete-weight"),
-        pytest.param(0, 12, 0, 0, 0, False, True, id="unsent-layer"),
-        pytest.param(8, 12, 0, 0, 0, False, True, id="missing-stacked-part"),
-        pytest.param(12, 15, 0, 0, 0, False, True, id="unsent-bias"),
-        pytest.param(0, None, 0, 0, 0, True, False, id="already-processed"),
-        pytest.param(0, 32, 0, 0, 32, False, False, id="non-persistent-only"),
-        pytest.param(0, 44, 0, 0, 32, False, True, id="non-persistent-with-unsent-parameter"),
-        pytest.param(12, 16, 4, 0, 0, False, False, id="vocabulary-padding"),
-        pytest.param(8, 16, 4, 0, 0, False, True, id="padding-does-not-cover-unsent-weight"),
-        pytest.param(252, 256, 3, 1, 0, False, False, id="padded-vocabulary-bias"),
-        pytest.param(189, 256, 3, 1, 0, False, True, id="unsent-padded-vocabulary-bias"),
+        pytest.param(12, 12, 0, 0, 0, 0, {}, False, False, id="complete-weight"),
+        pytest.param(0, 12, 0, 0, 0, 0, {}, False, True, id="unsent-layer"),
+        pytest.param(8, 12, 0, 0, 0, 0, {}, False, True, id="missing-stacked-part"),
+        pytest.param(12, 15, 0, 0, 0, 0, {}, False, True, id="unsent-bias"),
+        pytest.param(0, None, 0, 0, 0, 0, {}, True, False, id="already-processed"),
+        pytest.param(0, 32, 0, 0, 32, 0, {}, False, False, id="non-persistent-only"),
+        pytest.param(0, 44, 0, 0, 32, 0, {}, False, True, id="non-persistent-with-unsent-parameter"),
+        pytest.param(12, 16, 4, 0, 0, 0, {}, False, False, id="vocabulary-padding"),
+        pytest.param(8, 16, 4, 0, 0, 0, {}, False, True, id="padding-does-not-cover-unsent-weight"),
+        pytest.param(252, 256, 3, 1, 0, 0, {}, False, False, id="padded-vocabulary-bias"),
+        pytest.param(189, 256, 3, 1, 0, 0, {}, False, True, id="unsent-padded-vocabulary-bias"),
+        pytest.param(0, 4, 0, 0, 0, 4, {}, False, False, id="generated-scales"),
+        pytest.param(0, 16, 0, 0, 0, 4, {}, False, True, id="unsent-weight-with-scales"),
+        pytest.param(
+            2363392,
+            3150848,
+            0,
+            0,
+            0,
+            0,
+            {"w13_weight": 524288, "w2_weight": 262144, "w2_bias": 1024},
+            False,
+            False,
+            id="moe-padding",
+        ),
+        pytest.param(
+            1970176,
+            3150848,
+            0,
+            0,
+            0,
+            0,
+            {"w13_weight": 524288, "w2_weight": 262144, "w2_bias": 1024},
+            False,
+            True,
+            id="missing-moe-gate",
+        ),
+        pytest.param(
+            2361856,
+            3150848,
+            0,
+            0,
+            0,
+            0,
+            {"w13_weight": 524288, "w2_weight": 262144, "w2_bias": 1024},
+            False,
+            True,
+            id="missing-moe-bias",
+        ),
     ],
 )
 def test_dummy_weights_require_every_loadable_layer_element(
-    loaded, total, padding, bias_padding, non_persistent, complete, fails
+    loaded, total, padding, bias_padding, non_persistent, generated, tensor_padding, complete, fails
 ):
     layers = {
         "model.layer": {
@@ -135,6 +183,8 @@ def test_dummy_weights_require_every_loadable_layer_element(
             "vocab_padding_numel": padding,
             "vocab_bias_padding_numel": bias_padding,
             "non_persistent_numel": non_persistent,
+            "generated_numel": generated,
+            "tensor_padding_numel": tensor_padding,
         }
     }
     if fails:
@@ -186,43 +236,3 @@ def test_dummy_float_weights_excluded_from_layer_counts_still_require_a_load(loa
     else:
         with pytest.raises(RuntimeError, match="e_score_correction_bias"):
             validate_dummy_weight_coverage({}, set(), {name})
-
-
-@pytest.mark.parametrize(
-    ("total", "fails"), [(4, False), (16, True)], ids=["generated-scales", "unsent-weight-with-scales"]
-)
-def test_dummy_generated_attention_scales_do_not_exempt_checkpoint_weights(total, fails):
-    layers = {
-        "model.attn": {
-            "can_load": True,
-            "load_numel": 0,
-            "load_numel_total": total,
-            "tensors": {},
-            "vocab_padding_numel": 0,
-            "generated_numel": 4,
-        }
-    }
-    if fails:
-        with pytest.raises(RuntimeError, match="model.attn"):
-            validate_dummy_weight_coverage(layers, set(), set())
-    else:
-        validate_dummy_weight_coverage(layers, set(), set())
-
-
-@pytest.mark.parametrize("missing", [0, 393216, 1536], ids=["complete", "missing-gate", "missing-bias"])
-def test_dummy_moe_backend_padding_preserves_checkpoint_coverage(missing):
-    layers = {
-        "model.experts": {
-            "can_load": True,
-            "load_numel_total": 3150848,
-            "load_numel": 2363392 - missing,
-            "tensors": {},
-            "vocab_padding_numel": 0,
-            "tensor_padding_numel": {"w13_weight": 524288, "w2_weight": 262144, "w2_bias": 1024},
-        }
-    }
-    if missing:
-        with pytest.raises(RuntimeError, match="model.experts"):
-            validate_dummy_weight_coverage(layers, set(), set())
-    else:
-        validate_dummy_weight_coverage(layers, set(), set())
