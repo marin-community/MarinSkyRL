@@ -72,3 +72,22 @@ def test_teacher_rejects_a_sequence_without_a_response_header(tokenizer):
     teacher = CatCountTeacher(tokenizer, TeacherNoise())
     with pytest.raises(ValueError, match="assistant header"):
         teacher.score(tokenizer.encode("cat cat", add_special_tokens=False))
+
+
+def test_a_generated_header_does_not_move_the_response_boundary(tokenizer):
+    teacher = CatCountTeacher(tokenizer, TeacherNoise())
+    assert response_scores(teacher, tokenizer, 2, "cat <|assistant|> dog") == pytest.approx([HIGH, LOW, LOW, HIGH])
+
+
+def test_a_special_token_that_is_not_eos_is_wrong(tokenizer):
+    teacher = CatCountTeacher(tokenizer, TeacherNoise())
+    assert response_scores(teacher, tokenizer, 2, "cat cat <unk>") == pytest.approx([HIGH, HIGH, LOW, HIGH])
+
+
+def test_jitter_depends_only_on_the_prompt_and_earlier_tokens(tokenizer):
+    teacher = CatCountTeacher(tokenizer, TeacherNoise(jitter=0.5, seed=3))
+    same_prefix = response_scores(teacher, tokenizer, 2, "cat cat", eos=False)
+    other_suffix = response_scores(teacher, tokenizer, 2, "cat dog", eos=False)
+    assert same_prefix[0] == other_suffix[0]
+    longer = response_scores(teacher, tokenizer, 2, "cat cat cat", eos=False)
+    assert longer[:2] == same_prefix

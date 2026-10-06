@@ -14,8 +14,12 @@ Noise makes the teacher imperfect:
 - ``jitter`` adds Gaussian noise with that standard deviation to every response log-probability, capped at 0;
 - ``error_rate`` is the chance that the teacher targets N+1 or N-1 cats for a whole response instead of N.
 
-Noise is a deterministic function of ``seed`` and the scored token sequence, so a retried request gets the same
-scores. ``flipped`` swaps the correct and wrong log-probabilities; a student trained on a flipped teacher should
+Noise is causal and deterministic. Each response is seeded from ``seed`` and its prompt, the wrong-count draw comes
+first, and each response token then consumes one jitter draw, so a token's score depends only on the prompt and
+the tokens before it, as a language model's would, and a retried request gets the same scores.
+
+Only the tokenizer's end-of-sequence token stops a reply. Any other special token the student writes, such as a
+chat-template header, is a wrong token. ``flipped`` swaps the correct and wrong log-probabilities; a student trained on a flipped teacher should
 get worse, which tests that learning depends on the teacher's signal.
 
 Serve it for a training run on the policy's tokenizer::
@@ -65,6 +69,7 @@ class CatCountTeacher:
         self.tokenizer = tokenizer
         self.noise = noise
         self.eos_token_id = tokenizer.eos_token_id
+        self.special_token_ids = frozenset(tokenizer.all_special_ids)
         message = [{"role": "user", "content": "x"}]
         with_header = tokenizer.apply_chat_template(
             message, tokenize=True, return_dict=False, add_generation_prompt=True
@@ -77,8 +82,12 @@ class CatCountTeacher:
         self.assistant_header = list(with_header[len(without_header) :])
 
     def response_start(self, sequence: Sequence[int]) -> int:
+        """Return where the response begins: after the first assistant header, since prompts are single-turn.
+
+        A header the student generates later is part of its response and must not move this boundary.
+        """
         header = self.assistant_header
-        for start in range(len(sequence) - len(header), -1, -1):
+        for start in range(len(sequence) - len(header) + 1):
             if list(sequence[start : start + len(header)]) == header:
                 return start + len(header)
         raise ValueError("the scored sequence has no assistant header")
@@ -103,19 +112,22 @@ class CatCountTeacher:
                 verdicts.append(not on_track or text == target)
                 on_track = False
                 continue
-            if on_track:
+            if on_track and token_id not in self.special_token_ids:
                 text = self.tokenizer.decode(response_ids[: index + 1], skip_special_tokens=True).lstrip()
                 on_track = target.startswith(text) or text.rstrip() == target
                 verdicts.append(on_track)
+            elif on_track:
+                on_track = False
+                verdicts.append(False)
             else:
                 verdicts.append(False)
         return verdicts
 
     def score(self, sequence: Sequence[int]) -> list[float | None]:
         """Return one log-probability per sequence position; the first position has none, as in vLLM."""
-        identity = repr((self.noise.seed, list(sequence))).encode()
-        rng = random.Random(int.from_bytes(hashlib.sha256(identity).digest()[:8], "big"))
         start = self.response_start(sequence)
+        identity = repr((self.noise.seed, list(sequence[:start]))).encode()
+        rng = random.Random(int.from_bytes(hashlib.sha256(identity).digest()[:8], "big"))
         n = self.target_count(sequence[:start], rng)
         high, low = self.noise.correct_logprob, self.noise.wrong_logprob
         if self.noise.flipped:
