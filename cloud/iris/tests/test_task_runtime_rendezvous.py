@@ -10,6 +10,7 @@ import pytest
 import ray
 
 from cloud.iris import task_runtime
+from marinskyrl.environment_contract import DEBUG_ARTIFACT_DIR_ENV
 from cloud.iris.task_runtime import (
     DONE_FILENAME,
     RENDEZVOUS_FILENAME,
@@ -131,7 +132,8 @@ def _worker_args(tmp_path):
     )
 
 
-def _isolate_worker_runtime(monkeypatch, payload):
+def _isolate_worker_runtime(tmp_path, monkeypatch, payload):
+    monkeypatch.setenv(DEBUG_ARTIFACT_DIR_ENV, str(tmp_path / "debug"))
     handlers = {}
     monkeypatch.setattr(task_runtime, "_rank", lambda: 1)
     monkeypatch.setattr(task_runtime, "_num_tasks", lambda: 2)
@@ -159,7 +161,7 @@ def _isolate_worker_runtime(monkeypatch, payload):
 
 def test_worker_exits_zero_after_current_head_succeeds(tmp_path, monkeypatch):
     payload = _head_payload()
-    _isolate_worker_runtime(monkeypatch, payload)
+    _isolate_worker_runtime(tmp_path, monkeypatch, payload)
     write_head_result(str(tmp_path), payload.gang_epoch)
 
     assert task_runtime.run_worker(_worker_args(tmp_path)) == 0
@@ -167,7 +169,7 @@ def test_worker_exits_zero_after_current_head_succeeds(tmp_path, monkeypatch):
 
 def test_worker_termination_without_current_head_success_is_nonzero(tmp_path, monkeypatch):
     payload = _head_payload()
-    handlers = _isolate_worker_runtime(monkeypatch, payload)
+    handlers = _isolate_worker_runtime(tmp_path, monkeypatch, payload)
     write_head_result(str(tmp_path), "prior-epoch")
 
     monkeypatch.setattr(
