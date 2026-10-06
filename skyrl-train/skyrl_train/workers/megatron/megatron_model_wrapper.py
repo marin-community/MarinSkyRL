@@ -474,11 +474,6 @@ class MegatronModelWrapper:
         if mpu.is_pipeline_last_stage(ignore_virtual=True):
             scores = [o["scores"] for o in output]
             scores = torch.cat(scores, dim=0)
-            # take last num_actions tokens per micro; concatenate later
-            # Assume all micros have same num_actions
-            num_actions = micro_batches[0].num_actions
-            if micro_batches[0].ftpo_chosen_mask is None:
-                scores = scores[:, -num_actions:]
             selected_logprobs = (
                 torch.cat([o["selected_logprobs"] for o in output], dim=0)
                 if micro_batches[0].score_topk_indices is not None
@@ -595,17 +590,18 @@ class MegatronModelWrapper:
             if data.ftpo is None and temperature != 1.0:
                 logits.div_(temperature)
 
+            centering_width = self.cfg.trainer.algorithm.get("score_centering_topk", 0)
             response = self._response_logprobs(
                 logits,
                 sequences,
                 data.attention_mask,
                 num_actions,
                 packed_seq_params,
-                data.score_topk_indices if self.cfg.trainer.algorithm.get("score_centering_topk", 0) else None,
+                data.score_topk_indices if centering_width else None,
             )
             action_log_probs = response.scores
             score_centering = None
-            if self.cfg.trainer.algorithm.get("score_centering_topk", 0):
+            if centering_width:
                 if any(
                     value is None
                     for value in (data.score_topk_indices, data.score_old_logprobs, data.score_behavior_logprobs)

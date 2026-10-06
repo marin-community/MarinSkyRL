@@ -74,8 +74,9 @@ def collate_behavior_topk(
 ) -> BehaviorTopKBatch:
     """Right-pad CPU candidate IDs, full-vocabulary logprobs and trajectory loss masks.
 
-    Only response_mask's shape sets padding. Sampled-probability agreement is
-    checked where the sampled token belongs to the head; provenance is a caller obligation.
+    Only response_mask's shape sets padding. When sampled_logprobs is supplied,
+    agreement is checked where the sampled token belongs to the head.
+    Evidence provenance is a caller obligation.
     """
     index_rows = trajectory_batch.get("student_topk_indices")
     behavior_rows = trajectory_batch.get("behavior_topk_logprobs")

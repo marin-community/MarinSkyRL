@@ -159,10 +159,11 @@ def test_composed_ppo_tis_centering_matches_enumerated_value_gradient_and_partit
     advantages = torch.tensor([[0, 0, 0], [-1, 0.5, 3], [0, 0, 0], [-2, 1, 0]], dtype=torch.float64)
     old = torch.tensor([0.20, 0.25, 0.30, 0.15, 0.10], dtype=torch.float64).expand(4, 3, 5).clone()
     behavior = torch.tensor([0.45, 0.08, 0.07, 0.30, 0.10], dtype=torch.float64).expand(4, 3, 5).clone()
+    # Unequal row-0 tails make token weighting observable in coverage.
     old[0, :, 0], old[0, :, 4] = 0.10, 0.20
     behavior[0, :, 0], behavior[0, :, 4] = 0.35, 0.20
     # These actions exercise positive/negative advantages and active/inactive PPO clipping.
-    actions = torch.tensor([[1, 0, 0], [0, 2, 4], [0, 0, 0], [3, 2, 0]])
+    actions = torch.tensor([[1, 0, 0], [0, 2, 4], [0, 0, 0], [3, 1, 0]])
     logits = torch.tensor([-0.9, 0.8, -0.2, 0.1, -1.0], dtype=torch.float64).expand(4, 3, 5).clone()
     logits[0, :, 4] += 1
     logits.requires_grad_()
