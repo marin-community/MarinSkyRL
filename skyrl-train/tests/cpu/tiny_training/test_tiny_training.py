@@ -20,6 +20,7 @@ from tests.cpu.tiny_training.cpu_backend import CHECKPOINT_FILE_TEMPLATE, Causal
 from tests.cpu.tiny_training.fixed_batch import fixed_training_batch, run_fixed_update
 from skyrl_train.rollouts.payloads import ROLLOUT_OBJECT_SUFFIX
 from skyrl_train.training_batch import TrainingInputBatch
+from skyrl_train.utils.utils import get_free_port
 from tests.cpu.tiny_training import experiment
 from tests.cpu.tiny_training.experiment import (
     MAX_STALENESS_STEPS,
@@ -43,6 +44,7 @@ RESUMED_STEP = 1
 RUN_TIMEOUT_SECONDS = 300
 POLICY_READY_FILE = "policy-ready"
 ENGINE_STARTED_FILE = "engine-started"
+ENGINE_READY_FILE = "engine-ready"
 
 
 class _PolicyReadyWorker(CPUPolicyWorker):
@@ -83,7 +85,7 @@ class _LateInferenceTinyTrainingExp(_OverlappingTinyTrainingExp):
 
     def create_inference_engine_client(self, *, operation=experiment.EntrypointOperation.TRAIN):
         client = super().create_inference_engine_client(operation=operation)
-        (Path(self.cfg.trainer.export_path) / "engine-ready").touch()
+        (Path(self.cfg.trainer.export_path) / ENGINE_READY_FILE).touch()
         return client
 
 
@@ -229,14 +231,13 @@ def test_engine_startup_failure_releases_policy_resources(runs, tmp_path, tiny_p
     _run_in_process(runs, _run_failed_engine_startup, tmp_path, tiny_policy)
 
 
-def _run_failed_policy_startup(root: Path, model: Path, port: int) -> None:
+def _run_failed_policy_startup(root: Path, model: Path) -> None:
     cfg = experiment.tiny_training_config(
         root, model, TrainingMode.ASYNC, RolloutShape.SINGLE_TURN, max_steps=1, checkpoint_interval=-1
     )
     cfg.trainer.placement.policy_strict_spread_pg = True
     cfg.trainer.placement.overlap_init = True
     cfg.generator.enable_http_endpoint = True
-    cfg.generator.http_endpoint_port = port
     experiment.validate_cfg(cfg)
     ray.init(
         num_cpus=experiment.LOGICAL_CPUS,
@@ -245,10 +246,12 @@ def _run_failed_policy_startup(root: Path, model: Path, port: int) -> None:
         include_dashboard=False,
     )
     try:
+        port = get_free_port()
+        cfg.generator.http_endpoint_port = port
         exp = _LateInferenceTinyTrainingExp(cfg)
         with pytest.raises(ray.exceptions.RayTaskError):
             exp.run()
-        wait_for_condition((Path(cfg.trainer.export_path) / "engine-ready").is_file, timeout=60)
+        wait_for_condition((Path(cfg.trainer.export_path) / ENGINE_READY_FILE).is_file, timeout=60)
 
         def _port_released():
             with socket.socket() as endpoint:
@@ -271,8 +274,8 @@ def _run_failed_policy_startup(root: Path, model: Path, port: int) -> None:
         ray.shutdown()
 
 
-def test_policy_startup_failure_closes_late_inference_endpoint(runs, tmp_path, tiny_policy, unused_tcp_port):
-    _run_in_process(runs, _run_failed_policy_startup, tmp_path, tiny_policy, unused_tcp_port)
+def test_policy_startup_failure_closes_late_inference_endpoint(runs, tmp_path, tiny_policy):
+    _run_in_process(runs, _run_failed_policy_startup, tmp_path, tiny_policy)
 
 
 def _assert_trained_to_max_steps(root: Path, mode: TrainingMode, shape: RolloutShape) -> None:
