@@ -6,11 +6,11 @@ import pytest
 import torch
 
 from skyrl_train.weight_sync.expert_block.schedule import TrainerRank
+from skyrl_train.weight_sync.expert_block.megatron_source import local_source_slices
 from skyrl_train.weight_sync.expert_block.source_views import (
     dense_source_view,
     expert_source_view,
     local_expert_sources,
-    local_source_slices,
 )
 from tests.cpu.weight_sync.expert_block.megatron_layout import (
     HIDDEN,
@@ -32,41 +32,56 @@ def rank_parameters(experts=range(NUM_EXPERTS)):
     return megatron_parameters(LAYERS, experts, last_stage=True, model_names=MODEL_NAMES)
 
 
-def test_dense_slices_assemble_every_hf_tensor_from_the_interleaved_and_fused_parameters():
-    parameters = rank_parameters()
-    local = local_source_slices(conversion_tasks(parameters), PROVIDER, pp=0)
-    expected, _ = reference_hf(parameters)
-    assembled = {name: torch.zeros_like(value) for name, value in expected.items()}
-    written = {name: 0 for name in expected}
+@pytest.mark.parametrize("expert_schema", ["stacked", "split"])
+@pytest.mark.parametrize("expert_width", [HIDDEN, HIDDEN - 1])
+def test_source_slices_reconstruct_dense_and_owned_expert_matrices(expert_schema, expert_width):
+    parameters = megatron_parameters(
+        LAYERS, (2, 3), last_stage=True, model_names=MODEL_NAMES, expert_hidden_size=expert_width
+    )
+    sconv_name = "model.layers.0.self_attn.sconv_k.weight"
+    sconv = torch.arange(12, dtype=torch.bfloat16).reshape(3, 4)
+    tasks = conversion_tasks(parameters, expert_schema=expert_schema)
+    tasks.append(
+        task("decoder.layers.0.self_attention.sconv_k.weight", sconv, mapping("RowParallelMapping", sconv_name))
+    )
+    dense, experts = reference_hf({name: weight.clone() for name, weight in parameters.items()})
+    dense[sconv_name] = sconv.clone()
+    local = local_source_slices(tasks, PROVIDER, pp=0)
+    assembled = {name: torch.zeros_like(value) for name, value in dense.items()}
+    written = {name: 0 for name in dense}
     for item in local.dense:
         run = assembled[item.hf_name].view(-1).narrow(0, item.hf_offset, item.numel)
         run.copy_(dense_source_view(item, local.sources))
         written[item.hf_name] += item.numel
-    assert written == {name: value.numel() for name, value in expected.items()}
-    for name, value in expected.items():
+    assert written == {name: value.numel() for name, value in dense.items()}
+    for name, value in dense.items():
         assert torch.equal(assembled[name], value), name
-
-
-def test_expert_sources_are_the_whole_gate_up_and_down_matrices_of_the_ranks_own_block():
     # EP rank 1 of 2 owns experts 2 and 3.
-    parameters = rank_parameters(experts=(2, 3))
-    local = local_source_slices(conversion_tasks(parameters), PROVIDER, pp=0)
     sources = local_expert_sources(
         local.experts,
         local.sources,
         TrainerRank(rank=1, dp=0, pp=0, ep=1),
         num_experts=NUM_EXPERTS,
         expert_parallel_size=2,
-        hidden_size=HIDDEN,
+        expert_hidden_size=expert_width,
         intermediate_size=INTERMEDIATE,
     )
-    _, expected = reference_hf(parameters)
-    assert {(item.entry.projection, item.entry.layer, item.entry.expert) for item in sources} == set(expected)
+    assert {(item.entry.projection, item.entry.layer, item.entry.expert) for item in sources} == set(experts)
     for item in sources:
         entry = item.entry
-        matrix = expected[entry.projection, entry.layer, entry.expert]
-        assert torch.equal(expert_source_view(item, local.sources), matrix.reshape(-1))
+        matrix = experts[entry.projection, entry.layer, entry.expert]
+        assert torch.equal(expert_source_view(item, local.sources), matrix.reshape(-1)), entry.name
         assert entry.nbytes == matrix.numel() * 2
+
+
+def test_split_schema_rejects_a_mismatched_expert_id():
+    bad = task(
+        "decoder.layers.0.mlp.experts.linear_fc2.weight2",
+        torch.zeros(HIDDEN, INTERMEDIATE, dtype=torch.bfloat16),
+        mapping("AutoMapping", "model.layers.0.mlp.experts.3.down_proj.weight"),
+    )
+    with pytest.raises(ValueError, match="disagrees with its HF tensors"):
+        local_source_slices([bad], PROVIDER, pp=0)
 
 
 def test_an_expert_outside_the_ranks_block_is_refused():
@@ -78,7 +93,7 @@ def test_an_expert_outside_the_ranks_block_is_refused():
             TrainerRank(rank=1, dp=0, pp=0, ep=1),
             num_experts=NUM_EXPERTS,
             expert_parallel_size=2,
-            hidden_size=HIDDEN,
+            expert_hidden_size=HIDDEN,
             intermediate_size=INTERMEDIATE,
         )
 

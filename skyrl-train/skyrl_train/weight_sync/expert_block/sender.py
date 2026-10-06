@@ -15,7 +15,8 @@ import torch
 
 from skyrl_train.weight_sync.expert_block.groups import Rendezvous, destroy_groups
 from skyrl_train.weight_sync.expert_block.schedule import Schedule, TrainerRank, from_wire, to_wire
-from skyrl_train.weight_sync.expert_block.source_views import local_expert_sources, local_source_slices
+from skyrl_train.weight_sync.expert_block.megatron_source import local_source_slices
+from skyrl_train.weight_sync.expert_block.source_views import local_expert_sources
 from skyrl_train.weight_sync.expert_block.stream import Stream, bind, storage_identity
 from skyrl_train.weight_sync.expert_block.verify_weights import compare_replicas, replay
 
@@ -45,13 +46,14 @@ class ExpertBlockSender:
             self.worker.bridge.get_conversion_tasks(self.worker.actor_module), provider, pp=self.trainer.pp
         )
         sources = local.sources
+        expert_hidden_size = provider.moe_latent_size if provider.moe_latent_size is not None else provider.hidden_size
         experts = local_expert_sources(
             local.experts,
             sources,
             self.trainer,
             num_experts=provider.num_moe_experts,
             expert_parallel_size=state.get_expert_model_parallel_world_size(),
-            hidden_size=provider.hidden_size,
+            expert_hidden_size=expert_hidden_size,
             intermediate_size=provider.moe_ffn_hidden_size,
         )
         self.sources = sources
@@ -64,6 +66,7 @@ class ExpertBlockSender:
             "model": {
                 "num_experts": provider.num_moe_experts,
                 "hidden_size": provider.hidden_size,
+                "expert_hidden_size": expert_hidden_size,
                 "intermediate_size": provider.moe_ffn_hidden_size,
             },
             "experts": [to_wire(item.entry) for item in experts],

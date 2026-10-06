@@ -41,7 +41,7 @@ def grug_engine_client(
         seed=23,
         vllm_v1_disable_multiproc=True,
         enable_prefix_caching=False,
-        enforce_eager=False,
+        enforce_eager=cfg.generator.enforce_eager,
         engine_init_timeout_seconds=cfg.generator.engine_init_timeout_seconds,
         shared_pg=shared_pg,
         gpu_memory_utilization=cfg.generator.gpu_memory_utilization,
@@ -97,9 +97,9 @@ def assert_engine_weights(
 ) -> dict[str, int]:
     """Check that every serving rank holding a named weight matches the training snapshot.
 
-    Router biases and router weights must arrive in fp32 and everything else in bf16;
-    per-expert serving weights are compared against slices of the stacked training
-    tensor. Returns the serving EP rank that owns each named expert.
+    Router biases and router weights must arrive in fp32 and everything else in bf16.
+    Split experts use their named training tensor; stacked experts use its slice.
+    Returns the serving EP rank that owns each named expert.
     """
     found = {name: False for name in names}
     expert_owners = {name: set() for name in serving_expert_index_by_name}
@@ -125,7 +125,7 @@ def assert_engine_weights(
                 expert_index = serving_expert_index_by_name.get(name)
                 if expert_index is not None:
                     expert_owners[name].add(serving_ep_rank)
-                expected = training[STACKED_EXPERT_NAME][expert_index] if expert_index is not None else training[name]
+                expected = training[name] if name in training else training[STACKED_EXPERT_NAME][expert_index]
                 actual = entry["tensor"]
                 if name not in bias_names:
                     expected = expected.to(torch.bfloat16).to(actual.dtype)
