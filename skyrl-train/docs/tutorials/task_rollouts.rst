@@ -1,10 +1,9 @@
 Canonical task rollouts
 =======================
 
-Marin defines ``ShellboxRolloutEngine`` in
-``lib/rolloutengine/src/rolloutengine/engine.py``.
-SkyRL uses that engine through ``TaskRolloutWorker`` in
-``skyrl_train/rollouts/task_worker.py``.
+``TaskRolloutWorker`` runs TaskCompendium tasks through Marin's ``ShellboxRolloutEngine``.
+The engine owns model calls, conversation and exact-token accumulation, stage progression, and resource cleanup.
+The worker controls concurrency, retries, group grading, and training projections.
 
 ``ShellboxRolloutEngine.run(task, execution=...)`` asynchronously executes one task. The worker
 starts one coroutine for each task, and inference runs on the worker's event
@@ -50,10 +49,7 @@ Each factory creates a direct implementation of Marin's ``TaskSession`` protocol
 The session prepares the task, executes model actions, returns observations, and grades the result.
 The engine creates its Shellbox machine and closes the session before the machine.
 Pure answer graders use null environments and do not create a machine.
-The canonical engine owns the inference loop for single-turn and multi-turn tasks.
-It also owns conversation and token accumulation. Each session returns its
-initial messages and model options in a typed ``SessionStart`` record.
-New task sessions implement task operations without another rollout loop.
+Each session returns its initial messages and model options in ``SessionStart``.
 
 Exact tokens
 ------------
@@ -66,7 +62,7 @@ next prompt to start with ``[1, 2, 3, 4]``.
 The engine gives model tokens a loss mask of ``1``. It gives observation and
 chat-boundary tokens a mask of ``0`` and a log probability of ``0``.
 It does not reconstruct sampled responses from text or add sampled EOS tokens.
-An environment cannot replace the sampled action with different text.
+Sessions cannot replace sampled actions with different text.
 Token-contract violations abort the prompt group.
 
 One transition follows each model response, including the final response.
@@ -126,3 +122,4 @@ The worker returns after the buffer commit.
 
 Rollout telemetry records collection, backend tokenization, batch assembly,
 finalization, and model waits.
+See :doc:`../api/trajectory_runner` for the worker API.

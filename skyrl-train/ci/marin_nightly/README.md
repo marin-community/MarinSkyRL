@@ -15,8 +15,8 @@ root environment.
 
 ## How the gate sees the run
 
-The trainer mirrors every tracker payload to stdout as a `WANDB_MIRROR` line, so a run's
-metrics are recoverable from its log alone — no wandb, no checkpoint, no cluster access:
+The trainer writes every tracker payload to stdout as a `WANDB_MIRROR` line.
+The gate reads these metrics from the run log:
 
 ```
 WANDB_MIRROR kind=train step=2 metrics={"policy/policy_loss": 0.41, "reward/avg_raw_reward": 0.25, ...}
@@ -29,7 +29,6 @@ improvement, and a minimum number of observations above or below a threshold. Tr
 payloads are separate streams. A selected observation must exist. Duplicate
 payloads for one stream and step count once;
 conflicting copies fail. The gate exits non-zero with one line per violation.
-`tests/cpu/test_marin_nightly_gate.py` covers it.
 
 ## Metric gates
 
@@ -81,12 +80,10 @@ and is not retried. The script records each attempt's wall time and exit status;
 The workflow uploads the combined native log and cancels its own named jobs
 in the shared cleanup step.
 
-## Two Ray instances cannot share a node
+## Ray startup collisions
 
-Ray persists session state under a temp directory. Two Ray instances that end up on one node find
-each other's and the second dies: "Session name ... does not match persisted value. Perhaps there
-was an error connecting to Redis." Observed on 2026-09-10 between two single-GPU jobs submitted six
-seconds apart.
+Ray instances on the same node can read each other's temporary session state.
+The second instance fails at startup with "Session name ... does not match persisted value. Perhaps there was an error connecting to Redis."
 
 The Grug tests start Ray through `initialize_ray`; CatCount starts it through
 the Marin task runtime. Both target `cw-rno2a`. A Ray startup error with that

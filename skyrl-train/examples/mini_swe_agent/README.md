@@ -68,9 +68,9 @@ seconds. `generator.max_turns` controls the model turn limit.
 
 To change task setup, add commands to the task's `environment.setup` during
 materialization. The engine applies the same setup to the fresh grading machine.
-The grader collects staged and unstaged changes, including new files, through
-`git add -A` and `git diff --cached --binary`. It transfers the patch as a file,
-so the patch does not consume shell argument space.
+The task saves the initial Git revision in `refs/taskcompendium/base` before inference.
+The grader collects all changes against that revision, including agent commits and new files.
+It transfers the patch as a file to the grading machine.
 
 A successful evaluation command gives reward `1`. A failed patch application or
 evaluation command gives reward `0`. An evaluation timeout has no grade and

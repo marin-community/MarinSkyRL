@@ -4,7 +4,7 @@ OpenEnv uses the common TaskSession interface and a Shellbox machine per rollout
 The session starts the configured server inside that machine, sends reset and step requests, and returns observations and rewards.
 The engine closes the session before the machine.
 
-The host does not install the OpenEnv SDK or start a separate Docker container.
+The OpenEnv SDK is not a host dependency.
 Supply an image and `server_command` in `environment.task_sessions.openenv`.
 Select an image with the HTTP reset/step API. The included image installer lists fixed source revisions for five task types.
 

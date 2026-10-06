@@ -50,8 +50,7 @@ Pass the session class to the experiment:
    experiment.run()
 
 A factory accepts ``(TaskSpec, Machine | None)`` and returns a fresh session.
-The worker sends this explicit factory map to its Ray workers.
-There is no environment registry or separate episode controller.
+The worker sends this factory map to its Ray workers.
 
 Prepare source rows
 -------------------
@@ -74,8 +73,9 @@ Keep the reference out of model-visible observations.
 
 ``TaskSpec.context`` holds the public conversation.
 ``TaskSpec.environment`` contains an ``EnvironmentSpec`` that selects the machine and named session factory.
-The session parses ``TaskSpec.verifier.parameters_json`` as an ``ExternalVerifierSpec``.
-Its ``parameters["config"]`` contains task settings, and ``parameters["extras"]`` contains the source row's private fields.
+The session decodes ``TaskSpec.verifier.parameters_json`` with ``ExternalVerifierSpec.model_validate_json``.
+Use the resulting verifier's ``parameters`` mapping:
+``config`` contains task settings and ``extras`` contains the source row's private fields.
 The multiplication session reads ``extras["reward_spec"]["ground_truth"]``.
 See :doc:`../api/env` for these types and :doc:`task_rollouts` for the Parquet format.
 
