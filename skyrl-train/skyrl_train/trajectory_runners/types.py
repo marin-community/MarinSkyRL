@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any, Dict, List, Literal, NotRequired, Optional, Sequence, TypedDict, Union
 
@@ -136,6 +136,14 @@ class BatchFields:
     first_group_list_fields: frozenset[str]
     route_geometry: tuple[int, int, np.dtype] | None
     token_rewards: bool
+
+    def without_routes(self) -> "BatchFields":
+        return replace(
+            self,
+            present=self.present - {"rollout_routed_experts"},
+            first_group_list_fields=self.first_group_list_fields - {"rollout_routed_experts"},
+            route_geometry=None,
+        )
 
     @classmethod
     def from_batch(cls, batch: TrajectoryBatch) -> "BatchFields":

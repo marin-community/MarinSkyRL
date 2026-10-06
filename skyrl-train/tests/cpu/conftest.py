@@ -1,4 +1,6 @@
 import json
+import asyncio
+from copy import deepcopy
 import os
 import sys
 from collections.abc import Iterator
@@ -20,7 +22,11 @@ import zstandard  # noqa: E402
 from marinskyrl.environment_contract import TrainingType  # noqa: E402
 from skyrl_train import telemetry as training_telemetry  # noqa: E402
 from skyrl_train.distillation import ChosenTokenTeacherEvidence  # noqa: E402
+from skyrl_train.rollouts.context import TrainingContext  # noqa: E402
+from skyrl_train.trainer import RayPPOTrainer  # noqa: E402
+from skyrl_train.utils import validate_cfg  # noqa: E402
 from skyrl_train.trajectory_runners.types import TrajectoryID, VerifierTestCollection  # noqa: E402
+from tests.rollout_fixtures import FixedPromptDataset, FixedRolloutRunner  # noqa: E402
 
 
 # A slow test starts its own Ray cluster of about 4 GiB, and four workers running the rest of the suite fill most
@@ -169,6 +175,40 @@ def ray_module() -> Iterator[None]:
     """Share a local Ray session across an actor-heavy test module."""
     with _local_ray_session():
         yield
+
+
+@pytest.fixture
+def driver_trainer_factory(ray_init):
+    trainers = []
+
+    def create(config, *, tokenizer=None, dp_size=1, trainer_type=RayPPOTrainer, **trainer_kwargs):
+        cfg = deepcopy(config)
+        cfg.trainer.placement.colocate_all = False
+        cfg.trainer.placement.policy_num_gpus_per_node = cfg.trainer.placement.ref_num_gpus_per_node = dp_size
+        cfg.trainer.policy_mini_batch_size = cfg.trainer.train_batch_size
+        cfg.trainer.micro_train_batch_size_per_gpu = cfg.trainer.micro_forward_batch_size_per_gpu = 1
+        cfg.generator.trajectory_retention.enabled = False
+        validate_cfg(cfg)
+        dataset = FixedPromptDataset([f"prompt-{index}" for index in range(cfg.trainer.train_batch_size)])
+        runner = FixedRolloutRunner()
+        trainer = trainer_type(
+            cfg=cfg,
+            tracker=None,
+            tokenizer=tokenizer,
+            train_dataset=dataset,
+            inference_engine_client=None,
+            trajectory_runner=runner,
+            context=TrainingContext.from_config(cfg, dataset, runner),
+            callbacks=[],
+            **trainer_kwargs,
+        )
+        trainer.policy_model = SimpleNamespace(actor_infos=[SimpleNamespace(rank=SimpleNamespace(dp_size=dp_size))])
+        trainers.append(trainer)
+        return trainer
+
+    yield create
+    for trainer in trainers:
+        asyncio.run(trainer.context.close())
 
 
 @pytest.fixture(scope="module")

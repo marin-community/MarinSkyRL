@@ -3,7 +3,6 @@
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -15,7 +14,6 @@ from tokenizers.models import WordLevel
 from transformers import PreTrainedTokenizerFast, Qwen2Config, Qwen2ForCausalLM
 
 from skyrl_train.trainer import RayPPOTrainer
-from skyrl_train.group_admission import GroupAdvantageInvariant
 from skyrl_train.training_batch import TrainingBatchIterator
 from skyrl_train.config.ftpo import FTPOConfig, validate_ftpo
 from skyrl_train.utils.utils import validate_cfg
@@ -264,18 +262,14 @@ def test_ftpo_recipe_accepts_greedy_capture_and_rejects_unsupported_geometry(con
             validate_ftpo(changed)
 
 
-def test_ftpo_rollout_payload_survives_padding_serialization_and_microbatching(config, tmp_path):
-    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
-    trainer.cfg = config
-    trainer.global_step = 0
-    trainer.all_metrics = {}
-    trainer.group_advantage_invariant = GroupAdvantageInvariant.no_group_advantage(physical_group_size=1)
-    trainer.tokenizer = PreTrainedTokenizerFast(
+def test_ftpo_rollout_payload_survives_padding_serialization_and_microbatching(
+    config, tmp_path, driver_trainer_factory
+):
+    tokenizer = PreTrainedTokenizerFast(
         tokenizer_object=Tokenizer(WordLevel({"Wait": 0, "So": 1, "Therefore": 2, "Done": 3, "[PAD]": 4})),
         pad_token="[PAD]",
     )
-    trainer.policy_model = SimpleNamespace(actor_infos=[SimpleNamespace(rank=SimpleNamespace(dp_size=2))])
-    trainer.ref_model = trainer.critic_model = None
+    trainer = driver_trainer_factory(config, tokenizer=tokenizer, dp_size=2)
     responses = [[0, 1] * 4, [2, 3], [0] * 5]
     trajectory = {
         "prompt_token_ids": [[2, 3], [3], [1, 2, 3]],

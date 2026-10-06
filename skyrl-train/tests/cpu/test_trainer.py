@@ -12,6 +12,9 @@ import ray
 import torch
 from omegaconf import OmegaConf
 
+from skyrl_train.batch_assembly import assemble_slice, plan_batch
+from skyrl_train.rollouts.buffer import RowFacts
+from skyrl_train.trajectory_runners.types import BatchFields
 import skyrl_train.trainer as trainer_module
 from skyrl_train.callbacks.base import TrainerControl
 from skyrl_train.config.utils import get_default_config
@@ -646,11 +649,6 @@ def test_teacher_credit_follows_environment_normalization_and_loop_credit(
 
 
 def test_loop_advantages_are_collated_with_response_tokens(dummy_config, dummy_tokenizer):
-    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
-    trainer.cfg = dummy_config
-    trainer.group_advantage_invariant = GroupAdvantageInvariant.no_group_advantage(physical_group_size=1)
-    trainer.tokenizer = dummy_tokenizer
-    trainer.pad_batch = lambda batch: batch
     trajectory_batch = {
         "prompt_token_ids": [[1, 2], [3]],
         "response_ids": [[4, 5, 6], [7]],
@@ -660,7 +658,23 @@ def test_loop_advantages_are_collated_with_response_tokens(dummy_config, dummy_t
         "loop_advantages": [[0.0, -0.1, -0.1], [-0.2]],
     }
 
-    batch = trainer.convert_to_training_input(trajectory_batch, ["a", "b"])
+    plan = plan_batch(
+        batch_id=1,
+        global_step=1,
+        uids=["a", "b"],
+        facts=RowFacts.from_batch(trajectory_batch),
+        fields=BatchFields.from_batch(trajectory_batch),
+        dp_size=1,
+        rollout_staleness=[0, 0],
+        num_experts=None,
+    )
+    batch = assemble_slice(
+        plan,
+        range(2),
+        trajectory_batch,
+        pad_token_id=dummy_tokenizer.pad_token_id,
+        algorithm=dummy_config.trainer.algorithm,
+    )
 
     torch.testing.assert_close(
         batch["loop_advantages"],
@@ -675,12 +689,9 @@ def test_teacher_evidence_is_validated_and_collated_with_response_tokens(
     dummy_config,
     dummy_tokenizer,
     chosen_teacher_evidence,
+    driver_trainer_factory,
 ):
-    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
-    trainer.cfg = dummy_config
-    trainer.group_advantage_invariant = GroupAdvantageInvariant.no_group_advantage(physical_group_size=1)
-    trainer.tokenizer = dummy_tokenizer
-    trainer.pad_batch = lambda batch: batch
+    trainer = driver_trainer_factory(dummy_config, tokenizer=dummy_tokenizer)
     evidence = chosen_teacher_evidence
     distillation = ChosenTokenTeacherInput(
         teacher_action_log_probs=evidence.chosen_logprobs,
@@ -708,12 +719,10 @@ def test_teacher_evidence_is_validated_and_collated_with_response_tokens(
     torch.testing.assert_close(batch["distillation_loss_weights"], distillation.loss_weights)
 
 
-def test_topk_teacher_evidence_is_collated_without_dense_vocabulary_tensors(dummy_config, dummy_tokenizer):
-    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
-    trainer.cfg = dummy_config
-    trainer.group_advantage_invariant = GroupAdvantageInvariant.no_group_advantage(physical_group_size=1)
-    trainer.tokenizer = dummy_tokenizer
-    trainer.pad_batch = lambda batch: batch
+def test_topk_teacher_evidence_is_collated_without_dense_vocabulary_tensors(
+    dummy_config, dummy_tokenizer, driver_trainer_factory
+):
+    trainer = driver_trainer_factory(dummy_config, tokenizer=dummy_tokenizer)
     valid_mask = torch.tensor([[True, True, True], [True, False, False]])
     evidence = TopKTeacherEvidence(
         trajectory_ids=("math_0", "swe_0"),

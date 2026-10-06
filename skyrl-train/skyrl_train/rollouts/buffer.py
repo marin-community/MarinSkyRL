@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
 
+import numpy as np
+
 from skyrl_train.dynamic_sampling import DynamicSamplingType, GroupSelectionPolicy, GroupSelectionResult
 from skyrl_train.group_admission import (
     AdmissionRejection,
@@ -32,7 +34,7 @@ from skyrl_train.trajectory_runners.rollout_metrics import (
     get_trajectory_passes,
 )
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import NormalizedReward
-from skyrl_train.trajectory_runners.types import TrajectoryBatch, TrajectoryRequestBatch
+from skyrl_train.trajectory_runners.types import BatchFields, TrajectoryBatch, TrajectoryRequestBatch
 
 
 class BatchPolicy(StrEnum):
@@ -126,6 +128,52 @@ class GroupRewards:
             optimization=tuple(NormalizedReward.from_output(reward).total for reward in batch["rewards"]),
             outcome=tuple(get_outcome_rewards(batch)),
             passed=any(get_trajectory_passes(batch)),
+        )
+
+
+@dataclass(frozen=True)
+class RowFacts:
+    """Row scalars and field geometry carried with a committed group's verdict."""
+
+    prompt_len: np.ndarray
+    response_len: np.ndarray
+    score: np.ndarray
+    loss_tokens: np.ndarray
+    is_last_step: np.ndarray
+    exclude_from_baseline: np.ndarray
+    fields: tuple[str, ...]
+    route_geometry: tuple[int, int, np.dtype] | None
+    scalar_rewards: bool
+    stop_reasons: tuple[str | None, ...] | None
+    first_group_list_fields: tuple[str, ...]
+    token_rewards: bool
+
+    @classmethod
+    def from_batch(cls, batch: TrajectoryBatch) -> RowFacts:
+        responses = batch["response_ids"]
+        scalar_rewards = all(
+            not isinstance(reward, list) or sum(value != 0 for value in reward) <= 1 for reward in batch["rewards"]
+        )
+        scores = [
+            np.sum(reward, dtype=np.float32) if isinstance(reward, list) else float(reward) if response else 0.0
+            for reward, response in zip(batch["rewards"], responses, strict=True)
+        ]
+        fields = BatchFields.from_batch(batch)
+        return cls(
+            prompt_len=np.asarray([len(prompt) for prompt in batch["prompt_token_ids"]], dtype=np.int64),
+            response_len=np.asarray([len(response) for response in responses], dtype=np.int64),
+            score=np.asarray(scores, dtype=np.float32),
+            loss_tokens=np.asarray([sum(mask) for mask in batch["loss_masks"]], dtype=np.int64),
+            is_last_step=np.asarray(batch.get("is_last_step") or [True] * len(responses), dtype=bool),
+            exclude_from_baseline=np.asarray(
+                batch.get("exclude_from_baseline") or [False] * len(responses), dtype=bool
+            ),
+            fields=tuple(key for key in batch if key in fields.present),
+            route_geometry=fields.route_geometry,
+            scalar_rewards=scalar_rewards,
+            stop_reasons=tuple(batch["stop_reasons"]) if batch.get("stop_reasons") is not None else None,
+            first_group_list_fields=tuple(key for key in batch if key in fields.first_group_list_fields),
+            token_rewards=fields.token_rewards,
         )
 
 

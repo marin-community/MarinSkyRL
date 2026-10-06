@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import json
 
 import numpy as np
 import pytest
@@ -13,7 +14,6 @@ from transformers import PreTrainedTokenizerFast
 from skyrl_train.callbacks.base import TrainerControl, TrainerState
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.distributed.dispatch import MeshRank
-from skyrl_train.group_admission import GroupAdvantageInvariant
 from skyrl_train.inference_engines.vllm_teacher_oracle import tokenizer_vocabulary_fingerprint
 from skyrl_train.mismatch_probe.archive import MismatchArchive, read_frozen_probe
 from skyrl_train.mismatch_probe.collect import ProbeCollector
@@ -21,7 +21,6 @@ from skyrl_train.callbacks.builtin import create_default_callbacks
 from skyrl_train.callbacks.base import CallbackHandler
 from skyrl_train.models.megatron_router_replay import MegatronRouterReplay
 from skyrl_train.training_batch import TrainingOutputBatch
-from skyrl_train.trainer import RayPPOTrainer
 
 
 class _InferenceEndpoint:
@@ -87,12 +86,14 @@ class _PolicyEndpoint:
             output = TrainingOutputBatch({"output": probabilities[data["sequences"][start:end, -width:]]})
             output.metadata = {"probe_routes": controller.take_probe_observations()}
             outputs.append(output)
-        return outputs
+        return [ray.put(output) for output in outputs]
 
 
 @pytest.mark.parametrize("explicit_callbacks", [False, True])
 @pytest.mark.asyncio
-async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_path, monkeypatch, explicit_callbacks):
+async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(
+    tmp_path, driver_trainer_factory, explicit_callbacks
+):
     uri = str(tmp_path / "probe")
     tokenizer = PreTrainedTokenizerFast(
         tokenizer_object=Tokenizer(models.WordLevel({str(i): i for i in range(32)}, unk_token="0")),
@@ -107,17 +108,16 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
     cfg.trainer.policy.megatron_config.moe_router_replay = True
     cfg.trainer.algorithm.advantage_estimator = "uniform"
     cfg.trainer.algorithm.off_policy_correction = "none"
-    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
-    trainer.cfg = cfg
-    trainer.loaded_checkpoint_path = None
-    trainer.group_advantage_invariant = GroupAdvantageInvariant.no_group_advantage(physical_group_size=1)
-    trainer.tokenizer = tokenizer
+    cfg.trainer.train_batch_size = 4
+    cfg.generator.n_samples_per_prompt = 1
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text(json.dumps({"model_type": "mixtral", "num_local_experts": 8}))
+    cfg.trainer.policy.model.path = str(model)
+    trainer = driver_trainer_factory(cfg, tokenizer=tokenizer, dp_size=2)
+    cfg = trainer.cfg
     trainer.inference_engine_client = _InferenceEndpoint(tokenizer)
     trainer.policy_model = _PolicyEndpoint()
-    monkeypatch.setattr(ray, "get", lambda results: results)
-    trainer.critic_model = trainer.ref_model = None
-    trainer.all_metrics = {}
-    trainer._num_experts_cache = 8
     routes = np.asarray([[[1, 2]], [[0, 0]], [[1, 2]], [[0, 0]]], dtype=np.int32)
     trajectory = {
         "prompt_token_ids": [[3, 4], [5], [6, 7, 8]],

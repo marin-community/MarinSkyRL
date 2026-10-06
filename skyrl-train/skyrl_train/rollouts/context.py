@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 import collections
 import dataclasses
-from collections.abc import Awaitable, Callable
-from contextlib import AbstractContextManager
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AbstractContextManager, asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
@@ -97,6 +97,49 @@ class RolloutBatchMetadata:
     batch_id: int
     groups: tuple[AdmittedRollout, ...]
     metrics: dict[str, float]
+
+
+@dataclass(frozen=True)
+class RolloutReader:
+    """Read selected rollout payloads with their admitted identity and size checks."""
+
+    buffer: ActorHandle
+    payloads: PayloadStore
+    selected: tuple[AdmittedRollout, ...]
+    stall_timeout: float
+
+    async def read(self, batch_id: int, indices: tuple[int, ...]) -> list[RolloutGroup]:
+        """Fetch selected groups through the configured store and validate their admitted facts."""
+        async with self._read_timeout(batch_id, indices):
+            refs = await self.buffer.payload_refs.remote(batch_id, indices)
+            groups = await self.payloads.fetch(refs)
+        return self._validate(indices, groups)
+
+    @asynccontextmanager
+    async def _read_timeout(self, batch_id: int, indices: tuple[int, ...]) -> AsyncIterator[None]:
+        try:
+            async with asyncio.timeout(self.stall_timeout):
+                yield
+        except TimeoutError as error:
+            raise GroupAdmissionStalledError(
+                f"{len(indices)} selected rollout payloads did not arrive within "
+                f"{self.stall_timeout:.0f}s: batch_id={batch_id} indices={list(indices)}"
+            ) from error
+
+    def _validate(self, indices: tuple[int, ...], groups: list[RolloutGroup]) -> list[RolloutGroup]:
+        by_index = {group.index: group for group in self.selected}
+        selected = tuple(by_index[index] for index in indices)
+        if len(groups) != len(selected):
+            raise ValueError("payload store returned the wrong number of selected rollout groups")
+        for expected, group in zip(selected, groups, strict=True):
+            if group.uid != expected.uid or group.policy_step != expected.policy_step:
+                raise ValueError(f"selected rollout payload does not match batch metadata for {expected.uid}")
+            work = GeneratedWork.from_batch(
+                group.trajectory_batch["response_ids"], group.trajectory_batch.get("is_last_step")
+            )
+            if work.sample_count != expected.sample_count or work.generated_token_count != expected.response_tokens:
+                raise ValueError(f"selected rollout payload size does not match batch metadata for {expected.uid}")
+        return groups
 
 
 def prompt_order_from_config(config: DictConfig, dataset: PromptGroupDataset) -> PromptOrder:
@@ -227,8 +270,13 @@ class TrainingContext:
 
     async def publish(self, policy_step: int) -> None:
         """Acknowledge the previous batch and lease rollouts at ``policy_step``, whose weights are now live."""
-        await self._until_failure(self._buffer.publish.remote(policy_step))
+        await self.wait(self._buffer.publish.remote(policy_step))
         self._policy_step = policy_step
+
+    @property
+    def batch_id(self) -> int:
+        """The published batch identity used by current admissions and payload reads."""
+        return self._policy_step
 
     async def next_batch(
         self,
@@ -258,28 +306,8 @@ class TrainingContext:
     async def _fetch_groups(
         self, batch_id: int, selected: tuple[AdmittedRollout, ...], *, stall_timeout: float
     ) -> list[RolloutGroup]:
-        try:
-            async with asyncio.timeout(stall_timeout):
-                refs = await self._until_failure(
-                    self._buffer.payload_refs.remote(batch_id, tuple(group.index for group in selected))
-                )
-                groups = await self._until_failure(self._payloads.fetch(refs))
-        except TimeoutError as error:
-            raise GroupAdmissionStalledError(
-                f"{len(selected)} selected rollout payloads did not arrive within "
-                f"{stall_timeout:.0f}s: batch_id={batch_id} indices={[group.index for group in selected]}"
-            ) from error
-        if len(groups) != len(selected):
-            raise ValueError("payload store returned the wrong number of selected rollout groups")
-        for expected, group in zip(selected, groups, strict=True):
-            if group.uid != expected.uid or group.policy_step != expected.policy_step:
-                raise ValueError(f"selected rollout payload does not match batch metadata for {expected.uid}")
-            work = GeneratedWork.from_batch(
-                group.trajectory_batch["response_ids"], group.trajectory_batch.get("is_last_step")
-            )
-            if work.sample_count != expected.sample_count or work.generated_token_count != expected.response_tokens:
-                raise ValueError(f"selected rollout payload size does not match batch metadata for {expected.uid}")
-        return groups
+        reader = RolloutReader(self._buffer, self._payloads, selected, stall_timeout)
+        return await self.wait(reader.read(batch_id, tuple(group.index for group in selected)))
 
     async def next_batch_metadata(
         self,
@@ -293,7 +321,7 @@ class TrainingContext:
         deadline = loop.time() + stall_timeout
         while True:
             timeout = max(deadline - loop.time(), 0.0)
-            admission = await self._until_failure(self._buffer.admit.remote(timeout))
+            admission = await self.wait(self._buffer.admit.remote(timeout))
             await self._release(admission)
             for policy_step, work in admission.generated:
                 record_generated_work(work, policy_step)
@@ -417,12 +445,16 @@ class TrainingContext:
         if not self._failure.done():
             self._failure.set_exception(error)
 
-    async def _until_failure(self, awaitable: Awaitable[_T]) -> _T:
+    async def wait(self, awaitable: Awaitable[_T]) -> _T:
         """Await ``awaitable`` unless a rollout task fails first, then raise that failure."""
         assert self._failure is not None, "start the training context before reading from it"
         work: asyncio.Future[Any] = asyncio.ensure_future(awaitable)
-        await asyncio.wait({work, self._failure}, return_when=asyncio.FIRST_COMPLETED)
-        if work.done():
-            return work.result()
-        work.cancel()
-        return self._failure.result()
+        try:
+            await asyncio.wait({work, self._failure}, return_when=asyncio.FIRST_COMPLETED)
+            if work.done():
+                return work.result()
+            return self._failure.result()
+        finally:
+            if not work.done():
+                work.cancel()
+            await asyncio.gather(work, return_exceptions=True)

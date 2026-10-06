@@ -2,12 +2,11 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.rollouts.buffer import RolloutGroup
-from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.trajectory_runners.base import TrajectoryID
-from skyrl_train.trajectory_selection import BestOfNTrajectorySelector
 
 
 def _group(uid: str, policy_step: int, *, rewards: list[float] | None = None) -> RolloutGroup:
@@ -26,13 +25,10 @@ def _group(uid: str, policy_step: int, *, rewards: list[float] | None = None) ->
 
 @pytest.mark.parametrize("reason", ["initial", "training_step"])
 @pytest.mark.parametrize("offload_enabled", [False, True])
-def test_weight_sync_respects_optimizer_offload_policy(reason, offload_enabled):
-    trainer = object.__new__(RayPPOTrainer)
-    trainer.cfg = SimpleNamespace(trainer=SimpleNamespace(offload_optimizer_during_rollouts=offload_enabled))
-    trainer.colocate_all = False
-    trainer.global_step = 0
-    trainer.all_startup_timings = {}
-    trainer.all_timings = {}
+def test_weight_sync_respects_optimizer_offload_policy(reason, offload_enabled, driver_trainer_factory):
+    cfg = get_default_config()
+    cfg.trainer.offload_optimizer_during_rollouts = offload_enabled
+    trainer = driver_trainer_factory(cfg)
     events = []
 
     class Policy:
@@ -67,41 +63,23 @@ def test_weight_sync_respects_optimizer_offload_policy(reason, offload_enabled):
     )
 
 
-def test_rollout_batch_conversion_reports_staleness_and_stage_timings(monkeypatch):
-    trainer = object.__new__(RayPPOTrainer)
-    trainer.context = SimpleNamespace(config=SimpleNamespace(batch_size=2, max_staleness_steps=2))
-    trainer.cfg = SimpleNamespace(trainer=SimpleNamespace(algorithm=get_default_config().trainer.algorithm))
-    trainer.cfg.trainer.algorithm.off_policy_correction = "none"
+def test_rollout_batch_conversion_reports_staleness_and_stage_timings(monkeypatch, driver_trainer_factory):
+    cfg = get_default_config()
+    cfg.trainer.train_batch_size = 2
+    cfg.trainer.rollout_buffer.max_staleness_steps = 2
+    cfg.generator.n_samples_per_prompt = 2
+    cfg.trainer.algorithm.policy_loss_type = "regular"
+    cfg.trainer.algorithm.off_policy_correction = "none"
+    trainer = driver_trainer_factory(cfg, tokenizer=SimpleNamespace(decode=str, pad_token_id=0))
     trainer.global_step = 10
-    trainer.all_metrics = {}
-    trainer.all_timings = {}
-    trainer.tokenizer = SimpleNamespace(decode=lambda response: str(response))
-    now = [0.0]
-    monkeypatch.setattr("skyrl_train.utils.utils.time", SimpleNamespace(monotonic=lambda: now[0]))
-
-    def postprocess(batch, uids):
-        now[0] += 7.0
-        return batch
-
-    def select(batch, uids):
-        now[0] += 11.0
-        return batch, uids
-
-    def convert(batch, uids, *, rollout_staleness):
-        now[0] += 3.0
-        return {"rewards": batch["rewards"], "uids": uids, "rollout_staleness": rollout_staleness}
-
-    trainer.postprocess_trajectory_batch = postprocess
-    trainer.select_trajectories = select
-    trainer.convert_to_training_input = convert
+    ticks = iter((0.0, 0.0, 0.0, 18.0, 18.0, 21.0))
+    monkeypatch.setattr("skyrl_train.utils.utils.time", SimpleNamespace(monotonic=lambda: next(ticks)))
 
     result = trainer.convert_rollout_groups_to_training_input([_group("fresh", 10), _group("stale", 8)])
 
-    assert result == {
-        "rewards": [0.0, 1.0, 0.0, 1.0],
-        "uids": ["fresh", "fresh", "stale", "stale"],
-        "rollout_staleness": [0, 0, 2, 2],
-    }
+    torch.testing.assert_close(result["rewards"], torch.tensor([[0.0], [1.0], [0.0], [1.0]]))
+    assert result.metadata["uids"] == ["fresh", "fresh", "stale", "stale"]
+    assert result["rollout_staleness"].tolist() == [0, 0, 2, 2]
     assert trainer.all_metrics["async/staleness_max"] == 2
     assert trainer.all_metrics["async/staleness_ratio"] == 0.5
     assert trainer.all_timings == {
@@ -111,19 +89,14 @@ def test_rollout_batch_conversion_reports_staleness_and_stage_timings(monkeypatc
     }
 
 
-def test_rollout_batch_conversion_records_domain_reward_metrics():
-    trainer = object.__new__(RayPPOTrainer)
-    trainer.context = SimpleNamespace(config=SimpleNamespace(batch_size=3, max_staleness_steps=0))
-    trainer.cfg = get_default_config()
-    trainer.cfg.trainer.algorithm.policy_loss_type = "regular"
-    trainer.cfg.trainer.algorithm.off_policy_correction = "none"
-    trainer.cfg.generator.n_samples_per_prompt = 2
-    trainer.global_step = 0
-    trainer.all_metrics = {}
-    trainer.all_timings = {}
-    trainer.tokenizer = SimpleNamespace(decode=str)
-    trainer.select_trajectories = lambda batch, uids: (batch, uids)
-    trainer.convert_to_training_input = lambda batch, uids, *, rollout_staleness: batch
+def test_rollout_batch_conversion_records_domain_reward_metrics(driver_trainer_factory):
+    cfg = get_default_config()
+    cfg.trainer.train_batch_size = 3
+    cfg.trainer.rollout_buffer.max_staleness_steps = 0
+    cfg.trainer.algorithm.policy_loss_type = "regular"
+    cfg.trainer.algorithm.off_policy_correction = "none"
+    cfg.generator.n_samples_per_prompt = 2
+    trainer = driver_trainer_factory(cfg, tokenizer=SimpleNamespace(decode=str, pad_token_id=0))
     math = _group("math", 0, rewards=[0.2, 0.6])
     tools = _group("tools", 0, rewards=[0.6, 1.0])
     missing = _group("missing", 0, rewards=[0.4, 0.6])
@@ -138,6 +111,8 @@ def test_rollout_batch_conversion_records_domain_reward_metrics():
 
 
 class _RecordingDistillationRuntime:
+    domain_balancer = None
+
     def __init__(self):
         self.submitted = []
 
@@ -146,16 +121,17 @@ class _RecordingDistillationRuntime:
         return object()
 
 
-def test_teacher_scores_only_the_rows_the_learner_selects():
-    trainer = object.__new__(RayPPOTrainer)
+def test_teacher_scores_only_the_rows_the_learner_selects(driver_trainer_factory):
+    cfg = get_default_config()
+    cfg.generator.n_samples_per_prompt = 2
+    cfg.trainer.trajectory_selector.type = "best_of_n"
+    cfg.trainer.algorithm.advantage_estimator = "uniform"
+    trainer = driver_trainer_factory(cfg)
     runtime = _RecordingDistillationRuntime()
-    trainer._distillation_runtime = runtime
-    trainer._distillation_tickets = {}
-    trainer.trajectory_selector = BestOfNTrajectorySelector(2)
+    trainer.configure_distillation(runtime)
 
     asyncio.run(trainer._submit_admitted_groups_for_teacher_scoring([_group("best", 10, rewards=[0.25, 0.75])]))
 
     (submitted,) = runtime.submitted
     assert submitted["response_ids"] == [[3]]
     assert submitted["trajectory_ids"][0].repetition_id == 1
-    assert set(trainer._distillation_tickets) == {"best"}
