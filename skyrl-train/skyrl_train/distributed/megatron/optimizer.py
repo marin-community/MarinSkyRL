@@ -50,7 +50,7 @@ def _grug_muonh_extra(optim_config: Mapping) -> dict:
 
 
 def _register_grug_muonh(optim_config: Mapping) -> None:
-    """Register Hero's recipe with the optimizer factory pinned at MCore 0.18."""
+    """Register the Grug MuonH routes with the Core 0.19 optimizer factory."""
     extra = _grug_muonh_extra(optim_config)
     adam_lr = float(extra.get("adam_lr", optim_config["lr"]))
     muon_eps = float(extra.get("muon_epsilon", 1e-8))
@@ -104,6 +104,15 @@ class _MegatronParamScheduler(OptimizerParamScheduler):
         super().load_state_dict(state_dict)
 
 
+class _GrugMuonHParamScheduler(_MegatronParamScheduler):
+    def get_lr(self, param_group: dict) -> float:
+        if param_group.get("optimizer") != "adam" or self.lr_warmup_steps <= 0 or self.num_steps > self.lr_warmup_steps:
+            return super().get_lr(param_group)
+        max_lr = param_group.get("max_lr", self.max_lr)
+        init_lr = self.init_lr * max_lr / self.max_lr if self.max_lr else 0.0
+        return init_lr + (max_lr - init_lr) * self.num_steps / self.lr_warmup_steps
+
+
 def _init_megatron_optim_config(optim_config: Mapping, optimizer_config_kwargs: Mapping) -> OptimizerConfig:
     # megatron-core only recognizes 'adam' / 'sgd' as standard optimizers (anything
     # else routes to `_get_megatron_emerging_optimizer`, which raises
@@ -141,8 +150,6 @@ def _init_megatron_optim_config(optim_config: Mapping, optimizer_config_kwargs: 
         extra = _grug_muonh_extra(optim_config)
         if float(optim_args["weight_decay"]) != 0.0:
             raise ValueError("MuonH requires weight_decay=0, including Megatron overrides")
-        if optim_args["clip_grad"] is None or float(optim_args["clip_grad"]) != 0.0:
-            raise ValueError("Hero MuonH requires max_grad_norm=0.0 (unclipped gradients)")
         if optimizer_config_kwargs.get("use_distributed_optimizer", False):
             raise ValueError("Hero MuonH uses Megatron's full-matrix optimizer path")
         if optim_args.get("optimizer_cpu_offload", False) or optim_args.get("optimizer_offload_fraction", 0.0):
@@ -180,7 +187,6 @@ def get_megatron_optimizer(
     config = _init_megatron_optim_config(optim_config, optimizer_config_kwargs)
     if config.optimizer == _GRUG_MUONH_NAME:
         _register_grug_muonh(optim_config)
-        return get_megatron_optimizer_native(config=config, model_chunks=model)
 
     config_overrides = get_standard_config_overrides(config)
     if config.optimizer == "adam":
@@ -213,7 +219,10 @@ def get_megatron_optimizer_param_scheduler(
     ):
         lr_warmup_steps = int(config.lr_warmup_steps_ratio * lr_decay_steps)
 
-    opt_param_scheduler = _MegatronParamScheduler(
+    scheduler_class = (
+        _GrugMuonHParamScheduler if str(config.get("optimizer", "adam")).lower() == "muonh" else _MegatronParamScheduler
+    )
+    opt_param_scheduler = scheduler_class(
         optimizer,
         init_lr=config.get("lr_warmup_init", 0.0),
         max_lr=config.lr,
