@@ -120,6 +120,8 @@ class MegatronWorker:
         """
         Initialize the Megatron-Bridge bridge and provider objects + hf_config and tokenizer
         """
+        if remote_read_mode not in ("per_key", "prefetch"):
+            raise ValueError(f"remote_read_mode must be per_key or prefetch; got {remote_read_mode!r}")
         with Timer("megatron/init_configs"):
             hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True, revision=model_revision)
             validate_grug_training_strategy(getattr(hf_config, "model_type", None), "megatron")
