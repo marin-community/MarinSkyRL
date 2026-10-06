@@ -670,6 +670,8 @@ def student_topk_logprobs_from_sampled_action_logprobs(
     Logits use Megatron's compacted sequence positions. The attention mask still
     uses the original left-padded prompt and right-padded response layout.
     Reuse each sampled action's logprob to avoid another vocabulary normalizer.
+    Sampled logprobs must come from these same scaled logits and token positions,
+    retaining their gradient graph when scoring the current policy for training.
     """
     if (
         logits.ndim != 3

@@ -198,6 +198,28 @@ class MegatronModelWrapper:
         )
         return scatter_token_values(compact_logprobs, attention_mask, drop_last=True)
 
+    def _response_logprobs(
+        self,
+        logits: torch.Tensor,
+        sequences: torch.Tensor,
+        attention_mask: torch.Tensor,
+        num_actions: int,
+        packed_seq_params,
+        candidate_ids: torch.Tensor | None = None,
+    ) -> MegatronForwardResult:
+        """Score response actions and candidates with the same differentiable normalizer.
+
+        Logits already include the scoring temperature. Returned scores use the
+        original response suffix, despite Megatron's compacted model positions.
+        """
+        chosen = self._token_logprobs(logits, sequences, attention_mask.to(bool), packed_seq_params)[:, -num_actions:]
+        selected = None
+        if candidate_ids is not None:
+            selected = student_topk_logprobs_from_sampled_action_logprobs(
+                logits, candidate_ids, sequences[:, -num_actions:], chosen, attention_mask
+            )
+        return MegatronForwardResult(chosen, selected)
+
     def _token_entropies(self, logits: torch.Tensor, attention_mask: torch.Tensor, packed_seq_params) -> torch.Tensor:
         """Compute entropy before reconstructing only scalar token values."""
         token_entropies = vocab_parallel_entropy(logits, chunk_size=self._logprob_chunk_size)
@@ -409,17 +431,13 @@ class MegatronModelWrapper:
             if temperature != 1.0:
                 logits.div_(temperature)
 
-            token_logprobs = self._token_logprobs(logits, sequences, data.attention_mask.to(bool), packed_seq_params)
-            result = {"scores": token_logprobs}
-            if data.score_topk_indices is not None:
-                result["selected_logprobs"] = student_topk_logprobs_from_sampled_action_logprobs(
-                    logits,
-                    data.score_topk_indices,
-                    sequences[:, -data.num_actions :],
-                    token_logprobs[:, -data.num_actions :],
-                    data.attention_mask,
-                )
-            return token_logprobs.new_zeros(()), result
+            response = self._response_logprobs(
+                logits, sequences, data.attention_mask, data.num_actions, packed_seq_params, data.score_topk_indices
+            )
+            result = {"scores": response.scores}
+            if response.selected_logprobs is not None:
+                result["selected_logprobs"] = response.selected_logprobs
+            return response.scores.new_zeros(()), result
 
         def forward_step(batch_iter, model):
             batch = next(batch_iter)
@@ -470,11 +488,7 @@ class MegatronModelWrapper:
             # return dummy tensor for non-last pp stages
             device = micro_batches[0].sequences.device
             scores = torch.zeros(size=(1, 1), dtype=torch.bfloat16, device=device)
-            selected_logprobs = (
-                torch.zeros_like(micro_batches[0].score_topk_indices, dtype=torch.float32)
-                if micro_batches[0].score_topk_indices is not None
-                else None
-            )
+            selected_logprobs = None
         return MegatronForwardResult(scores, selected_logprobs)
 
     def _distillation_student_logprobs(
@@ -581,9 +595,15 @@ class MegatronModelWrapper:
             if data.ftpo is None and temperature != 1.0:
                 logits.div_(temperature)
 
-            token_logprobs = self._token_logprobs(logits, sequences, data.attention_mask.to(bool), packed_seq_params)
-
-            action_log_probs = token_logprobs[:, -num_actions:]
+            response = self._response_logprobs(
+                logits,
+                sequences,
+                data.attention_mask,
+                num_actions,
+                packed_seq_params,
+                data.score_topk_indices if self.cfg.trainer.algorithm.get("score_centering_topk", 0) else None,
+            )
+            action_log_probs = response.scores
             score_centering = None
             if self.cfg.trainer.algorithm.get("score_centering_topk", 0):
                 if any(
@@ -591,15 +611,8 @@ class MegatronModelWrapper:
                     for value in (data.score_topk_indices, data.score_old_logprobs, data.score_behavior_logprobs)
                 ):
                     raise ValueError("score centering requires behavior IDs and old and behavior log probabilities")
-                current_selected = student_topk_logprobs_from_sampled_action_logprobs(
-                    logits,
-                    data.score_topk_indices,
-                    sequences[:, -num_actions:],
-                    action_log_probs,
-                    data.attention_mask,
-                )
                 score_centering = ScoreCenteringBatch(
-                    current_selected, data.score_old_logprobs, data.score_behavior_logprobs
+                    response.selected_logprobs, data.score_old_logprobs, data.score_behavior_logprobs
                 )
 
             sparse_student_logprobs = self._distillation_student_logprobs(logits, data)

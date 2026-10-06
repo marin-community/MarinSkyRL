@@ -1,7 +1,7 @@
 """Score centering for the PPO objective with truncated behavior importance weights.
 
-The current trainer policy is ``p``, the stored policy at the start of the
-optimizer update is ``o``, and the policy that sampled each token is ``q``.
+The current trainer policy is ``p``, the stored policy before training the
+batch is ``o``, and the policy that sampled each token is ``q``.
 For a sampled token, PPO contributes ``A * min(o/q, cap) * (p/o) * score(p)``
 while its directional clip is inactive, and zero while it is active. The
 correction subtracts the expectation of this same score coefficient under q.

@@ -12,7 +12,6 @@ from skyrl_train.objective.reduction import StepCounts, policy_data_weights, red
 from skyrl_train.objective.score_centering import masked_topk_tail_mass, ppo_tis_score_centering_correction
 from skyrl_train.objective.teacher import TopKEvidence, mask_teacher_evidence, topk_teacher_loss
 from skyrl_train.utils.policy_math import differentiable_approx_kl
-from skyrl_train.tensor_math import masked_mean
 
 
 @dataclass(frozen=True)
@@ -154,9 +153,10 @@ def compute_policy_objective(
             ("behavior", evidence.behavior_log_probs),
         ):
             tail = masked_topk_tail_mass(log_probs, batch.policy.loss_mask)
-            centering_metrics[f"score_centering/{name}_tail_mass_mean"] = masked_mean(
-                tail, batch.policy_data_weights
-            ).item()
+            tail_mean = reduce_to_step(
+                tail, batch.policy_data_weights, counts.policy, LossReduction.TOKEN_MEAN, **common
+            )
+            centering_metrics[f"score_centering/{name}_tail_mass_mean"] = (tail_mean * report_scale).item()
     mask = batch.policy.loss_mask
     entropy = reduce_to_step(batch.token_entropy, mask, counts.mask, LossReduction.TOKEN_MEAN, **common)
     if config.use_kl_loss:

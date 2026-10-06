@@ -155,12 +155,16 @@ def test_composed_ppo_tis_centering_matches_enumerated_value_gradient_and_partit
     mask = torch.tensor([[1, 0, 0], [1, 1, 1], [0, 0, 0], [1, 1, 0]], dtype=torch.float64)
     tags = torch.tensor([[1, 0, 0], [1, 0, 1], [0, 0, 0], [0, 1, 0]])
     weights = policy_data_weights(mask, tags, 0.25)
-    advantages = torch.tensor([[2, 0, 0], [-1, 0.5, 3], [0, 0, 0], [-2, 1, 0]], dtype=torch.float64)
-    old = torch.tensor([0.20, 0.25, 0.30, 0.15, 0.10], dtype=torch.float64).expand(4, 3, 5)
-    behavior = torch.tensor([0.45, 0.08, 0.07, 0.30, 0.10], dtype=torch.float64).expand(4, 3, 5)
+    # A valid row with zero advantages distinguishes the global row denominator.
+    advantages = torch.tensor([[0, 0, 0], [-1, 0.5, 3], [0, 0, 0], [-2, 1, 0]], dtype=torch.float64)
+    old = torch.tensor([0.20, 0.25, 0.30, 0.15, 0.10], dtype=torch.float64).expand(4, 3, 5).clone()
+    behavior = torch.tensor([0.45, 0.08, 0.07, 0.30, 0.10], dtype=torch.float64).expand(4, 3, 5).clone()
+    old[0, :, 0], old[0, :, 4] = 0.10, 0.20
+    behavior[0, :, 0], behavior[0, :, 4] = 0.35, 0.20
     # These actions exercise positive/negative advantages and active/inactive PPO clipping.
     actions = torch.tensor([[1, 0, 0], [0, 2, 4], [0, 0, 0], [3, 2, 0]])
     logits = torch.tensor([-0.9, 0.8, -0.2, 0.1, -1.0], dtype=torch.float64).expand(4, 3, 5).clone()
+    logits[0, :, 4] += 1
     logits.requires_grad_()
     current = logits.log_softmax(-1)
     selected = current.gather(-1, actions.unsqueeze(-1)).squeeze(-1)
@@ -201,6 +205,8 @@ def test_composed_ppo_tis_centering_matches_enumerated_value_gradient_and_partit
     denominator = weights.sum() if mode == LossReduction.TOKEN_MEAN else (weights.sum(-1) > 0).sum()
     if mode in (LossReduction.SEQ_MEAN_TOKEN_SUM_NORM, LossReduction.SEQ_MEAN_TOKEN_SUM_NORM_GLOBAL):
         denominator = denominator * 8
+    if mode == LossReduction.SEQ_MEAN_TOKEN_SUM_NORM_GLOBAL:
+        denominator = ((weights > 0) & (advantages != 0)).any(-1).sum() * 8
     expected = expected / denominator
     expected_gradient = torch.autograd.grad(expected, logits, retain_graph=True)[0]
 
@@ -208,6 +214,7 @@ def test_composed_ppo_tis_centering_matches_enumerated_value_gradient_and_partit
     scale = megatron_loss_scale(micros, dp)
     actual = logits.new_zeros(())
     reported = logits.new_zeros(())
+    coverage = {name: 0.0 for name in ("current", "old", "behavior")}
     for start in range(0, 4, micro_size):
         chunk = slice(start, start + micro_size)
         evidence = None
@@ -242,11 +249,18 @@ def test_composed_ppo_tis_centering_matches_enumerated_value_gradient_and_partit
         )
         actual = actual + objective.optimization_loss / micros / dp
         reported = reported + objective.rows.policy / scale
+        if capture_width:
+            for name in coverage:
+                coverage[name] += objective.metrics[f"score_centering/{name}_tail_mass_mean"] / micros / dp
     actual_gradient = torch.autograd.grad(actual, logits)[0]
     torch.testing.assert_close(actual, expected, atol=1e-7, rtol=1e-6)
     torch.testing.assert_close(reported, expected, atol=1e-7, rtol=1e-6)
     torch.testing.assert_close(actual_gradient, expected_gradient, atol=1e-7, rtol=1e-6)
     assert torch.isfinite(actual_gradient).all()
+    if capture_width:
+        for name, probabilities in (("current", current.detach().exp()), ("old", old), ("behavior", behavior)):
+            expected_coverage = (probabilities[..., 4] * weights).sum() / weights.sum()
+            assert coverage[name] == pytest.approx(expected_coverage.item(), abs=1e-7)
 
 
 @pytest.mark.parametrize("advantage", [-1.7, 2.3])

@@ -347,6 +347,11 @@ counts. The sampled action's TIS weight must not multiply it again. Outside the
 captured head, stored and behavior probabilities are approximated as copies of
 the current policy scaled to preserve each tail mass. This approximation does
 not guarantee the true omitted gradient; tail-mass metrics report its coverage.
+The three tail-mass means weight eligible tokens by the policy's THINK-token
+weight, using global optimizer-step counts before averaging across steps.
+Equivalent microbatch and data-parallel partitions preserve these means.
+Stored probabilities remain the anchor throughout training of the batch;
+current chosen and candidate scores share a differentiable normalizer.
 
 For cap 1.05 and width 32:
 

@@ -72,7 +72,11 @@ def collate_behavior_topk(
     *,
     sampled_logprobs: torch.Tensor | None = None,
 ) -> BehaviorTopKBatch:
-    """Return CPU candidate IDs, full-vocabulary logprobs and loss masks, right-padded to response_mask."""
+    """Right-pad CPU candidate IDs, full-vocabulary logprobs and trajectory loss masks.
+
+    Only response_mask's shape sets padding. Sampled-probability agreement is
+    checked where the sampled token belongs to the head; provenance is a caller obligation.
+    """
     index_rows = trajectory_batch.get("student_topk_indices")
     behavior_rows = trajectory_batch.get("behavior_topk_logprobs")
     loss_masks = trajectory_batch.get("loss_masks")
