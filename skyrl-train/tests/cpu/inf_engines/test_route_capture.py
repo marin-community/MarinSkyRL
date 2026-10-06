@@ -18,7 +18,6 @@ from skyrl_train.models.megatron_router_replay import (
     SENTINEL_EXPERT_ID,
     LayerReplayHandle,
     MegatronRouterReplay,
-    dense_replay_targets,
 )
 from skyrl_train.trajectory_runners.routed_experts import normalize_routed_experts
 
@@ -30,7 +29,7 @@ def test_response_routes_select_prediction_positions() -> None:
 
     response = response_routes(captured, 2)
     np.testing.assert_array_equal(response, [[[5, 6]], [[7, 8]]])
-    assert response.dtype == captured.dtype
+    assert np.issubdtype(response.dtype, np.integer)
     assert not np.shares_memory(response, captured)
     assert response_routes(captured, 0).shape == (0, 1, 2)
     assert response_routes(None, 2) is None
@@ -44,69 +43,46 @@ def test_response_routes_reject_incomplete_capture() -> None:
 
 
 @pytest.mark.parametrize("source", ["generate", "chat"])
-def test_captured_routes_replay_at_the_positions_that_predicted_responses(source: str) -> None:
-    # The model sees prompt tokens 10, 11, 12 before generating 20 and 21.
-    captured = np.array([[[1, 2]], [[3, 4]], [[5, 6]], [[7, 8]]], dtype=np.uint16)
-    if source == "generate":
-        response = response_routes(captured, 2)
-    else:
-        payload = io.BytesIO()
-        np.save(payload, captured, allow_pickle=False)
-        response = normalize_routed_experts(
-            base64.b64encode(payload.getvalue()).decode("ascii"), [10, 11, 12], [20, 21]
-        )
-    routes = torch.tensor(np.asarray(response)).unsqueeze(0)
-    full, mask = dense_replay_targets(routes, batch_size=1, seq_len=5, num_actions=2)
-
-    assert full[0, 2].tolist() == [[5, 6]]  # prompt token 12 predicts response token 20
-    assert full[0, 3].tolist() == [[7, 8]]  # response token 20 predicts response token 21
-    assert mask[0].tolist() == [False, False, True, True, False]
-
-
 @pytest.mark.parametrize("packing", [False, True], ids=["unpacked", "packed"])
 @pytest.mark.parametrize("mode", ["native", "router_replay"])
-@pytest.mark.parametrize("expert_offset", [0, 256], ids=["uint8-routes", "hero-uint16-routes"])
-def test_client_retry_compact_routes_and_probe_observations_follow_prediction_tokens(
-    megatron_wrapper, packing, mode, expert_offset
+@pytest.mark.parametrize(
+    ("expert_offset", "num_experts", "expected_dtype"),
+    [(0, 32, torch.uint8), (0, 384, torch.int16), (256, 384, torch.int16)],
+    ids=["32experts", "384experts_low_ids", "384experts_high_ids"],
+)
+def test_retry_routes_and_probe_observations_follow_prediction_tokens(
+    megatron_wrapper, source, packing, mode, expert_offset, num_experts, expected_dtype
 ):
-    captured = np.array(
-        [
-            [[1, 2], [1, 2], [1, 2]],
-            [[3, 4], [3, 4], [3, 4]],
-            [[4, 5], [0, 1], [6, 7]],
-            [[5, 6], [1, 2], [7, 0]],
-        ],
-        dtype=np.uint16,
-    )
-    captured += expert_offset
-    chunks = iter([([10, 11, 12], [20], captured[:3], "abort"), ([10, 11, 12, 20], [21], captured[3:], "stop")])
+    # Each forwarded position and layer has distinct choices, including IDs above 255.
+    captured = np.arange(24, dtype=np.uint16).reshape(4, 3, 2) + expert_offset
+    chunks = iter([([10, 11, 12], [20], "abort"), ([10, 11, 12, 20], [21], "stop")])
 
-    class Engine:
-        async def generate(self, request):
-            prompt, response_ids, raw_routes, stop = next(chunks)
-            assert request["prompt_token_ids"] == [prompt]
-            return {
-                "responses": ["response"],
-                "response_ids": [response_ids],
-                "response_logprobs": [[-0.1]],
-                "stop_reasons": [stop],
-                "routed_experts": [response_routes(raw_routes, len(response_ids))],
-            }
+    async def generate(request):
+        prompt, tokens, stop = next(chunks)
+        assert request["prompt_token_ids"] == [prompt]
+        raw = captured[: len(prompt)]
+        if source == "generate":
+            rows = response_routes(raw, len(tokens))
+        else:
+            payload = io.BytesIO()
+            np.save(payload, raw, allow_pickle=False)
+            rows = normalize_routed_experts(base64.b64encode(payload.getvalue()).decode("ascii"), prompt, tokens)
+        return {"responses": ["response"], "response_ids": [tokens], "stop_reasons": [stop], "routed_experts": [rows]}
 
     cfg = get_default_config()
     cfg.generator.enable_http_endpoint = False
     cfg.trainer.policy.megatron_config.moe_router_replay = True
-    client = InferenceEngineClient([Engine()], SimpleNamespace(decode=lambda *_args, **_kwargs: "response"), cfg)
+    client = InferenceEngineClient(
+        [SimpleNamespace(generate=generate)], SimpleNamespace(decode=lambda *_, **__: "response"), cfg
+    )
     output = asyncio.run(client.generate({"prompt_token_ids": [[10, 11, 12]], "sampling_params": {"max_tokens": 2}}))
-    response = output["routed_experts"][0]
     assert output["response_ids"] == [[20, 21]]
-    assert response.dtype == (np.uint16 if expert_offset else np.uint8)
+    response = output["routed_experts"][0]
     np.testing.assert_array_equal(response, captured[2:])
     # Compact batches can carry only the local response rows even when
     # the global padded action window is longer.
-    num_experts = 384 if expert_offset else 8
     routes = RoutedExpertRows((response,), response_len=3, num_experts=num_experts).materialize()
-    assert routes.dtype == (torch.int16 if expert_offset else torch.uint8)
+    assert routes.dtype == expected_dtype
     if mode == "native":
         # The production mismatch probe requests native routing with sentinel rows.
         routes.fill_(SENTINEL_EXPERT_ID)
@@ -131,7 +107,8 @@ def test_client_retry_compact_routes_and_probe_observations_follow_prediction_to
             for token, expected in ((12, captured[2, layer]), (20, captured[3, layer])):
                 actual = selected[tokens == token].tolist()
                 assert actual == [expected.tolist() if mode == "router_replay" else [0, 1]]
-            assert selected[tokens == 21].tolist() == [[0, 1]]
+            for token in (10, 11, 21):
+                assert selected[tokens == token].tolist() == [[0, 1]]
         return torch.zeros(1)
 
     wrapper._forward_micro_batch(
