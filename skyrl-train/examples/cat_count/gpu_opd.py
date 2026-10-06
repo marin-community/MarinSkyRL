@@ -207,7 +207,7 @@ def opd_config(args: argparse.Namespace) -> DictConfig:
     )
 
 
-def main() -> None:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--model", required=True, help="local Qwen2.5-0.5B-Instruct directory")
     parser.add_argument("--output", type=Path, required=True)
@@ -217,8 +217,17 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=SEED)
     # Calibrated on seeds 17, 23 and 31; 2e-6 was unstable with or without the clip.
     parser.add_argument("--lr", type=float, default=1e-6)
-    parser.add_argument("--advantage-clip", type=float, default=5.0, help="bound on each token's teacher credit")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--advantage-clip",
+        type=lambda value: None if value.lower() == "none" else float(value),
+        default=5.0,
+        help="bound on each token's teacher credit; none disables clipping",
+    )
+    return parser.parse_args(argv)
+
+
+def main() -> None:
+    args = parse_args()
     cfg = opd_config(args)
     print("CAT_COUNT_OPD_CONFIG " + json.dumps(OmegaConf.to_container(cfg.trainer.algorithm.distillation)))
     run(cfg)

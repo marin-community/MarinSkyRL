@@ -440,3 +440,21 @@ def test_opencode_spec_requires_exact_concurrent_literal_coverage():
             del metrics["policy/correction/weight_mean"]
         failures = check_run(parse_metrics(mirror_line(1, **metrics)), spec, wall_clock_seconds=900)
         assert any(failure.metric == "policy/correction/weight_mean" for failure in failures)
+
+
+@pytest.mark.parametrize("final_score", [0.49, 0.71, 0.82, 0.77, 0.83])
+def test_cat_count_opd_gate_rejects_a_peak_followed_by_collapse(final_score):
+    spec = load_spec(SHIPPED_SPEC.parent / "cat-count-opd-qwen2.5-0.5b-async.json")
+    metric = "eval/sampled/train/avg_score"
+    # Isolate learning from independent runtime-health checks. A peak-only gate
+    # accepts this unstable curve: it reaches 0.70 but ends at 0.49.
+    spec = replace(
+        spec,
+        min_train_steps=0,
+        finite_metrics=(),
+        bounds={},
+        metric_gates=tuple(gate for gate in spec.metric_gates if gate.metric == metric),
+    )
+    rows = [StepMetrics("eval", step, {metric: score}) for step, score in ((0, 0.29), (25, 0.70), (30, final_score))]
+    assert (check_run(rows, spec, 300) == []) == (final_score >= 0.65)
+    assert check_run(rows[:-1], spec, 300)

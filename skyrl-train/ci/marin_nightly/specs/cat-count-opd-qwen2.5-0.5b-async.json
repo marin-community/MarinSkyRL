@@ -45,9 +45,9 @@
     {
       "kind": "eval",
       "metric": "eval/sampled/train/avg_score",
-      "min_observations": 2,
-      "max_step": 30,
-      "bounds": {"minimum_count": 1, "minimum": 0.65}
+      "min_observations": 1,
+      "step": 30,
+      "bounds": {"minimum": 0.65}
     },
     {
       "kind": "train",

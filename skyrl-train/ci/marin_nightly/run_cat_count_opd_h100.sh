@@ -14,7 +14,10 @@ SPEC="${SPEC-ci/marin_nightly/specs/cat-count-opd-qwen2.5-0.5b-async.json}"
 MAX_STEPS="${MAX_STEPS:-30}"
 LEARNING_RATE="${LEARNING_RATE:-1e-6}"
 SEED="${SEED:-17}"
+
+# An explicitly empty value disables clipping; an unset value uses the calibrated bound.
 ADVANTAGE_CLIP="${ADVANTAGE_CLIP-5}"
+ADVANTAGE_CLIP="${ADVANTAGE_CLIP:-none}"
 TEACHER_JITTER="${TEACHER_JITTER:-0.5}"
 TEACHER_FLAGS="${TEACHER_FLAGS:-}"
 TEACHER_PORT=18080
@@ -72,7 +75,7 @@ START=$(date +%s)
   --teacher-url "http://127.0.0.1:${TEACHER_PORT}/v1" \
   --teacher-revision "jitter${TEACHER_JITTER}${TEACHER_FLAGS// /}" \
   --steps "$MAX_STEPS" --lr "$LEARNING_RATE" --seed "$SEED" \
-  ${ADVANTAGE_CLIP:+--advantage-clip "$ADVANTAGE_CLIP"} \
+  --advantage-clip "$ADVANTAGE_CLIP" \
   2>&1 | tee "$LOG"
 ELAPSED=$(( $(date +%s) - START ))
 
