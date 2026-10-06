@@ -141,6 +141,7 @@ Rollout workers generate prompt groups under leases from a rollout buffer, and e
   ``dump_data_batch`` is available with ``driver`` and ``verify``. Router replay requires captured routes
   and a resolved model expert count. ``generator.r3_transport`` affects driver construction;
   worker construction keeps its batches on the policy workers. Verification is intended for tests and short runs.
+  The Snowball Ultra RLVR1 split64 and colocated64 recipes select ``worker``.
   Worker and verify mismatch diagnostics report p99 and maximum; p95 and p999 are driver-only.
   P99 uses a global histogram with 4,096 bins of width log(1.01), covering absolute log ratios up to about 40.8.
   Within that range the upper-bin estimate is at most one bin above the exact p99; overflow uses the global maximum.
