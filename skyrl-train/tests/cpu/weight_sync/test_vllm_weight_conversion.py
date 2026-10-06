@@ -4,6 +4,7 @@ from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
 
 from skyrl_train.weight_sync.weight_extractor_utils import yield_module_grouped_chunks
 from skyrl_train.weight_sync.vllm_weight_conversion import load_weights_into_vllm, validate_dummy_weight_coverage
+from skyrl_train.weight_sync.expert_block.stream import storage_identity
 
 
 class RecordingVLLMModel:
@@ -204,7 +205,7 @@ def test_dummy_tied_head_requires_its_bias_after_shared_weight_and_padding(
     bias_numel, loaded_bias, fails, embedding_processed
 ):
     weight = torch.ones(4, 3)
-    identity = (weight.data_ptr(), tuple(weight.shape), tuple(weight.stride()), str(weight.dtype), str(weight.device))
+    identity = storage_identity({"weight": weight})["weight"]
     layers = {
         "model.embed_tokens": {
             "can_load": not embedding_processed,
