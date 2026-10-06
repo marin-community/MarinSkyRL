@@ -60,6 +60,7 @@ from skyrl_train.training_batch import (
     per_data_parallel_batch_size,
 )
 from skyrl_train.batch_assembly import BatchLoadResult, BatchPlan, assemble_worker_slice, forward_input
+from skyrl_train.batch_digest import BatchDigest, BatchInputPhase, digest
 from skyrl_train.batch_metrics import WorldReduction, advantage_metrics, install_correction, rollout_probability_metrics
 from skyrl_train.rollouts.context import RolloutReader
 from skyrl_train.rollouts.buffer import PayloadReference
@@ -1007,6 +1008,11 @@ class PolicyWorkerBase(Worker):
     def train_loaded(self, batch_id: int) -> TrainingOutputBatch:
         """Train on the finalized retained slice through the existing policy path."""
         return self.ppo_train(self._loaded_batches[batch_id])
+
+    def digest_loaded(self, batch_id: int, phase: BatchInputPhase) -> BatchDigest:
+        """Return the byte digest of the retained input for this phase."""
+        batch = self._loaded_batches[batch_id]
+        return digest(forward_input(batch) if phase is BatchInputPhase.FORWARD else batch)
 
     def unload_batch(self, batch_id: int) -> None:
         """Release a retained slice after a completed or failed training step."""

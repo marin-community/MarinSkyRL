@@ -185,13 +185,15 @@ _SOURCE_METRIC_KEY_DIFFERENCES = frozenset(
         "timing/convert_to_training_input",
         "timing/dump_data_batch",
         "timing/load_worker_batch",
+        "timing/verify_driver_preparation",
+        "timing/verify_driver_finalization",
         "timing/compute_advantages_and_returns",
         "timing/prepare_worker_training_input",
     }
 )
 
 
-def _worker_batch_config(root: Path, tiny_policy: Path, builder: str):
+def _worker_batch_config(root: Path, tiny_policy: Path, builder: str, estimator: str = "rloo_n"):
     cfg = experiment.tiny_training_config(
         root,
         tiny_policy,
@@ -206,8 +208,8 @@ def _worker_batch_config(root: Path, tiny_policy: Path, builder: str):
     cfg.trainer.batch_builder = builder
     cfg.trainer.train_batch_size = cfg.trainer.policy_mini_batch_size = 3
     cfg.trainer.training_metrics = True
-    cfg.trainer.algorithm.advantage_estimator = "rloo_n"
-    cfg.trainer.algorithm.group_advantage_min_size = 2
+    cfg.trainer.algorithm.advantage_estimator = estimator
+    cfg.trainer.algorithm.group_advantage_min_size = 2 if estimator == "rloo_n" else None
     cfg.generator.trajectory_reward_shaping.enabled = True
     cfg.generator.trajectory_reward_shaping.overlong.penalty_scale = 0.0
     return cfg
@@ -220,26 +222,60 @@ def _run_worker_batch_case(runs: ForkServerContext, cfg):
     if run.exitcode is None:
         run.kill()
         run.join()
-        pytest.fail("worker training did not finish")
+        pytest.fail("worker verification did not finish")
     assert run.exitcode == 0
 
 
 @pytest.fixture(scope="module")
-def driver_batch_metric_keys(runs, tmp_path_factory, tiny_policy):
-    root = tmp_path_factory.mktemp("driver_batch_metrics")
-    _run_worker_batch_case(runs, _worker_batch_config(root, tiny_policy, "driver"))
-    return [set(record) - _SOURCE_METRIC_KEY_DIFFERENCES for record in _trained_steps(root)]
+def driver_batch_metrics(runs, tmp_path_factory, tiny_policy):
+    baselines = {}
+
+    def for_estimator(estimator):
+        if estimator not in baselines:
+            root = tmp_path_factory.mktemp(f"driver_batch_metrics_{estimator}")
+            _run_worker_batch_case(runs, _worker_batch_config(root, tiny_policy, "driver", estimator))
+            baselines[estimator] = _trained_steps(root)
+        return baselines[estimator]
+
+    return for_estimator
 
 
-def test_worker_batches_train_two_tis_steps_with_a_group_split_between_dp_ranks(
-    runs: ForkServerContext, tmp_path: Path, tiny_policy: Path, driver_batch_metric_keys
+@pytest.mark.parametrize(
+    ("builder", "estimator"),
+    [("verify", "rloo_n"), ("worker", "rloo_n"), ("verify", "grpo")],
+    ids=["verify", "worker", "verify-grpo"],
+)
+def test_worker_batches_verify_two_tis_steps_with_a_group_split_between_dp_ranks(
+    runs: ForkServerContext, tmp_path: Path, tiny_policy: Path, builder: str, estimator: str, driver_batch_metrics
 ):
-    _run_worker_batch_case(runs, _worker_batch_config(tmp_path, tiny_policy, "worker"))
+    _run_worker_batch_case(runs, _worker_batch_config(tmp_path, tiny_policy, builder, estimator))
     steps = _trained_steps(tmp_path)
+    baseline = driver_batch_metrics(estimator)
     assert [record["trainer/global_step"] for record in steps] == [1, 2]
     assert all(record["policy/raw_grad_norm"] > 0 for record in steps)
-    assert [set(record) - _SOURCE_METRIC_KEY_DIFFERENCES for record in steps] == driver_batch_metric_keys
-    assert all(record["generate/avg_num_tokens"] > 0 for record in steps)
+    assert [set(record) - _SOURCE_METRIC_KEY_DIFFERENCES for record in steps] == [
+        set(record) - _SOURCE_METRIC_KEY_DIFFERENCES for record in baseline
+    ]
+    if estimator == "grpo":
+        assert [record["reward/zero_std_group_fraction"] for record in steps] == [
+            record["reward/zero_std_group_fraction"] for record in baseline
+        ]
+    if builder == "worker":
+        assert all(record["generate/avg_num_tokens"] > 0 for record in steps)
+        return
+    for step in (1, 2):
+        batch = TrainingInputBatch().load(tmp_path / f"exports/dumped_data/global_step_{step}_training_input.pkl")
+        assert batch.batch_size == 12
+        lengths = batch["response_mask"].sum(-1)
+        assert torch.unique(lengths).numel() > 1
+        assert torch.unique(batch["advantages"]).numel() > 2
+        eligible = batch["loss_mask"].bool()
+        expected = torch.zeros_like(batch["action_log_probs"], dtype=torch.float32)
+        expected[eligible] = (
+            (batch["action_log_probs"][eligible] - batch["rollout_logprobs"][eligible]).exp().clamp(max=2)
+        )
+        torch.testing.assert_close(batch["correction_weights"], expected, rtol=0, atol=0)
+        assert (expected[eligible] != 1).any()
 
 
 _FORWARD_GATE_NAME = "tiny_training_forward_gate"

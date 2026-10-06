@@ -8,6 +8,7 @@ from typing import Any
 class BatchBuilder(StrEnum):
     DRIVER = "driver"
     WORKER = "worker"
+    VERIFY = "verify"
 
 
 def parse_batch_builder(value: str) -> BatchBuilder:
@@ -15,7 +16,7 @@ def parse_batch_builder(value: str) -> BatchBuilder:
     try:
         return BatchBuilder(value)
     except ValueError as error:
-        raise ValueError("trainer.batch_builder must be driver or worker") from error
+        raise ValueError("trainer.batch_builder must be driver, worker, or verify") from error
 
 
 class R3Transport(StrEnum):
