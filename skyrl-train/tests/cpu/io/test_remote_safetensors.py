@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 from fsspec.spec import AbstractBufferedFile, AbstractFileSystem
 from safetensors.torch import save_file
+from s3fs import S3FileSystem
 import torch
 
 from cloud.iris.hf_model_cache import stage_model_metadata
@@ -39,7 +40,7 @@ class CountingFileSystem(AbstractFileSystem):
     def _open(self, path, mode="rb", block_size=None, cache_type="readahead", **kwargs):
         self.opens += 1
         return CountingBufferedFile(
-            self, path, mode, block_size=50 * 2**20, cache_type=cache_type, size=len(self.payload)
+            self, path, mode, block_size=S3FileSystem.default_block_size, cache_type=cache_type, size=len(self.payload)
         )
 
     def cat_file(self, path, start=None, end=None, **kwargs):
