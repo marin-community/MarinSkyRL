@@ -5,12 +5,14 @@ import torch
 from marinskyrl.distillation import DistillationRewardMode
 from omegaconf import DictConfig, OmegaConf
 
-from skyrl_train.config.objective_spec import LossReduction, TopKLossParams
+from skyrl_train.config.objective_spec import LossReduction, TopKLossParams, score_centering_tis_cap
 from skyrl_train.ftpo import FTPOInputs
 from skyrl_train.objective.losses import PolicyLoss, PolicyLossInputs, TokenLoss, complete_clip_metrics
 from skyrl_train.objective.reduction import StepCounts, policy_data_weights, reduce_to_step
+from skyrl_train.objective.score_centering import masked_topk_tail_mass, ppo_tis_score_centering_correction
 from skyrl_train.objective.teacher import TopKEvidence, mask_teacher_evidence, topk_teacher_loss
 from skyrl_train.utils.policy_math import differentiable_approx_kl
+from skyrl_train.tensor_math import masked_mean
 
 
 @dataclass(frozen=True)
@@ -22,6 +24,13 @@ class TopKTeacherBatch:
 
 
 @dataclass(frozen=True)
+class ScoreCenteringBatch:
+    current_log_probs: torch.Tensor
+    old_log_probs: torch.Tensor
+    behavior_log_probs: torch.Tensor
+
+
+@dataclass(frozen=True)
 class ObjectiveMicroBatch:
     policy: PolicyLossInputs
     policy_data_weights: torch.Tensor
@@ -29,6 +38,7 @@ class ObjectiveMicroBatch:
     token_entropy: torch.Tensor
     teacher: TopKTeacherBatch | None
     correction_weights: torch.Tensor | None = None
+    score_centering: ScoreCenteringBatch | None = None
 
 
 @dataclass(frozen=True)
@@ -60,6 +70,7 @@ def build_objective_micro_batch(
     teacher: TopKTeacherBatch | None,
     ftpo: FTPOInputs | None = None,
     correction_weights: torch.Tensor | None = None,
+    score_centering: ScoreCenteringBatch | None = None,
 ) -> ObjectiveMicroBatch:
     """Prepare finite values at masked positions before objective formulas run."""
     valid = loss_mask > 0
@@ -89,6 +100,7 @@ def build_objective_micro_batch(
         token_entropy=sanitize(token_entropy),
         teacher=teacher,
         correction_weights=None if correction_weights is None else sanitize(correction_weights).detach(),
+        score_centering=score_centering,
     )
 
 
@@ -118,6 +130,40 @@ def compute_policy_objective(
         numerator_weights=batch.correction_weights,
         **common,
     )
+    centering_metrics = {}
+    if config.get("score_centering_topk", 0):
+        evidence = batch.score_centering
+        if evidence is None:
+            raise ValueError("score centering requires aligned current, old, and behavior top-K log probabilities")
+        centering = ppo_tis_score_centering_correction(
+            evidence.current_log_probs,
+            evidence.old_log_probs,
+            evidence.behavior_log_probs,
+            batch.policy.advantages,
+            batch.policy.loss_mask,
+            tis_cap=score_centering_tis_cap(config),
+            eps_clip_low=config.eps_clip_low,
+            eps_clip_high=config.eps_clip_high,
+        )
+        # Centering already integrates TIS over the behavior distribution. Applying the
+        # sampled-action correction weight again would change its gradient.
+        policy_row = policy_row + reduce_to_step(centering, batch.policy_data_weights, counts.policy, mode, **common)
+        centering_metrics["score_centering/correction_abs_mean"] = masked_mean(
+            centering.detach().abs(), batch.policy_data_weights
+        ).item()
+        for name, log_probs in (
+            ("current", evidence.current_log_probs),
+            ("old", evidence.old_log_probs),
+            ("behavior", evidence.behavior_log_probs),
+        ):
+            tail = masked_topk_tail_mass(log_probs, batch.policy.loss_mask)
+            centering_metrics[f"score_centering/{name}_tail_mass_mean"] = masked_mean(
+                tail, batch.policy_data_weights
+            ).item()
+            if name == "behavior":
+                centering_metrics["score_centering/behavior_tail_mass_gt_1pct_fraction"] = masked_mean(
+                    (tail > 0.01).float(), batch.policy_data_weights
+                ).item()
     mask = batch.policy.loss_mask
     entropy = reduce_to_step(batch.token_entropy, mask, counts.mask, LossReduction.TOKEN_MEAN, **common)
     if config.use_kl_loss:
@@ -133,6 +179,7 @@ def compute_policy_objective(
     if config.use_entropy_loss:
         combined = combined - config.entropy_loss_coef * entropy
     metrics = complete_clip_metrics(policy.metrics)
+    metrics.update(centering_metrics)
     teacher_row = None
     if batch.teacher is not None:
         teacher = batch.teacher

@@ -331,6 +331,38 @@ dependence on microbatch statistics and zero-advantage behavior. These
 declarations determine which configurations are valid before training starts. See
 :doc:`custom_algorithms` for the registration example.
 
+PPO/TIS score centering
+----------------------
+
+``trainer.algorithm.score_centering_topk`` defaults to zero (disabled). A
+positive width adds an expected-score correction to regular PPO with exactly
+one token-level TIS truncation rule. Set ``generator.sampling_params.logprobs``
+to the same width. This requires local vLLM and unpacked Megatron with tensor,
+context and sequence parallel size one; distillation is unsupported.
+
+The correction uses current, stored pre-update and sampled-behavior log
+probabilities for identical candidate IDs. It includes directional PPO clipping
+and the stored/behavior TIS cap, and is reduced with the policy's whole-step
+counts. The sampled action's TIS weight must not multiply it again. Outside the
+captured head, stored and behavior probabilities are approximated as copies of
+the current policy scaled to preserve each tail mass. This approximation does
+not guarantee the true omitted gradient; tail-mass metrics report its coverage.
+
+For cap 1.05 and width 32:
+
+.. code-block:: yaml
+
+   trainer:
+     algorithm:
+       policy_loss_type: regular
+       off_policy_correction: custom
+       off_policy_correction_rules:
+         - {kind: token, action: truncate, high: 1.05}
+       score_centering_topk: 32
+   generator:
+     sampling_params:
+       logprobs: 32
+
 .. _objective-kl-estimator:
 
 KL estimator

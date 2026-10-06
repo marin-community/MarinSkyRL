@@ -199,7 +199,10 @@ def test_from_config_retries_s3_engine_gang_after_actor_startup_failure(monkeypa
     assert attempts[1]["engine_init_timeout_seconds"] < attempts[0]["engine_init_timeout_seconds"]
 
 
-@pytest.mark.parametrize(("training", "evaluation", "profile", "expected"), [(16, 24, None, 24), (0, None, 5, 5)])
+@pytest.mark.parametrize(
+    ("training", "evaluation", "profile", "expected"),
+    [(16, 24, None, 25), (0, None, 5, 6), (32, None, None, 33), (0, None, None, 1)],
+)
 def test_from_config_reserves_enough_rollout_logprobs(monkeypatch, training, evaluation, profile, expected):
     captured = {}
     monkeypatch.setattr(rwie, "create_ray_wrapped_inference_engines", lambda **kwargs: captured.update(kwargs) or [])

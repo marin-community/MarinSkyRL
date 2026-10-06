@@ -81,6 +81,9 @@ class Experience:
     distillation: Optional[TopKEvidence] = None
     ftpo: FTPOTargets | None = None
     correction_weights: Optional[Float[torch.Tensor, "batch response_len"]] = None
+    score_topk_indices: Optional[Integer[torch.Tensor, "batch response_len top_k"]] = None
+    score_old_logprobs: Optional[Float[torch.Tensor, "batch response_len top_k"]] = None
+    score_behavior_logprobs: Optional[Float[torch.Tensor, "batch response_len top_k"]] = None
 
     @torch.no_grad()
     def to_device(self, device: torch.device) -> None:
@@ -104,6 +107,12 @@ class Experience:
             self.rollout_logprobs = to(self.rollout_logprobs, device)
         if self.correction_weights is not None:
             self.correction_weights = to(self.correction_weights, device)
+        if self.score_topk_indices is not None:
+            self.score_topk_indices = to(self.score_topk_indices, device)
+        if self.score_old_logprobs is not None:
+            self.score_old_logprobs = to(self.score_old_logprobs, device)
+        if self.score_behavior_logprobs is not None:
+            self.score_behavior_logprobs = to(self.score_behavior_logprobs, device)
         if self.rollout_routed_experts is not None:
             self.rollout_routed_experts = to(self.rollout_routed_experts, device)
         if self.response_span_tags is not None:
@@ -134,6 +143,12 @@ class Experience:
             self.rollout_logprobs = self.rollout_logprobs.pin_memory()
         if self.correction_weights is not None:
             self.correction_weights = self.correction_weights.pin_memory()
+        if self.score_topk_indices is not None:
+            self.score_topk_indices = self.score_topk_indices.pin_memory()
+        if self.score_old_logprobs is not None:
+            self.score_old_logprobs = self.score_old_logprobs.pin_memory()
+        if self.score_behavior_logprobs is not None:
+            self.score_behavior_logprobs = self.score_behavior_logprobs.pin_memory()
         if self.rollout_routed_experts is not None:
             self.rollout_routed_experts = self.rollout_routed_experts.pin_memory()
         if self.response_span_tags is not None:
