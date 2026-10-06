@@ -245,7 +245,7 @@ Policy and Reference Configuration
 ----------------------------------
 
 Set ``trainer.policy.model.path`` to the Hugging Face model identifier or local model directory.
-For remote weight sources, ``trainer.policy.model.remote_read_mode`` selects ``per_key`` reads
+When ``trainer.policy.model.source_uri`` is set, ``trainer.policy.model.remote_read_mode`` selects ``per_key`` reads
 or ``prefetch`` of rank-owned tensors in bounded 1 GiB windows. The default is ``prefetch``.
 ``trainer.ref.model.remote_read_mode`` inherits the policy setting and can be overridden independently.
 The policy optimizer uses ``trainer.policy.optimizer_config``. Policy and reference model parallelism,

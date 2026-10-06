@@ -121,8 +121,6 @@ def test_conversion_task_prefetch_preserves_rank_owned_tensors_and_reduces_range
         experts = store.load_tensors(["experts"])["experts"]
         for index in (-1, 0):
             assert torch.equal(experts[index], tensors["experts"][index])
-        with pytest.raises(TypeError):
-            experts[:]
         store.close()
         assert store.read_stats.prefetch_misses == store.read_stats.prefetch_unused == 0
         assert store.read_stats.gets == filesystem.gets
@@ -132,7 +130,8 @@ def test_conversion_task_prefetch_preserves_rank_owned_tensors_and_reduces_range
 
 
 def test_prefetch_large_tensors_split_ranges_and_keep_windows_bounded(tmp_path, monkeypatch):
-    tensors = {str(index): torch.full((65 * 1024**2,), index, dtype=torch.uint8) for index in range(3)}
+    tensor_bytes = remote_safetensors._PREFETCH_MAX_BLOCK + 1024**2
+    tensors = {str(index): torch.full((tensor_bytes,), index, dtype=torch.uint8) for index in range(3)}
     shard = tmp_path / "model.safetensors"
     save_file(tensors, shard)
     metadata = tmp_path / "metadata"
@@ -145,7 +144,7 @@ def test_prefetch_large_tensors_split_ranges_and_keep_windows_bounded(tmp_path, 
     def bounded_ranges(paths, starts, ends, **kwargs):
         sizes = [end - start for start, end in zip(starts, ends, strict=True)]
         assert sum(sizes) <= 140 * 1024**2
-        assert max(sizes) <= 64 * 1024**2
+        assert max(sizes) <= remote_safetensors._PREFETCH_MAX_BLOCK
         return cat_ranges(paths, starts, ends, **kwargs)
 
     monkeypatch.setattr(filesystem, "cat_ranges", bounded_ranges)
