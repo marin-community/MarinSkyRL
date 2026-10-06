@@ -69,3 +69,40 @@ def load_weights_into_vllm(
         missing = ", ".join(sorted(missing_parameters))
         raise RuntimeError(f"vLLM did not load required fused MoE parameters: {missing}")
     return loaded_parameters
+
+
+def validate_dummy_weight_coverage(
+    layers: dict[str, dict], loaded_parameters: set[str], skipped_float_parameters: set[str]
+) -> None:
+    """Reject incomplete initial dummy weights before vLLM finalizes the reload."""
+    satisfied_storage = {
+        identity for layer in layers.values() if not layer["can_load"] for identity, _numel in layer["tensors"].values()
+    }
+    pending = {name: layer for name, layer in layers.items() if layer["can_load"]}
+    gaps = []
+    while pending:
+        gaps = []
+        satisfied = []
+        for name, layer in pending.items():
+            weight_padding = layer["vocab_padding_numel"]
+            bias_padding = layer.get("vocab_bias_padding_numel", 0)
+            padding = {"weight": weight_padding, "bias": bias_padding} | layer.get("tensor_padding_numel", {})
+            required = layer["load_numel_total"] - sum(padding.values()) - layer.get("non_persistent_numel", 0)
+            required -= layer.get("generated_numel", 0)
+            for tensor_name, (identity, numel) in layer["tensors"].items():
+                if identity in satisfied_storage:
+                    required -= numel - padding.get(tensor_name, 0)
+            if layer["load_numel"] < max(0, required):
+                gaps.append(f"{name or '<root>'}: {layer['load_numel']} of {required} elements loaded")
+            else:
+                satisfied.append(name)
+                satisfied_storage.update(identity for identity, _numel in layer["tensors"].values())
+        if not satisfied:
+            break
+        for name in satisfied:
+            del pending[name]
+    gaps.extend(
+        f"{name}: floating skipped tensor not loaded" for name in sorted(skipped_float_parameters - loaded_parameters)
+    )
+    if gaps:
+        raise RuntimeError("Incomplete dummy engine weights: " + "; ".join(gaps))

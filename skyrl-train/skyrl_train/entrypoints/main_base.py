@@ -173,12 +173,21 @@ def create_ray_wrapped_inference_engines_from_config(
     if tokenizer_revision is not None:
         engine_init_kwargs["tokenizer_revision"] = tokenizer_revision
     policy_source_uri = cfg.trainer.policy.model.get("source_uri")
-    rollout_model_path = runai_model_uri(policy_source_uri) if policy_source_uri else cfg.trainer.policy.model.path
-    if policy_source_uri is not None:
+    load_format = engine_init_kwargs.get("load_format")
+    if load_format == "dummy":
+        if operation is not EntrypointOperation.TRAIN:
+            raise ValueError("Dummy engine weights require the training entrypoint's initial weight sync")
+        rollout_model_path = cfg.trainer.policy.model.path
+    elif policy_source_uri is not None:
+        if load_format is not None:
+            raise ValueError("Object-store policies accept only an explicit dummy load_format")
+        rollout_model_path = runai_model_uri(policy_source_uri)
         engine_init_kwargs["load_format"] = "runai_streamer"
         model_loader_extra_config = engine_init_kwargs.setdefault("model_loader_extra_config", {})
         model_loader_extra_config.setdefault("distributed", True)
         engine_init_kwargs[MODEL_METADATA_PATH_KEY] = cfg.trainer.policy.model.path
+    else:
+        rollout_model_path = cfg.trainer.policy.model.path
     if speculative_decoding is not None:
         engine_init_kwargs["speculative_config"] = speculative_decoding.vllm_speculative_config()
         if speculative_decoding.training is not None:
@@ -331,7 +340,27 @@ class BasePPOExp:
         else:
             inference_engines = create_remote_inference_engines_from_config(self.cfg, self.tokenizer)
         logger.info("Inference engines ready: mode={} count={}", engine_mode, len(inference_engines))
-        return InferenceEngineClient(inference_engines, self.tokenizer, self.cfg)
+        dummy = (
+            operation is EntrypointOperation.TRAIN
+            and self.cfg.generator.engine_init_kwargs.get("load_format") == "dummy"
+        )
+        client_cfg = OmegaConf.merge(self.cfg, {"generator": {"enable_http_endpoint": False}}) if dummy else self.cfg
+        client = InferenceEngineClient(inference_engines, self.tokenizer, client_cfg)
+        if dummy:
+            try:
+                asyncio.run(client.pause_generation())
+                client.enable_http_endpoint = self.cfg.generator.enable_http_endpoint
+                if client.enable_http_endpoint:
+                    client._spin_up_http_endpoint()
+            except BaseException:
+                from skyrl_train.trainer import kill_inference_engines  # noqa: PLC0415
+
+                try:
+                    client.shutdown_http_endpoint()
+                finally:
+                    kill_inference_engines(client)
+                raise
+        return client
 
     def _configure_log_level(self):
         """Configure loguru log level from trainer config."""

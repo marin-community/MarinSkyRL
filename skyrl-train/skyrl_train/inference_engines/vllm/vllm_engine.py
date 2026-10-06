@@ -18,6 +18,14 @@ from vllm.inputs import TokensPrompt
 from vllm.distributed.parallel_state import get_dp_group, get_ep_group, get_pp_group
 from vllm.distributed.weight_transfer.base import WeightTransferUpdateRequest
 from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.model_executor.layers.attention import is_deferred_attention_layer
+from vllm.model_executor.layers.attention.attention import should_load_quant_weights
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
+from vllm.model_executor.model_loader.reload.meta import SKIP_LOAD_TENSORS
+from vllm.model_executor.model_loader.reload.utils import get_layer_params_buffers, get_layer_tensors
 
 from marinskyrl.resource_locator import is_cloud_uri, join_resource_path
 from skyrl_train.numa_policy import NUMA_AFFINITY_ENV
@@ -68,7 +76,8 @@ from skyrl_train.inference_engines.placement import inference_worker_placement
 from skyrl_train.inference_engines.vllm.numa import set_async_worker_numa_affinity
 from skyrl_train.weight_sync.expert_block.receiver import ExpertBlockReceiver
 from skyrl_train.weight_sync.weight_loader import WeightLoader
-from skyrl_train.weight_sync.vllm_weight_conversion import load_weights_into_vllm
+from skyrl_train.weight_sync.vllm_weight_conversion import load_weights_into_vllm, validate_dummy_weight_coverage
+from skyrl_train.weight_sync.expert_block.stream import storage_identity
 from skyrl_train.weight_sync.weight_extractor import is_weight_sync_dtype_compatible
 from skyrl_train.inference_engines.vllm.utils import (
     pop_vllm_wrapper_kwargs,
@@ -562,6 +571,8 @@ class WorkerWrap:
         with set_current_vllm_config(self.vllm_config), torch.device(self.device):
             initialize_layerwise_reload(model)
         self._skyrl_weight_update_active = True
+        self._skyrl_received_weight_names = set()
+        self._skyrl_loaded_weight_names = set()
 
     def skyrl_finish_weight_reload(self) -> None:
         """RENAMED from ``finish_weight_update`` + NOW WIRED — see
@@ -583,8 +594,92 @@ class WorkerWrap:
         from vllm.model_executor.model_loader.reload import finalize_layerwise_reload
 
         model = self.model_runner.model
+        dummy_pending = self.vllm_config.load_config.load_format == "dummy" and not getattr(
+            self, "_skyrl_dummy_weights_verified", False
+        )
+        if dummy_pending:
+            layers = {}
+            skipped_float_aliases = {}
+            for layer_name, layer in model.named_modules():
+                info = get_layerwise_info(layer)
+                live = get_layer_tensors(layer)
+                params, buffers = info.kernel_tensors or get_layer_params_buffers(layer)
+                original = params | buffers
+                non_persistent = info.kernel_non_persistent_buffers | layer._non_persistent_buffers_set
+                generated = set()
+                if is_deferred_attention_layer(layer) and not should_load_quant_weights(
+                    getattr(layer, "quant_method", None)
+                ):
+                    generated = {"_k_scale", "_v_scale", "_q_scale", "_prob_scale"} & buffers.keys()
+                tensors = {
+                    name: original.get(name, tensor)
+                    for name, tensor in live.items()
+                    if name not in SKIP_LOAD_TENSORS and name not in non_persistent and name not in generated
+                }
+                identities = storage_identity(tensors)
+                padding = 0
+                bias_padding = 0
+                if isinstance(layer, VocabParallelEmbedding) and "weight" in tensors:
+                    shard_indices = layer.shard_indices
+                    weight = tensors["weight"]
+                    padding_rows = shard_indices.num_org_vocab_padding + shard_indices.num_added_vocab_padding
+                    padding = padding_rows * weight.shape[1]
+                    if "bias" in tensors:
+                        bias_padding = padding_rows
+                tensor_padding = {}
+                if isinstance(layer, RoutedExperts) and isinstance(layer.quant_method, UnquantizedFusedMoEMethod):
+                    moe = layer.moe_config
+                    hidden = moe.hidden_dim_unpadded
+                    intermediate = moe.intermediate_size_per_partition_unpadded
+                    assert hidden is not None and intermediate is not None
+                    experts = layer.local_num_experts
+                    gate_parts = 2 if moe.is_act_and_mul else 1
+                    checkpoint_numel = {
+                        "w13_weight": experts * gate_parts * intermediate * hidden,
+                        "w2_weight": experts * hidden * intermediate,
+                        "w13_bias": experts * gate_parts * intermediate,
+                        "w2_bias": experts * hidden,
+                    }
+                    for name, numel in checkpoint_numel.items():
+                        if name in tensors:
+                            tensor_padding[name] = live[name].numel() - numel
+                layers[layer_name] = {
+                    "can_load": info.can_load(),
+                    "load_numel_total": info.load_numel_total,
+                    "load_numel": info.load_numel,
+                    "tensors": {name: (identities[name], live[name].numel()) for name in tensors},
+                    "vocab_padding_numel": padding,
+                    "tensor_padding_numel": tensor_padding,
+                    "vocab_bias_padding_numel": bias_padding,
+                    "non_persistent_numel": sum(
+                        tensor.numel()
+                        for name, tensor in live.items()
+                        if name in non_persistent and name not in SKIP_LOAD_TENSORS
+                    ),
+                    "generated_numel": sum(
+                        tensor.numel()
+                        for name, tensor in live.items()
+                        if name in generated and name not in non_persistent
+                    ),
+                }
+                skipped_floats = {
+                    name: tensor
+                    for name, tensor in (original | live).items()
+                    if name in SKIP_LOAD_TENSORS and tensor.is_floating_point()
+                }
+                for name, identity in storage_identity(skipped_floats).items():
+                    skipped_float_aliases.setdefault(identity, set()).add(
+                        f"{layer_name}.{name}" if layer_name else name
+                    )
+            skipped_float_parameters = {
+                min(names) for names in skipped_float_aliases.values() if not names & self._skyrl_loaded_weight_names
+            }
+            validate_dummy_weight_coverage(layers, self._skyrl_loaded_weight_names, skipped_float_parameters)
         with set_current_vllm_config(self.vllm_config), torch.device(self.device):
             finalize_layerwise_reload(model, self.model_config)
+        if dummy_pending:
+            self._skyrl_dummy_weights_verified = True
+            logger.info("Dummy engine weights verified")
         self._skyrl_weight_update_active = False
         speculative_config = self.vllm_config.speculative_config
         if speculative_config is not None and speculative_config.method == "eagle3":
@@ -766,7 +861,9 @@ class WorkerWrap:
                 gc.collect()
                 torch.cuda.empty_cache()
             else:
-                load_weights_into_vllm(model, self._accumulated_weights)
+                loaded = load_weights_into_vllm(model, self._accumulated_weights)
+                if getattr(self, "_skyrl_weight_update_active", False):
+                    self._skyrl_loaded_weight_names.update(loaded)
             self._accumulated_weights.clear()
             del self._accumulated_weights
             gc.collect()
@@ -785,8 +882,19 @@ class WorkerWrap:
         Args:
             request: Weight update request with names, dtypes, shapes, etc.
         """
+        active = getattr(self, "_skyrl_weight_update_active", False)
+        if (
+            self.vllm_config.load_config.load_format == "dummy"
+            and not active
+            and not getattr(self, "_skyrl_dummy_weights_verified", False)
+        ):
+            raise RuntimeError("Pending dummy weights require a bracketed initial weight sync")
         weight_list = []
         for name, tensor in self._weight_receiver.receive_weights(request):
+            if active:
+                if name in self._skyrl_received_weight_names:
+                    raise RuntimeError(f"Weight received twice in one reload: {name}")
+                self._skyrl_received_weight_names.add(name)
             weight_list.append((name, tensor))
 
         if hasattr(self, "_accumulated_weights"):
@@ -796,7 +904,9 @@ class WorkerWrap:
             del weight_list
         else:
             # Immediate mode (default): load right away
-            load_weights_into_vllm(self.model_runner.model, weight_list)
+            loaded = load_weights_into_vllm(self.model_runner.model, weight_list)
+            if active:
+                self._skyrl_loaded_weight_names.update(loaded)
             for weight in weight_list:
                 del weight
 
@@ -808,31 +918,7 @@ class WorkerWrap:
         destroy_process_group(self._model_update_group)
 
     def read_named_weights(self, hf_names, dump_inventory: bool = False):
-        """TEST-ONLY (Stage 6 weight-equality gate): read engine-side weights back
-        from the live vLLM model, reconstructed under the HF parameter names the
-        trainer broadcasts.
-
-        This is the symmetric inverse of ``load_weights`` (vLLM consumes HF-named
-        tensors in ``model.load_weights`` and maps them into its internal
-        fused/sharded params; here we read those internal params back and rebuild
-        the HF view so the trainer's post-step HF tensors can be compared
-        tensor-by-tensor). Returns, per requested HF name, this worker's
-        contribution as a CPU fp32 tensor plus the live engine dtype and rank
-        coordinates so the caller can assemble across TP/EP shards.
-
-        Supported HF name forms (Qwen1.5-MoE / Qwen2MoE vLLM layout):
-          * ``model.embed_tokens.weight``                       -> VocabParallelEmbedding (TP vocab-sharded)
-          * ``model.layers.{i}.mlp.gate.weight`` (router)       -> ReplicatedLinear (full copy every rank)
-          * ``model.layers.{i}.self_attn.o_proj.weight``        -> RowParallelLinear (TP input-sharded)
-          * ``model.layers.{i}.mlp.experts.{j}.gate_proj.weight`` -> RoutedExperts w13_weight[local_e, :I]
-          * ``...experts.{j}.up_proj.weight``                   -> RoutedExperts w13_weight[local_e, I:]
-          * ``...experts.{j}.down_proj.weight``                 -> RoutedExperts w2_weight[local_e]
-
-        Args:
-            hf_names: list of HF parameter names to read back.
-            dump_inventory: if True, also returns the full ``named_parameters()``
-                name->shape inventory under key ``__inventory__`` (first run aid).
-        """
+        """Return HF-named CPU float32 weights, engine dtypes and shard coordinates, with an optional parameter inventory."""
         import re
         import torch as _torch
 
@@ -888,6 +974,35 @@ class WorkerWrap:
                         "tensor": _cpu(tensor),
                     }
                     out[name] = entry
+                    continue
+
+                packed = re.match(
+                    r"^(model\.layers\.\d+)\.(self_attn\.(q|k|v)_proj|mlp\.(gate|up)_proj)\.(weight|bias)$",
+                    name,
+                )
+                if packed is not None:
+                    prefix, _projection, qkv, mlp, kind = packed.groups()
+                    if qkv is not None:
+                        module_name = f"{prefix}.self_attn.qkv_proj"
+                        module = model.get_submodule(module_name)
+                        sizes = (
+                            module.num_heads * module.head_size,
+                            module.num_kv_heads * module.head_size,
+                            module.num_kv_heads * module.v_head_size,
+                        )
+                        index = ("q", "k", "v").index(qkv)
+                    else:
+                        module_name = f"{prefix}.mlp.gate_up_proj"
+                        module = model.get_submodule(module_name)
+                        sizes = tuple(size // tp_size for size in module.output_sizes)
+                        index = ("gate", "up").index(mlp)
+                    tensor = all_params[f"{module_name}.{kind}"].narrow(0, sum(sizes[:index]), sizes[index])
+                    out[name] = {
+                        "found": True,
+                        "mode": "packed",
+                        "dtype": torch_dtype_to_str(tensor.dtype),
+                        "tensor": _cpu(tensor),
+                    }
                     continue
 
                 # 2. Routed expert -> FusedMoE fused weights.

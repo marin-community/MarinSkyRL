@@ -3,7 +3,8 @@ import torch
 from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
 
 from skyrl_train.weight_sync.weight_extractor_utils import yield_module_grouped_chunks
-from skyrl_train.weight_sync.vllm_weight_conversion import load_weights_into_vllm
+from skyrl_train.weight_sync.vllm_weight_conversion import load_weights_into_vllm, validate_dummy_weight_coverage
+from skyrl_train.weight_sync.expert_block.stream import storage_identity
 
 
 class RecordingVLLMModel:
@@ -105,3 +106,134 @@ def test_load_weights_into_vllm_rejects_invalid_fused_expert_shapes(name, tensor
 
     with pytest.raises(ValueError, match="fused MoE weight"):
         load_weights_into_vllm(model, [(name, tensor)])
+
+
+@pytest.mark.parametrize(
+    (
+        "loaded",
+        "total",
+        "padding",
+        "bias_padding",
+        "non_persistent",
+        "generated",
+        "tensor_padding",
+        "complete",
+        "fails",
+    ),
+    [
+        pytest.param(12, 12, 0, 0, 0, 0, {}, False, False, id="complete-weight"),
+        pytest.param(0, 12, 0, 0, 0, 0, {}, False, True, id="unsent-layer"),
+        pytest.param(8, 12, 0, 0, 0, 0, {}, False, True, id="missing-stacked-part"),
+        pytest.param(12, 15, 0, 0, 0, 0, {}, False, True, id="unsent-bias"),
+        pytest.param(0, None, 0, 0, 0, 0, {}, True, False, id="already-processed"),
+        pytest.param(0, 32, 0, 0, 32, 0, {}, False, False, id="non-persistent-only"),
+        pytest.param(0, 44, 0, 0, 32, 0, {}, False, True, id="non-persistent-with-unsent-parameter"),
+        pytest.param(12, 16, 4, 0, 0, 0, {}, False, False, id="vocabulary-padding"),
+        pytest.param(8, 16, 4, 0, 0, 0, {}, False, True, id="padding-does-not-cover-unsent-weight"),
+        pytest.param(252, 256, 3, 1, 0, 0, {}, False, False, id="padded-vocabulary-bias"),
+        pytest.param(189, 256, 3, 1, 0, 0, {}, False, True, id="unsent-padded-vocabulary-bias"),
+        pytest.param(0, 4, 0, 0, 0, 4, {}, False, False, id="generated-scales"),
+        pytest.param(0, 16, 0, 0, 0, 4, {}, False, True, id="unsent-weight-with-scales"),
+        pytest.param(
+            2363392,
+            3150848,
+            0,
+            0,
+            0,
+            0,
+            {"w13_weight": 524288, "w2_weight": 262144, "w2_bias": 1024},
+            False,
+            False,
+            id="moe-padding",
+        ),
+        pytest.param(
+            1970176,
+            3150848,
+            0,
+            0,
+            0,
+            0,
+            {"w13_weight": 524288, "w2_weight": 262144, "w2_bias": 1024},
+            False,
+            True,
+            id="missing-moe-gate",
+        ),
+        pytest.param(
+            2361856,
+            3150848,
+            0,
+            0,
+            0,
+            0,
+            {"w13_weight": 524288, "w2_weight": 262144, "w2_bias": 1024},
+            False,
+            True,
+            id="missing-moe-bias",
+        ),
+    ],
+)
+def test_dummy_weights_require_every_loadable_layer_element(
+    loaded, total, padding, bias_padding, non_persistent, generated, tensor_padding, complete, fails
+):
+    layers = {
+        "model.layer": {
+            "can_load": not complete,
+            "load_numel": loaded,
+            "load_numel_total": total,
+            "tensors": {},
+            "vocab_padding_numel": padding,
+            "vocab_bias_padding_numel": bias_padding,
+            "non_persistent_numel": non_persistent,
+            "generated_numel": generated,
+            "tensor_padding_numel": tensor_padding,
+        }
+    }
+    if fails:
+        with pytest.raises(RuntimeError, match="model.layer"):
+            validate_dummy_weight_coverage(layers, set(), set())
+    else:
+        validate_dummy_weight_coverage(layers, set(), set())
+
+
+@pytest.mark.parametrize(
+    ("bias_numel", "loaded_bias", "fails"),
+    [(0, 0, False), (4, 4, False), (4, 0, True)],
+    ids=["tied-head", "tied-head-bias", "unsent-tied-head-bias"],
+)
+@pytest.mark.parametrize("embedding_processed", [True, False])
+def test_dummy_tied_head_requires_its_bias_after_shared_weight_and_padding(
+    bias_numel, loaded_bias, fails, embedding_processed
+):
+    weight = torch.ones(4, 3)
+    identity = storage_identity({"weight": weight})["weight"]
+    layers = {
+        "model.embed_tokens": {
+            "can_load": not embedding_processed,
+            "load_numel": 6,
+            "load_numel_total": None if embedding_processed else weight.numel(),
+            "tensors": {"weight": (identity, weight.numel())},
+            "vocab_padding_numel": 6,
+        },
+        "lm_head": {
+            "can_load": True,
+            "load_numel": loaded_bias,
+            "load_numel_total": weight.numel() + bias_numel,
+            "tensors": {"weight": (identity, weight.numel())},
+            "vocab_padding_numel": 6,
+        },
+    }
+    if fails:
+        with pytest.raises(RuntimeError, match="lm_head"):
+            validate_dummy_weight_coverage(layers, set(), set())
+    else:
+        validate_dummy_weight_coverage(layers, set(), set())
+
+
+@pytest.mark.parametrize("loaded", [True, False])
+def test_dummy_float_weights_excluded_from_layer_counts_still_require_a_load(loaded):
+    name = "model.layer.e_score_correction_bias"
+    if loaded:
+        validate_dummy_weight_coverage({}, {name}, {name})
+    else:
+        with pytest.raises(RuntimeError, match="e_score_correction_bias"):
+            validate_dummy_weight_coverage({}, set(), {name})
