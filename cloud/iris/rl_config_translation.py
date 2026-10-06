@@ -28,6 +28,7 @@ from marinskyrl.resource_locator import join_resource_path, model_source_for_pat
 from marinskyrl.speculative_decoding import STANDARD_TRAINING_ENTRYPOINT, parse_speculative_decoding_config
 from marinskyrl.harbor_agent_names import DEFAULT_HARBOR_AGENT_NAME
 from marinskyrl.remote_io import filesystem_and_path, open_output_stream
+from marinskyrl.pivot import apply_pivot_mode
 from marinskyrl.rollout_grading import validate_nemotron_ultra_grading
 
 # Directory containing the bundled example RL config YAML files.
@@ -134,20 +135,20 @@ class ContextBudget:
     """One coherent token budget for an Iris RL rollout request."""
 
     request_window_tokens: int
-    max_new_tokens_per_turn: int
+    max_new_tokens_per_turn: int | None
     max_turns: int
     generated_budget_fraction: float = _DEFAULT_GENERATED_BUDGET_FRACTION
     overlong_cache_fraction: float = _DEFAULT_OVERLONG_CACHE_FRACTION
 
     @property
     def max_input_tokens(self) -> int:
-        """Return the input allowance after reserving one complete response."""
-        return self.request_window_tokens - self.max_new_tokens_per_turn
+        """Reserve the response cap, or one token for remaining-context generation."""
+        return self.request_window_tokens - (self.max_new_tokens_per_turn or 1)
 
     @property
     def opencode_limit_output(self) -> int:
         """OpenCode's per-request output cap (mirrors harbor ``_resolve_model_limit``)."""
-        return min(self.max_new_tokens_per_turn, max(1, self.max_input_tokens - 1))
+        return min(self.max_new_tokens_per_turn or self.request_window_tokens - 1, max(1, self.max_input_tokens - 1))
 
     @property
     def opencode_limit_context(self) -> int:
@@ -166,7 +167,7 @@ class ContextBudget:
     def generated_tokens_per_trajectory(self) -> int:
         """Return the generated-token allowance used by trajectory-level shaping."""
         if self.max_turns == 1:
-            return self.max_new_tokens_per_turn
+            return self.max_new_tokens_per_turn or self.request_window_tokens - 1
         return max(1, int(self.request_window_tokens * self.generated_budget_fraction))
 
     @property
@@ -174,7 +175,7 @@ class ContextBudget:
         """Return the soft-overlong transition width."""
         return int(self.generated_tokens_per_trajectory * self.overlong_cache_fraction)
 
-    def as_dict(self) -> Dict[str, int | float]:
+    def as_dict(self) -> Dict[str, int | float | None]:
         """Return the persisted representation, including derived client input."""
         return {
             "request_window_tokens": self.request_window_tokens,
@@ -247,9 +248,9 @@ def resolve_context_budget(raw: Dict[str, Any], config_path: Path) -> ContextBud
         request_window_tokens=_require_positive_integer(
             config["request_window_tokens"], "request_window_tokens", config_path
         ),
-        max_new_tokens_per_turn=_require_positive_integer(
-            config["max_new_tokens_per_turn"], "max_new_tokens_per_turn", config_path
-        ),
+        max_new_tokens_per_turn=None
+        if config["max_new_tokens_per_turn"] is None
+        else _require_positive_integer(config["max_new_tokens_per_turn"], "max_new_tokens_per_turn", config_path),
         max_turns=_require_positive_integer(config["max_turns"], "max_turns", config_path),
         generated_budget_fraction=_require_fraction(
             config.get("generated_budget_fraction", _DEFAULT_GENERATED_BUDGET_FRACTION),
@@ -264,6 +265,8 @@ def resolve_context_budget(raw: Dict[str, Any], config_path: Path) -> ContextBud
             allow_zero=True,
         ),
     )
+    if budget.max_new_tokens_per_turn is None and (budget.max_turns != 1 or raw.get("terminal_bench") is not None):
+        raise ValueError("Remaining-context generation requires a single-turn Gym rollout")
     if budget.max_input_tokens <= 0:
         raise ValueError(
             f"{config_path}: request_window_tokens ({budget.request_window_tokens}) must exceed "
@@ -284,7 +287,10 @@ def _materialize_context_budget(
     trainer["max_prompt_length"] = budget.max_input_tokens
     generator["max_input_length"] = budget.max_input_tokens
     generator["max_turns"] = budget.max_turns
-    generator.setdefault("sampling_params", {})["max_generate_length"] = budget.max_new_tokens_per_turn
+    generator["use_remaining_context"] = budget.max_new_tokens_per_turn is None
+    generator.setdefault("sampling_params", {})["max_generate_length"] = (
+        budget.max_new_tokens_per_turn or budget.request_window_tokens - 1
+    )
     generator.setdefault("engine_init_kwargs", {})["max_model_len"] = budget.request_window_tokens
     generator.setdefault("trajectory_reward_shaping", {})["overlong"] = {
         "l_max": budget.generated_tokens_per_trajectory,
@@ -550,6 +556,7 @@ def parse_rl_config(
         recipe = _compose_config_groups({"algorithm_recipe": config_groups["algorithm_recipe"]}, config_name=None)
         raw = OmegaConf.to_container(OmegaConf.merge(OmegaConf.to_container(recipe, resolve=False), raw), resolve=False)
         assert isinstance(raw, dict)
+    raw = apply_pivot_mode(raw)
     distillation_plan = compile_distillation_plan(raw)
     context_budget = resolve_context_budget(raw, path)
 
@@ -675,6 +682,8 @@ _OPTIONAL_HYDRA_PATTERNS = {
     ".rope_scaling",
     ".wrap_policy",
     ".transformer_config_kwargs",
+    ".environment.skyrl_gym.nemotron_ultra.pivot_reward",
+    ".environment.skyrl_gym.nemotron_ultra.pivot_arm",
 }
 
 

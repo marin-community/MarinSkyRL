@@ -74,6 +74,7 @@ FR_DUMP_TEMP_FILE_ENV = "TORCH_FR_DUMP_TEMP_FILE"
 NCCL_DEBUG_INFO_TEMP_FILE_ENV = "TORCH_NCCL_DEBUG_INFO_TEMP_FILE"
 NCCL_BUFFER_SIZE_ENV_VAR = "NCCL_BUFFSIZE"
 PYTHONPATH_ENV = "PYTHONPATH"
+PYTORCH_CUDA_ALLOC_CONF_ENV = "PYTORCH_CUDA_ALLOC_CONF"
 VLLM_USE_V1_ENV = "VLLM_USE_V1"
 VLLM_USE_V2_MODEL_RUNNER_ENV = "VLLM_USE_V2_MODEL_RUNNER"
 VLLM_USE_DEEP_GEMM_ENV = "VLLM_USE_DEEP_GEMM"
@@ -225,6 +226,12 @@ ENV_VAR_SPECS = (
     EnvVarSpec(
         LD_LIBRARY_PATH_ENV,
         "runtime.bootstrap",
+        EnvVarSource.EXTERNAL,
+        frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.TASK_RUNTIME}),
+    ),
+    EnvVarSpec(
+        PYTORCH_CUDA_ALLOC_CONF_ENV,
+        "runtime.task_env",
         EnvVarSource.EXTERNAL,
         frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.TASK_RUNTIME}),
     ),
@@ -384,7 +391,7 @@ _RUNTIME_BOUNDARIES = {
     "POLICY_NUM_NODES",
     "PYTHONPATH",
     "PYTHONUNBUFFERED",
-    "PYTORCH_CUDA_ALLOC_CONF",
+    PYTORCH_CUDA_ALLOC_CONF_ENV,
     "RANK",
     "RAY_ADDRESS",
     "RAY_DEDUP_LOGS",
@@ -499,6 +506,7 @@ class EnvVarManager:
         values[UV_USE_IO_URING_ENV] = "0"
         passthrough_names = (
             LD_LIBRARY_PATH_ENV,
+            PYTORCH_CUDA_ALLOC_CONF_ENV,
             NVRTC_HOME_ENV,
             CUDA_HOME_ENV,
             LIBRARY_PATH_ENV,

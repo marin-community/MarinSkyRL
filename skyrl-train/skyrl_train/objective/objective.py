@@ -10,7 +10,7 @@ from skyrl_train.ftpo import FTPOInputs
 from skyrl_train.objective.losses import PolicyLoss, PolicyLossInputs, TokenLoss, complete_clip_metrics
 from skyrl_train.objective.reduction import StepCounts, policy_data_weights, reduce_to_step
 from skyrl_train.objective.teacher import TopKEvidence, mask_teacher_evidence, topk_teacher_loss
-from skyrl_train.utils.policy_math import differentiable_approx_kl
+from skyrl_train.utils.policy_math import differentiable_approx_kl, forward_kl_loss
 
 
 @dataclass(frozen=True)
@@ -123,10 +123,14 @@ def compute_policy_objective(
     if config.use_kl_loss:
         if batch.ref_log_probs is None:
             raise ValueError("base_action_log_probs are required when use_kl_loss is enabled")
-        kl_values = differentiable_approx_kl(
-            batch.policy.log_probs, batch.ref_log_probs, kl_estimator_type=config.kl_estimator_type
-        )
-        kl = reduce_to_step(kl_values, mask, counts.mask, LossReduction.SEQUENCE_MEAN, **common)
+        if config.kl_estimator_type == "forward":
+            kl_values = forward_kl_loss(batch.policy.log_probs, batch.ref_log_probs, batch.policy.old_log_probs)
+            kl = reduce_to_step(kl_values, mask, counts.mask, mode, **common)
+        else:
+            kl_values = differentiable_approx_kl(
+                batch.policy.log_probs, batch.ref_log_probs, kl_estimator_type=config.kl_estimator_type
+            )
+            kl = reduce_to_step(kl_values, mask, counts.mask, LossReduction.SEQUENCE_MEAN, **common)
     else:
         kl = policy_row.new_zeros(())
     combined = policy_row + config.kl_loss_coef * kl

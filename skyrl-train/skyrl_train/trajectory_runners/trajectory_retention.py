@@ -393,8 +393,8 @@ def build_trajectory_records(
     verifier_tests = output.get("verifier_tests")
     if verifier_tests is not None and len(verifier_tests) != len(output["response_ids"]):
         raise ValueError("verifier tests must have one entry per trajectory row")
-    # A request's step names the policy version being trained, which has completed one fewer update.
-    model_version_step = max(0, metadata.global_step - 1)
+    # Training requests precede their update; evaluation requests use the completed step.
+    model_version_step = max(0, metadata.global_step - int(metadata.training_phase == "train"))
 
     records = []
     for group in _group_rows(input_batch, output):

@@ -1244,6 +1244,7 @@ def launch(args: SimpleNamespace, expected_launcher_commit: str) -> LaunchOutcom
         "DAYTONA_ORGANIZATION_ID",
         "DAYTONA_API_URL",
         "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
         "ANTHROPIC_API_KEY",
         "GOOGLE_API_KEY",
         "GEMINI_API_KEY",

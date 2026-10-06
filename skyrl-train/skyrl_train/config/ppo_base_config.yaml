@@ -353,6 +353,7 @@ trainer:
 
 
 generator:
+  use_remaining_context: false
   reference_actions: false
   model_name: ${trainer.policy.model.path}
   model_dtype: "bfloat16"
