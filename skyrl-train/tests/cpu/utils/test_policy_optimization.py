@@ -1,6 +1,7 @@
 """Advantage estimators, KL estimators and controllers, policy objectives, TIS diagnostics, and validate_cfg."""
 
 import math
+from skyrl_train.utils.policy_math import forward_kl_loss
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -678,3 +679,17 @@ def test_algorithm_recipe_launch_drives_policy_value_and_gradient(tmp_path: Path
         positive_gradient /= 2
     expected_gradient = torch.tensor([[1.1 * scale / denominator, 0], [positive_gradient, positive_gradient]])
     torch.testing.assert_close(current.grad, expected_gradient, rtol=1e-5, atol=1e-7)
+
+
+@pytest.mark.parametrize("coefficient", [0.0, 0.001, 0.01])
+def test_forward_kl_value_and_gradient_match_exact_categorical_kl(coefficient):
+    logits = torch.tensor([0.4, -0.8, 0.1], dtype=torch.float64, requires_grad=True)
+    reference = torch.tensor([0.2, 0.5, 0.3], dtype=torch.float64)
+    behavior = torch.tensor([0.6, 0.1, 0.3], dtype=torch.float64)
+    log_probs = logits.log_softmax(-1)
+    exact = coefficient * (log_probs.exp() * (log_probs - reference.log())).sum()
+    estimated = coefficient * (behavior * forward_kl_loss(log_probs, reference.log(), behavior.log())).sum()
+    torch.testing.assert_close(estimated, exact)
+    exact_gradient = torch.autograd.grad(exact, logits, retain_graph=True)[0]
+    estimated_gradient = torch.autograd.grad(estimated, logits)[0]
+    torch.testing.assert_close(estimated_gradient, exact_gradient)

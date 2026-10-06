@@ -155,6 +155,29 @@ def test_composed_launch_rejects_kl_switches(tmp_path: Path, switch: str) -> Non
         load_launch_config(path)
 
 
+def test_launch_preserves_unbounded_retention_at_existing_history_path(tmp_path: Path) -> None:
+    raw = _raw_config()
+    history_path = "s3://runs/original-profile/trajectories"
+    raw["skyrl"]["generator"]["pivot_profiling_resume"] = True
+    raw["skyrl"]["generator"]["trajectory_retention"] = {
+        "enabled": True,
+        "output_path": history_path,
+        "required": True,
+        "sample_fraction": 1.0,
+        "phases": ["eval"],
+        "max_bytes_per_step": None,
+        "max_bytes_per_run": None,
+    }
+    path = tmp_path / "resume.yaml"
+    path.write_text(yaml.safe_dump(raw))
+
+    config = load_launch_config(path)
+
+    assert config.skyrl.generator.trajectory_retention.output_path == history_path
+    assert config.skyrl.generator.trajectory_retention.max_bytes_per_step is None
+    assert config.skyrl.generator.trajectory_retention.max_bytes_per_run is None
+
+
 @pytest.mark.parametrize(
     ("entrypoint", "max_staleness_steps", "expected"),
     [
@@ -172,7 +195,7 @@ def test_composed_launch_records_whether_training_runs_ahead_of_its_updates(
     raw["skyrl"]["trainer"]["placement"]["colocate_all"] = False
     raw["skyrl"]["trainer"]["rollout_buffer"] = {"max_staleness_steps": max_staleness_steps}
     raw["skyrl"]["trainer"]["algorithm"]["off_policy_correction"] = "none"
-    raw["iris"]["allocation"]["num_nodes"] = 2
+    raw["iris"]["allocation"]["num_nodes"] = 1 if entrypoint == "generate" else 2
     path = tmp_path / "launch.yaml"
     path.write_text(yaml.safe_dump(raw, sort_keys=False))
 
@@ -381,3 +404,17 @@ def test_inherited_recipe_round_trips_as_a_self_contained_launch(tmp_path: Path,
     OmegaConf.save(config, resolved)
     reloaded = load_launch_config(resolved)
     assert OmegaConf.to_container(reloaded, resolve=True) == OmegaConf.to_container(config, resolve=True)
+
+
+@pytest.mark.parametrize("entrypoint", ["generate", "terminal_bench_generate"])
+def test_generate_only_reserves_inference_nodes_without_training_roles(tmp_path, entrypoint):
+    raw = _raw_config()
+    raw["skyrl"]["entrypoint"] = entrypoint
+    raw["skyrl"]["trainer"]["placement"].update(colocate_all=False, policy_num_nodes=10)
+    raw["skyrl"]["generator"].update(num_inference_engines=12, inference_engine_data_parallel_size=4)
+    raw["iris"]["allocation"]["num_nodes"] = 6
+    path = tmp_path / "generate-only.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    config = load_launch_config(path)
+    allocation = validate_launch_config(config)
+    assert allocation.num_nodes * allocation.gpus_per_node == 48

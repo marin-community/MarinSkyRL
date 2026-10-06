@@ -163,6 +163,7 @@ class RolloutWorkerPool:
         self._last_progress: list[float | None] = [None] * resources.num_workers
         self._routing = asyncio.Condition()
         self._eval_session_active = False
+        self._eval_worker_count = 1
 
     def set_trajectory_sink(self, sink: RetentionSink) -> None:
         """Retain trajectories inside each worker, where its runner produces them.
@@ -239,20 +240,46 @@ class RolloutWorkerPool:
             await self._release_eval_worker()
             raise
 
+    async def start_profiling_session(self, *, run_name: str, eval_step: int) -> None:
+        """Reserve every worker for frozen-policy profiling with evaluation provenance."""
+        async with self._routing:
+            if self._eval_session_active:
+                raise RuntimeError("an eval session is already active")
+            self._eval_session_active = True
+            self._eval_worker_count = len(self._actors)
+            await self._routing.wait_for(lambda: not any(self._pending))
+        results = await asyncio.gather(
+            *(
+                actor.start_eval_session.remote(run_name=run_name, eval_step=eval_step, val_set_name=None)
+                for actor in self._actors
+            ),
+            return_exceptions=True,
+        )
+        if any(isinstance(result, BaseException) for result in results):
+            await self.stop_eval_session()
+            raise ExceptionGroup("profiling session startup failed", [r for r in results if isinstance(r, Exception)])
+
     async def stop_eval_session(self) -> None:
         try:
-            await self._actors[0].stop_eval_session.remote()
+            results = await asyncio.gather(
+                *(actor.stop_eval_session.remote() for actor in self._actors[: self._eval_worker_count]),
+                return_exceptions=True,
+            )
+            errors = [result for result in results if isinstance(result, Exception)]
+            if errors:
+                raise ExceptionGroup("evaluation session shutdown failed", errors)
         finally:
             await self._release_eval_worker()
 
     async def _release_eval_worker(self) -> None:
         async with self._routing:
             self._eval_session_active = False
+            self._eval_worker_count = 1
             self._routing.notify_all()
 
     def _training_worker(self) -> int | None:
         """The least-loaded worker that may take training work now, if any."""
-        reserved = {0} if self._eval_session_active else set()
+        reserved = set(range(self._eval_worker_count)) if self._eval_session_active else set()
         eligible = [index for index in range(len(self._actors)) if index not in reserved]
         return min(eligible, key=self._pending.__getitem__, default=None)
 
@@ -276,7 +303,7 @@ class RolloutWorkerPool:
             if phase == "eval":
                 if not self._eval_session_active:
                     raise RuntimeError("evaluation request received without an active eval session")
-                index = 0
+                index = min(range(self._eval_worker_count), key=self._pending.__getitem__)
             else:
                 await self._routing.wait_for(lambda: self._training_worker() is not None)
                 index = self._training_worker()

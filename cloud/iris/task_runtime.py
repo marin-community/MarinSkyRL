@@ -54,6 +54,7 @@ from cloud.iris.hf_model_cache import (
     load_model_manifest,
     stage_artifact_model_metadata,
     stage_model_metadata,
+    stage_model_snapshot,
 )
 from marinskyrl.environment_contract import (
     DEBUG_ARTIFACT_DIR_ENV,
@@ -399,7 +400,7 @@ def prepare_draft_model(
     cache_ttl_days: int,
     cache_source_prefix: str,
 ) -> SpeculatorModelConfig:
-    """Resolve a draft locator, mirroring a Hub revision once when needed."""
+    """Resolve and stage a complete draft on each node before vLLM initialization."""
     if model.source_kind is SpeculatorModelSourceKind.LOCAL:
         assert model.local_source_path is not None
         filesystem, root = fs_and_path(model.local_source_path)
@@ -427,7 +428,11 @@ def prepare_draft_model(
                 f"Draft manifest identity mismatch: requested {model.source_identity}, "
                 f"found {manifest.identity} at {source_uri}"
             )
-    return SpeculatorModelConfig(source_uri=source_uri, source_identity=manifest.identity)
+    local_path = str(
+        Path(tempfile.gettempdir()) / "marinskyrl" / "draft_models" / manifest.identity.removeprefix("sha256:")
+    )
+    stage_model_snapshot(source_uri, manifest, local_path)
+    return SpeculatorModelConfig(source_uri=local_path, source_identity=manifest.identity)
 
 
 def materialize_data_sources(data_sources_json: str) -> None:

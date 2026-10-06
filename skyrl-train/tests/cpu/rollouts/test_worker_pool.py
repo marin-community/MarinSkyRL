@@ -57,7 +57,7 @@ class _SessionWorker(_Worker):
             calls.append((name, f"task {task.prompt['uid']}"))
             return 0, None
 
-        async def start_eval_session(**_kwargs):
+        async def start_eval_session(*, run_name: str, eval_step: int, val_set_name: str | None):
             calls.append((name, "start_eval"))
 
         async def stop_eval_session():
@@ -288,3 +288,31 @@ async def test_pool_preserves_a_remote_timeout_error(spec):
         await pool.run(_request([TrajectoryID("a", 0)]))
 
     assert raised.value is remote_error
+
+
+@pytest.mark.asyncio
+async def test_profiling_distributes_eval_requests_and_closes_all_sessions(spec):
+    release = asyncio.Event()
+    started = []
+    calls = []
+
+    class ProfilingWorker(_SessionWorker):
+        def __init__(self, name):
+            super().__init__(name, calls)
+
+            async def run(request, _observe):
+                started.append(name)
+                if len(started) == 2:
+                    release.set()
+                await release.wait()
+                return _output(request["trajectory_ids"]), None
+
+            self.run = _RemoteMethod(run)
+
+    pool = _pool([ProfilingWorker("first"), ProfilingWorker("second")], spec)
+    await pool.start_profiling_session(run_name="profile", eval_step=0)
+    async with asyncio.timeout(5):
+        await asyncio.gather(*(pool.run(_request([TrajectoryID(str(i), 0)], "eval")) for i in range(2)))
+    await pool.stop_eval_session()
+    assert started == ["first", "second"]
+    assert calls == [("first", "start_eval"), ("second", "start_eval"), ("first", "stop_eval"), ("second", "stop_eval")]

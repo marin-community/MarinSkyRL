@@ -1,0 +1,176 @@
+# Controlled pilot: 1M loss tokens per arm; evaluate every 2 updates and at token milestones.
+entrypoint: standard
+context_budget:
+  request_window_tokens: 65536
+  max_new_tokens_per_turn: null
+  max_turns: 1
+trainer:
+  strategy: megatron
+  seed: 42
+  flash_attn: true
+  gradient_checkpointing: true
+  gradient_checkpointing_use_reentrant: false
+  offload_optimizer_during_rollouts: true
+  algorithm:
+    advantage_estimator: grpo
+    group_advantage_min_size: null
+    advantage_batch_normalize: false
+    eps_clip_low: 0.2
+    eps_clip_high: 0.2
+    use_entropy_loss: false
+    use_kl_loss: true
+    use_kl_in_reward: false
+    loss_reduction: token_mean
+    grpo_norm_by_std: true
+    kl_loss_coef: 0.001
+    kl_estimator_type: forward
+    dynamic_sampling:
+      type: null
+      max_sample_batches: 30
+      informative_on: unshaped
+      min_reward_std: 0.0
+  epochs: 100
+  max_steps: 2000
+  update_epochs_per_batch: 1
+  train_batch_size: 64
+  policy_mini_batch_size: 64
+  eval_batch_size: 16
+  micro_forward_batch_size_per_gpu: 1
+  micro_train_batch_size_per_gpu: 1
+  use_sample_packing: true
+  eval_before_train: true
+  eval_interval: 2
+  ckpt_interval: 2
+  max_ckpts_to_keep: 3
+  resume_mode: none
+  logger: wandb
+  project_name: pivot-rl
+  policy:
+    optimizer_config:
+      optimizer: AdamW
+      lr: 4.0e-06
+      weight_decay: 0.0
+      max_grad_norm: 0.5
+      num_warmup_steps: 0
+      scheduler: constant_with_warmup
+    megatron_config:
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 6
+      context_parallel_size: 1
+      expert_model_parallel_size: 8
+      expert_tensor_parallel_size: 1
+      logprob_chunk_size: 128
+      optimizer_config_kwargs:
+        optimizer_cpu_offload: true
+        optimizer_offload_fraction: 1.0
+      transformer_config_kwargs:
+        num_layers_in_first_pipeline_stage: 4
+        num_layers_in_last_pipeline_stage: 2
+      optimizer_checkpoint_sharding_type: dp_reshardable
+      ddp_config:
+        overlap_grad_reduce: true
+        overlap_param_gather: true
+        grad_reduce_in_fp32: false
+  ref:
+    megatron_config:
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 4
+      context_parallel_size: 1
+      expert_model_parallel_size: 8
+      expert_tensor_parallel_size: 1
+      logprob_chunk_size: 128
+      transformer_config_kwargs:
+        num_layers_in_first_pipeline_stage: 6
+        num_layers_in_last_pipeline_stage: 6
+  placement:
+    colocate_all: false
+    colocate_policy_ref: false
+    policy_num_nodes: 6
+    policy_num_gpus_per_node: 8
+    ref_num_nodes: 4
+    ref_num_gpus_per_node: 8
+  loss_token_budget: 1000000
+  eval_loss_token_interval: 250000
+generator:
+  backend: vllm
+  model_dtype: bfloat16
+  vllm_attention_backend: FLASH_ATTN
+  inference_engine_tensor_parallel_size: 1
+  inference_engine_data_parallel_size: 8
+  inference_engine_expert_parallel_size: 8
+  num_inference_engines: 2
+  n_samples_per_prompt: 16
+  eval_n_samples_per_prompt: 1
+  gpu_memory_utilization: 0.8
+  max_num_seqs: 16
+  max_num_batched_tokens: 16384
+  enable_prefix_caching: true
+  enable_chunked_prefill: true
+  enforce_eager: false
+  run_engines_locally: true
+  weight_sync_backend: nccl
+  enable_http_endpoint: true
+  sampling_params:
+    temperature: 1.0
+    top_p: 1.0
+    top_k: -1
+  engine_init_kwargs:
+    enable_auto_tool_choice: true
+    tool_call_parser: hermes
+  trajectory_retention:
+    phases:
+    - train
+    - eval
+    sample_fraction: 1.0
+    max_bytes_per_step: null
+    max_bytes_per_run: null
+    required: true
+  trajectory_reward_shaping:
+    enabled: false
+  eval_sampling_params:
+    temperature: 0.0
+    top_p: 1.0
+    top_k: -1
+environment:
+  skyrl_gym:
+    nemotron_ultra:
+      sandbox:
+        host: snowball-nemo-skills-sandbox.iris.svc.cluster.local
+        port: 6000
+      judges:
+        general:
+          base_url: https://api.together.xyz/v1
+          model: openai/gpt-oss-120b
+          api_key_env: TOGETHER_API_KEY
+          reasoning_effort: low
+          timeout_seconds: 600.0
+        safety:
+          base_url: https://api.together.xyz/v1
+          model: openai/gpt-oss-120b
+          api_key_env: TOGETHER_API_KEY
+          reasoning_effort: low
+          timeout_seconds: 600.0
+      genrm:
+        judge:
+          base_url: https://api.together.xyz/v1
+          model: openai/gpt-oss-120b
+          api_key_env: TOGETHER_API_KEY
+          response_transport: chat_completions
+          reasoning_effort: low
+          timeout_seconds: 600.0
+        max_output_tokens: 512
+        temperature: 0.0
+        top_p: 1.0
+data:
+  kind: parquet
+  train_data:
+  - <immutable-student-profiled-swe-artifact>/train.parquet
+  val_data:
+  - s3://marin-us-east-02a/marin/users/dml/skyrl/snowball-pivotrl/prepared/swe/4947a3c8ea803413a65f9eca14a96ef521b2ddf5/969d2314262106a7024a4b8bdf091a78bea0471f229f06662aec2d79d90fd808/validation.parquet
+  - s3://marin-us-east-02a/marin/users/dml/skyrl/snowball-pivotrl/prepared/terminal/eaef26944643644c8a3dbbf361ce6128142f5976/a7d84ff33dc74d0cdc42c317e1458f043f48ed5ef432bae44c933d9d5c3cc478/validation.parquet
+  shuffle: true
+extra_env:
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+pivot:
+  mode: pivotrl
+  profiling_samples: 8

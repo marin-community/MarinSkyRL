@@ -115,6 +115,8 @@ trainer:
       tokenizer_revision: ${trainer.policy.model.revision}
       source_uri: null
       source_identity: null
+      # Load Megatron model weights before creating fresh optimizer state.
+      initial_checkpoint_path: null
       lora:
           rank: 0
           alpha: 16
@@ -153,6 +155,7 @@ trainer:
       tokenizer_revision: ${trainer.policy.model.tokenizer_revision}
       source_uri: ${trainer.policy.model.source_uri}
       source_identity: ${trainer.policy.model.source_identity}
+      initial_checkpoint_path: ${trainer.policy.model.initial_checkpoint_path}
     sequence_parallel_size: 1
   critic:
     model:
@@ -296,6 +299,7 @@ trainer:
   # Optional OPD stage boundary. Stops after the first optimizer batch whose
   # cumulative teacher-scored tokens reach the budget.
   distillation_token_budget: null
+  pivot_pilot: null
   loss_token_budget: null
   eval_loss_token_interval: null
   reset_distillation_token_count_on_resume: false
@@ -355,7 +359,11 @@ trainer:
 
 
 generator:
+  use_remaining_context: false
   reference_actions: false
+  pivot_profiling: false
+  pivot_profiling_max_retries: 2
+  pivot_profiling_resume: false
   model_name: ${trainer.policy.model.path}
   model_dtype: "bfloat16"
   timeout_multiplier: 1.0
@@ -517,6 +525,7 @@ generator:
     # Set either bound to null to make that dimension unlimited.
     max_bytes_per_step: 838860800
     max_bytes_per_run: 26843545600
+    grade_table: false
     required: false
     publish_timeout_seconds: 120
     shutdown_timeout_seconds: 30

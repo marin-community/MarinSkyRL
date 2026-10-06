@@ -1299,6 +1299,18 @@ def get_batch_failure_metrics(
     }
 
 
+def select_request_rows(batch: TrajectoryRequestBatch, indices: list[int]) -> TrajectoryRequestBatch:
+    """Subset aligned request fields while preserving batch metadata and sampling options."""
+    size = len(batch["prompts"])
+    selected: dict[str, Any] = {}
+    for key, value in batch.items():
+        if isinstance(value, list) and len(value) == size:
+            selected[key] = [value[index] for index in indices]
+        else:
+            selected[key] = value
+    return selected  # type: ignore[return-value]
+
+
 def prepare_trajectory_request(
     prompts: List[Any],
     n_samples_per_prompt: int,

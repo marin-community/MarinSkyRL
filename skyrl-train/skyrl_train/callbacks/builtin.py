@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Type
 
 from loguru import logger
+from marinskyrl.pivot_pilot import evaluation_kind
 from omegaconf import DictConfig
 
 from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_export_enabled
@@ -295,6 +296,28 @@ class EvaluationCallback(TrainerCallback):
     ) -> Optional[TrainerControl]:
         if self.eval_on_train_end and self.eval_steps > 0:
             control.should_evaluate = True
+        return control
+
+
+class PivotPilotEvaluationCallback(TrainerCallback):
+    """Only the preregistered evaluation events; resume never repeats initialization."""
+
+    def __init__(self, arm: str):
+        self.arm = arm
+
+    def on_train_begin(self, state, control, **kwargs):
+        control.should_evaluate = state.global_step == 0
+        return control
+
+    def on_step_end(self, state, control, **kwargs):
+        kind = evaluation_kind(
+            self.arm,
+            state.global_step,
+            int(state.metrics.get("consumed/loss_total", 0)),
+            int(state.metrics.get("consumed/loss_step", 0)),
+        )
+        control.should_evaluate = kind is not None
+        control.should_save = control.should_save or kind == "full" or state.global_step == 1
         return control
 
 
@@ -882,7 +905,9 @@ def create_default_callbacks(cfg: DictConfig) -> List[TrainerCallback]:
     # Evaluation callback
     eval_interval = getattr(cfg.trainer, "eval_interval", 5)
     eval_before_train = getattr(cfg.trainer, "eval_before_train", True)
-    if eval_interval > 0:
+    if cfg.trainer.get("pivot_pilot") is not None:
+        callbacks.append(PivotPilotEvaluationCallback(cfg.trainer.pivot_pilot.arm))
+    elif eval_interval > 0:
         callbacks.append(
             EvaluationCallback(
                 eval_steps=eval_interval,

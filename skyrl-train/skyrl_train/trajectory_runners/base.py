@@ -155,6 +155,10 @@ class TrajectoryRunner(ABC):
     ) -> None:
         """Start an evaluation-scoped resource session when a runner needs one."""
 
+    async def start_profiling_session(self, *, run_name: str, eval_step: int) -> None:
+        """Start a frozen-policy profiling session, ended by stop_eval_session."""
+        await self.start_eval_session(run_name=run_name, eval_step=eval_step)
+
     async def stop_eval_session(self) -> None:
         """Stop resources created for the current evaluation session."""
 

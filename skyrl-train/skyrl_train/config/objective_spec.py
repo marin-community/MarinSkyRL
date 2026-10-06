@@ -23,6 +23,7 @@ from marinskyrl.runtime_options import AdvantageEstimator, PolicyLossType
 
 
 class KLEstimator(StrEnum):
+    FORWARD = "forward"
     K1 = "k1"
     ABS = "abs"
     K2 = "k2"

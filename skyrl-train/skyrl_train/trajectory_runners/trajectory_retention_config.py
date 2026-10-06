@@ -22,6 +22,7 @@ class TrajectoryRetentionConfig:
     max_bytes_per_step: int | None = 800 * 1024 * 1024
     max_bytes_per_run: int | None = 25 * 1024 * 1024 * 1024
     required: bool = False
+    grade_table: bool = False
     publish_timeout_seconds: float = 120.0
     shutdown_timeout_seconds: float = 30.0
     redact_fields: tuple[str, ...] = ()
@@ -67,6 +68,7 @@ def parse_trajectory_retention_config(config: Mapping[str, Any] | None) -> Traje
         max_bytes_per_step=_optional_int(config.get("max_bytes_per_step", defaults.max_bytes_per_step)),
         max_bytes_per_run=_optional_int(config.get("max_bytes_per_run", defaults.max_bytes_per_run)),
         required=bool(config.get("required", defaults.required)),
+        grade_table=bool(config.get("grade_table", defaults.grade_table)),
         publish_timeout_seconds=float(config.get("publish_timeout_seconds", defaults.publish_timeout_seconds)),
         shutdown_timeout_seconds=float(config.get("shutdown_timeout_seconds", defaults.shutdown_timeout_seconds)),
         redact_fields=tuple(str(field) for field in redact_value),

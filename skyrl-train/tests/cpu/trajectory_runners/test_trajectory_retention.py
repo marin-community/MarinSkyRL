@@ -8,8 +8,12 @@ import threading
 import zipfile
 
 import pytest
+from omegaconf import OmegaConf
 
 from skyrl_train.config.utils import get_default_config
+
+from skyrl_train.evaluate import evaluate
+from skyrl_train.trajectory_runners import trajectory_retention as retention
 from skyrl_train.trajectory_runners.base import (
     BatchMetadata,
     TrajectoryRequestBatch,
@@ -253,6 +257,49 @@ def _sink(config, publisher=None) -> TrajectorySink:
     sink = TrajectorySink(config, _Tokenizer(), publisher=publisher or InlineTrajectoryPublisher(execute_publication))
     sink.bind_runner("SkyRLGymTrajectoryRunner")
     return sink
+
+
+@pytest.mark.asyncio
+async def test_eval_only_retains_rollouts_at_initial_policy_step(tmp_path):
+    cfg = OmegaConf.create(
+        {
+            "trainer": {
+                "run_name": "baseline",
+                "dump_eval_results": False,
+                "algorithm": {"tis_lcs_alert_threshold": 0.0},
+            },
+            "generator": {
+                "backend": "vllm",
+                "eval_n_samples_per_prompt": 1,
+                "eval_sampling_params": {
+                    "temperature": 0.0,
+                    "top_p": 1.0,
+                    "top_k": -1,
+                    "max_generate_length": 16,
+                    "min_p": 0.0,
+                    "logprobs": None,
+                },
+            },
+            "environment": {"env_class": "math"},
+        }
+    )
+    request = _input()
+    prompts = [
+        {"prompt": prompt, "env_class": env, "env_extras": extras, "uid": identity.instance_id}
+        for prompt, env, extras, identity in zip(
+            request["prompts"], request["env_classes"], request["env_extras"], request["trajectory_ids"]
+        )
+    ]
+    sink = TrajectorySink(_config(tmp_path, phases=["eval"], sample_count_per_step=3), _Tokenizer())
+    try:
+        metrics = await evaluate([prompts], _NormalizedRunner(), cfg, None, _Tokenizer(), trajectory_sink=sink)
+    finally:
+        sink.close()
+    records = _records(tmp_path)
+    assert len(records) == 3
+    assert {record["global_step"] for record in records} == {0}
+    assert {record["provenance"]["model_version_step"] for record in records} == {0}
+    assert metrics["eval/all/avg_score"] == pytest.approx(0.25)
 
 
 def test_normalized_output_produces_complete_core_trace_schema():
@@ -749,6 +796,51 @@ def test_initialization_reconciles_archive_written_before_ledger_commit(tmp_path
     assert len(list(tmp_path.rglob("*.zip"))) == 1
 
 
+def test_append_only_profiling_recovers_without_per_batch_ledger_snapshots(tmp_path):
+    class RecordingPublisher:
+        def __init__(self):
+            self.publications = []
+
+        def execute(self, request):
+            result = retention.execute_publication(request)
+            assert result.error is None
+            if request.operation is PublicationOperation.PUBLISH:
+                self.publications.append((request, result))
+            return result
+
+        def poll(self):
+            return None
+
+        def close(self):
+            return None
+
+    config = _config(
+        tmp_path,
+        sample_count_per_step=0,
+        sample_fraction=1.0,
+        max_bytes_per_step=None,
+        max_bytes_per_run=None,
+    )
+    publisher = RecordingPublisher()
+    sink = _sink(config, publisher)
+    sink.retain(_input(step=7), _output())
+    sink.retain(_input(step=8), _output())
+    assert not (tmp_path / "_retention_ledger.json").exists()
+    assert all(request.ledger is None and result.ledger is None for request, result in publisher.publications)
+
+    # Simulate a killed storage process before its clean-shutdown checkpoint.
+    retention._PUBLICATION_LEDGERS.pop(config.output_path)
+    resumed = _sink(config, RecordingPublisher())
+    metrics = resumed.retain(_input(step=8), _output())
+    assert metrics["generate/trajectory_retention/duplicates"] == 3.0
+    assert metrics["generate/trajectory_retention/written"] == 0.0
+    resumed.close()
+    ledger = json.loads((tmp_path / "_retention_ledger.json").read_text())
+    assert len(ledger["records"]) == 6
+    assert ledger["total_bytes"] == sum(path.stat().st_size for path in tmp_path.rglob("*.zip"))
+    assert len(_records(tmp_path)) == 6
+
+
 def test_retention_takes_the_run_id_the_initiator_set(monkeypatch):
     """Retained trajectories must carry the same run id as telemetry, or they cannot be joined.
 
@@ -837,3 +929,30 @@ def test_retained_record_preserves_calls_observations_and_verifier_diagnostics()
     assert record["response"]["messages"] == messages
     assert record["verification_result"] == asdict(verdict)
     assert record["response"]["token_ids"] == [10, 11]
+
+
+def test_required_retention_surfaces_checkpoint_failure_and_closes_storage(tmp_path):
+    class FailingCheckpointStorage(InlineTrajectoryPublisher):
+        def __init__(self):
+            super().__init__(execute_publication)
+            self.closed = False
+
+        def execute(self, request):
+            if request.operation is PublicationOperation.CHECKPOINT:
+                return PublicationResult(request.request_id, 0, error="storage unavailable")
+            return super().execute(request)
+
+        def close(self):
+            self.closed = True
+            return super().close()
+
+    storage = FailingCheckpointStorage()
+    config = _config(
+        tmp_path, sample_count_per_step=0, sample_fraction=1.0, max_bytes_per_step=None, max_bytes_per_run=None
+    )
+    sink = _sink(config, storage)
+    sink.retain(_input(), _output())
+    with pytest.raises(RuntimeError):
+        sink.close()
+    assert storage.closed
+    assert len(_records(tmp_path)) == 3

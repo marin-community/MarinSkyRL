@@ -1,4 +1,7 @@
+import json
 import torch
+from skyrl_gym.envs.nemotron_ultra.tool_call import PIVOT_VERIFIER_IDENTITIES
+from marinskyrl.pivot_pilot import diagnostic_metrics, evaluation_kind, quick_evaluation_batches
 from skyrl_train.utils.progress import tqdm
 from typing import Any, Dict, List, Protocol
 from loguru import logger
@@ -126,8 +129,14 @@ async def _collect_evaluation_rollouts(
     last_batch = None
     pbar = None
     try:
-        pbar = tqdm(total=len(eval_dataloader), initial=0, desc="Evaluation Progress")
-        for prompts in eval_dataloader:
+        prompt_batches: StatefulDataLoader | list[list[dict[str, Any]]] = eval_dataloader
+        pilot = cfg.trainer.get("pivot_pilot")
+        if pilot is not None and evaluation_kind(pilot.arm, global_step or 0) == "quick":
+            prompt_batches = quick_evaluation_batches(
+                eval_dataloader, pilot.quick_source_ids, cfg.trainer.eval_batch_size
+            )
+        pbar = tqdm(total=len(prompt_batches), initial=0, desc="Evaluation Progress")
+        for prompts in prompt_batches:
             pbar.update(1)
             request, uids = prepare_trajectory_request(
                 prompts,
@@ -135,7 +144,7 @@ async def _collect_evaluation_rollouts(
                 get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.eval_sampling_params),
                 cfg.environment.env_class,
                 "eval",
-                global_step,
+                global_step if global_step is not None else 0,
             )
             batch = await trajectory_runner.run(request)
             trajectory_batches.append(batch)
@@ -238,6 +247,26 @@ async def evaluate(
     Returns:
         Dict[str, float]: evaluation metrics
     """
+    pilot = cfg.trainer.get("pivot_pilot")
+    cache = None if pilot is None else pilot.baseline_cache
+    identity = (
+        None
+        if pilot is None
+        else {
+            "model": cfg.trainer.policy.model.path,
+            "revision": cfg.generator.trajectory_retention.model_source_identity,
+            "split": pilot.split_hash,
+            "quick": pilot.quick_hash,
+            "sampling": dict(cfg.generator.eval_sampling_params),
+            "verifiers": [f"{name}:{identity}" for name, identity in PIVOT_VERIFIER_IDENTITIES.items()],
+        }
+    )
+    if cache and global_step in (None, 0) and io.exists(cache):
+        with io.open_file(cache, "r") as stream:
+            cached = json.load(stream)
+        if cached["identity"] != identity:
+            raise ValueError("Initialization cache identity mismatch")
+        return cached["metrics"]
     owns_sink = trajectory_sink is None
     active_sink = trajectory_sink or make_trajectory_sink(cfg.generator, tokenizer)
     try:
@@ -261,7 +290,30 @@ async def evaluate(
             concat_data_sources,
             cfg.generator.eval_n_samples_per_prompt,
         )
+        if pilot is not None:
+            kind = "quick" if evaluation_kind(pilot.arm, global_step or 0) == "quick" else "full"
+            expected_count = 64 if kind == "quick" else 256
+            source_ids = [extra["extra_info"]["source_id"] for extra in rollouts.env_extras]
+            if len(source_ids) != expected_count or len(set(source_ids)) != expected_count:
+                raise ValueError("Pilot evaluation has missing or duplicate source rows")
+            eval_metrics.update(diagnostic_metrics(concatenated_batch, prefix=f"eval/{kind}"))
+            quick = [index for index, sid in enumerate(source_ids) if sid in set(pilot.quick_source_ids)]
+            if len(quick) != 64:
+                raise ValueError("Pilot evaluation is missing quick-subset rows")
+            eval_metrics.update(diagnostic_metrics(concatenated_batch, prefix="eval/quick", indices=quick))
         _dump_eval_results(cfg, global_step, tokenizer, rollouts, concat_data_sources, eval_metrics)
+        if cache and global_step in (None, 0):
+            io.makedirs(cache.rsplit("/", 1)[0], exist_ok=True)
+            with io.open_file(cache, "w") as stream:
+                json.dump(
+                    {
+                        "identity": identity,
+                        "metrics": eval_metrics,
+                        "archive_root": pilot.archive_root,
+                        "grade_table_root": pilot.grade_table_root,
+                    },
+                    stream,
+                )
 
         return eval_metrics
     finally:

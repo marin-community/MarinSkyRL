@@ -37,7 +37,13 @@ def test_iris_config_materializes_one_coherent_context_budget(config_path):
     window = budget.request_window_tokens
     output = budget.max_new_tokens_per_turn
 
-    assert parsed.trainer["max_prompt_length"] + parsed.generator["sampling_params"]["max_generate_length"] == window
+    if output is None:
+        assert parsed.trainer["max_prompt_length"] == window - 1
+        assert parsed.generator["use_remaining_context"]
+    else:
+        assert (
+            parsed.trainer["max_prompt_length"] + parsed.generator["sampling_params"]["max_generate_length"] == window
+        )
     assert parsed.generator["max_input_length"] == budget.max_input_tokens
     assert parsed.generator["engine_init_kwargs"]["max_model_len"] == window
     assert parsed.generator["max_turns"] == budget.max_turns

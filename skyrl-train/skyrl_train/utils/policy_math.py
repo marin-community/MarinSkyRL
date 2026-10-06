@@ -32,6 +32,18 @@ def right_pad_to_match(
     return aligned
 
 
+def forward_kl_loss(
+    log_probs: torch.Tensor, reference_log_probs: torch.Tensor, behavior_log_probs: torch.Tensor
+) -> torch.Tensor:
+    """Estimate KL(policy || frozen reference) under behavior-policy token samples.
+
+    Importance weights remain differentiable: detaching them drops the sampling
+    distribution gradient. This is a conditional token KL at sampled prefixes.
+    """
+    ratio = torch.exp(log_probs - behavior_log_probs.detach())
+    return ratio * (log_probs - reference_log_probs.detach())
+
+
 def differentiable_approx_kl(
     log_probs: torch.Tensor,
     log_probs_base: torch.Tensor,
@@ -73,7 +85,9 @@ def compute_approx_kl(
 
     Use ``differentiable_approx_kl`` for a differentiable KL regularization loss.
     """
-    return differentiable_approx_kl(log_probs, log_probs_base, loss_mask=loss_mask, kl_estimator_type=kl_estimator_type)
+    # Diagnostics are measured before optimization under the sampling policy.
+    estimator = "k1" if kl_estimator_type == "forward" else kl_estimator_type
+    return differentiable_approx_kl(log_probs, log_probs_base, loss_mask=loss_mask, kl_estimator_type=estimator)
 
 
 @torch.no_grad()

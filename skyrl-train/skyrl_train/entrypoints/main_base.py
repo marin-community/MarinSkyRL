@@ -365,6 +365,7 @@ class BasePPOExp:
         if (
             self.cfg.trainer.eval_interval > 0
             or needs_probe_prompts
+            or self.cfg.trainer.get("pivot_pilot") is not None
             or self.cfg.trainer.get("eval_loss_token_interval") is not None
         ) and self.cfg.data.val_data:
             from skyrl_train.dataset import PromptDataset  # noqa: PLC0415

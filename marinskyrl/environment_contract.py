@@ -215,7 +215,12 @@ ENV_VAR_SPECS = (
         frozenset({EnvVarScope.INFERENCE_WORKER}),
         frozenset({EnvVarWriter.PYTHON_ASSIGNMENT}),
     ),
-    EnvVarSpec(WANDB_ENTITY_ENV, "launch.wandb_entity", EnvVarSource.EXTERNAL, frozenset({EnvVarScope.TASK_RUNTIME})),
+    EnvVarSpec(
+        WANDB_ENTITY_ENV,
+        "launch.wandb_entity",
+        EnvVarSource.EXTERNAL,
+        frozenset({EnvVarScope.TASK_RUNTIME, EnvVarScope.RAY_WORKER}),
+    ),
     EnvVarSpec(
         HF_HUB_OFFLINE_ENV,
         "checkpoint_export.hf_hub_publish",
@@ -225,6 +230,12 @@ ENV_VAR_SPECS = (
     EnvVarSpec(
         LD_LIBRARY_PATH_ENV,
         "runtime.bootstrap",
+        EnvVarSource.EXTERNAL,
+        frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.TASK_RUNTIME}),
+    ),
+    EnvVarSpec(
+        "PYTORCH_CUDA_ALLOC_CONF",
+        "runtime.task_env",
         EnvVarSource.EXTERNAL,
         frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.TASK_RUNTIME}),
     ),
@@ -499,6 +510,7 @@ class EnvVarManager:
         values[UV_USE_IO_URING_ENV] = "0"
         passthrough_names = (
             LD_LIBRARY_PATH_ENV,
+            "PYTORCH_CUDA_ALLOC_CONF",
             NVRTC_HOME_ENV,
             CUDA_HOME_ENV,
             LIBRARY_PATH_ENV,

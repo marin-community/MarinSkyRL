@@ -130,9 +130,13 @@ class FakeEngines:
 class FakeTracker:
     def __init__(self):
         self.logs = []
+        self.finished = False
 
     def log(self, metrics, step, commit=True):
         self.logs.append((dict(metrics), step))
+
+    def finish(self):
+        self.finished = True
 
 
 def _config(max_staleness_steps: int):
@@ -193,7 +197,11 @@ async def _train_two_steps(monkeypatch, max_staleness_steps: int) -> RayPPOTrain
     monkeypatch.setattr(trainer, "init_weight_sync_state", lambda: None)
     monkeypatch.setattr(trainer, "train_critic_and_policy", lambda data: {"policy_loss": 0.0})
     # The fake policy returns its outputs directly instead of Ray object refs.
-    monkeypatch.setattr(trainer_module, "ray", SimpleNamespace(get=lambda refs: refs))
+    monkeypatch.setattr(
+        trainer_module,
+        "ray",
+        SimpleNamespace(get=lambda refs: refs, cluster_resources=trainer_module.ray.cluster_resources),
+    )
     monkeypatch.setattr(
         trainer_module,
         "monitor_event_loop_lag",
