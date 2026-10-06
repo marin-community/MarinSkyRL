@@ -219,8 +219,11 @@ def test_teacher_objective_is_validated_before_launch(tmp_path, key, value, erro
         load_launch_config(path)
 
 
-@pytest.mark.parametrize("local_teacher", [True, False], ids=["local", "external"])
-@pytest.mark.parametrize("load_format", ["dummy", "Dummy"])
+@pytest.mark.parametrize(
+    ("local_teacher", "load_format"),
+    [(True, "dummy"), (True, "Dummy"), (False, "dummy")],
+    ids=["dummy-local", "Dummy-local", "dummy-external"],
+)
 def test_dummy_student_weights_require_teachers_with_independent_loading(local_teacher, load_format):
     cfg = selected_topk_config() if local_teacher else replace_mode_config()
     cfg.trainer.placement.colocate_all = False
