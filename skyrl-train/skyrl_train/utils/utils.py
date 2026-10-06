@@ -94,7 +94,6 @@ def overlap_init_eligible(cfg: DictConfig) -> bool:
     """Return whether engine initialization can overlap policy construction."""
     return (
         policy_strict_spread_eligible(cfg)
-        and cfg.trainer.placement.policy_strict_spread_pg
         and not reference_model_required(cfg.trainer.algorithm)
         and cfg.generator.run_engines_locally
         and compile_distillation_plan_from_config(cfg) is None
