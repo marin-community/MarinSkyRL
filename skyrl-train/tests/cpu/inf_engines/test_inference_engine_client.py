@@ -66,14 +66,22 @@ def _make_min_cfg():
 
 
 def test_rendezvous_port_avoids_ephemeral_range_and_existing_listener(monkeypatch):
-    first = _RENDEZVOUS_PORT_START
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
-        listener.bind(("", first))
+        for first in range(_RENDEZVOUS_PORT_START, _RENDEZVOUS_PORT_STOP):
+            try:
+                listener.bind(("", first))
+                break
+            except OSError:
+                continue
+        else:
+            pytest.fail("No port available for the rendezvous listener fixture")
         monkeypatch.setattr("skyrl_train.inference_engines.utils.random.shuffle", lambda _ports: None)
         second = _find_available_rendezvous_port()
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as contender:
+            contender.bind(("", second))
 
     assert _RENDEZVOUS_PORT_START <= second < _RENDEZVOUS_PORT_STOP
-    assert second == first + 1
+    assert second != first
 
 
 def test_rendezvous_port_fails_when_range_is_excluded():
