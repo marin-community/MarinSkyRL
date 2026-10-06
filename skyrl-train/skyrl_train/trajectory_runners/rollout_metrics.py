@@ -2,6 +2,7 @@
 
 from collections import defaultdict
 from collections.abc import Sequence
+from dataclasses import fields as dataclass_fields
 from typing import Any, Dict, List, Optional, Tuple, Union
 import re
 
@@ -12,6 +13,7 @@ from skyrl_gym.verification import VerificationResult, VerificationStatus, norma
 from skyrl_train.trajectory_runners.types import (
     BatchFields,
     RolloutObservations,
+    ShapingObservations,
     TitoFullDeclineReason,
     TrajectoryBatch,
 )
@@ -354,6 +356,42 @@ def observe_rollout(batch: TrajectoryBatch, *, fields: BatchFields) -> RolloutOb
         env_classes=tuple(batch["env_classes"]) if batch.get("env_classes") is not None else None,
         group_metrics=(batch.get("rollout_metrics") or {},),
         shaping=observe_shaping(batch, fields=fields),
+    )
+
+
+def merge_rollout_observations(groups: Sequence[RolloutObservations]) -> RolloutObservations:
+    """Join complete group observations in admitted order without averaging their metrics."""
+
+    def rows(name: str) -> tuple:
+        return tuple(value for group in groups for value in getattr(group, name))
+
+    def optional_rows(name: str) -> tuple | None:
+        return None if getattr(groups[0], name) is None else rows(name)
+
+    shaping = None
+    if groups[0].shaping is not None:
+        if any(group.shaping is None for group in groups):
+            raise ValueError("shaping observations must cover every admitted group")
+        shaping = ShapingObservations(
+            **{
+                field.name: tuple(value for group in groups for value in getattr(group.shaping, field.name))
+                for field in dataclass_fields(ShapingObservations)
+            }
+        )
+    return RolloutObservations(
+        response_lengths=rows("response_lengths"),
+        optimization_totals=rows("optimization_totals"),
+        reward_sign_totals=rows("reward_sign_totals"),
+        outcomes=rows("outcomes"),
+        unshaped_outcomes=optional_rows("unshaped_outcomes"),
+        scalar_rewards=optional_rows("scalar_rewards"),
+        is_last_step=optional_rows("is_last_step"),
+        verification_results=optional_rows("verification_results"),
+        data_sources=optional_rows("data_sources"),
+        env_metrics=optional_rows("env_metrics"),
+        env_classes=optional_rows("env_classes"),
+        group_metrics=rows("group_metrics"),
+        shaping=shaping,
     )
 
 

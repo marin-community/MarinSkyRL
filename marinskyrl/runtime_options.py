@@ -5,6 +5,19 @@ from enum import StrEnum
 from typing import Any
 
 
+class BatchBuilder(StrEnum):
+    DRIVER = "driver"
+    WORKER = "worker"
+
+
+def parse_batch_builder(value: str) -> BatchBuilder:
+    """Validate the public batch-builder choice at runtime configuration entry."""
+    try:
+        return BatchBuilder(value)
+    except ValueError as error:
+        raise ValueError("trainer.batch_builder must be driver or worker") from error
+
+
 class R3Transport(StrEnum):
     BY_VALUE = "by_value"
     RESIDENT = "resident"

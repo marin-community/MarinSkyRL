@@ -56,6 +56,10 @@ class PayloadStore(Protocol):
 
     async def fetch(self, payloads: Sequence) -> list[RolloutGroup]: ...
 
+    async def shared_refs(self, payloads: Sequence[object]) -> tuple[ray.ObjectRef, ...]:
+        """Return Ray references that policy replicas can read without a driver payload copy."""
+        ...
+
     async def checkpoint(self, payload: object | None) -> object | None:
         """The durable form of one payload for a checkpoint."""
         ...
@@ -93,6 +97,9 @@ class MemoryPayloads:
 
     async def fetch(self, payloads: Sequence) -> list[RolloutGroup]:
         return list(await asyncio.gather(*payloads))
+
+    async def shared_refs(self, payloads: Sequence[object]) -> tuple[ray.ObjectRef, ...]:
+        return tuple(payloads)
 
     async def checkpoint(self, payload: object | None) -> object | None:
         if payload is None:
@@ -140,6 +147,11 @@ class ObjectStorePayloads:
     async def fetch(self, payloads: Sequence) -> list[RolloutGroup]:
         loop = asyncio.get_running_loop()
         return list(await asyncio.gather(*(loop.run_in_executor(_reads, _read_group, uri) for uri in payloads)))
+
+    async def shared_refs(self, payloads: Sequence[object]) -> tuple[ray.ObjectRef, ...]:
+        groups = await self.fetch(payloads)
+        loop = asyncio.get_running_loop()
+        return tuple(await asyncio.gather(*(loop.run_in_executor(_writes, ray.put, group) for group in groups)))
 
     async def checkpoint(self, payload: object | None) -> object | None:
         return payload

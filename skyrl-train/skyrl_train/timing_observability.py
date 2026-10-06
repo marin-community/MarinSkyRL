@@ -23,6 +23,7 @@ TIMING_PARENTS: dict[str, str | None] = {
     "fwd_logprobs_values_reward": "run_training",
     "apply_reward_kl_penalty": "run_training",
     "compute_advantages_and_returns": "run_training",
+    "prepare_worker_training_input": "run_training",
     "train_critic_and_policy": "run_training",
     "critic_train": "train_critic_and_policy",
     "policy_train": "train_critic_and_policy",

@@ -40,6 +40,7 @@ from skyrl_train.timing_observability import PhaseBreakdown
 from marinskyrl.runtime_options import PolicyLossType
 from skyrl_train.training_batch import (
     TrainingBatchIterator,
+    TrainingInputBatch,
     TrainingOutputBatch,
     gradient_accumulation_steps,
 )
@@ -383,6 +384,26 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     def forward(self, data, *, probe_micro_batch_size: int | None = None):
         with self._memory.span("forward", step=data.metadata.get("global_step")):
             return super().forward(data, probe_micro_batch_size=probe_micro_batch_size)
+
+    def _forward_loaded_logprobs(self, data: TrainingInputBatch) -> torch.Tensor:
+        """Give every pipeline stage the last stage's response logprobs."""
+        scores = self.forward(data)["output"]
+        if self.mesh_rank.pp_size == 1:
+            return scores
+        shape = (data.batch_size, data.metadata["response_length"])
+        device = self.strategy.collective_device()
+        if mpu.is_pipeline_last_stage(ignore_virtual=True):
+            scores = scores.to(device)
+            if scores.dtype != torch.float32 or tuple(scores.shape) != shape:
+                raise ValueError("worker pipeline forward requires float32 response scores with the global width")
+        else:
+            scores = torch.empty(shape, dtype=torch.float32, device=device)
+        torch.distributed.broadcast(
+            scores,
+            src=mpu.get_pipeline_model_parallel_last_rank(),
+            group=mpu.get_pipeline_model_parallel_group(),
+        )
+        return scores.cpu()
 
     def offload_to_cpu(self, pin_memory=True, non_blocking=True, offload_optimizer=True, offload_model=True):
         self.strategy.offload_to_cpu(
@@ -869,8 +890,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         raise NotImplementedError()
 
     def _set_pad_token_id(self, pad_token_id):
-        # this already gets set in the init_model method
-        pass
+        self._pad_token_id = pad_token_id
 
 
 class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):

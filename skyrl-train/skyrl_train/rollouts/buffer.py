@@ -176,6 +176,31 @@ class RowFacts:
             token_rewards=fields.token_rewards,
         )
 
+    @classmethod
+    def concatenate(cls, facts: Sequence[RowFacts]) -> RowFacts:
+        """Join admitted row scalars in their original group and sample order."""
+        if not facts:
+            raise ValueError("row facts require at least one group")
+        stops = None
+        if "stop_reasons" in facts[0].first_group_list_fields:
+            if any(group.stop_reasons is None for group in facts):
+                raise ValueError("stop_reasons must be present on every group when the first group carries them")
+            stops = tuple(reason for group in facts for reason in group.stop_reasons)
+        return cls(
+            prompt_len=np.concatenate([group.prompt_len for group in facts]),
+            response_len=np.concatenate([group.response_len for group in facts]),
+            score=np.concatenate([group.score for group in facts]),
+            loss_tokens=np.concatenate([group.loss_tokens for group in facts]),
+            is_last_step=np.concatenate([group.is_last_step for group in facts]),
+            exclude_from_baseline=np.concatenate([group.exclude_from_baseline for group in facts]),
+            fields=tuple(dict.fromkeys(key for group in facts for key in group.fields)),
+            route_geometry=next((group.route_geometry for group in facts if group.route_geometry is not None), None),
+            scalar_rewards=all(group.scalar_rewards for group in facts),
+            stop_reasons=stops,
+            first_group_list_fields=facts[0].first_group_list_fields,
+            token_rewards=any(group.token_rewards for group in facts),
+        )
+
 
 @dataclass(frozen=True)
 class RolloutVerdict:
@@ -189,6 +214,7 @@ class RolloutVerdict:
     selection: GroupSelectionResult | None
     rewards: GroupRewards | None
     work: GeneratedWork
+    row_facts: RowFacts | None = None
 
     @property
     def trainable(self) -> bool:
@@ -213,7 +239,14 @@ class RolloutContentPolicy:
         work = GeneratedWork.from_batch(batch["response_ids"], batch.get("is_last_step"))
         if not decision.accepted:
             return RolloutVerdict(group.uid, decision.rejections, None, None, work)
-        return RolloutVerdict(group.uid, (), self.selection.evaluate(group), GroupRewards.from_batch(batch), work)
+        return RolloutVerdict(
+            group.uid,
+            (),
+            self.selection.evaluate(group),
+            GroupRewards.from_batch(batch),
+            work,
+            RowFacts.from_batch(batch),
+        )
 
 
 class RolloutWriter(Protocol):
@@ -282,6 +315,7 @@ class AdmittedRollout:
     policy_step: int
     sample_count: int
     response_tokens: int
+    row_facts: RowFacts | None = None
 
 
 @dataclass(frozen=True)
@@ -589,6 +623,7 @@ class RolloutBuffer:
                         policy_step=rollout.policy_step,
                         sample_count=rollout.verdict.work.sample_count,
                         response_tokens=rollout.verdict.work.generated_token_count,
+                        row_facts=rollout.verdict.row_facts,
                     )
                     for index, rollout in enumerate(
                         self._unreported, start=len(self._admitted[self._policy_step]) - len(self._unreported)

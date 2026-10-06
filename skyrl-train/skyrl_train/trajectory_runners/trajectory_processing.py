@@ -855,6 +855,11 @@ def _rollout_observations(
     )
 
 
+def observe_rollout_groups(batches: Sequence[TrajectoryBatch], *, fields: BatchFields) -> RolloutObservations:
+    """Normalize complete groups and retain their original counters for scalar metrics."""
+    return _rollout_observations(normalize_trajectory_batches(batches, fields=fields), batches, fields)
+
+
 def concatenate_trajectory_batches(
     trajectory_batches: List[TrajectoryBatch],
     *,

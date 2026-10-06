@@ -4,11 +4,14 @@ import contextlib
 import logging
 import os
 import socket
+import time
 from typing import Dict, Optional, Type, List, Any, Callable
 from skyrl_train.utils.progress import configure_progress, tqdm
 from marinskyrl.runtime_options import R3Transport
 from collections import defaultdict
+from collections.abc import Sequence
 
+import numpy as np
 import ray
 import torch
 import torch.nn as nn
@@ -40,9 +43,7 @@ from loguru import logger
 from skyrl_train.distributed.utils import init_custom_process_group, init_worker_process_group_with_device
 from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
 from skyrl_train.utils.policy_math import ppo_critic_loss
-from skyrl_train.utils.importance_ratio_diagnostics import (
-    LogRatioMonitor,
-)
+from skyrl_train.utils.importance_ratio_diagnostics import LogRatioMonitor
 from skyrl_train.learner_memory import LearnerCudaMetrics
 from skyrl_train.timing_observability import PhaseBreakdown
 from skyrl_train.telemetry import WORKER_ROLE, ProcessTelemetry, TelemetryConfig
@@ -58,7 +59,13 @@ from skyrl_train.training_batch import (
     gradient_accumulation_steps,
     per_data_parallel_batch_size,
 )
+from skyrl_train.batch_assembly import BatchLoadResult, BatchPlan, assemble_worker_slice, forward_input
+from skyrl_train.batch_metrics import WorldReduction, advantage_metrics, install_correction, rollout_probability_metrics
+from skyrl_train.rollouts.context import RolloutReader
+from skyrl_train.rollouts.buffer import PayloadReference
 from skyrl_train.trajectory_selection import optimization_samples_per_prompt
+from skyrl_train.trajectory_runners.trajectory_processing import observe_rollout_groups
+from skyrl_train.utils.advantage_estimators import finalize_outcome_batch
 from skyrl_train.utils.metrics import mean_metrics, policy_progress_metrics, policy_training_metrics
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.models.grug_query_bias import (
@@ -578,6 +585,7 @@ class PPORayActorGroup:
         self.record_memory = record_memory
         self._actor_runtime_env = {"env_vars": actor_env_vars} if actor_env_vars else None
         self._initiate_actors(pg, num_gpus_per_actor)
+        self._batch_owners = self._collection_actors()
 
     def _initiate_actors(self, pg: Optional[PlacementGroup], num_gpus_per_actor: float):
         """Initialize Ray actors in the worker group.
@@ -727,6 +735,54 @@ class PPORayActorGroup:
         )
         return dispatch_class.dispatch(self.actor_infos, method_name, *args, settings=settings, **kwargs)
 
+    def _collection_actors(self) -> tuple[ActorInfo, ...]:
+        dp_size = self.actor_infos[0].rank.dp_size
+        owners = {}
+        for actor in self.actor_infos:
+            if actor.rank.is_collection_dp_rank():
+                if actor.rank.dp in owners:
+                    raise ValueError(f"multiple collection actors for DP rank {actor.rank.dp}")
+                owners[actor.rank.dp] = actor
+        if set(owners) != set(range(dp_size)):
+            raise ValueError("policy mesh requires exactly one collection actor per DP rank")
+        return tuple(owners[dp] for dp in range(dp_size))
+
+    @staticmethod
+    def _batch_group_indices(plan: BatchPlan, reader: RolloutReader, dp: int) -> tuple[int, ...]:
+        rows = plan.rank_rows(dp)
+        uids = set(plan.uids[rows.start : rows.stop])
+        return tuple(group.index for group in reader.selected if group.uid in uids)
+
+    def read_batch_groups(self, plan: BatchPlan, reader: RolloutReader) -> list[ObjectRef]:
+        """Return DP-ordered tasks sharing groups through one owner per DP rank."""
+        return [
+            actor.handle.read_batch_groups.remote(
+                plan.batch_id, reader, self._batch_group_indices(plan, reader, actor.rank.dp)
+            )
+            for actor in self._batch_owners
+        ]
+
+    def load_batch(
+        self,
+        plan: BatchPlan,
+        reader: RolloutReader,
+        groups_by_dp: Sequence[PayloadReference],
+        advantages: np.ndarray,
+    ) -> list[ObjectRef]:
+        """Submit each DP slice's shared references to every replica and return all actor tasks."""
+        plan_ref = ray.put(plan)
+        advantages_ref = ray.put(advantages)
+        return [
+            actor.handle.load_batch.remote(
+                plan_ref,
+                reader,
+                self._batch_group_indices(plan, reader, actor.rank.dp),
+                groups_by_dp[actor.rank.dp].value,
+                advantages_ref,
+            )
+            for actor in self.actor_infos
+        ]
+
     def async_init_model(
         self,
         *args,
@@ -865,6 +921,96 @@ class PolicyWorkerBase(Worker):
         self._policy_train_spans: bool = self.cfg.trainer.policy_train_spans
         self._memory = LearnerCudaMetrics(enabled=self._policy_train_spans, rank=self._rank)
         self._model_version_step: int | None = None
+        self._loaded_batches: dict[int, TrainingInputBatch] = {}
+
+    async def read_batch_groups(
+        self, batch_id: int, reader: RolloutReader, indices: tuple[int, ...]
+    ) -> PayloadReference:
+        """Share this DP slice's groups through their existing or owner-published references."""
+        return PayloadReference(await reader.share(batch_id, indices))
+
+    async def load_batch(
+        self,
+        plan: BatchPlan,
+        reader: RolloutReader,
+        indices: tuple[int, ...],
+        references: tuple[ObjectRef, ...],
+        advantages: np.ndarray,
+    ) -> BatchLoadResult:
+        """Resolve shared groups and retain the contiguous rows assigned to this policy DP rank."""
+        if plan.batch_id in self._loaded_batches:
+            raise ValueError(f"worker batch {plan.batch_id} is already loaded")
+        started = time.perf_counter()
+        groups = await reader.read_shared(plan.batch_id, indices, references)
+        batch = await asyncio.to_thread(
+            assemble_worker_slice,
+            plan,
+            self.mesh_rank.dp,
+            groups,
+            advantages,
+            pad_token_id=self._pad_token_id,
+            algorithm=self.cfg.trainer.algorithm,
+        )
+        observations = []
+        if self.mesh_rank.is_collection_dp_rank():
+            rows = plan.rank_rows(self.mesh_rank.dp)
+            by_uid = {group.uid: group.trajectory_batch for group in groups}
+            offset = 0
+            for admitted in reader.selected:
+                if rows.start <= offset < rows.stop:
+                    observations.append(
+                        (
+                            admitted.index,
+                            await asyncio.to_thread(observe_rollout_groups, [by_uid[admitted.uid]], fields=plan.fields),
+                        )
+                    )
+                offset += admitted.sample_count
+        self._loaded_batches[plan.batch_id] = batch
+        return BatchLoadResult(time.perf_counter() - started, tuple(observations))
+
+    def _forward_loaded_logprobs(self, data: TrainingInputBatch) -> torch.Tensor:
+        return self.forward(data)["output"]
+
+    def forward_loaded(self, batch_id: int) -> TrainingOutputBatch:
+        """Retain complete old-policy response scores on this actor."""
+        batch = self._loaded_batches[batch_id]
+        batch["action_log_probs"] = self._forward_loaded_logprobs(forward_input(batch))
+        batch["base_action_log_probs"] = None
+        batch["values"] = None
+        output = TrainingOutputBatch({})
+        output.metadata = {"dp_rank": self.mesh_rank.dp}
+        return output
+
+    def prepare_loaded(self, batch_id: int) -> TrainingOutputBatch:
+        """Compute shared diagnostics and finalize the retained input before optimizer work."""
+        batch = self._loaded_batches[batch_id]
+        reduction = WorldReduction(
+            all_reduce=self.strategy.all_reduce,
+            contributes=self.mesh_rank.is_collection_dp_rank(),
+        )
+        metrics = install_correction(batch, self.cfg.trainer.algorithm, reduction=reduction)
+        metrics.update(
+            rollout_probability_metrics(
+                batch,
+                algorithm=self.cfg.trainer.algorithm,
+                training_metrics=self.cfg.trainer.training_metrics,
+                rollout_logprobs_enabled=self.cfg.generator.sampling_params.logprobs is not None,
+                reduction=reduction,
+            )
+        )
+        metrics.update(advantage_metrics(batch, reduction=reduction, step_wise=False))
+        self._loaded_batches[batch_id] = finalize_outcome_batch(batch)
+        output = TrainingOutputBatch({})
+        output.metadata = {"batch_metrics": metrics}
+        return output
+
+    def train_loaded(self, batch_id: int) -> TrainingOutputBatch:
+        """Train on the finalized retained slice through the existing policy path."""
+        return self.ppo_train(self._loaded_batches[batch_id])
+
+    def unload_batch(self, batch_id: int) -> None:
+        """Release a retained slice after a completed or failed training step."""
+        self._loaded_batches.pop(batch_id, None)
 
     async def _begin_vllm_layerwise_weight_reload(self, inference_engine_client, *, enabled: bool) -> None:
         """Open a rank-synchronized vLLM reload around a streamed weight update."""

@@ -34,7 +34,9 @@ from skyrl_train.batch_source import (
     DriverBatchOperations,
     DriverBatchSource,
     PolicyUpdate,
+    WorkerBatchSource,
 )
+from skyrl_train.batch_verification import make_batch_source
 from skyrl_train.batch_metrics import (
     LocalReduction,
     advantage_metrics,
@@ -44,6 +46,7 @@ from skyrl_train.batch_metrics import (
 )
 from skyrl_train.trajectory_runners.rollout_metrics import observe_rollout, reward_metrics, staleness_metrics
 from skyrl_train.trajectory_runners.types import BatchFields
+from marinskyrl.runtime_options import BatchBuilder, parse_batch_builder
 from skyrl_train.rollouts.buffer import RolloutGroup, RowFacts
 from skyrl_train.rollouts.context import TrainingContext, TrainingContextState
 from skyrl_train.trajectory_selection import trajectory_selector_from_config
@@ -335,6 +338,9 @@ class RayPPOTrainer:
 
         # Trainer control object for callback coordination
         self._control = TrainerControl()
+        self.batch_builder = parse_batch_builder(cfg.trainer.batch_builder)
+        if self.batch_builder is not BatchBuilder.DRIVER and type(self) is not RayPPOTrainer:
+            raise ValueError(f"{type(self).__name__} supports only trainer.batch_builder=driver")
 
     def configure_distillation(self, runtime: DistillationRuntime) -> None:
         """Install admitted-group teacher scoring before the training loop starts."""
@@ -1592,7 +1598,22 @@ class RayPPOTrainer:
         return await asyncio.to_thread(self.train_critic_and_policy, update, diagnostics=diagnostics)
 
     def _configure_batch_source(self) -> None:
-        self.batch_source = self.driver_batch_source()
+        def worker() -> WorkerBatchSource:
+            replay = moe_router_replay_requested(self.cfg)
+            return WorkerBatchSource(
+                self.context,
+                self.policy_model,
+                self.cfg.trainer.algorithm,
+                replay=replay,
+                num_experts=self._resolve_num_experts() if replay else None,
+                colocate_all=self.colocate_all,
+                n_samples_per_prompt=self.cfg.generator.n_samples_per_prompt,
+                optimize=self._optimize_policy_update,
+            )
+
+        self.batch_source = make_batch_source(
+            self.batch_builder, driver=self.driver_batch_source(), worker_factory=worker
+        )
 
     def _group_for_teacher_scoring(self, group: RolloutGroup) -> TrajectoryBatch:
         """Apply the learner's row selector without duplicating its metric side effects."""

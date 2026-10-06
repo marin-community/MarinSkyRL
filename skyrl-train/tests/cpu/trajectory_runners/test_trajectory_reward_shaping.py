@@ -9,10 +9,14 @@ from skyrl_train.trajectory_runners.trajectory_reward_shaping import (
 )
 from skyrl_train.trajectory_runners.trajectory_processing import (
     concatenate_trajectory_batches,
+    batch_fields,
+    observe_rollout_groups,
 )
 from skyrl_train.trajectory_runners.rollout_metrics import (
     get_metrics_from_trajectory_batch,
 )
+
+from skyrl_train.trajectory_runners.rollout_metrics import merge_rollout_observations, rollout_metrics
 
 
 def _output(
@@ -345,8 +349,9 @@ def test_disabled_trajectory_shaping_preserves_output_exactly():
     assert output == original
 
 
+@pytest.mark.parametrize("compact_groups", [False, True])
 @pytest.mark.parametrize("mixed_empty", [False, True])
-def test_concatenation_recomputes_shaping_metrics_from_retained_components(mixed_empty):
+def test_concatenation_recomputes_shaping_metrics_from_retained_components(compact_groups, mixed_empty):
     short = _output([[] if mixed_empty else [1, 2]], [1.0], ["stop"])
     long = _output([[1, 2, 3, 4, 5]], [[0.0, 0.0, 0.0, 0.0, 1.0]] if mixed_empty else [1.0], ["stop"])
     config = {
@@ -370,6 +375,12 @@ def test_concatenation_recomputes_shaping_metrics_from_retained_components(mixed
     else:
         assert concatenated["rewards"] == pytest.approx([1.0, 0.7])
     metrics = concatenated["rollout_metrics"]
+    if compact_groups:
+        fields = batch_fields([short, long])
+        observations = merge_rollout_observations(
+            [observe_rollout_groups([group], fields=fields) for group in (short, long)]
+        )
+        metrics = rollout_metrics(observations, tis_lcs_alert_threshold=0.005)
 
     assert metrics["generate/reward_shaping/shaped_reward_mean"] == pytest.approx(0.35 if mixed_empty else 0.85)
     assert metrics["generate/reward_shaping/outcome_reward_mean"] == 1.0

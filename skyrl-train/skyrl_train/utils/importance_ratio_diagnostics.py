@@ -15,6 +15,8 @@ from skyrl_train.tensor_math import LOG_PROB_DELTA_CLIP
 
 # Absolute-position bucket width; the async RL dashboard reads pos_first256 and pos_last256 by name.
 POSITION_WINDOW = 256
+MISMATCH_RATIO_HISTOGRAM_LOG_WIDTH = math.log1p(0.01)
+MISMATCH_RATIO_HISTOGRAM_BINS = 4096
 
 
 LOG_RATIO_TAIL_CAPACITY = 8192
@@ -104,6 +106,96 @@ def exact_ratio_statistics(
         kl_k3=clipped_ratio.mean().item() - mean - 1,
         chi2=clipped_ratio.square().mean().item() - 1,
         log_ratio_mean_squared=delta.square().mean().item(),
+    )
+    return result
+
+
+def histogram_ratio_statistics(
+    delta: torch.Tensor,
+    *,
+    reduction: MetricReduction,
+    eps_clip_low: float = 0.2,
+    eps_clip_high: float = 0.2,
+) -> dict[str, float]:
+    """Compute globally reduced ratio moments and a bounded-histogram p99."""
+    delta = delta.detach().double().reshape(-1)
+    selected = delta.numel()
+    finite = torch.isfinite(delta)
+    if not finite.all():
+        delta = delta[finite]
+    count = delta.numel()
+    absolute = delta.abs()
+    maxima = reduction.combine(
+        torch.stack([absolute.max(), delta.max()]) if count else torch.full((2,), -math.inf, dtype=torch.float64),
+        "max",
+    )
+    weights = (delta - maxima[1]).exp()
+    clipped_ratio = delta.clamp(-LOG_PROB_DELTA_CLIP, LOG_PROB_DELTA_CLIP).exp()
+    lower_bound = math.log1p(-eps_clip_low) if eps_clip_low < 1 else -math.inf
+    totals = reduction.combine(
+        torch.tensor(
+            [
+                selected,
+                count,
+                delta.sum(),
+                absolute.sum(),
+                (delta < lower_bound).sum(),
+                (delta > math.log1p(eps_clip_high)).sum(),
+                (absolute > LOG_RATIO_DOUBLING).sum(),
+                (delta < LOG_RATIO_COLLAPSE).sum(),
+                weights.sum(),
+                weights.square().sum(),
+                clipped_ratio.sum(),
+                clipped_ratio.square().sum(),
+                delta.square().sum(),
+            ],
+            dtype=torch.float64,
+        ),
+        "sum",
+    ).tolist()
+    (
+        selected,
+        count,
+        summed,
+        absolute_sum,
+        below,
+        above,
+        outside,
+        collapsed,
+        weight_sum,
+        weight_square,
+        ratio_sum,
+        ratio_square,
+        squared,
+    ) = totals
+    result = {"selected_tokens": selected, "finite_tokens": count}
+    if selected:
+        result["finite_fraction"] = count / selected
+    if not count:
+        return result
+    bins = (absolute / MISMATCH_RATIO_HISTOGRAM_LOG_WIDTH).clamp(max=MISMATCH_RATIO_HISTOGRAM_BINS).long()
+    histogram = reduction.combine(torch.bincount(bins, minlength=MISMATCH_RATIO_HISTOGRAM_BINS + 1), "sum")
+    position = 0.99 * (count - 1)
+    orders = torch.tensor([math.floor(position) + 1, math.ceil(position) + 1], dtype=torch.int64)
+    percentile_bins = torch.searchsorted(histogram.cumsum(0), orders, right=False)
+    bounds = torch.minimum(maxima[0], (percentile_bins.double() + 1) * MISMATCH_RATIO_HISTOGRAM_LOG_WIDTH)
+    bounds[percentile_bins == MISMATCH_RATIO_HISTOGRAM_BINS] = maxima[0]
+    p99 = float(bounds[0] + (bounds[1] - bounds[0]) * (position - math.floor(position)))
+    mean = summed / count
+    result.update(
+        log_ratio_mean=mean,
+        log_ratio_abs_mean=absolute_sum / count,
+        log_ratio_abs_p99=p99,
+        log_ratio_abs_max=float(maxima[0]),
+        lower_clip_pressure=below / count,
+        upper_clip_pressure=above / count,
+        frac_outside_0_5_2=outside / count,
+        frac_below_1e_5=collapsed / count,
+        ess_fraction=weight_sum * weight_sum / (count * weight_square),
+        kl_k1=-mean,
+        kl_k3=ratio_sum / count - mean - 1,
+        chi2=ratio_square / count - 1,
+        log_ratio_mean_squared=squared / count,
     )
     return result
 

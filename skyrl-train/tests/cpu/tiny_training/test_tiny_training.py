@@ -1,23 +1,30 @@
 """End-to-end CPU training through the production entrypoints on a tiny policy."""
 
-import multiprocessing
+import asyncio
 import json
+import multiprocessing
+import os
+import signal
+import threading
+import time
+from multiprocessing.connection import Connection
 from multiprocessing.context import ForkServerContext
 from pathlib import Path
 
+import psutil
 import pytest
+import ray
 import torch
-from transformers import AutoModelForCausalLM
 from omegaconf import OmegaConf
 from skyrl_train.callbacks.base import TrainerCallback
 from skyrl_train.callbacks.builtin import register_callback
-
-from marinskyrl.checkpoint_paths import POLICY_CHECKPOINT_SUBDIRECTORY
-from tests.cpu.tiny_training.cpu_backend import CHECKPOINT_FILE_TEMPLATE, CausalLMPolicy
-from tests.cpu.tiny_training.fixed_batch import fixed_training_batch, run_fixed_update
 from skyrl_train.rollouts.payloads import ROLLOUT_OBJECT_SUFFIX
 from skyrl_train.training_batch import TrainingInputBatch
+from transformers import AutoModelForCausalLM
+
+from marinskyrl.checkpoint_paths import POLICY_CHECKPOINT_SUBDIRECTORY
 from tests.cpu.tiny_training import experiment
+from tests.cpu.tiny_training.cpu_backend import CHECKPOINT_FILE_TEMPLATE, CausalLMPolicy, CPUPolicyWorker
 from tests.cpu.tiny_training.experiment import (
     MAX_STALENESS_STEPS,
     N_SAMPLES_PER_PROMPT,
@@ -29,6 +36,7 @@ from tests.cpu.tiny_training.experiment import (
     run_experiment,
     sampling_kind,
 )
+from tests.cpu.tiny_training.fixed_batch import fixed_training_batch, run_fixed_update
 from tests.cpu.tiny_training.tiny_model import CURRICULUM_BINS, build_tiny_policy
 
 pytestmark = pytest.mark.slow
@@ -162,6 +170,213 @@ def test_tiny_policy_trains_to_max_steps(
     _train(runs, tmp_path, tiny_policy, mode, shape, steps=NUM_STEPS)
 
     _assert_trained_to_max_steps(tmp_path, mode, shape)
+
+
+# Every remaining metric key must have a producer in both source implementations.
+# The driver publishes exact p95/p999; workers publish the shared histogram p99.
+_SOURCE_METRIC_KEY_DIFFERENCES = frozenset(
+    {
+        "policy/mismatch/pooled/log_ratio_abs_p95",
+        "policy/mismatch/pooled/log_ratio_abs_p999",
+        "policy/mismatch/staleness0/log_ratio_abs_p95",
+        "policy/mismatch/staleness0/log_ratio_abs_p999",
+        "timing/assemble_generation_group_mini_batch",
+        "timing/postprocess_trajectory_batch",
+        "timing/convert_to_training_input",
+        "timing/dump_data_batch",
+        "timing/load_worker_batch",
+        "timing/compute_advantages_and_returns",
+        "timing/prepare_worker_training_input",
+    }
+)
+
+
+def _worker_batch_config(root: Path, tiny_policy: Path, builder: str):
+    cfg = experiment.tiny_training_config(
+        root,
+        tiny_policy,
+        TrainingMode.SYNC,
+        RolloutShape.SINGLE_TURN,
+        max_steps=2,
+        checkpoint_interval=-1,
+        dp_size=2,
+        micro_batch_size=3,
+        dump_data_batch=builder != "worker",
+    )
+    cfg.trainer.batch_builder = builder
+    cfg.trainer.train_batch_size = cfg.trainer.policy_mini_batch_size = 3
+    cfg.trainer.training_metrics = True
+    cfg.trainer.algorithm.advantage_estimator = "rloo_n"
+    cfg.trainer.algorithm.group_advantage_min_size = 2
+    cfg.generator.trajectory_reward_shaping.enabled = True
+    cfg.generator.trajectory_reward_shaping.overlong.penalty_scale = 0.0
+    return cfg
+
+
+def _run_worker_batch_case(runs: ForkServerContext, cfg):
+    run = runs.Process(target=experiment.run_tiny_training, args=(cfg,))
+    run.start()
+    run.join(RUN_TIMEOUT_SECONDS)
+    if run.exitcode is None:
+        run.kill()
+        run.join()
+        pytest.fail("worker training did not finish")
+    assert run.exitcode == 0
+
+
+@pytest.fixture(scope="module")
+def driver_batch_metric_keys(runs, tmp_path_factory, tiny_policy):
+    root = tmp_path_factory.mktemp("driver_batch_metrics")
+    _run_worker_batch_case(runs, _worker_batch_config(root, tiny_policy, "driver"))
+    return [set(record) - _SOURCE_METRIC_KEY_DIFFERENCES for record in _trained_steps(root)]
+
+
+def test_worker_batches_train_two_tis_steps_with_a_group_split_between_dp_ranks(
+    runs: ForkServerContext, tmp_path: Path, tiny_policy: Path, driver_batch_metric_keys
+):
+    _run_worker_batch_case(runs, _worker_batch_config(tmp_path, tiny_policy, "worker"))
+    steps = _trained_steps(tmp_path)
+    assert [record["trainer/global_step"] for record in steps] == [1, 2]
+    assert all(record["policy/raw_grad_norm"] > 0 for record in steps)
+    assert [set(record) - _SOURCE_METRIC_KEY_DIFFERENCES for record in steps] == driver_batch_metric_keys
+    assert all(record["generate/avg_num_tokens"] > 0 for record in steps)
+
+
+_FORWARD_GATE_NAME = "tiny_training_forward_gate"
+
+
+class ForwardFailure(RuntimeError):
+    pass
+
+
+class _ForwardGate:
+    def __init__(self):
+        self.ranks = set()
+        self.both_entered = asyncio.Event()
+        self.released = asyncio.Event()
+
+    async def enter(self, rank: int):
+        self.ranks.add(rank)
+        if self.ranks == {0, 1}:
+            self.both_entered.set()
+        await self.both_entered.wait()
+
+    async def wait_for_both(self):
+        await self.both_entered.wait()
+        return tuple(sorted(self.ranks))
+
+    async def withhold(self):
+        await self.released.wait()
+
+    async def release(self):
+        self.released.set()
+
+
+class _FailedForwardWorker(CPUPolicyWorker):
+    def forward_loaded(self, batch_id):
+        gate = ray.get_actor(_FORWARD_GATE_NAME)
+        ray.get(gate.enter.remote(self.mesh_rank.dp))
+        if self.mesh_rank.dp == 0:
+            raise ForwardFailure("injected policy forward failure")
+        # A synchronous hold prevents this actor from servicing queued cleanup RPCs.
+        ray.get(gate.withhold.remote())
+        return super().forward_loaded(batch_id)
+
+
+class _FailedForwardExp(experiment.TinyTrainingExp):
+    def get_worker_classes(self):
+        return ray.remote(num_gpus=1)(_FailedForwardWorker), None, None
+
+    def get_trainer(self, *args, **kwargs):
+        self.trainer = super().get_trainer(*args, **kwargs)
+        return self.trainer
+
+
+def _run_failed_forward(cfg, ready: Connection, log: Path):
+    os.setsid()
+    ready.send(("session", os.getpid()))
+    with log.open("w") as output:
+        os.dup2(output.fileno(), 1)
+        os.dup2(output.fileno(), 2)
+        experiment.validate_cfg(cfg)
+        experiment.validate_trajectory_runner_capabilities(
+            cfg, experiment.TrajectoryRunnerMode.SKYRL_GYM, experiment.EntrypointOperation.TRAIN
+        )
+        gate = None
+        try:
+            ray.init(
+                num_cpus=experiment.LOGICAL_CPUS,
+                num_gpus=experiment.LOGICAL_GPUS,
+                runtime_env={"env_vars": experiment.WORKER_ENV_VARS},
+                include_dashboard=False,
+            )
+            gate = ray.remote(num_cpus=0)(_ForwardGate).options(name=_FORWARD_GATE_NAME).remote()
+
+            def report_ready():
+                ready.send(("forward_ranks", ray.get(gate.wait_for_both.remote())))
+
+            threading.Thread(target=report_ready, daemon=True).start()
+            exp = _FailedForwardExp(cfg)
+            with pytest.raises(ray.exceptions.RayTaskError) as raised:
+                exp.run()
+            assert isinstance(raised.value.as_instanceof_cause(), ForwardFailure)
+            assert len(exp.trainer.policy_model.actor_infos) == 2
+            for actor in exp.trainer.policy_model.actor_infos:
+                with pytest.raises(ray.exceptions.RayActorError):
+                    ray.get(actor.handle.get_mesh_rank.remote(), timeout=10)
+            metrics = Path(cfg.trainer.export_path) / experiment.METRICS_FILE
+            assert not metrics.exists() or not _trained_steps(metrics.parent.parent)
+        finally:
+            try:
+                if gate is not None:
+                    ray.get(gate.release.remote(), timeout=10)
+            finally:
+                ray.shutdown()
+                ready.close()
+
+
+def test_worker_forward_failure_preserves_error_and_stops_policy_actors(runs, tmp_path, tiny_policy):
+    cfg = _worker_batch_config(tmp_path, tiny_policy, "worker")
+    cfg.trainer.max_steps = 1
+    log = tmp_path / "failed-forward.log"
+    ready, child_ready = runs.Pipe(duplex=False)
+    run = runs.Process(target=_run_failed_forward, args=(cfg, child_ready, log))
+    run.start()
+    child_ready.close()
+    session_started = False
+    descendants = set()
+    setup_deadline = time.monotonic() + RUN_TIMEOUT_SECONDS
+    try:
+        assert ready.poll(RUN_TIMEOUT_SECONDS), "failed-forward child did not start"
+        assert ready.recv() == ("session", run.pid)
+        session_started = True
+        assert ready.poll(max(0, setup_deadline - time.monotonic())), "policy ranks did not reach forward"
+        assert ready.recv() == ("forward_ranks", (0, 1))
+        descendants.update(psutil.Process(run.pid).children(recursive=True))
+        run.join(RUN_TIMEOUT_SECONDS)
+        assert run.exitcode == 0, f"failed-forward training did not finish cleanly; exitcode={run.exitcode}"
+    finally:
+        if run.exitcode != 0:
+            if run.is_alive():
+                try:
+                    descendants.update(psutil.Process(run.pid).children(recursive=True))
+                    if session_started:
+                        os.killpg(run.pid, signal.SIGKILL)
+                    else:
+                        run.kill()
+                except (ProcessLookupError, psutil.NoSuchProcess):
+                    pass
+            for process in descendants:
+                try:
+                    process.kill()
+                except psutil.NoSuchProcess:
+                    pass
+            _, alive = psutil.wait_procs(descendants, timeout=10)
+            run.join(10)
+            assert not alive and not run.is_alive(), "failed-forward child processes survived cleanup"
+        ready.close()
+        if run.exitcode != 0 and log.exists():
+            print(log.read_text()[-16000:])
 
 
 def test_async_training_resumes_with_committed_groups(runs: ForkServerContext, tmp_path: Path, tiny_policy: Path):

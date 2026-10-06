@@ -30,6 +30,7 @@ from skyrl_train.rollouts.buffer import (
     RolloutWriter,
 )
 from skyrl_train.rollouts.context import (
+    RolloutReader,
     RolloutRequestSpec,
     TrainingContext,
     TrainingContextState,
@@ -139,6 +140,9 @@ class _CountingPayloads:
         self.fetched.append(list(payloads))
         return await self.store.fetch(payloads)
 
+    async def shared_refs(self, payloads):
+        return await self.store.shared_refs(payloads)
+
     async def checkpoint(self, payloads):
         return await self.store.checkpoint(payloads)
 
@@ -239,14 +243,17 @@ async def _next_uids(context: TrainingContext) -> list[str]:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("payload_kind", ["memory", "object_store"])
+@pytest.mark.parametrize("read_kind", ["direct", "shared"])
 @pytest.mark.parametrize("start_buffer", ["ray_actor"], indirect=True)
-async def test_batch_metadata_supports_worker_index_fetch(ray_module, start_buffer, payload_kind, tmp_path):
-    def fetch_selected_uids(
-        buffer: ActorHandle, batch_id: int, indices: tuple[int, ...], object_store_root: str | None
-    ):
-        refs = ray.get(buffer.payload_refs.remote(batch_id, indices))
-        store = MemoryPayloads() if object_store_root is None else ObjectStorePayloads(object_store_root)
-        return [group.uid for group in asyncio.run(store.fetch(refs))]
+async def test_batch_metadata_supports_worker_index_fetch(ray_module, start_buffer, payload_kind, read_kind, tmp_path):
+    def fetch_selected_uids(reader: RolloutReader, batch_id: int, indices: tuple[int, ...]):
+        return [group.uid for group in asyncio.run(reader.read(batch_id, indices))]
+
+    def share_selected(reader: RolloutReader, batch_id: int, indices: tuple[int, ...]):
+        return asyncio.run(reader.share(batch_id, indices))
+
+    def fetch_shared_uids(reader: RolloutReader, batch_id: int, indices: tuple[int, ...], references):
+        return [group.uid for group in asyncio.run(reader.read_shared(batch_id, indices, references))]
 
     store = MemoryPayloads() if payload_kind == "memory" else ObjectStorePayloads(str(tmp_path / "rollouts"))
     payloads = _CountingPayloads(store)
@@ -259,14 +266,30 @@ async def test_batch_metadata_supports_worker_index_fetch(ray_module, start_buff
         assert {group.uid for group in metadata.groups} == {"a", "b"}
         assert all(group.policy_step == 1 and group.sample_count == SAMPLES_PER_PROMPT for group in metadata.groups)
         assert all(group.response_tokens == SAMPLES_PER_PROMPT for group in metadata.groups)
+        for group in metadata.groups:
+            np.testing.assert_array_equal(group.row_facts.prompt_len, [1, 1])
+            np.testing.assert_array_equal(group.row_facts.response_len, [1, 1])
+            np.testing.assert_array_equal(group.row_facts.score, np.asarray([0.0, 1.0], dtype=np.float32))
+            np.testing.assert_array_equal(group.row_facts.loss_tokens, [1, 1])
         assert metadata.metrics["async/rejected_count"] == 0
 
-        fetch = ray.remote(fetch_selected_uids)
-        worker_uids = await asyncio.gather(
-            fetch.remote(context._buffer, metadata.batch_id, (1,), store.object_store_root),
-            fetch.remote(context._buffer, metadata.batch_id, (0,), store.object_store_root),
-        )
-        assert worker_uids == [[metadata.groups[1].uid], [metadata.groups[0].uid]]
+        reader = context.reader(metadata, stall_timeout=STALL_TIMEOUT)
+        if read_kind == "direct":
+            fetch = ray.remote(fetch_selected_uids)
+            worker_uids = await asyncio.gather(
+                fetch.remote(reader, metadata.batch_id, (1,)),
+                fetch.remote(reader, metadata.batch_id, (0,)),
+            )
+            assert worker_uids == [[metadata.groups[1].uid], [metadata.groups[0].uid]]
+        else:
+            share = ray.remote(share_selected)
+            fetch = ray.remote(fetch_shared_uids)
+            references = share.remote(reader, metadata.batch_id, (1, 0))
+            worker_uids = await asyncio.gather(
+                fetch.remote(reader, metadata.batch_id, (1, 0), references),
+                fetch.remote(reader, metadata.batch_id, (1, 0), references),
+            )
+            assert worker_uids == [[metadata.groups[1].uid, metadata.groups[0].uid]] * 2
         assert payloads.fetched == []
     finally:
         await context.close()

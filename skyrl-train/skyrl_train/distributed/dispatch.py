@@ -201,7 +201,7 @@ class MeshRank:
 
         This is the rank with (SP=0, TP=0, PP=pp_size-1)
 
-        Note: double check this for ETP > 1 (but this is not a typically used case)
+        These coordinates belong to the attention mesh, independently of expert parallelism.
         """
         return self.tp == 0 and self.pp == self.pp_size - 1 and self.sp == 0
 

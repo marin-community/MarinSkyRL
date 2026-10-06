@@ -116,6 +116,7 @@ Rollout Buffer Configuration
 
 .. code-block:: yaml
 
+    batch_builder: driver
     rollout_buffer:
       max_staleness_steps: 0
       batch_policy: full_batch
@@ -128,6 +129,23 @@ Rollout Buffer Configuration
 Rollout workers generate prompt groups under leases from a rollout buffer, and each training step trains on
 ``train_batch_size`` groups. See :doc:`../tutorials/fully_async` for the full design.
 
+- ``batch_builder``: ``driver`` (default) builds the training batch on the coordinator. ``worker`` lets policy
+  workers fetch admitted groups and build their contiguous DP slices with whole-batch padded widths.
+  Worker construction supports scalar rewards with ``rloo``, ``rloo_n``, and ``grpo``. It requires a batch
+  divisible by the policy DP size and rejects critic, reward KL, reference KL loss, FTPO, distillation,
+  trajectory selection, step-wise training, batch advantage normalization, and nonzero loop reward credit.
+  Single-credit token lists are supported scalar rewards. Worker returns keep optimization rewards and
+  original task outcomes bounded by row count; response-length metrics use admitted lengths.
+  Worker construction requires the base trainer; custom trainer subclasses use driver.
+  ``dump_data_batch`` is available with ``driver``. Router replay requires captured routes
+  and a resolved model expert count. ``generator.r3_transport`` affects driver construction;
+  worker construction keeps its batches on the policy workers.
+  Worker mismatch diagnostics report p99 and maximum; p95 and p999 are driver-only.
+  P99 uses a global histogram with 4,096 bins of width log(1.01), covering absolute log ratios up to about 40.8.
+  Within that range the upper-bin estimate is at most one bin above the exact p99; overflow uses the global maximum.
+  One actor per DP slice shares payload references with its TP, PP and CP replicas. For object storage,
+  that actor fetches compact groups once before publishing their references. A group split across DP slices
+  is read by each slice's owner.
 - ``rollout_buffer.max_staleness_steps``: How many policy steps may separate the step at which a group was leased
   from the step that trains on it. ``0`` is synchronous on-policy training and is required when ``placement.colocate_all=true``.
   A positive value lets generation run ahead of training.

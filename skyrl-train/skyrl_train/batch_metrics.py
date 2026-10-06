@@ -1,4 +1,5 @@
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+import math
 from typing import Literal
 
 import torch
@@ -14,6 +15,7 @@ from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.utils.advantage_estimators import GRPO_FLAT_REWARD_STD_TOLERANCE
 from skyrl_train.utils.importance_ratio_diagnostics import (
     exact_ratio_statistics,
+    histogram_ratio_statistics,
     mismatch_ratio_metrics,
 )
 
@@ -35,6 +37,38 @@ class LocalReduction:
 
     def ratios(self, delta: Tensor, *, eps_clip_low: float, eps_clip_high: float) -> dict[str, float]:
         return exact_ratio_statistics(delta, eps_clip_low=eps_clip_low, eps_clip_high=eps_clip_high)
+
+
+class WorldReduction:
+    """Count one contribution per ordinary DP slice in world-wide diagnostics."""
+
+    def __init__(self, all_reduce: Callable, contributes: bool):
+        self.all_reduce = all_reduce
+        self.contributes = contributes
+
+    def combine(self, values: Tensor, operation: Literal["sum", "max"]) -> Tensor:
+        values = values.clone()
+        if not self.contributes:
+            values.fill_(0 if operation == "sum" else -math.inf)
+        return self.all_reduce(values, operation)
+
+    def sum(self, values: Tensor) -> Tensor:
+        return self.combine(values.double().sum(), "sum")
+
+    def mean(self, values: Tensor) -> float:
+        totals = torch.stack([values.new_tensor(values.numel(), dtype=torch.float64), values.double().sum()])
+        count, total = self.combine(totals, "sum").tolist()
+        return total / count if count else math.nan
+
+    def std(self, values: Tensor) -> float:
+        values = values.double()
+        moments = torch.stack([values.new_tensor(values.numel()), values.sum(), values.square().sum()])
+        count, total, squared = self.combine(moments, "sum").tolist()
+        variance = (squared - total * total / count) / (count - 1) if count > 1 else math.nan
+        return math.sqrt(max(variance, 0.0))
+
+    def ratios(self, delta: Tensor, *, eps_clip_low: float, eps_clip_high: float) -> dict[str, float]:
+        return histogram_ratio_statistics(delta, reduction=self, eps_clip_low=eps_clip_low, eps_clip_high=eps_clip_high)
 
 
 def consumed_work(batch: TrainingInputBatch) -> ConsumedWork:

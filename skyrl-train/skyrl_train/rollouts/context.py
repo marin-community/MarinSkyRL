@@ -115,6 +115,20 @@ class RolloutReader:
             groups = await self.payloads.fetch(refs)
         return self._validate(indices, groups)
 
+    async def share(self, batch_id: int, indices: tuple[int, ...]) -> tuple[ray.ObjectRef, ...]:
+        """Share existing memory references or publish object-store groups on the calling actor."""
+        async with self._read_timeout(batch_id, indices):
+            refs = await self.buffer.payload_refs.remote(batch_id, indices)
+            return await self.payloads.shared_refs(refs)
+
+    async def read_shared(
+        self, batch_id: int, indices: tuple[int, ...], references: tuple[ray.ObjectRef, ...]
+    ) -> list[RolloutGroup]:
+        """Resolve shared group references with the same checks as a direct store read."""
+        async with self._read_timeout(batch_id, indices):
+            groups = list(await asyncio.gather(*references))
+        return self._validate(indices, groups)
+
     @asynccontextmanager
     async def _read_timeout(self, batch_id: int, indices: tuple[int, ...]) -> AsyncIterator[None]:
         try:
@@ -308,6 +322,10 @@ class TrainingContext:
     ) -> list[RolloutGroup]:
         reader = RolloutReader(self._buffer, self._payloads, selected, stall_timeout)
         return await self.wait(reader.read(batch_id, tuple(group.index for group in selected)))
+
+    def reader(self, metadata: RolloutBatchMetadata, *, stall_timeout: float) -> RolloutReader:
+        """Construct a picklable reader for the admitted groups in this batch."""
+        return RolloutReader(self._buffer, self._payloads, metadata.groups, stall_timeout)
 
     async def next_batch_metadata(
         self,

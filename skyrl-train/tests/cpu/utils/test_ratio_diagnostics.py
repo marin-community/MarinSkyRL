@@ -6,14 +6,18 @@ import numpy
 import pytest
 import torch
 
-from skyrl_train.batch_metrics import LocalReduction
+from skyrl_train.batch_metrics import LocalReduction, WorldReduction
 from skyrl_train.utils.importance_ratio_diagnostics import (
+    MISMATCH_RATIO_HISTOGRAM_LOG_WIDTH,
     LogRatioMonitor,
     linear_quantiles,
     mismatch_ratio_metrics,
     exact_ratio_statistics,
     gather_ratio_tensor,
 )
+from skyrl_train.config.objective_spec import load_correction
+from skyrl_train.objective.correction import compute_correction
+from tests.cpu.tiny_training.cpu_backend import CPUStrategy
 
 
 def test_ratio_statistics_match_hand_values_and_clamp_only_exponentials():
@@ -156,6 +160,80 @@ def _distributed_ratio_worker(rank, directory):
         if rank == 1:
             monitor._failed = True
         failed = monitor.metrics(gather_fn=gather_ratio_tensor)
+        strategy = CPUStrategy(max_grad_norm=1.0)
+        learner = torch.tensor(
+            [
+                [-0.9, -0.1, -2.0, 0.8, 0.3, -3.0, 0.0],
+                [-0.5, -1.1, -3.0, -1.2, 0.4, 0.7, 0.0],
+                [-0.6, 0.4, -0.8, -1.0, -0.3, 0.9, 0.0],
+                [15.0, -1.0, -0.3, -1.1, 0.5, 0.3, -0.2],
+                [-3.0, -0.2, -0.8, -1.0, -2.0, -0.3, -0.1],
+                [-0.9, -1.3, -0.2, -0.1, -2.0, -2.0, -1.0],
+            ]
+        )
+        rollout = torch.full_like(learner, -1.5)
+        mask = torch.arange(7)[None, :] < torch.tensor([1, 2, 3, 7, 4, 5])[:, None]
+        learner[~mask] = rollout[~mask] = math.nan
+        staleness = torch.tensor([0, 0, 0, 1, 3, 8])
+        for mode in ("uneven", "all_stale", "empty", "nonfinite", "replica", "overflow", "large_finite"):
+            current = learner.clone()
+            behavior = rollout
+            current_mask = torch.zeros_like(mask) if mode == "empty" else mask
+            ages = torch.full_like(staleness, 2) if mode == "all_stale" else staleness
+            if mode == "nonfinite":
+                current[0, 0] = math.inf
+            if mode == "overflow":
+                current = torch.full((2, 100), 50.0)
+                current[-1, -1] = 100.0
+                behavior, current_mask, ages = torch.zeros_like(current), torch.ones_like(current), torch.zeros(2)
+            if mode == "large_finite":
+                current = torch.full((2, 100), 1e18, dtype=torch.float64)
+                behavior, current_mask, ages = torch.zeros_like(current), torch.ones_like(current), torch.zeros(2)
+            rows = (
+                slice(None)
+                if mode == "replica"
+                else slice(rank * (len(current) // 2), (rank + 1) * (len(current) // 2))
+            )
+            contributes = mode != "replica" or rank == 0
+            if mode not in ("nonfinite", "overflow", "large_finite"):
+                reference = compute_correction(
+                    current, behavior, current_mask, load_correction("tis"), reduction=LocalReduction()
+                )
+                correction = compute_correction(
+                    current[rows],
+                    behavior[rows],
+                    current_mask[rows],
+                    load_correction("tis"),
+                    reduction=WorldReduction(strategy.all_reduce, contributes=contributes),
+                )
+                torch.testing.assert_close(correction.weights, reference.weights[rows], rtol=0, atol=0)
+                assert correction.metrics == pytest.approx(reference.metrics, abs=1e-6)
+            reference = mismatch_ratio_metrics(current, behavior, current_mask, ages, reduction=LocalReduction())
+            reduced = mismatch_ratio_metrics(
+                current[rows],
+                behavior[rows],
+                current_mask[rows],
+                ages[rows],
+                reduction=WorldReduction(strategy.all_reduce, contributes=contributes),
+            )
+            assert reduced.keys() == {
+                key for key in reference if not key.endswith(("log_ratio_abs_p95", "log_ratio_abs_p999"))
+            }
+            for key, actual in reduced.items():
+                if key.endswith("log_ratio_abs_p99"):
+                    if mode in ("overflow", "large_finite"):
+                        assert actual == reference[key.replace("_p99", "_max")]
+                    else:
+                        assert reference[key] <= actual + 1e-9
+                        assert actual - reference[key] <= MISMATCH_RATIO_HISTOGRAM_LOG_WIDTH + 1e-9
+                else:
+                    assert actual == pytest.approx(reference[key], abs=1e-9, rel=1e-12), (
+                        mode,
+                        rank,
+                        key,
+                        actual,
+                        reference[key],
+                    )
         Path(directory, f"rank{rank}.json").write_text(json.dumps({"pooled": pooled, "failed": failed}))
     finally:
         torch.distributed.destroy_process_group()

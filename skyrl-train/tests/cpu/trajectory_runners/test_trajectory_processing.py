@@ -16,6 +16,8 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     TitoFullDeclineReason,
     apply_overlong_filtering,
     concatenate_trajectory_batches,
+    batch_fields,
+    observe_rollout_groups,
     encode_messages_subset,
     get_generation_prompt_ids,
     get_response_ids_and_loss_mask_from_messages,
@@ -25,6 +27,8 @@ from skyrl_train.trajectory_runners.rollout_metrics import (
     get_metrics_from_trajectory_batch,
     get_rollout_metrics,
 )
+
+from skyrl_train.trajectory_runners.rollout_metrics import merge_rollout_observations, rollout_metrics
 
 QWEN2_5 = "Qwen/Qwen2.5-0.5B-Instruct"
 QWEN3 = "Qwen/Qwen3-0.6B"
@@ -405,7 +409,8 @@ def test_unaligned_logprob_alert_survives_concatenation():
     assert merged["rollout_metrics"]["generate/tis/alignment_alert"] == 1.0
 
 
-def test_full_tito_and_literal_bridge_metrics_survive_concatenation():
+@pytest.mark.parametrize("compact_groups", [False, True])
+def test_full_tito_and_literal_bridge_metrics_survive_concatenation(compact_groups):
     groups = [_generated_group(1, 0), _generated_group(1, 0)]
     first = AlignmentStats()
     first.n_tokens = 5
@@ -432,13 +437,19 @@ def test_full_tito_and_literal_bridge_metrics_survive_concatenation():
 
     merged = concatenate_trajectory_batches(groups, tis_lcs_alert_threshold=0.005)
 
-    assert merged["rollout_metrics"]["generate/tis/tito_full/attempts"] == 2.0
-    assert merged["rollout_metrics"]["generate/tis/tito_full/success_fraction"] == 0.5
-    assert merged["rollout_metrics"]["generate/tis/tito_full/decline_count"] == 1.0
-    assert merged["rollout_metrics"]["generate/tis/tito_full/decline/prefix_mismatch"] == 1.0
-    assert merged["rollout_metrics"]["generate/tis/alignment_alert"] == 1.0
-    assert merged["rollout_metrics"]["generate/literal_bridge/correlated_trials"] == 2.0
-    assert merged["rollout_metrics"]["generate/literal_bridge/correlated_turns"] == 5.0
+    metrics = merged["rollout_metrics"]
+    if compact_groups:
+        fields = batch_fields(groups)
+        observations = merge_rollout_observations([observe_rollout_groups([group], fields=fields) for group in groups])
+        metrics = rollout_metrics(observations, tis_lcs_alert_threshold=0.005)
+
+    assert metrics["generate/tis/tito_full/attempts"] == 2.0
+    assert metrics["generate/tis/tito_full/success_fraction"] == 0.5
+    assert metrics["generate/tis/tito_full/decline_count"] == 1.0
+    assert metrics["generate/tis/tito_full/decline/prefix_mismatch"] == 1.0
+    assert metrics["generate/tis/alignment_alert"] == 1.0
+    assert metrics["generate/literal_bridge/correlated_trials"] == 2.0
+    assert metrics["generate/literal_bridge/correlated_turns"] == 5.0
 
 
 def test_identity_aware_reward_metrics_survive_concatenation():
