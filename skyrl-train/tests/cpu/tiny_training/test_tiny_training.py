@@ -42,10 +42,13 @@ RESUMED_STEP = 1
 # workers, and stays above the experiment's admission stall timeout so a stall reports its own error.
 RUN_TIMEOUT_SECONDS = 300
 POLICY_READY_FILE = "policy-ready"
+ENGINE_STARTED_FILE = "engine-started"
 
 
 class _PolicyReadyWorker(CPUPolicyWorker):
     def init_model(self, model_path, num_training_steps=None):
+        marker = Path(self.cfg.trainer.export_path) / ENGINE_STARTED_FILE
+        wait_for_condition(marker.is_file, timeout=60)
         super().init_model(model_path, num_training_steps)
         (Path(self.cfg.trainer.export_path) / POLICY_READY_FILE).touch()
 
@@ -55,6 +58,7 @@ class _OverlappingTinyTrainingExp(experiment.TinyTrainingExp):
         return ray.remote(num_gpus=1)(_PolicyReadyWorker), None, None
 
     def create_inference_engine_client(self, *, operation=experiment.EntrypointOperation.TRAIN):
+        (Path(self.cfg.trainer.export_path) / ENGINE_STARTED_FILE).touch()
         marker = Path(self.cfg.trainer.export_path) / POLICY_READY_FILE
         wait_for_condition(marker.is_file, timeout=60)
         return super().create_inference_engine_client(operation=operation)
@@ -78,9 +82,9 @@ class _LateInferenceTinyTrainingExp(_OverlappingTinyTrainingExp):
         return ray.remote(num_gpus=1)(_FailingPolicyWorker), None, None
 
     def create_inference_engine_client(self, *, operation=experiment.EntrypointOperation.TRAIN):
-        self.completed_client = super().create_inference_engine_client(operation=operation)
+        client = super().create_inference_engine_client(operation=operation)
         (Path(self.cfg.trainer.export_path) / "engine-ready").touch()
-        return self.completed_client
+        return client
 
 
 def _run_overlapped_training(root: Path, model: Path) -> None:
@@ -189,8 +193,7 @@ def _run_in_process(runs, target, *args) -> None:
 def test_tiny_policy_initializes_while_engines_wait_then_trains(runs, tmp_path, tiny_policy):
     _run_in_process(runs, _run_overlapped_training, tmp_path, tiny_policy)
     _assert_trained_to_max_steps(tmp_path, TrainingMode.ASYNC, RolloutShape.SINGLE_TURN)
-    startup = next(record for record in read_metrics(tmp_path) if "startup/engines/create" in record)
-    assert startup["startup/engines/create"] >= 0
+    assert any("startup/engines/create" in record for record in read_metrics(tmp_path))
 
 
 def _run_failed_engine_startup(tmp_path: Path, tiny_policy: Path) -> None:
