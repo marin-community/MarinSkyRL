@@ -381,16 +381,19 @@ def test_generate_batched_routing_and_order_preservation(num_prompts, with_sessi
             responses = []
             response_ids = []
             stop_reasons = []
+            routed_experts = []
             for ids in prompt_token_ids:
                 # construct a deterministic text and token output based on first id
                 base = ids[0]
                 responses.append(f"{base}{base}")
                 response_ids.append([base, base])
                 stop_reasons.append("stop")
+                routed_experts.append([[[base, base + 1]], [[base + 2, base + 3]]])
             return {
                 "responses": responses,
                 "response_ids": response_ids,
                 "stop_reasons": stop_reasons,
+                "routed_experts": routed_experts,
             }
 
     cfg = _make_min_cfg()
@@ -421,6 +424,7 @@ def test_generate_batched_routing_and_order_preservation(num_prompts, with_sessi
         assert out["responses"][i] == expected_texts[i]
         assert out["response_ids"][i] == [i, i]
         assert out["stop_reasons"][i] == "stop"
+        np.testing.assert_array_equal(out["routed_experts"][i], [[[i, i + 1]], [[i + 2, i + 3]]])
     if session_ids is not None:
         observed = [session_id for engine in engines for batch in engine.inputs for session_id in batch["session_ids"]]
         assert sorted(observed) == sorted(session_ids)
@@ -754,7 +758,7 @@ async def test_chat_completion_retry_keeps_routes_across_interrupted_chunks(drop
     assert engine.requests[1]["json"]["_skyrl_exact_prompt_token_ids"] == [1, 2, 11, 12]
     np.testing.assert_array_equal(
         normalize_routed_experts(choice["routed_experts"], response["prompt_token_ids"], choice["token_ids"]),
-        [[[3]], [[4]], [[0]]],
+        [[[2]], [[3]], [[4]]],
     )
 
 
@@ -949,8 +953,9 @@ def vllm_sampling_params() -> dict:
 
 
 @pytest.mark.parametrize("max_tokens_key", ["max_tokens", "max_completion_tokens"])
+@pytest.mark.parametrize("expert_offset", [0, 256], ids=["uint8-routes", "retry-crosses-uint8-limit"])
 @pytest.mark.asyncio
-async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key, tokenizer, vllm_sampling_params):
+async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key, expert_offset, tokenizer, vllm_sampling_params):
     """
     Test that generate() with retry logic properly accumulates tokens and adjusts subsequent requests.
 
@@ -972,6 +977,7 @@ async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key, tokenizer, 
                     response_ids=[[21, 22]],
                     stop_reasons=["abort"],
                     response_logprobs=[[-0.1, -0.2]],
+                    routed_experts=[[[[3, 4]], [[5, 6]]]],
                 ),
                 # 2) abort with 0 tokens (should be ignored)
                 InferenceEngineOutput(
@@ -986,6 +992,7 @@ async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key, tokenizer, 
                     response_ids=[[23, 24]],
                     stop_reasons=["stop"],
                     response_logprobs=[[-0.3, -0.4]],
+                    routed_experts=[np.array([[[7, 8]], [[9, 10]]], dtype=np.uint16) + expert_offset],
                 ),
             ]
 
@@ -1035,6 +1042,11 @@ async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key, tokenizer, 
     assert out["response_ids"] == [expected_final_response_ids]
     assert out["stop_reasons"] == ["stop"]
     assert out["response_logprobs"] == [[-0.1, -0.2, -0.3, -0.4]]
+    np.testing.assert_array_equal(
+        out["routed_experts"][0],
+        [[[3, 4]], [[5, 6]], [[7 + expert_offset, 8 + expert_offset]], [[9 + expert_offset, 10 + expert_offset]]],
+    )
+    assert out["routed_experts"][0].dtype == (np.uint16 if expert_offset else np.uint8)
 
 
 @pytest.mark.asyncio
