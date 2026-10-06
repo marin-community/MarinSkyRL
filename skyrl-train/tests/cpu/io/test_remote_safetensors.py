@@ -9,9 +9,14 @@ from s3fs import S3FileSystem
 import torch
 
 from cloud.iris.hf_model_cache import stage_model_metadata
-from marinskyrl.model_manifest import snapshot_model_manifest
+from marinskyrl.model_manifest import _HEADER_READ_CHUNK_BYTES, snapshot_model_manifest
 from skyrl_train.io import io
-from skyrl_train.io.remote_safetensors import RemoteSafetensorsTensorStore, lazy_first_dim_patterns_for_bridge
+import skyrl_train.io.remote_safetensors as remote_safetensors
+from skyrl_train.io.remote_safetensors import (
+    RemoteSafetensorsTensorStore,
+    lazy_first_dim_patterns_for_bridge,
+    prefetch_items_from_tasks,
+)
 
 
 class CountingBufferedFile(AbstractBufferedFile):
@@ -26,25 +31,33 @@ class CountingFileSystem(AbstractFileSystem):
     protocol = "s3"
     cachable = False
 
-    def __init__(self, payload: bytes, **kwargs):
+    def __init__(self, payload: bytes, shards: dict[str, bytes] | None = None, **kwargs):
         super().__init__(**kwargs)
         self.payload = payload
+        self.shards = shards or {}
         self.opens = 0
         self.reads = 0
         self.bytes_read = 0
         self.fetched_bytes = 0
+        self.gets = 0
 
     def info(self, path, **kwargs):
-        return {"name": path, "type": "file", "size": len(self.payload)}
+        return {"name": path, "type": "file", "size": len(self.shards.get(path, self.payload))}
 
     def _open(self, path, mode="rb", block_size=None, cache_type="readahead", **kwargs):
         self.opens += 1
         return CountingBufferedFile(
-            self, path, mode, block_size=S3FileSystem.default_block_size, cache_type=cache_type, size=len(self.payload)
+            self,
+            path,
+            mode,
+            block_size=S3FileSystem.default_block_size,
+            cache_type=cache_type,
+            size=len(self.shards.get(path, self.payload)),
         )
 
     def cat_file(self, path, start=None, end=None, **kwargs):
-        payload = self.payload[start:end]
+        self.gets += 1
+        payload = self.shards.get(path, self.payload)[start:end]
         self.fetched_bytes += len(payload)
         return payload
 
@@ -52,6 +65,139 @@ class CountingFileSystem(AbstractFileSystem):
 def _write_index(metadata_dir: Path, weight_map: dict[str, str]) -> None:
     metadata_dir.mkdir()
     (metadata_dir / "model.safetensors.index.json").write_text(json.dumps({"weight_map": weight_map}))
+
+
+@pytest.mark.parametrize(
+    "header_metadata_bytes", [0, _HEADER_READ_CHUNK_BYTES + 1024**2], ids=["small-header", "multi-read-header"]
+)
+def test_conversion_task_prefetch_preserves_rank_owned_tensors_and_reduces_range_fetches(
+    tmp_path, monkeypatch, header_metadata_bytes
+):
+    tensors = {f"dense.{index}": torch.arange(8, dtype=torch.float32) + index for index in range(24)}
+    tensors["dense.1"] = tensors["dense.1"].to(torch.bfloat16)
+    tensors["experts"] = torch.arange(24, dtype=torch.bfloat16).reshape(3, 8)
+    tensors["outside"] = torch.arange(8, dtype=torch.float32)
+    shards = {}
+    for name in ("a.safetensors", "b.safetensors"):
+        shard = tmp_path / name
+        save_file(
+            {key: value for key, value in tensors.items() if key.startswith("dense.") == (name == "a.safetensors")},
+            shard,
+            metadata={"annotation": "x" * header_metadata_bytes},
+        )
+        shards[f"bucket/policy/{name}"] = shard.read_bytes()
+    metadata = tmp_path / "metadata"
+    _write_index(metadata, {key: "a.safetensors" if key.startswith("dense.") else "b.safetensors" for key in tensors})
+    tasks = [
+        SimpleNamespace(
+            megatron_module=object(),
+            mapping=SimpleNamespace(
+                hf_param={"left": f"dense.{index}", "right": f"dense.{index + 1}"}, megatron_param="dense"
+            ),
+        )
+        for index in range(0, 24, 2)
+    ]
+    tasks += [
+        SimpleNamespace(
+            megatron_module=object(), mapping=SimpleNamespace(hf_param="experts", megatron_param=str(index))
+        )
+        for index in (2, 0)
+    ]
+    tasks += [
+        SimpleNamespace(megatron_module=None, mapping=SimpleNamespace(hf_param="outside", megatron_param="other_pp")),
+        SimpleNamespace(
+            megatron_module=object(), mapping=SimpleNamespace(hf_param="synthesized", megatron_param="synthesized")
+        ),
+        tasks[0],
+    ]
+    results = []
+    for prefetched in (False, True):
+        filesystem = CountingFileSystem(b"", shards=shards)
+        monkeypatch.setattr(io, "_get_filesystem", lambda path: filesystem)
+        store = RemoteSafetensorsTensorStore("s3://bucket/policy", metadata, lazy_first_dim_patterns=("experts",))
+        if prefetched:
+            store.plan_prefetch(prefetch_items_from_tasks(tasks, {"experts"}, int))
+        for index in range(24):
+            value = store.load_tensors([f"dense.{index}"])[f"dense.{index}"]
+            assert torch.equal(value, tensors[f"dense.{index}"])
+            assert value.dtype == tensors[f"dense.{index}"].dtype
+        experts = store.load_tensors(["experts"])["experts"]
+        for index in (-1, 0):
+            assert torch.equal(experts[index], tensors["experts"][index])
+        store.close()
+        assert store.read_stats.prefetch_misses == store.read_stats.prefetch_unused == 0
+        assert store.read_stats.gets == filesystem.gets
+        results.append((store.read_stats.bytes_read, filesystem.gets))
+    assert results[0][0] == results[1][0]
+    assert results[1][1] < results[0][1]
+
+
+def test_prefetch_large_tensors_split_ranges_and_keep_windows_bounded(tmp_path, monkeypatch):
+    tensor_bytes = remote_safetensors._PREFETCH_MAX_BLOCK + 1024**2
+    tensors = {str(index): torch.full((tensor_bytes,), index, dtype=torch.uint8) for index in range(3)}
+    shard = tmp_path / "model.safetensors"
+    save_file(tensors, shard)
+    metadata = tmp_path / "metadata"
+    _write_index(metadata, {key: shard.name for key in tensors})
+    filesystem = CountingFileSystem(shard.read_bytes())
+    monkeypatch.setattr(io, "_get_filesystem", lambda path: filesystem)
+    monkeypatch.setattr(remote_safetensors, "_PREFETCH_WINDOW_BYTES", 140 * 1024**2)
+    cat_ranges = filesystem.cat_ranges
+
+    def bounded_ranges(paths, starts, ends, **kwargs):
+        sizes = [end - start for start, end in zip(starts, ends, strict=True)]
+        assert sum(sizes) <= 140 * 1024**2
+        assert max(sizes) <= remote_safetensors._PREFETCH_MAX_BLOCK
+        return cat_ranges(paths, starts, ends, **kwargs)
+
+    monkeypatch.setattr(filesystem, "cat_ranges", bounded_ranges)
+    store = RemoteSafetensorsTensorStore("s3://bucket/policy", metadata)
+    store.plan_prefetch((key, None) for key in tensors)
+    try:
+        for key, tensor in tensors.items():
+            assert torch.equal(store.load_tensors([key])[key], tensor)
+    finally:
+        store.close()
+    assert store.read_stats.prefetch_misses == store.read_stats.prefetch_unused == 0
+
+
+@pytest.mark.parametrize("failure", [False, True], ids=["fallback", "range-error"])
+def test_prefetch_unplanned_key_reads_through_and_range_errors_propagate(tmp_path, monkeypatch, failure):
+    shard = tmp_path / "model.safetensors"
+    tensors = {
+        "planned": torch.arange(8, dtype=torch.float32),
+        "outside": torch.arange(8, dtype=torch.float32) + 10,
+        "oversized": torch.arange(16, dtype=torch.float32),
+        "later": torch.arange(8, dtype=torch.float32) + 20,
+    }
+    save_file(tensors, shard)
+    metadata = tmp_path / "metadata"
+    _write_index(metadata, {key: shard.name for key in tensors})
+    filesystem = CountingFileSystem(shard.read_bytes())
+    monkeypatch.setattr(io, "_get_filesystem", lambda path: filesystem)
+    payload_budget = tensors["planned"].numel() * tensors["planned"].element_size()
+    monkeypatch.setattr(
+        remote_safetensors, "_PREFETCH_WINDOW_BYTES", remote_safetensors._PREFETCH_MAX_GAP + payload_budget
+    )
+    store = RemoteSafetensorsTensorStore("s3://bucket/policy", metadata)
+    store.plan_prefetch([("planned", None), ("oversized", None), ("later", None)])
+    try:
+        if failure:
+            monkeypatch.setattr(
+                filesystem, "cat_ranges", lambda *args, **kwargs: [RuntimeError("object-store range failed")]
+            )
+            with pytest.raises(RuntimeError, match="object-store range failed"):
+                store.load_tensors(["planned"])
+        else:
+            assert torch.equal(store.load_tensors(["outside"])["outside"], tensors["outside"])
+            assert torch.equal(store.load_tensors(["planned"])["planned"], tensors["planned"])
+            assert torch.equal(store.load_tensors(["oversized"])["oversized"], tensors["oversized"])
+            assert torch.equal(store.load_tensors(["later"])["later"], tensors["later"])
+            assert store.read_stats.prefetch_misses == 2
+    finally:
+        store.close()
+    if not failure:
+        assert store.read_stats.prefetch_unused == 0
 
 
 @pytest.mark.parametrize("indexed", [True, False])
