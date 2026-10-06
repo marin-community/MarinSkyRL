@@ -1193,6 +1193,9 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
 
     # TODO: this can be removed if we standardize on env files.
     # But it's helpful for a quickstart
+    if os.environ.get("OPENROUTER_API_KEY"):
+        env_vars["OPENROUTER_API_KEY"] = os.environ["OPENROUTER_API_KEY"]
+
     if os.environ.get("WANDB_API_KEY"):
         logger.info("Exporting wandb api key to ray runtime env")
         env_vars["WANDB_API_KEY"] = os.environ["WANDB_API_KEY"]

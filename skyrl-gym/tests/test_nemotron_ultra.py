@@ -33,7 +33,7 @@ from skyrl_gym.envs.nemotron_ultra.nvarc import grade_inductive_arc, grade_trans
 from skyrl_gym.envs.nemotron_ultra.ns_tools import execute_python_calls
 from skyrl_gym.envs.nemotron_ultra.rdkit_chemistry import grade_rdkit_chemistry
 from skyrl_gym.envs.nemotron_ultra.structured_outputs import grade_structured_output
-from skyrl_gym.envs.nemotron_ultra.tool_call import grade_expected_action
+from skyrl_gym.envs.nemotron_ultra.tool_call import grade_expected_action, grade_pivot_verifiers
 from skyrl_gym.verification import RolloutEvidence, VerificationStatus
 
 
@@ -337,6 +337,110 @@ def test_tool_call_reward_accepts_any_text_when_a_message_is_expected():
 
     assert grade_expected_action(expected, {"content": "a different useful answer", "tool_calls": []})[0] == 1.0
     assert grade_expected_action(expected, {"content": None, "tool_calls": [{"function": {}}]})[0] == 0.0
+
+
+@pytest.mark.parametrize("call_names", [[], ["search", "search"], ["browse", "search"], ["search", "browse"]])
+def test_single_action_pilot_rejects_missing_or_extra_calls(call_names):
+    expected = {"type": "function_call", "name": "search", "arguments": '{"query":"q"}'}
+    calls = [{"function": {"name": name, "arguments": expected["arguments"]}} for name in call_names]
+
+    grades = grade_pivot_verifiers(expected, {"content": None, "tool_calls": calls})
+
+    assert grades["scores"] == {"tool_name": 0.0, "nemo": 0.0, "exact": 0.0}
+    assert grades["tool_call_count"] == len(call_names)
+
+
+def test_single_action_pilot_keeps_name_and_argument_rewards_distinct():
+    expected = {"type": "function_call", "name": "search", "arguments": '{"query":"q"}'}
+    matching = {"content": None, "tool_calls": [{"function": {"name": "search", "arguments": '{"query":"q"}'}}]}
+    malformed = {"content": None, "tool_calls": [{"function": {"name": "search", "arguments": "{"}}]}
+
+    assert grade_pivot_verifiers(expected, matching)["scores"] == {"tool_name": 1.0, "nemo": 1.0, "exact": 1.0}
+    assert grade_pivot_verifiers(expected, malformed)["scores"] == {"tool_name": 1.0, "nemo": 0.0, "exact": 0.0}
+
+
+@pytest.mark.parametrize(
+    "stop_reason, reward",
+    [("stop", 1.0), ("tool_calls", 1.0), ("length", 0.0), ("abort", 0.0), ("error", 0.0), ("unknown", 0.0)],
+)
+def test_terminal_completed_action_gate_rejects_unfinished_matching_json(stop_reason, reward):
+    action = json.dumps({"analysis": "", "plan": "", "commands": [{"keystrokes": "pwd"}, {"keystrokes": "ls"}]})
+    env = _ultra_env(
+        "terminus_judge_string_only_simple_agent",
+        {"require_completed_action": True},
+        {"metadata": {"harness": "terminus_2"}, "expected_answer": action},
+    )
+    env.set_rollout_evidence(RolloutEvidence(response=action, stop_reason=stop_reason, generated_token_count=1024))
+
+    result = env.step(action)
+
+    assert result["reward"] == reward
+    assert result["verification"].status is VerificationStatus.VERIFIED
+    assert result["verification"].score == reward
+    if reward == 0:
+        assert result["verification"].diagnostics["reason"] == "response_not_completed"
+
+
+def test_truncated_pilot_tool_call_has_zero_reward_and_zero_diagnostic_grades():
+    expected = {"type": "function_call", "name": "search", "arguments": '{"query":"q"}'}
+    env = _ultra_env(
+        "swe_pivot_single_step_tool_use_with_argument_comparison_agent",
+        {"require_completed_action": True, "pivot_reward": "tool_name", "pivot_arm": "rl_tool_name"},
+        {"expected_action": expected},
+    )
+    message = {"content": None, "tool_calls": [{"function": {"name": "search", "arguments": expected["arguments"]}}]}
+    env.set_rollout_evidence(
+        RolloutEvidence(response="", stop_reason="length", metadata={"assistant_message": message})
+    )
+
+    result = env.step("")
+
+    assert result["reward"] == 0.0
+    assert result["verification"].score == 0.0
+    assert result["verification"].diagnostics["pivot"]["scores"] == {"tool_name": 0.0, "nemo": 0.0, "exact": 0.0}
+
+
+@pytest.mark.parametrize(
+    "reward_name, expected_reward", [("schema_completion", 1.0), ("string_90", 0.0), ("exact_commands", 0.0)]
+)
+def test_terminal_pilot_selects_its_reward_and_retains_all_verifier_scores(reward_name, expected_reward):
+    reference = {"analysis": "", "plan": "", "commands": [{"keystrokes": "pwd"}]}
+    action = json.dumps({**reference, "commands": [{"keystrokes": "echo hello"}]})
+    env = _ultra_env(
+        "terminus_judge_string_only_simple_agent",
+        {"require_completed_action": True, "pivot_reward": reward_name, "pivot_arm": f"rl_{reward_name}"},
+        {"metadata": {"harness": "terminus_2"}, "expected_answer": json.dumps(reference)},
+    )
+    env.set_rollout_evidence(RolloutEvidence(response=action, stop_reason="stop"))
+
+    result = env.step(action)
+
+    assert result["reward"] == expected_reward
+    assert result["verification"].diagnostics["pivot"]["scores"] == {
+        "exact_commands": 0.0,
+        "string_90": 0.0,
+        "schema_completion": 1.0,
+    }
+
+
+def test_terminal_pilot_schema_reward_requires_reference_completion_flag():
+    reference = {"analysis": "", "plan": "", "commands": [], "task_complete": True}
+    action = json.dumps({**reference, "task_complete": False})
+    env = _ultra_env(
+        "terminus_judge_string_only_simple_agent",
+        {"require_completed_action": True, "pivot_reward": "schema_completion", "pivot_arm": "rl_schema_completion"},
+        {"metadata": {"harness": "terminus_2"}, "expected_answer": json.dumps(reference)},
+    )
+    env.set_rollout_evidence(RolloutEvidence(response=action, stop_reason="stop"))
+
+    result = env.step(action)
+
+    assert result["reward"] == 0.0
+    assert result["verification"].diagnostics["pivot"]["scores"] == {
+        "exact_commands": 0.0,
+        "string_90": 0.0,
+        "schema_completion": 0.0,
+    }
 
 
 def test_calendar_reward_checks_all_events_constraints_and_overlaps():
@@ -810,3 +914,64 @@ def test_nemotron_ultra_environment_is_registered():
         },
     )
     assert env.step("No calendar changes are needed.")["reward"] == 1.0
+
+
+def test_terminal_release_verifier_checks_commands_and_completion_in_one_turn():
+    expected = {
+        "analysis": "inspect",
+        "plan": "list files",
+        "commands": [{"keystrokes": "ls\n"}],
+        "task_complete": True,
+    }
+    record = {"metadata": {"harness": "terminus_2"}, "expected_answer": json.dumps(expected)}
+    for candidate, reward in (
+        ({**expected, "analysis": "different explanation"}, 1.0),
+        ({**expected, "task_complete": False}, 0.0),
+        ({**expected, "commands": [{"keystrokes": "rm -rf /tmp/other\n"}]}, 0.0),
+        ({**expected, "unexpected_key": True}, 0.0),
+    ):
+        env = _ultra_env("terminus_judge_string_only_simple_agent", {}, record)
+        result = env.step(json.dumps(candidate))
+        assert result["done"]
+        assert result["reward"] == reward
+        assert result["verification"].status == VerificationStatus.VERIFIED
+        env.close()
+
+
+@pytest.mark.parametrize("probability, expected_reward", [(0.9, 1.0), (0.1, 0.0)])
+def test_terminal_hybrid_rewards_semantic_equivalence_not_schema_alone(monkeypatch, probability, expected_reward):
+    monkeypatch.setenv("TERMINAL_TEST_KEY", "test")
+
+    def post(url, **kwargs):
+        response = requests.Response()
+        response.status_code = 200
+        response._content = json.dumps(
+            {"answers": {"equivalent": {"noul": probability}}, "usage": {"cost": 0.0001}}
+        ).encode()
+        return response
+
+    monkeypatch.setattr(requests, "post", post)
+    reference = {"analysis": "", "plan": "", "commands": [{"keystrokes": "pwd"}]}
+    action = json.dumps({**reference, "commands": [{"keystrokes": f"printf test-{probability}"}]})
+    env = _ultra_env(
+        "terminus_judge_string_only_simple_agent",
+        {
+            "require_completed_action": True,
+            "pivot_reward": "string_or_jev",
+            "pivot_arm": "rl_string_or_jev",
+            "terminal_judge": {
+                "base_url": "http://judge.invalid",
+                "model": "test",
+                "api_key_env": "TERMINAL_TEST_KEY",
+                "threshold": 0.5,
+            },
+        },
+        {"metadata": {"harness": "terminus_2"}, "expected_answer": json.dumps(reference)},
+    )
+    env.set_rollout_evidence(RolloutEvidence(response=action, stop_reason="stop"))
+    result = env.step(action)
+    assert result["reward"] == expected_reward
+    assert result["verification"].diagnostics["pivot"]["scores"]["string_90"] == 0.0
+    # Truncated generations cannot receive a semantic reward even when their JSON parses.
+    env.set_rollout_evidence(RolloutEvidence(response=action, stop_reason="length"))
+    assert env.step(action)["reward"] == 0.0

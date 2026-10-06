@@ -31,7 +31,9 @@ from skyrl_gym.envs.nemotron_ultra.ns_tools import execute_python_calls
 from skyrl_gym.envs.nemotron_ultra.rdkit_chemistry import grade_rdkit_chemistry
 from skyrl_gym.envs.nemotron_ultra.sandbox import SandboxClient
 from skyrl_gym.envs.nemotron_ultra.structured_outputs import grade_structured_output
-from skyrl_gym.envs.nemotron_ultra.tool_call import grade_expected_action
+from skyrl_gym.envs.nemotron_ultra.terminal import grade_terminal, grade_terminal_verifiers, TERMINAL_PIVOT_VERIFIERS
+from skyrl_gym.envs.nemotron_ultra.terminal_judge import TerminalJudge
+from skyrl_gym.envs.nemotron_ultra.tool_call import grade_expected_action, grade_pivot_verifiers, PIVOT_VERIFIERS
 from skyrl_gym.envs.reasoning_gym.scoring import extract_answer
 from skyrl_gym.verification import VERIFIER_RUNTIME_ERROR, RolloutEvidence, VerificationResult
 
@@ -93,6 +95,22 @@ class NemotronUltraEnv(BaseTextEnv):
         if ultra.get("route") != "skyrl_gym":
             raise ValueError("terminal-bench Nemotron Ultra rows must not execute in the SkyRL Gym environment")
         self.agent = str(ultra["agent"])
+        self.pivot_reward = env_config.get("pivot_reward")
+        self.pivot_arm = env_config.get("pivot_arm")
+        self.require_completed_action = env_config.get("require_completed_action", False)
+        terminal_judge = env_config.get("terminal_judge")
+        self.terminal_judge = (
+            TerminalJudge(**{key: value for key, value in terminal_judge.items() if key != "enabled"})
+            if terminal_judge is not None and terminal_judge.get("enabled", True)
+            else None
+        )
+        self.pivot_verifiers = (
+            TERMINAL_PIVOT_VERIFIERS if self.agent == "terminus_judge_string_only_simple_agent" else PIVOT_VERIFIERS
+        )
+        if self.agent == "terminus_judge_string_only_simple_agent" and self.terminal_judge is not None:
+            self.pivot_verifiers = (*self.pivot_verifiers, "string_or_jev")
+        if self.pivot_reward is not None and self.pivot_reward not in self.pivot_verifiers:
+            raise ValueError(f"Unknown pivot reward: {self.pivot_reward}")
         self.record = self._decode_mapping(ultra.get("record_json"), "record_json")
         self.request = self._decode_mapping(ultra.get("request_json"), "request_json")
         self.evidence: RolloutEvidence | None = None
@@ -224,6 +242,24 @@ class NemotronUltraEnv(BaseTextEnv):
     def _step(self, action: str) -> BaseTextEnvStepOutput:
         diagnostics: dict[str, Any] = {"agent": self.agent}
         self.turns += 1
+        if self.require_completed_action and self.grading is NemotronUltraGrading.VERIFY:
+            stop_reason = self.evidence.stop_reason if self.evidence is not None else "unknown"
+            diagnostics.update(completed_action=stop_reason in {"stop", "tool_calls"}, stop_reason=stop_reason)
+            if not diagnostics["completed_action"]:
+                diagnostics.update(reason="response_not_completed", graded=1.0, grading_action=action)
+                if self.pivot_reward is not None:
+                    diagnostics["pivot"] = {
+                        "scores": dict.fromkeys(self.pivot_verifiers, 0.0),
+                        "training_reward": self.pivot_reward if self.pivot_arm.startswith("rl_") else None,
+                        "training_arm": self.pivot_arm,
+                    }
+                return BaseTextEnvStepOutput(
+                    observations=[],
+                    reward=0.0,
+                    done=True,
+                    metadata=diagnostics,
+                    verification=VerificationResult.verified(0.0, passed=False, diagnostics=diagnostics),
+                )
         if self.agent == _NS_TOOLS_AGENT:
             tool_turn = self._ns_tools_turn(action, diagnostics)
             if tool_turn is not None:
@@ -260,14 +296,35 @@ class NemotronUltraEnv(BaseTextEnv):
                     verification=VerificationResult.unavailable("failed Lean attempt will be replaced by a correction"),
                     reset_conversation=[{"role": "user", "content": correction_prompt}],
                 )
+        elif self.agent == "terminus_judge_string_only_simple_agent":
+            if self.pivot_reward is None:
+                reward, details = grade_terminal(action, self.record)
+                diagnostics.update(details)
+            else:
+                grades = grade_terminal_verifiers(action, self.record, judge=self.terminal_judge)
+                diagnostics["pivot"] = {
+                    **grades,
+                    "training_reward": self.pivot_reward if self.pivot_arm.startswith("rl_") else None,
+                    "training_arm": self.pivot_arm,
+                }
+                reward = grades["scores"][self.pivot_reward]
         elif self.agent in _TOOL_COMPARISON_AGENTS:
-            comparator = grade_expected_action
-            if self.verifyit_enabled:
-                from skyrl_gym.envs.nemotron_ultra.tool_comparison_verifyit import grade_expected_action_verifyit
+            if self.pivot_reward is not None:
+                grades = grade_pivot_verifiers(self.record["expected_action"], self._assistant_message(action))
+                diagnostics["pivot"] = {
+                    **grades,
+                    "training_reward": self.pivot_reward if self.pivot_arm.startswith("rl_") else None,
+                    "training_arm": self.pivot_arm,
+                }
+                reward = grades["scores"][self.pivot_reward]
+            else:
+                comparator = grade_expected_action
+                if self.verifyit_enabled:
+                    from skyrl_gym.envs.nemotron_ultra.tool_comparison_verifyit import grade_expected_action_verifyit
 
-                comparator = grade_expected_action_verifyit
-            reward, category = comparator(self.record["expected_action"], self._assistant_message(action))
-            diagnostics["category"] = category.value
+                    comparator = grade_expected_action_verifyit
+                reward, category = comparator(self.record["expected_action"], self._assistant_message(action))
+                diagnostics["category"] = category.value
         elif self.agent == "calendar_simple_agent":
             calendar_scorer = grade_calendar
             if self.verifyit_enabled:
