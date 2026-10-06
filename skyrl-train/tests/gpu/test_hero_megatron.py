@@ -1,7 +1,10 @@
 """Hero architecture through the actual Megatron worker, with split-expert checkpoints."""
 
 import math
+import os
+import posixpath
 from pathlib import Path
+from uuid import uuid4
 
 from omegaconf import open_dict
 import pytest
@@ -11,7 +14,9 @@ from safetensors.torch import load_file, save_file
 from transformers import AutoTokenizer
 
 from skyrl_train.models.grug_moe import GrugMoeConfig
+from skyrl_train.io import io
 from skyrl_train.utils import initialize_ray
+from skyrl_train.utils.utils import validate_cfg
 from tests.gpu.grug_gpu_gates import require_hoppers
 from tests.gpu.grug_serving import rank0_validation_snapshot
 from tests.gpu.test_grug_megatron import (
@@ -91,27 +96,38 @@ def write_tiny_hero_checkpoint(path: Path):
 
 
 @pytest.mark.parametrize(
-    "tp,pp,ep,cp,packing,optimizer_offload",
+    "tp,pp,ep,cp,packing,optimizer_offload,muonh",
     [
-        (1, 1, 1, 1, False, None),
-        (1, 2, 1, 1, False, None),
-        (1, 1, 2, 1, True, None),
-        (1, 1, 1, 2, True, None),
-        (2, 1, 1, 1, True, None),
-        pytest.param(1, 1, 2, 1, True, 0.0, id="precision-aware-gpu"),
-        pytest.param(1, 1, 2, 1, True, 0.5, id="half-offloaded-adamw"),
-        pytest.param(1, 1, 2, 1, True, 1.0, id="cpu-adamw"),
+        (1, 1, 1, 1, False, None, False),
+        (1, 2, 1, 1, False, None, False),
+        (1, 1, 2, 1, True, None, False),
+        (1, 1, 1, 2, True, None, False),
+        (2, 1, 1, 1, True, None, False),
+        pytest.param(1, 1, 2, 1, True, 0.0, False, id="precision-aware-gpu"),
+        pytest.param(1, 1, 2, 1, True, 0.5, False, id="half-offloaded-adamw"),
+        pytest.param(1, 1, 2, 1, True, 1.0, False, id="cpu-adamw"),
+        pytest.param(1, 2, 2, 1, False, None, True, id="pp2-ep2-muonh-cpu-momentum"),
     ],
 )
-def test_hero_worker_repeated_updates(tmp_path, monkeypatch, tp, pp, ep, cp, packing, optimizer_offload):
-    world_size = max(tp, pp, ep, cp)
+def test_hero_worker_repeated_updates(tmp_path, monkeypatch, tp, pp, ep, cp, packing, optimizer_offload, muonh):
+    world_size = tp * pp * ep * cp
     require_hoppers(world_size)
+    checkpoint_prefix = os.environ.get("MARIN_TEMP_PREFIX", os.environ.get("MARIN_PREFIX", ""))
+    if not checkpoint_prefix.startswith("s3://"):
+        raise ValueError("Run the Hero checkpoint test on Iris with CoreWeave object storage configured")
+    checkpoint = posixpath.join(checkpoint_prefix, "tests", "hero-checkpoint", uuid4().hex)
     model_path = tmp_path / "model"
     model_path.mkdir()
     original = write_tiny_hero_checkpoint(model_path)
     cfg = _config(str(model_path), world_size=world_size, pp=pp, ep=ep)
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
     cfg.trainer.policy.megatron_config.context_parallel_size = cp
+    if muonh:
+        cfg.trainer.policy.optimizer_config.optimizer = "MuonH"
+        cfg.trainer.policy.optimizer_config.weight_decay = 0.0
+        cfg.trainer.policy.optimizer_config.adam_betas = [0.9, 0.95]
+        cfg.trainer.policy.optimizer_config.optimizer_kwargs = {"adam_lr": 2.0e-2, "offload_momentum": True}
+        cfg.trainer.policy.megatron_config.optimizer_checkpoint_sharding_type = "dp_reshardable"
     if optimizer_offload is not None:
         monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "0")
         cfg.trainer.flash_attn = True
@@ -129,9 +145,24 @@ def test_hero_worker_repeated_updates(tmp_path, monkeypatch, tp, pp, ep, cp, pac
     cfg.trainer.use_sample_packing = packing
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     batch = _padded_batch(tokenizer.pad_token_id, prompt_length=48, response_length=48, variable_lengths=True)
+    validate_cfg(cfg)
     initialize_ray(cfg)
     try:
         policy = _init_policy(cfg, world_size)
+        if muonh:
+            snapshots = ray.get(policy.async_run_ray_method("pass_through", "grug_optimizer_route_snapshot"))
+            routes = {name: route for snapshot in snapshots for name, route in snapshot["routes"].items()}
+            for name_fragment, expected_route in (
+                ("self_attention.linear_qkv.weight", "grug_muonh_qkv"),
+                ("mlp.experts.linear_fc1.weight", "grug_muonh_gate_up"),
+                ("output_layer.weight", "grug_adamh"),
+                ("self_attention.sconv_k.weight", "adam"),
+                ("mlp.router.weight", "adam"),
+            ):
+                assert any(name_fragment in name and route == expected_route for name, route in routes.items()), (
+                    name_fragment,
+                    expected_route,
+                )
         names = list(original)
         before = rank0_validation_snapshot(policy, names)
         for name in names:
@@ -170,7 +201,6 @@ def test_hero_worker_repeated_updates(tmp_path, monkeypatch, tp, pp, ep, cp, pac
         assert torch.isfinite(final_scores).all()
         assert not torch.equal(initial_scores, final_scores)
         batch["action_log_probs"] = (final_scores * batch["response_mask"]).float()
-        checkpoint = str(tmp_path / "checkpoint")
         ray.get(
             policy.async_run_ray_method("pass_through", "save_checkpoint", ckpt_dir=checkpoint, tokenizer=tokenizer)
         )
@@ -192,3 +222,5 @@ def test_hero_worker_repeated_updates(tmp_path, monkeypatch, tp, pp, ep, cp, pac
                 torch.testing.assert_close(resumed[name], expected[name], rtol=0, atol=0)
     finally:
         ray.shutdown()
+        if io.exists(checkpoint):
+            io.remove(checkpoint)
