@@ -10,8 +10,10 @@ import re
 from skyrl_train.weight_sync.expert_block.schedule import DenseSlice, WIRE_DTYPE_BYTES
 from skyrl_train.weight_sync.expert_block.source_views import ExpertSlice, LocalSources, dtype_name
 
-EXPERT_HF_NAME = re.compile(r"model\.layers\.(\d+)\.mlp\.experts\.(gate|up|down)_proj\.weight")
-SPLIT_EXPERT_HF_NAME = re.compile(r"model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.(gate|up|down)_proj\.weight")
+EXPERT_HF_NAME = re.compile(
+    r"model\.layers\.(?P<layer>\d+)\.mlp\.experts\."
+    r"(?:(?P<expert>\d+)\.)?(?P<part>gate|up|down)_proj\.weight"
+)
 EXPERT_SOURCE_KEY = re.compile(r"decoder\.layers\.(\d+)\.mlp\.experts\.linear_fc[12]\.weight(\d+)")
 EXPERT_MAPPINGS = ("GrugStackedExpertMapping", "GrugStackedGatedExpertMapping")
 WIRE_DTYPES = frozenset(WIRE_DTYPE_BYTES)
@@ -42,50 +44,43 @@ def local_source_slices(tasks, config, *, pp: int) -> LocalSources:
         # For an expert mapping, tp_size is the expert-tensor-parallel size.
         if mapping.tp_size != 1:
             raise ValueError(f"Parameter {key} is tensor-parallel; expert-block sync requires trainer TP=1 and ETP=1")
-        if kind in EXPERT_MAPPINGS:
-            match = re.search(r"\.weight(\d+)$", key)
-            if match is None or source.ndim != 2:
-                raise ValueError(f"Expert parameter {key} is not a single per-expert matrix")
-            expert_id = int(match.group(1))
-            if kind == "GrugStackedExpertMapping":
-                hf = EXPERT_HF_NAME.fullmatch(mapping.hf_param)
-                if hf is None or hf[2] != "down":
-                    raise ValueError(f"Expert slice {mapping.hf_param} is not a Grug down projection")
-                expert.append(ExpertSlice(int(hf[1]), expert_id, "down", key))
-            else:
-                if source.shape[0] % 2 or set(mapping.hf_param) != {"gate", "up"}:
-                    raise ValueError(f"Gated expert parameter {key} is not a complete [gate;up] matrix")
-                for part in ("gate", "up"):
-                    hf = EXPERT_HF_NAME.fullmatch(mapping.hf_param[part])
-                    if hf is None or hf[2] != part:
-                        raise ValueError(f"Expert slice {mapping.hf_param[part]} is not a Grug {part} projection")
-                    expert.append(ExpertSlice(int(hf[1]), expert_id, part, key))
-            continue
-
-        # Split expert artifacts use one HF tensor per expert. Megatron-Bridge
-        # maps them with generic GatedMLPMapping/AutoMapping rather than the
-        # stacked-expert classes above. At TP=ETP=1, each is a whole matrix.
-        if kind in ("GatedMLPMapping", "AutoMapping"):
-            names = [mapping.hf_param] if kind == "AutoMapping" else mapping.hf_param.values()
-            matches = [SPLIT_EXPERT_HF_NAME.fullmatch(name) for name in names]
-            if any(match is not None for match in matches):
-                if not all(match is not None for match in matches):
-                    raise ValueError(f"Split expert mapping for {key} has mixed HF tensors")
-                source_match = EXPERT_SOURCE_KEY.fullmatch(key)
-                if source_match is None or source.ndim != 2:
-                    raise ValueError(f"Split expert parameter {key} is not a single per-expert matrix")
-                expert_id = int(source_match[2])
-                layer = int(source_match[1])
-                expected_parts = {"down"} if kind == "AutoMapping" else {"gate", "up"}
-                if (
-                    {match[3] for match in matches} != expected_parts
-                    or any(int(match[1]) != layer or int(match[2]) != expert_id for match in matches)
-                    or (kind == "AutoMapping" and ".linear_fc2." not in key)
-                    or (kind == "GatedMLPMapping" and ".linear_fc1." not in key)
+        if kind in (*EXPERT_MAPPINGS, "GatedMLPMapping", "AutoMapping"):
+            gated = kind in ("GrugStackedGatedExpertMapping", "GatedMLPMapping")
+            names = mapping.hf_param if gated else {"down": mapping.hf_param}
+            matches = {part: EXPERT_HF_NAME.fullmatch(name) for part, name in names.items()}
+            stacked = kind in EXPERT_MAPPINGS
+            source_match = EXPERT_SOURCE_KEY.fullmatch(key)
+            # Recognize expert source keys so malformed HF names cannot become dense slices.
+            if (
+                stacked
+                or source_match is not None
+                or any(hf is not None and hf["expert"] is not None for hf in matches.values())
+            ):
+                expected_parts = {"gate", "up"} if gated else {"down"}
+                if set(names) != expected_parts or any(
+                    hf is None or hf["part"] != part or (hf["expert"] is None) != stacked
+                    for part, hf in matches.items()
+                ):
+                    raise ValueError(
+                        f"Expert mapping for {key} does not contain matching {sorted(expected_parts)} tensors"
+                    )
+                if stacked:
+                    source_match = re.search(r"\.weight(\d+)$", key)
+                if source_match is None or source.ndim != 2 or (gated and source.shape[0] % 2):
+                    raise ValueError(f"Expert parameter {key} is not a complete per-expert matrix")
+                # Model dimensions are checked by local_expert_sources for both schemas.
+                expert_id = int(source_match.groups()[-1])
+                if not stacked and (
+                    any(
+                        int(hf["layer"]) != int(source_match[1]) or int(hf["expert"]) != expert_id
+                        for hf in matches.values()
+                    )
+                    or (".linear_fc1." if gated else ".linear_fc2.") not in key
                 ):
                     raise ValueError(f"Split expert mapping for {key} disagrees with its HF tensors")
-                for part in sorted(expected_parts):
-                    expert.append(ExpertSlice(layer, expert_id, part, key))
+                expert.extend(
+                    ExpertSlice(int(hf["layer"]), expert_id, part, key) for part, hf in sorted(matches.items())
+                )
                 continue
 
         def add(name, hf_offset, numel, source_offset):

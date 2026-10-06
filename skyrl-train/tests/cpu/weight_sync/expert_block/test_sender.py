@@ -7,30 +7,31 @@ import torch
 
 from skyrl_train.weight_sync.expert_block.sender import ExpertBlockSender
 from skyrl_train.weight_sync.expert_block.stream import InstallReport
-from tests.cpu.weight_sync.expert_block.megatron_layout import mapping
+from tests.cpu.weight_sync.expert_block.megatron_layout import (
+    INTERMEDIATE,
+    NUM_EXPERTS,
+    PROVIDER,
+    conversion_tasks,
+    megatron_parameters,
+    megatron_shapes,
+)
 
 
 @pytest.fixture
 def inventoried_sender(monkeypatch):
     monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
-    prefix = "model.layers.0.mlp.experts.0"
-    tasks = [
-        SimpleNamespace(
-            global_param_name="decoder.layers.0.mlp.experts.linear_fc1.weight0",
-            param_weight=torch.nn.Parameter(torch.zeros(4, 2, dtype=torch.bfloat16)),
-            mapping=mapping("GatedMLPMapping", {part: f"{prefix}.{part}_proj.weight" for part in ("gate", "up")}),
-        ),
-        SimpleNamespace(
-            global_param_name="decoder.layers.0.mlp.experts.linear_fc2.weight0",
-            param_weight=torch.nn.Parameter(torch.zeros(2, 2, dtype=torch.bfloat16)),
-            mapping=mapping("AutoMapping", f"{prefix}.down_proj.weight"),
-        ),
-    ]
-    provider = SimpleNamespace(num_moe_experts=4, hidden_size=3, moe_latent_size=2, moe_ffn_hidden_size=2)
+    names = sorted(megatron_shapes((0,), range(NUM_EXPERTS), last_stage=False))
+    parameters = megatron_parameters(
+        (0,), range(NUM_EXPERTS), last_stage=False, model_names=names, expert_hidden_size=2
+    )
+    parameters = {name: torch.nn.Parameter(weight, requires_grad=False) for name, weight in parameters.items()}
+    provider = SimpleNamespace(
+        **vars(PROVIDER), num_moe_experts=NUM_EXPERTS, moe_latent_size=2, moe_ffn_hidden_size=INTERMEDIATE
+    )
     worker = SimpleNamespace(
         provider=provider,
-        bridge=SimpleNamespace(get_conversion_tasks=lambda _: tasks),
-        actor_module=object(),
+        bridge=SimpleNamespace(get_conversion_tasks=lambda rows: conversion_tasks(rows, expert_schema="split")),
+        actor_module=parameters,
         _model_version_step=None,
     )
     state = SimpleNamespace(
@@ -41,8 +42,8 @@ def inventoried_sender(monkeypatch):
     )
     sender = ExpertBlockSender(worker, state)
     report = sender.inventory()
-    sender.stream = SimpleNamespace(run=lambda version: InstallReport(0, version, 2, 24, 0.01))
-    return sender, tasks[0].param_weight, report
+    sender.stream = SimpleNamespace(run=lambda version: InstallReport(0, version, 0, 0, 0))
+    return sender, parameters, report
 
 
 def test_inventory_uses_latent_width_for_hero_expert_matrices(inventoried_sender):
@@ -66,12 +67,17 @@ def test_refuses_a_version_that_is_not_the_completed_update(inventoried_sender):
         sender.send_weights({"version": 2})
 
 
-def test_refuses_when_a_parameter_was_reassigned_new_storage_since_preparation(inventoried_sender):
-    sender, parameter, _ = inventoried_sender
+@pytest.mark.parametrize(
+    "source_key",
+    ["decoder.layers.0.self_attention.linear_qkv.weight", "decoder.layers.0.mlp.experts.linear_fc1.weight0"],
+)
+def test_refuses_when_a_parameter_was_reassigned_new_storage_since_preparation(inventoried_sender, source_key):
+    sender, parameters, _ = inventoried_sender
+    parameter = parameters[source_key]
     sender.worker._model_version_step = 1
     # An in-place update keeps the storage and is accepted. Reassigning ``.data`` is not.
     parameter.data.fill_(1)
-    assert sender.send_weights({"version": 1})["expert_matrices"] == 2
+    assert sender.send_weights({"version": 1})["version"] == 1
     parameter.data = torch.zeros_like(parameter)
     with pytest.raises(RuntimeError, match="storage changed"):
         sender.send_weights({"version": 1})
