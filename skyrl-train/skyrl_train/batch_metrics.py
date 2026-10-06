@@ -3,12 +3,19 @@ from typing import Literal
 
 import torch
 from torch import Tensor
+from omegaconf import DictConfig
 
+from marinskyrl.runtime_options import AdvantageEstimator
+from skyrl_train.config.objective_spec import off_policy_correction
 from skyrl_train.metric_reduction import MetricReduction
+from skyrl_train.objective.correction import compute_correction
 from skyrl_train.telemetry import ConsumedWork
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.utils.advantage_estimators import GRPO_FLAT_REWARD_STD_TOLERANCE
-from skyrl_train.utils.importance_ratio_diagnostics import exact_ratio_statistics
+from skyrl_train.utils.importance_ratio_diagnostics import (
+    exact_ratio_statistics,
+    mismatch_ratio_metrics,
+)
 
 
 class LocalReduction:
@@ -52,6 +59,65 @@ def zero_std_group_fraction(uids: Sequence[str], rewards: Tensor) -> float:
         for group in groups.values()
     )
     return flat / len(groups)
+
+
+def group_reward_metrics(
+    uids: Sequence[str],
+    rewards: Tensor,
+    *,
+    advantage_estimator: AdvantageEstimator,
+    step_wise: bool,
+) -> dict[str, float]:
+    """Report flat GRPO groups from the rewards used by the advantage estimator."""
+    if advantage_estimator != AdvantageEstimator.GRPO or step_wise:
+        return {}
+    return {"reward/zero_std_group_fraction": zero_std_group_fraction(uids, rewards.sum(-1))}
+
+
+def install_correction(
+    batch: TrainingInputBatch, algorithm: DictConfig, *, reduction: MetricReduction
+) -> dict[str, float]:
+    """Install configured policy correction weights and return their diagnostics."""
+    correction = off_policy_correction(algorithm)
+    if not correction.rules:
+        return {}
+    rollout_logprobs = batch.get("rollout_logprobs")
+    if rollout_logprobs is None:
+        raise ValueError("off_policy_correction requires rollout_logprobs")
+    result = compute_correction(
+        batch["action_log_probs"], rollout_logprobs, batch["loss_mask"], correction, reduction=reduction
+    )
+    batch["correction_weights"] = result.weights
+    return result.metrics
+
+
+def rollout_probability_metrics(
+    batch: TrainingInputBatch,
+    *,
+    algorithm: DictConfig,
+    training_metrics: bool,
+    rollout_logprobs_enabled: bool,
+    reduction: MetricReduction,
+) -> dict[str, float]:
+    """Report configured learner-to-rollout probability diagnostics."""
+    if batch.get("rollout_logprobs") is None:
+        return {}
+    metrics = {}
+    if training_metrics:
+        metrics.update(
+            mismatch_ratio_metrics(
+                batch["action_log_probs"],
+                batch["rollout_logprobs"],
+                batch["loss_mask"],
+                batch["rollout_staleness"],
+                eps_clip_low=algorithm.eps_clip_low,
+                eps_clip_high=algorithm.eps_clip_high,
+                reduction=reduction,
+            )
+        )
+    if rollout_logprobs_enabled:
+        metrics.update(probability_difference_metrics(batch, reduction=reduction))
+    return metrics
 
 
 def advantage_metrics(batch: TrainingInputBatch, *, reduction: MetricReduction, step_wise: bool) -> dict[str, float]:

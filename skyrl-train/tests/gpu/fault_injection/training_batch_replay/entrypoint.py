@@ -16,6 +16,7 @@ from skyrl_train.entrypoints.main_base import config_dir, run_ray_driver
 from skyrl_train.rollouts.context import TrainingContext
 from skyrl_train.checkpoint_listing import extract_step_from_path
 from skyrl_train.config.trajectory_runner_capabilities import TrajectoryRunnerMode
+from skyrl_train.trajectory_runners.base import TrajectoryRunner
 from skyrl_train.utils.trainer_utils import ResumeMode
 from tests.training_batch_replay import (
     BatchReplayProvenance,
@@ -32,6 +33,13 @@ from tests.gpu.utils import import_worker
 class Mode(StrEnum):
     CAPTURE = "capture"
     REPLAY = "replay"
+
+
+class ReplayTrajectoryRunner(TrajectoryRunner):
+    """Keep the replay trainer's rollout boundary closed to generation requests."""
+
+    async def _run(self, input_batch, disable_tqdm=False):
+        raise RuntimeError("batch replay consumes a captured batch and cannot request rollouts")
 
 
 _REVISION_PATTERN = re.compile(r"^[0-9a-f]{40}$")
@@ -129,6 +137,7 @@ def _replay_experiment_class():
         """Build training actors only; never construct rollout/inference engines."""
 
         def _setup_replay_trainer(self):
+            runner = ReplayTrajectoryRunner()
             trainer = self.get_trainer(
                 cfg=self.cfg,
                 tracker=None,
@@ -136,7 +145,7 @@ def _replay_experiment_class():
                 train_dataset=self.train_dataset,
                 eval_dataset=self.eval_dataset,
                 inference_engine_client=None,
-                trajectory_runner=None,
+                trajectory_runner=runner,
                 colocate_pg=self.colocate_pg,
             )
             strategy = str(self.cfg.trainer.strategy)
@@ -168,6 +177,7 @@ def _replay_experiment_class():
                 shapes = {key: list(value.shape) for key, value in result.items() if value is not None}
                 logger.info(f"TRAINING_BATCH_REPLAY_OK target_step={provenance.target_step} tensors={shapes}")
             finally:
+                asyncio.run(trainer.context.close())
                 trainer.cleanup_ray_actors()
 
     return ReplayTerminalBenchExp

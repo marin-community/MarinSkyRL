@@ -7,9 +7,11 @@ import hydra
 import torch
 from typing import List
 from omegaconf import DictConfig
+from skyrl_train.batch_source import BatchDiagnostics
 from skyrl_train.trainer import RayPPOTrainer
-from skyrl_train.utils import initialize_ray
-from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
+from skyrl_train.rollouts.context import TrainingContext
+from skyrl_train.utils import initialize_ray, validate_cfg
+from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir
 
 from skyrl_train.trajectory_runners.base import TrajectoryBatch
 
@@ -22,7 +24,9 @@ class DAPOTrainer(RayPPOTrainer):
     """
 
     @torch.no_grad()
-    def postprocess_trajectory_batch(self, trajectory_batch: TrajectoryBatch, uids: List[str]) -> TrajectoryBatch:
+    def postprocess_trajectory_batch(
+        self, trajectory_batch: TrajectoryBatch, uids: List[str], *, diagnostics: BatchDiagnostics | None = None
+    ) -> TrajectoryBatch:
         """
         Overrides the postprocess_trajectory_batch method to additionally apply DAPO specific soft overlong punishment to rewards.
 
@@ -71,12 +75,18 @@ class DAPOTrainer(RayPPOTrainer):
         trajectory_batch["rewards"] = rewards
 
         # use base class impl for metrics and per-token reward conversion
-        return super().postprocess_trajectory_batch(trajectory_batch, uids)
+        return super().postprocess_trajectory_batch(trajectory_batch, uids, diagnostics=diagnostics)
 
 
 class DAPOExp(BasePPOExp):
-    def get_trainer(self, *args, **kwargs):
-        return DAPOTrainer(*args, **kwargs)
+    def get_trainer(self, cfg, train_dataset, trajectory_runner, **kwargs):
+        return DAPOTrainer(
+            cfg=cfg,
+            train_dataset=train_dataset,
+            trajectory_runner=trajectory_runner,
+            context=TrainingContext.from_config(cfg, train_dataset, trajectory_runner),
+            **kwargs,
+        )
 
 
 @ray.remote(num_cpus=1)

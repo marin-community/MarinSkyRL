@@ -9,14 +9,11 @@ import numpy as np
 import pytest
 import torch
 from omegaconf import OmegaConf
-
 from skyrl_train import trainer as trainer_module
-from skyrl_train.distributed.dispatch import ActorInfo, MeshRank
-from skyrl_train.rollouts.context import TrainingContext
-from skyrl_train.trainer import RayPPOTrainer
-from skyrl_train.training_batch import TrainingOutputBatch
 from skyrl_train.timing_observability import STEP_WALL_PHASES
+from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.trajectory_runners.base import TrajectoryRunner
+
 from tests.cpu.util import example_dummy_config
 
 # Record names and attribute values the async RL dashboard reads (marin
@@ -109,32 +106,6 @@ class ScriptedRunner(TrajectoryRunner):
         return output
 
 
-class FakePolicyGroup:
-    actor_infos = [ActorInfo(handle=None, rank=MeshRank(dp=0, sp=0, tp=0, pp=0, world_size=1, dp_size=1, pp_size=1))]
-
-    def async_run_ray_method(self, dispatch, method, *args, data=None, **kwargs):
-        if method != "forward":
-            return []
-        logprobs = torch.full((data["sequences"].shape[0], data.metadata["response_length"]), -0.75)
-        return [TrainingOutputBatch({"output": logprobs})]
-
-
-class FakeEngines:
-    async def pause_generation(self):
-        pass
-
-    async def resume_generation(self):
-        pass
-
-
-class FakeTracker:
-    def __init__(self):
-        self.logs = []
-
-    def log(self, metrics, step, commit=True):
-        self.logs.append((dict(metrics), step))
-
-
 def _config(max_staleness_steps: int):
     cfg = example_dummy_config()
     OmegaConf.update(
@@ -162,54 +133,31 @@ def _config(max_staleness_steps: int):
     return cfg
 
 
-async def _train_two_steps(monkeypatch, max_staleness_steps: int) -> RayPPOTrainer:
+async def _train_two_steps(monkeypatch, training_trainer_factory, max_staleness_steps: int) -> RayPPOTrainer:
     cfg = _config(max_staleness_steps)
     runner = ScriptedRunner()
     dataset = PromptRows()
-    trainer = RayPPOTrainer(
-        cfg=cfg,
-        tracker=FakeTracker(),
-        tokenizer=None,
-        train_dataset=dataset,
-        eval_dataset=None,
-        inference_engine_client=FakeEngines(),
-        trajectory_runner=runner,
-        context=TrainingContext.from_config(cfg, dataset, runner),
+    trainer = training_trainer_factory(
+        cfg,
+        dataset=dataset,
+        runner=runner,
+        tokenizer=SimpleNamespace(decode=str, pad_token_id=0),
     )
-    trainer.policy_model, trainer.ref_model, trainer.critic_model = FakePolicyGroup(), None, None
-    trainer.tokenizer = SimpleNamespace(decode=str, pad_token_id=0)
-
-    async def no_op(*args, **kwargs):
-        pass
-
-    for name in (
-        "_startup_trajectory_runner",
-        "sync_policy_weights_to_inference_engines",
-        "_drain_policy_event_loops",
-        "_finalize_training",
-        "shutdown",
-    ):
-        monkeypatch.setattr(trainer, name, no_op)
-    monkeypatch.setattr(trainer, "init_weight_sync_state", lambda: None)
-    monkeypatch.setattr(trainer, "train_critic_and_policy", lambda data: {"policy_loss": 0.0})
-    # The fake policy returns its outputs directly instead of Ray object refs.
-    monkeypatch.setattr(trainer_module, "ray", SimpleNamespace(get=lambda refs: refs))
     monkeypatch.setattr(
         trainer_module,
         "monitor_event_loop_lag",
         functools.partial(trainer_module.monitor_event_loop_lag, interval=0.001),
     )
-    try:
-        await trainer.train()
-    finally:
-        await trainer.context.close()
+    await trainer.train()
     return trainer
 
 
 @pytest.mark.asyncio
-async def test_two_steps_deliver_every_record_the_dashboard_reads(ray_module, delivered_telemetry, monkeypatch):
+async def test_two_steps_deliver_every_record_the_dashboard_reads(
+    delivered_telemetry, monkeypatch, training_trainer_factory
+):
     # Async (staleness 1) exercises every record the sync configuration emits; tiny_training covers sync.
-    trainer = await _train_two_steps(monkeypatch, max_staleness_steps=1)
+    trainer = await _train_two_steps(monkeypatch, training_trainer_factory, max_staleness_steps=1)
     rows = delivered_telemetry.flush()
 
     # The launch environment names the training type, and every record carries it.

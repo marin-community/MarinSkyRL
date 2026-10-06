@@ -106,17 +106,27 @@ We show the outline of creating a custom trainer below, and you can find a full 
 
 .. code-block:: python
 
+    from skyrl_train.rollouts.context import TrainingContext
+
     class CustomTrainer(RayPPOTrainer):
         @torch.no_grad()
-        def postprocess_trajectory_batch(self, trajectory_batch: TrajectoryBatch, uids: List[str]) -> TrajectoryBatch:
+        def postprocess_trajectory_batch(
+            self, trajectory_batch: TrajectoryBatch, uids: List[str], *, diagnostics=None
+        ) -> TrajectoryBatch:
             # apply custom reward penalties
             ...
             # use base class impl for metrics and per-token reward conversion
-            return super().postprocess_trajectory_batch(trajectory_batch, uids)
+            return super().postprocess_trajectory_batch(trajectory_batch, uids, diagnostics=diagnostics)
 
-   class CustomExp(BasePPOExp):
-       def get_trainer(self, *args, **kwargs):
-           return CustomTrainer(*args, **kwargs)
+    class CustomExp(BasePPOExp):
+        def get_trainer(self, cfg, train_dataset, trajectory_runner, **kwargs):
+            return CustomTrainer(
+                cfg=cfg,
+                train_dataset=train_dataset,
+                trajectory_runner=trajectory_runner,
+                context=TrainingContext.from_config(cfg, train_dataset, trajectory_runner),
+                **kwargs,
+            )
 
     @ray.remote(num_cpus=1)
     def skyrl_entrypoint(cfg: DictConfig):

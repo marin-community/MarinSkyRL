@@ -1,10 +1,11 @@
-import json
 import asyncio
-from copy import deepcopy
+import json
 import os
 import sys
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 
@@ -19,15 +20,23 @@ import ray  # noqa: E402
 import torch  # noqa: E402
 import torch.distributed as dist  # noqa: E402
 import zstandard  # noqa: E402
-from marinskyrl.environment_contract import TrainingType  # noqa: E402
 from skyrl_train import telemetry as training_telemetry  # noqa: E402
+from skyrl_train import trainer as trainer_module  # noqa: E402
+from skyrl_train.callbacks.builtin import create_default_callbacks  # noqa: E402
 from skyrl_train.distillation import ChosenTokenTeacherEvidence  # noqa: E402
 from skyrl_train.rollouts.context import TrainingContext  # noqa: E402
 from skyrl_train.trainer import RayPPOTrainer  # noqa: E402
-from skyrl_train.utils import validate_cfg  # noqa: E402
 from skyrl_train.trajectory_runners.types import TrajectoryID, VerifierTestCollection  # noqa: E402
-from tests.rollout_fixtures import FixedPromptDataset, FixedRolloutRunner  # noqa: E402
+from skyrl_train.utils import validate_cfg  # noqa: E402
 
+from marinskyrl.environment_contract import TrainingType  # noqa: E402
+from tests.rollout_fixtures import (  # noqa: E402
+    FixedInferenceEngines,
+    FixedPolicyGroup,
+    FixedPromptDataset,
+    FixedRolloutRunner,
+    RecordingTracker,
+)
 
 # A slow test starts its own Ray cluster of about 4 GiB, and four workers running the rest of the suite fill most
 # of a 16 GiB CI runner, so at most one slow test runs per 12 GiB of host memory. A second one on that runner
@@ -209,6 +218,56 @@ def driver_trainer_factory(ray_init):
     yield create
     for trainer in trainers:
         asyncio.run(trainer.context.close())
+
+
+@pytest.fixture
+def training_trainer_factory(ray_module, monkeypatch, tmp_path):
+    """Build the normal trainer with model and inference I/O completed locally."""
+    timers = []
+
+    def owned_timer(*args, **kwargs):
+        timer = threading.Timer(*args, **kwargs)
+        timers.append(timer)
+        return timer
+
+    # A production teardown watchdog exits its process; this fixture owns and
+    # cancels the timers before returning the shared pytest process to its caller.
+    monkeypatch.setattr(trainer_module, "threading", SimpleNamespace(Timer=owned_timer))
+    monkeypatch.setattr(trainer_module, "PPORayActorGroup", FixedPolicyGroup)
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text(json.dumps({"model_type": "qwen2"}))
+
+    def create(cfg, *, dataset, runner, tokenizer, tracker=None, callbacks=()):
+        cfg = deepcopy(cfg)
+        cfg.trainer.placement.colocate_all = False
+        cfg.trainer.placement.policy_num_nodes = cfg.trainer.placement.ref_num_nodes = 1
+        cfg.trainer.placement.policy_num_gpus_per_node = cfg.trainer.placement.ref_num_gpus_per_node = 1
+        cfg.trainer.policy_mini_batch_size = cfg.trainer.train_batch_size
+        cfg.trainer.micro_train_batch_size_per_gpu = cfg.trainer.micro_forward_batch_size_per_gpu = 1
+        cfg.trainer.policy.model.path = str(model)
+        cfg.generator.trajectory_retention.enabled = False
+        validate_cfg(cfg)
+        trainer = RayPPOTrainer(
+            cfg=cfg,
+            tracker=tracker if tracker is not None else RecordingTracker(),
+            tokenizer=tokenizer,
+            train_dataset=dataset,
+            eval_dataset=None,
+            inference_engine_client=FixedInferenceEngines(),
+            trajectory_runner=runner,
+            context=TrainingContext.from_config(cfg, dataset, runner),
+            callbacks=create_default_callbacks(cfg) + list(callbacks),
+        )
+        trainer.build_models(object, object, object)
+        return trainer
+
+    try:
+        yield create
+    finally:
+        for timer in timers:
+            timer.cancel()
+            timer.join(timeout=1)
 
 
 @pytest.fixture(scope="module")

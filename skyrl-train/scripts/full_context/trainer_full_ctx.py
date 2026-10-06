@@ -1,6 +1,7 @@
 from skyrl_train.trainer import RayPPOTrainer
 from loguru import logger
 import random
+import sys
 from skyrl_train.utils.utils import Timer
 
 
@@ -14,7 +15,7 @@ class FullCtxTrainer(RayPPOTrainer):
     This helps catch OOM issues early before running full training.
     """
 
-    def train(self):
+    async def train(self):
         """Run a few training steps with max sequence length."""
         logger.info("Starting dummy training with max sequence length...")
 
@@ -61,22 +62,14 @@ class FullCtxTrainer(RayPPOTrainer):
                 }
                 training_input = self.convert_to_training_input(dummy_generator_output, uids)
 
-                # Run forward pass
-                training_input = self.fwd_logprobs_values_reward(training_input)
-
-                # 1.5 apply kl divergence penalty to rewards
-                if self.cfg.trainer.algorithm.use_kl_in_reward:
-                    with Timer("apply_reward_kl_penalty", self.all_timings):
-                        training_input = self.apply_reward_kl_penalty(training_input)
-
-                # 3. calculate advantages and returns
-                with Timer("compute_advantages_and_returns", self.all_timings):
-                    training_input = self.compute_advantages_and_returns(training_input)
-                    training_input = self.apply_loop_credit_and_drop_advantage_inputs(training_input)
-
-                # 4. train policy/critic model
-                with Timer("train_critic_and_policy", self.all_timings):
-                    status = self.train_critic_and_policy(training_input)
+                source = self.driver_batch_source()
+                await source.prepare_from_batch(training_input, diagnostics=self.batch_diagnostics())
+                try:
+                    await source.forward(step_wall=None)
+                    await source.finalize(step_wall=None)
+                    status = await source.train(step_wall=None)
+                finally:
+                    await source.release(sys.exception())
 
                 self.tracker.log(self.all_metrics, step=self.global_step)
                 self.all_metrics = {}

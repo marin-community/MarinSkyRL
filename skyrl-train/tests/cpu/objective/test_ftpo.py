@@ -3,9 +3,11 @@
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import ray
 import torch
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
@@ -13,8 +15,10 @@ from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from transformers import PreTrainedTokenizerFast, Qwen2Config, Qwen2ForCausalLM
 
-from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.training_batch import TrainingBatchIterator
+from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
+from skyrl_train.dataset.routed_expert_batch import RoutedExpertRows
+from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.config.ftpo import FTPOConfig, validate_ftpo
 from skyrl_train.utils.utils import validate_cfg
 from skyrl_train.ftpo import (
@@ -262,9 +266,27 @@ def test_ftpo_recipe_accepts_greedy_capture_and_rejects_unsupported_geometry(con
             validate_ftpo(changed)
 
 
+class _FTPOForwardGroup:
+    def __init__(self, output):
+        self.output = output
+        self.input = None
+        self.actor_infos = [
+            SimpleNamespace(rank=MeshRank(dp=rank, sp=0, tp=0, pp=0, world_size=2, dp_size=2, pp_size=1))
+            for rank in range(2)
+        ]
+
+    def async_run_ray_method(self, dispatch_type, method_name, *, data=None):
+        if method_name == "empty_cache":
+            return []
+        assert method_name == "forward"
+        self.input = data
+        return [ray.put(TrainingOutputBatch({"output": shard})) for shard in self.output.chunk(2)]
+
+
 def test_ftpo_rollout_payload_survives_padding_serialization_and_microbatching(
     config, tmp_path, driver_trainer_factory
 ):
+    config.trainer.placement.colocate_policy_ref = False
     tokenizer = PreTrainedTokenizerFast(
         tokenizer_object=Tokenizer(WordLevel({"Wait": 0, "So": 1, "Therefore": 2, "Done": 3, "[PAD]": 4})),
         pad_token="[PAD]",
@@ -291,8 +313,19 @@ def test_ftpo_rollout_payload_survives_padding_serialization_and_microbatching(
     compact_logits = torch.arange(4 * 10 * 5).reshape(4, 10, 5).float()
     boundary = compact_boundary_logits(compact_logits, batch["attention_mask"], batch["ftpo_chosen_mask"])
     torch.testing.assert_close(boundary[0], compact_logits[0, 3])
-    batch["ftpo_reference_logits"] = boundary
-    for key in ("action_log_probs", "base_action_log_probs", "values", "returns", "advantages"):
+    route_rows = tuple(np.full((len(row), 2, 1), index + 1, dtype=np.uint8) for index, row in enumerate(responses))
+    batch.routed_expert_rows = RoutedExpertRows(route_rows + route_rows[:1], response_len=8, num_experts=8)
+    expected_routes = torch.zeros((4, 8, 2, 1), dtype=torch.uint8)
+    for index, response in enumerate(responses + responses[:1]):
+        expected_routes[index, : len(response)] = index % 3 + 1
+    trainer.policy_model = _FTPOForwardGroup(torch.zeros_like(batch["loss_mask"]))
+    trainer.ref_model = _FTPOForwardGroup(boundary)
+    trainer.fwd_logprobs_values_reward(batch)
+    for group in (trainer.policy_model, trainer.ref_model):
+        torch.testing.assert_close(group.input.routed_experts_tensor(), expected_routes, atol=0, rtol=0)
+    torch.testing.assert_close(trainer.ref_model.input["ftpo_chosen_mask"], batch["ftpo_chosen_mask"])
+    assert "ftpo_chosen_mask" not in trainer.policy_model.input
+    for key in ("returns", "advantages"):
         batch[key] = torch.zeros_like(batch["loss_mask"])
     path = tmp_path / "batch.pt"
     torch.save(batch, path)
@@ -301,20 +334,44 @@ def test_ftpo_rollout_payload_survives_padding_serialization_and_microbatching(
     assert [bool(experience.ftpo.chosen_mask.any()) for experience in experiences] == [True, False, False, False]
     torch.testing.assert_close(experiences[0].ftpo.reference_logits, boundary[:1])
     assert experiences[0].ftpo.candidate_ids[experiences[0].ftpo.chosen_mask].tolist() == [1, 2, 3]
+    for experience, response, index in zip(experiences, responses + responses[:1], [1, 2, 3, 1], strict=True):
+        torch.testing.assert_close(
+            experience.rollout_routed_experts,
+            torch.full((1, len(response), 2, 1), index, dtype=torch.uint8),
+            atol=0,
+            rtol=0,
+        )
 
 
 @pytest.mark.asyncio
-async def test_ftpo_empty_rollout_batch_skips_training(config):
-    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
-    trainer.cfg = config
-    trainer.all_timings = {}
-    trainer.all_metrics = {}
-    # No actors exist: an empty batch must not dispatch a forward or optimizer step.
-    status = await trainer._run_training(
+async def test_ftpo_empty_rollout_batch_skips_training(config, driver_trainer_factory):
+    config.trainer.train_batch_size = 2
+    trainer = driver_trainer_factory(config)
+    batch = TrainingInputBatch(
         {
+            "sequences": torch.ones((2, 4), dtype=torch.long),
+            "attention_mask": torch.ones((2, 4), dtype=torch.long),
+            "response_mask": torch.ones((2, 3), dtype=torch.long),
+            "rollout_staleness": torch.zeros(2, dtype=torch.int32),
             "ftpo_chosen_mask": torch.zeros((2, 3, 2), dtype=torch.bool),
             "loss_mask": torch.zeros((2, 3)),
         }
     )
-    assert status["policy_update_steps"] == 0
-    assert trainer.all_metrics["ftpo/empty_batch"] == 1
+    batch.metadata = {"uids": ["a", "b"], "global_step": 1, "response_length": 3}
+    original_tensors = {key: (value.dtype, tuple(value.shape), value.numpy().tobytes()) for key, value in batch.items()}
+    original_metadata = deepcopy(batch.metadata)
+    source = trainer.driver_batch_source()
+    try:
+        await source.prepare_from_batch(batch, diagnostics=trainer.batch_diagnostics())
+        # A normal trainer without model actors must finish before any drain, forward or optimizer RPC.
+        await source.forward(step_wall=None)
+        await source.finalize(step_wall=None)
+        status = await source.train(step_wall=None)
+        assert status["policy_update_steps"] == 0
+        assert trainer.all_metrics["ftpo/empty_batch"] == 1
+        assert {
+            key: (value.dtype, tuple(value.shape), value.numpy().tobytes()) for key, value in batch.items()
+        } == original_tensors
+        assert batch.metadata == original_metadata
+    finally:
+        await source.release()

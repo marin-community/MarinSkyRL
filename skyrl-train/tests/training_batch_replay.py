@@ -14,7 +14,7 @@ from typing import Any, TypedDict
 
 from omegaconf import DictConfig, OmegaConf
 
-from skyrl_train.timing_observability import StepWallTime
+from skyrl_train.batch_source import BatchDiagnostics
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.training_batch import TrainingInputBatch
 
@@ -201,34 +201,26 @@ class CapturingRayPPOTrainer(RayPPOTrainer):
         self.capture_provenance = capture_provenance
         super().__init__(*args, **kwargs)
 
-    async def _run_training(self, training_input: TrainingInputBatch, *, step_wall: StepWallTime | None = None):
+    def fwd_logprobs_values_reward(
+        self, training_input: TrainingInputBatch, *, diagnostics: BatchDiagnostics | None = None
+    ) -> TrainingInputBatch:
         if self.global_step == self.capture_provenance.target_step:
             save_training_batch_artifact(
                 self.capture_artifact_path,
                 training_input,
                 self.capture_provenance,
             )
-        return await super()._run_training(training_input, step_wall=step_wall)
-
-
-class _PolicyForwardComplete(Exception):
-    def __init__(self, result: TrainingInputBatch):
-        self.result = result
+        return super().fwd_logprobs_values_reward(training_input, diagnostics=diagnostics)
 
 
 async def replay_policy_forward(trainer: RayPPOTrainer, training_input: TrainingInputBatch) -> TrainingInputBatch:
     """Run the production training-step prefix through policy forward."""
 
-    production_forward = trainer.fwd_logprobs_values_reward
-
-    def stop_after_forward(batch: TrainingInputBatch):
-        raise _PolicyForwardComplete(production_forward(batch))
-
-    trainer.fwd_logprobs_values_reward = stop_after_forward
+    training_input.metadata["global_step"] = trainer.global_step
+    source = trainer.driver_batch_source()
+    await source.prepare_from_batch(training_input, diagnostics=trainer.batch_diagnostics())
     try:
-        await trainer._run_training(training_input)
-    except _PolicyForwardComplete as complete:
-        return complete.result
+        await source.forward(step_wall=None)
+        return source.batch
     finally:
-        trainer.fwd_logprobs_values_reward = production_forward
-    raise AssertionError("Production training step returned without invoking policy forward")
+        await source.release()

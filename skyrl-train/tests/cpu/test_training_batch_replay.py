@@ -1,15 +1,17 @@
 import copy
 import json
 from pathlib import Path
-from types import MethodType
+from types import SimpleNamespace
 
 import pytest
+import ray
 import torch
 from omegaconf import OmegaConf
 
+from skyrl_train.config.utils import get_default_config
+from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.dataset.routed_expert_batch import RoutedExpertRows
-from skyrl_train.trainer import RayPPOTrainer
-from skyrl_train.training_batch import TrainingInputBatch
+from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from tests.training_batch_replay import (
     BatchReplayProvenance,
     CapturingRayPPOTrainer,
@@ -25,11 +27,16 @@ def _batch() -> TrainingInputBatch:
         {
             "sequences": torch.tensor([[1, 2, 3], [4, 5, 6]]),
             "attention_mask": torch.ones((2, 3), dtype=torch.bool),
+            "response_mask": torch.ones((2, 2), dtype=torch.long),
+            "loss_mask": torch.ones((2, 2), dtype=torch.long),
+            "rollout_staleness": torch.tensor([0, 1], dtype=torch.int32),
+            "rollout_logprobs": None,
             "rollout_routed_experts": torch.arange(24, dtype=torch.int16).reshape(2, 3, 2, 2),
         }
     )
     batch.metadata = {
         "response_length": 2,
+        "global_step": 7,
         "uids": ["trial-a", "trial-b"],
         "nested": {"staleness": [0, 1]},
     }
@@ -48,24 +55,40 @@ def _provenance(**overrides) -> BatchReplayProvenance:
     return BatchReplayProvenance(**fields)
 
 
-def _bare_trainer(trainer_type):
-    trainer = object.__new__(trainer_type)
-    trainer.cfg = OmegaConf.create(
-        {
-            "trainer": {
-                "algorithm": {"use_kl_in_reward": False, "advantage_batch_normalize": False},
-                "dump_data_batch": False,
-            }
-        }
-    )
-    trainer.all_timings = {}
-    events = []
+class _PolicyForwardBoundary:
+    actor_infos = [SimpleNamespace(rank=MeshRank(dp=0, sp=0, tp=0, pp=0, world_size=1, dp_size=1, pp_size=1))]
 
-    async def drain_policy_event_loops(_self):
-        events.append("drain")
+    def __init__(self, *, fail=False):
+        self.fail = fail
+        self.drained = False
 
-    trainer._drain_policy_event_loops = MethodType(drain_policy_event_loops, trainer)
-    return trainer, events
+    def async_run_ray_method(self, dispatch, method, *args, **kwargs):
+        if method == "barrier_all":
+            self.drained = True
+            return [ray.put(None)]
+        if method == "empty_cache":
+            return []
+        if method != "forward":
+            raise AssertionError("replay continued past the policy-forward boundary")
+        assert self.drained
+        if self.fail:
+            raise torch.OutOfMemoryError("injected forward OOM")
+        batch = kwargs["data"]
+        assert batch.metadata["global_step"] == 7
+        return [
+            ray.put(
+                TrainingOutputBatch({"output": torch.full((batch.batch_size, batch.metadata["response_length"]), 0.25)})
+            )
+        ]
+
+
+@pytest.fixture
+def replay_config():
+    cfg = get_default_config()
+    cfg.trainer.train_batch_size = 2
+    cfg.trainer.algorithm.use_kl_loss = False
+    cfg.trainer.algorithm.off_policy_correction = "none"
+    return cfg
 
 
 def test_training_batch_artifact_round_trips_tensors_metadata_and_manifest(tmp_path: Path):
@@ -83,6 +106,9 @@ def test_training_batch_artifact_round_trips_tensors_metadata_and_manifest(tmp_p
     manifest = json.loads((artifact_path / "manifest.json").read_text())
     assert manifest["tensors"] == {
         "attention_mask": {"dtype": "torch.bool", "shape": [2, 3]},
+        "response_mask": {"dtype": "torch.int64", "shape": [2, 2]},
+        "loss_mask": {"dtype": "torch.int64", "shape": [2, 2]},
+        "rollout_staleness": {"dtype": "torch.int32", "shape": [2]},
         "rollout_routed_experts": {"dtype": "torch.int16", "shape": [2, 3, 2, 2]},
         "sequences": {"dtype": "torch.int64", "shape": [2, 3]},
     }
@@ -162,22 +188,17 @@ def test_config_fingerprint_excludes_only_the_diagnostic_controls():
 
 
 @pytest.mark.asyncio
-async def test_capture_survives_a_subsequent_forward_failure(tmp_path: Path):
-    trainer, events = _bare_trainer(CapturingRayPPOTrainer)
+async def test_capture_survives_a_subsequent_forward_failure(tmp_path: Path, replay_config, driver_trainer_factory):
+    trainer = driver_trainer_factory(
+        replay_config,
+        trainer_type=CapturingRayPPOTrainer,
+        capture_artifact_path=tmp_path / "step-7-pre-forward",
+        capture_provenance=_provenance(),
+    )
     trainer.global_step = 7
-    trainer.capture_artifact_path = tmp_path / "step-7-pre-forward"
-    trainer.capture_provenance = _provenance()
-
-    def fwd_logprobs_values_reward(_self, _training_input):
-        events.append("forward")
-        raise torch.OutOfMemoryError("injected forward OOM")
-
-    trainer.fwd_logprobs_values_reward = MethodType(fwd_logprobs_values_reward, trainer)
-
+    trainer.policy_model = _PolicyForwardBoundary(fail=True)
     with pytest.raises(torch.OutOfMemoryError, match="injected forward OOM"):
-        await trainer._run_training(_batch())
-
-    assert events == ["drain", "forward"]
+        await replay_policy_forward(trainer, _batch())
     restored = load_training_batch_artifact(
         trainer.capture_artifact_path,
         expected=trainer.capture_provenance,
@@ -186,21 +207,12 @@ async def test_capture_survives_a_subsequent_forward_failure(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_replay_uses_production_step_prefix_and_stops_after_forward():
-    trainer, events = _bare_trainer(RayPPOTrainer)
-
-    def forward(_self, training_input):
-        events.append("forward")
-        training_input["action_log_probs"] = torch.full((2, 3), 0.25)
-        return training_input
-
-    def forbidden(_self, _training_input):
-        raise AssertionError("replay continued past the policy-forward boundary")
-
-    trainer.fwd_logprobs_values_reward = MethodType(forward, trainer)
-    trainer.compute_advantages_and_returns = MethodType(forbidden, trainer)
-
-    result = await replay_policy_forward(trainer, _batch())
-
-    assert events == ["drain", "forward"]
-    torch.testing.assert_close(result["action_log_probs"], torch.full((2, 3), 0.25))
+async def test_replay_uses_production_step_prefix_and_stops_after_forward(replay_config, driver_trainer_factory):
+    trainer = driver_trainer_factory(replay_config)
+    trainer.global_step = 7
+    trainer.policy_model = _PolicyForwardBoundary()
+    batch = _batch()
+    del batch.metadata["global_step"]
+    result = await replay_policy_forward(trainer, batch)
+    torch.testing.assert_close(result["action_log_probs"], torch.full((2, 2), 0.25))
+    assert "advantages" not in result
