@@ -458,3 +458,23 @@ def test_cat_count_opd_gate_rejects_a_peak_followed_by_collapse(final_score):
     rows = [StepMetrics("eval", step, {metric: score}) for step, score in ((0, 0.29), (25, 0.70), (30, final_score))]
     assert (check_run(rows, spec, 300) == []) == (final_score >= 0.65)
     assert check_run(rows[:-1], spec, 300)
+
+
+@pytest.mark.parametrize(
+    ("cat_final", "dog_final", "passes"), [(0.64, 0.77, True), (0.49, 0.77, False), (0.80, 0.49, False)]
+)
+def test_cat_count_mopd_gate_requires_each_route_to_retain_learning(cat_final, dog_final, passes):
+    spec = load_spec(SHIPPED_SPEC.parent / "cat-count-mopd-qwen2.5-0.5b-async.json")
+    spec = replace(
+        spec,
+        min_train_steps=0,
+        finite_metrics=(),
+        bounds={},
+        metric_gates=tuple(gate for gate in spec.metric_gates if gate.kind == "eval"),
+    )
+    rows = [
+        StepMetrics("eval", step, {"eval/sampled/cat_train/avg_score": cat, "eval/sampled/dog_train/avg_score": dog})
+        for step, cat, dog in ((0, 0.23, 0.37), (25, 0.74, 0.78), (30, cat_final, dog_final))
+    ]
+    assert (check_run(rows, spec, 300) == []) == passes
+    assert check_run(rows[:-1], spec, 300)

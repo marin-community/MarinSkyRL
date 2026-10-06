@@ -43,7 +43,8 @@
         "dog": 0.1
       }
     },
-    "sampled_score_threshold_per_route": 0.65
+    "sampled_score_threshold_per_route": 0.65,
+    "final_sampled_score_floor_per_route": 0.55
   },
   "min_train_steps": 30,
   "max_wall_clock_seconds": 1800,
@@ -65,6 +66,20 @@
     "distillation/route_rows/dog"
   ],
   "metric_gates": [
+    {
+      "kind": "eval",
+      "metric": "eval/sampled/cat_train/avg_score",
+      "min_observations": 1,
+      "step": 30,
+      "bounds": {"minimum": 0.55}
+    },
+    {
+      "kind": "eval",
+      "metric": "eval/sampled/dog_train/avg_score",
+      "min_observations": 1,
+      "step": 30,
+      "bounds": {"minimum": 0.55}
+    },
     {
       "kind": "eval",
       "metric": "eval/sampled/cat_train/avg_score",
