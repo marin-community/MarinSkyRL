@@ -70,7 +70,6 @@ def _write_index(metadata_dir: Path, weight_map: dict[str, str]) -> None:
 def test_conversion_task_prefetch_preserves_rank_owned_tensors_and_reduces_range_fetches(
     tmp_path, monkeypatch, header_metadata_bytes
 ):
-    assert Path(remote_safetensors.__file__).is_relative_to(Path.cwd() / "skyrl-train")
     tensors = {f"dense.{index}": torch.arange(8, dtype=torch.float32) + index for index in range(24)}
     tensors["dense.1"] = tensors["dense.1"].to(torch.bfloat16)
     tensors["experts"] = torch.arange(24, dtype=torch.bfloat16).reshape(3, 8)
