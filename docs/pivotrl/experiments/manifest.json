@@ -1,0 +1,752 @@
+{
+  "schema_version": 1,
+  "recorded_base": "00fcf63e255b49cd5685829ad23ccf98192cc12a",
+  "reproduction_base": "544d5d6f",
+  "experiments": [
+    {
+      "key": "swe-grug-sft-all",
+      "config": "configs/swe-grug-sft-all.yaml",
+      "config_sha256": "a65b0cd0aabbf6c3e6e0e72e1ababcc7b2fc69416f900aa07bedfa3bd3fd32c6",
+      "run_id": "swe-pilot-grug-sft-all-checkpoint-20261002-071603",
+      "launcher_commit": "492ad8fab9b89c9140847f12e08bdb9ad8e55fbf",
+      "model": {
+        "identity": "b8c07f7df1df65525abbfdbcd1572318ba11c42f",
+        "local_path": "open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21",
+        "tokenizer_revision": "b8c07f7df1df65525abbfdbcd1572318ba11c42f",
+        "tokenizer_uri": "open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21",
+        "uri": "open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21"
+      },
+      "train_data": [
+        {
+          "identity": "714ace0b4966264994793ef2367f196061ac5cbb42fb07a65fb3bee48cd248f6",
+          "kind": "directory",
+          "local_path": "/tmp/swe-pilot-data/grug-frozen",
+          "relative_path": "all_train.parquet",
+          "uri": "s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/profiles/swe/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21/b8c07f7df1df65525abbfdbcd1572318ba11c42f/714ace0b4966264994793ef2367f196061ac5cbb42fb07a65fb3bee48cd248f6"
+        }
+      ],
+      "validation_data": [
+        {
+          "identity": "ece2903ce8cec42afa0dc9e97142cbaec794a8f8ab195264d26c9a29d9581097",
+          "kind": "directory",
+          "local_path": "/tmp/swe-pilot-data/split",
+          "relative_path": "validation.parquet",
+          "uri": "s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/prepared/swe/4947a3c8ea803413a65f9eca14a96ef521b2ddf5/ece2903ce8cec42afa0dc9e97142cbaec794a8f8ab195264d26c9a29d9581097"
+        }
+      ],
+      "observed_loss_tokens": 1000000,
+      "observed_updates": 110,
+      "full_validation": {
+        "tool_name": {
+          "examples": 256,
+          "tasks": 154,
+          "accuracy": 0.61328125,
+          "ci95": [
+            0.5538461538461539,
+            0.6720664365832614
+          ],
+          "interval_method": "task-cluster bootstrap",
+          "excluded": 0
+        },
+        "nemo": {
+          "examples": 256,
+          "tasks": 154,
+          "accuracy": 0.37109375,
+          "ci95": [
+            0.30969954099793917,
+            0.43446048452093106
+          ],
+          "interval_method": "task-cluster bootstrap",
+          "excluded": 0
+        },
+        "exact": {
+          "examples": 256,
+          "tasks": 154,
+          "accuracy": 0.09375,
+          "ci95": [
+            0.05976095617529881,
+            0.13095238095238096
+          ],
+          "interval_method": "task-cluster bootstrap",
+          "excluded": 0
+        }
+      },
+      "lineage": {}
+    },
+    {
+      "key": "swe-grug-sft-random",
+      "config": "configs/swe-grug-sft-random.yaml",
+      "config_sha256": "4708e099cf6399db5b70977188c760e1bcb49ce4ea1b4eccef70922c9ae13066",
+      "run_id": "swe-pilot-grug-sft-random-residencyfix-20261001-231323",
+      "launcher_commit": "95cc2c2140f5c15f2d734c6f4c916fbb30c943b9",
+      "model": {
+        "identity": "b8c07f7df1df65525abbfdbcd1572318ba11c42f",
+        "local_path": "open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21",
+        "tokenizer_revision": "b8c07f7df1df65525abbfdbcd1572318ba11c42f",
+        "tokenizer_uri": "open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21",
+        "uri": "open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21"
+      },
+      "train_data": [
+        {
+          "identity": "714ace0b4966264994793ef2367f196061ac5cbb42fb07a65fb3bee48cd248f6",
+          "kind": "directory",
+          "local_path": "/tmp/swe-pilot-data/grug-frozen",
+          "relative_path": "random_train.parquet",
+          "uri": "s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/profiles/swe/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21/b8c07f7df1df65525abbfdbcd1572318ba11c42f/714ace0b4966264994793ef2367f196061ac5cbb42fb07a65fb3bee48cd248f6"
+        }
+      ],
+      "validation_data": [
+        {
+          "identity": "ece2903ce8cec42afa0dc9e97142cbaec794a8f8ab195264d26c9a29d9581097",
+          "kind": "directory",
+          "local_path": "/tmp/swe-pilot-data/split",
+          "relative_path": "validation.parquet",
+          "uri": "s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/prepared/swe/4947a3c8ea803413a65f9eca14a96ef521b2ddf5/ece2903ce8cec42afa0dc9e97142cbaec794a8f8ab195264d26c9a29d9581097"
+        }
+      ],
+      "observed_loss_tokens": 1000000,
+      "observed_updates": 107,
+      "full_validation": {
+        "tool_name": {
+          "examples": 256,
+          "tasks": 154,
+          "accuracy": 0.62890625,
+          "ci95": [
+            0.5696639045111882,
+            0.6859528156832597
+          ],
+          "interval_method": "task-cluster bootstrap",
+          "excluded": 0
+        },
+        "nemo": {
+          "examples": 256,
+          "tasks": 154,
+          "accuracy": 0.390625,
+          "ci95": [
+            0.33088166958233106,
+            0.45161601693859754
+          ],
+          "interval_method": "task-cluster bootstrap",
+          "excluded": 0
+        },
+        "exact": {
+          "examples": 256,
+          "tasks": 154,
+          "accuracy": 0.08984375,
+          "ci95": [
+            0.057692307692307696,
+            0.12605042016806722
+          ],
+          "interval_method": "task-cluster bootstrap",
+          "excluded": 0
+        }
+      },
+      "lineage": {}
+    },
+    {
+      "key": "swe-grug-sft-selected",
+      "config": "configs/swe-grug-sft-selected.yaml",
+      "config_sha256": "6202438371fa8e699ea879a54be3f0f67fe39edd50008b408cd6cb614aa2909d",
+      "run_id": "swe-pilot-grug-sft-selected-node-retry-20261001-233112",
+      "launcher_commit": "95cc2c2140f5c15f2d734c6f4c916fbb30c943b9",
+      "model": {
+        "identity": "b8c07f7df1df65525abbfdbcd1572318ba11c42f",
+        "local_path": "open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21",
+        "tokenizer_revision": "b8c07f7df1df65525abbfdbcd1572318ba11c42f",
+        "tokenizer_uri": "open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21",
+        "uri": "open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21"
+      },
+      "train_data": [
+        {
+          "identity": "714ace0b4966264994793ef2367f196061ac5cbb42fb07a65fb3bee48cd248f6",
+          "kind": "directory",
+          "local_path": "/tmp/swe-pilot-data/grug-frozen",
+          "relative_path": "train.parquet",
+          "uri": "s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/profiles/swe/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21/b8c07f7df1df65525abbfdbcd1572318ba11c42f/714ace0b4966264994793ef2367f196061ac5cbb42fb07a65fb3bee48cd248f6"
+        }
+      ],
+      "validation_data": [
+        {
+          "identity": "ece2903ce8cec42afa0dc9e97142cbaec794a8f8ab195264d26c9a29d9581097",
+          "kind": "directory",
+          "local_path": "/tmp/swe-pilot-data/split",
+          "relative_path": "validation.parquet",
+          "uri": "s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/prepared/swe/4947a3c8ea803413a65f9eca14a96ef521b2ddf5/ece2903ce8cec42afa0dc9e97142cbaec794a8f8ab195264d26c9a29d9581097"
+        }
+      ],
+      "observed_loss_tokens": 1000000,
+      "observed_updates": 125,
+      "full_validation": {
+        "tool_name": {
+          "examples": 256,
+          "tasks": 154,
+          "accuracy": 0.609375,
+          "ci95": [
+            0.5513307984790875,
+            0.6679389312977099
+          ],
+          "interval_method": "task-cluster bootstrap",
+          "excluded": 0
+        },
+        "nemo": {
+          "examples": 256,
+          "tasks": 154,
+          "accuracy": 0.36328125,
+          "ci95": [
+            0.30379512423816224,
+            0.4251991130419042
+          ],
+          "interval_method": "task-cluster bootstrap",
+          "excluded": 0
+        },
+        "exact": {
+          "examples": 256,
+          "tasks": 154,
+          "accuracy": 0.07421875,
+          "ci95": [
+            0.04477460259677223,
+            0.1076923076923077
+          ],
+          "interval_method": "task-cluster bootstrap",
+          "excluded": 0
+        }
+      },
+      "lineage": {}
+    },
+    {
+      "key": "swe-snowball-sft-all",
+      "config": "configs/swe-snowball-sft-all.yaml",
+      "config_sha256": "0d9baa2c658b50feeece8e3890bf008669010aca83d22d985f2a722d2147f778",
+      "run_id": "swe-pilot-snowball-sft-all-checkpoint-20261002-204037",
+      "launcher_commit": "fc66776489eb20781efcdd2c65410163ced0d63c",
+      "model": {
+        "identity": "fdc3c3c5fff489d3fb04dcbc2387c179b1bf3fab",
+        "local_path": "open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92",
+        "tokenizer_revision": "fdc3c3c5fff489d3fb04dcbc2387c179b1bf3fab",
+        "tokenizer_uri": "open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92",
+        "uri": "open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92"
+      },
+      "train_data": [
+        {
+          "identity": "b6e9c7502131ec7b6dc3576b7dc2fcdf1db892cc8b9fa3fbcd7f1ac93b77ffdf",
+          "kind": "directory",
+          "local_path": "/tmp/swe-pilot-data/snowball-frozen",
+          "relative_path": "all_train.parquet",
+          "uri": "s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/profiles/swe/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92/fdc3c3c5fff489d3fb04dcbc2387c179b1bf3fab/b6e9c7502131ec7b6dc3576b7dc2fcdf1db892cc8b9fa3fbcd7f1ac93b77ffdf"
+        }
+      ],
+      "validation_data": [
+        {
+          "identity": "ece2903ce8cec42afa0dc9e97142cbaec794a8f8ab195264d26c9a29d9581097",
+          "kind": "directory",
+          "local_path": "/tmp/swe-pilot-data/split",
+          "relative_path": "validation.parquet",
+          "uri": "s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/prepared/swe/4947a3c8ea803413a65f9eca14a96ef521b2ddf5/ece2903ce8cec42afa0dc9e97142cbaec794a8f8ab195264d26c9a29d9581097"
+        }
+      ],
+      "observed_loss_tokens": 759168,
+      "observed_updates": 77,
+      "full_validation": {
+        "tool_name": {
+          "examples": 256,
+          "tasks": 154,
+          "accuracy": 0.60546875,
+          "ci95": [
+            0.5473230776708466,
+            0.6628352490421456
+          ],
+          "interval_method": "task-cluster bootstrap",
+          "excluded": 0
+        },
+        "nemo": {
+          "examples": 256,
+          "tasks": 154,
+          "accuracy": 0.3515625,
+          "ci95": [
+            0.2931726907630522,
+            0.40945356228061847
+          ],
+          "interval_method": "task-cluster bootstrap",
+          "excluded": 0
+        },
+        "exact": {
+          "examples": 256,
+          "tasks": 154,
+          "accuracy": 0.0859375,
+          "ci95": [
+            0.053231939163498096,
+            0.12260714438319871
+          ],
+          "interval_method": "task-cluster bootstrap",
+          "excluded": 0
+        }
+      },
+      "lineage": {}
+    },
+    {
+      "key": "swe-snowball-sft-random",
+      "config": "configs/swe-snowball-sft-random.yaml",
+      "config_sha256": "402884d1fa79381908eb8fe11c662b0594894f1215f1f8d9917c72804d29b484",
+      "run_id": "swe-pilot-snowball-sft-random-20261001-195833-allocfix",
+      "launcher_commit": "d2d04c8183c1e2d41fdfe7f22aab9b05de67b207",
+      "model": {
+        "identity": "fdc3c3c5fff489d3fb04dcbc2387c179b1bf3fab",
+        "local_path": "open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92",
+        "tokenizer_revision": "fdc3c3c5fff489d3fb04dcbc2387c179b1bf3fab",
+        "tokenizer_uri": "open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92",
+        "uri": "open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92"
+      },
+      "train_data": [
+        {
+          "identity": "b6e9c7502131ec7b6dc3576b7dc2fcdf1db892cc8b9fa3fbcd7f1ac93b77ffdf",
+          "kind": "directory",
+          "local_path": "/tmp/swe-pilot-data/snowball-frozen",
+          "relative_path": "random_train.parquet",
+          "uri": "s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/profiles/swe/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92/fdc3c3c5fff489d3fb04dcbc2387c179b1bf3fab/b6e9c7502131ec7b6dc3576b7dc2fcdf1db892cc8b9fa3fbcd7f1ac93b77ffdf"
+        }
+      ],
+      "validation_data": [
+        {
+          "identity": "ece2903ce8cec42afa0dc9e97142cbaec794a8f8ab195264d26c9a29d9581097",
+          "kind": "directory",
+          "local_path": "/tmp/swe-pilot-data/split",
+          "relative_path": "validation.parquet",
+          "uri": "s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/prepared/swe/4947a3c8ea803413a65f9eca14a96ef521b2ddf5/ece2903ce8cec42afa0dc9e97142cbaec794a8f8ab195264d26c9a29d9581097"
+        }
+      ],
+      "observed_loss_tokens": 1000000,
+      "observed_updates": 102,
+      "full_validation": {
+        "tool_name": {
+          "examples": 256,
+          "tasks": 154,
+          "accuracy": 0.65625,
+          "ci95": [
+            0.5983935742971888,
+            0.7136929460580913
+          ],
+          "interval_method": "task-cluster bootstrap",
+          "excluded": 0
+        },
+        "nemo": {
+          "examples": 256,
+          "tasks": 154,
+          "accuracy": 0.421875,
+          "ci95": [
+            0.35877330373163835,
+            0.48627450980392156
+          ],
+          "interval_method": "task-cluster bootstrap",
+          "excluded": 0
+        },
+        "exact": {
+          "examples": 256,
+          "tasks": 154,
+          "accuracy": 0.0703125,
+          "ci95": [
+            0.04065040650406504,
+            0.10526315789473684
+          ],
+          "interval_method": "task-cluster bootstrap",
+          "excluded": 0
+        }
+      },
+      "lineage": {}
+    },
+    {
+      "key": "swe-snowball-sft-selected",
+      "config": "configs/swe-snowball-sft-selected.yaml",
+      "config_sha256": "d34b28b0a29a2873f236527344dead9a4bcc78ff86f6181d920d79c2beb8ffc9",
+      "run_id": "swe-pilot-snowball-sft-selected-20261001-195833-allocfix",
+      "launcher_commit": "d2d04c8183c1e2d41fdfe7f22aab9b05de67b207",
+      "model": {
+        "identity": "fdc3c3c5fff489d3fb04dcbc2387c179b1bf3fab",
+        "local_path": "open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92",
+        "tokenizer_revision": "fdc3c3c5fff489d3fb04dcbc2387c179b1bf3fab",
+        "tokenizer_uri": "open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92",
+        "uri": "open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92"
+      },
+      "train_data": [
+        {
+          "identity": "b6e9c7502131ec7b6dc3576b7dc2fcdf1db892cc8b9fa3fbcd7f1ac93b77ffdf",
+          "kind": "directory",
+          "local_path": "/tmp/swe-pilot-data/snowball-frozen",
+          "relative_path": "train.parquet",
+          "uri": "s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/profiles/swe/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92/fdc3c3c5fff489d3fb04dcbc2387c179b1bf3fab/b6e9c7502131ec7b6dc3576b7dc2fcdf1db892cc8b9fa3fbcd7f1ac93b77ffdf"
+        }
+      ],
+      "validation_data": [
+        {
+          "identity": "ece2903ce8cec42afa0dc9e97142cbaec794a8f8ab195264d26c9a29d9581097",
+          "kind": "directory",
+          "local_path": "/tmp/swe-pilot-data/split",
+          "relative_path": "validation.parquet",
+          "uri": "s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/prepared/swe/4947a3c8ea803413a65f9eca14a96ef521b2ddf5/ece2903ce8cec42afa0dc9e97142cbaec794a8f8ab195264d26c9a29d9581097"
+        }
+      ],
+      "observed_loss_tokens": 1000000,
+      "observed_updates": 102,
+      "full_validation": {
+        "tool_name": {
+          "examples": 256,
+          "tasks": 154,
+          "accuracy": 0.640625,
+          "ci95": [
+            0.5789473684210527,
+            0.6988914529645264
+          ],
+          "interval_method": "task-cluster bootstrap",
+          "excluded": 0
+        },
+        "nemo": {
+          "examples": 256,
+          "tasks": 154,
+          "accuracy": 0.41796875,
+          "ci95": [
+            0.3545816733067729,
+            0.48132780082987553
+          ],
+          "interval_method": "task-cluster bootstrap",
+          "excluded": 0
+        },
+        "exact": {
+          "examples": 256,
+          "tasks": 154,
+          "accuracy": 0.08203125,
+          "ci95": [
+            0.05078125,
+            0.11715481171548117
+          ],
+          "interval_method": "task-cluster bootstrap",
+          "excluded": 0
+        }
+      },
+      "lineage": {}
+    },
+    {
+      "key": "terminal-grug-sft-selected",
+      "config": "configs/terminal-grug-sft-selected.yaml",
+      "config_sha256": "e2b982528851dabe5342d19a9b35f2e94c044c91fabdaddd8f06e74f10d5f232",
+      "run_id": "terminal-grug-sft-selected-20261003-231651",
+      "launcher_commit": "34b813525c70a47737aa35ec896f19f7e9a2acef",
+      "model": {
+        "identity": "b8c07f7df1df65525abbfdbcd1572318ba11c42f",
+        "local_path": "open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21",
+        "tokenizer_revision": "b8c07f7df1df65525abbfdbcd1572318ba11c42f",
+        "tokenizer_uri": "open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21",
+        "uri": "open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21"
+      },
+      "train_data": [
+        {
+          "kind": "directory",
+          "identity": "33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3",
+          "local_path": "/tmp/terminal-pilot-data/33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3",
+          "relative_path": "grug/train.parquet",
+          "uri": "s3://marin-us-east-02a/marin/users/dml/skyrl/terminal-behavior-pilot/prepared/33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3"
+        }
+      ],
+      "validation_data": [
+        {
+          "kind": "directory",
+          "identity": "33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3",
+          "local_path": "/tmp/terminal-pilot-data/33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3",
+          "relative_path": "validation.parquet",
+          "uri": "s3://marin-us-east-02a/marin/users/dml/skyrl/terminal-behavior-pilot/prepared/33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3"
+        }
+      ],
+      "observed_loss_tokens": 1000000,
+      "observed_updates": 54
+    },
+    {
+      "key": "terminal-grug-sft-all",
+      "config": "configs/terminal-grug-sft-all.yaml",
+      "config_sha256": "42e901821cdd46e5cdd6ce1042983e7ec878aa4d40e4fbb4e4e264eb24a7bee9",
+      "run_id": "terminal-grug-sft-all-20261003-231651",
+      "launcher_commit": "34b813525c70a47737aa35ec896f19f7e9a2acef",
+      "model": {
+        "identity": "b8c07f7df1df65525abbfdbcd1572318ba11c42f",
+        "local_path": "open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21",
+        "tokenizer_revision": "b8c07f7df1df65525abbfdbcd1572318ba11c42f",
+        "tokenizer_uri": "open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21",
+        "uri": "open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21"
+      },
+      "train_data": [
+        {
+          "kind": "directory",
+          "identity": "33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3",
+          "local_path": "/tmp/terminal-pilot-data/33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3",
+          "relative_path": "grug/all_train.parquet",
+          "uri": "s3://marin-us-east-02a/marin/users/dml/skyrl/terminal-behavior-pilot/prepared/33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3"
+        }
+      ],
+      "validation_data": [
+        {
+          "kind": "directory",
+          "identity": "33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3",
+          "local_path": "/tmp/terminal-pilot-data/33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3",
+          "relative_path": "validation.parquet",
+          "uri": "s3://marin-us-east-02a/marin/users/dml/skyrl/terminal-behavior-pilot/prepared/33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3"
+        }
+      ],
+      "observed_loss_tokens": 1000000,
+      "observed_updates": 55
+    },
+    {
+      "key": "terminal-snowball-sft-selected",
+      "config": "configs/terminal-snowball-sft-selected.yaml",
+      "config_sha256": "abc6770570a16d3c47773256d2118d32a8d66582f4c2d51bda818410450fa6fe",
+      "run_id": "terminal-snowball-sft-selected-20261003-231651-retry1",
+      "launcher_commit": "34b813525c70a47737aa35ec896f19f7e9a2acef",
+      "model": {
+        "identity": "fdc3c3c5fff489d3fb04dcbc2387c179b1bf3fab",
+        "local_path": "open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92",
+        "tokenizer_revision": "fdc3c3c5fff489d3fb04dcbc2387c179b1bf3fab",
+        "tokenizer_uri": "open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92",
+        "uri": "open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92"
+      },
+      "train_data": [
+        {
+          "kind": "directory",
+          "identity": "33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3",
+          "local_path": "/tmp/terminal-pilot-data/33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3",
+          "relative_path": "snowball/train.parquet",
+          "uri": "s3://marin-us-east-02a/marin/users/dml/skyrl/terminal-behavior-pilot/prepared/33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3"
+        }
+      ],
+      "validation_data": [
+        {
+          "kind": "directory",
+          "identity": "33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3",
+          "local_path": "/tmp/terminal-pilot-data/33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3",
+          "relative_path": "validation.parquet",
+          "uri": "s3://marin-us-east-02a/marin/users/dml/skyrl/terminal-behavior-pilot/prepared/33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3"
+        }
+      ],
+      "observed_loss_tokens": 1000000,
+      "observed_updates": 64
+    },
+    {
+      "key": "terminal-snowball-sft-all",
+      "config": "configs/terminal-snowball-sft-all.yaml",
+      "config_sha256": "b9febc50c12df5e57e8948cda4421faa2bce3d9e4a9c6c4ec3e692f9c0c91ce5",
+      "run_id": "terminal-snowball-sft-all-20261003-231651",
+      "launcher_commit": "34b813525c70a47737aa35ec896f19f7e9a2acef",
+      "model": {
+        "identity": "fdc3c3c5fff489d3fb04dcbc2387c179b1bf3fab",
+        "local_path": "open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92",
+        "tokenizer_revision": "fdc3c3c5fff489d3fb04dcbc2387c179b1bf3fab",
+        "tokenizer_uri": "open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92",
+        "uri": "open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92"
+      },
+      "train_data": [
+        {
+          "kind": "directory",
+          "identity": "33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3",
+          "local_path": "/tmp/terminal-pilot-data/33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3",
+          "relative_path": "snowball/all_train.parquet",
+          "uri": "s3://marin-us-east-02a/marin/users/dml/skyrl/terminal-behavior-pilot/prepared/33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3"
+        }
+      ],
+      "validation_data": [
+        {
+          "kind": "directory",
+          "identity": "33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3",
+          "local_path": "/tmp/terminal-pilot-data/33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3",
+          "relative_path": "validation.parquet",
+          "uri": "s3://marin-us-east-02a/marin/users/dml/skyrl/terminal-behavior-pilot/prepared/33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3"
+        }
+      ],
+      "observed_loss_tokens": 1000000,
+      "observed_updates": 55
+    },
+    {
+      "key": "swe-grug-rl-sync",
+      "config": "configs/swe-grug-rl-sync.yaml",
+      "config_sha256": "023fef6915eea077eb8ab3c8d3f72ede3a69c9ca9edb80177d8423ee5ce3a7fc",
+      "run_id": "pivot-fixed-swe-grug-base-2048-20261005-161058-resume15-memory3-refseparate-eager",
+      "launcher_commit": "30eb118b3af1a07aff95531cf877644fe22f1c86",
+      "model": {
+        "identity": "b8c07f7df1df65525abbfdbcd1572318ba11c42f",
+        "local_path": "open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21",
+        "tokenizer_revision": "b8c07f7df1df65525abbfdbcd1572318ba11c42f",
+        "tokenizer_uri": "open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21",
+        "uri": "open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21"
+      },
+      "train_data": [
+        {
+          "kind": "directory",
+          "identity": "2b68f59be95d66b65c4c4220f973f77de278433fa1ef3de6af11eb4a7d19cb71",
+          "local_path": "/tmp/pivot-fixed-selected/2b68f59be95d66b65c4c4220f973f77de278433fa1ef3de6af11eb4a7d19cb71",
+          "relative_path": "train.parquet",
+          "uri": "s3://marin-us-east-02a/marin/users/dml/skyrl/pivot-invariant-reruns/existing-data-selected/2b68f59be95d66b65c4c4220f973f77de278433fa1ef3de6af11eb4a7d19cb71"
+        }
+      ],
+      "validation_data": [
+        {
+          "identity": "ece2903ce8cec42afa0dc9e97142cbaec794a8f8ab195264d26c9a29d9581097",
+          "kind": "directory",
+          "local_path": "/tmp/swe-pilot-data/split",
+          "relative_path": "validation.parquet",
+          "uri": "s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/prepared/swe/4947a3c8ea803413a65f9eca14a96ef521b2ddf5/ece2903ce8cec42afa0dc9e97142cbaec794a8f8ab195264d26c9a29d9581097"
+        }
+      ],
+      "selected_rows": 1844,
+      "lineage": [
+        {
+          "run_id": "pivot-fixed-swe-grug-base-2048-20261005-161058",
+          "resume_step": 15,
+          "trajectory_root": "s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/runs/pivot-fixed-swe-grug-base-2048-20261005-161058/attempts/trajectories",
+          "checkpoint_root": "s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/runs/pivot-fixed-swe-grug-base-2048-20261005-161058/checkpoint",
+          "evidence_folder": "/Users/dml/src/marin/pivotrl-artifacts/invariant-reruns/offline-witness-20261005-161058/swe-grug-base/failed-submissions/pivot-fixed-swe-grug-base-2048-20261005-161058"
+        },
+        {
+          "run_id": "pivot-fixed-swe-grug-base-2048-20261005-161058-resume15-memory1",
+          "resume_step": 15,
+          "trajectory_root": "s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/runs/pivot-fixed-swe-grug-base-2048-20261005-161058-resume15-memory1/attempts/trajectories",
+          "checkpoint_root": "s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/runs/pivot-fixed-swe-grug-base-2048-20261005-161058-resume15-memory1/checkpoint",
+          "evidence_folder": "/Users/dml/src/marin/pivotrl-artifacts/invariant-reruns/offline-witness-20261005-161058/swe-grug-base/failed-submissions/pivot-fixed-swe-grug-base-2048-20261005-161058-resume15-memory1"
+        }
+      ],
+      "selection": "selection.json"
+    },
+    {
+      "key": "terminal-grug-rl-sync",
+      "config": "configs/terminal-grug-rl-sync.yaml",
+      "config_sha256": "aeb61291e80484e43a7dfdb99995ef1da8cbbe975d7be57e4493fd71a295ce42",
+      "run_id": "pivot-fixed-terminal-grug-base-2048-20261005-161058-adc1",
+      "launcher_commit": "30eb118b3af1a07aff95531cf877644fe22f1c86",
+      "model": {
+        "identity": "b8c07f7df1df65525abbfdbcd1572318ba11c42f",
+        "local_path": "open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21",
+        "tokenizer_revision": "b8c07f7df1df65525abbfdbcd1572318ba11c42f",
+        "tokenizer_uri": "open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21",
+        "uri": "open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21"
+      },
+      "train_data": [
+        {
+          "kind": "directory",
+          "identity": "4651d3098b9f9dbcd92a13aab0d26f6102c8122366ea8e070d0c2e5fd02908af",
+          "local_path": "/tmp/pivot-fixed-selected/4651d3098b9f9dbcd92a13aab0d26f6102c8122366ea8e070d0c2e5fd02908af",
+          "relative_path": "train.parquet",
+          "uri": "s3://marin-us-east-02a/marin/users/dml/skyrl/pivot-invariant-reruns/existing-data-selected/4651d3098b9f9dbcd92a13aab0d26f6102c8122366ea8e070d0c2e5fd02908af"
+        }
+      ],
+      "validation_data": [
+        {
+          "kind": "directory",
+          "identity": "33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3",
+          "local_path": "/tmp/terminal-pilot-data/33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3",
+          "relative_path": "validation.parquet",
+          "uri": "s3://marin-us-east-02a/marin/users/dml/skyrl/terminal-behavior-pilot/prepared/33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3"
+        }
+      ],
+      "selected_rows": 3063,
+      "lineage": [],
+      "selection": "selection.json"
+    },
+    {
+      "key": "swe-snowball-rl-sync",
+      "config": "configs/swe-snowball-rl-sync.yaml",
+      "config_sha256": "38aaca896e87f8a382951bff019e2076e44d579c146f8590c2ea6540b179eca6",
+      "run_id": "pivot-snowball-own-mixed-grug-config-swe-sync-2048-20261005-222737",
+      "launcher_commit": "30eb118b3af1a07aff95531cf877644fe22f1c86",
+      "model": {
+        "identity": "fdc3c3c5fff489d3fb04dcbc2387c179b1bf3fab",
+        "local_path": "open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92",
+        "tokenizer_revision": "fdc3c3c5fff489d3fb04dcbc2387c179b1bf3fab",
+        "tokenizer_uri": "open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92",
+        "uri": "open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92"
+      },
+      "train_data": [
+        {
+          "kind": "directory",
+          "identity": "e674f7648db1e888cdc2afd18d6741ee97d54584830835b04d77245a127c5fbb",
+          "local_path": "/tmp/pivot-fixed-selected/e674f7648db1e888cdc2afd18d6741ee97d54584830835b04d77245a127c5fbb",
+          "relative_path": "train.parquet",
+          "uri": "s3://marin-us-east-02a/marin/users/dml/skyrl/pivot-invariant-reruns/existing-data-selected/e674f7648db1e888cdc2afd18d6741ee97d54584830835b04d77245a127c5fbb"
+        }
+      ],
+      "validation_data": [
+        {
+          "identity": "ece2903ce8cec42afa0dc9e97142cbaec794a8f8ab195264d26c9a29d9581097",
+          "kind": "directory",
+          "local_path": "/tmp/swe-pilot-data/split",
+          "relative_path": "validation.parquet",
+          "uri": "s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/prepared/swe/4947a3c8ea803413a65f9eca14a96ef521b2ddf5/ece2903ce8cec42afa0dc9e97142cbaec794a8f8ab195264d26c9a29d9581097"
+        }
+      ],
+      "selected_rows": 1199,
+      "lineage": [],
+      "selection": "selection.json"
+    },
+    {
+      "key": "terminal-snowball-rl-sync",
+      "config": "configs/terminal-snowball-rl-sync.yaml",
+      "config_sha256": "a86fba4dad5216b3922c750ee83504a02f4a7273986676b3d4656fbb50335d61",
+      "run_id": "pivot-snowball-own-mixed-grug-config-terminal-sync-2048-20261005-222737-fresh-grading2",
+      "launcher_commit": "30eb118b3af1a07aff95531cf877644fe22f1c86",
+      "model": {
+        "identity": "fdc3c3c5fff489d3fb04dcbc2387c179b1bf3fab",
+        "local_path": "open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92",
+        "tokenizer_revision": "fdc3c3c5fff489d3fb04dcbc2387c179b1bf3fab",
+        "tokenizer_uri": "open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92",
+        "uri": "open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92"
+      },
+      "train_data": [
+        {
+          "kind": "directory",
+          "identity": "ae42bf77322c396866299dd4863d4d9128af1db45d0635d1b8b1824b03d7bf07",
+          "local_path": "/tmp/pivot-fixed-selected/ae42bf77322c396866299dd4863d4d9128af1db45d0635d1b8b1824b03d7bf07",
+          "relative_path": "train.parquet",
+          "uri": "s3://marin-us-east-02a/marin/users/dml/skyrl/pivot-invariant-reruns/existing-data-selected/ae42bf77322c396866299dd4863d4d9128af1db45d0635d1b8b1824b03d7bf07"
+        }
+      ],
+      "validation_data": [
+        {
+          "kind": "directory",
+          "identity": "33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3",
+          "local_path": "/tmp/terminal-pilot-data/33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3",
+          "relative_path": "validation.parquet",
+          "uri": "s3://marin-us-east-02a/marin/users/dml/skyrl/terminal-behavior-pilot/prepared/33d64ccc719cea1111a2cf39d99dfa185e07a2d8cc844443fc1a0a894f40d7f3"
+        }
+      ],
+      "selected_rows": 265,
+      "lineage": [],
+      "selection": "selection.json"
+    }
+  ],
+  "target_action_lengths": {
+    "validation_sha256": "886696609b201b96161b946a7f5d16d0cf9903102baf6a1303a85a765ba1817c",
+    "tokenizers": {
+      "grug": {
+        "revision": "b8c07f7df1df65525abbfdbcd1572318ba11c42f",
+        "tokenizer_sha256": "6a61ca2105a54e9984169b409581f31cc50330d1b47104af13c221b05e462e45",
+        "config_sha256": "f7f56f12eb85c29eb64b9aa418c5fcd12990916afac2df48edfb79c7ba02f764",
+        "examples": 256,
+        "maximum": 972,
+        "at_most_1024": 256
+      },
+      "snowball": {
+        "revision": "fdc3c3c5fff489d3fb04dcbc2387c179b1bf3fab",
+        "tokenizer_sha256": "881c9c36c359e1617afef6f7583403567931b7b4f43f6552d2b2155a131650a2",
+        "config_sha256": "7c11be094d34bd4bb5cf704584fb71b1164220bcfcc5963321bc6ec03d7ec853",
+        "examples": 256,
+        "maximum": 985,
+        "at_most_1024": 256
+      }
+    },
+    "definition": "Released expected_action rendered by the training demonstration_tokens function: completion tokens extending the exact generation prefix, including action formatting and end markers; no generated response or prompt tokens counted."
+  },
+  "sft_reproduction": {
+    "stopping": "Recorded optimizer update count, using standard trainer.max_steps",
+    "target_mask": "Full demonstrated action; no token-budget clipping in the final update",
+    "evaluation": "Standard step-based evaluation at initialization and the final update",
+    "limitation": "Approximates recorded supervised-token exposure; Snowball All uses the recorded interim update count"
+  },
+  "reproduction_runtime": {
+    "rl_evaluation": "Full heldout set at initialization and every five optimizer updates; no quick pilot subset",
+    "retention": "Standard trajectory records and evaluation predictions; no grade-table sidecars or duplicate batch dumps",
+    "snapshots": "Original launch configs are unchanged; prepare_run removes historical pilot and token-budget options",
+    "launch": "Run scripts/pivotrl/prepare_run.py --help for fresh config preparation; set run.submission=detach before Iris launch"
+  }
+}

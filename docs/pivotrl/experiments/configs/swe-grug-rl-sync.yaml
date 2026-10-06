@@ -1,0 +1,306 @@
+artifacts:
+  attempts_root: s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/runs/pivot-fixed-swe-grug-base-2048-20261005-161058-resume15-memory3-refseparate-eager/attempts
+  checkpoint_root: s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/runs/pivot-fixed-swe-grug-base-2048-20261005-161058-resume15-memory3-refseparate-eager/checkpoint
+  export_root: s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/runs/pivot-fixed-swe-grug-base-2048-20261005-161058-resume15-memory3-refseparate-eager/export
+  resolved_config_uri: s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/runs/pivot-fixed-swe-grug-base-2048-20261005-161058-resume15-memory3-refseparate-eager/resolved.yaml
+  terminal_manifest_uri: s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/runs/pivot-fixed-swe-grug-base-2048-20261005-161058-resume15-memory3-refseparate-eager/terminal.json
+  resume_checkpoint_count: 2
+inputs:
+  data_kind: parquet
+  model:
+    identity: b8c07f7df1df65525abbfdbcd1572318ba11c42f
+    local_path: open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21
+    tokenizer_revision: b8c07f7df1df65525abbfdbcd1572318ba11c42f
+    tokenizer_uri: open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21
+    uri: open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21
+  train_data:
+  - kind: directory
+    identity: 2b68f59be95d66b65c4c4220f973f77de278433fa1ef3de6af11eb4a7d19cb71
+    local_path: /tmp/pivot-fixed-selected/2b68f59be95d66b65c4c4220f973f77de278433fa1ef3de6af11eb4a7d19cb71
+    relative_path: train.parquet
+    uri: s3://marin-us-east-02a/marin/users/dml/skyrl/pivot-invariant-reruns/existing-data-selected/2b68f59be95d66b65c4c4220f973f77de278433fa1ef3de6af11eb4a7d19cb71
+  validation_data:
+  - identity: ece2903ce8cec42afa0dc9e97142cbaec794a8f8ab195264d26c9a29d9581097
+    kind: directory
+    local_path: /tmp/swe-pilot-data/split
+    relative_path: validation.parquet
+    uri: s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/prepared/swe/4947a3c8ea803413a65f9eca14a96ef521b2ddf5/ece2903ce8cec42afa0dc9e97142cbaec794a8f8ab195264d26c9a29d9581097
+iris:
+  allocation:
+    cpu: 48
+    disk: 2TB
+    gpu_variant: H100
+    gpus_per_node: 8
+    memory: 700GB
+    num_nodes: 14
+  cluster: marin-contractor-adc
+  cluster_config: /Users/dml/src/marin/pivotrl-artifacts/terminal-behavior-pilot/iris-contractor-adc.yaml
+  job_name: pivot-fixed-swe-grug-base-2048-20261005-161058-resume15-memory3-refseparate-eager
+  max_retries: 0
+  parent_cluster_config: /Users/dml/src/marin/pivotrl-artifacts/terminal-behavior-pilot/iris-contractor-adc.yaml
+  priority: interactive
+  target_cluster: cw-us-east-02a
+  timeout: 259200
+  wandb_entity: marin-community
+ray:
+  driver_liveness_timeout: 3600
+  log_dir: s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/runs/pivot-fixed-swe-grug-base-2048-20261005-161058-resume15-memory3-refseparate-eager/ray-logs
+  rendezvous_dir: s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/runs/pivot-fixed-swe-grug-base-2048-20261005-161058-resume15-memory3-refseparate-eager/rendezvous
+  spill_backend: local
+  spill_dir: /tmp/skyrl-ray-spill
+run:
+  attempt_id: a1
+  export_hf: false
+  id: pivot-fixed-swe-grug-base-2048-20261005-161058-resume15-memory3-refseparate-eager
+  mode: train
+  seed: 42
+  submission: detach
+runtime:
+  launcher_commit: 30eb118b3af1a07aff95531cf877644fe22f1c86
+  profile: megatron
+  task_env:
+    PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+schema_version: 1
+skyrl:
+  entrypoint: standard
+  context_budget:
+    request_window_tokens: 65536
+    max_new_tokens_per_turn: 2048
+    max_turns: 1
+  trainer:
+    strategy: megatron
+    seed: 42
+    flash_attn: true
+    gradient_checkpointing: true
+    gradient_checkpointing_use_reentrant: false
+    offload_optimizer_during_rollouts: true
+    algorithm:
+      advantage_estimator: grpo
+      group_advantage_min_size: null
+      advantage_batch_normalize: false
+      eps_clip_low: 0.2
+      eps_clip_high: 0.2
+      use_entropy_loss: false
+      use_kl_loss: true
+      use_kl_in_reward: false
+      loss_reduction: sequence_mean
+      grpo_norm_by_std: true
+      kl_loss_coef: 0.01
+      kl_estimator_type: forward
+      dynamic_sampling:
+        type: null
+        max_sample_batches: 30
+        informative_on: unshaped
+        min_reward_std: 0.0
+    epochs: 100000
+    max_steps: 20
+    update_epochs_per_batch: 1
+    train_batch_size: 64
+    policy_mini_batch_size: 64
+    eval_batch_size: 16
+    micro_forward_batch_size_per_gpu: 1
+    micro_train_batch_size_per_gpu: 1
+    use_sample_packing: true
+    eval_before_train: false
+    eval_interval: -1
+    ckpt_interval: 5
+    max_ckpts_to_keep: -1
+    resume_mode: from_path
+    logger: wandb
+    project_name: pivot-rl
+    policy:
+      optimizer_config:
+        optimizer: AdamW
+        lr: 4.0e-06
+        weight_decay: 0.0
+        max_grad_norm: 0.5
+        num_warmup_steps: 0
+        scheduler: constant_with_warmup
+      megatron_config:
+        tensor_model_parallel_size: 1
+        pipeline_model_parallel_size: 6
+        context_parallel_size: 1
+        expert_model_parallel_size: 8
+        expert_tensor_parallel_size: 1
+        logprob_chunk_size: 128
+        optimizer_config_kwargs:
+          optimizer_cpu_offload: true
+          optimizer_offload_fraction: 1.0
+        transformer_config_kwargs:
+          num_layers_in_first_pipeline_stage: 4
+          num_layers_in_last_pipeline_stage: 2
+          recompute_num_layers: 2
+        optimizer_checkpoint_sharding_type: dp_reshardable
+        ddp_config:
+          overlap_grad_reduce: true
+          overlap_param_gather: true
+          grad_reduce_in_fp32: false
+      model:
+        path: open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.21
+        revision: b8c07f7df1df65525abbfdbcd1572318ba11c42f
+    ref:
+      megatron_config:
+        tensor_model_parallel_size: 1
+        pipeline_model_parallel_size: 6
+        context_parallel_size: 1
+        expert_model_parallel_size: 8
+        expert_tensor_parallel_size: 1
+        logprob_chunk_size: 128
+        transformer_config_kwargs:
+          num_layers_in_first_pipeline_stage: 4
+          num_layers_in_last_pipeline_stage: 2
+    placement:
+      colocate_all: false
+      colocate_policy_ref: false
+      policy_num_nodes: 6
+      policy_num_gpus_per_node: 8
+      ref_num_nodes: 6
+      ref_num_gpus_per_node: 8
+    loss_token_budget: null
+    eval_loss_token_interval: null
+    dump_data_batch: true
+    pivot_pilot:
+      arm: rl_nemo
+      quick_source_ids:
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:11298
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:15578
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:22496
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:50058
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:7351
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:50282
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:50358
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:43182
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:2270
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:39337
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:21971
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:27986
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:1241
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:29624
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:18223
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:16708
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:41490
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:37169
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:9819
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:34262
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:36505
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:31351
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:44759
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:33229
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:46447
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:36265
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:10001
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:43525
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:44456
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:17417
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:23999
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:23028
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:13013
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:32222
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:35983
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:13659
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:2963
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:12315
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:32307
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:49844
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:27259
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:19229
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:49912
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:21578
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:40363
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:45710
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:3785
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:47282
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:28536
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:44543
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:10851
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:9119
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:29306
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:28051
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:48804
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:27751
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:1703
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:49526
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:33120
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:29096
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:13892
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:36970
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:34561
+      - swe:4947a3c8ea803413a65f9eca14a96ef521b2ddf5:28320
+      split_hash: 784b88ac49006bc3395f66229ce04f95247f9e87c5372c8a7bb38f3c80b658f3
+      quick_hash: 4d9bbdf4f5fa22322a57fdcdb08d61601e291148d7ca39686e05b3c9a268d787
+      baseline_cache: null
+      archive_root: s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/runs/pivot-fixed-swe-grug-base-2048-20261005-161058-resume15-memory3-refseparate-eager/attempts/trajectories
+      grade_table_root: null
+      train_data_sha256: 2b68f59be95d66b65c4c4220f973f77de278433fa1ef3de6af11eb4a7d19cb71
+      validation_data_sha256: 886696609b201b96161b946a7f5d16d0cf9903102baf6a1303a85a765ba1817c
+      quick_data_sha256: f0cc293bb374c9c652d3a3cce01edbec04465c87fe8f06aef21d55f02df42334
+      selected_data_uri: s3://marin-us-east-02a/marin/users/dml/skyrl/pivot-invariant-reruns/existing-data-selected/2b68f59be95d66b65c4c4220f973f77de278433fa1ef3de6af11eb4a7d19cb71/train.parquet
+      selected_data_sha256: 2b68f59be95d66b65c4c4220f973f77de278433fa1ef3de6af11eb4a7d19cb71
+      verifier_tool_name_id: expected_tool_name_match:v1
+      verifier_nemo_id: word_count_similarity_threshold=0:v1
+      verifier_exact_id: strict_recursive_arguments:v1
+    resume_path: s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/runs/pivot-fixed-swe-grug-base-2048-20261005-161058/checkpoint/global_step_15
+    restore_dataloader_state: true
+    ckpt_path: s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/runs/pivot-fixed-swe-grug-base-2048-20261005-161058-resume15-memory3-refseparate-eager/checkpoint
+  generator:
+    backend: vllm
+    model_dtype: bfloat16
+    vllm_attention_backend: FLASH_ATTN
+    inference_engine_tensor_parallel_size: 1
+    inference_engine_data_parallel_size: 8
+    inference_engine_expert_parallel_size: 8
+    num_inference_engines: 2
+    n_samples_per_prompt: 8
+    eval_n_samples_per_prompt: 1
+    gpu_memory_utilization: 0.85
+    max_num_seqs: 64
+    max_num_batched_tokens: 32768
+    enable_prefix_caching: true
+    enable_chunked_prefill: true
+    enforce_eager: true
+    run_engines_locally: true
+    weight_sync_backend: nccl
+    enable_http_endpoint: true
+    sampling_params:
+      temperature: 1.0
+      top_p: 1.0
+      top_k: -1
+    engine_init_kwargs:
+      enable_auto_tool_choice: true
+      tool_call_parser: hermes
+    trajectory_retention:
+      phases:
+      - train
+      - eval
+      sample_fraction: 1.0
+      max_bytes_per_step: null
+      max_bytes_per_run: null
+      required: true
+      enabled: true
+      grade_table: false
+      output_path: s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/runs/pivot-fixed-swe-grug-base-2048-20261005-161058-resume15-memory3-refseparate-eager/attempts/trajectories
+      model_source_identity: b8c07f7df1df65525abbfdbcd1572318ba11c42f
+    trajectory_reward_shaping:
+      enabled: false
+    eval_sampling_params:
+      temperature: 0.0
+      top_p: 1.0
+      top_k: -1
+  environment:
+    skyrl_gym:
+      nemotron_ultra:
+        pivot_reward: nemo
+        pivot_arm: rl_nemo
+        require_completed_action: true
+  data:
+    kind: parquet
+    train_data:
+    - s3://marin-us-east-02a/marin/users/dml/skyrl/pivot-invariant-reruns/existing-data-selected/2b68f59be95d66b65c4c4220f973f77de278433fa1ef3de6af11eb4a7d19cb71/train.parquet
+    val_data:
+    - s3://marin-us-east-02a/marin/users/dml/skyrl/swe-behavior-pilot/prepared/swe/4947a3c8ea803413a65f9eca14a96ef521b2ddf5/ece2903ce8cec42afa0dc9e97142cbaec794a8f8ab195264d26c9a29d9581097/validation.parquet
+    shuffle: true
+  extra_env:
+    PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+  pivot:
+    mode: pivotrl
+    profiling_samples: 8
