@@ -4,6 +4,8 @@ import pytest
 from examples.cat_count.cpu_canary import PROMPT, build_tokenizer
 from examples.cat_count.synthetic_teacher import CatCountTeacher, TeacherNoise
 
+from tests.cpu.tiny_training.cat_count_opd import cat_count_opd_config
+
 HIGH = math.log(0.95)
 # The tiny word-level vocabulary has 38 tokens; the other 0.05 is spread over 37 of them.
 LOW = math.log(0.05 / 37)
@@ -105,3 +107,16 @@ def test_generation_config_stop_tokens_end_a_reply(tokenizer):
     teacher = CatCountTeacher(tokenizer, TeacherNoise(), stop_token_ids=(tokenizer.eos_token_id, pad))
     full, start = sequence(tokenizer, 2, "cat cat", eos=False)
     assert teacher.score([*full, pad])[start:] == pytest.approx([HIGH, HIGH, HIGH])
+
+
+def test_an_expert_teaches_its_own_word_whatever_the_prompt_asks(tokenizer):
+    dog = CatCountTeacher(tokenizer, TeacherNoise(), word="dog")
+    assert response_scores(dog, tokenizer, 2, "dog dog") == pytest.approx([HIGH, HIGH, HIGH])
+    assert response_scores(dog, tokenizer, 2, "cat cat") == pytest.approx([LOW, LOW, HIGH])
+
+
+def test_cpu_opd_rejects_a_single_expert_for_another_word(tmp_path):
+    model = tmp_path / "policy"
+    build_tokenizer().save_pretrained(model)
+    with pytest.raises(ValueError, match="teaches cat"):
+        cat_count_opd_config(tmp_path / "run", model, {"dog": "http://127.0.0.1:1/v1"})

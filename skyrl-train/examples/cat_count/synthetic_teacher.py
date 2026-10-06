@@ -1,9 +1,9 @@
 """A programmed CatCount teacher served through the OpenAI-compatible teacher protocol.
 
-The teacher knows the right answer, so it is not a language model. For each prompt it reads N, then gives every
-response token one log-probability:
+The teacher knows the right answer, so it is not a language model. It is an expert in one word (``--word``,
+``cat`` by default). For each prompt it reads N, then gives every response token one log-probability:
 
-- log ``correct_probability`` while the response is still a prefix of ``cat`` repeated N times, and for a stop
+- log ``correct_probability`` while the response is still a prefix of its word repeated N times, and for a stop
   token (any special token) once the response is exactly that;
 - for the first token that leaves that prefix, the log of the remaining probability spread evenly over the rest of
   the vocabulary, as if the teacher were a full distribution;
@@ -18,13 +18,18 @@ Noise makes the teacher imperfect:
 - ``jitter`` adds Gaussian noise with that standard deviation to every response log-probability, capped at 0;
 - ``error_rate`` is the chance that the teacher targets N+1 or N-1 cats for a whole response instead of N.
 
+The teacher ignores which word the prompt asks for, so a row routed to the wrong expert is taught the wrong word.
+That is how a multi-teacher run detects misrouting.
+
 Noise is causal and deterministic. Each response is seeded from ``seed`` and its prompt, the wrong-count draw comes
 first, and each response token then consumes one jitter draw, so a token's score depends only on the prompt and
 the tokens before it, as a language model's would, and a retried request gets the same scores.
 
 Only end-of-sequence tokens stop a reply: the tokenizer's by default, or the ones the inference engine stops on
 (``stop_token_ids``; the server adds the model's generation-config EOS ids, such as Qwen's <|endoftext|> beside
-<|im_end|>). Any other special token the student writes, such as a chat-template header, is a wrong token. ``flipped`` swaps the correct and wrong log-probabilities; a student trained on a flipped teacher should
+<|im_end|>). Any other special token the student writes, such as a chat-template header, is a wrong token.
+
+``flipped`` swaps the correct and wrong log-probabilities; a student trained on a flipped teacher should
 get worse, which tests that learning depends on the teacher's signal.
 
 Serve it for a training run on the policy's tokenizer::
@@ -69,8 +74,15 @@ class TeacherNoise:
 class CatCountTeacher:
     """Score CatCount responses token by token against the known answer."""
 
-    def __init__(self, tokenizer: PreTrainedTokenizerBase, noise: TeacherNoise, stop_token_ids: Iterable[int] = ()):
+    def __init__(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        noise: TeacherNoise,
+        word: str = TARGET_WORD,
+        stop_token_ids: Iterable[int] = (),
+    ):
         self.tokenizer = tokenizer
+        self.word = word
         self.noise = noise
         self.correct_logprob = math.log(noise.correct_probability)
         self.wrong_logprob = math.log((1 - noise.correct_probability) / (len(tokenizer) - 1))
@@ -109,7 +121,7 @@ class CatCountTeacher:
 
     def correct_tokens(self, response_ids: Sequence[int], n: int) -> list[bool]:
         """Return, for each response token, whether the teacher prefers it."""
-        target = " ".join([TARGET_WORD] * n)
+        target = " ".join([self.word] * n)
         verdicts = []
         on_track = True
         for index, token_id in enumerate(response_ids):
@@ -197,6 +209,7 @@ def application(teacher: CatCountTeacher) -> web.Application:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--tokenizer", required=True, help="the student policy's tokenizer directory or HF name")
+    parser.add_argument("--word", default=TARGET_WORD, help="the word this expert teaches")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--correct-probability", type=float, default=TeacherNoise.correct_probability)
@@ -213,7 +226,7 @@ def main() -> None:
         seed=args.seed,
     )
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
-    teacher = CatCountTeacher(tokenizer, noise, engine_stop_token_ids(args.tokenizer, tokenizer))
+    teacher = CatCountTeacher(tokenizer, noise, args.word, engine_stop_token_ids(args.tokenizer, tokenizer))
     web.run_app(application(teacher), host=args.host, port=args.port, print=None)
 
 

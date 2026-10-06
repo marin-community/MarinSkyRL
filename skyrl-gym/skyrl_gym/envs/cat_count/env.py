@@ -5,16 +5,17 @@ from typing import Any
 from omegaconf import DictConfig
 
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput, ConversationType
-from skyrl_gym.envs.cat_count.reward import CatCountScore, cat_count_score
+from skyrl_gym.envs.cat_count.reward import TARGET_WORD, CatCountScore, cat_count_score
 from skyrl_gym.verification import UNKNOWN_STOP_REASON, RolloutEvidence, VerificationResult
 
 
 class CatCountEnv(BaseTextEnv):
-    """Score the decoded assistant turn against the row's requested cat count."""
+    """Score the decoded assistant turn against the row's requested count of its word, ``cat`` unless ``extra_info.word``."""
 
     def __init__(self, env_config: DictConfig, extras: dict[str, Any]):
         super().__init__()
         self.n = int(extras["extra_info"]["n"])
+        self.word = str(extras["extra_info"].get("word", TARGET_WORD))
         self.stop_reason = UNKNOWN_STOP_REASON
         self.score: CatCountScore | None = None
 
@@ -25,7 +26,7 @@ class CatCountEnv(BaseTextEnv):
         self.stop_reason = evidence.stop_reason
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
-        score = cat_count_score(action, self.n, stop_reason=self.stop_reason)
+        score = cat_count_score(action, self.n, stop_reason=self.stop_reason, word=self.word)
         self.score = score
         return BaseTextEnvStepOutput(
             observations=[],

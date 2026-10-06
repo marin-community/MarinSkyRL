@@ -1,0 +1,181 @@
+{
+  "provenance": {
+    "what": "CatCount multi-teacher on-policy distillation (MOPD) from two synthetic experts, cat and dog, through Megatron with pretrained Qwen2.5-0.5B-Instruct.",
+    "produced_by": "TEACHER_WORDS='cat dog' ci/marin_nightly/run_cat_count_opd_h100.sh on one Iris H100x4 task",
+    "recipe": "The OPD recipe (lr 1e-6, teacher-credit clip 5, jitter 0.5) with one row per word for every count, teacher_route set to the row's word, and each route sent to that word's expert. Every 64-prompt batch is 32 cat and 32 dog rows.",
+    "learning_rate": 1e-06,
+    "advantage_clip": 5,
+    "teacher_jitter": 0.5,
+    "step_cap": 30,
+    "eval_interval": 5,
+    "calibration": {
+      "healthy_seeds": [
+        17,
+        23,
+        31
+      ],
+      "step0_sampled_train_score": {
+        "cat": [
+          0.28,
+          0.31,
+          0.23
+        ],
+        "dog": [
+          0.3,
+          0.27,
+          0.37
+        ]
+      },
+      "peak_sampled_train_score_by_step_30": {
+        "cat": [
+          0.8,
+          0.81,
+          0.74
+        ],
+        "dog": [
+          0.81,
+          0.8,
+          0.78
+        ]
+      },
+      "swapped_routes_seed_17_peak_after_step_0": {
+        "cat": 0.08,
+        "dog": 0.1
+      }
+    },
+    "sampled_score_threshold_per_route": 0.65
+  },
+  "min_train_steps": 30,
+  "max_wall_clock_seconds": 1800,
+  "required_log_patterns": {
+    "successful_head_completion": {
+      "pattern": "Training done!",
+      "minimum": 1
+    }
+  },
+  "finite_metrics": [
+    "policy/final_loss",
+    "distillation/teacher_advantage_mean",
+    "distillation/teacher_advantage_abs_mean",
+    "distillation/valid_tokens",
+    "distillation/scored_tokens",
+    "distillation/teacher_count",
+    "policy/raw_grad_norm",
+    "distillation/route_rows/cat",
+    "distillation/route_rows/dog"
+  ],
+  "metric_gates": [
+    {
+      "kind": "eval",
+      "metric": "eval/sampled/cat_train/avg_score",
+      "min_observations": 1,
+      "bounds": {
+        "minimum": 0.1,
+        "maximum": 0.45
+      },
+      "step": 0
+    },
+    {
+      "kind": "eval",
+      "metric": "eval/sampled/cat_train/avg_score",
+      "min_observations": 2,
+      "max_step": 30,
+      "bounds": {
+        "minimum_count": 1,
+        "minimum": 0.65
+      }
+    },
+    {
+      "kind": "train",
+      "metric": "distillation/route_rows/cat",
+      "min_observations": 30,
+      "bounds": {
+        "minimum": 1
+      }
+    },
+    {
+      "kind": "eval",
+      "metric": "eval/sampled/dog_train/avg_score",
+      "min_observations": 1,
+      "bounds": {
+        "minimum": 0.1,
+        "maximum": 0.45
+      },
+      "step": 0
+    },
+    {
+      "kind": "eval",
+      "metric": "eval/sampled/dog_train/avg_score",
+      "min_observations": 2,
+      "max_step": 30,
+      "bounds": {
+        "minimum_count": 1,
+        "minimum": 0.65
+      }
+    },
+    {
+      "kind": "train",
+      "metric": "distillation/route_rows/dog",
+      "min_observations": 30,
+      "bounds": {
+        "minimum": 1
+      }
+    },
+    {
+      "kind": "train",
+      "metric": "distillation/teacher_count",
+      "min_observations": 30,
+      "bounds": {
+        "minimum": 2,
+        "maximum": 2
+      }
+    },
+    {
+      "kind": "train",
+      "metric": "distillation/valid_tokens",
+      "min_observations": 30,
+      "bounds": {
+        "minimum": 1,
+        "maximum": 100000
+      }
+    },
+    {
+      "kind": "train",
+      "metric": "distillation/teacher_advantage_abs_mean",
+      "min_observations": 30,
+      "bounds": {
+        "minimum": 0,
+        "inclusive_minimum": false,
+        "maximum": 5
+      }
+    },
+    {
+      "kind": "train",
+      "metric": "policy/raw_grad_norm",
+      "min_observations": 30,
+      "bounds": {
+        "minimum": 0,
+        "inclusive_minimum": false
+      }
+    },
+    {
+      "kind": "train",
+      "metric": "async/staleness_mean",
+      "min_observations": 30,
+      "bounds": {
+        "minimum_count": 1,
+        "minimum": 0,
+        "inclusive_minimum": false
+      }
+    },
+    {
+      "kind": "train",
+      "metric": "policy/dp_weight_checksum_mismatch",
+      "min_observations": 30,
+      "bounds": {
+        "minimum": 0,
+        "maximum": 0
+      }
+    }
+  ]
+}

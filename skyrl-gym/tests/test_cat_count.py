@@ -110,3 +110,12 @@ def test_environment_scores_completion_and_reports_verification_and_metrics(
     assert metrics[f"n_words_n{n}"] == float(n_words)
     assert metrics["has_cat"] == 1.0
     assert metrics["truncated"] == float(truncated)
+
+
+def test_environment_scores_the_row_word():
+    env = skyrl_gym.make("cat_count", env_config=DictConfig({}), extras={"extra_info": {"n": 3, "word": "dog"}})
+    env.init([{"role": "user", "content": "Reply with the word dog exactly 3 times, separated by single spaces."}])
+    assert env.step("dog dog dog")["verification"].passed is True
+    wrong_word = skyrl_gym.make("cat_count", env_config=DictConfig({}), extras={"extra_info": {"n": 3, "word": "dog"}})
+    assert wrong_word.step("cat cat cat")["verification"].passed is False
+    assert cat_count_score("cat cat cat", 3, word="dog").reward < cat_count_score("dog dog dog", 3, word="dog").reward

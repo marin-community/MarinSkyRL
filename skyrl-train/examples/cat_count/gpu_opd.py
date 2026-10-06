@@ -1,9 +1,14 @@
-"""CatCount on-policy distillation on GPU from a synthetic expert teacher.
+"""CatCount on-policy distillation on GPU from synthetic expert teachers.
 
 The recipe is the async CatCount GPU canary's (Qwen2.5-0.5B-Instruct, two Megatron data-parallel ranks, two vLLM
 engines, 64 prompts with eight samples, two update epochs, rollout staleness 2, seed 17), with the environment
-reward replaced by the teacher's per-token signal. The teacher is ``synthetic_teacher.py`` served over HTTP on the
-same host, so it needs no GPU. ``ci/marin_nightly/run_cat_count_opd_h100.sh`` runs this on one Iris H100x4 task.
+reward replaced by the teachers' per-token signal. Each teacher is ``synthetic_teacher.py`` for one word, served
+over HTTP on the same host, so it needs no GPU. ``ci/marin_nightly/run_cat_count_opd_h100.sh`` runs this on one
+Iris H100x4 task.
+
+One teacher (``--teacher cat=URL``) is single-teacher OPD. Several (MOPD) give every count one row per word, each
+row's ``teacher_route`` is its word, and evaluation also reports every word separately. ``--swap-routes`` sends
+each word's rows to the next word's expert, a control that a working router must fail.
 """
 
 import argparse
@@ -31,52 +36,78 @@ SAMPLED_EVAL_SAMPLES = 8
 EVAL_INTERVAL = 5
 
 
-def record(n: int, split: str, index: int) -> dict:
-    return {
-        "data_source": f"cat_count_n{n}",
+def data_source(word: str, n: int) -> str:
+    return f"{word}_count_n{n}"
+
+
+def record(word: str, n: int, split: str, index: int, routed: bool) -> dict:
+    row = {
+        "data_source": data_source(word, n),
         "prompt": [
             {
                 "role": "user",
-                "content": f"Reply with the word cat exactly {n} times, separated by single spaces. Nothing else.",
+                "content": f"Reply with the word {word} exactly {n} times, separated by single spaces. Nothing else.",
             }
         ],
         "env_class": "cat_count",
         "reward_spec": {"method": "rule", "ground_truth": n},
-        "extra_info": {"n": n, "split": split, "index": index},
+        "extra_info": {"n": n, "word": word, "split": split, "index": index},
     }
+    if routed:
+        row["teacher_route"] = word
+    return row
 
 
-def write_data(directory: Path, steps: int, seed: int) -> tuple[Path, Path]:
-    """Write the canary's rows: shuffled cycles of the training counts, and one row per evaluation count."""
+def write_data(directory: Path, words: tuple[str, ...], steps: int, seed: int) -> tuple[Path, Path]:
+    """Write shuffled cycles of the training counts with one row per word each, and every evaluation count.
+
+    Each count's rows stay adjacent and training reads them in order, so every batch holds every word equally.
+    """
     import polars as pl  # noqa: PLC0415
 
     rng = random.Random(seed)
-    rows = BATCH_SIZE * (steps + STALENESS)
+    counts = BATCH_SIZE * (steps + STALENESS) // len(words)
     schedule: list[int] = []
-    while len(schedule) < rows:
+    while len(schedule) < counts:
         cycle = list(TRAIN_NS)
         rng.shuffle(cycle)
         schedule.extend(cycle)
+    routed = len(words) > 1
+    train_rows = [record(word, n, "train", i, routed) for i, n in enumerate(schedule[:counts]) for word in words]
+    validation_rows = [record(word, n, "validation", i, routed) for i, n in enumerate(EVAL_NS) for word in words]
     directory.mkdir(parents=True, exist_ok=True)
     train, validation = directory / "train.parquet", directory / "validation.parquet"
-    pl.DataFrame([record(n, "train", i) for i, n in enumerate(schedule[:rows])]).write_parquet(train)
-    pl.DataFrame([record(n, "validation", i) for i, n in enumerate(EVAL_NS)]).write_parquet(validation)
+    pl.DataFrame(train_rows).write_parquet(train)
+    pl.DataFrame(validation_rows).write_parquet(validation)
     return train, validation
 
 
-def metric_groups() -> dict[str, list[str]]:
+def metric_groups(words: tuple[str, ...]) -> dict[str, list[str]]:
+    """Group per-count scores by split over all words and, for MOPD, by split for each word."""
     groups = {}
+    scopes = [("", words)] + ([(f"{word}_", (word,)) for word in words] if len(words) > 1 else [])
     for profile in ("eval", "eval/sampled"):
-        for split, counts in (("train", TRAIN_NS), ("heldout", HELDOUT_NS), ("extrapolation", EXTRAPOLATION_NS)):
-            groups[f"{profile}/{split}/avg_score"] = [f"{profile}/cat_count_n{n}/avg_score" for n in counts]
-            groups[f"{profile}/{split}/environment/exact"] = [
-                f"{profile}/cat_count_n{n}/environment/cat_count/exact" for n in counts
-            ]
+        for prefix, scope in scopes:
+            for split, counts in (("train", TRAIN_NS), ("heldout", HELDOUT_NS), ("extrapolation", EXTRAPOLATION_NS)):
+                sources = [data_source(word, n) for word in scope for n in counts]
+                groups[f"{profile}/{prefix}{split}/avg_score"] = [f"{profile}/{source}/avg_score" for source in sources]
+                groups[f"{profile}/{prefix}{split}/environment/exact"] = [
+                    f"{profile}/{source}/environment/cat_count/exact" for source in sources
+                ]
     return groups
 
 
 def opd_config(args: argparse.Namespace) -> DictConfig:
-    train, validation = write_data(args.output / "data", args.steps, args.seed)
+    teacher_urls = dict(teacher.split("=", 1) for teacher in args.teacher)
+    words = tuple(teacher_urls)
+    if len(words) == 1:
+        if args.swap_routes:
+            raise ValueError("swapping routes needs at least two teachers")
+        routes = {"default": {"teacher": words[0], "weight": 1.0}}
+    else:
+        experts = words[1:] + words[:1] if args.swap_routes else words
+        routes = {word: {"teacher": expert, "weight": 1.0} for word, expert in zip(words, experts, strict=True)}
+    train, validation = write_data(args.output / "data", words, args.steps, args.seed)
     fingerprint = tokenizer_vocabulary_fingerprint(create_tokenizer(args.model, disable_fast_tokenizer=False))
     geometry = {
         "tensor_model_parallel_size": 1,
@@ -106,7 +137,7 @@ def opd_config(args: argparse.Namespace) -> DictConfig:
                 "micro_forward_batch_size_per_gpu": MICRO_BATCH_SIZE,
                 "update_epochs_per_batch": 2,
                 "max_prompt_length": 64,
-                "eval_batch_size": len(EVAL_NS),
+                "eval_batch_size": len(EVAL_NS) * len(words),
                 "eval_interval": EVAL_INTERVAL,
                 "eval_before_train": True,
                 "ckpt_interval": -1,
@@ -164,7 +195,7 @@ def opd_config(args: argparse.Namespace) -> DictConfig:
                                 "n_samples_per_prompt": SAMPLED_EVAL_SAMPLES,
                             }
                         },
-                        "metric_groups": metric_groups(),
+                        "metric_groups": metric_groups(words),
                     }
                 ],
             },
@@ -189,20 +220,19 @@ def opd_config(args: argparse.Namespace) -> DictConfig:
                 "engine_init_kwargs": {"max_model_len": 128},
             },
             "teachers": {
-                "cat": {
+                word: {
                     "source": "openai_compatible",
                     "placement": "external",
-                    "model": {"path": "synthetic/cat-count", "revision": args.teacher_revision},
-                    "endpoints": [{"url": args.teacher_url, "max_concurrency": 8}],
+                    "model": {"path": f"synthetic/{word}-count", "revision": args.teacher_revision},
+                    "endpoints": [{"url": url, "max_concurrency": 8}],
                     "tokenizer_fingerprint": fingerprint,
                     "max_sequence_length": 128,
                     "request_timeout_seconds": 120,
                     "evidence": "chosen_token",
                 }
+                for word, url in teacher_urls.items()
             },
-            "teacher_routing": {
-                "opd": {"revision": "cat-count-v1", "routes": {"default": {"teacher": "cat", "weight": 1.0}}}
-            },
+            "teacher_routing": {"opd": {"revision": "cat-count-v1", "routes": routes}},
         },
     )
 
@@ -211,7 +241,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--model", required=True, help="local Qwen2.5-0.5B-Instruct directory")
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--teacher-url", required=True, help="the synthetic teacher's OpenAI base URL")
+    parser.add_argument(
+        "--teacher",
+        action="append",
+        required=True,
+        help="WORD=URL: an expert's word and OpenAI base URL; repeat for MOPD",
+    )
+    parser.add_argument("--swap-routes", action="store_true", help="send each word's rows to the next word's expert")
     parser.add_argument("--teacher-revision", required=True, help="the teacher's noise settings, for run identity")
     parser.add_argument("--steps", type=int, default=30)
     parser.add_argument("--seed", type=int, default=SEED)
