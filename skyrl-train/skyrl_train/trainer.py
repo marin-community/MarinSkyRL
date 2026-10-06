@@ -4,7 +4,6 @@ import io as stdlib_io
 import json
 import math
 import os
-import re
 import shutil
 import threading
 import time
@@ -20,7 +19,7 @@ from omegaconf import DictConfig, OmegaConf
 from ray.util.placement_group import PlacementGroup, placement_group
 from skyrl_train.utils.progress import tqdm
 from transformers import AutoTokenizer
-from collections import defaultdict, deque
+from collections import deque
 
 import numpy as np
 from skyrl_train.dataset import PromptDataset
@@ -34,14 +33,11 @@ from skyrl_train.trajectory_runners.base import (
     TrajectoryRunner,
 )
 import copy
-from skyrl_train.batch_sampling import RowOwnership, filter_trajectory_batch
+from skyrl_train.trajectory_runners.rollout_metrics import observe_rollout, reward_metrics, staleness_metrics
+from skyrl_train.trajectory_runners.types import BatchFields
 from skyrl_train.trajectory_runners.trajectory_processing import (
+    token_reward_rows,
     concatenate_trajectory_batches,
-    get_metrics_from_trajectory_batch,
-    graded_row_indices,
-    normalized_verifier_scores,
-    scalar_reward_token_credit,
-    verifier_score_summary,
 )
 from skyrl_train.trajectory_runners.trajectory_retention import make_trajectory_sink
 from skyrl_train.dataset.preprocess import (
@@ -61,7 +57,12 @@ from skyrl_train.tensor_math import masked_mean
 from skyrl_train.utils.policy_math import compute_approx_kl, normalize_advantages_dict
 from skyrl_train.utils.kl_controllers import get_kl_controller, FixedKLController, AdaptiveKLController
 from skyrl_train.utils.algorithm_registry import AdvantageEstimator
-from skyrl_train.utils.advantage_estimators import GRPO_FLAT_REWARD_STD_TOLERANCE, compute_advantages_and_returns
+from skyrl_train.utils.advantage_estimators import (
+    GRPO_FLAT_REWARD_STD_TOLERANCE,
+    compute_advantages_and_returns,
+    apply_loop_advantages,
+    finalize_outcome_batch,
+)
 from marinskyrl.runtime_options import reference_model_required
 from marinskyrl.distillation import (
     DistillationObjectiveKind,
@@ -171,47 +172,6 @@ class CheckpointSnapshot:
 
 
 _MODEL_INITIALIZATION_TIMEOUT = 60 * 60
-
-MAX_DOMAIN_REWARD_METRICS = 32
-
-
-def _domain_metric_source_key(source: str | None) -> str:
-    """Encode one source as a distinct, tracker-safe metric path segment.
-
-    Lowercase ASCII names stay readable. ``_missing`` denotes absent metadata;
-    other names use fixed-width UTF-8 byte escapes under ``_source_``.
-    """
-    if source is None:
-        return "_missing"
-    if re.fullmatch(r"[a-z_][a-z0-9_]*", source) and source != "_missing" and not source.startswith("_source_"):
-        return source
-    encoded = "".join(
-        chr(byte) if byte in b"abcdefghijklmnopqrstuvwxyz0123456789" else f"_{byte:02x}"
-        for byte in source.encode("utf-8")
-    )
-    return f"_source_{encoded}"
-
-
-def _domain_reward_metrics(data_sources: List[str | None], rewards: List[float]) -> Dict[str, float]:
-    """Return bounded per-source means with distinct, stable metric names."""
-    if len(data_sources) != len(rewards):
-        raise ValueError(
-            f"Expected one data source per reward, got {len(data_sources)} sources and {len(rewards)} rewards"
-        )
-
-    rewards_by_source: Dict[str, List[float]] = defaultdict(list)
-    for source, reward in zip(data_sources, rewards, strict=True):
-        rewards_by_source[_domain_metric_source_key(source)].append(reward)
-
-    sources = sorted(rewards_by_source)
-    metrics = {
-        f"reward/domain/{source}/avg_raw_reward": float(np.mean(rewards_by_source[source]))
-        for source in sources[:MAX_DOMAIN_REWARD_METRICS]
-    }
-    if len(sources) > MAX_DOMAIN_REWARD_METRICS:
-        overflow = [reward for source in sources[MAX_DOMAIN_REWARD_METRICS:] for reward in rewards_by_source[source]]
-        metrics["reward/domain_overflow/avg_raw_reward"] = float(np.mean(overflow))
-    return metrics
 
 
 def _active_online_eagle_results(results: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
@@ -1660,12 +1620,11 @@ class RayPPOTrainer:
             assert trajectory_batch["rollout_metrics"] is not None, "Rollout metrics should be non-null."
             self.all_metrics.update(trajectory_batch["rollout_metrics"])
             self.all_metrics.update(
-                {
-                    "async/staleness_mean": sum(stalenesses) / len(stalenesses),
-                    "async/staleness_max": max(stalenesses),
-                    "async/staleness_min": min(stalenesses),
-                    "async/staleness_ratio": sum(1 for s in stalenesses if s > 0) / len(stalenesses),
-                }
+                staleness_metrics(
+                    [group.policy_step for group in groups],
+                    global_step=self.global_step,
+                    max_staleness_steps=max_staleness_steps,
+                )
             )
 
         with Timer("postprocess_trajectory_batch", self.all_timings):
@@ -2220,104 +2179,23 @@ class RayPPOTrainer:
 
         In the future algorithm specific reward or loss mask post processing should be done here.
         """
-        trajectory_batch_for_metrics = trajectory_batch
-        uids_for_metrics = uids
-        if self.cfg.trainer.step_wise_training:
-            trajectory_batch_for_metrics = defaultdict(list)
-            for key in trajectory_batch:
-                if isinstance(trajectory_batch[key], list):
-                    trajectory_batch_for_metrics[key] = [
-                        trajectory_batch[key][i]
-                        for i in range(len(trajectory_batch[key]))
-                        if trajectory_batch["is_last_step"][i]
-                    ]
-            uids_for_metrics = [
-                uid for uid, is_last_step in zip(uids, trajectory_batch["is_last_step"]) if is_last_step
-            ]
-
-        # only use `trajectory_batch_for_metrics` for metrics calculation
-        # For step-wise training, we only calculate metrics for the last step of each trajectory
-        self._record_reward_metrics(trajectory_batch_for_metrics, uids_for_metrics)
-
-        # Per-sample scalar rewards for this step, kept for callbacks that need the
-        # distribution rather than its mean (PreflightGateCallback reads this). Captured
-        # here because rewards are converted to per-token form a few lines below and the
-        # scalar form is not recoverable afterwards. Token-level rewards are skipped: the
-        # gate is defined on a per-sample scalar.
-        step_rewards = trajectory_batch_for_metrics["rewards"]
-        self._current_step_rewards = (
-            [float(r) for r in step_rewards] if step_rewards and not isinstance(step_rewards[0], list) else []
+        observations = observe_rollout(trajectory_batch, fields=BatchFields.from_batch(trajectory_batch))
+        self.all_metrics.update(
+            reward_metrics(
+                observations,
+                uids,
+                n_samples_per_prompt=self.cfg.generator.n_samples_per_prompt,
+                step_wise=self.cfg.trainer.step_wise_training,
+            )
         )
-
-        # these use the full trajectory batch
-        rewards: Union[List[float], List[List[float]]] = trajectory_batch["rewards"]
-        responses: List[List[int]] = trajectory_batch["response_ids"]
-        per_token_rewards: List[List[float]] = []
-
-        # Check if rewards are already token-level (List[List[float]]) or response-level (List[float])
-        if rewards and isinstance(rewards[0], list):
-            # Token-level rewards: rewards is List[List[float]]
-            per_token_rewards = rewards
-        else:
-            # Response-level rewards: rewards is List[float], convert to per-token rewards.
-            # Zero-token responses keep an empty credit list; see scalar_reward_token_credit.
-            per_token_rewards = [
-                scalar_reward_token_credit(reward, response) for reward, response in zip(rewards, responses)
-            ]
-
-        # re-assign reward but now it's per token rewards
-        trajectory_batch["rewards"] = per_token_rewards
+        callback_rewards = observations.scalar_rewards
+        if callback_rewards is not None and self.cfg.trainer.step_wise_training:
+            callback_rewards = tuple(
+                reward for reward, last in zip(callback_rewards, observations.is_last_step, strict=True) if last
+            )
+        self._current_step_rewards = list(callback_rewards) if callback_rewards is not None else []
+        trajectory_batch["rewards"] = token_reward_rows(trajectory_batch["rewards"], trajectory_batch["response_ids"])
         return trajectory_batch
-
-    def _record_reward_metrics(self, trajectory_batch: TrajectoryBatch, uids: List[str]) -> None:
-        """Record reward metrics over graded rows; a step with none records no reward metrics."""
-        graded_indices = graded_row_indices(trajectory_batch)
-        if not graded_indices:
-            return
-        if len(graded_indices) < len(trajectory_batch["rewards"]):
-            trajectory_batch = filter_trajectory_batch(
-                trajectory_batch, graded_indices, row_ownership=RowOwnership.BORROWED
-            )
-            uids = [uids[index] for index in graded_indices]
-        mean_reward, pass_at_n = get_metrics_from_trajectory_batch(trajectory_batch, uids)
-        rewards = trajectory_batch["rewards"]
-        n_samples_per_prompt = self.cfg.generator.n_samples_per_prompt
-
-        reward_metrics = {
-            f"reward/avg_pass_at_{n_samples_per_prompt}": pass_at_n,
-            "reward/avg_raw_reward": mean_reward,
-        }
-        # A group whose rewards all tie carries no advantage signal.
-        grouped_rewards = defaultdict(list)
-        for uid, reward in zip(uids, rewards):
-            grouped_rewards[uid].append(float(np.sum(reward)))
-        reward_metrics["reward/informative_group_fraction"] = sum(
-            max(values) > min(values) for values in grouped_rewards.values()
-        ) / len(grouped_rewards)
-        verifier_scores = normalized_verifier_scores(trajectory_batch)
-        if verifier_scores is not None:
-            coverage, average = verifier_score_summary(verifier_scores)
-            reward_metrics["reward/verifier_score_coverage"] = coverage
-            if average is not None:
-                reward_metrics["reward/avg_verifier_score"] = average
-            results = trajectory_batch["verification_results"]
-            scores_by_agent: Dict[str, List[float]] = defaultdict(list)
-            for result, score in zip(results, verifier_scores, strict=True):
-                if result is not None and score is not None and isinstance(result.diagnostics.get("agent"), str):
-                    agent = _domain_metric_source_key(result.diagnostics["agent"])
-                    scores_by_agent[agent].append(score)
-            for agent in sorted(scores_by_agent)[:MAX_DOMAIN_REWARD_METRICS]:
-                reward_metrics[f"reward/agent/{agent}/avg_verifier_score"] = float(np.mean(scores_by_agent[agent]))
-        self.all_metrics.update(reward_metrics)
-        data_sources = trajectory_batch.get("data_sources")
-        if data_sources is not None:
-            self.all_metrics.update(
-                _domain_reward_metrics(
-                    data_sources,
-                    [float(sum(reward) if isinstance(reward, list) else reward) for reward in rewards],
-                )
-            )
-        logger.info(f"reward/avg_pass_at_{n_samples_per_prompt}: {pass_at_n}, reward/avg_raw_reward: {mean_reward}")
 
     def select_trajectories(
         self, trajectory_batch: TrajectoryBatch, uids: List[str]
@@ -2455,14 +2333,8 @@ class RayPPOTrainer:
 
     @staticmethod
     def apply_loop_advantages(data: TrainingInputBatch) -> TrainingInputBatch:
-        """Add loop credit after normalization, or return unchanged when the channel is absent."""
-        loop_advantages = data.get("loop_advantages")
-        if loop_advantages is None:
-            return data
-        advantages = data["advantages"]
-        loop_advantages = loop_advantages.to(device=advantages.device, dtype=advantages.dtype)
-        data["advantages"] = advantages + loop_advantages * data["response_mask"]
-        return data
+        """Add masked loop credit while preserving the outcome returns."""
+        return apply_loop_advantages(data)
 
     def finalize_advantages_for_training(self, data: TrainingInputBatch) -> TrainingInputBatch:
         """Normalize environment credit, add loop credit, then apply teacher credit."""
@@ -2492,12 +2364,8 @@ class RayPPOTrainer:
         return data
 
     def apply_loop_credit_and_drop_advantage_inputs(self, data: TrainingInputBatch) -> TrainingInputBatch:
-        """Apply loop credit, then remove rewards, loop_advantages, and uids before worker dispatch."""
-        data = self.apply_loop_advantages(data)
-        data.pop("rewards")
-        data.pop("loop_advantages", None)
-        data.metadata.pop("uids")
-        return data
+        """Finalize environment advantages for optimizer dispatch."""
+        return finalize_outcome_batch(data, apply_loop=self.apply_loop_advantages)
 
     def dump_data(self, data: TrainingInputBatch, file_name: str):
         """

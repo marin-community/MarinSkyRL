@@ -1,9 +1,8 @@
-import torch
-from dataclasses import dataclass
+from skyrl_train.trajectory_runners.rollout_metrics import get_outcome_rewards, observe_rollout, rollout_metrics
+from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from typing import List, Tuple, Union, Optional, Dict, Any, Sequence
 from collections import defaultdict
-from enum import StrEnum
 import numpy as np
 from skyrl_train.group_admission import group_is_fully_excluded_from_training
 from skyrl_train.trajectory_runners.types import (
@@ -12,14 +11,12 @@ from skyrl_train.trajectory_runners.types import (
     TrajectoryID,
     BatchMetadata,
     TrainingPhase,
+    BatchFields,
+    RolloutObservations,
+    TitoFullDeclineReason,
 )
-from skyrl_train.trajectory_runners.trajectory_retention import RETENTION_METRIC_PREFIX
 from skyrl_train.trajectory_runners.routed_experts import normalize_routed_experts
 from skyrl_train.metric_names import (
-    ENVIRONMENT_METRIC_PREFIX,
-    IDENTITY_AWARE_REWARD_METRIC_PREFIX,
-    LITERAL_BRIDGE_CORRELATED_TRIALS_METRIC,
-    LITERAL_BRIDGE_CORRELATED_TURNS_METRIC,
     TIS_ALIGNED_TOKENS_METRIC,
     TIS_ALIGNMENT_ALERT_METRIC,
     TIS_METRIC_PREFIX,
@@ -34,37 +31,9 @@ from skyrl_train.metric_names import (
     TIS_TITO_FULL_DECLINE_COUNT_METRIC,
     TIS_TITO_FULL_DECLINE_METRIC_PREFIX,
 )
-from skyrl_train.trajectory_runners.trajectory_reward_shaping import (
-    NormalizedReward,
-    refresh_trajectory_reward_shaping_metrics,
-)
-from skyrl_train.metric_names import ROLLOUT_FAILURE_FRACTION_METRIC
 from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
 from loguru import logger
-from skyrl_gym.metrics import aggregate_for_environment
-from skyrl_gym.verification import VerificationResult, VerificationStatus, normalized_verifier_score
-
-
-BATCH_ERROR_METRIC_PREFIX = "generate/errors/"
-_NUM_TRIALS_METRIC = "generate/num_trials"
-_NUM_FAILED_INSTANCES_METRIC = "generate/num_failed_instances"
-_NUM_FAILED_TRAJECTORIES_METRIC = "generate/num_failed_trajectories"
-_NUM_MASKED_TRAJECTORIES_METRIC = "generate/num_masked_trajectories"
-
-
-class TitoFullDeclineReason(StrEnum):
-    """Reason exact full-token trajectory assembly could not be proven safe."""
-
-    MISSING_STREAMS = "missing_streams"
-    EMPTY_STREAMS = "empty_streams"
-    TURN_COUNT_MISMATCH = "turn_count_mismatch"
-    ASSISTANT_MESSAGE_COUNT_MISMATCH = "assistant_message_count_mismatch"
-    MALFORMED_TURN_STREAM = "malformed_turn_stream"
-    PREFIX_MISMATCH = "prefix_mismatch"
-    INITIAL_PROMPT_TOO_SHORT = "initial_prompt_too_short"
-    GENERATION_PROMPT_MISMATCH = "generation_prompt_mismatch"
-    COMPLETION_REGION_MISMATCH = "completion_region_mismatch"
 
 
 @dataclass(frozen=True)
@@ -649,116 +618,6 @@ def detect_qwen3_5_empty_think_prefix(tokenizer, generation_prompt_ids: List[int
     return list(generation_prompt_ids[:open_pos])
 
 
-@torch.no_grad()
-def get_metrics_from_trajectory_batch(trajectory_batch: TrajectoryBatch, uids: List[str]) -> Tuple[float, float]:
-    """
-    Get the mean optimization reward and `pass_at_n` from a trajectory batch.
-
-    The `n` in `pass_at_n` is the number of trajectories we generate for each example. It is
-    calculated as `len(trajectory_batch["rewards"]) / len(uids)`, where `len(uids)` is the number of
-    unique examples.
-
-    Rewards can be either per-trajectory or per-token. The returned mean describes
-    the optimization reward. ``pass_at_n`` uses ``unshaped_rewards`` when supplied,
-    so optimization-specific shaping cannot change the task-success metric.
-    Explicit verifier pass verdicts take precedence over positive partial rewards.
-    """
-    rewards: Union[List[float], List[List[float]]] = trajectory_batch["rewards"]
-    if not len(rewards):
-        raise ValueError(f"`rewards` must be a non-empty list, got {rewards}")
-
-    trajectory_passes = get_trajectory_passes(trajectory_batch)
-
-    if isinstance(rewards[0], list):
-        # Token-level rewards: rewards is List[List[float]]
-        # For each trajectory, sum token rewards before computing the batch mean.
-        mean_reward = float(np.mean([sum(trajectory_rewards) for trajectory_rewards in rewards]))
-    else:
-        mean_reward = float(np.mean(rewards))
-
-    uid_to_trajectory_passes = defaultdict(list)
-    for uid, passed in zip(uids, trajectory_passes, strict=True):
-        uid_to_trajectory_passes[uid].append(passed)
-
-    pass_at_n = sum(any(passes) for passes in uid_to_trajectory_passes.values()) / len(uid_to_trajectory_passes)
-
-    return mean_reward, pass_at_n
-
-
-def get_outcome_rewards(trajectory_batch: TrajectoryBatch) -> List[float]:
-    """Return the unshaped task outcome associated with each trajectory."""
-    rewards = trajectory_batch["rewards"]
-    unshaped_rewards = trajectory_batch.get("unshaped_rewards")
-    if unshaped_rewards is not None:
-        if len(unshaped_rewards) != len(rewards):
-            raise ValueError(
-                "`unshaped_rewards` must have one entry per trajectory: "
-                f"got {len(unshaped_rewards)} unshaped rewards and {len(rewards)} optimization rewards"
-            )
-        return [float(reward) for reward in unshaped_rewards]
-    return [NormalizedReward.from_output(reward).outcome for reward in rewards]
-
-
-def normalized_verifier_scores(trajectory_batch: TrajectoryBatch) -> List[float | None] | None:
-    """Return bounded task scores, or None if the batch has no verdict channel.
-
-    Entries are None for skipped or missing verdicts and zero for verifier
-    failures. A verifier may declare its native score range. This keeps
-    GenRM's 1–5 ratings comparable with 0–1 verifiers in cross-task averages,
-    while leaving the optimization rewards and raw verifier scores intact.
-    """
-    results = trajectory_batch.get("verification_results")
-    if results is None:
-        return None
-    if len(results) != len(trajectory_batch["rewards"]):
-        raise ValueError("verification_results must have one entry per reward")
-    scores: List[float | None] = []
-    for result in results:
-        if result is None or result.status is VerificationStatus.SKIPPED:
-            scores.append(None)
-        elif result.status is not VerificationStatus.VERIFIED:
-            scores.append(0.0)
-        else:
-            scores.append(normalized_verifier_score(result))
-    return scores
-
-
-def verifier_score_summary(scores: List[float | None]) -> tuple[float, float | None]:
-    """Return included-row coverage and mean bounded score."""
-    included = [score for score in scores if score is not None]
-    coverage = len(included) / len(scores) if scores else 0.0
-    return coverage, float(np.mean(included)) if included else None
-
-
-def graded_row_indices(trajectory_batch: TrajectoryBatch) -> List[int]:
-    """Return rows whose environment ran grading; skipped rows carry no reward to report."""
-    results = trajectory_batch.get("verification_results")
-    if results is None:
-        return list(range(len(trajectory_batch["rewards"])))
-    return [
-        index
-        for index, result in enumerate(results)
-        if result is None or result.status is not VerificationStatus.SKIPPED
-    ]
-
-
-def get_trajectory_passes(trajectory_batch: TrajectoryBatch) -> List[bool]:
-    """Return task success, honoring explicit verifier verdicts when available."""
-    outcomes = get_outcome_rewards(trajectory_batch)
-    results = trajectory_batch.get("verification_results")
-    if results is None:
-        return [outcome > 0.0 for outcome in outcomes]
-    passes = []
-    for outcome, result in zip(outcomes, results, strict=True):
-        if result is None:
-            passes.append(outcome > 0.0)
-        elif result.status is not VerificationStatus.VERIFIED:
-            passes.append(False)
-        else:
-            passes.append(result.passed if result.passed is not None else outcome > 0.0)
-    return passes
-
-
 def _rollout_logprob_presence(trajectory_batches: List[TrajectoryBatch], *, required: bool) -> List[bool]:
     """Validate missing logprobs and return their per-group presence mask."""
     presence = [output.get("rollout_logprobs") is not None for output in trajectory_batches]
@@ -781,30 +640,31 @@ def scalar_reward_token_credit(reward: float, response_ids: Sequence[int]) -> Li
     return token_rewards
 
 
-def _concatenate_rewards(trajectory_batches: List[TrajectoryBatch]) -> Union[List[float], List[List[float]]]:
+def token_reward_rows(rewards: Sequence[float | List[float]], responses: Sequence[Sequence[int]]) -> List[List[float]]:
+    """Keep token credit and place each scalar reward on its last response token."""
+    return [
+        reward if isinstance(reward, list) else scalar_reward_token_credit(reward, response)
+        for reward, response in zip(rewards, responses, strict=True)
+    ]
+
+
+def _concatenate_rewards(
+    trajectory_batches: Sequence[TrajectoryBatch], *, token_rewards: bool
+) -> Union[List[float], List[List[float]]]:
     """Concatenate rewards while preserving token-level credit from any child batch."""
-    has_token_level_rewards = any(
-        isinstance(reward, list) for output in trajectory_batches for reward in output["rewards"]
-    )
-    if not has_token_level_rewards:
+    if not token_rewards:
         return [float(reward) for output in trajectory_batches for reward in output["rewards"]]
 
-    rewards: List[List[float]] = []
-    for output in trajectory_batches:
-        for reward, response_ids in zip(output["rewards"], output["response_ids"], strict=True):
-            if isinstance(reward, list):
-                rewards.append(reward)
-                continue
-            rewards.append(scalar_reward_token_credit(reward, response_ids))
-    return rewards
+    return token_reward_rows(
+        [reward for output in trajectory_batches for reward in output["rewards"]],
+        [response for output in trajectory_batches for response in output["response_ids"]],
+    )
 
 
-def _reward_sign_successes(rewards: Sequence[float | List[float]]) -> List[bool]:
-    return [float(np.sum(reward)) > 0.0 for reward in rewards]
-
-
-def _concatenate_environment_metrics(result: TrajectoryBatch, batches: List[TrajectoryBatch]) -> None:
-    if any("env_metrics" in batch for batch in batches):
+def _concatenate_environment_metrics(
+    result: TrajectoryBatch, batches: Sequence[TrajectoryBatch], *, fields: BatchFields
+) -> None:
+    if "env_metrics" in fields.present:
         for batch in batches:
             if ("env_metrics" in batch) != ("env_classes" in batch):
                 raise ValueError("environment metrics and classes must be carried together")
@@ -816,20 +676,17 @@ def _concatenate_environment_metrics(result: TrajectoryBatch, batches: List[Traj
         ]
 
 
-def concatenate_trajectory_batches(
-    trajectory_batches: List[TrajectoryBatch],
-    *,
-    require_rollout_logprobs: bool = False,
-    tis_lcs_alert_threshold: float,
-) -> TrajectoryBatch:
-    """
-    Concatenate multiple trajectory batches into one batch.
+def batch_fields(batches: Sequence[TrajectoryBatch]) -> BatchFields:
+    """Resolve whole-batch field presence, first-group list keys and route geometry."""
+    return BatchFields.from_groups([BatchFields.from_batch(batch) for batch in batches])
 
-    Preserve episode-level environment observations for metrics across repeated concatenation.
-    """
+
+def normalize_trajectory_batches(
+    trajectory_batches: Sequence[TrajectoryBatch], *, fields: BatchFields
+) -> TrajectoryBatch:
+    """Concatenate rows with the supplied global placeholder and reward-promotion rules."""
     assert len(trajectory_batches) > 0
-    has_rollout_logprobs = _rollout_logprob_presence(trajectory_batches, required=require_rollout_logprobs)
-    any_has_logprobs = any(has_rollout_logprobs)
+    any_has_logprobs = "rollout_logprobs" in fields.present
 
     # Handle mixed rollout_logprobs: if some batches have logprobs and others don't,
     # fill in placeholder [0.0] values for the batches that don't have them.
@@ -848,7 +705,7 @@ def concatenate_trajectory_batches(
 
     selected_topk_concat = None
     behavior_topk_concat = None
-    if any(output.get("student_topk_indices") is not None for output in trajectory_batches):
+    if "student_topk_indices" in fields.present:
         if any(
             output.get("student_topk_indices") is None or output.get("behavior_topk_logprobs") is None
             for output in trajectory_batches
@@ -856,11 +713,11 @@ def concatenate_trajectory_batches(
             raise ValueError("student-selected top-K evidence cannot be concatenated with missing rollout scores")
         selected_topk_concat = [row for output in trajectory_batches for row in output["student_topk_indices"]]
         behavior_topk_concat = [row for output in trajectory_batches for row in output["behavior_topk_logprobs"]]
-    elif any(output.get("behavior_topk_logprobs") is not None for output in trajectory_batches):
+    elif "behavior_topk_logprobs" in fields.present:
         raise ValueError("student-selected behavior scores require selected token IDs")
 
     data_sources_concat = None
-    if any(output.get("data_sources") is not None for output in trajectory_batches):
+    if "data_sources" in fields.present:
         data_sources_concat = [
             source
             for output in trajectory_batches
@@ -869,12 +726,9 @@ def concatenate_trajectory_batches(
 
     unshaped_rewards_concat = None
     unshaped_reward_available_concat = None
-    if any(output.get("unshaped_rewards") is not None for output in trajectory_batches):
+    if "unshaped_rewards" in fields.present:
         unshaped_rewards_concat = [reward for output in trajectory_batches for reward in get_outcome_rewards(output)]
-        if any(
-            output.get("unshaped_reward_available") is not None or output.get("unshaped_rewards") is None
-            for output in trajectory_batches
-        ):
+        if "unshaped_reward_available" in fields.present:
             unshaped_reward_available_concat = [
                 available
                 for output in trajectory_batches
@@ -886,7 +740,7 @@ def concatenate_trajectory_batches(
 
     disposition_channels: dict[str, list[Any]] = {}
     for key in ("exception_types", "error_treatments", "server_errors"):
-        if any(output.get(key) is not None for output in trajectory_batches):
+        if key in fields.present:
             disposition_channels[key] = [
                 value
                 for output in trajectory_batches
@@ -894,7 +748,7 @@ def concatenate_trajectory_batches(
             ]
 
     baseline_exclusions_concat = None
-    if any(output.get("exclude_from_baseline") is not None for output in trajectory_batches):
+    if "exclude_from_baseline" in fields.present:
         baseline_exclusions_concat = [
             excluded
             for output in trajectory_batches
@@ -902,22 +756,12 @@ def concatenate_trajectory_batches(
         ]
 
     # Missing batches keep the geometry learned from the first captured sample.
-    has_routed_experts = [
-        "rollout_routed_experts" in output and output.get("rollout_routed_experts") is not None
-        for output in trajectory_batches
-    ]
     rollout_routed_experts_concat = None
-    if any(has_routed_experts):
+    if "rollout_routed_experts" in fields.present:
         _concat_sentinel_row = None
-        for output in trajectory_batches:
-            re_out = output.get("rollout_routed_experts")
-            if re_out is not None and len(re_out) > 0:
-                for sample_re in re_out:
-                    if sample_re is not None:
-                        _concat_sentinel_row = np.zeros(sample_re.shape[1:], dtype=sample_re.dtype)
-                        break
-            if _concat_sentinel_row is not None:
-                break
+        if fields.route_geometry is not None:
+            layers, top_k, dtype = fields.route_geometry
+            _concat_sentinel_row = np.zeros((layers, top_k), dtype=dtype)
         rollout_routed_experts_concat = []
         for output in trajectory_batches:
             if "rollout_routed_experts" in output and output.get("rollout_routed_experts") is not None:
@@ -931,12 +775,8 @@ def concatenate_trajectory_batches(
     # any batch that lacks them so the concatenated list stays 1:1 with
     # response_ids. When the channel is off NO batch carries the keys (the
     # runner omits them), so these stay None and the result is byte-identical.
-    has_token_shaping = [
-        "token_level_shaping" in output and output.get("token_level_shaping") is not None
-        for output in trajectory_batches
-    ]
     token_level_shaping_concat = None
-    if any(has_token_shaping):
+    if "token_level_shaping" in fields.present:
         token_level_shaping_concat = []
         for output in trajectory_batches:
             if "token_level_shaping" in output and output.get("token_level_shaping") is not None:
@@ -945,11 +785,8 @@ def concatenate_trajectory_batches(
                 for response_ids in output["response_ids"]:
                     token_level_shaping_concat.append([0.0] * len(response_ids))
 
-    has_span_tags = [
-        "response_span_tags" in output and output.get("response_span_tags") is not None for output in trajectory_batches
-    ]
     response_span_tags_concat = None
-    if any(has_span_tags):
+    if "response_span_tags" in fields.present:
         response_span_tags_concat = []
         for output in trajectory_batches:
             if "response_span_tags" in output and output.get("response_span_tags") is not None:
@@ -961,11 +798,11 @@ def concatenate_trajectory_batches(
     result: TrajectoryBatch = {
         "prompt_token_ids": sum([output["prompt_token_ids"] for output in trajectory_batches], []),
         "response_ids": sum([output["response_ids"] for output in trajectory_batches], []),
-        "rewards": _concatenate_rewards(trajectory_batches),
+        "rewards": _concatenate_rewards(trajectory_batches, token_rewards=fields.token_rewards),
         "loss_masks": sum([output["loss_masks"] for output in trajectory_batches], []),
         "stop_reasons": (
             sum([output["stop_reasons"] for output in trajectory_batches], [])
-            if "stop_reasons" in trajectory_batches[0] and trajectory_batches[0]["stop_reasons"] is not None
+            if "stop_reasons" in fields.first_group_list_fields
             else None
         ),
         "rollout_logprobs": rollout_logprobs_concat,
@@ -990,9 +827,9 @@ def concatenate_trajectory_batches(
     if baseline_exclusions_concat is not None:
         result["exclude_from_baseline"] = baseline_exclusions_concat
 
-    _concatenate_environment_metrics(result, trajectory_batches)
+    _concatenate_environment_metrics(result, trajectory_batches, fields=fields)
     for key in ("verification_results", "evidence_messages"):
-        if any(batch.get(key) is not None for batch in trajectory_batches):
+        if key in fields.present:
             result[key] = [
                 value
                 for batch in trajectory_batches
@@ -1000,95 +837,38 @@ def concatenate_trajectory_batches(
             ]
 
     # propagate additional keys with list values as-is
-    additional_keys = [
-        key for key in trajectory_batches[0] if key not in result and isinstance(trajectory_batches[0][key], list)
-    ]
+    additional_keys = [key for key in fields.first_group_list_fields if key not in result]
     if len(additional_keys):
         logger.info(f"Attempting to concatenate values for additional keys {additional_keys}")
     for key in additional_keys:
         result[key] = sum([trajectory_batch[key] for trajectory_batch in trajectory_batches], [])
 
-    # Re-aggregate rollout metrics
-    rollout_metrics = get_rollout_metrics(
-        result["response_ids"],
-        result["rewards"],
-        result.get("env_metrics"),
-        result.get("env_classes"),
-        verification_results=result.get("verification_results"),
+    return result
+
+
+def _rollout_observations(
+    batch: TrajectoryBatch, groups: Sequence[TrajectoryBatch], fields: BatchFields
+) -> RolloutObservations:
+    return replace(
+        observe_rollout(batch, fields=fields),
+        group_metrics=tuple(group.get("rollout_metrics") or {} for group in groups),
     )
 
-    # TIS alignment metrics use token-weighted fractions across batches.
-    total_aligned = 0.0
-    sum_exact = sum_lcs = sum_unaligned = 0.0
-    sum_fail = sum_lcs_msgs = 0.0
-    saw_tis = False
-    for output in trajectory_batches:
-        rm = output.get("rollout_metrics") or {}
-        n = rm.get(TIS_ALIGNED_TOKENS_METRIC)
-        if n is None:
-            continue
-        saw_tis = True
-        total_aligned += n
-        sum_exact += rm.get(TIS_EXACT_MATCH_FRACTION_METRIC, 0.0) * n
-        sum_lcs += rm.get(TIS_LCS_FALLBACK_FRACTION_METRIC, 0.0) * n
-        sum_unaligned += rm.get(TIS_UNALIGNED_FRACTION_METRIC, 0.0) * n
-        sum_fail += rm.get(TIS_ALIGNMENT_FAIL_COUNT_METRIC, 0.0)
-        sum_lcs_msgs += rm.get(TIS_LCS_FALLBACK_MESSAGES_METRIC, 0.0)
-    if saw_tis:
-        denom = max(total_aligned, 1.0)
-        rollout_metrics[TIS_ALIGNED_TOKENS_METRIC] = total_aligned
-        rollout_metrics[TIS_EXACT_MATCH_FRACTION_METRIC] = sum_exact / denom
-        rollout_metrics[TIS_LCS_FALLBACK_FRACTION_METRIC] = sum_lcs / denom
-        rollout_metrics[TIS_UNALIGNED_FRACTION_METRIC] = sum_unaligned / denom
-        rollout_metrics[TIS_ALIGNMENT_FAIL_COUNT_METRIC] = sum_fail
-        rollout_metrics[TIS_LCS_FALLBACK_MESSAGES_METRIC] = sum_lcs_msgs
-        lcs_alert = 1.0 if (sum_lcs / denom) > tis_lcs_alert_threshold else 0.0
-        rollout_metrics[TIS_LCS_FALLBACK_ALERT_METRIC] = lcs_alert
-        total_tito_attempts = sum(
-            (output.get("rollout_metrics") or {}).get(TIS_TITO_FULL_ATTEMPTS_METRIC, 0.0)
-            for output in trajectory_batches
-        )
-        total_tito_successes = sum(
-            (output.get("rollout_metrics") or {}).get(TIS_TITO_FULL_SUCCESS_FRACTION_METRIC, 0.0)
-            * (output.get("rollout_metrics") or {}).get(TIS_TITO_FULL_ATTEMPTS_METRIC, 0.0)
-            for output in trajectory_batches
-        )
-        rollout_metrics[TIS_TITO_FULL_ATTEMPTS_METRIC] = total_tito_attempts
-        rollout_metrics[TIS_TITO_FULL_SUCCESS_FRACTION_METRIC] = (
-            total_tito_successes / total_tito_attempts if total_tito_attempts else 0.0
-        )
-        total_tito_declines = sum(
-            (output.get("rollout_metrics") or {}).get(TIS_TITO_FULL_DECLINE_COUNT_METRIC, 0.0)
-            for output in trajectory_batches
-        )
-        rollout_metrics[TIS_TITO_FULL_DECLINE_COUNT_METRIC] = total_tito_declines
-        rollout_metrics[TIS_ALIGNMENT_ALERT_METRIC] = (
-            1.0 if sum_unaligned > 0 or lcs_alert or total_tito_declines > 0 else 0.0
-        )
-        for reason in TitoFullDeclineReason:
-            name = f"{TIS_TITO_FULL_DECLINE_METRIC_PREFIX}{reason.value}"
-            rollout_metrics[name] = sum(
-                (output.get("rollout_metrics") or {}).get(name, 0.0) for output in trajectory_batches
-            )
 
-    rollout_metrics.update(_merge_batch_failure_metrics(trajectory_batches))
-
-    # Retention counts per group, and this rebuilds rollout_metrics from responses and rewards, so
-    # the per-group counters have to be carried across or the archives are written unobserved.
-    for output in trajectory_batches:
-        for name, value in (output.get("rollout_metrics") or {}).items():
-            if name.startswith((RETENTION_METRIC_PREFIX, IDENTITY_AWARE_REWARD_METRIC_PREFIX)) or name in {
-                LITERAL_BRIDGE_CORRELATED_TRIALS_METRIC,
-                LITERAL_BRIDGE_CORRELATED_TURNS_METRIC,
-            }:
-                rollout_metrics[name] = rollout_metrics.get(name, 0.0) + value
-
-    result["rollout_metrics"] = rollout_metrics
-    refresh_trajectory_reward_shaping_metrics(result)
-
-    num_prompts = len(result["prompt_token_ids"])
-    validate_trajectory_batch(num_prompts, result)
-
+def concatenate_trajectory_batches(
+    trajectory_batches: List[TrajectoryBatch],
+    *,
+    require_rollout_logprobs: bool = False,
+    tis_lcs_alert_threshold: float,
+) -> TrajectoryBatch:
+    """Concatenate rollout rows and compute their shared scalar metrics."""
+    assert len(trajectory_batches) > 0
+    _rollout_logprob_presence(trajectory_batches, required=require_rollout_logprobs)
+    fields = batch_fields(trajectory_batches)
+    result = normalize_trajectory_batches(trajectory_batches, fields=fields)
+    observations = _rollout_observations(result, trajectory_batches, fields)
+    result["rollout_metrics"] = rollout_metrics(observations, tis_lcs_alert_threshold=tis_lcs_alert_threshold)
+    validate_trajectory_batch(len(result["prompt_token_ids"]), result)
     return result
 
 
@@ -1177,126 +957,6 @@ def apply_overlong_filtering(
         [0] * len(mask) if not response or response[-1] != eos_token_id else mask
         for mask, response in zip(loss_masks, response_ids)
     ]
-
-
-def get_rollout_metrics(
-    responses: List[List[int]],
-    rewards: Union[List[float], List[List[float]]],
-    env_metrics: Optional[List[Dict[str, Any]]] = None,
-    env_classes: Optional[List[str]] = None,
-    verification_results: Optional[List[Optional[VerificationResult]]] = None,
-):
-    """
-    Computes rollout metrics including token statistics and optional environment-specific metrics.
-
-    Args:
-        responses: List of token ID sequences for each response
-        rewards: List of rewards (either per-trajectory or per-token)
-        env_metrics: Optional list of environment-specific metrics for each trajectory
-        env_classes: Optional list of environment class names for each trajectory
-        verification_results: Verifier verdicts that override reward-sign token statistics when present
-
-    Returns:
-        Dictionary of aggregated metrics
-    """
-    num_tokens_arr = np.array([len(response) for response in responses])
-    successes = _reward_sign_successes(rewards)
-    if verification_results is not None:
-        for index, result in enumerate(verification_results):
-            if result is None:
-                continue
-            if result.status is not VerificationStatus.VERIFIED:
-                successes[index] = False
-            else:
-                successes[index] = result.passed if result.passed is not None else float(result.score) > 0.0
-    non_zero_rewards_arr = np.array(successes, dtype=bool)
-    zero_rewards_arr = ~non_zero_rewards_arr
-    # average tokens for non zero rewards
-    avg_tokens_non_zero_rewards = (
-        np.mean(num_tokens_arr[non_zero_rewards_arr]) if non_zero_rewards_arr.sum() > 0 else np.zeros(1)
-    )
-    # average tokens for zero rewards
-    avg_tokens_zero_rewards = np.mean(num_tokens_arr[zero_rewards_arr]) if zero_rewards_arr.sum() > 0 else np.zeros(1)
-
-    rollout_metrics = {
-        "generate/min_num_tokens": np.min(num_tokens_arr).item(),
-        "generate/max_num_tokens": np.max(num_tokens_arr).item(),
-        "generate/avg_num_tokens": np.mean(num_tokens_arr).item(),
-        "generate/std_num_tokens": np.std(num_tokens_arr).item(),
-        "generate/avg_tokens_non_zero_rewards": avg_tokens_non_zero_rewards.item(),
-        "generate/avg_tokens_zero_rewards": avg_tokens_zero_rewards.item(),
-    }
-
-    if env_metrics is not None and env_classes is not None:
-        env_to_metrics = defaultdict(list)
-        for i, metrics in enumerate(env_metrics):
-            # Skipped episodes (e.g. over-length prompts) never step the environment and
-            # report an empty dict; per-environment aggregators only see stepped episodes.
-            if metrics:
-                env_to_metrics[env_classes[i]].append(metrics)
-        for env_name, metrics in env_to_metrics.items():
-            # Aggregate metrics across all trajectories for the same environment
-            agg = aggregate_for_environment(env_name, metrics)
-            for key, value in agg.items():
-                rollout_metrics[f"{ENVIRONMENT_METRIC_PREFIX}{key}"] = value
-
-    return rollout_metrics
-
-
-_BATCH_FAILURE_COUNT_KEYS = (
-    _NUM_TRIALS_METRIC,
-    _NUM_FAILED_INSTANCES_METRIC,
-    _NUM_FAILED_TRAJECTORIES_METRIC,
-    _NUM_MASKED_TRAJECTORIES_METRIC,
-)
-
-
-def _merge_batch_failure_metrics(trajectory_batches: List[TrajectoryBatch]) -> dict[str, float]:
-    """Sum failure counts across rollout groups and recompute their batch fraction."""
-    group_metrics = [
-        metrics
-        for metrics in (output.get("rollout_metrics") or {} for output in trajectory_batches)
-        if _NUM_TRIALS_METRIC in metrics
-    ]
-    if not group_metrics:
-        return {}
-    for metrics in group_metrics:
-        missing = [key for key in _BATCH_FAILURE_COUNT_KEYS if key not in metrics]
-        if missing:
-            raise ValueError(f"Incomplete rollout failure metrics: missing {', '.join(missing)}")
-
-    merged = get_batch_failure_metrics(
-        sum(metrics[_NUM_TRIALS_METRIC] for metrics in group_metrics),
-        num_failed_trajectories=sum(metrics[_NUM_FAILED_TRAJECTORIES_METRIC] for metrics in group_metrics),
-        num_failed_instances=sum(metrics[_NUM_FAILED_INSTANCES_METRIC] for metrics in group_metrics),
-        num_masked_trajectories=sum(metrics[_NUM_MASKED_TRAJECTORIES_METRIC] for metrics in group_metrics),
-    )
-    error_keys = {key for metrics in group_metrics for key in metrics if key.startswith(BATCH_ERROR_METRIC_PREFIX)}
-    merged.update({key: sum(metrics.get(key, 0) for metrics in group_metrics) for key in error_keys})
-    return merged
-
-
-def get_batch_failure_metrics(
-    num_trials: int,
-    num_failed_trajectories: int,
-    num_failed_instances: int,
-    num_masked_trajectories: int,
-) -> Dict[str, float]:
-    """Describe failed and masked trajectories within a requested rollout group.
-
-    Args:
-        num_trials: Requested trajectories and denominator of the failure fraction.
-        num_failed_trajectories: Trajectories that did not complete successfully.
-        num_failed_instances: Distinct instances with at least one failed trajectory.
-        num_masked_trajectories: Trajectories excluded from the baseline.
-    """
-    return {
-        _NUM_TRIALS_METRIC: num_trials,
-        _NUM_FAILED_INSTANCES_METRIC: num_failed_instances,
-        _NUM_FAILED_TRAJECTORIES_METRIC: num_failed_trajectories,
-        _NUM_MASKED_TRAJECTORIES_METRIC: num_masked_trajectories,
-        ROLLOUT_FAILURE_FRACTION_METRIC: num_failed_trajectories / num_trials if num_trials else 0.0,
-    }
 
 
 def prepare_trajectory_request(

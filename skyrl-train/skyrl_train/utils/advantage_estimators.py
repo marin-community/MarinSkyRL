@@ -7,6 +7,7 @@ licensed under Apache 2.0.
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Callable
 from typing import Optional, Tuple
 
 import loguru
@@ -16,6 +17,7 @@ from jaxtyping import Float
 from omegaconf import DictConfig
 
 from marinskyrl.runtime_options import AdvantageEstimator
+from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.utils.algorithm_registry import (
     AdvantageEstimatorRegistry,
     ExactPhysicalGroup,
@@ -27,6 +29,30 @@ from skyrl_train.utils.policy_math import masked_whiten, right_pad_to_match
 from skyrl_train.group_admission import GroupAdvantageInvariant, GroupAdvantageKind
 
 GRPO_FLAT_REWARD_STD_TOLERANCE = 1e-6
+
+
+def apply_loop_advantages(data: TrainingInputBatch) -> TrainingInputBatch:
+    """Add masked loop credit after normalization, preserving the outcome returns."""
+    loop_advantages = data.get("loop_advantages")
+    if loop_advantages is None:
+        return data
+    advantages = data["advantages"]
+    loop_advantages = loop_advantages.to(device=advantages.device, dtype=advantages.dtype)
+    data["advantages"] = advantages + loop_advantages * data["response_mask"]
+    return data
+
+
+def finalize_outcome_batch(
+    data: TrainingInputBatch,
+    *,
+    apply_loop: Callable[[TrainingInputBatch], TrainingInputBatch] = apply_loop_advantages,
+) -> TrainingInputBatch:
+    """Apply loop credit and retain only the fields needed after advantage estimation."""
+    data = apply_loop(data)
+    data.pop("rewards")
+    data.pop("loop_advantages", None)
+    data.metadata.pop("uids")
+    return data
 
 
 @register_advantage_estimator(AdvantageEstimator.UNIFORM, group_contract=NoGroupAdvantage())

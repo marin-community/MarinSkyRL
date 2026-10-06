@@ -17,10 +17,12 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     apply_overlong_filtering,
     concatenate_trajectory_batches,
     encode_messages_subset,
-    get_batch_failure_metrics,
     get_generation_prompt_ids,
-    get_metrics_from_trajectory_batch,
     get_response_ids_and_loss_mask_from_messages,
+)
+from skyrl_train.trajectory_runners.rollout_metrics import (
+    get_batch_failure_metrics,
+    get_metrics_from_trajectory_batch,
     get_rollout_metrics,
 )
 

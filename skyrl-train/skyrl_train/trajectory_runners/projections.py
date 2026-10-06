@@ -17,8 +17,10 @@ from skyrl_train.trajectory_runners.types import (
 )
 from skyrl_train.trajectory_runners.trajectory_processing import (
     apply_overlong_filtering,
-    get_rollout_metrics,
     scalar_reward_token_credit,
+)
+from skyrl_train.trajectory_runners.rollout_metrics import (
+    get_rollout_metrics,
 )
 
 

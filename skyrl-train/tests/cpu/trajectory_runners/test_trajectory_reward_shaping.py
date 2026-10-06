@@ -9,6 +9,8 @@ from skyrl_train.trajectory_runners.trajectory_reward_shaping import (
 )
 from skyrl_train.trajectory_runners.trajectory_processing import (
     concatenate_trajectory_batches,
+)
+from skyrl_train.trajectory_runners.rollout_metrics import (
     get_metrics_from_trajectory_batch,
 )
 
@@ -343,9 +345,10 @@ def test_disabled_trajectory_shaping_preserves_output_exactly():
     assert output == original
 
 
-def test_concatenation_recomputes_shaping_metrics_from_retained_components():
-    short = _output([[1, 2]], [1.0], ["stop"])
-    long = _output([[1, 2, 3, 4, 5]], [1.0], ["stop"])
+@pytest.mark.parametrize("mixed_empty", [False, True])
+def test_concatenation_recomputes_shaping_metrics_from_retained_components(mixed_empty):
+    short = _output([[] if mixed_empty else [1, 2]], [1.0], ["stop"])
+    long = _output([[1, 2, 3, 4, 5]], [[0.0, 0.0, 0.0, 0.0, 1.0]] if mixed_empty else [1.0], ["stop"])
     config = {
         "enabled": True,
         "successful_length": {
@@ -361,12 +364,17 @@ def test_concatenation_recomputes_shaping_metrics_from_retained_components():
 
     concatenated = concatenate_trajectory_batches([short, long], tis_lcs_alert_threshold=0.005)
 
-    assert concatenated["rewards"] == pytest.approx([1.0, 0.7])
-    assert concatenated["rollout_metrics"]["generate/reward_shaping/shaped_reward_mean"] == pytest.approx(0.85)
-    assert concatenated["rollout_metrics"]["generate/reward_shaping/successful_length_penalty_mean"] == pytest.approx(
-        -0.15
-    )
-    assert concatenated["rollout_metrics"]["generate/reward_shaping/identity_aware/groups"] == 2
+    if mixed_empty:
+        assert concatenated["rewards"][0] == []
+        assert concatenated["rewards"][1] == pytest.approx([0.0, 0.0, 0.0, 0.0, 0.7])
+    else:
+        assert concatenated["rewards"] == pytest.approx([1.0, 0.7])
+    metrics = concatenated["rollout_metrics"]
+
+    assert metrics["generate/reward_shaping/shaped_reward_mean"] == pytest.approx(0.35 if mixed_empty else 0.85)
+    assert metrics["generate/reward_shaping/outcome_reward_mean"] == 1.0
+    assert metrics["generate/reward_shaping/successful_length_penalty_mean"] == pytest.approx(-0.15)
+    assert metrics["generate/reward_shaping/identity_aware/groups"] == 2
 
 
 def test_concatenation_preserves_later_passthrough_disposition():

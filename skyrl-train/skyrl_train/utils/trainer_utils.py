@@ -10,7 +10,7 @@ from loguru import logger
 import json
 import torch
 from torch.utils.data import Dataset, Subset
-from skyrl_train.trajectory_runners.trajectory_processing import (
+from skyrl_train.trajectory_runners.rollout_metrics import (
     get_metrics_from_trajectory_batch,
     get_rollout_metrics,
 )

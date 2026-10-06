@@ -6,7 +6,9 @@ from typing import cast
 
 from skyrl_train.metric_names import ENVIRONMENT_METRIC_PREFIX
 from skyrl_train.trajectory_runners.base import TrajectoryBatch
-from skyrl_train.trajectory_runners.trajectory_processing import get_rollout_metrics
+from skyrl_train.trajectory_runners.rollout_metrics import (
+    get_rollout_metrics,
+)
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import refresh_trajectory_reward_shaping_metrics
 
 

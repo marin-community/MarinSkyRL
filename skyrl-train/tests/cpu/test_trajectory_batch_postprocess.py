@@ -1,22 +1,10 @@
-"""RayPPOTrainer.postprocess_trajectory_batch reward shaping and reward metrics."""
-
 import pytest
-from omegaconf import OmegaConf
 from skyrl_gym.verification import VerificationResult
 
-from skyrl_train.trainer import RayPPOTrainer, _domain_reward_metrics
 from skyrl_train.trajectory_runners.base import TrajectoryBatch, propagate_data_sources
-from skyrl_train.trajectory_runners.types import TrajectoryID
-
-
-def make_trainer(n_samples_per_prompt: int = 1) -> RayPPOTrainer:
-    """Postprocessing reads only config and metrics; skip __init__, which starts a Ray trajectory sink."""
-    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
-    trainer.cfg = OmegaConf.create(
-        {"trainer": {"step_wise_training": False}, "generator": {"n_samples_per_prompt": n_samples_per_prompt}}
-    )
-    trainer.all_metrics = {}
-    return trainer
+from skyrl_train.trajectory_runners.rollout_metrics import _domain_reward_metrics, observe_rollout, reward_metrics
+from skyrl_train.trajectory_runners.trajectory_processing import token_reward_rows
+from skyrl_train.trajectory_runners.types import BatchFields, TrajectoryID
 
 
 @pytest.mark.parametrize(
@@ -28,7 +16,7 @@ def make_trainer(n_samples_per_prompt: int = 1) -> RayPPOTrainer:
         ([[0.1, 0.3], [0.2, 0.1, 0.1]], [[0.1, 0.3], [0.2, 0.1, 0.1]]),
     ],
 )
-def test_postprocess_produces_per_token_rewards(rewards, expected):
+def test_reward_rows_produce_per_token_rewards(rewards, expected):
     trajectory_batch: TrajectoryBatch = {
         "prompt_token_ids": [[1, 2], [3, 4]],
         "response_ids": [[5, 6], [7, 8, 9]],
@@ -38,13 +26,12 @@ def test_postprocess_produces_per_token_rewards(rewards, expected):
         "rollout_metrics": None,
     }
 
-    result = make_trainer().postprocess_trajectory_batch(trajectory_batch, ["uid1", "uid2"])
+    result = token_reward_rows(trajectory_batch["rewards"], trajectory_batch["response_ids"])
 
-    assert result["rewards"] == expected
+    assert result == expected
 
 
 def test_pass_at_k_uses_unshaped_outcomes():
-    trainer = make_trainer(n_samples_per_prompt=2)
     trajectory_batch: TrajectoryBatch = {
         "prompt_token_ids": [[1], [1], [2], [2]],
         "response_ids": [[3], [4], [5], [6]],
@@ -55,14 +42,14 @@ def test_pass_at_k_uses_unshaped_outcomes():
         "rollout_metrics": None,
     }
 
-    trainer.postprocess_trajectory_batch(trajectory_batch, ["a", "a", "b", "b"])
+    observations = observe_rollout(trajectory_batch, fields=BatchFields.from_batch(trajectory_batch))
+    metrics = reward_metrics(observations, ["a", "a", "b", "b"], n_samples_per_prompt=2, step_wise=False)
 
-    assert trainer.all_metrics["reward/avg_pass_at_2"] == 0.5
-    assert trainer.all_metrics["reward/avg_raw_reward"] == pytest.approx(0.35)
+    assert metrics["reward/avg_pass_at_2"] == 0.5
+    assert metrics["reward/avg_raw_reward"] == pytest.approx(0.35)
 
 
 def test_training_reports_normalized_composite_scores_by_agent():
-    trainer = make_trainer()
     batch: TrajectoryBatch = {
         "response_ids": [[1], [2], [3]],
         "rewards": [5.0, 1.0, 0.0],
@@ -73,21 +60,21 @@ def test_training_reports_normalized_composite_scores_by_agent():
         ],
     }
 
-    trainer.postprocess_trajectory_batch(batch, ["a", "b", "c"])
+    observations = observe_rollout(batch, fields=BatchFields.from_batch(batch))
+    metrics = reward_metrics(observations, ["a", "b", "c"], n_samples_per_prompt=1, step_wise=False)
 
-    assert trainer.all_metrics["reward/avg_raw_reward"] == 2.0
-    assert trainer.all_metrics["reward/avg_verifier_score"] == pytest.approx(2 / 3)
-    assert trainer.all_metrics["reward/agent/genrm/avg_verifier_score"] == 1.0
-    assert trainer.all_metrics["reward/agent/mcqa/avg_verifier_score"] == 0.5
+    assert metrics["reward/avg_raw_reward"] == 2.0
+    assert metrics["reward/avg_verifier_score"] == pytest.approx(2 / 3)
+    assert metrics["reward/agent/genrm/avg_verifier_score"] == 1.0
+    assert metrics["reward/agent/mcqa/avg_verifier_score"] == 0.5
 
 
 def test_informative_group_fraction_counts_groups_whose_rewards_differ():
-    trainer = make_trainer()
     # Group a has reward spread; group b is a tie and carries no advantage signal.
-    trainer.postprocess_trajectory_batch(
-        {"response_ids": [[1], [2], [3], [4]], "rewards": [1.0, 0.0, 0.5, 0.5]}, ["a", "a", "b", "b"]
-    )
-    assert trainer.all_metrics["reward/informative_group_fraction"] == 0.5
+    batch = {"response_ids": [[1], [2], [3], [4]], "rewards": [1.0, 0.0, 0.5, 0.5]}
+    observations = observe_rollout(batch, fields=BatchFields.from_batch(batch))
+    metrics = reward_metrics(observations, ["a", "a", "b", "b"], n_samples_per_prompt=1, step_wise=False)
+    assert metrics["reward/informative_group_fraction"] == 0.5
 
 
 def test_domain_reward_metrics_aggregate_and_bound_metric_keys():
@@ -145,7 +132,6 @@ def test_step_wise_rollout_rows_keep_request_data_sources():
 
 
 def test_reward_metrics_leave_out_skipped_rollouts():
-    trainer = make_trainer(n_samples_per_prompt=2)
     skipped = VerificationResult.skipped("grading is skipped")
     trajectory_batch: TrajectoryBatch = {
         "prompt_token_ids": [[1], [1], [2], [2]],
@@ -162,17 +148,17 @@ def test_reward_metrics_leave_out_skipped_rollouts():
         "rollout_metrics": None,
     }
 
-    trainer.postprocess_trajectory_batch(trajectory_batch, ["a", "a", "b", "b"])
+    observations = observe_rollout(trajectory_batch, fields=BatchFields.from_batch(trajectory_batch))
+    metrics = reward_metrics(observations, ["a", "a", "b", "b"], n_samples_per_prompt=2, step_wise=False)
 
-    assert trainer.all_metrics["reward/avg_raw_reward"] == 0.5
-    assert trainer.all_metrics["reward/avg_pass_at_2"] == 1.0
-    assert trainer.all_metrics["reward/informative_group_fraction"] == 1.0
-    assert trainer.all_metrics["reward/domain/lean/avg_raw_reward"] == 0.5
-    assert "reward/domain/ultra/avg_raw_reward" not in trainer.all_metrics
+    assert metrics["reward/avg_raw_reward"] == 0.5
+    assert metrics["reward/avg_pass_at_2"] == 1.0
+    assert metrics["reward/informative_group_fraction"] == 1.0
+    assert metrics["reward/domain/lean/avg_raw_reward"] == 0.5
+    assert "reward/domain/ultra/avg_raw_reward" not in metrics
 
 
 def test_all_skipped_rollouts_record_no_reward_metrics():
-    trainer = make_trainer()
     skipped = VerificationResult.skipped("grading is skipped")
     trajectory_batch: TrajectoryBatch = {
         "prompt_token_ids": [[1], [2]],
@@ -183,7 +169,8 @@ def test_all_skipped_rollouts_record_no_reward_metrics():
         "rollout_metrics": None,
     }
 
-    result = trainer.postprocess_trajectory_batch(trajectory_batch, ["a", "b"])
+    observations = observe_rollout(trajectory_batch, fields=BatchFields.from_batch(trajectory_batch))
+    metrics = reward_metrics(observations, ["a", "b"], n_samples_per_prompt=1, step_wise=False)
 
-    assert not any(key.startswith("reward/") for key in trainer.all_metrics)
-    assert result["rewards"] == [[0.0], [0.0]]
+    assert not any(key.startswith("reward/") for key in metrics)
+    assert token_reward_rows(trajectory_batch["rewards"], trajectory_batch["response_ids"]) == [[0.0], [0.0]]

@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Dict, List, Literal, NotRequired, Optional, TypedDict, Union
+from typing import Any, Dict, List, Literal, NotRequired, Optional, Sequence, TypedDict, Union
 
 import numpy as np
 
@@ -126,3 +126,92 @@ class TrajectoryBatch(TypedDict):
     teacher_route_keys: Optional[List[str]]
     is_last_step: Optional[List[bool]]
     exclude_from_baseline: Optional[List[bool]]
+
+
+@dataclass(frozen=True)
+class BatchFields:
+    """Whole-batch channel presence and geometry used by every row slice."""
+
+    present: frozenset[str]
+    first_group_list_fields: frozenset[str]
+    route_geometry: tuple[int, int, np.dtype] | None
+    token_rewards: bool
+
+    @classmethod
+    def from_batch(cls, batch: TrajectoryBatch) -> "BatchFields":
+        """Describe field presence and the first captured route geometry of one group."""
+        geometry = next(
+            (
+                (*row.shape[1:], row.dtype)
+                for row in batch.get("rollout_routed_experts") or ()
+                if row is not None and row.ndim == 3
+            ),
+            None,
+        )
+        return cls(
+            present=frozenset(key for key, value in batch.items() if value is not None),
+            first_group_list_fields=frozenset(key for key, value in batch.items() if isinstance(value, list)),
+            route_geometry=geometry,
+            token_rewards=any(isinstance(reward, list) for reward in batch["rewards"]),
+        )
+
+    @classmethod
+    def from_groups(cls, groups: Sequence["BatchFields"]) -> "BatchFields":
+        """Combine ordered group descriptors using the first group's list-field policy."""
+        present = frozenset(key for group in groups for key in group.present)
+        if "unshaped_rewards" in present and any("unshaped_rewards" not in group.present for group in groups):
+            present = present | {"unshaped_reward_available"}
+        return cls(
+            present=present,
+            first_group_list_fields=groups[0].first_group_list_fields,
+            route_geometry=next((group.route_geometry for group in groups if group.route_geometry is not None), None),
+            token_rewards=any(group.token_rewards for group in groups),
+        )
+
+
+class TitoFullDeclineReason(StrEnum):
+    """Reason exact full-token trajectory assembly could not be proven safe."""
+
+    MISSING_STREAMS = "missing_streams"
+    EMPTY_STREAMS = "empty_streams"
+    TURN_COUNT_MISMATCH = "turn_count_mismatch"
+    ASSISTANT_MESSAGE_COUNT_MISMATCH = "assistant_message_count_mismatch"
+    MALFORMED_TURN_STREAM = "malformed_turn_stream"
+    PREFIX_MISMATCH = "prefix_mismatch"
+    INITIAL_PROMPT_TOO_SHORT = "initial_prompt_too_short"
+    GENERATION_PROMPT_MISMATCH = "generation_prompt_mismatch"
+    COMPLETION_REGION_MISMATCH = "completion_region_mismatch"
+
+
+@dataclass(frozen=True)
+class ShapingObservations:
+    """Ordered trajectory scalars and charged credits used by shaping metrics."""
+
+    components: tuple[RewardShapingComponents, ...]
+    shaped_totals: tuple[float, ...]
+    outcomes: tuple[float, ...]
+    response_tokens: tuple[int, ...]
+    stop_reasons: tuple[str | None, ...]
+    loop_incidence: tuple[bool, ...]
+    loop_advantage_totals: tuple[float, ...]
+    loop_charged_tokens: tuple[int, ...]
+    charged_loop_advantages: tuple[float, ...]
+
+
+@dataclass(frozen=True)
+class RolloutObservations:
+    """Ordered rollout scalars, verifier evidence and complete group metric maps."""
+
+    response_lengths: tuple[int, ...]
+    optimization_totals: tuple[float, ...]
+    reward_sign_totals: tuple[float, ...]
+    outcomes: tuple[float, ...]
+    unshaped_outcomes: tuple[float, ...] | None
+    scalar_rewards: tuple[float, ...] | None
+    is_last_step: tuple[bool, ...] | None
+    verification_results: tuple[VerificationResult | None, ...] | None
+    data_sources: tuple[str | None, ...] | None
+    env_metrics: tuple[dict[str, Any], ...] | None
+    env_classes: tuple[str, ...] | None
+    group_metrics: tuple[dict[str, float], ...]
+    shaping: ShapingObservations | None

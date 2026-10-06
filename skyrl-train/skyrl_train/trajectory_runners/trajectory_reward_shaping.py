@@ -9,6 +9,8 @@ import numpy as np
 from skyrl_train.error_treatment import ErrorTreatment
 from skyrl_train.trajectory_runners.types import (
     REWARD_SHAPING_COMPONENT_NAMES,
+    BatchFields,
+    ShapingObservations,
     TrajectoryBatch,
     RewardShapingComponents,
     RewardShapingLoopSpan,
@@ -376,11 +378,13 @@ def _trajectory_groups(output: TrajectoryBatch, batch_size: int) -> list[list[in
     return groups
 
 
-def refresh_trajectory_reward_shaping_metrics(output: TrajectoryBatch) -> None:
-    """Recompute shaping metrics after concatenation, filtering, or replacement."""
+def observe_shaping(output: TrajectoryBatch, *, fields: BatchFields) -> ShapingObservations | None:
+    """Capture shaping scalars from globally normalized rows with the first-group field policy."""
+    if "reward_shaping_components" not in fields.first_group_list_fields:
+        return None
     components = output.get("reward_shaping_components")
     if components is None:
-        return
+        return None
 
     batch_size = len(output["response_ids"])
     if len(components) != batch_size:
@@ -405,7 +409,6 @@ def refresh_trajectory_reward_shaping_metrics(output: TrajectoryBatch) -> None:
     response_lengths = [sum(bool(value) for value in loss_mask) for loss_mask in output["loss_masks"]]
     trajectory_components = [aggregate_reward_shaping_components(components, group) for group in groups]
     shaped_totals = [NormalizedReward.from_output(output["rewards"][group[-1]]).total for group in groups]
-    penalties = [sum(values.values()) for values in trajectory_components]
     trajectory_lengths = [sum(response_lengths[index] for index in group) for group in groups]
     trajectory_stops = [stop_reasons[group[-1]] for group in groups]
     trajectory_outcomes = [float(outcomes[group[-1]]) for group in groups]
@@ -417,12 +420,35 @@ def refresh_trajectory_reward_shaping_metrics(output: TrajectoryBatch) -> None:
         value for sample_advantages in loop_advantages for value in sample_advantages if value < 0
     ]
     loop_incidence = [any(spans[index] for index in group) for group in groups]
+    return ShapingObservations(
+        components=tuple(trajectory_components),
+        shaped_totals=tuple(shaped_totals),
+        outcomes=tuple(trajectory_outcomes),
+        response_tokens=tuple(trajectory_lengths),
+        stop_reasons=tuple(trajectory_stops),
+        loop_incidence=tuple(loop_incidence),
+        loop_advantage_totals=tuple(trajectory_loop_advantages),
+        loop_charged_tokens=tuple(trajectory_loop_token_counts),
+        charged_loop_advantages=tuple(charged_loop_advantages),
+    )
+
+
+def shaping_metrics(observations: ShapingObservations) -> dict[str, float]:
+    """Compute shaping metrics over the original ordered trajectory observations."""
+    trajectory_components = observations.components
+    shaped_totals = observations.shaped_totals
+    trajectory_outcomes = observations.outcomes
+    trajectory_lengths = observations.response_tokens
+    trajectory_stops = observations.stop_reasons
+    loop_incidence = observations.loop_incidence
+    trajectory_loop_advantages = observations.loop_advantage_totals
+    trajectory_loop_token_counts = observations.loop_charged_tokens
+    charged_loop_advantages = observations.charged_loop_advantages
+    penalties = [sum(values.values()) for values in trajectory_components]
     correct_loop_incidence = [
         incidence for incidence, outcome in zip(loop_incidence, trajectory_outcomes) if outcome > 0
     ]
-
-    metrics = output.get("rollout_metrics") or {}
-    refreshed_metrics = {
+    metrics = {
         f"{SHAPING_METRIC_PREFIX}/outcome_reward_mean": float(np.mean(trajectory_outcomes)),
         f"{SHAPING_METRIC_PREFIX}/optimization_reward_before_mean": float(
             np.mean([shaped - penalty for shaped, penalty in zip(shaped_totals, penalties)])
@@ -465,13 +491,25 @@ def refresh_trajectory_reward_shaping_metrics(output: TrajectoryBatch) -> None:
         f"{SHAPING_METRIC_PREFIX}/response_tokens_mean": float(np.mean(trajectory_lengths)),
         f"{SHAPING_METRIC_PREFIX}/response_tokens_max": float(max(trajectory_lengths, default=0)),
     }
+    for stop_reason in trajectory_stops:
+        key = f"{SHAPING_METRIC_PREFIX}/stop_reason/{_metric_key(stop_reason)}"
+        metrics[key] = metrics.get(key, 0.0) + 1.0
+    return metrics
+
+
+def refresh_trajectory_reward_shaping_metrics(output: TrajectoryBatch) -> None:
+    """Recompute shaping metrics after concatenation, filtering, or replacement."""
+    if output.get("reward_shaping_components") is None:
+        return
+    observations = observe_shaping(output, fields=BatchFields.from_batch(output))
+    if observations is None:
+        return
+    refreshed_metrics = shaping_metrics(observations)
+    metrics = output.get("rollout_metrics") or {}
     stop_reason_prefix = f"{SHAPING_METRIC_PREFIX}/stop_reason/"
     for key in [key for key in metrics if key in refreshed_metrics or key.startswith(stop_reason_prefix)]:
         del metrics[key]
     metrics.update(refreshed_metrics)
-    for stop_reason in trajectory_stops:
-        key = f"{SHAPING_METRIC_PREFIX}/stop_reason/{_metric_key(stop_reason)}"
-        metrics[key] = metrics.get(key, 0.0) + 1.0
     output["rollout_metrics"] = metrics
 
 

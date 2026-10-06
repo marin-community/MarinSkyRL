@@ -11,9 +11,11 @@ from marinskyrl.resource_locator import join_resource_path
 
 from skyrl_train.trajectory_runners.trajectory_processing import (
     concatenate_trajectory_batches,
+    prepare_trajectory_request,
+)
+from skyrl_train.trajectory_runners.rollout_metrics import (
     get_metrics_from_trajectory_batch,
     normalized_verifier_scores,
-    prepare_trajectory_request,
     verifier_score_summary,
 )
 from skyrl_train.trajectory_runners.base import (

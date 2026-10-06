@@ -26,8 +26,10 @@ from skyrl_train.trajectory_runners.projections import attach_unshaped_rewards
 from skyrl_train.inference_engines.base import ConversationType
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.trajectory_runners.trajectory_processing import (
-    get_rollout_metrics,
     get_response_ids_and_loss_mask_from_messages,
+)
+from skyrl_train.trajectory_runners.rollout_metrics import (
+    get_rollout_metrics,
 )
 
 

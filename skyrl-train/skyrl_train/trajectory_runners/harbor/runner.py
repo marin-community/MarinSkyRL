@@ -26,9 +26,6 @@ from skyrl_train.metric_names import (
     TIS_METRIC_PREFIX,
 )
 from skyrl_train.trajectory_runners.trajectory_processing import (
-    BATCH_ERROR_METRIC_PREFIX,
-    get_batch_failure_metrics,
-    get_rollout_metrics,
     get_custom_chat_template,
     get_response_ids_and_loss_mask_from_messages,
     get_generation_prompt_ids,
@@ -40,6 +37,11 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     normalize_token_ids,
     AlignmentStats,
     _re_sentinel_rows,
+)
+from skyrl_train.trajectory_runners.rollout_metrics import (
+    BATCH_ERROR_METRIC_PREFIX,
+    get_batch_failure_metrics,
+    get_rollout_metrics,
 )
 from skyrl_train.utils.reward_shaping import (
     ParsedTestResult,

@@ -27,7 +27,10 @@ from skyrl_train.group_admission import (
 )
 from skyrl_train.rollouts.loader import JudgedGroup
 from skyrl_train.telemetry import GeneratedWork
-from skyrl_train.trajectory_runners.trajectory_processing import get_outcome_rewards, get_trajectory_passes
+from skyrl_train.trajectory_runners.rollout_metrics import (
+    get_outcome_rewards,
+    get_trajectory_passes,
+)
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import NormalizedReward
 from skyrl_train.trajectory_runners.types import TrajectoryBatch, TrajectoryRequestBatch
 
