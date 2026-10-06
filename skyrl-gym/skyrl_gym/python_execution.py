@@ -6,12 +6,14 @@ from pathlib import Path
 from uuid import uuid4
 
 from pydantic import TypeAdapter
+from rolloutengine.cleanup import finish_cleanup
 from shellbox.machine import Command, ExitReason, Machine, Result
 
 from skyrl_gym.python_kernel import FRAME_LIMIT_BYTES
 
 KERNEL_SCRIPT = Path(__file__).with_name("python_kernel.py")
 KERNEL_STARTUP_TIMEOUT = 40.0
+KERNEL_CLEANUP_TIMEOUT = 10.0
 KERNEL_OUTPUT_LIMIT_BYTES = 65536
 KERNEL_RESULT = TypeAdapter(Result)
 
@@ -54,15 +56,27 @@ class PythonKernel:
         )
         try:
             result = await self.machine.run(command)
-        except asyncio.CancelledError:
-            # Cleanup must not issue another command after machine cancellation.
-            self.started = False
+        except asyncio.CancelledError as interruption:
+            try:
+                await finish_cleanup(self._close_interrupted_kernel, timeout=KERNEL_CLEANUP_TIMEOUT)
+            except (Exception, asyncio.CancelledError) as cleanup_error:
+                raise interruption from cleanup_error
             raise
         if result.reason == ExitReason.TIMED_OUT:
-            self.started = False
+            await finish_cleanup(self._close_interrupted_kernel, timeout=KERNEL_CLEANUP_TIMEOUT)
         if result.reason != ExitReason.EXITED or result.exit_code != 0 or result.stdout_truncated:
             raise RuntimeError(f"Python kernel execution failed: {result.stderr.decode(errors='replace')}")
         return KERNEL_RESULT.validate_json(result.stdout, strict=True)
+
+    async def _close_interrupted_kernel(self) -> None:
+        try:
+            await self.close()
+        except (Exception, asyncio.CancelledError) as error:
+            # A live candidate must not share the machine with subsequent grading.
+            await self.machine.close()
+            self.started = False
+            error.add_note("The task machine was closed because Python kernel cleanup failed.")
+            raise
 
     async def close(self) -> None:
         if not self.started:

@@ -34,9 +34,11 @@ class BoundedOutput(io.TextIOBase):
         return self.data.decode("utf-8", errors="replace")
 
 
-def request(directory: Path, value: dict) -> dict:
+def request(directory: Path, value: dict, *, socket_timeout: float | None = None) -> dict:
     with socket.socket(socket.AF_UNIX) as connection:
-        connection.settimeout(value.get("timeout", STARTUP_TIMEOUT) + 5.0)
+        connection.settimeout(
+            socket_timeout if socket_timeout is not None else value.get("timeout", STARTUP_TIMEOUT) + 5.0
+        )
         connection.connect(str(directory / "socket"))
         connection.sendall(json.dumps(value).encode() + b"\n")
         with connection.makefile("rb") as stream:
@@ -59,13 +61,19 @@ def start(directory: Path, memory_bytes: int | None) -> None:
     (directory / "pid").write_text(str(process.pid))
     deadline = time.monotonic() + STARTUP_TIMEOUT
     try:
-        while not (directory / "socket").exists():
+        while True:
             if process.poll() is not None:
                 raise RuntimeError((directory / "server.log").read_text())
-            if time.monotonic() >= deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 raise TimeoutError("The Python kernel did not start")
+            try:
+                request(directory, {"ping": True}, socket_timeout=remaining)
+                break
+            except (FileNotFoundError, ConnectionRefusedError):
+                # bind creates the path before listen makes the socket ready.
+                pass
             time.sleep(0.01)
-        request(directory, {"ping": True})
     except BaseException:
         os.killpg(process.pid, signal.SIGKILL)
         process.wait()

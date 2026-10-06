@@ -1,11 +1,95 @@
 """Persistent Python state, execution bounds, and cleanup through a Shellbox Machine."""
 
+import asyncio
+from contextlib import suppress
+
+import psutil
 import pytest
 from shellbox.machine import Command, ExitReason
 
+from skyrl_gym import python_kernel
 from skyrl_gym.code_execution import execute_code
 from skyrl_gym.envs.lcb.livecodebench import VerifierLimits
 from skyrl_gym.python_execution import PythonKernel
+
+
+def test_kernel_start_waits_for_a_listening_socket(tmp_path, monkeypatch):
+    socket_type = python_kernel.socket.socket
+    refuse_connection = True
+
+    class StartupSocket(socket_type):
+        def connect(self, address):
+            nonlocal refuse_connection
+            if refuse_connection:
+                refuse_connection = False
+                raise ConnectionRefusedError
+            return super().connect(address)
+
+    monkeypatch.setattr(python_kernel.socket, "socket", StartupSocket)
+    python_kernel.start(tmp_path, None)
+    try:
+        result = python_kernel.request(tmp_path, {"code": "print(6 * 7)", "timeout": 5})
+        assert (result["exit_code"], result["stdout"]) == (0, "42\n")
+    finally:
+        python_kernel.close(tmp_path)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_again", [False, True])
+async def test_kernel_cancellation_retains_primary_error_after_cleanup_failure(machine, monkeypatch, cancel_again):
+    kernel = PythonKernel(machine)
+    await kernel.start()
+    process = psutil.Process(int(machine.path(f"{kernel.directory}/pid").read_text()))
+    ready = machine.path(f"{kernel.directory}/candidate-ready")
+    pending = asyncio.create_task(
+        kernel.execute(f"import signal\nopen({str(ready)!r}, 'w').close()\nsignal.pause()", timeout=30)
+    )
+    closing = asyncio.Event()
+    release = asyncio.Event()
+    run = machine.run
+
+    async def delayed_cleanup(command):
+        closing.set()
+        await release.wait()
+        return await run(command)
+
+    try:
+        async with asyncio.timeout(5):
+            while not ready.exists():
+                if pending.done():
+                    await pending
+                    pytest.fail("The candidate exited before cancellation")
+                await asyncio.sleep(0)
+        monkeypatch.setattr(machine, "run", delayed_cleanup)
+        pending.cancel()
+        await asyncio.wait_for(closing.wait(), timeout=5)
+        if cancel_again:
+            pending.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError) as interrupted:
+            await pending
+        cause = interrupted.value.__cause__
+        if cancel_again:
+            assert isinstance(cause, asyncio.CancelledError)
+            cause = cause.__cause__
+        assert isinstance(cause, RuntimeError)
+        assert machine.closed
+        async with asyncio.timeout(5):
+            while True:
+                try:
+                    state = process.status()
+                except psutil.NoSuchProcess:
+                    state = None
+                if state in (None, psutil.STATUS_ZOMBIE):
+                    break
+                await asyncio.sleep(0)
+        assert state in (None, psutil.STATUS_ZOMBIE)
+    finally:
+        release.set()
+        pending.cancel()
+        with suppress(asyncio.CancelledError):
+            await pending
+        await kernel.close()
 
 
 @pytest.mark.asyncio

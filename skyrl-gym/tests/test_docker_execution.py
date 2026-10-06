@@ -77,7 +77,7 @@ async def test_docker_candidate_cannot_read_worker_reference(docker_machine, tmp
     assert reference.read_text() == "938171"
 
 
-async def test_docker_cancellation_disposes_of_blocked_candidate(docker_machine):
+async def test_docker_cancellation_stops_candidate_and_preserves_machine_for_grading(docker_machine):
     kernel = PythonKernel(docker_machine)
     await kernel.start()
     ready = f"{kernel.directory}/candidate-ready"
@@ -98,7 +98,24 @@ async def test_docker_cancellation_disposes_of_blocked_candidate(docker_machine)
         pending.cancel()
         with pytest.raises(asyncio.CancelledError):
             await pending
-        assert (await docker("inspect", docker_machine.name)).exit_code != 0
+        pid_file = await docker_machine.run(Command(("cat", f"{kernel.directory}/pid"), timeout=5.0))
+        assert pid_file.exit_code == 0
+        pid = int(pid_file.stdout)
+        stopped = await docker_machine.run(
+            Command(
+                (
+                    "sh",
+                    "-c",
+                    'if [ -f "/proc/$1/stat" ]; then read -r pid comm state rest < "/proc/$1/stat"; '
+                    'test "$state" = Z; fi',
+                    "kernel-state",
+                    str(pid),
+                ),
+                timeout=5.0,
+            )
+        )
+        assert stopped.exit_code == 0
+        assert (await docker_machine.run(Command(("test", "-f", ready), timeout=5.0))).exit_code == 0
     finally:
         pending.cancel()
         with suppress(asyncio.CancelledError):
