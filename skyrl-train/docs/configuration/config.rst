@@ -116,6 +116,7 @@ Rollout Buffer Configuration
 
 .. code-block:: yaml
 
+    batch_builder: driver
     rollout_buffer:
       max_staleness_steps: 0
       batch_policy: full_batch
@@ -128,6 +129,20 @@ Rollout Buffer Configuration
 Rollout workers generate prompt groups under leases from a rollout buffer, and each training step trains on
 ``train_batch_size`` groups. See :doc:`../tutorials/fully_async` for the full design.
 
+- ``batch_builder``: ``driver`` (default) builds the training batch on the coordinator. ``worker`` lets policy
+  workers fetch admitted groups and build their contiguous DP slices with whole-batch padded widths.
+  ``verify`` trains on worker slices and compares their consumed inputs against a driver-built reference.
+  Worker construction supports scalar rewards with ``rloo``, ``rloo_n``, and ``grpo``. It requires a batch
+  divisible by the policy DP size and rejects critic, reward KL, reference KL loss, FTPO, distillation,
+  trajectory selection, step-wise training, batch advantage normalization, and loop reward credit.
+  ``dump_data_batch`` is available with ``driver`` and ``verify``. Router replay requires captured routes
+  and a resolved model expert count. ``generator.r3_transport`` affects driver construction;
+  worker construction keeps its batches on the policy workers. Verification is intended for tests and short runs.
+  Worker and verify mismatch diagnostics report p99 and maximum; p95 and p999 are driver-only.
+  P99 uses a global histogram with 4,096 bins of width log(1.01), covering absolute log ratios up to about 40.8.
+  Within that range the upper-bin estimate is at most one bin above the exact p99; overflow uses the global maximum.
+  Every TP, PP and CP rank reads its slice's groups. Ray caches in-memory payload transfers per node;
+  an object-store payload is read separately by each rank, including overlapping groups at slice boundaries.
 - ``rollout_buffer.max_staleness_steps``: How many policy steps may separate the step at which a group was leased
   from the step that trains on it. ``0`` is synchronous on-policy training and is required when ``placement.colocate_all=true``.
   A positive value lets generation run ahead of training.
