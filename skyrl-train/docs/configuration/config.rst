@@ -36,8 +36,15 @@ Model Placement Configuration
     ref_num_gpus_per_node: 4
     reward_num_nodes: 1
     reward_num_gpus_per_node: 4
+    policy_strict_spread_pg: false
+    overlap_init: false
 
 For an in-depth guide on model placement and colocation, please refer to the :doc:`model placement and colocation guide <placement>`.
+
+``trainer.placement.overlap_init`` starts inference engines while policy workers build their models.
+It defaults to false and requires dedicated policy placement (``policy_strict_spread_pg: true``),
+disaggregated local engines, an objective without a reference model, and disabled distillation.
+It controls startup concurrency separately from placement reservation so recipes can opt in individually.
 
 General Training Configuration
 ------------------------------
