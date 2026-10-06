@@ -349,6 +349,7 @@ class BasePPOExp:
             datasets=self.cfg.data.train_data,
             tokenizer=self.tokenizer,
             max_prompt_length=self.cfg.trainer.max_prompt_length,
+            prompt_length_policy=self.cfg.data.prompt_length_policy,
             num_workers=8,
         )
         # make sure the dataset is large enough to train on
@@ -368,6 +369,7 @@ class BasePPOExp:
                 datasets=self.cfg.data.val_data,
                 tokenizer=self.tokenizer,
                 max_prompt_length=self.cfg.trainer.max_prompt_length,
+                prompt_length_policy=self.cfg.data.prompt_length_policy,
                 num_workers=8,
             )
             return prompts_dataset

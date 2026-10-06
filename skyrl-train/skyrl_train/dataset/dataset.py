@@ -15,12 +15,16 @@ class PromptDataset:
         num_workers: int = 8,
         prompt_key: str = "prompt",
         env_class_key: str = "env_class",
+        prompt_length_policy: str = "filter",
     ):
         self.tokenizer = tokenizer
         self.max_prompt_length = max_prompt_length
         self.prompt_key = prompt_key
         self.env_class_key = env_class_key
         self.num_workers = num_workers
+        if prompt_length_policy not in {"filter", "keep"}:
+            raise ValueError("prompt_length_policy must be filter or keep")
+        self.prompt_length_policy = prompt_length_policy
 
         self.datasets = datasets
         if isinstance(self.datasets, str):
@@ -54,6 +58,10 @@ class PromptDataset:
         self.dataframe: datasets.Dataset = datasets.concatenate_datasets(loaded_datasets)
 
         logger.info(f"Total dataset size: {len(self.dataframe)}")
+
+        if self.prompt_length_policy == "keep":
+            # Profiling accounts for every source row, including explicit context exclusions.
+            return
 
         # filter out too long prompts
         tokenizer = self.tokenizer

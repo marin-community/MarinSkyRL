@@ -13,6 +13,7 @@ from skyrl_train.inference_engines.base import InferenceEngineInterface
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.rollouts.workers import WorkerShard, detached_config
 from skyrl_train.trajectory_runners.base import TrajectoryRunner
+from skyrl_train.trajectory_runners.pivot_sft import PivotSFTRunner
 from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection
 from skyrl_train.trajectory_runners.skyrl_gym import SkyRLGymTrajectoryRunner, TrajectoryPipeline
 from skyrl_train.trajectory_runners.step_wise import StepWiseRolloutCollector
@@ -49,10 +50,14 @@ class GymRunnerSpec:
                 StepWiseRolloutCollector,
                 StepWiseTrajectoryProjection(self.config.generator, tokenizer),
             )
-        return SkyRLGymTrajectoryRunner(
+        runner = SkyRLGymTrajectoryRunner(
             trajectory_runner_cfg=self.config.generator,
             skyrl_gym_cfg=self.config.environment.skyrl_gym,
             inference_engine_client=InferenceEngineClient(self.engines, tokenizer, client_config),
             tokenizer=tokenizer,
             pipeline=pipeline,
         )
+
+        if self.config.generator.reference_actions:
+            return PivotSFTRunner(runner, tokenizer, self.config.generator)
+        return runner
