@@ -207,12 +207,12 @@ class MegatronModelWrapper:
     ):
         """Build per-layer router targets in the exact token order the routers see.
 
-        Pushes the dense ``[B, S, L, K]`` targets and the replay / response
+        Pushes the dense ``[B, S, L, K]`` targets and the replay / prediction
         masks through the SAME sequence transform the model input takes
         (packing or left-pad removal, with the CP chunk split), flattens
         sequence-major (``s*B + b``, mirroring the router view), and slices to
         this TP rank's contiguous sequence chunk under sequence parallelism.
-        The result contains per-layer targets, replay and response masks, and
+        The result contains per-layer targets, replay and prediction masks, and
         optional probe positions aligned to the model chunk's router rows.
         """
         controller = self.router_replay

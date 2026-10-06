@@ -2,7 +2,6 @@
 
 import base64
 import asyncio
-from contextlib import nullcontext
 import io
 from types import SimpleNamespace
 
@@ -12,12 +11,16 @@ import torch
 
 from skyrl_train.inference_engines.vllm.route_capture import response_routes
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.config.utils import get_default_config
 from skyrl_train.dataset.routed_expert_batch import RoutedExpertRows
 from skyrl_train.mismatch_probe.collect import ProbeCollector
-from skyrl_train.models.megatron_router_replay import LayerReplayHandle, MegatronRouterReplay, dense_replay_targets
+from skyrl_train.models.megatron_router_replay import (
+    SENTINEL_EXPERT_ID,
+    LayerReplayHandle,
+    MegatronRouterReplay,
+    dense_replay_targets,
+)
 from skyrl_train.trajectory_runners.routed_experts import normalize_routed_experts
-from tests.cpu.test_megatron_router_replay_plumbing import _make_wrapper
-from tests.cpu.inf_engines.test_inference_engine_client import _make_min_cfg
 
 
 def test_response_routes_select_prediction_positions() -> None:
@@ -64,7 +67,7 @@ def test_captured_routes_replay_at_the_positions_that_predicted_responses(source
 @pytest.mark.parametrize("mode", ["native", "router_replay"])
 @pytest.mark.parametrize("expert_offset", [0, 256], ids=["uint8-routes", "hero-uint16-routes"])
 def test_client_retry_compact_routes_and_probe_observations_follow_prediction_tokens(
-    monkeypatch, packing, mode, expert_offset
+    megatron_wrapper, packing, mode, expert_offset
 ):
     captured = np.array(
         [
@@ -90,9 +93,10 @@ def test_client_retry_compact_routes_and_probe_observations_follow_prediction_to
                 "routed_experts": [response_routes(raw_routes, len(response_ids))],
             }
 
-    client = InferenceEngineClient(
-        [Engine()], SimpleNamespace(decode=lambda *_args, **_kwargs: "response"), _make_min_cfg()
-    )
+    cfg = get_default_config()
+    cfg.generator.enable_http_endpoint = False
+    cfg.trainer.policy.megatron_config.moe_router_replay = True
+    client = InferenceEngineClient([Engine()], SimpleNamespace(decode=lambda *_args, **_kwargs: "response"), cfg)
     output = asyncio.run(client.generate({"prompt_token_ids": [[10, 11, 12]], "sampling_params": {"max_tokens": 2}}))
     response = output["routed_experts"][0]
     assert output["response_ids"] == [[20, 21]]
@@ -105,14 +109,13 @@ def test_client_retry_compact_routes_and_probe_observations_follow_prediction_to
     assert routes.dtype == (torch.int16 if expert_offset else torch.uint8)
     if mode == "native":
         # The production mismatch probe requests native routing with sentinel rows.
-        routes.zero_()
+        routes.fill_(SENTINEL_EXPERT_ID)
     sequences = torch.tensor([[0, 0, 0, 10, 11, 12, 20, 21, 0]])
     attention = (sequences != 0).long()
     positions = (attention.cumsum(-1) - 1).masked_fill(attention == 0, 0)
     controller = MegatronRouterReplay(range(3), recompute_enabled=False)
     controller.num_moe_layers_total, controller.topk = 3, 2
-    wrapper = _make_wrapper(monkeypatch, packing=packing, controller=controller)
-    wrapper.actor_module[0].config.num_moe_experts = num_experts
+    wrapper = megatron_wrapper(packing=packing, controller=controller, num_experts=num_experts)
 
     def model(tokens, *args, **kwargs):
         tokens = tokens.flatten()
@@ -131,21 +134,17 @@ def test_client_retry_compact_routes_and_probe_observations_follow_prediction_to
             assert selected[tokens == 21].tolist() == [[0, 1]]
         return torch.zeros(1)
 
-    with controller.scoring_mode(mode) if mode == "router_replay" else nullcontext():
-        wrapper._forward_micro_batch(
-            model,
-            sequences,
-            attention,
-            positions,
-            rollout_routed_experts=routes,
-            probe_row_indices=torch.tensor([0]),
-            num_actions=3,
-        )
-    observations = controller.take_probe_observations()
-    collector = ProbeCollector.__new__(ProbeCollector)
-    collector.cfg = SimpleNamespace(
-        trainer=SimpleNamespace(policy=SimpleNamespace(megatron_config=SimpleNamespace(moe_router_replay=True)))
+    wrapper._forward_micro_batch(
+        model,
+        sequences,
+        attention,
+        positions,
+        rollout_routed_experts=routes,
+        probe_row_indices=torch.tensor([0]),
+        num_actions=3,
     )
+    observations = controller.take_probe_observations()
+    collector = ProbeCollector(cfg)
     collector.batch_layout = SimpleNamespace(padded_rows=0)
     collector.probes = [
         SimpleNamespace(
