@@ -206,6 +206,7 @@ class EvaluationCallback(TrainerCallback):
         additional_evaluations: Dict[str, Dict[str, Any]] | None = None,
         metric_groups: Dict[str, List[str]] | None = None,
         stop_when: Dict[str, Dict[str, float]] | None = None,
+        eval_loss_tokens: int | None = None,
     ):
         self.eval_steps = eval_steps
         self.eval_on_train_end = eval_on_train_end
@@ -221,6 +222,10 @@ class EvaluationCallback(TrainerCallback):
             raise ValueError("additional evaluation names must be identifiers")
         if any(not keys for keys in self.metric_groups.values()):
             raise ValueError("evaluation metric groups must be nonempty")
+
+        if eval_loss_tokens is not None and eval_loss_tokens <= 0:
+            raise ValueError("eval_loss_tokens must be positive")
+        self.eval_loss_tokens = eval_loss_tokens
 
     async def on_evaluate_async(
         self, state: TrainerState, control: TrainerControl, *, metrics: Dict[str, float], trainer, **kwargs
@@ -274,6 +279,12 @@ class EvaluationCallback(TrainerCallback):
     ) -> Optional[TrainerControl]:
         if self.eval_steps > 0 and state.global_step % self.eval_steps == 0:
             control.should_evaluate = True
+        if self.eval_loss_tokens is not None:
+            total = state.metrics["consumed/loss_total"]
+            previous = total - state.metrics["consumed/loss_step"]
+            if total // self.eval_loss_tokens > previous // self.eval_loss_tokens:
+                control.should_evaluate = True
+                control.should_save = True
         return control
 
     def on_train_end(
@@ -876,6 +887,7 @@ def create_default_callbacks(cfg: DictConfig) -> List[TrainerCallback]:
             EvaluationCallback(
                 eval_steps=eval_interval,
                 eval_before_train=eval_before_train,
+                eval_loss_tokens=cfg.trainer.get("eval_loss_token_interval"),
             )
         )
 

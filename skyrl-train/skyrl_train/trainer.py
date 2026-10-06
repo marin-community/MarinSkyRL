@@ -4,14 +4,15 @@ import io as stdlib_io
 import json
 import math
 import os
+import pickle
 import re
 import shutil
 import threading
 import time
+from uuid import uuid4
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 from jaxtyping import Float
-from pathlib import Path
 import ray
 from ray import ObjectRef
 import torch
@@ -127,6 +128,7 @@ from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
 from skyrl_train.evaluate import evaluate, evaluate_step_wise
 from skyrl_train.callbacks.base import TrainerCallback, TrainerState, TrainerControl, CallbackHandler
 from skyrl_train.callbacks.builtin import DefaultCallbackHandler, RefModelUpdateCallback
+from skyrl_train.training_tokens import TrainingTokens, loss_token_budget
 from skyrl_train.telemetry import (
     TRAINER_ROLE,
     ConsumedWork,
@@ -377,6 +379,8 @@ class RayPPOTrainer:
         self._distillation_tickets: dict[str, AsyncRoutedTeacherScoreTicket] = {}
         self._domain_balancer: DomainGradientBalancer | None = None
         self.distillation_scored_tokens_total = 0
+        self.training_tokens = TrainingTokens()
+        self.loss_token_budget = loss_token_budget(cfg.trainer)
 
         self.reward_kl_controller: Optional[Union[FixedKLController, AdaptiveKLController]] = None
         configure_ray_worker_logging()
@@ -637,6 +641,7 @@ class RayPPOTrainer:
                 await self._distillation_runtime.start()
             await self._startup_trajectory_runner()
             await self._train_loop()
+            await asyncio.to_thread(self.tracker.finish)
         except Exception as error:
             log_exception_as_text(f"Train loop failed at global_step {self.global_step}", error)
             receipt = write_exception_receipt("skyrl-trainer", error)
@@ -1250,7 +1255,16 @@ class RayPPOTrainer:
         await self._start_draft_trainer()
         await self._sync_policy_for_rollouts(reason="initial")
 
-        if self._ftpo_stopped:
+        # Synchronize before checking completion so a requested final evaluation uses the checkpoint weights.
+        # The loaded global_step counts completed steps, so >= treats a resume exactly at max_steps as complete.
+        if (
+            self._ftpo_stopped
+            or self.resume_mode != ResumeMode.NONE
+            and (
+                self.global_step >= self.total_training_steps
+                or (self.loss_token_budget is not None and self.training_tokens.loss >= self.loss_token_budget)
+            )
+        ):
             await self._handle_resume_at_max_steps()
             return
 
@@ -1334,7 +1348,9 @@ class RayPPOTrainer:
             last_completed_step = self.global_step
             record_policy_step(self.global_step)
 
-            stop = self._control.should_training_stop
+            stop = self._control.should_training_stop or (
+                self.loss_token_budget is not None and self.training_tokens.loss >= self.loss_token_budget
+            )
             if step_state.is_epoch_end:
                 await self._end_epoch(epoch)
                 stop = stop or self._control.should_training_stop
@@ -1389,6 +1405,9 @@ class RayPPOTrainer:
     def _update_step_performance_metrics(
         self, training_input: TrainingInputBatch, *, core_seconds: float, cycle_started: float
     ) -> None:
+        self.all_metrics["consumed/allocated_gpu_hours_step"] = (
+            (time.perf_counter() - cycle_started) * ray.cluster_resources().get("GPU", 0) / 3600
+        )
         if not self._training_metrics_enabled:
             return
         placement = self.cfg.trainer.placement
@@ -1496,6 +1515,10 @@ class RayPPOTrainer:
 
     def _log_rollout_batch_completed(self, groups: List[RolloutGroup], *, duration_seconds: float) -> None:
         response_ids = [response for group in groups for response in group.trajectory_batch["response_ids"]]
+        response_tokens = sum(len(response) for response in response_ids)
+        self.all_metrics["consumed/rollout_generated_tokens_step"] = (
+            0 if self.cfg.generator.reference_actions else response_tokens
+        )
         logger.info(
             "Rollout batch completed: step={} groups={} trajectories={} response_tokens={} staleness_mean={:.3f} "
             "staleness_max={} duration_seconds={:.3f}",
@@ -1575,6 +1598,7 @@ class RayPPOTrainer:
         with Timer("compute_advantages_and_returns", self.all_timings):
             training_input = self.compute_advantages_and_returns(training_input)
             training_input = self.finalize_advantages_for_training(training_input)
+        self.training_tokens.limit_loss(training_input, self.loss_token_budget)
 
         if self.cfg.trainer.dump_data_batch:
             if step_wall is not None:
@@ -1586,6 +1610,14 @@ class RayPPOTrainer:
             step_wall.start("policy_training")
         with Timer("train_critic_and_policy", self.all_timings), critical_phase("train_step", self.global_step):
             status = await asyncio.to_thread(self.train_critic_and_policy, training_input)
+        self.all_metrics.update(self.training_tokens.consume(training_input))
+        input_tokens = self.all_metrics["consumed/input_step"]
+        self.all_metrics["consumed/policy_forward_tokens_step"] = input_tokens * (
+            1 + self.cfg.trainer.update_epochs_per_batch
+        )
+        self.all_metrics["consumed/reference_forward_tokens_step"] = input_tokens if self.ref_model is not None else 0
+        if self.loss_token_budget is not None:
+            self.all_metrics["consumed/loss_token_budget"] = self.loss_token_budget
 
         ftpo = ftpo_config(self.cfg.trainer.algorithm)
         if ftpo is not None and ftpo.early_stopping_chosen_win is not None:
@@ -2500,12 +2532,15 @@ class RayPPOTrainer:
         return data
 
     def dump_data(self, data: TrainingInputBatch, file_name: str):
-        """
-        Dump data to pickle file
-        """
-        data_save_dir = Path(self.cfg.trainer.export_path) / "dumped_data"
-        data_save_dir.mkdir(parents=True, exist_ok=True)
-        data.save(data_save_dir / f"{file_name}.pkl")
+        """Publish training input with its budget-limited loss mask."""
+        data_save_dir = join_resource_path(self.cfg.trainer.export_path, "dumped_data")
+        io.makedirs(data_save_dir, exist_ok=True)
+        # A preempted attempt can repeat a step; retain both cloud objects.
+        suffix = f"-{uuid4().hex}" if is_cloud_uri(data_save_dir) else ""
+        destination = join_resource_path(data_save_dir, f"{file_name}{suffix}.pkl")
+        with io.open_file(destination, "wb") as output:
+            pickle.dump(data, output)
+        logger.info("Published training input: {}", destination)
 
     def pad_batch(self, training_input: TrainingInputBatch) -> TrainingInputBatch:
         """Pad the batch to be divisible by dp size"""
@@ -2936,6 +2971,7 @@ class RayPPOTrainer:
             "config": self.cfg,
             "distillation_scored_tokens_total": self.distillation_scored_tokens_total,
             "ftpo_stopped": self._ftpo_stopped,
+            "training_tokens": vars(self.training_tokens),
             "domain_gradient_balance_state": self._domain_balancer.state_dict() if self._domain_balancer else None,
         }
         trainer_state_path = os.path.join(global_step_folder, TRAINER_STATE_FILENAME)
@@ -3061,6 +3097,9 @@ class RayPPOTrainer:
             trainer_state = torch.load(f, map_location="cpu", weights_only=False)
         saved_global_step = trainer_state.get("global_step", global_step)
         self._ftpo_stopped = bool(trainer_state.get("ftpo_stopped", False))
+        if self.loss_token_budget is not None and "training_tokens" not in trainer_state:
+            raise ValueError("A token-budgeted resume requires checkpointed training token counts")
+        self.training_tokens = TrainingTokens(**trainer_state.get("training_tokens", {}))
         if self.cfg.trainer.get("reset_distillation_token_count_on_resume", False):
             self.distillation_scored_tokens_total = 0
         else:

@@ -349,6 +349,7 @@ class BasePPOExp:
             datasets=self.cfg.data.train_data,
             tokenizer=self.tokenizer,
             max_prompt_length=self.cfg.trainer.max_prompt_length,
+            prompt_length_policy=self.cfg.data.prompt_length_policy,
             num_workers=8,
         )
         # make sure the dataset is large enough to train on
@@ -361,13 +362,18 @@ class BasePPOExp:
         """Load validation prompts for evaluation or new mismatch-probe generation."""
         probe = self.cfg.trainer.mismatch_probe
         needs_probe_prompts = probe.enabled and probe.reuse_probe is None
-        if (self.cfg.trainer.eval_interval > 0 or needs_probe_prompts) and self.cfg.data.val_data:
+        if (
+            self.cfg.trainer.eval_interval > 0
+            or needs_probe_prompts
+            or self.cfg.trainer.get("eval_loss_token_interval") is not None
+        ) and self.cfg.data.val_data:
             from skyrl_train.dataset import PromptDataset  # noqa: PLC0415
 
             prompts_dataset = PromptDataset(
                 datasets=self.cfg.data.val_data,
                 tokenizer=self.tokenizer,
                 max_prompt_length=self.cfg.trainer.max_prompt_length,
+                prompt_length_policy=self.cfg.data.prompt_length_policy,
                 num_workers=8,
             )
             return prompts_dataset
