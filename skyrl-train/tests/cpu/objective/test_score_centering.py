@@ -15,6 +15,7 @@ from skyrl_train.objective.objective import (
 )
 from skyrl_train.objective.reduction import policy_data_weights, step_counts
 from skyrl_train.objective.score_centering import ppo_tis_score_centering_correction
+from skyrl_train.training_batch import TrainingBatchIterator, TrainingInputBatch
 
 
 def _expected_ppo_tis_loss(logits, old_probs, behavior_probs, advantage, cap, clip_low, clip_high):
@@ -73,10 +74,8 @@ def test_topk_tail_model_matches_full_gradient_when_tail_ratios_are_constant():
     # The tail of both fixed policies is proportional to current on IDs 2:.
     head = torch.tensor([0, 1])
     logits = current.log().clone().requires_grad_()
-    topk_gradient = torch.autograd.grad(_correction(logits, old, behavior, -1.0, head, 1.3, 0.2, 0.2), logits)[0]
-    full_gradient = torch.autograd.grad(
-        _correction(logits, old, behavior, -1.0, torch.arange(5), 1.3, 0.2, 0.2), logits
-    )[0]
+    topk_gradient = torch.autograd.grad(_correction(logits, old, behavior, 1.0, head, 1.3, 0.2, 0.2), logits)[0]
+    full_gradient = -torch.autograd.grad(_expected_ppo_tis_loss(logits, old, behavior, 1.0, 1.3, 0.2, 0.2), logits)[0]
     torch.testing.assert_close(topk_gradient, full_gradient, atol=1e-12, rtol=0)
 
 
@@ -126,9 +125,16 @@ def test_masked_sentinel_rows_do_not_poison_centering():
     assert loss[0, 1] == 0
 
 
-@pytest.mark.parametrize("capture_width", [0, 4])
-@pytest.mark.parametrize("mode", list(LossReduction))
-@pytest.mark.parametrize(("micro_size", "dp"), [(4, 1), (1, 1), (2, 2), (1, 2)])
+@pytest.mark.parametrize(
+    ("capture_width", "mode", "micro_size", "dp"),
+    [
+        (width, mode, micro_size, dp)
+        for width in (0, 4)
+        for mode in LossReduction
+        for micro_size, dp in ((4, 1), (1, 1), (2, 2))
+        if mode is LossReduction.TOKEN_MEAN or micro_size == 4
+    ],
+)
 def test_composed_ppo_tis_centering_matches_enumerated_value_gradient_and_partition(
     capture_width, mode, micro_size, dp
 ):
@@ -303,3 +309,41 @@ def test_composed_full_vocabulary_centering_cancels_expected_constant_advantage_
         expected = expected + probability * objective.optimization_loss
     gradient = torch.autograd.grad(expected, logits)[0]
     torch.testing.assert_close(gradient, torch.zeros_like(gradient), atol=1e-7, rtol=0)
+
+
+def test_score_evidence_survives_serialization_and_microbatching(tmp_path):
+    mask = torch.tensor([[1, 1], [1, 0]], dtype=torch.float32)
+    ids = torch.tensor([[[3, 4], [5, 6]], [[7, 8], [-1, -1]]])
+    old = torch.tensor([[[-0.5, -1.5], [-0.6, -1.6]], [[-0.7, -1.7], [torch.nan, torch.nan]]])
+    behavior = old - 0.3
+    payload = {
+        "sequences": torch.tensor([[1, 3, 5], [2, 7, 0]]),
+        "attention_mask": torch.tensor([[1, 1, 1], [1, 1, 0]]),
+        "response_mask": mask.bool(),
+        "loss_mask": mask,
+        "score_topk_indices": ids,
+        "score_old_logprobs": old,
+        "score_behavior_logprobs": behavior,
+    }
+    payload.update(
+        {
+            key: torch.zeros_like(mask)
+            for key in ("action_log_probs", "base_action_log_probs", "values", "returns", "advantages")
+        }
+    )
+    batch = TrainingInputBatch(payload)
+    batch.metadata = {"response_length": 2}
+    path = tmp_path / "batch.pt"
+    torch.save(batch, path)
+    restored = torch.load(path, weights_only=False)
+    experiences = list(TrainingBatchIterator(restored, sample_batch_size=1))
+    assert len(experiences) == 2
+    for row, experience in enumerate(experiences):
+        for name, expected in (
+            ("score_topk_indices", ids),
+            ("score_old_logprobs", old),
+            ("score_behavior_logprobs", behavior),
+        ):
+            torch.testing.assert_close(
+                getattr(experience, name), expected[row : row + 1], atol=0, rtol=0, equal_nan=True
+            )

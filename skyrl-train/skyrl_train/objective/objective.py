@@ -148,9 +148,6 @@ def compute_policy_objective(
         # Centering already integrates TIS over the behavior distribution. Applying the
         # sampled-action correction weight again would change its gradient.
         policy_row = policy_row + reduce_to_step(centering, batch.policy_data_weights, counts.policy, mode, **common)
-        centering_metrics["score_centering/correction_abs_mean"] = masked_mean(
-            centering.detach().abs(), batch.policy_data_weights
-        ).item()
         for name, log_probs in (
             ("current", evidence.current_log_probs),
             ("old", evidence.old_log_probs),
@@ -160,10 +157,6 @@ def compute_policy_objective(
             centering_metrics[f"score_centering/{name}_tail_mass_mean"] = masked_mean(
                 tail, batch.policy_data_weights
             ).item()
-            if name == "behavior":
-                centering_metrics["score_centering/behavior_tail_mass_gt_1pct_fraction"] = masked_mean(
-                    (tail > 0.01).float(), batch.policy_data_weights
-                ).item()
     mask = batch.policy.loss_mask
     entropy = reduce_to_step(batch.token_entropy, mask, counts.mask, LossReduction.TOKEN_MEAN, **common)
     if config.use_kl_loss:
