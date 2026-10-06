@@ -118,8 +118,9 @@ def test_split_schema_expert_mappings_use_the_expert_schedule():
         (0, 2, "fc1"),
         (0, 2, "fc2"),
     }
-    assert torch.equal(expert_source_view(sources[0], local.sources), fc1.flatten())
-    assert torch.equal(expert_source_view(sources[1], local.sources), fc2.flatten())
+    expected = {"fc1": fc1, "fc2": fc2}
+    for item in sources:
+        assert torch.equal(expert_source_view(item, local.sources), expected[item.entry.projection].flatten())
 
 
 def test_split_schema_rejects_a_mismatched_expert_id():
