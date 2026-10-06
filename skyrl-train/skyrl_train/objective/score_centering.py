@@ -16,6 +16,8 @@ import torch
 
 from skyrl_train.tensor_math import LOG_PROB_DELTA_CLIP, PROBABILITY_MASS_TOLERANCE
 
+TAIL_MASS_FLOOR = 1e-6
+
 
 def _bounded_ratio(numerator_logprob: torch.Tensor, denominator_logprob: torch.Tensor) -> torch.Tensor:
     return (numerator_logprob - denominator_logprob).clamp(-LOG_PROB_DELTA_CLIP, LOG_PROB_DELTA_CLIP).exp()
@@ -38,7 +40,6 @@ def ppo_tis_score_centering_correction(
     tis_cap: float,
     eps_clip_low: float,
     eps_clip_high: float,
-    tail_floor: float = 1e-6,
 ) -> torch.Tensor:
     """Return the per-token term to add before the PPO loss reduction.
 
@@ -57,8 +58,8 @@ def ppo_tis_score_centering_correction(
         or loss_mask.shape != shape[:2]
     ):
         raise ValueError("score centering requires aligned [batch, response, top-k] logprobs and advantages")
-    if tis_cap <= 0 or not 0 <= eps_clip_low < 1 or eps_clip_high < 0 or tail_floor <= 0:
-        raise ValueError("invalid score-centering TIS, PPO clipping, or tail-floor parameter")
+    if tis_cap <= 0 or not 0 <= eps_clip_low < 1 or eps_clip_high < 0:
+        raise ValueError("invalid score-centering TIS or PPO clipping parameter")
 
     # Invalid sentinel rows are allowed only where the policy loss is masked.
     # Replace them before any exp or multiply so NaN * 0 cannot poison a batch.
@@ -81,9 +82,9 @@ def ppo_tis_score_centering_correction(
     if torch.any(behavior_mass.sum(dim=-1) > 1 + PROBABILITY_MASS_TOLERANCE):
         raise ValueError("behavior top-k probabilities exceed full-vocabulary mass")
 
-    p_tail = (1 - current_mass.sum(dim=-1)).clamp_min(tail_floor)
-    o_tail = (1 - old_mass.sum(dim=-1)).clamp_min(tail_floor)
-    q_tail = (1 - behavior_mass.sum(dim=-1)).clamp_min(tail_floor)
+    p_tail = (1 - current_mass.sum(dim=-1)).clamp_min(TAIL_MASS_FLOOR)
+    o_tail = (1 - old_mass.sum(dim=-1)).clamp_min(TAIL_MASS_FLOOR)
+    q_tail = (1 - behavior_mass.sum(dim=-1)).clamp_min(TAIL_MASS_FLOOR)
 
     ppo_delta = current - old
     ppo_ratio = _bounded_ratio(current, old)

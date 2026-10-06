@@ -197,17 +197,6 @@ def _pad_token_rows(token_rows: list[list[int]]) -> tuple[torch.Tensor, torch.Te
     return padded, mask
 
 
-def collate_student_selected_rollout(
-    trajectory_batch: TrajectoryBatch,
-    response_token_ids: list[list[int]],
-    response_mask: torch.Tensor,
-    top_k: int | None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    if top_k is None:
-        raise ValueError("student-selected scoring requires a positive top_k")
-    return collate_behavior_topk(trajectory_batch, response_token_ids, response_mask, top_k)
-
-
 def build_teacher_scoring_work(
     trajectory_batch: TrajectoryBatch,
     *,
@@ -247,7 +236,9 @@ def build_teacher_scoring_work(
     behavior_logprobs = None
     selected_mask = None
     if evidence is TeacherEvidenceKind.STUDENT_SELECTED_TOPK:
-        selected_indices, behavior_logprobs, selected_mask = collate_student_selected_rollout(
+        if top_k is None:
+            raise ValueError("student-selected scoring requires a positive top_k")
+        selected_indices, behavior_logprobs, selected_mask = collate_behavior_topk(
             trajectory_batch, response_token_ids, response_mask, top_k
         )
 

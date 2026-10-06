@@ -665,7 +665,12 @@ def student_topk_logprobs_from_sampled_action_logprobs(
     sampled_action_logprobs: torch.Tensor,
     attention_mask: torch.Tensor,
 ) -> torch.Tensor:
-    """Return selected response logprobs after left-padding compaction, with NaN sentinels."""
+    """Score selected IDs in the right-padded response suffix, with NaN sentinels.
+
+    Logits use Megatron's compacted sequence positions. The attention mask still
+    uses the original left-padded prompt and right-padded response layout.
+    Reuse each sampled action's logprob to avoid another vocabulary normalizer.
+    """
     if (
         logits.ndim != 3
         or topk_indices.ndim != 3

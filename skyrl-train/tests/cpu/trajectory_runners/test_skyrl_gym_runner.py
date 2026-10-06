@@ -852,8 +852,8 @@ async def test_multi_turn_assembly_aligns_per_token_fields_across_observations(
             "response_ids": [[10, EOS]],
             "response_logprobs": [[-0.1, -0.2]],
             "routed_experts": [np.asarray([[[1, 2]], [[3, 4]]], dtype=np.uint8)],
-            "student_topk_indices": [[[11, 12], [13, 14]]],
-            "behavior_topk_logprobs": [[[-0.1, -2.0], [-0.2, -1.9]]],
+            "student_topk_indices": [[[10, 12], [EOS, 14]]],
+            "behavior_topk_logprobs": [[[-0.1, -3.0], [-0.2, -1.9]]],
         },
         {
             "responses": ["second"],
@@ -861,7 +861,7 @@ async def test_multi_turn_assembly_aligns_per_token_fields_across_observations(
             "response_ids": [[20, EOS]],
             "response_logprobs": [[-0.3, -0.4]],
             "routed_experts": [np.asarray([[[5, 6]], [[7, 8]]], dtype=np.uint8)],
-            "student_topk_indices": [[[21, 22], [23, 24]]],
+            "student_topk_indices": [[[20, 22], [EOS, 24]]],
             "behavior_topk_logprobs": [[[-0.3, -1.8], [-0.4, -1.7]]],
         },
     )
@@ -896,11 +896,11 @@ async def test_multi_turn_assembly_aligns_per_token_fields_across_observations(
         [[[1, 2]], [[3, 4]]] + [[[0, 0]]] * gap + [[[5, 6]], [[7, 8]]],
     )
     np.testing.assert_array_equal(
-        output["student_topk_indices"][0], [[11, 12], [13, 14]] + [[-1, -1]] * gap + [[21, 22], [23, 24]]
+        output["student_topk_indices"][0], [[10, 12], [EOS, 14]] + [[-1, -1]] * gap + [[20, 22], [EOS, 24]]
     )
     np.testing.assert_allclose(
         output["behavior_topk_logprobs"][0],
-        [[-0.1, -2.0], [-0.2, -1.9]] + [[0.0, 0.0]] * gap + [[-0.3, -1.8], [-0.4, -1.7]],
+        [[-0.1, -3.0], [-0.2, -1.9]] + [[0.0, 0.0]] * gap + [[-0.3, -1.8], [-0.4, -1.7]],
     )
     behavior = torch.from_numpy(np.stack(output["rollout_logprobs"]))
     ratios = torch.tensor([[1.5, 4.0] + [torch.nan] * gap + [1.0, 0.5]])

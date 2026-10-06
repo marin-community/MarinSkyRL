@@ -58,6 +58,12 @@ def align_student_topk(
     return AlignedStudentTopK(aligned_ids, aligned_scores)
 
 
+class BehaviorTopKBatch(NamedTuple):
+    indices: torch.Tensor
+    logprobs: torch.Tensor
+    loss_mask: torch.Tensor
+
+
 def collate_behavior_topk(
     trajectory_batch: TrajectoryBatch,
     response_token_ids: list[list[int]],
@@ -65,7 +71,7 @@ def collate_behavior_topk(
     top_k: int,
     *,
     sampled_logprobs: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> BehaviorTopKBatch:
     """Return CPU candidate IDs, full-vocabulary logprobs and loss masks, right-padded to response_mask."""
     index_rows = trajectory_batch.get("student_topk_indices")
     behavior_rows = trajectory_batch.get("behavior_topk_logprobs")
@@ -130,4 +136,4 @@ def collate_behavior_topk(
 
     indices.masked_fill_(~selected.unsqueeze(-1), INVALID_TOPK_INDEX)
     behavior.masked_fill_(~selected.unsqueeze(-1), torch.nan)
-    return indices, behavior, loss_mask
+    return BehaviorTopKBatch(indices, behavior, loss_mask)
