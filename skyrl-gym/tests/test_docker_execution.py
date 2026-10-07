@@ -2,11 +2,9 @@
 
 import asyncio
 from contextlib import suppress
-from pathlib import Path
 
 import pytest
 import pytest_asyncio
-import yaml
 from shellbox.backends.docker.machine import DockerMachineFactory, docker
 from shellbox.machine import Command, DockerImage, ExitReason, MachineSpec
 
@@ -16,13 +14,17 @@ from skyrl_gym.python_execution import PythonKernel
 pytestmark = [pytest.mark.docker, pytest.mark.asyncio]
 
 
-@pytest.fixture(scope="session")
-def python_image():
-    configuration = (
-        Path(__file__).resolve().parents[2] / "skyrl-train/skyrl_train/config/task_session_config/default.yaml"
-    )
-    values = yaml.safe_load(configuration.read_text())
-    return DockerImage(values["lcb"]["machine"]["requirements"]["docker_image"])
+# CI has no Artifact Registry credentials. This public image supplies IPython and the code-grading packages.
+PYTHON_IMAGE = (
+    "docker.io/igitman/nemo-skills-sandbox@sha256:f8237dd0aafab99a759c11506916dc40a32a11081891f95462e5e576b87c899c"
+)
+
+
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
+async def python_image():
+    result = await docker("pull", PYTHON_IMAGE, timeout=600)
+    assert result.exit_code == 0, result.stderr.decode(errors="replace")
+    return DockerImage(PYTHON_IMAGE)
 
 
 @pytest_asyncio.fixture
