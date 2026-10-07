@@ -230,7 +230,9 @@ async def test_one_machine_cleanup_failure_does_not_abort_the_buffer_group(task_
 
     class Factory:
         async def create(self, spec):
-            machine = await ShellSimMachineFactory().create(spec)
+            machine = await ShellSimMachineFactory().create(
+                replace(spec, source=ShellSimBuiltins(), workdir=spec.workdir or "/workspace")
+            )
             machines.append(machine)
             return Machine(machine) if len(machines) == 1 else machine
 
@@ -382,6 +384,15 @@ async def test_task_grade_and_exact_tokens_reach_the_leased_buffer(task_inputs, 
     }
 
 
+class FixtureImageFactory:
+    """Execute fixture image commands on the built-in filesystem."""
+
+    async def create(self, spec):
+        return await ShellSimMachineFactory().create(
+            replace(spec, source=ShellSimBuiltins(), workdir=spec.workdir or "/workspace")
+        )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("projection_type", [WholeTaskProjection, StepTaskProjection])
 @pytest.mark.parametrize("timeout_phase", ["model", "advance"])
@@ -402,6 +413,7 @@ async def test_agent_deadlines_grade_the_workspace_and_commit_training_tokens(
         answer_type=AnswerType.FILE,
         verifier=VerifierSpec(
             kind="shell",
+            environment_requirements=EnvironmentRequirements(docker_image="fixture@sha256:" + "0" * 64),
             parameters_json=ShellVerifierSpec(
                 argv=("test", "-f", "/workspace/answer"),
                 reward=ExitCodeReward(),
@@ -459,7 +471,9 @@ async def test_agent_deadlines_grade_the_workspace_and_commit_training_tokens(
 
     class Factory:
         async def create(self, spec):
-            machine = await ShellSimMachineFactory().create(spec)
+            machine = await ShellSimMachineFactory().create(
+                replace(spec, source=ShellSimBuiltins(), workdir=spec.workdir or "/workspace")
+            )
             machines.append(machine)
             return Machine(machine)
 
@@ -577,20 +591,20 @@ class ConversationClient:
 @pytest.mark.parametrize("projection_type", [WholeTaskProjection, StepTaskProjection])
 async def test_disabled_harbor_verification_keeps_tokens_without_a_score(tmp_path, task_inputs, phase, projection_type):
     config, request = task_inputs
-    source = tmp_path / "shared"
+    source = tmp_path / "private"
     (source / "tests").mkdir(parents=True)
     (source / "instruction.md").write_text("Complete the task.")
     (source / "task.toml").write_text(
         '[environment]\nworkdir = "/workspace"\nallow_internet = false\ndocker_image = "fixture@sha256:'
         + "a" * 64
         + '"\n'
-        '[verifier]\nenvironment_mode = "shared"\nuser = "candidate"\n'
+        '[verifier]\nenvironment_mode = "separate"\nuser = "candidate"\n'
     )
     (source / "tests/test.sh").write_text("echo private-grade-only\n")
-    with pytest.raises(NotImplementedError):
-        HarborTaskDataset(
-            [str(source)], Tokenizer(), 100, session=session_spec(), cache_dir=tmp_path / "native", num_workers=1
-        )
+    native = HarborTaskDataset(
+        [str(source)], Tokenizer(), 100, session=session_spec(), cache_dir=tmp_path / "native", num_workers=1
+    )
+    assert LoweredTaskSpec.model_validate_json(native[0][2]["lowered_task_spec"]).task.resources.verifier
     settings = HarborTaskSettings.from_config(OmegaConf.create({"harbor": {"verifier_disable": True}}))
     prepared = HarborTaskDataset(
         [str(source)],
@@ -611,7 +625,9 @@ async def test_disabled_harbor_verification_keeps_tokens_without_a_score(tmp_pat
 
     class ImageFactory:
         async def create(self, spec):
-            return await ShellSimMachineFactory().create(replace(spec, source=ShellSimBuiltins()))
+            return await ShellSimMachineFactory().create(
+                replace(spec, source=ShellSimBuiltins(), workdir=spec.workdir or "/workspace")
+            )
 
     worker = TaskRolloutWorker(
         config,
@@ -643,6 +659,7 @@ async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected
             "tags": ("harbor",),
             "verifier": VerifierSpec(
                 kind="shell",
+                environment_requirements=EnvironmentRequirements(docker_image="fixture@sha256:" + "0" * 64),
                 parameters_json=ShellVerifierSpec(
                     argv=("cat", "/workspace/reward"),
                     artifacts=(
@@ -671,7 +688,9 @@ async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected
             attempts += 1
             if failure_stage == "startup" and attempts < 3:
                 raise TimeoutError("Sandbox startup timed out")
-            machine = await ShellSimMachineFactory().create(spec)
+            machine = await ShellSimMachineFactory().create(
+                replace(spec, source=ShellSimBuiltins(), workdir=spec.workdir or "/workspace")
+            )
             machines.append(machine)
             if failure_stage not in {"verifier", "cancel"} or attempts == 3:
                 await machine.run(Command(("sh", "-c", "echo 1 > /workspace/reward")))
@@ -718,7 +737,9 @@ async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected
 
     class VerifierFactory:
         async def create(self, spec):
-            machine = await ShellSimMachineFactory().create(spec)
+            machine = await ShellSimMachineFactory().create(
+                replace(spec, source=ShellSimBuiltins(), workdir=spec.workdir or "/workspace")
+            )
             machines.append(machine)
             return machine
 
@@ -845,6 +866,7 @@ async def test_harbor_retry_policy_preserves_terminal_grades(task_inputs, phase,
             "tags": ("harbor",),
             "verifier": VerifierSpec(
                 kind="shell",
+                environment_requirements=EnvironmentRequirements(docker_image="fixture@sha256:" + "0" * 64),
                 parameters_json=verifier.model_dump_json(),
             ),
         }
@@ -864,7 +886,9 @@ async def test_harbor_retry_policy_preserves_terminal_grades(task_inputs, phase,
         async def create(self, spec):
             nonlocal attempts
             attempts += 1
-            machine = await ShellSimMachineFactory().create(spec)
+            machine = await ShellSimMachineFactory().create(
+                replace(spec, source=ShellSimBuiltins(), workdir=spec.workdir or "/workspace")
+            )
             await machine.run(Command(("sh", "-c", f"echo {attempts} > /workspace/attempt")))
             return machine
 
@@ -874,7 +898,9 @@ async def test_harbor_retry_policy_preserves_terminal_grades(task_inputs, phase,
             verifier_starts += 1
             if failure.startswith("grade_timeout"):
                 raise TimeoutError("Verifier machine startup timed out")
-            return await ShellSimMachineFactory().create(spec)
+            return await ShellSimMachineFactory().create(
+                replace(spec, source=ShellSimBuiltins(), workdir=spec.workdir or "/workspace")
+            )
 
     class Client(InferenceClient):
         async def generate(self, request):
@@ -963,7 +989,11 @@ async def test_harbor_completion_reward_uses_the_engine_stop_reason(task_inputs,
         update={
             "answer_type": AnswerType.STATE,
             "tags": ("harbor",),
-            "verifier": VerifierSpec(kind="shell", parameters_json=verifier.model_dump_json()),
+            "verifier": VerifierSpec(
+                kind="shell",
+                environment_requirements=EnvironmentRequirements(docker_image="fixture@sha256:" + "0" * 64),
+                parameters_json=verifier.model_dump_json(),
+            ),
         }
     )
     request["env_extras"][0]["lowered_task_spec"] = lowered_task(
@@ -992,7 +1022,7 @@ async def test_harbor_completion_reward_uses_the_engine_stop_reason(task_inputs,
         config,
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         Client(),
-        {"shellsim": ShellSimMachineFactory()},
+        {"shellsim": FixtureImageFactory()},
         harbor=settings,
     )
     batch = await worker.run(request)
@@ -1018,7 +1048,11 @@ async def test_strict_harbor_parser_masks_only_the_affected_response(task_inputs
                 update={
                     "answer_type": AnswerType.STATE,
                     "tags": ("harbor",),
-                    "verifier": VerifierSpec(kind="shell", parameters_json=verifier.model_dump_json()),
+                    "verifier": VerifierSpec(
+                        kind="shell",
+                        environment_requirements=EnvironmentRequirements(docker_image="fixture@sha256:" + "0" * 64),
+                        parameters_json=verifier.model_dump_json(),
+                    ),
                 }
             )
         )
@@ -1052,7 +1086,7 @@ async def test_strict_harbor_parser_masks_only_the_affected_response(task_inputs
         config,
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         InferenceClient(),
-        {"shellsim": ShellSimMachineFactory()},
+        {"shellsim": FixtureImageFactory()},
         harbor=settings,
     )
     batch = await worker.run(request)
@@ -1546,7 +1580,9 @@ async def test_harbor_source_materialization_runs_without_the_original_directory
 
     class ImageFactory:
         async def create(self, spec):
-            return await ShellSimMachineFactory().create(replace(spec, source=ShellSimBuiltins()))
+            return await ShellSimMachineFactory().create(
+                replace(spec, source=ShellSimBuiltins(), workdir=spec.workdir or "/workspace")
+            )
 
     client = ConversationClient(
         ["", "Done"],
@@ -1629,7 +1665,11 @@ async def test_harbor_task_worker_preserves_verdicts_and_shapes_group_rewards(
                 context=ConversationInput(events=(TextMessage(role="user", content="Complete the task."),)),
                 environment_requirements=EnvironmentRequirements(),
                 answer_type=AnswerType.STATE,
-                verifier=VerifierSpec(kind="shell", parameters_json=verifier.model_dump_json()),
+                verifier=VerifierSpec(
+                    kind="shell",
+                    environment_requirements=EnvironmentRequirements(docker_image="fixture@sha256:" + "0" * 64),
+                    parameters_json=verifier.model_dump_json(),
+                ),
                 source=Source(dataset="harbor", revision="1", row=str(index), importer_revision="1"),
                 tags=("harbor",),
             )
@@ -1655,7 +1695,7 @@ async def test_harbor_task_worker_preserves_verdicts_and_shapes_group_rewards(
         config,
         projection_type(projection),
         InferenceClient(),
-        {"shellsim": ShellSimMachineFactory()},
+        {"shellsim": FixtureImageFactory()},
         harbor=settings,
     )
     writer = Writer()

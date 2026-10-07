@@ -220,8 +220,7 @@ def test_packed_selection_becomes_portable_task_parquet(tmp_path: Path) -> None:
 async def test_packed_tasks_execute_after_source_removal(tmp_path, verification):
     config = 'artifacts = ["/setup_files/input"]\n[environment]\nworkdir = "/workspace"\nallow_internet = false\n'
     config += 'docker_image = "fixture@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\n'
-    if verification:
-        config += '[verifier]\nenvironment_mode = "separate"\n'
+    config += '[verifier]\nenvironment_mode = "separate"\n'
     files = {
         "setup_files/input": b"first\n",
         "instruction.md": b"Single task.",

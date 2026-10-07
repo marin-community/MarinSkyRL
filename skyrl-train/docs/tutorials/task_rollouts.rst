@@ -63,8 +63,10 @@ Cleanup runs outside the attempt deadline. Machine cleanup can override the sess
 ``command_timeout`` limits each shell command. A command timeout returns a ``timed_out`` tool observation, and the model can continue.
 ``tool_turn_timeout`` limits the full ``advance`` call. Its budget is separate from the command limit.
 When these limits are finite, lowering requires the command limit to be less than the tool-turn deadline.
-Shell grading requires a separate verifier machine and declared artifacts for workspace submissions.
-Runtime lowering rejects shared-machine Harbor shell graders.
+Shell grading requires a prebuilt, digest-pinned verifier image, a separate verifier machine, and declared artifacts for workspace submissions.
+The Harbor importer accepts only separate verifier environments.
+An unset verifier mode without a separate environment selects shared mode and causes rejection.
+Harbor setup uses root-user overrides. The Iris backend rejects these overrides, so native Harbor execution is unsupported on Iris.
 Disabling Harbor verification removes private grader resources and selects skipped grading before runtime lowering.
 
 Exact tokens
