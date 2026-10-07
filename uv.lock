@@ -2783,21 +2783,21 @@ wheels = [
 
 [[package]]
 name = "marin-finestore"
-version = "0.2.139.dev37117265303"
+version = "0.2.144.dev37540375919"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "marin-rigging", extra = ["prometheus", "secrets"] },
     { name = "pyarrow" },
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/18/de/49b963d954694142820b34b05afde9e7b3f1dfdbeec7bd7655586865dff2/marin_finestore-0.2.139.dev37117265303.tar.gz", hash = "sha256:a0d418b08a7aeab1bfc5ef8721b7082c07ae0c389c29b054ef1deaa8f466cb5b", size = 55091, upload-time = "2026-10-03T10:43:58.266Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a8/7c/1ead18cdd66a198a335115829528053b31e84edda67cd9aca457aeffb570/marin_finestore-0.2.144.dev37540375919.tar.gz", hash = "sha256:898f7bb1a9c4ef5e6e7ea17c8fa05b29b54e67b955b53e2f02a3fc61f8eea05c", size = 55455, upload-time = "2026-10-06T22:27:33.044Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/fb/a0/7ac743ca4dd5bb179d2c334d1f1ef792767cf1574fc2d810e2d0ef630c9c/marin_finestore-0.2.139.dev37117265303-py3-none-any.whl", hash = "sha256:b19697a16697e6f7ef96c20d45396663d0b8d4f2b30b0c48f4af770fa63e2604", size = 45001, upload-time = "2026-10-03T10:43:44.297Z" },
+    { url = "https://files.pythonhosted.org/packages/30/b4/df6d2834f2548543b08846c3b023ab79a7597a7a1bb9348ee3e8ec11f9aa/marin_finestore-0.2.144.dev37540375919-py3-none-any.whl", hash = "sha256:3c8d0001b9944cea3fef2df412983501db3dd8f023ed7724e6986868aee1f5c6", size = 45001, upload-time = "2026-10-06T22:27:18.743Z" },
 ]
 
 [[package]]
 name = "marin-iris"
-version = "0.2.139.dev37117265303"
+version = "0.2.144.dev37540375919"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
@@ -2827,9 +2827,9 @@ dependencies = [
     { name = "uvicorn", extra = ["standard"] },
     { name = "zstandard" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c4/8f/a1435e146be81ab18543d6e6c883858d7b28a4695e3ab7112c4bc4891b85/marin_iris-0.2.139.dev37117265303.tar.gz", hash = "sha256:394598d48a0cdf2000529d3e2aeea166c3ceb4e9e3a66ff52d9fa4ce70df02bb", size = 936885, upload-time = "2026-10-03T10:44:01.458Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/2b/84/8b3138ba3c8f3041a0974fd35c6680b5edfb070dda4304826f95966e4a0f/marin_iris-0.2.144.dev37540375919.tar.gz", hash = "sha256:6c84464c02cb02c1e218e9c7a87c182be21766040577211cc55bbcef05ef0a6c", size = 945637, upload-time = "2026-10-06T22:27:36.523Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/43/fd/35cd137501d8cce61f7d8e30a04a6a2637ba295d1ef35a81f3448b996738/marin_iris-0.2.139.dev37117265303-py3-none-any.whl", hash = "sha256:37b84ad62e242d6775e6d0b63bbefcbf9af559b5e946bc074853e57cf1f8a249", size = 1132280, upload-time = "2026-10-03T10:43:48.553Z" },
+    { url = "https://files.pythonhosted.org/packages/ec/96/2bb463e308da31c6519fb56cd4ee8af745f3fabdd0f831920922b4b503f2/marin_iris-0.2.144.dev37540375919-py3-none-any.whl", hash = "sha256:1f340ba7b7be44ba027574199c7ce571fb3b47113c30c9b46133c54819487947", size = 1142503, upload-time = "2026-10-06T22:27:23.308Z" },
 ]
 
 [[package]]
@@ -3118,7 +3118,7 @@ requires-dist = [
     { name = "marin-finelog" },
     { name = "marin-finelog-server" },
     { name = "marin-finestore", specifier = ">=0.2.135.dev36906221286" },
-    { name = "marin-iris" },
+    { name = "marin-iris", specifier = "==0.2.144.dev37540375919" },
     { name = "marin-iris-native" },
     { name = "marin-rigging", extras = ["prometheus"], marker = "extra == 'telemetry'", specifier = ">=0.2.123.dev35633925924" },
     { name = "marin-rigging", extras = ["secrets"], specifier = ">=0.2.123.dev35633925924" },

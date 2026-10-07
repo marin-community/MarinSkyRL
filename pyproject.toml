@@ -32,7 +32,7 @@ dependencies = [
     "marin-finelog",
     "marin-finelog-server",
     "marin-finestore>=0.2.135.dev36906221286",
-    "marin-iris",
+    "marin-iris==0.2.144.dev37540375919",
     "marin-iris-native",
     "marin-rigging[secrets]>=0.2.123.dev35633925924",
     "marin-rolloutengine @ git+https://github.com/marin-community/marin.git@232f192a56b013fdc3f6914eb158c7bc2d231f94#subdirectory=lib/rolloutengine",

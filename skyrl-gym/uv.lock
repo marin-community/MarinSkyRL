@@ -7,7 +7,7 @@ resolution-markers = [
 ]
 
 [manifest]
-overrides = [{ name = "marin-rigging", specifier = "==0.2.139.dev37117265303" }]
+overrides = [{ name = "marin-rigging", specifier = "==0.2.144.dev37540375919" }]
 
 [[package]]
 name = "absl-py"
@@ -1143,7 +1143,7 @@ wheels = [
 
 [[package]]
 name = "marin-rigging"
-version = "0.2.139.dev37117265303"
+version = "0.2.144.dev37540375919"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiobotocore" },
@@ -1164,9 +1164,9 @@ dependencies = [
     { name = "starlette" },
     { name = "zstandard" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/dc/df/df5f1f367049aef1fb07207ee1a060fd04c8e6f81c8b7158a0a40f6343b3/marin_rigging-0.2.139.dev37117265303.tar.gz", hash = "sha256:429ccf7eec8837e14241fc8922034e8c8646138287fdac06f386703c3ad3aa76", size = 224377, upload-time = "2026-10-03T10:44:04.299Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/57/d1/b36fb0328c3c68ed660dca7d951fc33641b3f4252784d895b2e1df6a31b7/marin_rigging-0.2.144.dev37540375919.tar.gz", hash = "sha256:d34f2d44d89fd4874bab7e57819a929b9e988079300b43f73c7fb1995d7d9032", size = 224421, upload-time = "2026-10-06T22:27:39.571Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/9f/5c/043a28bc55a885ec3ad78c0e64edd4ff8118aee8926ee96632418257c10c/marin_rigging-0.2.139.dev37117265303-py3-none-any.whl", hash = "sha256:2ce899d34fa102982e7005d78b4bdc36d4faeabf54d176675b8671c11d6017c6", size = 526306, upload-time = "2026-10-03T10:43:52.754Z" },
+    { url = "https://files.pythonhosted.org/packages/22/f6/9d4117580a6a0ef8e104ca869d76dfec5d0828539d2e4414911a2db5ea8d/marin_rigging-0.2.144.dev37540375919-py3-none-any.whl", hash = "sha256:72e2566837fa0b3709a738101aa2884c5f4879ad90247c1cecbbf9c17309b191", size = 527724, upload-time = "2026-10-06T22:27:27.357Z" },
 ]
 
 [[package]]
