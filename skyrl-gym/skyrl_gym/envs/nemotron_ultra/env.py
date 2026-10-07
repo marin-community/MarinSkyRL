@@ -20,6 +20,7 @@ from skyrl_gym.envs.nemotron_ultra.calendar import grade_calendar
 from skyrl_gym.envs.nemotron_ultra.code_gen import DEFAULT_PER_TEST_TIMEOUT_SECONDS, grade_code
 from skyrl_gym.envs.nemotron_ultra.format_verification import grade_format
 from skyrl_gym.envs.nemotron_ultra.instruction_following import grade_instruction_following
+from skyrl_gym.envs.nemotron_ultra.indirect_prompt_injection import create_session, execute_tool_calls, grade_session
 from skyrl_gym.envs.nemotron_ultra.jailbreak import grade_jailbreak
 from skyrl_gym.envs.nemotron_ultra.judge import OpenAIJudge
 from skyrl_gym.envs.nemotron_ultra.judge_verifiers import grade_abstention, grade_multichallenge
@@ -36,6 +37,7 @@ from skyrl_gym.envs.reasoning_gym.scoring import extract_answer
 from skyrl_gym.verification import VERIFIER_RUNTIME_ERROR, RolloutEvidence, VerificationResult
 
 _NS_TOOLS_AGENT = "ns_tools_simple_agent"
+_IPI_AGENT = "indirect_prompt_injection_simple_agent"
 _LEAN_AGENT = "math_formal_lean_refinement_agent"
 _TOOL_COMPARISON_AGENTS = {
     "single_step_tool_use_with_argument_comparison_agent",
@@ -95,6 +97,7 @@ class NemotronUltraEnv(BaseTextEnv):
         self.agent = str(ultra["agent"])
         self.record = self._decode_mapping(ultra.get("record_json"), "record_json")
         self.request = self._decode_mapping(ultra.get("request_json"), "request_json")
+        self.ipi_session = create_session(self.record) if self.agent == _IPI_AGENT else None
         self.evidence: RolloutEvidence | None = None
         sandbox_config = env_config.get("sandbox", {})
         self.sandbox = SandboxClient(
@@ -118,6 +121,8 @@ class NemotronUltraEnv(BaseTextEnv):
             self.max_turns = 1
         elif self.agent == _NS_TOOLS_AGENT:
             self.max_turns = 50
+        elif self.agent == _IPI_AGENT:
+            self.max_turns = int((extras or {}).get("max_turns", 50))
         elif self.agent == _LEAN_AGENT:
             self.max_turns = 3
         else:
@@ -228,6 +233,18 @@ class NemotronUltraEnv(BaseTextEnv):
             tool_turn = self._ns_tools_turn(action, diagnostics)
             if tool_turn is not None:
                 return tool_turn
+        if self.agent == _IPI_AGENT:
+            assert self.ipi_session is not None
+            observations = execute_tool_calls(self.ipi_session, self._assistant_message(action))
+            truncated = self.evidence is not None and self.evidence.stop_reason == "length"
+            if observations is not None and self.turns < self.max_turns and not truncated:
+                return BaseTextEnvStepOutput(
+                    observations=observations,
+                    reward=0.0,
+                    done=False,
+                    metadata={**diagnostics, "num_tool_calls": len(observations)},
+                    verification=VerificationResult.unavailable("tool execution is not a terminal verdict"),
+                )
         # Lean verification decides whether a correction turn follows, so it runs in both modes.
         if self.grading is NemotronUltraGrading.SKIP and self.agent != _LEAN_AGENT:
             diagnostics["graded"] = 0.0
@@ -245,6 +262,14 @@ class NemotronUltraEnv(BaseTextEnv):
             diagnostics["cohort_reward_pending"] = True
         elif self.agent == _NS_TOOLS_AGENT:
             reward, details = self._grade_math(action)
+            diagnostics.update(details)
+        elif self.agent == _IPI_AGENT:
+            assert self.ipi_session is not None
+            reward, details = grade_session(
+                self.ipi_session,
+                thinking_incomplete=self.evidence is not None and self.evidence.stop_reason == "length",
+                timeout=self.judge_verifier_timeout_seconds,
+            )
             diagnostics.update(details)
         elif self.agent == _LEAN_AGENT:
             reward, details, correction_prompt = verify_lean_attempt(
