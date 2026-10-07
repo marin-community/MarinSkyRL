@@ -51,8 +51,8 @@ dependencies = [
     "smart_open",
     "tensorboard",
     "tqdm>=4.66",
-    "tokenizers==0.23.2",
-    "transformers==5.18.0",
+    "tokenizers==0.22.2",
+    "transformers==5.12.1",
     "verifiable-instructions @ git+https://github.com/abukharin-nv/verifiable-instructions.git@f46a5ac87b1400a4f8973039844b6be9b56e3faf",
     "xmltodict",
     "uvicorn",
@@ -99,7 +99,7 @@ vllm = [
     "torch==2.14.1 ; sys_platform == 'linux'",
     "torchdata ; sys_platform == 'linux'",
     "torchvision==0.29.1 ; sys_platform == 'linux'",
-    "vllm==0.0.0.dev20261005+marin.4c6a2cc228a2.cu132 ; sys_platform == 'linux'",
+    "vllm==0.0.0.dev20261006+marin.47b411d5785d.cu132 ; sys_platform == 'linux'",
 ]
 megatron = [
     "cuda-toolkit[nvcc,cccl]==13.2.2 ; sys_platform == 'linux'",
@@ -111,11 +111,11 @@ megatron = [
     "nvidia-cutlass-dsl==4.7.1 ; sys_platform == 'linux'",
     # Keep the qualified FlashAttention 2 path for context parallelism.
     "flash-attn==2.8.3.post1+marin.cu132torch2141.1 ; sys_platform == 'linux'",
-    "flash-linear-attention==0.5.2 ; sys_platform == 'linux'",
+    "flash-linear-attention==0.4.2 ; sys_platform == 'linux'",
     "fast-hadamard-transform==1.1.0 ; sys_platform == 'linux'",
     "mamba-ssm==2.3.2.post1+marin.cu132torch2141.1 ; sys_platform == 'linux'",
-    "megatron-bridge==0.6.2+marin.torch2141.1 ; sys_platform == 'linux'",
-    "megatron-core==0.19.2+marin.torch2141.3 ; sys_platform == 'linux'",
+    "megatron-bridge==0.6.2+marin.torch2141.2 ; sys_platform == 'linux'",
+    "megatron-core==0.19.2+marin.torch2141.4 ; sys_platform == 'linux'",
     "harbor-config ; sys_platform == 'linux'",
     "nvidia-modelopt==0.47.0 ; sys_platform == 'linux'",
     "peft>=0.19 ; sys_platform == 'linux'",
@@ -187,6 +187,20 @@ no-build-isolation-package = [
     "transformer-engine",
     "transformer-engine-torch",
 ]
+constraint-dependencies = [
+    "opentelemetry-api==1.43.0",
+    "opentelemetry-sdk==1.43.0",
+    "opentelemetry-proto==1.43.0",
+    "opentelemetry-exporter-otlp==1.43.0",
+    "opentelemetry-exporter-otlp-proto-common==1.43.0",
+    "opentelemetry-exporter-otlp-proto-grpc==1.43.0",
+    "opentelemetry-exporter-otlp-proto-http==1.43.0",
+    "opentelemetry-semantic-conventions==0.64b0",
+    "opentelemetry-instrumentation==0.64b0",
+    "opentelemetry-instrumentation-aiohttp-client==0.64b0",
+    "opentelemetry-util-http==0.64b0",
+    "opentelemetry-exporter-prometheus==0.64b0",
+]
 [tool.uv.extra-build-dependencies]
 transformer-engine = [{ requirement = "torch", match-runtime = true }, "build_tools", "ninja"]
 transformer-engine-torch = [{ requirement = "torch", match-runtime = true }, "build_tools", "ninja"]
@@ -202,7 +216,7 @@ flash-attn = [
 ]
 harbor = { git = "https://github.com/marin-community/harbor.git" }
 hs-connectors = { git = "https://github.com/marin-community/speculators.git", rev = "ecac1b16278063e9640004135153882c02de5801", subdirectory = "hs_connectors" }
-speculators = { git = "https://github.com/marin-community/speculators.git", rev = "ecac1b16278063e9640004135153882c02de5801" }
+speculators = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-trimmed-candidate-20261007-604f2c14/speculators-0.9.0a16.post1-py3-none-any.whl" }
 torch = [
     { index = "pytorch-cpu", extra = "cpu", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
     { index = "pytorch-cu132", extra = "cuda" },
@@ -216,8 +230,8 @@ torchvision = [
 ]
 flashinfer-cubin = { index = "flashinfer", marker = "sys_platform == 'linux'" }
 vllm = [
-    { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-staged-candidate-4c6a2cc228a2/vllm-0.0.0.dev20261005+marin.4c6a2cc228a2.cu132-cp38-abi3-manylinux_2_28_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
-    { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-staged-candidate-4c6a2cc228a2/vllm-0.0.0.dev20261005+marin.4c6a2cc228a2.cu132-cp38-abi3-manylinux_2_28_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+    { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-staged-candidate-47b411d5785d/vllm-0.0.0.dev20261006+marin.47b411d5785d.cu132-cp38-abi3-manylinux_2_28_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+    { url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-staged-candidate-47b411d5785d/vllm-0.0.0.dev20261006+marin.47b411d5785d.cu132-cp38-abi3-manylinux_2_28_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
 ]
 transformer-engine-torch = [
     { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/transformer_engine_torch-2.19.0-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
@@ -232,10 +246,10 @@ mamba-ssm = [
     { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/mamba_ssm-2.3.2.post1+marin.cu132torch2141.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
 ]
 megatron-core = [
-    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/megatron_core-0.19.2+marin.torch2141.3-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
-    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/megatron_core-0.19.2+marin.torch2141.3-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-trimmed-candidate-20261007-604f2c14/megatron_core-0.19.2+marin.torch2141.4-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-trimmed-candidate-20261007-604f2c14/megatron_core-0.19.2+marin.torch2141.4-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
 ]
-megatron-bridge = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/megatron_bridge-0.6.2+marin.torch2141.1-py3-none-any.whl", marker = "sys_platform == 'linux'" }
+megatron-bridge = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-trimmed-candidate-20261007-604f2c14/megatron_bridge-0.6.2+marin.torch2141.2-py3-none-any.whl", marker = "sys_platform == 'linux'" }
 fast-hadamard-transform = [
     { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/fast_hadamard_transform-1.1.0-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
     { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/fast_hadamard_transform-1.1.0-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
