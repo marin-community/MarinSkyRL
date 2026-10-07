@@ -29,9 +29,8 @@ async def python_image():
 
 @pytest_asyncio.fixture
 async def docker_machine(python_image):
-    machine = await DockerMachineFactory().create(
-        MachineSpec(source=python_image, workdir="/workspace", memory_mb=1024, cpus=1)
-    )
+    # An empty workdir retains the directory declared by the image.
+    machine = await DockerMachineFactory().create(MachineSpec(source=python_image, workdir="", memory_mb=1024, cpus=1))
     try:
         yield machine
     finally:
