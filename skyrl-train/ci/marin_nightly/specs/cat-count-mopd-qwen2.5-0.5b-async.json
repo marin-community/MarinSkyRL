@@ -2,8 +2,8 @@
   "provenance": {
     "what": "CatCount multi-teacher on-policy distillation (MOPD) from two synthetic experts, cat and dog, through Megatron with pretrained Qwen2.5-0.5B-Instruct.",
     "produced_by": "TEACHER_WORDS='cat dog' ci/marin_nightly/run_cat_count_opd_h100.sh on one Iris H100x4 task",
-    "recipe": "The OPD recipe (lr 1e-6, teacher-credit clip 5, jitter 0.5) with one row per word for every count, teacher_route set to the row's word, and each route sent to that word's expert. Every 64-prompt batch is 32 cat and 32 dog rows.",
-    "learning_rate": 1e-06,
+    "recipe": "The OPD recipe (lr 5e-7, teacher-credit clip 5, jitter 0.5) with one row per word for every count, teacher_route set to the row's word, and each route sent to that word's expert. Every 64-prompt batch is 32 cat and 32 dog rows.",
+    "learning_rate": 5e-07,
     "advantage_clip": 5,
     "teacher_jitter": 0.5,
     "step_cap": 30,
@@ -12,36 +12,47 @@
       "healthy_seeds": [
         17,
         23,
-        31
+        31,
+        47,
+        59
       ],
       "step0_sampled_train_score": {
         "cat": [
-          0.28,
           0.31,
-          0.23
+          0.31,
+          0.23,
+          0.3,
+          0.27
         ],
         "dog": [
           0.3,
-          0.27,
-          0.37
+          0.35,
+          0.28,
+          0.36,
+          0.29
         ]
       },
-      "peak_sampled_train_score_by_step_30": {
+      "step30_sampled_train_score": {
         "cat": [
+          0.78,
+          0.81,
           0.8,
           0.81,
-          0.74
+          0.77
         ],
         "dog": [
           0.81,
+          0.81,
           0.8,
-          0.78
+          0.8,
+          0.8
         ]
       },
-      "swapped_routes_seed_17_peak_after_step_0": {
-        "cat": 0.08,
-        "dog": 0.1
-      }
+      "swapped_routes_seed_17_step30": {
+        "cat": -0.07,
+        "dog": -0.13
+      },
+      "unstable_settings": "at lr 1e-6 one of five healthy runs lost its cat route (entropy 1.2 to 6.4, cat score -0.54)"
     },
     "sampled_score_threshold_per_route": 0.65,
     "final_sampled_score_floor_per_route": 0.55
@@ -71,14 +82,18 @@
       "metric": "eval/sampled/cat_train/avg_score",
       "min_observations": 1,
       "step": 30,
-      "bounds": {"minimum": 0.55}
+      "bounds": {
+        "minimum": 0.55
+      }
     },
     {
       "kind": "eval",
       "metric": "eval/sampled/dog_train/avg_score",
       "min_observations": 1,
       "step": 30,
-      "bounds": {"minimum": 0.55}
+      "bounds": {
+        "minimum": 0.55
+      }
     },
     {
       "kind": "eval",
