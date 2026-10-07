@@ -313,6 +313,17 @@ class DirectModelClient:
                 selected = [
                     select_chat_response_topk(item.get("top_logprobs") or [], requested_top_k) for item in logprob_items
                 ]
+            stop_reason = choice["finish_reason"]
+            token_budget = chat_options.get("max_completion_tokens")
+            if (
+                stop_reason == "tool_calls"
+                and token_budget is not None
+                and len(response_ids) >= token_budget
+                and choice.get("stop_reason") is None
+                and response_ids[-1] != tokenizer.eos_token_id
+            ):
+                # A tool parser can replace the backend's output-budget stop reason.
+                stop_reason = "length"
             return _ChatResult(
                 prompt_ids,
                 response_ids,
@@ -320,9 +331,9 @@ class DirectModelClient:
                 None if selected is None else [ids for ids, _ in selected],
                 None if selected is None else [scores for _, scores in selected],
                 text,
-                choice["finish_reason"],
+                stop_reason,
                 message,
-                chat_options.get("max_completion_tokens"),
+                token_budget,
                 _choice_routed_experts(choice, prompt_ids, response_ids),
             )
 

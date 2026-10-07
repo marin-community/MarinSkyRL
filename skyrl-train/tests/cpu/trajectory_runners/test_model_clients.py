@@ -589,6 +589,46 @@ async def test_chat_output_budget_fits_the_exact_backend_rendered_prompt():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tokens,backend_stop,reason",
+    [
+        ([21, 22], None, "length"),
+        ([21], None, "tool_calls"),
+        ([21, 99], None, "tool_calls"),
+        ([21, 98], 98, "tool_calls"),
+    ],
+)
+async def test_chat_output_budget_stops_a_parser_reclassified_tool_call(tokens, backend_stop, reason):
+    engine = AsyncMock()
+    engine.model_name = "glm"
+    engine.tokenizer = MagicMock(eos_token_id=99)
+    engine.tokenizer.decode.return_value = "partial tool call"
+    engine.tokenize.return_value = {"tokens": [1, 2]}
+    message = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [{"id": "call", "type": "function", "function": {"name": "shell", "arguments": '{"command":'}}],
+    }
+    engine.chat_completion.return_value = {
+        "choices": [
+            {"message": message, "finish_reason": "tool_calls", "token_ids": tokens, "stop_reason": backend_stop}
+        ]
+    }
+
+    result = await DirectModelClient(engine).generate(
+        {
+            "prompts": [[{"role": "user", "content": "Run a command."}]],
+            "chat_completion_params": [{}],
+            "sampling_params": {"max_generate_length": 2},
+        }
+    )
+
+    assert result["stop_reasons"] == [reason]
+    assert result["response_ids"] == [tokens]
+    assert result["assistant_messages"] == [message]
+
+
+@pytest.mark.asyncio
 async def test_chat_output_keeps_the_per_turn_limit_of_vllm_sampling_params():
     """Training passes vLLM-form sampling params; a large request window must not lift their per-turn limit."""
     engine = AsyncMock()
