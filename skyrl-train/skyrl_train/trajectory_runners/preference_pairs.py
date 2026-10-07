@@ -6,6 +6,8 @@ generating rollouts. Each prompt is leased with ``n_samples_per_prompt=2``; repe
 trainer's group machinery delivers adjacent rows that the DPO loss pairs in order.
 """
 
+from collections.abc import Mapping
+
 from loguru import logger
 
 from skyrl_train.dataset.preference_pairs import completion_text
@@ -20,7 +22,7 @@ from skyrl_train.trajectory_runners.types import (
 def _token_ids(tokenizer, prompt) -> list[int]:
     """Apply the chat template with a generation prompt, normalizing Transformers 5 returns."""
     encoded = tokenizer.apply_chat_template(prompt, add_generation_prompt=True)
-    if hasattr(encoded, "get"):
+    if isinstance(encoded, Mapping):
         encoded = encoded.get("input_ids")
     if hasattr(encoded, "tolist"):
         encoded = encoded.tolist()
@@ -39,7 +41,29 @@ class PreferencePairTrajectoryRunner(TrajectoryRunner):
         self.max_generate_length = max_generate_length
         self.max_input_length = max_input_length
 
-    async def _run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
+    def _tokenize_pair(self, prompt, chosen: str, rejected: str) -> tuple[list[int], list[list[int]]]:
+        """Tokenize one pair, failing loudly when either side exceeds the rollout budget."""
+        prompt_ids = _token_ids(self.tokenizer, prompt)
+        completions = []
+        for field, text in (("chosen", chosen), ("rejected", rejected)):
+            completion_ids = [int(token) for token in self.tokenizer(text, add_special_tokens=False)["input_ids"]]
+            if not completion_ids:
+                raise ValueError(f"preference-pair {field} completion tokenized to zero tokens")
+            if len(completion_ids) > self.max_generate_length:
+                raise ValueError(
+                    f"preference-pair {field} completion needs {len(completion_ids)} tokens but "
+                    f"generator.sampling_params.max_generate_length is {self.max_generate_length}"
+                )
+            if len(prompt_ids) + len(completion_ids) > self.max_input_length + self.max_generate_length:
+                raise ValueError(
+                    f"preference-pair {field} completion exceeds the "
+                    f"{self.max_input_length + self.max_generate_length}-token sequence budget; "
+                    "filter the pair at dataset load instead"
+                )
+            completions.append(completion_ids)
+        return prompt_ids, completions
+
+    def _validate_request(self, input_batch: TrajectoryRequestBatch) -> None:
         prompts = input_batch["prompts"]
         env_extras = input_batch["env_extras"] or []
         if len(prompts) % 2 or len(env_extras) != len(prompts):
@@ -48,13 +72,20 @@ class PreferencePairTrajectoryRunner(TrajectoryRunner):
                 f"with {len(env_extras)} extras"
             )
         trajectory_ids = input_batch.get("trajectory_ids")
-        if trajectory_ids is not None:
-            for pair_index in range(len(prompts) // 2):
-                chosen_id, rejected_id = trajectory_ids[2 * pair_index : 2 * pair_index + 2]
-                if chosen_id.instance_id != rejected_id.instance_id or (
-                    chosen_id.repetition_id, rejected_id.repetition_id
-                ) != (0, 1):
-                    raise ValueError("preference pairs require trajectory IDs ordered as repetition 0 then 1")
+        if trajectory_ids is None:
+            return
+        for pair_index in range(len(prompts) // 2):
+            chosen_id, rejected_id = trajectory_ids[2 * pair_index : 2 * pair_index + 2]
+            if chosen_id.instance_id != rejected_id.instance_id or (
+                chosen_id.repetition_id,
+                rejected_id.repetition_id,
+            ) != (0, 1):
+                raise ValueError("preference pairs require trajectory IDs ordered as repetition 0 then 1")
+
+    async def _run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
+        self._validate_request(input_batch)
+        prompts = input_batch["prompts"]
+        env_extras = input_batch["env_extras"] or []
 
         prompt_token_ids: list[list[int]] = []
         response_ids: list[list[int]] = []
@@ -66,26 +97,11 @@ class PreferencePairTrajectoryRunner(TrajectoryRunner):
             extras = env_extras[2 * pair_index]
             if prompts[2 * pair_index + 1] != prompt or env_extras[2 * pair_index + 1] != extras:
                 raise ValueError("both rows of a preference pair must carry the same prompt and extras")
-            chosen = completion_text(extras.get("chosen"), "chosen")
-            rejected = completion_text(extras.get("rejected"), "rejected")
-            prompt_ids = _token_ids(self.tokenizer, prompt)
-            completions = []
-            for field, text in (("chosen", chosen), ("rejected", rejected)):
-                completion_ids = self.tokenizer(text, add_special_tokens=False)["input_ids"]
-                if not completion_ids:
-                    raise ValueError(f"preference-pair {field} completion tokenized to zero tokens")
-                if len(completion_ids) > self.max_generate_length:
-                    raise ValueError(
-                        f"preference-pair {field} completion needs {len(completion_ids)} tokens but "
-                        f"generator.sampling_params.max_generate_length is {self.max_generate_length}"
-                    )
-                if len(prompt_ids) + len(completion_ids) > self.max_input_length + self.max_generate_length:
-                    raise ValueError(
-                        f"preference-pair {field} completion exceeds the "
-                        f"{self.max_input_length + self.max_generate_length}-token sequence budget; "
-                        "filter the pair at dataset load instead"
-                    )
-                completions.append([int(token) for token in completion_ids])
+            prompt_ids, completions = self._tokenize_pair(
+                prompt,
+                completion_text(extras.get("chosen"), "chosen"),
+                completion_text(extras.get("rejected"), "rejected"),
+            )
             prompt_token_ids.extend((prompt_ids, prompt_ids))
             response_ids.extend(completions)
             rewards.extend((1.0, 0.0))

@@ -1,5 +1,7 @@
+from types import SimpleNamespace
+
 import torch
-from omegaconf import OmegaConf
+
 from skyrl_train.group_admission import GroupAdvantageInvariant
 from skyrl_train.objective.losses import PolicyLossInputs  # noqa: F401 — populate the loss registry
 from skyrl_train.objective.objective import build_objective_micro_batch, compute_policy_objective
@@ -7,34 +9,7 @@ from skyrl_train.objective.reduction import StepCounts, WeightCounts
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.training_batch import TrainingBatchIterator
 from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
-
-from tests.cpu.util import example_dummy_config
-
-
-def dpo_plumbing_config():
-    cfg = example_dummy_config()
-    return OmegaConf.merge(
-        cfg,
-        {
-            "environment": {"env_class": "preference_pair"},
-            "trainer": {
-                "algorithm": {
-                    "policy_loss_type": "dpo",
-                    "advantage_estimator": "uniform",
-                    "loss_reduction": "pair_mean",
-                    "use_kl_loss": False,
-                    "use_kl_in_reward": False,
-                    "off_policy_correction": "none",
-                    "dynamic_sampling": {"type": None},
-                    "dpo": {"beta": 0.1, "label_smoothing": 0.0},
-                },
-                "placement": {"colocate_all": False},
-                "use_sample_packing": False,
-                "micro_train_batch_size_per_gpu": 2,
-            },
-            "generator": {"n_samples_per_prompt": 2},
-        },
-    )
+from tests.cpu.util import dpo_test_config
 
 
 def pair_trajectory_batch():
@@ -52,10 +27,8 @@ def pair_trajectory_batch():
 
 
 def test_pair_roles_survive_conversion_into_experience():
-    from types import SimpleNamespace
-
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
-    trainer.cfg = dpo_plumbing_config()
+    trainer.cfg = dpo_test_config()
     trainer.tokenizer = SimpleNamespace(pad_token_id=0)
     trainer.pad_batch = lambda batch: batch
     trainer.trajectory_selector = None

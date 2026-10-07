@@ -24,13 +24,9 @@ returned values are ``w_i.detach() * s_t * (-(log pi_t - log pi_ref_t.detach()))
 """
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
-
-if TYPE_CHECKING:
-    from skyrl_train.objective.losses import PolicyLossInputs
 
 
 @dataclass(frozen=True)
@@ -40,30 +36,33 @@ class DPOInputs:
     pair_roles: torch.Tensor
 
 
-def _pair_logratios(inputs: "PolicyLossInputs", dpo: DPOInputs) -> torch.Tensor:
+def _pair_logratios(log_probs, ref_log_probs, loss_mask, roles) -> torch.Tensor:
     """Return validated per-pair policy-minus-reference log-prob sums as (pairs, 2) rows."""
-    if inputs.ref_log_probs is None:
-        raise ValueError("dpo requires base_action_log_probs from a frozen reference model")
-    batch_size = inputs.log_probs.shape[0]
+    batch_size = log_probs.shape[0]
     if batch_size % 2:
         raise ValueError(f"dpo pairs require an even microbatch, got {batch_size} rows")
-    roles = dpo.pair_roles.to(inputs.log_probs.dtype)
+    roles = roles.to(log_probs.dtype)
     expected = torch.tensor([1.0, -1.0], device=roles.device, dtype=roles.dtype).repeat(batch_size // 2)
     if not torch.equal(roles, expected):
         raise ValueError("dpo requires adjacent chosen/rejected pairs: pair_roles must alternate +1, -1 per row")
-    mask = inputs.loss_mask.to(inputs.log_probs.dtype)
+    mask = loss_mask.to(log_probs.dtype)
     pair_eligible = (mask.sum(-1) > 0).reshape(batch_size // 2, 2)
     if not bool(pair_eligible.all()):
         raise ValueError("every chosen and rejected row needs at least one eligible loss-mask token")
-    logratios = ((inputs.log_probs.float() - inputs.ref_log_probs.float()) * mask).sum(dim=-1)
+    logratios = ((log_probs.float() - ref_log_probs.float()) * mask).sum(dim=-1)
     return logratios.reshape(batch_size // 2, 2)
 
 
 def dpo_pair_values(
-    inputs: "PolicyLossInputs", dpo: DPOInputs, beta: float, label_smoothing: float
+    log_probs: torch.Tensor,
+    ref_log_probs: torch.Tensor,
+    loss_mask: torch.Tensor,
+    dpo: DPOInputs,
+    beta: float,
+    label_smoothing: float,
 ) -> tuple[torch.Tensor, dict]:
     """Return per-token surrogate values with the exact DPO gradient plus detached metrics."""
-    pair_logratios = _pair_logratios(inputs, dpo)
+    pair_logratios = _pair_logratios(log_probs, ref_log_probs, loss_mask, dpo.pair_roles)
     chosen, rejected = pair_logratios[:, 0], pair_logratios[:, 1]
     delta = chosen - rejected
     scale = 1.0 / (1.0 - 2.0 * label_smoothing)
@@ -72,8 +71,10 @@ def dpo_pair_values(
     loss = scale * (
         -(1.0 - label_smoothing) * F.logsigmoid(beta * delta) - label_smoothing * F.logsigmoid(-beta * delta)
     )
-    values = weight.repeat_interleave(2, dim=0)[:, None] * dpo.pair_roles[:, None].to(weight.dtype) * (
-        -(inputs.log_probs.float() - inputs.ref_log_probs.detach().float())
+    values = (
+        weight.repeat_interleave(2, dim=0)[:, None]
+        * dpo.pair_roles[:, None].to(weight.dtype)
+        * (-(log_probs.float() - ref_log_probs.detach().float()))
     )
     chosen_reward = beta * chosen.detach()
     rejected_reward = beta * rejected.detach()

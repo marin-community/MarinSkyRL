@@ -271,5 +271,14 @@ def dpo_policy_loss(inputs: PolicyLossInputs, config: DictConfig) -> TokenLoss:
     """Optimize adjacent preference pairs against the frozen reference model."""
     if inputs.dpo is None:
         raise ValueError("dpo requires pair_roles on every training row")
-    values, metrics = dpo_pair_values(inputs, inputs.dpo, config.dpo.beta, config.dpo.label_smoothing)
+    if inputs.ref_log_probs is None:
+        raise ValueError("dpo requires base_action_log_probs from a frozen reference model")
+    values, metrics = dpo_pair_values(
+        inputs.log_probs,
+        inputs.ref_log_probs,
+        inputs.loss_mask,
+        inputs.dpo,
+        config.dpo.beta,
+        config.dpo.label_smoothing,
+    )
     return _token_loss(values.to(inputs.log_probs.dtype), inputs, metrics)

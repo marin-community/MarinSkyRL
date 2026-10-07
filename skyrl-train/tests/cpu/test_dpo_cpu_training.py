@@ -30,9 +30,7 @@ def runs() -> ForkServerContext:
 
 
 def _run(context: ForkServerContext, root: Path, model: Path, steps: int) -> None:
-    run = context.Process(
-        target=preference_pairs.run_dpo_experiment, args=(root, model), kwargs={"steps": steps}
-    )
+    run = context.Process(target=preference_pairs.run_dpo_experiment, args=(root, model), kwargs={"steps": steps})
     run.start()
     run.join(RUN_TIMEOUT_SECONDS)
     if run.exitcode is None:

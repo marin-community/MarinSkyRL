@@ -1125,7 +1125,7 @@ class RayPPOTrainer:
         memory the policy model releases. Separate engines keep serving rollouts, so they pause for the sync
         and their requests in flight resume on the new weights.
         """
-        if not self._engines_running():
+        if not self._inference_engines_configured():
             return
         timings = self.all_startup_timings if reason == "initial" else self.all_timings
         with Timer("sync_weights", timings) as update_timer:
@@ -1350,13 +1350,16 @@ class RayPPOTrainer:
         await self._finalize_training(completed_step=last_completed_step, epoch=self.cfg.trainer.epochs - 1)
         logger.info("Training done!")
 
-    def _engines_running(self) -> bool:
-        """False only for a client explicitly configured with zero engines."""
-        engines = getattr(self.inference_engine_client, "engines", None)
-        return engines is None or bool(engines)
+    def _inference_engines_configured(self) -> bool:
+        """False only for a client explicitly constructed with zero engines."""
+        client = self.inference_engine_client
+        if not isinstance(client, InferenceEngineClient):
+            # Test doubles and custom clients manage their own engines.
+            return True
+        return bool(client.engines)
 
     async def _init_weight_sync(self) -> None:
-        if not self._engines_running():
+        if not self._inference_engines_configured():
             logger.info("Skipping weight sync: no inference engines are running for this objective")
             return
         with Timer("init_weight_sync_state", self.all_startup_timings):

@@ -47,7 +47,10 @@ class PreferencePairDataset(PromptDataset):
         budget = self.max_completion_length
 
         def normalize(row):
-            return {"chosen": completion_text(row["chosen"], "chosen"), "rejected": completion_text(row["rejected"], "rejected")}
+            return {
+                "chosen": completion_text(row["chosen"], "chosen"),
+                "rejected": completion_text(row["rejected"], "rejected"),
+            }
 
         def fits(row) -> bool:
             for column in ("chosen", "rejected"):

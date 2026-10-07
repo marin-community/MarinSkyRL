@@ -34,7 +34,7 @@ from marinskyrl.speculative_decoding import (
     parse_speculative_decoding_config,
     runai_model_uri,
 )
-from marinskyrl.runtime_options import WeightSyncTransport, preference_pair_generation_requested
+from marinskyrl.runtime_options import WeightSyncTransport, static_preference_pairs_requested
 
 if TYPE_CHECKING:
     from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -296,7 +296,7 @@ class BasePPOExp:
         """Create the configured local or remote inference-engine client."""
         from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient  # noqa: PLC0415
 
-        if preference_pair_generation_requested(self.cfg):
+        if static_preference_pairs_requested(self.cfg):
             logger.info("Skipping inference engines: preference-pair training reads static completions")
             return InferenceEngineClient([], self.tokenizer, self.cfg)
 
@@ -350,7 +350,7 @@ class BasePPOExp:
         Returns:
             PromptDataset: The training dataset.
         """
-        if preference_pair_generation_requested(self.cfg):
+        if static_preference_pairs_requested(self.cfg):
             from skyrl_train.dataset import PreferencePairDataset  # noqa: PLC0415
 
             return PreferencePairDataset(
@@ -404,7 +404,7 @@ class BasePPOExp:
         from skyrl_train.utils.utils import get_ray_pg_ready_with_timeout  # noqa: PLC0415
 
         timeout = int(self.cfg.trainer.distributed.placement_group_timeout_seconds) if timeout is None else timeout
-        if self.cfg.trainer.placement.colocate_all and not preference_pair_generation_requested(self.cfg):
+        if self.cfg.trainer.placement.colocate_all and not static_preference_pairs_requested(self.cfg):
             pg = placement_group(
                 [{"GPU": 1, "CPU": 1}]
                 * self.cfg.generator.num_inference_engines
@@ -469,7 +469,7 @@ class BasePPOExp:
         Returns:
             TrajectoryRunner: The runner.
         """
-        if preference_pair_generation_requested(cfg):
+        if static_preference_pairs_requested(cfg):
             from skyrl_train.trajectory_runners.preference_pairs import PreferencePairTrajectoryRunner  # noqa: PLC0415
 
             if list(cfg.data.get("terminal_bench_data", [])):

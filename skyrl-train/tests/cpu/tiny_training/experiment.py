@@ -219,6 +219,11 @@ class TinyTrainingExp(BasePPOExp):
 
 def run_tiny_training(cfg: DictConfig) -> None:
     """Validate the config as the production driver does, then run in a fresh local Ray session."""
+    run_with_exp(cfg, TinyTrainingExp)
+
+
+def run_with_exp(cfg: DictConfig, make_exp) -> None:
+    """Run one validated experiment class in a fresh local Ray session."""
     validate_cfg(cfg)
     validate_trajectory_runner_capabilities(cfg, TrajectoryRunnerMode.SKYRL_GYM, EntrypointOperation.TRAIN)
     ray.init(
@@ -229,7 +234,7 @@ def run_tiny_training(cfg: DictConfig) -> None:
         include_dashboard=False,
     )
     try:
-        TinyTrainingExp(cfg).run()
+        make_exp(cfg).run()
     finally:
         ray.shutdown()
 

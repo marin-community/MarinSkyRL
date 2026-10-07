@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-from marinskyrl.runtime_options import preference_pair_generation_requested, reference_model_required
+from marinskyrl.runtime_options import static_preference_pairs_requested, reference_model_required
 from marinskyrl.distillation import (
     LocalInferenceTeacherSpec,
     OpenAICompatibleTeacherSpec,
@@ -391,7 +391,7 @@ def derive_role_plan(config: dict[str, Any]) -> SkyRLRolePlan:
     """
     values = _role_plan_values(config)
     claims = _core_model_claims(config, values)
-    if not preference_pair_generation_requested(config):
+    if not static_preference_pairs_requested(config):
         claims.append(_rollout_claim(config, values))
     claims.extend(_teacher_claims(config))
     claims.extend(_draft_trainer_claims(config, values))
