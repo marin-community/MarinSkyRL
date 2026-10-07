@@ -23,7 +23,7 @@ generator.run_engines_locally=true
 generator.sampling_params.logprobs=32
 ```
 
-From `skyrl-train/`, launch with `uv run --project .. --frozen --no-sync -m skyrl_train.entrypoints.main_base` followed by the working config's overrides and those above. For Iris, put the same values under `skyrl` in the standard resolved launch config and submit through `marinskyrl launch --config <config.yaml>`. Set `runtime.launcher_commit` to this research branch's exact commit; the selected launcher checkout must match it. Follow the repository's launch and resource coordination procedure before submission.
+From `skyrl-train/`, launch with `uv run --project .. --frozen --no-sync -m skyrl_train.entrypoints.main_base` followed by the working config's overrides and those above. For Iris, put the same values under `skyrl` in the standard resolved launch config and submit through `marinskyrl launch --config <config.yaml>`. Set `runtime.launcher_commit` to `git rev-parse HEAD` from the research checkout; the selected launcher checkout must match it. Follow the repository's launch and resource coordination procedure before submission.
 
 Width zero disables centering. Also set generation `logprobs=null` when returning to ordinary PPO/TIS, unless another supported consumer needs the capture. Use full-distribution, temperature-only training sampling: `top_p=1`, `min_p=0`, `top_k=-1`, without probability-changing processors. Normal startup validates these settings and configures compatible serving log probabilities.
 
