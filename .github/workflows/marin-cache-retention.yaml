@@ -1,0 +1,45 @@
+name: Marin build-cache retention
+
+on:
+  schedule:
+    - cron: "51 * * * *"
+  workflow_dispatch:
+
+permissions:
+  packages: write
+
+concurrency:
+  group: marin-cache-retention
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [marinskyrl/cache, marinskyrl/cache-arm64]
+    steps:
+      # Kaniko keys individual layers with tags and ignores entries after two
+      # weeks. Keep a 30-day grace period and the ten newest versions.
+      - name: Select expired cache versions
+        id: expired
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE: ${{ matrix.package }}
+        run: |
+          set -euo pipefail
+          PACKAGE_PATH=$(jq -rn --arg name "$PACKAGE" '$name | @uri')
+          IDS=$(gh api "orgs/$GITHUB_REPOSITORY_OWNER/packages/container/$PACKAGE_PATH/versions?per_page=100" \
+            --paginate --slurp | jq -r 'flatten | sort_by(.updated_at) | reverse | .[10:] |
+              map(select((.updated_at | fromdateiso8601) < (now - 30 * 86400))) |
+              reverse | .[:100] |
+              map(.id) | join(",")')
+          echo "ids=$IDS" >> "$GITHUB_OUTPUT"
+      - uses: actions/delete-package-versions@v5
+        if: steps.expired.outputs.ids != ''
+        with:
+          package-name: ${{ matrix.package }}
+          package-type: container
+          package-version-ids: ${{ steps.expired.outputs.ids }}
