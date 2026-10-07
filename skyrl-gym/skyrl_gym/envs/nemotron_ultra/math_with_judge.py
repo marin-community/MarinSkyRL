@@ -31,6 +31,8 @@ _JUDGE_SYSTEM = """Please act as an impartial judge and evaluate the equivalence
 
 For a problem that asks for one example or construction, count the answers as equivalent if each satisfies all requested constraints, even when they use different mathematical objects. For questions with uniquely determined answers, require mathematical equivalence.
 
+When an answer states alternative solutions, compare the mathematical values in the complete final response, including alternatives stated outside a boxed value. Descriptions of the same solution set are equivalent regardless of their order or which value is boxed. For a problem requesting a complete solution set, omitted valid solutions and added invalid solutions make the answers different.
+
 Evaluate the answers using the mathematical requirements of the problem. If the problem requests special formatting instructions, you may disregard formatting when evaluating correctness and equivalence.
 
 After evaluating both answers for equivalence, you must output only one of the following choices as your final verdict with a label:
