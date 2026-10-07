@@ -11,6 +11,7 @@ from taskcompendium.grading_result import Outcome
 from transformers import AutoTokenizer
 from taskcompendium.importers.skyrl import source_task
 from taskcompendium.models import Source
+from tests.cpu.task_specs import lowered_task
 
 from skyrl_train.entrypoints.main_base import config_dir
 from skyrl_train.rollouts.workers import WorkerShard
@@ -43,7 +44,6 @@ async def test_pickled_worker_runs_real_cpu_inference_with_direct_sessions(tmp_p
     validate_cfg(cfg)
     task = source_task(
         [{"role": "user", "content": "What is two? End with #### 2."}],
-        session,
         {"reward_spec": {"ground_truth": "2"}},
         {},
         Source(dataset="tiny", revision="1", row="0", importer_revision="1"),
@@ -59,7 +59,9 @@ async def test_pickled_worker_runs_real_cpu_inference_with_direct_sessions(tmp_p
             {
                 "prompts": [[{"role": "user", "content": "What is two? End with #### 2."}]],
                 "env_classes": [session],
-                "env_extras": [{"task_spec": task.model_dump_json()}],
+                "env_extras": [
+                    {"lowered_task_spec": lowered_task(task, session, max_turns=max_turns).model_dump_json()}
+                ],
                 "trajectory_ids": [TrajectoryID(task.id, 0)],
                 "batch_metadata": None,
                 "sampling_params": None,
@@ -82,12 +84,11 @@ async def test_pickled_worker_runs_real_cpu_inference_with_direct_sessions(tmp_p
 async def test_multiplication_session_returns_feedback_then_rewards_the_final_answer():
     task = source_task(
         [{"role": "user", "content": "What is six times seven?"}],
-        "multiply",
         {"reward_spec": {"ground_truth": "42"}, "max_turns": 2},
         {},
         Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
     )
-    session = MultiplyTaskSession(task, None)
+    session = MultiplyTaskSession(lowered_task(task, "multiply", max_turns=2), None)
     await session.prepare()
     try:
         results = []

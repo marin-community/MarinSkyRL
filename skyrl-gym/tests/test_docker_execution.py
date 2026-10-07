@@ -1,18 +1,14 @@
 """Container execution checks; run explicitly with the docker marker."""
 
 import asyncio
-import subprocess
 from contextlib import suppress
 from pathlib import Path
-from tempfile import TemporaryDirectory
-from uuid import uuid4
 
 import pytest
 import pytest_asyncio
 import yaml
 from shellbox.backends.docker.machine import DockerMachineFactory, docker
 from shellbox.machine import Command, DockerImage, ExitReason, MachineSpec
-from taskcompendium.environment import EnvironmentSpec
 
 from skyrl_gym.code_execution import execute_code
 from skyrl_gym.python_execution import PythonKernel
@@ -26,18 +22,7 @@ def python_image():
         Path(__file__).resolve().parents[2] / "skyrl-train/skyrl_train/config/task_session_config/default.yaml"
     )
     values = yaml.safe_load(configuration.read_text())
-    specification = EnvironmentSpec.model_validate(values["lcb"]["machine"])
-    image = f"skyrl-task-test:{uuid4().hex}"
-    with TemporaryDirectory(prefix="skyrl-image-") as directory:
-        for file in specification.image.files:
-            target = Path(directory) / file.path.lstrip("/")
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(file.content)
-        subprocess.run(["docker", "build", "--tag", image, directory], check=True, timeout=300)
-    try:
-        yield DockerImage(image)
-    finally:
-        subprocess.run(["docker", "image", "rm", image], check=True, timeout=30)
+    return DockerImage(values["lcb"]["machine"]["requirements"]["docker_image"])
 
 
 @pytest_asyncio.fixture

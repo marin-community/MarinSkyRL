@@ -10,14 +10,19 @@ from typing import Any
 
 from loguru import logger
 from transformers import PreTrainedTokenizerBase
-from taskcompendium.importers.harbor import harbor_execution, harbor_task
-from taskcompendium.models import Source, TaskSpec, VerifierSpec
+from taskcompendium.importers.harbor import harbor_task
+from harbor_config.models.task.config import EnvironmentConfig, TaskConfig
+from rolloutengine.lowering import SHELLBOX_SESSION
+from rolloutengine.spec import LoweredTaskSpec, MachineRuntimeSpec, TaskRuntimeSpec, TaskSessionSpec
+from shellbox.machine import NetworkPolicy
+from taskcompendium.models import EnvironmentRequirements, Source, TaskSpec, VerifierSpec
 
 from marinskyrl.packed_tasks import PackedTaskMaterializer, PackedTaskReference, select_task_references
 from marinskyrl.task_sources import DirectoryDataSource, TaskTroveParquetSource, data_source
-from skyrl_train.dataset.tasks import TaskDataset, TaskRecord, cache_tasks
+from skyrl_train.dataset.tasks import LOWERED_TASK_COLUMN, TaskDataset, cache_tasks
 
 MATERIALIZATION_BATCH_SIZE = 64
+HARBOR_ID_PREFIX = "harbor-id:"
 
 
 class TerminalBenchTaskDataset:
@@ -118,15 +123,59 @@ def harbor_task_ids(task_path: Path) -> set[str]:
     return {task_id.casefold() for task_id in task_ids}
 
 
+def harbor_machine(environment: EnvironmentConfig, user: str | int | None) -> MachineRuntimeSpec:
+    return MachineRuntimeSpec(
+        backend="docker",
+        network=NetworkPolicy.ALLOW if environment.allow_internet else NetworkPolicy.DENY,
+        cpus=environment.cpus,
+        memory_mb=environment.memory_mb,
+        storage_mb=environment.storage_mb,
+        gpus=0 if environment.gpus is None else environment.gpus,
+        user=None if user is None else str(user),
+        startup_timeout=environment.build_timeout_sec,
+        cleanup_timeout=None,
+    )
+
+
+def lower_harbor_task(directory: Path, task: TaskSpec, *, session: TaskSessionSpec) -> LoweredTaskSpec:
+    """Use package machine settings and phase deadlines, with other limits from the caller."""
+    config = TaskConfig.model_validate_toml((directory / "task.toml").read_text())
+
+    task_machine = harbor_machine(config.environment, config.agent.user)
+    verifier_machine = (
+        harbor_machine(config.verifier.environment or config.environment, config.verifier.user)
+        if task.verifier.environment_requirements != EnvironmentRequirements()
+        else None
+    )
+    if verifier_machine is None and config.verifier.user not in {None, 0, "0", "root"}:
+        raise NotImplementedError("A shared Harbor verifier supports only the trusted root user")
+    return LoweredTaskSpec(
+        task=task,
+        runtime=TaskRuntimeSpec(task_machine=task_machine, verifier_machine=verifier_machine),
+        session=TaskSessionSpec.model_validate(
+            {
+                **session.model_dump(),
+                "task_session": SHELLBOX_SESSION,
+                "total_turn_timeout": config.agent.timeout_sec,
+                "verifier_timeout": config.verifier.timeout_sec,
+            }
+        ),
+    )
+
+
 def materialize_harbor_tasks(
-    data_files: Sequence[str | Mapping[str, Any]], *, cache_dir: Path, verifier_override: VerifierSpec | None = None
+    data_files: Sequence[str | Mapping[str, Any]],
+    *,
+    cache_dir: Path,
+    session: TaskSessionSpec,
+    verifier_override: VerifierSpec | None = None,
 ) -> Path:
     """Convert selected directory and packed tasks to portable task Parquet."""
     sources = TerminalBenchTaskDataset(data_files)
     if not len(sources):
         raise ValueError("No Harbor tasks matched the configured sources")
 
-    def tasks() -> Iterator[TaskRecord]:
+    def tasks() -> Iterator[LoweredTaskSpec]:
         with closing(PackedTaskMaterializer(cache_dir / "archives")) as materializer:
             for batch in batched(sources, MATERIALIZATION_BATCH_SIZE):
                 references = [item for item in batch if isinstance(item, PackedTaskReference)]
@@ -151,18 +200,22 @@ def materialize_harbor_tasks(
                         ),
                     )
                     content = json.dumps(task.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
-                    yield TaskRecord(
-                        task.model_copy(
-                            update={
-                                "id": uid,
-                                "metadata": {**task.metadata, "harbor_task_ids": sorted(harbor_task_ids(directory))},
-                                "source": task.source.model_copy(
-                                    update={"revision": f"sha256:{hashlib.sha256(content).hexdigest()}"}
+                    task = task.model_copy(
+                        update={
+                            "id": uid,
+                            "tags": (
+                                *task.tags,
+                                *(
+                                    f"{HARBOR_ID_PREFIX}{identifier}"
+                                    for identifier in sorted(harbor_task_ids(directory))
                                 ),
-                            }
-                        ),
-                        harbor_execution(directory),
+                            ),
+                            "source": task.source.model_copy(
+                                update={"revision": f"sha256:{hashlib.sha256(content).hexdigest()}"}
+                            ),
+                        }
                     )
+                    yield lower_harbor_task(directory, task, session=session)
 
     return cache_tasks(tasks(), cache_dir)
 
@@ -177,13 +230,14 @@ class HarborTaskDataset(TaskDataset):
         max_prompt_length: int,
         *,
         cache_dir: Path,
+        session: TaskSessionSpec,
         verifier_override: VerifierSpec | None = None,
         num_workers: int = 8,
     ):
         self.task_path = materialize_harbor_tasks(
-            data_files, cache_dir=cache_dir.expanduser(), verifier_override=verifier_override
+            data_files, cache_dir=cache_dir.expanduser(), session=session, verifier_override=verifier_override
         )
         super().__init__([str(self.task_path)], tokenizer, max_prompt_length, num_workers=num_workers)
 
     def uid(self, index: int) -> str:
-        return TaskSpec.model_validate_json(self.dataframe[index]["task_spec"]).id
+        return LoweredTaskSpec.model_validate_json(self.dataframe[index][LOWERED_TASK_COLUMN]).task.id

@@ -6,7 +6,7 @@ from functools import partial
 
 from rolloutengine.contracts import TaskSession
 from shellbox.machine import Machine
-from taskcompendium.models import TaskSpec
+from rolloutengine.spec import LoweredTaskSpec
 
 from skyrl_gym.answer_tasks import (
     grade_aime,
@@ -30,9 +30,9 @@ from skyrl_gym.sql_tasks import SQLTaskSession, SeededSQLTaskSession
 
 
 def session_factories(
-    *, max_turns: int, executor: Executor | None = None
-) -> dict[str, Callable[[TaskSpec, Machine | None], TaskSession]]:
-    """Return fresh-session factories with the worker's turn limit and verifier executor."""
+    *, executor: Executor | None = None
+) -> dict[str, Callable[[LoweredTaskSpec, Machine | None], TaskSession]]:
+    """Return factories that apply each lowered task's session settings."""
     answer_graders = {
         "aime": grade_aime,
         "cat_count": grade_cat_count,
@@ -49,11 +49,11 @@ def session_factories(
             name: partial(AnswerTaskSession, grader=grader, executor=executor)
             for name, grader in answer_graders.items()
         },
-        "gsm8k_multi_turn": partial(MathTaskSession, max_turns=max_turns),
-        "search": partial(SearchTaskSession, max_turns=max_turns, executor=executor),
-        "searchcode": partial(SearchCodeTaskSession, max_turns=max_turns, executor=executor),
+        "gsm8k_multi_turn": MathTaskSession,
+        "search": partial(SearchTaskSession, executor=executor),
+        "searchcode": partial(SearchCodeTaskSession, executor=executor),
         "lcb": CodeTaskSession,
         "nemotron_ultra": partial(NemotronTaskSession, executor=executor),
-        "text2sql": partial(SQLTaskSession, max_turns=max_turns, executor=executor),
+        "text2sql": partial(SQLTaskSession, executor=executor),
         "text_to_sql": partial(SeededSQLTaskSession, executor=executor),
     }

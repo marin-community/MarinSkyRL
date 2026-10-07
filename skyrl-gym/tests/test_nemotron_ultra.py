@@ -691,6 +691,35 @@ async def test_ns_tools_executes_structured_python_calls_with_stateful_session(
 
 
 @pytest.mark.asyncio
+async def test_ns_tools_does_not_execute_a_length_stopped_call(nemotron_session, model_turn, tmp_path):
+    session = await nemotron_session("ns_tools_simple_agent", {"expected_answer": "42"})
+    marker = tmp_path / "truncated-call"
+    turn = model_turn(
+        "",
+        stop_reason="length",
+        message={
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "partial",
+                    "function": {
+                        "name": "stateful_python_code_exec",
+                        "arguments": json.dumps({"code": f"open({str(marker)!r}, 'w').write('executed')"}),
+                    },
+                }
+            ],
+        },
+    )
+
+    result = await session.advance(turn)
+
+    assert not marker.exists()
+    assert result.done and result.grade.status is Outcome.UNAVAILABLE
+    assert (await session.grade(())).reward is None
+
+
+@pytest.mark.asyncio
 async def test_calendar_session_accepts_no_changes_when_the_calendar_is_empty(nemotron_session, model_turn):
     session = await nemotron_session("calendar_simple_agent", {"exp_cal_state": {}})
     result = await session.advance(model_turn("No calendar changes are necessary."))

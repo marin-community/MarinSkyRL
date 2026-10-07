@@ -20,7 +20,9 @@ Implement the four operations in Marin's ``TaskSession`` protocol:
 
 A ``ModelTurn`` contains the sampled assistant message, exact token IDs, and log probabilities.
 Use its message or text for task actions. Do not replace the sampled tokens.
-A session can return ``reset_conversation`` when the next attempt requires a fresh conversation.
+A session can set ``Transition.reset_conversation`` to start the next model turn with a fresh conversation.
+The engine replaces the active conversation and removes the preceding turns and token evidence from the rollout record.
+The next model response must preserve the new conversation's exact served prefix.
 
 The multiplication implementation is:
 
@@ -49,7 +51,7 @@ Pass the session class to the experiment:
    experiment = BasePPOExp(cfg, sessions={"multiply": MultiplyTaskSession})
    experiment.run()
 
-A factory accepts ``(TaskSpec, Machine | None)`` and returns a fresh session.
+A factory accepts ``(LoweredTaskSpec, Machine | None)`` and returns a fresh session.
 The worker sends this factory map to its Ray workers.
 
 Prepare source rows
@@ -64,7 +66,6 @@ Each source row declares its task name and private reference:
        "env_class": "multiply",
        "reward_spec": {"method": "rule", "ground_truth": "42"},
        "data_source": "synthetic_multiply",
-       "max_turns": 5,
    }
 
 ``SourceTaskDataset`` converts these rows directly to serialized tasks in the prepared dataset.
@@ -72,7 +73,14 @@ The prompt contains public messages. The verifier payload contains the private r
 Keep the reference out of model-visible observations.
 
 ``TaskSpec.context`` holds the public conversation.
-``TaskSpec.environment`` contains an ``EnvironmentSpec`` that selects the machine and named session factory.
+``TaskSpec.environment_requirements`` declares capabilities, the prebuilt image, workdir, setup commands, and environment variables.
+``LoweredTaskSpec.runtime`` selects task and verifier machines.
+``LoweredTaskSpec.session.task_session`` selects the named session factory.
+The session reads its turn limit and deadlines from ``LoweredTaskSpec.session``.
+The multiplication session does not read a source row's ``max_turns`` field.
+Set ``generator.max_turns=5`` for this example.
+An explicit ``environment.task_sessions.session.max_turns`` overrides that launch value.
+A task-specific ``environment.task_sessions.multiply.session.max_turns`` overrides the common session value.
 The session decodes ``TaskSpec.verifier.parameters_json`` with ``ExternalVerifierSpec.model_validate_json``.
 Use the resulting verifier's ``parameters`` mapping:
 ``config`` contains task settings and ``extras`` contains the source row's private fields.
@@ -91,12 +99,15 @@ Execution and rewards
 
 For an executable task, declare ``machine`` in
 ``environment.task_sessions.<task_name>``.
+Its ``requirements`` block contains ``EnvironmentRequirements``.
+Its ``runtime`` block contains ``MachineRuntimeSpec``.
 Use ``Machine.run``, ``upload``, and ``download`` for task execution.
 The engine owns the machine lifecycle. See :doc:`tools_guide`.
 
 A transition reward contributes to the final token of that model turn.
 Observation tokens have zero loss mask and zero log probability.
-A missing or failed grade excludes the rollout from training.
+A verifier result without a grade excludes the rollout from training.
+Execution failures use the configured exception policy.
 Explicitly skipped grading retains trainable model tokens.
 
 The source label also supplies ``reward/domain/<source>/avg_raw_reward`` metrics.

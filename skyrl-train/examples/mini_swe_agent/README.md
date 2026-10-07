@@ -14,17 +14,19 @@ Materialize the source rows:
 uv run --no-sync --project .. examples/mini_swe_agent/preprocess_swegym.py \
   --train_revision TRAIN_DATASET_COMMIT \
   --eval_revision EVAL_DATASET_COMMIT \
+  --image_manifest /path/to/instance-images.json \
   --output_dir ~/data/swe_gym_subset
 ```
 
 Replace the two revision values with pinned dataset commit IDs. The converter
 reads `SumanthRH/SWE-Gym-Subset` for training and
 `SumanthRH/SWE-bench_Verified` for evaluation. Each output row contains one
-serialized `TaskSpec` in the `task_spec` column. The evaluation script stays in
+serialized `LoweredTaskSpec` in the `lowered_task_spec` column. The evaluation script stays in
 the private verifier fields.
 
-The converter uses each row's `image_name`, when present. Otherwise it derives
-the image name from the dataset and instance ID. Task commands use `/testbed`.
+The image manifest maps every selected instance ID to a prebuilt image reference with its SHA-256 digest.
+Prepare those images before conversion. Image tags and task-specific builds cause rejection.
+The converter does not build or resolve images. Task commands use `/testbed`.
 The task environment permits network access and uses the environment variables
 in `preprocess_swegym.py`. The grader timeout is 3600 seconds.
 
@@ -40,11 +42,11 @@ List the task images from the materialized files:
 uv run --no-sync --project .. python - <<'PY'
 from pathlib import Path
 from datasets import Dataset
-from taskcompendium.models import TaskSpec
+from rolloutengine.spec import LoweredTaskSpec
 
 directory = Path("~/data/swe_gym_subset").expanduser()
 images = {
-    TaskSpec.model_validate_json(row["task_spec"]).environment.image.reference
+    LoweredTaskSpec.model_validate_json(row["lowered_task_spec"]).task.environment_requirements.docker_image
     for name in ("train.parquet", "validation.parquet")
     for row in Dataset.from_parquet(str(directory / name))
 }
@@ -63,11 +65,12 @@ The scripts use `skyrl_train.entrypoints.taskcompendium`.
 Edit `DATA_DIR` and `CKPT_PATH` in the script to select task Parquet and checkpoint directories.
 The two-node example requires a Ray cluster with eight GPUs per node.
 See the [cluster setup](../../docs/getting-started/installation.rst#initialize-ray-cluster).
-The scripts set the command timeout to 180
-seconds. `generator.max_turns` controls the model turn limit.
+The materialized session settings control execution limits: 50 turns, a 120-second tool cap, and a 3600-second cumulative turn deadline.
+Final verification has a separate 3600-second deadline. Each cleanup action has a 30-second limit.
+Change those values in `preprocess_swegym.py` before materialization.
 
-To change task setup, add commands to the task's `environment.setup` during
-materialization. The engine applies the same setup to the fresh grading machine.
+To change task setup, add commands to `environment_requirements.setup_commands` during materialization.
+The verifier's `environment_requirements` declares setup for its fresh grading machine.
 The task saves the initial Git revision in `refs/taskcompendium/base` before inference.
 The grader collects all changes against that revision, including agent commits and new files.
 It transfers the patch as a file to the grading machine.

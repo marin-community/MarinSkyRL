@@ -5,7 +5,7 @@
 The common [TaskSession interface](https://github.com/marin-community/marin/blob/main/lib/rolloutengine/src/rolloutengine/contracts.py) defines `prepare`, `advance`, `grade`, and `close`. Sessions hold task state. Marin's rollout engine calls the model and records exact tokens. Shellbox supplies machines for executable tasks.
 
 Pure answer tasks do not create a machine. Python, SQL, Lean, and OpenEnv tasks
-use the machine declared in their TaskSpec. Private reference answers stay on
+use the requirements in `TaskSpec` and machine selection in `LoweredTaskSpec.runtime`. Private reference answers stay on
 the rollout worker.
 
 From the repository root:

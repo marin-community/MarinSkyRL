@@ -11,7 +11,6 @@ from transformers import AutoTokenizer
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from taskcompendium.environment import EnvironmentKind
 from skyrl_train.dataset.tasks import source_row_task
 from skyrl_train.rollouts.task_worker import TaskRolloutWorker
 from skyrl_train.rollouts.task_projections import WholeTaskProjection
@@ -38,10 +37,10 @@ def get_test_actor_config() -> DictConfig:
 
 
 class ThreeTurnSession:
-    def __init__(self, task, machine):
-        self.task = task
+    def __init__(self, lowered, machine):
+        self.task = lowered.task
         self.turns = 0
-        self.max_turns = 3
+        self.max_turns = lowered.session.max_turns
 
     async def prepare(self):
         return SessionStart(tuple(conversation_messages(self.task.context)), {})
@@ -157,9 +156,7 @@ async def run_trajectory_runner_end_to_end(
         trajectory_runner_cfg=generator_cfg,
         projection=WholeTaskProjection(WholeTrajectoryProjection(generator_cfg, tokenizer)),
         model_client=DirectModelClient(inference_engine_client),
-        factories={EnvironmentKind.DOCKER: DockerMachineFactory()},
-        command_timeout=120,
-        cleanup_timeout=30,
+        factories={"docker": DockerMachineFactory()},
         max_verifier_workers=max_verifier_workers,
         sessions={"test_env": ThreeTurnSession},
     )
@@ -184,7 +181,7 @@ async def run_trajectory_runner_end_to_end(
     )
     input_batch["env_extras"] = [
         {
-            "task_spec": source_row_task(
+            "lowered_task_spec": source_row_task(
                 row,
                 index,
                 source_name="gpu-test",

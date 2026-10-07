@@ -21,7 +21,13 @@ from marinskyrl.environment_contract import TrainingType  # noqa: E402
 from skyrl_train import telemetry as training_telemetry  # noqa: E402
 from skyrl_train.distillation import ChosenTokenTeacherEvidence  # noqa: E402
 from skyrl_train.trajectory_runners.types import TrajectoryID, VerifierTestCollection  # noqa: E402
+from tests.cpu.task_specs import lowered_task  # noqa: E402
 from tests.cpu.util import stub_megatron_modules  # noqa: E402
+
+
+@pytest.fixture
+def task_lowering():
+    return lowered_task
 
 
 # A slow test starts its own Ray cluster of about 4 GiB, and four workers running the rest of the suite fill most

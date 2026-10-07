@@ -5,6 +5,7 @@ import math
 import re
 import sqlite3
 from concurrent.futures import Executor
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -14,9 +15,9 @@ from uuid import uuid4
 import pandas as pd
 from rolloutengine.contracts import ModelTurn, SessionStart, Transition
 from shellbox.machine import Command, ExitReason, Machine
-from taskcompendium.environment import ExternalVerifierSpec
+from taskcompendium.importers.skyrl import ExternalVerifierSpec
 from taskcompendium.grading_result import GradeResult, Outcome
-from taskcompendium.models import TaskSpec
+from rolloutengine.spec import LoweredTaskSpec
 from taskcompendium.submission import conversation_messages
 from verifyit.modes.grade_exact import grade_exact_candidate
 from verifyit.spec import ExactSpec
@@ -24,7 +25,7 @@ from verifyit.spec import ExactSpec
 from skyrl_gym.envs.sql.utils import final_sql
 from skyrl_gym.envs.text_to_sql import scoring
 from skyrl_gym.task_records import fold_grades
-from skyrl_gym.task_sessions import run_blocking
+from skyrl_gym.task_sessions import BlockingOperations
 
 QUERY_OUTPUT_LIMIT_BYTES = 4 * 1024 * 1024
 SQL_QUERY_TIMEOUT = 30.0
@@ -165,11 +166,13 @@ def _reference_failure(error: sqlite3.Error | ValueError) -> GradeResult:
 class SeededSQLTaskSession:
     """Compare one query on seeded and perturbed public databases."""
 
-    def __init__(self, task: TaskSpec, machine: Machine | None, *, executor: Executor | None = None):
+    def __init__(self, lowered: LoweredTaskSpec, machine: Machine | None, *, executor: Executor | None = None):
+        task = lowered.task
         specification = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
         self.task = task
         self.machine = machine
-        self.executor = executor
+        self.blocking = BlockingOperations(executor)
+        self.local_files = ExitStack()
         self.verifyit = bool(specification.parameters["config"].get("verifyit_enabled", False))
         self.spec = scoring.parse_ground_truth(
             specification.parameters["extras"].get("reward_model", {}).get("ground_truth")
@@ -188,15 +191,14 @@ class SeededSQLTaskSession:
             )
             return SessionStart(tuple(conversation_messages(self.task.context)), {})
         assert self.machine is not None
-        with TemporaryDirectory(prefix="skyrl-sql-reference-") as directory:
-            root = Path(directory)
-            try:
-                cases = await run_blocking(self.executor, _seeded_databases, self.spec, root, verifyit=self.verifyit)
-            except (sqlite3.Error, ValueError) as error:
-                self.result = _reference_failure(error)
-            else:
-                self.directory = await _upload_queries(self.machine, [path for path, _ in cases])
-                self.cases = [(path.name, reference) for path, reference in cases]
+        root = Path(self.local_files.enter_context(TemporaryDirectory(prefix="skyrl-sql-reference-")))
+        try:
+            cases = await self.blocking.run(_seeded_databases, self.spec, root, verifyit=self.verifyit)
+        except (sqlite3.Error, ValueError) as error:
+            self.result = _reference_failure(error)
+        else:
+            self.directory = await _upload_queries(self.machine, [path for path, _ in cases])
+            self.cases = [(path.name, reference) for path, reference in cases]
         return SessionStart(tuple(conversation_messages(self.task.context)), {})
 
     async def advance(self, turn: ModelTurn) -> Transition:
@@ -224,19 +226,24 @@ class SeededSQLTaskSession:
         return self.result
 
     async def close(self) -> None:
-        pass
+        try:
+            await self.blocking.close()
+        finally:
+            self.local_files.close()
 
 
 class SQLTaskSession:
     """Execute SQL tools between model turns and grade the final result set."""
 
-    def __init__(self, task: TaskSpec, machine: Machine | None, *, max_turns: int, executor: Executor | None = None):
+    def __init__(self, lowered: LoweredTaskSpec, machine: Machine | None, *, executor: Executor | None = None):
+        task = lowered.task
         assert machine is not None
         specification = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
         config, extras = specification.parameters["config"], specification.parameters["extras"]
         self.task = task
         self.machine = machine
-        self.executor = executor
+        self.blocking = BlockingOperations(executor)
+        self.local_files = ExitStack()
         self.database = (
             Path(config["db_path"])
             / SQL_DATABASE_DIRECTORIES[extras["data"]]
@@ -245,7 +252,7 @@ class SQLTaskSession:
         )
         self.reference_sql = extras["reward_spec"]["ground_truth"]
         self.verifyit = bool(config.get("verifyit_enabled", False))
-        self.max_turns = max_turns
+        self.max_turns = lowered.session.max_turns
         self.directory = ""
         self.reference = scoring.QueryRows(0, [])
         self.failure: GradeResult | None = None
@@ -253,16 +260,15 @@ class SQLTaskSession:
         self.grades: list[GradeResult] = []
 
     async def prepare(self) -> SessionStart:
-        with TemporaryDirectory(prefix="skyrl-sql-reference-") as directory:
-            root = Path(directory)
-            try:
-                self.reference = await run_blocking(
-                    self.executor, _database_snapshot, self.database, self.reference_sql, root, verifyit=self.verifyit
-                )
-            except (sqlite3.Error, ValueError) as error:
-                self.failure = _reference_failure(error)
-            else:
-                self.directory = await _upload_queries(self.machine, [root / "fixture.sqlite"])
+        root = Path(self.local_files.enter_context(TemporaryDirectory(prefix="skyrl-sql-reference-")))
+        try:
+            self.reference = await self.blocking.run(
+                _database_snapshot, self.database, self.reference_sql, root, verifyit=self.verifyit
+            )
+        except (sqlite3.Error, ValueError) as error:
+            self.failure = _reference_failure(error)
+        else:
+            self.directory = await _upload_queries(self.machine, [root / "fixture.sqlite"])
         return SessionStart(tuple(conversation_messages(self.task.context)), {})
 
     async def advance(self, turn: ModelTurn) -> Transition:
@@ -312,4 +318,7 @@ class SQLTaskSession:
         return fold_grades(self.grades)
 
     async def close(self) -> None:
-        pass
+        try:
+            await self.blocking.close()
+        finally:
+            self.local_files.close()

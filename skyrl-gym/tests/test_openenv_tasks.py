@@ -9,8 +9,6 @@ import psutil
 import pytest
 import pytest_asyncio
 from rolloutengine.engine import ShellboxRolloutEngine
-from taskcompendium.environment import EnvironmentKind, EnvironmentSpec
-from taskcompendium.execution import TaskExecution
 from taskcompendium.importers.skyrl import source_task
 from taskcompendium.models import Source
 from taskcompendium.submission import AnswerFormat, SubmissionConvention
@@ -56,7 +54,7 @@ HTTPServer(('127.0.0.1', port), Handler).serve_forever()
 
 
 @pytest_asyncio.fixture
-async def openenv_session(machine):
+async def openenv_session(machine, task_lowering):
     script = machine.root / "server.py"
     script.write_text(SERVER)
     log = machine.root / "requests.jsonl"
@@ -68,7 +66,6 @@ async def openenv_session(machine):
     def make(name="echo_env", *, max_turns=2, command=None):
         task = source_task(
             [{"role": "user", "content": "Public task question"}],
-            "openenv",
             {"env_name": name},
             {
                 "server_command": [sys.executable, str(script), str(port), str(log)] if command is None else command,
@@ -77,9 +74,9 @@ async def openenv_session(machine):
                 "startup_timeout": 5.0,
             },
             Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
-            environment=EnvironmentSpec(kind=EnvironmentKind.SHELLSIM),
         )
-        session = OpenEnvTaskSession(task, machine, max_turns=max_turns)
+        task = task_lowering(task, "openenv", max_turns=max_turns)
+        session = OpenEnvTaskSession(task, machine)
         sessions.append(session)
         return session, task, log
 
@@ -160,15 +157,12 @@ async def test_openenv_engine_preserves_tokens_and_releases_server(openenv_sessi
         return model_turn("<action>done</action>")
 
     engine = ShellboxRolloutEngine(
-        factories={EnvironmentKind.SHELLSIM: Factory()},
+        factories={"local": Factory()},
         model=model,
         sessions={"openenv": lambda task, machine: session},
-        max_turns=2,
-        command_timeout=5.0,
-        cleanup_timeout=5,
         convention=SubmissionConvention(id="plain", answer_format=AnswerFormat.PLAIN),
     )
-    rollout = await engine.run(task, execution=TaskExecution())
+    rollout = await engine.run(task)
     assert rollout.grade.reward == 0.25
     assert rollout.response_token_ids == (20, 21)
     assert rollout.loss_mask == (1, 1)

@@ -10,10 +10,9 @@ from omegaconf import DictConfig
 from shellbox.backends.daytona.machine import DaytonaMachineFactory, DaytonaNetworkMode, DaytonaNetworkPolicy
 from shellbox.backends.docker.machine import DockerMachineFactory
 from shellbox.machine import MachineFactory
-from taskcompendium.environment import EnvironmentSpec, ShellVerifierSpec
-from taskcompendium.execution import TaskExecution
-from taskcompendium.models import TaskSpec, VerifierKind, VerifierSpec
-from taskcompendium.grading import skipped_verifier
+from taskcompendium.models import VerifierSpec
+import json
+from rolloutengine.spec import LoweredTaskSpec, MachineRuntimeSpec
 from taskcompendium.grading_result import GradingFailure, Outcome
 from rolloutengine.contracts import RolloutData, RolloutFailure
 
@@ -86,7 +85,11 @@ class HarborTaskSettings:
         return min(self.retry.min_wait_sec * self.retry.wait_multiplier**retries, self.retry.max_wait_sec)
 
     def verifier_override(self) -> VerifierSpec | None:
-        return skipped_verifier("Harbor verification is disabled") if self.verifier.disable else None
+        return (
+            VerifierSpec(kind="skipped", parameters_json=json.dumps({"reason": "Harbor verification is disabled"}))
+            if self.verifier.disable
+            else None
+        )
 
     def machine_factory(self, runner_config: DictConfig) -> MachineFactory:
         match self.environment.type:
@@ -108,10 +111,14 @@ class HarborTaskSettings:
             case other:
                 raise ValueError(f"No Shellbox factory is configured for Harbor backend {other!r}")
 
-    def task(self, task: TaskSpec) -> TaskSpec:
-        """Apply machine and verifier overrides without changing the source specification."""
+    def lowered(self, lowered: LoweredTaskSpec, *, phase: str) -> LoweredTaskSpec:
+        """Apply deployment overrides without changing the task definition."""
+        if self.verifier.disable and lowered.task.verifier.kind != "skipped":
+            raise ValueError("Disabled Harbor verification must be selected before task import")
 
-        def environment(original: EnvironmentSpec) -> EnvironmentSpec:
+        def machine(original: MachineRuntimeSpec | None) -> MachineRuntimeSpec | None:
+            if original is None:
+                return None
             updates = {
                 name: value
                 for name in ("cpus", "memory_mb", "storage_mb", "gpus")
@@ -121,65 +128,38 @@ class HarborTaskSettings:
                 updates["startup_timeout"] = original.startup_timeout * self.timeout_multiplier
             return original.model_copy(update=updates)
 
-        def verifier(original: VerifierSpec) -> VerifierSpec:
-            override = self.verifier_override()
-            if override is not None and original.kind != VerifierKind.STAGED:
-                return override
-            updates: dict[str, object] = {
-                "environment": None if original.environment is None else environment(original.environment),
-            }
-            if original.kind != VerifierKind.SHELL:
-                return original.model_copy(update=updates)
-            specification = ShellVerifierSpec.model_validate_json(original.parameters_json)
-            timeout = (
-                specification.timeout
-                if self.verifier.override_timeout_sec is None
-                else self.verifier.override_timeout_sec
-            ) * self.timeout_multiplier
-            if self.verifier.max_timeout_sec is not None:
-                timeout = min(timeout, self.verifier.max_timeout_sec)
-            specification = specification.model_copy(update={"timeout": timeout})
-            updates["parameters_json"] = specification.model_dump_json()
-            return original.model_copy(update=updates)
-
-        return task.model_copy(
-            update={
-                "environment": environment(task.environment),
-                "verifier": verifier(task.verifier),
-                "stages": tuple(
-                    stage.model_copy(update={"verifier": verifier(stage.verifier)}) for stage in task.stages
-                ),
-            }
-        )
-
-    def execution(self, execution: TaskExecution, *, phase: str) -> TaskExecution:
-        """Apply deployment deadlines to the imported execution settings."""
-        agent_override = self.eval_timeout if phase == "eval" else self.agent_timeout
-
-        def agent_timeout(original: float | None) -> float | None:
-            value = original if agent_override is None else agent_override
+        def timeout(original: float | None, override: float | None, ceiling: float | None) -> float | None:
+            value = original if override is None else override
             if value is None:
                 return None
             value *= self.timeout_multiplier
-            ceiling = self.max_agent_timeout
             return value if ceiling is None else min(value, ceiling)
 
-        return execution.model_copy(
+        runtime = lowered.runtime.model_copy(
             update={
-                "agent_timeout": agent_timeout(execution.agent_timeout),
-                "attempt_timeout": execution.attempt_timeout if self.attempt_timeout is None else self.attempt_timeout,
-                "stages": {
-                    name: stage.model_copy(
-                        update={
-                            "agent_timeout": agent_timeout(
-                                execution.agent_timeout if stage.agent_timeout is None else stage.agent_timeout
-                            ),
-                        }
-                    )
-                    for name, stage in execution.stages.items()
-                },
+                "task_machine": machine(lowered.runtime.task_machine),
+                "verifier_machine": machine(lowered.runtime.verifier_machine),
             }
         )
+        session = lowered.session.model_copy(
+            update={
+                "max_turns": lowered.session.max_turns if self.max_turns is None else self.max_turns,
+                "total_turn_timeout": timeout(
+                    lowered.session.total_turn_timeout,
+                    self.eval_timeout if phase == "eval" else self.agent_timeout,
+                    self.max_agent_timeout,
+                ),
+                "verifier_timeout": timeout(
+                    lowered.session.verifier_timeout,
+                    self.verifier.override_timeout_sec,
+                    self.verifier.max_timeout_sec,
+                ),
+                "attempt_timeout": lowered.session.attempt_timeout
+                if self.attempt_timeout is None
+                else self.attempt_timeout,
+            }
+        )
+        return lowered.model_copy(update={"runtime": runtime, "session": session})
 
 
 _GRADING_FAILURE_TYPES = {

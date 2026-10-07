@@ -9,11 +9,11 @@ from typing import Any
 
 import reasoning_gym
 import requests
-from rolloutengine.contracts import ModelTurn, SessionStart, Transition
+from rolloutengine.contracts import LENGTH_STOP_REASON, ModelTurn, SessionStart, Transition
 from shellbox.machine import ExitReason, Machine
-from taskcompendium.environment import ExternalVerifierSpec
+from taskcompendium.importers.skyrl import ExternalVerifierSpec
 from taskcompendium.grading_result import GradeResult, Outcome
-from taskcompendium.models import TaskSpec
+from rolloutengine.spec import LoweredTaskSpec
 from taskcompendium.submission import conversation_messages
 from verifyit.adapters.skyrl import grade_grid_candidate
 
@@ -53,7 +53,7 @@ from skyrl_gym.envs.verifyit_clients import grade_reasoning_entry
 from skyrl_gym.python_execution import PythonKernel
 from skyrl_gym.lean_execution import compile_lean
 from skyrl_gym.task_records import fold_grades, grade_result
-from skyrl_gym.task_sessions import run_blocking
+from skyrl_gym.task_sessions import BlockingOperations
 from skyrl_gym.verification import VERIFIER_RUNTIME_ERROR, VerificationResult
 
 NS_TOOLS_AGENT = "ns_tools_simple_agent"
@@ -83,12 +83,13 @@ class GradingMode(StrEnum):
 class NemotronTaskSession:
     """Keep row-specific task state and execute tools through the supplied Shellbox machine."""
 
-    def __init__(self, task: TaskSpec, machine: Machine | None, *, executor: Executor | None = None):
+    def __init__(self, lowered: LoweredTaskSpec, machine: Machine | None, *, executor: Executor | None = None):
+        task = lowered.task
         specification = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
         self.task = task
         self.machine = machine
         self.config = specification.parameters["config"]
-        self.executor = executor
+        self.blocking = BlockingOperations(executor)
         self.verifyit_enabled = bool(self.config.get("verifyit_enabled", False))
         self.grading = GradingMode(self.config.get("grading", GradingMode.VERIFY))
         ultra = specification.parameters["extras"]["extra_info"]["nemotron_ultra"]
@@ -103,13 +104,14 @@ class NemotronTaskSession:
             )
         self.record = json.loads(ultra["record_json"])
         self.request = json.loads(ultra["request_json"])
-        self.max_turns = (
+        source_turn_limit = (
             PYTHON_TOOL_TURN_LIMIT
             if self.agent == NS_TOOLS_AGENT
             else LEAN_TURN_LIMIT
             if self.agent == LEAN_AGENT
             else 1
         )
+        self.max_turns = min(source_turn_limit, lowered.session.max_turns)
         self.turns = 0
         self.grades: list[GradeResult] = []
         judges = self.config.get("judges", {})
@@ -131,6 +133,10 @@ class NemotronTaskSession:
         action = final_answer_text(turn.text)
         message = {**turn.message, "content": action}
         diagnostics = {"agent": self.agent}
+        if self.agent == NS_TOOLS_AGENT and turn.stop_reason == LENGTH_STOP_REASON and message.get("tool_calls"):
+            grade = GradeResult(Outcome.UNAVAILABLE, None, "The model stopped within a tool call")
+            self.grades.append(grade)
+            return Transition(done=True, reward=0.0, grade=grade)
         try:
             transition = await self._advance(action, message, diagnostics)
         except (requests.RequestException, RuntimeError, ValueError, OSError) as error:
@@ -193,7 +199,7 @@ class NemotronTaskSession:
             reward, details = await self._arc_grade(action)
             diagnostics.update(details)
         else:
-            reward, details = await run_blocking(self.executor, self._answer_grade, action, message)
+            reward, details = await self.blocking.run(self._answer_grade, action, message)
             diagnostics.update(details)
         if diagnostics.get("error_type") in {"schema_error", "verification_error"} or any(
             diagnostics.get("instruction_errors", [])
@@ -355,7 +361,7 @@ class NemotronTaskSession:
         output = await compile_lean(
             self.machine,
             proof,
-            project=self.task.environment.workdir,
+            project=self.task.environment_requirements.working_directory,
             timeout=float(self.config.get("lean_timeout", 30.0)),
         )
         status = determine_proof_status(output)
@@ -419,5 +425,8 @@ class NemotronTaskSession:
         return fold_grades(self.grades)
 
     async def close(self) -> None:
-        if self.python is not None:
-            await self.python.close()
+        try:
+            await self.blocking.close()
+        finally:
+            if self.python is not None:
+                await self.python.close()

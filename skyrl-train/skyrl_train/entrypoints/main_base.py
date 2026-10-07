@@ -9,7 +9,7 @@ from collections.abc import Callable, Mapping
 
 from rolloutengine.contracts import TaskSession
 from shellbox.machine import Machine
-from taskcompendium.models import TaskSpec
+from rolloutengine.spec import LoweredTaskSpec
 
 from ray.util.placement_group import placement_group, PlacementGroup
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
@@ -277,7 +277,7 @@ class BasePPOExp:
         self,
         cfg: DictConfig,
         *,
-        sessions: Mapping[str, Callable[[TaskSpec, Machine | None], TaskSession]] | None = None,
+        sessions: Mapping[str, Callable[[LoweredTaskSpec, Machine | None], TaskSession]] | None = None,
     ):
         """
         Initializes a PPO experiment.

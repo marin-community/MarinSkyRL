@@ -2,7 +2,7 @@
 
 import pytest
 from shellbox.machine import ExitReason
-from taskcompendium.environment import EnvironmentKind, EnvironmentSpec
+from taskcompendium.models import EnvironmentRequirements
 from taskcompendium.grading_result import Outcome
 
 from skyrl_gym.lean_execution import compile_lean
@@ -24,7 +24,7 @@ async def test_lean_session_retains_compiler_status_and_correction(
     session = await nemotron_session(
         "math_formal_lean_refinement_agent",
         {"header": "import Mathlib\n", "formal_statement": "example : True := by\n"},
-        environment=EnvironmentSpec(kind=EnvironmentKind.SHELLSIM, workdir=lean_compiler),
+        environment=EnvironmentRequirements(working_directory=lean_compiler),
     )
     result = await session.advance(model_turn(f"```lean4\nby\n  {proof}\n```"))
     assert result.metrics["proof_status"] == status
@@ -58,7 +58,7 @@ async def test_lean_session_keeps_the_source_theorem_and_replaces_its_placeholde
     session = await nemotron_session(
         "math_formal_lean_refinement_agent",
         {"header": "import Mathlib\n", "formal_statement": "example : True := by sorry"},
-        environment=EnvironmentSpec(kind=EnvironmentKind.SHELLSIM, workdir=lean_compiler),
+        environment=EnvironmentRequirements(working_directory=lean_compiler),
     )
     result = await session.advance(model_turn(generation))
     assert result.metrics["predicted_proof"] == "import Mathlib\nexample : True := " + expected
@@ -78,7 +78,7 @@ async def test_lean_truncated_diagnostics_cannot_be_a_success(nemotron_session, 
     session = await nemotron_session(
         "math_formal_lean_refinement_agent",
         {"header": "", "formal_statement": "example : True := by\n"},
-        environment=EnvironmentSpec(kind=EnvironmentKind.SHELLSIM, workdir=lean_compiler),
+        environment=EnvironmentRequirements(working_directory=lean_compiler),
     )
     result = await session.advance(model_turn("truncated_output"))
     assert result.done and result.grade.status is Outcome.INFRA_ERROR
@@ -90,7 +90,7 @@ async def test_lean_missing_toolchain_is_an_infrastructure_failure(nemotron_sess
     session = await nemotron_session(
         "math_formal_lean_refinement_agent",
         {"header": "", "formal_statement": "example : True := by\n"},
-        environment=EnvironmentSpec(kind=EnvironmentKind.SHELLSIM, workdir=str(machine.path("/missing-project"))),
+        environment=EnvironmentRequirements(working_directory=str(machine.path("/missing-project"))),
     )
     result = await session.advance(model_turn("trivial"))
     assert result.done and result.grade.status is Outcome.INFRA_ERROR

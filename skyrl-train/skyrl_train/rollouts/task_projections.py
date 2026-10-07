@@ -288,7 +288,7 @@ def _task_error_policies(
     if harbor is None:
         return [default] * len(request["prompts"])
     return [
-        harbor if "harbor" in json.loads(extras["task_spec"])["metadata"] else default
+        harbor if "harbor" in json.loads(extras["lowered_task_spec"])["task"]["tags"] else default
         for extras in request["env_extras"]
     ]
 

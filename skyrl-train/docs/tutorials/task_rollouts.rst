@@ -2,10 +2,10 @@ Canonical task rollouts
 =======================
 
 ``TaskRolloutWorker`` runs TaskCompendium tasks through Marin's ``ShellboxRolloutEngine``.
-The engine owns model calls, conversation and exact-token accumulation, stage progression, and resource cleanup.
+The engine owns model calls, conversation and exact-token accumulation, deadlines, and resource cleanup.
 The worker controls concurrency, retries, group grading, and training projections.
 
-``ShellboxRolloutEngine.run(task, execution=...)`` asynchronously executes one task. The worker
+``ShellboxRolloutEngine.run(lowered)`` asynchronously executes one task. The worker
 starts one coroutine for each task, and inference runs on the worker's event
 loop. Synchronous graders use a separate executor. Shellbox commands use asynchronous machine operations.
 ``trajectory_runner.max_concurrent_tasks`` limits active task coroutines.
@@ -15,9 +15,9 @@ If that setting is absent, the concurrency limit uses
 Task and environment operations
 -------------------------------
 
-A task Parquet file contains one serialized ``TaskSpec`` per row in the
-``task_spec`` column. A task declares its public conversation, executable
-environment, and private grading inputs.
+A task Parquet file contains one serialized ``LoweredTaskSpec`` per row in the
+``lowered_task_spec`` column. The record preserves a ``TaskSpec`` and adds machine selections and session limits.
+The task declares public context, tools, private grading inputs, resources, and environment requirements.
 
 ``skyrl_train.entrypoints.main_base`` converts source rows through
 ``SourceTaskDataset`` with Hugging Face ``Dataset.map``.
@@ -29,11 +29,11 @@ The `SWE example <../../examples/mini_swe_agent/README.md>`_ uses this entrypoin
 directories and packed sources through ``HarborTaskDataset`` and uses the same worker.
 Harbor caches private task Parquet in ``data.task_cache_dir``.
 Explicit exports use ``skyrl_train.dataset.tasks.write_tasks(Path(...), records)``.
-Each ``TaskRecord`` pairs a ``TaskSpec`` with separate ``TaskExecution`` settings.
-The ``task_execution`` column stores deadlines, agent users, and stage preparation.
-Task-only datasets can omit this column. Their execution settings have no time limits.
-Staged tasks require an execution record with one entry for every stage.
-The worker rejects a missing or unknown stage entry before inference.
+``LoweredTaskSpec.runtime`` selects optional task and verifier machines through ``MachineRuntimeSpec``.
+Each machine selection supplies a configured backend identifier, network policy, hardware limits, user, and startup or cleanup deadline.
+``LoweredTaskSpec.session`` supplies the session factory identifier, turn limit, model and tool caps, cumulative turn deadline, attempt deadline, and verifier deadline.
+Its cleanup deadline requires an explicit finite, positive value.
+Tasks support one stage and prebuilt, digest-pinned images. Multi-stage packages and task-specific image builds cause rejection.
 TaskCompendium defines task serialization. SkyRL owns its dataset file format.
 With ``data.terminal_bench_data``, ``skyrl_train.entrypoints.main_base`` prepares mixed Nemotron
 rows through ``NemotronTaskDataset``. Terminal rows contain the executable task and its execution settings.
@@ -48,8 +48,17 @@ The worker supplies explicit factories from ``skyrl_gym/task_factories.py``.
 Each factory creates a direct implementation of Marin's ``TaskSession`` protocol.
 The session prepares the task, executes model actions, returns observations, and grades the result.
 The engine creates its Shellbox machine and closes the session before the machine.
-Pure answer graders use null environments and do not create a machine.
+Pure answer graders use ``runtime.task_machine=None`` and do not create a machine.
 Each session returns its initial messages and model options in ``SessionStart``.
+
+``environment.task_sessions.session`` supplies launch-time session limits.
+Source-specific ``session`` blocks override those limits.
+Harbor lowering uses package machine settings, users, total-turn deadlines, and verifier deadlines.
+Other Harbor session limits come from launch configuration.
+The attempt deadline includes startup, preparation, all turns, and final verification.
+The cumulative turn deadline excludes preparation and final verification.
+The verifier deadline includes artifact transfer and separate verifier startup.
+Cleanup runs outside the attempt deadline. Machine cleanup can override the session cleanup limit.
 
 Exact tokens
 ------------
@@ -66,7 +75,8 @@ Sessions cannot replace sampled actions with different text.
 Token-contract violations abort the prompt group.
 
 One transition follows each model response, including the final response.
-The engine uses ``generator.max_turns`` unless Harbor supplies its own turn limit.
+The engine uses each lowered record's ``session.max_turns``.
+Source conversion derives that limit from ``generator.max_turns``. The worker applies ``harbor.max_turns`` to Harbor tasks.
 A session can finish earlier.
 ``generator.engine_init_kwargs.max_model_len`` sets the model context limit when
 configured. Each response fits the space after the exact rendered prompt.
@@ -87,7 +97,7 @@ Step projection uses each turn's reward, with the task grade on the last turn wh
 A verifier result without a grade excludes tokens from loss and baseline calculations.
 Recorded execution failures use the exception policy, with zero optimization reward when no grade is available. Explicitly
 skipped grading retains trainable tokens with zero reward.
-``harbor.verifier_disable=true`` skips grading for Harbor tasks, including all their stages.
+``harbor.verifier_disable=true`` skips grading for Harbor tasks.
 Nemotron GenRM tasks use a judge model to compare a group of responses against
 a private grading principle. Configure that judge in
 ``environment.task_sessions.nemotron_ultra.genrm``.
@@ -114,10 +124,11 @@ When that setting requests log probabilities, recovery requires one log probabil
 ``TaskRolloutWorker.run_task`` projects and finalizes a completed prompt group before one
 buffer write. A failed group cannot commit partial results.
 ``environment.task_sessions.max_verifier_workers`` limits verifier threads per worker.
-Cancellation waits for active verifier threads before resource cleanup.
-Synchronous HTTP operations must finish before cancellation releases their resources.
+Cancellation returns control to the engine without an unbounded wait for active verifier threads.
+Session cleanup retains pending thread operations before it releases their resources.
+The cleanup deadline bounds the caller's wait. Unfinished cleanup remains owned until it completes.
 The search task's HTTP client can use ten attempts, each with ``environment.task_sessions.search.timeout``, plus 45 seconds of retry delays.
-Cancellation can wait for these attempts.
+Those attempts can continue in retained cleanup after a task deadline expires.
 The worker returns after the buffer commit.
 
 Rollout telemetry records collection, backend tokenization, batch assembly,

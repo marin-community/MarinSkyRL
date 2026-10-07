@@ -19,6 +19,14 @@ terminal state, rewards, and grading results. The engine owns model inference an
 
 .. autoclass:: taskcompendium.models.TaskSpec
 
-.. autoclass:: taskcompendium.environment.EnvironmentSpec
+.. autoclass:: taskcompendium.models.EnvironmentRequirements
 
-.. autoclass:: taskcompendium.environment.ExternalVerifierSpec
+.. autoclass:: rolloutengine.spec.MachineRuntimeSpec
+
+.. autoclass:: rolloutengine.spec.TaskRuntimeSpec
+
+.. autoclass:: rolloutengine.spec.TaskSessionSpec
+
+.. autoclass:: rolloutengine.spec.LoweredTaskSpec
+
+.. autoclass:: taskcompendium.importers.skyrl.ExternalVerifierSpec

@@ -11,9 +11,9 @@ from typing import Any
 
 from rolloutengine.contracts import ModelTurn, SessionStart, Transition
 from shellbox.machine import ExitReason, Machine
-from taskcompendium.environment import ExternalVerifierSpec
+from taskcompendium.importers.skyrl import ExternalVerifierSpec
 from taskcompendium.grading_result import GradeResult, Outcome
-from taskcompendium.models import TaskSpec
+from rolloutengine.spec import LoweredTaskSpec
 from taskcompendium.submission import conversation_messages
 
 from skyrl_gym.answer_tasks import ground_truth
@@ -34,22 +34,40 @@ AnswerGrader = Callable[[ModelTurn, dict[str, Any], dict[str, Any]], Transition]
 logger = logging.getLogger(__name__)
 
 
-async def run_blocking[T](executor: Executor | None, operation: Callable[..., T], *args: Any, **kwargs: Any) -> T:
-    """Let a started thread operation finish before cancellation releases its resources."""
-    pending = asyncio.get_running_loop().run_in_executor(executor, partial(operation, *args, **kwargs))
-    try:
-        return await asyncio.shield(pending)
-    except asyncio.CancelledError as cancellation:
-        while not pending.done():
-            try:
-                await asyncio.shield(pending)
-            except asyncio.CancelledError:
-                continue
-            except Exception as error:
-                raise cancellation from error
-        if error := pending.exception():
-            raise cancellation from error
-        raise
+class BlockingOperations:
+    """Keep cancelled thread operations until session cleanup can release their resources."""
+
+    def __init__(self, executor: Executor | None):
+        self.executor = executor
+        self.pending: set[asyncio.Future[Any]] = set()
+
+    async def run[T](self, operation: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+        pending = asyncio.get_running_loop().run_in_executor(self.executor, partial(operation, *args, **kwargs))
+        self.pending.add(pending)
+        try:
+            return await asyncio.shield(pending)
+        finally:
+            if pending.done():
+                self.pending.discard(pending)
+
+    async def close(self) -> None:
+        cancellation = None
+        failure = None
+        for pending in tuple(self.pending):
+            while not pending.done():
+                try:
+                    await asyncio.shield(pending)
+                except asyncio.CancelledError as error:
+                    cancellation = error
+                except Exception as error:
+                    failure = error
+            if not pending.cancelled() and (error := pending.exception()) is not None:
+                failure = error
+            self.pending.discard(pending)
+        if cancellation is not None:
+            raise cancellation from failure
+        if failure is not None:
+            raise failure
 
 
 class AnswerTaskSession:
@@ -57,25 +75,26 @@ class AnswerTaskSession:
 
     def __init__(
         self,
-        task: TaskSpec,
+        lowered: LoweredTaskSpec,
         machine: Machine | None,
         *,
         grader: AnswerGrader,
         executor: Executor | None = None,
     ):
+        task = lowered.task
         self.task = task
         specification = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
         self.config = specification.parameters["config"]
         self.extras = specification.parameters["extras"]
         self.grader = grader
-        self.executor = executor
+        self.blocking = BlockingOperations(executor)
         self.result = GradeResult(Outcome.UNAVAILABLE, None, "The task has no completed turn")
 
     async def prepare(self) -> SessionStart:
         return SessionStart(tuple(conversation_messages(self.task.context)), {})
 
     async def advance(self, turn: ModelTurn) -> Transition:
-        transition = await run_blocking(self.executor, self.grader, turn, self.config, self.extras)
+        transition = await self.blocking.run(self.grader, turn, self.config, self.extras)
         assert transition.done and transition.grade is not None
         self.result = transition.grade
         return transition
@@ -84,17 +103,18 @@ class AnswerTaskSession:
         return self.result
 
     async def close(self) -> None:
-        pass
+        await self.blocking.close()
 
 
 class MathTaskSession:
     """Return per-turn math rewards and correction prompts until success or the turn limit."""
 
-    def __init__(self, task: TaskSpec, machine: Machine | None, *, max_turns: int):
+    def __init__(self, lowered: LoweredTaskSpec, machine: Machine | None):
+        task = lowered.task
         specification = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
         self.task = task
         self.expected = ground_truth(specification.parameters["extras"])
-        self.max_turns = max_turns
+        self.max_turns = lowered.session.max_turns
         self.grades: list[GradeResult] = []
 
     async def prepare(self) -> SessionStart:
@@ -129,13 +149,14 @@ class MathTaskSession:
 class SearchTaskSession:
     """Execute search actions and grade the task transcript on completion."""
 
-    def __init__(self, task: TaskSpec, machine: Machine | None, *, max_turns: int, executor: Executor | None = None):
+    def __init__(self, lowered: LoweredTaskSpec, machine: Machine | None, *, executor: Executor | None = None):
+        task = lowered.task
         specification = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
         config = specification.parameters["config"]
         self.task = task
         self.expected = ground_truth(specification.parameters["extras"])
-        self.max_turns = max_turns
-        self.executor = executor
+        self.max_turns = lowered.session.max_turns
+        self.blocking = BlockingOperations(executor)
         self.tool = SearchClient(**{key: config[key] for key in ("search_url", "topk", "timeout", "log_requests")})
         self.transcript: list[str] = []
         self.grades: list[GradeResult] = []
@@ -156,7 +177,7 @@ class SearchTaskSession:
             return Transition(done=True, reward=reward, grade=grade)
         match = re.search(r"<search>(.*?)</search>", turn.text, re.DOTALL)
         query = match.group(1) if match else None
-        output = await run_blocking(self.executor, self.tool.search, query)
+        output = await self.blocking.run(self.tool.search, query)
         observation = "\n<information>" + output + "</information>\n"
         self.transcript.append(observation)
         return Transition(
@@ -171,13 +192,17 @@ class SearchTaskSession:
         return fold_grades(self.grades)
 
     async def close(self) -> None:
-        await run_blocking(self.executor, self.tool.close)
+        try:
+            await self.blocking.close()
+        finally:
+            self.tool.close()
 
 
 class CodeTaskSession:
     """Grade one candidate program in Shellbox, with hidden test outputs on the worker."""
 
-    def __init__(self, task: TaskSpec, machine: Machine | None):
+    def __init__(self, lowered: LoweredTaskSpec, machine: Machine | None):
+        task = lowered.task
         specification = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
         self.task = task
         self.machine = machine
@@ -234,13 +259,14 @@ class SearchCodeTaskSession:
     Each Python action receives a fresh namespace.
     """
 
-    def __init__(self, task: TaskSpec, machine: Machine | None, *, max_turns: int, executor: Executor | None = None):
+    def __init__(self, lowered: LoweredTaskSpec, machine: Machine | None, *, executor: Executor | None = None):
+        task = lowered.task
         assert machine is not None
         specification = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
         self.task = task
         self.expected = ground_truth(specification.parameters["extras"])
-        self.max_turns = max_turns
-        self.executor = executor
+        self.max_turns = lowered.session.max_turns
+        self.blocking = BlockingOperations(executor)
         self.search = SearchClient(**specification.parameters["config"].get("search", {}))
         self.python = PythonKernel(machine)
         self.transcript: list[str] = []
@@ -263,7 +289,7 @@ class SearchCodeTaskSession:
         if tool is None:
             output = "No valid tool block found in action string."
         elif tool.group(1) == "search":
-            output = await run_blocking(self.executor, self.search.search, tool.group(2).strip())
+            output = await self.blocking.run(self.search.search, tool.group(2).strip())
         elif tool.group(1) == "python":
             result = await self.python.execute("exec(" + repr(tool.group(2).strip()) + ", {})", timeout=10)
             if result.reason == ExitReason.TIMED_OUT:
@@ -287,6 +313,9 @@ class SearchCodeTaskSession:
 
     async def close(self) -> None:
         try:
-            await self.python.close()
+            await self.blocking.close()
         finally:
-            await run_blocking(self.executor, self.search.close)
+            try:
+                await self.python.close()
+            finally:
+                self.search.close()

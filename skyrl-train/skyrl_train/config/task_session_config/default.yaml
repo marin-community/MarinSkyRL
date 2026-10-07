@@ -1,18 +1,30 @@
 # @package environment.task_sessions
 max_verifier_workers: 32 # verifier threads in each rollout worker
 
+session:
+  max_turns: ${generator.max_turns}
+  model_turn_timeout: null
+  tool_turn_timeout: ${trajectory_runner.command_timeout}
+  total_turn_timeout: null
+  attempt_timeout: null
+  verifier_timeout: null
+  cleanup_timeout: ${trajectory_runner.cleanup_timeout}
+
 lcb:
   machine: &python_machine
-    kind: docker
-    image:
-      kind: build
-      files:
-        - path: /Dockerfile
-          # TaskCompendium file content uses base64 in serialized configuration.
-          content: RlJPTSBweXRob246My4xMi4xNS1zbGltClJVTiBwaXAgaW5zdGFsbCAtLW5vLWNhY2hlLWRpciBpcHl0aG9uPT05LjYuMCBudW1weT09Mi4yLjYgcGFuZGFzPT0yLjMuMCBzeW1weT09MS4xNC4wCldPUktESVIgL3dvcmtzcGFjZQo=
-    network: false
-    memory_mb: 8192
-    cpus: 1
+    requirements:
+      docker_image: us-east1-docker.pkg.dev/hai-gcp-models/marin/nemo-skills-sandbox@sha256:280e0871b02f5dc935c1b3fdfbf75c394cceb087a0a284b13918aeb22e10b104
+      working_directory: /workspace
+    runtime: &python_runtime
+      backend: docker
+      network: deny
+      memory_mb: 8192
+      cpus: 1
+      storage_mb: null
+      gpus: 0
+      user: null
+      startup_timeout: 600
+      cleanup_timeout: null
 
 searchcode:
   machine: *python_machine
@@ -50,14 +62,10 @@ nemotron_ultra:
     code_gen_simple_agent: *python_machine
     nvarc_inductive_simple_agent: *python_machine
     math_formal_lean_refinement_agent:
-      kind: docker
-      image:
-        kind: registry
-        reference: us-east1-docker.pkg.dev/hai-gcp-models/marin/nemo-skills-sandbox@sha256:280e0871b02f5dc935c1b3fdfbf75c394cceb087a0a284b13918aeb22e10b104
-      workdir: /lean4/my_project
-      network: false
-      memory_mb: 8192
-      cpus: 1
+      requirements:
+        docker_image: us-east1-docker.pkg.dev/hai-gcp-models/marin/nemo-skills-sandbox@sha256:280e0871b02f5dc935c1b3fdfbf75c394cceb087a0a284b13918aeb22e10b104
+        working_directory: /lean4/my_project
+      runtime: *python_runtime
   lean_timeout: 30.0
   # Kernel bounds for code_gen_simple_agent. max_memory_bytes limits the
   # interpreter address space and data size. total_timeout_seconds limits the

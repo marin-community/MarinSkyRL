@@ -19,15 +19,11 @@ from omegaconf import OmegaConf
 from skyrl_gym.task_records import fold_grades, grade_result
 from skyrl_gym.task_sessions import AnswerTaskSession
 from skyrl_gym.verification import VerificationResult, VerificationStatus, normalized_verifier_score
-from taskcompendium.grading import numeric_answer, skipped_verifier
+from taskcompendium.grading import numeric_answer
 from taskcompendium.grading_result import GradeResult, Outcome
-from taskcompendium.execution import StageExecution, TaskExecution
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
-from shellbox.image import DockerfileSource
 from shellbox.machine import Command, ExitReason, Result, ShellSimBuiltins
-from taskcompendium.environment import (
-    EnvironmentKind,
-    EnvironmentSpec,
+from taskcompendium.shell_verifier import (
     ExitCodeReward,
     FileReward,
     RewardFile,
@@ -38,13 +34,9 @@ from taskcompendium.models import (
     AnswerType,
     ConversationInput,
     Source,
-    StageRewardStrategy,
-    StageVerifierSpec,
     EnvironmentRequirements,
     TaskSpec,
-    TaskStage,
     TextMessage,
-    VerifierKind,
     VerifierSpec,
 )
 
@@ -59,6 +51,9 @@ from skyrl_train.rollouts.group_grader import GenRMGroupGraderParameters, GroupG
 from skyrl_train.rollouts.genrm_grading import grade_genrm_rollouts
 from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
 from taskcompendium.importers.skyrl import source_task
+from rolloutengine.spec import LoweredTaskSpec
+from skyrl_train.config.utils import get_default_config
+from tests.cpu.task_specs import lowered_task, machine_runtime, session_spec
 from rolloutengine.contracts import ModelTurn, RolloutContractError, RolloutData, RolloutStep, SessionStart, Transition
 from skyrl_train.trajectory_runners.types import BatchMetadata, TokenProvenance, TrajectoryID
 from skyrl_train.trajectory_runners.model_clients import DirectModelClient, ModelServerError
@@ -103,12 +98,11 @@ async def test_session_verifier_failures_reach_training_eligibility(
     config, request = task_inputs
     task = source_task(
         request["prompts"][0],
-        "verifier",
         {},
         {},
         Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
     )
-    request["env_extras"] = [{"task_spec": task.model_dump_json()}]
+    request["env_extras"] = [{"lowered_task_spec": lowered_task(task, "verifier").model_dump_json()}]
     request["env_classes"] = ["verifier"]
     projection = (
         WholeTrajectoryProjection if projection_type is WholeTaskProjection else StepWiseTrajectoryProjection
@@ -118,8 +112,6 @@ async def test_session_verifier_failures_reach_training_eligibility(
         projection_type(projection),
         InferenceClient(),
         {},
-        command_timeout=5,
-        cleanup_timeout=5,
         sessions={"verifier": partial(AnswerTaskSession, grader=grader)},
     )
     writer = Writer()
@@ -160,7 +152,6 @@ async def test_corrupt_source_task_is_masked_without_losing_its_graded_peer(
     config, original = task_inputs
     failed = source_task(
         original["prompts"][0],
-        session,
         {"reward_spec": {"ground_truth": "not JSON"}, "reward_model": {"ground_truth": "not JSON"}},
         {},
         Source(dataset="corrupt", revision="1", row="0", importer_revision="1"),
@@ -169,7 +160,10 @@ async def test_corrupt_source_task_is_masked_without_losing_its_graded_peer(
         **original,
         "prompts": original["prompts"] * 2,
         "env_classes": [session, "taskcompendium"],
-        "env_extras": [{"task_spec": failed.model_dump_json(), "teacher_route": "corrupt"}, original["env_extras"][0]],
+        "env_extras": [
+            {"lowered_task_spec": lowered_task(failed, session).model_dump_json(), "teacher_route": "corrupt"},
+            original["env_extras"][0],
+        ],
         "trajectory_ids": [TrajectoryID("corrupt", 0), TrajectoryID("arithmetic", 0)],
     }
     projection = (
@@ -180,8 +174,6 @@ async def test_corrupt_source_task_is_masked_without_losing_its_graded_peer(
         projection_type(projection),
         InferenceClient(),
         {},
-        command_timeout=5,
-        cleanup_timeout=5,
     )
     writer = Writer()
     try:
@@ -205,13 +197,13 @@ async def test_corrupt_source_task_is_masked_without_losing_its_graded_peer(
 @pytest.mark.parametrize("projection_type", [WholeTaskProjection, StepTaskProjection])
 async def test_one_machine_cleanup_failure_does_not_abort_the_buffer_group(task_inputs, projection_type):
     config, original = task_inputs
-    task = TaskSpec.model_validate_json(original["env_extras"][0]["task_spec"])
-    task = task.model_copy(update={"environment": EnvironmentSpec(kind=EnvironmentKind.SHELLSIM)})
+    task = LoweredTaskSpec.model_validate_json(original["env_extras"][0]["lowered_task_spec"]).task
+    task = task.model_copy()
     request = {
         **original,
         "prompts": original["prompts"] * 2,
         "env_classes": original["env_classes"] * 2,
-        "env_extras": [{"task_spec": task.model_dump_json()}] * 2,
+        "env_extras": [{"lowered_task_spec": lowered_task(task, "shellbox", backend="shellsim").model_dump_json()}] * 2,
         "trajectory_ids": [TrajectoryID("arithmetic", 0), TrajectoryID("arithmetic", 1)],
     }
     machines = []
@@ -246,9 +238,7 @@ async def test_one_machine_cleanup_failure_does_not_abort_the_buffer_group(task_
         config,
         projection_type(projection),
         InferenceClient(),
-        {EnvironmentKind.SHELLSIM: Factory()},
-        command_timeout=5,
-        cleanup_timeout=5,
+        {"shellsim": Factory()},
     )
     writer = Writer()
     try:
@@ -276,7 +266,7 @@ def task_inputs():
         context=ConversationInput(events=(TextMessage(role="user", content="What is six plus six?"),)),
         environment_requirements=EnvironmentRequirements(),
         answer_type=AnswerType.NUMBER,
-        verifier=numeric_answer(12, tolerance_abs=0, tolerance_rel=0),
+        verifier=numeric_answer("12", tolerance_abs=0, tolerance_rel=0),
         source=Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
     )
     config = OmegaConf.create(
@@ -299,7 +289,11 @@ def task_inputs():
         "prompts": [[{"role": "user", "content": "What is six plus six?"}]],
         "env_classes": ["taskcompendium"],
         "env_extras": [
-            {"task_spec": task.model_dump_json(), "teacher_route": "arithmetic", "data_source": "arithmetic"}
+            {
+                "lowered_task_spec": lowered_task(task, "shellbox").model_dump_json(),
+                "teacher_route": "arithmetic",
+                "data_source": "arithmetic",
+            }
         ],
         "trajectory_ids": [TrajectoryID("arithmetic", 0)],
         "sampling_params": None,
@@ -323,8 +317,6 @@ async def test_task_replay_preserves_inference_session(task_inputs):
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         Client(),
         {},
-        command_timeout=5,
-        cleanup_timeout=5,
     )
     try:
         await worker.generate(request)
@@ -354,8 +346,6 @@ async def test_task_grade_and_exact_tokens_reach_the_leased_buffer(task_inputs, 
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         Client(),
         {},
-        command_timeout=5,
-        cleanup_timeout=5,
     )
     lease = RolloutLease("lease", policy_step=7, batch_id=8)
     writer = Writer()
@@ -392,7 +382,7 @@ async def test_task_grade_and_exact_tokens_reach_the_leased_buffer(task_inputs, 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("projection_type", [WholeTaskProjection, StepTaskProjection])
 @pytest.mark.parametrize("timeout_phase", ["model", "advance"])
-@pytest.mark.parametrize("deadline_source", ["task", "train", "eval", "stage", "inherited_stage"])
+@pytest.mark.parametrize("deadline_source", ["task", "train", "eval"])
 async def test_agent_deadlines_grade_the_workspace_and_commit_training_tokens(
     task_inputs, projection_type, timeout_phase, deadline_source
 ):
@@ -406,20 +396,18 @@ async def test_agent_deadlines_grade_the_workspace_and_commit_training_tokens(
         id="deadline",
         context=ConversationInput(events=(TextMessage(role="user", content="Write the answer file."),)),
         environment_requirements=EnvironmentRequirements(),
-        environment=EnvironmentSpec(kind=EnvironmentKind.SHELLSIM),
         answer_type=AnswerType.FILE,
         verifier=VerifierSpec(
-            kind=VerifierKind.SHELL,
+            kind="shell",
             parameters_json=ShellVerifierSpec(
-                argv=("test", "-f", "/workspace/answer"), timeout=5, reward=ExitCodeReward()
+                argv=("test", "-f", "/workspace/answer"), reward=ExitCodeReward()
             ).model_dump_json(),
         ),
         source=Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
     )
-    execution = TaskExecution(agent_timeout=1)
     settings = None
     if deadline_source != "task":
-        task = task.model_copy(update={"metadata": {"harbor": {}}})
+        task = task.model_copy(update={"tags": ("harbor",)})
         settings = HarborTaskSettings.from_config(
             OmegaConf.create(
                 {
@@ -434,36 +422,8 @@ async def test_agent_deadlines_grade_the_workspace_and_commit_training_tokens(
             )
         )
         request["batch_metadata"] = BatchMetadata(0, "eval" if deadline_source == "eval" else "train")
-        execution = TaskExecution()
-    if deadline_source in {"stage", "inherited_stage"}:
-        task = task.model_copy(
-            update={
-                "verifier": VerifierSpec(
-                    kind=VerifierKind.STAGED,
-                    parameters_json=StageVerifierSpec(strategy=StageRewardStrategy.FINAL).model_dump_json(),
-                ),
-                "stages": (
-                    TaskStage(name="write", verifier=task.verifier),
-                    TaskStage(
-                        name="unreached",
-                        context=ConversationInput(events=(TextMessage(role="user", content="Continue."),)),
-                        verifier=task.verifier,
-                    ),
-                ),
-            }
-        )
-        execution = TaskExecution(
-            agent_timeout=1 if deadline_source == "inherited_stage" else None,
-            stages={
-                "write": StageExecution(agent_timeout=1 if deadline_source == "stage" else None),
-                "unreached": StageExecution(),
-            },
-        )
     request["env_extras"] = [
-        {
-            "task_spec": task.model_dump_json(),
-            "task_execution": execution.model_dump_json(),
-        }
+        {"lowered_task_spec": lowered_task(task, backend="shellsim", total_turn_timeout=1).model_dump_json()}
     ]
     machines = []
 
@@ -522,9 +482,7 @@ async def test_agent_deadlines_grade_the_workspace_and_commit_training_tokens(
         config,
         projection_type(projection),
         Client(),
-        {EnvironmentKind.SHELLSIM: Factory()},
-        command_timeout=5,
-        cleanup_timeout=5,
+        {"shellsim": Factory()},
         harbor=settings,
     )
     writer = Writer()
@@ -535,7 +493,7 @@ async def test_agent_deadlines_grade_the_workspace_and_commit_training_tokens(
     np.testing.assert_allclose(batch["rollout_logprobs"], [[-0.1, -0.2]])
     assert batch["unshaped_rewards"] == [1.0]
     assert batch["exclude_from_baseline"] == [False]
-    assert batch["stop_reasons"] == ["agent_timeout"]
+    assert batch["stop_reasons"] == ["total_turn_timeout"]
     assert not batch.get("exception_types")
     for machine in machines:
         with pytest.raises(RuntimeError, match="closed"):
@@ -567,8 +525,6 @@ async def test_model_failure_does_not_commit_a_partial_group(task_inputs):
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         FailedClient(),
         {},
-        command_timeout=5,
-        cleanup_timeout=5,
     )
     with pytest.raises(ExceptionGroup) as failure:
         await runner.run_task(RolloutTask(RolloutLease("lease", 0, 1), {"uid": "task"}, request), writer)
@@ -606,133 +562,56 @@ class ConversationClient:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("staged", [False, True])
 @pytest.mark.parametrize("phase", ["train", "eval"])
 @pytest.mark.parametrize("projection_type", [WholeTaskProjection, StepTaskProjection])
-async def test_disabled_harbor_verification_keeps_stage_tokens_without_a_score(
-    task_inputs, staged, phase, projection_type
-):
+async def test_disabled_harbor_verification_keeps_tokens_without_a_score(task_inputs, phase, projection_type):
     config, request = task_inputs
-    task = TaskSpec.model_validate_json(request["env_extras"][0]["task_spec"])
-    broken = VerifierSpec(
-        kind=VerifierKind.SHELL,
-        parameters_json=ShellVerifierSpec(argv=("false",), timeout=5).model_dump_json(),
-    )
-    task = task.model_copy(
-        update={
-            "environment": EnvironmentSpec(kind=EnvironmentKind.SHELLSIM),
-            "metadata": {"harbor": {}},
-            "verifier": VerifierSpec(
-                kind=VerifierKind.STAGED,
-                parameters_json=StageVerifierSpec(strategy=StageRewardStrategy.MEAN).model_dump_json(),
-            )
-            if staged
-            else broken,
-            "stages": (
-                TaskStage(name="first", verifier=broken, minimum_rewards={"reward": 1}),
-                TaskStage(
-                    name="second",
-                    verifier=broken,
-                    context=ConversationInput(events=(TextMessage(role="user", content="Continue."),)),
-                ),
-            )
-            if staged
-            else (),
-        }
-    )
-    request["env_extras"][0]["task_spec"] = task.model_dump_json()
-    request["batch_metadata"] = BatchMetadata(0, phase)
-    request["env_extras"][0]["task_execution"] = TaskExecution(
-        stages={stage.name: StageExecution() for stage in task.stages}
-    ).model_dump_json()
-    client = ConversationClient(["Done", "Done"] if staged else ["Done"])
+    task = LoweredTaskSpec.model_validate_json(request["env_extras"][0]["lowered_task_spec"]).task
     settings = HarborTaskSettings.from_config(OmegaConf.create({"harbor": {"verifier_disable": True}}))
+    task = task.model_copy(update={"tags": ("harbor",), "verifier": settings.verifier_override()})
+    request["env_extras"][0]["lowered_task_spec"] = lowered_task(task, backend="shellsim").model_dump_json()
+    request["batch_metadata"] = BatchMetadata(0, phase)
     projection = (
         WholeTrajectoryProjection if projection_type is WholeTaskProjection else StepWiseTrajectoryProjection
     )(config, Tokenizer())
     worker = TaskRolloutWorker(
         config,
         projection_type(projection),
-        client,
-        {EnvironmentKind.SHELLSIM: ShellSimMachineFactory()},
-        command_timeout=5,
-        cleanup_timeout=5,
+        ConversationClient(["Done"]),
+        {"shellsim": ShellSimMachineFactory()},
         harbor=settings,
     )
-    writer = Writer()
-    await worker.run_task(RolloutTask(RolloutLease("lease", 0, 1), {"uid": task.id}, request), writer)
-    batch = writer.groups[0][1].trajectory_batch
+    try:
+        batch = await worker.run(request)
+    finally:
+        await worker.shutdown()
     assert all(grade.status == VerificationStatus.SKIPPED for grade in batch["verification_results"])
-    assert batch["rollout_metrics"]["generate/task_rollout/tasks"] == 1
-    assert batch["rollout_metrics"]["generate/task_rollout/turns"] == (2 if staged else 1)
-    assert batch["rollout_metrics"]["generate/task_rollout/multi_turn_tasks"] == int(staged)
-    assert batch["rollout_metrics"]["generate/task_rollout/generated_tokens"] == (4 if staged else 2)
     assert all(grade.score is None for grade in batch["verification_results"])
-    if staged and projection_type is StepTaskProjection:
-        assert batch["response_ids"] == [[3, 4], [5, 6]]
-        assert batch["loss_masks"] == [[1, 1], [1, 1]]
-        np.testing.assert_allclose(batch["rollout_logprobs"], [[-0.1, -0.2], [-0.1, -0.2]])
-    else:
-        assert batch["response_ids"] == ([[3, 4, 90, 91, 5, 6]] if staged else [[3, 4]])
-        assert batch["loss_masks"] == ([[1, 1, 0, 0, 1, 1]] if staged else [[1, 1]])
-        np.testing.assert_allclose(
-            batch["rollout_logprobs"], ([[-0.1, -0.2, 0, 0, -0.1, -0.2]] if staged else [[-0.1, -0.2]])
-        )
+    assert batch["response_ids"] == [[3, 4]]
+    assert batch["loss_masks"] == [[1, 1]]
+    np.testing.assert_allclose(batch["rollout_logprobs"], [[-0.1, -0.2]])
+    assert batch["rollout_metrics"]["generate/task_rollout/turns"] == 1
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "failure_stage", ["startup", "model", "verifier", "staged_verifier", "attempt", "cancel", "cancel_model"]
-)
+@pytest.mark.parametrize("failure_stage", ["startup", "model", "verifier", "attempt", "cancel", "cancel_model"])
 async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected_result(task_inputs, failure_stage):
     config, request = task_inputs
-    task = TaskSpec.model_validate_json(request["env_extras"][0]["task_spec"])
+    task = LoweredTaskSpec.model_validate_json(request["env_extras"][0]["lowered_task_spec"]).task
     task = task.model_copy(
         update={
             "answer_type": AnswerType.STATE,
-            "environment": EnvironmentSpec(kind=EnvironmentKind.SHELLSIM),
-            "metadata": {"harbor": {}},
+            "tags": ("harbor",),
             "verifier": VerifierSpec(
-                kind=VerifierKind.SHELL,
+                kind="shell",
                 parameters_json=ShellVerifierSpec(
                     argv=("cat", "/workspace/reward"),
-                    timeout=5,
                 ).model_dump_json(),
             ),
         }
     )
-    if failure_stage == "staged_verifier":
-        task = task.model_copy(
-            update={
-                "verifier": VerifierSpec(
-                    kind=VerifierKind.STAGED,
-                    parameters_json=StageVerifierSpec(strategy=StageRewardStrategy.MEAN).model_dump_json(),
-                ),
-                "stages": (
-                    TaskStage(
-                        name="first",
-                        verifier=VerifierSpec(
-                            kind=VerifierKind.SHELL,
-                            parameters_json=ShellVerifierSpec(
-                                argv=("cat", "/workspace/first_reward"), timeout=5
-                            ).model_dump_json(),
-                        ),
-                    ),
-                    TaskStage(
-                        name="second",
-                        verifier=task.verifier,
-                        context=ConversationInput(
-                            events=(TextMessage(role="user", content="Complete the second stage."),)
-                        ),
-                    ),
-                ),
-            }
-        )
-    request["env_extras"][0]["task_spec"] = task.model_dump_json()
+    request["env_extras"][0]["lowered_task_spec"] = lowered_task(task, "shellbox", backend="shellsim").model_dump_json()
     attempts = 0
-    request["env_extras"][0]["task_execution"] = TaskExecution(
-        stages={stage.name: StageExecution() for stage in task.stages}
-    ).model_dump_json()
     machines = []
     waits = []
     backoff = asyncio.Event()
@@ -745,9 +624,7 @@ async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected
                 raise TimeoutError("Sandbox startup timed out")
             machine = await ShellSimMachineFactory().create(spec)
             machines.append(machine)
-            if failure_stage == "staged_verifier":
-                await machine.run(Command(("sh", "-c", f"echo {attempts / 3} > /workspace/first_reward")))
-            if failure_stage not in {"verifier", "staged_verifier", "cancel"} or attempts == 3:
+            if failure_stage not in {"verifier", "cancel"} or attempts == 3:
                 await machine.run(Command(("sh", "-c", "echo 1 > /workspace/reward")))
             return machine
 
@@ -824,9 +701,7 @@ async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected
         config,
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         Client(),
-        {EnvironmentKind.SHELLSIM: Factory()},
-        command_timeout=5,
-        cleanup_timeout=5,
+        {"shellsim": Factory()},
         harbor=settings,
         retry_wait=wait,
     )
@@ -856,7 +731,7 @@ async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected
     batch = writer.groups[0][1].trajectory_batch
     assert batch["unshaped_rewards"] == [1.0]
     assert batch["rollout_metrics"]["rollout_retries"] == 2
-    if failure_stage in {"model", "staged_verifier"}:
+    if failure_stage == "model":
         assert batch["response_ids"] == [[33, 34, 90, 91, 35, 36]]
         assert batch["loss_masks"] == [[1, 1, 0, 0, 1, 1]]
     else:
@@ -884,7 +759,7 @@ async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected
 )
 async def test_harbor_retry_policy_preserves_terminal_grades(task_inputs, phase, failure):
     config, request = task_inputs
-    task = TaskSpec.model_validate_json(request["env_extras"][0]["task_spec"])
+    task = LoweredTaskSpec.model_validate_json(request["env_extras"][0]["lowered_task_spec"]).task
     failing_command = {
         "missing": "true",
         "retry_missing": "true",
@@ -902,28 +777,31 @@ async def test_harbor_retry_policy_preserves_terminal_grades(task_inputs, phase,
     )
     verifier = ShellVerifierSpec(
         argv=("sh", "-c", script),
-        timeout=5,
         reward=FileReward(files=(RewardFile(path="/reward.txt", format=RewardFileFormat.NUMBER),)),
     )
     # A command failure without a reward file is a missing-reward failure.
     # Use stdout grading to exercise the retry limit for verifier execution errors.
     if failure == "exhausted":
-        verifier = ShellVerifierSpec(argv=("false",), timeout=5)
+        verifier = ShellVerifierSpec(argv=("false",))
     task = task.model_copy(
         update={
             "answer_type": AnswerType.STATE,
-            "environment": EnvironmentSpec(kind=EnvironmentKind.SHELLSIM),
-            "metadata": {"harbor": {}},
+            "tags": ("harbor",),
             "verifier": VerifierSpec(
-                kind=VerifierKind.SHELL,
+                kind="shell",
                 parameters_json=verifier.model_dump_json(),
-                environment=EnvironmentSpec(kind=EnvironmentKind.SHELLSIM)
+                environment_requirements=EnvironmentRequirements(working_directory="/workspace")
                 if failure.startswith("grade_timeout")
-                else None,
+                else EnvironmentRequirements(),
             ),
         }
     )
-    request["env_extras"][0]["task_spec"] = task.model_dump_json()
+    request["env_extras"][0]["lowered_task_spec"] = lowered_task(
+        task,
+        "shellbox",
+        backend="shellsim",
+        verifier_backend="shellsim" if failure.startswith("grade_timeout") else None,
+    ).model_dump_json()
     request["batch_metadata"] = BatchMetadata(0, phase)
     attempts = 0
     waits = []
@@ -986,9 +864,7 @@ async def test_harbor_retry_policy_preserves_terminal_grades(task_inputs, phase,
         config,
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         Client(),
-        {EnvironmentKind.SHELLSIM: Factory()},
-        command_timeout=5,
-        cleanup_timeout=5,
+        {"shellsim": Factory()},
         harbor=settings,
         retry_wait=wait,
     )
@@ -1017,21 +893,19 @@ async def test_harbor_retry_policy_preserves_terminal_grades(task_inputs, phase,
 @pytest.mark.parametrize("stop_reason,expected", [("stop", 1.3), ("length", 0.8)])
 async def test_harbor_completion_reward_uses_the_engine_stop_reason(task_inputs, stop_reason, expected):
     config, request = task_inputs
-    task = TaskSpec.model_validate_json(request["env_extras"][0]["task_spec"])
+    task = LoweredTaskSpec.model_validate_json(request["env_extras"][0]["lowered_task_spec"]).task
     verifier = ShellVerifierSpec(
         argv=("sh", "-c", "echo '===== 1 passed in 0.1s ====='; echo 1 > /reward.txt"),
-        timeout=5,
         reward=FileReward(files=(RewardFile(path="/reward.txt", format=RewardFileFormat.NUMBER),)),
     )
     task = task.model_copy(
         update={
             "answer_type": AnswerType.STATE,
-            "environment": EnvironmentSpec(kind=EnvironmentKind.SHELLSIM),
-            "metadata": {"harbor": {}},
-            "verifier": VerifierSpec(kind=VerifierKind.SHELL, parameters_json=verifier.model_dump_json()),
+            "tags": ("harbor",),
+            "verifier": VerifierSpec(kind="shell", parameters_json=verifier.model_dump_json()),
         }
     )
-    request["env_extras"][0]["task_spec"] = task.model_dump_json()
+    request["env_extras"][0]["lowered_task_spec"] = lowered_task(task, "shellbox", backend="shellsim").model_dump_json()
 
     class Client(InferenceClient):
         async def generate(self, request):
@@ -1055,9 +929,7 @@ async def test_harbor_completion_reward_uses_the_engine_stop_reason(task_inputs,
         config,
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         Client(),
-        {EnvironmentKind.SHELLSIM: ShellSimMachineFactory()},
-        command_timeout=5,
-        cleanup_timeout=5,
+        {"shellsim": ShellSimMachineFactory()},
         harbor=settings,
     )
     batch = await worker.run(request)
@@ -1071,28 +943,29 @@ async def test_harbor_completion_reward_uses_the_engine_stop_reason(task_inputs,
 @pytest.mark.parametrize("shaper", ["threshold", "identity_aware_pass_ratio"])
 async def test_strict_harbor_parser_masks_only_the_affected_response(task_inputs, shaper):
     config, request = task_inputs
-    base = TaskSpec.model_validate_json(request["env_extras"][0]["task_spec"])
+    base = LoweredTaskSpec.model_validate_json(request["env_extras"][0]["lowered_task_spec"]).task
     tasks = []
     for output in ("unrecognized output", "tests/test_task.py::test_answer PASSED"):
         verifier = ShellVerifierSpec(
             argv=("sh", "-c", f"echo '{output}'; echo 1 > /reward.txt"),
-            timeout=5,
             reward=FileReward(files=(RewardFile(path="/reward.txt", format=RewardFileFormat.NUMBER),)),
         )
         tasks.append(
             base.model_copy(
                 update={
                     "answer_type": AnswerType.STATE,
-                    "environment": EnvironmentSpec(kind=EnvironmentKind.SHELLSIM),
-                    "metadata": {"harbor": {}},
-                    "verifier": VerifierSpec(kind=VerifierKind.SHELL, parameters_json=verifier.model_dump_json()),
+                    "tags": ("harbor",),
+                    "verifier": VerifierSpec(kind="shell", parameters_json=verifier.model_dump_json()),
                 }
             )
         )
     request.update(
         prompts=request["prompts"] * 2,
         env_classes=["taskcompendium"] * 2,
-        env_extras=[{"task_spec": task.model_dump_json()} for task in tasks],
+        env_extras=[
+            {"lowered_task_spec": lowered_task(task, "shellbox", backend="shellsim").model_dump_json()}
+            for task in tasks
+        ],
         trajectory_ids=[TrajectoryID(base.id, index) for index in range(2)],
     )
     settings = HarborTaskSettings.from_config(
@@ -1112,9 +985,7 @@ async def test_strict_harbor_parser_masks_only_the_affected_response(task_inputs
         config,
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         InferenceClient(),
-        {EnvironmentKind.SHELLSIM: ShellSimMachineFactory()},
-        command_timeout=5,
-        cleanup_timeout=5,
+        {"shellsim": ShellSimMachineFactory()},
         harbor=settings,
     )
     batch = await worker.run(request)
@@ -1130,8 +1001,8 @@ async def test_strict_harbor_parser_masks_only_the_affected_response(task_inputs
 @pytest.mark.parametrize("phase", ["train", "eval"])
 async def test_harbor_concurrency_does_not_queue_gym_tasks(task_inputs, phase):
     config, request = task_inputs
-    base = TaskSpec.model_validate_json(request["env_extras"][0]["task_spec"])
-    tasks = [base.model_copy(update={"id": "harbor", "metadata": {"harbor": {}}})] * 2 + [base]
+    base = LoweredTaskSpec.model_validate_json(request["env_extras"][0]["lowered_task_spec"]).task
+    tasks = [base.model_copy(update={"id": "harbor", "tags": ("harbor",)})] * 2 + [base]
     admitted = []
     active_harbor = 0
     maximum_harbor = 0
@@ -1162,7 +1033,7 @@ async def test_harbor_concurrency_does_not_queue_gym_tasks(task_inputs, phase):
     request.update(
         prompts=request["prompts"] * 3,
         env_classes=["taskcompendium"] * 3,
-        env_extras=[{"task_spec": task.model_dump_json()} for task in tasks],
+        env_extras=[{"lowered_task_spec": lowered_task(task, "shellbox").model_dump_json()} for task in tasks],
         trajectory_ids=[TrajectoryID(str(index), 0) for index in range(3)],
         batch_metadata=BatchMetadata(0, phase),
     )
@@ -1171,8 +1042,6 @@ async def test_harbor_concurrency_does_not_queue_gym_tasks(task_inputs, phase):
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         WaitingClient(),
         {},
-        command_timeout=5,
-        cleanup_timeout=5,
         harbor=HarborTaskSettings.from_config(OmegaConf.create({"harbor": {"n_concurrent_trials": 2}})),
         concurrent_tasks=2 if phase == "train" else 3,
         concurrent_harbor_tasks=1,
@@ -1212,8 +1081,9 @@ async def test_mixed_nemotron_tasks_run_without_the_original_sources(
     (source / "environment").mkdir(parents=True)
     (source / "tests").mkdir()
     (source / "instruction.md").write_text("Repair the terminal task.")
-    (source / "task.toml").write_text('[environment]\nworkdir = "/workspace"\nallow_internet = false\n')
-    (source / "environment/Dockerfile").write_text("FROM busybox\n")
+    (source / "task.toml").write_text(
+        '[environment]\nworkdir = "/workspace"\nallow_internet = false\ndocker_image = "fixture@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\n'
+    )
     (source / "tests" / alias_file).write_text(json.dumps(alias_metadata))
     (source / "tests/test.sh").write_text(
         "#!/bin/sh\necho 'tests/test_task.py::test_fix PASSED'\necho 0.75 > /logs/verifier/reward.txt\n"
@@ -1243,7 +1113,10 @@ async def test_mixed_nemotron_tasks_run_without_the_original_sources(
         [str(input_path)],
         Tokenizer(),
         100,
-        environment_configs={},
+        environment_configs={
+            **OmegaConf.to_container(get_default_config().environment.task_sessions, resolve=True),
+            "session": session_spec().model_dump(exclude={"task_session"}),
+        },
         terminal_bench_data=[str(source)],
         cache_dir=tmp_path / "tasks",
         num_workers=1,
@@ -1302,9 +1175,7 @@ async def test_mixed_nemotron_tasks_run_without_the_original_sources(
         config,
         projection_type(projection),
         MixedClient(),
-        {EnvironmentKind.DOCKER: ImageFactory()},
-        command_timeout=5,
-        cleanup_timeout=5,
+        {"docker": ImageFactory()},
         harbor=settings,
     )
     writer = Writer()
@@ -1332,162 +1203,6 @@ async def test_mixed_nemotron_tasks_run_without_the_original_sources(
     assert batch["rollout_metrics"]["nemotron_ultra/coverage/rlvr1/arithmetic"] == 2
     assert batch["rollout_metrics"]["nemotron_ultra/coverage/rlvr1/swe"] == 1
     assert "test_fix" not in json.dumps(prompts)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("projection_type", [WholeTaskProjection, StepTaskProjection])
-@pytest.mark.parametrize(
-    "last_grade,expected_rewards,eligible",
-    [
-        ("0", [[0, 0], [0, 0.5]], True),
-        ("invalid", [[0, 0], [0, 0]], False),
-        ("verifier_timeout", [[0, 0], [0, 0]], False),
-        ("skipped", [[0, 1], [0, 0]], True),
-        ("timeout", None, False),
-    ],
-)
-async def test_staged_task_failures_mask_training_and_preserve_candidates_in_the_buffer(
-    task_inputs, projection_type, last_grade, expected_rewards, eligible
-):
-    config, request = task_inputs
-    config.max_turns = 1
-    config.error_handling = {
-        "enable_error_classification": True,
-        "passthrough_exceptions": ["AgentTimeoutError"],
-        "preserve_logprobs_on_timeout": False,
-    }
-    first_context = ConversationInput(events=(TextMessage(role="user", content="Complete the first stage."),))
-    task = TaskSpec(
-        id="staged",
-        context=first_context,
-        environment_requirements=EnvironmentRequirements(),
-        answer_type=AnswerType.STATE,
-        environment=EnvironmentSpec(kind=EnvironmentKind.SHELLSIM),
-        verifier=VerifierSpec(
-            kind=VerifierKind.STAGED,
-            parameters_json=StageVerifierSpec(strategy=StageRewardStrategy.MEAN).model_dump_json(),
-        ),
-        stages=(
-            TaskStage(
-                name="first",
-                verifier=VerifierSpec(
-                    kind=VerifierKind.SHELL,
-                    parameters_json=ShellVerifierSpec(argv=("echo", "1"), timeout=5).model_dump_json(),
-                ),
-            ),
-            TaskStage(
-                name="second",
-                context=ConversationInput(events=(TextMessage(role="user", content="Complete the second stage."),)),
-                verifier=VerifierSpec(
-                    kind=VerifierKind.SHELL,
-                    parameters_json=ShellVerifierSpec(argv=("echo", last_grade), timeout=5).model_dump_json(),
-                )
-                if last_grade != "skipped"
-                else skipped_verifier("No second-stage grader"),
-            ),
-        ),
-        source=Source(dataset="fixture", revision="1", row="staged", importer_revision="1"),
-    )
-    if last_grade in {"invalid", "verifier_timeout"}:
-        task = task.model_copy(
-            update={
-                "stages": (
-                    *task.stages,
-                    TaskStage(
-                        name="third",
-                        verifier=task.stages[0].verifier,
-                        context=ConversationInput(
-                            events=(TextMessage(role="user", content="Complete the third stage."),)
-                        ),
-                    ),
-                ),
-            }
-        )
-    request["prompts"] = [[{"role": "user", "content": "Complete the first stage."}]]
-    request["env_extras"] = [
-        {
-            "task_spec": task.model_dump_json(),
-            "task_execution": TaskExecution(
-                stages={stage.name: StageExecution() for stage in task.stages}
-            ).model_dump_json(),
-        }
-    ]
-    projection = (
-        WholeTrajectoryProjection(config, Tokenizer())
-        if projection_type is WholeTaskProjection
-        else StepWiseTrajectoryProjection(config, Tokenizer())
-    )
-
-    class StageClient(ConversationClient):
-        async def generate(self, request):
-            if last_grade == "timeout" and self.requests:
-                raise TimeoutError("Model request timed out")
-            return await super().generate(request)
-
-    class Machine:
-        def __init__(self, machine):
-            self.machine = machine
-
-        async def run(self, command):
-            if command.argv == ("echo", "verifier_timeout"):
-                return Result(
-                    exit_code=None,
-                    stdout=b"",
-                    stderr=b"",
-                    stdout_truncated=False,
-                    stderr_truncated=False,
-                    reason=ExitReason.TIMED_OUT,
-                )
-            return await self.machine.run(command)
-
-        async def upload(self, source, target):
-            await self.machine.upload(source, target)
-
-        async def download(self, source, target):
-            await self.machine.download(source, target)
-
-        async def close(self):
-            await self.machine.close()
-
-    class Factory:
-        async def create(self, spec):
-            return Machine(await ShellSimMachineFactory().create(spec))
-
-    runner = TaskRolloutWorker(
-        config,
-        projection_type(projection),
-        StageClient(["Completed first.", "Completed second."]),
-        {EnvironmentKind.SHELLSIM: Factory()},
-        command_timeout=5,
-        cleanup_timeout=5,
-    )
-    writer = Writer()
-    await runner.run_task(RolloutTask(RolloutLease("lease", 0, 1), {"uid": "staged"}, request), writer)
-    batch = writer.groups[0][1].trajectory_batch
-    if last_grade == "timeout":
-        assert batch["response_ids"] == [[]]
-        assert batch["loss_masks"] == [[]]
-        assert batch["rewards"] == [0.0]
-        assert batch["exclude_from_baseline"] == [True]
-        return
-    if projection_type is WholeTaskProjection:
-        assert batch["response_ids"] == [[3, 4, 90, 91, 5, 6]]
-        assert batch["loss_masks"] == ([[1, 1, 0, 0, 1, 1]] if eligible else [[0] * 6])
-        assert batch["rewards"] == [[*expected_rewards[0], 0, 0, *expected_rewards[1]]]
-        np.testing.assert_array_equal(batch["student_topk_indices"][0][:2], [[3, 99], [4, 99]])
-        assert batch["exclude_from_baseline"] == [not eligible]
-    else:
-        assert batch["response_ids"] == [[3, 4], [5, 6]]
-        assert batch["prompt_token_ids"] == [[1, 2], [1, 2, 3, 4, 90, 91]]
-        assert batch["loss_masks"] == ([[1, 1], [1, 1]] if eligible else [[0, 0], [0, 0]])
-        assert batch["rewards"] == expected_rewards
-        assert batch["exclude_from_baseline"] == [not eligible, not eligible]
-        np.testing.assert_array_equal(batch["student_topk_indices"][0], [[3, 99], [4, 99]])
-    if not eligible:
-        assert all(result.status == VerificationStatus.ERROR for result in batch["verification_results"])
-        stages = batch["verification_results"][0].diagnostics["stages"]
-        assert [stage["status"] for stage in stages] == ["graded", "infra_error"]
-        assert [stage["reward"] for stage in stages] == [1.0, None]
 
 
 @pytest.mark.asyncio
@@ -1570,12 +1285,11 @@ async def test_interrupted_tasks_keep_verified_turns_and_apply_training_policy(
     }
     task = source_task(
         request["prompts"][0],
-        "interrupted",
         {},
         {},
         Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
     )
-    request["env_extras"] = [{"task_spec": task.model_dump_json()}]
+    request["env_extras"] = [{"lowered_task_spec": lowered_task(task, "interrupted").model_dump_json()}]
     request["env_classes"] = ["interrupted"]
     request["sampling_params"] = {"max_tokens": 3}
     projection = (
@@ -1586,8 +1300,6 @@ async def test_interrupted_tasks_keep_verified_turns_and_apply_training_policy(
         projection_type(projection),
         InterruptedClient(["first", "unverified"]),
         {},
-        command_timeout=5,
-        cleanup_timeout=5,
         sessions={"interrupted": InterruptedSession},
     )
     writer = Writer()
@@ -1640,19 +1352,16 @@ async def test_invalid_model_evidence_aborts_the_group_even_with_error_masking(t
     config.error_handling = {"enable_error_classification": True, "default_error_treatment": "mask"}
     task = source_task(
         request["prompts"][0],
-        "gsm8k_multi_turn",
         {"reward_spec": {"ground_truth": "12"}},
         {},
         Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
     )
-    request["env_extras"] = [{"task_spec": task.model_dump_json()}]
+    request["env_extras"] = [{"lowered_task_spec": lowered_task(task, "gsm8k_multi_turn").model_dump_json()}]
     worker = TaskRolloutWorker(
         config,
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         InvalidClient(["#### 13", "#### 12"]),
         {},
-        command_timeout=5,
-        cleanup_timeout=5,
     )
     writer = Writer()
     with pytest.raises(ExceptionGroup) as failure:
@@ -1680,8 +1389,6 @@ async def test_overlong_filter_uses_sampled_end_tokens(task_inputs, stop_reason,
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         StoppedClient(),
         {},
-        command_timeout=5,
-        cleanup_timeout=5,
     )
     batch = await worker.run(request)
     assert batch["response_ids"] == [[3, last_token]]
@@ -1711,7 +1418,10 @@ async def test_source_tasks_run_without_the_original_dataset(tmp_path, task_inpu
         [str(source)],
         Tokenizer(),
         100,
-        environment_configs={"gsm8k": {"reward_method": "strict"}},
+        environment_configs={
+            **OmegaConf.to_container(get_default_config().environment.task_sessions, resolve=True),
+            "session": session_spec().model_dump(exclude={"task_session"}),
+        },
         num_workers=1,
     )
     source.unlink()
@@ -1723,8 +1433,6 @@ async def test_source_tasks_run_without_the_original_dataset(tmp_path, task_inpu
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         client,
         {},
-        command_timeout=5,
-        cleanup_timeout=5,
     )
     request = {
         "prompts": [prompt],
@@ -1752,13 +1460,16 @@ async def test_harbor_source_materialization_runs_without_the_original_directory
     (source / "environment").mkdir(parents=True)
     (source / "tests").mkdir()
     (source / "instruction.md").write_text("Write 12 to /logs/artifacts/answer.")
-    (source / "task.toml").write_text('[environment]\nworkdir = "/workspace"\nallow_internet = false\n')
-    (source / "environment/Dockerfile").write_text("FROM busybox\n")
+    (source / "task.toml").write_text(
+        '[environment]\nworkdir = "/workspace"\nallow_internet = false\ndocker_image = "fixture@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\n'
+    )
     (source / "tests/test.sh").write_text(
         '#!/bin/sh\nif [ "$(cat /logs/artifacts/answer)" = "12" ]; then\n'
         "echo 0.75 > /logs/verifier/reward.txt\nelse\necho 0 > /logs/verifier/reward.txt\nfi\n"
     )
-    prepared = HarborTaskDataset([str(source)], Tokenizer(), 100, cache_dir=tmp_path / "tasks", num_workers=1)
+    prepared = HarborTaskDataset(
+        [str(source)], Tokenizer(), 100, session=session_spec(), cache_dir=tmp_path / "tasks", num_workers=1
+    )
     assert prepared.uid(0) == "source"
     shutil.rmtree(source)
     restored = TaskDataset([str(prepared.task_path)], Tokenizer(), 100, num_workers=1)
@@ -1766,9 +1477,6 @@ async def test_harbor_source_materialization_runs_without_the_original_directory
 
     class ImageFactory:
         async def create(self, spec):
-            assert isinstance(spec.source, DockerfileSource)
-            assert spec.source.dockerfile.read_text() == "FROM busybox\n"
-            assert not (spec.source.context / "tests").exists()
             return await ShellSimMachineFactory().create(replace(spec, source=ShellSimBuiltins()))
 
     client = ConversationClient(
@@ -1796,9 +1504,7 @@ async def test_harbor_source_materialization_runs_without_the_original_directory
         config,
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         client,
-        {EnvironmentKind.DOCKER: ImageFactory()},
-        command_timeout=5,
-        cleanup_timeout=5,
+        {"docker": ImageFactory()},
     )
     writer = Writer()
     await worker.run_task(RolloutTask(RolloutLease("lease", 0, 1), {"uid": uid}, request), writer)
@@ -1846,7 +1552,6 @@ async def test_harbor_task_worker_preserves_verdicts_and_shapes_group_rewards(
                 f"printf 'tests/test_task.py::test_common PASSED\\n"
                 f"tests/test_task.py::test_changed {verdict}\\n'; echo 0 > /reward.txt",
             ),
-            timeout=10,
             reward=FileReward(files=(RewardFile(path="/reward.txt", format=RewardFileFormat.NUMBER),)),
         )
         tasks.append(
@@ -1855,16 +1560,18 @@ async def test_harbor_task_worker_preserves_verdicts_and_shapes_group_rewards(
                 context=ConversationInput(events=(TextMessage(role="user", content="Complete the task."),)),
                 environment_requirements=EnvironmentRequirements(),
                 answer_type=AnswerType.STATE,
-                environment=EnvironmentSpec(kind=EnvironmentKind.SHELLSIM),
-                verifier=VerifierSpec(kind=VerifierKind.SHELL, parameters_json=verifier.model_dump_json()),
+                verifier=VerifierSpec(kind="shell", parameters_json=verifier.model_dump_json()),
                 source=Source(dataset="harbor", revision="1", row=str(index), importer_revision="1"),
-                metadata={"harbor": {}},
+                tags=("harbor",),
             )
         )
     request.update(
         prompts=[[{"role": "user", "content": "Complete the task."}]] * 2,
         env_classes=["taskcompendium"] * 2,
-        env_extras=[{"task_spec": task.model_dump_json()} for task in tasks],
+        env_extras=[
+            {"lowered_task_spec": lowered_task(task, "shellbox", backend="shellsim").model_dump_json()}
+            for task in tasks
+        ],
         trajectory_ids=[TrajectoryID("harbor", index) for index in range(2)],
         batch_metadata=BatchMetadata(0, phase),
     )
@@ -1875,9 +1582,7 @@ async def test_harbor_task_worker_preserves_verdicts_and_shapes_group_rewards(
         config,
         projection_type(projection),
         InferenceClient(),
-        {EnvironmentKind.SHELLSIM: ShellSimMachineFactory()},
-        command_timeout=5,
-        cleanup_timeout=5,
+        {"shellsim": ShellSimMachineFactory()},
         harbor=settings,
     )
     writer = Writer()
@@ -1947,7 +1652,7 @@ def genrm_judge_server():
 @pytest.mark.parametrize("valid_peers", [0, 2])
 def test_genrm_ineligible_attempts_have_no_provisional_score(task_inputs, genrm_judge_server, valid_peers):
     _, request = task_inputs
-    task = TaskSpec.model_validate_json(request["env_extras"][0]["task_spec"])
+    task = LoweredTaskSpec.model_validate_json(request["env_extras"][0]["lowered_task_spec"]).task
     specification = GroupGraderSpec(
         name="nemotron_genrm",
         parameters_json=GenRMGroupGraderParameters(
@@ -2017,7 +1722,6 @@ async def test_genrm_final_grades_and_credit_reach_training_batch(
     count = 3 if failed_peer else 2
     task = source_task(
         request["prompts"][0],
-        session="nemotron_ultra",
         extras={
             "extra_info": {
                 "nemotron_ultra": {
@@ -2043,13 +1747,13 @@ async def test_genrm_final_grades_and_credit_reach_training_batch(
         },
         source=Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
     )
-    group_grader = task_group_grader(task)
+    group_grader = task_group_grader(lowered_task(task, "nemotron_ultra"))
     request.update(
         prompts=request["prompts"] * count,
         env_classes=["nemotron_ultra"] * count,
         env_extras=[
             {
-                "task_spec": task.model_dump_json(),
+                "lowered_task_spec": lowered_task(task, "nemotron_ultra").model_dump_json(),
                 "group_grader": None if group_grader is None else group_grader.model_dump_json(),
             }
         ]
@@ -2070,8 +1774,6 @@ async def test_genrm_final_grades_and_credit_reach_training_batch(
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         CohortClient(["better", "failed", "worse"] if failed_peer else ["better", "worse"]),
         {},
-        command_timeout=5,
-        cleanup_timeout=5,
     )
     rollouts = await runner.generate(request)
     batch = await runner.training_batch(request, rollouts)
@@ -2125,17 +1827,25 @@ async def test_genrm_final_grades_and_credit_reach_training_batch(
 @pytest.mark.asyncio
 async def test_task_group_grader_preserves_separate_samples_and_private_inputs(task_inputs):
     config, request = task_inputs
-    task = TaskSpec.model_validate_json(request["env_extras"][0]["task_spec"])
+    task = LoweredTaskSpec.model_validate_json(request["env_extras"][0]["lowered_task_spec"]).task
     task = task.model_copy(
         update={
-            "verifier": skipped_verifier("Group grading supplies the final score"),
+            "verifier": VerifierSpec(
+                kind="skipped", parameters_json=json.dumps({"reason": "Group grading supplies the final score"})
+            ),
         }
     )
     group_grader = GroupGraderSpec(name="group_total", parameters_json=json.dumps({"private_offset": 10}))
     request.update(
         prompts=request["prompts"] * 4,
         env_classes=["taskcompendium"] * 4,
-        env_extras=[{"task_spec": task.model_dump_json(), "group_grader": group_grader.model_dump_json()}] * 4,
+        env_extras=[
+            {
+                "lowered_task_spec": lowered_task(task, "shellbox").model_dump_json(),
+                "group_grader": group_grader.model_dump_json(),
+            }
+        ]
+        * 4,
         trajectory_ids=[TrajectoryID(group, sample) for group, sample in [("a", 0), ("b", 0), ("a", 1), ("b", 1)]],
     )
 
@@ -2160,8 +1870,6 @@ async def test_task_group_grader_preserves_separate_samples_and_private_inputs(t
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         model,
         {},
-        command_timeout=5,
-        cleanup_timeout=5,
         concurrent_tasks=1,
         group_graders={"group_total": group_total},
     )
@@ -2195,9 +1903,12 @@ async def test_unified_gym_tasks_preserve_grading_and_turn_credit(task_inputs, e
         {"prompt": request["prompts"][0], "env_class": environment, **extras},
         0,
         source_name="fixture",
-        environment_configs={environment: {}},
+        environment_configs={
+            **OmegaConf.to_container(get_default_config().environment.task_sessions, resolve=True),
+            "session": session_spec().model_dump(exclude={"task_session"}),
+        },
     )
-    request["env_extras"] = [{"task_spec": task.model_dump_json()}]
+    request["env_extras"] = [{"lowered_task_spec": task.model_dump_json()}]
     request["env_classes"] = [environment]
     model = ConversationClient(responses)
     runner = TaskRolloutWorker(
@@ -2205,8 +1916,6 @@ async def test_unified_gym_tasks_preserve_grading_and_turn_credit(task_inputs, e
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         model,
         {},
-        command_timeout=5,
-        cleanup_timeout=5,
     )
     batch = await runner.run(request)
     assert batch["rewards"] == [rewards]
@@ -2232,12 +1941,11 @@ async def test_aime_rollout_preserves_length_reward_and_phase_metrics(
     config.chat_template_kwargs = {"enable_thinking": enable_thinking}
     task = source_task(
         request["prompts"][0],
-        session="aime",
         extras={reward_key: {"ground_truth": "12"}},
         config={"length_penalty_weight": 1.0, "min_response_length": 0, "evaluation_token_budget": 1},
         source=Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
     )
-    request["env_extras"] = [{"task_spec": task.model_dump_json()}]
+    request["env_extras"] = [{"lowered_task_spec": lowered_task(task, "aime").model_dump_json()}]
     request["sampling_params"] = {"max_tokens": 4, "logprobs": 0}
     request["env_classes"] = ["aime"]
     engine = AsyncMock()
@@ -2271,8 +1979,6 @@ async def test_aime_rollout_preserves_length_reward_and_phase_metrics(
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         DirectModelClient(engine),
         {},
-        command_timeout=5,
-        cleanup_timeout=5,
         max_verifier_workers=1,
     )
     try:
@@ -2318,12 +2024,11 @@ async def test_context_limits_preserve_only_completed_gym_turns(
     request["sampling_params"] = None if output_limit is None else {"max_tokens": output_limit}
     task = source_task(
         request["prompts"][0],
-        "gsm8k_multi_turn",
         {"reward_spec": {"ground_truth": "12"}},
         {},
         Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
     )
-    request["env_extras"] = [{"task_spec": task.model_dump_json()}]
+    request["env_extras"] = [{"lowered_task_spec": lowered_task(task, "gsm8k_multi_turn").model_dump_json()}]
     request["env_classes"] = ["gsm8k_multi_turn"]
     engine = AsyncMock()
     engine.model_name = "fixture"
@@ -2358,9 +2063,7 @@ async def test_context_limits_preserve_only_completed_gym_turns(
     projection = (
         WholeTrajectoryProjection if projection_type is WholeTaskProjection else StepWiseTrajectoryProjection
     )(config, Tokenizer())
-    worker = TaskRolloutWorker(
-        config, projection_type(projection), DirectModelClient(engine), {}, command_timeout=5, cleanup_timeout=5
-    )
+    worker = TaskRolloutWorker(config, projection_type(projection), DirectModelClient(engine), {})
     writer = Writer()
     await worker.run_task(RolloutTask(RolloutLease("lease", 0, 1), {"uid": task.id}, request), writer)
     batch = writer.groups[0][1].trajectory_batch
@@ -2416,12 +2119,11 @@ async def test_native_rewards_and_credit_remain_aligned_across_tool_observations
     config, request = task_inputs
     task = source_task(
         request["prompts"][0],
-        "credit",
         {},
         {},
         Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
     )
-    request["env_extras"] = [{"task_spec": task.model_dump_json()}]
+    request["env_extras"] = [{"lowered_task_spec": lowered_task(task, "credit").model_dump_json()}]
     projection = (
         WholeTrajectoryProjection if projection_type is WholeTaskProjection else StepWiseTrajectoryProjection
     )(config, Tokenizer())
@@ -2430,8 +2132,6 @@ async def test_native_rewards_and_credit_remain_aligned_across_tool_observations
         projection_type(projection),
         ConversationClient(["first", "second"]),
         {},
-        command_timeout=5,
-        cleanup_timeout=5,
         sessions={"credit": CreditSession},
     )
     batch = await runner.run(request)
@@ -2462,22 +2162,20 @@ async def test_lean_refinement_discards_the_failed_attempt(task_inputs, task_mac
     }
     task = source_task(
         request["prompts"][0],
-        "nemotron_ultra",
         extras,
         {},
         Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
-        environment=EnvironmentSpec(kind=EnvironmentKind.SHELLSIM),
     )
-    request["env_extras"] = [{"task_spec": task.model_dump_json()}]
+    request["env_extras"] = [
+        {"lowered_task_spec": lowered_task(task, "nemotron_ultra", backend="shellsim").model_dump_json()}
+    ]
     request["env_classes"] = ["nemotron_ultra"]
     client = ConversationClient(["", "by rfl"])
     runner = TaskRolloutWorker(
         config,
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         client,
-        {EnvironmentKind.SHELLSIM: task_machine},
-        command_timeout=5,
-        cleanup_timeout=5,
+        {"shellsim": task_machine},
     )
     batch = await runner.run(request)
     assert batch["response_ids"] == [[5, 6]]
@@ -2492,20 +2190,19 @@ async def test_step_projection_preserves_served_prompts_grades_and_teacher_route
     config, request = task_inputs
     task = source_task(
         request["prompts"][0],
-        session="gsm8k_multi_turn",
         extras={"reward_spec": {"ground_truth": "12"}},
         config={},
         source=Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
     )
-    request["env_extras"] = [{"task_spec": task.model_dump_json(), "teacher_route": "arithmetic"}]
+    request["env_extras"] = [
+        {"lowered_task_spec": lowered_task(task, "gsm8k_multi_turn").model_dump_json(), "teacher_route": "arithmetic"}
+    ]
     request["env_classes"] = ["gsm8k_multi_turn"]
     runner = TaskRolloutWorker(
         config,
         StepTaskProjection(StepWiseTrajectoryProjection(config, Tokenizer())),
         ConversationClient(["#### 13", "#### 12"]),
         {},
-        command_timeout=5,
-        cleanup_timeout=5,
     )
     writer = Writer()
     await runner.run_task(RolloutTask(RolloutLease("lease", 0, 1), {"uid": task.id}, request), writer)
@@ -2575,8 +2272,18 @@ def task_machine():
 async def test_source_machine_selection_controls_tool_results(task_inputs, task_machine, per_agent):
     config, request = task_inputs
     environment = {
-        "machine": {"kind": "shellsim", "env": {"PYTHON_OUTPUT": "4"}},
-        "machines": {"ns_tools_simple_agent": {"kind": "shellsim", "env": {"PYTHON_OUTPUT": "7"}}} if per_agent else {},
+        "machine": {
+            "requirements": {"environment_variables": {"PYTHON_OUTPUT": "4"}},
+            "runtime": machine_runtime("shellsim").model_dump(),
+        },
+        "machines": {
+            "ns_tools_simple_agent": {
+                "requirements": {"environment_variables": {"PYTHON_OUTPUT": "7"}},
+                "runtime": machine_runtime("shellsim").model_dump(),
+            }
+        }
+        if per_agent
+        else {},
     }
     expected = "7" if per_agent else "4"
     row = {
@@ -2591,8 +2298,16 @@ async def test_source_machine_selection_controls_tool_results(task_inputs, task_
             }
         },
     }
-    task = source_row_task(row, 0, source_name="source", environment_configs={"nemotron_ultra": environment})
-    request["env_extras"] = [{"task_spec": task.model_dump_json()}]
+    task = source_row_task(
+        row,
+        0,
+        source_name="source",
+        environment_configs={
+            "session": session_spec().model_dump(exclude={"task_session"}),
+            "nemotron_ultra": environment,
+        },
+    )
+    request["env_extras"] = [{"lowered_task_spec": task.model_dump_json()}]
     request["env_classes"] = ["nemotron_ultra"]
     message = {
         "role": "assistant",
@@ -2605,9 +2320,7 @@ async def test_source_machine_selection_controls_tool_results(task_inputs, task_
         config,
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         model,
-        {EnvironmentKind.SHELLSIM: task_machine},
-        command_timeout=5,
-        cleanup_timeout=5,
+        {"shellsim": task_machine},
     )
     try:
         batch = await worker.run(request)
@@ -2629,7 +2342,6 @@ def python_tool_task(task_inputs):
     config, request = task_inputs
     task = source_task(
         request["prompts"][0],
-        session="nemotron_ultra",
         extras={
             "extra_info": {
                 "nemotron_ultra": {
@@ -2642,7 +2354,6 @@ def python_tool_task(task_inputs):
         },
         config={},
         source=Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
-        environment=EnvironmentSpec(kind=EnvironmentKind.SHELLSIM),
     )
     message = {
         "role": "assistant",
@@ -2654,7 +2365,8 @@ def python_tool_task(task_inputs):
             }
         ],
     }
-    request["env_extras"] = [{"task_spec": task.model_dump_json()}]
+    task = lowered_task(task, "nemotron_ultra", backend="shellsim")
+    request["env_extras"] = [{"lowered_task_spec": task.model_dump_json()}]
     request["env_classes"] = ["nemotron_ultra"]
     return task, message
 
@@ -2676,9 +2388,7 @@ async def test_python_tool_observations_preserve_training_and_release_session(
         config,
         projection_type(projection),
         model,
-        {EnvironmentKind.SHELLSIM: task_machine},
-        command_timeout=5,
-        cleanup_timeout=5,
+        {"shellsim": task_machine},
     )
     batch = await runner.run(request)
     assert task_machine.closed
@@ -2705,7 +2415,7 @@ def verifier_executor(request):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancellations", [1, 2])
 @pytest.mark.parametrize("verifier_fails", [False, True])
-async def test_cancellation_waits_for_the_verifier_before_session_cleanup(
+async def test_cancellation_returns_before_the_verifier_but_cleanup_keeps_ownership(
     python_tool_task, verifier_executor, cancellations, verifier_fails
 ):
     loop = asyncio.get_running_loop()
@@ -2726,25 +2436,88 @@ async def test_cancellation_waits_for_the_verifier_before_session_cleanup(
     session = AnswerTaskSession(task, None, grader=execute, executor=verifier_executor)
     await session.prepare()
     operation = asyncio.create_task(session.advance(ModelTurn(message, (1, 2), (3, 4), None, "stop")))
+    cleanup = None
     try:
         await asyncio.wait_for(started.wait(), timeout=5)
+        operation.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(operation, timeout=5)
+        assert events == ["start"]
+
+        async def close():
+            try:
+                await session.close()
+            finally:
+                events.append("close")
+
+        cleanup = asyncio.create_task(close())
+        cleanup_started = loop.create_future()
+        loop.call_soon(cleanup_started.set_result, None)
+        await cleanup_started
         for _ in range(cancellations):
-            operation.cancel()
+            cleanup.cancel()
             completion_at_cancel = loop.create_future()
-            # Let cancellation reach the session while the verifier thread remains blocked.
-            loop.call_soon(loop.call_soon, lambda: completion_at_cancel.set_result(operation.done()))
+            # Deliver cleanup cancellation while the verifier thread still owns its resources.
+            loop.call_soon(loop.call_soon, lambda: completion_at_cancel.set_result(cleanup.done()))
             assert not await completion_at_cancel
     finally:
         release.set()
-        try:
+        if cleanup is not None:
             with pytest.raises(asyncio.CancelledError) as cancellation:
-                await operation
-        finally:
+                await cleanup
+        else:
             await session.close()
-            events.append("close")
     assert events == ["start", "finish", "close"]
     if verifier_fails:
         assert isinstance(cancellation.value.__cause__, RuntimeError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("deadline", ["tool_turn_timeout", "attempt_timeout"])
+async def test_blocking_grader_cannot_extend_attempt_or_cleanup_deadlines(task_inputs, deadline):
+    config, request = task_inputs
+    config.error_handling = {
+        "enable_error_classification": True,
+        "mask_exceptions": ["AgentTimeoutError", "TrialTimeoutError"],
+    }
+    loop = asyncio.get_running_loop()
+    started = asyncio.Event()
+    finished = asyncio.Event()
+    release = threading.Event()
+
+    def grade(turn, config, extras):
+        loop.call_soon_threadsafe(started.set)
+        assert release.wait(timeout=5)
+        loop.call_soon_threadsafe(finished.set)
+        return Transition(done=True, reward=1.0, grade=GradeResult(Outcome.GRADED, 1.0))
+
+    task = source_task(
+        request["prompts"][0], {}, {}, Source(dataset="deadline", revision="1", row="0", importer_revision="1")
+    )
+    selected = lowered_task(task, "blocking", cleanup_timeout=0.01, **{deadline: 0.25})
+    request["env_extras"] = [{"lowered_task_spec": selected.model_dump_json()}]
+    request["env_classes"] = ["blocking"]
+    worker = TaskRolloutWorker(
+        config,
+        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        InferenceClient(),
+        {},
+        sessions={"blocking": partial(AnswerTaskSession, grader=grade)},
+    )
+    operation = asyncio.create_task(worker.run(request))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        batch = await asyncio.wait_for(operation, timeout=5)
+        assert not release.is_set()
+        assert batch["exclude_from_baseline"] == [True]
+        assert batch["verification_results"][0].score is None
+        assert batch["verification_results"][0].diagnostics["cleanup_errors"] == [
+            {"operation": "session_close", "exception_type": "TimeoutError"}
+        ]
+    finally:
+        release.set()
+        await asyncio.wait_for(finished.wait(), timeout=5)
+        await worker.shutdown()
 
 
 @pytest.mark.asyncio
@@ -2760,8 +2533,6 @@ async def test_worker_keeps_blocking_inference_available_during_rollout(task_inp
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         BlockingClient(),
         {},
-        command_timeout=5,
-        cleanup_timeout=5,
         concurrent_tasks=1,
     )
     writer = Writer()

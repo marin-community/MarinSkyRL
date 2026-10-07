@@ -4,6 +4,7 @@ import json
 import pytest
 from taskcompendium.importers.skyrl import source_task
 from taskcompendium.models import Source
+from tests.cpu.task_specs import lowered_task, session_spec
 
 from skyrl_train.dataset.harbor import TerminalBenchTaskDataset, materialize_harbor_tasks
 from skyrl_train.dataset.nemotron_ultra import resolve_terminal_task, terminal_task_index
@@ -40,9 +41,13 @@ def test_terminal_task_selection_fails_before_execution(tmp_path, selection):
         (task / "tests").mkdir()
         (task / "tests/config.json").write_text(json.dumps({"instance_id": "same-id"}))
         (task / "tests/test.sh").write_text("echo 1 > /logs/verifier/reward.txt\n")
-        (task / "task.toml").write_text('[environment]\ndocker_image = "busybox"\n')
+        (task / "task.toml").write_text(
+            '[environment]\ndocker_image = "fixture@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\n'
+        )
     path = materialize_harbor_tasks(
-        [str(sources if selection == "ambiguous" else sources / "first")], cache_dir=tmp_path / "cache"
+        [str(sources if selection == "ambiguous" else sources / "first")],
+        cache_dir=tmp_path / "cache",
+        session=session_spec(),
     )
     if selection == "ambiguous":
         with pytest.raises(ValueError, match="Duplicate terminal-bench task ID"):
@@ -50,7 +55,6 @@ def test_terminal_task_selection_fails_before_execution(tmp_path, selection):
         return
     task = source_task(
         [{"role": "user", "content": "Repair the task."}],
-        "nemotron_ultra",
         {
             "extra_info": {
                 "nemotron_ultra": {
@@ -65,4 +69,4 @@ def test_terminal_task_selection_fails_before_execution(tmp_path, selection):
         Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
     )
     with pytest.raises(ValueError, match="absent from the configured task data"):
-        resolve_terminal_task(task, terminal_task_index(path))
+        resolve_terminal_task(lowered_task(task, "nemotron_ultra"), terminal_task_index(path))

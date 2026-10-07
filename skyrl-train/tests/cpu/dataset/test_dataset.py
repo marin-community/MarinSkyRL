@@ -4,10 +4,11 @@ import pytest
 from unittest.mock import patch
 from datasets import Dataset
 from transformers import BatchEncoding
-from taskcompendium.models import TaskSpec
+from omegaconf import OmegaConf
+from rolloutengine.spec import LoweredTaskSpec
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.dataset import PromptDataset
-from skyrl_train.dataset.tasks import SourceTaskDataset
+from skyrl_train.dataset.tasks import LOWERED_TASK_COLUMN, SourceTaskDataset
 from skyrl_train.entrypoints.main_base import BasePPOExp
 
 
@@ -70,7 +71,7 @@ def test_eval_dataset_filtering(mock_tokenizer, sample_dataset, tmp_path, probe_
         [{"role": "user", "content": "a" * 120}],
     ]
     assert [row["uid"] for row in rows] == ["0", "1"]
-    tasks = [TaskSpec.model_validate_json(row["env_extras"]["task_spec"]) for row in rows]
+    tasks = [LoweredTaskSpec.model_validate_json(row["env_extras"][LOWERED_TASK_COLUMN]).task for row in rows]
     assert [task.source.row for task in tasks] == ["0", "1"]
     assert all(row["env_class"] == "gsm8k" for row in rows)
 
@@ -95,12 +96,12 @@ def test_source_tasks_preserve_global_row_indices_without_cache_files(tmp_path, 
         [str(source)],
         _StubTokenizer(),
         100,
-        environment_configs={},
+        environment_configs=OmegaConf.to_container(get_default_config().environment.task_sessions, resolve=True),
         num_workers=num_workers,
     )
     prepared = dataset.collate_fn([dataset[index] for index in range(len(dataset))])
     assert [row["prompt"] for row in prepared] == [rows[0]["prompt"], rows[2]["prompt"]]
-    tasks = [TaskSpec.model_validate_json(row["env_extras"]["task_spec"]) for row in prepared]
+    tasks = [LoweredTaskSpec.model_validate_json(row["env_extras"][LOWERED_TASK_COLUMN]).task for row in prepared]
     assert [task.source.row for task in tasks] == ["0", "2"]
     assert dataset.dataframe.cache_files == []
 

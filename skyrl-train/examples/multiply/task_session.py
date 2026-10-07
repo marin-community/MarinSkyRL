@@ -5,9 +5,9 @@ from typing import Any
 
 from rolloutengine.contracts import ModelTurn, SessionStart, Transition
 from shellbox.machine import Machine
-from taskcompendium.environment import ExternalVerifierSpec
+from taskcompendium.importers.skyrl import ExternalVerifierSpec
 from taskcompendium.grading_result import GradeResult, Outcome
-from taskcompendium.models import TaskSpec
+from rolloutengine.spec import LoweredTaskSpec
 from taskcompendium.submission import conversation_messages
 
 from skyrl_gym.answer_tasks import ground_truth
@@ -17,12 +17,13 @@ from skyrl_gym.task_records import fold_grades
 class MultiplyTaskSession:
     """Keep the multiplication reference and return feedback until completion."""
 
-    def __init__(self, task: TaskSpec, machine: Machine | None):
+    def __init__(self, lowered: LoweredTaskSpec, machine: Machine | None):
+        task = lowered.task
         specification = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
         extras = specification.parameters["extras"]
         self.task = task
         self.expected = str(ground_truth(extras)).strip()
-        self.max_turns = extras.get("max_turns", 5)
+        self.max_turns = lowered.session.max_turns
         self.grades: list[GradeResult] = []
 
     async def prepare(self) -> SessionStart:

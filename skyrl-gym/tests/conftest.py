@@ -20,14 +20,47 @@ import psutil
 from rolloutengine.contracts import ModelTurn
 from rolloutengine.engine import ShellboxRolloutEngine
 from shellbox.machine import Command, ExitReason, Result
-from taskcompendium.environment import EnvironmentKind, EnvironmentSpec
-from taskcompendium.execution import TaskExecution
+from rolloutengine.spec import LoweredTaskSpec, MachineRuntimeSpec, TaskRuntimeSpec, TaskSessionSpec
 from taskcompendium.importers.skyrl import source_task
 from taskcompendium.models import Source
 from taskcompendium.submission import AnswerFormat, SubmissionConvention
 
 from skyrl_gym.task_factories import session_factories
 from skyrl_gym.nemotron_tasks import NemotronTaskSession
+
+
+@pytest.fixture
+def task_lowering():
+    def make(task, name, *, max_turns=3):
+        return LoweredTaskSpec(
+            task=task,
+            runtime=TaskRuntimeSpec(
+                task_machine=MachineRuntimeSpec(
+                    backend="local",
+                    network="deny",
+                    cpus=None,
+                    memory_mb=None,
+                    storage_mb=None,
+                    gpus=0,
+                    user=None,
+                    startup_timeout=None,
+                    cleanup_timeout=None,
+                ),
+                verifier_machine=None,
+            ),
+            session=TaskSessionSpec(
+                task_session=name,
+                max_turns=max_turns,
+                model_turn_timeout=None,
+                tool_turn_timeout=5,
+                total_turn_timeout=None,
+                attempt_timeout=None,
+                verifier_timeout=5,
+                cleanup_timeout=5,
+            ),
+        )
+
+    return make
 
 
 @pytest.fixture
@@ -179,13 +212,12 @@ async def machine():
 
 
 @pytest_asyncio.fixture
-async def nemotron_session(machine):
+async def nemotron_session(machine, task_lowering):
     sessions = []
 
     async def make(agent, record, config=None, request=None, *, environment=None):
         task = source_task(
             [{"role": "user", "content": "Public task question"}],
-            "nemotron_ultra",
             {
                 "extra_info": {
                     "nemotron_ultra": {
@@ -200,7 +232,7 @@ async def nemotron_session(machine):
             Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
             environment=environment,
         )
-        session = NemotronTaskSession(task, machine)
+        session = NemotronTaskSession(task_lowering(task, "nemotron_ultra", max_turns=50), machine)
         sessions.append(session)
         await session.prepare()
         return session
@@ -235,7 +267,7 @@ def lean_compiler(machine, monkeypatch):
 
 
 @pytest_asyncio.fixture
-async def rollout_session():
+async def rollout_session(task_lowering):
     """Run scripted model responses through the public engine and real SQLite processes."""
     with TemporaryDirectory(prefix="sb-rollout-") as directory:
         machines = []
@@ -260,22 +292,17 @@ async def rollout_session():
 
             task = source_task(
                 [{"role": "user", "content": "Public task question"}],
-                name,
                 extras,
                 {} if config is None else config,
                 Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
-                environment=EnvironmentSpec(kind=EnvironmentKind.SHELLSIM),
             )
             engine = ShellboxRolloutEngine(
                 model,
-                {EnvironmentKind.SHELLSIM: Factory()},
-                max_turns=max_turns,
-                command_timeout=5,
-                cleanup_timeout=5,
+                {"local": Factory()},
                 convention=SubmissionConvention(id="plain", answer_format=AnswerFormat.PLAIN),
-                sessions=session_factories(max_turns=max_turns),
+                sessions=session_factories(),
             )
-            return await engine.run(task, execution=TaskExecution())
+            return await engine.run(task_lowering(task, name, max_turns=max_turns))
 
         try:
             yield run

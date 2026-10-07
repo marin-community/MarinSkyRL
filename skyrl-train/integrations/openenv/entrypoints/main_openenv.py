@@ -1,5 +1,4 @@
 import hydra
-from functools import partial
 from omegaconf import DictConfig
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
 from skyrl_train.utils import initialize_ray
@@ -9,7 +8,7 @@ from skyrl_gym.openenv_tasks import OpenEnvTaskSession
 
 @ray.remote(num_cpus=1)
 def skyrl_entrypoint(cfg: DictConfig):
-    exp = BasePPOExp(cfg, sessions={"openenv": partial(OpenEnvTaskSession, max_turns=cfg.generator.max_turns)})
+    exp = BasePPOExp(cfg, sessions={"openenv": OpenEnvTaskSession})
     exp.run()
 
 

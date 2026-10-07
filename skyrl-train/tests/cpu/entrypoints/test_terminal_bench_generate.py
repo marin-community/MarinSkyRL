@@ -1,5 +1,6 @@
 from omegaconf import OmegaConf
-from taskcompendium.models import TaskSpec
+from rolloutengine.spec import LoweredTaskSpec
+from tests.cpu.task_specs import session_spec
 
 from skyrl_train.config.rollout_validation import EntrypointOperation
 from skyrl_train.dataset.harbor import HarborTaskDataset
@@ -65,7 +66,9 @@ def test_terminal_bench_generate_builds_complete_evaluation_request(tmp_path):
         source = sources / name
         (source / "tests").mkdir(parents=True)
         (source / "instruction.md").write_text(name)
-        (source / "task.toml").write_text('[environment]\ndocker_image = "fixture"\n')
+        (source / "task.toml").write_text(
+            '[environment]\ndocker_image = "fixture@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\n'
+        )
         (source / "tests/test.sh").write_text("echo 1 > /logs/verifier/reward.txt\n")
 
     class Tokenizer:
@@ -74,7 +77,7 @@ def test_terminal_bench_generate_builds_complete_evaluation_request(tmp_path):
 
     experiment.tokenizer = Tokenizer()
     experiment.train_dataset = HarborTaskDataset(
-        [str(sources)], experiment.tokenizer, 100, cache_dir=tmp_path / "cache", num_workers=1
+        [str(sources)], experiment.tokenizer, 100, session=session_spec(), cache_dir=tmp_path / "cache", num_workers=1
     )
     inference_client = object()
 
@@ -96,7 +99,8 @@ def test_terminal_bench_generate_builds_complete_evaluation_request(tmp_path):
         f"task-{task}_{repetition_id}" for task in ("a", "b") for repetition_id in range(8)
     ]
     assert runner.request["env_classes"] == ["taskcompendium"] * 16
-    assert [TaskSpec.model_validate_json(extra["task_spec"]).id for extra in runner.request["env_extras"]] == (
-        ["task-a"] * 8 + ["task-b"] * 8
-    )
+    assert [
+        LoweredTaskSpec.model_validate_json(extra["lowered_task_spec"]).task.id
+        for extra in runner.request["env_extras"]
+    ] == (["task-a"] * 8 + ["task-b"] * 8)
     assert runner.request["batch_metadata"] == BatchMetadata(global_step=0, training_phase="eval")

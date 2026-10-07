@@ -11,9 +11,9 @@ from uuid import uuid4
 
 from rolloutengine.contracts import ModelTurn, SessionStart, Transition
 from shellbox.machine import Command, ExitReason, Machine
-from taskcompendium.environment import ExternalVerifierSpec
+from taskcompendium.importers.skyrl import ExternalVerifierSpec
 from taskcompendium.grading_result import GradeResult, Outcome
-from taskcompendium.models import TaskSpec
+from rolloutengine.spec import LoweredTaskSpec
 from taskcompendium.submission import conversation_messages
 
 from skyrl_gym.task_records import fold_grades
@@ -67,7 +67,8 @@ def serialize_observation(observation: dict, max_list_len: int = 20) -> str:
 class OpenEnvTaskSession:
     """Advance one OpenEnv server episode in the prepared task machine."""
 
-    def __init__(self, task: TaskSpec, machine: Machine | None, *, max_turns: int):
+    def __init__(self, lowered: LoweredTaskSpec, machine: Machine | None):
+        task = lowered.task
         assert machine is not None
         specification = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
         config = specification.parameters["config"]
@@ -77,7 +78,7 @@ class OpenEnvTaskSession:
         self.name = self.extras["env_name"]
         if self.name not in OPENENV_TASKS:
             raise ValueError(f"Unknown OpenEnv task: {self.name}")
-        self.max_turns = self.extras.get("max_turns", max_turns)
+        self.max_turns = min(self.extras.get("max_turns", lowered.session.max_turns), lowered.session.max_turns)
         self.server_command = config["server_command"]
         self.port = config.get("server_port", OPENENV_PORT)
         self.timeout = config.get("timeout", REQUEST_TIMEOUT)

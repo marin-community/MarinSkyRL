@@ -2,9 +2,9 @@ OpenEnv task sessions
 =====================
 
 ``OpenEnvTaskSession`` implements the common task interface.
-Shellbox creates one machine for each rollout.
-The session starts the configured OpenEnv server in that machine and sends
-HTTP reset and step requests from inside the machine.
+Shellbox creates one machine for each rollout from a prebuilt, digest-pinned image.
+The session starts the configured OpenEnv server in that machine.
+HTTP reset and step requests run inside the machine.
 
 The initial server observation enters the model conversation.
 Each action produces a reward and, for a nonterminal turn, an observation.
@@ -24,34 +24,40 @@ The session factory is explicit:
 
 .. code-block:: python
 
-   from functools import partial
    from skyrl_gym.openenv_tasks import OpenEnvTaskSession
    from skyrl_train.entrypoints.main_base import BasePPOExp
 
-   experiment = BasePPOExp(
-       cfg,
-       sessions={"openenv": partial(OpenEnvTaskSession, max_turns=cfg.generator.max_turns)},
-   )
+   experiment = BasePPOExp(cfg, sessions={"openenv": OpenEnvTaskSession})
 
 Machine configuration
 ---------------------
 
-Supply the machine image and server command. For the HTTP Echo image:
+Save this configuration as ``/absolute/path/openenv.yaml``.
+Replace ``IMAGE@sha256:DIGEST`` with the full digest-pinned reference for your prepared image:
 
 .. code-block:: yaml
+
+   defaults:
+     - ppo_base_config
+     - _self_
 
    environment:
      task_sessions:
        openenv:
          machine:
-           kind: docker
-           image:
-             kind: registry
-             reference: ghcr.io/meta-pytorch/openenv-echo-env:sha-64d4b10
-           workdir: /app
-           network: false
-           memory_mb: 1024
-           cpus: 1
+           requirements:
+             docker_image: IMAGE@sha256:DIGEST
+             working_directory: /app
+           runtime:
+             backend: docker
+             network: deny
+             cpus: 1
+             memory_mb: 1024
+             storage_mb: null
+             gpus: 0
+             user: null
+             startup_timeout: 600
+             cleanup_timeout: null
          server_command:
            - python
            - -m
@@ -63,16 +69,66 @@ Supply the machine image and server command. For the HTTP Echo image:
            - "8000"
          server_port: 8000
 
-This integration uses the HTTP API from the selected image revision.
-The server must accept ``POST /reset`` with an empty object and ``POST /step``
-with ``{"action": <task payload>, "timeout_s": <integer>}``.
+Session limits come from ``environment.task_sessions.session``.
+An ``openenv.session`` block can override them.
+The session reads its turn limit from the lowered record.
+
+The selected image must supply the HTTP API that this integration calls.
+The server accepts ``POST /reset`` with an empty object.
+For ``<action>hello</action>``, the Echo request to ``POST /step`` is:
+
+.. code-block:: json
+
+   {"action": {"message": "hello"}, "timeout_s": 15}
+
+The other action payloads are:
+
+- Coding: ``{"code": "print(42)"}``.
+- OpenSpiel: ``{"action_id": 2, "game_name": "catch", "game_params": {}}``. The row can override ``game_name``.
+- Atari: ``{"action_id": 2, "game_name": "pong", "obs_type": "rgb", "full_action_space": false}``.
+- SUMO: ``{"phase_id": 2, "ts_id": "0"}``.
+- FinRL: ``{"actions": [0.1, -0.2]}``.
+
 Each response contains an ``observation`` object, a numeric or null ``reward``, and a boolean ``done``.
-``GET /health`` must return a successful HTTP status before the startup deadline.
-Select images and commands with this API.
+The session converts a null reward to zero.
+The final grade is the mean of completed turn rewards, including invalid actions and null rewards.
+``GET /health`` returns a successful HTTP status before the server startup deadline.
 The host does not require the OpenEnv Python SDK or exposed container ports.
 
-For mixed task types, use ``machines`` keyed by the row's ``env_name``.
-Each row selects the ``openenv`` factory and an image-specific application:
+For mixed task types, ``environment.task_sessions.openenv.machines`` maps each row's ``env_name`` to its machine configuration.
+Each entry contains ``requirements`` and ``runtime``, as the ``machine`` block above shows.
+The selected entry overrides the common ``machine`` block.
+The server command remains common to all entries.
+Different applications therefore require prepared images with the same server entrypoint, for example:
+
+.. code-block:: yaml
+
+   environment:
+     task_sessions:
+       openenv:
+         server_command: [/app/start-server]
+         machines:
+           echo_env:
+             requirements:
+               docker_image: ECHO_IMAGE@sha256:DIGEST
+               working_directory: /app
+             runtime: &openenv_runtime
+               backend: docker
+               network: deny
+               cpus: 1
+               memory_mb: 1024
+               storage_mb: null
+               gpus: 0
+               user: null
+               startup_timeout: 600
+               cleanup_timeout: null
+           coding_env:
+             requirements:
+               docker_image: CODING_IMAGE@sha256:DIGEST
+               working_directory: /app
+             runtime: *openenv_runtime
+
+This row selects the ``echo_env`` entry:
 
 .. code-block:: python
 
@@ -82,53 +138,27 @@ Each row selects the ``openenv`` factory and an image-specific application:
        "env_name": "echo_env",
    }
 
-.. code-block:: yaml
-
-   environment:
-     task_sessions:
-       openenv:
-         machines:
-           echo_env:
-             kind: docker
-             image:
-               kind: registry
-               reference: ghcr.io/meta-pytorch/openenv-echo-env:sha-64d4b10
-             workdir: /app
-             env:
-               OPENENV_APP: envs.echo_env.server.app:app
-           coding_env:
-             kind: docker
-             image:
-               kind: registry
-               reference: ghcr.io/meta-pytorch/openenv-coding-env:sha-64d4b10
-             workdir: /app
-             env:
-               OPENENV_APP: envs.coding_env.server.app:app
-         server_command:
-           - python
-           - -c
-           - 'import os, uvicorn; uvicorn.run(os.environ["OPENENV_APP"], host="127.0.0.1", port=8000)'
-
-The importer removes ``machine`` and ``machines`` from the private session configuration.
-It stores the selected machine in ``TaskSpec.environment``.
+Source conversion puts selected requirements in ``TaskSpec.environment_requirements``.
+It puts the machine selection in ``LoweredTaskSpec.runtime.task_machine``.
 The remaining settings, including the server command, stay in the private verifier payload.
 
 Prepare and launch
 ------------------
 
-From ``skyrl-train/``:
+From ``skyrl-train/``, prepare the source rows:
 
 .. code-block:: bash
 
    uv run --project .. integrations/openenv/prepare_dummy_dataset.py \
-     --output_dir "$HOME/data/openenv/echo_env" --env_name echo_env
-   bash integrations/openenv/run_openenv.sh --config-name ppo_base_config \
-     +environment.task_sessions.openenv.machine.kind=docker \
-     +environment.task_sessions.openenv.machine.image.kind=registry \
-     +environment.task_sessions.openenv.machine.image.reference=ghcr.io/meta-pytorch/openenv-echo-env:sha-64d4b10 \
-     +environment.task_sessions.openenv.machine.workdir=/app \
-     '+environment.task_sessions.openenv.server_command=[python,-m,uvicorn,envs.echo_env.server.app:app,--host,127.0.0.1,--port,"8000"]'
+     --output_dir "$HOME/data/openenv" --env_name echo_env
+
+Then run the example with the machine configuration above:
+
+.. code-block:: bash
+
+   bash integrations/openenv/run_openenv.sh \
+     --config-dir /absolute/path --config-name openenv
 
 The example data script supplies Echo and Coding rows.
-Other task types require benchmark-specific data and images.
+Other task types require benchmark-specific data and prebuilt images.
 See :doc:`../tutorials/task_rollouts` for reward projection and cleanup.

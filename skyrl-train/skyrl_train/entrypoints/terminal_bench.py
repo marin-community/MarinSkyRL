@@ -6,6 +6,7 @@ import ray
 import hydra
 from pathlib import Path
 from omegaconf import DictConfig
+from rolloutengine.spec import TaskSessionSpec
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, run_ray_driver
 from skyrl_train.rollouts.workers import RolloutWorkerPool, RolloutWorkerResources
 from skyrl_train.rollouts.task_worker import TaskRolloutWorkerSpec
@@ -29,6 +30,12 @@ class TerminalBenchExp(BasePPOExp):
             tokenizer=self.tokenizer,
             max_prompt_length=self.cfg.trainer.max_prompt_length,
             cache_dir=Path(self.cfg.data.task_cache_dir),
+            session=TaskSessionSpec.model_validate(
+                {
+                    **dict(self.cfg.environment.task_sessions.session),
+                    "task_session": "shellbox",
+                }
+            ),
             verifier_override=HarborTaskSettings.from_config(self.cfg.terminal_bench_config).verifier_override(),
         )
 

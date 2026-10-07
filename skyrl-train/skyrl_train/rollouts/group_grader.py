@@ -4,8 +4,8 @@ import json
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
-from taskcompendium.environment import ExternalVerifierSpec
-from taskcompendium.models import TaskSpec, VerifierKind
+from taskcompendium.importers.skyrl import ExternalVerifierSpec
+from rolloutengine.spec import LoweredTaskSpec
 
 from skyrl_gym.envs.nemotron_ultra import GENRM_AGENTS
 
@@ -31,16 +31,17 @@ class GenRMGroupGraderParameters(BaseModel):
     config: dict[str, Any]
 
 
-def task_group_grader(task: TaskSpec) -> GroupGraderSpec | None:
+def task_group_grader(lowered: LoweredTaskSpec) -> GroupGraderSpec | None:
     """Derive a group grader from the SkyRL environment payload."""
-    if task.verifier.kind != VerifierKind.EXTERNAL:
+    task = lowered.task
+    if task.verifier.kind != "external":
         return None
     verifier = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
     extras = verifier.parameters["extras"]
     config = verifier.parameters["config"]
     ultra = (extras.get("extra_info") or {}).get("nemotron_ultra") or {}
     if (
-        task.environment.interaction != "nemotron_ultra"
+        lowered.session.task_session != "nemotron_ultra"
         or ultra.get("agent") not in GENRM_AGENTS
         or config.get("grading") == "skip"
     ):
