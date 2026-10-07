@@ -69,6 +69,7 @@ cpu = [
     "torchdata",
 ]
 cuda = [
+    "setuptools==84.0.0 ; sys_platform == 'linux'",
     "cuda-toolkit[nvcc,cccl]==13.2.2 ; sys_platform == 'linux'",
     "nvidia-cusparselt-cu13==0.8.1 ; sys_platform == 'linux' and platform_machine == 'aarch64'",
     "accelerate>=1.14,<2 ; sys_platform == 'linux'",
@@ -80,6 +81,7 @@ cuda = [
     "torchvision==0.29.1 ; sys_platform == 'linux'",
 ]
 vllm = [
+    "setuptools==84.0.0 ; sys_platform == 'linux'",
     # The CPU audio wheel uses Torch for GPU resampling without loading a cu132 extension.
     "torchaudio==2.11.0+cpu ; sys_platform == 'linux'",
     "torchcodec==0.17.0+cu132 ; sys_platform == 'linux'",
@@ -102,6 +104,7 @@ vllm = [
     "vllm==0.0.0.dev20261006+marin.47b411d5785d.cu132 ; sys_platform == 'linux'",
 ]
 megatron = [
+    "setuptools==84.0.0 ; sys_platform == 'linux'",
     "cuda-toolkit[nvcc,cccl]==13.2.2 ; sys_platform == 'linux'",
     "nvidia-cusparselt-cu13==0.8.1 ; sys_platform == 'linux' and platform_machine == 'aarch64'",
     "accelerate>=1.14,<2 ; sys_platform == 'linux'",
