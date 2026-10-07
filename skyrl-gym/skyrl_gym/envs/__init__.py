@@ -8,6 +8,11 @@ register(
 )
 
 register(
+    id="sequence",
+    entry_point="skyrl_gym.envs.sequence.env:SequenceEnv",
+)
+
+register(
     id="aime",
     entry_point="skyrl_gym.envs.aime.env:AIMEEnv",
 )

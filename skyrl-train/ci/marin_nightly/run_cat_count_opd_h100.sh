@@ -15,7 +15,9 @@ LOG="${LOG:-$PWD/cat-count-opd-run.log}"
 TEACHER_WORDS="${TEACHER_WORDS:-cat}"
 SWAP_ROUTES="${SWAP_ROUTES:-0}"
 read -r -a WORDS <<< "$TEACHER_WORDS"
-if (( ${#WORDS[@]} > 1 )); then DEFAULT_SPEC=cat-count-mopd-qwen2.5-0.5b-async.json; else DEFAULT_SPEC=cat-count-opd-qwen2.5-0.5b-async.json; fi
+if [[ " ${WORDS[*]} " == *" evens "* ]]; then DEFAULT_SPEC=cat-evens-mopd-qwen2.5-0.5b-async.json
+elif (( ${#WORDS[@]} > 1 )); then DEFAULT_SPEC=cat-count-mopd-qwen2.5-0.5b-async.json
+else DEFAULT_SPEC=cat-count-opd-qwen2.5-0.5b-async.json; fi
 SPEC="${SPEC-ci/marin_nightly/specs/$DEFAULT_SPEC}"
 MAX_STEPS="${MAX_STEPS:-30}"
 LEARNING_RATE="${LEARNING_RATE:-5e-7}"
@@ -56,7 +58,8 @@ for index in "${!WORDS[@]}"; do
   word="${WORDS[$index]}"
   port=$((FIRST_TEACHER_PORT + index))
   # shellcheck disable=SC2086
-  "$PYTHON" examples/cat_count/synthetic_teacher.py --tokenizer "$MODEL_DIR" --port "$port" --word "$word" \
+  if [[ "$word" == evens ]]; then TARGET_ARGS=(--task evens); else TARGET_ARGS=(--task count --word "$word"); fi
+  "$PYTHON" examples/cat_count/synthetic_teacher.py --tokenizer "$MODEL_DIR" --port "$port" "${TARGET_ARGS[@]}" \
     --jitter "$TEACHER_JITTER" $TEACHER_FLAGS &
   teacher_pids+=($!)
   "$PYTHON" - "$port" <<'PY'

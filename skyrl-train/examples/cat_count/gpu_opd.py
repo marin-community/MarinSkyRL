@@ -6,9 +6,11 @@ reward replaced by the teachers' per-token signal. Each teacher is ``synthetic_t
 over HTTP on the same host, so it needs no GPU. ``ci/marin_nightly/run_cat_count_opd_h100.sh`` runs this on one
 Iris H100x4 task.
 
-One teacher (``--teacher cat=URL``) is single-teacher OPD. Several (MOPD) give every count one row per word, each
-row's ``teacher_route`` is its word, and evaluation also reports every word separately. ``--swap-routes`` sends
-each word's rows to the next word's expert, a control that a working router must fail.
+One teacher (``--teacher cat=URL``) is single-teacher OPD. Several (MOPD) give every count one row per route, each
+row's ``teacher_route`` is its route, and evaluation also reports every route separately. A route is a word the
+student repeats N times (cat, dog), or ``evens``, the first N positive even numbers, a different skill with the
+same shape. ``--swap-routes`` sends each route's rows to the next route's expert, a control that a working router
+must fail.
 """
 
 import argparse
@@ -40,19 +42,42 @@ def data_source(word: str, n: int) -> str:
     return f"{word}_count_n{n}"
 
 
+EVENS_ROUTE = "evens"
+
+
+def exact_metric(route: str) -> str:
+    """The per-row exact-match metric name each route's environment reports."""
+    return "environment/sequence/exact" if route == EVENS_ROUTE else "environment/cat_count/exact"
+
+
 def record(word: str, n: int, split: str, index: int, routed: bool) -> dict:
-    row = {
-        "data_source": data_source(word, n),
-        "prompt": [
-            {
-                "role": "user",
-                "content": f"Reply with the word {word} exactly {n} times, separated by single spaces. Nothing else.",
-            }
-        ],
-        "env_class": "cat_count",
-        "reward_spec": {"method": "rule", "ground_truth": n},
-        "extra_info": {"n": n, "word": word, "split": split, "index": index},
-    }
+    if word == EVENS_ROUTE:
+        items = [str(2 * i) for i in range(1, n + 1)]
+        row = {
+            "data_source": data_source(word, n),
+            "prompt": [
+                {
+                    "role": "user",
+                    "content": f"List the first {n} positive even numbers, separated by single spaces. Nothing else.",
+                }
+            ],
+            "env_class": "sequence",
+            "reward_spec": {"method": "rule", "ground_truth": " ".join(items)},
+            "extra_info": {"n": n, "items": items, "split": split, "index": index},
+        }
+    else:
+        row = {
+            "data_source": data_source(word, n),
+            "prompt": [
+                {
+                    "role": "user",
+                    "content": f"Reply with the word {word} exactly {n} times, separated by single spaces. Nothing else.",
+                }
+            ],
+            "env_class": "cat_count",
+            "reward_spec": {"method": "rule", "ground_truth": n},
+            "extra_info": {"n": n, "word": word, "split": split, "index": index},
+        }
     if routed:
         row["teacher_route"] = word
     return row
@@ -92,7 +117,7 @@ def metric_groups(words: tuple[str, ...]) -> dict[str, list[str]]:
                 sources = [data_source(word, n) for word in scope for n in counts]
                 groups[f"{profile}/{prefix}{split}/avg_score"] = [f"{profile}/{source}/avg_score" for source in sources]
                 groups[f"{profile}/{prefix}{split}/environment/exact"] = [
-                    f"{profile}/{source}/environment/cat_count/exact" for source in sources
+                    f"{profile}/{data_source(word, n)}/{exact_metric(word)}" for word in scope for n in counts
                 ]
     return groups
 
@@ -108,6 +133,9 @@ def opd_config(args: argparse.Namespace) -> DictConfig:
         experts = words[1:] + words[:1] if args.swap_routes else words
         routes = {word: {"teacher": expert, "weight": 1.0} for word, expert in zip(words, experts, strict=True)}
     train, validation = write_data(args.output / "data", words, args.steps, args.seed)
+    # Evens answers for the extrapolation counts (24 and 28) take 68 and 80 tokens with EOS; training counts fit 64.
+    eval_generate = 96 if EVENS_ROUTE in words else 64
+    max_model_len = 160 if EVENS_ROUTE in words else 128
     fingerprint = tokenizer_vocabulary_fingerprint(create_tokenizer(args.model, disable_fast_tokenizer=False))
     geometry = {
         "tensor_model_parallel_size": 1,
@@ -215,15 +243,18 @@ def opd_config(args: argparse.Namespace) -> DictConfig:
                 "gpu_memory_utilization": 0.7,
                 "chat_template": {"source": "name", "name_or_path": "qwen2_5_with_generation_tag_simplified"},
                 "sampling_params": {"temperature": 1.0, "top_p": 1.0, "logprobs": 0, "max_generate_length": 64},
-                "eval_sampling_params": {"temperature": 0.0, "max_generate_length": 64},
+                "eval_sampling_params": {"temperature": 0.0, "max_generate_length": eval_generate},
                 "eval_n_samples_per_prompt": 1,
-                "engine_init_kwargs": {"max_model_len": 128},
+                "engine_init_kwargs": {"max_model_len": max_model_len},
             },
             "teachers": {
                 word: {
                     "source": "openai_compatible",
                     "placement": "external",
-                    "model": {"path": f"synthetic/{word}-count", "revision": args.teacher_revision},
+                    "model": {
+                        "path": f"synthetic/{word}" if word == EVENS_ROUTE else f"synthetic/{word}-count",
+                        "revision": args.teacher_revision,
+                    },
                     "endpoints": [{"url": url, "max_concurrency": 8}],
                     "tokenizer_fingerprint": fingerprint,
                     "max_sequence_length": 128,

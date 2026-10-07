@@ -1,10 +1,12 @@
-"""A programmed CatCount teacher served through the OpenAI-compatible teacher protocol.
+"""Programmed teachers served through the OpenAI-compatible teacher protocol.
 
-The teacher knows the right answer, so it is not a language model. It is an expert in one word (``--word``,
-``cat`` by default). For each prompt it reads N, then gives every response token one log-probability:
+A teacher knows the right answer, so it is not a language model. Its target builds that answer from the prompt:
+``--task count`` is a CatCount expert in one word (``--word``, ``cat`` by default) that reads N from the prompt
+and expects the word N times; ``--task evens`` expects the first N positive even numbers. It then gives every
+response token one log-probability:
 
-- log ``correct_probability`` while the response is still a prefix of its word repeated N times, and for a stop
-  token (any special token) once the response is exactly that;
+- log ``correct_probability`` while the response is still a prefix of the target answer, and for a stop token once
+  the response is exactly that;
 - for the first token that leaves that prefix, the log of the remaining probability spread evenly over the rest of
   the vocabulary, as if the teacher were a full distribution;
 - after that first error, the correct score for a stop token and the wrong score for everything else, so a student
@@ -16,9 +18,9 @@ student's own probability for most of a 150k-token vocabulary, so it would push 
 Noise makes the teacher imperfect:
 
 - ``jitter`` adds Gaussian noise with that standard deviation to every response log-probability, capped at 0;
-- ``error_rate`` is the chance that the teacher targets N+1 or N-1 cats for a whole response instead of N.
+- ``error_rate`` is the chance that the teacher targets N+1 or N-1 items for a whole response instead of N.
 
-The teacher ignores which word the prompt asks for, so a row routed to the wrong expert is taught the wrong word.
+An expert ignores which task the prompt asks for, so a row routed to the wrong expert is taught the wrong answer.
 That is how a multi-teacher run detects misrouting.
 
 Noise is causal and deterministic. Each response is seeded from ``seed`` and its prompt, the wrong-count draw comes
@@ -52,8 +54,41 @@ from aiohttp import web
 from skyrl_gym.envs.cat_count.reward import TARGET_WORD
 from transformers import AutoTokenizer, GenerationConfig, PreTrainedTokenizerBase
 
-# Tokenizers that split digits decode "12" as "1 2".
-_N_PATTERN = re.compile(r"exactly (\d[\d ]*) times")
+# The prompt's one number is N. Tokenizers that split digits decode "12" as "1 2". An expert reads only N and
+# ignores the task wording, so a row routed to the wrong expert gets that expert's answer for N.
+_N_PATTERN = re.compile(r"(\d[\d ]*)")
+
+
+def _count(prompt_text: str, rng: random.Random, error_rate: float) -> int:
+    match = _N_PATTERN.search(prompt_text)
+    if match is None:
+        raise ValueError("the scored prompt does not name an N")
+    n = int(match.group(1).replace(" ", ""))
+    if rng.random() < error_rate:
+        n = max(1, n + rng.choice((-1, 1)))
+    return n
+
+
+@dataclass(frozen=True)
+class WordCountTarget:
+    """CatCount: ``word`` repeated N times."""
+
+    word: str = TARGET_WORD
+
+    def answer(self, prompt_text: str, rng: random.Random, error_rate: float) -> str:
+        return " ".join([self.word] * _count(prompt_text, rng, error_rate))
+
+
+@dataclass(frozen=True)
+class EvenNumbersTarget:
+    """The first N positive even numbers, space-separated."""
+
+    def answer(self, prompt_text: str, rng: random.Random, error_rate: float) -> str:
+        n = _count(prompt_text, rng, error_rate)
+        return " ".join(str(2 * i) for i in range(1, n + 1))
+
+
+TARGETS = {"count": WordCountTarget, "evens": EvenNumbersTarget}
 
 
 @dataclass(frozen=True)
@@ -71,18 +106,22 @@ class TeacherNoise:
             raise ValueError("jitter must be non-negative and error_rate must be in [0, 1]")
 
 
-class CatCountTeacher:
-    """Score CatCount responses token by token against the known answer."""
+class SyntheticTeacher:
+    """Score responses token by token against the answer its target builds from the prompt.
+
+    This is a prefix preference scorer, not a language model: it gives one score to tokens that keep the reply on
+    the target and another to all others, and its scores are not a normalized distribution over the vocabulary.
+    """
 
     def __init__(
         self,
         tokenizer: PreTrainedTokenizerBase,
         noise: TeacherNoise,
-        word: str = TARGET_WORD,
+        target: WordCountTarget | EvenNumbersTarget = WordCountTarget(),
         stop_token_ids: Iterable[int] = (),
     ):
         self.tokenizer = tokenizer
-        self.word = word
+        self.target = target
         self.noise = noise
         self.correct_logprob = math.log(noise.correct_probability)
         self.wrong_logprob = math.log((1 - noise.correct_probability) / (len(tokenizer) - 1))
@@ -110,18 +149,8 @@ class CatCountTeacher:
                 return start + len(header)
         raise ValueError("the scored sequence has no assistant header")
 
-    def target_count(self, prompt_ids: Sequence[int], rng: random.Random) -> int:
-        match = _N_PATTERN.search(self.tokenizer.decode(prompt_ids, skip_special_tokens=True))
-        if match is None:
-            raise ValueError("the scored prompt does not name a CatCount N")
-        n = int(match.group(1).replace(" ", ""))
-        if rng.random() < self.noise.error_rate:
-            n = max(1, n + rng.choice((-1, 1)))
-        return n
-
-    def correct_tokens(self, response_ids: Sequence[int], n: int) -> list[bool]:
+    def correct_tokens(self, response_ids: Sequence[int], target: str) -> list[bool]:
         """Return, for each response token, whether the teacher prefers it."""
-        target = " ".join([self.word] * n)
         verdicts = []
         on_track = True
         for index, token_id in enumerate(response_ids):
@@ -146,12 +175,13 @@ class CatCountTeacher:
         start = self.response_start(sequence)
         identity = repr((self.noise.seed, list(sequence[:start]))).encode()
         rng = random.Random(int.from_bytes(hashlib.sha256(identity).digest()[:8], "big"))
-        n = self.target_count(sequence[:start], rng)
+        prompt_text = self.tokenizer.decode(sequence[:start], skip_special_tokens=True)
+        target = self.target.answer(prompt_text, rng, self.noise.error_rate)
         high, low = self.correct_logprob, self.wrong_logprob
         if self.noise.flipped:
             high, low = low, high
         scores: list[float | None] = [None, *([0.0] * (start - 1))]
-        for correct in self.correct_tokens(sequence[start:], n):
+        for correct in self.correct_tokens(sequence[start:], target):
             value = high if correct else low
             if self.noise.jitter:
                 value = min(0.0, value + rng.gauss(0.0, self.noise.jitter))
@@ -184,7 +214,7 @@ def completion_choice(index: int, sequence: Sequence[int], scores: Sequence[floa
     }
 
 
-def application(teacher: CatCountTeacher) -> web.Application:
+def application(teacher: SyntheticTeacher) -> web.Application:
     """Serve ``/v1/completions`` with ``echo`` scoring of token-ID prompts, as vLLM does."""
 
     async def completions(request: web.Request) -> web.Response:
@@ -209,7 +239,8 @@ def application(teacher: CatCountTeacher) -> web.Application:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--tokenizer", required=True, help="the student policy's tokenizer directory or HF name")
-    parser.add_argument("--word", default=TARGET_WORD, help="the word this expert teaches")
+    parser.add_argument("--task", choices=sorted(TARGETS), default="count")
+    parser.add_argument("--word", default=TARGET_WORD, help="count: the word this expert teaches")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--correct-probability", type=float, default=TeacherNoise.correct_probability)
@@ -226,7 +257,8 @@ def main() -> None:
         seed=args.seed,
     )
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
-    teacher = CatCountTeacher(tokenizer, noise, args.word, engine_stop_token_ids(args.tokenizer, tokenizer))
+    target = WordCountTarget(args.word) if args.task == "count" else TARGETS[args.task]()
+    teacher = SyntheticTeacher(tokenizer, noise, target, engine_stop_token_ids(args.tokenizer, tokenizer))
     web.run_app(application(teacher), host=args.host, port=args.port, print=None)
 
 

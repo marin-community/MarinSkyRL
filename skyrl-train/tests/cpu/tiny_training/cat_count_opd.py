@@ -31,7 +31,7 @@ from pathlib import Path
 
 from aiohttp import web
 from examples.cat_count.cpu_canary import HELD_OUT_N, TEMPLATE, TRAIN_N
-from examples.cat_count.synthetic_teacher import CatCountTeacher, TeacherNoise, application
+from examples.cat_count.synthetic_teacher import SyntheticTeacher, TeacherNoise, WordCountTarget, application
 from omegaconf import DictConfig, OmegaConf
 from skyrl_train.inference_engines.vllm_teacher_oracle import tokenizer_vocabulary_fingerprint
 from skyrl_train.tokenizer import create_tokenizer
@@ -46,7 +46,7 @@ LEARNING_RATE = 3e-5
 @contextmanager
 def serve_teacher(model: Path, noise: TeacherNoise, word: str) -> Iterator[str]:
     """Serve one word's programmed teacher on a free local port and yield its OpenAI base URL."""
-    teacher = CatCountTeacher(create_tokenizer(str(model), disable_fast_tokenizer=False), noise, word)
+    teacher = SyntheticTeacher(create_tokenizer(str(model), disable_fast_tokenizer=False), noise, WordCountTarget(word))
     loop = asyncio.new_event_loop()
     runner = web.AppRunner(application(teacher))
     loop.run_until_complete(runner.setup())
