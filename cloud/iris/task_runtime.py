@@ -514,16 +514,18 @@ def apply_policy_chat_template(model_path: str, template_repo_rel: str) -> None:
             f"(loaded len={len(ct) if ct else None}, expected {len(delphi)})"
         )
     vocab = tok.get_vocab()
-    missing = [t for t in _REQUIRED_CHAT_TEMPLATE_TOKENS if t not in vocab]
+    # The think-protocol gate applies only when the template itself carries the tokens;
+    # completion-style templates for base models (e.g. GPT-2) legitimately omit them.
+    missing = [t for t in _REQUIRED_CHAT_TEMPLATE_TOKENS if t in delphi and t not in vocab]
     if missing:
         raise RuntimeError(
-            f"delphi_v0 think-protocol tokens {missing} are NOT single registered tokens in "
+            f"chat-template protocol tokens {missing} are NOT single registered tokens in "
             f"{model_path}'s tokenizer (lossy SFT export?) — they would fragment to bytes and "
             f"break the reward/parse contract. Aborting before a silent reward-zero run."
         )
     _log(
-        f"apply_policy_chat_template: delphi_v0 applied + verified for {model_path} "
-        f"(chat_template len={len(ct)}, tokens OK) on rank {_rank()}/{_num_tasks()} (snapshot={snap})"
+        f"apply_policy_chat_template: template applied + verified for {model_path} "
+        f"(chat_template len={len(ct)}, protocol tokens OK) on rank {_rank()}/{_num_tasks()} (snapshot={snap})"
     )
 
 
