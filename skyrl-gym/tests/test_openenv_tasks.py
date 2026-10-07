@@ -11,7 +11,7 @@ import pytest_asyncio
 from rolloutengine.engine import ShellboxRolloutEngine
 from taskcompendium.importers.skyrl import source_task
 from taskcompendium.models import Source
-from taskcompendium.submission import AnswerFormat, SubmissionConvention
+from taskcompendium.submission import PlainText
 
 from skyrl_gym.openenv_tasks import OpenEnvTaskSession
 
@@ -160,7 +160,7 @@ async def test_openenv_engine_preserves_tokens_and_releases_server(openenv_sessi
         factories={"local": Factory()},
         model=model,
         sessions={"openenv": lambda task, machine: session},
-        convention=SubmissionConvention(id="plain", answer_format=AnswerFormat.PLAIN),
+        convention=PlainText(id="plain"),
     )
     rollout = await engine.run(task)
     assert rollout.grade.reward == 0.25

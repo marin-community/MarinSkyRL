@@ -23,7 +23,7 @@ from shellbox.machine import Command, ExitReason, Result
 from rolloutengine.spec import LoweredTaskSpec, MachineRuntimeSpec, TaskRuntimeSpec, TaskSessionSpec
 from taskcompendium.importers.skyrl import source_task
 from taskcompendium.models import Source
-from taskcompendium.submission import AnswerFormat, SubmissionConvention
+from taskcompendium.submission import PlainText
 
 from skyrl_gym.task_factories import session_factories
 from skyrl_gym.nemotron_tasks import NemotronTaskSession
@@ -299,7 +299,7 @@ async def rollout_session(task_lowering):
             engine = ShellboxRolloutEngine(
                 model,
                 {"local": Factory()},
-                convention=SubmissionConvention(id="plain", answer_format=AnswerFormat.PLAIN),
+                convention=PlainText(id="plain"),
                 sessions=session_factories(),
             )
             return await engine.run(task_lowering(task, name, max_turns=max_turns))

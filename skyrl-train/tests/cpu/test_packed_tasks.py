@@ -38,7 +38,7 @@ from rolloutengine.spec import LoweredTaskSpec
 from tests.cpu.task_specs import session_spec
 from rolloutengine.contracts import ModelTurn
 from rolloutengine.engine import ShellboxRolloutEngine
-from taskcompendium.submission import AnswerFormat, SubmissionConvention
+from taskcompendium.submission import PlainText
 
 
 def _task_binary(name: str, *, solution: bool = False, unsafe_path: bool = False) -> bytes:
@@ -255,7 +255,7 @@ async def test_packed_tasks_execute_after_source_removal(tmp_path, verification)
     engine = ShellboxRolloutEngine(
         Model().complete,
         {"docker": Factory()},
-        convention=SubmissionConvention(id="plain", answer_format=AnswerFormat.PLAIN),
+        convention=PlainText(id="plain"),
     )
     row = pq.read_table(output).to_pylist()[0]
     task = LoweredTaskSpec.model_validate_json(row["lowered_task_spec"])

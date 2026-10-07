@@ -9,7 +9,7 @@ from taskcompendium.grading_result import Outcome
 from rolloutengine.spec import LoweredTaskSpec, TaskRuntimeSpec, TaskSessionSpec
 from taskcompendium.importers.skyrl import source_task
 from taskcompendium.models import Source
-from taskcompendium.submission import AnswerFormat, SubmissionConvention
+from taskcompendium.submission import PlainText
 
 from skyrl_gym.task_factories import session_factories
 
@@ -41,7 +41,7 @@ def engine(model):
     return ShellboxRolloutEngine(
         model,
         {},
-        convention=SubmissionConvention(id="plain", answer_format=AnswerFormat.PLAIN),
+        convention=PlainText(id="plain"),
         sessions=session_factories(),
     )
 

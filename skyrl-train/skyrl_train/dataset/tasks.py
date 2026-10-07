@@ -17,7 +17,7 @@ from rolloutengine.lowering import SHELLBOX_SESSION
 from rolloutengine.task_session import session_start
 from taskcompendium.importers.skyrl import ExternalVerifierSpec, source_task
 from taskcompendium.models import EnvironmentRequirements, Source
-from taskcompendium.submission import AnswerFormat, SubmissionConvention
+from taskcompendium.submission import PlainText
 from transformers import PreTrainedTokenizerBase
 
 from skyrl_train.dataset.dataset import PromptDataset
@@ -37,7 +37,7 @@ def task_prompt(lowered: LoweredTaskSpec) -> dict:
         if task.verifier.kind == "external"
         else {}
     )
-    convention = SubmissionConvention(id="rollout", answer_format=AnswerFormat.PLAIN)
+    convention = PlainText(id="rollout")
     return {
         **extras,
         LOWERED_TASK_COLUMN: lowered.model_dump_json(),

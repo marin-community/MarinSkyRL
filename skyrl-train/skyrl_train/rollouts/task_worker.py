@@ -30,7 +30,7 @@ from rolloutengine.engine import ShellboxRolloutEngine
 from rolloutengine.spec import LoweredTaskSpec
 from rolloutengine.lowering import SHELLBOX_SESSION
 from skyrl_train.dataset.tasks import LOWERED_TASK_COLUMN
-from taskcompendium.submission import AnswerFormat, SubmissionConvention
+from taskcompendium.submission import PlainText
 from skyrl_gym.task_factories import session_factories
 from skyrl_gym.task_records import fold_grades
 
@@ -313,7 +313,7 @@ class TaskRolloutWorker:
             engine = ShellboxRolloutEngine(
                 model,
                 self.factories,
-                convention=SubmissionConvention(id="plain", answer_format=AnswerFormat.PLAIN),
+                convention=PlainText(id="plain"),
                 sessions=self.sessions,
             )
             harbor_slots = (
