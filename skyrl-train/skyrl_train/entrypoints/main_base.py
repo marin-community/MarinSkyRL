@@ -180,8 +180,12 @@ def create_ray_wrapped_inference_engines_from_config(
                 for profile in (callback.get("additional_evaluations") or {}).values()
             )
     requested_logprobs = [
-        value for value in requested_logprobs if isinstance(value, int) and not isinstance(value, bool) and value > 0
+        value + 1
+        for value in requested_logprobs
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0
     ]
+    # Chat capture requests K+1 candidates so the sampled token cannot displace
+    # a token from the natural top K. Reserve the actual request width in vLLM.
 
     role = InferenceEngineRoleConfig(
         pretrain=rollout_model_path,
