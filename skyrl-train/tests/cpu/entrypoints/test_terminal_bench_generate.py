@@ -68,6 +68,7 @@ def test_terminal_bench_generate_builds_complete_evaluation_request(tmp_path):
         (source / "instruction.md").write_text(name)
         (source / "task.toml").write_text(
             '[environment]\ndocker_image = "fixture@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\n'
+            '[verifier]\nenvironment_mode = "separate"\n'
         )
         (source / "tests/test.sh").write_text("echo 1 > /logs/verifier/reward.txt\n")
 
