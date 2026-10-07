@@ -29,6 +29,7 @@ def session_spec(
         task_session=session_name,
         max_turns=max_turns,
         model_turn_timeout=5,
+        command_timeout=1,
         tool_turn_timeout=5,
         total_turn_timeout=None,
         attempt_timeout=None,

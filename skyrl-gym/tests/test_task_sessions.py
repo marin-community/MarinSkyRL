@@ -7,7 +7,7 @@ from rolloutengine.contracts import ModelTurn
 from rolloutengine.engine import ShellboxRolloutEngine
 from taskcompendium.grading_result import Outcome
 from rolloutengine.spec import LoweredTaskSpec, TaskRuntimeSpec, TaskSessionSpec
-from taskcompendium.importers.skyrl import source_task
+from skyrl_gym.source_task import source_task
 from taskcompendium.models import Source
 from taskcompendium.submission import PlainText
 
@@ -60,6 +60,7 @@ def task(name, extras, config=None):
             task_session=name,
             max_turns=3,
             model_turn_timeout=None,
+            command_timeout=1,
             tool_turn_timeout=5,
             total_turn_timeout=None,
             attempt_timeout=None,

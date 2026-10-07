@@ -1,7 +1,7 @@
 import json
 
 from examples.livecodebench.lcb_dataset import LIVECODEBENCH, process_example
-from taskcompendium.importers.skyrl import ExternalVerifierSpec
+from skyrl_gym.source_task import ExternalVerifierSpec
 from taskcompendium.submission import conversation_messages
 
 from skyrl_train.dataset.tasks import source_row_task

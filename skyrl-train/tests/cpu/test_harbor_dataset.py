@@ -2,7 +2,7 @@ from pathlib import Path
 import json
 
 import pytest
-from taskcompendium.importers.skyrl import source_task
+from skyrl_gym.source_task import source_task
 from taskcompendium.models import Source
 from tests.cpu.task_specs import lowered_task, session_spec
 
@@ -43,6 +43,7 @@ def test_terminal_task_selection_fails_before_execution(tmp_path, selection):
         (task / "tests/test.sh").write_text("echo 1 > /logs/verifier/reward.txt\n")
         (task / "task.toml").write_text(
             '[environment]\ndocker_image = "fixture@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\n'
+            '[verifier]\nenvironment_mode = "separate"\n'
         )
     path = materialize_harbor_tasks(
         [str(sources if selection == "ambiguous" else sources / "first")],

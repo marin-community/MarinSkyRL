@@ -44,7 +44,10 @@ from taskcompendium.submission import PlainText
 def _task_binary(name: str, *, solution: bool = False, unsafe_path: bool = False) -> bytes:
     files = {
         "instruction.md": f"Do {name}".encode(),
-        "task.toml": b'[environment]\ndocker_image = "fixture@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\n',
+        "task.toml": (
+            b'[environment]\ndocker_image = "fixture@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\n'
+            b'[verifier]\nenvironment_mode = "separate"\n'
+        ),
         "tests/test.sh": b"#!/bin/sh\nexit 0\n",
     }
     if solution:
@@ -215,8 +218,10 @@ def test_packed_selection_becomes_portable_task_parquet(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("verification", [True, False])
 async def test_packed_tasks_execute_after_source_removal(tmp_path, verification):
-    config = '[environment]\nworkdir = "/workspace"\nallow_internet = false\n'
+    config = 'artifacts = ["/setup_files/input"]\n[environment]\nworkdir = "/workspace"\nallow_internet = false\n'
     config += 'docker_image = "fixture@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\n'
+    if verification:
+        config += '[verifier]\nenvironment_mode = "separate"\n'
     files = {
         "setup_files/input": b"first\n",
         "instruction.md": b"Single task.",

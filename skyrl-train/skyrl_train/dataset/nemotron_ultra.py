@@ -7,7 +7,7 @@ from typing import Any
 
 import pyarrow.parquet as pq
 from datasets import Dataset
-from taskcompendium.importers.skyrl import ExternalVerifierSpec
+from skyrl_gym.source_task import ExternalVerifierSpec
 from rolloutengine.spec import LoweredTaskSpec, TaskSessionSpec
 from taskcompendium.models import VerifierSpec
 from transformers import PreTrainedTokenizerBase

@@ -147,8 +147,8 @@ def lower_harbor_task(directory: Path, task: TaskSpec, *, session: TaskSessionSp
         if task.verifier.environment_requirements != EnvironmentRequirements()
         else None
     )
-    if verifier_machine is None and config.verifier.user not in {None, 0, "0", "root"}:
-        raise NotImplementedError("A shared Harbor verifier supports only the trusted root user")
+    if task.verifier.kind == "shell" and verifier_machine is None:
+        raise NotImplementedError("Harbor shell grading requires a separate verifier environment")
     return LoweredTaskSpec(
         task=task,
         runtime=TaskRuntimeSpec(task_machine=task_machine, verifier_machine=verifier_machine),
@@ -191,7 +191,6 @@ def materialize_harbor_tasks(
                         uid = item.uid()
                     task = harbor_task(
                         directory,
-                        verifier_override=verifier_override,
                         source=Source(
                             dataset=data_source,
                             revision="unhashed",
@@ -199,6 +198,13 @@ def materialize_harbor_tasks(
                             importer_revision="skyrl-harbor-v1",
                         ),
                     )
+                    if verifier_override is not None:
+                        task = task.model_copy(
+                            update={
+                                "verifier": verifier_override,
+                                "resources": task.resources.model_copy(update={"verifier": ()}),
+                            }
+                        )
                     content = json.dumps(task.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
                     task = task.model_copy(
                         update={

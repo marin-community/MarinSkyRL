@@ -9,7 +9,7 @@ import psutil
 import pytest
 import pytest_asyncio
 from rolloutengine.engine import ShellboxRolloutEngine
-from taskcompendium.importers.skyrl import source_task
+from skyrl_gym.source_task import source_task
 from taskcompendium.models import Source
 from taskcompendium.submission import PlainText
 

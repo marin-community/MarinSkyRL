@@ -15,7 +15,7 @@ from datasets import Dataset
 from rolloutengine.spec import LoweredTaskSpec, MachineRuntimeSpec, TaskRuntimeSpec, TaskSessionSpec
 from rolloutengine.lowering import SHELLBOX_SESSION
 from rolloutengine.task_session import session_start
-from taskcompendium.importers.skyrl import ExternalVerifierSpec, source_task
+from skyrl_gym.source_task import ExternalVerifierSpec, source_task
 from taskcompendium.models import EnvironmentRequirements, Source
 from taskcompendium.submission import PlainText
 from transformers import PreTrainedTokenizerBase

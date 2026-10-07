@@ -4,7 +4,8 @@ max_verifier_workers: 32 # verifier threads in each rollout worker
 session:
   max_turns: ${generator.max_turns}
   model_turn_timeout: null
-  tool_turn_timeout: ${trajectory_runner.command_timeout}
+  command_timeout: ${trajectory_runner.command_timeout}
+  tool_turn_timeout: 600
   total_turn_timeout: null
   attempt_timeout: null
   verifier_timeout: null

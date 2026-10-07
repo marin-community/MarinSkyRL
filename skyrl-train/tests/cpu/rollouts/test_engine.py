@@ -24,11 +24,14 @@ from taskcompendium.grading_result import GradeResult, Outcome
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
 from shellbox.machine import Command, ExitReason, Result, ShellSimBuiltins
 from taskcompendium.shell_verifier import (
+    ArtifactKind,
     ExitCodeReward,
     FileReward,
+    MissingArtifactPolicy,
     RewardFile,
     RewardFileFormat,
     ShellVerifierSpec,
+    VerifierArtifact,
 )
 from taskcompendium.models import (
     AnswerType,
@@ -50,7 +53,7 @@ from skyrl_train.rollouts.task_worker import TaskRolloutWorker
 from skyrl_train.rollouts.group_grader import GenRMGroupGraderParameters, GroupGraderSpec, task_group_grader
 from skyrl_train.rollouts.genrm_grading import grade_genrm_rollouts
 from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
-from taskcompendium.importers.skyrl import source_task
+from skyrl_gym.source_task import source_task
 from rolloutengine.spec import LoweredTaskSpec
 from skyrl_train.config.utils import get_default_config
 from tests.cpu.task_specs import lowered_task, machine_runtime, session_spec
@@ -400,7 +403,11 @@ async def test_agent_deadlines_grade_the_workspace_and_commit_training_tokens(
         verifier=VerifierSpec(
             kind="shell",
             parameters_json=ShellVerifierSpec(
-                argv=("test", "-f", "/workspace/answer"), reward=ExitCodeReward()
+                argv=("test", "-f", "/workspace/answer"),
+                reward=ExitCodeReward(),
+                artifacts=(
+                    VerifierArtifact(source="/workspace/answer", target="/workspace/answer", kind=ArtifactKind.FILE),
+                ),
             ).model_dump_json(),
         ),
         source=Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
@@ -423,7 +430,11 @@ async def test_agent_deadlines_grade_the_workspace_and_commit_training_tokens(
         )
         request["batch_metadata"] = BatchMetadata(0, "eval" if deadline_source == "eval" else "train")
     request["env_extras"] = [
-        {"lowered_task_spec": lowered_task(task, backend="shellsim", total_turn_timeout=1).model_dump_json()}
+        {
+            "lowered_task_spec": lowered_task(
+                task, backend="shellsim", verifier_backend="shellsim", total_turn_timeout=1
+            ).model_dump_json()
+        }
     ]
     machines = []
 
@@ -564,21 +575,49 @@ class ConversationClient:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["train", "eval"])
 @pytest.mark.parametrize("projection_type", [WholeTaskProjection, StepTaskProjection])
-async def test_disabled_harbor_verification_keeps_tokens_without_a_score(task_inputs, phase, projection_type):
+async def test_disabled_harbor_verification_keeps_tokens_without_a_score(tmp_path, task_inputs, phase, projection_type):
     config, request = task_inputs
-    task = LoweredTaskSpec.model_validate_json(request["env_extras"][0]["lowered_task_spec"]).task
+    source = tmp_path / "shared"
+    (source / "tests").mkdir(parents=True)
+    (source / "instruction.md").write_text("Complete the task.")
+    (source / "task.toml").write_text(
+        '[environment]\nworkdir = "/workspace"\nallow_internet = false\ndocker_image = "fixture@sha256:'
+        + "a" * 64
+        + '"\n'
+        '[verifier]\nenvironment_mode = "shared"\nuser = "candidate"\n'
+    )
+    (source / "tests/test.sh").write_text("echo private-grade-only\n")
+    with pytest.raises(NotImplementedError):
+        HarborTaskDataset(
+            [str(source)], Tokenizer(), 100, session=session_spec(), cache_dir=tmp_path / "native", num_workers=1
+        )
     settings = HarborTaskSettings.from_config(OmegaConf.create({"harbor": {"verifier_disable": True}}))
-    task = task.model_copy(update={"tags": ("harbor",), "verifier": settings.verifier_override()})
-    request["env_extras"][0]["lowered_task_spec"] = lowered_task(task, backend="shellsim").model_dump_json()
+    prepared = HarborTaskDataset(
+        [str(source)],
+        Tokenizer(),
+        100,
+        session=session_spec(),
+        cache_dir=tmp_path / "disabled",
+        verifier_override=settings.verifier_override(),
+        num_workers=1,
+    )
+    prompt, env, extras, uid = prepared[0]
+    assert LoweredTaskSpec.model_validate_json(extras["lowered_task_spec"]).task.resources.verifier == ()
+    request.update(prompts=[prompt], env_classes=[env], env_extras=[extras], trajectory_ids=[TrajectoryID(uid, 0)])
     request["batch_metadata"] = BatchMetadata(0, phase)
     projection = (
         WholeTrajectoryProjection if projection_type is WholeTaskProjection else StepWiseTrajectoryProjection
     )(config, Tokenizer())
+
+    class ImageFactory:
+        async def create(self, spec):
+            return await ShellSimMachineFactory().create(replace(spec, source=ShellSimBuiltins()))
+
     worker = TaskRolloutWorker(
         config,
         projection_type(projection),
         ConversationClient(["Done"]),
-        {"shellsim": ShellSimMachineFactory()},
+        {"docker": ImageFactory()},
         harbor=settings,
     )
     try:
@@ -606,11 +645,21 @@ async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected
                 kind="shell",
                 parameters_json=ShellVerifierSpec(
                     argv=("cat", "/workspace/reward"),
+                    artifacts=(
+                        VerifierArtifact(
+                            source="/workspace/reward",
+                            target="/workspace/reward",
+                            kind=ArtifactKind.FILE,
+                            missing=MissingArtifactPolicy.SKIP,
+                        ),
+                    ),
                 ).model_dump_json(),
             ),
         }
     )
-    request["env_extras"][0]["lowered_task_spec"] = lowered_task(task, "shellbox", backend="shellsim").model_dump_json()
+    request["env_extras"][0]["lowered_task_spec"] = lowered_task(
+        task, "shellbox", backend="shellsim", verifier_backend="verifier"
+    ).model_dump_json()
     attempts = 0
     machines = []
     waits = []
@@ -667,6 +716,12 @@ async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected
                 "token_provenance": TokenProvenance.ENGINE,
             }
 
+    class VerifierFactory:
+        async def create(self, spec):
+            machine = await ShellSimMachineFactory().create(spec)
+            machines.append(machine)
+            return machine
+
     async def wait(delay):
         waits.append(delay)
         for machine in machines:
@@ -701,7 +756,7 @@ async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected
         config,
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         Client(),
-        {"shellsim": Factory()},
+        {"shellsim": Factory(), "verifier": VerifierFactory()},
         harbor=settings,
         retry_wait=wait,
     )
@@ -778,11 +833,12 @@ async def test_harbor_retry_policy_preserves_terminal_grades(task_inputs, phase,
     verifier = ShellVerifierSpec(
         argv=("sh", "-c", script),
         reward=FileReward(files=(RewardFile(path="/reward.txt", format=RewardFileFormat.NUMBER),)),
+        artifacts=(VerifierArtifact(source="/workspace/attempt", target="/workspace/attempt", kind=ArtifactKind.FILE),),
     )
     # A command failure without a reward file is a missing-reward failure.
     # Use stdout grading to exercise the retry limit for verifier execution errors.
     if failure == "exhausted":
-        verifier = ShellVerifierSpec(argv=("false",))
+        verifier = ShellVerifierSpec(argv=("false",), artifacts=verifier.artifacts)
     task = task.model_copy(
         update={
             "answer_type": AnswerType.STATE,
@@ -790,9 +846,6 @@ async def test_harbor_retry_policy_preserves_terminal_grades(task_inputs, phase,
             "verifier": VerifierSpec(
                 kind="shell",
                 parameters_json=verifier.model_dump_json(),
-                environment_requirements=EnvironmentRequirements(working_directory="/workspace")
-                if failure.startswith("grade_timeout")
-                else EnvironmentRequirements(),
             ),
         }
     )
@@ -800,21 +853,28 @@ async def test_harbor_retry_policy_preserves_terminal_grades(task_inputs, phase,
         task,
         "shellbox",
         backend="shellsim",
-        verifier_backend="shellsim" if failure.startswith("grade_timeout") else None,
+        verifier_backend="verifier",
     ).model_dump_json()
     request["batch_metadata"] = BatchMetadata(0, phase)
     attempts = 0
+    verifier_starts = 0
     waits = []
 
     class Factory:
         async def create(self, spec):
             nonlocal attempts
             attempts += 1
-            if failure.startswith("grade_timeout") and attempts == 2:
-                raise TimeoutError("Verifier machine startup timed out")
             machine = await ShellSimMachineFactory().create(spec)
             await machine.run(Command(("sh", "-c", f"echo {attempts} > /workspace/attempt")))
             return machine
+
+    class VerifierFactory:
+        async def create(self, spec):
+            nonlocal verifier_starts
+            verifier_starts += 1
+            if failure.startswith("grade_timeout"):
+                raise TimeoutError("Verifier machine startup timed out")
+            return await ShellSimMachineFactory().create(spec)
 
     class Client(InferenceClient):
         async def generate(self, request):
@@ -864,13 +924,14 @@ async def test_harbor_retry_policy_preserves_terminal_grades(task_inputs, phase,
         config,
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         Client(),
-        {"shellsim": Factory()},
+        {"shellsim": Factory(), "verifier": VerifierFactory()},
         harbor=settings,
         retry_wait=wait,
     )
     batch = await worker.run(request)
     retries = {"exhausted": 2, "retry_missing": 1}.get(failure, 0)
-    assert attempts == (2 if failure.startswith("grade_timeout") else retries + 1)
+    assert attempts == retries + 1
+    assert verifier_starts == retries + 1
     assert len(waits) == retries
     assert batch["rollout_metrics"]["rollout_retries"] == retries
     if failure in {"passthrough", "retry_missing"}:
@@ -905,7 +966,9 @@ async def test_harbor_completion_reward_uses_the_engine_stop_reason(task_inputs,
             "verifier": VerifierSpec(kind="shell", parameters_json=verifier.model_dump_json()),
         }
     )
-    request["env_extras"][0]["lowered_task_spec"] = lowered_task(task, "shellbox", backend="shellsim").model_dump_json()
+    request["env_extras"][0]["lowered_task_spec"] = lowered_task(
+        task, "shellbox", backend="shellsim", verifier_backend="shellsim"
+    ).model_dump_json()
 
     class Client(InferenceClient):
         async def generate(self, request):
@@ -963,7 +1026,11 @@ async def test_strict_harbor_parser_masks_only_the_affected_response(task_inputs
         prompts=request["prompts"] * 2,
         env_classes=["taskcompendium"] * 2,
         env_extras=[
-            {"lowered_task_spec": lowered_task(task, "shellbox", backend="shellsim").model_dump_json()}
+            {
+                "lowered_task_spec": lowered_task(
+                    task, "shellbox", backend="shellsim", verifier_backend="shellsim"
+                ).model_dump_json()
+            }
             for task in tasks
         ],
         trajectory_ids=[TrajectoryID(base.id, index) for index in range(2)],
@@ -1083,6 +1150,7 @@ async def test_mixed_nemotron_tasks_run_without_the_original_sources(
     (source / "instruction.md").write_text("Repair the terminal task.")
     (source / "task.toml").write_text(
         '[environment]\nworkdir = "/workspace"\nallow_internet = false\ndocker_image = "fixture@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\n'
+        '[verifier]\nenvironment_mode = "separate"\n'
     )
     (source / "tests" / alias_file).write_text(json.dumps(alias_metadata))
     (source / "tests/test.sh").write_text(
@@ -1462,6 +1530,7 @@ async def test_harbor_source_materialization_runs_without_the_original_directory
     (source / "instruction.md").write_text("Write 12 to /logs/artifacts/answer.")
     (source / "task.toml").write_text(
         '[environment]\nworkdir = "/workspace"\nallow_internet = false\ndocker_image = "fixture@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\n'
+        '[verifier]\nenvironment_mode = "separate"\n'
     )
     (source / "tests/test.sh").write_text(
         '#!/bin/sh\nif [ "$(cat /logs/artifacts/answer)" = "12" ]; then\n'
@@ -1569,7 +1638,11 @@ async def test_harbor_task_worker_preserves_verdicts_and_shapes_group_rewards(
         prompts=[[{"role": "user", "content": "Complete the task."}]] * 2,
         env_classes=["taskcompendium"] * 2,
         env_extras=[
-            {"lowered_task_spec": lowered_task(task, "shellbox", backend="shellsim").model_dump_json()}
+            {
+                "lowered_task_spec": lowered_task(
+                    task, "shellbox", backend="shellsim", verifier_backend="shellsim"
+                ).model_dump_json()
+            }
             for task in tasks
         ],
         trajectory_ids=[TrajectoryID("harbor", index) for index in range(2)],

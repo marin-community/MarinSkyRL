@@ -11,7 +11,7 @@ from typing import Any
 
 from rolloutengine.contracts import ModelTurn, SessionStart, Transition
 from shellbox.machine import ExitReason, Machine
-from taskcompendium.importers.skyrl import ExternalVerifierSpec
+from skyrl_gym.source_task import ExternalVerifierSpec
 from taskcompendium.grading_result import GradeResult, Outcome
 from rolloutengine.spec import LoweredTaskSpec
 from taskcompendium.submission import conversation_messages

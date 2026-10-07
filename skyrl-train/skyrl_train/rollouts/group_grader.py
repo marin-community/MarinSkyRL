@@ -4,7 +4,7 @@ import json
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
-from taskcompendium.importers.skyrl import ExternalVerifierSpec
+from skyrl_gym.source_task import ExternalVerifierSpec
 from rolloutengine.spec import LoweredTaskSpec
 
 from skyrl_gym.envs.nemotron_ultra import GENRM_AGENTS

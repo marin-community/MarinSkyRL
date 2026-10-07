@@ -31,7 +31,7 @@ Harbor caches private task Parquet in ``data.task_cache_dir``.
 Explicit exports use ``skyrl_train.dataset.tasks.write_tasks(Path(...), records)``.
 ``LoweredTaskSpec.runtime`` selects optional task and verifier machines through ``MachineRuntimeSpec``.
 Each machine selection supplies a configured backend identifier, network policy, hardware limits, user, and startup or cleanup deadline.
-``LoweredTaskSpec.session`` supplies the session factory identifier, turn limit, model and tool caps, cumulative turn deadline, attempt deadline, and verifier deadline.
+``LoweredTaskSpec.session`` supplies the session factory identifier, turn limit, model and command caps, tool-turn deadline, cumulative turn deadline, attempt deadline, and verifier deadline.
 Its cleanup deadline requires an explicit finite, positive value.
 Tasks support one stage and prebuilt, digest-pinned images. Multi-stage packages and task-specific image builds cause rejection.
 TaskCompendium defines task serialization. SkyRL owns its dataset file format.
@@ -53,12 +53,19 @@ Each session returns its initial messages and model options in ``SessionStart``.
 
 ``environment.task_sessions.session`` supplies launch-time session limits.
 Source-specific ``session`` blocks override those limits.
+For example, ``environment.task_sessions.lcb.session.total_turn_timeout`` overrides the cumulative turn deadline for code tasks.
 Harbor lowering uses package machine settings, users, total-turn deadlines, and verifier deadlines.
 Other Harbor session limits come from launch configuration.
 The attempt deadline includes startup, preparation, all turns, and final verification.
 The cumulative turn deadline excludes preparation and final verification.
 The verifier deadline includes artifact transfer and separate verifier startup.
 Cleanup runs outside the attempt deadline. Machine cleanup can override the session cleanup limit.
+``command_timeout`` limits each shell command. A command timeout returns a ``timed_out`` tool observation, and the model can continue.
+``tool_turn_timeout`` limits the full ``advance`` call. Its budget is separate from the command limit.
+When these limits are finite, lowering requires the command limit to be less than the tool-turn deadline.
+Shell grading requires a separate verifier machine and declared artifacts for workspace submissions.
+Runtime lowering rejects shared-machine Harbor shell graders.
+Disabling Harbor verification removes private grader resources and selects skipped grading before runtime lowering.
 
 Exact tokens
 ------------
@@ -94,8 +101,8 @@ behavior log probabilities, token rewards, expert routes, and teacher routes.
 
 Sessions can supply per-turn optimization rewards. Otherwise, the whole-task projection uses the task grade.
 Step projection uses each turn's reward, with the task grade on the last turn when no per-turn rewards exist.
-A verifier result without a grade excludes tokens from loss and baseline calculations.
-Recorded execution failures use the exception policy, with zero optimization reward when no grade is available. Explicitly
+A no-grade verifier result with ``RolloutData.failure=None`` excludes tokens from loss and baseline calculations.
+Recorded execution failures, including verifier timeouts, use the exception policy, with zero optimization reward when no grade is available. Explicitly
 skipped grading retains trainable tokens with zero reward.
 ``harbor.verifier_disable=true`` skips grading for Harbor tasks.
 Nemotron GenRM tasks use a judge model to compare a group of responses against

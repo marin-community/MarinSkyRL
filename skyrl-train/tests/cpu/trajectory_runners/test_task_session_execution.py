@@ -9,7 +9,7 @@ from skyrl_gym.verification import VerificationStatus
 from rolloutengine.contracts import ModelTurn
 from taskcompendium.grading_result import Outcome
 from transformers import AutoTokenizer
-from taskcompendium.importers.skyrl import source_task
+from skyrl_gym.source_task import source_task
 from taskcompendium.models import Source
 from tests.cpu.task_specs import lowered_task
 
