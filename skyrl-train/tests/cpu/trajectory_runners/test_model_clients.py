@@ -392,7 +392,7 @@ async def test_direct_chat_client_captures_exact_student_topk_ids():
     assert body["return_tokens_as_token_ids"] is True
     assert output["student_topk_indices"] == [[[2, 3], [10, 11]]]
     assert output["behavior_topk_logprobs"] == [[[-0.1, -0.2], [-0.1, -0.2]]]
-    np.testing.assert_array_equal(output["routed_experts"][0], [[[4, 7]], [[0, 0]]])
+    np.testing.assert_array_equal(output["routed_experts"][0], [[[3, 4]], [[4, 7]]])
     assert output["routed_experts"][0].dtype == np.uint8
 
 
@@ -460,7 +460,7 @@ async def test_chat_grading_recovers_reasoning_boundaries_without_changing_repla
     assert result["responses"] == [expected]
     assert result["response_ids"] == [[3, 4, 5]]
     assert result["response_logprobs"] == [[-0.1, -0.2, -0.3]]
-    np.testing.assert_array_equal(result["routed_experts"][0], [[[1, 2]], [[3, 4]], [[0, 0]]])
+    np.testing.assert_array_equal(result["routed_experts"][0], [[[0, 0]], [[1, 2]], [[3, 4]]])
     assert result["assistant_messages"] == [raw_message]
 
 
