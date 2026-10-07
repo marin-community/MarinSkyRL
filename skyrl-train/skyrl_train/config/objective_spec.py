@@ -57,6 +57,7 @@ BUILTIN_LOSS_SPECS: Mapping[str, LossSpec] = MappingProxyType(
         PolicyLossType.BEHAVIOR_CLIP: LossSpec(RatioAnchor.ROLLOUT),
         PolicyLossType.SFT: LossSpec(RatioAnchor.NONE, advantage_linear=False),
         PolicyLossType.FTPO: LossSpec(RatioAnchor.NONE, advantage_linear=False),
+        PolicyLossType.DPO: LossSpec(RatioAnchor.NONE, advantage_linear=False),
     }
 )
 
@@ -64,6 +65,7 @@ BUILTIN_LOSS_SPECS: Mapping[str, LossSpec] = MappingProxyType(
 class LossReduction(StrEnum):
     TOKEN_MEAN = "token_mean"
     SEQUENCE_MEAN = "sequence_mean"
+    PAIR_MEAN = "pair_mean"
     SEQ_MEAN_TOKEN_SUM_NORM = "seq_mean_token_sum_norm"
     SEQ_MEAN_TOKEN_SUM_NORM_GLOBAL = "seq_mean_token_sum_norm_global"
 
@@ -200,9 +202,85 @@ def rollout_logprobs_required(algorithm: DictConfig, *, loss_spec: LossSpec | No
     return spec.anchor is RatioAnchor.ROLLOUT or bool(off_policy_correction(algorithm).rules)
 
 
+def validate_dpo(cfg: DictConfig) -> None:
+    """Reject configurations that would break chosen/rejected pair adjacency or the frozen reference."""
+    algorithm = cfg.trainer.algorithm
+    beta = float(algorithm.dpo.beta)
+    label_smoothing = float(algorithm.dpo.label_smoothing)
+    if not math.isfinite(beta) or beta <= 0:
+        raise ValueError("trainer.algorithm.dpo.beta must be a positive finite number")
+    if not math.isfinite(label_smoothing) or not 0 <= label_smoothing < 0.5:
+        raise ValueError("trainer.algorithm.dpo.label_smoothing must be in [0, 0.5)")
+    if LossReduction(algorithm.loss_reduction) is not LossReduction.PAIR_MEAN:
+        raise ValueError("dpo requires trainer.algorithm.loss_reduction=pair_mean")
+    if str(cfg.environment.env_class) != "preference_pair":
+        raise ValueError("dpo requires environment.env_class=preference_pair (the static pair runner)")
+    if algorithm.advantage_estimator != AdvantageEstimator.UNIFORM or algorithm.advantage_batch_normalize:
+        raise ValueError("dpo ignores advantages; use advantage_estimator=uniform and advantage_batch_normalize=false")
+    if (
+        algorithm.use_kl_loss
+        or algorithm.use_kl_in_reward
+        or algorithm.think_token_weight != 1
+        or algorithm.enable_token_reward_channel
+        or algorithm.dynamic_sampling.type is not None
+    ):
+        raise ValueError(
+            "dpo supplies its own beta-weighted reference term; disable use_kl_loss, use_kl_in_reward, "
+            "think_token_weight, the token-reward channel, and reward-based dynamic sampling"
+        )
+    if cfg.generator.n_samples_per_prompt != 2:
+        raise ValueError("dpo requires generator.n_samples_per_prompt=2 (chosen and rejected rows per prompt)")
+    if cfg.trainer.trajectory_selector.type is not None:
+        raise ValueError("dpo cannot drop half a pair; unset trainer.trajectory_selector")
+    if cfg.trainer.step_wise_training:
+        raise ValueError("dpo trains single-turn preference completions; step-wise training is not supported")
+    if cfg.trainer.use_sample_packing:
+        raise ValueError("dpo requires use_sample_packing=false; packing reorders rows and breaks pair adjacency")
+    if cfg.trainer.critic.model.path:
+        raise ValueError("dpo trains the policy against a frozen reference; a critic model is not supported")
+    if cfg.trainer.get("update_ref_every_epoch", False) or any(
+        callback.get("type") == "ref_model_update" for callback in (cfg.trainer.get("callbacks") or [])
+    ):
+        raise ValueError("dpo requires a frozen reference; reference-update callbacks must be disabled")
+    if cfg.trainer.placement.colocate_all:
+        raise ValueError("dpo launches no inference engines; use trainer.placement.colocate_all=false")
+    if compile_distillation_plan_from_config(cfg) is not None:
+        raise ValueError("dpo does not combine with distillation objectives")
+    for role in (cfg.trainer.policy, cfg.trainer.ref):
+        geometry = role.megatron_config
+        if role.sequence_parallel_size != 1 or geometry.context_parallel_size != 1:
+            raise ValueError("dpo requires sequence_parallel_size=1 and context_parallel_size=1 on policy and ref")
+    if cfg.trainer.micro_train_batch_size_per_gpu % 2:
+        raise ValueError("dpo requires an even trainer.micro_train_batch_size_per_gpu so pairs share a microbatch")
+
+    def data_parallel_size(role: DictConfig, default_nodes: int, default_gpus: int) -> int:
+        placement = cfg.trainer.placement
+        nodes = placement.get("ref_num_nodes") or default_nodes
+        gpus = placement.get("ref_num_gpus_per_node") or default_gpus
+        if role is cfg.trainer.policy:
+            nodes, gpus = default_nodes, default_gpus
+        geometry = role.megatron_config
+        return int(nodes * gpus) // (
+            geometry.pipeline_model_parallel_size * geometry.context_parallel_size * geometry.tensor_model_parallel_size
+        )
+
+    policy_nodes = cfg.trainer.placement.policy_num_nodes
+    policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node
+    policy_dp = data_parallel_size(cfg.trainer.policy, policy_nodes, policy_gpus)
+    ref_dp = data_parallel_size(cfg.trainer.ref, policy_nodes, policy_gpus)
+    rows = cfg.trainer.train_batch_size * cfg.generator.n_samples_per_prompt
+    if rows % (2 * math.lcm(policy_dp, ref_dp)):
+        raise ValueError(
+            "dpo requires each data-parallel rank to receive whole pairs: "
+            f"{rows} training rows do not divide into pair-aligned shards of {math.lcm(policy_dp, ref_dp)} ranks"
+        )
+
+
 def validate_objective(cfg: DictConfig, *, loss_spec: LossSpec | None = None) -> None:
     """Reject objective settings that cannot affect the selected training rows correctly."""
     validate_ftpo(cfg)
+    if cfg.trainer.algorithm.policy_loss_type == PolicyLossType.DPO:
+        validate_dpo(cfg)
     limit = cfg.trainer.policy.max_consecutive_nonfinite_steps
     if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
         raise ValueError("trainer.policy.max_consecutive_nonfinite_steps must be null or an integer >= 1")

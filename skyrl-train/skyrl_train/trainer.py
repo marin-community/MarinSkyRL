@@ -1125,6 +1125,8 @@ class RayPPOTrainer:
         memory the policy model releases. Separate engines keep serving rollouts, so they pause for the sync
         and their requests in flight resume on the new weights.
         """
+        if not self._engines_running():
+            return
         timings = self.all_startup_timings if reason == "initial" else self.all_timings
         with Timer("sync_weights", timings) as update_timer:
             if self.colocate_all:
@@ -1348,7 +1350,15 @@ class RayPPOTrainer:
         await self._finalize_training(completed_step=last_completed_step, epoch=self.cfg.trainer.epochs - 1)
         logger.info("Training done!")
 
+    def _engines_running(self) -> bool:
+        """False only for a client explicitly configured with zero engines."""
+        engines = getattr(self.inference_engine_client, "engines", None)
+        return engines is None or bool(engines)
+
     async def _init_weight_sync(self) -> None:
+        if not self._engines_running():
+            logger.info("Skipping weight sync: no inference engines are running for this objective")
+            return
         with Timer("init_weight_sync_state", self.all_startup_timings):
             if self.cfg.generator.weight_sync_transport != WeightSyncTransport.EXPERT_BLOCK:
                 self.init_weight_sync_state()
@@ -2171,6 +2181,11 @@ class RayPPOTrainer:
             training_input["token_level_shaping"] = token_level_shaping_tensor
         if response_span_tags_tensor is not None:
             training_input["response_span_tags"] = response_span_tags_tensor
+        pair_roles = trajectory_batch.get("pair_roles")
+        if pair_roles is not None:
+            if len(pair_roles) != len(response_ids):
+                raise ValueError("pair_roles must carry one role per response row")
+            training_input["pair_roles"] = torch.tensor(pair_roles, dtype=torch.float32)
         loop_advantages_tensor = collate_response_token_channel(
             loop_advantages,
             response_masks_tensor,

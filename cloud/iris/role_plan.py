@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-from marinskyrl.runtime_options import reference_model_required
+from marinskyrl.runtime_options import preference_pair_generation_requested, reference_model_required
 from marinskyrl.distillation import (
     LocalInferenceTeacherSpec,
     OpenAICompatibleTeacherSpec,
@@ -140,8 +140,13 @@ class SkyRLRolePlan:
     @property
     def colocate_all(self) -> bool:
         """Whether the policy-side roles and rollout share one bundle."""
-        rollout = self.claim(ModelRoleKind.ROLLOUT)
-        if rollout.execution is RoleExecution.REMOTE:
+        rollout_claims = [claim for claim in self.claims if claim.kind is ModelRoleKind.ROLLOUT]
+        if not rollout_claims:
+            # Static preference-pair launches provision no rollout role at all.
+            return False
+        if len(rollout_claims) > 1:
+            raise ValueError("role plan contains duplicate rollout claims")
+        if rollout_claims[0].execution is RoleExecution.REMOTE:
             return False
         groups = {
             claim.colocation_group
@@ -386,7 +391,8 @@ def derive_role_plan(config: dict[str, Any]) -> SkyRLRolePlan:
     """
     values = _role_plan_values(config)
     claims = _core_model_claims(config, values)
-    claims.append(_rollout_claim(config, values))
+    if not preference_pair_generation_requested(config):
+        claims.append(_rollout_claim(config, values))
     claims.extend(_teacher_claims(config))
     claims.extend(_draft_trainer_claims(config, values))
     bundles = _physical_bundles(tuple(claims))

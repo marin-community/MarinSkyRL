@@ -202,6 +202,11 @@ trainer:
     policy_loss_type: "regular"
     # FTPOConfig owns the defaults; set policy_loss_type=ftpo to activate.
     ftpo: {}
+    # DPO pairing parameters; set policy_loss_type=dpo (and loss_reduction=pair_mean,
+    # environment.env_class=preference_pair) to activate.
+    dpo:
+      beta: 0.1
+      label_smoothing: 0.0
     loss_reduction: "token_mean"
     grpo_norm_by_std: true
     rloo_n_filter_zero_reward_groups: true

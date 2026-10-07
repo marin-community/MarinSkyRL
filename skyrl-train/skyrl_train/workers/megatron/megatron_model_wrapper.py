@@ -96,6 +96,7 @@ class MegatronPolicyMicroBatch:
     ftpo: FTPOTargets | None = None
     correction_weights: Optional[torch.Tensor] = None
     rollout_routed_experts: Optional[torch.Tensor] = None
+    pair_roles: Optional[torch.Tensor] = None
 
 
 class MegatronModelWrapper:
@@ -579,6 +580,7 @@ class MegatronModelWrapper:
                 think_token_weight=self.cfg.trainer.algorithm.think_token_weight,
                 teacher=teacher,
                 ftpo=ftpo_inputs,
+                pair_roles=data.pair_roles,
             )
             objective = compute_policy_objective(
                 batch,

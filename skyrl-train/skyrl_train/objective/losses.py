@@ -13,6 +13,7 @@ from omegaconf import DictConfig
 from marinskyrl.runtime_options import PolicyLossType
 from skyrl_train.ftpo import FTPOInputs, ftpo_loss
 from skyrl_train.config.ftpo import ftpo_config
+from skyrl_train.objective.dpo import DPOInputs, dpo_pair_values
 from skyrl_train.tensor_math import masked_mean, safe_exp_delta
 from skyrl_train.utils.algorithm_registry import register_policy_loss
 
@@ -25,6 +26,8 @@ class PolicyLossInputs:
     advantages: torch.Tensor
     loss_mask: torch.Tensor
     ftpo: FTPOInputs | None = None
+    ref_log_probs: torch.Tensor | None = None
+    dpo: DPOInputs | None = None
 
 
 @dataclass(frozen=True)
@@ -261,3 +264,12 @@ def ftpo_policy_loss(inputs: PolicyLossInputs, config: DictConfig) -> TokenLoss:
         raise ValueError("FTPO requires candidate masks and raw reference logits")
     values, metrics = ftpo_loss(inputs.ftpo, params)
     return TokenLoss(values, metrics)
+
+
+@register_policy_loss(PolicyLossType.DPO)
+def dpo_policy_loss(inputs: PolicyLossInputs, config: DictConfig) -> TokenLoss:
+    """Optimize adjacent preference pairs against the frozen reference model."""
+    if inputs.dpo is None:
+        raise ValueError("dpo requires pair_roles on every training row")
+    values, metrics = dpo_pair_values(inputs, inputs.dpo, config.dpo.beta, config.dpo.label_smoothing)
+    return _token_loss(values.to(inputs.log_probs.dtype), inputs, metrics)

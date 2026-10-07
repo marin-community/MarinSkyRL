@@ -1183,6 +1183,7 @@ class PolicyWorkerBase(Worker):
                 token_entropy=token_entropy,
                 think_token_weight=self.cfg.trainer.algorithm.think_token_weight,
                 teacher=teacher,
+                pair_roles=experience.pair_roles,
             )
             objective = compute_policy_objective(
                 batch,
