@@ -1,0 +1,12 @@
+diff --git a/pyproject.toml b/pyproject.toml
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -76 +76 @@
+-    "transformers>=5.0.0,<=5.18.0",
++    "transformers>=5.0.0,<5.17.0",
+diff --git a/setup.py b/setup.py
+--- a/setup.py
++++ b/setup.py
+@@ -80 +80 @@
+-        version = Version(f"{version}.a{build_iteration}")
++        version = Version(f"{version}.a{build_iteration}.post1")

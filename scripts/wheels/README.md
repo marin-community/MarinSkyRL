@@ -11,12 +11,40 @@ Mamba 2.3.2.post1 and fast-hadamard-transform 1.1 from the stable GitHub tag
 `v1.1.0.post2`. Sources and recursive submodules
 are fetched by exact commit. Upstream prebuilt Torch extensions are bypassed.
 
-Core and Bridge carry explicit patches under `patches/`. Core retains Hero's
-registered optimizer routes through its emerging optimizer factory and updates
-dependency bounds for frontend 1.30, FLA 0.5.2 and OpenTelemetry 1.44. Bridge uses
-Transformers through 5.18 and the paired FlashInfer 0.6.18.post1 packages.
-Core uses the local version `+marin.torch2141.3`; Bridge uses
-`+marin.torch2141.1`.
+Core and Bridge carry explicit patches under `patches/`. Core retains the
+registered optimizer routes through its emerging optimizer factory and the
+frontend 1.30 requirement exception. Its native FLA 0.4 and OpenTelemetry 1.43
+bounds are preserved. Bridge preserves its native Transformers upper bound at
+5.12.1 and carries the paired FlashInfer 0.6.18.post1 requirement exceptions.
+Core uses the local version `+marin.torch2141.4`; Bridge uses
+`+marin.torch2141.2`.
+
+`restore_core_bounds.py` produces the new Core wheels from the checksum-pinned
+qualified `.3` artifacts. It fetches the exact upstream source and applies the
+current patch, checks that the optimizer and attention source still match the
+input wheel, and changes only package version fields and the FLA/OTEL metadata.
+It rejects changes to other source paths. `REPACK_PROOF.json` proves that every
+other payload, including the native dataset helper, retains its exact bytes.
+This avoids recompiling unchanged native code; the new dependency group still
+needs runtime qualification. The shared archive writer also preserves the
+qualified FlashAttention retagging output.
+
+Bridge is pure Python. Its separate `bridge-build.txt` environment uses
+setuptools 79.0.1 under the native `<80` requirement and CPU Torch 2.14.1;
+CPython 3.12.13 builds this wheel without a CUDA toolkit or GPU. The builder does not change the managed Marin
+runtime setuptools policy. Native trainer packages continue to use
+`native-cu132.txt`. Build requirements and runtime requirements have separate
+provenance.
+
+The Speculators recipe retains the qualified `ecac1b1` implementation and its
+Torch 2.14.1 bound exception, but restores the original Transformers `<5.17.0`
+cap. Its native nightly packaging path avoids a build-host `file://` dependency
+on hs-connectors. The pinned v0.8.0 tag and iteration 16 produce
+`0.9.0a16.post1`; the post-release identifies the restored metadata.
+The unchanged qualified hs-connectors source satisfies the native nightly
+dependency range. This is another maintained pure Python artifact and version
+patch, with no model or optimizer source changes. `speculators-build.txt` pins
+its separate CPython 3.12.13 builder; runtime dependencies come from the root lock.
 
 FlashAttention, causal-conv1d and Mamba force C++17 upstream. Their build patches
 select C++20, which Torch 2.14 headers require. These wheels use the local version
@@ -40,7 +68,8 @@ dependencies and commands; separate builds can produce different archive bytes.
 compiler versions, recipe hashes and Torch ABI. `BUILD_REQUIREMENTS.txt` records
 the installed build dependencies.
 
-Use CPython 3.12.14 on Linux with git, a C++ compiler and uv. The multiarch Iris
+Use CPython 3.12.14 for native extensions and 3.12.13 for the pure Bridge and
+Speculators builders on Linux with git and uv. Native builds also need a C++ compiler. The multiarch Iris
 build image is
 `ghcr.io/marin-community/iris-task@sha256:28a807a676b0b0ae155a80b1c6de75ae1b2932e25cef9bb8462b9ed7582c6990`.
 Record the resolved architecture image and host tool versions with each build.
@@ -53,10 +82,12 @@ Invoke through `bash` because Iris bundles do not retain executable modes:
 bash scripts/wheels/build_native.sh transformer-engine-torch /tmp/build-te
 bash scripts/wheels/build_native.sh megatron-core /tmp/build-core
 bash scripts/wheels/build_native.sh megatron-bridge /tmp/build-bridge
+bash scripts/wheels/build_native.sh speculators /tmp/build-speculators
 bash scripts/wheels/build_native.sh flash-attn /tmp/build-flash-attn
 bash scripts/wheels/build_native.sh causal-conv1d /tmp/build-causal-conv1d
 bash scripts/wheels/build_native.sh mamba-ssm /tmp/build-mamba
 bash scripts/wheels/build_native.sh fast-hadamard-transform /tmp/build-hadamard
+python scripts/wheels/restore_core_bounds.py /tmp/megatron_core-0.19.2+marin.torch2141.3-cp312-cp312-linux_x86_64.whl /tmp/repack-core-x86
 ```
 
 Use a fresh build directory for a patched source. The applied patch stays in the
