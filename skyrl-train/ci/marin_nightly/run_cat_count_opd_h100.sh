@@ -12,7 +12,7 @@ OUTPUT="${OUTPUT:-$PWD/cat-count-opd}"
 LOG="${LOG:-$PWD/cat-count-opd-run.log}"
 SPEC="${SPEC-ci/marin_nightly/specs/cat-count-opd-qwen2.5-0.5b-async.json}"
 MAX_STEPS="${MAX_STEPS:-30}"
-LEARNING_RATE="${LEARNING_RATE:-1e-6}"
+LEARNING_RATE="${LEARNING_RATE:-5e-7}"
 SEED="${SEED:-17}"
 
 # An explicitly empty value disables clipping; an unset value uses the calibrated bound.

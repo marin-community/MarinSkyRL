@@ -215,8 +215,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--teacher-revision", required=True, help="the teacher's noise settings, for run identity")
     parser.add_argument("--steps", type=int, default=30)
     parser.add_argument("--seed", type=int, default=SEED)
-    # Calibrated on seeds 17, 23 and 31; 2e-6 was unstable with or without the clip.
-    parser.add_argument("--lr", type=float, default=1e-6)
+    # Every healthy run on seeds 17, 23, 31, 47 and 59 passed at 5e-7; 1e-6 sometimes peaked and then fell.
+    parser.add_argument("--lr", type=float, default=5e-7)
     parser.add_argument(
         "--advantage-clip",
         type=lambda value: None if value.lower() == "none" else float(value),

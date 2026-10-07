@@ -2,18 +2,19 @@
   "provenance": {
     "what": "CatCount on-policy distillation from a synthetic expert teacher, through Megatron with pretrained Qwen2.5-0.5B-Instruct.",
     "produced_by": "ci/marin_nightly/run_cat_count_opd_h100.sh on one Iris H100x4 task",
-    "recipe": "The async CatCount GPU recipe (64 prompts x 8 samples, two update epochs, staleness 2, DP=2, two vLLM engines) with reward_mode=replace, the uniform estimator, sampled reverse KL, lr 1e-6 and teacher-credit clip 5. Teacher: log 0.95 for an on-track token, the remaining 0.05 spread over the vocabulary otherwise, Gaussian jitter 0.5.",
-    "learning_rate": 1e-06,
+    "recipe": "The async CatCount GPU recipe (64 prompts x 8 samples, two update epochs, staleness 2, DP=2, two vLLM engines) with reward_mode=replace, the uniform estimator, sampled reverse KL, lr 5e-7 and teacher-credit clip 5. Teacher: log 0.95 for an on-track token, the remaining 0.05 spread over the vocabulary otherwise, Gaussian jitter 0.5.",
+    "learning_rate": 5e-07,
     "advantage_clip": 5,
     "teacher_jitter": 0.5,
     "step_cap": 30,
     "eval_interval": 5,
     "calibration": {
-      "healthy_seeds": [17, 23, 31],
-      "step0_sampled_train_score": [0.259, 0.275, 0.279],
-      "peak_sampled_train_score_by_step_30": [0.741, 0.824, 0.773],
-      "flipped_teacher_seed_17_peak_after_step_0": -0.416,
-      "unstable_settings": "lr 2e-6 with or without the clip collapsed or dipped below 0.15 before recovering; a fixed wrong-token log-probability of log 0.001 made the student learn junk tokens"
+      "healthy_seeds": [17, 23, 31, 47, 59],
+      "step0_sampled_train_score": [0.27, 0.25, 0.28, 0.23, 0.25],
+      "step30_sampled_train_score": [0.80, 0.79, 0.72, 0.77, 0.79],
+      "max_policy_entropy": [1.18, 1.18, 1.26, 1.23, 1.22],
+      "flipped_teacher_seed_17_step30": -0.53,
+      "unstable_settings": "lr 1e-6 ended below 0.65 in 1 of 5 healthy runs after a peak (0.75, then 0.48 at step 30); lr 2e-6 with the clip peaked at 0.68 and ended at 0.35; a fixed wrong-token log-probability of log 0.001 made the student learn junk tokens"
     },
     "sampled_score_threshold": 0.65
   },
