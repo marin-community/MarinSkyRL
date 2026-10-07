@@ -147,15 +147,23 @@ def _select_cli_literal_chain(entries: List[Dict[str, Any]], trial_id: str, agen
     lengths = [1] * len(candidates)
     for current_idx, current in enumerate(candidates):
         current_prompt = current["literal"]["prompt_token_ids"]
-        for previous_idx, previous in enumerate(candidates[:current_idx]):
-            previous_literal = previous["literal"]
-            expected_prefix = previous_literal["prompt_token_ids"] + previous_literal["completion_token_ids"]
-            if current_prompt[: len(expected_prefix)] != expected_prefix:
+        # Choose the longest chain, breaking ties by earliest predecessor.
+        # Searching in that order lets continuous histories stop at their immediate
+        # predecessor instead of copying and comparing every earlier token prefix.
+        for previous_idx in sorted(range(current_idx), key=lambda index: (-lengths[index], index)):
+            previous_literal = candidates[previous_idx]["literal"]
+            previous_prompt = previous_literal["prompt_token_ids"]
+            previous_completion = previous_literal["completion_token_ids"]
+            prefix_length = len(previous_prompt) + len(previous_completion)
+            if prefix_length > len(current_prompt):
                 continue
-            candidate_length = lengths[previous_idx] + 1
-            if candidate_length > lengths[current_idx]:
-                lengths[current_idx] = candidate_length
-                parents[current_idx] = previous_idx
+            if current_prompt[: len(previous_prompt)] != previous_prompt:
+                continue
+            if current_prompt[len(previous_prompt) : prefix_length] != previous_completion:
+                continue
+            lengths[current_idx] = lengths[previous_idx] + 1
+            parents[current_idx] = previous_idx
+            break
 
     route_indices = []
     current_idx: Optional[int] = len(candidates) - 1

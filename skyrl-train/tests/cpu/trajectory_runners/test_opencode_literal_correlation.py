@@ -147,6 +147,43 @@ def test_correlation_excludes_auxiliary_call_from_tito_stream(tmp_path, monkeypa
     assert rollout_details[0]["prompt_token_ids"] == [[1], [1, 10, 2]]
 
 
+@pytest.mark.parametrize(
+    ("entries", "expected_completions", "expected_logprobs"),
+    [
+        pytest.param(
+            [
+                _entry("A", 1.0, [1], [10, 11], [-0.1, -0.1]),
+                _entry("A", 2.0, [1, 10, 11], [12], [-0.2]),
+                _entry("A", 3.0, [1, 10], [11, 12], [-0.3, -0.3]),
+                _entry("A", 4.0, [1, 10, 11, 12], [13], [-0.4]),
+            ],
+            [[10, 11], [12], [13]],
+            [[-0.1, -0.1], [-0.2], [-0.4]],
+            id="longer-chain-before-newer-predecessor",
+        ),
+        pytest.param(
+            [
+                _entry("A", 1.0, [1], [10], [-0.1]),
+                _entry("A", 2.0, [1], [10], [-0.2]),
+                _entry("A", 3.0, [1, 10], [11], [-0.3]),
+            ],
+            [[10], [11]],
+            [[-0.1], [-0.3]],
+            id="earliest-predecessor-on-equal-chain-length",
+        ),
+    ],
+)
+def test_correlation_preserves_longest_chain_and_tied_logprobs(
+    tmp_path, monkeypatch, entries, expected_completions, expected_logprobs
+):
+    monkeypatch.setenv("OTAGENT_LITERAL_LOG_PATH", _write_log(tmp_path, entries))
+
+    details = _correlate(_fake_self(), _result("A"), None)
+
+    assert details[0]["completion_token_ids"] == expected_completions
+    assert details[0]["logprobs"] == expected_logprobs
+
+
 @pytest.mark.parametrize("agent_name", ["opencode", "mini-swe-agent"])
 def test_correlation_keeps_task_route_when_tool_free_call_finishes_last(tmp_path, monkeypatch, agent_name):
     entries = [
