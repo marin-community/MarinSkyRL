@@ -18,15 +18,11 @@ from skyrl_train.distributed.megatron.model_utils import (
 )
 from skyrl_train.distributed.megatron.megatron_utils import get_model_config
 from skyrl_train.ftpo import FTPOTargets, FTPOInputs, boundary_values, compact_boundary_logits, ftpo_counts
-from skyrl_train.distillation import (
-    TopKEvidence,
-    student_topk_logprobs,
-    student_topk_logprobs_from_sampled_action_logprobs,
-)
+from skyrl_train.distillation import TopKEvidence, student_topk_logprobs, INVALID_TOPK_INDEX
 from skyrl_train.models.megatron_router_replay import MegatronRouterReplay
-from skyrl_train.config.objective_spec import topk_loss_params
+from skyrl_train.config.objective_spec import topk_loss_params, score_centering_tis_cap
+from skyrl_train.objective.score_centering import ppo_tis_score_centering_correction
 from skyrl_train.objective.objective import (
-    ScoreCenteringBatch,
     TopKTeacherBatch,
     build_objective_micro_batch,
     compute_policy_objective,
@@ -215,8 +211,26 @@ class MegatronModelWrapper:
         chosen = self._token_logprobs(logits, sequences, attention_mask.to(bool), packed_seq_params)[:, -num_actions:]
         selected = None
         if candidate_ids is not None:
-            selected = student_topk_logprobs_from_sampled_action_logprobs(
-                logits, candidate_ids, sequences[:, -num_actions:], chosen, attention_mask
+            if candidate_ids.ndim != 3 or candidate_ids.shape[:2] != chosen.shape:
+                raise ValueError("selected response IDs must align with chosen logprobs")
+            query_start = attention_mask.shape[1] - num_actions - 1
+            if query_start < 0:
+                raise ValueError("selected response IDs require at least one prompt token")
+            queries = torch.arange(query_start, query_start + num_actions, device=logits.device)
+            positions = attention_mask.long().cumsum(1)[:, queries] - 1
+            valid = candidate_ids != INVALID_TOPK_INDEX
+            valid_rows = valid.any(-1)
+            if torch.any(valid_rows & ~(attention_mask[:, queries].bool() & attention_mask[:, queries + 1].bool())):
+                raise ValueError("selected response IDs refer to padded prompt or response positions")
+            if torch.any(candidate_ids < INVALID_TOPK_INDEX) or torch.any(candidate_ids[valid] >= logits.shape[-1]):
+                raise ValueError("selected token IDs are outside the student vocabulary")
+            positions = positions.masked_fill(~valid_rows, 0)
+            rows = torch.arange(logits.shape[0], device=logits.device)[:, None]
+            head_logits = logits[rows[:, :, None], positions[:, :, None], candidate_ids.masked_fill(~valid, 0).long()]
+            chosen_logits = logits[rows, positions, sequences[:, -num_actions:]]
+            # Reuse the differentiable chosen normalizer; save no second FP32 vocabulary tensor.
+            selected = (chosen.unsqueeze(-1) + head_logits.float() - chosen_logits.float().unsqueeze(-1)).masked_fill(
+                ~valid, torch.nan
             )
         return MegatronForwardResult(chosen, selected)
 
@@ -607,8 +621,15 @@ class MegatronModelWrapper:
                     for value in (data.score_topk_indices, data.score_old_logprobs, data.score_behavior_logprobs)
                 ):
                     raise ValueError("score centering requires behavior IDs and old and behavior log probabilities")
-                score_centering = ScoreCenteringBatch(
-                    response.selected_logprobs, data.score_old_logprobs, data.score_behavior_logprobs
+                score_centering = ppo_tis_score_centering_correction(
+                    response.selected_logprobs,
+                    data.score_old_logprobs,
+                    data.score_behavior_logprobs,
+                    advantages,
+                    loss_mask,
+                    tis_cap=score_centering_tis_cap(self.cfg.trainer.algorithm),
+                    eps_clip_low=self.cfg.trainer.algorithm.eps_clip_low,
+                    eps_clip_high=self.cfg.trainer.algorithm.eps_clip_high,
                 )
 
             sparse_student_logprobs = self._distillation_student_logprobs(logits, data)

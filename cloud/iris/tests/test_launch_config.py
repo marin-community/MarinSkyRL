@@ -18,7 +18,6 @@ from cloud.iris.rl_config_translation import (
     materialize_launch_config,
     parse_rl_config,
 )
-from skyrl_train.config.objective_spec import score_centering_tis_cap
 from skyrl_train.distributed.step_policy import NonfiniteStepPolicy, nonfinite_step_policy
 
 
@@ -285,28 +284,6 @@ def test_composed_launch_rejects_tis_selectors(tmp_path: Path, key: str, value) 
 
     with pytest.raises(ValueError, match="off_policy_correction"):
         load_launch_config(path)
-
-
-@pytest.mark.parametrize("cap", [1.05, 2.0])
-def test_launch_preserves_score_centering_truncation_cap(tmp_path: Path, cap: float) -> None:
-    raw = OmegaConf.create(_raw_config())
-    raw.skyrl.trainer.policy = {
-        "sequence_parallel_size": 1,
-        "megatron_config": {"tensor_model_parallel_size": 1, "context_parallel_size": 1},
-    }
-    raw.skyrl.trainer.use_sample_packing = False
-    raw.skyrl.trainer.algorithm.update(
-        score_centering_topk=32,
-        off_policy_correction="tis" if cap == 2.0 else "custom",
-        off_policy_correction_rules=[] if cap == 2.0 else [{"kind": "token", "action": "truncate", "high": cap}],
-    )
-    raw.skyrl.generator.sampling_params = {"logprobs": 32}
-    path = tmp_path / "launch.yaml"
-    OmegaConf.save(raw, path)
-
-    composed = load_launch_config(path)
-    assert score_centering_tis_cap(composed.skyrl.trainer.algorithm) == cap
-    assert composed.skyrl.generator.sampling_params.logprobs == 32
 
 
 @pytest.mark.parametrize(

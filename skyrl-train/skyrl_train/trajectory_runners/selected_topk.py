@@ -4,12 +4,8 @@ from collections.abc import Sequence
 from typing import NamedTuple
 
 import numpy as np
-import torch
-
-from skyrl_train.trajectory_runners.types import TrajectoryBatch
 
 from skyrl_train.distillation import INVALID_TOPK_INDEX
-from skyrl_train.tensor_math import PROBABILITY_MASS_TOLERANCE
 
 
 class AlignedStudentTopK(NamedTuple):
@@ -56,89 +52,3 @@ def align_student_topk(
     aligned_ids[generated_positions] = candidate_ids_array
     aligned_scores[generated_positions] = np.asarray(candidate_scores, dtype=np.float32)
     return AlignedStudentTopK(aligned_ids, aligned_scores)
-
-
-class BehaviorTopKBatch(NamedTuple):
-    indices: torch.Tensor
-    logprobs: torch.Tensor
-    loss_mask: torch.Tensor
-
-
-def collate_behavior_topk(
-    trajectory_batch: TrajectoryBatch,
-    response_token_ids: list[list[int]],
-    response_mask: torch.Tensor,
-    top_k: int,
-    *,
-    sampled_logprobs: torch.Tensor | None = None,
-) -> BehaviorTopKBatch:
-    """Right-pad CPU candidate IDs, full-vocabulary logprobs and trajectory loss masks.
-
-    Only response_mask's shape sets padding. When sampled_logprobs is supplied,
-    agreement is checked where the sampled token belongs to the head.
-    Evidence provenance is a caller obligation.
-    """
-    index_rows = trajectory_batch.get("student_topk_indices")
-    behavior_rows = trajectory_batch.get("behavior_topk_logprobs")
-    loss_masks = trajectory_batch.get("loss_masks")
-    if index_rows is None or behavior_rows is None:
-        raise ValueError("behavior top-k IDs and logprobs are required for every selected-token batch")
-    if (
-        top_k < 1
-        or response_mask.ndim != 2
-        or loss_masks is None
-        or len(index_rows) != len(response_token_ids)
-        or len(behavior_rows) != len(response_token_ids)
-        or len(loss_masks) != len(response_token_ids)
-    ):
-        raise ValueError("behavior top-k rows must align with response rows and have positive width")
-    if (
-        response_mask.shape[0] != len(response_token_ids)
-        or sampled_logprobs is not None
-        and sampled_logprobs.shape != response_mask.shape
-    ):
-        raise ValueError("behavior top-k mask and sampled logprobs must align with response rows")
-
-    loss_mask = torch.zeros(response_mask.shape, dtype=torch.bool)
-    indices = torch.full((*response_mask.shape, top_k), INVALID_TOPK_INDEX, dtype=torch.long)
-    behavior = torch.full((*response_mask.shape, top_k), torch.nan, dtype=torch.float32)
-    for row, (ids, scores, response, mask) in enumerate(
-        zip(index_rows, behavior_rows, response_token_ids, loss_masks, strict=True)
-    ):
-        if len(ids) != len(response) or len(scores) != len(response) or len(response) > response_mask.shape[1]:
-            raise ValueError("behavior top-k evidence must align with exact response token IDs")
-        if len(mask) != len(response) or any(value not in (0, 1) for value in mask):
-            raise ValueError("behavior top-k loss masks must align with response tokens and contain 0 or 1")
-        loss_mask[row, : len(response)] = torch.tensor(mask, dtype=torch.bool)
-        if any(len(token_ids) != top_k or len(token_scores) != top_k for token_ids, token_scores in zip(ids, scores)):
-            raise ValueError("behavior top-k width must match the configured capture width")
-        indices[row, : len(response)] = torch.tensor(ids, dtype=torch.long)
-        behavior[row, : len(response)] = torch.tensor(scores, dtype=torch.float32)
-
-    selected = loss_mask
-    selected_ids = indices[selected]
-    selected_scores = behavior[selected]
-    if selected_ids.numel():
-        if torch.any(selected_ids < 0):
-            raise ValueError("trainable behavior top-k token IDs must be nonnegative")
-        ordered = selected_ids.sort(dim=-1).values
-        if torch.any(ordered[:, 1:] == ordered[:, :-1]):
-            raise ValueError("trainable behavior top-k token IDs must be unique")
-        if not torch.isfinite(selected_scores).all() or torch.any(selected_scores > 0):
-            raise ValueError("trainable behavior top-k logprobs must be finite and nonpositive")
-        if torch.any(selected_scores.exp().sum(dim=-1) > 1 + PROBABILITY_MASS_TOLERANCE):
-            raise ValueError("behavior top-k probabilities must be normalized over the full vocabulary")
-        if sampled_logprobs is not None:
-            padded_response = torch.zeros(response_mask.shape, dtype=torch.long)
-            for row, response in enumerate(response_token_ids):
-                padded_response[row, : len(response)] = torch.tensor(response, dtype=torch.long)
-            matched = selected_ids == padded_response[selected].unsqueeze(-1)
-            if torch.any(matched):
-                head_sample_logprobs = selected_scores[matched]
-                expected_logprobs = sampled_logprobs[selected].unsqueeze(-1).expand_as(matched)[matched]
-                if not torch.allclose(head_sample_logprobs, expected_logprobs, rtol=0, atol=1e-4):
-                    raise ValueError("behavior top-k and sampled-token logprobs disagree for the same token IDs")
-
-    indices.masked_fill_(~selected.unsqueeze(-1), INVALID_TOPK_INDEX)
-    behavior.masked_fill_(~selected.unsqueeze(-1), torch.nan)
-    return BehaviorTopKBatch(indices, behavior, loss_mask)

@@ -14,20 +14,16 @@ import math
 
 import torch
 
-from skyrl_train.tensor_math import LOG_PROB_DELTA_CLIP, PROBABILITY_MASS_TOLERANCE
+from skyrl_train.tensor_math import LOG_PROB_DELTA_CLIP
+from skyrl_train.distillation_adapters import collate_student_selected_rollout
+from skyrl_train.trajectory_runners.types import TrajectoryBatch
 
 TAIL_MASS_FLOOR = 1e-6
+PROBABILITY_MASS_TOLERANCE = 1e-4
 
 
 def _bounded_ratio(numerator_logprob: torch.Tensor, denominator_logprob: torch.Tensor) -> torch.Tensor:
     return (numerator_logprob - denominator_logprob).clamp(-LOG_PROB_DELTA_CLIP, LOG_PROB_DELTA_CLIP).exp()
-
-
-def masked_topk_tail_mass(logprobs: torch.Tensor, loss_mask: torch.Tensor) -> torch.Tensor:
-    """Measure omitted probability without letting masked sentinels poison telemetry."""
-    valid = loss_mask.to(torch.bool)
-    head = logprobs.detach().float().masked_fill(~valid.unsqueeze(-1), 0.0).exp().sum(dim=-1)
-    return (1 - head).clamp_min(0).masked_fill(~valid, 0)
 
 
 def ppo_tis_score_centering_correction(
@@ -111,3 +107,46 @@ def ppo_tis_score_centering_correction(
     residual = head_coefficient - tail_coefficient.unsqueeze(-1) * current_mass
     correction = advantages * (residual.detach() * current).sum(dim=-1)
     return correction.masked_fill(~loss_mask.to(torch.bool), 0)
+
+
+def collate_score_centering(
+    trajectory_batch: TrajectoryBatch,
+    response_token_ids: list[list[int]],
+    response_mask: torch.Tensor,
+    top_k: int,
+    *,
+    sampled_logprobs: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pad aligned behavior evidence and check its full-vocabulary probabilities.
+
+    The existing collator uses the trajectory loss masks and response_mask's
+    shape. Check sampled-score agreement where the chosen token is in the head.
+    The caller remains responsible for evidence provenance.
+    """
+    if sampled_logprobs.shape != response_mask.shape:
+        raise ValueError("sampled behavior logprobs must align with response rows")
+    for field in ("student_topk_indices", "behavior_topk_logprobs"):
+        rows = trajectory_batch.get(field)
+        if rows is None or len(rows) != len(response_token_ids):
+            raise ValueError("behavior top-k evidence must align with response rows")
+        if any(row.shape != (len(response), top_k) for row, response in zip(rows, response_token_ids, strict=True)):
+            raise ValueError("behavior top-k width must match the configured capture width")
+    indices, behavior, selected = collate_student_selected_rollout(
+        trajectory_batch, response_token_ids, response_mask, top_k
+    )
+    ids, scores = indices[selected], behavior[selected]
+    ordered = ids.sort(dim=-1).values
+    if torch.any(ids < 0) or torch.any(ordered[:, 1:] == ordered[:, :-1]):
+        raise ValueError("trainable behavior top-k token IDs must be nonnegative and unique")
+    if not torch.isfinite(scores).all() or torch.any(scores > 0):
+        raise ValueError("trainable behavior top-k logprobs must be finite and nonpositive")
+    if torch.any(scores.exp().sum(dim=-1) > 1 + PROBABILITY_MASS_TOLERANCE):
+        raise ValueError("behavior top-k probabilities must be normalized over the full vocabulary")
+    padded_response = torch.zeros(response_mask.shape, dtype=torch.long)
+    for row, response in enumerate(response_token_ids):
+        padded_response[row, : len(response)] = torch.tensor(response, dtype=torch.long)
+    matched = ids == padded_response[selected].unsqueeze(-1)
+    expected = sampled_logprobs[selected].unsqueeze(-1).expand_as(matched)
+    if not torch.allclose(scores[matched], expected[matched], rtol=0, atol=1e-4):
+        raise ValueError("behavior top-k and sampled-token logprobs disagree for the same token IDs")
+    return indices, behavior

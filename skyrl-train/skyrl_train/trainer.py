@@ -70,10 +70,11 @@ from marinskyrl.distillation import (
 )
 from skyrl_train.objective.teacher import teacher_advantages
 from skyrl_train.objective.correction import compute_correction
-from skyrl_train.trajectory_runners.selected_topk import collate_behavior_topk
+from skyrl_train.objective.score_centering import collate_score_centering
 from skyrl_train.config.objective_spec import off_policy_correction
 from skyrl_train.config.ftpo import ftpo_config
 from skyrl_train.ftpo import select_ftpo_candidates
+from skyrl_train.distillation_adapters import collate_student_selected_rollout
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import parse_trajectory_reward_shaping_config
 from skyrl_train.distributed.dispatch import (
     ActorInfo,
@@ -2117,7 +2118,7 @@ class RayPPOTrainer:
         if score_width:
             if rollout_logprobs_tensor is None:
                 raise ValueError("score centering requires sampled behavior log probabilities on every batch")
-            ids, scores, _ = collate_behavior_topk(
+            ids, scores = collate_score_centering(
                 trajectory_batch,
                 response_ids,
                 response_masks_tensor,
@@ -2149,7 +2150,7 @@ class RayPPOTrainer:
         training_input.update(score_tensors)
         ftpo = ftpo_config(self.cfg.trainer.algorithm)
         if ftpo is not None:
-            candidates, scores, _ = collate_behavior_topk(
+            candidates, scores, _ = collate_student_selected_rollout(
                 trajectory_batch,
                 response_ids,
                 response_masks_tensor.bool(),

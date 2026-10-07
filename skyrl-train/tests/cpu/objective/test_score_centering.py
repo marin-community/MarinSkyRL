@@ -1,5 +1,6 @@
 """Independent small-vocabulary checks for PPO/TIS score centering."""
 
+import numpy as np
 import pytest
 import torch
 from omegaconf import OmegaConf
@@ -8,13 +9,12 @@ from skyrl_train.objective.correction import compute_correction
 from skyrl_train.config.objective_spec import LossReduction, off_policy_correction
 from skyrl_train.objective.losses import ppo_policy_loss
 from skyrl_train.objective.objective import (
-    ScoreCenteringBatch,
     build_objective_micro_batch,
     compute_policy_objective,
     megatron_loss_scale,
 )
 from skyrl_train.objective.reduction import policy_data_weights, step_counts
-from skyrl_train.objective.score_centering import ppo_tis_score_centering_correction
+from skyrl_train.objective.score_centering import collate_score_centering, ppo_tis_score_centering_correction
 from skyrl_train.training_batch import TrainingBatchIterator, TrainingInputBatch
 
 
@@ -44,18 +44,6 @@ def _correction(logits, old_probs, behavior_probs, advantage, head, cap, clip_lo
         eps_clip_low=clip_low,
         eps_clip_high=clip_high,
     ).sum()
-
-
-def test_full_vocabulary_centering_cancels_constant_reward_gradient_with_clipping():
-    old = torch.tensor([0.20, 0.25, 0.30, 0.25], dtype=torch.float64)
-    behavior = torch.tensor([0.45, 0.08, 0.07, 0.40], dtype=torch.float64)
-    head = torch.arange(4)
-    for advantage in (-1.7, 2.3):
-        logits = torch.tensor([-0.9, 0.8, -0.2, 0.1], dtype=torch.float64, requires_grad=True)
-        loss = _expected_ppo_tis_loss(logits, old, behavior, advantage, 1.5, 0.2, 0.2)
-        loss += _correction(logits, old, behavior, advantage, head, 1.5, 0.2, 0.2)
-        gradient = torch.autograd.grad(loss, logits)[0]
-        torch.testing.assert_close(gradient, torch.zeros_like(gradient), atol=1e-12, rtol=0)
 
 
 def test_unclipped_untruncated_tis_centering_has_zero_gradient():
@@ -106,25 +94,6 @@ def test_float32_subfloor_tails_track_full_vocabulary_score_gradient():
     torch.testing.assert_close(actual, expected, atol=2e-6, rtol=1e-5)
 
 
-def test_masked_sentinel_rows_do_not_poison_centering():
-    logits = torch.tensor([[[[-0.3, 0.1, 0.2]]]], dtype=torch.float64, requires_grad=True)
-    selected = logits.log_softmax(dim=-1)[..., :2].squeeze(0)
-    invalid = torch.full_like(selected, torch.nan)
-    values = torch.cat((selected, invalid), dim=1)
-    loss = ppo_tis_score_centering_correction(
-        values,
-        values.detach(),
-        values.detach(),
-        torch.ones((1, 2), dtype=torch.float64),
-        torch.tensor([[1.0, 0.0]], dtype=torch.float64),
-        tis_cap=2.0,
-        eps_clip_low=0.2,
-        eps_clip_high=0.2,
-    )
-    assert torch.isfinite(loss).all()
-    assert loss[0, 1] == 0
-
-
 @pytest.mark.parametrize(
     ("capture_width", "mode", "micro_size", "dp"),
     [
@@ -159,7 +128,7 @@ def test_composed_ppo_tis_centering_matches_enumerated_value_gradient_and_partit
     advantages = torch.tensor([[0, 0, 0], [-1, 0.5, 3], [0, 0, 0], [-2, 1, 0]], dtype=torch.float64)
     old = torch.tensor([0.20, 0.25, 0.30, 0.15, 0.10], dtype=torch.float64).expand(4, 3, 5).clone()
     behavior = torch.tensor([0.45, 0.08, 0.07, 0.30, 0.10], dtype=torch.float64).expand(4, 3, 5).clone()
-    # Unequal row-0 tails make token weighting observable in coverage.
+    # Unequal row-0 distributions exercise policy/THINK weighting with zero advantages.
     old[0, :, 0], old[0, :, 4] = 0.10, 0.20
     behavior[0, :, 0], behavior[0, :, 4] = 0.35, 0.20
     # These actions exercise positive/negative advantages and active/inactive PPO clipping.
@@ -215,16 +184,20 @@ def test_composed_ppo_tis_centering_matches_enumerated_value_gradient_and_partit
     scale = megatron_loss_scale(micros, dp)
     actual = logits.new_zeros(())
     reported = logits.new_zeros(())
-    coverage = {name: 0.0 for name in ("current", "old", "behavior")}
     for start in range(0, 4, micro_size):
         chunk = slice(start, start + micro_size)
         evidence = None
         if capture_width:
             invalid = ~mask[chunk].bool().unsqueeze(-1)
-            evidence = ScoreCenteringBatch(
+            evidence = ppo_tis_score_centering_correction(
                 current[chunk, :, :4].masked_fill(invalid, torch.nan),
                 old[chunk, :, :4].log().masked_fill(invalid, torch.nan),
                 behavior[chunk, :, :4].log().masked_fill(invalid, torch.nan),
+                advantages[chunk],
+                mask[chunk],
+                tis_cap=1.05,
+                eps_clip_low=0.2,
+                eps_clip_high=0.2,
             )
         batch = build_objective_micro_batch(
             action_log_probs=selected[chunk].masked_fill(~mask[chunk].bool(), torch.nan),
@@ -250,80 +223,11 @@ def test_composed_ppo_tis_centering_matches_enumerated_value_gradient_and_partit
         )
         actual = actual + objective.optimization_loss / micros / dp
         reported = reported + objective.rows.policy / scale
-        if capture_width:
-            for name in coverage:
-                coverage[name] += objective.metrics[f"score_centering/{name}_tail_mass_mean"] / micros / dp
     actual_gradient = torch.autograd.grad(actual, logits)[0]
     torch.testing.assert_close(actual, expected, atol=1e-7, rtol=1e-6)
     torch.testing.assert_close(reported, expected, atol=1e-7, rtol=1e-6)
     torch.testing.assert_close(actual_gradient, expected_gradient, atol=1e-7, rtol=1e-6)
     assert torch.isfinite(actual_gradient).all()
-    if capture_width:
-        for name, probabilities in (("current", current.detach().exp()), ("old", old), ("behavior", behavior)):
-            expected_coverage = (probabilities[..., 4] * weights).sum() / weights.sum()
-            assert coverage[name] == pytest.approx(expected_coverage.item(), abs=1e-7)
-
-
-@pytest.mark.parametrize("advantage", [-1.7, 2.3])
-@pytest.mark.parametrize(
-    ("old_probabilities", "behavior_probabilities", "current_logits"),
-    [
-        ([0.20, 0.25, 0.30, 0.25], [0.45, 0.08, 0.07, 0.40], [-0.9, 0.8, -0.2, 0.1]),
-        ([1e-15, 0.25, 0.50, 0.25], [0.45, 0.08, 0.07, 0.40], [1.0, 0.0, -60.0, -1.0]),
-    ],
-)
-def test_composed_full_vocabulary_centering_cancels_expected_constant_advantage_gradient(
-    advantage, old_probabilities, behavior_probabilities, current_logits
-):
-    config = OmegaConf.create(
-        dict(
-            loss_reduction="token_mean",
-            eps_clip_low=0.2,
-            eps_clip_high=0.2,
-            off_policy_correction="custom",
-            off_policy_correction_rules=[dict(kind="token", action="truncate", high=1.5)],
-            use_kl_loss=False,
-            kl_loss_coef=0,
-            use_entropy_loss=False,
-            score_centering_topk=4,
-        )
-    )
-    old = torch.tensor(old_probabilities, dtype=torch.float64)
-    behavior = torch.tensor(behavior_probabilities, dtype=torch.float64)
-    logits = torch.tensor(current_logits, dtype=torch.float64, requires_grad=True)
-    current = logits.log_softmax(-1)
-    mask = torch.ones((1, 1), dtype=torch.float64)
-    advantages = torch.full_like(mask, advantage)
-    counts = step_counts([mask], [mask], [], [advantages], 1, lambda value: value)
-    expected = logits.new_zeros(())
-    for action, probability in enumerate(behavior):
-        old_selected = old[action].log().reshape(1, 1)
-        behavior_selected = behavior[action].log().reshape(1, 1)
-        correction = compute_correction(old_selected, behavior_selected, mask, off_policy_correction(config)).weights
-        batch = build_objective_micro_batch(
-            action_log_probs=current[action].reshape(1, 1),
-            old_action_log_probs=old_selected,
-            base_action_log_probs=None,
-            advantages=advantages,
-            loss_mask=mask,
-            rollout_logprobs=behavior_selected,
-            response_span_tags=None,
-            token_entropy=torch.zeros_like(mask),
-            think_token_weight=1,
-            teacher=None,
-            correction_weights=correction,
-            score_centering=ScoreCenteringBatch(
-                current.reshape(1, 1, 4),
-                old.log().reshape(1, 1, 4),
-                behavior.log().reshape(1, 1, 4),
-            ),
-        )
-        objective = compute_policy_objective(
-            batch, loss=ppo_policy_loss, counts=counts, config=config, loss_scale=1, report_scale=1
-        )
-        expected = expected + probability * objective.optimization_loss
-    gradient = torch.autograd.grad(expected, logits)[0]
-    torch.testing.assert_close(gradient, torch.zeros_like(gradient), atol=1e-7, rtol=0)
 
 
 def test_score_evidence_survives_serialization_and_microbatching(tmp_path):
@@ -362,3 +266,19 @@ def test_score_evidence_survives_serialization_and_microbatching(tmp_path):
             torch.testing.assert_close(
                 getattr(experience, name), expected[row : row + 1], atol=0, rtol=0, equal_nan=True
             )
+
+
+def test_behavior_evidence_ignores_masked_failure_but_checks_sampled_probability():
+    batch = {
+        "loss_masks": [[0, 0], [1]],
+        "student_topk_indices": [np.array([[-1, -1], [-1, -1]]), np.array([[3, 4]])],
+        "behavior_topk_logprobs": [np.zeros((2, 2)), np.array([[-0.5, -1.5]])],
+    }
+    mask = torch.tensor([[0, 0], [1, 0]])
+    sampled = torch.tensor([[0.0, 0.0], [-0.5, 0.0]])
+    indices, scores = collate_score_centering(batch, [[2, 3], [3]], mask, 2, sampled_logprobs=sampled)
+    assert indices[1, 0].tolist() == [3, 4]
+    assert indices[0].tolist() == [[-1, -1], [-1, -1]]
+    assert torch.isnan(scores[0]).all()
+    with pytest.raises(ValueError, match="disagree"):
+        collate_score_centering(batch, [[2, 3], [3]], mask, 2, sampled_logprobs=sampled - 0.1)

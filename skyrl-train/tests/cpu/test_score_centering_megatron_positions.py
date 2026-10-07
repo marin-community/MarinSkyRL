@@ -4,6 +4,9 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from omegaconf import OmegaConf
+
+from skyrl_train.objective.losses import ppo_policy_loss
 
 from skyrl_train.distributed.dispatch import ActorInfo, MeshRank, concatenate_outputs_after_mesh_dispatch
 from skyrl_train.training_batch import TrainingOutputBatch
@@ -132,3 +135,82 @@ def test_selected_response_reuses_sampled_normalizer_without_full_float_logits(d
     expected_gradient = torch.autograd.grad(expected[valid].sum(), base_logits)[0]
     tolerance = 5e-3 if dtype == torch.bfloat16 else 1e-6
     torch.testing.assert_close(selected_gradient, expected_gradient, atol=tolerance, rtol=tolerance)
+
+
+def test_training_scores_and_centers_constant_advantage_without_masked_nan_gradients(
+    monkeypatch, megatron_wrapper, single_rank_group
+):
+    # Enumerate all sampled actions under q using policy-data weights. A full
+    # head must cancel their expected score gradient, for both advantage signs.
+    q = torch.tensor([0.30, 0.05, 0.25, 0.10, 0.10, 0.10, 0.10])
+    old = torch.tensor([1e-15, 0.20, 0.25, 0.15, 0.15, 0.10, 0.15])
+    sequences = torch.tensor([[1, 2, action, action] for action in range(7)] + [[1, 2, 0, 0]])
+    mask = torch.cat((q[:, None].expand(7, 2), torch.zeros(1, 2)))
+    advantages = torch.tensor([1.7, -2.3]).expand(8, 2).clone()
+    advantages[-1] = torch.nan
+    candidates = torch.arange(7).expand(8, 2, 7).clone()
+    candidates[-1] = -1
+    old_head, behavior_head = old.log().expand(8, 2, 7).clone(), q.log().expand(8, 2, 7).clone()
+    old_head[-1], behavior_head[-1] = torch.nan, torch.nan
+    old_chosen = old.log()[sequences[:, -2:]]
+    behavior_chosen = q.log()[sequences[:, -2:]]
+    torch.manual_seed(93)
+    parameters = torch.randn(4, 7, requires_grad=True)
+
+    def model(sequences, *args, **kwargs):
+        return parameters.expand(len(sequences), 4, 7).clone()
+
+    model.training = True
+
+    def schedule(forward_step_func, data_iterator, model, **kwargs):
+        logits, closure = forward_step_func(data_iterator, model[0])
+        loss, metrics = closure(logits)
+        loss.backward()
+        return [metrics]
+
+    monkeypatch.setattr(mmw, "get_forward_backward_func", lambda: schedule)
+    monkeypatch.setattr(mmw.mpu, "is_pipeline_last_stage", lambda **kwargs: True, raising=False)
+    monkeypatch.setattr(mmw.mpu, "get_data_parallel_group", lambda **kwargs: single_rank_group, raising=False)
+    monkeypatch.setattr(mmw.mpu, "get_pipeline_model_parallel_group", lambda: single_rank_group, raising=False)
+    monkeypatch.setattr(mmw.mpu, "get_pipeline_model_parallel_last_rank", lambda: 0, raising=False)
+    megatron_wrapper.actor_module = [model]
+    megatron_wrapper.policy_loss_fn = ppo_policy_loss
+    megatron_wrapper.cfg = OmegaConf.create(
+        {
+            "trainer": {
+                "algorithm": {
+                    "score_centering_topk": 7,
+                    "max_seq_len": 4,
+                    "think_token_weight": 1,
+                    "off_policy_correction": "custom",
+                    "off_policy_correction_rules": [{"kind": "token", "action": "truncate", "high": 1.05}],
+                    "eps_clip_low": 0.2,
+                    "eps_clip_high": 0.2,
+                    "loss_reduction": "token_mean",
+                    "use_entropy_loss": False,
+                    "use_kl_loss": False,
+                    "kl_loss_coef": 0,
+                }
+            }
+        }
+    )
+    micro = mmw.MegatronPolicyMicroBatch(
+        sequences=sequences,
+        attention_mask=torch.ones_like(sequences),
+        position_ids=torch.arange(4).expand(8, 4),
+        num_actions=2,
+        old_action_log_probs=old_chosen,
+        base_action_log_probs=None,
+        advantages=advantages,
+        loss_mask=mask,
+        rollout_action_logprobs=behavior_chosen,
+        response_span_tags=None,
+        correction_weights=(old_chosen - behavior_chosen).exp().clamp(max=1.05),
+        score_topk_indices=candidates,
+        score_old_logprobs=old_head,
+        score_behavior_logprobs=behavior_head,
+    )
+    # Exercise the actual CPU math without requiring a native compiler for telemetry.
+    with torch.compiler.set_stance("force_eager"):
+        megatron_wrapper.forward_backward_mini_batch([micro], seq_len=4, micro_batch_size=8, temperature=0.7)
+    torch.testing.assert_close(parameters.grad, torch.zeros_like(parameters), atol=1e-7, rtol=0)
