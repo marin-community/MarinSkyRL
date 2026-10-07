@@ -5,6 +5,7 @@ Main entrypoint for generating rollouts on terminal bench tasks.
 import ray
 import asyncio
 import hydra
+import torch
 from omegaconf import DictConfig
 from torchdata.stateful_dataloader import StatefulDataLoader
 
@@ -32,7 +33,8 @@ class TerminalBenchGenerateExp(TerminalBenchExp):
             self.train_dataset,
             batch_size=self.cfg.trainer.eval_batch_size,
             collate_fn=self.train_dataset.collate_fn,
-            shuffle=False,
+            shuffle=self.cfg.data.shuffle,
+            generator=torch.Generator().manual_seed(self.cfg.trainer.seed),
             num_workers=0,
             drop_last=False,
         )

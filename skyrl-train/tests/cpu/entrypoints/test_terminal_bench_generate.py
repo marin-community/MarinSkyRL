@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 from omegaconf import OmegaConf
 
 from skyrl_train.config.trajectory_runner_capabilities import EntrypointOperation
@@ -34,11 +35,13 @@ class RecordingTrajectoryRunner:
         self.events.append("shutdown")
 
 
-def test_terminal_bench_generate_batches_all_tasks_with_global_indices(tmp_path: Path):
+@pytest.mark.parametrize("shuffle", [False, True])
+def test_terminal_bench_generate_batches_all_tasks_with_global_indices(tmp_path: Path, shuffle: bool):
     runner = RecordingTrajectoryRunner()
     experiment = object.__new__(TerminalBenchGenerateExp)
     experiment.cfg = OmegaConf.create(
         {
+            "data": {"shuffle": shuffle},
             "generator": {
                 "backend": "vllm",
                 "n_samples_per_prompt": 8,
@@ -54,6 +57,7 @@ def test_terminal_bench_generate_batches_all_tasks_with_global_indices(tmp_path:
             "environment": {"env_class": "terminal_bench"},
             # run() configures progress and enters the trainer telemetry lifecycle before _run().
             "trainer": {
+                "seed": 7,
                 "run_name": "generate",
                 "eval_batch_size": 2,
                 "eval_num_prompts": 1,
@@ -86,15 +90,28 @@ def test_terminal_bench_generate_batches_all_tasks_with_global_indices(tmp_path:
 
     assert runner.events == ["startup", "start_eval generate 0", "run", "run", "run", "stop_eval", "shutdown"]
     assert [len(request["prompts"]) for request in runner.requests] == [16, 16, 8]
+    indices = [extras["task_index"] for request in runner.requests for extras in request["env_extras"]]
+    order = indices[::8]
+    assert sorted(order) == list(range(5))
+    assert (order != list(range(5))) is shuffle
     assert [prompt for request in runner.requests for prompt in request["prompts"]] == [
-        str(path) for path in task_paths for _ in range(8)
+        str(task_paths[index]) for index in order for _ in range(8)
     ]
-    assert [extras["task_index"] for request in runner.requests for extras in request["env_extras"]] == [
-        index for index in range(5) for _ in range(8)
-    ]
+    assert indices == [index for index in order for _ in range(8)]
     assert [
         trajectory_id.to_string() for request in runner.requests for trajectory_id in request["trajectory_ids"]
-    ] == [f"task-{task}_{repetition_id}" for task in ("a", "b", "c", "d", "e") for repetition_id in range(8)]
+    ] == [f"{task_paths[index].name}_{repetition_id}" for index in order for repetition_id in range(8)]
     for request in runner.requests:
         assert request["env_classes"] == ["terminal_bench"] * len(request["prompts"])
         assert request["batch_metadata"] == BatchMetadata(global_step=0, training_phase="eval")
+
+    runner.requests.clear()
+    experiment.run()
+    assert [extras["task_index"] for request in runner.requests for extras in request["env_extras"]] == indices
+
+    experiment.cfg.trainer.seed = 8
+    runner.requests.clear()
+    experiment.run()
+    new_indices = [extras["task_index"] for request in runner.requests for extras in request["env_extras"]]
+    assert sorted(new_indices) == sorted(indices)
+    assert (new_indices != indices) is shuffle
