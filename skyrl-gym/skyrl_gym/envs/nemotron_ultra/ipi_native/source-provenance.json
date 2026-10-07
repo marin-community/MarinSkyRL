@@ -2,7 +2,7 @@
   "repository": "NVIDIA-NeMo/Gym",
   "revision": "804c12a7d56a151a98ae150a352350e3c856ba47",
   "path": "resources_servers/indirect_prompt_injection",
-  "changes": "Only the package import prefix is relocated; original tool and verifier logic is preserved.",
+  "changes": "Package imports are relocated and two incorrect upstream docstrings are corrected; executable native logic is preserved.",
   "files": {
     "common_tools.py": {
       "upstream_sha256": "fd57479d7dc87436273423bddbe164d091520d4b33a731272be96756d913855d",
@@ -10,7 +10,7 @@
     },
     "education_tools.py": {
       "upstream_sha256": "9e4897115a27f785031a374b7d89ff114054b729d0f42de741118698837d57c3",
-      "packaged_sha256": "14d73ba0b55d2ddbb007420032947ca0891abed59ad5160ab33a3623678e726a"
+      "packaged_sha256": "ebccb633b5ad2a8c89590907ff3535ec0698072d43734974b9cde21f06db9f32"
     },
     "insurance_tools.py": {
       "upstream_sha256": "e31b30b357d941930b368b0c3c893cf3747ddc7bfc669bd2a5adac526087cb89",
@@ -30,7 +30,7 @@
     },
     "ecommerce_tools.py": {
       "upstream_sha256": "7e84f9a026e64de3127669f86fd2941b3b8b383a893013dbee21253dbb4b3b63",
-      "packaged_sha256": "7e84f9a026e64de3127669f86fd2941b3b8b383a893013dbee21253dbb4b3b63"
+      "packaged_sha256": "6c777844df33b304e9f3b4b1b19601b22e17b05956579eea81ff4b4a054f0092"
     },
     "healthcare_tools.py": {
       "upstream_sha256": "73f9280dd198a63bf24d9890a8e9c3a8a963c720c7353d7c98bea63d5415b7f5",
@@ -49,5 +49,5 @@
       "packaged_sha256": "fe648d34cf04f7d58e285b724ddb3f42499de6ac888fbc438ba2a4eff5a57b26"
     }
   },
-  "validation": "All eleven module ASTs match the pinned originals after only import-prefix relocation."
+  "validation": "All eleven implementation ASTs match the pinned originals after import relocation and excluding docstrings."
 }

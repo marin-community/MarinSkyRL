@@ -72,7 +72,7 @@ def add_order_note(env: Dict[str, Any], order_id: str, note: str) -> str:
 
 
 def search_products(env: Dict[str, Any], query: str = None, category: str = None, **kwargs) -> List[Dict[str, Any]]:
-    """Search products by query, category, or tags."""
+    """Filter products by text in names/descriptions and by category."""
     results = []
     for product in env.get("products", {}).values():
         if category and product.get("category", "").lower() != category.lower():

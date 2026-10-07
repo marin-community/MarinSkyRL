@@ -128,7 +128,7 @@ def submit_grade(
     grader_comments: str = "",
     **kwargs,
 ) -> str:
-    """Submit or update a grade for a student in a course."""
+    """Create a grade record for a student and course assignment."""
     grade_id = f"G-{uuid.uuid4().hex[:6].upper()}"
     env.setdefault("grades", {})[grade_id] = {
         "grade_id": grade_id,
