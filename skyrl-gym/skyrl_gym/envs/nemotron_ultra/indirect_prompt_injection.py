@@ -27,6 +27,8 @@ from skyrl_gym.envs.nemotron_ultra.ipi_native import (
 )
 from skyrl_gym.envs.nemotron_ultra.ipi_native.verifier import check_injection_followed, extract_function_calls
 
+VERDICT_FILE = "ipi-verdict.json"
+
 TOOL_HANDLERS = {
     **healthcare_tools.TOOL_HANDLERS,
     **hr_tools.TOOL_HANDLERS,
@@ -137,7 +139,7 @@ def grade_session(session: IPISession, *, thinking_incomplete: bool, timeout: fl
             + "\n"
         )
         spec = root / "verifier.toml"
-        spec.write_text(render_spec(ScriptSpec(path=checker.name, verdict_file="ipi-verdict.json", timeout=timeout)))
+        spec.write_text(render_spec(ScriptSpec(path=checker.name, verdict_file=VERDICT_FILE, timeout=timeout)))
         result = run(spec, root)
         if result.status is not Status.SCORED:
             return 0.0, {"error_type": "verification_error", "verifyit_verdict": result.detail}
@@ -149,7 +151,7 @@ def main() -> None:
     parser.add_argument("--check", type=Path, required=True)
     args = parser.parse_args()
     verdict = native_verdict(json.loads(args.check.read_text()))
-    (Path(os.environ["VERIFYIT_LOGS_DIR"]) / "ipi-verdict.json").write_text(json.dumps(verdict))
+    (Path(os.environ["VERIFYIT_LOGS_DIR"]) / VERDICT_FILE).write_text(json.dumps(verdict))
 
 
 if __name__ == "__main__":
