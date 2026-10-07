@@ -108,7 +108,6 @@ megatron = [
     "cuda-toolkit[nvcc,cccl]==13.2.2 ; sys_platform == 'linux'",
     "nvidia-cusparselt-cu13==0.8.1 ; sys_platform == 'linux' and platform_machine == 'aarch64'",
     "accelerate>=1.14,<2 ; sys_platform == 'linux'",
-    "causal-conv1d==1.7.0+marin.cu132torch2141.1 ; sys_platform == 'linux'",
     "flashinfer-cubin==0.6.18.post1 ; sys_platform == 'linux'",
     "flashinfer-python==0.6.18.post1 ; sys_platform == 'linux'",
     "nvidia-cutlass-dsl==4.7.1 ; sys_platform == 'linux'",
@@ -116,7 +115,6 @@ megatron = [
     "flash-attn==2.8.3.post1+marin.cu132torch2141.1 ; sys_platform == 'linux'",
     "flash-linear-attention==0.4.2 ; sys_platform == 'linux'",
     "fast-hadamard-transform==1.1.0 ; sys_platform == 'linux'",
-    "mamba-ssm==2.3.2.post1+marin.cu132torch2141.1 ; sys_platform == 'linux'",
     "megatron-bridge==0.6.2+marin.torch2141.2 ; sys_platform == 'linux'",
     "megatron-core==0.19.2+marin.torch2141.4 ; sys_platform == 'linux'",
     "harbor-config ; sys_platform == 'linux'",
@@ -239,14 +237,6 @@ vllm = [
 transformer-engine-torch = [
     { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/transformer_engine_torch-2.19.0-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
     { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/transformer_engine_torch-2.19.0-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
-]
-causal-conv1d = [
-    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/causal_conv1d-1.7.0+marin.cu132torch2141.1-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
-    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/causal_conv1d-1.7.0+marin.cu132torch2141.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
-]
-mamba-ssm = [
-    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/mamba_ssm-2.3.2.post1+marin.cu132torch2141.1-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
-    { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-native-cu132-torch2141-20261004-db1a32ca/mamba_ssm-2.3.2.post1+marin.cu132torch2141.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
 ]
 megatron-core = [
     { url = "https://github.com/marin-community/MarinSkyRL/releases/download/trainer-trimmed-candidate-20261007-604f2c14/megatron_core-0.19.2+marin.torch2141.4-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
