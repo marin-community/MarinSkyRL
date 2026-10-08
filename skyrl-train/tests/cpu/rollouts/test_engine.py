@@ -635,7 +635,7 @@ async def test_disabled_harbor_verification_keeps_tokens_but_masks_training(
         config,
         projection_type(projection),
         ConversationClient(["Done"]),
-        {"docker": ImageFactory()},
+        {"harbor": ImageFactory()},
         harbor=settings,
     )
     try:
@@ -1278,7 +1278,7 @@ async def test_mixed_nemotron_tasks_run_without_the_original_sources(
         config,
         projection_type(projection),
         MixedClient(),
-        {"docker": ImageFactory()},
+        {"harbor": ImageFactory()},
         harbor=settings,
     )
     writer = Writer()

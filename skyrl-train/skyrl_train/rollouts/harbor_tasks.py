@@ -35,6 +35,8 @@ from skyrl_train.utils.reward_shaping import (
     verifier_test_collection,
 )
 
+HARBOR_MACHINE_BACKEND = "harbor"
+
 
 @dataclass(frozen=True)
 class HarborTaskSettings:
@@ -124,6 +126,8 @@ class HarborTaskSettings:
                 for name in ("cpus", "memory_mb", "storage_mb", "gpus")
                 if (value := getattr(self.environment, f"override_{name}")) is not None
             }
+            if original.backend == "docker":
+                updates["backend"] = HARBOR_MACHINE_BACKEND
             if original.startup_timeout is not None:
                 updates["startup_timeout"] = original.startup_timeout * self.timeout_multiplier
             return original.model_copy(update=updates)

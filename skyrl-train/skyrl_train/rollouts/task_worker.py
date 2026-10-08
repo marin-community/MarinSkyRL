@@ -41,7 +41,12 @@ from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.rollouts.buffer import RolloutGroup, RolloutTask, RolloutWriter
 from skyrl_train.rollouts.group_grader import GroupGraderSpec
 from skyrl_train.rollouts.group_grading import GROUP_GRADERS, GroupGrader, grade_groups
-from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings, harbor_grading_failure, shape_harbor_rollouts
+from skyrl_train.rollouts.harbor_tasks import (
+    HARBOR_MACHINE_BACKEND,
+    HarborTaskSettings,
+    harbor_grading_failure,
+    shape_harbor_rollouts,
+)
 from skyrl_train.rollouts.workers import WorkerShard, detached_config
 from skyrl_train.rollouts.finalization import finalize_trajectory_batch, propagate_data_sources
 from skyrl_train.rollout_observability import rollout_phase, rollout_wait
@@ -399,6 +404,15 @@ class TaskRolloutWorkerSpec:
         runner_config = self.config.generator
         client_config = OmegaConf.merge(self.config, {"generator": {"enable_http_endpoint": False}})
         client = DirectModelClient(InferenceEngineClient(self.engines, tokenizer, client_config))
+        factories: dict[str, MachineFactory] = {
+            "docker": DockerMachineFactory(
+                skopeo=Path(self.config.trajectory_runner.skopeo),
+                image_cache=Path(self.config.trajectory_runner.image_cache).expanduser(),
+            ),
+            "shellsim": ShellSimMachineFactory(),
+        }
+        if harbor is not None:
+            factories[HARBOR_MACHINE_BACKEND] = harbor.machine_factory(self.config.trajectory_runner)
         return TaskRolloutWorker(
             runner_config,
             (
@@ -407,22 +421,10 @@ class TaskRolloutWorkerSpec:
                 else WholeTaskProjection(WholeTrajectoryProjection(runner_config, tokenizer))
             ),
             client,
-            {
-                "docker": harbor.machine_factory(self.config.trajectory_runner)
-                if harbor is not None
-                else DockerMachineFactory(
-                    skopeo=Path(self.config.trajectory_runner.skopeo),
-                    image_cache=Path(self.config.trajectory_runner.image_cache).expanduser(),
-                ),
-                "shellsim": ShellSimMachineFactory(),
-            },
+            factories,
             max_verifier_workers=int(self.config.environment.task_sessions.max_verifier_workers),
             harbor=harbor,
-            concurrent_tasks=(
-                self.config.trajectory_runner.rollout_workers.executor_threads
-                if self.config.trajectory_runner.max_concurrent_tasks is None
-                else self.config.trajectory_runner.max_concurrent_tasks
-            ),
+            concurrent_tasks=int(self.config.trajectory_runner.max_concurrent_tasks),
             concurrent_harbor_tasks=None if harbor is None else max(1, harbor.concurrent_trials // shard.count),
             sessions=self.sessions,
         )
