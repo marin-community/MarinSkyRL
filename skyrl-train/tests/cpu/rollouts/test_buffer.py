@@ -105,20 +105,6 @@ async def test_on_policy_leases_one_batch_per_published_step(batch_policy):
 
 
 @pytest.mark.asyncio
-async def test_partial_epoch_tail_trains_remaining_group_without_another_lease(batch_policy):
-    buffer = RolloutBuffer(RolloutBufferConfig(2, 4, 0, batch_policy, None, None, epoch_batch_sizes=(2, 1)))
-    await buffer.publish(1)
-    await _generate(buffer, "a")
-    await _generate(buffer, "b")
-    first, _ = await _take_batch(buffer)
-    await buffer.publish(2)
-    await _generate(buffer, "c")
-    assert await _lease_is_blocked(buffer)
-    last, _ = await _take_batch(buffer)
-    assert first + last == ["a", "b", "c"]
-
-
-@pytest.mark.asyncio
 async def test_off_policy_generation_runs_ahead_by_the_staleness_bound(batch_policy):
     buffer = _buffer(batch_policy, batch_size=2, max_in_flight=8, max_staleness_steps=1)
     await buffer.publish(1)

@@ -5,22 +5,9 @@ from __future__ import annotations
 import collections
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
-from enum import StrEnum
 from typing import Any, Protocol
 
 import torch
-
-
-class EpochTail(StrEnum):
-    DROP = "drop"
-    INCLUDE = "include"
-
-
-def training_epoch_batch_sizes(num_rows: int, batch_size: int, tail: EpochTail) -> tuple[int, ...]:
-    """Count a non-repeating dataset pass, optionally retaining its smaller final batch."""
-    full, remaining = divmod(num_rows, batch_size)
-    sizes = (batch_size,) * full
-    return sizes + (remaining,) if remaining and tail is EpochTail.INCLUDE else sizes
 
 
 class PromptGroupDataset(Protocol):

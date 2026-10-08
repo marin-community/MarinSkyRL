@@ -28,7 +28,6 @@ from skyrl_train.utils.tracking import Tracking
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.rollouts.buffer import RolloutGroup
 from skyrl_train.rollouts.context import TrainingContext, TrainingContextState
-from skyrl_train.rollouts.loader import EpochTail, training_epoch_batch_sizes
 from skyrl_train.trajectory_selection import trajectory_selector_from_config
 from skyrl_train.trajectory_runners.base import (
     TrajectoryBatch,
@@ -323,8 +322,15 @@ class RayPPOTrainer:
         self.trajectory_selector = trajectory_selector_from_config(cfg)
         self.trajectory_sink = make_trajectory_sink(cfg.generator, tokenizer)
         self.trajectory_runner.set_trajectory_sink(self.trajectory_sink)
+        self.eval_trajectory_sink = self.trajectory_sink
         if self.eval_trajectory_runner is not self.trajectory_runner:
-            self.eval_trajectory_runner.set_trajectory_sink(self.trajectory_sink)
+            evaluation_config = OmegaConf.create(OmegaConf.to_container(cfg.generator, resolve=True))
+            if evaluation_config.trajectory_retention.enabled:
+                evaluation_config.trajectory_retention.output_path = join_resource_path(
+                    evaluation_config.trajectory_retention.output_path, "validation"
+                )
+            self.eval_trajectory_sink = make_trajectory_sink(evaluation_config, tokenizer)
+            self.eval_trajectory_runner.set_trajectory_sink(self.eval_trajectory_sink)
         self.total_training_steps = None
         self._configure_training_schedule()
 
@@ -407,8 +413,7 @@ class RayPPOTrainer:
     def _configure_training_schedule(self):
         """Count steps in batches of prompt groups; one pass over the dataset is one epoch."""
         batch_size = self.cfg.trainer.train_batch_size
-        sizes = training_epoch_batch_sizes(len(self.train_dataset), batch_size, EpochTail(self.cfg.data.epoch_tail))
-        self.num_steps_per_epoch = len(sizes)
+        self.num_steps_per_epoch = len(self.train_dataset) // batch_size
         if self.num_steps_per_epoch == 0:
             raise ValueError(
                 f"the training dataset has {len(self.train_dataset)} prompts, fewer than one batch of {batch_size}"
@@ -480,7 +485,7 @@ class RayPPOTrainer:
             cfg=cfg,
             global_step=self.global_step,
             tokenizer=self.tokenizer,
-            trajectory_sink=self.trajectory_sink,
+            trajectory_sink=self.eval_trajectory_sink,
             val_set_name=val_set_name,
         )
 
@@ -598,6 +603,8 @@ class RayPPOTrainer:
                 self.eval_trajectory_runner.shutdown(), timeout=60, label="Evaluation trajectory runner shutdown"
             )
         self._guarded_sync(self.trajectory_sink.close, label="Trajectory retention shutdown")
+        if self.eval_trajectory_sink is not self.trajectory_sink:
+            self._guarded_sync(self.eval_trajectory_sink.close, label="Evaluation retention shutdown")
         self._draft_trainer_update_ref = None
         if self._speculator_refresh_task is not None:
             await self._guarded_async(
@@ -1671,7 +1678,7 @@ class RayPPOTrainer:
 
     def convert_rollout_groups_to_training_input(self, groups: List[RolloutGroup]) -> TrainingInputBatch:
         """Concatenate one batch of admitted groups and convert it to a training batch."""
-        batch_size = self.context.config.batch_size_for(self.global_step)
+        batch_size = self.context.config.batch_size
         max_staleness_steps = self.context.config.max_staleness_steps
         assert len(groups) == batch_size, f"Expected {batch_size} groups, got {len(groups)}"
         with Timer("assemble_generation_group_mini_batch", self.all_timings):

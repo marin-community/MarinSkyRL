@@ -2,6 +2,8 @@
 uv run --isolated --group dev --extra cpu pytest tests/cpu/test_eval.py
 """
 
+import json
+import zipfile
 from unittest.mock import MagicMock
 
 import pytest
@@ -10,9 +12,11 @@ from skyrl_gym.envs.registration import registry
 from skyrl_gym.verification import VerificationResult
 
 from skyrl_train.evaluate import _calculate_eval_metrics, evaluate
-from skyrl_train.dataset.preference_pairs import PreferencePairFormat
+from skyrl_train.dataset.dataset import PromptDataset
+from skyrl_train.dataset.preference_pairs import PreferencePairDataset, PreferencePairFormat
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.trainer import RayPPOTrainer
+from skyrl_train.rollouts.context import TrainingContext
 from skyrl_train.trajectory_runners.preference_pairs import PreferencePairTrajectoryRunner
 from skyrl_train.trajectory_runners.base import TrajectoryRunner, TrajectoryBatch
 from skyrl_train.trajectory_runners.trajectory_retention import (
@@ -21,7 +25,8 @@ from skyrl_train.trajectory_runners.trajectory_retention import (
     parse_trajectory_retention_config,
 )
 from skyrl_train.trajectory_runners.trajectory_retention_publisher import InlineTrajectoryPublisher
-from tests.cpu.util import example_dummy_config
+from tests.cpu.tiny_training.experiment import JsonlTracker
+from tests.cpu.util import dpo_test_config, example_dummy_config
 
 
 @pytest.fixture
@@ -70,15 +75,61 @@ class DummyRunner(TrajectoryRunner):
         return self.output
 
 
+class RetentionTokenizer:
+    def apply_chat_template(self, messages, **kwargs):
+        return [101]
+
+    def decode(self, token_ids, **kwargs):
+        return " ".join(str(token) for token in token_ids)
+
+
 @pytest.mark.asyncio
-async def test_offline_preference_evaluation_generates_with_separate_validation_runner(dummy_config, tmp_path):
-    cfg = configure_eval(dummy_config, tmp_path)
+@pytest.mark.slow
+@pytest.mark.usefixtures("ray_module")
+async def test_offline_preference_evaluation_generates_with_separate_validation_runner(tmp_path):
+    cfg = configure_eval(dpo_test_config(), tmp_path)
     cfg.environment.env_class = "preference_pair"
     cfg.generator.enable_http_endpoint = False
-    tokenizer = MagicMock()
-    tokenizer.decode.return_value = "generated validation answer"
+    cfg.trainer.train_batch_size = cfg.trainer.policy_mini_batch_size = 4
+    cfg.trainer.max_steps = 1
+    retained = tmp_path / "retained"
+    cfg.generator.trajectory_retention.enabled = True
+    cfg.generator.trajectory_retention.output_path = str(retained)
+    cfg.generator.trajectory_retention.phases = ["eval"]
+    cfg.generator.trajectory_retention.sample_count_per_step = 0
+    cfg.generator.trajectory_retention.sample_fraction = 1.0
+    cfg.generator.trajectory_retention.required = True
+    tokenizer = RetentionTokenizer()
+    row = {
+        "chosen_input_ids": [10, 20, 30],
+        "chosen_assistant_masks": [0, 0, 1],
+        "rejected_input_ids": [10, 20, 35],
+        "rejected_assistant_masks": [0, 0, 1],
+    }
+    training_file = tmp_path / "pairs.jsonl"
+    training_file.write_text((json.dumps(row) + "\n") * 4)
+    training_data = PreferencePairDataset(
+        tokenizer=tokenizer,
+        data_format=PreferencePairFormat.TOKENIZED,
+        datasets=[str(training_file)],
+        max_prompt_length=32,
+        max_completion_length=32,
+        num_workers=1,
+    )
+    validation_file = tmp_path / "validation.jsonl"
+    validation_file.write_text(
+        json.dumps(
+            {
+                "prompt": [{"role": "user", "content": "validation question"}],
+                "env_class": "gsm8k",
+                "data_source": "holdout",
+            }
+        )
+        + "\n"
+    )
+    validation_data = PromptDataset([str(validation_file)], tokenizer, max_prompt_length=32, num_workers=1)
     training_runner = PreferencePairTrajectoryRunner(
-        tokenizer, data_format=PreferencePairFormat.TEXT, max_generate_length=32, max_input_length=64
+        tokenizer, data_format=PreferencePairFormat.TOKENIZED, max_generate_length=32, max_input_length=32
     )
     evaluation_runner = DummyRunner(
         {
@@ -91,34 +142,29 @@ async def test_offline_preference_evaluation_generates_with_separate_validation_
             "verification_results": [VerificationResult.verified(1.0)],
         }
     )
-    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
-    trainer.cfg = cfg
-    trainer.tokenizer = tokenizer
-    trainer.global_step = 4
-    trainer.trajectory_runner = training_runner
-    trainer.eval_trajectory_runner = evaluation_runner
-    trainer.inference_engine_client = InferenceEngineClient([], tokenizer, cfg)
-    trainer.trajectory_sink = TrajectorySink(
-        parse_trajectory_retention_config(cfg.generator.trajectory_retention),
-        tokenizer,
-        publisher=InlineTrajectoryPublisher(execute_publication),
+    trainer = RayPPOTrainer(
+        cfg=cfg,
+        tracker=JsonlTracker(tmp_path / "metrics.jsonl"),
+        tokenizer=tokenizer,
+        train_dataset=training_data,
+        eval_dataset=validation_data,
+        inference_engine_client=InferenceEngineClient([], tokenizer, cfg),
+        trajectory_runner=training_runner,
+        eval_trajectory_runner=evaluation_runner,
+        context=TrainingContext.from_config(cfg, training_data, training_runner),
     )
-    trainer.eval_dataloader = DummyStatefulDataLoader(
-        [
-            [
-                {
-                    "prompt": [{"role": "user", "content": "validation question"}],
-                    "env_class": "gsm8k",
-                    "env_extras": {"data_source": "holdout"},
-                    "uid": "held-out-task",
-                }
-            ]
-        ]
-    )
-    metrics = await trainer.eval()
+    try:
+        metrics = await trainer.eval()
+    finally:
+        trainer.trajectory_sink.close()
+        trainer.eval_trajectory_sink.close()
     assert metrics["eval/all/avg_verifier_score"] == 1.0
     assert metrics["eval/all/verifier_score_coverage"] == 1.0
     assert metrics["eval/holdout/pass_at_1"] == 1.0
+    [archive_path] = list(retained.rglob("*.zip"))
+    assert archive_path.relative_to(retained).parts[0] == "validation"
+    with zipfile.ZipFile(archive_path) as archive:
+        assert len(json.loads(archive.read("manifest.json"))["records"]) == 1
 
 
 def test_eval_reports_normalized_verifier_score_alongside_raw_reward():

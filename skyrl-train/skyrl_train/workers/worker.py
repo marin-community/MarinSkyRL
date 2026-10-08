@@ -6,7 +6,7 @@ import os
 import socket
 from typing import Dict, Optional, Type, List, Any, Callable
 from skyrl_train.utils.progress import configure_progress, tqdm
-from marinskyrl.runtime_options import PolicyLossType, R3Transport
+from marinskyrl.runtime_options import R3Transport
 from collections import defaultdict
 
 import ray
@@ -967,8 +967,6 @@ class PolicyWorkerBase(Worker):
             self.policy_mini_batch_size_per_gpu,
             self.cfg.trainer.micro_train_batch_size_per_gpu,
         )
-        if self.cfg.trainer.algorithm.policy_loss_type == PolicyLossType.DPO:
-            micro_batches_per_mini_batch = min(micro_batches_per_mini_batch, len(dataloader))
         # The number of steps (over micro batches) to accumulate gradients before taking an optimizer step.
         accumulation_steps = micro_batches_per_mini_batch
 

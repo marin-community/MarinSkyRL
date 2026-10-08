@@ -13,7 +13,6 @@ import ray
 from omegaconf import DictConfig, OmegaConf
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.entrypoints.main_base import BasePPOExp
-from skyrl_train.rollouts.loader import EpochTail
 
 from tests.cpu.tiny_training.cpu_backend import CPUPolicyWorker, CPURefWorker
 from tests.cpu.tiny_training.experiment import (
@@ -36,29 +35,20 @@ PREFERENCE_ROWS = [
 ]
 
 
-def write_preference_rows(path: Path, num_pairs: int) -> Path:
+def write_preference_rows(path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w") as handle:
-        for row in PREFERENCE_ROWS[:num_pairs]:
+        for row in PREFERENCE_ROWS:
             handle.write(json.dumps(row) + "\n")
     return path
 
 
-def preference_pair_training_config(
-    root: Path,
-    model_dir: Path,
-    *,
-    steps: int,
-    beta: float = 0.1,
-    num_pairs: int = len(PREFERENCE_ROWS),
-    epoch_tail: EpochTail = EpochTail.DROP,
-) -> DictConfig:
+def preference_pair_training_config(root: Path, model_dir: Path, *, steps: int, beta: float = 0.1) -> DictConfig:
     overrides = {
         "data": {
-            "train_data": [str(write_preference_rows(root / "data" / "preferences.jsonl", num_pairs))],
+            "train_data": [str(write_preference_rows(root / "data" / "preferences.jsonl"))],
             "val_data": [],
             "shuffle": False,
-            "epoch_tail": epoch_tail.value,
         },
         "trainer": {
             "debug_mode": "off",
@@ -109,15 +99,8 @@ class PreferencePairCPUExp(BasePPOExp):
         return JsonlTracker(Path(self.cfg.trainer.export_path) / METRICS_FILE)
 
 
-def run_dpo_experiment(
-    root: Path,
-    model_dir: Path,
-    *,
-    steps: int,
-    num_pairs: int = len(PREFERENCE_ROWS),
-    epoch_tail: EpochTail = EpochTail.DROP,
-) -> Path:
-    cfg = preference_pair_training_config(root, model_dir, steps=steps, num_pairs=num_pairs, epoch_tail=epoch_tail)
+def run_dpo_experiment(root: Path, model_dir: Path, *, steps: int) -> Path:
+    cfg = preference_pair_training_config(root, model_dir, steps=steps)
     run_with_exp(cfg, PreferencePairCPUExp)
     return root / "exports" / METRICS_FILE
 

@@ -41,15 +41,7 @@ from skyrl_train.rollouts.buffer import (
     RolloutGroup,
     RolloutTask,
 )
-from skyrl_train.rollouts.loader import (
-    EpochTail,
-    PromptLoader,
-    PromptLoaderState,
-    PromptGroupDataset,
-    PromptOrder,
-    SeededPasses,
-    training_epoch_batch_sizes,
-)
+from skyrl_train.rollouts.loader import PromptLoader, PromptLoaderState, PromptGroupDataset, PromptOrder, SeededPasses
 from skyrl_train.rollouts.payloads import MemoryPayloads, ObjectStorePayloads, PayloadStore
 from skyrl_train.rollout_observability import dispatch_wait, observe_rollout_call, record_group_disposition
 from skyrl_train.rollouts.workers import RolloutWorkers
@@ -194,7 +186,6 @@ class TrainingContext:
             batch_policy=BatchPolicy(config.trainer.rollout_buffer.batch_policy),
             dynamic_sampling=selection.sampling_type,
             max_candidate_groups=max_sample_batches * batch_size if max_sample_batches > 0 else None,
-            epoch_batch_sizes=training_epoch_batch_sizes(len(dataset), batch_size, EpochTail(config.data.epoch_tail)),
         )
         plan = compile_distillation_plan_from_config(config)
         admission = GroupAdmissionPolicy(
@@ -322,9 +313,8 @@ class TrainingContext:
                     await on_admitted(admitted)
                 deadline = loop.time() + stall_timeout
             if admission.selection is not None:
-                expected = self.config.batch_size_for(self._policy_step)
-                if len(groups) != expected:
-                    raise ValueError(f"selected batch has {len(groups)} groups, expected {expected}")
+                if len(groups) != self.config.batch_size:
+                    raise ValueError(f"selected batch has {len(groups)} groups, expected {self.config.batch_size}")
                 if any(group.index != index for index, group in enumerate(groups)):
                     raise ValueError("selected batch group indices are not ordered from zero")
                 return RolloutBatchMetadata(
