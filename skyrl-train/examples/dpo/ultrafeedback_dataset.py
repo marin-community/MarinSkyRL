@@ -25,11 +25,13 @@ def main() -> None:
 
     loaded = datasets.load_dataset(args.source)
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    for split in ("train_prefs", "test_prefs"):
-        if split not in loaded:
+    written = 0
+    for split, aliases in (("train_prefs", ("train_prefs", "train")), ("test_prefs", ("test_prefs", "test"))):
+        available = next((name for name in aliases if name in loaded), None)
+        if available is None:
             continue
         rows = {"prompt": [], "chosen": [], "rejected": []}
-        for row in loaded[split]:
+        for row in loaded[available]:
             prompt = row["prompt"]
             if not isinstance(prompt, str) or len(prompt) > args.max_prompt_chars:
                 continue
@@ -45,6 +47,9 @@ def main() -> None:
         out = datasets.Dataset.from_dict(rows)
         out.to_parquet(str(args.output_dir / f"{split}.parquet"))
         print(f"wrote {len(out)} {split} rows to {args.output_dir / f'{split}.parquet'}")
+        written += 1
+    if written == 0:
+        raise SystemExit(f"no usable splits found in {args.source} (available: {sorted(loaded)})")
 
 
 if __name__ == "__main__":
