@@ -16,7 +16,7 @@ def validate_rollout_launch(
     cfg: DictConfig,
     operation: EntrypointOperation = EntrypointOperation.TRAIN,
 ) -> None:
-    """Reject launches that cannot supply the engine's exact-token transport."""
+    """Validate exact-token transport and training-only distillation requirements."""
     if cfg.generator.backend != "vllm":
         raise ValueError("Task rollouts require generator.backend=vllm for exact structured-chat transport")
     if operation is EntrypointOperation.GENERATE and compile_distillation_plan_from_config(cfg) is not None:
