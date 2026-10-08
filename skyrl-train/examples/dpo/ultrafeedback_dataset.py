@@ -32,16 +32,34 @@ def main() -> None:
             continue
         rows = {"prompt": [], "chosen": [], "rejected": []}
         for row in loaded[available]:
-            prompt = row["prompt"]
-            if not isinstance(prompt, str) or len(prompt) > args.max_prompt_chars:
-                continue
             chosen, rejected = row["chosen"], row["rejected"]
-            # Message lists include the prompt turn; the completion is the assistant reply.
-            chosen_text = chosen[-1]["content"] if isinstance(chosen, list) else chosen
-            rejected_text = rejected[-1]["content"] if isinstance(rejected, list) else rejected
+            if "prompt" in row:
+                prompt = row["prompt"]
+                if not isinstance(prompt, str) or len(prompt) > args.max_prompt_chars:
+                    continue
+                prompt_messages = [{"role": "user", "content": prompt}]
+                # Message lists include the prompt turn; the completion is the assistant reply.
+                chosen_text = chosen[-1]["content"] if isinstance(chosen, list) else chosen
+                rejected_text = rejected[-1]["content"] if isinstance(rejected, list) else rejected
+            else:
+                # Chat-format rows carry the full conversation in chosen/rejected.
+                if (
+                    not isinstance(chosen, list)
+                    or not isinstance(rejected, list)
+                    or len(chosen) < 2
+                    or len(rejected) < 2
+                ):
+                    continue
+                if [m.get("content") for m in chosen[:-1]] != [m.get("content") for m in rejected[:-1]]:
+                    continue
+                if len(chosen[-2]["content"]) > args.max_prompt_chars:
+                    continue
+                prompt_messages = chosen[:-1]
+                chosen_text = chosen[-1]["content"]
+                rejected_text = rejected[-1]["content"]
             if not chosen_text or not rejected_text:
                 continue
-            rows["prompt"].append([{"role": "user", "content": prompt}])
+            rows["prompt"].append(prompt_messages)
             rows["chosen"].append(chosen_text)
             rows["rejected"].append(rejected_text)
         out = datasets.Dataset.from_dict(rows)
