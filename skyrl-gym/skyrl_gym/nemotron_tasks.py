@@ -25,13 +25,14 @@ from skyrl_gym.envs.lcb.livecodebench import (
     normalize_lcb_ground_truth,
 )
 from skyrl_gym.envs.nemotron_ultra.answer_extraction import final_answer_text, last_boxed_answer
-from skyrl_gym.envs.nemotron_ultra import GENRM_AGENTS, NEMOTRON_ULTRA_MOPD_AGENTS, NEMOTRON_ULTRA_RLVR2_AGENTS
+from skyrl_gym.envs.nemotron_ultra import GENRM_AGENTS, NEMOTRON_ULTRA_MOPD_AGENTS
 from skyrl_gym.envs.nemotron_ultra.calendar import grade_calendar
 from skyrl_gym.envs.nemotron_ultra.calendar_verifyit import grade_calendar_verifyit
 from skyrl_gym.envs.nemotron_ultra.code_gen import DEFAULT_PER_TEST_TIMEOUT_SECONDS, has_reasoning_format_violation
 from skyrl_gym.envs.nemotron_ultra.format_verification import grade_format
 from skyrl_gym.envs.nemotron_ultra.format_verifyit import grade_format_verifyit
 from skyrl_gym.envs.nemotron_ultra.instruction_following import grade_instruction_following
+from skyrl_gym.envs.nemotron_ultra.indirect_prompt_injection import create_session, execute_tool_calls, grade_session
 from skyrl_gym.envs.nemotron_ultra.jailbreak import grade_jailbreak
 from skyrl_gym.envs.nemotron_ultra.judge import OpenAIJudge
 from skyrl_gym.envs.nemotron_ultra.judge_profiles_verifyit import grade_judge_profile_verifyit
@@ -57,6 +58,7 @@ from skyrl_gym.task_sessions import BlockingOperations
 from skyrl_gym.verification import VERIFIER_RUNTIME_ERROR, VerificationResult
 
 NS_TOOLS_AGENT = "ns_tools_simple_agent"
+IPI_AGENT = "indirect_prompt_injection_simple_agent"
 LEAN_AGENT = "math_formal_lean_refinement_agent"
 PYTHON_TOOL_TURN_LIMIT = 50
 LEAN_TURN_LIMIT = 3
@@ -98,15 +100,12 @@ class NemotronTaskSession:
         self.agent = ultra["agent"]
         if self.agent not in NEMOTRON_ULTRA_MOPD_AGENTS:
             raise ValueError(f"Unsupported Nemotron source agent: {self.agent!r}")
-        if self.grading == GradingMode.VERIFY and self.agent not in NEMOTRON_ULTRA_RLVR2_AGENTS:
-            raise ValueError(
-                f"Nemotron agent {self.agent!r} requires skip mode because its verifier is not implemented"
-            )
         self.record = json.loads(ultra["record_json"])
         self.request = json.loads(ultra["request_json"])
+        self.ipi_session = create_session(self.record) if self.agent == IPI_AGENT else None
         source_turn_limit = (
             PYTHON_TOOL_TURN_LIMIT
-            if self.agent == NS_TOOLS_AGENT
+            if self.agent in {NS_TOOLS_AGENT, IPI_AGENT}
             else LEAN_TURN_LIMIT
             if self.agent == LEAN_AGENT
             else 1
@@ -138,7 +137,7 @@ class NemotronTaskSession:
             self.grades.append(grade)
             return Transition(done=True, reward=0.0, grade=grade)
         try:
-            transition = await self._advance(action, message, diagnostics)
+            transition = await self._advance(action, message, diagnostics, turn.stop_reason)
         except (requests.RequestException, RuntimeError, ValueError, OSError) as error:
             details = {
                 "agent": self.agent,
@@ -161,7 +160,7 @@ class NemotronTaskSession:
             self.grades.append(transition.grade)
         return transition
 
-    async def _advance(self, action, message, diagnostics):
+    async def _advance(self, action, message, diagnostics, stop_reason):
         if self.agent == NS_TOOLS_AGENT:
             observations = await self._python_calls(message)
             if observations is not None and self.turns < self.max_turns:
@@ -173,6 +172,17 @@ class NemotronTaskSession:
                     metrics={**diagnostics, "num_tool_calls": len(observations)},
                 )
             diagnostics["max_steps_exhausted"] = observations is not None
+        if self.agent == IPI_AGENT:
+            assert self.ipi_session is not None
+            observations = execute_tool_calls(self.ipi_session, message)
+            if observations is not None and self.turns < self.max_turns and stop_reason != LENGTH_STOP_REASON:
+                return Transition(
+                    done=False,
+                    observations=tuple(observations),
+                    reward=0.0,
+                    grade=GradeResult(Outcome.UNAVAILABLE, None, "Tool execution is not a terminal verdict"),
+                    metrics={**diagnostics, "num_tool_calls": len(observations)},
+                )
         if self.grading == GradingMode.SKIP and self.agent != LEAN_AGENT:
             diagnostics["graded"] = 0.0
             return Transition(
@@ -181,7 +191,16 @@ class NemotronTaskSession:
                 grade=GradeResult(Outcome.SKIPPED, None, "Grading is skipped", diagnostics=diagnostics),
                 metrics=diagnostics,
             )
-        if self.agent == LEAN_AGENT:
+        if self.agent == IPI_AGENT:
+            assert self.ipi_session is not None
+            reward, details = await self.blocking.run(
+                grade_session,
+                self.ipi_session,
+                thinking_incomplete=stop_reason == LENGTH_STOP_REASON,
+                timeout=self.config.get("verifyit_judge_total_timeout_seconds", 120.0),
+            )
+            diagnostics.update(details)
+        elif self.agent == LEAN_AGENT:
             reward, details, correction = await self._lean_attempt(action)
             diagnostics.update(details)
             if correction is not None and self.turns < self.max_turns:

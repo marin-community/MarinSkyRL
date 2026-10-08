@@ -35,9 +35,9 @@ NEMOTRON_ULTRA_RLVR1_AGENTS = frozenset(
 NEMOTRON_ULTRA_RLVR2_AGENTS = NEMOTRON_ULTRA_RLVR1_AGENTS | {
     "citation_format_simple_agent",
     "freeform_formatting_simple_agent",
+    "indirect_prompt_injection_simple_agent",
     "rdkit_chemistry_agent",
     "structured_outputs_v3_simple_agent",
 }
 
-# The additional MOPD agent requires skip mode because its verifier is not implemented.
-NEMOTRON_ULTRA_MOPD_AGENTS = NEMOTRON_ULTRA_RLVR2_AGENTS | {"indirect_prompt_injection_simple_agent"}
+NEMOTRON_ULTRA_MOPD_AGENTS = NEMOTRON_ULTRA_RLVR2_AGENTS

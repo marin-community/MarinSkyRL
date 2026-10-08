@@ -93,3 +93,26 @@ def test_aime_reward_policy_uses_generation_budget_from_evidence(model_turn):
     assert result.grade.reward == 1.0
     assert result.reward == pytest.approx(0.5)
     assert result.reward_components["length"] == pytest.approx(-0.5)
+
+
+@pytest.mark.parametrize(
+    "reference,candidate,correct",
+    [
+        (r"(-\infty,1)\cup(1,\infty)", r"(1,\infty)\cup(-\infty,1)", True),
+        (r"(-\infty,1)\cup(1,\infty)", r"x\ne1", True),
+        (r"(-\infty,1)\cup(1,\infty)", r"(-\infty,\infty)", False),
+        ("[2,12)", "[2,12)", True),
+        ("[2,12)", "(2,12)", False),
+        ("[2,12)", "[2,12]", False),
+        ("(18,-24)", "(-24,18)", False),
+        ("3:4", "0.75", True),
+        ("2x-8", "2(x-4)", True),
+    ],
+)
+def test_math_task_scores_intervals_and_preserves_other_answer_semantics(model_turn, reference, candidate, correct):
+    result = grade_aime(
+        model_turn(f"Answer: \\boxed{{{candidate}}}"), {}, {"reward_model": {"ground_truth": reference}}
+    )
+    assert result.grade.status is Outcome.GRADED
+    assert result.grade.passed is correct
+    assert result.reward == (1.0 if correct else -1.0)
