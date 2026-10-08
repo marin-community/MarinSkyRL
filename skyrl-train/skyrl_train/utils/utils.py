@@ -20,6 +20,7 @@ from ray.util.placement_group import (
 
 from skyrl_train.batch_invariant import BATCH_INVARIANT_NCCL_ENV
 from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_export_enabled
+from skyrl_train.config.utils import generation_context_limit
 from skyrl_train.config.query_bias import resolve_grug_query_bias_update
 from skyrl_train.config.weight_sync_pause import resolve_weight_sync_pause_policy
 from skyrl_train.config.behavior_logprobs import configure_behavior_logprob_sampling
@@ -599,11 +600,8 @@ def validate_cfg(cfg: DictConfig):
         minimum_group_size=algorithm_config.group_advantage_min_size,
     )
     algorithm_config.resolved_group_advantage = group_advantage.to_config()
-    # NOTE (erictang000): this is the max sequence length including the prompt, since max response length
-    # per batch can be variable based on the prompt length. This is used to normalize the loss for
-    # seq_mean_token_sum_norm loss reduction. Potentially revisit this if we update to use a
-    # fixed max response budget.
-    algorithm_config.max_seq_len = cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
+    # Sequence-normalized losses use the same bound as model generation.
+    algorithm_config.max_seq_len = generation_context_limit(cfg.generator)
 
     cfg.trainer.algorithm = algorithm_config
 

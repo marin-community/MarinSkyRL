@@ -339,6 +339,43 @@ def _validatable_dummy_config():
     return cfg
 
 
+@pytest.mark.parametrize("model_limit,expected_limit", [(None, 96), (64, 64), (128, 96)])
+def test_sequence_normalized_loss_uses_the_generation_context_bound(model_limit, expected_limit):
+    cfg = _validatable_dummy_config()
+    cfg.generator.max_input_length = 64
+    cfg.trainer.max_prompt_length = 64
+    cfg.generator.sampling_params.max_generate_length = 32
+    OmegaConf.update(cfg, "generator.engine_init_kwargs.max_model_len", model_limit, force_add=True)
+    cfg.generator.num_inference_engines = 1
+    cfg.generator.inference_engine_tensor_parallel_size = 1
+    cfg.trainer.algorithm.loss_reduction = "seq_mean_token_sum_norm"
+    cfg.trainer.algorithm.use_kl_loss = False
+    validate_cfg(cfg)
+    config = cfg.trainer.algorithm
+    log_probs = torch.zeros((1, 2), dtype=torch.float64, requires_grad=True)
+    mask = torch.ones_like(log_probs)
+    advantages = torch.ones_like(log_probs)
+    batch = build_objective_micro_batch(
+        action_log_probs=log_probs,
+        old_action_log_probs=log_probs.detach(),
+        base_action_log_probs=None,
+        advantages=advantages,
+        loss_mask=mask,
+        rollout_logprobs=None,
+        response_span_tags=None,
+        token_entropy=torch.zeros_like(log_probs),
+        think_token_weight=1,
+        teacher=None,
+    )
+    counts = step_counts([mask], [mask], [], [advantages], config.max_seq_len, lambda value: value)
+    objective = compute_policy_objective(
+        batch, loss=ppo_policy_loss, counts=counts, config=config, loss_scale=1, report_scale=1
+    )
+    objective.optimization_loss.backward()
+    torch.testing.assert_close(objective.optimization_loss, torch.tensor(-2 / expected_limit, dtype=torch.float64))
+    torch.testing.assert_close(log_probs.grad, torch.full_like(log_probs, -1 / expected_limit))
+
+
 @pytest.mark.parametrize(
     "loss_reduction",
     ["token_mean", "sequence_mean", "seq_mean_token_sum_norm", "seq_mean_token_sum_norm_global"],
