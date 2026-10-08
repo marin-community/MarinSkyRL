@@ -89,8 +89,9 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/skyrl-train:${{ github.workspace }}/skyrl-gym
         run: |
           nproc
-          uv run --frozen pytest skyrl-train/tests/cpu/ --ignore=skyrl-train/tests/cpu/test_cat_count_cpu_canary.py -m "slow and not nightly" -n 0
-      - name: Check CatCount learning on seed 0
+          uv run --frozen pytest skyrl-train/tests/cpu/ --ignore=skyrl-train/tests/cpu/test_cat_count_cpu_canary.py --ignore=skyrl-train/tests/cpu/test_cat_count_cpu_opd.py -m "slow and not nightly" -n 0
+      # The CatCount RL and OPD gates download the calibrated policy, so they run only where the credentials are.
+      - name: Check CatCount RL and OPD learning on seed 0
         env:
           PYTHONPATH: ${{ github.workspace }}/skyrl-train:${{ github.workspace }}/skyrl-gym
           AWS_ACCESS_KEY_ID: ${{ secrets.CW_ACCESS_KEY_ID }}
@@ -98,7 +99,7 @@ jobs:
           AWS_ENDPOINT_URL: https://cwobject.com
           AWS_REGION: auto
           FSSPEC_S3: '{"endpoint_url": "https://cwobject.com", "config_kwargs": {"s3": {"addressing_style": "virtual"}}}'
-        run: uv run --frozen pytest skyrl-train/tests/cpu/test_cat_count_cpu_canary.py -m "not nightly" -n 0 -s --durations=10
+        run: uv run --frozen pytest skyrl-train/tests/cpu/test_cat_count_cpu_canary.py skyrl-train/tests/cpu/test_cat_count_cpu_opd.py -m "not nightly" -n 0 -s --durations=10
 
   skyrl_train_macos_install:
     runs-on: macos-15
