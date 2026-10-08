@@ -278,17 +278,25 @@ class BasePPOExp:
 
         The `cfg` passed here will be the final config from Hydra, including CLI overrides.
         """
+        from skyrl_train.utils.utils import Timer  # noqa: PLC0415
+
         self.cfg = cfg
         self._configure_log_level()
-        self.tokenizer = self.get_tokenizer()
-        self.train_dataset = self.get_train_dataset()
-        self.eval_dataset = self.get_eval_dataset()
-        self.colocate_pg = self.get_colocate_pg()
+        self.startup_timings = {}
+        with Timer("driver/tokenizer", self.startup_timings):
+            self.tokenizer = self.get_tokenizer()
+        with Timer("driver/train_dataset", self.startup_timings):
+            self.train_dataset = self.get_train_dataset()
+        with Timer("driver/eval_dataset", self.startup_timings):
+            self.eval_dataset = self.get_eval_dataset()
+        with Timer("placement/colocate_pg", self.startup_timings):
+            self.colocate_pg = self.get_colocate_pg()
         # Reserve the policy/training placement group BEFORE the inference
         # engines (which are created later, in `_setup_trainer`), so that in the
         # disaggregated case the policy (and optional colocated reference)
         # claims GPU slots before inference engines use the remainder.
-        self.policy_pg = self.get_policy_pg()
+        with Timer("placement/policy_pg", self.startup_timings):
+            self.policy_pg = self.get_policy_pg()
 
     def create_inference_engine_client(
         self, *, operation: EntrypointOperation = EntrypointOperation.TRAIN
@@ -571,39 +579,47 @@ class BasePPOExp:
         Returns:
             RayPPOTrainer: The trainer.
         """
+        from skyrl_train.utils.utils import Timer  # noqa: PLC0415
+
         logger.info(self.get_cfg_as_str(self.cfg))
         os.makedirs(self.cfg.trainer.export_path, exist_ok=True)
         os.makedirs(self.cfg.trainer.ckpt_path, exist_ok=True)
 
-        PolicyWorker, CriticWorker, RefWorker = self.get_worker_classes()
+        with Timer("driver/worker_classes", self.startup_timings):
+            PolicyWorker, CriticWorker, RefWorker = self.get_worker_classes()
 
         # NOTE (sumanthrh): Instantiate tracker before trainer init.
         # We have custom validation before this step to give better error messages.
-        tracker = self.get_tracker()
+        with Timer("driver/tracker", self.startup_timings):
+            tracker = self.get_tracker()
 
         tokenizer = self.tokenizer
         from skyrl_train.teacher_runtime import prepare_distillation_runtime, start_distillation_runtime  # noqa: PLC0415
 
         prepared_distillation = prepare_distillation_runtime(self.cfg, tokenizer)
-        inference_engine_client = self.create_inference_engine_client()
+        with Timer("engines/create", self.startup_timings):
+            inference_engine_client = self.create_inference_engine_client()
 
         trajectory_runner: TrajectoryRunner = self.get_trajectory_runner(self.cfg, tokenizer, inference_engine_client)
 
-        trainer = self.get_trainer(
-            cfg=self.cfg,
-            tracker=tracker,
-            tokenizer=tokenizer,
-            train_dataset=self.train_dataset,
-            eval_dataset=self.eval_dataset,
-            inference_engine_client=inference_engine_client,
-            trajectory_runner=trajectory_runner,
-            colocate_pg=self.colocate_pg,
-        )
+        with Timer("driver/get_trainer", self.startup_timings):
+            trainer = self.get_trainer(
+                cfg=self.cfg,
+                tracker=tracker,
+                tokenizer=tokenizer,
+                train_dataset=self.train_dataset,
+                eval_dataset=self.eval_dataset,
+                inference_engine_client=inference_engine_client,
+                trajectory_runner=trajectory_runner,
+                colocate_pg=self.colocate_pg,
+            )
 
         # Pass the policy placement group reserved before inference startup.
         logger.info("Starting policy workers: strategy={}", self.cfg.trainer.strategy)
         try:
-            trainer.build_models(PolicyWorker, CriticWorker, RefWorker, policy_pg=self.policy_pg)
+            with Timer("policy/build_models", self.startup_timings):
+                trainer.build_models(PolicyWorker, CriticWorker, RefWorker, policy_pg=self.policy_pg)
+            trainer.all_startup_timings.update(self.startup_timings)
             logger.info(
                 "Policy workers ready: strategy={} count={}",
                 self.cfg.trainer.strategy,

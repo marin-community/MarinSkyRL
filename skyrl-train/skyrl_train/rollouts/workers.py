@@ -178,8 +178,8 @@ class RolloutWorkerPool:
         interval = self._resources.start_interval_seconds
         if interval == 0:
             actors = [self._launch_worker(index) for index in range(count)]
-            await asyncio.gather(*(actor.startup.remote() for actor in actors))
             self._actors = actors
+            await asyncio.gather(*(actor.startup.remote() for actor in actors))
             logger.info("Rollout workers started: count={}", count)
             return
         for index in range(count):

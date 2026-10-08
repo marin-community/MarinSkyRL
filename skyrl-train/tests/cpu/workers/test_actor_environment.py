@@ -14,7 +14,7 @@ class EnvironmentActor:
     def get_master_addr_port(self):
         return "127.0.0.1", 12345
 
-    def init_worker_process_group(self):
+    def init_worker_process_group(self, master_addr, master_port):
         self.buffer_size_at_init = os.environ.get("NCCL_BUFFSIZE")
 
     def get_mesh_rank(self):

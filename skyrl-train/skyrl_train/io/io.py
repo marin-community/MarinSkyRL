@@ -90,10 +90,12 @@ def _normalized_path(filesystem, path: str) -> str:
     return filesystem._strip_protocol(path) if is_cloud_path(path) else path
 
 
-def open_file(path: str, mode: str = "rb"):
+def open_file(path: str, mode: str = "rb", cache_type: str | None = None):
     """Open a file using fsspec, works with both local and cloud paths."""
     fs = _get_filesystem(path)
     norm = _normalized_path(fs, path)
+    if cache_type is not None:
+        return fs.open(norm, mode, cache_type=cache_type)
     return fs.open(norm, mode)
 
 

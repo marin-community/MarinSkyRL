@@ -92,6 +92,7 @@ async def test_training_failure_preserves_receipt_before_shutdown(monkeypatch, t
     trainer._distillation_runtime = None
     trainer.context = SimpleNamespace(close=AsyncMock())
     trainer.trajectory_runner = SimpleNamespace(startup=AsyncMock())
+    trainer.all_startup_timings = {}
     trainer._train_loop = AsyncMock(side_effect=_UnpickleableError("GPU worker ran out of memory"))
     monkeypatch.setenv(DEBUG_ARTIFACT_DIR_ENV, str(tmp_path))
 
