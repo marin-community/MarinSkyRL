@@ -98,6 +98,12 @@ class ImageFactory:
         return machine
 
 
+async def assert_machines_closed(factory):
+    for machine in factory.machines:
+        with pytest.raises(RuntimeError):
+            await machine.run(Command(("true",)))
+
+
 def answer_task():
     return TaskSpec(
         id="arithmetic",
@@ -243,9 +249,7 @@ async def test_native_tool_turn_keeps_private_grading_and_masks_observations():
     assert observation["role"] == "tool"
     assert json.loads(observation["content"])["exit_code"] == 0
     assert len(factory.machines) == 2
-    for machine in factory.machines:
-        with pytest.raises(RuntimeError):
-            await machine.run(Command(("true",)))
+    await assert_machines_closed(factory)
 
 
 async def test_native_verifier_failure_is_masked_instead_of_a_wrong_answer():
@@ -259,9 +263,7 @@ async def test_native_verifier_failure_is_masked_instead_of_a_wrong_answer():
     assert output["loss_masks"] == [[0, 0, 0, 0]]
     assert output["exclude_from_baseline"] == [True]
     assert output["unshaped_reward_available"] == [False]
-    for machine in factory.machines:
-        with pytest.raises(RuntimeError):
-            await machine.run(Command(("true",)))
+    await assert_machines_closed(factory)
 
 
 @pytest.mark.parametrize(
@@ -326,6 +328,28 @@ async def test_native_partial_model_failure_obeys_training_policy(
     np.testing.assert_allclose(output["rollout_logprobs"][0], [-0.5])
 
 
+@pytest.mark.parametrize("policy,reward", [("zero", 0.0), ("passthrough", 1.0)])
+async def test_native_model_timeout_without_recovery_masks_completed_turns(policy, reward):
+    client = ReplayClient([shell_turn("echo 12 > /workspace/answer"), TimeoutError("model deadline")])
+    output = await runner(
+        client,
+        {"fixture": ImageFactory()},
+        error_handling={
+            "enable_error_classification": True,
+            "preserve_logprobs_on_timeout": False,
+            f"{policy}_exceptions": ["AgentTimeoutError"],
+        },
+    ).run(request(lowered(file_task())))
+
+    assert output["response_ids"] == [[20]]
+    assert output["loss_masks"] == [[0]]
+    assert output["rewards"] == [reward]
+    assert output["verification_results"][0].score == 1.0
+    assert output["unshaped_rewards"] == [1.0]
+    assert output["exclude_from_baseline"] == [False]
+    np.testing.assert_allclose(output["rollout_logprobs"][0], [-0.5])
+
+
 @pytest.mark.parametrize(
     "failure_after,exception_type",
     [(0, "EnvironmentStartTimeoutError"), (1, "VerifierTimeoutError")],
@@ -346,9 +370,7 @@ async def test_native_machine_timeout_is_masked_by_execution_phase(failure_after
     assert output["exclude_from_baseline"] == [True]
     assert output["exception_types"] == [exception_type]
     assert output["error_treatments"] == ["mask"]
-    for machine in factory.machines:
-        with pytest.raises(RuntimeError):
-            await machine.run(Command(("true",)))
+    await assert_machines_closed(factory)
 
 
 async def test_native_serving_failure_after_work_does_not_train_available_grade():

@@ -117,6 +117,10 @@ group baseline. Infrastructure failures are masked from loss and the baseline.
 Explicit exception overrides take precedence: ``mask_exceptions``,
 ``zero_exceptions``, or ``passthrough_exceptions`` select the corresponding policy.
 
+Setting ``preserve_logprobs_on_timeout: false`` excludes completed tokens from loss
+after a timeout. The error policy still controls optimization reward and baseline
+membership. Exact tokens and logprobs remain in the evidence.
+
 Pass-through requires an available verifier score and any required behavior
 logprobs. Otherwise, the row is masked from loss and the baseline. Verifier scores
 remain separate from optimization rewards. Without a terminal failure, skipped

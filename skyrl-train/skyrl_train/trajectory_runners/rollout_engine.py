@@ -3,6 +3,7 @@
 import asyncio
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
+from types import MappingProxyType
 from uuid import uuid4
 
 import numpy as np
@@ -40,6 +41,7 @@ from skyrl_train.trajectory_runners.types import (
     TrajectoryRequestBatch,
 )
 from skyrl_train.utils.harbor_errors import (
+    AGENT_TIMEOUT_ERROR,
     ErrorHandlingConfig,
     classify_exception_type,
     passthrough_logprob_error_type,
@@ -48,14 +50,17 @@ from skyrl_train.utils.harbor_errors import (
 
 LOWERED_TASK_COLUMN = "lowered_task_json"
 MASKED_TOKEN_ID = 0
-_TIMEOUT_EXCEPTION_TYPES = {
-    RolloutOperation.START: "EnvironmentStartTimeoutError",
-    RolloutOperation.PREPARE: "AgentSetupTimeoutError",
-    RolloutOperation.MODEL: "AgentTimeoutError",
-    RolloutOperation.ADVANCE: "AgentTimeoutError",
-    RolloutOperation.ATTEMPT: "TrialTimeoutError",
-    RolloutOperation.GRADE: "VerifierTimeoutError",
-}
+NO_VERIFIER_VERDICT = "No verifier verdict"
+_TIMEOUT_EXCEPTION_TYPES = MappingProxyType(
+    {
+        RolloutOperation.START: "EnvironmentStartTimeoutError",
+        RolloutOperation.PREPARE: "AgentSetupTimeoutError",
+        RolloutOperation.MODEL: AGENT_TIMEOUT_ERROR,
+        RolloutOperation.ADVANCE: AGENT_TIMEOUT_ERROR,
+        RolloutOperation.ATTEMPT: "TrialTimeoutError",
+        RolloutOperation.GRADE: "VerifierTimeoutError",
+    }
+)
 
 
 def validate_rollout_engine_config(config: DictConfig) -> None:
@@ -86,13 +91,13 @@ def _training_output(
         disposition = TrainingDisposition.train()
     elif grade.status == Outcome.SKIPPED:
         verification = VerificationResult.skipped(grade.error or "Verification skipped")
-        disposition = TrainingDisposition.mask("No verifier verdict", exception_type=grade.status.value)
+        disposition = TrainingDisposition.mask(NO_VERIFIER_VERDICT, exception_type=grade.status.value)
     elif grade.status == Outcome.UNAVAILABLE:
-        verification = VerificationResult.unavailable(grade.error or "No verifier verdict")
-        disposition = TrainingDisposition.mask("No verifier verdict", exception_type=grade.status.value)
+        verification = VerificationResult.unavailable(grade.error or NO_VERIFIER_VERDICT)
+        disposition = TrainingDisposition.mask(NO_VERIFIER_VERDICT, exception_type=grade.status.value)
     else:
         verification = VerificationResult.error(grade.error or grade.status.value, diagnostics=grade.diagnostics)
-        disposition = TrainingDisposition.mask("No verifier verdict", exception_type=grade.status.value)
+        disposition = TrainingDisposition.mask(NO_VERIFIER_VERDICT, exception_type=grade.status.value)
 
     optimization_reward = verification.score if verification.score is not None else 0.0
     error_treatment = None
@@ -129,8 +134,9 @@ def _training_output(
         baseline_eligible = (
             not treatment_excludes_from_baseline(treatment, verifier_available=graded) and missing_logprobs is None
         )
+        recover_completed_turns = not isinstance(error, TimeoutError) or error_handling.preserve_logprobs_on_timeout
         disposition = TrainingDisposition(
-            loss_eligible=any(rollout.loss_mask) and baseline_eligible,
+            loss_eligible=any(rollout.loss_mask) and baseline_eligible and recover_completed_turns,
             baseline_eligible=baseline_eligible,
             reason="Rollout execution failed",
             exception_type=missing_logprobs or exception_type,
