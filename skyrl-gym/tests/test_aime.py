@@ -135,3 +135,25 @@ def test_aime_reward_policy_uses_generation_budget_from_evidence():
     assert step_output["verification"].score == 1.0
     assert step_output["reward"] == pytest.approx(0.5)
     assert step_output["reward_result"].components["length"] == pytest.approx(-0.5)
+
+
+@pytest.mark.parametrize(
+    "reference,candidate,correct",
+    [
+        (r"(-\infty,1)\cup(1,\infty)", r"(1,\infty)\cup(-\infty,1)", True),
+        (r"(-\infty,1)\cup(1,\infty)", r"x\ne1", True),
+        (r"(-\infty,1)\cup(1,\infty)", r"(-\infty,\infty)", False),
+        ("[2,12)", "[2,12)", True),
+        ("[2,12)", "(2,12)", False),
+        ("[2,12)", "[2,12]", False),
+        ("(18,-24)", "(-24,18)", False),
+        ("3:4", "0.75", True),
+        ("2x-8", "2(x-4)", True),
+    ],
+)
+def test_math_environment_scores_intervals_and_preserves_other_answer_semantics(reference, candidate, correct):
+    env = skyrl_gym.make("aime", env_config=DictConfig({}), extras={"reward_model": {"ground_truth": reference}})
+    result = env.step(f"Answer: \\boxed{{{candidate}}}")
+    assert result["verification"].status is VerificationStatus.VERIFIED
+    assert result["verification"].passed is correct
+    assert result["reward"] == (1.0 if correct else -1.0)
