@@ -50,8 +50,8 @@ dev = [
 line-length = 120
 
 [tool.uv]
-# Match the published runtime dependency used by the training package.
-override-dependencies = ["marin-rigging==0.2.144.dev37540375919"]
+# Select a published package instead of the enclosing Git workspace.
+override-dependencies = ["marin-rigging>=0.2.144.dev37540375919"]
 
 [tool.ruff.lint]
 ignore = [
