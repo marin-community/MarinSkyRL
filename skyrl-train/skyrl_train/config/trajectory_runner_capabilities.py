@@ -23,6 +23,7 @@ class TrajectoryRunnerMode(StrEnum):
     SKYRL_GYM = "skyrl_gym"
     MINI_SWE = "mini_swe"
     HARBOR = "harbor"
+    ROLLOUT_ENGINE = "rollout_engine"
 
 
 class EntrypointOperation(StrEnum):
@@ -168,6 +169,13 @@ def _harbor_capabilities(cfg: DictConfig) -> TrajectoryRunnerCapabilities:
 
 def trajectory_runner_capabilities(cfg: DictConfig, mode: TrajectoryRunnerMode) -> TrajectoryRunnerCapabilities:
     """Resolve the evidence contract for the selected runner and configuration."""
+    if mode is TrajectoryRunnerMode.ROLLOUT_ENGINE:
+        return TrajectoryRunnerCapabilities(
+            runner="RolloutEngine",
+            sampled_completion=EvidenceFidelity.EXACT,
+            full_context_continuation=EvidenceFidelity.EXACT,
+            action_tokens=ActionTokenHandling.EXACT,
+        )
     if mode is TrajectoryRunnerMode.HARBOR:
         return _harbor_capabilities(cfg)
     if mode is TrajectoryRunnerMode.MINI_SWE:

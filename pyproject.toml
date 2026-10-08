@@ -11,7 +11,7 @@ version = "0.1.0"
 description = "Marin's typed launcher and RL training runtime"
 requires-python = "==3.12.*"
 dependencies = [
-    "verifyit[answer,schema,reasoning-gym,judge] @ git+https://github.com/marin-community/verifyit@a04f28fd8c00879f949031e58ce9fbe5f4d5da6e",
+    "verifyit[answer,schema,reasoning-gym,judge] @ git+https://github.com/marin-community/marin.git@232f192a56b013fdc3f6914eb158c7bc2d231f94#subdirectory=lib/verifyit",
     "aiohttp>=3.13.3",
     "boto3",
     "datasets>=4.0.0",
@@ -34,6 +34,8 @@ dependencies = [
     "marin-iris",
     "marin-iris-native",
     "marin-rigging[secrets]>=0.2.123.dev35633925924",
+    "marin-rolloutengine @ git+https://github.com/marin-community/marin.git@232f192a56b013fdc3f6914eb158c7bc2d231f94#subdirectory=lib/rolloutengine",
+    "marin-shellbox @ git+https://github.com/marin-community/marin.git@232f192a56b013fdc3f6914eb158c7bc2d231f94#subdirectory=lib/shellbox",
     "ninja",
     "nvidia-ml-py",
     "omegaconf",
@@ -50,6 +52,7 @@ dependencies = [
     "s3fs",
     "smart_open",
     "tensorboard",
+    "taskcompendium @ git+https://github.com/marin-community/marin.git@232f192a56b013fdc3f6914eb158c7bc2d231f94#subdirectory=lib/taskcompendium",
     "tqdm>=4.66",
     "tokenizers==0.23.1",
     "transformers==5.16.1",
@@ -146,6 +149,7 @@ docs = [
 dev = [
     { include-group = "analysis" },
     "litellm",
+    "marin-shellbox[shellsim]",
     "marin-rigging[prometheus]>=0.2.123.dev35633925924",
     "marin-style @ git+https://github.com/marin-community/marin-style@727f180cd423246ca1a6164163a5883cda5bf52b",
     "prometheus-client",
@@ -181,6 +185,8 @@ no-build-isolation-package = [
     "transformer-engine-torch",
 ]
 override-dependencies = [
+    "marin-rigging[secrets,prometheus]==0.2.144.dev37540375919",
+    "harbor-config @ https://github.com/marin-community/harbor/releases/download/harbor-config-952a005353273590631b8f970f4664a121710b32/harbor_config-0.1.0-py3-none-any.whl",
     # Megatron Bridge declares this native extension but does not import or use it.
     "fast-hadamard-transform ; sys_platform == 'never'",
     "nvidia-resiliency-ext ; sys_platform == 'never'",
