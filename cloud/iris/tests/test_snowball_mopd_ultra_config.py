@@ -8,6 +8,7 @@ import yaml
 from cloud.iris.rl_config_translation import compose_skyrl_config, parse_rl_config
 from cloud.iris.role_plan import derive_num_nodes, derive_role_plan
 from infra.rl_data.nemotron_ultra_mopd_subset import TEACHER_ROUTES
+from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
 from marinskyrl.distillation import (
     DistillationObjectiveKind,
     DistillationRewardMode,
@@ -93,3 +94,6 @@ def test_snowball_mopd_32k_recipe_composes_against_the_base_config():
 
     assert cfg.trainer.policy.megatron_config.context_parallel_size == 1
     assert cfg.environment.task_sessions.nemotron_ultra.grading == "skip"
+    # The driver resolves Harbor settings after composition, before it starts workers.
+    settings = HarborTaskSettings.from_config(cfg.terminal_bench_config)
+    assert settings.agent_timeout == cfg.terminal_bench_config.harbor.override_timeout_sec

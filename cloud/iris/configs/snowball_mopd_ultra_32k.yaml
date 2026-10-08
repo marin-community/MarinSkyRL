@@ -30,7 +30,6 @@ context_budget:
 
 terminal_bench:
   harbor:
-    override_setup_timeout_sec: 600
     override_timeout_sec: 600
     verifier_override_timeout_sec: 300
     override_cpus: 1
