@@ -2050,6 +2050,70 @@ async def test_unified_gym_tasks_preserve_grading_and_turn_credit(task_inputs, e
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "row_limits,session_config,turns",
+    [
+        ({"max_turns": 2}, {}, 2),
+        ({"extra_info": {"max_turns": 2}}, {}, 2),
+        ({"max_turns": None, "extra_info": {"max_turns": 2}}, {}, 2),
+        ({"max_turns": 2, "extra_info": {"max_turns": 1}}, {}, 2),
+        ({"max_turns": 2}, {"session": {"max_turns": 1}}, 1),
+        ({}, {}, 1),
+    ],
+)
+async def test_source_row_turn_limit_controls_correction_and_terminal_grade(
+    task_inputs, row_limits, session_config, turns
+):
+    config, request = task_inputs
+    task = source_row_task(
+        {
+            "prompt": request["prompts"][0],
+            "env_class": "gsm8k_multi_turn",
+            "reward_spec": {"ground_truth": "12"},
+            **row_limits,
+        },
+        0,
+        source_name="fixture",
+        environment_configs={
+            "session": session_spec(max_turns=1).model_dump(exclude={"task_session"}),
+            "gsm8k_multi_turn": session_config,
+        },
+    )
+    request["env_extras"] = [{"lowered_task_spec": task.model_dump_json()}]
+    request["env_classes"] = ["gsm8k_multi_turn"]
+    model = ConversationClient(["#### 13", "#### 12"])
+    worker = TaskRolloutWorker(
+        config, WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())), model, {}, shutdown_timeout=30
+    )
+    batch = await worker.run(request)
+    assert len(model.requests) == turns
+    assert batch["unshaped_rewards"] == [float(turns == 2)]
+    assert batch["verification_results"][0].passed is (turns == 2)
+    assert sum(batch["rewards"][0]) == pytest.approx(0.2 / turns + float(turns == 2))
+
+
+@pytest.mark.asyncio
+async def test_materialized_turn_limit_precedes_source_row_metadata(task_inputs):
+    config, request = task_inputs
+    task = source_task(
+        request["prompts"][0],
+        {"reward_spec": {"ground_truth": "12"}, "max_turns": 1},
+        {},
+        Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
+    )
+    request["env_extras"] = [{"lowered_task_spec": lowered_task(task, "gsm8k_multi_turn").model_dump_json()}]
+    request["env_classes"] = ["gsm8k_multi_turn"]
+    model = ConversationClient(["#### 13", "#### 12"])
+    worker = TaskRolloutWorker(
+        config, WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())), model, {}, shutdown_timeout=30
+    )
+    batch = await worker.run(request)
+    assert len(model.requests) == 2
+    assert batch["unshaped_rewards"] == [1.0]
+    assert batch["verification_results"][0].passed is True
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("enable_thinking", [True, False])
 @pytest.mark.parametrize("reward_key", ["reward_spec", "reward_model"])
 async def test_aime_rollout_preserves_length_reward_and_phase_metrics(
