@@ -2901,6 +2901,10 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+daytona = [
+    { name = "daytona" },
+    { name = "marin-rigging", extra = ["prometheus", "secrets"] },
+]
 shellsim = [
     { name = "marin-rigging", extra = ["prometheus", "secrets"] },
     { name = "shellsim" },
@@ -2947,7 +2951,7 @@ dependencies = [
     { name = "marin-iris-native" },
     { name = "marin-rigging", extra = ["prometheus", "secrets"] },
     { name = "marin-rolloutengine" },
-    { name = "marin-shellbox" },
+    { name = "marin-shellbox", extra = ["daytona", "shellsim"] },
     { name = "math-verify" },
     { name = "ninja" },
     { name = "nvidia-ml-py" },
@@ -2991,7 +2995,6 @@ cpu = [
 cuda = [
     { name = "accelerate", marker = "sys_platform == 'linux'" },
     { name = "cuda-toolkit", version = "13.2.1", source = { registry = "https://pypi.org/simple" }, extra = ["cccl", "nvcc"], marker = "(sys_platform == 'linux' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
-    { name = "harbor-config" },
     { name = "peft", marker = "sys_platform == 'linux'" },
     { name = "tensordict", marker = "sys_platform == 'linux'" },
     { name = "torch", version = "2.13.0+cu132", source = { registry = "https://download.pytorch.org/whl/cu132" }, marker = "sys_platform == 'linux'" },
@@ -3005,7 +3008,6 @@ megatron = [
     { name = "flash-attn", version = "2.8.3", source = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-fa283-20260920/flash_attn-2.8.3-cp312-cp312-linux_aarch64.whl" }, marker = "(platform_machine != 'x86_64' and sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "flash-attn", version = "2.8.3", source = { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-fa283-20260920/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl" }, marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "flash-linear-attention", marker = "sys_platform == 'linux'" },
-    { name = "harbor-config" },
     { name = "mamba-ssm", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "megatron-bridge", marker = "sys_platform == 'linux'" },
     { name = "megatron-core", marker = "sys_platform == 'linux'" },
@@ -3030,8 +3032,6 @@ vllm = [
     { name = "cuda-toolkit", version = "13.2.1", source = { registry = "https://pypi.org/simple" }, extra = ["cccl", "nvcc"], marker = "(sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "flashinfer-cubin", marker = "sys_platform == 'linux'" },
     { name = "flashinfer-python", marker = "sys_platform == 'linux'" },
-    { name = "harbor", extra = ["analysis", "datasets", "daytona"], marker = "(sys_platform == 'linux' and extra != 'extra-10-marinskyrl-cpu') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
-    { name = "harbor-config" },
     { name = "hs-connectors", marker = "sys_platform == 'linux'" },
     { name = "peft", marker = "sys_platform == 'linux'" },
     { name = "quack-kernels", marker = "sys_platform == 'linux'" },
@@ -3120,10 +3120,10 @@ requires-dist = [
     { name = "marin-finestore", specifier = ">=0.2.135.dev36906221286" },
     { name = "marin-iris", specifier = "==0.2.144.dev37540375919" },
     { name = "marin-iris-native" },
-    { name = "marin-rigging", extras = ["prometheus"], marker = "extra == 'telemetry'", specifier = ">=0.2.123.dev35633925924" },
-    { name = "marin-rigging", extras = ["secrets"], specifier = ">=0.2.123.dev35633925924" },
+    { name = "marin-rigging", extras = ["prometheus"], marker = "extra == 'telemetry'" },
+    { name = "marin-rigging", extras = ["secrets"], specifier = "==0.2.144.dev37540375919" },
     { name = "marin-rolloutengine", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frolloutengine&rev=232f192a56b013fdc3f6914eb158c7bc2d231f94" },
-    { name = "marin-shellbox", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fshellbox&rev=232f192a56b013fdc3f6914eb158c7bc2d231f94" },
+    { name = "marin-shellbox", extras = ["daytona", "shellsim"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fshellbox&rev=232f192a56b013fdc3f6914eb158c7bc2d231f94" },
     { name = "math-verify", specifier = "==0.9.0" },
     { name = "megatron-bridge", marker = "sys_platform == 'linux' and extra == 'megatron'", specifier = "==0.6.0" },
     { name = "megatron-core", marker = "sys_platform == 'linux' and extra == 'megatron'", specifier = "==0.18.0" },
