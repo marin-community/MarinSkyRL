@@ -353,6 +353,7 @@ Algorithm Configuration
   - ``sapo``: Smooth sigmoid-gated policy loss with separate positive- and negative-advantage temperatures; see the :doc:`objective usage guide </algorithms/objective_guide>`.
   - ``behavior_clip``: PPO clipping against the sampling policy, with a dual bound for negative advantages; see the :doc:`objective usage guide </algorithms/objective_guide>`.
   - ``sft``: Negative log likelihood on eligible response tokens, independent of advantages; see the :doc:`objective usage guide </algorithms/objective_guide>`.
+  - ``dpo``: Direct Preference Optimization over dataset-supplied chosen/rejected pairs against the frozen reference; requires ``algorithm.loss_reduction=pair_mean`` and ``environment.env_class=preference_pair``. See the :doc:`objective usage guide </algorithms/objective_guide>`.
   - Custom policy losses can be registered with the ``PolicyLossRegistry``
 
 
@@ -360,6 +361,7 @@ Algorithm Configuration
 
   - ``token_mean``: computes average loss over all valid tokens in the batch. Used in `DAPO <https://dapo-sia.github.io/>`_.
   - ``sequence_mean``: computes per-sequence avg token loss, then averages over the batch.
+  - ``pair_mean``: sums the per-token surrogate values and divides by the global pair count; used by ``dpo`` whose adjacent chosen/rejected rows form one training unit.
   - ``seq_mean_token_sum_norm``: computes the sum of token losses for each sequence, normalizes by the max sequence length (computed as ``cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length``), and then averages over the batch. This is used in `Dr. GRPO <https://arxiv.org/abs/2503.20783>`_.
   - ``seq_mean_token_sum_norm_global``: GLOBAL length-unbiased variant of Dr. GRPO. Sums the masked per-token loss over the whole DP batch and divides by a single global denominator ``Z = global_num_seqs * max_seq_len`` (computed once on the driver via a single all-reduce), instead of dividing each micro-batch by ``accumulation_steps``. This sidesteps the mean-of-per-microbatch-means size bias under gradient accumulation + async rollouts.
 

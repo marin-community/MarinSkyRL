@@ -126,3 +126,5 @@ class TrajectoryBatch(TypedDict):
     teacher_route_keys: Optional[List[str]]
     is_last_step: Optional[List[bool]]
     exclude_from_baseline: Optional[List[bool]]
+    # DPO pairing evidence: +1 chosen / -1 rejected per row, emitted as adjacent pairs.
+    pair_roles: NotRequired[List[int]]

@@ -34,7 +34,7 @@ from marinskyrl.speculative_decoding import (
     parse_speculative_decoding_config,
     runai_model_uri,
 )
-from marinskyrl.runtime_options import WeightSyncTransport
+from marinskyrl.runtime_options import WeightSyncTransport, static_preference_pairs_requested
 
 if TYPE_CHECKING:
     from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -296,6 +296,10 @@ class BasePPOExp:
         """Create the configured local or remote inference-engine client."""
         from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient  # noqa: PLC0415
 
+        if static_preference_pairs_requested(self.cfg):
+            logger.info("Skipping inference engines: preference-pair training reads static completions")
+            return InferenceEngineClient([], self.tokenizer, self.cfg)
+
         engine_mode = "local" if self.cfg.generator.run_engines_locally else "remote"
         logger.info("Starting inference engines: mode={}", engine_mode)
         if self.cfg.generator.run_engines_locally:
@@ -346,6 +350,16 @@ class BasePPOExp:
         Returns:
             PromptDataset: The training dataset.
         """
+        if static_preference_pairs_requested(self.cfg):
+            from skyrl_train.dataset import PreferencePairDataset  # noqa: PLC0415
+
+            return PreferencePairDataset(
+                tokenizer=self.tokenizer,
+                datasets=self.cfg.data.train_data,
+                max_prompt_length=self.cfg.trainer.max_prompt_length,
+                num_workers=8,
+                max_completion_length=self.cfg.generator.sampling_params.max_generate_length,
+            )
         from skyrl_train.dataset import PromptDataset  # noqa: PLC0415
 
         prompts_dataset = PromptDataset(
@@ -390,7 +404,7 @@ class BasePPOExp:
         from skyrl_train.utils.utils import get_ray_pg_ready_with_timeout  # noqa: PLC0415
 
         timeout = int(self.cfg.trainer.distributed.placement_group_timeout_seconds) if timeout is None else timeout
-        if self.cfg.trainer.placement.colocate_all:
+        if self.cfg.trainer.placement.colocate_all and not static_preference_pairs_requested(self.cfg):
             pg = placement_group(
                 [{"GPU": 1, "CPU": 1}]
                 * self.cfg.generator.num_inference_engines
@@ -455,6 +469,16 @@ class BasePPOExp:
         Returns:
             TrajectoryRunner: The runner.
         """
+        if static_preference_pairs_requested(cfg):
+            from skyrl_train.trajectory_runners.preference_pairs import PreferencePairTrajectoryRunner  # noqa: PLC0415
+
+            if list(cfg.data.get("terminal_bench_data", [])):
+                raise ValueError("preference-pair training cannot mix terminal-bench rows")
+            return PreferencePairTrajectoryRunner(
+                tokenizer,
+                max_generate_length=cfg.generator.sampling_params.max_generate_length,
+                max_input_length=cfg.generator.max_input_length,
+            )
         del tokenizer
         from skyrl_train.rollouts.workers import RolloutWorkerPool, RolloutWorkerResources  # noqa: PLC0415
         from skyrl_train.trajectory_runners.skyrl_gym_execution import GymRunnerSpec  # noqa: PLC0415

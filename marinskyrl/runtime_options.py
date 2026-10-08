@@ -52,7 +52,11 @@ class PolicyLossType(StrEnum):
     SAPO = "sapo"
     SFT = "sft"
     FTPO = "ftpo"
+    DPO = "dpo"
     IMPORTANCE_SAMPLING = "importance_sampling"
+
+
+PREFERENCE_PAIR_ENV_CLASS = "preference_pair"
 
 
 def reference_model_required(algorithm: Mapping[str, Any]) -> bool:
@@ -61,4 +65,13 @@ def reference_model_required(algorithm: Mapping[str, Any]) -> bool:
         algorithm.get("use_kl_loss")
         or algorithm.get("use_kl_in_reward")
         or algorithm.get("policy_loss_type") == PolicyLossType.FTPO
+        or algorithm.get("policy_loss_type") == PolicyLossType.DPO
     )
+
+
+def static_preference_pairs_requested(config: Mapping[str, Any]) -> bool:
+    """Return whether training reads static chosen/rejected completions instead of generating rollouts."""
+    environment = config.get("environment") if isinstance(config, Mapping) else None
+    if environment is None:
+        return False
+    return environment.get("env_class") == PREFERENCE_PAIR_ENV_CLASS

@@ -248,6 +248,9 @@ class InferenceEngineClient(InferenceEngineInterface):
         """
         Call a method on all live engines concurrently and gather the results.
         """
+        if not self.engines:
+            # A zero-engine client (static preference-pair training) has nothing to fan out to.
+            return []
         live_engines = [engine for i, engine in enumerate(self.engines) if i not in self._dead_engines]
         if not live_engines:
             raise RuntimeError("All inference engines have died")

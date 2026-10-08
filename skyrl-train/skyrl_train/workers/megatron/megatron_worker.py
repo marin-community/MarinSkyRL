@@ -592,6 +592,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         distillation=experience.distillation,
                         ftpo=experience.ftpo,
                         rollout_routed_experts=experience.rollout_routed_experts,
+                        pair_roles=experience.pair_roles,
                     )
                 )
 

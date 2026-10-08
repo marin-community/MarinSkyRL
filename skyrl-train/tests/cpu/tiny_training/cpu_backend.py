@@ -197,6 +197,21 @@ class CPUPolicyWorker(PolicyWorkerBase):
         dist.barrier()
 
 
+class CPURefWorker(CPUPolicyWorker):
+    """Reference worker: the CPU policy forward without optimizer state."""
+
+    def init_model(self, model_path, num_training_steps: int | None = None):
+        self.model = CausalLMPolicy(AutoModelForCausalLM.from_pretrained(model_path, dtype=torch.float32).eval())
+        self.optimizer = None
+        self.scheduler = None
+
+    def training_step(self, *args, **kwargs):
+        raise RuntimeError("the reference model never trains")
+
+    def save_checkpoint(self, ckpt_dir, tokenizer=None):
+        raise RuntimeError("the reference model checkpoints with the trainer state")
+
+
 class CPUInferenceEngine(InferenceEngineInterface):
     """Sample from a Hugging Face causal LM with vLLM's pause, abort, and weight-update semantics.
 
