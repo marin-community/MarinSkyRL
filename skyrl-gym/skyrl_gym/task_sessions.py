@@ -27,7 +27,7 @@ from skyrl_gym.envs.lcb.livecodebench import (
 )
 from skyrl_gym.envs.search.utils import compute_score as search_score
 from skyrl_gym.python_execution import PythonKernel
-from skyrl_gym.task_records import fold_grades
+from skyrl_gym.task_records import terminal_grade
 from skyrl_gym.tools.search import SearchClient
 
 AnswerGrader = Callable[[ModelTurn, dict[str, Any], dict[str, Any]], Transition]
@@ -122,7 +122,8 @@ class MathTaskSession:
 
     async def advance(self, turn: ModelTurn) -> Transition:
         reward = math_score(turn.text, self.expected, method="strict", format_score=0.2 / self.max_turns)
-        grade = GradeResult(Outcome.GRADED, reward)
+        correct = reward == 1.0
+        grade = GradeResult(Outcome.GRADED, float(correct), passed=correct)
         self.grades.append(grade)
         remaining = self.max_turns - len(self.grades)
         done = remaining == 0 or reward == 1.0
@@ -140,7 +141,7 @@ class MathTaskSession:
         )
 
     async def grade(self, messages: tuple[dict[str, Any], ...]) -> GradeResult:
-        return fold_grades(self.grades)
+        return terminal_grade(self.grades)
 
     async def close(self) -> None:
         pass
@@ -171,7 +172,11 @@ class SearchTaskSession:
         self.transcript.append(turn.text)
         done = len(self.grades) + 1 >= self.max_turns or ("<answer>" in turn.text and "</answer>" in turn.text)
         reward = search_score("".join(self.transcript), self.expected) if done else 0.0
-        grade = GradeResult(Outcome.GRADED, reward)
+        grade = (
+            GradeResult(Outcome.GRADED, reward, passed=reward == 1.0)
+            if done
+            else GradeResult(Outcome.UNAVAILABLE, None, "Tool execution is not a terminal verdict")
+        )
         self.grades.append(grade)
         if done:
             return Transition(done=True, reward=reward, grade=grade)
@@ -189,7 +194,7 @@ class SearchTaskSession:
         )
 
     async def grade(self, messages: tuple[dict[str, Any], ...]) -> GradeResult:
-        return fold_grades(self.grades)
+        return terminal_grade(self.grades)
 
     async def close(self) -> None:
         try:
@@ -280,7 +285,11 @@ class SearchCodeTaskSession:
         self.transcript.append(turn.text)
         done = len(self.grades) + 1 >= self.max_turns or ("<solution>" in turn.text and "</solution>" in turn.text)
         reward = math_score("\n".join(self.transcript), self.expected) if done else 0.0
-        grade = GradeResult(Outcome.GRADED, reward)
+        grade = (
+            GradeResult(Outcome.GRADED, reward, passed=reward == 1.0)
+            if done
+            else GradeResult(Outcome.UNAVAILABLE, None, "Tool execution is not a terminal verdict")
+        )
         self.grades.append(grade)
         if done:
             return Transition(done=True, reward=reward, grade=grade)
@@ -309,7 +318,7 @@ class SearchCodeTaskSession:
         )
 
     async def grade(self, messages: tuple[dict[str, Any], ...]) -> GradeResult:
-        return fold_grades(self.grades)
+        return terminal_grade(self.grades)
 
     async def close(self) -> None:
         try:

@@ -24,11 +24,12 @@ from verifyit.spec import ExactSpec
 
 from skyrl_gym.envs.sql.utils import final_sql
 from skyrl_gym.envs.text_to_sql import scoring
-from skyrl_gym.task_records import fold_grades
+from skyrl_gym.task_records import terminal_grade
 from skyrl_gym.task_sessions import BlockingOperations
 
 QUERY_OUTPUT_LIMIT_BYTES = 4 * 1024 * 1024
 SQL_QUERY_TIMEOUT = 30.0
+QUERY_DATABASE_FILENAME = "fixture.sqlite"
 SQL_DATABASE_DIRECTORIES = {
     "synsql": "SynSQL-2.5M/databases",
     "spider": "spider/database",
@@ -78,7 +79,7 @@ def _database_snapshot(database: Path, reference_sql: str, root: Path, *, verify
         raise FileNotFoundError(database)
     connection = sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)
     try:
-        with sqlite3.connect(root / "fixture.sqlite") as snapshot:
+        with sqlite3.connect(root / QUERY_DATABASE_FILENAME) as snapshot:
             connection.backup(snapshot)
             return _reference_result(snapshot, reference_sql, verifyit=verifyit, timeout=SQL_QUERY_TIMEOUT)
     finally:
@@ -268,7 +269,7 @@ class SQLTaskSession:
         except (sqlite3.Error, ValueError) as error:
             self.failure = _reference_failure(error)
         else:
-            self.directory = await _upload_queries(self.machine, [root / "fixture.sqlite"])
+            self.directory = await _upload_queries(self.machine, [root / QUERY_DATABASE_FILENAME])
         return SessionStart(tuple(conversation_messages(self.task.context)), {})
 
     async def advance(self, turn: ModelTurn) -> Transition:
@@ -286,10 +287,10 @@ class SQLTaskSession:
             reward = -1.0
             if query is not None:
                 candidate = await _query(
-                    self.machine, self.directory, "fixture.sqlite", query, timeout=SQL_QUERY_TIMEOUT
+                    self.machine, self.directory, QUERY_DATABASE_FILENAME, query, timeout=SQL_QUERY_TIMEOUT
                 )
                 reward = float(_set_equal(self.reference.rows, candidate, verifyit=self.verifyit))
-            grade = GradeResult(Outcome.GRADED, reward)
+            grade = GradeResult(Outcome.GRADED, reward, passed=reward == 1.0)
             self.grades.append(grade)
             return Transition(done=True, reward=reward, grade=grade)
         match = re.search(r"<sql>(.*?)</sql>", turn.text, re.DOTALL)
@@ -297,7 +298,7 @@ class SQLTaskSession:
             observation = "Your previous action is invalid. Follow the format of outputting thinking process and sql tool, and try again."
         else:
             candidate = await _query(
-                self.machine, self.directory, "fixture.sqlite", match.group(1), timeout=scoring.QUERY_TIMEOUT
+                self.machine, self.directory, QUERY_DATABASE_FILENAME, match.group(1), timeout=scoring.QUERY_TIMEOUT
             )
             if candidate.error is not None:
                 observation = candidate.error
@@ -310,12 +311,12 @@ class SQLTaskSession:
                     )
         observation = f"\n\n<observation>{observation}\n<reminder>You have {remaining} turns left to complete the task.</reminder></observation>\n\n"
         self.transcript.append(observation)
-        grade = GradeResult(Outcome.GRADED, 0.0)
+        grade = GradeResult(Outcome.UNAVAILABLE, None, "Tool execution is not a terminal verdict")
         self.grades.append(grade)
         return Transition(done=False, reward=0.0, grade=grade, observations=({"role": "user", "content": observation},))
 
     async def grade(self, messages: tuple[dict[str, Any], ...]) -> GradeResult:
-        return fold_grades(self.grades)
+        return terminal_grade(self.grades)
 
     async def close(self) -> None:
         try:

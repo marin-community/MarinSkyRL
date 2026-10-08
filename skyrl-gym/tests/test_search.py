@@ -35,7 +35,8 @@ async def test_search_failure_observations_allow_a_later_final_answer(rollout_se
     assert requests == [{"query": query, "topk": 3, "return_scores": True}] * (2 if query == "retry" else 1)
     assert rollout.steps[1].messages[-2] == observation
     assert [step.transition.reward for step in rollout.steps] == [0.0, 1.0]
-    assert rollout.grade.reward == 0.5
+    assert rollout.grade.reward == 1.0
+    assert rollout.grade.passed is True
     assert rollout.loss_mask == (1, 1, 0, 0, 1, 1)
 
 

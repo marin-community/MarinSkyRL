@@ -57,8 +57,15 @@ def graded_transition(
     )
 
 
+def terminal_grade(results: Sequence[GradeResult]) -> GradeResult:
+    """Return the last task verdict without averaging tool or correction turns."""
+    if not results:
+        return GradeResult(Outcome.UNAVAILABLE, None, "The task produced no grade")
+    return results[-1]
+
+
 def fold_grades(results: Sequence[GradeResult]) -> GradeResult:
-    """Preserve one verdict or average the normalized scores from completed turns."""
+    """Average independent turn scores and preserve an unscored terminal result."""
     if not results:
         return GradeResult(Outcome.UNAVAILABLE, None, "The task produced no grade")
     if len(results) == 1 or results[-1].reward is None:

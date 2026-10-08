@@ -39,7 +39,8 @@ async def test_sql_observations_and_set_grade_preserve_the_original_database(
     assert "<reminder>You have 2 turns left to complete the task.</reminder>" in observation["content"]
     assert rollout.steps[1].messages[-2] == observation
     assert [step.transition.reward for step in rollout.steps] == [0.0, expected]
-    assert rollout.grade.reward == expected / 2
+    assert rollout.grade.reward == expected
+    assert rollout.grade.passed is bool(expected)
     assert rollout.loss_mask == (1, 1, 0, 0, 1, 1)
     with sqlite3.connect(path) as connection:
         assert connection.execute("SELECT count(*) FROM t").fetchone()[0] == 3

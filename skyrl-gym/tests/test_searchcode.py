@@ -34,7 +34,8 @@ async def test_python_tool_failure_does_not_end_the_task(rollout_session):
     assert "ValueError: fail" in rollout.steps[0].transition.observations[0]["content"]
     assert rollout.steps[1].transition.observations[0]["content"] == "2"
     assert [step.transition.reward for step in rollout.steps] == [0.0, 0.0, 1.0]
-    assert rollout.grade.reward == pytest.approx(1 / 3)
+    assert rollout.grade.reward == 1.0
+    assert rollout.grade.passed is True
 
 
 @pytest.mark.asyncio

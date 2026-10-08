@@ -11,7 +11,7 @@ from rolloutengine.spec import LoweredTaskSpec
 from taskcompendium.submission import conversation_messages
 
 from skyrl_gym.answer_tasks import ground_truth
-from skyrl_gym.task_records import fold_grades
+from skyrl_gym.task_records import terminal_grade
 
 
 class MultiplyTaskSession:
@@ -35,7 +35,7 @@ class MultiplyTaskSession:
         correct = answer is not None and answer.strip() == self.expected
         done = len(self.grades) + 1 >= self.max_turns or correct
         reward = (1.0 if correct else 0.5 if answer is not None else 0.0) if done else 0.0
-        grade = GradeResult(Outcome.GRADED, reward)
+        grade = GradeResult(Outcome.GRADED, float(correct), passed=correct)
         self.grades.append(grade)
         feedback = (
             f"Your answer '{answer}' is incorrect. Please try again."
@@ -51,7 +51,7 @@ class MultiplyTaskSession:
         )
 
     async def grade(self, messages: tuple[dict[str, Any], ...]) -> GradeResult:
-        return fold_grades(self.grades)
+        return terminal_grade(self.grades)
 
     async def close(self) -> None:
         pass

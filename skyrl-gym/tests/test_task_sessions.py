@@ -127,11 +127,23 @@ async def test_math_correction_preserves_per_turn_credit_and_masks_only_observat
     model = ReplayModel(["#### 11", "#### 12"])
     rollout = await engine(model).run(task("gsm8k_multi_turn", {"reward_spec": {"ground_truth": "12"}}))
     assert [step.transition.reward for step in rollout.steps] == pytest.approx([0.2 / 3, 1.0])
-    assert rollout.grade.reward == pytest.approx((0.2 / 3 + 1.0) / 2)
+    assert rollout.grade.reward == 1.0
+    assert rollout.grade.passed is True
+    assert [step.transition.grade.reward for step in rollout.steps] == [0.0, 1.0]
     assert rollout.response_token_ids == (20, 21, 90, 91, 20, 21)
     assert rollout.loss_mask == (1, 1, 0, 0, 1, 1)
     assert model.requests[1].messages[-1]["role"] == "user"
     assert rollout.metrics == {"steps": 2}
+
+
+@pytest.mark.asyncio
+async def test_math_format_rewards_do_not_produce_a_correctness_score():
+    model = ReplayModel(["#### 11", "#### 10", "#### 9"])
+    rollout = await engine(model).run(task("gsm8k_multi_turn", {"reward_spec": {"ground_truth": "12"}}))
+    assert [step.transition.reward for step in rollout.steps] == pytest.approx([0.2 / 3] * 3)
+    assert [step.transition.grade.reward for step in rollout.steps] == [0.0] * 3
+    assert rollout.grade.reward == 0.0
+    assert rollout.grade.passed is False
 
 
 @pytest.mark.asyncio
@@ -151,6 +163,8 @@ async def test_search_observation_reaches_model_without_entering_the_loss_mask(r
     assert json.loads(observation["content"].strip().removeprefix("<information>").removesuffix("</information>")) == {
         "result": "Doc 1: Paris is the capital of France.\n"
     }
-    assert rollout.grade.reward == 0.5
+    assert rollout.grade.reward == 1.0
+    assert rollout.grade.passed is True
+    assert rollout.steps[0].transition.grade.status is Outcome.UNAVAILABLE
     assert [step.transition.reward for step in rollout.steps] == [0.0, 1.0]
     assert rollout.loss_mask == (1, 1, 0, 0, 1, 1)
