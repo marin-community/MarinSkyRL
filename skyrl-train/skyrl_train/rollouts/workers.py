@@ -313,6 +313,9 @@ class RolloutWorkerPool:
                     ) from error
                 self._last_progress[index] = loop.time()
                 return output
+        except asyncio.CancelledError:
+            ray.cancel(request, force=False, recursive=True)
+            raise
         finally:
             # An abandoned request's result would otherwise surface later as an unretrieved error.
             result.cancel()
