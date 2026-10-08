@@ -259,7 +259,7 @@ class DirectModelClient:
                 **{key: value for key, value in sampling_params.items() if key not in _CHAT_SAMPLING_EXCLUSIONS},
                 **chat_options,
                 "return_token_ids": True,
-                "include_stop_str_in_output": False,
+                "include_stop_str_in_output": True,
             }
             body[EXACT_PROMPT_TOKEN_IDS_KEY] = prompt_ids
             if sampling_params.get("stop") is not None:
@@ -299,6 +299,11 @@ class DirectModelClient:
             semantic_ids = (
                 response_ids[:-1] if response_ids and response_ids[-1] == tokenizer.eos_token_id else response_ids
             )
+            if len(semantic_ids) != len(response_ids):
+                eos_text = tokenizer.decode(response_ids[-1:], skip_special_tokens=False)
+                text = text.removesuffix(eos_text)
+                if message.get("content") is not None:
+                    message = {**message, "content": text}
             decoded = tokenizer.decode(semantic_ids, skip_special_tokens=False)
             if any(marker in decoded for pair in REASONING_DELIMITERS for marker in pair):
                 text = final_answer_text(decoded)

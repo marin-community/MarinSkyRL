@@ -6,6 +6,10 @@ import numpy as np
 import pytest
 from jinja2 import TemplateError
 from omegaconf import OmegaConf
+from rolloutengine.contracts import ModelTurn
+from skyrl_gym.source_task import source_task
+from skyrl_gym.task_sessions import SearchTaskSession
+from taskcompendium.models import Source
 
 from skyrl_train.inference_engines.chat_template import SINGLE_TOOL_CALL_TEMPLATE_ERROR
 from skyrl_train.inference_engines.chat_continuation import render_exact_chat_continuation
@@ -204,7 +208,7 @@ async def test_direct_model_client_uses_vllm_chat_rendering_for_row_request_opti
         "parallel_tool_calls": False,
         "max_completion_tokens": 128,
         "return_token_ids": True,
-        "include_stop_str_in_output": False,
+        "include_stop_str_in_output": True,
         "logprobs": True,
     }
     assert output["prompt_ids"] == [[11, 12, 13]]
@@ -212,6 +216,65 @@ async def test_direct_model_client_uses_vllm_chat_rendering_for_row_request_opti
     assert output["response_logprobs"] == [[-0.1, -0.2]]
     assert output["assistant_messages"] == [engine.chat_completion.return_value["choices"][0]["message"]]
     assert output["token_provenance"] == "engine"
+
+
+@pytest.mark.asyncio
+async def test_plain_chat_stop_marker_reaches_terminal_search_grading(task_lowering):
+    engine = AsyncMock()
+    engine.model_name = "plain-chat"
+    engine.tokenizer = MagicMock()
+    engine.tokenizer.eos_token_id = 99
+    engine.tokenizer.decode.return_value = "<answer>Paris</answer>"
+    engine.tokenize.return_value = {"tokens": [11, 12]}
+
+    async def respond(payload):
+        content = "<answer>Paris" + ("</answer>" if payload["json"]["include_stop_str_in_output"] else "")
+        return {
+            "choices": [
+                {
+                    "message": {"role": "assistant", "content": content},
+                    "finish_reason": "stop",
+                    "token_ids": [21, 22],
+                    "logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]},
+                }
+            ]
+        }
+
+    engine.chat_completion.side_effect = respond
+    prompt = [{"role": "user", "content": "What is the capital of France?"}]
+    task = source_task(
+        prompt,
+        {"reward_spec": {"ground_truth": {"target": "Paris"}}},
+        {"search_url": "http://127.0.0.1:1", "topk": 3, "timeout": 1, "log_requests": False},
+        Source(dataset="search", revision="1", row="0", importer_revision="1"),
+    )
+    session = SearchTaskSession(task_lowering(task, "search"), None)
+    try:
+        start = await session.prepare()
+        output = await DirectModelClient(engine).generate(
+            {
+                "prompts": [list(start.messages)],
+                "chat_completion_params": [start.options],
+                "sampling_params": {"stop": ["</answer>"], "logprobs": 0},
+            }
+        )
+        transition = await session.advance(
+            ModelTurn(
+                output["assistant_messages"][0],
+                tuple(output["prompt_ids"][0]),
+                tuple(output["response_ids"][0]),
+                tuple(output["response_logprobs"][0]),
+                output["stop_reasons"][0],
+                text=output["responses"][0],
+            )
+        )
+        assert transition.done and transition.reward == 1.0
+        assert transition.grade.passed is True
+        assert output["responses"] == ["<answer>Paris</answer>"]
+        assert output["response_ids"] == [[21, 22]]
+        assert output["response_logprobs"] == [[-0.1, -0.2]]
+    finally:
+        await session.close()
 
 
 @pytest.mark.asyncio
