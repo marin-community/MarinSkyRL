@@ -39,6 +39,7 @@ from skyrl_train.rollouts.buffer import (
     RolloutTask,
 )
 from skyrl_train.trajectory_runners.rollout_engine import LOWERED_TASK_COLUMN, RolloutEngineTrajectoryRunner
+from skyrl_train.trajectory_runners.model_clients import ModelServerError
 from skyrl_train.trajectory_runners.types import TokenProvenance, TrajectoryID
 
 FIXTURE_IMAGE = "fixture@sha256:" + "0" * 64
@@ -84,8 +85,12 @@ class ReplayClient:
 @dataclass
 class ImageFactory:
     machines: list = field(default_factory=list)
+    failure: Exception | None = None
+    failure_after: int = 0
 
     async def create(self, spec):
+        if self.failure is not None and len(self.machines) == self.failure_after:
+            raise self.failure
         machine = await ShellSimMachineFactory().create(
             replace(spec, source=ShellSimBuiltins(), workdir=spec.workdir or "/workspace")
         )
@@ -158,13 +163,14 @@ def lowered(task):
     )
 
 
-def runner(client, factories=None):
+def runner(client, factories=None, *, error_handling=None):
     config = OmegaConf.create(
         {
             "backend": "vllm",
             "max_input_length": 128,
             "apply_overlong_filtering": False,
             "sampling_params": {"logprobs": True, "max_generate_length": 32},
+            "error_handling": error_handling or {},
         }
     )
     return RolloutEngineTrajectoryRunner(config, Tokenizer(), client, factories or {})
@@ -258,12 +264,145 @@ async def test_native_verifier_failure_is_masked_instead_of_a_wrong_answer():
             await machine.run(Command(("true",)))
 
 
-async def test_native_model_failure_returns_masked_row():
-    output = await runner(ReplayClient([ConnectionError("serving unavailable")])).run(request(lowered(answer_task())))
+@pytest.mark.parametrize(
+    "error,exception_type,excluded",
+    [
+        (ConnectionError("serving unavailable"), "ConnectionError", True),
+        (ModelServerError("context_overflow", "request-1", 400), "ContextLengthExceededError", False),
+        (TimeoutError("model deadline"), "AgentTimeoutError", False),
+    ],
+)
+async def test_native_model_failure_without_tokens_returns_masked_padding(error, exception_type, excluded):
+    output = await runner(
+        ReplayClient([error]),
+        error_handling={"enable_error_classification": True, "default_error_treatment": "mask"},
+    ).run(request(lowered(answer_task())))
     assert output["verification_results"][0].status == VerificationStatus.ERROR
-    assert output["response_ids"] == [[]]
-    assert output["loss_masks"] == [[]]
+    assert output["verification_results"][0].score is None
+    assert len(output["prompt_token_ids"][0]) > 0
+    assert len(output["response_ids"][0]) == 1
+    assert output["loss_masks"] == [[0]]
+    assert output["rewards"] == [0.0]
+    assert output["exclude_from_baseline"] == [excluded]
+    assert output["exception_types"] == [exception_type]
+    np.testing.assert_array_equal(output["rollout_logprobs"][0], [0.0])
+
+
+@pytest.mark.parametrize(
+    "error,exception_type",
+    [
+        (ModelServerError("context_overflow", "request-1", 400), "ContextLengthExceededError"),
+        (TimeoutError("model deadline"), "AgentTimeoutError"),
+    ],
+)
+@pytest.mark.parametrize(
+    "policy,reward,mask,excluded,treatment",
+    [
+        ("default", 0.0, 1, False, "zero"),
+        ("disabled", 0.0, 0, True, "mask"),
+        ("mask", 0.0, 0, True, "mask"),
+        ("passthrough", 1.0, 1, False, "passthrough"),
+    ],
+)
+async def test_native_partial_model_failure_obeys_training_policy(
+    error, exception_type, policy, reward, mask, excluded, treatment
+):
+    handling = {"enable_error_classification": policy != "disabled", "default_error_treatment": "mask"}
+    if policy in {"mask", "passthrough"}:
+        handling[f"{policy}_exceptions"] = [exception_type]
+    client = ReplayClient([shell_turn("echo 12 > /workspace/answer"), error])
+    output = await runner(client, {"fixture": ImageFactory()}, error_handling=handling).run(
+        request(lowered(file_task()))
+    )
+
+    assert output["rewards"] == [reward]
+    assert output["verification_results"][0].score == 1.0
+    assert output["unshaped_rewards"] == [1.0]
+    assert output["response_ids"] == [[20]]
+    assert output["loss_masks"] == [[mask]]
+    assert output["exclude_from_baseline"] == [excluded]
+    assert output["exception_types"] == [exception_type]
+    assert output["error_treatments"] == [treatment]
+    np.testing.assert_allclose(output["rollout_logprobs"][0], [-0.5])
+
+
+@pytest.mark.parametrize(
+    "failure_after,exception_type",
+    [(0, "EnvironmentStartTimeoutError"), (1, "VerifierTimeoutError")],
+)
+async def test_native_machine_timeout_is_masked_by_execution_phase(failure_after, exception_type):
+    factory = ImageFactory(failure=TimeoutError("machine startup deadline"), failure_after=failure_after)
+    client = ReplayClient([shell_turn("echo 12 > /workspace/answer"), {"role": "assistant", "content": "Done."}])
+    output = await runner(
+        client,
+        {"fixture": factory},
+        error_handling={"enable_error_classification": True, "default_error_treatment": "mask"},
+    ).run(request(lowered(file_task())))
+
+    assert output["rewards"] == [0.0]
+    assert output["verification_results"][0].score is None
+    assert output["response_ids"][0]
+    assert not any(output["loss_masks"][0])
     assert output["exclude_from_baseline"] == [True]
+    assert output["exception_types"] == [exception_type]
+    assert output["error_treatments"] == ["mask"]
+    for machine in factory.machines:
+        with pytest.raises(RuntimeError):
+            await machine.run(Command(("true",)))
+
+
+async def test_native_serving_failure_after_work_does_not_train_available_grade():
+    error = ModelServerError("service_unavailable", "request-2", 503)
+    client = ReplayClient([shell_turn("echo 12 > /workspace/answer"), error])
+    output = await runner(
+        client,
+        {"fixture": ImageFactory()},
+        error_handling={"enable_error_classification": True, "default_error_treatment": "mask"},
+    ).run(request(lowered(file_task())))
+
+    assert output["verification_results"][0].score == 1.0
+    assert output["unshaped_rewards"] == [1.0]
+    assert output["rewards"] == [0.0]
+    assert output["loss_masks"] == [[0]]
+    assert output["exclude_from_baseline"] == [True]
+    assert output["server_errors"] == [
+        {"category": "service_unavailable", "request_id": "request-2", "status_code": 503}
+    ]
+
+
+async def test_native_passthrough_without_verifier_score_is_masked():
+    factory = ImageFactory(failure=TimeoutError("verifier unavailable"), failure_after=1)
+    client = ReplayClient([shell_turn("echo 12 > /workspace/answer"), TimeoutError("model deadline")])
+    output = await runner(
+        client,
+        {"fixture": factory},
+        error_handling={"enable_error_classification": True, "passthrough_exceptions": ["VerifierTimeoutError"]},
+    ).run(request(lowered(file_task())))
+
+    assert output["verification_results"][0].score is None
+    assert output["response_ids"] == [[20]]
+    assert output["loss_masks"] == [[0]]
+    assert output["rewards"] == [0.0]
+    assert output["exclude_from_baseline"] == [True]
+    assert output["error_treatments"] == ["passthrough"]
+
+
+async def test_native_empty_failure_keeps_mixed_batch_evidence_aligned():
+    batch = request(lowered(answer_task()))
+    for key in ("prompts", "env_classes", "env_extras", "trajectory_ids"):
+        batch[key] *= 2
+    client = ReplayClient([{"role": "assistant", "content": "12"}, ConnectionError("serving unavailable")])
+    output = await runner(client).run(batch)
+
+    assert output["rewards"] == [1.0, 0.0]
+    assert output["loss_masks"] == [[1], [0]]
+    assert output["exclude_from_baseline"] == [False, True]
+    assert all(len(tokens) == 1 for tokens in output["response_ids"])
+    np.testing.assert_allclose(output["rollout_logprobs"], [[-0.5], [0.0]])
+    np.testing.assert_array_equal(output["student_topk_indices"][0], [[20, 50]])
+    assert np.all(output["student_topk_indices"][1] < 0)
+    np.testing.assert_array_equal(output["behavior_topk_logprobs"][1], [[0.0, 0.0]])
+    np.testing.assert_array_equal(output["rollout_routed_experts"][1], [[[0, 0]]])
 
 
 @pytest.mark.parametrize(

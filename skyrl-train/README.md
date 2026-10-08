@@ -97,6 +97,8 @@ To implement a new task or environment using the SkyRL-Gym interface, please see
 
 If you already have a task or agent harness, implement the [`TrajectoryRunner`](skyrl_train/trajectory_runners/base.py) contract and its `run()` lifecycle. [`SkyRLGymTrajectoryRunner`](skyrl_train/trajectory_runners/skyrl_gym.py) shows how a runner composes model transport, environment interaction, and projection into trainer-ready trajectories.
 
+Native TaskCompendium records can use the opt-in [`rollout_engine` entrypoint](docs/tutorials/rollout_engine.rst), with configurable failure treatment.
+
 ## Reproducing SkyRL-SQL
 We also test SkyRL by reproducing our prior release [SkyRL-SQL](https://novasky-ai.notion.site/skyrl-sql), which enabled efficient Multi-Turn RL for Text2SQL. 
 You can find a link to the wandb report [here](https://wandb.ai/sky-posttraining-uc-berkeley/skyrl-sql/reports/SkyRL-SQL---VmlldzoxMzM0MTAyMw), and a detailed walk through of the reproduction in our [documentation](https://skyrl.readthedocs.io/en/latest/examples/multi_turn_text2sql.html).

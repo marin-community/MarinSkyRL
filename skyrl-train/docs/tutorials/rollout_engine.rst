@@ -107,9 +107,23 @@ projection, reward shaping, retention, and leased rollout buffer. Exact served
 tokens and behavior logprobs remain aligned. Tool observation tokens have zero
 loss masks. Reconstructed model tokens cause a transport-contract error.
 
-Correct and wrong answers train with their verifier grades. Execution failures
-and skipped or unavailable verdicts have zero loss masks. They do not contribute
-to the group baseline. Invalid task records fail before execution.
+Correct and wrong answers train with their verifier grades. Invalid task records
+fail before execution.
+
+``generator.error_handling`` controls terminal failures. The default configuration
+enables classification with ``enable_error_classification: true``. Model context
+overflow and model timeouts receive zero optimization reward and remain in the
+group baseline. Infrastructure failures are masked from loss and the baseline.
+Explicit exception overrides take precedence: ``mask_exceptions``,
+``zero_exceptions``, or ``passthrough_exceptions`` select the corresponding policy.
+
+Pass-through requires an available verifier score and any required behavior
+logprobs. Otherwise, the row is masked from loss and the baseline. Verifier scores
+remain separate from optimization rewards. Without a terminal failure, skipped
+or unavailable verdicts are masked from loss and the baseline.
+
+An empty response becomes one fully masked token in the trainer row. Its behavior
+logprob is zero. The original rollout evidence remains unchanged.
 
 This entrypoint does not convert existing Gym source rows or Harbor roots.
 It does not support custom session factories, step-wise training, multi-stage
