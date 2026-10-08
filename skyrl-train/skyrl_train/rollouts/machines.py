@@ -5,7 +5,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from loguru import logger
-from shellbox.machine import Backend, Command, Machine, MachineFactory, MachineSpec, Result, UnsupportedMachineSpec
+from shellbox.machine import Backend, Command, Machine, MachineFactory, MachineSpec, Result
+
+_PASSTHROUGH_ERRORS = (TypeError, ValueError, AttributeError, LookupError, AssertionError)
 
 
 class TaskMachineError(RuntimeError):
@@ -21,18 +23,24 @@ class _OwnedMachine:
     async def run(self, command: Command) -> Result:
         try:
             return await self.machine.run(command)
+        except _PASSTHROUGH_ERRORS:
+            raise
         except Exception as error:
             raise TaskMachineError("Task-machine command failed") from error
 
     async def upload(self, source: Path, target: str) -> None:
         try:
             await self.machine.upload(source, target)
+        except _PASSTHROUGH_ERRORS:
+            raise
         except Exception as error:
             raise TaskMachineError("Task-machine upload failed") from error
 
     async def download(self, source: str, target: Path) -> None:
         try:
             await self.machine.download(source, target)
+        except _PASSTHROUGH_ERRORS:
+            raise
         except Exception as error:
             raise TaskMachineError("Task-machine download failed") from error
 
@@ -84,7 +92,7 @@ class OwnedMachineFactory:
         try:
             try:
                 machine = await self.factory.create(spec)
-            except (UnsupportedMachineSpec, TimeoutError):
+            except (TimeoutError, *_PASSTHROUGH_ERRORS):
                 raise
             except Exception as error:
                 raise TaskMachineError("Task-machine creation failed") from error

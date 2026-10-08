@@ -11,7 +11,7 @@ from omegaconf import OmegaConf
 from skyrl_gym.task_sessions import AnswerTaskSession
 from taskcompendium.grading_result import GradeResult, Outcome
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
-from shellbox.machine import Command, ShellSimBuiltins
+from shellbox.machine import Backend, Command, MachineSpec, ShellSimBuiltins
 from taskcompendium.shell_verifier import ArtifactKind, ExitCodeReward, ShellVerifierSpec, VerifierArtifact
 from taskcompendium.models import (
     AnswerType,
@@ -28,12 +28,56 @@ from skyrl_train.rollouts.buffer import RolloutLease, RolloutTask
 from skyrl_train.rollouts.task_worker import TaskRolloutWorker
 from skyrl_train.rollouts.group_grader import GroupGraderSpec
 from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
+from skyrl_train.rollouts.machines import OwnedMachineFactory, TaskMachineError
 from skyrl_gym.source_task import source_task
 from rolloutengine.spec import LoweredTaskSpec
 from tests.cpu.task_specs import lowered_task
 from rolloutengine.contracts import ModelTurn, Transition
 from skyrl_train.trajectory_runners.types import BatchMetadata, TrajectoryID
 from tests.cpu.rollouts.engine_fakes import InferenceClient, Tokenizer, Writer
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["create", "run", "upload", "download"])
+@pytest.mark.parametrize(
+    "error_type,expected_type", [(TypeError, TypeError), (ValueError, ValueError), (OSError, TaskMachineError)]
+)
+async def test_owned_machine_preserves_fault_categories(tmp_path, operation, error_type, expected_type):
+    class Machine:
+        async def run(self, command):
+            raise error_type("Provider operation failed")
+
+        async def upload(self, source, target):
+            raise error_type("Provider operation failed")
+
+        async def download(self, source, target):
+            raise error_type("Provider operation failed")
+
+        async def close(self):
+            return None
+
+    class Factory:
+        backend = Backend.SHELLSIM
+
+        async def create(self, spec):
+            if operation == "create":
+                raise error_type("Provider operation failed")
+            return Machine()
+
+    factory = OwnedMachineFactory(Factory(), "fixture")
+    try:
+        with pytest.raises(expected_type) as failure:
+            machine = await factory.create(MachineSpec(ShellSimBuiltins()))
+            if operation == "run":
+                await machine.run(Command(("true",)))
+            elif operation == "upload":
+                await machine.upload(tmp_path / "artifact", "/artifact")
+            else:
+                await machine.download("/artifact", tmp_path / "artifact")
+        if error_type is OSError:
+            assert isinstance(failure.value.__cause__, OSError)
+    finally:
+        await factory.close(asyncio.get_running_loop().time() + 5)
 
 
 @pytest.mark.asyncio

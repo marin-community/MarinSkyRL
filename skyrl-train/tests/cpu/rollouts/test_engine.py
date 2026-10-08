@@ -193,6 +193,63 @@ async def test_model_programming_failure_does_not_commit_a_partial_group(task_in
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["construct", "prepare", "advance", "grade"])
+@pytest.mark.parametrize("error_type", [TypeError, AttributeError, AssertionError])
+async def test_task_programming_failure_does_not_commit_a_masked_group(task_inputs, operation, error_type):
+    config, request = task_inputs
+    config.error_handling = {"enable_error_classification": True, "default_error_treatment": "mask"}
+    task = source_task(
+        request["prompts"][0],
+        {},
+        {},
+        Source(dataset="programming-failure", revision="1", row="0", importer_revision="1"),
+    )
+    request["env_extras"] = [{"lowered_task_spec": lowered_task(task, "fixture").model_dump_json()}]
+    closed = []
+
+    class Session:
+        def __init__(self, lowered, machine):
+            if operation == "construct":
+                raise error_type("Invalid session implementation")
+
+        async def prepare(self):
+            if operation == "prepare":
+                raise error_type("Invalid session implementation")
+            return SessionStart(tuple(request["prompts"][0]), {})
+
+        async def advance(self, turn):
+            if operation == "advance":
+                raise error_type("Invalid session implementation")
+            return Transition(done=True, reward=1.0, grade=GradeResult(Outcome.GRADED, 1.0))
+
+        async def grade(self, messages):
+            if operation == "grade":
+                raise error_type("Invalid session implementation")
+            return GradeResult(Outcome.GRADED, 1.0)
+
+        async def close(self):
+            closed.append(True)
+
+    worker = TaskRolloutWorker(
+        config,
+        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        InferenceClient(),
+        {},
+        sessions={"fixture": Session},
+        shutdown_timeout=30,
+    )
+    writer = Writer()
+    try:
+        with pytest.raises(ExceptionGroup) as failure:
+            await worker.run_task(RolloutTask(RolloutLease("lease", 0, 1), {"uid": task.id}, request), writer)
+        assert isinstance(failure.value.exceptions[0], error_type)
+        assert writer.groups == []
+        assert closed == ([] if operation == "construct" else [True])
+    finally:
+        await worker.shutdown()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("projection_type", [WholeTaskProjection, StepTaskProjection])
 @pytest.mark.parametrize(
     "template,cause_type",

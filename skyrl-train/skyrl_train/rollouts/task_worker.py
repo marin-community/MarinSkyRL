@@ -144,6 +144,8 @@ def _failed_rollout(
     task = lowered.task
     error = interruption.__cause__
     assert isinstance(error, Exception)
+    if isinstance(error, (TypeError, AttributeError, AssertionError)):
+        raise error
     if interruption.operation == RolloutOperation.MODEL and not isinstance(
         error, (ModelServerError, TimeoutError, ConnectionError, TemplateError)
     ):
