@@ -42,7 +42,7 @@ from skyrl_gym.verification import VERIFIER_RUNTIME_ERROR
 from skyrl_train.inference_engines.base import ChatContinuation, InferenceEngineInterface, InferenceEngineInput
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl_train.rollouts.buffer import RolloutGroup, RolloutTask, RolloutWriter
+from skyrl_train.rollouts.buffer import RolloutTask, RolloutWriter, write_trajectory_batch
 from skyrl_train.rollouts.group_grader import GroupGraderSpec
 from skyrl_train.rollouts.group_grading import GROUP_GRADERS, GroupGrader, grade_groups
 from skyrl_train.rollouts.harbor_tasks import (
@@ -434,10 +434,7 @@ class TaskRolloutWorker:
         with self._active_request():
             rollouts = await self.generate(task.request)
             batch = await self.training_batch(task.request, rollouts)
-            group = RolloutGroup(batch, task.prompt["uid"], task.lease.policy_step, task.prompt)
-            with rollout_wait("enqueue"):
-                await writer.write_rollout(task.lease, group)
-            return sum(len(response) for response in batch["response_ids"])
+            return await write_trajectory_batch(task, writer, batch)
 
 
 @dataclass(frozen=True)

@@ -2,8 +2,7 @@
 
 from types import MappingProxyType
 
-from skyrl_train.rollout_observability import rollout_wait
-from skyrl_train.rollouts.buffer import RolloutGroup, RolloutTask, RolloutWriter
+from skyrl_train.rollouts.buffer import RolloutTask, RolloutWriter, write_trajectory_batch
 from skyrl_train.rollouts.finalization import finalize_trajectory_batch
 from skyrl_train.trajectory_runners.trajectory_retention import RetentionSink
 from skyrl_train.trajectory_runners.types import TrajectoryBatch, TrajectoryRequestBatch
@@ -19,11 +18,7 @@ class FixtureRunner:
 
     async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> int:
         output = await self.run(task.request)
-        with rollout_wait("enqueue"):
-            await writer.write_rollout(
-                task.lease, RolloutGroup(output, task.prompt["uid"], task.lease.policy_step, task.prompt)
-            )
-        return sum(len(response) for response in output["response_ids"])
+        return await write_trajectory_batch(task, writer, output)
 
     def set_trajectory_sink(self, sink: RetentionSink) -> None:
         sink.bind_runner(type(self).__name__)

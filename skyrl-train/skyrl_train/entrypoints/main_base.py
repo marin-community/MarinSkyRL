@@ -493,6 +493,7 @@ class BasePPOExp:
                 tokenizer,
                 max_generate_length=cfg.generator.sampling_params.max_generate_length,
                 max_input_length=cfg.generator.max_input_length,
+                generator_config=cfg.generator,
             )
         del tokenizer
         from skyrl_train.rollouts.workers import RolloutWorkerPool, RolloutWorkerResources  # noqa: PLC0415
