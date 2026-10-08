@@ -42,11 +42,16 @@ def main() -> None:
     classifier = AutoModelForSequenceClassification.from_pretrained(args.classifier).to(device).eval()
 
     imdb = datasets.load_dataset("stanfordnlp/imdb")["train"].shuffle(seed=args.seed)
+    generator = torch.Generator().manual_seed(args.seed)
     prefixes = []
     for review in imdb:
-        length = len(policy_tokenizer(review["text"])["input_ids"])
-        if PROMPT_TOKENS[0] <= length <= PROMPT_TOKENS[1]:
-            prefixes.append(review["text"])
+        tokens = policy_tokenizer(review["text"])["input_ids"]
+        if len(tokens) <= PROMPT_TOKENS[1]:
+            continue
+        # The paper conditions on a review prefix truncated to 2-8 tokens, not on
+        # reviews that are naturally that short (effectively none are).
+        length = int(torch.randint(PROMPT_TOKENS[0], PROMPT_TOKENS[1] + 1, (1,), generator=generator))
+        prefixes.append(policy_tokenizer.decode(tokens[:length]))
         if len(prefixes) >= args.num_prompts:
             break
 
