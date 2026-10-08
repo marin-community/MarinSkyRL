@@ -1,27 +1,21 @@
 Native tasks with RolloutEngine
 ===============================
 
-The opt-in ``rollout_engine`` entrypoint executes native TaskCompendium tasks
-through Marin's ``ShellboxRolloutEngine``. The existing Gym, Harbor, and mini-SWE
-entrypoints do not change.
+The ``taskcompendium`` entrypoint executes native TaskCompendium tasks through
+Marin's ``ShellboxRolloutEngine`` and SkyRL's common task worker.
 
-This entrypoint supports single-stage tasks and whole-rollout training. Multiple
+This entrypoint supports single-stage tasks and whole-rollout or step-wise training. Multiple
 model turns can occur within one task. Shell commands use the ``docker`` backend.
 Tasks without commands or shell verifiers do not require Docker machines.
 
 Input rows
 ----------
 
-Use the existing ``PromptDataset`` input formats: JSON, JSONL, Parquet, or a
-Hugging Face dataset. Each row contains:
-
-* ``prompt``: the public conversation from ``TaskSpec.context``.
-* ``lowered_task_json``: serialized ``LoweredTaskSpec``.
-* Optional ``env_class``: a metrics label, not a Gym environment selection.
-
-The prompt must equal ``conversation_messages(task.context)``. Private verifier
-inputs remain inside the task record. The engine sends only public instructions
-and tool observations to the model.
+Use JSON, JSONL, Parquet, or a Hugging Face dataset. Each row contains a
+``lowered_task_spec`` field with a serialized ``LoweredTaskSpec``. ``TaskDataset``
+derives public messages and private worker inputs from that record. Private
+verifier inputs remain inside the task record. The engine sends only public
+instructions and tool observations to the model.
 
 This example writes one machine-free arithmetic task:
 
@@ -35,7 +29,6 @@ This example writes one machine-free arithmetic task:
    from taskcompendium.models import (
        AnswerType, ConversationInput, EnvironmentRequirements, Source, TaskSpec, TextMessage,
    )
-   from taskcompendium.submission import conversation_messages
    from verifyit.spec import NumericSpec
 
    task = TaskSpec(
@@ -62,23 +55,21 @@ This example writes one machine-free arithmetic task:
        ),
    )
    row = {
-       "prompt": conversation_messages(task.context),
-       "env_class": "arithmetic",
-       "lowered_task_json": lowered.model_dump_json(),
+       "lowered_task_spec": lowered.model_dump_json(),
    }
    Path("tasks.jsonl").write_text(json.dumps(row) + "\n")
 
-Select the module in an existing whole-rollout training command:
+Select the module in a training command:
 
 .. code-block:: bash
 
    uv run --extra vllm --extra megatron \
-     python -m skyrl_train.entrypoints.rollout_engine \
+     python -m skyrl_train.entrypoints.taskcompendium \
      data.train_data='[tasks.jsonl]'
 
 The command requires the same policy, inference, and topology settings as the
 other training entrypoints. An Iris launch recipe selects ``entrypoint:
-rollout_engine``. The recipe's context budget supplies the model context window
+taskcompendium``. The recipe's context budget supplies the model context window
 and per-response token limit. The task record supplies session turn limits and
 execution deadlines.
 
@@ -102,8 +93,8 @@ the record's finite cleanup limit.
 Training output
 ---------------
 
-The adapter uses SkyRL's existing model client, worker pool, whole-rollout
-projection, reward shaping, retention, and leased rollout buffer. Exact served
+The task worker uses SkyRL's model client, worker pool, training projection,
+reward shaping, retention, and leased rollout buffer. Exact served
 tokens and behavior logprobs remain aligned. Tool observation tokens have zero
 loss masks. Reconstructed model tokens cause a transport-contract error.
 
@@ -123,13 +114,13 @@ membership. Exact tokens and logprobs remain in the evidence.
 
 Pass-through requires an available verifier score and any required behavior
 logprobs. Otherwise, the row is masked from loss and the baseline. Verifier scores
-remain separate from optimization rewards. Without a terminal failure, skipped
-or unavailable verdicts are masked from loss and the baseline.
+remain separate from optimization rewards. Unavailable verdicts are masked from
+loss and the baseline. Explicitly skipped grading can use a session's reward.
 
 An empty response becomes one fully masked token in the trainer row. Its behavior
 logprob is zero. The original rollout evidence remains unchanged.
 
-This entrypoint does not convert existing Gym source rows or Harbor roots.
-It does not support custom session factories, step-wise training, multi-stage
-tasks, task-specific image builds, retries, or group-level grading. Use the
-existing entrypoints for those workflows.
+Source-row conversion uses the standard entrypoint. Harbor roots use the
+``terminal_bench`` entrypoint. All use the same worker, with retries and group
+grading before projection. Multi-stage tasks and task-specific image builds are
+not supported. See :doc:`task_rollouts` for session and backend selection.

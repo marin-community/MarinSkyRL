@@ -41,7 +41,6 @@ class RLEntrypoint(StrEnum):
 
     GENERATE = "generate"
     MINI_SWE = "mini_swe"
-    ROLLOUT_ENGINE = "rollout_engine"
     STANDARD = "standard"
     TASKCOMPENDIUM = "taskcompendium"
     TERMINAL_BENCH = "terminal_bench"
@@ -52,7 +51,6 @@ RL_ENTRYPOINTS = MappingProxyType(
     {
         RLEntrypoint.GENERATE: "skyrl_train.entrypoints.main_generate",
         RLEntrypoint.MINI_SWE: "skyrl_train.entrypoints.mini_swe",
-        RLEntrypoint.ROLLOUT_ENGINE: "skyrl_train.entrypoints.rollout_engine",
         RLEntrypoint.STANDARD: STANDARD_TRAINING_ENTRYPOINT,
         RLEntrypoint.TASKCOMPENDIUM: "skyrl_train.entrypoints.taskcompendium",
         RLEntrypoint.TERMINAL_BENCH: "skyrl_train.entrypoints.terminal_bench",

@@ -526,7 +526,7 @@ async def test_agent_deadlines_grade_the_workspace_and_commit_training_tokens(
 
 
 @pytest.mark.asyncio
-async def test_model_failure_does_not_commit_a_partial_group(task_inputs):
+async def test_model_programming_failure_does_not_commit_a_partial_group(task_inputs):
     first_response = asyncio.Event()
 
     class FailedClient:
@@ -535,7 +535,7 @@ async def test_model_failure_does_not_commit_a_partial_group(task_inputs):
                 response = await InferenceClient().generate(request)
                 first_response.set()
                 return response
-            raise ConnectionError("Inference endpoint unavailable")
+            raise ValueError("Invalid inference response")
 
     writer = Writer()
     config, request = task_inputs
@@ -554,7 +554,7 @@ async def test_model_failure_does_not_commit_a_partial_group(task_inputs):
     with pytest.raises(ExceptionGroup) as failure:
         await runner.run_task(RolloutTask(RolloutLease("lease", 0, 1), {"uid": "task"}, request), writer)
     assert writer.groups == []
-    assert isinstance(failure.value.exceptions[0], ConnectionError)
+    assert isinstance(failure.value.exceptions[0], ValueError)
 
 
 @dataclass
@@ -589,7 +589,9 @@ class ConversationClient:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["train", "eval"])
 @pytest.mark.parametrize("projection_type", [WholeTaskProjection, StepTaskProjection])
-async def test_disabled_harbor_verification_keeps_tokens_without_a_score(tmp_path, task_inputs, phase, projection_type):
+async def test_disabled_harbor_verification_keeps_tokens_but_masks_training(
+    tmp_path, task_inputs, phase, projection_type
+):
     config, request = task_inputs
     source = tmp_path / "private"
     (source / "tests").mkdir(parents=True)
@@ -643,7 +645,8 @@ async def test_disabled_harbor_verification_keeps_tokens_without_a_score(tmp_pat
     assert all(grade.status == VerificationStatus.SKIPPED for grade in batch["verification_results"])
     assert all(grade.score is None for grade in batch["verification_results"])
     assert batch["response_ids"] == [[3, 4]]
-    assert batch["loss_masks"] == [[1, 1]]
+    assert batch["loss_masks"] == [[0, 0]]
+    assert batch["exclude_from_baseline"] == [True]
     np.testing.assert_allclose(batch["rollout_logprobs"], [[-0.1, -0.2]])
     assert batch["rollout_metrics"]["generate/task_rollout/turns"] == 1
 
@@ -968,12 +971,10 @@ async def test_harbor_retry_policy_preserves_terminal_grades(task_inputs, phase,
     else:
         assert batch["unshaped_rewards"] == [0.0]
         assert batch["verification_results"][0].score is None
-        assert batch["loss_masks"] == ([[]] if failure == "grade_timeout_discard" else [[0, 0]])
+        assert batch["loss_masks"] == [[0, 0]]
         assert batch["exclude_from_baseline"] == [True]
-    assert batch["response_ids"] == ([[]] if failure == "grade_timeout_discard" else [[3, 4]])
-    np.testing.assert_allclose(
-        batch["rollout_logprobs"], ([[]] if failure == "grade_timeout_discard" else [[-0.1, -0.2]])
-    )
+    assert batch["response_ids"] == [[3, 4]]
+    np.testing.assert_allclose(batch["rollout_logprobs"], [[-0.1, -0.2]])
 
 
 @pytest.mark.asyncio
@@ -1286,7 +1287,7 @@ async def test_mixed_nemotron_tasks_run_without_the_original_sources(
     if model_failure:
         assert batch["exclude_from_baseline"] == [True, False, True]
         assert batch["error_treatments"] == ["mask", "zero", "mask"]
-        assert batch["loss_masks"] == [[], [], []]
+        assert batch["loss_masks"] == [[0], [0], [0]]
         expected_rows = [0, 1, 2]
     elif projection_type is WholeTaskProjection:
         assert batch["unshaped_rewards"] == [0.55, 0.75, 0.55]
@@ -1310,23 +1311,23 @@ async def test_mixed_nemotron_tasks_run_without_the_original_sources(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("projection_type", [WholeTaskProjection, StepTaskProjection])
 @pytest.mark.parametrize(
-    "phase,treatment,preserve,retain,exclude",
+    "phase,treatment,preserve,train,exclude",
     [
         ("model_context", "passthrough", True, True, False),
         ("model_context", "zero", True, True, False),
-        ("model_context", "mask", True, True, True),
+        ("model_context", "mask", True, False, True),
         ("step", "passthrough", True, True, False),
         ("step", "zero", True, True, False),
-        ("step", "passthrough", False, False, True),
+        ("step", "passthrough", False, False, False),
         ("model_server", "mask", True, False, True),
         ("model_timeout", "passthrough", True, True, False),
-        ("model_timeout", "passthrough", False, False, True),
+        ("model_timeout", "passthrough", False, False, False),
         ("missing_logprobs", "passthrough", True, False, True),
         ("prepare", "mask", True, False, True),
     ],
 )
 async def test_interrupted_tasks_keep_verified_turns_and_apply_training_policy(
-    task_inputs, projection_type, phase, treatment, preserve, retain, exclude
+    task_inputs, projection_type, phase, treatment, preserve, train, exclude
 ):
     closed = []
 
@@ -1376,7 +1377,7 @@ async def test_interrupted_tasks_keep_verified_turns_and_apply_training_policy(
         "model_context": "ContextLengthExceededError",
         "model_server": "ModelServerError",
         "step": "AgentTimeoutError",
-        "prepare": "AgentTimeoutError",
+        "prepare": "AgentSetupTimeoutError",
         "model_timeout": "AgentTimeoutError",
         "missing_logprobs": "ContextLengthExceededError",
     }[phase]
@@ -1409,21 +1410,23 @@ async def test_interrupted_tasks_keep_verified_turns_and_apply_training_policy(
     batch = writer.groups[0][1].trajectory_batch
     assert closed == [True]
     assert batch["error_treatments"] == [treatment]
-    assert batch["exception_types"] == [exception_type]
+    assert batch["exception_types"] == ["PassthroughWithoutLogprobs" if phase == "missing_logprobs" else exception_type]
     assert batch["exclude_from_baseline"] == [exclude]
     assert "private" not in str(batch["verification_results"])
-    if retain:
+    if phase != "prepare":
         assert batch["response_ids"] == [[3, 4]]
-        np.testing.assert_allclose(batch["rollout_logprobs"], [[-0.1, -0.2]])
-        assert batch["loss_masks"] == ([[0, 0]] if treatment == "mask" else [[1, 1]])
+        np.testing.assert_allclose(
+            batch["rollout_logprobs"], [[0.0, 0.0]] if phase == "missing_logprobs" else [[-0.1, -0.2]]
+        )
+        assert batch["loss_masks"] == ([[1, 1]] if train else [[0, 0]])
         assert batch["unshaped_rewards"] == [1.0]
         assert batch["rewards"] == [[0.0, 1.0 if treatment == "passthrough" else 0.0]]
         assert batch["evidence_messages"][0][-1]["content"] == "first"
         np.testing.assert_array_equal(batch["student_topk_indices"], [[[3, 99], [4, 99]]])
         assert batch["rollout_routed_experts"][0][:, 0, 0].tolist() == [1, 1]
     else:
-        assert batch["response_ids"] == [[]]
-        assert batch["loss_masks"] == [[]]
+        assert batch["response_ids"] == [[0]]
+        assert batch["loss_masks"] == [[0]]
         assert batch["verification_results"][0].score is None
     if phase in {"model_context", "model_server", "missing_logprobs"}:
         assert batch["server_errors"] == [
@@ -1899,7 +1902,8 @@ async def test_genrm_final_grades_and_credit_reach_training_batch(
         failed_index = failed_indices[0]
         assert batch["exception_types"][failed_index] == "ModelServerError"
         assert batch["verification_results"][failed_index].score is None
-        assert batch["loss_masks"][failed_index] == []
+        assert batch["response_ids"][failed_index] == [0]
+        assert batch["loss_masks"][failed_index] == [0]
         assert batch["exclude_from_baseline"][failed_index] is True
         if failed_judge:
             # A failed comparison can cancel pending judge requests.
@@ -1912,7 +1916,7 @@ async def test_genrm_final_grades_and_credit_reach_training_batch(
             assert {pair["response_1"] for pair in comparisons} == {"better", "worse"}
             for index, rollout in enumerate(rollouts):
                 if index == failed_index:
-                    assert batch["rewards"][index] == []
+                    assert batch["rewards"][index] == [0.0]
                 else:
                     reward = {"better": 5.0, "worse": 1.0}[rollout.steps[-1].turn.text]
                     assert batch["rewards"][index] == [0.0, reward]
@@ -2191,9 +2195,9 @@ async def test_context_limits_preserve_only_completed_gym_turns(
         assert batch["rewards"] == [[0.0, 0.1]]
         assert batch["evidence_messages"][0][-1] == {"role": "assistant", "content": "#### 13"}
     else:
-        assert batch["response_ids"] == [[]]
-        assert batch["loss_masks"] == [[]]
-        np.testing.assert_allclose(batch["rollout_logprobs"], [[]])
+        assert batch["response_ids"] == [[0]]
+        assert batch["loss_masks"] == [[0]]
+        np.testing.assert_allclose(batch["rollout_logprobs"], [[0.0]])
         assert batch["verification_results"][0].score is None
         assert batch["exclude_from_baseline"] == [True]
 

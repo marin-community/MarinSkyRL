@@ -13,7 +13,7 @@ from skyrl_gym.verification import (
     VerificationResult,
 )
 from taskcompendium.grading_result import GradeResult, Outcome
-from rolloutengine.contracts import RolloutData
+from rolloutengine.contracts import RolloutContractError, RolloutData
 
 from skyrl_train.error_treatment import ErrorTreatment
 from skyrl_train.dataset.tasks import TASKCOMPENDIUM_ENVIRONMENT
@@ -23,6 +23,7 @@ from skyrl_train.trajectory_runners.projections import (
     WholeTrajectoryProjection,
     logprobs_requested,
 )
+
 from skyrl_train.trajectory_runners.selected_topk import align_student_topk
 from skyrl_train.trajectory_runners.trajectory_processing import get_batch_failure_metrics
 from skyrl_train.trajectory_runners.types import AgentLoopOutput, TrajectoryBatch, TrajectoryRequestBatch
@@ -34,10 +35,12 @@ from skyrl_train.utils.harbor_errors import (
     treatment_excludes_from_baseline,
 )
 
+MASKED_TOKEN_ID = 0
+
 
 def verification_result(grade: GradeResult) -> VerificationResult:
     """Preserve the task verdict and its availability in the training contract."""
-    if grade.status == Outcome.GRADED:
+    if grade.status in {Outcome.GRADED, Outcome.SUBMISSION_FAILURE}:
         assert grade.reward is not None
         return VerificationResult.verified(
             grade.reward,
@@ -63,7 +66,13 @@ def rollout_loss_eligible(
     if rollout.failure is None:
         return True
     treatment, missing_logprobs = _failure_policy(rollout, error_handling, logprobs_required)
-    return bool(any(rollout.loss_mask)) and treatment is not ErrorTreatment.MASK and missing_logprobs is None
+    graded = rollout.grade.status in {Outcome.GRADED, Outcome.SUBMISSION_FAILURE}
+    return (
+        bool(any(rollout.loss_mask))
+        and not treatment_excludes_from_baseline(treatment, verifier_available=graded)
+        and missing_logprobs is None
+        and (not rollout.failure.diagnostics.get("timed_out") or error_handling.preserve_logprobs_on_timeout)
+    )
 
 
 def _failure_policy(
@@ -88,7 +97,7 @@ def _failure_policy(
 
 
 def _rollout_rewards(rollout: RolloutData) -> RewardResult:
-    graded = rollout.grade.status == Outcome.GRADED
+    graded = rollout.grade.status in {Outcome.GRADED, Outcome.SUBMISSION_FAILURE}
     skipped = rollout.grade.status == Outcome.SKIPPED
     token_rewards = None
     token_credit = None
@@ -128,7 +137,9 @@ def _model_evidence(rollout: RolloutData) -> RolloutEvidence:
     candidates = [step.turn.metadata.get("student_topk_indices") for step in rollout.steps]
     scores = [step.turn.metadata.get("behavior_topk_logprobs") for step in rollout.steps]
     selected = None
-    if candidates and all(value is not None for value in candidates) and all(value is not None for value in scores):
+    if any(value is not None for value in (*candidates, *scores)):
+        if any(value is None for value in (*candidates, *scores)):
+            raise RolloutContractError("Student top-K evidence must be present on every model turn")
         generated = []
         admitted_candidates = []
         admitted_scores = []
@@ -163,9 +174,15 @@ def _model_evidence(rollout: RolloutData) -> RolloutEvidence:
         response=rollout.steps[-1].turn.text if rollout.steps else None,
         stop_reason=rollout.stop_reason,
         generated_token_count=sum(rollout.loss_mask),
-        prompt_token_ids=rollout.prompt_token_ids,
-        response_token_ids=rollout.response_token_ids,
-        behavior_logprobs=None if rollout.logprobs is None else np.asarray(rollout.logprobs, dtype=np.float32),
+        prompt_token_ids=rollout.prompt_token_ids or (MASKED_TOKEN_ID,),
+        response_token_ids=rollout.response_token_ids or (MASKED_TOKEN_ID,),
+        behavior_logprobs=(
+            np.asarray([0.0], dtype=np.float32)
+            if not rollout.response_token_ids
+            else None
+            if rollout.logprobs is None
+            else np.asarray(rollout.logprobs, dtype=np.float32)
+        ),
         student_topk_indices=None if selected is None else selected.indices,
         behavior_topk_logprobs=None if selected is None else selected.topk_logprobs,
         routed_experts=routed_experts,
@@ -179,12 +196,16 @@ def training_output(
     logprobs_required: bool,
 ) -> AgentLoopOutput:
     """Project token evidence and rewards with the configured training eligibility policy."""
-    graded = rollout.grade.status == Outcome.GRADED
+    graded = rollout.grade.status in {Outcome.GRADED, Outcome.SUBMISSION_FAILURE}
     verification = verification_result(rollout.grade)
     if graded:
         disposition = TrainingDisposition.train()
     elif rollout.grade.status == Outcome.SKIPPED:
-        disposition = TrainingDisposition.train(reason="verification skipped")
+        disposition = (
+            TrainingDisposition.train(reason="verification skipped")
+            if any(step.transition.reward is not None for step in rollout.steps)
+            else TrainingDisposition.mask("No verifier verdict", exception_type=rollout.grade.status.value)
+        )
     else:
         disposition = TrainingDisposition(
             loss_eligible=False,
@@ -207,9 +228,11 @@ def training_output(
             exception_type=missing_logprobs or failure.exception_type,
         )
         error_treatment = treatment.value
-        verification = replace(
-            verification,
-            diagnostics={**verification.diagnostics, "exception_type": failure.exception_type, **failure.diagnostics},
+        diagnostics = {**verification.diagnostics, "exception_type": failure.exception_type, **failure.diagnostics}
+        verification = (
+            replace(verification, diagnostics=diagnostics)
+            if graded
+            else VerificationResult.error("Rollout execution failed", diagnostics=diagnostics)
         )
         if treatment is not ErrorTreatment.PASSTHROUGH or not graded:
             reward = replace(
@@ -228,12 +251,15 @@ def training_output(
                 if len(tags) != len(step.turn.response_token_ids):
                     raise ValueError("Span tags must align with generated tokens")
                 response_span_tags[step.response_end + 1 - len(tags) : step.response_end + 1] = tags
+    evidence = _model_evidence(rollout)
+    if evidence.behavior_logprobs is None and not disposition.loss_eligible:
+        evidence = replace(evidence, behavior_logprobs=np.zeros(len(rollout.response_token_ids), dtype=np.float32))
     return AgentLoopOutput(
-        evidence=_model_evidence(rollout),
+        evidence=evidence,
         verification=verification,
         reward=reward,
         disposition=disposition,
-        loss_mask=list(rollout.loss_mask),
+        loss_mask=list(rollout.loss_mask) if rollout.response_token_ids else [0],
         env_metrics=dict(rollout.metrics),
         error_treatment=error_treatment,
         response_span_tags=response_span_tags,

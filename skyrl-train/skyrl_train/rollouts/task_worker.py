@@ -14,7 +14,7 @@ from omegaconf import DictConfig, OmegaConf
 from shellbox.backends.docker.machine import DockerMachineFactory
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
 from shellbox.machine import Machine, MachineFactory
-from taskcompendium.grading_result import GradeResult, Outcome
+from taskcompendium.grading_result import Outcome
 from rolloutengine.contracts import (
     GenerationLimitReached,
     ModelRequest,
@@ -128,30 +128,26 @@ async def _model_turn(
 def _failed_rollout(
     interruption: RolloutInterrupted,
     lowered: LoweredTaskSpec,
-    config: ErrorHandlingConfig,
-    *,
-    logprobs_required: bool,
 ) -> RolloutData:
     """Retain verified turns and safe diagnostics for the training policy."""
     task = lowered.task
     error = interruption.__cause__
     assert isinstance(error, Exception)
-    if interruption.operation == RolloutOperation.MODEL and not isinstance(error, (ModelServerError, TimeoutError)):
+    if interruption.operation == RolloutOperation.MODEL and not isinstance(
+        error, (ModelServerError, TimeoutError, ConnectionError)
+    ):
         raise error
     exception_type = type(error).__name__
-    diagnostics = {}
+    diagnostics = {"operation": interruption.operation.value, "timed_out": isinstance(error, TimeoutError)}
     if isinstance(error, ModelServerError):
         if error.category == "context_overflow":
             exception_type = "ContextLengthExceededError"
-        diagnostics = {
-            "error_category": error.category,
-            "request_id": error.request_id,
-            "status_code": error.status_code,
-        }
+        diagnostics.update(error_category=error.category, request_id=error.request_id, status_code=error.status_code)
     elif isinstance(error, TimeoutError):
         exception_type = {
             RolloutOperation.ATTEMPT: "TrialTimeoutError",
             RolloutOperation.START: "EnvironmentStartTimeoutError",
+            RolloutOperation.PREPARE: "AgentSetupTimeoutError",
             RolloutOperation.GRADE: "VerifierTimeoutError",
             RolloutOperation.CLEANUP: "CleanupTimeoutError",
         }.get(interruption.operation, "AgentTimeoutError")
@@ -173,36 +169,11 @@ def _failed_rollout(
             messages=steps[-1].messages if steps else (),
             steps=steps,
         )
-    recover = (
-        bool(rollout.steps)
-        and (
-            interruption.operation != RolloutOperation.GRADE
-            or (isinstance(error, TimeoutError) and config.preserve_logprobs_on_timeout)
-        )
-        and (not logprobs_required or rollout.logprobs is not None)
-        and (
-            not isinstance(error, TimeoutError)
-            or config.preserve_logprobs_on_timeout
-            or (lowered.session.task_session == SHELLBOX_SESSION and rollout.grade.status == Outcome.GRADED)
-        )
-        and (not isinstance(error, ModelServerError) or error.category == "context_overflow")
-    )
-    grade = GradeResult(Outcome.INFRA_ERROR, None, "Rollout execution failed")
-    if recover and interruption.operation != RolloutOperation.GRADE:
-        grade = rollout.grade
-        if grade.status == Outcome.UNAVAILABLE:
-            grade = fold_grades([step.transition.grade for step in rollout.steps if step.transition.grade is not None])
+    grade = rollout.grade
+    if grade.status == Outcome.UNAVAILABLE and interruption.operation != RolloutOperation.GRADE and rollout.steps:
+        grade = fold_grades([step.transition.grade for step in rollout.steps if step.transition.grade is not None])
     if cleanup_errors := interruption.rollout.grade.diagnostics.get("cleanup_errors"):
         grade = replace(grade, diagnostics={**grade.diagnostics, "cleanup_errors": cleanup_errors})
-    if not recover:
-        rollout = replace(
-            rollout,
-            response_token_ids=(),
-            loss_mask=(),
-            logprobs=(),
-            steps=(),
-            metrics={name: value for name, value in rollout.metrics.items() if name == "cleanup_error_count"},
-        )
     logger.warning("Task {} interrupted during {}: {}", task.id, interruption.operation, exception_type)
     return replace(
         rollout,
@@ -329,12 +300,7 @@ class TaskRolloutWorker:
                     async with harbor_slots, self.task_slots:
                         result = await engine.run(lowered)
                 except RolloutInterrupted as interruption:
-                    result = _failed_rollout(
-                        interruption,
-                        lowered,
-                        policies[index],
-                        logprobs_required=require_logprobs,
-                    )
+                    result = _failed_rollout(interruption, lowered)
                 if harbor is None:
                     return result
                 result = harbor_grading_failure(result)

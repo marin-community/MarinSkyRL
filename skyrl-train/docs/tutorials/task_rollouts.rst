@@ -25,7 +25,7 @@ It retains serialized tasks in memory without an intermediate Parquet or Arrow c
 Source-row conversion does not use ``data.task_cache_dir``.
 ``skyrl_train.entrypoints.taskcompendium`` reads task Parquet directly.
 The `SWE example <../../examples/mini_swe_agent/README.md>`_ uses this entrypoint with ``data.train_data`` and ``data.val_data``.
-``skyrl_train.entrypoints.main_harbor`` converts task
+``skyrl_train.entrypoints.terminal_bench`` converts task
 directories and packed sources through ``HarborTaskDataset`` and uses the same worker.
 Harbor caches private task Parquet in ``data.task_cache_dir``.
 Explicit exports use ``skyrl_train.dataset.tasks.write_tasks(Path(...), records)``.
@@ -104,9 +104,11 @@ behavior log probabilities, token rewards, expert routes, and teacher routes.
 Sessions can supply per-turn optimization rewards. Otherwise, the whole-task projection uses the task grade.
 Step projection uses each turn's reward, with the task grade on the last turn when no per-turn rewards exist.
 A no-grade verifier result with ``RolloutData.failure=None`` excludes tokens from loss and baseline calculations.
-Recorded execution failures, including verifier timeouts, use the exception policy, with zero optimization reward when no grade is available. Explicitly
-skipped grading retains trainable tokens with zero reward.
-``harbor.verifier_disable=true`` skips grading for Harbor tasks.
+Recorded execution failures, including verifier timeouts, use the exception policy.
+They receive zero optimization reward when no grade is available.
+Explicitly skipped grading can use a session's optimization reward.
+Without a session reward, the row is masked from loss and the baseline.
+``harbor.verifier_disable=true`` skips grading for Harbor tasks and masks those rows.
 Nemotron GenRM tasks use a judge model to compare a group of responses against
 a private grading principle. Configure that judge in
 ``environment.task_sessions.nemotron_ultra.genrm``.
@@ -125,10 +127,12 @@ Private task records and grading configuration remain outside these exports.
 ``passthrough`` retains the available verifier score.
 Exception lists override the built-in error categories. ``default_error_treatment``
 selects one of these policies for unknown errors.
-Timeout recovery retains completed turns with available grades and valid token evidence.
+Failed attempts retain exact tokens, behavior log probabilities, and available verifier grades.
 The effective ``sampling_params.logprobs`` setting determines the probability requirement, including request overrides.
-When that setting requests log probabilities, recovery requires one log probability per retained generated token.
-``generator.error_handling.preserve_logprobs_on_timeout=false`` disables timeout recovery.
+When that setting requests log probabilities, loss eligibility requires one log probability per retained generated token.
+``generator.error_handling.preserve_logprobs_on_timeout=false`` masks loss after a timeout.
+The error policy still controls optimization reward and baseline membership.
+Empty responses use one fully masked placeholder token in the trainer row.
 
 ``TaskRolloutWorker.run_task`` projects and finalizes a completed prompt group before one
 buffer write. A failed group cannot commit partial results.

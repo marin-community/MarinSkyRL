@@ -27,6 +27,7 @@ from taskcompendium.submission import conversation_messages
 from verifyit.spec import NumericSpec
 
 from skyrl_gym.verification import VerificationStatus
+from skyrl_train.config.utils import get_default_config
 from skyrl_train.dataset.dataset import PromptDataset
 from skyrl_train.dynamic_sampling import GroupSelectionPolicy
 from skyrl_train.group_admission import GroupAdmissionPolicy, GroupAdvantageInvariant
@@ -38,7 +39,10 @@ from skyrl_train.rollouts.buffer import (
     RolloutContentPolicy,
     RolloutTask,
 )
-from skyrl_train.trajectory_runners.rollout_engine import LOWERED_TASK_COLUMN, RolloutEngineTrajectoryRunner
+from skyrl_train.dataset.tasks import LOWERED_TASK_COLUMN, TASKCOMPENDIUM_ENVIRONMENT
+from skyrl_train.rollouts.task_projections import WholeTaskProjection
+from skyrl_train.rollouts.task_worker import TaskRolloutWorker
+from skyrl_train.trajectory_runners.projections import WholeTrajectoryProjection
 from skyrl_train.trajectory_runners.model_clients import ModelServerError
 from skyrl_train.trajectory_runners.types import TokenProvenance, TrajectoryID
 
@@ -170,22 +174,25 @@ def lowered(task):
 
 
 def runner(client, factories=None, *, error_handling=None):
-    config = OmegaConf.create(
+    config = OmegaConf.merge(
+        get_default_config().generator,
         {
             "backend": "vllm",
             "max_input_length": 128,
             "apply_overlong_filtering": False,
             "sampling_params": {"logprobs": True, "max_generate_length": 32},
             "error_handling": error_handling or {},
-        }
+        },
     )
-    return RolloutEngineTrajectoryRunner(config, Tokenizer(), client, factories or {})
+    return TaskRolloutWorker(
+        config, WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())), client, factories or {}
+    )
 
 
 def request(record):
     return {
         "prompts": [conversation_messages(record.task.context)],
-        "env_classes": ["native"],
+        "env_classes": [TASKCOMPENDIUM_ENVIRONMENT],
         "env_extras": [
             {LOWERED_TASK_COLUMN: record.model_dump_json(), "data_source": "fixture", "teacher_route": "math"}
         ],
@@ -413,6 +420,7 @@ async def test_native_empty_failure_keeps_mixed_batch_evidence_aligned():
     batch = request(lowered(answer_task()))
     for key in ("prompts", "env_classes", "env_extras", "trajectory_ids"):
         batch[key] *= 2
+    batch["trajectory_ids"] = [TrajectoryID("task", index) for index in range(2)]
     client = ReplayClient([{"role": "assistant", "content": "12"}, ConnectionError("serving unavailable")])
     output = await runner(client).run(batch)
 
@@ -449,8 +457,9 @@ async def test_native_no_verdict_is_classified_and_masked(scenario, status):
 
 async def test_native_reconstructed_tokens_fail_the_transport_contract():
     client = ReplayClient([{"role": "assistant", "content": "12"}], provenance=TokenProvenance.RECONSTRUCTED)
-    with pytest.raises(RolloutContractError):
+    with pytest.raises(ExceptionGroup) as failure:
         await runner(client).run(request(lowered(answer_task())))
+    assert isinstance(failure.value.exceptions[0], RolloutContractError)
 
 
 async def test_native_dataset_group_round_trips_through_leased_buffer(tmp_path):
