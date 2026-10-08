@@ -111,7 +111,7 @@ _REQUIRED_CONTEXT_BUDGET_FIELDS = frozenset(
     }
 )
 _CONTEXT_BUDGET_FRACTION_FIELDS = frozenset({"generated_budget_fraction", "overlong_cache_fraction"})
-_CONTEXT_BUDGET_FIELDS = _REQUIRED_CONTEXT_BUDGET_FIELDS | _CONTEXT_BUDGET_FRACTION_FIELDS
+_CONTEXT_BUDGET_FIELDS = _REQUIRED_CONTEXT_BUDGET_FIELDS | _CONTEXT_BUDGET_FRACTION_FIELDS | {"serving_window_tokens"}
 _DEFAULT_GENERATED_BUDGET_FRACTION = 0.5
 _DEFAULT_OVERLONG_CACHE_FRACTION = 0.25
 
@@ -133,11 +133,12 @@ _DERIVED_CONTEXT_FIELDS = (
 
 @dataclass(frozen=True)
 class ContextBudget:
-    """One coherent token budget for an Iris RL rollout request."""
+    """Request limits and serving capacity; larger capacity does not enlarge client requests."""
 
     request_window_tokens: int
     max_new_tokens_per_turn: int
     max_turns: int
+    serving_window_tokens: int
     generated_budget_fraction: float = _DEFAULT_GENERATED_BUDGET_FRACTION
     overlong_cache_fraction: float = _DEFAULT_OVERLONG_CACHE_FRACTION
 
@@ -180,6 +181,7 @@ class ContextBudget:
         """Return the persisted representation, including derived client input."""
         return {
             "request_window_tokens": self.request_window_tokens,
+            "serving_window_tokens": self.serving_window_tokens,
             "max_new_tokens_per_turn": self.max_new_tokens_per_turn,
             "max_turns": self.max_turns,
             "generated_budget_fraction": self.generated_budget_fraction,
@@ -253,6 +255,9 @@ def resolve_context_budget(raw: Dict[str, Any], config_path: Path) -> ContextBud
             config["max_new_tokens_per_turn"], "max_new_tokens_per_turn", config_path
         ),
         max_turns=_require_positive_integer(config["max_turns"], "max_turns", config_path),
+        serving_window_tokens=_require_positive_integer(
+            config.get("serving_window_tokens", config["request_window_tokens"]), "serving_window_tokens", config_path
+        ),
         generated_budget_fraction=_require_fraction(
             config.get("generated_budget_fraction", _DEFAULT_GENERATED_BUDGET_FRACTION),
             "generated_budget_fraction",
@@ -271,6 +276,8 @@ def resolve_context_budget(raw: Dict[str, Any], config_path: Path) -> ContextBud
             f"{config_path}: request_window_tokens ({budget.request_window_tokens}) must exceed "
             f"max_new_tokens_per_turn ({budget.max_new_tokens_per_turn})"
         )
+    if budget.serving_window_tokens < budget.request_window_tokens:
+        raise ValueError(f"{config_path}: serving_window_tokens must cover the complete request_window_tokens")
     return budget
 
 
@@ -287,7 +294,7 @@ def _materialize_context_budget(
     generator["max_input_length"] = budget.max_input_tokens
     generator["max_turns"] = budget.max_turns
     generator.setdefault("sampling_params", {})["max_generate_length"] = budget.max_new_tokens_per_turn
-    generator.setdefault("engine_init_kwargs", {})["max_model_len"] = budget.request_window_tokens
+    generator.setdefault("engine_init_kwargs", {})["max_model_len"] = budget.serving_window_tokens
     generator.setdefault("trajectory_reward_shaping", {})["overlong"] = {
         "l_max": budget.generated_tokens_per_trajectory,
         "l_cache": budget.overlong_cache_tokens,

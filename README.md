@@ -55,6 +55,13 @@ task's local disk before Ray starts and load vLLM from local safetensors. Reserv
 the full checkpoint on every task. The learner continues to use the original object-store
 source and identity; tokenizer selection, model weights, and training settings are preserved.
 
+`context_budget.request_window_tokens` includes one prompt and its complete response. The launcher
+derives the agent's input allowance by subtracting `max_new_tokens_per_turn`. Set
+`context_budget.serving_window_tokens` when validation needs a larger vLLM server capacity; it must
+cover the request window and leaves agent and training limits unchanged. If omitted, serving capacity
+equals the request window. For example, a 40,960-token request window with 8,192 output tokens and
+73,728 serving tokens gives the agent a 32,768-token input limit while preserving the larger server.
+
 The walkthrough below reproduces the original OpenThoughts-Agent v1 release (kept here for reference), i.e.:
 - Using [open-thoughts/OpenThinker-Agent-v1-SFT](https://huggingface.co/open-thoughts/OpenThinker-Agent-v1-SFT) as base
 - GRPO with the data [open-thoughts/OpenThoughts-Agent-v1-RL](https://huggingface.co/datasets/open-thoughts/OpenThoughts-Agent-v1-RL), while
