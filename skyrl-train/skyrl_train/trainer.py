@@ -1411,9 +1411,9 @@ class RayPPOTrainer:
             async_step_metrics(
                 core_seconds=core_seconds,
                 cycle_seconds=time.perf_counter() - cycle_started,
-                buffer_wait_seconds=self.all_timings["wait_for_generation_buffer"],
+                buffer_wait_seconds=self.all_timings.get("wait_for_generation_buffer", 0.0),
                 training_seconds=self.all_timings["run_training"],
-                sync_seconds=self.all_timings["sync_weights"],
+                sync_seconds=self.all_timings.get("sync_weights", 0.0),
                 consumed_loss_tokens=consumed.loss_tokens,
                 consumed_response_tokens=consumed.response_tokens,
                 policy_gpus=placement.policy_num_nodes * placement.policy_num_gpus_per_node,
