@@ -218,7 +218,6 @@ trainer:
     clip_ratio_c: 3.0
     off_policy_correction: null
     off_policy_correction_rules: null
-    tito_full: null
     tis_splice: true
     tis_lcs_alert_threshold: 0.005
     enable_token_reward_channel: false
@@ -531,6 +530,7 @@ environment:
 trajectory_runner:
   command_timeout: 120
   cleanup_timeout: 30
+  shutdown_timeout: 60
   max_concurrent_tasks: 32
   skopeo: skopeo
   image_cache: ~/.cache/skyrl/task-images

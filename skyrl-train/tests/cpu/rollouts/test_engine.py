@@ -14,7 +14,9 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from loguru import logger
 from harbor_config.errors import ErrorCategory, error_category
+from jinja2 import Environment, StrictUndefined
 from omegaconf import OmegaConf
 from skyrl_gym.task_records import fold_grades, grade_result
 from skyrl_gym.task_sessions import AnswerTaskSession
@@ -22,7 +24,7 @@ from skyrl_gym.verification import VerificationResult, VerificationStatus, norma
 from taskcompendium.grading import numeric_answer
 from taskcompendium.grading_result import GradeResult, Outcome
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
-from shellbox.machine import Command, ExitReason, Result, ShellSimBuiltins
+from shellbox.machine import Command, ExitReason, Result, ShellSimBuiltins, UnsupportedMachineSpec, NetworkPolicy
 from taskcompendium.shell_verifier import (
     ArtifactKind,
     ExitCodeReward,
@@ -116,6 +118,7 @@ async def test_session_verifier_failures_reach_training_eligibility(
         InferenceClient(),
         {},
         sessions={"verifier": partial(AnswerTaskSession, grader=grader)},
+        shutdown_timeout=30,
     )
     writer = Writer()
     try:
@@ -177,6 +180,7 @@ async def test_corrupt_source_task_is_masked_without_losing_its_graded_peer(
         projection_type(projection),
         InferenceClient(),
         {},
+        shutdown_timeout=30,
     )
     writer = Writer()
     try:
@@ -244,12 +248,14 @@ async def test_one_machine_cleanup_failure_does_not_abort_the_buffer_group(task_
         projection_type(projection),
         InferenceClient(),
         {"shellsim": Factory()},
+        shutdown_timeout=30,
     )
     writer = Writer()
     try:
         await worker.run_task(RolloutTask(RolloutLease("lease", 0, 1), {"uid": task.id}, request), writer)
     finally:
-        await worker.shutdown()
+        with pytest.raises(ExceptionGroup, match="Task worker shutdown failed"):
+            await worker.shutdown()
     assert len(writer.groups) == 1
     batch = writer.groups[0][1].trajectory_batch
     assert batch["response_ids"] == [[3, 4], [3, 4]]
@@ -262,6 +268,169 @@ async def test_one_machine_cleanup_failure_does_not_abort_the_buffer_group(task_
     for machine in machines:
         with pytest.raises(RuntimeError, match="closed"):
             await machine.run(Command(("true",)))
+
+
+@dataclass
+class DeletionMachine:
+    machine: object
+    deletions: list
+    deleted: asyncio.Event
+
+    async def run(self, command):
+        return await self.machine.run(command)
+
+    async def upload(self, source, target):
+        await self.machine.upload(source, target)
+
+    async def download(self, source, target):
+        await self.machine.download(source, target)
+
+    async def close(self):
+        await self.machine.close()
+        self.deletions.append(self.machine)
+        self.deleted.set()
+
+
+@pytest.mark.asyncio
+async def test_worker_shutdown_cancels_model_and_deletes_its_machine(task_inputs):
+    config, request = task_inputs
+    lowered = LoweredTaskSpec.model_validate_json(request["env_extras"][0]["lowered_task_spec"])
+    request["env_extras"][0]["lowered_task_spec"] = lowered_task(lowered.task, backend="fixture").model_dump_json()
+    started = asyncio.Event()
+    deleted = asyncio.Event()
+    deletions = []
+
+    class Client(InferenceClient):
+        async def generate(self, request):
+            started.set()
+            await asyncio.Event().wait()
+
+    class Factory:
+        async def create(self, spec):
+            machine = await ShellSimMachineFactory().create(spec)
+            return DeletionMachine(machine, deletions, deleted)
+
+    worker = TaskRolloutWorker(
+        config,
+        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        Client(),
+        {"fixture": Factory()},
+        shutdown_timeout=30,
+    )
+    async with asyncio.timeout(5):
+        pending = asyncio.create_task(worker.run(request))
+        await started.wait()
+        await worker.shutdown()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+    assert len(deletions) == 1
+    with pytest.raises(RuntimeError, match="closed"):
+        await deletions[0].run(Command(("true",)))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("complete_during_shutdown", [True, False])
+async def test_worker_shutdown_owns_late_creation_and_bounds_a_blocked_provider(task_inputs, complete_during_shutdown):
+    config, request = task_inputs
+    lowered = LoweredTaskSpec.model_validate_json(request["env_extras"][0]["lowered_task_spec"])
+    request["env_extras"][0]["lowered_task_spec"] = lowered_task(
+        lowered.task, backend="fixture-provider"
+    ).model_dump_json()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    deleted = asyncio.Event()
+    deletions = []
+    diagnostics = []
+
+    class Factory:
+        async def create(self, spec):
+            started.set()
+            await release.wait()
+            machine = await ShellSimMachineFactory().create(spec)
+            return DeletionMachine(machine, deletions, deleted)
+
+    worker = TaskRolloutWorker(
+        config,
+        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        InferenceClient(),
+        {"fixture-provider": Factory()},
+        shutdown_timeout=0.05 if not complete_during_shutdown else 5,
+    )
+    log_sink = logger.add(lambda message: diagnostics.append(message.record["extra"]), level="ERROR")
+    try:
+        async with asyncio.timeout(5):
+            rollout = asyncio.create_task(worker.run(request))
+            await started.wait()
+            shutdown = asyncio.create_task(worker.shutdown())
+            with pytest.raises(asyncio.CancelledError):
+                await rollout
+            if complete_during_shutdown:
+                release.set()
+                await shutdown
+            else:
+                with pytest.raises(ExceptionGroup, match="Task worker shutdown failed"):
+                    await shutdown
+                assert {"provider": "fixture-provider", "open_creations": 1, "open_machines": 0} in diagnostics
+                release.set()
+            await deleted.wait()
+            await worker.shutdown()
+    finally:
+        release.set()
+        logger.remove(log_sink)
+    assert len(deletions) == 1
+    with pytest.raises(RuntimeError, match="closed"):
+        await deletions[0].run(Command(("true",)))
+
+
+@pytest.mark.asyncio
+async def test_mixed_harbor_and_native_tasks_keep_separate_providers_and_machine_specs(task_inputs):
+    config, original = task_inputs
+    lowered = LoweredTaskSpec.model_validate_json(original["env_extras"][0]["lowered_task_spec"])
+    native = lowered.task.model_copy(
+        update={"environment_requirements": EnvironmentRequirements(docker_image="fixture@sha256:" + "a" * 64)}
+    )
+    harbor = native.model_copy(update={"id": "harbor", "tags": ("harbor",)})
+    machines = {"docker": [], "harbor": []}
+
+    class Factory:
+        def __init__(self, provider):
+            self.provider = provider
+
+        async def create(self, spec):
+            machines[self.provider].append(spec)
+            return await ShellSimMachineFactory().create(
+                replace(spec, source=ShellSimBuiltins(), cpus=None, workdir="/workspace")
+            )
+
+    settings = HarborTaskSettings.from_config(OmegaConf.create({"harbor": {"override_cpus": 2, "max_retries": 0}}))
+    request = {
+        **original,
+        "prompts": original["prompts"] * 2,
+        "env_classes": ["taskcompendium"] * 2,
+        "env_extras": [
+            {"lowered_task_spec": lowered_task(task, backend="docker").model_dump_json()} for task in (native, harbor)
+        ],
+        "trajectory_ids": [TrajectoryID(task.id, 0) for task in (native, harbor)],
+    }
+    worker = TaskRolloutWorker(
+        config,
+        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        InferenceClient(),
+        {provider: Factory(provider) for provider in machines},
+        harbor=settings,
+        shutdown_timeout=30,
+    )
+    try:
+        batch = await worker.run(request)
+    finally:
+        await worker.shutdown()
+    assert batch["unshaped_rewards"] == [1.0, 1.0]
+    assert [sum(reward) for reward in batch["rewards"]] == [1.0, 1.0]
+    assert batch["exclude_from_baseline"] == [False, False]
+    assert len(machines["docker"]) == len(machines["harbor"]) == 1
+    assert machines["docker"][0].network is NetworkPolicy.DENY
+    assert machines["docker"][0].cpus is None
+    assert machines["harbor"][0].cpus == 2
 
 
 @pytest.fixture
@@ -322,6 +491,7 @@ async def test_task_replay_preserves_inference_session(task_inputs):
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         Client(),
         {},
+        shutdown_timeout=30,
     )
     try:
         await worker.generate(request)
@@ -351,6 +521,7 @@ async def test_task_grade_and_exact_tokens_reach_the_leased_buffer(task_inputs, 
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         Client(),
         {},
+        shutdown_timeout=30,
     )
     lease = RolloutLease("lease", policy_step=7, batch_id=8)
     writer = Writer()
@@ -509,6 +680,7 @@ async def test_agent_deadlines_grade_the_workspace_and_commit_training_tokens(
         Client(),
         {"shellsim": Factory()},
         harbor=settings,
+        shutdown_timeout=30,
     )
     writer = Writer()
     await worker.run_task(RolloutTask(RolloutLease("lease", 0, 1), {"uid": task.id}, request), writer)
@@ -550,11 +722,68 @@ async def test_model_programming_failure_does_not_commit_a_partial_group(task_in
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         FailedClient(),
         {},
+        shutdown_timeout=30,
     )
     with pytest.raises(ExceptionGroup) as failure:
         await runner.run_task(RolloutTask(RolloutLease("lease", 0, 1), {"uid": "task"}, request), writer)
     assert writer.groups == []
     assert isinstance(failure.value.exceptions[0], ValueError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("projection_type", [WholeTaskProjection, StepTaskProjection])
+@pytest.mark.parametrize(
+    "template,cause_type",
+    [("{{ missing }}", "UndefinedError"), ("{% if %}", "TemplateSyntaxError")],
+)
+async def test_model_template_failure_is_masked_without_losing_its_graded_peer(
+    task_inputs, projection_type, template, cause_type
+):
+    class TemplateClient(InferenceClient):
+        async def generate(self, request):
+            Environment(undefined=StrictUndefined).from_string(request["prompts"][0][0]["content"]).render()
+            return await super().generate(request)
+
+    config, original = task_inputs
+    config.error_handling = {"enable_error_classification": True}
+    prompt = [{"role": "user", "content": template}]
+    failed = source_task(
+        prompt,
+        {"reward_spec": {"ground_truth": "12"}},
+        {},
+        Source(dataset="template", revision="1", row="0", importer_revision="1"),
+    )
+    request = {
+        **original,
+        "prompts": [prompt, original["prompts"][0]],
+        "env_classes": ["gsm8k", "taskcompendium"],
+        "env_extras": [
+            {"lowered_task_spec": lowered_task(failed, "gsm8k").model_dump_json(), "teacher_route": "template"},
+            original["env_extras"][0],
+        ],
+        "trajectory_ids": [TrajectoryID(failed.id, 0), TrajectoryID("arithmetic", 0)],
+    }
+    projection = (
+        WholeTrajectoryProjection if projection_type is WholeTaskProjection else StepWiseTrajectoryProjection
+    )(config, Tokenizer())
+    worker = TaskRolloutWorker(config, projection_type(projection), TemplateClient(), {}, shutdown_timeout=30)
+    writer = Writer()
+    try:
+        await worker.run_task(RolloutTask(RolloutLease("lease", 0, 1), {"uid": failed.id}, request), writer)
+    finally:
+        await worker.shutdown()
+    batch = writer.groups[0][1].trajectory_batch
+    assert batch["response_ids"] == [[0], [3, 4]]
+    assert batch["loss_masks"] == [[0], [1, 1]]
+    assert batch["exclude_from_baseline"] == [True, False]
+    assert batch["exception_types"] == ["TemplateError", None]
+    assert batch["error_treatments"] == ["mask", None]
+    assert batch["unshaped_rewards"] == [0.0, 1.0]
+    failed_result, peer_result = batch["verification_results"]
+    assert failed_result.status is VerificationStatus.ERROR
+    assert failed_result.diagnostics["cause_error_type"] == cause_type
+    assert peer_result.status is VerificationStatus.VERIFIED
+    assert peer_result.score == 1.0
 
 
 @dataclass
@@ -637,6 +866,7 @@ async def test_disabled_harbor_verification_keeps_tokens_but_masks_training(
         ConversationClient(["Done"]),
         {"harbor": ImageFactory()},
         harbor=settings,
+        shutdown_timeout=30,
     )
     try:
         batch = await worker.run(request)
@@ -783,6 +1013,7 @@ async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected
         {"shellsim": Factory(), "verifier": VerifierFactory()},
         harbor=settings,
         retry_wait=wait,
+        shutdown_timeout=30,
     )
     writer = Writer()
     operation = asyncio.create_task(
@@ -956,6 +1187,7 @@ async def test_harbor_retry_policy_preserves_terminal_grades(task_inputs, phase,
         {"shellsim": Factory(), "verifier": VerifierFactory()},
         harbor=settings,
         retry_wait=wait,
+        shutdown_timeout=30,
     )
     batch = await worker.run(request)
     retries = {"exhausted": 2, "retry_missing": 1}.get(failure, 0)
@@ -1025,6 +1257,7 @@ async def test_harbor_completion_reward_uses_the_engine_stop_reason(task_inputs,
         Client(),
         {"shellsim": FixtureImageFactory()},
         harbor=settings,
+        shutdown_timeout=30,
     )
     batch = await worker.run(request)
     assert batch["unshaped_rewards"] == [1.0]
@@ -1089,6 +1322,7 @@ async def test_strict_harbor_parser_masks_only_the_affected_response(task_inputs
         InferenceClient(),
         {"shellsim": FixtureImageFactory()},
         harbor=settings,
+        shutdown_timeout=30,
     )
     batch = await worker.run(request)
     assert batch["unshaped_rewards"] == [1.0, 1.0]
@@ -1147,6 +1381,7 @@ async def test_harbor_concurrency_does_not_queue_gym_tasks(task_inputs, phase):
         harbor=HarborTaskSettings.from_config(OmegaConf.create({"harbor": {"n_concurrent_trials": 2}})),
         concurrent_tasks=2 if phase == "train" else 3,
         concurrent_harbor_tasks=1,
+        shutdown_timeout=30,
     )
     operation = asyncio.create_task(worker.run(request))
     try:
@@ -1280,6 +1515,7 @@ async def test_mixed_nemotron_tasks_run_without_the_original_sources(
         MixedClient(),
         {"harbor": ImageFactory()},
         harbor=settings,
+        shutdown_timeout=30,
     )
     writer = Writer()
     await worker.run_task(RolloutTask(RolloutLease("lease", 0, 1), {"uid": "mixed"}, request), writer)
@@ -1404,6 +1640,7 @@ async def test_interrupted_tasks_keep_verified_turns_and_apply_training_policy(
         InterruptedClient(["first", "unverified"]),
         {},
         sessions={"interrupted": InterruptedSession},
+        shutdown_timeout=30,
     )
     writer = Writer()
     await worker.run_task(RolloutTask(RolloutLease("lease", 0, 1), {"uid": task.id}, request), writer)
@@ -1467,6 +1704,7 @@ async def test_invalid_model_evidence_aborts_the_group_even_with_error_masking(t
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         InvalidClient(["#### 13", "#### 12"]),
         {},
+        shutdown_timeout=30,
     )
     writer = Writer()
     with pytest.raises(ExceptionGroup) as failure:
@@ -1494,6 +1732,7 @@ async def test_overlong_filter_uses_sampled_end_tokens(task_inputs, stop_reason,
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         StoppedClient(),
         {},
+        shutdown_timeout=30,
     )
     batch = await worker.run(request)
     assert batch["response_ids"] == [[3, last_token]]
@@ -1538,6 +1777,7 @@ async def test_source_tasks_run_without_the_original_dataset(tmp_path, task_inpu
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         client,
         {},
+        shutdown_timeout=30,
     )
     request = {
         "prompts": [prompt],
@@ -1613,6 +1853,7 @@ async def test_harbor_source_materialization_runs_without_the_original_directory
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         client,
         {"docker": ImageFactory()},
+        shutdown_timeout=30,
     )
     writer = Writer()
     await worker.run_task(RolloutTask(RolloutLease("lease", 0, 1), {"uid": uid}, request), writer)
@@ -1700,6 +1941,7 @@ async def test_harbor_task_worker_preserves_verdicts_and_shapes_group_rewards(
         InferenceClient(),
         {"shellsim": FixtureImageFactory()},
         harbor=settings,
+        shutdown_timeout=30,
     )
     writer = Writer()
     await worker.run_task(RolloutTask(RolloutLease("lease", 0, 1), {"uid": "harbor"}, request), writer)
@@ -1890,6 +2132,7 @@ async def test_genrm_final_grades_and_credit_reach_training_batch(
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         CohortClient(["better", "failed", "worse"] if failed_peer else ["better", "worse"]),
         {},
+        shutdown_timeout=30,
     )
     rollouts = await runner.generate(request)
     batch = await runner.training_batch(request, rollouts)
@@ -1989,6 +2232,7 @@ async def test_task_group_grader_preserves_separate_samples_and_private_inputs(t
         {},
         concurrent_tasks=1,
         group_graders={"group_total": group_total},
+        shutdown_timeout=30,
     )
     rollouts = await worker.generate(request)
     batch = await worker.training_batch(request, rollouts)
@@ -2033,6 +2277,7 @@ async def test_unified_gym_tasks_preserve_grading_and_turn_credit(task_inputs, e
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         model,
         {},
+        shutdown_timeout=30,
     )
     batch = await runner.run(request)
     assert batch["rewards"] == [rewards]
@@ -2162,6 +2407,7 @@ async def test_aime_rollout_preserves_length_reward_and_phase_metrics(
         DirectModelClient(engine),
         {},
         max_verifier_workers=1,
+        shutdown_timeout=30,
     )
     try:
         with observe_rollout_call(step=3, mode="async", enabled=True):
@@ -2253,7 +2499,7 @@ async def test_context_limits_preserve_only_completed_gym_turns(
     projection = (
         WholeTrajectoryProjection if projection_type is WholeTaskProjection else StepWiseTrajectoryProjection
     )(config, Tokenizer())
-    worker = TaskRolloutWorker(config, projection_type(projection), DirectModelClient(engine), {})
+    worker = TaskRolloutWorker(config, projection_type(projection), DirectModelClient(engine), {}, shutdown_timeout=30)
     writer = Writer()
     await worker.run_task(RolloutTask(RolloutLease("lease", 0, 1), {"uid": task.id}, request), writer)
     batch = writer.groups[0][1].trajectory_batch
@@ -2323,6 +2569,7 @@ async def test_native_rewards_and_credit_remain_aligned_across_tool_observations
         ConversationClient(["first", "second"]),
         {},
         sessions={"credit": CreditSession},
+        shutdown_timeout=30,
     )
     batch = await runner.run(request)
     if projection_type is WholeTaskProjection:
@@ -2366,6 +2613,7 @@ async def test_lean_refinement_discards_the_failed_attempt(task_inputs, task_mac
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         client,
         {"shellsim": task_machine},
+        shutdown_timeout=30,
     )
     batch = await runner.run(request)
     assert batch["response_ids"] == [[5, 6]]
@@ -2393,6 +2641,7 @@ async def test_step_projection_preserves_served_prompts_grades_and_teacher_route
         StepTaskProjection(StepWiseTrajectoryProjection(config, Tokenizer())),
         ConversationClient(["#### 13", "#### 12"]),
         {},
+        shutdown_timeout=30,
     )
     writer = Writer()
     await runner.run_task(RolloutTask(RolloutLease("lease", 0, 1), {"uid": task.id}, request), writer)
@@ -2511,6 +2760,7 @@ async def test_source_machine_selection_controls_tool_results(task_inputs, task_
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         model,
         {"shellsim": task_machine},
+        shutdown_timeout=30,
     )
     try:
         batch = await worker.run(request)
@@ -2525,6 +2775,92 @@ async def test_source_machine_selection_controls_tool_results(task_inputs, task_
     assert batch["exclude_from_baseline"] == [False]
     assert batch["loss_masks"] == [[1, 1, 0, 0, 1, 1]]
     assert task_machine.closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("projection_type", [WholeTaskProjection, StepTaskProjection])
+@pytest.mark.parametrize(
+    "session,operation,cause_type",
+    [
+        ("searchcode", "prepare", "RuntimeError"),
+        ("nemotron_ultra", "prepare", "RuntimeError"),
+        ("searchcode", "start", "UnsupportedMachineSpec"),
+        ("searchcode", "start", "RuntimeError"),
+    ],
+)
+async def test_python_startup_failure_is_masked_without_losing_its_graded_peer(
+    task_inputs, task_machine, projection_type, session, operation, cause_type
+):
+    if operation == "start":
+        startup_error = UnsupportedMachineSpec if cause_type == "UnsupportedMachineSpec" else RuntimeError
+        task_machine.create = AsyncMock(side_effect=startup_error("The task provider did not start the machine"))
+    task_machine.run = AsyncMock(
+        return_value=Result(1, b"", b"ModuleNotFoundError: No module named 'IPython'", False, False, ExitReason.EXITED)
+    )
+    config, original = task_inputs
+    config.error_handling = {"enable_error_classification": True}
+    extras = (
+        {"reward_spec": {"ground_truth": "12"}}
+        if session == "searchcode"
+        else {
+            "extra_info": {
+                "nemotron_ultra": {
+                    "route": "task_session",
+                    "agent": "ns_tools_simple_agent",
+                    "record_json": json.dumps({"expected_answer": "12"}),
+                    "request_json": "{}",
+                }
+            }
+        }
+    )
+    failed = source_task(
+        original["prompts"][0],
+        extras,
+        {},
+        Source(dataset="python-startup", revision="1", row="0", importer_revision="1"),
+    )
+    request = {
+        **original,
+        "prompts": original["prompts"] * 2,
+        "env_classes": [session, "taskcompendium"],
+        "env_extras": [
+            {
+                "lowered_task_spec": lowered_task(failed, session, backend="shellsim").model_dump_json(),
+                "teacher_route": "python-startup",
+            },
+            original["env_extras"][0],
+        ],
+        "trajectory_ids": [TrajectoryID(failed.id, 0), TrajectoryID("arithmetic", 0)],
+    }
+    projection = (
+        WholeTrajectoryProjection if projection_type is WholeTaskProjection else StepWiseTrajectoryProjection
+    )(config, Tokenizer())
+    worker = TaskRolloutWorker(
+        config, projection_type(projection), InferenceClient(), {"shellsim": task_machine}, shutdown_timeout=30
+    )
+    writer = Writer()
+    try:
+        await worker.run_task(RolloutTask(RolloutLease("lease", 0, 1), {"uid": failed.id}, request), writer)
+    finally:
+        await worker.shutdown()
+    batch = writer.groups[0][1].trajectory_batch
+    assert batch["response_ids"] == [[0], [3, 4]]
+    assert batch["loss_masks"] == [[0], [1, 1]]
+    assert batch["exclude_from_baseline"] == [True, False]
+    assert batch["exception_types"] == [
+        "TaskMachineError" if operation == "start" and cause_type == "RuntimeError" else "VerifierRuntimeError",
+        None,
+    ]
+    assert batch["error_treatments"] == ["mask", None]
+    assert batch["unshaped_rewards"] == [0.0, 1.0]
+    failed_result, peer_result = batch["verification_results"]
+    assert failed_result.status is VerificationStatus.ERROR
+    assert failed_result.diagnostics["operation"] == operation
+    assert failed_result.diagnostics["cause_error_type"] == cause_type
+    assert peer_result.status is VerificationStatus.VERIFIED
+    assert peer_result.score == 1.0
+    if operation == "prepare":
+        assert task_machine.closed
 
 
 @pytest.fixture
@@ -2579,6 +2915,7 @@ async def test_python_tool_observations_preserve_training_and_release_session(
         projection_type(projection),
         model,
         {"shellsim": task_machine},
+        shutdown_timeout=30,
     )
     batch = await runner.run(request)
     assert task_machine.closed
@@ -2693,6 +3030,7 @@ async def test_blocking_grader_cannot_extend_attempt_or_cleanup_deadlines(task_i
         InferenceClient(),
         {},
         sessions={"blocking": partial(AnswerTaskSession, grader=grade)},
+        shutdown_timeout=30,
     )
     operation = asyncio.create_task(worker.run(request))
     try:
@@ -2724,6 +3062,7 @@ async def test_worker_keeps_blocking_inference_available_during_rollout(task_inp
         BlockingClient(),
         {},
         concurrent_tasks=1,
+        shutdown_timeout=30,
     )
     writer = Writer()
     asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=1))
@@ -2735,3 +3074,126 @@ async def test_worker_keeps_blocking_inference_available_during_rollout(task_inp
         assert writer.groups[0][1].trajectory_batch["unshaped_rewards"] == [1.0]
     finally:
         await worker.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["group_grade", "enqueue"])
+async def test_worker_shutdown_cancels_the_whole_request_before_buffer_commit(task_inputs, phase):
+    config, request = task_inputs
+    started = asyncio.Event()
+    finished = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+
+    def blocking_grader(task, specification, records, eligible, training_phase):
+        loop.call_soon_threadsafe(started.set)
+        try:
+            assert release.wait(timeout=5)
+            return records
+        finally:
+            loop.call_soon_threadsafe(finished.set)
+
+    class BlockingWriter(Writer):
+        async def write_rollout(self, lease, group):
+            if phase == "enqueue":
+                started.set()
+                try:
+                    await asyncio.Future()
+                finally:
+                    finished.set()
+            await super().write_rollout(lease, group)
+
+    if phase == "group_grade":
+        request["env_extras"][0]["group_grader"] = GroupGraderSpec(
+            name="fixture", parameters_json="{}"
+        ).model_dump_json()
+    worker = TaskRolloutWorker(
+        config,
+        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        InferenceClient(),
+        {},
+        group_graders={"fixture": blocking_grader},
+        shutdown_timeout=5,
+    )
+    writer = BlockingWriter()
+    pending = asyncio.create_task(
+        worker.run_task(RolloutTask(RolloutLease("lease", 0, 1), {"uid": "arithmetic"}, request), writer)
+    )
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        await asyncio.wait_for(worker.shutdown(), timeout=5)
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        assert writer.groups == []
+    finally:
+        release.set()
+        pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+        await asyncio.wait_for(finished.wait(), timeout=5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_error", [OSError, asyncio.CancelledError])
+async def test_worker_shutdown_reports_late_provider_close_failure_without_unhandled_task(task_inputs, provider_error):
+    config, request = task_inputs
+    lowered = LoweredTaskSpec.model_validate_json(request["env_extras"][0]["lowered_task_spec"])
+    request["env_extras"][0]["lowered_task_spec"] = lowered_task(
+        lowered.task, backend="fixture-provider"
+    ).model_dump_json()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    deleted = asyncio.Event()
+    deletions = []
+    diagnostics = []
+    unhandled = []
+    loop = asyncio.get_running_loop()
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _, context: unhandled.append(context))
+    log_sink = logger.add(lambda message: diagnostics.append(message.record["extra"]), level="ERROR")
+
+    class DelayedFailureMachine(DeletionMachine):
+        async def close(self):
+            started.set()
+            await release.wait()
+            await super().close()
+            raise provider_error("Provider deletion failed after the shutdown deadline")
+
+    class Factory:
+        async def create(self, spec):
+            machine = await ShellSimMachineFactory().create(spec)
+            return DelayedFailureMachine(machine, deletions, deleted)
+
+    worker = TaskRolloutWorker(
+        config,
+        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        InferenceClient(),
+        {"fixture-provider": Factory()},
+        shutdown_timeout=0.02,
+    )
+    pending = asyncio.create_task(worker.run(request))
+    try:
+        async with asyncio.timeout(5):
+            await started.wait()
+            with pytest.raises(ExceptionGroup, match="Task worker shutdown failed"):
+                await asyncio.wait_for(worker.shutdown(), timeout=1)
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+            await deleted.wait()
+            ready = loop.create_future()
+            loop.call_soon(ready.set_result, None)
+            await ready
+        assert {
+            "provider": "fixture-provider",
+            "operation": "machine_close",
+            "exception_type": provider_error.__name__,
+        } in diagnostics
+        assert unhandled == []
+        assert len(deletions) == 1
+        with pytest.raises(RuntimeError, match="closed"):
+            await deletions[0].run(Command(("true",)))
+    finally:
+        release.set()
+        await asyncio.gather(pending, return_exceptions=True)
+        loop.set_exception_handler(previous_handler)
+        logger.remove(log_sink)

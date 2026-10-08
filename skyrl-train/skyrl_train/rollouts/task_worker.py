@@ -3,13 +3,14 @@
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from loguru import logger
+from jinja2 import TemplateError
 from omegaconf import DictConfig, OmegaConf
 from shellbox.backends.docker.machine import DockerMachineFactory
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
@@ -34,6 +35,7 @@ from skyrl_train.config.utils import generation_context_limit
 from taskcompendium.submission import PlainText
 from skyrl_gym.task_factories import session_factories
 from skyrl_gym.task_records import fold_grades
+from skyrl_gym.verification import VERIFIER_RUNTIME_ERROR
 
 from skyrl_train.inference_engines.base import ChatContinuation, InferenceEngineInterface, InferenceEngineInput
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -41,6 +43,7 @@ from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.rollouts.buffer import RolloutGroup, RolloutTask, RolloutWriter
 from skyrl_train.rollouts.group_grader import GroupGraderSpec
 from skyrl_train.rollouts.group_grading import GROUP_GRADERS, GroupGrader, grade_groups
+from skyrl_train.rollouts.machines import OwnedMachineFactory, TaskMachineError
 from skyrl_train.rollouts.harbor_tasks import (
     HARBOR_MACHINE_BACKEND,
     HarborTaskSettings,
@@ -140,16 +143,14 @@ def _failed_rollout(
     error = interruption.__cause__
     assert isinstance(error, Exception)
     if interruption.operation == RolloutOperation.MODEL and not isinstance(
-        error, (ModelServerError, TimeoutError, ConnectionError)
+        error, (ModelServerError, TimeoutError, ConnectionError, TemplateError)
     ):
         raise error
     exception_type = type(error).__name__
     diagnostics = {"operation": interruption.operation.value, "timed_out": isinstance(error, TimeoutError)}
-    if isinstance(error, ModelServerError):
-        if error.category == "context_overflow":
-            exception_type = "ContextLengthExceededError"
-        diagnostics.update(error_category=error.category, request_id=error.request_id, status_code=error.status_code)
-    elif isinstance(error, TimeoutError):
+    if isinstance(error, TaskMachineError) and error.__cause__ is not None:
+        diagnostics["cause_error_type"] = type(error.__cause__).__name__
+    if isinstance(error, TimeoutError):
         exception_type = {
             RolloutOperation.ATTEMPT: "TrialTimeoutError",
             RolloutOperation.START: "EnvironmentStartTimeoutError",
@@ -157,6 +158,18 @@ def _failed_rollout(
             RolloutOperation.GRADE: "VerifierTimeoutError",
             RolloutOperation.CLEANUP: "CleanupTimeoutError",
         }.get(interruption.operation, "AgentTimeoutError")
+    elif isinstance(error, TemplateError):
+        exception_type = "TemplateError"
+        diagnostics["cause_error_type"] = type(error).__name__
+    elif isinstance(error, TaskMachineError):
+        exception_type = "TaskMachineError"
+    elif interruption.operation in {RolloutOperation.START, RolloutOperation.PREPARE}:
+        exception_type = VERIFIER_RUNTIME_ERROR
+        diagnostics.setdefault("cause_error_type", type(error).__name__)
+    elif isinstance(error, ModelServerError):
+        if error.category == "context_overflow":
+            exception_type = "ContextLengthExceededError"
+        diagnostics.update(error_category=error.category, request_id=error.request_id, status_code=error.status_code)
     rollout = interruption.rollout
     if (
         interruption.operation == RolloutOperation.ADVANCE
@@ -205,10 +218,15 @@ class TaskRolloutWorker:
         retry_wait: Callable[[float], Awaitable[None]] = asyncio.sleep,
         group_graders: Mapping[str, GroupGrader] = GROUP_GRADERS,
         sessions: Mapping[str, Callable[[LoweredTaskSpec, Machine | None], TaskSession]] | None = None,
+        *,
+        shutdown_timeout: float,
     ):
         self.trajectory_runner_cfg = trajectory_runner_cfg
         self.model_client = model_client
-        self.factories = factories
+        self.factories = {name: OwnedMachineFactory(factory, name) for name, factory in factories.items()}
+        self.active_requests: set[asyncio.Task] = set()
+        self.closing = False
+        self.shutdown_timeout = shutdown_timeout
         self.chat_template_kwargs = dict(trajectory_runner_cfg.get("chat_template_kwargs", {}))
         self.harbor = harbor
         self.retry_wait = retry_wait
@@ -238,7 +256,26 @@ class TaskRolloutWorker:
             self.sessions.update(sessions)
         self.trajectory_sink: RetentionSink | None = None
 
+    @contextmanager
+    def _active_request(self):
+        if self.closing:
+            raise RuntimeError("The rollout worker is closed")
+        task = asyncio.current_task()
+        assert task is not None
+        if task in self.active_requests:
+            yield
+            return
+        self.active_requests.add(task)
+        try:
+            yield
+        finally:
+            self.active_requests.discard(task)
+
     async def generate(self, request: TrajectoryRequestBatch) -> list[RolloutData]:
+        with self._active_request():
+            return await self._generate(request)
+
+    async def _generate(self, request: TrajectoryRequestBatch) -> list[RolloutData]:
         extras = request.get("env_extras")
         if extras is None or len(extras) != len(request["prompts"]):
             raise ValueError("Each rollout request must contain one lowered task per prompt")
@@ -340,8 +377,9 @@ class TaskRolloutWorker:
         return rollouts
 
     async def run(self, input_batch: TrajectoryRequestBatch) -> TrajectoryBatch:
-        outputs = await self.generate(input_batch)
-        return await self.training_batch(input_batch, outputs)
+        with self._active_request():
+            outputs = await self.generate(input_batch)
+            return await self.training_batch(input_batch, outputs)
 
     async def training_batch(self, request: TrajectoryRequestBatch, outputs: Sequence[RolloutData]) -> TrajectoryBatch:
         with rollout_phase("assemble"):
@@ -357,9 +395,30 @@ class TaskRolloutWorker:
         pass
 
     async def shutdown(self) -> None:
-        """Stop queued verifier work. Retained session cleanup owns active threads."""
-        if self.verifier_executor is not None:
-            self.verifier_executor.shutdown(wait=False, cancel_futures=True)
+        """Cancel rollouts and release their machines before actor termination."""
+        self.closing = True
+        deadline = asyncio.get_running_loop().time() + self.shutdown_timeout
+        for factory in self.factories.values():
+            factory.stop_creating()
+        pending = tuple(self.active_requests)
+        for task in pending:
+            task.cancel()
+        failures = []
+        try:
+            if pending:
+                _, remaining = await asyncio.wait(pending, timeout=self.shutdown_timeout / 2)
+                if remaining:
+                    logger.error("Task worker shutdown deadline expired with {} active rollouts", len(remaining))
+                    failures.append(TimeoutError("Task rollouts did not stop before the shutdown deadline"))
+            results = await asyncio.gather(
+                *(factory.close(deadline) for factory in self.factories.values()), return_exceptions=True
+            )
+            failures.extend(result for result in results if isinstance(result, Exception))
+        finally:
+            if self.verifier_executor is not None:
+                self.verifier_executor.shutdown(wait=False, cancel_futures=True)
+        if failures:
+            raise ExceptionGroup("Task worker shutdown failed", failures)
 
     async def start_eval_session(self, *, run_name: str, eval_step: int, val_set_name: str | None) -> None:
         pass
@@ -368,12 +427,13 @@ class TaskRolloutWorker:
         pass
 
     async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> int:
-        rollouts = await self.generate(task.request)
-        batch = await self.training_batch(task.request, rollouts)
-        group = RolloutGroup(batch, task.prompt["uid"], task.lease.policy_step, task.prompt)
-        with rollout_wait("enqueue"):
-            await writer.write_rollout(task.lease, group)
-        return sum(len(response) for response in batch["response_ids"])
+        with self._active_request():
+            rollouts = await self.generate(task.request)
+            batch = await self.training_batch(task.request, rollouts)
+            group = RolloutGroup(batch, task.prompt["uid"], task.lease.policy_step, task.prompt)
+            with rollout_wait("enqueue"):
+                await writer.write_rollout(task.lease, group)
+            return sum(len(response) for response in batch["response_ids"])
 
 
 @dataclass(frozen=True)
@@ -427,4 +487,5 @@ class TaskRolloutWorkerSpec:
             concurrent_tasks=int(self.config.trajectory_runner.max_concurrent_tasks),
             concurrent_harbor_tasks=None if harbor is None else max(1, harbor.concurrent_trials // shard.count),
             sessions=self.sessions,
+            shutdown_timeout=float(self.config.trajectory_runner.shutdown_timeout),
         )

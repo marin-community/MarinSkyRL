@@ -159,6 +159,7 @@ async def run_trajectory_runner_end_to_end(
         factories={"docker": DockerMachineFactory()},
         max_verifier_workers=max_verifier_workers,
         sessions={"test_env": ThreeTurnSession},
+        shutdown_timeout=30,
     )
 
     input_batch: TrajectoryRequestBatch = get_test_trajectory_request(

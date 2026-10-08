@@ -185,7 +185,11 @@ def runner(client, factories=None, *, error_handling=None):
         },
     )
     return TaskRolloutWorker(
-        config, WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())), client, factories or {}
+        config,
+        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        client,
+        factories or {},
+        shutdown_timeout=30,
     )
 
 
