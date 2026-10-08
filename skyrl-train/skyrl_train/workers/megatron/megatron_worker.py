@@ -61,6 +61,7 @@ from skyrl_train.workers.megatron.megatron_model_wrapper import (
     MegatronPolicyMicroBatch,
 )
 from skyrl_train.workers.megatron.router_replay_install import install_megatron_router_replay
+from skyrl_train.workers.megatron.output_projection_layout import install_dpo_batch_major_output_projection
 from skyrl_train.workers.megatron.weight_extractor import BucketedMegatronWeightExtractor, mapping_hf_names
 from skyrl_train.workers.worker import (
     CriticWorkerBase,
@@ -192,6 +193,7 @@ class MegatronWorker:
         model = self.provider.provide_distributed_model(
             ddp_config=default_ddp_config, wrap_with_ddp=wrap_with_ddp, bf16=bf16
         )
+        install_dpo_batch_major_output_projection(model, self.provider, self.cfg.trainer.algorithm.policy_loss_type)
         return model
 
     def forward(self, data, *, probe_micro_batch_size: int | None = None):
