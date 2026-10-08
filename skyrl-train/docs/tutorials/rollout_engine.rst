@@ -74,8 +74,10 @@ Its ``context_budget.request_window_tokens`` sets the context window.
 ``context_budget.max_new_tokens_per_turn`` limits each response.
 The task record supplies session turn limits and execution deadlines.
 
-Iris launches support machine-free tasks. Docker-backed tasks require access to
-a Docker daemon on the rollout worker host.
+Iris launches support machine-free tasks. Docker-backed tasks require Docker,
+Skopeo, and access to a Docker daemon on the rollout worker host.
+When an executable is unavailable, the worker rejects a batch whose task or verifier machine selects Docker before model requests.
+Machine-free tasks do not require those executables.
 
 Machines and grading
 --------------------

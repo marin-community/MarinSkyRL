@@ -51,6 +51,13 @@ The engine creates its Shellbox machine and closes the session before the machin
 Pure answer graders use ``runtime.task_machine=None`` and do not create a machine.
 Each session returns its initial messages and model options in ``SessionStart``.
 
+The worker registers the native ``docker`` backend only when Docker and the configured Skopeo executable are available.
+It validates each ``LoweredTaskSpec`` record's backend and session before it starts a batch.
+An unavailable backend aborts the batch before model requests and buffer writes.
+The per-row infrastructure error policy does not mask this deployment error.
+Machine-free tasks do not require these executables, even when unused session configuration selects Docker.
+Executable availability does not establish Docker daemon access or image contents.
+
 ``environment.task_sessions.session`` supplies launch-time session limits.
 Source-specific ``session`` blocks override those limits, including ``max_turns``.
 Source conversion uses a non-null row ``max_turns``, then ``extra_info.max_turns``, then the common session limit.
@@ -70,7 +77,8 @@ When these limits are finite, lowering requires the command limit to be less tha
 Shell grading requires a prebuilt, digest-pinned verifier image, a separate verifier machine, and declared artifacts for workspace submissions.
 The Harbor importer accepts only separate verifier environments.
 An unset verifier mode without a separate environment selects shared mode and causes rejection.
-Harbor setup uses root-user overrides. The Iris backend rejects these overrides, so native Harbor execution is unsupported on Iris.
+Harbor machine preparation executes commands with ``user="0"`` (root).
+The Shellbox Iris backend rejects per-command user overrides, so imported Harbor tasks cannot use that backend.
 Disabling Harbor verification removes private grader resources and selects skipped grading before runtime lowering.
 
 Exact tokens
