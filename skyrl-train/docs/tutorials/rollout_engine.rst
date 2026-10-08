@@ -67,11 +67,12 @@ Select the module in a training command:
      python -m skyrl_train.entrypoints.taskcompendium \
      data.train_data='[tasks.jsonl]'
 
-The command requires the same policy, inference, and topology settings as the
-other training entrypoints. An Iris launch recipe selects ``entrypoint:
-taskcompendium``. The recipe's context budget supplies the model context window
-and per-response token limit. The task record supplies session turn limits and
-execution deadlines.
+The command requires policy, inference, and topology settings. See
+:doc:`../getting-started/quickstart` for a full training command.
+An Iris launch recipe selects ``entrypoint: taskcompendium``.
+Its ``context_budget.request_window_tokens`` sets the context window.
+``context_budget.max_new_tokens_per_turn`` limits each response.
+The task record supplies session turn limits and execution deadlines.
 
 Iris launches support machine-free tasks. Docker-backed tasks require access to
 a Docker daemon on the rollout worker host.
@@ -82,6 +83,8 @@ Machines and grading
 Records that execute shell commands select ``task_machine.backend="docker"``.
 The task declares a prebuilt, digest-pinned Docker image. A shell verifier also
 selects a separate ``verifier_machine`` and declares its own digest-pinned image.
+See the `SWE example <../../examples/mini_swe_agent/README.md>`_ for image,
+artifact, and verifier configuration.
 The engine transfers declared artifacts to a fresh verifier machine after the
 model turn loop. It does not install private grader files on the task machine.
 
@@ -94,7 +97,7 @@ Training output
 ---------------
 
 The task worker uses SkyRL's model client, worker pool, training projection,
-reward shaping, retention, and leased rollout buffer. Exact served
+reward shaping, retained trajectory records, and leased rollout buffer. Exact served
 tokens and behavior logprobs remain aligned. Tool observation tokens have zero
 loss masks. Reconstructed model tokens cause a transport-contract error.
 
@@ -102,11 +105,16 @@ Correct and wrong answers train with their verifier grades. Invalid task records
 fail before execution.
 
 ``generator.error_handling`` controls terminal failures. The default configuration
-enables classification with ``enable_error_classification: true``. Model context
-overflow and model timeouts receive zero optimization reward and remain in the
-group baseline. Infrastructure failures are masked from loss and the baseline.
+enables classification with ``enable_error_classification: true``. Classified
+model context overflow and model timeouts receive zero optimization reward and
+remain in the group baseline. Infrastructure failures are masked from loss and the baseline.
+An overlong initial prompt that prevents generation has no response or verdict.
+That row is excluded from loss and the baseline.
 Explicit exception overrides take precedence: ``mask_exceptions``,
 ``zero_exceptions``, or ``passthrough_exceptions`` select the corresponding policy.
+For example, ``passthrough_exceptions: [AgentTimeoutError]`` selects pass-through
+for model and tool-turn timeouts. Attempt and verifier timeouts use
+``TrialTimeoutError`` and ``VerifierTimeoutError``.
 
 Setting ``preserve_logprobs_on_timeout: false`` excludes completed tokens from loss
 after a timeout. The error policy still controls optimization reward and baseline
@@ -114,13 +122,14 @@ membership. Exact tokens and logprobs remain in the evidence.
 
 Pass-through requires an available verifier score and any required behavior
 logprobs. Otherwise, the row is masked from loss and the baseline. Verifier scores
-remain separate from optimization rewards. Unavailable verdicts are masked from
-loss and the baseline. Explicitly skipped grading can use a session's reward.
+remain separate from optimization rewards. Without an execution failure,
+unavailable verdicts are masked from loss and the baseline. With an execution
+failure, the exception policy applies. Explicitly skipped grading can use a session's reward.
 
 An empty response becomes one fully masked token in the trainer row. Its behavior
 logprob is zero. The original rollout evidence remains unchanged.
 
-Source-row conversion uses the standard entrypoint. Harbor roots use the
+Source-row conversion uses the standard entrypoint. Harbor task directories use the
 ``terminal_bench`` entrypoint. All use the same worker, with retries and group
 grading before projection. Multi-stage tasks and task-specific image builds are
 not supported. See :doc:`task_rollouts` for session and backend selection.

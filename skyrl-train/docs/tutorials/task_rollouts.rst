@@ -41,6 +41,7 @@ The worker does not require the original task directories.
 ``harbor.max_turns`` and Harbor exception settings apply only to Harbor tasks.
 These exception settings include ``harbor.mask_exceptions`` and ``harbor.default_error_treatment``.
 Other tasks use ``generator.max_turns`` and ``generator.error_handling``.
+See :doc:`../datasets/dataset-preparation` for source rows and training inputs.
 Whole-trajectory and per-step output preserve task order,
 teacher routes, and source labels.
 
@@ -52,7 +53,8 @@ Pure answer graders use ``runtime.task_machine=None`` and do not create a machin
 Each session returns its initial messages and model options in ``SessionStart``.
 
 ``environment.task_sessions.session`` supplies launch-time session limits.
-Source-specific ``session`` blocks override those limits.
+Source-specific ``session`` blocks override those limits, including ``max_turns``.
+Without an override, ``session.max_turns`` uses ``generator.max_turns``.
 For example, ``environment.task_sessions.lcb.session.total_turn_timeout`` overrides the cumulative turn deadline for code tasks.
 Harbor lowering uses package machine settings, users, total-turn deadlines, and verifier deadlines.
 Other Harbor session limits come from launch configuration.
@@ -101,7 +103,8 @@ one row per retained model turn. Select step projection with
 ``trainer.step_wise_training=true``. The two projections preserve exact tokens,
 behavior log probabilities, token rewards, expert routes, and teacher routes.
 
-Sessions can supply per-turn optimization rewards. Otherwise, the whole-task projection uses the task grade.
+Sessions can supply per-turn optimization rewards. The whole-task projection sums these rewards.
+Otherwise, it uses the task grade.
 Step projection uses each turn's reward, with the task grade on the last turn when no per-turn rewards exist.
 A no-grade verifier result with ``RolloutData.failure=None`` excludes tokens from loss and baseline calculations.
 Recorded execution failures, including verifier timeouts, use the exception policy.
