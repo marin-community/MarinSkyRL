@@ -74,6 +74,9 @@ def main() -> None:
         )
         for index in range(len(batch)):
             group = completions[index * args.samples_per_prompt : (index + 1) * args.samples_per_prompt]
+            group = [text.strip() for text in group if text.strip()]
+            if len(group) < 2:
+                continue
             encoded_labels = label_tokenizer(group, return_tensors="pt", padding=True, truncation=True).to(device)
             with torch.no_grad():
                 scores = torch.softmax(classifier(**encoded_labels).logits, dim=-1)[:, 1]
