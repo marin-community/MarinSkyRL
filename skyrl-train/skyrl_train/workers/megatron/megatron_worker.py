@@ -552,6 +552,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             self.policy_mini_batch_size_per_gpu,
             self.cfg.trainer.micro_train_batch_size_per_gpu,
         )
+        if self.cfg.trainer.algorithm.policy_loss_type == PolicyLossType.DPO:
+            # A pair-aligned epoch tail can contain fewer micros than the normal optimizer batch.
+            micro_batches_per_mini_batch = min(micro_batches_per_mini_batch, len(dataloader))
 
         status_list = []
         all_metrics = defaultdict(list)

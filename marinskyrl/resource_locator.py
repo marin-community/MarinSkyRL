@@ -1,6 +1,7 @@
 """Durable resource-reference contracts shared by training and launch tooling."""
 
 from dataclasses import dataclass
+from enum import StrEnum
 import os
 import posixpath
 from urllib.parse import quote, urlsplit, urlunsplit
@@ -9,6 +10,11 @@ CLOUD_URI_SCHEMES = frozenset({"s3", "gs", "gcs"})
 CLOUD_URI_PREFIXES = tuple(f"{scheme}://" for scheme in sorted(CLOUD_URI_SCHEMES))
 HF_SELECTOR_REVISION_SEPARATOR = "@"
 HF_SELECTOR_SUBDIR_SEPARATOR = "::"
+
+
+class RolloutModelLoading(StrEnum):
+    STREAM = "stream"
+    STAGE_LOCAL = "stage_local"
 
 
 class ModelLocatorError(ValueError):

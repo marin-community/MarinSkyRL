@@ -1,14 +1,15 @@
-"""Exact token continuation for OpenCode requests at the terminal-bench bridge."""
+"""Exact token continuation for Harbor chat requests at the serving bridge."""
 
 import asyncio
 import json
 import logging
 from collections import OrderedDict
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
+from marinskyrl.harbor_agent_names import is_harbor_task_request
 from skyrl_train.inference_engines.chat_continuation import (
     CHAT_TOKENIZE_FIELDS,
     EXACT_PROMPT_TOKEN_IDS_KEY,
@@ -20,6 +21,7 @@ from skyrl_train.inference_engines.inference_http_backend import InferenceHTTPBa
 logger = logging.getLogger(__name__)
 
 TRIAL_ID_HEADER = "x-ot-trial-id"
+TASK_AGENT_HEADER = "x-ot-task-agent"
 _RENDER_SIGNATURE_FIELDS = CHAT_TOKENIZE_FIELDS - {"messages", "add_generation_prompt", "continue_final_message"}
 
 
@@ -38,7 +40,7 @@ def _extract_chunk_token_ids(chunk: dict[str, Any]) -> tuple[list[int] | None, l
     for choice in chunk.get("choices") or []:
         if not isinstance(choice, dict):
             continue
-        for candidate in (choice.get("delta"), choice):
+        for candidate in (choice.get("delta"), choice.get("message"), choice):
             if not isinstance(candidate, dict):
                 continue
             provider_fields = candidate.get("provider_specific_fields")
@@ -52,15 +54,19 @@ def _extract_chunk_token_ids(chunk: dict[str, Any]) -> tuple[list[int] | None, l
 
 
 def _render_signature(body: dict[str, Any]) -> dict[str, Any]:
-    return {key: deepcopy(value) for key, value in body.items() if key in _RENDER_SIGNATURE_FIELDS}
+    return {
+        key: deepcopy(value)
+        for key, value in body.items()
+        if key in _RENDER_SIGNATURE_FIELDS and not (key in {"tools", "chat_template_kwargs"} and not value)
+    }
 
 
-class OpenCodeContinuationLease:
-    """One serialized OpenCode request whose stream will establish the next state."""
+class HarborContinuationLease:
+    """One serialized agent request whose response establishes the next token prefix."""
 
     def __init__(
         self,
-        manager: "OpenCodeContinuationManager",
+        manager: "HarborContinuationManager",
         trial_id: str,
         request_body: dict[str, Any],
         lock: asyncio.Lock,
@@ -69,6 +75,33 @@ class OpenCodeContinuationLease:
         self._trial_id = trial_id
         self._request_body = request_body
         self._lock = lock
+
+    def release(self) -> None:
+        """Release the trial after a generation or a prompt-budget inspection."""
+        self._lock.release()
+        self._manager._forget_unused_lock(self._trial_id, self._lock)
+
+    async def capture_response(self, response: Awaitable[dict[str, Any]]) -> dict[str, Any]:
+        """Retain served tokens from a non-streaming response and release the trial."""
+        try:
+            result = await response
+            prompt_ids, completion_ids = _extract_chunk_token_ids(result)
+            expected_prompt = self._request_body.get(EXACT_PROMPT_TOKEN_IDS_KEY)
+            if prompt_ids and completion_ids and (expected_prompt is None or prompt_ids == expected_prompt):
+                self._manager.commit(
+                    self._trial_id,
+                    self._request_body,
+                    prompt_token_ids=prompt_ids,
+                    completion_token_ids=completion_ids,
+                )
+            else:
+                self._manager.discard(self._trial_id)
+            return result
+        except BaseException:
+            self._manager.discard(self._trial_id)
+            raise
+        finally:
+            self.release()
 
     async def capture(self, stream: AsyncIterator[str]) -> AsyncIterator[str]:
         prompt_ids: list[int] | None = None
@@ -123,20 +156,20 @@ class OpenCodeContinuationLease:
                             completion_token_ids=completion_ids,
                         )
             finally:
-                self._lock.release()
-                self._manager._forget_unused_lock(self._trial_id, self._lock)
+                self.release()
 
 
-class OpenCodeContinuationManager:
+class HarborContinuationManager:
     """Maintain exact served-token prefixes independently for concurrent trials."""
 
-    def __init__(self, backend: InferenceHTTPBackend, *, max_trials: int = 4096) -> None:
+    def __init__(self, backend: InferenceHTTPBackend, *, max_states: int = 4096) -> None:
         self._backend = backend
-        self._max_trials = max_trials
-        self._states: OrderedDict[str, _ContinuationState] = OrderedDict()
+        self._max_states = max_states
+        self._states: OrderedDict[str, list[_ContinuationState]] = OrderedDict()
+        self._state_count = 0
         self._locks: dict[str, asyncio.Lock] = {}
 
-    async def begin(self, request_payload: dict[str, Any]) -> OpenCodeContinuationLease | None:
+    async def begin(self, request_payload: dict[str, Any]) -> HarborContinuationLease | None:
         """Acquire a trial lease, or return ``None`` for an unmarked request."""
         headers = request_payload.get("headers", {})
         trial_id = headers.get(TRIAL_ID_HEADER)
@@ -148,25 +181,60 @@ class OpenCodeContinuationManager:
             # OpenCode's title and compaction agents share the trial header but call
             # the model with no tools. They are auxiliary generations, not turns in
             # the task agent's causal action chain, and must not replace its state.
-            or not body.get("tools")
+            or not is_harbor_task_request(body, headers.get(TASK_AGENT_HEADER, ""))
         ):
             return None
 
         lock = self._locks.setdefault(trial_id, asyncio.Lock())
         await lock.acquire()
         try:
+            # Mini-SWE's budget request retains function_call:null from the
+            # response DTO; LiteLLM omits it from generation requests. Both
+            # mean no legacy function call and must identify the same history.
+            body["messages"] = [
+                {key: value for key, value in message.items() if key != "function_call" or value is not None}
+                for message in body["messages"]
+            ]
             body.setdefault("session_id", trial_id)
-            state = self._states.get(trial_id)
-            if state is not None:
+            states = self._states.get(trial_id)
+            if states:
+                # A native agent can reject a response and retry without adding
+                # that assistant turn. Continue from its last surviving prefix.
+                messages = body["messages"]
+                state = next(
+                    (
+                        candidate
+                        for candidate in reversed(states)
+                        if len(messages) > len(candidate.messages)
+                        and messages[: len(candidate.messages)] == candidate.messages
+                        and messages[len(candidate.messages)].get("role") == "assistant"
+                        and _render_signature(body) == candidate.render_signature
+                    ),
+                    states[-1],
+                )
                 exact_prompt = await self._continue_prompt(state, request_payload)
-                if exact_prompt is None:
-                    self._states.pop(trial_id, None)
-                else:
+                if exact_prompt is not None:
                     body[EXACT_PROMPT_TOKEN_IDS_KEY] = exact_prompt
-            return OpenCodeContinuationLease(self, trial_id, deepcopy(body), lock)
+            return HarborContinuationLease(self, trial_id, deepcopy(body), lock)
         except BaseException:
             lock.release()
             raise
+
+    async def tokenize(self, request_payload: dict[str, Any]) -> dict[str, Any]:
+        """Count the same exact prompt that a marked agent will next generate from."""
+        lease = await self.begin(request_payload)
+        if lease is None:
+            return await self._backend.tokenize(request_payload)
+        try:
+            body = request_payload["json"]
+            exact_prompt = body.pop(EXACT_PROMPT_TOKEN_IDS_KEY, None)
+            body.pop("session_id", None)
+            result = await self._backend.tokenize(request_payload)
+            if exact_prompt is not None and "tokens" in result:
+                result = {**result, "tokens": exact_prompt, "count": len(exact_prompt)}
+            return result
+        finally:
+            lease.release()
 
     async def _continue_prompt(
         self,
@@ -212,22 +280,26 @@ class OpenCodeContinuationManager:
         prompt_token_ids: list[int],
         completion_token_ids: list[int],
     ) -> None:
-        self._states[trial_id] = _ContinuationState(
-            messages=deepcopy(request_body["messages"]),
-            render_signature=_render_signature(request_body),
-            prompt_token_ids=list(prompt_token_ids),
-            completion_token_ids=list(completion_token_ids),
+        self._states.setdefault(trial_id, []).append(
+            _ContinuationState(
+                messages=deepcopy(request_body["messages"]),
+                render_signature=_render_signature(request_body),
+                prompt_token_ids=list(prompt_token_ids),
+                completion_token_ids=list(completion_token_ids),
+            )
         )
+        self._state_count += 1
         self._states.move_to_end(trial_id)
-        while len(self._states) > self._max_trials:
-            expired_trial, _ = self._states.popitem(last=False)
+        while self._state_count > self._max_states:
+            expired_trial, expired_states = self._states.popitem(last=False)
+            self._state_count -= len(expired_states)
             expired_lock = self._locks.get(expired_trial)
             if expired_lock is not None and not expired_lock.locked():
                 self._locks.pop(expired_trial, None)
 
     def discard(self, trial_id: str) -> None:
         """Forget a trial whose backend response disproved its requested prefix."""
-        self._states.pop(trial_id, None)
+        self._state_count -= len(self._states.pop(trial_id, []))
 
     def _forget_unused_lock(self, trial_id: str, lock: asyncio.Lock) -> None:
         if trial_id not in self._states and self._locks.get(trial_id) is lock:

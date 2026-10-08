@@ -1,7 +1,9 @@
 """Pre-launch behavior-evidence contracts for trajectory runners."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Any
 
 from omegaconf import DictConfig
 
@@ -9,13 +11,20 @@ from marinskyrl.distillation import DistillationObjectiveKind, compile_distillat
 from skyrl_train.config.objective_spec import LossSpec, rollout_logprobs_required
 
 from marinskyrl.harbor_agent_names import (
+    CLAUDE_CODE_HARBOR_AGENT_NAME,
+    CODEX_HARBOR_AGENT_NAME,
     DEFAULT_HARBOR_AGENT_NAME,
+    MINI_SWE_HARBOR_AGENT_NAME,
     OPENCODE_HARBOR_AGENT_NAME,
     PI_HARBOR_AGENT_NAME,
     TERMINUS_KIRA_HARBOR_AGENT_NAME,
+    configured_harbor_profiles,
 )
 
 SUPPORTED_OPENCODE_LITERAL_VERSION = "1.18.2"
+SUPPORTED_MINI_SWE_LITERAL_VERSION = "2.1.0"
+SUPPORTED_CLAUDE_CODE_LITERAL_VERSION = "2.1.284"
+SUPPORTED_CODEX_LITERAL_VERSION = "0.118.0"
 SUPPORTED_PI_THINKING_FORMATS = frozenset({"chat-template", "qwen-chat-template"})
 
 
@@ -85,7 +94,10 @@ _HARBOR_EVIDENCE_PROFILES = {
     # the prior literal token prefix.
     TERMINUS_KIRA_HARBOR_AGENT_NAME: _EXACT_COMPLETION_ONLY_HARBOR_EVIDENCE,
     OPENCODE_HARBOR_AGENT_NAME: _EXACT_HARBOR_EVIDENCE,
+    MINI_SWE_HARBOR_AGENT_NAME: _EXACT_HARBOR_EVIDENCE,
     PI_HARBOR_AGENT_NAME: _EXACT_HARBOR_EVIDENCE,
+    CLAUDE_CODE_HARBOR_AGENT_NAME: _EXACT_HARBOR_EVIDENCE,
+    CODEX_HARBOR_AGENT_NAME: _EXACT_HARBOR_EVIDENCE,
 }
 
 
@@ -96,17 +108,29 @@ def _terminal_bench_harbor_config(cfg: DictConfig) -> DictConfig | None:
     return terminal_bench.get("harbor") if terminal_bench is not None else None
 
 
-def opencode_exact_continuation_enabled(cfg: DictConfig) -> bool:
-    """Whether this launch needs the terminal-bench OpenCode continuation bridge."""
+def harbor_exact_continuation_enabled(cfg: DictConfig) -> bool:
+    """Whether this launch needs exact continuation for a captured Harbor chat agent."""
     harbor = _terminal_bench_harbor_config(cfg)
     if harbor is None:
         return False
     agent_name = str(harbor.get("name", DEFAULT_HARBOR_AGENT_NAME)).strip().lower().replace("_", "-")
-    return bool(
-        str(cfg.get("generator", {}).get("backend", "")) == "vllm"
-        and agent_name == OPENCODE_HARBOR_AGENT_NAME
-        and harbor.get("collect_rollout_details", False)
+    profiles = configured_harbor_profiles(harbor)
+    exact_chat_agents = {
+        OPENCODE_HARBOR_AGENT_NAME,
+        MINI_SWE_HARBOR_AGENT_NAME,
+        CLAUDE_CODE_HARBOR_AGENT_NAME,
+        CODEX_HARBOR_AGENT_NAME,
+    }
+    uses_exact_chat = (
+        any(
+            profile.name in exact_chat_agents
+            and profile.settings.get("collect_rollout_details", harbor.get("collect_rollout_details", False))
+            for profile in profiles
+        )
+        if profiles
+        else agent_name in exact_chat_agents and harbor.get("collect_rollout_details", False)
     )
+    return bool(str(cfg.get("generator", {}).get("backend", "")) == "vllm" and uses_exact_chat)
 
 
 def _harbor_capabilities(cfg: DictConfig) -> TrajectoryRunnerCapabilities:
@@ -119,6 +143,41 @@ def _harbor_capabilities(cfg: DictConfig) -> TrajectoryRunnerCapabilities:
             action_tokens=ActionTokenHandling.UNAVAILABLE,
         )
 
+    profiles = configured_harbor_profiles(harbor)
+    if not profiles:
+        return _harbor_agent_capabilities(cfg, harbor)
+
+    agents = [
+        _harbor_agent_capabilities(cfg, {**dict(harbor), **profile.settings, "name": profile.name})
+        for profile in profiles
+    ]
+    fidelity_order = (EvidenceFidelity.UNAVAILABLE, EvidenceFidelity.RETOKENIZED, EvidenceFidelity.EXACT)
+    action_order = (
+        ActionTokenHandling.UNAVAILABLE,
+        ActionTokenHandling.RETOKENIZED,
+        ActionTokenHandling.RUNTIME_VALIDATED,
+        ActionTokenHandling.EXACT,
+    )
+    return TrajectoryRunnerCapabilities(
+        runner=f"Harbor panel ({', '.join(profile.name for profile in profiles)})",
+        sampled_completion=min((agent.sampled_completion for agent in agents), key=fidelity_order.index),
+        full_context_continuation=min((agent.full_context_continuation for agent in agents), key=fidelity_order.index),
+        action_tokens=min((agent.action_tokens for agent in agents), key=action_order.index),
+        requirements=tuple(
+            CapabilityRequirement(
+                config_path=requirement.config_path.replace(
+                    "terminal_bench.harbor.", f"terminal_bench.harbor.agent_profiles[{index}]."
+                ),
+                expected_value=requirement.expected_value,
+                satisfied=requirement.satisfied,
+            )
+            for index, agent in enumerate(agents)
+            for requirement in agent.requirements
+        ),
+    )
+
+
+def _harbor_agent_capabilities(cfg: DictConfig, harbor: Mapping[str, Any]) -> TrajectoryRunnerCapabilities:
     agent_name = str(harbor.get("name", DEFAULT_HARBOR_AGENT_NAME)).strip().lower().replace("_", "-")
     rollout_details = CapabilityRequirement(
         config_path="terminal_bench.harbor.collect_rollout_details",
@@ -126,13 +185,20 @@ def _harbor_capabilities(cfg: DictConfig) -> TrajectoryRunnerCapabilities:
         satisfied=bool(harbor.get("collect_rollout_details", False)),
     )
     requirements = [rollout_details]
-    if agent_name == OPENCODE_HARBOR_AGENT_NAME:
+    supported_versions = {
+        OPENCODE_HARBOR_AGENT_NAME: SUPPORTED_OPENCODE_LITERAL_VERSION,
+        MINI_SWE_HARBOR_AGENT_NAME: SUPPORTED_MINI_SWE_LITERAL_VERSION,
+        CLAUDE_CODE_HARBOR_AGENT_NAME: SUPPORTED_CLAUDE_CODE_LITERAL_VERSION,
+        CODEX_HARBOR_AGENT_NAME: SUPPORTED_CODEX_LITERAL_VERSION,
+    }
+    if agent_name in supported_versions:
+        supported_version = supported_versions[agent_name]
         requirements.extend(
             (
                 CapabilityRequirement(
                     config_path="terminal_bench.harbor.version",
-                    expected_value=SUPPORTED_OPENCODE_LITERAL_VERSION,
-                    satisfied=str(harbor.get("version", "")).strip() == SUPPORTED_OPENCODE_LITERAL_VERSION,
+                    expected_value=supported_version,
+                    satisfied=str(harbor.get("version", "")).strip() == supported_version,
                 ),
                 CapabilityRequirement(
                     config_path="generator.backend",

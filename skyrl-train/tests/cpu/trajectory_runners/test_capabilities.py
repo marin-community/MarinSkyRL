@@ -2,11 +2,14 @@ import pytest
 from omegaconf import OmegaConf
 
 from skyrl_train.config.trajectory_runner_capabilities import (
+    SUPPORTED_MINI_SWE_LITERAL_VERSION,
     SUPPORTED_OPENCODE_LITERAL_VERSION,
     EntrypointOperation,
     TrajectoryRunnerMode,
+    harbor_exact_continuation_enabled,
     validate_trajectory_runner_capabilities,
 )
+from skyrl_train.trajectory_runners.harbor.configuration import HarborConfigBuilder
 
 GYM = TrajectoryRunnerMode.SKYRL_GYM
 HARBOR = TrajectoryRunnerMode.HARBOR
@@ -15,6 +18,9 @@ HARBOR_KEY = "terminal_bench_config.harbor"
 NO_ROLLOUT_LOGPROBS = {"trainer.algorithm.off_policy_correction": "none"}
 FULL_TITO = {"trainer.algorithm.off_policy_correction": "none", "trainer.algorithm.tito_full": True}
 OPENCODE = {f"{HARBOR_KEY}.version": SUPPORTED_OPENCODE_LITERAL_VERSION}
+CLAUDE_CODE = {f"{HARBOR_KEY}.version": "2.1.284"}
+CODEX = {f"{HARBOR_KEY}.version": "0.118.0"}
+HARBOR_MINI_SWE = {f"{HARBOR_KEY}.version": SUPPORTED_MINI_SWE_LITERAL_VERSION}
 EXACT_CHAT = {
     "generator.chat_template.name_or_path": "qwen2_5_with_generation_tag_simplified",
     "generator.require_exact_chat_transport": True,
@@ -64,6 +70,32 @@ def _skyrl_config():
     )
 
 
+def test_harbor_panel_validates_each_harness_before_training():
+    cfg = _harbor_config("pi")
+    cfg.terminal_bench_config.harbor.collect_rollout_details = False
+    cfg.terminal_bench_config.harbor.agent_profiles = [
+        {"name": "pi", "collect_rollout_details": True},
+        {"name": "opencode", "version": SUPPORTED_OPENCODE_LITERAL_VERSION, "collect_rollout_details": True},
+    ]
+    validate_trajectory_runner_capabilities(cfg, HARBOR)
+    assert harbor_exact_continuation_enabled(cfg)
+    assert HarborConfigBuilder(cfg.terminal_bench_config).get_collect_rollout_details()
+
+    cfg.terminal_bench_config.harbor.agent_profiles.append({"name": "codex"})
+    with pytest.raises(ValueError, match=r"agent_profiles\[2\].version"):
+        validate_trajectory_runner_capabilities(cfg, HARBOR)
+
+
+def test_harbor_panel_rejects_missing_evidence_in_one_profile():
+    cfg = _harbor_config("pi")
+    cfg.terminal_bench_config.harbor.agent_profiles = [
+        {"name": "pi"},
+        {"name": "opencode", "version": SUPPORTED_OPENCODE_LITERAL_VERSION, "collect_rollout_details": False},
+    ]
+    with pytest.raises(ValueError, match=r"agent_profiles\[1\].collect_rollout_details"):
+        validate_trajectory_runner_capabilities(cfg, HARBOR)
+
+
 def _config(agent_name, overrides, distillation, local_distillation_config):
     cfg = _skyrl_config() if agent_name is None else _harbor_config(agent_name)
     for key, value in overrides.items():
@@ -76,6 +108,7 @@ ACCEPTED = [
     pytest.param(HARBOR, "terminus-2", {}, False, id="harbor-terminus-2"),
     pytest.param(HARBOR, "terminus_kira", {}, False, id="harbor-terminus-kira-underscore-alias"),
     pytest.param(HARBOR, "opencode", OPENCODE, False, id="harbor-opencode-tested-version"),
+    pytest.param(HARBOR, "mini-swe-agent", HARBOR_MINI_SWE, False, id="harbor-mini-swe-tested-version"),
     pytest.param(HARBOR, "pi", {}, False, id="harbor-pi"),
     pytest.param(GYM, None, {}, False, id="gym-tis"),
     pytest.param(GYM, None, {"trainer.step_wise_training": True}, False, id="gym-step-wise"),
@@ -100,7 +133,10 @@ ACCEPTED = [
     ),
     pytest.param(HARBOR, "terminus-2", FULL_TITO, False, id="full-tito-harbor-terminus-2"),
     pytest.param(HARBOR, "opencode", {**FULL_TITO, **OPENCODE}, False, id="full-tito-harbor-opencode"),
+    pytest.param(HARBOR, "mini-swe-agent", {**FULL_TITO, **HARBOR_MINI_SWE}, False, id="full-tito-harbor-mini-swe"),
     pytest.param(HARBOR, "pi", FULL_TITO, False, id="full-tito-harbor-pi"),
+    pytest.param(HARBOR, "claude-code", {**FULL_TITO, **CLAUDE_CODE}, False, id="full-tito-native-claude-code"),
+    pytest.param(HARBOR, "codex", {**FULL_TITO, **CODEX}, False, id="full-tito-native-codex"),
 ]
 
 
@@ -133,7 +169,16 @@ REJECTED = [
         )
         for mode in (HARBOR, MINI_SWE)
     ),
-    pytest.param(HARBOR, "codex", {}, False, "train", "Harbor codex cannot supply exact", id="harbor-codex"),
+    *(
+        pytest.param(HARBOR, agent, overrides, False, "train", field, id=f"native-{agent}-{case}")
+        for agent, pinned in (("claude-code", CLAUDE_CODE), ("codex", CODEX))
+        for case, overrides, field in (
+            ("unpinned", {}, "terminal_bench.harbor.version"),
+            ("latest", {f"{HARBOR_KEY}.version": "latest"}, "terminal_bench.harbor.version"),
+            ("sglang", {**pinned, "generator.backend": "sglang"}, "generator.backend"),
+            ("no-details", {**pinned, f"{HARBOR_KEY}.collect_rollout_details": False}, "collect_rollout_details"),
+        )
+    ),
     pytest.param(HARBOR, "future-agent", {}, False, "train", "Harbor future-agent", id="harbor-unknown-agent"),
     *(
         pytest.param(
@@ -167,6 +212,24 @@ REJECTED = [
         "train",
         "generator.backend",
         id="harbor-opencode-sglang",
+    ),
+    pytest.param(
+        HARBOR,
+        "mini-swe-agent",
+        {**HARBOR_MINI_SWE, "generator.backend": "sglang"},
+        False,
+        "train",
+        "generator.backend",
+        id="harbor-mini-swe-sglang",
+    ),
+    pytest.param(
+        HARBOR,
+        "mini-swe-agent",
+        {f"{HARBOR_KEY}.version": "1.0.0"},
+        False,
+        "train",
+        "terminal_bench.harbor.version",
+        id="harbor-mini-swe-legacy-transport",
     ),
     *(
         pytest.param(
@@ -210,7 +273,13 @@ REJECTED = [
     ),
     pytest.param(MINI_SWE, None, NO_ROLLOUT_LOGPROBS, True, "train", "mini-swe", id="distill-mini-swe"),
     pytest.param(
-        HARBOR, "codex", NO_ROLLOUT_LOGPROBS, True, "train", "tokenized learner actions", id="distill-harbor-codex"
+        HARBOR,
+        "codex",
+        NO_ROLLOUT_LOGPROBS,
+        True,
+        "train",
+        "terminal_bench.harbor.version",
+        id="distill-harbor-codex-unpinned",
     ),
     pytest.param(HARBOR, "terminus-2", NO_ROLLOUT_LOGPROBS, True, "generate", "training-only", id="distill-generate"),
     pytest.param(GYM, None, FULL_TITO, False, "train", "SkyRL Gym does not support", id="full-tito-gym"),

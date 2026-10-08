@@ -53,6 +53,7 @@ class RolloutBufferConfig:
     batch_policy: BatchPolicy
     dynamic_sampling: DynamicSamplingType | None
     max_candidate_groups: int | None
+    epoch_batch_sizes: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         if self.batch_size < 1:
@@ -66,6 +67,14 @@ class RolloutBufferConfig:
     def max_untrained_groups(self) -> int:
         """Groups leased, committed, or batched that the next ``max_staleness_steps + 1`` steps can train on."""
         return (self.max_staleness_steps + 1) * self.batch_size
+
+    def batch_size_for(self, step: int) -> int:
+        if not self.epoch_batch_sizes:
+            return self.batch_size
+        return self.epoch_batch_sizes[(step - 1) % len(self.epoch_batch_sizes)]
+
+    def untrained_capacity_for(self, step: int) -> int:
+        return sum(self.batch_size_for(index) for index in range(step, step + self.max_staleness_steps + 1))
 
     @property
     def max_concurrent_rollouts(self) -> int:
@@ -346,7 +355,7 @@ class FullBatchRolloutPolicy:
 
     def lease_batch(self, step: int, occupancy: collections.Counter[int]) -> int | None:
         for batch_id in range(step, step + self.config.max_staleness_steps + 1):
-            if occupancy[batch_id] < self.config.batch_size:
+            if occupancy[batch_id] < self.config.batch_size_for(batch_id):
                 return batch_id
         return None
 
@@ -375,14 +384,18 @@ class RollingBatchPolicy:
 
     def lease_batch(self, step: int, occupancy: collections.Counter[int]) -> int | None:
         untrained = sum(occupancy.values())
-        if untrained >= self.config.max_untrained_groups:
+        if untrained >= self.config.untrained_capacity_for(step):
             return None
         # The batch the group joins if groups commit in lease order.
-        return step + untrained // self.config.batch_size
+        batch_id = step
+        while untrained >= self.config.batch_size_for(batch_id):
+            untrained -= self.config.batch_size_for(batch_id)
+            batch_id += 1
+        return batch_id
 
     def train_batch(self, rollout: ReadyRollout, open_batch: int, admitted: collections.Counter[int]) -> int | None:
         batch_id = open_batch
-        while admitted[batch_id] >= self.config.batch_size:
+        while admitted[batch_id] >= self.config.batch_size_for(batch_id):
             batch_id += 1
         if batch_id - rollout.policy_step > self.config.max_staleness_steps:
             return None
@@ -586,7 +599,9 @@ class RolloutBuffer:
         )
 
     def _batch_complete(self) -> bool:
-        return not self._batch_taken and len(self._admitted[self._policy_step]) == self.config.batch_size
+        return not self._batch_taken and len(self._admitted[self._policy_step]) == self.config.batch_size_for(
+            self._policy_step
+        )
 
     def _over_budget_batch(self) -> int | None:
         """A batch whose dynamic-sampling candidates reached the limit before it filled, if any."""
@@ -594,7 +609,7 @@ class RolloutBuffer:
         if limit is None:
             return None
         for batch_id, stats in self._stats.items():
-            if stats.candidates >= limit and len(self._admitted[batch_id]) < self.config.batch_size:
+            if stats.candidates >= limit and len(self._admitted[batch_id]) < self.config.batch_size_for(batch_id):
                 return batch_id
         return None
 

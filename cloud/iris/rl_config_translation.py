@@ -636,7 +636,18 @@ def parse_checkpoint_export_config(
 # types. Used to determine tunnel requirements for custom environments.
 IMPORT_PATH_TO_ENV_TYPE = {
     "harbor.environments.pooled.daytona_dind:PooledDaytonaDinDEnvironment": "daytona",
+    "marinskyrl.iris_harbor_environment:IrisEnvironment": "iris",
 }
+
+
+def terminal_bench_environment(harbor: Mapping[str, Any]) -> str:
+    """Resolve the sandbox provider for credential and ingress preparation."""
+    import_path = harbor.get("import_path")
+    if not import_path:
+        return harbor.get("environment_type", "daytona")
+    if import_path not in IMPORT_PATH_TO_ENV_TYPE:
+        raise ValueError(f"Unknown environment import_path: {import_path}")
+    return IMPORT_PATH_TO_ENV_TYPE[import_path]
 
 
 def extract_terminal_bench_agent_env(parsed: ParsedRLConfig) -> tuple:
@@ -650,19 +661,7 @@ def extract_terminal_bench_agent_env(parsed: ParsedRLConfig) -> tuple:
 
     agent_name = harbor.get("name", DEFAULT_HARBOR_AGENT_NAME)
 
-    import_path = harbor.get("import_path")
-    if import_path:
-        if import_path not in IMPORT_PATH_TO_ENV_TYPE:
-            raise ValueError(
-                f"Unknown environment import_path: {import_path}\n"
-                f"Add it to IMPORT_PATH_TO_ENV_TYPE in rl_config_translation.py.\n"
-                f"Known import paths: {list(IMPORT_PATH_TO_ENV_TYPE.keys())}"
-            )
-        harbor_env = IMPORT_PATH_TO_ENV_TYPE[import_path]
-    else:
-        harbor_env = harbor.get("environment_type", "daytona")
-
-    return agent_name, harbor_env
+    return agent_name, terminal_bench_environment(harbor)
 
 
 _OPTIONAL_HYDRA_PATTERNS = {

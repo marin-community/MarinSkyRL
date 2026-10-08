@@ -285,7 +285,7 @@ def test_normalized_output_produces_complete_core_trace_schema():
     assert record["prompt"]["messages"] == [{"role": "user", "content": "first"}]
     assert record["response"]["text"] == "10 11"
     assert record["verifier"] is None
-    assert record["schema_version"] == 5
+    assert record["schema_version"] == 6
     assert record["disposition"] == {"exception_type": None, "error_treatment": None, "server_error": None}
     assert record["provenance"]["runner"] == "SkyRLGymTrajectoryRunner"
 
@@ -397,7 +397,7 @@ def test_groups_retained_during_a_publication_are_published_after_it(tmp_path):
     assert len(list(tmp_path.rglob("*.zip"))) == 3
 
 
-def test_step_wise_rows_form_one_replayable_trajectory_with_explicit_boundaries():
+def test_step_wise_retention_preserves_context_forks_and_response_boundaries():
     input_batch = _input()
     for key in ("prompts", "env_classes", "env_extras", "trajectory_ids"):
         input_batch[key] = [input_batch[key][0]]
@@ -405,7 +405,7 @@ def test_step_wise_rows_form_one_replayable_trajectory_with_explicit_boundaries(
     output = _output()
     output.update(
         {
-            "prompt_token_ids": [[1], [1]],
+            "prompt_token_ids": [[1], [99, 98]],
             "response_ids": [[10], [20, 21]],
             "rewards": [0.0, 1.0],
             "unshaped_rewards": [0.0, 1.0],
@@ -431,8 +431,22 @@ def test_step_wise_rows_form_one_replayable_trajectory_with_explicit_boundaries(
 
     assert record["response"]["token_ids"] == [10, 20, 21]
     assert record["response"]["step_boundaries"] == [
-        {"row_index": 0, "token_start": 0, "token_end": 1, "stop_reason": "tool", "is_last_step": False},
-        {"row_index": 1, "token_start": 1, "token_end": 3, "stop_reason": "stop", "is_last_step": True},
+        {
+            "row_index": 0,
+            "prompt_token_ids": [1],
+            "token_start": 0,
+            "token_end": 1,
+            "stop_reason": "tool",
+            "is_last_step": False,
+        },
+        {
+            "row_index": 1,
+            "prompt_token_ids": [99, 98],
+            "token_start": 1,
+            "token_end": 3,
+            "stop_reason": "stop",
+            "is_last_step": True,
+        },
     ]
     assert record["reward"] == {"outcome": 1.0, "shaped": 1.0, "components": None}
 

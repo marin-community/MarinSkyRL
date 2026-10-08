@@ -5,8 +5,9 @@
 
 Each sandbox runs as its own CPU-only Iris job on cluster workers (bin-packed
 onto spare host CPU, TPU hosts included). Only prebuilt-image tasks
-(``[environment] docker_image = ...``) are supported; Dockerfile/compose
-builds are not.
+(``[environment] docker_image = ...``) are supported. Dockerfile tasks may instead
+use an explicit mapping from Dockerfile SHA-256 to a previously built image
+digest. Image builds and compose services do not run inside this backend.
 
 The default ``gvisor`` profile submits CONTAINER_PROFILE_GVISOR, so untrusted
 agent code gets full in-container root behind gVisor's intercepted guest
@@ -24,6 +25,8 @@ default. Local callers may instead pass exactly one of ``cluster`` or
 
 import asyncio
 import base64
+import hashlib
+import math
 import os
 import re
 import shlex
@@ -31,6 +34,7 @@ import tarfile
 import tempfile
 import time
 from pathlib import Path
+from collections.abc import Mapping
 
 from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.environments.capabilities import EnvironmentCapabilities, EnvironmentResourceCapabilities
@@ -38,6 +42,7 @@ from harbor.trial.errors import EnvironmentStartTimeoutError
 from iris.cli.connect import ControllerEndpoint, connect_controller
 from iris.client import IrisClient, Job
 from iris.cluster.types import Entrypoint, EnvironmentSpec, ResourceSpec
+from iris.resources.state import TaskState
 from iris.rpc import controller_pb2, job_pb2
 from iris.rpc.compression import IRIS_RPC_COMPRESSIONS
 from iris.rpc.controller_connect import ControllerServiceClientSync
@@ -46,7 +51,7 @@ from upath import UPath
 
 ENVIRONMENT_TYPE = "iris"
 
-# Chunks ride inside one ``sh -c`` argument. Base64 expands them by 4/3 and
+# Chunks ride inside one ``bash -c`` argument. Base64 expands them by 4/3 and
 # Linux caps one argv string at 128 KiB.
 UPLOAD_CHUNK_BYTES = 64 * 1024
 DOWNLOAD_CHUNK_BYTES = 1024 * 1024
@@ -90,7 +95,7 @@ def _require_success(result: ExecResult, message: str, exc_type: type[Exception]
     return result
 
 
-def _local_download_target(target: Path | str) -> Path | None:
+def _local_path(target: Path | str) -> Path | None:
     """Return a local ``Path`` for *target*, or ``None`` if it is remote.
 
     Harbor passes trial-dir download targets as ``UPath`` and the trial dir may
@@ -103,11 +108,12 @@ def _local_download_target(target: Path | str) -> Path | None:
     return None
 
 
-def _copy_local_tree_to_remote(local_root: Path, remote_root: UPath) -> None:
-    for local_file in local_root.rglob("*"):
-        if local_file.is_file():
-            remote_file = remote_root / local_file.relative_to(local_root).as_posix()
-            remote_file.write_bytes(local_file.read_bytes())
+def _copy_tree(source_root: UPath, target_root: UPath) -> None:
+    for source_file in source_root.rglob("*"):
+        if source_file.is_file():
+            target_file = target_root / source_file.relative_to(source_root).as_posix()
+            target_file.parent.mkdir(parents=True, exist_ok=True)
+            target_file.write_bytes(source_file.read_bytes())
 
 
 def _owned_by_root(info: tarfile.TarInfo) -> tarfile.TarInfo:
@@ -127,6 +133,7 @@ class IrisEnvironment(BaseEnvironment):
         scheduling_timeout: int | str = DEFAULT_SCHEDULING_TIMEOUT,
         container_profile: str = GVISOR_PROFILE,
         sandbox_ttl: int | str = DEFAULT_SANDBOX_TTL,
+        prebuilt_images: Mapping[str, str] | None = None,
         **kwargs,
     ):
         """
@@ -148,7 +155,14 @@ class IrisEnvironment(BaseEnvironment):
             sandbox_ttl: Hard job TTL in seconds after which Iris kills the
                 sandbox even if stop() is never called (leaked-harness safety
                 net). Accepts str like scheduling_timeout.
+            prebuilt_images: Dockerfile SHA-256 to immutable image reference.
+                The caller builds each image from the matching task definition.
+                Task environment files are uploaded after the image starts.
         """
+        self._prebuilt_images = dict(prebuilt_images or {})
+        for digest, image in self._prebuilt_images.items():
+            if re.fullmatch(r"[0-9a-f]{64}", digest) is None or re.fullmatch(r".+@sha256:[0-9a-f]{64}", image) is None:
+                raise ValueError("prebuilt_images requires Dockerfile SHA-256 keys and immutable image digests")
         super().__init__(*args, **kwargs)
         if cluster is None and controller_url is None:
             controller_url = os.environ.get("IRIS_CONTROLLER_URL")
@@ -182,11 +196,22 @@ class IrisEnvironment(BaseEnvironment):
         return EnvironmentResourceCapabilities(cpu_request=True, memory_request=True)
 
     def _validate_definition(self):
-        if not self.task_env_config.docker_image:
+        if self.task_env_config.docker_image:
+            return
+        dockerfile = self.environment_dir / "Dockerfile"
+        if (self.environment_dir / "docker-compose.yaml").exists():
+            raise ValueError("IrisEnvironment does not support compose services")
+        if not dockerfile.is_file() or hashlib.sha256(dockerfile.read_bytes()).hexdigest() not in self._prebuilt_images:
             raise ValueError(
                 "IrisEnvironment only supports prebuilt-image tasks "
-                "([environment] docker_image = ...); Dockerfile builds are not supported."
+                "([environment] docker_image = ...) or a pinned prebuilt_images mapping for the task Dockerfile."
             )
+
+    def _task_image(self) -> str:
+        if self.task_env_config.docker_image:
+            return self.task_env_config.docker_image
+        digest = hashlib.sha256((self.environment_dir / "Dockerfile").read_bytes()).hexdigest()
+        return self._prebuilt_images[digest]
 
     def _job_name(self) -> str:
         sanitized = re.sub(r"[^a-zA-Z0-9_.-]", "-", self.session_id).strip("-")
@@ -214,7 +239,17 @@ class IrisEnvironment(BaseEnvironment):
                     self._ensure_dirs_command(dirs, chmod=True), cwd="/", user=self._reset_dirs_user()
                 )
                 _require_success(result, f"failed to create sandbox dirs {dirs}", IrisSandboxError)
-            await self._upload_environment_dir_after_start()
+            if self.task_env_config.docker_image:
+                await self._upload_environment_dir_after_start()
+            else:
+                # The mapped image supplies Dockerfile build steps; upload restores COPY inputs
+                # from this particular task without modifying its checked-in definition.
+                result = await self.exec("pwd")
+                _require_success(result, "failed to resolve image working directory", IrisSandboxError)
+                workdir = self.task_env_config.workdir or result.stdout.strip()
+                if not workdir:
+                    raise IrisSandboxError("mapped image has no working directory")
+                await self.upload_dir(self.environment_dir, workdir)
         except BaseException:
             await asyncio.shield(asyncio.to_thread(self._stop_sync))
             raise
@@ -244,7 +279,7 @@ class IrisEnvironment(BaseEnvironment):
                     memory=(self.task_env_config.memory_mb or DEFAULT_MEMORY_MB) * 1024 * 1024,
                     disk=(self.task_env_config.storage_mb or DEFAULT_STORAGE_MB) * 1024 * 1024,
                 ),
-                task_image=self.task_env_config.docker_image,
+                task_image=self._task_image(),
                 container_profile=self._container_profile,
                 scheduling_timeout=Duration.from_seconds(self._scheduling_timeout),
                 timeout=Duration.from_seconds(self._sandbox_ttl),
@@ -266,16 +301,16 @@ class IrisEnvironment(BaseEnvironment):
             tasks = self._job.tasks()
             if tasks:
                 status = tasks[0].status()
-                if status.state == job_pb2.TASK_STATE_RUNNING:
+                if status.state is TaskState.RUNNING:
                     return tasks[0].task_id.to_wire()
                 if status.state not in (
-                    job_pb2.TASK_STATE_PENDING,
-                    job_pb2.TASK_STATE_BUILDING,
-                    job_pb2.TASK_STATE_ASSIGNED,
+                    TaskState.PENDING,
+                    TaskState.BUILDING,
+                    TaskState.ASSIGNED,
                 ):
                     raise IrisSandboxError(
                         f"Sandbox task {tasks[0].task_id} entered "
-                        f"{job_pb2.TaskState.Name(status.state)} before running: {status.error or 'no error'}"
+                        f"{status.state.value} before running: {status.error_message or 'no error'}"
                     )
             time.sleep(2)
         raise EnvironmentStartTimeoutError(
@@ -290,7 +325,7 @@ class IrisEnvironment(BaseEnvironment):
         try:
             job, self._job = self._job, None
             if job is not None:
-                job.terminate()
+                job.cancel()
         finally:
             self._task_id = None
             self._rpc = None
@@ -314,6 +349,8 @@ class IrisEnvironment(BaseEnvironment):
         user: str | int | None = None,
     ) -> ExecResult:
         effective_cwd = cwd or self.task_env_config.workdir
+        if timeout_sec is None and self.agent_timeout_sec is not None:
+            timeout_sec = math.ceil(self.agent_timeout_sec)
         script = self._build_script(command, cwd=effective_cwd, env=env, user=user)
         return await asyncio.to_thread(self._exec_sync, script, timeout_sec)
 
@@ -336,21 +373,23 @@ class IrisEnvironment(BaseEnvironment):
 
         resolved_user = self._resolve_user(user)
         if resolved_user not in (None, "root", 0, "0"):
-            script = f"su -s /bin/sh -c {shlex.quote(script)} {shlex.quote(str(resolved_user))}"
+            script = f"su -s /bin/bash -c {shlex.quote(script)} {shlex.quote(str(resolved_user))}"
         return script
 
     def _exec_sync(self, script: str, timeout_sec: int | None) -> ExecResult:
         if self._rpc is None or self._task_id is None:
             raise RuntimeError("IrisEnvironment is not started")
         if timeout_sec is None:
-            container_timeout, rpc_timeout_ms = -1, UNLIMITED_EXEC_RPC_TIMEOUT_MS
+            # Kubernetes exec substitutes its 60-second default for an unlimited
+            # timeout. The sandbox TTL bounds commands outside an agent phase.
+            container_timeout, rpc_timeout_ms = self._sandbox_ttl, UNLIMITED_EXEC_RPC_TIMEOUT_MS
         else:
             container_timeout = timeout_sec
             rpc_timeout_ms = (timeout_sec + EXEC_RPC_PADDING) * 1000
         response = self._rpc.exec_in_container(
             controller_pb2.Controller.ExecInContainerRequest(
                 task_id=self._task_id,
-                command=["sh", "-c", script],
+                command=["bash", "-c", script],
                 timeout_seconds=container_timeout,
             ),
             timeout_ms=rpc_timeout_ms,
@@ -360,7 +399,7 @@ class IrisEnvironment(BaseEnvironment):
         return ExecResult(stdout=response.stdout, stderr=response.stderr, return_code=response.exit_code)
 
     async def upload_file(self, source_path: Path | str, target_path: str):
-        data = Path(source_path).read_bytes()
+        data = UPath(str(source_path)).read_bytes()
         quoted = shlex.quote(target_path)
         parent = shlex.quote(str(Path(target_path).parent))
         await self._check_exec(f"mkdir -p {parent} && rm -f {quoted} && touch {quoted}")
@@ -369,6 +408,11 @@ class IrisEnvironment(BaseEnvironment):
             await self._check_exec(f"printf '%s' {encoded} | base64 -d >> {quoted}")
 
     async def upload_dir(self, source_dir: Path | str, target_dir: str):
+        if _local_path(source_dir) is None:
+            with tempfile.TemporaryDirectory() as staging:
+                _copy_tree(UPath(str(source_dir)), UPath(staging))
+                await self.upload_dir(staging, target_dir)
+            return
         remote_tar = f"/tmp/.hb-upload-{Path(str(source_dir)).name}.tar.gz"
         with tempfile.NamedTemporaryFile(suffix=".tar.gz") as local_tar:
             with tarfile.open(local_tar.name, "w:gz") as tf:
@@ -383,7 +427,7 @@ class IrisEnvironment(BaseEnvironment):
         )
 
     async def download_file(self, source_path: str, target_path: Path | str):
-        target = _local_download_target(target_path)
+        target = _local_path(target_path)
         if target is None:
             # Remote (e.g. gs://) trial dir: stage locally, then copy the bytes out.
             with tempfile.NamedTemporaryFile() as staging:
@@ -406,12 +450,12 @@ class IrisEnvironment(BaseEnvironment):
                     break
 
     async def download_dir(self, source_dir: str, target_dir: Path | str):
-        target = _local_download_target(target_dir)
+        target = _local_path(target_dir)
         if target is None:
             # Remote (e.g. gs://) trial dir: extract locally, then copy the tree out.
             with tempfile.TemporaryDirectory() as staging:
                 await self.download_dir(source_dir, staging)
-                _copy_local_tree_to_remote(Path(staging), UPath(str(target_dir)))
+                _copy_tree(UPath(staging), UPath(str(target_dir)))
             return
         remote_tar = f"/tmp/.hb-download-{Path(source_dir).name}.tar.gz"
         await self._check_exec(

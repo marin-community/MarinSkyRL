@@ -6,6 +6,28 @@ from typing import List
 from transformers import PreTrainedTokenizerBase
 
 
+def read_prompt_files(sources: list[str]) -> datasets.Dataset:
+    """Load local parquet/JSON files or explicitly selected Hugging Face splits."""
+    loaded = []
+    for source in sources:
+        ext = os.path.splitext(source)[-1].lower()
+        if ext == ".parquet":
+            data = datasets.load_dataset("parquet", data_files=source, keep_in_memory=False)["train"]
+        elif ext in [".json", ".jsonl"]:
+            data = datasets.load_dataset("json", data_files=source, keep_in_memory=False)["train"]
+        else:
+            name, separator, split = source.partition(":")
+            split = split if separator else "train"
+            available = datasets.load_dataset(path=name, keep_in_memory=False)
+            if split not in available:
+                raise ValueError(
+                    f"Split `{split}` not found in dataset `{name}`. Configured split was `{split}` and default is `train`"
+                )
+            data = available[split]
+        loaded.append(data)
+    return datasets.concatenate_datasets(loaded)
+
+
 class PromptDataset:
     def __init__(
         self,
@@ -29,29 +51,7 @@ class PromptDataset:
         self._read_files_and_tokenize()
 
     def _read_files_and_tokenize(self):
-        loaded_datasets = []
-        for source in self.datasets:
-            ext = os.path.splitext(source)[-1].lower()
-            if ext == ".parquet":
-                ds = datasets.load_dataset("parquet", data_files=source, keep_in_memory=False)["train"]
-            elif ext in [".json", ".jsonl"]:
-                ds = datasets.load_dataset("json", data_files=source, keep_in_memory=False)["train"]
-            else:
-                # Treat as HF dataset spec: "name" or "name:split"
-                dataset_name, has_split, split = source.partition(":")
-                try:
-                    ds_dict = datasets.load_dataset(path=dataset_name, keep_in_memory=False)
-                except ValueError:
-                    raise ValueError(f"Dataset `{dataset_name}` not found on Hugging Face.")
-                split = split if has_split else "train"
-                if split not in ds_dict:
-                    raise ValueError(
-                        f"Split `{split}` not found in dataset `{dataset_name}`. Configured split was `{split}` and default is `train`"
-                    )
-                ds = ds_dict[split]
-            loaded_datasets.append(ds)
-
-        self.dataframe: datasets.Dataset = datasets.concatenate_datasets(loaded_datasets)
+        self.dataframe = read_prompt_files(self.datasets)
 
         logger.info(f"Total dataset size: {len(self.dataframe)}")
 

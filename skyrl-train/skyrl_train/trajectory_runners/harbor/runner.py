@@ -58,6 +58,7 @@ from skyrl_train.utils.span_tagger import tag_response_spans
 from skyrl_train.utils.pbs_shaping import compute_pbs_token_shaping
 from omegaconf import DictConfig
 from pathlib import Path
+from marinskyrl.harbor_agent_names import is_harbor_task_request
 from marinskyrl.packed_tasks import PackedTaskMaterializer, PackedTaskReference
 
 # Harbor orchestrator and trial imports.
@@ -107,7 +108,7 @@ def _materialized_prompts(
     ]
 
 
-def _select_cli_literal_chain(entries: List[Dict[str, Any]], trial_id: str) -> List[Dict[str, Any]]:
+def _select_cli_literal_chain(entries: List[Dict[str, Any]], trial_id: str, agent_name: str) -> List[Dict[str, Any]]:
     """Return the final continuous agent-call chain for one CLI-agent trial.
 
     The controller RecordProxy captures every request carrying the trial header.
@@ -115,7 +116,7 @@ def _select_cli_literal_chain(entries: List[Dict[str, Any]], trial_id: str) -> L
     summary-seeded conversation. Neither belongs in the causal sequence assembled
     from the final request's chat history. A real next agent turn has the previous
     served prompt and completion as an exact prefix of its prompt, so retain the
-    longest such route ending at the final captured call.
+    longest such route ending at the final captured task-agent call.
 
     Entries without complete token-id streams keep the existing all-entry fallback:
     they can still support the re-tokenized TIS path but cannot prove a TITO route.
@@ -127,6 +128,7 @@ def _select_cli_literal_chain(entries: List[Dict[str, Any]], trial_id: str) -> L
         and entry.get("status_code") == 200
         and isinstance(entry.get("literal"), dict)
         and entry["literal"].get("completion_token_ids")
+        and is_harbor_task_request(entry.get("request", {}), agent_name)
     ]
     candidates.sort(key=lambda entry: entry.get("timestamp") or 0.0)
     if len(candidates) < 2:
@@ -145,15 +147,23 @@ def _select_cli_literal_chain(entries: List[Dict[str, Any]], trial_id: str) -> L
     lengths = [1] * len(candidates)
     for current_idx, current in enumerate(candidates):
         current_prompt = current["literal"]["prompt_token_ids"]
-        for previous_idx, previous in enumerate(candidates[:current_idx]):
-            previous_literal = previous["literal"]
-            expected_prefix = previous_literal["prompt_token_ids"] + previous_literal["completion_token_ids"]
-            if current_prompt[: len(expected_prefix)] != expected_prefix:
+        # Choose the longest chain, breaking ties by earliest predecessor.
+        # Searching in that order lets continuous histories stop at their immediate
+        # predecessor instead of copying and comparing every earlier token prefix.
+        for previous_idx in sorted(range(current_idx), key=lambda index: (-lengths[index], index)):
+            previous_literal = candidates[previous_idx]["literal"]
+            previous_prompt = previous_literal["prompt_token_ids"]
+            previous_completion = previous_literal["completion_token_ids"]
+            prefix_length = len(previous_prompt) + len(previous_completion)
+            if prefix_length > len(current_prompt):
                 continue
-            candidate_length = lengths[previous_idx] + 1
-            if candidate_length > lengths[current_idx]:
-                lengths[current_idx] = candidate_length
-                parents[current_idx] = previous_idx
+            if current_prompt[: len(previous_prompt)] != previous_prompt:
+                continue
+            if current_prompt[len(previous_prompt) : prefix_length] != previous_completion:
+                continue
+            lengths[current_idx] = lengths[previous_idx] + 1
+            parents[current_idx] = previous_idx
+            break
 
     route_indices = []
     current_idx: Optional[int] = len(candidates) - 1
@@ -962,6 +972,9 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 api_base=self._agent_api_base,
                 session_id=session_id,
                 timeout_override_sec=timeout_override,
+                task_index=(input_batch["env_extras"][i] or {}).get("task_index")
+                if input_batch["env_extras"]
+                else None,
             )
             trial_configs.append(trial_config)
             trajectory_ids.append(trajectory_id)
@@ -1380,6 +1393,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
             "prompt_token_ids": [list(output.evidence.prompt_token_ids) for output in all_outputs],
             "response_ids": [list(output.evidence.response_token_ids) for output in all_outputs],
             "rewards": [output.reward_result.optimization_reward for output in all_outputs],
+            "verification_results": [output.verification for output in all_outputs],
             "unshaped_rewards": [float(output.reward_result.unshaped_reward or 0.0) for output in all_outputs],
             "loss_masks": [
                 project_loss_mask(output, list(output.evidence.response_token_ids)) for output in all_outputs
@@ -1500,7 +1514,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
                 from harbor.literal.rollout_build import build_rollout_details_from_pairs
             except Exception:  # harbor without the bridge → no-op
                 return rollout_details
-            selected_entries = _select_cli_literal_chain(entries, trial_id)
+            selected_entries = _select_cli_literal_chain(entries, trial_id, result.agent_info.name)
             built = build_rollout_details_from_pairs([entry["literal"] for entry in selected_entries])
             if not built:
                 return rollout_details
@@ -1585,7 +1599,7 @@ class HarborTrajectoryRunner(TrajectoryRunner):
         ]
         if not matched:
             return None
-        matched = _select_cli_literal_chain(matched, trial_id)
+        matched = _select_cli_literal_chain(matched, trial_id, result.agent_info.name)
         if not matched:
             return None
         last = matched[-1]

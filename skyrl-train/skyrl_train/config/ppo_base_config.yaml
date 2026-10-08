@@ -9,6 +9,8 @@ data:
   train_data: ["${oc.env:HOME}/data/gsm8k/train.parquet"]
   val_data: ["${oc.env:HOME}/data/gsm8k/validation.parquet"]
   shuffle: true
+  preference_pair_format: text # text completions or tokenized full conversations with assistant masks
+  epoch_tail: drop # include retains a smaller final batch instead of dropping it
   # Optional task-directory sidechannel for mixed Nemotron Ultra RLVR. The
   # parquet dataloader remains authoritative; SWE rows resolve their instance ID
   # against these terminal-bench task roots at rollout time.
@@ -41,6 +43,7 @@ checkpoint_export:
   hf_upload_mode: latest
 
 trainer:
+  evaluation_runner: training # harbor uses separate sandboxed generation for offline preference validation
   trajectory_selector:
     type: null # null | best_of_n; selection runs after reward postprocessing and before teacher scoring
   # light is the shared default: fatal Python stacks, bounded NCCL flight recording,
@@ -357,6 +360,8 @@ trainer:
 
 
 generator:
+  # stage_local copies the immutable policy checkpoint before Ray starts on each Iris node.
+  model_loading: stream
   model_name: ${trainer.policy.model.path}
   model_dtype: "bfloat16"
   timeout_multiplier: 1.0

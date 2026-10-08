@@ -50,7 +50,7 @@ from skyrl_train.io import io
 
 RETENTION_METRIC_PREFIX = "generate/trajectory_retention"
 RETENTION_SCHEMA_VERSION = 1
-TRAJECTORY_RECORD_SCHEMA_VERSION = 5
+TRAJECTORY_RECORD_SCHEMA_VERSION = 6
 _LEDGER_NAME = "_retention_ledger.json"
 _SELECTION_COUNT = "count"
 _SELECTION_FRACTION = "fraction"
@@ -157,6 +157,7 @@ class _PromptTrace:
 @dataclass(frozen=True)
 class _StepBoundary:
     row_index: int
+    prompt_token_ids: tuple[int, ...]
     token_start: int
     token_end: int
     stop_reason: str | None
@@ -335,6 +336,7 @@ def _step_boundaries(
         boundaries.append(
             _StepBoundary(
                 row_index=row_index,
+                prompt_token_ids=tuple(output["prompt_token_ids"][row_index]),
                 token_start=token_start,
                 token_end=token_end,
                 stop_reason=stop_reasons[row_index],

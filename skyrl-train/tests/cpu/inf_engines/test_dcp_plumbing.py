@@ -32,6 +32,37 @@ from skyrl_train.entrypoints import main_base
 DCP_KEY = "inference_engine_decode_context_parallel_size"
 
 
+@pytest.mark.parametrize("loading", ["stream", "stage_local"])
+def test_immutable_policy_can_load_from_staged_shards_without_changing_source(monkeypatch, loading):
+    captured = {}
+
+    def launch_actor_gang(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(rwie, "create_ray_wrapped_inference_engines", launch_actor_gang)
+    cfg = get_default_config()
+    cfg.trainer.policy.model.path = "/tmp/immutable-policy"
+    cfg.trainer.policy.model.source_uri = "s3://models/policy/step-57"
+    cfg.trainer.policy.model.source_identity = "policy-export/step-57"
+    cfg.generator.model_loading = loading
+    OmegaConf.update(cfg, "generator.engine_init_kwargs.model_loader_extra_config", {"concurrency": 4}, force_add=True)
+
+    main_base.create_ray_wrapped_inference_engines_from_config(cfg, colocate_pg=None, tokenizer=None)
+
+    assert cfg.trainer.policy.model.source_uri == "s3://models/policy/step-57"
+    assert cfg.trainer.policy.model.source_identity == "policy-export/step-57"
+    options = captured["engine_init_kwargs"]
+    if loading == "stage_local":
+        assert captured["pretrain"] == "/tmp/immutable-policy"
+        assert options["load_format"] == "safetensors"
+        assert "model_loader_extra_config" not in options
+    else:
+        assert captured["pretrain"] == "s3://models/policy/step-57"
+        assert options["load_format"] == "runai_streamer"
+        assert options["model_loader_extra_config"] == {"concurrency": 4, "distributed": True}
+
+
 # ===================================================================== seam / G5
 def test_from_config_forwards_vllm_engine_options(monkeypatch):
     """The config-assembly seam forwards typed vLLM engine options.

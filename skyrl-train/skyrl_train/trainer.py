@@ -28,6 +28,7 @@ from skyrl_train.utils.tracking import Tracking
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.rollouts.buffer import RolloutGroup
 from skyrl_train.rollouts.context import TrainingContext, TrainingContextState
+from skyrl_train.rollouts.loader import EpochTail, training_epoch_batch_sizes
 from skyrl_train.trajectory_selection import trajectory_selector_from_config
 from skyrl_train.trajectory_runners.base import (
     TrajectoryBatch,
@@ -62,7 +63,7 @@ from skyrl_train.utils.policy_math import compute_approx_kl, normalize_advantage
 from skyrl_train.utils.kl_controllers import get_kl_controller, FixedKLController, AdaptiveKLController
 from skyrl_train.utils.algorithm_registry import AdvantageEstimator
 from skyrl_train.utils.advantage_estimators import GRPO_FLAT_REWARD_STD_TOLERANCE, compute_advantages_and_returns
-from marinskyrl.runtime_options import reference_model_required
+from marinskyrl.runtime_options import PolicyLossType, reference_model_required
 from marinskyrl.distillation import (
     DistillationObjectiveKind,
     DistillationRewardMode,
@@ -300,6 +301,7 @@ class RayPPOTrainer:
         context: TrainingContext,
         colocate_pg: Optional[PlacementGroup] = None,
         eval_dataset: Optional[PromptDataset] = None,
+        eval_trajectory_runner: TrajectoryRunner | None = None,
         callbacks: Optional[List[TrainerCallback]] = None,
     ):
         self.cfg = cfg
@@ -317,9 +319,12 @@ class RayPPOTrainer:
         self.eval_dataset = eval_dataset
         self.inference_engine_client = inference_engine_client
         self.trajectory_runner = trajectory_runner
+        self.eval_trajectory_runner = eval_trajectory_runner or trajectory_runner
         self.trajectory_selector = trajectory_selector_from_config(cfg)
         self.trajectory_sink = make_trajectory_sink(cfg.generator, tokenizer)
         self.trajectory_runner.set_trajectory_sink(self.trajectory_sink)
+        if self.eval_trajectory_runner is not self.trajectory_runner:
+            self.eval_trajectory_runner.set_trajectory_sink(self.trajectory_sink)
         self.total_training_steps = None
         self._configure_training_schedule()
 
@@ -339,6 +344,7 @@ class RayPPOTrainer:
         self.loaded_checkpoint_path: str | None = None
         self._last_saved_step: int | None = None
         self._last_evaluated_step: int | None = None
+        self._inference_policy_step: int | None = None
         self._pending_checkpoint_upload: tuple[asyncio.Task[tuple[float, float]], TrainerState] | None = None
         raw_speculative_decoding = cfg.generator.get("speculative_decoding")
         if raw_speculative_decoding is not None:
@@ -401,7 +407,8 @@ class RayPPOTrainer:
     def _configure_training_schedule(self):
         """Count steps in batches of prompt groups; one pass over the dataset is one epoch."""
         batch_size = self.cfg.trainer.train_batch_size
-        self.num_steps_per_epoch = len(self.train_dataset) // batch_size
+        sizes = training_epoch_batch_sizes(len(self.train_dataset), batch_size, EpochTail(self.cfg.data.epoch_tail))
+        self.num_steps_per_epoch = len(sizes)
         if self.num_steps_per_epoch == 0:
             raise ValueError(
                 f"the training dataset has {len(self.train_dataset)} prompts, fewer than one batch of {batch_size}"
@@ -465,9 +472,11 @@ class RayPPOTrainer:
         for key, value in (sampling_params or {}).items():
             OmegaConf.update(cfg, f"generator.eval_sampling_params.{key}", value, force_add=True)
         evaluator = evaluate_step_wise if cfg.trainer.step_wise_training else evaluate
+        if self._inference_engines_configured() and self._inference_policy_step != self.global_step:
+            await self._sync_policy_for_rollouts(reason="evaluation")
         return await evaluator(
             eval_dataloader=self.eval_dataloader,
-            trajectory_runner=self.trajectory_runner,
+            trajectory_runner=self.eval_trajectory_runner,
             cfg=cfg,
             global_step=self.global_step,
             tokenizer=self.tokenizer,
@@ -584,6 +593,10 @@ class RayPPOTrainer:
             timeout=60,
             label="Trajectory runner shutdown",
         )
+        if self.eval_trajectory_runner is not self.trajectory_runner:
+            await self._guarded_async(
+                self.eval_trajectory_runner.shutdown(), timeout=60, label="Evaluation trajectory runner shutdown"
+            )
         self._guarded_sync(self.trajectory_sink.close, label="Trajectory retention shutdown")
         self._draft_trainer_update_ref = None
         if self._speculator_refresh_task is not None:
@@ -636,6 +649,8 @@ class RayPPOTrainer:
             if self._distillation_runtime is not None:
                 await self._distillation_runtime.start()
             await self._startup_trajectory_runner()
+            if self.eval_trajectory_runner is not self.trajectory_runner:
+                await self.eval_trajectory_runner.startup()
             await self._train_loop()
         except Exception as error:
             log_exception_as_text(f"Train loop failed at global_step {self.global_step}", error)
@@ -1127,6 +1142,11 @@ class RayPPOTrainer:
         """
         if not self._inference_engines_configured():
             return
+        if self.cfg.trainer.algorithm.policy_loss_type == PolicyLossType.DPO and reason not in (
+            "initial",
+            "evaluation",
+        ):
+            return
         timings = self.all_startup_timings if reason == "initial" else self.all_timings
         with Timer("sync_weights", timings) as update_timer:
             if self.colocate_all:
@@ -1149,6 +1169,7 @@ class RayPPOTrainer:
                 if pause:
                     await self.inference_engine_client.resume_generation()
         self._log_weight_update_completed(reason=reason, duration_seconds=update_timer.duration)
+        self._inference_policy_step = self.global_step
 
     async def sync_policy_weights_to_inference_engines(self) -> None:
         # Align policy actors before the weight extraction collectives.
@@ -1650,7 +1671,7 @@ class RayPPOTrainer:
 
     def convert_rollout_groups_to_training_input(self, groups: List[RolloutGroup]) -> TrainingInputBatch:
         """Concatenate one batch of admitted groups and convert it to a training batch."""
-        batch_size = self.context.config.batch_size
+        batch_size = self.context.config.batch_size_for(self.global_step)
         max_staleness_steps = self.context.config.max_staleness_steps
         assert len(groups) == batch_size, f"Expected {batch_size} groups, got {len(groups)}"
         with Timer("assemble_generation_group_mini_batch", self.all_timings):
@@ -2980,6 +3001,12 @@ class RayPPOTrainer:
             return
 
         protected_steps = protected_hf_export_steps(self.cfg.trainer.ckpt_path)
+        best_path = join_resource_path(self.cfg.trainer.ckpt_path, "best_checkpoint.json")
+        if io.exists(best_path):
+            with io.open_file(best_path, "r") as stream:
+                best = json.load(stream)
+            if best["model_format"] == "native":
+                protected_steps.add(best["step"])
 
         if not self._node_ids:
             self._node_ids = get_node_ids(self.policy_model, self.critic_model, self.ref_model)

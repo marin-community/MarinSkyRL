@@ -35,7 +35,7 @@ import random
 import ray.exceptions
 from dataclasses import dataclass, field
 from http import HTTPStatus
-from skyrl_train.config.trajectory_runner_capabilities import opencode_exact_continuation_enabled
+from skyrl_train.config.trajectory_runner_capabilities import harbor_exact_continuation_enabled
 from skyrl_train.inference_engines.chat_continuation import EXACT_PROMPT_TOKEN_IDS_KEY
 from skyrl_train.trajectory_runners.routed_experts import decode_routed_experts
 import base64
@@ -104,7 +104,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         self.enable_http_endpoint = full_config.generator.enable_http_endpoint
         self.http_endpoint_host = full_config.generator.http_endpoint_host
         self.http_endpoint_port = full_config.generator.http_endpoint_port
-        self.enable_opencode_exact_continuation = opencode_exact_continuation_enabled(full_config)
+        self.enable_harbor_exact_continuation = harbor_exact_continuation_enabled(full_config)
         self.generation_paused_event = threading.Event()
         # One wake-up event per event loop that has passed the pause barrier since the last
         # release: the trainer's loop and, with the HTTP endpoint, the server thread's loop.
@@ -1230,7 +1230,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                 "port": self.http_endpoint_port,
                 "log_level": "warning",
                 "bridge_stats": self._http_bridge_stats,
-                "enable_opencode_exact_continuation": self.enable_opencode_exact_continuation,
+                "enable_harbor_exact_continuation": self.enable_harbor_exact_continuation,
             },
             daemon=True,
         )

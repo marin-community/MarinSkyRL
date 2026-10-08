@@ -29,7 +29,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from skyrl_train.inference_engines.inference_http_backend import InferenceHTTPBackend
-from skyrl_train.inference_engines.opencode_continuation import OpenCodeContinuationManager
+from skyrl_train.inference_engines.harbor_continuation import HarborContinuationManager
 from skyrl_train.inference_engines.vllm.stats import HTTPBridgeStatsAccumulator
 
 
@@ -315,7 +315,7 @@ async def handle_openai_request(
     raw_request: Request,
     endpoint: str,
     bridge_stats: HTTPBridgeStatsAccumulator,
-    continuation_manager: OpenCodeContinuationManager | None = None,
+    continuation_manager: HarborContinuationManager | None = None,
 ):
     """Handle a request implemented by the policy model's serving backend.
 
@@ -359,11 +359,18 @@ async def handle_openai_request(
 
         # Non-streaming requests stay attached to the client until completion.
         if endpoint == "/chat/completions":
+            lease = await continuation_manager.begin(payload) if continuation_manager is not None else None
             backend_request = _global_inference_engine_client.chat_completion(payload)
+            if lease is not None:
+                backend_request = lease.capture_response(backend_request)
         elif endpoint == "/completions":
             backend_request = _global_inference_engine_client.completion(payload)
         else:
-            backend_request = _global_inference_engine_client.tokenize(payload)
+            backend_request = (
+                continuation_manager.tokenize(payload)
+                if continuation_manager is not None
+                else _global_inference_engine_client.tokenize(payload)
+            )
         response = await _await_with_disconnect(raw_request, backend_request)
 
         if is_engine_error_response(response):
@@ -511,15 +518,15 @@ def create_app(
     *,
     backend: InferenceHTTPBackend | None = None,
     event_loop_lag_interval_seconds: float = 0.5,
-    enable_opencode_exact_continuation: bool = False,
+    enable_harbor_exact_continuation: bool = False,
 ) -> fastapi.FastAPI:
     """Create the FastAPI application."""
     bridge_stats = bridge_stats or HTTPBridgeStatsAccumulator()
     continuation_manager = None
-    if enable_opencode_exact_continuation:
+    if enable_harbor_exact_continuation:
         if backend is None:
-            raise ValueError("OpenCode exact continuation requires an explicit inference backend")
-        continuation_manager = OpenCodeContinuationManager(backend)
+            raise ValueError("Harbor exact continuation requires an explicit inference backend")
+        continuation_manager = HarborContinuationManager(backend)
 
     @asynccontextmanager
     async def lifespan(app: fastapi.FastAPI):
@@ -607,7 +614,12 @@ def create_app(
     @app.post(TOKENIZE_ENDPOINT)
     async def tokenize(raw_request: Request):
         """Delegate chat tokenization to the inference backend's serving renderer."""
-        return await handle_openai_request(raw_request, endpoint=TOKENIZE_ENDPOINT, bridge_stats=bridge_stats)
+        return await handle_openai_request(
+            raw_request,
+            endpoint=TOKENIZE_ENDPOINT,
+            bridge_stats=bridge_stats,
+            continuation_manager=continuation_manager,
+        )
 
     @app.get(MODELS_ENDPOINT)
     async def models():
@@ -648,7 +660,7 @@ def serve(
     port: int = 8000,
     log_level: str = "info",
     bridge_stats: HTTPBridgeStatsAccumulator | None = None,
-    enable_opencode_exact_continuation: bool = False,
+    enable_harbor_exact_continuation: bool = False,
 ):
     """
     Start the HTTP endpoint.
@@ -659,12 +671,12 @@ def serve(
         port: Port to bind to (default: 8000)
         log_level: Logging level (default: "info")
         bridge_stats: Shared accumulator for HTTP bridge metrics
-        enable_opencode_exact_continuation: Preserve exact served token prefixes for terminal-bench OpenCode
+        enable_harbor_exact_continuation: Preserve exact served token prefixes for captured Harbor chat agents
     """
     app = create_app(
         bridge_stats,
         backend=inference_engine_client,
-        enable_opencode_exact_continuation=enable_opencode_exact_continuation,
+        enable_harbor_exact_continuation=enable_harbor_exact_continuation,
     )
 
     # Configure logging

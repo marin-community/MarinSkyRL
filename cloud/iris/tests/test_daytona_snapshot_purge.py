@@ -66,6 +66,22 @@ def test_daytona_preflight_follows_harbor_usage(entrypoint, terminal_bench_data,
     assert launcher._rl_config_uses_daytona(config) is expected
 
 
+@pytest.mark.parametrize("entrypoint", ["terminal_bench", "terminal_bench_generate"])
+def test_iris_harbor_launch_skips_daytona_credentials_and_snapshot_preparation(entrypoint):
+    config = OmegaConf.create(
+        {
+            "runtime": {"entrypoint": f"skyrl_train.entrypoints.{entrypoint}"},
+            "skyrl": {
+                "terminal_bench_config": {
+                    "harbor": {"import_path": "marinskyrl.iris_harbor_environment:IrisEnvironment"}
+                }
+            },
+        }
+    )
+
+    assert launcher._rl_config_uses_daytona(config) is False
+
+
 @dataclass
 class _FakeSnapshot:
     name: str

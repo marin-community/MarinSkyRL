@@ -82,14 +82,14 @@ class TerminalBenchTaskDataset:
             return {
                 "prompt": path,
                 "env_class": None,
-                "env_extras": {"data_source": path},
+                "env_extras": {"data_source": path, "task_index": index},
                 "uid": self.uid(index),
             }
         uri = item.stable_uri()
         return {
             "prompt": uri,
             "env_class": None,
-            "env_extras": {"data_source": uri, "packed_task": asdict(item)},
+            "env_extras": {"data_source": uri, "packed_task": asdict(item), "task_index": index},
             "uid": self.uid(index),
         }
 

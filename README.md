@@ -49,6 +49,12 @@ selected architecture. Validate frozen-profile installation, two-node H100 Ray a
 checkpoint export with the selected image before publishing the digest; GPU dependency versions
 come from `uv.lock`.
 
+For immutable object-store policies, `generator.model_loading: stream` loads rollout weights
+directly through RunAI. Set it to `stage_local` to copy the complete checkpoint onto each Iris
+task's local disk before Ray starts and load vLLM from local safetensors. Reserve disk space for
+the full checkpoint on every task. The learner continues to use the original object-store
+source and identity; tokenizer selection, model weights, and training settings are preserved.
+
 The walkthrough below reproduces the original OpenThoughts-Agent v1 release (kept here for reference), i.e.:
 - Using [open-thoughts/OpenThinker-Agent-v1-SFT](https://huggingface.co/open-thoughts/OpenThinker-Agent-v1-SFT) as base
 - GRPO with the data [open-thoughts/OpenThoughts-Agent-v1-RL](https://huggingface.co/datasets/open-thoughts/OpenThoughts-Agent-v1-RL), while
@@ -73,6 +79,9 @@ cd ../..
 ```
 
 Install Harbor
+
+See [Harbor agent profiles](docs/harbor-agent-profiles.md) for stable task-to-agent assignment.
+
 ```bash
 git clone https://github.com/CharlieFRuan/harbor
 cd harbor

@@ -523,13 +523,14 @@ async def test_draft_refresh_retains_per_engine_exceptions() -> None:
     ("entrypoint", "agent_name", "collect_rollout_details", "backend", "expected"),
     [
         ("terminal_bench", "opencode", True, "vllm", True),
+        ("terminal_bench", "mini-swe-agent", True, "vllm", True),
         ("terminal_bench", "opencode", False, "vllm", False),
         ("terminal_bench", "terminus-2", True, "vllm", False),
         ("terminal_bench", "opencode", True, "sglang", False),
         ("gsm8k", "opencode", True, "vllm", False),
     ],
 )
-def test_exact_opencode_continuation_is_terminal_bench_scoped(
+def test_exact_harbor_continuation_is_terminal_bench_scoped(
     entrypoint, agent_name, collect_rollout_details, backend, expected
 ):
     configured = _make_min_cfg()
@@ -539,7 +540,7 @@ def test_exact_opencode_continuation_is_terminal_bench_scoped(
 
     client = InferenceEngineClient(engines=[], tokenizer=object(), full_config=configured)
 
-    assert client.enable_opencode_exact_continuation is expected
+    assert client.enable_harbor_exact_continuation is expected
 
 
 @pytest.mark.asyncio

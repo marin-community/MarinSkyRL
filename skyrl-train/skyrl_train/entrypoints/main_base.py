@@ -24,6 +24,8 @@ import asyncio
 import multiprocessing as mp
 
 from skyrl_train.config.objective_spec import rollout_logprobs_required
+from skyrl_train.dataset.preference_pairs import PreferencePairFormat
+from marinskyrl.resource_locator import RolloutModelLoading
 from skyrl_train.config.trajectory_runner_capabilities import (
     EntrypointOperation,
     TrajectoryRunnerMode,
@@ -34,7 +36,12 @@ from marinskyrl.speculative_decoding import (
     parse_speculative_decoding_config,
     runai_model_uri,
 )
-from marinskyrl.runtime_options import WeightSyncTransport, static_preference_pairs_requested
+from marinskyrl.runtime_options import (
+    EvaluationRunner,
+    WeightSyncTransport,
+    inference_engines_required,
+    static_preference_pairs_requested,
+)
 
 if TYPE_CHECKING:
     from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -158,12 +165,17 @@ def create_ray_wrapped_inference_engines_from_config(
     if tokenizer_revision is not None:
         engine_init_kwargs["tokenizer_revision"] = tokenizer_revision
     policy_source_uri = cfg.trainer.policy.model.get("source_uri")
-    rollout_model_path = runai_model_uri(policy_source_uri) if policy_source_uri else cfg.trainer.policy.model.path
-    if policy_source_uri is not None:
+    model_loading = RolloutModelLoading(cfg.generator.model_loading)
+    stream_policy = policy_source_uri is not None and model_loading is RolloutModelLoading.STREAM
+    rollout_model_path = runai_model_uri(policy_source_uri) if stream_policy else cfg.trainer.policy.model.path
+    if stream_policy:
         engine_init_kwargs["load_format"] = "runai_streamer"
         model_loader_extra_config = engine_init_kwargs.setdefault("model_loader_extra_config", {})
         model_loader_extra_config.setdefault("distributed", True)
         engine_init_kwargs[MODEL_METADATA_PATH_KEY] = cfg.trainer.policy.model.path
+    elif model_loading is RolloutModelLoading.STAGE_LOCAL:
+        engine_init_kwargs["load_format"] = "safetensors"
+        engine_init_kwargs.pop("model_loader_extra_config", None)
     if speculative_decoding is not None:
         engine_init_kwargs["speculative_config"] = speculative_decoding.vllm_speculative_config()
         if speculative_decoding.training is not None:
@@ -233,7 +245,7 @@ def create_ray_wrapped_inference_engines_from_config(
             )
             engine_kwargs["enforce_eager"] = False
 
-    if policy_source_uri is not None and rollout_model_path.startswith("s3://") and cfg.generator.backend == "vllm":
+    if stream_policy and rollout_model_path.startswith("s3://") and cfg.generator.backend == "vllm":
         retry = cfg.trainer.model_load_retry
 
         def create_engines(remaining_timeout_seconds: float):
@@ -296,7 +308,7 @@ class BasePPOExp:
         """Create the configured local or remote inference-engine client."""
         from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient  # noqa: PLC0415
 
-        if static_preference_pairs_requested(self.cfg):
+        if not inference_engines_required(self.cfg):
             logger.info("Skipping inference engines: preference-pair training reads static completions")
             return InferenceEngineClient([], self.tokenizer, self.cfg)
 
@@ -355,6 +367,7 @@ class BasePPOExp:
 
             return PreferencePairDataset(
                 tokenizer=self.tokenizer,
+                data_format=PreferencePairFormat(self.cfg.data.preference_pair_format),
                 datasets=self.cfg.data.train_data,
                 max_prompt_length=self.cfg.trainer.max_prompt_length,
                 num_workers=8,
@@ -379,6 +392,10 @@ class BasePPOExp:
         probe = self.cfg.trainer.mismatch_probe
         needs_probe_prompts = probe.enabled and probe.reuse_probe is None
         if (self.cfg.trainer.eval_interval > 0 or needs_probe_prompts) and self.cfg.data.val_data:
+            if EvaluationRunner(self.cfg.trainer.evaluation_runner) is EvaluationRunner.HARBOR:
+                from skyrl_train.trajectory_runners.harbor.dataset import TerminalBenchTaskDataset  # noqa: PLC0415
+
+                return TerminalBenchTaskDataset(data_files=self.cfg.data.val_data)
             from skyrl_train.dataset import PromptDataset  # noqa: PLC0415
 
             prompts_dataset = PromptDataset(
@@ -476,6 +493,7 @@ class BasePPOExp:
                 raise ValueError("preference-pair training cannot mix terminal-bench rows")
             return PreferencePairTrajectoryRunner(
                 tokenizer,
+                data_format=PreferencePairFormat(cfg.data.preference_pair_format),
                 max_generate_length=cfg.generator.sampling_params.max_generate_length,
                 max_input_length=cfg.generator.max_input_length,
             )
@@ -528,6 +546,17 @@ class BasePPOExp:
         from skyrl_train.rollouts.context import TrainingContext  # noqa: PLC0415
         from skyrl_train.trainer import RayPPOTrainer  # noqa: PLC0415
 
+        evaluation_runner = None
+        if EvaluationRunner(cfg.trainer.evaluation_runner) is EvaluationRunner.HARBOR:
+            from skyrl_train.rollouts.workers import RolloutWorkerPool, RolloutWorkerResources  # noqa: PLC0415
+            from skyrl_train.trajectory_runners.harbor.execution import HarborRunnerSpec  # noqa: PLC0415
+
+            if eval_dataset is None:
+                raise ValueError("Harbor evaluation requires validation task data and an enabled evaluation interval")
+            evaluation_runner = RolloutWorkerPool(
+                HarborRunnerSpec.from_config(cfg), RolloutWorkerResources.from_config(cfg)
+            )
+
         return RayPPOTrainer(
             context=TrainingContext.from_config(cfg, train_dataset, trajectory_runner),
             cfg=cfg,
@@ -537,6 +566,7 @@ class BasePPOExp:
             eval_dataset=eval_dataset,
             inference_engine_client=inference_engine_client,
             trajectory_runner=trajectory_runner,
+            eval_trajectory_runner=evaluation_runner,
             colocate_pg=colocate_pg,
         )
 

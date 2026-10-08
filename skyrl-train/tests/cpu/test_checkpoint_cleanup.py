@@ -10,6 +10,7 @@ Background on the incident that motivated these tests is in
     uv run --isolated --extra dev pytest tests/cpu/test_checkpoint_cleanup.py
 """
 
+import json
 from unittest.mock import MagicMock, patch
 
 import ray.exceptions
@@ -61,3 +62,15 @@ def test_cleanup_runs_driver_side_after_fanout_failure(tmp_path):
 
     remaining = sorted(p.name for p in tmp_path.iterdir())
     assert remaining == ["global_step_3"], "driver-side cleanup should keep only the newest checkpoint"
+
+
+def test_cleanup_preserves_best_model_after_later_checkpoints(tmp_path):
+    for step in (1, 2, 3):
+        (tmp_path / f"global_step_{step}").mkdir()
+    (tmp_path / "best_checkpoint.json").write_text(json.dumps({"step": 1, "model_format": "native"}))
+    trainer = _make_bare_trainer(max_ckpts_to_keep=1, ckpt_path=str(tmp_path), node_ids=["local-test-node"])
+    with patch("skyrl_train.trainer.run_on_each_node"):
+        trainer._cleanup_old_checkpoints()
+    assert (tmp_path / "global_step_1").is_dir()
+    assert (tmp_path / "global_step_3").is_dir()
+    assert not (tmp_path / "global_step_2").exists()

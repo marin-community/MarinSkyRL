@@ -20,6 +20,7 @@ Supports two configuration styles:
 
 import asyncio
 import contextlib
+import json
 import math
 import os
 from dataclasses import dataclass
@@ -31,6 +32,9 @@ from omegaconf import DictConfig
 from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_export_enabled
 from skyrl_train.distillation import DISTILLATION_SCORED_TOKENS_METRIC
 from skyrl_train.json_serialization import to_jsonable
+from skyrl_train.io import io
+from marinskyrl.checkpoint_paths import POLICY_CHECKPOINT_SUBDIRECTORY
+from marinskyrl.resource_locator import join_resource_path
 from skyrl_train.inference_engines.vllm.stats import VLLM_NUM_ENGINES_METRIC, IntervalReadMode
 from skyrl_train.inference_observability import (
     InferenceMetricsSink,
@@ -181,6 +185,55 @@ class EvaluationStopConfig:
         threshold = self.minimum if self.minimum is not None else self.min_improvement
         if not math.isfinite(threshold):
             raise ValueError("evaluation stop thresholds must be finite")
+
+
+BEST_CHECKPOINT_FILENAME = "best_checkpoint.json"
+
+
+@register_callback("best_checkpoint")
+class BestCheckpointCallback(TrainerCallback):
+    """Persist the best sufficiently covered verifier score, retaining the initial policy on ties."""
+
+    error_behavior = CallbackErrorBehavior.RAISE
+
+    def __init__(self, *, initial_model_uri: str, expected_tasks: int, minimum_scored_tasks: int):
+        self.initial_model_uri = initial_model_uri
+        self.expected_tasks = expected_tasks
+        self.minimum_scored_tasks = minimum_scored_tasks
+        self.best_score: float | None = None
+
+    async def on_evaluate_async(self, state, control, *, metrics, trainer, **kwargs):
+        attempted = metrics["eval/all/num_attempted"]
+        scored = metrics["eval/all/num_scored"]
+        if attempted != self.expected_tasks or scored < self.minimum_scored_tasks:
+            return control
+        score = metrics["eval/all/avg_verifier_score"]
+        if not math.isfinite(score) or not 0 <= score <= 1:
+            raise ValueError("Best-checkpoint selection requires a finite normalized verifier score")
+        if self.best_score is not None and score <= self.best_score:
+            return control
+        model_uri = self.initial_model_uri
+        model_format = "hf"
+        if state.global_step:
+            await trainer.save_checkpoints()
+            model_uri = join_resource_path(
+                trainer.cfg.trainer.ckpt_path, f"global_step_{state.global_step}", POLICY_CHECKPOINT_SUBDIRECTORY
+            )
+            model_format = "native"
+        payload = {
+            "step": state.global_step,
+            "accuracy": score,
+            "attempted": attempted,
+            "scored": scored,
+            "model_uri": model_uri,
+            "model_format": model_format,
+            "selection": "Highest valid normalized verifier score; keep the earliest checkpoint on ties",
+        }
+        root = trainer.cfg.trainer.ckpt_path
+        io.makedirs(root, exist_ok=True)
+        io.write_bytes_atomic(join_resource_path(root, BEST_CHECKPOINT_FILENAME), json.dumps(payload).encode())
+        self.best_score = score
+        return control
 
 
 @register_callback("evaluation")
