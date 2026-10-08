@@ -7,13 +7,15 @@
 # Pass the student with --model-path (open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92 at
 # fdc3c3c5) and the 1,600-prompt CruxEval parquet with --train-data. Frozen with marten's SFT arms:
 # same prompts, same sampling temperature, AdamW betas 0.9/0.999, weight decay 0, grad clip 1.0,
-# router query bias frozen. max_new_tokens_per_turn is the shared production cap chosen from E's
-# demo pilot; set it here and in the k=8 demo collection before either runs.
+# router query bias frozen. The 32K window and 30,720-token generation cap are the shared production
+# budget (same as the frozen evaluator and the k=8 E demo collection); E's demo pilot reached
+# 12,138 tokens in 32 samples, so a smaller cap is not safe. The 32K settings (CPU optimizer,
+# logprob chunking, batched-token caps) follow snowball_mopd_ultra_32k.yaml.
 entrypoint: standard
 
 context_budget:
-  request_window_tokens: 16384
-  max_new_tokens_per_turn: 12288  # PROVISIONAL until the pilot fixes the shared cap
+  request_window_tokens: 32768
+  max_new_tokens_per_turn: 30720
   max_turns: 1
 
 environment:
@@ -23,7 +25,8 @@ trainer:
   strategy: megatron
   flash_attn: false
   use_sample_packing: false
-  offload_optimizer_during_rollouts: true
+  # The optimizer lives on the CPU (optimizer_config_kwargs below), so there is nothing to offload.
+  offload_optimizer_during_rollouts: false
   gradient_checkpointing: true
   algorithm:
     advantage_estimator: uniform
@@ -63,6 +66,11 @@ trainer:
       expert_model_parallel_size: 8
       expert_tensor_parallel_size: 1
       optimizer_checkpoint_sharding_type: dp_reshardable
+      # A 32K sequence's last-stage vocabulary log-softmax does not fit beside the optimizer state.
+      optimizer_config_kwargs:
+        optimizer_cpu_offload: true
+        optimizer_offload_fraction: 1.0
+      logprob_chunk_size: 512
   placement:
     colocate_all: false
     policy_num_nodes: 4
@@ -77,7 +85,8 @@ generator:
   inference_engine_expert_parallel_size: 8
   num_inference_engines: 1
   n_samples_per_prompt: 4
-  gpu_memory_utilization: 0.75
+  gpu_memory_utilization: 0.8
+  max_num_batched_tokens: 16384
   enforce_eager: false
   run_engines_locally: true
   weight_sync_backend: nccl
@@ -101,7 +110,8 @@ teachers:
       data_parallel_size: 8
       expert_parallel_size: 8
       colocation_group: teacher_expert
-      gpu_memory_utilization: 0.75
+      gpu_memory_utilization: 0.8
+      max_num_batched_tokens: 16384
 
 teacher_routing:
   opd:
