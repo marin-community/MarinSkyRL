@@ -1,6 +1,7 @@
 """TaskCompendium execution and projection into SkyRL training batches."""
 
 import asyncio
+import shutil
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
@@ -10,6 +11,7 @@ from typing import Any
 from uuid import uuid4
 
 from jinja2 import TemplateError
+from harbor_config.models.environment_type import EnvironmentType
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from shellbox.backends.docker.machine import DockerMachineFactory
@@ -29,7 +31,7 @@ from rolloutengine.contracts import (
 )
 from rolloutengine.engine import ShellboxRolloutEngine
 from rolloutengine.spec import LoweredTaskSpec
-from rolloutengine.lowering import SHELLBOX_SESSION
+from rolloutengine.lowering import SHELLBOX_SESSION, validate_lowered_task
 from skyrl_train.dataset.tasks import LOWERED_TASK_COLUMN
 from skyrl_train.config.utils import generation_context_limit
 from taskcompendium.submission import PlainText
@@ -292,6 +294,8 @@ class TaskRolloutWorker:
             item if harbor is None else harbor.lowered(item, phase=phase)
             for item, harbor in zip(lowered_tasks, harbor_settings, strict=True)
         ]
+        for lowered in lowered_tasks:
+            validate_lowered_task(lowered, factories=self.factories, sessions=self.sessions)
         tasks = [item.task for item in lowered_tasks]
         sampling = get_sampling_params_for_backend(
             self.trajectory_runner_cfg.backend, self.trajectory_runner_cfg.sampling_params
@@ -464,15 +468,18 @@ class TaskRolloutWorkerSpec:
         runner_config = self.config.generator
         client_config = OmegaConf.merge(self.config, {"generator": {"enable_http_endpoint": False}})
         client = DirectModelClient(InferenceEngineClient(self.engines, tokenizer, client_config))
-        factories: dict[str, MachineFactory] = {
-            "docker": DockerMachineFactory(
-                skopeo=Path(self.config.trajectory_runner.skopeo),
+        factories: dict[str, MachineFactory] = {"shellsim": ShellSimMachineFactory()}
+        skopeo = shutil.which(str(Path(self.config.trajectory_runner.skopeo).expanduser()))
+        if shutil.which("docker") is not None and skopeo is not None:
+            factories["docker"] = DockerMachineFactory(
+                skopeo=Path(skopeo),
                 image_cache=Path(self.config.trajectory_runner.image_cache).expanduser(),
-            ),
-            "shellsim": ShellSimMachineFactory(),
-        }
+            )
         if harbor is not None:
-            factories[HARBOR_MACHINE_BACKEND] = harbor.machine_factory(self.config.trajectory_runner)
+            if harbor.environment.type != EnvironmentType.DOCKER:
+                factories[HARBOR_MACHINE_BACKEND] = harbor.machine_factory(self.config.trajectory_runner)
+            elif "docker" in factories:
+                factories[HARBOR_MACHINE_BACKEND] = factories["docker"]
         return TaskRolloutWorker(
             runner_config,
             (
