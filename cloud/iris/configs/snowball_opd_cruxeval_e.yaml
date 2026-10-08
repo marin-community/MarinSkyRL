@@ -1,0 +1,120 @@
+# Snowball 67B-A2B single-teacher on-policy distillation from the CruxEval expert E (marin #9920).
+# Geometry is the proven single-teacher OPD smoke: four PP2 x EP8 learner nodes, one EP8 rollout
+# node, one pinned EP8 teacher node (six H100 nodes). The teacher is E, Marin's HF export of B after
+# SFT on GLM CruxEval traces, served from its S3 export (object-store teacher staging). The
+# environment is prompt_only: the teacher supplies the objective, no verifier runs.
+#
+# Pass the student with --model-path (open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92 at
+# fdc3c3c5) and the 1,600-prompt CruxEval parquet with --train-data. Frozen with marten's SFT arms:
+# same prompts, same sampling temperature, AdamW betas 0.9/0.999, weight decay 0, grad clip 1.0,
+# router query bias frozen. max_new_tokens_per_turn is the shared production cap chosen from E's
+# demo pilot; set it here and in the k=8 demo collection before either runs.
+entrypoint: standard
+
+context_budget:
+  request_window_tokens: 16384
+  max_new_tokens_per_turn: 12288  # PROVISIONAL until the pilot fixes the shared cap
+  max_turns: 1
+
+environment:
+  env_class: prompt_only
+
+trainer:
+  strategy: megatron
+  flash_attn: false
+  use_sample_packing: false
+  offload_optimizer_during_rollouts: true
+  gradient_checkpointing: true
+  algorithm:
+    advantage_estimator: uniform
+    policy_loss_type: importance_sampling
+    use_kl_loss: false
+    use_entropy_loss: false
+    loss_reduction: token_mean
+    distillation:
+      objective: sampled_reverse_kl
+      routing_plan: opd
+      coefficient: 1.0
+      reward_mode: replace
+  epochs: 4
+  update_epochs_per_batch: 1
+  # 64 prompts x 4 rollouts = 256 sampled responses per update; 1,600 prompts = 25 updates per epoch.
+  train_batch_size: 64
+  policy_mini_batch_size: 64
+  eval_batch_size: 64
+  micro_forward_batch_size_per_gpu: 1
+  micro_train_batch_size_per_gpu: 1
+  eval_before_train: false
+  eval_interval: -1
+  ckpt_interval: 25
+  resume_mode: none
+  logger: wandb
+  policy:
+    grug_query_bias_update_mode: frozen
+    optimizer_config:
+      lr: 1.0e-6
+      max_grad_norm: 1.0
+      weight_decay: 0.0
+      adam_betas: [0.9, 0.999]
+    megatron_config:
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 2
+      context_parallel_size: 1
+      expert_model_parallel_size: 8
+      expert_tensor_parallel_size: 1
+      optimizer_checkpoint_sharding_type: dp_reshardable
+  placement:
+    colocate_all: false
+    policy_num_nodes: 4
+    policy_num_gpus_per_node: 8
+
+generator:
+  backend: vllm
+  model_dtype: bfloat16
+  vllm_attention_backend: FLASH_ATTN
+  inference_engine_tensor_parallel_size: 1
+  inference_engine_data_parallel_size: 8
+  inference_engine_expert_parallel_size: 8
+  num_inference_engines: 1
+  n_samples_per_prompt: 4
+  gpu_memory_utilization: 0.75
+  enforce_eager: false
+  run_engines_locally: true
+  weight_sync_backend: nccl
+  sampling_params:
+    temperature: 1.0
+    top_p: 1.0
+
+teachers:
+  expert:
+    source: local_inference
+    placement: pinned
+    backend: vllm
+    evidence: chosen_token
+    model:
+      path: s3://marin-us-east-02a/marin/experiments/task133-cruxeval/checkpoints/karan/cruxeval-step92-lr1e-05/2026.10.07.5/hf/step-272
+      revision: step-272
+    resources:
+      num_nodes: 1
+      gpus_per_node: 8
+      tensor_parallel_size: 1
+      data_parallel_size: 8
+      expert_parallel_size: 8
+      colocation_group: teacher_expert
+      gpu_memory_utilization: 0.75
+
+teacher_routing:
+  opd:
+    revision: snowball-opd-cruxeval-e-v1
+    routes:
+      default:
+        teacher: expert
+        weight: 1.0
+
+data:
+  kind: parquet
+  train_data: []
+  val_data: []
+
+extra_env:
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
