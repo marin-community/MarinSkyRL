@@ -12,6 +12,7 @@ from taskcompendium.models import Source
 from taskcompendium.submission import PlainText
 
 from skyrl_gym.task_factories import session_factories
+from skyrl_gym.task_sessions import CodeTaskSession
 
 
 class ReplayModel:
@@ -168,3 +169,43 @@ async def test_search_observation_reaches_model_without_entering_the_loss_mask(r
     assert rollout.steps[0].transition.grade.status is Outcome.UNAVAILABLE
     assert [step.transition.reward for step in rollout.steps] == [0.0, 1.0]
     assert rollout.loss_mask == (1, 1, 0, 0, 1, 1)
+
+
+@pytest.mark.asyncio
+async def test_lcb_machine_failure_reports_infrastructure_without_a_grade(machine, model_turn, monkeypatch):
+    session = CodeTaskSession(
+        task("lcb", {"reward_model": {"ground_truth": [{"input": "", "output": "42", "testtype": "stdin"}]}}),
+        machine,
+    )
+
+    async def failed_command(command):
+        raise OSError("Machine transport disconnected")
+
+    monkeypatch.setattr(machine, "run", failed_command)
+    transition = await session.advance(model_turn("```python\nprint(42)\n```"))
+    assert transition.done is True
+    assert (transition.grade.status, transition.grade.reward) == (Outcome.INFRA_ERROR, None)
+    assert transition.grade.diagnostics == {
+        "error_type": "OSError",
+        "error_message": "Machine transport disconnected",
+    }
+    assert await session.grade(()) == transition.grade
+
+
+@pytest.mark.asyncio
+async def test_lcb_programmer_failure_propagates_instead_of_producing_a_training_result(
+    machine, model_turn, monkeypatch
+):
+    session = CodeTaskSession(
+        task("lcb", {"reward_model": {"ground_truth": [{"input": "", "output": "42", "testtype": "stdin"}]}}),
+        machine,
+    )
+    error = TypeError("Invalid machine call")
+
+    async def invalid_command(command):
+        raise error
+
+    monkeypatch.setattr(machine, "run", invalid_command)
+    with pytest.raises(TypeError) as failure:
+        await session.advance(model_turn("```python\nprint(42)\n```"))
+    assert failure.value is error

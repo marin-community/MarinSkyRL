@@ -240,12 +240,13 @@ class CodeTaskSession:
         assert self.machine is not None
         try:
             reward, details = await execute_code(self.machine, self.tests, code or "", reward_mode=self.reward_mode)
-        except (OSError, RuntimeError, TypeError, ValueError) as error:
+        except (OSError, RuntimeError, ValueError) as error:
+            logger.exception("LCB verification failed for task %s", self.task.id)
             self.result = GradeResult(
                 Outcome.INFRA_ERROR,
                 None,
                 "Code verification unavailable",
-                diagnostics={"error_type": type(error).__name__},
+                diagnostics={"error_type": type(error).__name__, "error_message": str(error)},
             )
             return Transition(done=True, reward=0.0, grade=self.result)
         self.result = GradeResult(Outcome.GRADED, reward)
