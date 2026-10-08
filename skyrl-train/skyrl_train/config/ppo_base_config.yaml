@@ -530,7 +530,7 @@ environment:
 trajectory_runner:
   command_timeout: 120
   cleanup_timeout: 30
-  shutdown_timeout: 60
+  shutdown_timeout: 45
   max_concurrent_tasks: 32
   skopeo: skopeo
   image_cache: ~/.cache/skyrl/task-images
