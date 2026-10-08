@@ -15,6 +15,8 @@ uv run --no-sync --project .. examples/mini_swe_agent/preprocess_swegym.py \
   --train_revision TRAIN_DATASET_COMMIT \
   --eval_revision EVAL_DATASET_COMMIT \
   --image_manifest /path/to/instance-images.json \
+  --max_turns 20 \
+  --command_timeout 180 \
   --output_dir ~/data/swe_gym_subset
 ```
 
@@ -65,9 +67,14 @@ The scripts use `skyrl_train.entrypoints.taskcompendium`.
 Edit `DATA_DIR` and `CKPT_PATH` in the script to select task Parquet and checkpoint directories.
 The two-node example requires a Ray cluster with eight GPUs per node.
 See the [cluster setup](../../docs/getting-started/installation.rst#initialize-ray-cluster).
-The materialized session settings control execution limits: 50 turns, a 120-second tool cap, and a 3600-second cumulative turn deadline.
+The materialized session settings control execution limits.
+The preparation command above selects 20 turns and a 180-second command timeout for the 8B example.
+For the 30B example, prepare the data with `--max_turns 50`.
+Each tool turn has a separate 600-second timeout. The cumulative turn deadline is 3600 seconds.
 Final verification has a separate 3600-second deadline. Each cleanup action has a 30-second limit.
-Change those values in `preprocess_swegym.py` before materialization.
+Select turn and command limits with the preparation flags.
+Change the other deadlines in `preprocess_swegym.py` before materialization.
+The launch-time `generator.max_turns` setting does not override a materialized task.
 
 To change task setup, add commands to `environment_requirements.setup_commands` during materialization.
 The verifier's `environment_requirements` declares setup for its fresh grading machine.

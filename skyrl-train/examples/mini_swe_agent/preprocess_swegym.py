@@ -58,6 +58,8 @@ def main() -> None:
     parser.add_argument(
         "--image_manifest", type=Path, required=True, help="JSON map of instance IDs to digest-pinned images"
     )
+    parser.add_argument("--max_turns", type=int, default=50)
+    parser.add_argument("--command_timeout", type=float, default=120)
     args = parser.parse_args()
     output = args.output_dir.expanduser()
     output.mkdir(parents=True, exist_ok=True)
@@ -76,9 +78,9 @@ def main() -> None:
     runtime = TaskRuntimeSpec(task_machine=machine, verifier_machine=machine)
     session = TaskSessionSpec(
         task_session="shellbox",
-        max_turns=50,
+        max_turns=args.max_turns,
         model_turn_timeout=None,
-        command_timeout=120,
+        command_timeout=args.command_timeout,
         tool_turn_timeout=600,
         total_turn_timeout=3600,
         attempt_timeout=None,

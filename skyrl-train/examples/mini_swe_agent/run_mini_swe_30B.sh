@@ -58,5 +58,4 @@ uv run --project .. --extra megatron --extra vllm -m skyrl_train.entrypoints.tas
   trainer.run_name="mini_swe_32B_swe_gym" \
   trainer.resume_mode=null \
   trainer.ckpt_path="$CKPT_PATH" \
-  trajectory_runner.command_timeout=180 \
   "$@"
