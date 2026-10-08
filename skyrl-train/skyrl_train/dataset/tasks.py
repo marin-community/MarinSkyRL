@@ -86,7 +86,13 @@ def source_row_task(
         machine = machines.get(row["extra_info"]["nemotron_ultra"]["agent"], machine)
     elif session_name == "openenv":
         machine = machines.get(row["env_name"], machine)
-    session = {**environment_configs["session"], **config.pop("session", {}), "task_session": session_name}
+    source_session = dict(environment_configs["session"])
+    row_turn_limit = row.get("max_turns")
+    if row_turn_limit is None:
+        row_turn_limit = (row.get("extra_info") or {}).get("max_turns")
+    if row_turn_limit is not None:
+        source_session["max_turns"] = int(row_turn_limit)
+    session = {**source_session, **config.pop("session", {}), "task_session": session_name}
     requirements = (
         EnvironmentRequirements()
         if machine is None
