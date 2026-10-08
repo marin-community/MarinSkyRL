@@ -1290,12 +1290,12 @@ async def test_mixed_nemotron_tasks_run_without_the_original_sources(
         assert batch["loss_masks"] == [[0], [0], [0]]
         expected_rows = [0, 1, 2]
     elif projection_type is WholeTaskProjection:
-        assert batch["unshaped_rewards"] == [0.55, 0.75, 0.55]
+        assert batch["unshaped_rewards"] == [1.0, 0.75, 1.0]
         assert [sum(reward) for reward in batch["rewards"]] == [1.1, 1.0, 1.1]
         assert batch["loss_masks"] == [[1, 1, 0, 0, 1, 1], [1, 1], [1, 1, 0, 0, 1, 1]]
         expected_rows = [0, 1, 2]
     else:
-        assert batch["unshaped_rewards"] == [0.1, 1.0, 0.75, 0.1, 1.0]
+        assert batch["unshaped_rewards"] == [0.0, 1.0, 0.75, 0.0, 1.0]
         assert [sum(reward) for reward in batch["rewards"]] == [0.1, 1.0, 1.0, 0.1, 1.0]
         assert batch["response_ids"] == [[3, 4]] * 5
         assert batch["loss_masks"] == [[1, 1]] * 5
@@ -2036,8 +2036,9 @@ async def test_unified_gym_tasks_preserve_grading_and_turn_credit(task_inputs, e
     )
     batch = await runner.run(request)
     assert batch["rewards"] == [rewards]
-    assert batch["unshaped_rewards"] == [sum(rewards) / len(responses)]
-    assert batch["verification_results"][0].score == sum(rewards) / len(responses)
+    expected_grade = float(responses[-1] == "#### 12") if environment == "gsm8k_multi_turn" else sum(rewards)
+    assert batch["unshaped_rewards"] == [expected_grade]
+    assert batch["verification_results"][0].score == expected_grade
     if environment == "cat_count":
         assert batch["verification_results"][0].passed is True
         assert batch["env_metrics"][0]["exact_n2"] == 1.0
@@ -2199,7 +2200,7 @@ async def test_context_limits_preserve_only_completed_gym_turns(
         assert batch["response_ids"] == [[3, 4]]
         assert batch["loss_masks"] == [[1, 1]]
         np.testing.assert_allclose(batch["rollout_logprobs"], [[-0.1, -0.2]])
-        assert batch["unshaped_rewards"] == [0.1]
+        assert batch["unshaped_rewards"] == [0.0]
         assert batch["rewards"] == [[0.0, 0.1]]
         assert batch["evidence_messages"][0][-1] == {"role": "assistant", "content": "#### 13"}
     else:
@@ -2337,8 +2338,8 @@ async def test_step_projection_preserves_served_prompts_grades_and_teacher_route
     assert batch["loss_masks"] == [[1, 1], [1, 1]]
     np.testing.assert_allclose(batch["rollout_logprobs"], [[-0.1, -0.2], [-0.1, -0.2]])
     assert batch["rewards"] == [[0.0, 0.1], [0.0, 1.0]]
-    assert batch["unshaped_rewards"] == [0.1, 1.0]
-    assert [grade.score for grade in batch["verification_results"]] == [0.1, 1.0]
+    assert batch["unshaped_rewards"] == [0.0, 1.0]
+    assert [grade.score for grade in batch["verification_results"]] == [0.0, 1.0]
     assert [item.step for item in batch["trajectory_ids"]] == [0, 1]
     assert batch["is_last_step"] == [False, True]
     assert batch["teacher_route_keys"] == ["arithmetic", "arithmetic"]
