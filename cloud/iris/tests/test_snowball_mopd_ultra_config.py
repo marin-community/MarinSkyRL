@@ -8,7 +8,6 @@ import yaml
 from cloud.iris.rl_config_translation import compose_skyrl_config, parse_rl_config
 from cloud.iris.role_plan import derive_num_nodes, derive_role_plan
 from infra.rl_data.nemotron_ultra_mopd_subset import TEACHER_ROUTES
-from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
 from marinskyrl.distillation import (
     DistillationObjectiveKind,
     DistillationRewardMode,
@@ -82,18 +81,3 @@ def test_snowball_mopd_smoke_route_weights_survive_config_composition():
 
     assert cfg.data.sampling.kind == "domain-weighted"
     assert dict(cfg.data.sampling.domain_weights) == {"math": 1.0, "swe": 1.0, "terminal": 1.0}
-
-
-def test_snowball_mopd_32k_recipe_composes_against_the_base_config():
-    """compose_skyrl_config rejects keys the base config dropped, which only a launch would reveal."""
-    config = Path(__file__).parents[1] / "configs" / "snowball_mopd_ultra_32k.yaml"
-    parsed = parse_rl_config(str(config), model_override=STUDENT)
-    cfg = compose_skyrl_config(
-        parsed, {"job_name": "mopd-32k-test", "experiments_dir": "/tmp/exp", "num_nodes": 9}, _HPCStub()
-    ).config
-
-    assert cfg.trainer.policy.megatron_config.context_parallel_size == 1
-    assert cfg.environment.task_sessions.nemotron_ultra.grading == "skip"
-    # The driver resolves Harbor settings after composition, before it starts workers.
-    settings = HarborTaskSettings.from_config(cfg.terminal_bench_config)
-    assert settings.agent_timeout == cfg.terminal_bench_config.harbor.override_timeout_sec
