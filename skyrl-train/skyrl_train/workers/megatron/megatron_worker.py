@@ -18,6 +18,7 @@ from megatron.bridge import AutoBridge
 from megatron.core.optimizer import DistributedOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 from megatron.core.tensor_parallel.random import get_cuda_rng_tracker
+from megatron.core.utils import get_attr_wrapped_model
 from omegaconf import OmegaConf
 from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.distributed.megatron.megatron_strategy import MegatronStrategy
@@ -61,6 +62,7 @@ from skyrl_train.workers.megatron.megatron_model_wrapper import (
     MegatronPolicyMicroBatch,
 )
 from skyrl_train.workers.megatron.router_replay_install import install_megatron_router_replay
+from skyrl_train.workers.megatron.output_projection_layout import use_batch_major_output_projection
 from skyrl_train.workers.megatron.weight_extractor import BucketedMegatronWeightExtractor, mapping_hf_names
 from skyrl_train.workers.worker import (
     CriticWorkerBase,
@@ -192,6 +194,15 @@ class MegatronWorker:
         model = self.provider.provide_distributed_model(
             ddp_config=default_ddp_config, wrap_with_ddp=wrap_with_ddp, bf16=bf16
         )
+        if (
+            self.cfg.trainer.algorithm.policy_loss_type == PolicyLossType.DPO
+            and self.provider.tensor_model_parallel_size == 1
+            and self.provider.context_parallel_size == 1
+            and not self.provider.sequence_parallel
+        ):
+            for chunk in model:
+                if get_attr_wrapped_model(chunk, "post_process"):
+                    use_batch_major_output_projection(get_attr_wrapped_model(chunk, "output_layer"))
         return model
 
     def forward(self, data, *, probe_micro_batch_size: int | None = None):
