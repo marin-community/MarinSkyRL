@@ -50,4 +50,5 @@ marinskyrl/speculative_decoding.py
 marinskyrl/task_sources.py
 chat_templates/delphi_v0.jinja2
 chat_templates/delphi_v1.jinja2
+chat_templates/gpt2_completion.jinja2
 chat_templates/qwen3_thinking_acc.jinja2
