@@ -15,6 +15,8 @@ from pathlib import Path
 STARTUP_TIMEOUT = 30.0
 OUTPUT_LIMIT_BYTES = 65536
 FRAME_LIMIT_BYTES = 12 * OUTPUT_LIMIT_BYTES + 1024
+KERNEL_TIMEOUT_EXIT_CODE = 124
+KERNEL_TERMINATED_EXIT_CODE = 125
 
 
 class BoundedOutput(io.TextIOBase):
@@ -75,7 +77,7 @@ def start(directory: Path, memory_bytes: int | None) -> None:
                 pass
             time.sleep(0.01)
     except BaseException:
-        os.killpg(process.pid, signal.SIGKILL)
+        close(directory)
         process.wait()
         raise
 
@@ -152,7 +154,15 @@ if __name__ == "__main__":
     elif mode == "serve":
         serve(directory, int(sys.argv[3]) or None)
     elif mode == "call":
-        print(json.dumps(request(directory, json.load(sys.stdin)), ensure_ascii=False))
+        try:
+            result = request(directory, json.load(sys.stdin))
+        except TimeoutError:
+            print("The candidate did not return before its execution deadline", file=sys.stderr)
+            raise SystemExit(KERNEL_TIMEOUT_EXIT_CODE)
+        except (ConnectionError, FileNotFoundError, RuntimeError) as error:
+            print(f"The candidate kernel terminated: {error}", file=sys.stderr)
+            raise SystemExit(KERNEL_TERMINATED_EXIT_CODE)
+        print(json.dumps(result, ensure_ascii=False))
     elif mode == "close":
         close(directory)
     else:

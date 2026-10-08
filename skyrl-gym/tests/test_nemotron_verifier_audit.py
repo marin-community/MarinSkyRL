@@ -312,10 +312,11 @@ async def test_lost_python_process_ends_the_task_without_a_replacement_namespace
     first = await session.advance(python_tool_turn("value = 7"))
     assert not first.done
     lost = await session.advance(python_tool_turn("import os; os._exit(0)"))
-    assert lost.done and lost.grade.status is Outcome.INFRA_ERROR
-    assert lost.grade.reward is None
-    assert lost.observations == ()
-    assert (await session.grade(())).status is Outcome.INFRA_ERROR
+    assert lost.done and lost.grade.status is Outcome.GRADED
+    assert lost.grade.reward == 0.0 and lost.grade.passed is False
+    assert lost.observations
+    assert lost.metrics["candidate_failure"] == ExitReason.EXITED.value
+    assert (await session.grade(())).status is Outcome.GRADED
 
 
 @pytest.mark.asyncio

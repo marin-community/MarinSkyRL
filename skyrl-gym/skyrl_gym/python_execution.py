@@ -9,7 +9,7 @@ from pydantic import TypeAdapter
 from rolloutengine.cleanup import finish_cleanup
 from shellbox.machine import Command, ExitReason, Machine, Result
 
-from skyrl_gym.python_kernel import FRAME_LIMIT_BYTES
+from skyrl_gym.python_kernel import FRAME_LIMIT_BYTES, KERNEL_TERMINATED_EXIT_CODE, KERNEL_TIMEOUT_EXIT_CODE
 
 KERNEL_SCRIPT = Path(__file__).with_name("python_kernel.py")
 KERNEL_STARTUP_TIMEOUT = 40.0
@@ -27,6 +27,7 @@ class PythonKernel:
         self.directory = f"/tmp/skyrl-python-{uuid4().hex}"
         self.script = f"{self.directory}/kernel.py"
         self.started = False
+        self.failure: Result | None = None
 
     async def start(self) -> None:
         await self.machine.upload(KERNEL_SCRIPT, self.script)
@@ -44,7 +45,9 @@ class PythonKernel:
     async def execute(
         self, code: str, *, timeout: float, output_limit_bytes: int = KERNEL_OUTPUT_LIMIT_BYTES
     ) -> Result:
-        """Execute Python in the same namespace and return bounded output."""
+        """Execute Python in the same namespace; return the terminal failure after process loss."""
+        if self.failure is not None:
+            return self.failure
         assert self.started
         command = Command(
             ("python", self.script, "call", self.directory),
@@ -62,8 +65,21 @@ class PythonKernel:
             except (Exception, asyncio.CancelledError) as cleanup_error:
                 raise interruption from cleanup_error
             raise
-        if result.reason == ExitReason.TIMED_OUT:
+        if result.reason == ExitReason.TIMED_OUT or result.exit_code in (
+            KERNEL_TIMEOUT_EXIT_CODE,
+            KERNEL_TERMINATED_EXIT_CODE,
+        ):
+            timed_out = result.reason == ExitReason.TIMED_OUT or result.exit_code == KERNEL_TIMEOUT_EXIT_CODE
+            self.failure = Result(
+                None if timed_out else result.exit_code,
+                result.stdout,
+                result.stderr,
+                result.stdout_truncated,
+                result.stderr_truncated,
+                ExitReason.TIMED_OUT if timed_out else ExitReason.EXITED,
+            )
             await finish_cleanup(self._close_interrupted_kernel, timeout=KERNEL_CLEANUP_TIMEOUT)
+            return self.failure
         if result.reason != ExitReason.EXITED or result.exit_code != 0 or result.stdout_truncated:
             raise RuntimeError(f"Python kernel execution failed: {result.stderr.decode(errors='replace')}")
         return KERNEL_RESULT.validate_json(result.stdout, strict=True)

@@ -163,6 +163,16 @@ class NemotronTaskSession:
     async def _advance(self, action, message, diagnostics, stop_reason):
         if self.agent == NS_TOOLS_AGENT:
             observations = await self._python_calls(message)
+            assert self.python is not None
+            if self.python.failure is not None:
+                diagnostics["candidate_failure"] = self.python.failure.reason.value
+                return Transition(
+                    done=True,
+                    reward=0.0,
+                    grade=GradeResult(Outcome.GRADED, 0.0, passed=False, diagnostics=diagnostics),
+                    observations=tuple(observations or ()),
+                    metrics=diagnostics,
+                )
             if observations is not None and self.turns < self.max_turns:
                 return Transition(
                     done=False,

@@ -11,6 +11,7 @@ from shellbox.machine import ExitReason, Machine
 from verifyit.modes.grade_exact import grade_exact_candidate
 from verifyit.spec import ExactSpec
 
+from skyrl_gym.code_candidate import CANDIDATE_RESULT_PREFIX
 from skyrl_gym.envs.lcb import livecodebench as runtime
 from skyrl_gym.python_execution import PythonKernel
 
@@ -105,28 +106,43 @@ async def execute_code(
         deadline = min(deadline, limits.total_timeout_seconds)
     kernel = PythonKernel(machine, memory_bytes=limits.max_memory_bytes)
     try:
-        async with asyncio.timeout(deadline):
-            await kernel.start()
-            return await _candidate_results(kernel, inputs, expected, code, function, timeout, reward_mode)
+        # Runtime setup failures are infrastructure errors, not candidate deadline failures.
+        await kernel.start()
+        script = f"{kernel.directory}/code_candidate.py"
+        await kernel.machine.upload(CANDIDATE_SCRIPT, script)
+        ready = await kernel.execute("from code_candidate import candidate_method, evaluate", timeout=timeout)
+        if (
+            ready.reason != ExitReason.EXITED
+            or ready.exit_code != 0
+            or ready.stdout_truncated
+            or ready.stderr_truncated
+        ):
+            raise RuntimeError("Code verifier runtime setup failed")
+        try:
+            async with asyncio.timeout(deadline):
+                return await _candidate_results(kernel, inputs, expected, code, function, timeout, reward_mode)
+        except TimeoutError:
+            return 0.0, {"test_results": [-3], "total_tests": len(expected), "reason": "candidate_timeout"}
     finally:
         await kernel.close()
 
 
 async def _candidate_results(kernel, inputs, expected, code, function, timeout, reward_mode):
-    script = f"{kernel.directory}/code_candidate.py"
-    await kernel.machine.upload(CANDIDATE_SCRIPT, script)
-    ready = await kernel.execute("from code_candidate import candidate_method, evaluate", timeout=timeout)
-    if ready.reason != ExitReason.EXITED or ready.exit_code != 0 or ready.stdout_truncated or ready.stderr_truncated:
-        raise RuntimeError("Code verifier runtime setup failed")
     startup = (
         f"try:\n    _candidate_method = candidate_method({code!r}, {function!r})\n"
         "    print('READY')\nexcept (Exception, SystemExit):\n    print('CANDIDATE_FAILURE')\n"
     )
     initialized = await kernel.execute(startup, timeout=timeout)
-    if initialized.reason != ExitReason.EXITED or initialized.exit_code != 0 or initialized.stdout_truncated:
-        raise RuntimeError("Code verifier initialization did not complete")
-    if initialized.stdout.strip() != b"READY":
+    if initialized.reason == ExitReason.TIMED_OUT:
+        return 0.0, {"test_results": [-3], "total_tests": len(expected)}
+    if (
+        initialized.exit_code != 0
+        or initialized.stdout_truncated
+        or initialized.stderr_truncated
+        or initialized.stdout.strip() != b"READY"
+    ):
         return 0.0, {"test_results": [-4], "total_tests": len(expected)}
+    result_prefix = CANDIDATE_RESULT_PREFIX.encode()
     results = []
     for arguments, target in zip(inputs, expected):
         call = f"evaluate(_candidate_method, {arguments!r}, {function!r})"
@@ -134,12 +150,12 @@ async def _candidate_results(kernel, inputs, expected, code, function, timeout, 
         if output.reason == ExitReason.TIMED_OUT:
             results.append(-3)
         elif output.exit_code != 0 or output.stdout_truncated or output.stderr_truncated:
-            raise RuntimeError("Code verifier execution did not complete")
-        elif not output.stdout.strip().startswith(b"VALUE:"):
+            results.append(-4)
+        elif not output.stdout.strip().startswith(result_prefix):
             results.append(-4)
         else:
             try:
-                prediction = _unwire(json.loads(output.stdout.strip()[len(b"VALUE:") :]))
+                prediction = _unwire(json.loads(output.stdout.strip()[len(result_prefix) :]))
                 actual = _typed(prediction) if function else _stdio(prediction)
             except (ValueError, TypeError):
                 results.append(-2)
@@ -154,6 +170,8 @@ async def _candidate_results(kernel, inputs, expected, code, function, timeout, 
                     json.dumps(actual, ensure_ascii=False),
                 )
                 results.append(True if verdict.reward == 1.0 else -2)
+        if kernel.failure is not None:
+            return 0.0, {"test_results": results, "total_tests": len(expected), "reason": "candidate_kernel_terminated"}
         if results[-1] is not True and reward_mode == runtime.BINARY_REWARD_MODE:
             break
     reward = (

@@ -12,6 +12,8 @@ from collections.abc import Callable
 from io import BytesIO, StringIO
 from unittest.mock import mock_open, patch
 
+CANDIDATE_RESULT_PREFIX = "VALUE:"
+
 BASE_IMPORTS = """from itertools import accumulate, chain, combinations, count, permutations, product, groupby, islice, repeat
 from copy import deepcopy
 from string import ascii_lowercase, ascii_uppercase
@@ -157,6 +159,6 @@ def evaluate(method: Callable, arguments, function: str | None) -> None:
             else:
                 call_method(method, arguments)
                 prediction = captured.getvalue()
-        print("VALUE:" + json.dumps(_wire(prediction), allow_nan=False))
+        print(CANDIDATE_RESULT_PREFIX + json.dumps(_wire(prediction), allow_nan=False))
     except (Exception, SystemExit):
         print("CANDIDATE_FAILURE")

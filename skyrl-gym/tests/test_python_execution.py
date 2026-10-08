@@ -34,6 +34,23 @@ def test_kernel_start_waits_for_a_listening_socket(tmp_path, monkeypatch):
         python_kernel.close(tmp_path)
 
 
+def test_kernel_failed_start_preserves_the_setup_error_and_reaps_the_process(tmp_path, monkeypatch):
+    start_process = python_kernel.subprocess.Popen
+    processes = []
+
+    def without_site_packages(arguments, **kwargs):
+        process = start_process([arguments[0], "-S", *arguments[1:]], **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(python_kernel.subprocess, "Popen", without_site_packages)
+    with pytest.raises(RuntimeError) as failure:
+        python_kernel.start(tmp_path, None)
+    assert "ModuleNotFoundError" in str(failure.value)
+    assert processes[0].returncode is not None
+    assert not (tmp_path / "socket").exists()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancel_again", [False, True])
 async def test_kernel_cancellation_retains_primary_error_after_cleanup_failure(machine, monkeypatch, cancel_again):
@@ -162,10 +179,10 @@ async def test_kernel_timeout_does_not_silently_reset_python_state(machine):
 async def test_kernel_process_loss_cannot_create_a_fresh_namespace(machine):
     kernel = PythonKernel(machine)
     await kernel.start()
-    with pytest.raises(RuntimeError):
-        await kernel.execute("import os; os._exit(0)", timeout=5)
-    with pytest.raises(RuntimeError):
-        await kernel.execute("print('a replacement kernel must not execute this')", timeout=5)
+    failure = await kernel.execute("import os; os._exit(0)", timeout=5)
+    assert failure.reason is ExitReason.EXITED and failure.exit_code != 0
+    rejected = await kernel.execute("print('a replacement kernel must not execute this')", timeout=5)
+    assert rejected.exit_code != 0 and b"replacement kernel" not in rejected.stdout
 
 
 @pytest.mark.asyncio
@@ -246,22 +263,44 @@ async def test_shellbox_runtime_loss_discards_prior_partial_credit(machine):
         for value in (0, 1)
     ]
     code = "def solve(x):\n    import os\n    if x: os._exit(0)\n    return 1"
-    with pytest.raises(RuntimeError):
-        await execute_code(machine, tests, code, reward_mode="fractional")
+    reward, details = await execute_code(machine, tests, code, reward_mode="fractional")
+    assert reward == 0.0
+    assert details["test_results"] == [True, -4]
 
 
 @pytest.mark.asyncio
 async def test_shellbox_deadline_releases_candidate_machine(machine):
     tests = [{"input": "1", "output": "1", "testtype": "functional", "metadata": {"func_name": "solve"}}]
-    with pytest.raises(TimeoutError):
-        await execute_code(
-            machine,
-            tests,
-            "def solve(x):\n    while True: pass",
-            timeout=10,
-            limits=VerifierLimits(total_timeout_seconds=3),
-        )
+    reward, details = await execute_code(
+        machine,
+        tests,
+        "def solve(x):\n    while True: pass",
+        timeout=10,
+        limits=VerifierLimits(total_timeout_seconds=3),
+    )
+    assert reward == 0.0 and details["test_results"] == [-3]
     assert machine.closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "code",
+    [
+        "def solve(x):\n    import os\n    os._exit(0)",
+        "while True: pass\ndef solve(x): return x",
+        "def solve(x):\n    import signal\n    signal.signal(signal.SIGALRM, signal.SIG_IGN)\n    while True: pass",
+        "def solve(x): return solve(x)",
+        "def solve(x):\n    print('x' * 100000)\n    return x",
+    ],
+    ids=["process-exit", "module-hang", "ignored-alarm", "recursion", "output-overflow"],
+)
+async def test_candidate_crash_hang_and_output_overflow_receive_zero_grade(machine, code):
+    tests = [{"input": "1", "output": "1", "testtype": "functional", "metadata": {"func_name": "solve"}}]
+    reward, details = await execute_code(
+        machine, tests, code, timeout=0.1, limits=VerifierLimits(total_timeout_seconds=2)
+    )
+    assert reward == 0.0
+    assert details["test_results"] in ([-3], [-4])
 
 
 @pytest.mark.asyncio
