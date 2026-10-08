@@ -49,7 +49,6 @@ terminal_bench:
       - NonZeroAgentExitCodeError
       - RewardFileNotFoundError
       - RewardFileEmptyError
-      - AgentEnvironmentTimeoutError
       - ContextLengthExceededError
     default_error_treatment: zero
     passthrough_exceptions:
