@@ -9,8 +9,7 @@ The worker controls concurrency, retries, group grading, and training projection
 starts one coroutine for each task, and inference runs on the worker's event
 loop. Synchronous graders use a separate executor. Shellbox commands use asynchronous machine operations.
 ``trajectory_runner.max_concurrent_tasks`` limits active task coroutines.
-If that setting is absent, the concurrency limit uses
-``trajectory_runner.rollout_workers.executor_threads``.
+Its default is 32 per worker. The verifier thread count does not set task concurrency.
 
 Task and environment operations
 -------------------------------
@@ -40,10 +39,10 @@ rows through ``NemotronTaskDataset``. Terminal rows contain the executable task 
 The worker does not require the original task directories.
 ``harbor.max_turns`` and Harbor exception settings apply only to Harbor tasks.
 These exception settings include ``harbor.mask_exceptions`` and ``harbor.default_error_treatment``.
-Other tasks use ``generator.max_turns`` and ``generator.error_handling``.
+Other tasks use their lowered session limits and ``generator.error_handling``.
 See :doc:`../datasets/dataset-preparation` for source rows and training inputs.
 Whole-trajectory and per-step output preserve task order,
-teacher routes, and source labels.
+teacher routes, and source labels. A teacher route identifies the configured teacher model for distillation of that row.
 
 The worker supplies explicit factories from ``skyrl_gym/task_factories.py``.
 Each factory creates a direct implementation of Marin's ``TaskSession`` protocol.
@@ -54,7 +53,10 @@ Each session returns its initial messages and model options in ``SessionStart``.
 
 ``environment.task_sessions.session`` supplies launch-time session limits.
 Source-specific ``session`` blocks override those limits, including ``max_turns``.
-Without an override, ``session.max_turns`` uses ``generator.max_turns``.
+Source conversion uses a non-null row ``max_turns``, then ``extra_info.max_turns``, then the common session limit.
+An explicit source-family ``session.max_turns`` overrides the row limit.
+The common session limit uses ``generator.max_turns`` by default.
+Materialized task records keep their stored session limits.
 For example, ``environment.task_sessions.lcb.session.total_turn_timeout`` overrides the cumulative turn deadline for code tasks.
 Harbor lowering uses package machine settings, users, total-turn deadlines, and verifier deadlines.
 Other Harbor session limits come from launch configuration.
@@ -87,11 +89,14 @@ Token-contract violations abort the prompt group.
 
 One transition follows each model response, including the final response.
 The engine uses each lowered record's ``session.max_turns``.
-Source conversion derives that limit from ``generator.max_turns``. The worker applies ``harbor.max_turns`` to Harbor tasks.
+Source conversion applies the row and source-family limits described above.
+The worker applies ``harbor.max_turns`` to Harbor tasks.
 A session can finish earlier.
-``generator.engine_init_kwargs.max_model_len`` sets the model context limit when
-configured. Each response fits the space after the exact rendered prompt.
-Without that setting, ``generator.max_input_length`` limits each prompt.
+``generator.max_input_length`` limits each rendered prompt, including continuations.
+The full sequence limit is that prompt bound plus ``sampling_params.max_generate_length``.
+``generator.engine_init_kwargs.max_model_len`` can reduce the full sequence limit.
+Each response fits the space after the exact rendered prompt.
+Sequence-normalized losses use the same full sequence bound.
 A context-limit stop retains completed turns. An overlong initial prompt has no
 response or grade and does not enter loss or baseline calculations.
 
@@ -105,6 +110,8 @@ behavior log probabilities, token rewards, expert routes, and teacher routes.
 
 Sessions can supply per-turn optimization rewards. The whole-task projection sums these rewards.
 Otherwise, it uses the task grade.
+Math, multiplication, search, SearchCode, and SQL sessions keep the final task verdict separate from optimization rewards.
+Their task grade does not average tool or correction turns. Format rewards do not count as correct answers.
 Step projection uses each turn's reward, with the task grade on the last turn when no per-turn rewards exist.
 A no-grade verifier result with ``RolloutData.failure=None`` excludes tokens from loss and baseline calculations.
 Recorded execution failures, including verifier timeouts, use the exception policy.
@@ -123,6 +130,9 @@ The completed rollout group enters the buffer.
 Ineligible attempts receive no comparison score.
 Evaluation exports contain public prompts, responses, labels, scores, and failure fields.
 Private task records and grading configuration remain outside these exports.
+Retained trajectory files omit private task records, grader parameters, and references.
+They also omit source metadata that contains grader inputs.
+They retain public source labels, teacher routes, prompts, responses, and verifier results.
 
 ``generator.error_handling`` controls exception policies.
 ``mask`` excludes the rollout from loss and baseline calculations.
@@ -131,6 +141,9 @@ Private task records and grading configuration remain outside these exports.
 Exception lists override the built-in error categories. ``default_error_treatment``
 selects one of these policies for unknown errors.
 Failed attempts retain exact tokens, behavior log probabilities, and available verifier grades.
+Candidate Python crashes, execution timeouts, and output overflow produce zero-reward candidate failures.
+Provider transport failures, Python startup failures, and model template failures use the infrastructure error policy.
+Exact-token contract violations remain fatal.
 The effective ``sampling_params.logprobs`` setting determines the probability requirement, including request overrides.
 When that setting requests log probabilities, loss eligibility requires one log probability per retained generated token.
 ``generator.error_handling.preserve_logprobs_on_timeout=false`` masks loss after a timeout.
@@ -143,6 +156,11 @@ buffer write. A failed group cannot commit partial results.
 Cancellation returns control to the engine without an unbounded wait for active verifier threads.
 Session cleanup retains pending thread operations before it releases their resources.
 The cleanup deadline bounds the caller's wait. Unfinished cleanup remains owned until it completes.
+Worker shutdown cancels active requests, including group grading and buffer submission.
+``trajectory_runner.shutdown_timeout`` bounds shutdown. Its default is 60 seconds.
+Half of that budget permits request cleanup. The remaining budget permits machine cleanup.
+Late machine creation uses the same owned close task as normal cleanup.
+If shutdown exceeds its budget, provider diagnostics identify open creations and machines, and shutdown reports a failure.
 The search task's HTTP client can use ten attempts, each with ``environment.task_sessions.search.timeout``, plus 45 seconds of retry delays.
 Those attempts can continue in retained cleanup after a task deadline expires.
 The worker returns after the buffer commit.

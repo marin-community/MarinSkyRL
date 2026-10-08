@@ -2,8 +2,8 @@ Execute task tools with Shellbox
 ================================
 
 A task session receives its prepared Shellbox ``Machine``.
-The engine creates the machine from the task's ``EnvironmentSpec``
-and closes the session before the machine.
+The engine combines ``TaskSpec.environment_requirements`` with ``LoweredTaskSpec.runtime`` to create the machine.
+It closes the session before the machine.
 
 The machine provides command execution and file transfer:
 
@@ -18,9 +18,11 @@ The machine provides command execution and file transfer:
 ``Result`` contains stdout, stderr, an exit code, a timeout reason, and truncation flags.
 Candidate errors can become model-visible tool observations.
 Machine failures are infrastructure errors and must not become incorrect-answer grades.
-For example, a Python ``NameError`` returns tool feedback while the interpreter retains its state.
-A lost interpreter or an invalid execution response produces an infrastructure failure with no verdict.
-An exit code or timeout alone does not distinguish those cases.
+With ``PythonKernel``, a Python ``NameError`` returns tool feedback while the interpreter retains its state.
+Python startup and transport failures produce infrastructure errors with no verdict.
+Candidate crashes and code-verifier execution deadlines produce zero-reward candidate failures.
+The session's ``advance`` call executes a model response and supplies its observations.
+``command_timeout`` limits each command. ``tool_turn_timeout`` bounds the complete ``advance`` call.
 
 Stateful Python
 ---------------
@@ -43,7 +45,8 @@ Close the kernel during session cleanup.
 
 The task image must contain IPython and the benchmark's Python dependencies.
 Per-call timeouts retain the interpreter namespace when the kernel survives.
-A lost kernel is an infrastructure failure. Do not restart it and silently discard state.
+Candidate code that terminates the kernel ends its attempt with zero reward.
+The session does not restart the kernel or discard state silently.
 
 Code and SQL verification
 -------------------------
@@ -61,10 +64,13 @@ Lean
 ----
 
 ``skyrl_gym.lean_execution.compile_lean`` executes ``lake env lean``
-in the task's ``environment.workdir``. The task image must contain the toolchain and cached dependencies.
+in ``TaskSpec.environment_requirements.working_directory``. The task image must contain the toolchain and cached dependencies.
 The function returns the same ``shellbox.machine.Result`` record as other task commands.
 The compiler uses bounded diagnostics and a process deadline.
 Lean refinement returns compiler feedback and a fresh conversation for the next attempt.
+That attempt stays in the same rollout. The engine discards the failed proof's training tokens before the new conversation starts.
+For a source theorem with a ``by`` proof, a bare tactic body receives the ``by`` prefix.
+Explicit proof assignments preserve tactic proofs or term proofs. The source theorem remains unchanged.
 
 External services
 -----------------
