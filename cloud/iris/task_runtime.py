@@ -48,6 +48,8 @@ from typing import Any, Protocol
 from omegaconf import DictConfig, OmegaConf
 
 from cloud.iris.artifacts import ArtifactSource, atomic_directory_update, file_inventory, fs_and_path, materialize
+from huggingface_hub.constants import HF_HUB_CACHE
+
 from cloud.iris.hf_model_cache import (
     download_hugging_face_snapshot,
     ensure_hugging_face_model_cache,
@@ -274,6 +276,59 @@ def stage_model(model_path: str, revision: str | None = None) -> None:
         allow_patterns=tuple(allow_patterns),
     )
     _log(f"model pre-staged to node-local HF cache: {local_dir}")
+
+
+@dataclass(frozen=True)
+class LocalTeacherModel:
+    """A local-inference teacher's config id and model source."""
+
+    id: str
+    model: TeacherModelSpec
+
+
+@dataclass(frozen=True)
+class StagedTeacherModel:
+    """A teacher whose object-store weights now live in a node-local directory."""
+
+    id: str
+    source_uri: str
+    revision: str
+    local_path: str
+
+
+def _teacher_model_path(source_uri: str, revision: str) -> str:
+    # Next to the Hub cache, so an object-store teacher lands on the same disk a Hub teacher would.
+    return os.path.join(
+        os.path.dirname(HF_HUB_CACHE), "marinskyrl-teacher-models", immutable_model_cache_key(source_uri, revision)
+    )
+
+
+def stage_teacher_models(teachers: tuple[LocalTeacherModel, ...]) -> tuple[StagedTeacherModel, ...]:
+    """Make every local-inference teacher loadable on this node before Ray starts.
+
+    A Hub repo id is pre-downloaded into the node-local HF cache like the policy. An object-store
+    export (``s3://`` or ``gs://``, such as a Marin HF export) is copied to a node-local directory,
+    and the caller rewrites the teacher's ``model.path`` to that directory so the vLLM teacher
+    engine loads it as a local model. Idempotent: an already-materialized tree is reused.
+    """
+    staged = []
+    for teacher in teachers:
+        if not is_cloud_uri(teacher.model.path):
+            stage_model(teacher.model.path, revision=teacher.model.revision)
+            continue
+        local_path = _teacher_model_path(teacher.model.path, teacher.model.revision)
+        _log(f"Staging object-store teacher {teacher.id!r} on this node: {teacher.model.path} -> {local_path}")
+        materialize(ArtifactSource(uri=teacher.model.path, identity=teacher.model.revision, local_path=local_path))
+        validate_hf_model_weights(set(os.listdir(local_path)), local_path)
+        staged.append(
+            StagedTeacherModel(
+                id=teacher.id,
+                source_uri=teacher.model.path,
+                revision=teacher.model.revision,
+                local_path=local_path,
+            )
+        )
+    return tuple(staged)
 
 
 def _metadata_path(source_uri: str, identity: str) -> str:
@@ -2004,11 +2059,15 @@ def _json_list(value: Any) -> str:
     return json.dumps(values, sort_keys=True)
 
 
-def _local_teacher_models(skyrl: DictConfig) -> tuple[TeacherModelSpec, ...]:
+def _local_teacher_models(skyrl: DictConfig) -> tuple[LocalTeacherModel, ...]:
     plan = compile_distillation_plan_from_config(skyrl)
     if plan is None:
         return ()
-    return tuple(teacher.model for teacher in plan.teachers if teacher.source is TeacherSource.LOCAL_INFERENCE)
+    return tuple(
+        LocalTeacherModel(id=teacher.id, model=teacher.model)
+        for teacher in plan.teachers
+        if teacher.source is TeacherSource.LOCAL_INFERENCE
+    )
 
 
 def _runtime_namespace(config: DictConfig) -> argparse.Namespace:
@@ -2079,6 +2138,7 @@ def _write_final_config(
     policy_model: PreparedPolicyModel | None,
     policy_tokenizer: PreparedPolicyTokenizer | None,
     draft_model: SpeculatorModelConfig | None,
+    staged_teachers: tuple[StagedTeacherModel, ...] = (),
 ) -> Path:
     """Persist the post-staging root document consumed by the training subprocess."""
     root = OmegaConf.create(OmegaConf.to_container(config, resolve=False))
@@ -2125,6 +2185,12 @@ def _write_final_config(
             draft_model.source_identity,
             force_add=True,
         )
+    for teacher in staged_teachers:
+        # The teacher engine loads ``model.path`` with vLLM, so the node-local copy replaces the
+        # object-store URI. The teacher schema allows only path and revision, so the source URI
+        # is logged rather than written beside it.
+        _log(f"teacher {teacher.id!r}: model.path {teacher.source_uri} -> {teacher.local_path}")
+        OmegaConf.update(skyrl, f"teachers.{teacher.id}.model.path", teacher.local_path, force_add=True)
     root.skyrl = skyrl
     destination = _final_config_path(config)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -2197,8 +2263,7 @@ def main() -> None:
             args.prestage_model,
             revision=(args.model_revision or None),
         )
-    for teacher_model in args.prestage_teacher_models:
-        stage_model(teacher_model.path, revision=teacher_model.revision)
+    staged_teachers = stage_teacher_models(args.prestage_teacher_models)
     draft_model = args.draft_model
     if draft_model is not None:
         draft_model = prepare_draft_model(
@@ -2223,6 +2288,7 @@ def main() -> None:
             policy_model=policy_model,
             policy_tokenizer=policy_tokenizer,
             draft_model=draft_model,
+            staged_teachers=staged_teachers,
         )
         exit_code = run_head(args, final_config_path, derived_gloo_ifname, debug_mode=debug_mode)
     else:

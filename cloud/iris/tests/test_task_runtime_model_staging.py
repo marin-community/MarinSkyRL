@@ -1,5 +1,6 @@
 from argparse import Namespace
 import hashlib
+import uuid
 from pathlib import Path
 
 import fsspec
@@ -181,3 +182,60 @@ def test_staged_policy_model_supplies_its_embedded_tokenizer(tmp_path, monkeypat
         assert model.path == "/tmp/policy-metadata"
         assert model.tokenizer_path == "/tmp/policy-metadata"
         assert model.tokenizer_revision is None
+
+
+def test_object_store_teacher_is_materialized_and_rewritten_to_local_path(tmp_path, monkeypatch) -> None:
+    from marinskyrl.distillation import TeacherModelSpec
+
+    from cloud.iris.task_runtime import LocalTeacherModel, stage_teacher_models
+
+    filesystem = fsspec.filesystem("memory")
+    root = f"/teachers/{uuid.uuid4().hex}"
+    payloads = {"config.json": b"{}", "model.safetensors": save({"weight": np.arange(4, dtype=np.float32)})}
+    for name, payload in payloads.items():
+        with filesystem.open(f"{root}/{name}", "wb") as destination:
+            destination.write(payload)
+    local_root = tmp_path / "teacher-models"
+    monkeypatch.setattr(task_runtime, "_teacher_model_path", lambda uri, revision: str(local_root / revision))
+    hub_calls: list[str] = []
+    monkeypatch.setattr(task_runtime, "stage_model", lambda path, revision=None: hub_calls.append(path))
+    # The memory filesystem stands in for S3/GCS, which is_cloud_uri recognizes by scheme.
+    monkeypatch.setattr(task_runtime, "is_cloud_uri", lambda uri: uri.startswith(("memory://", "s3://", "gs://")))
+
+    teachers = (
+        LocalTeacherModel(id="expert", model=TeacherModelSpec(path=f"memory://{root}", revision="step-272")),
+        LocalTeacherModel(id="hub", model=TeacherModelSpec(path="org/model", revision="abc")),
+    )
+    staged = stage_teacher_models(teachers)
+
+    assert hub_calls == ["org/model"]
+    assert [teacher.id for teacher in staged] == ["expert"]
+    local_path = Path(staged[0].local_path)
+    assert local_path == local_root / "step-272"
+    assert (local_path / "config.json").read_bytes() == b"{}"
+    assert (local_path / "model.safetensors").read_bytes() == payloads["model.safetensors"]
+
+    launch = OmegaConf.create(
+        {
+            "run": {"id": "run", "attempt_id": "attempt"},
+            "inputs": {"model": {"uri": "s3://models/policy"}},
+            "skyrl": {
+                "trainer": {"policy": {"model": {"path": "policy"}}, "ref": {"model": {"path": "policy"}}},
+                "generator": {"engine_init_kwargs": {"served_model_name": "policy"}},
+                "data": {"train_data": [], "val_data": [], "terminal_bench_data": []},
+                "terminal_bench_config": {"agent_api_base": None, "literal_log_path": None},
+                "teachers": {
+                    "expert": {"model": {"path": f"memory://{root}", "revision": "step-272"}},
+                    "hub": {"model": {"path": "org/model", "revision": "abc"}},
+                },
+            },
+        }
+    )
+    monkeypatch.setattr(task_runtime.tempfile, "gettempdir", lambda: str(tmp_path))
+    path = _write_final_config(
+        launch, policy_model=None, policy_tokenizer=None, draft_model=None, staged_teachers=staged
+    )
+    resolved = OmegaConf.load(path)
+    assert resolved.skyrl.teachers.expert.model.path == str(local_path)
+    assert resolved.skyrl.teachers.expert.model.revision == "step-272"
+    assert resolved.skyrl.teachers.hub.model.path == "org/model"
