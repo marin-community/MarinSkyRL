@@ -104,7 +104,8 @@ def _evaluate(data: dict[str, Any], root: Path) -> dict[str, Any]:
         )
         if exact.status is not Status.SCORED:
             raise RuntimeError("Abstention normalization failed")
-        if exact.reward == 1.0:
+        # The source's NOT_ATTEMPTED label includes an omitted final answer.
+        if not extracted.strip() or exact.reward == 1.0:
             reward, feedback = (
                 0.5,
                 {
