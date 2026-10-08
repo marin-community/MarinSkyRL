@@ -16,6 +16,7 @@
 """Lean proof assembly and compiler verdicts."""
 
 import re
+from textwrap import indent
 from typing import Any
 
 from shellbox.machine import ExitReason, Result
@@ -41,9 +42,11 @@ def build_lean4_proof(generation: str, record: dict[str, Any]) -> str:
             code = blocks[-1].strip()
             break
     proof = _proof_body(code)
-    statement, assignment, _ = record["formal_statement"].partition(":=")
+    statement, assignment, source_proof = record["formal_statement"].partition(":=")
     if not assignment:
         raise ValueError("The formal statement has no proof assignment")
+    if re.match(r"by\b", source_proof.lstrip()) and proof == code.strip() and not re.match(r"by\b", proof):
+        proof = "by\n" + indent(proof, "  ")
     return record["header"] + statement.rstrip() + " := " + proof
 
 

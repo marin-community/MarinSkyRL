@@ -3,7 +3,7 @@
 import json
 import re
 from concurrent.futures import Executor
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from enum import StrEnum
 from typing import Any
 
@@ -80,6 +80,13 @@ JAILBREAK_AGENTS = {
 class GradingMode(StrEnum):
     VERIFY = "verify"
     SKIP = "skip"
+
+
+@dataclass(frozen=True)
+class LeanAttempt:
+    reward: float
+    diagnostics: dict[str, Any]
+    correction: str | None
 
 
 class NemotronTaskSession:
@@ -211,15 +218,16 @@ class NemotronTaskSession:
             )
             diagnostics.update(details)
         elif self.agent == LEAN_AGENT:
-            reward, details, correction = await self._lean_attempt(action)
-            diagnostics.update(details)
-            if correction is not None and self.turns < self.max_turns:
+            attempt = await self._lean_attempt(action)
+            reward = attempt.reward
+            diagnostics.update(attempt.diagnostics)
+            if attempt.correction is not None and self.turns < self.max_turns:
                 return Transition(
                     done=False,
                     reward=0.0,
                     grade=GradeResult(Outcome.UNAVAILABLE, None, "A correction will replace the failed Lean attempt"),
                     metrics=diagnostics,
-                    reset_conversation=({"role": "user", "content": correction},),
+                    reset_conversation=({"role": "user", "content": attempt.correction},),
                 )
         elif self.agent == "code_gen_simple_agent":
             reward, details = await self._code_grade(action, message)
@@ -373,10 +381,10 @@ class NemotronTaskSession:
             "difficulty": self.record.get("verifier_metadata", {}).get("difficulty"),
         }
 
-    async def _lean_attempt(self, action):
+    async def _lean_attempt(self, action: str) -> LeanAttempt:
         if not action.strip():
             error = "Empty generation received. Please provide a valid Lean 4 proof."
-            return (
+            return LeanAttempt(
                 0.0,
                 {
                     "proof_status": "empty_generation",
@@ -406,10 +414,10 @@ class NemotronTaskSession:
             },
         }
         if status == "completed":
-            return 1.0, details, None
+            return LeanAttempt(1.0, details, None)
         feedback = format_error_feedback(output, proof)
         details["error_feedback"] = feedback
-        return 0.0, details, build_correction_prompt(proof_attempt=action, error_message=feedback)
+        return LeanAttempt(0.0, details, build_correction_prompt(proof_attempt=action, error_message=feedback))
 
     async def _arc_grade(self, action):
         assert self.machine is not None

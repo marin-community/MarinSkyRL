@@ -45,7 +45,8 @@ async def test_lean_session_retains_compiler_status_and_correction(
     "generation,expected",
     [
         ("```lean4\nexample : False := by\n  trivial\n```", "by\n  trivial"),
-        ("```lean4\nTrue.intro\n```", "True.intro"),
+        ("```lean4\nexample : True := True.intro\n```", "True.intro"),
+        ("```lean4\ntrivial\n```", "by\n  trivial"),
     ],
 )
 async def test_lean_session_keeps_the_source_theorem_and_replaces_its_placeholder_proof(
