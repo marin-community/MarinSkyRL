@@ -157,6 +157,8 @@ def checkpoint_export_launch_config(
     critic["model"]["path"] = None
     config.skyrl.pop("teachers", None)
     config.skyrl.pop("teacher_routing", None)
+    # The distillation objective would require those teachers at validation time; export runs no loss.
+    algorithm.pop("distillation", None)
     if config.skyrl.generator.get("speculative_decoding") is not None:
         config.skyrl.generator.speculative_decoding.training = None
 

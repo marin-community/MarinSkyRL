@@ -10,6 +10,7 @@ from cloud.iris.export_hf_checkpoint import (
     _run_export,
     checkpoint_export_launch_config,
 )
+from marinskyrl.distillation import compile_distillation_plan
 from skyrl_train.hf_export_schema import HFExportRequest
 
 
@@ -115,3 +116,52 @@ def test_nested_export_keeps_parent_response_stream_clean(capfd) -> None:
     captured = capfd.readouterr()
     assert "nested export response" not in captured.out
     assert "nested export response" in captured.err
+
+
+def _distillation_training_config():
+    config = _training_config()
+    config.skyrl.trainer.algorithm = {
+        "advantage_estimator": "uniform",
+        "policy_loss_type": "importance_sampling",
+        "distillation": {
+            "objective": "sampled_reverse_kl",
+            "routing_plan": "opd",
+            "coefficient": 1.0,
+            "reward_mode": "replace",
+        },
+    }
+    config.skyrl.teachers = {
+        "expert": {
+            "source": "local_inference",
+            "placement": "pinned",
+            "backend": "vllm",
+            "evidence": "chosen_token",
+            "model": {"path": "s3://models/expert/hf/step-272", "revision": "step-272"},
+            "resources": {
+                "num_nodes": 1,
+                "gpus_per_node": 8,
+                "tensor_parallel_size": 1,
+                "data_parallel_size": 8,
+                "expert_parallel_size": 8,
+                "colocation_group": "teacher_expert",
+            },
+        }
+    }
+    config.skyrl.teacher_routing = {
+        "opd": {"revision": "v1", "routes": {"default": {"teacher": "expert", "weight": 1.0}}}
+    }
+    return config
+
+
+def test_checkpoint_export_config_drops_distillation_with_its_teachers() -> None:
+    training = _distillation_training_config()
+    assert compile_distillation_plan(OmegaConf.to_container(training.skyrl)) is not None
+    request = _request()
+    config = checkpoint_export_launch_config(training, request, _spec(request))
+    skyrl = OmegaConf.to_container(config.skyrl)
+    assert "teachers" not in skyrl
+    assert "teacher_routing" not in skyrl
+    assert "distillation" not in skyrl["trainer"]["algorithm"]
+    # Launch validation compiles the distillation plan from the export document; a document that
+    # kept the objective without its teachers was rejected before the export job could start.
+    assert compile_distillation_plan(skyrl) is None
