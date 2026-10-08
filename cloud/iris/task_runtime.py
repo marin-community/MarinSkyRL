@@ -307,6 +307,19 @@ TOKENIZER_METADATA_PATTERNS = (
     "vocab.txt",
 )
 
+# AutoTokenizer resolves the tokenizer class from config.json's model_type when
+# tokenizer_config.json carries no tokenizer_class (common for older exports). A
+# staged tokenizer directory without it falls back to PreTrainedTokenizerFast with
+# no serialised backend and fails to load at all.
+TOKENIZER_CLASS_RESOLUTION_FILES = ("config.json",)
+
+
+def _stage_tokenizer_class_resolution(source: Path, destination: Path) -> None:
+    for name in TOKENIZER_CLASS_RESOLUTION_FILES:
+        candidate = source / name
+        if candidate.is_file():
+            shutil.copy2(candidate, destination / name)
+
 
 def prepare_policy_model(args: argparse.Namespace) -> PreparedPolicyModel | None:
     """Resolve one immutable policy source and stage what its runtime needs."""
@@ -379,12 +392,13 @@ def prepare_policy_tokenizer(args: argparse.Namespace) -> PreparedPolicyTokenize
             staging.mkdir()
             if os.path.isdir(tokenizer_path):
                 _copy_tokenizer_metadata(Path(tokenizer_path), staging)
+                _stage_tokenizer_class_resolution(Path(tokenizer_path), staging)
             elif is_hugging_face_repo_id(tokenizer_path):
                 download_hugging_face_snapshot(
                     tokenizer_path,
                     revision=revision or None,
                     destination=staging,
-                    allow_patterns=TOKENIZER_METADATA_PATTERNS,
+                    allow_patterns=TOKENIZER_METADATA_PATTERNS + TOKENIZER_CLASS_RESOLUTION_FILES,
                 )
                 _require_tokenizer_metadata(staging, tokenizer_path)
             else:
