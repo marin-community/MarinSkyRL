@@ -107,11 +107,7 @@ def test_harbor_config_source_is_locked() -> None:
         Requirement(value) for value in PYPROJECT["project"]["dependencies"] if Requirement(value).name == "harbor-config"
     )
     assert requirement.url is not None
-    declared_commit = requirement.url.split("@", 1)[1].split("#", 1)[0]
-    config_commit = packages["harbor-config"]["source"]["git"].rsplit("#", 1)[-1]
-
-    assert len(declared_commit) == 40
-    assert config_commit == declared_commit
+    assert packages["harbor-config"]["source"]["url"] == requirement.url
 
 
 def _exported_requirements(extras: tuple[str, ...]) -> list[Requirement]:
