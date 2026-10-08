@@ -654,10 +654,6 @@ class InferenceEngineClient(InferenceEngineInterface):
     ) -> Dict[str, Any]:
         """Continue an aborted chat response after generation resumes.
 
-        Retry requests reuse accumulated assistant content. They disable the
-        generation prompt and reduce the remaining token budget. A retry with
-        no generated tokens uses the original request unchanged.
-
         The final response retains the first nonempty response's fields.
         Token IDs, log probabilities, content, and routed experts accumulate
         across requests. Finish and stop reasons come from the last response.

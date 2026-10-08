@@ -4,11 +4,14 @@ import asyncio
 import json
 import socket
 import sys
+from dataclasses import dataclass
+from pathlib import Path
 
 import psutil
 import pytest
 import pytest_asyncio
 from rolloutengine.engine import ShellboxRolloutEngine
+from rolloutengine.spec import LoweredTaskSpec
 from skyrl_gym.source_task import source_task
 from taskcompendium.models import Source
 from taskcompendium.submission import PlainText
@@ -53,6 +56,13 @@ HTTPServer(('127.0.0.1', port), Handler).serve_forever()
 """
 
 
+@dataclass(frozen=True)
+class OpenEnvCase:
+    session: OpenEnvTaskSession
+    task: LoweredTaskSpec
+    log: Path
+
+
 @pytest_asyncio.fixture
 async def openenv_session(machine, task_lowering):
     script = machine.root / "server.py"
@@ -78,7 +88,7 @@ async def openenv_session(machine, task_lowering):
         task = task_lowering(task, "openenv", max_turns=max_turns)
         session = OpenEnvTaskSession(task, machine)
         sessions.append(session)
-        return session, task, log
+        return OpenEnvCase(session, task, log)
 
     try:
         yield make
@@ -100,7 +110,8 @@ async def openenv_session(machine, task_lowering):
     ],
 )
 async def test_openenv_actions_retain_server_state_and_turn_rewards(openenv_session, model_turn, name, action, payload):
-    session, _, log = openenv_session(name)
+    case = openenv_session(name)
+    session = case.session
     start = await session.prepare()
     assert "counter: 0" in start.messages[-1]["content"]
     first = await session.advance(model_turn(f"<action>{action}</action>"))
@@ -109,27 +120,28 @@ async def test_openenv_actions_retain_server_state_and_turn_rewards(openenv_sess
     final = await session.advance(model_turn(f"<action>{action}</action>"))
     assert final.done and final.reward == 0.75
     assert (await session.grade(())).reward == 0.5
-    requests = [json.loads(line) for line in log.read_text().splitlines()]
+    requests = [json.loads(line) for line in case.log.read_text().splitlines()]
     assert requests[0] == {"path": "/reset", "body": {}}
     assert requests[1] == {"path": "/step", "body": {"action": payload, "timeout_s": 30}}
 
 
 @pytest.mark.asyncio
 async def test_openenv_invalid_candidate_action_returns_feedback_without_server_step(openenv_session, model_turn):
-    session, _, log = openenv_session("atari-env")
+    case = openenv_session("atari-env")
+    session = case.session
     await session.prepare()
     rejected = await session.advance(model_turn("<action>move left</action>"))
     assert rejected.reward == -1.0 and not rejected.done
     assert rejected.observations
     corrected = await session.advance(model_turn("<action>2</action>"))
     assert corrected.reward == 0.25 and corrected.done
-    requests = [json.loads(line) for line in log.read_text().splitlines()]
+    requests = [json.loads(line) for line in case.log.read_text().splitlines()]
     assert [request["path"] for request in requests] == ["/reset", "/step"]
 
 
 @pytest.mark.asyncio
 async def test_openenv_server_completion_ends_before_turn_limit(openenv_session, model_turn):
-    session, _, _ = openenv_session(max_turns=5)
+    session = openenv_session(max_turns=5).session
     await session.prepare()
     final = await session.advance(model_turn("<action>done</action>"))
     assert final.done and final.reward == 0.25 and not final.observations
@@ -138,7 +150,7 @@ async def test_openenv_server_completion_ends_before_turn_limit(openenv_session,
 @pytest.mark.asyncio
 @pytest.mark.parametrize("response", ["server_error", "bad_reply"])
 async def test_openenv_server_failure_is_not_a_candidate_penalty(openenv_session, model_turn, response):
-    session, _, _ = openenv_session()
+    session = openenv_session().session
     await session.prepare()
     with pytest.raises(RuntimeError):
         await session.advance(model_turn(f"<action>{response}</action>"))
@@ -147,7 +159,7 @@ async def test_openenv_server_failure_is_not_a_candidate_penalty(openenv_session
 
 @pytest.mark.asyncio
 async def test_openenv_engine_preserves_tokens_and_releases_server(openenv_session, model_turn, machine):
-    session, task, _ = openenv_session()
+    case = openenv_session()
 
     class Factory:
         async def create(self, spec):
@@ -159,10 +171,10 @@ async def test_openenv_engine_preserves_tokens_and_releases_server(openenv_sessi
     engine = ShellboxRolloutEngine(
         factories={"local": Factory()},
         model=model,
-        sessions={"openenv": lambda task, machine: session},
+        sessions={"openenv": lambda task, machine: case.session},
         convention=PlainText(id="plain"),
     )
-    rollout = await engine.run(task)
+    rollout = await engine.run(case.task)
     assert rollout.grade.reward == 0.25
     assert rollout.response_token_ids == (20, 21)
     assert rollout.loss_mask == (1, 1)
@@ -172,13 +184,14 @@ async def test_openenv_engine_preserves_tokens_and_releases_server(openenv_sessi
 
 @pytest.mark.asyncio
 async def test_openenv_cancellation_releases_server_and_http_command(openenv_session, model_turn, machine):
-    session, _, log = openenv_session()
+    case = openenv_session()
+    session = case.session
     await session.prepare()
     pid_file = next((machine.root / "tmp").glob("skyrl-openenv-*/pid"))
     server_pid = int(pid_file.read_text())
     pending = asyncio.create_task(session.advance(model_turn("<action>hang</action>")))
     async with asyncio.timeout(5.0):
-        while len(log.read_text().splitlines()) < 2:
+        while len(case.log.read_text().splitlines()) < 2:
             await asyncio.sleep(0)
     pending.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -192,7 +205,7 @@ async def test_openenv_cancellation_releases_server_and_http_command(openenv_ses
 
 @pytest.mark.asyncio
 async def test_openenv_failed_server_startup_releases_process(openenv_session):
-    session, _, _ = openenv_session(command=[sys.executable, "-c", "raise SystemExit(3)"])
+    session = openenv_session(command=[sys.executable, "-c", "raise SystemExit(3)"]).session
     with pytest.raises(RuntimeError):
         await session.prepare()
     assert (await session.grade(())).reward is None

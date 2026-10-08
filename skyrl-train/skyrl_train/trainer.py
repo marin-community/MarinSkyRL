@@ -552,7 +552,7 @@ class RayPPOTrainer:
         Cleanup errors remain warnings so teardown can continue.
         Shutdown proceeds through expert-block sync, teacher engines, the HTTP
         endpoint, the task worker, inference engines, and remaining Ray actors.
-        The HTTP endpoint closes before the worker drains its task queue.
+        The HTTP endpoint closes before task-worker shutdown.
         """
         # Teacher cleanup can block or resist cancellation. Arm the process guard
         # before any teardown awaits, including executor shutdown after asyncio.run.

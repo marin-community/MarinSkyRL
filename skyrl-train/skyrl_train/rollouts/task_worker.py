@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from loguru import logger
 from jinja2 import TemplateError
+from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from shellbox.backends.docker.machine import DockerMachineFactory
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
@@ -43,13 +43,13 @@ from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.rollouts.buffer import RolloutGroup, RolloutTask, RolloutWriter
 from skyrl_train.rollouts.group_grader import GroupGraderSpec
 from skyrl_train.rollouts.group_grading import GROUP_GRADERS, GroupGrader, grade_groups
-from skyrl_train.rollouts.machines import OwnedMachineFactory, TaskMachineError
 from skyrl_train.rollouts.harbor_tasks import (
     HARBOR_MACHINE_BACKEND,
     HarborTaskSettings,
     harbor_grading_failure,
     shape_harbor_rollouts,
 )
+from skyrl_train.rollouts.machines import OwnedMachineFactory, TaskMachineError
 from skyrl_train.rollouts.workers import WorkerShard, detached_config
 from skyrl_train.rollouts.finalization import finalize_trajectory_batch, propagate_data_sources
 from skyrl_train.rollout_observability import rollout_phase, rollout_wait
