@@ -2129,7 +2129,15 @@ async def test_aime_rollout_preserves_length_reward_and_phase_metrics(
 @pytest.mark.parametrize("projection_type", [WholeTaskProjection, StepTaskProjection])
 @pytest.mark.parametrize(
     "max_model_len,max_input_length,output_limit,expected_budgets",
-    [(5, 100, None, [3]), (5, 100, 2, [2]), (2, 100, None, []), (None, 4, None, [10]), (None, 1, None, [])],
+    [
+        (5, 100, None, [3]),
+        (5, 100, 2, [2]),
+        (2, 100, None, []),
+        (None, 4, None, [10]),
+        (None, 1, None, []),
+        (100, 4, None, [10]),
+        (100, 1, None, []),
+    ],
 )
 async def test_context_limits_preserve_only_completed_gym_turns(
     task_inputs, projection_type, max_model_len, max_input_length, output_limit, expected_budgets

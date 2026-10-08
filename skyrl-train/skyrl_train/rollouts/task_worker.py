@@ -30,6 +30,7 @@ from rolloutengine.engine import ShellboxRolloutEngine
 from rolloutengine.spec import LoweredTaskSpec
 from rolloutengine.lowering import SHELLBOX_SESSION
 from skyrl_train.dataset.tasks import LOWERED_TASK_COLUMN
+from skyrl_train.config.utils import generation_context_limit
 from taskcompendium.submission import PlainText
 from skyrl_gym.task_factories import session_factories
 from skyrl_gym.task_records import fold_grades
@@ -255,13 +256,8 @@ class TaskRolloutWorker:
         )
         sampling.update(request.get("sampling_params") or {})
         require_logprobs = logprobs_requested(request, self.trajectory_runner_cfg)
-        context_limit = OmegaConf.select(self.trajectory_runner_cfg, "engine_init_kwargs.max_model_len")
         max_input_length = int(self.trajectory_runner_cfg.max_input_length)
-        max_context_length = (
-            int(context_limit)
-            if context_limit is not None
-            else max_input_length + int(self.trajectory_runner_cfg.sampling_params.max_generate_length)
-        )
+        max_context_length = generation_context_limit(self.trajectory_runner_cfg)
 
         trajectory_ids = request.get("trajectory_ids")
 
@@ -276,7 +272,7 @@ class TaskRolloutWorker:
                     request,
                     sampling_params=sampling,
                     max_context_length=max_context_length,
-                    max_prompt_length=max_input_length if context_limit is None else None,
+                    max_prompt_length=max_input_length,
                     chat_template_kwargs=self.chat_template_kwargs,
                     session_id=session_id,
                 )
