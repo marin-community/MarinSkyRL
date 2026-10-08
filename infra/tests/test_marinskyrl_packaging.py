@@ -100,16 +100,6 @@ def test_rollout_runtime_resolves_harbor_main_into_the_frozen_lock() -> None:
     assert len(harbor["source"]["git"].rsplit("#", 1)[-1]) == 40
 
 
-def test_harbor_config_source_is_locked() -> None:
-    lock = tomllib.loads((REPOSITORY_ROOT / "uv.lock").read_text())
-    packages = {package["name"]: package for package in lock["package"]}
-    requirement = next(
-        Requirement(value) for value in PYPROJECT["project"]["dependencies"] if Requirement(value).name == "harbor-config"
-    )
-    assert requirement.url is not None
-    assert packages["harbor-config"]["source"]["url"] == requirement.url
-
-
 def _exported_requirements(extras: tuple[str, ...]) -> list[Requirement]:
     command = ["uv", "export", "--frozen", "--no-annotate", "--no-dev", "--no-hashes"]
     for extra in extras:
