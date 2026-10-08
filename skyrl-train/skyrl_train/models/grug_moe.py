@@ -27,7 +27,7 @@ from skyrl_train.models.grug_query_bias import (
 )
 from skyrl_train.models.layers.moe_routing import TokenReorderer, grouped_expert_contributions
 from skyrl_train.models.router_instrumentation import NativeRouterObserverEmitter, emit_router_forward
-from skyrl_train.utils.flash_attention import (
+from skyrl_train.models.flash_attention import (
     FLASH_ATTN_IMPORT_ERROR,
     flash_attn_func,
     flash_attn_varlen_func,
