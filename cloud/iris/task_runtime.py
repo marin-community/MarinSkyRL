@@ -506,7 +506,15 @@ def apply_policy_chat_template(model_path: str, template_repo_rel: str) -> None:
         json.dump(tc, f, ensure_ascii=False, indent=2)
 
     # Verify the loaded tokenizer now renders delphi_v0 and keeps the think protocol tokens.
-    tok = AutoTokenizer.from_pretrained(snap, trust_remote_code=True)
+    try:
+        tok = AutoTokenizer.from_pretrained(snap, trust_remote_code=True)
+    except Exception:
+        listing = sorted(os.listdir(snap)) if os.path.isdir(snap) else None
+        _log(
+            f"apply_policy_chat_template: fast tokenizer load failed for {model_path} "
+            f"(snapshot files: {listing}); retrying with use_fast=False"
+        )
+        tok = AutoTokenizer.from_pretrained(snap, trust_remote_code=True, use_fast=False)
     ct = tok.chat_template
     if not ct or ct.strip() != delphi.strip():
         raise RuntimeError(
