@@ -35,6 +35,6 @@ def test_lcb_example_builder_preserves_executable_reference_tests():
     verifier = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
     assert "```python" in public[0]["content"]
     assert "cba" not in public[0]["content"]
-    assert json.loads(verifier.parameters["extras"]["reward_model"]["ground_truth"]) == [
+    assert json.loads(verifier.extras["reward_model"]["ground_truth"]) == [
         {"input": "abc\n", "output": "cba\n", "testtype": "stdin"}
     ]

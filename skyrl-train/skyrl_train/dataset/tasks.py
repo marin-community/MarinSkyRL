@@ -33,7 +33,7 @@ def task_prompt(lowered: LoweredTaskSpec) -> dict:
     """Prepare public messages and private worker inputs from a lowered task."""
     task = lowered.task
     extras = (
-        ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json).parameters["extras"]
+        ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json).extras
         if task.verifier.kind == "external"
         else {}
     )

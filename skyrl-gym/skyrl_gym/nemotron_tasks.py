@@ -97,11 +97,11 @@ class NemotronTaskSession:
         specification = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
         self.task = task
         self.machine = machine
-        self.config = specification.parameters["config"]
+        self.config = specification.config
         self.blocking = BlockingOperations(executor)
         self.verifyit_enabled = bool(self.config.get("verifyit_enabled", False))
         self.grading = GradingMode(self.config.get("grading", GradingMode.VERIFY))
-        ultra = specification.parameters["extras"]["extra_info"]["nemotron_ultra"]
+        ultra = specification.extras["extra_info"]["nemotron_ultra"]
         if ultra["route"] != "task_session":
             raise ValueError("Terminal source rows require a portable Harbor task")
         self.agent = ultra["agent"]

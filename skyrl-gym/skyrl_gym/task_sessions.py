@@ -84,8 +84,8 @@ class AnswerTaskSession:
         task = lowered.task
         self.task = task
         specification = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
-        self.config = specification.parameters["config"]
-        self.extras = specification.parameters["extras"]
+        self.config = specification.config
+        self.extras = specification.extras
         self.grader = grader
         self.blocking = BlockingOperations(executor)
         self.result = GradeResult(Outcome.UNAVAILABLE, None, "The task has no completed turn")
@@ -113,7 +113,7 @@ class MathTaskSession:
         task = lowered.task
         specification = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
         self.task = task
-        self.expected = ground_truth(specification.parameters["extras"])
+        self.expected = ground_truth(specification.extras)
         self.max_turns = lowered.session.max_turns
         self.grades: list[GradeResult] = []
 
@@ -153,9 +153,9 @@ class SearchTaskSession:
     def __init__(self, lowered: LoweredTaskSpec, machine: Machine | None, *, executor: Executor | None = None):
         task = lowered.task
         specification = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
-        config = specification.parameters["config"]
+        config = specification.config
         self.task = task
-        self.expected = ground_truth(specification.parameters["extras"])
+        self.expected = ground_truth(specification.extras)
         self.max_turns = lowered.session.max_turns
         self.blocking = BlockingOperations(executor)
         self.tool = SearchClient(**{key: config[key] for key in ("search_url", "topk", "timeout", "log_requests")})
@@ -211,12 +211,12 @@ class CodeTaskSession:
         specification = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
         self.task = task
         self.machine = machine
-        reward_mode = specification.parameters["config"].get("reward_mode", BINARY_REWARD_MODE)
+        reward_mode = specification.config.get("reward_mode", BINARY_REWARD_MODE)
         if reward_mode not in LCB_REWARD_MODES:
             raise ValueError(f"Unsupported LCB reward_mode: {reward_mode!r}")
         self.reward_mode = reward_mode
         try:
-            self.tests = json.loads(normalize_lcb_ground_truth(ground_truth(specification.parameters["extras"])))
+            self.tests = json.loads(normalize_lcb_ground_truth(ground_truth(specification.extras)))
         except (ValueError, TypeError):
             logger.exception("Invalid LCB ground truth")
             self.tests = None
@@ -269,10 +269,10 @@ class SearchCodeTaskSession:
         assert machine is not None
         specification = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
         self.task = task
-        self.expected = ground_truth(specification.parameters["extras"])
+        self.expected = ground_truth(specification.extras)
         self.max_turns = lowered.session.max_turns
         self.blocking = BlockingOperations(executor)
-        self.search = SearchClient(**specification.parameters["config"].get("search", {}))
+        self.search = SearchClient(**specification.config.get("search", {}))
         self.python = PythonKernel(machine)
         self.transcript: list[str] = []
         self.grades: list[GradeResult] = []

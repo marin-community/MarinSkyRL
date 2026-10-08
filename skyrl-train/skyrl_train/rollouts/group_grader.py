@@ -37,8 +37,8 @@ def task_group_grader(lowered: LoweredTaskSpec) -> GroupGraderSpec | None:
     if task.verifier.kind != "external":
         return None
     verifier = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
-    extras = verifier.parameters["extras"]
-    config = verifier.parameters["config"]
+    extras = verifier.extras
+    config = verifier.config
     ultra = (extras.get("extra_info") or {}).get("nemotron_ultra") or {}
     if (
         lowered.session.task_session != "nemotron_ultra"

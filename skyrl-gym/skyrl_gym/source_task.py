@@ -12,7 +12,8 @@ class ExternalVerifierSpec(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    parameters: dict[str, JsonValue]
+    extras: dict[str, JsonValue]
+    config: dict[str, JsonValue]
 
 
 def source_task(
@@ -24,7 +25,7 @@ def source_task(
     environment: EnvironmentRequirements | None = None,
 ) -> TaskSpec:
     """Preserve source semantics without selecting a session or machine backend."""
-    verifier = ExternalVerifierSpec(parameters={"extras": extras, "config": config})
+    verifier = ExternalVerifierSpec(extras=extras, config=config)
     return TaskSpec(
         id=f"{source.dataset}:{source.row}",
         context=chat_input(prompt),

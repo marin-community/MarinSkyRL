@@ -71,10 +71,10 @@ class OpenEnvTaskSession:
         task = lowered.task
         assert machine is not None
         specification = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
-        config = specification.parameters["config"]
+        config = specification.config
         self.task = task
         self.machine = machine
-        self.extras = specification.parameters["extras"]
+        self.extras = specification.extras
         self.name = self.extras["env_name"]
         if self.name not in OPENENV_TASKS:
             raise ValueError(f"Unknown OpenEnv task: {self.name}")

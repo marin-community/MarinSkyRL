@@ -48,7 +48,7 @@ def resolve_terminal_task(lowered: LoweredTaskSpec, terminals: Mapping[str, Lowe
     """Resolve a terminal source row before rollout execution."""
     task = lowered.task
     verifier = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
-    extras = verifier.parameters["extras"]
+    extras = verifier.extras
     ultra = (extras.get("extra_info") or {}).get("nemotron_ultra")
     if ultra is None:
         return lowered
@@ -78,7 +78,7 @@ def _nemotron_task_prompt(
     terminals: Mapping[str, LoweredTaskSpec],
 ) -> dict:
     source = source_row_task(row, index, source_name=source_name, environment_configs=environment_configs)
-    extras = ExternalVerifierSpec.model_validate_json(source.task.verifier.parameters_json).parameters["extras"]
+    extras = ExternalVerifierSpec.model_validate_json(source.task.verifier.parameters_json).extras
     return {**extras, **task_prompt(resolve_terminal_task(source, terminals))}
 
 

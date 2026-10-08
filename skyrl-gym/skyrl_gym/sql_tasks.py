@@ -174,10 +174,8 @@ class SeededSQLTaskSession:
         self.machine = machine
         self.blocking = BlockingOperations(executor)
         self.local_files = ExitStack()
-        self.verifyit = bool(specification.parameters["config"].get("verifyit_enabled", False))
-        self.spec = scoring.parse_ground_truth(
-            specification.parameters["extras"].get("reward_model", {}).get("ground_truth")
-        )
+        self.verifyit = bool(specification.config.get("verifyit_enabled", False))
+        self.spec = scoring.parse_ground_truth(specification.extras.get("reward_model", {}).get("ground_truth"))
         self.directory = ""
         self.cases: list[tuple[str, scoring.QueryRows]] = []
         self.result = GradeResult(Outcome.UNAVAILABLE, None, "The task has no completed query")
@@ -240,7 +238,7 @@ class SQLTaskSession:
         task = lowered.task
         assert machine is not None
         specification = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
-        config, extras = specification.parameters["config"], specification.parameters["extras"]
+        config, extras = specification.config, specification.extras
         self.task = task
         self.machine = machine
         self.blocking = BlockingOperations(executor)

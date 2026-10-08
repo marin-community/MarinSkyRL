@@ -20,7 +20,7 @@ class MultiplyTaskSession:
     def __init__(self, lowered: LoweredTaskSpec, machine: Machine | None):
         task = lowered.task
         specification = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
-        extras = specification.parameters["extras"]
+        extras = specification.extras
         self.task = task
         self.expected = str(ground_truth(extras)).strip()
         self.max_turns = lowered.session.max_turns
