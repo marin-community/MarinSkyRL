@@ -254,11 +254,13 @@ def lean_compiler(machine, monkeypatch):
     binary.parent.mkdir()
     binary.write_text(
         f"#!{sys.executable}\n"
-        "import pathlib, signal, sys\n"
+        "import pathlib, re, signal, sys\n"
         "proof = pathlib.Path(sys.argv[-1]).read_text()\n"
         "if 'hang_compiler' in proof: signal.pause()\n"
         "if 'truncated_output' in proof: print('x' * 70000)\n"
         "if 'sorry' in proof: print('warning: declaration uses sorry')\n"
+        "if re.search(r'(?m)^[ \\t]+(?:theorem|lemma|example)\\b', proof):\n"
+        "    print('error: declaration is not a tactic'); sys.exit(1)\n"
         "if 'bad_tactic' in proof:\n"
         "    print('error: unknown tactic bad_tactic'); sys.exit(1)\n"
     )

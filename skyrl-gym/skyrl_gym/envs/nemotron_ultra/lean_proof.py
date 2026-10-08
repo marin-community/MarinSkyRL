@@ -24,13 +24,13 @@ from shellbox.machine import ExitReason, Result
 
 def _proof_body(code: str) -> str:
     lines = code.strip().splitlines()
-    header = next((index for index, line in enumerate(lines) if re.match(r"\s*(theorem|example)\b", line)), None)
+    header = next((index for index, line in enumerate(lines) if re.match(r"\s*(theorem|lemma|example)\b", line)), None)
     if header is None:
         return code.strip()
     for index in range(header, len(lines)):
         if ":=" in lines[index]:
             return "\n".join([lines[index].split(":=", 1)[1].strip(), *lines[index + 1 :]]).strip()
-    raise ValueError("The generated theorem has no proof assignment")
+    return code.strip()
 
 
 def build_lean4_proof(generation: str, record: dict[str, Any]) -> str:
