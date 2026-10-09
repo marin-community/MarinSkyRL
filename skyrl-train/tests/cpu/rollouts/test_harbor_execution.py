@@ -9,16 +9,19 @@ from omegaconf import OmegaConf
 from skyrl_gym.verification import VerificationStatus
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
 from shellbox.machine import Command, ShellSimBuiltins, NetworkPolicy
-from taskcompendium.shell_verifier import (
+from taskcompendium.models import (
+    AnswerType,
     ArtifactKind,
+    ConversationInput,
+    EnvironmentRequirements,
     FileReward,
     MissingArtifactPolicy,
     RewardFile,
     RewardFileFormat,
-    ShellVerifierSpec,
+    ScriptGrader,
+    TextMessage,
     VerifierArtifact,
 )
-from taskcompendium.models import AnswerType, ConversationInput, EnvironmentRequirements, TextMessage, VerifierSpec
 from skyrl_train.rollouts.task_projections import StepTaskProjection, WholeTaskProjection
 from skyrl_train.dataset.tasks import TaskDataset
 from skyrl_train.dataset.harbor import HarborTaskDataset
@@ -112,7 +115,7 @@ async def test_disabled_harbor_verification_keeps_tokens_but_masks_training(
         100,
         session=session_spec(),
         cache_dir=tmp_path / "disabled",
-        verifier_override=settings.verifier_override(),
+        grader_override=settings.grader_override(),
         num_workers=1,
     )
     prompt, env, extras, uid = prepared[0]
@@ -157,22 +160,20 @@ async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected
     task = LoweredTaskSpec.model_validate_json(request["env_extras"][0]["lowered_task_spec"]).task
     task = task.model_copy(
         update={
-            "answer_type": AnswerType.STATE,
+            "answer_type": AnswerType.WORKSPACE_STATE,
             "tags": ("harbor",),
-            "verifier": VerifierSpec(
-                kind="shell",
-                environment_requirements=EnvironmentRequirements(docker_image="fixture@sha256:" + "0" * 64),
-                parameters_json=ShellVerifierSpec(
-                    argv=("cat", "/workspace/reward"),
-                    artifacts=(
-                        VerifierArtifact(
-                            source="/workspace/reward",
-                            target="/workspace/reward",
-                            kind=ArtifactKind.FILE,
-                            missing=MissingArtifactPolicy.SKIP,
-                        ),
+            "grader": ScriptGrader(
+                environment=EnvironmentRequirements(docker_image="fixture@sha256:" + "0" * 64),
+                answer_path=None,
+                argv=("cat", "/workspace/reward"),
+                artifacts=(
+                    VerifierArtifact(
+                        source="/workspace/reward",
+                        target="/workspace/reward",
+                        kind=ArtifactKind.FILE,
+                        missing=MissingArtifactPolicy.SKIP,
                     ),
-                ).model_dump_json(),
+                ),
             ),
         }
     )
@@ -354,7 +355,10 @@ async def test_harbor_retry_policy_preserves_terminal_grades(task_inputs, phase,
         if failure == "exhausted"
         else f'if [ "$(cat /workspace/attempt)" -eq 1 ]; then {failing_command}; else echo 1 > /reward.txt; fi'
     )
-    verifier = ShellVerifierSpec(
+    verifier_environment = EnvironmentRequirements(docker_image="fixture@sha256:" + "0" * 64)
+    verifier = ScriptGrader(
+        environment=verifier_environment,
+        answer_path=None,
         argv=("sh", "-c", script),
         reward=FileReward(files=(RewardFile(path="/reward.txt", format=RewardFileFormat.NUMBER),)),
         artifacts=(VerifierArtifact(source="/workspace/attempt", target="/workspace/attempt", kind=ArtifactKind.FILE),),
@@ -362,16 +366,17 @@ async def test_harbor_retry_policy_preserves_terminal_grades(task_inputs, phase,
     # A command failure without a reward file is a missing-reward failure.
     # Use stdout grading to exercise the retry limit for verifier execution errors.
     if failure == "exhausted":
-        verifier = ShellVerifierSpec(argv=("false",), artifacts=verifier.artifacts)
+        verifier = ScriptGrader(
+            environment=verifier_environment,
+            answer_path=None,
+            argv=("false",),
+            artifacts=verifier.artifacts,
+        )
     task = task.model_copy(
         update={
-            "answer_type": AnswerType.STATE,
+            "answer_type": AnswerType.WORKSPACE_STATE,
             "tags": ("harbor",),
-            "verifier": VerifierSpec(
-                kind="shell",
-                environment_requirements=EnvironmentRequirements(docker_image="fixture@sha256:" + "0" * 64),
-                parameters_json=verifier.model_dump_json(),
-            ),
+            "grader": verifier,
         }
     )
     request["env_extras"][0]["lowered_task_spec"] = lowered_task(
@@ -483,19 +488,17 @@ async def test_harbor_retry_policy_preserves_terminal_grades(task_inputs, phase,
 async def test_harbor_completion_reward_uses_the_engine_stop_reason(task_inputs, stop_reason, expected):
     config, request = task_inputs
     task = LoweredTaskSpec.model_validate_json(request["env_extras"][0]["lowered_task_spec"]).task
-    verifier = ShellVerifierSpec(
+    verifier = ScriptGrader(
+        environment=EnvironmentRequirements(docker_image="fixture@sha256:" + "0" * 64),
+        answer_path=None,
         argv=("sh", "-c", "echo '===== 1 passed in 0.1s ====='; echo 1 > /reward.txt"),
         reward=FileReward(files=(RewardFile(path="/reward.txt", format=RewardFileFormat.NUMBER),)),
     )
     task = task.model_copy(
         update={
-            "answer_type": AnswerType.STATE,
+            "answer_type": AnswerType.WORKSPACE_STATE,
             "tags": ("harbor",),
-            "verifier": VerifierSpec(
-                kind="shell",
-                environment_requirements=EnvironmentRequirements(docker_image="fixture@sha256:" + "0" * 64),
-                parameters_json=verifier.model_dump_json(),
-            ),
+            "grader": verifier,
         }
     )
     request["env_extras"][0]["lowered_task_spec"] = lowered_task(
@@ -542,20 +545,18 @@ async def test_strict_harbor_parser_masks_only_the_affected_response(task_inputs
     base = LoweredTaskSpec.model_validate_json(request["env_extras"][0]["lowered_task_spec"]).task
     tasks = []
     for output in ("unrecognized output", "tests/test_task.py::test_answer PASSED"):
-        verifier = ShellVerifierSpec(
+        verifier = ScriptGrader(
+            environment=EnvironmentRequirements(docker_image="fixture@sha256:" + "0" * 64),
+            answer_path=None,
             argv=("sh", "-c", f"echo '{output}'; echo 1 > /reward.txt"),
             reward=FileReward(files=(RewardFile(path="/reward.txt", format=RewardFileFormat.NUMBER),)),
         )
         tasks.append(
             base.model_copy(
                 update={
-                    "answer_type": AnswerType.STATE,
+                    "answer_type": AnswerType.WORKSPACE_STATE,
                     "tags": ("harbor",),
-                    "verifier": VerifierSpec(
-                        kind="shell",
-                        environment_requirements=EnvironmentRequirements(docker_image="fixture@sha256:" + "0" * 64),
-                        parameters_json=verifier.model_dump_json(),
-                    ),
+                    "grader": verifier,
                 }
             )
         )

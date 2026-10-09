@@ -15,18 +15,21 @@ from shellbox.machine import Command, DockerImage, ExitReason, MachineSpec
 from taskcompendium.grading_result import Outcome
 from taskcompendium.models import (
     AnswerType,
+    ArtifactKind,
     ConversationInput,
     EnvironmentRequirements,
+    FileReward,
+    PlainText,
     ResourceGroups,
+    RewardFile,
+    RewardFileFormat,
+    ScriptGrader,
     Source,
     TaskSpec,
     TextMessage,
-    VerifierSpec,
+    VerifierArtifact,
 )
 from taskcompendium.runtime.resources import inline_resource
-from taskcompendium.shell_verifier import FileReward, RewardFile, RewardFileFormat, ShellVerifierSpec
-from taskcompendium.shell_verifier import ArtifactKind, VerifierArtifact
-from taskcompendium.submission import PlainText
 
 from skyrl_gym.code_execution import execute_code
 from skyrl_gym.python_execution import PythonKernel
@@ -178,7 +181,12 @@ async def test_docker_shell_rollout_keeps_timeout_feedback_and_private_grades(py
         prompt = (*request.prefix_token_ids, 90, 91) if request.prefix_token_ids else (10, 11)
         return ModelTurn(message, prompt, (20 + index,), (-0.5,), "stop")
 
-    verifier = ShellVerifierSpec(
+    requirements = EnvironmentRequirements(
+        docker_image=PYTHON_IMAGE, working_directory="/tmp", capabilities=("shell", "filesystem")
+    )
+    verifier = ScriptGrader(
+        environment=requirements,
+        answer_path=None,
         argv=("sh", "/tests/task-session-grade.sh"),
         reward=FileReward(files=(RewardFile(path="/logs/verifier/reward.txt", format=RewardFileFormat.NUMBER),)),
         artifacts=(
@@ -191,17 +199,13 @@ async def test_docker_shell_rollout_keeps_timeout_feedback_and_private_grades(py
             else ()
         ),
     )
-    requirements = EnvironmentRequirements(
-        docker_image=PYTHON_IMAGE, working_directory="/tmp", capabilities=("shell", "filesystem")
-    )
     task = TaskSpec(
         id=scenario,
         context=ConversationInput(events=(TextMessage(role="user", content="Execute the task."),)),
         environment_requirements=requirements,
         answer_type=AnswerType.WORKSPACE_STATE,
-        verifier=VerifierSpec(
-            kind="shell", parameters_json=verifier.model_dump_json(), environment_requirements=requirements
-        ),
+        answer_format=PlainText(),
+        grader=verifier,
         resources=ResourceGroups(
             verifier=(inline_resource("task-session-grade.sh", f"echo {reward} > /logs/verifier/reward.txt".encode()),)
         ),
@@ -233,7 +237,7 @@ async def test_docker_shell_rollout_keeps_timeout_feedback_and_private_grades(py
             cleanup_timeout=30,
         ),
     )
-    record = await ShellboxRolloutEngine(complete, {"docker": Factory()}, convention=PlainText(id="plain")).run(lowered)
+    record = await ShellboxRolloutEngine(complete, {"docker": Factory()}).run(lowered)
     assert (record.grade.status, record.grade.reward) == (Outcome.GRADED, reward)
     assert record.failure is None
     assert json.loads(requests[1].messages[-1]["content"])["reason"] == first_reason

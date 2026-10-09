@@ -34,8 +34,8 @@ Intermediate turns receive zero reward and a correction prompt.
 A terminal correct answer in ``\boxed{42}`` format receives 1.0.
 A terminal wrong boxed answer receives 0.5.
 An answer with no box receives zero.
-The final grade is the mean of all completed turn grades, including intermediate zeros.
-For example, turn grades of 0.0 and 1.0 give a final grade of 0.5.
+The final grade records whether the terminal answer is correct.
+It is 1.0 for a correct answer and zero for an incorrect answer.
 The training projection retains the individual turn rewards.
 
 Supply the factory
@@ -69,7 +69,7 @@ Each source row declares its task name and private reference:
    }
 
 ``SourceTaskDataset`` converts these rows directly to serialized tasks in the prepared dataset.
-The prompt contains public messages. The verifier payload contains the private reference and task configuration.
+The prompt contains public messages. The verifier resources contain the private reference and task configuration.
 Keep the reference out of model-visible observations.
 
 ``TaskSpec.context`` holds the public conversation.
@@ -81,8 +81,10 @@ The multiplication session does not read a source row's ``max_turns`` field.
 Set ``generator.max_turns=5`` for this example.
 An explicit ``environment.task_sessions.session.max_turns`` overrides that launch value.
 A task-specific ``environment.task_sessions.multiply.session.max_turns`` overrides the common session value.
-The session decodes ``TaskSpec.verifier.parameters_json`` with ``ExternalVerifierSpec.model_validate_json``.
-Use the resulting verifier's ``parameters`` mapping:
+``TaskSpec.grader`` is a ``SessionGrader`` for a custom session.
+``TaskSpec.answer_format`` declares the answer format.
+The session reads ``session_parameters(task)`` from ``skyrl_gym.source_task``.
+This function decodes the private ``config.json`` verifier resource:
 ``config`` contains task settings and ``extras`` contains the source row's private fields.
 The multiplication session reads ``extras["reward_spec"]["ground_truth"]``.
 See :doc:`../api/env` for these types and :doc:`task_rollouts` for the Parquet format.

@@ -10,8 +10,7 @@ from omegaconf import DictConfig
 from shellbox.backends.daytona.machine import DaytonaMachineFactory, DaytonaNetworkMode, DaytonaNetworkPolicy
 from shellbox.backends.docker.machine import DockerMachineFactory
 from shellbox.machine import MachineFactory
-from taskcompendium.models import VerifierSpec
-import json
+from taskcompendium.models import NoGrader
 from rolloutengine.spec import LoweredTaskSpec, MachineRuntimeSpec
 from taskcompendium.grading_result import GradingFailure, Outcome
 from rolloutengine.contracts import RolloutData, RolloutFailure
@@ -86,12 +85,8 @@ class HarborTaskSettings:
             return None
         return min(self.retry.min_wait_sec * self.retry.wait_multiplier**retries, self.retry.max_wait_sec)
 
-    def verifier_override(self) -> VerifierSpec | None:
-        return (
-            VerifierSpec(kind="skipped", parameters_json=json.dumps({"reason": "Harbor verification is disabled"}))
-            if self.verifier.disable
-            else None
-        )
+    def grader_override(self) -> NoGrader | None:
+        return NoGrader(reason="Harbor verification is disabled") if self.verifier.disable else None
 
     def machine_factory(self, runner_config: DictConfig) -> MachineFactory:
         match self.environment.type:
@@ -115,7 +110,7 @@ class HarborTaskSettings:
 
     def lowered(self, lowered: LoweredTaskSpec, *, phase: str) -> LoweredTaskSpec:
         """Apply deployment overrides without changing the task definition."""
-        if self.verifier.disable and lowered.task.verifier.kind != "skipped":
+        if self.verifier.disable and not isinstance(lowered.task.grader, NoGrader):
             raise ValueError("Disabled Harbor verification must be selected before task import")
 
         def machine(original: MachineRuntimeSpec | None) -> MachineRuntimeSpec | None:

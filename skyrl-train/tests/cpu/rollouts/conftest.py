@@ -2,8 +2,17 @@ import json
 
 import pytest
 from omegaconf import OmegaConf
-from taskcompendium.grading import numeric_answer
-from taskcompendium.models import AnswerType, ConversationInput, Source, EnvironmentRequirements, TaskSpec, TextMessage
+from taskcompendium.grader import verifyit_package
+from taskcompendium.models import (
+    AnswerType,
+    ConversationInput,
+    PlainText,
+    Source,
+    EnvironmentRequirements,
+    TaskSpec,
+    TextMessage,
+)
+from verifyit.spec import NumericSpec
 from skyrl_gym.source_task import source_task
 from tests.cpu.task_specs import lowered_task
 from skyrl_train.trajectory_runners.types import TrajectoryID
@@ -16,7 +25,8 @@ def task_inputs():
         context=ConversationInput(events=(TextMessage(role="user", content="What is six plus six?"),)),
         environment_requirements=EnvironmentRequirements(),
         answer_type=AnswerType.NUMBER,
-        verifier=numeric_answer("12", tolerance_abs=0, tolerance_rel=0),
+        answer_format=PlainText(),
+        grader=verifyit_package(NumericSpec("12", tolerance_abs=0, tolerance_rel=0)).grader,
         source=Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
     )
     config = OmegaConf.create(

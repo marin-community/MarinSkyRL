@@ -25,9 +25,9 @@ This example writes one machine-free arithmetic task:
    from pathlib import Path
 
    from rolloutengine.spec import LoweredTaskSpec, TaskRuntimeSpec, TaskSessionSpec
-   from taskcompendium.grader import grader_package
+   from taskcompendium.grader import verifyit_package
    from taskcompendium.models import (
-       AnswerType, ConversationInput, EnvironmentRequirements, Source, TaskSpec, TextMessage,
+       AnswerType, ConversationInput, EnvironmentRequirements, PlainText, Source, TaskSpec, TextMessage,
    )
    from verifyit.spec import NumericSpec
 
@@ -36,7 +36,8 @@ This example writes one machine-free arithmetic task:
        context=ConversationInput(events=(TextMessage(role="user", content="What is six plus six?"),)),
        environment_requirements=EnvironmentRequirements(),
        answer_type=AnswerType.NUMBER,
-       verifier=grader_package(NumericSpec("12", tolerance_abs=0, tolerance_rel=0)).verifier,
+       answer_format=PlainText(),
+       grader=verifyit_package(NumericSpec("12", tolerance_abs=0, tolerance_rel=0)).grader,
        source=Source(dataset="example", revision="1", row="0", importer_revision="1"),
    )
    lowered = LoweredTaskSpec(

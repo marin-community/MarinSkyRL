@@ -10,19 +10,22 @@ from rolloutengine.contracts import GenerationLimitReached, RolloutContractError
 from rolloutengine.spec import LoweredTaskSpec, MachineRuntimeSpec, TaskRuntimeSpec, TaskSessionSpec
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
 from shellbox.machine import Command, NetworkPolicy, ShellSimBuiltins
-from taskcompendium.grader import grader_package
+from taskcompendium.grader import verifyit_package
 from taskcompendium.models import (
     AnswerType,
+    ArtifactKind,
     ConversationInput,
     EnvironmentRequirements,
+    NoGrader,
+    PlainText,
     ResourceGroups,
+    ScriptGrader,
     Source,
     TaskSpec,
     TextMessage,
-    VerifierSpec,
+    VerifierArtifact,
 )
 from taskcompendium.runtime.resources import inline_resource
-from taskcompendium.shell_verifier import ArtifactKind, ShellVerifierSpec, VerifierArtifact
 from taskcompendium.submission import conversation_messages
 from verifyit.spec import NumericSpec
 
@@ -114,7 +117,8 @@ def answer_task():
         context=ConversationInput(events=(TextMessage(role="user", content="What is six plus six?"),)),
         environment_requirements=EnvironmentRequirements(),
         answer_type=AnswerType.NUMBER,
-        verifier=grader_package(NumericSpec("12", tolerance_abs=0, tolerance_rel=0)).verifier,
+        answer_format=PlainText(),
+        grader=verifyit_package(NumericSpec("12", tolerance_abs=0, tolerance_rel=0)).grader,
         source=Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
     )
 
@@ -124,17 +128,13 @@ def file_task(script=b'if [ "$(cat /workspace/answer)" = 12 ]; then echo 1; else
         update={
             "answer_type": AnswerType.FILE,
             "environment_requirements": EnvironmentRequirements(capabilities=("shell", "filesystem")),
-            "verifier": VerifierSpec(
-                kind="shell",
-                environment_requirements=EnvironmentRequirements(docker_image=FIXTURE_IMAGE),
-                parameters_json=ShellVerifierSpec(
-                    argv=("sh", "/tests/grade.sh"),
-                    artifacts=(
-                        VerifierArtifact(
-                            source="/workspace/answer", target="/workspace/answer", kind=ArtifactKind.FILE
-                        ),
-                    ),
-                ).model_dump_json(),
+            "grader": ScriptGrader(
+                environment=EnvironmentRequirements(docker_image=FIXTURE_IMAGE),
+                answer_path=None,
+                argv=("sh", "/tests/grade.sh"),
+                artifacts=(
+                    VerifierArtifact(source="/workspace/answer", target="/workspace/answer", kind=ArtifactKind.FILE),
+                ),
             ),
             "resources": ResourceGroups(verifier=(inline_resource("grade.sh", script),)),
         }
@@ -157,7 +157,7 @@ def lowered(task):
         task=task,
         runtime=TaskRuntimeSpec(
             task_machine=machine if task.answer_type == AnswerType.FILE else None,
-            verifier_machine=machine if task.verifier.kind == "shell" else None,
+            verifier_machine=machine if isinstance(task.grader, ScriptGrader) else None,
         ),
         session=TaskSessionSpec(
             task_session="shellbox",
@@ -195,7 +195,7 @@ def runner(client, factories=None, *, error_handling=None):
 
 def request(record):
     return {
-        "prompts": [conversation_messages(record.task.context)],
+        "prompts": [conversation_messages(record.task.context.events)],
         "env_classes": [TASKCOMPENDIUM_ENVIRONMENT],
         "env_extras": [
             {LOWERED_TASK_COLUMN: record.model_dump_json(), "data_source": "fixture", "teacher_route": "math"}
@@ -440,16 +440,19 @@ async def test_native_empty_failure_keeps_mixed_batch_evidence_aligned():
 
 
 @pytest.mark.parametrize(
-    "scenario,status", [("skipped", VerificationStatus.SKIPPED), ("generation_limit", VerificationStatus.UNAVAILABLE)]
+    "scenario,status",
+    [
+        ("skipped", VerificationStatus.SKIPPED),
+        ("generation_limit", VerificationStatus.UNAVAILABLE),
+        ("generation_limit_without_grader", VerificationStatus.UNAVAILABLE),
+    ],
 )
 async def test_native_no_verdict_is_classified_and_masked(scenario, status):
     task = answer_task()
     turn = {"role": "assistant", "content": "12"}
-    if scenario == "skipped":
-        task = task.model_copy(
-            update={"verifier": VerifierSpec(kind="skipped", parameters_json='{"reason":"fixture"}')}
-        )
-    else:
+    if scenario in {"skipped", "generation_limit_without_grader"}:
+        task = task.model_copy(update={"grader": NoGrader(reason="fixture")})
+    if scenario != "skipped":
         turn = GenerationLimitReached((10, 11))
     output = await runner(ReplayClient([turn])).run(request(lowered(task)))
 
@@ -457,6 +460,8 @@ async def test_native_no_verdict_is_classified_and_masked(scenario, status):
     assert output["verification_results"][0].score is None
     assert not any(output["loss_masks"][0])
     assert output["exclude_from_baseline"] == [True]
+    if scenario != "skipped":
+        assert "Generation limit" in output["verification_results"][0].reason
 
 
 async def test_native_reconstructed_tokens_fail_the_transport_contract():
@@ -471,7 +476,7 @@ async def test_native_dataset_group_round_trips_through_leased_buffer(tmp_path):
     path = tmp_path / "tasks.jsonl"
     path.write_text(
         json.dumps(
-            {"prompt": conversation_messages(record.task.context), LOWERED_TASK_COLUMN: record.model_dump_json()}
+            {"prompt": conversation_messages(record.task.context.events), LOWERED_TASK_COLUMN: record.model_dump_json()}
         )
     )
     dataset = PromptDataset(str(path), Tokenizer(), max_prompt_length=128, num_workers=1)

@@ -7,9 +7,9 @@ from typing import Any
 
 import pyarrow.parquet as pq
 from datasets import Dataset
-from skyrl_gym.source_task import ExternalVerifierSpec
+from skyrl_gym.source_task import session_parameters
 from rolloutengine.spec import LoweredTaskSpec, TaskSessionSpec
-from taskcompendium.models import VerifierSpec
+from taskcompendium.models import NoGrader
 from transformers import PreTrainedTokenizerBase
 
 from skyrl_train.dataset.harbor import HARBOR_ID_PREFIX, materialize_harbor_tasks
@@ -47,8 +47,8 @@ def terminal_task_index(path: Path) -> dict[str, LoweredTaskSpec]:
 def resolve_terminal_task(lowered: LoweredTaskSpec, terminals: Mapping[str, LoweredTaskSpec]) -> LoweredTaskSpec:
     """Resolve a terminal source row before rollout execution."""
     task = lowered.task
-    verifier = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
-    extras = verifier.extras
+    parameters = session_parameters(task)
+    extras = parameters.extras
     ultra = (extras.get("extra_info") or {}).get("nemotron_ultra")
     if ultra is None:
         return lowered
@@ -78,7 +78,7 @@ def _nemotron_task_prompt(
     terminals: Mapping[str, LoweredTaskSpec],
 ) -> dict:
     source = source_row_task(row, index, source_name=source_name, environment_configs=environment_configs)
-    extras = ExternalVerifierSpec.model_validate_json(source.task.verifier.parameters_json).extras
+    extras = session_parameters(source.task).extras
     return {**extras, **task_prompt(resolve_terminal_task(source, terminals))}
 
 
@@ -94,7 +94,7 @@ class NemotronTaskDataset(SourceTaskDataset):
         environment_configs: Mapping[str, dict],
         terminal_bench_data: Sequence[str | Mapping[str, Any]],
         cache_dir: Path,
-        verifier_override: VerifierSpec | None = None,
+        grader_override: NoGrader | None = None,
         num_workers: int = 8,
     ):
         cache_dir = cache_dir.expanduser()
@@ -102,7 +102,7 @@ class NemotronTaskDataset(SourceTaskDataset):
             materialize_harbor_tasks(
                 terminal_bench_data,
                 cache_dir=cache_dir,
-                verifier_override=verifier_override,
+                grader_override=grader_override,
                 session=TaskSessionSpec.model_validate({**environment_configs["session"], "task_session": "shellbox"}),
             )
         )

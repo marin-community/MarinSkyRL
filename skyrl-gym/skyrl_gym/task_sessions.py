@@ -11,10 +11,10 @@ from typing import Any
 
 from rolloutengine.contracts import ModelTurn, SessionStart, Transition
 from shellbox.machine import ExitReason, Machine
-from skyrl_gym.source_task import ExternalVerifierSpec
+from skyrl_gym.source_task import session_parameters
 from taskcompendium.grading_result import GradeResult, Outcome
 from rolloutengine.spec import LoweredTaskSpec
-from taskcompendium.submission import conversation_messages
+from rolloutengine.task_session import session_start
 
 from skyrl_gym.answer_tasks import ground_truth
 from skyrl_gym.code_execution import execute_code
@@ -83,15 +83,15 @@ class AnswerTaskSession:
     ):
         task = lowered.task
         self.task = task
-        specification = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
-        self.config = specification.config
-        self.extras = specification.extras
+        parameters = session_parameters(task)
+        self.config = parameters.config
+        self.extras = parameters.extras
         self.grader = grader
         self.blocking = BlockingOperations(executor)
         self.result = GradeResult(Outcome.UNAVAILABLE, None, "The task has no completed turn")
 
     async def prepare(self) -> SessionStart:
-        return SessionStart(tuple(conversation_messages(self.task.context)), {})
+        return session_start(self.task)
 
     async def advance(self, turn: ModelTurn) -> Transition:
         transition = await self.blocking.run(self.grader, turn, self.config, self.extras)
@@ -111,14 +111,14 @@ class MathTaskSession:
 
     def __init__(self, lowered: LoweredTaskSpec, machine: Machine | None):
         task = lowered.task
-        specification = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
+        parameters = session_parameters(task)
         self.task = task
-        self.expected = ground_truth(specification.extras)
+        self.expected = ground_truth(parameters.extras)
         self.max_turns = lowered.session.max_turns
         self.grades: list[GradeResult] = []
 
     async def prepare(self) -> SessionStart:
-        return SessionStart(tuple(conversation_messages(self.task.context)), {})
+        return session_start(self.task)
 
     async def advance(self, turn: ModelTurn) -> Transition:
         reward = math_score(turn.text, self.expected, method="strict", format_score=0.2 / self.max_turns)
@@ -152,10 +152,10 @@ class SearchTaskSession:
 
     def __init__(self, lowered: LoweredTaskSpec, machine: Machine | None, *, executor: Executor | None = None):
         task = lowered.task
-        specification = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
-        config = specification.config
+        parameters = session_parameters(task)
+        config = parameters.config
         self.task = task
-        self.expected = ground_truth(specification.extras)
+        self.expected = ground_truth(parameters.extras)
         self.max_turns = lowered.session.max_turns
         self.blocking = BlockingOperations(executor)
         self.tool = SearchClient(**{key: config[key] for key in ("search_url", "topk", "timeout", "log_requests")})
@@ -163,7 +163,7 @@ class SearchTaskSession:
         self.grades: list[GradeResult] = []
 
     async def prepare(self) -> SessionStart:
-        return SessionStart(tuple(conversation_messages(self.task.context)), {})
+        return session_start(self.task)
 
     async def advance(self, turn: ModelTurn) -> Transition:
         for tag in ("</search>", "</answer>"):
@@ -208,15 +208,15 @@ class CodeTaskSession:
 
     def __init__(self, lowered: LoweredTaskSpec, machine: Machine | None):
         task = lowered.task
-        specification = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
+        parameters = session_parameters(task)
         self.task = task
         self.machine = machine
-        reward_mode = specification.config.get("reward_mode", BINARY_REWARD_MODE)
+        reward_mode = parameters.config.get("reward_mode", BINARY_REWARD_MODE)
         if reward_mode not in LCB_REWARD_MODES:
             raise ValueError(f"Unsupported LCB reward_mode: {reward_mode!r}")
         self.reward_mode = reward_mode
         try:
-            self.tests = json.loads(normalize_lcb_ground_truth(ground_truth(specification.extras)))
+            self.tests = json.loads(normalize_lcb_ground_truth(ground_truth(parameters.extras)))
         except (ValueError, TypeError):
             logger.exception("Invalid LCB ground truth")
             self.tests = None
@@ -225,7 +225,7 @@ class CodeTaskSession:
         self.result = GradeResult(Outcome.UNAVAILABLE, None, "The task has no completed turn")
 
     async def prepare(self) -> SessionStart:
-        return SessionStart(tuple(conversation_messages(self.task.context)), {})
+        return session_start(self.task)
 
     async def advance(self, turn: ModelTurn) -> Transition:
         code = extract_code_from_model(turn.text)
@@ -268,19 +268,19 @@ class SearchCodeTaskSession:
     def __init__(self, lowered: LoweredTaskSpec, machine: Machine | None, *, executor: Executor | None = None):
         task = lowered.task
         assert machine is not None
-        specification = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
+        parameters = session_parameters(task)
         self.task = task
-        self.expected = ground_truth(specification.extras)
+        self.expected = ground_truth(parameters.extras)
         self.max_turns = lowered.session.max_turns
         self.blocking = BlockingOperations(executor)
-        self.search = SearchClient(**specification.config.get("search", {}))
+        self.search = SearchClient(**parameters.config.get("search", {}))
         self.python = PythonKernel(machine)
         self.transcript: list[str] = []
         self.grades: list[GradeResult] = []
 
     async def prepare(self) -> SessionStart:
         await self.python.start()
-        return SessionStart(tuple(conversation_messages(self.task.context)), {})
+        return session_start(self.task)
 
     async def advance(self, turn: ModelTurn) -> Transition:
         self.transcript.append(turn.text)

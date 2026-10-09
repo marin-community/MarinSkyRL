@@ -386,7 +386,7 @@ class BasePPOExp:
             terminal_options = {
                 "terminal_bench_data": terminal_data,
                 "cache_dir": Path(self.cfg.data.task_cache_dir),
-                "verifier_override": HarborTaskSettings.from_config(self.cfg.terminal_bench_config).verifier_override(),
+                "grader_override": HarborTaskSettings.from_config(self.cfg.terminal_bench_config).grader_override(),
             }
         return dataset_type(
             datasets=data_files,

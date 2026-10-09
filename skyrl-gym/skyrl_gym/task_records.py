@@ -8,6 +8,21 @@ from taskcompendium.grading_result import GradeResult, Outcome
 
 from skyrl_gym.verification import RewardResult, RolloutEvidence, VerificationResult, VerificationStatus
 
+VERIFICATION_SKIPPED = "verification_skipped"
+
+
+def skipped_grade(reason: str, *, diagnostics: dict | None = None) -> GradeResult:
+    return GradeResult(
+        Outcome.UNAVAILABLE,
+        None,
+        reason,
+        diagnostics={**(diagnostics or {}), VERIFICATION_SKIPPED: True},
+    )
+
+
+def grade_skipped(grade: GradeResult) -> bool:
+    return grade.status == Outcome.UNAVAILABLE and grade.diagnostics.get(VERIFICATION_SKIPPED) is True
+
 
 def rollout_evidence(turn: ModelTurn) -> RolloutEvidence:
     return RolloutEvidence(
@@ -32,8 +47,9 @@ def grade_result(verification: VerificationResult) -> GradeResult:
             score_min=verification.score_min,
             score_max=verification.score_max,
         )
+    if verification.status == VerificationStatus.SKIPPED:
+        return skipped_grade(verification.reason, diagnostics=dict(verification.diagnostics))
     statuses = {
-        VerificationStatus.SKIPPED: Outcome.SKIPPED,
         VerificationStatus.UNAVAILABLE: Outcome.UNAVAILABLE,
         VerificationStatus.ERROR: Outcome.INFRA_ERROR,
     }

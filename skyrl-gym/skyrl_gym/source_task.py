@@ -4,16 +4,30 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, JsonValue
 from taskcompendium.chat import chat_input
-from taskcompendium.models import AnswerType, EnvironmentRequirements, Source, TaskSpec, VerifierSpec
+from taskcompendium.grader import grader_config
+from taskcompendium.models import (
+    AnswerType,
+    EnvironmentRequirements,
+    PlainText,
+    ResourceGroups,
+    SessionGrader,
+    Source,
+    TaskSpec,
+)
+from taskcompendium.runtime.resources import inline_resource
 
 
-class ExternalVerifierSpec(BaseModel):
-    """Private inputs for a SkyRL task verifier."""
+class SessionParameters(BaseModel):
+    """Private inputs for a SkyRL task session."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     extras: dict[str, JsonValue]
     config: dict[str, JsonValue]
+
+
+def session_parameters(task: TaskSpec) -> SessionParameters:
+    return SessionParameters.model_validate(grader_config(task))
 
 
 def source_task(
@@ -25,12 +39,14 @@ def source_task(
     environment: EnvironmentRequirements | None = None,
 ) -> TaskSpec:
     """Preserve source semantics without selecting a session or machine backend."""
-    verifier = ExternalVerifierSpec(extras=extras, config=config)
+    parameters = SessionParameters(extras=extras, config=config)
     return TaskSpec(
         id=f"{source.dataset}:{source.row}",
         context=chat_input(prompt),
         environment_requirements=EnvironmentRequirements() if environment is None else environment,
         answer_type=AnswerType.TEXT,
-        verifier=VerifierSpec(kind="external", parameters_json=verifier.model_dump_json()),
+        answer_format=PlainText(),
+        grader=SessionGrader(),
+        resources=ResourceGroups(verifier=(inline_resource("config.json", parameters.model_dump_json().encode()),)),
         source=source,
     )

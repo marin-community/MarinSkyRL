@@ -11,10 +11,10 @@ from uuid import uuid4
 
 from rolloutengine.contracts import ModelTurn, SessionStart, Transition
 from shellbox.machine import Command, ExitReason, Machine
-from skyrl_gym.source_task import ExternalVerifierSpec
+from skyrl_gym.source_task import session_parameters
 from taskcompendium.grading_result import GradeResult, Outcome
 from rolloutengine.spec import LoweredTaskSpec
-from taskcompendium.submission import conversation_messages
+from rolloutengine.task_session import session_start
 
 from skyrl_gym.task_records import fold_grades
 
@@ -70,11 +70,11 @@ class OpenEnvTaskSession:
     def __init__(self, lowered: LoweredTaskSpec, machine: Machine | None):
         task = lowered.task
         assert machine is not None
-        specification = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
-        config = specification.config
+        parameters = session_parameters(task)
+        config = parameters.config
         self.task = task
         self.machine = machine
-        self.extras = specification.extras
+        self.extras = parameters.extras
         self.name = self.extras["env_name"]
         if self.name not in OPENENV_TASKS:
             raise ValueError(f"Unknown OpenEnv task: {self.name}")
@@ -130,8 +130,10 @@ class OpenEnvTaskSession:
             raise RuntimeError(f"OpenEnv startup failed: {result.stderr.decode(errors='replace')}")
         self.started = True
         initial = await self._request("reset", {})
-        messages = (*conversation_messages(self.task.context),)
-        return SessionStart((*messages, {"role": "user", "content": serialize_observation(initial["observation"])}), {})
+        start = session_start(self.task)
+        return SessionStart(
+            (*start.messages, {"role": "user", "content": serialize_observation(initial["observation"])}), start.options
+        )
 
     async def advance(self, turn: ModelTurn) -> Transition:
         try:

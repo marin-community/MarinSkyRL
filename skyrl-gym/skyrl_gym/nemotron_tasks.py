@@ -11,10 +11,10 @@ import reasoning_gym
 import requests
 from rolloutengine.contracts import LENGTH_STOP_REASON, ModelTurn, SessionStart, Transition
 from shellbox.machine import ExitReason, Machine
-from skyrl_gym.source_task import ExternalVerifierSpec
+from skyrl_gym.source_task import session_parameters
 from taskcompendium.grading_result import GradeResult, Outcome
 from rolloutengine.spec import LoweredTaskSpec
-from taskcompendium.submission import conversation_messages
+from rolloutengine.task_session import session_start
 from verifyit.adapters.skyrl import grade_grid_candidate
 
 from skyrl_gym.code_execution import execute_code
@@ -53,7 +53,7 @@ from skyrl_gym.envs.instruction_verifyit import grade_nemotron_instructions
 from skyrl_gym.envs.verifyit_clients import grade_reasoning_entry
 from skyrl_gym.python_execution import PythonKernel
 from skyrl_gym.lean_execution import compile_lean
-from skyrl_gym.task_records import fold_grades, grade_result
+from skyrl_gym.task_records import fold_grades, grade_result, skipped_grade
 from skyrl_gym.task_sessions import BlockingOperations
 from skyrl_gym.verification import VERIFIER_RUNTIME_ERROR, VerificationResult
 
@@ -94,14 +94,14 @@ class NemotronTaskSession:
 
     def __init__(self, lowered: LoweredTaskSpec, machine: Machine | None, *, executor: Executor | None = None):
         task = lowered.task
-        specification = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
+        parameters = session_parameters(task)
         self.task = task
         self.machine = machine
-        self.config = specification.config
+        self.config = parameters.config
         self.blocking = BlockingOperations(executor)
         self.verifyit_enabled = bool(self.config.get("verifyit_enabled", False))
         self.grading = GradingMode(self.config.get("grading", GradingMode.VERIFY))
-        ultra = specification.extras["extra_info"]["nemotron_ultra"]
+        ultra = parameters.extras["extra_info"]["nemotron_ultra"]
         if ultra["route"] != "task_session":
             raise ValueError("Terminal source rows require a portable Harbor task")
         self.agent = ultra["agent"]
@@ -132,7 +132,8 @@ class NemotronTaskSession:
         if self.python is not None:
             await self.python.start()
         options = {key: value for key, value in self.request.items() if key != "input"}
-        return SessionStart(tuple(conversation_messages(self.task.context)), options)
+        start = session_start(self.task)
+        return SessionStart(start.messages, {**start.options, **options})
 
     async def advance(self, turn: ModelTurn) -> Transition:
         self.turns += 1
@@ -205,7 +206,7 @@ class NemotronTaskSession:
             return Transition(
                 done=True,
                 reward=0.0,
-                grade=GradeResult(Outcome.SKIPPED, None, "Grading is skipped", diagnostics=diagnostics),
+                grade=skipped_grade("Grading is skipped", diagnostics=diagnostics),
                 metrics=diagnostics,
             )
         if self.agent == IPI_AGENT:

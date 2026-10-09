@@ -15,9 +15,8 @@ from datasets import Dataset
 from rolloutengine.spec import LoweredTaskSpec, MachineRuntimeSpec, TaskRuntimeSpec, TaskSessionSpec
 from rolloutengine.lowering import SHELLBOX_SESSION
 from rolloutengine.task_session import session_start
-from skyrl_gym.source_task import ExternalVerifierSpec, source_task
-from taskcompendium.models import EnvironmentRequirements, Source
-from taskcompendium.submission import PlainText
+from skyrl_gym.source_task import session_parameters, source_task
+from taskcompendium.models import EnvironmentRequirements, SessionGrader, Source
 from transformers import PreTrainedTokenizerBase
 
 from skyrl_train.dataset.dataset import PromptDataset
@@ -32,16 +31,11 @@ PARQUET_BATCH_SIZE = 1024
 def task_prompt(lowered: LoweredTaskSpec) -> dict:
     """Prepare public messages and private worker inputs from a lowered task."""
     task = lowered.task
-    extras = (
-        ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json).extras
-        if task.verifier.kind == "external"
-        else {}
-    )
-    convention = PlainText(id="rollout")
+    extras = session_parameters(task).extras if isinstance(task.grader, SessionGrader) else {}
     return {
         **extras,
         LOWERED_TASK_COLUMN: lowered.model_dump_json(),
-        "prompt": session_start(task, convention).messages,
+        "prompt": session_start(task).messages,
         "env_class": TASKCOMPENDIUM_ENVIRONMENT
         if lowered.session.task_session == SHELLBOX_SESSION
         else lowered.session.task_session,

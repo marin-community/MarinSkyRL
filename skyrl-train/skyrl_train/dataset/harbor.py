@@ -15,7 +15,7 @@ from harbor_config.models.task.config import EnvironmentConfig, TaskConfig
 from rolloutengine.lowering import SHELLBOX_SESSION
 from rolloutengine.spec import LoweredTaskSpec, MachineRuntimeSpec, TaskRuntimeSpec, TaskSessionSpec
 from shellbox.machine import NetworkPolicy
-from taskcompendium.models import EnvironmentRequirements, Source, TaskSpec, VerifierSpec
+from taskcompendium.models import NoGrader, ScriptGrader, Source, TaskSpec, VerifyitGrader
 
 from marinskyrl.packed_tasks import PackedTaskMaterializer, PackedTaskReference, select_task_references
 from marinskyrl.task_sources import DirectoryDataSource, TaskTroveParquetSource, data_source
@@ -144,11 +144,10 @@ def lower_harbor_task(directory: Path, task: TaskSpec, *, session: TaskSessionSp
     task_machine = harbor_machine(config.environment, config.agent.user)
     verifier_machine = (
         harbor_machine(config.verifier.environment or config.environment, config.verifier.user)
-        if task.verifier.environment_requirements != EnvironmentRequirements()
+        if isinstance(task.grader, ScriptGrader)
+        or (isinstance(task.grader, VerifyitGrader) and task.grader.environment is not None)
         else None
     )
-    if task.verifier.kind == "shell" and verifier_machine is None:
-        raise NotImplementedError("Harbor shell grading requires a separate verifier environment")
     return LoweredTaskSpec(
         task=task,
         runtime=TaskRuntimeSpec(task_machine=task_machine, verifier_machine=verifier_machine),
@@ -168,7 +167,7 @@ def materialize_harbor_tasks(
     *,
     cache_dir: Path,
     session: TaskSessionSpec,
-    verifier_override: VerifierSpec | None = None,
+    grader_override: NoGrader | None = None,
 ) -> Path:
     """Convert selected directory and packed tasks to portable task Parquet."""
     sources = TerminalBenchTaskDataset(data_files)
@@ -198,10 +197,10 @@ def materialize_harbor_tasks(
                             importer_revision="skyrl-harbor-v1",
                         ),
                     )
-                    if verifier_override is not None:
+                    if grader_override is not None:
                         task = task.model_copy(
                             update={
-                                "verifier": verifier_override,
+                                "grader": grader_override,
                                 "resources": task.resources.model_copy(update={"verifier": ()}),
                             }
                         )
@@ -237,11 +236,11 @@ class HarborTaskDataset(TaskDataset):
         *,
         cache_dir: Path,
         session: TaskSessionSpec,
-        verifier_override: VerifierSpec | None = None,
+        grader_override: NoGrader | None = None,
         num_workers: int = 8,
     ):
         self.task_path = materialize_harbor_tasks(
-            data_files, cache_dir=cache_dir.expanduser(), session=session, verifier_override=verifier_override
+            data_files, cache_dir=cache_dir.expanduser(), session=session, grader_override=grader_override
         )
         super().__init__([str(self.task_path)], tokenizer, max_prompt_length, num_workers=num_workers)
 

@@ -8,15 +8,19 @@ import pytest
 from omegaconf import OmegaConf
 from skyrl_gym.verification import normalized_verifier_score
 from taskcompendium.grading_result import GradeResult, Outcome
-from taskcompendium.shell_verifier import FileReward, RewardFile, RewardFileFormat, ShellVerifierSpec
 from taskcompendium.models import (
     AnswerType,
     ConversationInput,
-    Source,
     EnvironmentRequirements,
+    FileReward,
+    NoGrader,
+    PlainText,
+    RewardFile,
+    RewardFileFormat,
+    ScriptGrader,
+    Source,
     TaskSpec,
     TextMessage,
-    VerifierSpec,
 )
 from skyrl_train.rollouts.task_projections import StepTaskProjection, WholeTaskProjection
 from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection, WholeTrajectoryProjection
@@ -62,7 +66,9 @@ async def test_harbor_task_worker_preserves_verdicts_and_shapes_group_rewards(
     )
     tasks = []
     for index, verdict in enumerate(("FAILED", "PASSED")):
-        verifier = ShellVerifierSpec(
+        verifier = ScriptGrader(
+            environment=EnvironmentRequirements(docker_image="fixture@sha256:" + "0" * 64),
+            answer_path=None,
             argv=(
                 "sh",
                 "-c",
@@ -76,12 +82,9 @@ async def test_harbor_task_worker_preserves_verdicts_and_shapes_group_rewards(
                 id=f"harbor-{index}",
                 context=ConversationInput(events=(TextMessage(role="user", content="Complete the task."),)),
                 environment_requirements=EnvironmentRequirements(),
-                answer_type=AnswerType.STATE,
-                verifier=VerifierSpec(
-                    kind="shell",
-                    environment_requirements=EnvironmentRequirements(docker_image="fixture@sha256:" + "0" * 64),
-                    parameters_json=verifier.model_dump_json(),
-                ),
+                answer_type=AnswerType.WORKSPACE_STATE,
+                answer_format=PlainText(),
+                grader=verifier,
                 source=Source(dataset="harbor", revision="1", row=str(index), importer_revision="1"),
                 tags=("harbor",),
             )
@@ -358,9 +361,7 @@ async def test_task_group_grader_preserves_separate_samples_and_private_inputs(t
     task = LoweredTaskSpec.model_validate_json(request["env_extras"][0]["lowered_task_spec"]).task
     task = task.model_copy(
         update={
-            "verifier": VerifierSpec(
-                kind="skipped", parameters_json=json.dumps({"reason": "Group grading supplies the final score"})
-            ),
+            "grader": NoGrader(reason="Group grading supplies the final score"),
         }
     )
     group_grader = GroupGraderSpec(name="group_total", parameters_json=json.dumps({"private_offset": 10}))

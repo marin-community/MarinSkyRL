@@ -6,6 +6,7 @@ import threading
 import pytest
 import requests
 from taskcompendium.grading_result import Outcome
+from skyrl_gym.task_records import grade_skipped
 
 from skyrl_gym.envs.nemotron_ultra.calendar import grade_calendar
 from skyrl_gym.envs.nemotron_ultra.format_verification import grade_format
@@ -47,7 +48,7 @@ async def test_judge_backed_row_requires_a_judge_unless_grading_is_skipped(nemot
     session = await nemotron_session("multichallenge_simple_agent", {}, {"grading": "skip"})
     result = await session.advance(model_turn("final answer"))
     assert result.done and result.reward == 0.0
-    assert result.grade.status is Outcome.SKIPPED
+    assert grade_skipped(result.grade)
     assert result.metrics["graded"] == 0.0
 
 
@@ -67,7 +68,7 @@ async def test_skipped_grading_still_executes_ns_tools_turns(nemotron_session, m
     assert not tool_turn.done
     assert tool_turn.observations == ({"role": "tool", "tool_call_id": "call-1", "content": "4"},)
     final = await session.advance(model_turn("The answer is 4."))
-    assert final.done and final.grade.status is Outcome.SKIPPED
+    assert final.done and grade_skipped(final.grade)
 
 
 def test_genrm_utilities_match_nvidia_circular_tiebreaker():

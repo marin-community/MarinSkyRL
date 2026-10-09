@@ -12,7 +12,7 @@ from rolloutengine.contracts import ModelTurn
 from taskcompendium.grading_result import Outcome
 from transformers import AutoTokenizer
 from skyrl_gym.source_task import source_task
-from taskcompendium.models import Source, VerifierSpec
+from taskcompendium.models import NoGrader, Source
 from shellbox.backends.daytona.machine import DaytonaMachineFactory
 from tests.cpu.task_specs import lowered_task
 
@@ -114,7 +114,7 @@ async def test_cpu_worker_runs_machine_free_rows_and_checks_native_tools(
                 "task": native.task.model_copy(
                     update={
                         "tags": ("harbor",),
-                        "verifier": VerifierSpec(kind="skipped", parameters_json=json.dumps({"reason": "fixture"})),
+                        "grader": NoGrader(reason="fixture"),
                     }
                 ),
                 "session": native.session.model_copy(update={"task_session": "shellbox"}),

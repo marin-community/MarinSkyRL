@@ -4,8 +4,9 @@ import json
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
-from skyrl_gym.source_task import ExternalVerifierSpec
+from skyrl_gym.source_task import session_parameters
 from rolloutengine.spec import LoweredTaskSpec
+from taskcompendium.models import SessionGrader
 
 from skyrl_gym.envs.nemotron_ultra import GENRM_AGENTS
 
@@ -34,11 +35,11 @@ class GenRMGroupGraderParameters(BaseModel):
 def task_group_grader(lowered: LoweredTaskSpec) -> GroupGraderSpec | None:
     """Derive a group grader from the SkyRL environment payload."""
     task = lowered.task
-    if task.verifier.kind != "external":
+    if not isinstance(task.grader, SessionGrader):
         return None
-    verifier = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
-    extras = verifier.extras
-    config = verifier.config
+    parameters = session_parameters(task)
+    extras = parameters.extras
+    config = parameters.config
     ultra = (extras.get("extra_info") or {}).get("nemotron_ultra") or {}
     if (
         lowered.session.task_session != "nemotron_ultra"

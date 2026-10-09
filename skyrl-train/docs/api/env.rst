@@ -29,4 +29,4 @@ terminal state, rewards, and grading results. The engine owns model inference an
 
 .. autoclass:: rolloutengine.spec.LoweredTaskSpec
 
-.. autoclass:: taskcompendium.importers.skyrl.ExternalVerifierSpec
+.. autoclass:: skyrl_gym.source_task.SessionParameters

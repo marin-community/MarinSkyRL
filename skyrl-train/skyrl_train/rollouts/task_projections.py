@@ -13,6 +13,7 @@ from skyrl_gym.verification import (
     VerificationResult,
 )
 from taskcompendium.grading_result import GradeResult, Outcome
+from skyrl_gym.task_records import grade_skipped, skipped_grade
 from rolloutengine.contracts import RolloutContractError, RolloutData
 
 from skyrl_train.error_treatment import ErrorTreatment
@@ -49,7 +50,7 @@ def verification_result(grade: GradeResult) -> VerificationResult:
             score_min=grade.score_min,
             score_max=grade.score_max,
         )
-    if grade.status == Outcome.SKIPPED:
+    if grade_skipped(grade):
         return VerificationResult.skipped(grade.error or "Verification skipped", diagnostics=grade.diagnostics)
     if grade.status == Outcome.UNAVAILABLE:
         return VerificationResult.unavailable(grade.error or "Verification unavailable", diagnostics=grade.diagnostics)
@@ -98,7 +99,7 @@ def _failure_policy(
 
 def _rollout_rewards(rollout: RolloutData) -> RewardResult:
     graded = rollout.grade.status in {Outcome.GRADED, Outcome.SUBMISSION_FAILURE}
-    skipped = rollout.grade.status == Outcome.SKIPPED
+    skipped = grade_skipped(rollout.grade)
     token_rewards = None
     token_credit = None
     components = {}
@@ -200,11 +201,11 @@ def training_output(
     verification = verification_result(rollout.grade)
     if graded:
         disposition = TrainingDisposition.train()
-    elif rollout.grade.status == Outcome.SKIPPED:
+    elif grade_skipped(rollout.grade):
         disposition = (
             TrainingDisposition.train(reason="verification skipped")
             if any(step.transition.reward is not None for step in rollout.steps)
-            else TrainingDisposition.mask("No verifier verdict", exception_type=rollout.grade.status.value)
+            else TrainingDisposition.mask("No verifier verdict", exception_type="skipped")
         )
     else:
         disposition = TrainingDisposition(
@@ -327,7 +328,7 @@ def _merge_task_metrics(
     failed = [
         rollout
         for rollout in rollouts
-        if rollout.failure is not None or rollout.grade.status not in {Outcome.GRADED, Outcome.SKIPPED}
+        if rollout.failure is not None or (rollout.grade.status != Outcome.GRADED and not grade_skipped(rollout.grade))
     ]
     excluded = batch["exclude_from_baseline"]
     final_steps = batch.get("is_last_step") or [True] * len(excluded)
@@ -372,10 +373,8 @@ def _step_training_outputs(
     for index, step in enumerate(rollout.steps):
         last = index == len(rollout.steps) - 1
         grade = rollout.grade
-        if grade.status in {Outcome.GRADED, Outcome.SKIPPED}:
-            grade = step.transition.grade or (
-                grade if last else GradeResult(Outcome.SKIPPED, None, "No intermediate verifier")
-            )
+        if grade.status == Outcome.GRADED or grade_skipped(grade):
+            grade = step.transition.grade or (grade if last else skipped_grade("No intermediate verifier"))
         reward = step.transition.reward
         if not last and reward is None:
             reward = 0.0
@@ -401,7 +400,8 @@ def _step_training_outputs(
             not last
             and not step.transition.done
             and grade.status == Outcome.UNAVAILABLE
-            and rollout.grade.status in {Outcome.GRADED, Outcome.SKIPPED}
+            and not grade_skipped(grade)
+            and (rollout.grade.status == Outcome.GRADED or grade_skipped(rollout.grade))
             and rollout.failure is None
         ):
             output.disposition = TrainingDisposition.train()

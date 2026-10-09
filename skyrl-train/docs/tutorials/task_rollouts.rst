@@ -16,7 +16,8 @@ Task and environment operations
 
 A task Parquet file contains one serialized ``LoweredTaskSpec`` per row in the
 ``lowered_task_spec`` column. The record preserves a ``TaskSpec`` and adds machine selections and session limits.
-The task declares public context, tools, private grading inputs, resources, and environment requirements.
+The task declares public context, tools, an answer format, a typed grader, resources, and environment requirements.
+Custom sessions use ``SessionGrader`` and retain private settings in a ``config.json`` verifier resource.
 
 ``skyrl_train.entrypoints.main_base`` converts source rows through
 ``SourceTaskDataset`` with Hugging Face ``Dataset.map``.

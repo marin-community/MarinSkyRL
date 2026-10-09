@@ -38,7 +38,7 @@ overrides = [
     { name = "flashinfer-cubin", marker = "sys_platform == 'linux'", specifier = "==0.6.18.post1", index = "https://flashinfer.ai/whl" },
     { name = "flashinfer-python", marker = "sys_platform == 'linux'", specifier = "==0.6.18.post1" },
     { name = "fsspec", specifier = "==2026.4.0" },
-    { name = "harbor-config", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-70a9fcaa9f6b4bb5eadecf32ee5e1de644ad91af/harbor_config-0.1.0-py3-none-any.whl" },
+    { name = "harbor-config", git = "https://github.com/marin-community/harbor?subdirectory=packages%2Fharbor-config&rev=6b2e76e1dae5c084eed05edefefffcec8c0c1ad9" },
     { name = "marin-rigging", extras = ["secrets", "prometheus"], specifier = "==0.2.144.dev37540375919" },
     { name = "nvidia-resiliency-ext", marker = "sys_platform == 'never'" },
     { name = "opentelemetry-api", marker = "sys_platform != 'linux'" },
@@ -495,6 +495,16 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/ac/01/5f394b8bcd6e5b92f73130990960423bbb19711f906bd9fe9ea5557c667c/bracex-3.0.1.tar.gz", hash = "sha256:4e38e32392e4a4780fe15d644bfc7c8514057cfc3861e060b11814ce829c25e4", size = 44019, upload-time = "2026-07-20T13:43:00.335Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b8/8f/6f7273a7adb8d73fc8d21ede4376a3e475e52f98435c6007f69100dec8ca/bracex-3.0.1-py3-none-any.whl", hash = "sha256:6523ad83aeb5098a4ee597cff0f964442ff74e460bd3fafaffab6a013ff2288c", size = 11940, upload-time = "2026-07-20T13:42:59.268Z" },
+]
+
+[[package]]
+name = "bubblewrap-bin"
+version = "0.11.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/1a/49/f1a0d7183817fd423c1212f2070795d45d8a8568490bcaca8f0272005371/bubblewrap_bin-0.11.0.tar.gz", hash = "sha256:c8e877a3dadc0397b71f43f76b03fa81dc4a80999c490b6b31c2577fbb6b4e83", size = 4649, upload-time = "2026-04-28T06:36:54.473Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/af/d9/ed3f436811cc7053797bee1e739aa81cca30061bde5e244d651909e27a62/bubblewrap_bin-0.11.0-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:e48a66717241522b2d08830f8cc3f877c944c7759d8f9301131ea63121d46813", size = 58196, upload-time = "2026-04-28T06:36:53.434Z" },
+    { url = "https://files.pythonhosted.org/packages/bc/01/e142d75984a2b691e40ff534fab39d6d4da7dc8ba53c25d0746eccd29d7e/bubblewrap_bin-0.11.0-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:592c8c60b80e6f45c5f152ad1b93b6e10cd26f11057a96621e4928706be5d94f", size = 57346, upload-time = "2026-04-28T06:36:52.524Z" },
 ]
 
 [[package]]
@@ -2061,25 +2071,14 @@ dependencies = [
 [[package]]
 name = "harbor-config"
 version = "0.1.0"
-source = { url = "https://github.com/marin-community/harbor/releases/download/harbor-config-70a9fcaa9f6b4bb5eadecf32ee5e1de644ad91af/harbor_config-0.1.0-py3-none-any.whl" }
+source = { git = "https://github.com/marin-community/harbor?subdirectory=packages%2Fharbor-config&rev=6b2e76e1dae5c084eed05edefefffcec8c0c1ad9#6b2e76e1dae5c084eed05edefefffcec8c0c1ad9" }
 dependencies = [
     { name = "pydantic" },
     { name = "pyyaml" },
     { name = "shortuuid" },
     { name = "toml" },
+    { name = "typing-extensions" },
     { name = "universal-pathlib" },
-]
-wheels = [
-    { url = "https://github.com/marin-community/harbor/releases/download/harbor-config-70a9fcaa9f6b4bb5eadecf32ee5e1de644ad91af/harbor_config-0.1.0-py3-none-any.whl", hash = "sha256:721008e7dc08d158b49d45f6c7708191d04942d36595e0aa6e672b841c0e1cca" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "pydantic", specifier = ">=2.11.7" },
-    { name = "pyyaml", specifier = ">=6.0.2" },
-    { name = "shortuuid", specifier = ">=1.0.13" },
-    { name = "toml", specifier = ">=0.10.2" },
-    { name = "universal-pathlib", specifier = ">=0.2.6" },
 ]
 
 [[package]]
@@ -2884,7 +2883,7 @@ secrets = [
 [[package]]
 name = "marin-rolloutengine"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frolloutengine&rev=232f192a56b013fdc3f6914eb158c7bc2d231f94#232f192a56b013fdc3f6914eb158c7bc2d231f94" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frolloutengine&rev=2ef4786903053025ca7fcee40ea76476276ca872#2ef4786903053025ca7fcee40ea76476276ca872" }
 dependencies = [
     { name = "harbor-config" },
     { name = "marin-shellbox" },
@@ -2895,8 +2894,9 @@ dependencies = [
 [[package]]
 name = "marin-shellbox"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fshellbox&rev=232f192a56b013fdc3f6914eb158c7bc2d231f94#232f192a56b013fdc3f6914eb158c7bc2d231f94" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fshellbox&rev=2ef4786903053025ca7fcee40ea76476276ca872#2ef4786903053025ca7fcee40ea76476276ca872" }
 dependencies = [
+    { name = "bubblewrap-bin", marker = "sys_platform == 'linux' or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "httpx" },
 ]
 
@@ -3106,7 +3106,7 @@ requires-dist = [
     { name = "flashinfer-python", marker = "sys_platform == 'linux' and extra == 'vllm'", specifier = "==0.6.18.post1" },
     { name = "fsspec", specifier = ">=2024.0.0" },
     { name = "func-timeout" },
-    { name = "harbor-config", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-70a9fcaa9f6b4bb5eadecf32ee5e1de644ad91af/harbor_config-0.1.0-py3-none-any.whl" },
+    { name = "harbor-config", git = "https://github.com/marin-community/harbor?subdirectory=packages%2Fharbor-config&rev=6b2e76e1dae5c084eed05edefefffcec8c0c1ad9" },
     { name = "hf-transfer" },
     { name = "hs-connectors", marker = "sys_platform == 'linux' and extra == 'vllm'", git = "https://github.com/lukedhlee/speculators.git?subdirectory=hs_connectors&rev=6496b4db007de00dd4741349643d23b23e29dce8" },
     { name = "huggingface-hub", specifier = ">=0.34.0" },
@@ -3124,8 +3124,8 @@ requires-dist = [
     { name = "marin-iris-native" },
     { name = "marin-rigging", extras = ["prometheus"], marker = "extra == 'telemetry'" },
     { name = "marin-rigging", extras = ["secrets"], specifier = ">=0.2.144.dev37540375919" },
-    { name = "marin-rolloutengine", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frolloutengine&rev=232f192a56b013fdc3f6914eb158c7bc2d231f94" },
-    { name = "marin-shellbox", extras = ["daytona", "shellsim"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fshellbox&rev=232f192a56b013fdc3f6914eb158c7bc2d231f94" },
+    { name = "marin-rolloutengine", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frolloutengine&rev=2ef4786903053025ca7fcee40ea76476276ca872" },
+    { name = "marin-shellbox", extras = ["daytona", "shellsim"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fshellbox&rev=2ef4786903053025ca7fcee40ea76476276ca872" },
     { name = "math-verify", specifier = "==0.9.0" },
     { name = "megatron-bridge", marker = "sys_platform == 'linux' and extra == 'megatron'", specifier = "==0.6.0" },
     { name = "megatron-core", marker = "sys_platform == 'linux' and extra == 'megatron'", specifier = "==0.18.0" },
@@ -3155,7 +3155,7 @@ requires-dist = [
     { name = "s3fs" },
     { name = "smart-open" },
     { name = "speculators", marker = "sys_platform == 'linux' and extra == 'vllm'", git = "https://github.com/lukedhlee/speculators.git?rev=6496b4db007de00dd4741349643d23b23e29dce8" },
-    { name = "taskcompendium", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=232f192a56b013fdc3f6914eb158c7bc2d231f94" },
+    { name = "taskcompendium", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=2ef4786903053025ca7fcee40ea76476276ca872" },
     { name = "tensorboard" },
     { name = "tensordict", marker = "sys_platform == 'linux' and extra == 'cuda'" },
     { name = "tensordict", marker = "sys_platform == 'linux' and extra == 'megatron'" },
@@ -3185,7 +3185,7 @@ requires-dist = [
     { name = "transformers", specifier = "==5.16.1" },
     { name = "uvicorn" },
     { name = "verifiable-instructions", git = "https://github.com/abukharin-nv/verifiable-instructions.git?rev=f46a5ac87b1400a4f8973039844b6be9b56e3faf" },
-    { name = "verifyit", extras = ["answer", "schema", "reasoning-gym", "judge"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fverifyit&rev=232f192a56b013fdc3f6914eb158c7bc2d231f94" },
+    { name = "verifyit", extras = ["answer", "schema", "reasoning-gym", "judge"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fverifyit&rev=2ef4786903053025ca7fcee40ea76476276ca872" },
     { name = "vllm", marker = "platform_machine == 'aarch64' and sys_platform == 'linux' and extra == 'vllm'", url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260929-39e62869693c/vllm-0.0.0.dev20260929+marin.39e62869693c.cu132-cp38-abi3-manylinux_2_28_aarch64.whl" },
     { name = "vllm", marker = "platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux' and extra == 'vllm'", specifier = "==0.0.0.dev20260929+marin.39e62869693c.cu132" },
     { name = "vllm", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'vllm'", url = "https://github.com/marin-community/vllm/releases/download/marin-vllm-gpu-20260929-39e62869693c/vllm-0.0.0.dev20260929+marin.39e62869693c.cu132-cp38-abi3-manylinux_2_28_x86_64.whl" },
@@ -6575,7 +6575,7 @@ wheels = [
 [[package]]
 name = "taskcompendium"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=232f192a56b013fdc3f6914eb158c7bc2d231f94#232f192a56b013fdc3f6914eb158c7bc2d231f94" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=2ef4786903053025ca7fcee40ea76476276ca872#2ef4786903053025ca7fcee40ea76476276ca872" }
 dependencies = [
     { name = "marin-rigging", extra = ["prometheus", "secrets"] },
     { name = "marin-shellbox" },
@@ -7235,7 +7235,7 @@ dependencies = [
 [[package]]
 name = "verifyit"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fverifyit&rev=232f192a56b013fdc3f6914eb158c7bc2d231f94#232f192a56b013fdc3f6914eb158c7bc2d231f94" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fverifyit&rev=2ef4786903053025ca7fcee40ea76476276ca872#2ef4786903053025ca7fcee40ea76476276ca872" }
 dependencies = [
     { name = "harbor-config" },
     { name = "tomlkit" },

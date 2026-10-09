@@ -1,7 +1,7 @@
 import json
 
 from examples.livecodebench.lcb_dataset import LIVECODEBENCH, process_example
-from skyrl_gym.source_task import ExternalVerifierSpec
+from skyrl_gym.source_task import session_parameters
 from taskcompendium.submission import conversation_messages
 
 from skyrl_train.dataset.tasks import source_row_task
@@ -31,10 +31,10 @@ def test_lcb_example_builder_preserves_executable_reference_tests():
         source_name=LIVECODEBENCH,
         environment_configs={"session": session_spec().model_dump(exclude={"task_session"})},
     ).task
-    public = conversation_messages(task.context)
-    verifier = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
+    public = conversation_messages(task.context.events)
+    parameters = session_parameters(task)
     assert "```python" in public[0]["content"]
     assert "cba" not in public[0]["content"]
-    assert json.loads(verifier.extras["reward_model"]["ground_truth"]) == [
+    assert json.loads(parameters.extras["reward_model"]["ground_truth"]) == [
         {"input": "abc\n", "output": "cba\n", "testtype": "stdin"}
     ]

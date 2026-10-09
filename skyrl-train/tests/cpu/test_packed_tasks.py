@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import gzip
 import io
-import json
 import shutil
 import tarfile
 from dataclasses import asdict, replace
@@ -32,13 +31,12 @@ from marinskyrl.task_sources import (
 )
 from skyrl_train.dataset.harbor import TerminalBenchTaskDataset, materialize_harbor_tasks
 from taskcompendium.grading_result import Outcome
-from taskcompendium.models import VerifierSpec
+from taskcompendium.models import NoGrader
 from taskcompendium.runtime.resources import resource_bytes
 from rolloutengine.spec import LoweredTaskSpec
 from tests.cpu.task_specs import session_spec
 from rolloutengine.contracts import ModelTurn
 from rolloutengine.engine import ShellboxRolloutEngine
-from taskcompendium.submission import PlainText
 
 
 def _task_binary(name: str, *, solution: bool = False, unsafe_path: bool = False) -> bytes:
@@ -240,9 +238,7 @@ async def test_packed_tasks_execute_after_source_removal(tmp_path, verification)
         [asdict(source)],
         cache_dir=cache,
         session=session_spec(max_turns=1),
-        verifier_override=None
-        if verification
-        else VerifierSpec(kind="skipped", parameters_json=json.dumps({"reason": "Verification is disabled"})),
+        grader_override=None if verification else NoGrader(reason="Verification is disabled"),
     )
     dataset_path.unlink()
     shutil.rmtree(cache / "archives")
@@ -259,13 +255,12 @@ async def test_packed_tasks_execute_after_source_removal(tmp_path, verification)
     engine = ShellboxRolloutEngine(
         Model().complete,
         {"docker": Factory()},
-        convention=PlainText(id="plain"),
     )
     row = pq.read_table(output).to_pylist()[0]
     task = LoweredTaskSpec.model_validate_json(row["lowered_task_spec"])
     result = await engine.run(task)
     assert (result.grade.status, result.grade.reward) == (
-        (Outcome.GRADED, 1.0) if verification else (Outcome.SKIPPED, None)
+        (Outcome.GRADED, 1.0) if verification else (Outcome.UNAVAILABLE, None)
     )
     assert result.response_token_ids == (20,)
     assert result.loss_mask == (1,)

@@ -18,6 +18,7 @@ from shellbox.backends.docker.machine import DockerMachineFactory
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
 from shellbox.machine import Machine, MachineFactory
 from taskcompendium.grading_result import Outcome
+from taskcompendium.models import NoGrader
 from rolloutengine.contracts import (
     GenerationLimitReached,
     ModelRequest,
@@ -34,9 +35,8 @@ from rolloutengine.spec import LoweredTaskSpec
 from rolloutengine.lowering import SHELLBOX_SESSION, validate_lowered_task
 from skyrl_train.dataset.tasks import LOWERED_TASK_COLUMN
 from skyrl_train.config.utils import generation_context_limit
-from taskcompendium.submission import PlainText
 from skyrl_gym.task_factories import session_factories
-from skyrl_gym.task_records import fold_grades
+from skyrl_gym.task_records import fold_grades, skipped_grade
 from skyrl_gym.verification import VERIFIER_RUNTIME_ERROR
 
 from skyrl_train.inference_engines.base import ChatContinuation, InferenceEngineInterface, InferenceEngineInput
@@ -325,12 +325,7 @@ class TaskRolloutWorker:
                     session_id=session_id,
                 )
 
-            engine = ShellboxRolloutEngine(
-                model,
-                self.factories,
-                convention=PlainText(id="plain"),
-                sessions=self.sessions,
-            )
+            engine = ShellboxRolloutEngine(model, self.factories, sessions=self.sessions)
             harbor_slots = (
                 nullcontext()
                 if harbor is None
@@ -345,6 +340,15 @@ class TaskRolloutWorker:
                         result = await engine.run(lowered)
                 except RolloutInterrupted as interruption:
                     result = _failed_rollout(interruption, lowered)
+                if (
+                    isinstance(task.grader, NoGrader)
+                    and result.grade.status == Outcome.UNAVAILABLE
+                    and result.failure is None
+                    and result.steps
+                ):
+                    result = replace(
+                        result, grade=skipped_grade(task.grader.reason, diagnostics=result.grade.diagnostics)
+                    )
                 if harbor is None:
                     return result
                 result = harbor_grading_failure(result)

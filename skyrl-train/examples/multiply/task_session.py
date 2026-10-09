@@ -5,10 +5,10 @@ from typing import Any
 
 from rolloutengine.contracts import ModelTurn, SessionStart, Transition
 from shellbox.machine import Machine
-from skyrl_gym.source_task import ExternalVerifierSpec
+from skyrl_gym.source_task import session_parameters
 from taskcompendium.grading_result import GradeResult, Outcome
 from rolloutengine.spec import LoweredTaskSpec
-from taskcompendium.submission import conversation_messages
+from rolloutengine.task_session import session_start
 
 from skyrl_gym.answer_tasks import ground_truth
 from skyrl_gym.task_records import terminal_grade
@@ -19,15 +19,15 @@ class MultiplyTaskSession:
 
     def __init__(self, lowered: LoweredTaskSpec, machine: Machine | None):
         task = lowered.task
-        specification = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
-        extras = specification.extras
+        parameters = session_parameters(task)
+        extras = parameters.extras
         self.task = task
         self.expected = str(ground_truth(extras)).strip()
         self.max_turns = lowered.session.max_turns
         self.grades: list[GradeResult] = []
 
     async def prepare(self) -> SessionStart:
-        return SessionStart(tuple(conversation_messages(self.task.context)), {})
+        return session_start(self.task)
 
     async def advance(self, turn: ModelTurn) -> Transition:
         match = re.search(r"\\boxed\{([^}]+)\}", turn.text)

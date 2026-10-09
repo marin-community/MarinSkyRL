@@ -14,7 +14,6 @@ from rolloutengine.engine import ShellboxRolloutEngine
 from rolloutengine.spec import LoweredTaskSpec
 from skyrl_gym.source_task import source_task
 from taskcompendium.models import Source
-from taskcompendium.submission import PlainText
 
 from skyrl_gym.openenv_tasks import OpenEnvTaskSession
 
@@ -172,7 +171,6 @@ async def test_openenv_engine_preserves_tokens_and_releases_server(openenv_sessi
         factories={"local": Factory()},
         model=model,
         sessions={"openenv": lambda task, machine: case.session},
-        convention=PlainText(id="plain"),
     )
     rollout = await engine.run(case.task)
     assert rollout.grade.reward == 0.25

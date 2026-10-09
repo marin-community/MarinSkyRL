@@ -12,15 +12,18 @@ from skyrl_gym.task_sessions import AnswerTaskSession
 from taskcompendium.grading_result import GradeResult, Outcome
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
 from shellbox.machine import Backend, Command, MachineSpec, ShellSimBuiltins
-from taskcompendium.shell_verifier import ArtifactKind, ExitCodeReward, ShellVerifierSpec, VerifierArtifact
 from taskcompendium.models import (
     AnswerType,
+    ArtifactKind,
     ConversationInput,
-    Source,
     EnvironmentRequirements,
+    ExitCodeReward,
+    PlainText,
+    ScriptGrader,
+    Source,
     TaskSpec,
     TextMessage,
-    VerifierSpec,
+    VerifierArtifact,
 )
 from skyrl_train.rollouts.task_projections import StepTaskProjection, WholeTaskProjection
 from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection, WholeTrajectoryProjection
@@ -280,16 +283,15 @@ async def test_agent_deadlines_grade_the_workspace_and_commit_training_tokens(
         context=ConversationInput(events=(TextMessage(role="user", content="Write the answer file."),)),
         environment_requirements=EnvironmentRequirements(),
         answer_type=AnswerType.FILE,
-        verifier=VerifierSpec(
-            kind="shell",
-            environment_requirements=EnvironmentRequirements(docker_image="fixture@sha256:" + "0" * 64),
-            parameters_json=ShellVerifierSpec(
-                argv=("test", "-f", "/workspace/answer"),
-                reward=ExitCodeReward(),
-                artifacts=(
-                    VerifierArtifact(source="/workspace/answer", target="/workspace/answer", kind=ArtifactKind.FILE),
-                ),
-            ).model_dump_json(),
+        answer_format=PlainText(),
+        grader=ScriptGrader(
+            environment=EnvironmentRequirements(docker_image="fixture@sha256:" + "0" * 64),
+            answer_path=None,
+            argv=("test", "-f", "/workspace/answer"),
+            reward=ExitCodeReward(),
+            artifacts=(
+                VerifierArtifact(source="/workspace/answer", target="/workspace/answer", kind=ArtifactKind.FILE),
+            ),
         ),
         source=Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
     )

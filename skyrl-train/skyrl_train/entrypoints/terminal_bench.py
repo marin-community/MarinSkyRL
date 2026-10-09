@@ -36,7 +36,7 @@ class TerminalBenchExp(BasePPOExp):
                     "task_session": "shellbox",
                 }
             ),
-            verifier_override=HarborTaskSettings.from_config(self.cfg.terminal_bench_config).verifier_override(),
+            grader_override=HarborTaskSettings.from_config(self.cfg.terminal_bench_config).grader_override(),
         )
 
     def get_train_dataset(self):

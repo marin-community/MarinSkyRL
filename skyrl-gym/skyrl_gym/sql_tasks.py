@@ -15,10 +15,10 @@ from uuid import uuid4
 import pandas as pd
 from rolloutengine.contracts import ModelTurn, SessionStart, Transition
 from shellbox.machine import Command, ExitReason, Machine
-from skyrl_gym.source_task import ExternalVerifierSpec
+from skyrl_gym.source_task import session_parameters
 from taskcompendium.grading_result import GradeResult, Outcome
 from rolloutengine.spec import LoweredTaskSpec
-from taskcompendium.submission import conversation_messages
+from rolloutengine.task_session import session_start
 from verifyit.modes.grade_exact import grade_exact_candidate
 from verifyit.spec import ExactSpec
 
@@ -169,13 +169,13 @@ class SeededSQLTaskSession:
 
     def __init__(self, lowered: LoweredTaskSpec, machine: Machine | None, *, executor: Executor | None = None):
         task = lowered.task
-        specification = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
+        parameters = session_parameters(task)
         self.task = task
         self.machine = machine
         self.blocking = BlockingOperations(executor)
         self.local_files = ExitStack()
-        self.verifyit = bool(specification.config.get("verifyit_enabled", False))
-        self.spec = scoring.parse_ground_truth(specification.extras.get("reward_model", {}).get("ground_truth"))
+        self.verifyit = bool(parameters.config.get("verifyit_enabled", False))
+        self.spec = scoring.parse_ground_truth(parameters.extras.get("reward_model", {}).get("ground_truth"))
         self.directory = ""
         self.cases: list[tuple[str, scoring.QueryRows]] = []
         self.result = GradeResult(Outcome.UNAVAILABLE, None, "The task has no completed query")
@@ -188,7 +188,7 @@ class SeededSQLTaskSession:
                 "Invalid SQL task",
                 diagnostics={"verifier_error": "invalid reward_model.ground_truth"},
             )
-            return SessionStart(tuple(conversation_messages(self.task.context)), {})
+            return session_start(self.task)
         assert self.machine is not None
         root = Path(self.local_files.enter_context(TemporaryDirectory(prefix="skyrl-sql-reference-")))
         try:
@@ -198,7 +198,7 @@ class SeededSQLTaskSession:
         else:
             self.directory = await _upload_queries(self.machine, [path for path, _ in cases])
             self.cases = [(path.name, reference) for path, reference in cases]
-        return SessionStart(tuple(conversation_messages(self.task.context)), {})
+        return session_start(self.task)
 
     async def advance(self, turn: ModelTurn) -> Transition:
         if self.result.status != Outcome.UNAVAILABLE:
@@ -237,8 +237,8 @@ class SQLTaskSession:
     def __init__(self, lowered: LoweredTaskSpec, machine: Machine | None, *, executor: Executor | None = None):
         task = lowered.task
         assert machine is not None
-        specification = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
-        config, extras = specification.config, specification.extras
+        parameters = session_parameters(task)
+        config, extras = parameters.config, parameters.extras
         self.task = task
         self.machine = machine
         self.blocking = BlockingOperations(executor)
@@ -268,7 +268,7 @@ class SQLTaskSession:
             self.failure = _reference_failure(error)
         else:
             self.directory = await _upload_queries(self.machine, [root / QUERY_DATABASE_FILENAME])
-        return SessionStart(tuple(conversation_messages(self.task.context)), {})
+        return session_start(self.task)
 
     async def advance(self, turn: ModelTurn) -> Transition:
         if self.failure is not None:

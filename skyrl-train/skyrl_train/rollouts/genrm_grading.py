@@ -91,7 +91,7 @@ def grade_genrm_rollouts(
         responses.append(response_object(message))
     try:
         rewards, metrics = grade_genrm_group(
-            conversation_history=conversation_messages(task.context),
+            conversation_history=conversation_messages(task.context.events),
             response_objects=responses,
             principle=parameters.principle,
             judge=judge,
