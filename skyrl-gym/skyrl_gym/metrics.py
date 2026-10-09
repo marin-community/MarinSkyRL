@@ -20,6 +20,7 @@ def _fraction(rows: list[dict[str, Any]], key: str) -> float:
 
 
 def aime_metrics(metrics: list[dict[str, Any]]) -> dict[str, float]:
+    metrics = [row for row in metrics if "acc" in row]
     correct = [row for row in metrics if bool(row["acc"])]
     incorrect = [row for row in metrics if not bool(row["acc"])]
     return {

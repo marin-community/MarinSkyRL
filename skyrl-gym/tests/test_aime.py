@@ -65,6 +65,7 @@ def test_aime_aggregates_evaluation_budget_diagnostics_by_outcome():
             {"acc": True, "over_evaluation_budget": True, "answered_within_evaluation_budget": False},
             {"acc": False, "over_evaluation_budget": True, "answered_within_evaluation_budget": False},
             {"acc": False, "over_evaluation_budget": True, "answered_within_evaluation_budget": False},
+            {"turn_timeout": True},
         ],
     )
 
