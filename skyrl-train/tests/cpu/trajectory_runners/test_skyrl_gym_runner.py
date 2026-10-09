@@ -11,7 +11,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import numpy as np
 import pytest
 import skyrl_gym
-from harbor_config.errors import ErrorCategory, error_category
 from loguru import logger
 from omegaconf import DictConfig
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
@@ -29,6 +28,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
     validate_trajectory_batch as assert_valid_trajectory_batch,
 )
 from skyrl_train.trajectory_runners.types import AgentLoopOutput, BatchMetadata, TokenProvenance
+from skyrl_train.utils.harbor_errors import ErrorCategory, error_category
 from skyrl_train.utils.utils import validate_cfg
 
 QWEN2_5 = "Qwen/Qwen2.5-0.5B-Instruct"
