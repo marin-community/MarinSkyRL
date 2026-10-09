@@ -1,23 +1,23 @@
-"""One-turn counting environment for the CatCountCanary learning gate."""
+"""One-turn environment that scores a reply against the row's expected sequence of items."""
 
 from typing import Any
 
 from omegaconf import DictConfig
 
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput, ConversationType
-from skyrl_gym.envs.cat_count.reward import TARGET_WORD, CatCountScore, cat_count_score
+from skyrl_gym.envs.sequence.reward import SequenceScore, sequence_score
 from skyrl_gym.verification import UNKNOWN_STOP_REASON, RolloutEvidence, VerificationResult
 
 
-class CatCountEnv(BaseTextEnv):
-    """Score the decoded assistant turn against the row's requested count of its word, ``cat`` unless ``extra_info.word``."""
+class SequenceEnv(BaseTextEnv):
+    """Score the decoded assistant turn against ``extra_info.items``; ``extra_info.n`` labels the metrics."""
 
     def __init__(self, env_config: DictConfig, extras: dict[str, Any]):
         super().__init__()
-        self.n = int(extras["extra_info"]["n"])
-        self.word = str(extras["extra_info"].get("word", TARGET_WORD))
+        self.items = [str(item) for item in extras["extra_info"]["items"]]
+        self.n = int(extras["extra_info"].get("n", len(self.items)))
         self.stop_reason = UNKNOWN_STOP_REASON
-        self.score: CatCountScore | None = None
+        self.score: SequenceScore | None = None
 
     def init(self, prompt: ConversationType) -> tuple[ConversationType, dict[str, Any]]:
         return prompt, {}
@@ -26,7 +26,7 @@ class CatCountEnv(BaseTextEnv):
         self.stop_reason = evidence.stop_reason
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
-        score = cat_count_score(action, self.n, stop_reason=self.stop_reason, word=self.word)
+        score = sequence_score(action, self.items, stop_reason=self.stop_reason)
         self.score = score
         return BaseTextEnvStepOutput(
             observations=[],
@@ -39,12 +39,10 @@ class CatCountEnv(BaseTextEnv):
     def get_metrics(self) -> dict[str, float]:
         if self.score is None:
             return {}
-        score = self.score
         return {
-            "exact": float(score.exact),
-            "has_cat": float(score.cat_unigram_count > 0),
-            "junk": float(score.junk_words),
-            "truncated": float(score.truncated),
-            f"exact_n{self.n}": float(score.exact),
-            f"n_words_n{self.n}": float(score.n_words),
+            "exact": float(self.score.exact),
+            "prefix_fraction": self.score.correct_prefix / len(self.items),
+            "truncated": float(self.score.truncated),
+            f"exact_n{self.n}": float(self.score.exact),
+            f"n_words_n{self.n}": float(self.score.n_words),
         }
