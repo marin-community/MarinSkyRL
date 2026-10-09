@@ -11,7 +11,7 @@ version = "0.1.0"
 description = "Marin's typed launcher and RL training runtime"
 requires-python = "==3.12.*"
 dependencies = [
-    "verifyit[answer,schema,reasoning-gym,judge] @ git+https://github.com/marin-community/marin.git@232f192a56b013fdc3f6914eb158c7bc2d231f94#subdirectory=lib/verifyit",
+    "marin-verifyit[math,schema,reasoning-gym,judge]",
     "aiohttp>=3.13.3",
     "boto3",
     "datasets>=4.0.0",
@@ -34,8 +34,8 @@ dependencies = [
     "marin-iris",
     "marin-iris-native",
     "marin-rigging[secrets]>=0.2.123.dev35633925924",
-    "marin-rolloutengine @ git+https://github.com/marin-community/marin.git@232f192a56b013fdc3f6914eb158c7bc2d231f94#subdirectory=lib/rolloutengine",
-    "marin-shellbox @ git+https://github.com/marin-community/marin.git@232f192a56b013fdc3f6914eb158c7bc2d231f94#subdirectory=lib/shellbox",
+    "marin-rolloutengine",
+    "marin-shellbox",
     "ninja",
     "nvidia-ml-py",
     "omegaconf",
@@ -52,7 +52,7 @@ dependencies = [
     "s3fs",
     "smart_open",
     "tensorboard",
-    "taskcompendium @ git+https://github.com/marin-community/marin.git@232f192a56b013fdc3f6914eb158c7bc2d231f94#subdirectory=lib/taskcompendium",
+    "marin-taskcompendium",
     "tqdm>=4.66",
     "tokenizers==0.23.1",
     "transformers==5.16.1",
@@ -185,7 +185,6 @@ no-build-isolation-package = [
     "transformer-engine-torch",
 ]
 override-dependencies = [
-    "marin-rigging[secrets,prometheus]==0.2.144.dev37540375919",
     "harbor-config @ https://github.com/marin-community/harbor/releases/download/harbor-config-70a9fcaa9f6b4bb5eadecf32ee5e1de644ad91af/harbor_config-0.1.0-py3-none-any.whl",
     # Megatron Bridge declares this native extension but does not import or use it.
     "fast-hadamard-transform ; sys_platform == 'never'",

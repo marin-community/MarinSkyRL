@@ -14,7 +14,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 
 dependencies = [
-    "verifyit[answer,schema,reasoning-gym,judge] @ git+https://github.com/marin-community/marin.git@232f192a56b013fdc3f6914eb158c7bc2d231f94#subdirectory=lib/verifyit",
+    "marin-verifyit[math,schema,reasoning-gym,judge]",
     "func_timeout",
     "loguru",
     "numpy",
