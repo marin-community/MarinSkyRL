@@ -261,6 +261,8 @@ async def test_progress_deadline_resets_when_the_same_worker_completes_a_request
 @pytest.mark.asyncio
 async def test_stalled_worker_request_is_cancelled_remotely(ray_init, spec, monkeypatch):
     actor = _BlockingWorker.remote()
+    async with asyncio.timeout(30):
+        await actor.__ray_ready__.remote()
     pool = _pool([actor], spec, timeout=0.1)
     cancel_calls = []
     original_cancel = ray.cancel
@@ -272,15 +274,21 @@ async def test_stalled_worker_request_is_cancelled_remotely(ray_init, spec, monk
     monkeypatch.setattr(ray, "cancel", capture_cancel)
 
     run = asyncio.create_task(pool.run(_request([TrajectoryID("a", 0)])))
-    await actor.wait_for_start.remote()
-    with pytest.raises(RolloutWorkerStalledError):
-        await run
+    try:
+        async with asyncio.timeout(30):
+            await actor.wait_for_start.remote()
+            with pytest.raises(RolloutWorkerStalledError):
+                await run
 
-    assert len(cancel_calls) == 1
-    cancelled_ref, force, recursive = cancel_calls[0]
-    assert isinstance(cancelled_ref, ray.ObjectRef)
-    assert force is False
-    assert recursive is True
+        assert len(cancel_calls) == 1
+        cancelled_ref, force, recursive = cancel_calls[0]
+        assert isinstance(cancelled_ref, ray.ObjectRef)
+        assert force is False
+        assert recursive is True
+    finally:
+        run.cancel()
+        await asyncio.gather(run, return_exceptions=True)
+        ray.kill(actor)
 
 
 @pytest.mark.slow
