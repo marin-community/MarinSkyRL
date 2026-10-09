@@ -38,8 +38,8 @@ overrides = [
     { name = "flashinfer-cubin", marker = "sys_platform == 'linux'", specifier = "==0.6.18.post1", index = "https://flashinfer.ai/whl" },
     { name = "flashinfer-python", marker = "sys_platform == 'linux'", specifier = "==0.6.18.post1" },
     { name = "fsspec", specifier = "==2026.4.0" },
-    { name = "harbor-config", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-a0f7a57d577080e7a78c742d79111d6ab5894355/harbor_config-0.1.0-py3-none-any.whl" },
-    { name = "marin-rigging", extras = ["secrets", "prometheus"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frigging&rev=232f192a56b013fdc3f6914eb158c7bc2d231f94" },
+    { name = "harbor-config", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-70a9fcaa9f6b4bb5eadecf32ee5e1de644ad91af/harbor_config-0.1.0-py3-none-any.whl" },
+    { name = "marin-rigging", extras = ["secrets", "prometheus"], specifier = "==0.2.144.dev37540375919" },
     { name = "nvidia-resiliency-ext", marker = "sys_platform == 'never'" },
     { name = "opentelemetry-api", marker = "sys_platform != 'linux'" },
     { name = "opentelemetry-api", marker = "sys_platform == 'linux'", specifier = "==1.44.0" },
@@ -2053,7 +2053,7 @@ wheels = [
 [[package]]
 name = "harbor"
 version = "0.8.1"
-source = { git = "https://github.com/marin-community/harbor.git?rev=737e97cbd9398eae1c0f1690b1883bbcf42a31e2#737e97cbd9398eae1c0f1690b1883bbcf42a31e2" }
+source = { git = "https://github.com/marin-community/harbor.git?rev=1675efa0f23c0033f0b5028ea42d56ae09f15115#1675efa0f23c0033f0b5028ea42d56ae09f15115" }
 dependencies = [
     { name = "dirhash" },
     { name = "fastapi" },
@@ -2062,7 +2062,6 @@ dependencies = [
     { name = "huggingface-hub", version = "1.32.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux' or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "jinja2" },
     { name = "litellm" },
-    { name = "orjson" },
     { name = "packaging" },
     { name = "pathspec" },
     { name = "pydantic" },
@@ -2093,7 +2092,7 @@ daytona = [
 [[package]]
 name = "harbor-config"
 version = "0.1.0"
-source = { url = "https://github.com/marin-community/harbor/releases/download/harbor-config-a0f7a57d577080e7a78c742d79111d6ab5894355/harbor_config-0.1.0-py3-none-any.whl" }
+source = { url = "https://github.com/marin-community/harbor/releases/download/harbor-config-70a9fcaa9f6b4bb5eadecf32ee5e1de644ad91af/harbor_config-0.1.0-py3-none-any.whl" }
 dependencies = [
     { name = "pydantic" },
     { name = "pyyaml" },
@@ -2102,7 +2101,7 @@ dependencies = [
     { name = "universal-pathlib" },
 ]
 wheels = [
-    { url = "https://github.com/marin-community/harbor/releases/download/harbor-config-a0f7a57d577080e7a78c742d79111d6ab5894355/harbor_config-0.1.0-py3-none-any.whl", hash = "sha256:8d03dd7ce39368b197a7ab6b20dc0efc7e27c20ff6a8637f65ee188ce4b5e0e3" },
+    { url = "https://github.com/marin-community/harbor/releases/download/harbor-config-70a9fcaa9f6b4bb5eadecf32ee5e1de644ad91af/harbor_config-0.1.0-py3-none-any.whl", hash = "sha256:721008e7dc08d158b49d45f6c7708191d04942d36595e0aa6e672b841c0e1cca" },
 ]
 
 [package.metadata]
@@ -2917,8 +2916,8 @@ wheels = [
 
 [[package]]
 name = "marin-rigging"
-version = "0.2.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frigging&rev=232f192a56b013fdc3f6914eb158c7bc2d231f94#232f192a56b013fdc3f6914eb158c7bc2d231f94" }
+version = "0.2.144.dev37540375919"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiobotocore", version = "3.7.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux' or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "aiobotocore", version = "3.9.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
@@ -2938,6 +2937,10 @@ dependencies = [
     { name = "s3fs" },
     { name = "starlette" },
     { name = "zstandard" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/57/d1/b36fb0328c3c68ed660dca7d951fc33641b3f4252784d895b2e1df6a31b7/marin_rigging-0.2.144.dev37540375919.tar.gz", hash = "sha256:d34f2d44d89fd4874bab7e57819a929b9e988079300b43f73c7fb1995d7d9032", size = 224421, upload-time = "2026-10-06T22:27:39.571Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/22/f6/9d4117580a6a0ef8e104ca869d76dfec5d0828539d2e4414911a2db5ea8d/marin_rigging-0.2.144.dev37540375919-py3-none-any.whl", hash = "sha256:72e2566837fa0b3709a738101aa2884c5f4879ad90247c1cecbbf9c17309b191", size = 527724, upload-time = "2026-10-06T22:27:27.357Z" },
 ]
 
 [package.optional-dependencies]
@@ -3180,11 +3183,11 @@ requires-dist = [
     { name = "flashinfer-python", marker = "sys_platform == 'linux' and extra == 'vllm'", specifier = "==0.6.18.post1" },
     { name = "fsspec", specifier = ">=2024.0.0" },
     { name = "func-timeout" },
-    { name = "harbor", extras = ["analysis", "datasets", "daytona"], marker = "sys_platform == 'linux' and extra == 'vllm'", git = "https://github.com/marin-community/harbor.git?rev=737e97cbd9398eae1c0f1690b1883bbcf42a31e2" },
-    { name = "harbor-config", marker = "sys_platform == 'linux' and extra == 'cuda'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-a0f7a57d577080e7a78c742d79111d6ab5894355/harbor_config-0.1.0-py3-none-any.whl" },
-    { name = "harbor-config", marker = "sys_platform == 'linux' and extra == 'megatron'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-a0f7a57d577080e7a78c742d79111d6ab5894355/harbor_config-0.1.0-py3-none-any.whl" },
-    { name = "harbor-config", marker = "sys_platform == 'linux' and extra == 'vllm'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-a0f7a57d577080e7a78c742d79111d6ab5894355/harbor_config-0.1.0-py3-none-any.whl" },
-    { name = "harbor-config", marker = "extra == 'cpu'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-a0f7a57d577080e7a78c742d79111d6ab5894355/harbor_config-0.1.0-py3-none-any.whl" },
+    { name = "harbor", extras = ["analysis", "datasets", "daytona"], marker = "sys_platform == 'linux' and extra == 'vllm'", git = "https://github.com/marin-community/harbor.git?rev=1675efa0f23c0033f0b5028ea42d56ae09f15115" },
+    { name = "harbor-config", marker = "sys_platform == 'linux' and extra == 'cuda'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-70a9fcaa9f6b4bb5eadecf32ee5e1de644ad91af/harbor_config-0.1.0-py3-none-any.whl" },
+    { name = "harbor-config", marker = "sys_platform == 'linux' and extra == 'megatron'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-70a9fcaa9f6b4bb5eadecf32ee5e1de644ad91af/harbor_config-0.1.0-py3-none-any.whl" },
+    { name = "harbor-config", marker = "sys_platform == 'linux' and extra == 'vllm'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-70a9fcaa9f6b4bb5eadecf32ee5e1de644ad91af/harbor_config-0.1.0-py3-none-any.whl" },
+    { name = "harbor-config", marker = "extra == 'cpu'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-70a9fcaa9f6b4bb5eadecf32ee5e1de644ad91af/harbor_config-0.1.0-py3-none-any.whl" },
     { name = "hf-transfer" },
     { name = "hs-connectors", marker = "sys_platform == 'linux' and extra == 'vllm'", git = "https://github.com/lukedhlee/speculators.git?subdirectory=hs_connectors&rev=6496b4db007de00dd4741349643d23b23e29dce8" },
     { name = "huggingface-hub", specifier = ">=0.34.0" },
@@ -3302,7 +3305,7 @@ docs = [
     { name = "sphinx-copybutton", specifier = ">=0.5.0" },
     { name = "sphinx-rtd-theme", specifier = ">=2.0.0" },
 ]
-harbor-test = [{ name = "harbor", git = "https://github.com/marin-community/harbor.git?rev=737e97cbd9398eae1c0f1690b1883bbcf42a31e2" }]
+harbor-test = [{ name = "harbor", git = "https://github.com/marin-community/harbor.git?rev=1675efa0f23c0033f0b5028ea42d56ae09f15115" }]
 
 [[package]]
 name = "markdown"
