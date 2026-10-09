@@ -44,6 +44,10 @@ from loguru import logger
 from skyrl_train.trajectory_runners.types import TrajectoryID, VerifierTestCollection, VerifierTestRecord
 
 
+class RewardOutputParseError(ValueError):
+    """Verifier output cannot supply a required shaping score."""
+
+
 # =============================================================================
 # Data Classes
 # =============================================================================
@@ -2154,7 +2158,7 @@ def shape_reward_from_output(
     if not stdout:
         if fallback_to_original:
             return original_reward
-        raise ValueError("could not parse verifier output: stdout is empty")
+        raise RewardOutputParseError("could not parse verifier output: stdout is empty")
 
     # Parse output
     parsed = parse_test_output(stdout, parser_name)
@@ -2166,7 +2170,7 @@ def shape_reward_from_output(
                 f"Falling back to original reward: {original_reward}"
             )
             return original_reward
-        raise ValueError(f"could not parse verifier output with parser={parser_name or 'auto'}")
+        raise RewardOutputParseError(f"could not parse verifier output with parser={parser_name or 'auto'}")
 
     # Log parse results
     logger.debug(

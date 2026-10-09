@@ -7,7 +7,7 @@ slice. Math rows that NVIDIA ships as Hugging Face placeholders are restored fro
 datasets. SWE rows are bound to TaskTrove proxy tasks, and SWE states TaskTrove lacks are skipped.
 
 Every generator is routed, so rows whose verifier needs a judge only train under
-``environment.skyrl_gym.nemotron_ultra.grading: skip``.
+``environment.task_sessions.nemotron_ultra.grading: skip``.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import datasets
+from skyrl_gym.envs.data_contracts import get_data_contract
 
 from infra.rl_data.nemotron_ultra_sample import (
     HUGGING_FACE_RESOLVE_URL,
@@ -192,8 +193,6 @@ def sample_proportional_rows(
 
 def prepare_subset_rows(rows: list[dict[str, Any]]) -> list[PreparedRow]:
     """Turn raw rows into SkyRL rows carrying the hardcoded ``teacher_route`` column."""
-    from skyrl_gym import get_data_contract
-
     source = nemotron_ultra_mopd_source()
     contract = get_data_contract(source.env_id)
     prepared: list[PreparedRow] = []

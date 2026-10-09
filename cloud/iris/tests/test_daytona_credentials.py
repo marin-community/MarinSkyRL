@@ -1,0 +1,49 @@
+"""Daytona credential selection for task backends."""
+
+import pytest
+from omegaconf import OmegaConf
+
+import cloud.iris.iris_backend as launcher
+
+
+def test_resolve_daytona_rl_api_key_prefers_explicit_rl_key(monkeypatch):
+    monkeypatch.setenv("DAYTONA_RL_API_KEY", "rl-key")
+    monkeypatch.setenv("DAYTONA_API_KEY", "generic-key")
+    monkeypatch.setattr(launcher, "_daytona_rl_api_key_from_secret_manager", lambda: "secret-manager-key")
+
+    assert launcher._resolve_daytona_rl_api_key() == "rl-key"
+
+
+def test_resolve_daytona_rl_api_key_rejects_generic_key(monkeypatch):
+    monkeypatch.delenv("DAYTONA_RL_API_KEY", raising=False)
+    monkeypatch.setenv("DAYTONA_API_KEY", "generic-key")
+    monkeypatch.setattr(launcher, "_daytona_rl_api_key_from_secret_manager", lambda: None)
+
+    with pytest.raises(SystemExit, match="no Daytona RL key available"):
+        launcher._resolve_daytona_rl_api_key()
+
+
+@pytest.mark.parametrize(
+    ("entrypoint", "terminal_bench_data", "backend", "expected"),
+    [
+        ("skyrl_train.entrypoints.main_base", [], "daytona", False),
+        ("skyrl_train.entrypoints.terminal_bench", [], "daytona", True),
+        ("skyrl_train.entrypoints.terminal_bench_generate", [], "daytona", True),
+        ("skyrl_train.entrypoints.terminal_bench", [], "docker", False),
+        ("skyrl_train.entrypoints.main_base", ["s3://bucket/tasks.parquet"], "docker", False),
+        # Nemotron Ultra routing sends its SWE rows to Harbor from the standard entrypoint.
+        ("skyrl_train.entrypoints.main_base", ["s3://bucket/tasks.parquet"], "daytona", True),
+    ],
+)
+def test_daytona_preflight_follows_task_backend(entrypoint, terminal_bench_data, backend, expected):
+    config = OmegaConf.create(
+        {
+            "runtime": {"entrypoint": entrypoint},
+            "skyrl": {
+                "data": {"terminal_bench_data": terminal_bench_data},
+                "terminal_bench_config": {"harbor": {"environment_type": backend}},
+            },
+        }
+    )
+
+    assert launcher._rl_config_uses_daytona(config) is expected

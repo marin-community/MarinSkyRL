@@ -8,6 +8,7 @@ from omegaconf import OmegaConf
 
 from cloud.iris.rl_config_translation import compose_skyrl_config, load_rl_recipe, parse_rl_config
 from cloud.iris.role_plan import derive_role_plan
+from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
 import skyrl_train.objective.losses  # noqa: F401  (registers policy losses for validate_cfg)
 from skyrl_train.utils import validate_cfg
 
@@ -15,6 +16,21 @@ CONFIGS = Path(__file__).parents[3] / "cloud" / "iris" / "configs"
 ASYNC_CONFIG = CONFIGS / "snowball_mopd_ultra_async_smoke.yaml"
 SYNC_CONFIG = CONFIGS / "snowball_mopd_ultra_smoke.yaml"
 STUDENT = "open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92"
+
+
+def test_snowball_mopd_32k_recipe_composes_against_the_base_config():
+    """Reject retired Harbor options before the trainer starts workers."""
+    parsed = parse_rl_config(str(CONFIGS / "snowball_mopd_ultra_32k.yaml"), model_override=STUDENT)
+    cfg = compose_skyrl_config(
+        parsed,
+        {"job_name": "mopd-32k-test", "experiments_dir": "/tmp/exp", "num_nodes": 9},
+        SimpleNamespace(gpus_per_node=8),
+    ).config
+
+    assert cfg.trainer.policy.megatron_config.context_parallel_size == 1
+    assert cfg.environment.task_sessions.nemotron_ultra.grading == "skip"
+    settings = HarborTaskSettings.from_config(cfg.terminal_bench_config)
+    assert settings.agent_timeout == cfg.terminal_bench_config.harbor.override_timeout_sec
 
 
 def test_async_smoke_runs_the_in_process_async_trainer_and_passes_trainer_validation():

@@ -5,6 +5,11 @@ Main entrypoint for training.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from collections.abc import Callable, Mapping
+
+from rolloutengine.contracts import TaskSession
+from shellbox.machine import Machine
+from rolloutengine.spec import LoweredTaskSpec
 
 from ray.util.placement_group import placement_group, PlacementGroup
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
@@ -23,11 +28,10 @@ from loguru import logger
 import asyncio
 import multiprocessing as mp
 
-from skyrl_train.config.objective_spec import rollout_logprobs_required
-from skyrl_train.config.trajectory_runner_capabilities import (
+from skyrl_train.inference_engines.chat_template import get_custom_chat_template
+from skyrl_train.config.rollout_validation import (
     EntrypointOperation,
-    TrajectoryRunnerMode,
-    validate_trajectory_runner_capabilities,
+    validate_rollout_launch,
 )
 from marinskyrl.speculative_decoding import (
     STANDARD_TRAINING_ENTRYPOINT,
@@ -146,9 +150,6 @@ def create_ray_wrapped_inference_engines_from_config(
         "openai_sampling_params": OmegaConf.to_container(cfg.generator.sampling_params, resolve=True),
     }
     if cfg.generator.backend == "vllm":
-        # The template resolver imports Torch from the optional trainer runtime.
-        from skyrl_train.trajectory_runners.trajectory_processing import get_custom_chat_template  # noqa: PLC0415
-
         engine_init_kwargs["chat_template"] = get_custom_chat_template(cfg.generator.chat_template)
         engine_init_kwargs["default_chat_template_kwargs"] = OmegaConf.to_container(
             cfg.generator.chat_template_kwargs, resolve=True
@@ -276,13 +277,19 @@ def create_remote_inference_engines_from_config(cfg: DictConfig, tokenizer: PreT
 
 
 class BasePPOExp:
-    def __init__(self, cfg: DictConfig):
+    def __init__(
+        self,
+        cfg: DictConfig,
+        *,
+        sessions: Mapping[str, Callable[[LoweredTaskSpec, Machine | None], TaskSession]] | None = None,
+    ):
         """
         Initializes a PPO experiment.
 
         The `cfg` passed here will be the final config from Hydra, including CLI overrides.
         """
         self.cfg = cfg
+        self.sessions = {} if sessions is None else dict(sessions)
         self._configure_log_level()
         self.tokenizer = self.get_tokenizer()
         self.train_dataset = self.get_train_dataset()
@@ -364,34 +371,42 @@ class BasePPOExp:
                 num_workers=8,
                 max_completion_length=self.cfg.generator.sampling_params.max_generate_length,
             )
-        from skyrl_train.dataset import PromptDataset  # noqa: PLC0415
-
-        prompts_dataset = PromptDataset(
-            datasets=self.cfg.data.train_data,
-            tokenizer=self.tokenizer,
-            max_prompt_length=self.cfg.trainer.max_prompt_length,
-            num_workers=8,
-        )
+        prompts_dataset = self.task_dataset(self.cfg.data.train_data)
         # make sure the dataset is large enough to train on
         assert len(prompts_dataset) >= self.cfg.trainer.train_batch_size, (
             f"dataset should be atleast as large as `train_batch_size` {self.cfg.trainer.train_batch_size}, got size {len(prompts_dataset)}"
         )
         return prompts_dataset
 
+    def task_dataset(self, data_files):
+        from skyrl_train.dataset.nemotron_ultra import NemotronTaskDataset  # noqa: PLC0415
+        from skyrl_train.dataset.tasks import SourceTaskDataset  # noqa: PLC0415
+        from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings  # noqa: PLC0415 - optional training dependencies
+
+        terminal_data = list(self.cfg.data.get("terminal_bench_data", []))
+        dataset_type = NemotronTaskDataset if terminal_data else SourceTaskDataset
+        terminal_options = {}
+        if terminal_data:
+            terminal_options = {
+                "terminal_bench_data": terminal_data,
+                "cache_dir": Path(self.cfg.data.task_cache_dir),
+                "grader_override": HarborTaskSettings.from_config(self.cfg.terminal_bench_config).grader_override(),
+            }
+        return dataset_type(
+            datasets=data_files,
+            environment_configs=OmegaConf.to_container(self.cfg.environment.task_sessions, resolve=True),
+            tokenizer=self.tokenizer,
+            max_prompt_length=self.cfg.trainer.max_prompt_length,
+            num_workers=8,
+            **terminal_options,
+        )
+
     def get_eval_dataset(self):
         """Load validation prompts for evaluation or new mismatch-probe generation."""
         probe = self.cfg.trainer.mismatch_probe
         needs_probe_prompts = probe.enabled and probe.reuse_probe is None
         if (self.cfg.trainer.eval_interval > 0 or needs_probe_prompts) and self.cfg.data.val_data:
-            from skyrl_train.dataset import PromptDataset  # noqa: PLC0415
-
-            prompts_dataset = PromptDataset(
-                datasets=self.cfg.data.val_data,
-                tokenizer=self.tokenizer,
-                max_prompt_length=self.cfg.trainer.max_prompt_length,
-                num_workers=8,
-            )
-            return prompts_dataset
+            return self.task_dataset(self.cfg.data.val_data)
         return None
 
     def get_colocate_pg(self, timeout: int | None = None) -> PlacementGroup:
@@ -468,7 +483,7 @@ class BasePPOExp:
         return pg
 
     def get_trajectory_runner(self, cfg, tokenizer, inference_engine_client):
-        """Run SkyRL-Gym, and Harbor for Nemotron Ultra's terminal-bench rows, in rollout worker processes.
+        """Run all task families through the common rollout worker.
 
         Returns:
             TrajectoryRunner: The runner.
@@ -482,35 +497,24 @@ class BasePPOExp:
                 tokenizer,
                 max_generate_length=cfg.generator.sampling_params.max_generate_length,
                 max_input_length=cfg.generator.max_input_length,
+                generator_config=cfg.generator,
             )
         del tokenizer
         from skyrl_train.rollouts.workers import RolloutWorkerPool, RolloutWorkerResources  # noqa: PLC0415
-        from skyrl_train.trajectory_runners.skyrl_gym_execution import GymRunnerSpec  # noqa: PLC0415
+        from skyrl_train.rollouts.task_worker import TaskRolloutWorkerSpec  # noqa: PLC0415
 
         resources = RolloutWorkerResources.from_config(cfg)
-        gym_runner = RolloutWorkerPool(GymRunnerSpec.from_config(cfg, inference_engine_client.engines), resources)
-        terminal_bench_data = list(cfg.data.get("terminal_bench_data", []))
-        if not terminal_bench_data:
-            return gym_runner
-
-        if cfg.trainer.step_wise_training:
-            raise ValueError("Nemotron Ultra terminal-bench routing is incompatible with step-wise training")
-
-        from skyrl_train.trajectory_runners.harbor.execution import HarborRunnerSpec  # noqa: PLC0415
-        from skyrl_train.trajectory_runners.nemotron_ultra import NemotronUltraTrajectoryRouter  # noqa: PLC0415
-        from skyrl_train.utils.algorithm_registry import PolicyLossRegistry  # noqa: PLC0415
-
-        if not cfg.get("terminal_bench_config"):
+        terminal_data = list(cfg.data.get("terminal_bench_data", []))
+        if terminal_data and not cfg.get("terminal_bench_config"):
             raise ValueError("data.terminal_bench_data requires terminal_bench_config")
-        harbor_runner = RolloutWorkerPool(HarborRunnerSpec.from_config(cfg), resources)
-        return NemotronUltraTrajectoryRouter(
-            gym_runner=gym_runner,
-            harbor_runner=harbor_runner,
-            terminal_bench_data=terminal_bench_data,
-            require_rollout_logprobs=rollout_logprobs_required(
-                cfg.trainer.algorithm, loss_spec=PolicyLossRegistry.spec(cfg.trainer.algorithm.policy_loss_type)
+        return RolloutWorkerPool(
+            TaskRolloutWorkerSpec.from_config(
+                cfg,
+                inference_engine_client.engines,
+                harbor_config=cfg.terminal_bench_config if terminal_data else None,
+                sessions=self.sessions,
             ),
-            tis_lcs_alert_threshold=float(cfg.trainer.algorithm.tis_lcs_alert_threshold),
+            resources,
         )
 
     def get_trainer(
@@ -690,7 +694,6 @@ def skyrl_entrypoint(cfg: DictConfig):
 def run_ray_driver(
     cfg: DictConfig,
     entrypoint: RemoteFunction,
-    runner_mode: TrajectoryRunnerMode,
     *,
     operation: EntrypointOperation = EntrypointOperation.TRAIN,
     failure_message: str = "Training failed",
@@ -700,16 +703,16 @@ def run_ray_driver(
     from marinskyrl.process_diagnostics import write_exception_receipt  # noqa: PLC0415
     from skyrl_train.telemetry import DRIVER_ROLE, process_telemetry  # noqa: PLC0415
     from skyrl_train import objective  # noqa: F401, PLC0415 - register losses when the training runtime loads
+    from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings  # noqa: PLC0415 - optional training dependencies
     from skyrl_train.utils import validate_cfg  # noqa: PLC0415
     from skyrl_train.utils.logging_utils import log_exception_as_text  # noqa: PLC0415
     from skyrl_train.utils.progress import configure_progress  # noqa: PLC0415 - keep launcher imports Torch-free
     from skyrl_train.utils.utils import initialize_ray  # noqa: PLC0415
-    from skyrl_train.utils.algorithm_registry import PolicyLossRegistry  # noqa: PLC0415
 
+    validate_rollout_launch(cfg, operation)
+    if cfg.get("terminal_bench_config") is not None:
+        HarborTaskSettings.from_config(cfg.terminal_bench_config)
     validate_cfg(cfg)
-    validate_trajectory_runner_capabilities(
-        cfg, runner_mode, operation, loss_spec=PolicyLossRegistry.spec(cfg.trainer.algorithm.policy_loss_type)
-    )
     configure_progress(cfg.trainer.progress)
 
     initialize_ray(cfg)
@@ -761,7 +764,7 @@ def run_ray_driver(
 
 
 def run(cfg: DictConfig) -> None:
-    run_ray_driver(cfg, skyrl_entrypoint, TrajectoryRunnerMode.SKYRL_GYM)
+    run_ray_driver(cfg, skyrl_entrypoint)
 
 
 @hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)

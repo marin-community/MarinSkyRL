@@ -11,17 +11,11 @@ context_budget:
 terminal_bench:
 
   harbor:
-    name: opencode
-    version: "1.18.2"
-    opencode_config: {}
-    override_setup_timeout_sec: 600
     override_timeout_sec: 1800
 
     override_cpus: 1
     override_memory_mb: 2048
     override_storage_mb: 2048
-
-    auto_snapshot: true
 
     verifier_override_timeout_sec: 300
 
@@ -39,15 +33,11 @@ terminal_bench:
 
     n_concurrent_trials: 96
 
-    log_level: INFO
-
     enable_reward_shaping: true
     reward_shaper: identity_aware_pass_ratio
     reward_parser: null
     reward_shaping_fallback: true
     truncation_penalty: 0.25
-
-    collect_rollout_details: true
 
     enable_error_classification: true
     mask_exceptions:
@@ -58,23 +48,10 @@ terminal_bench:
       - ConnectionError
       - RewardFileNotFoundError
       - RewardFileEmptyError
-      - AgentEnvironmentTimeoutError
     default_error_treatment: zero
     passthrough_exceptions:
       - AgentTimeoutError
       - ContextLengthExceededError
-
-  model_info:
-
-  archiving:
-    enabled: false
-
-  trace_upload:
-    enabled: true
-    repo_org: DCAgent
-    episodes: last
-    dataset_type: SFT
-    cleanup: true
 
 trainer:
   strategy: megatron
@@ -91,7 +68,6 @@ trainer:
     eps_clip_high: 0.05
     loss_reduction: sequence_mean
     policy_loss_type: behavior_clip
-    tito_full: true
 
   epochs: 2
   max_steps: 80
@@ -202,9 +178,7 @@ generator:
 
   run_engines_locally: true
   weight_sync_backend: nccl
-  enable_http_endpoint: true
   inference_stats_interval: 1
-  append_eos_token_after_stop_str_in_multi_turn: true
 
   sampling_params:
     temperature: 1.2

@@ -32,6 +32,7 @@ class AgentLoopOutput:
     env_metrics: Dict[str, Any]
     token_provenance: TokenProvenance = TokenProvenance.ENGINE
     error_treatment: Optional[str] = None
+    response_span_tags: Optional[List[int]] = None
 
 
 @dataclass

@@ -386,9 +386,3 @@ def discover_literal_logs(job_dir: str) -> list[str]:
             break
         cur = cur.parent
     return []
-
-
-def discover_literal_log(job_dir: str) -> Optional[str]:
-    """Back-compat single-file discovery: the first of :func:`discover_literal_logs`."""
-    logs = discover_literal_logs(job_dir)
-    return logs[0] if logs else None

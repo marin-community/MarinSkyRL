@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from skyrl_gym import get_data_contract
+from skyrl_gym.envs.data_contracts import get_data_contract
 
 from infra.rl_data.contracts import VerifierDataContract
 from infra.rl_data.preparation import (

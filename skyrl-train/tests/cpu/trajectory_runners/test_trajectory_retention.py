@@ -1,4 +1,5 @@
 from dataclasses import asdict
+import base64
 from skyrl_gym.verification import VerificationResult
 import gzip
 import json
@@ -8,15 +9,14 @@ import threading
 import zipfile
 
 import pytest
+from taskcompendium.models import InlineFile, ResourceGroups, Source, TaskResource
+from skyrl_gym.source_task import source_task
 
 from skyrl_train.config.utils import get_default_config
-from skyrl_train.trajectory_runners.base import (
-    BatchMetadata,
-    TrajectoryRequestBatch,
-    TrajectoryRunner,
-    TrajectoryBatch,
-    TrajectoryID,
-)
+from skyrl_train.rollouts.group_grader import GenRMGroupGraderParameters, GroupGraderSpec
+from tests.cpu.task_specs import lowered_task
+from tests.cpu.trajectory_runners.fixture_runner import FixtureRunner
+from skyrl_train.trajectory_runners.types import BatchMetadata, TrajectoryRequestBatch, TrajectoryBatch, TrajectoryID
 from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
 from skyrl_train.trajectory_runners.trajectory_retention import (
     RETENTION_METRIC_PREFIX,
@@ -42,8 +42,8 @@ class _Tokenizer:
         return " ".join(str(token_id) for token_id in token_ids)
 
 
-class _NormalizedRunner(TrajectoryRunner):
-    async def _run(self, input_batch, disable_tqdm=False):
+class _NormalizedRunner(FixtureRunner):
+    async def _run(self, input_batch):
         return _output()
 
 
@@ -251,7 +251,7 @@ def _records(output_path: Path) -> list[dict]:
 def _sink(config, publisher=None) -> TrajectorySink:
     """Build a bound sink that stores in-process; only the process-boundary tests pay for a storage process."""
     sink = TrajectorySink(config, _Tokenizer(), publisher=publisher or InlineTrajectoryPublisher(execute_publication))
-    sink.bind_runner("SkyRLGymTrajectoryRunner")
+    sink.bind_runner("TaskRolloutWorker")
     return sink
 
 
@@ -261,7 +261,7 @@ def test_normalized_output_produces_complete_core_trace_schema():
         _output(),
         _config(Path("/unused")),
         _Tokenizer(),
-        runner_name="SkyRLGymTrajectoryRunner",
+        runner_name="TaskRolloutWorker",
     )
     record = records[0].to_json()
 
@@ -287,7 +287,54 @@ def test_normalized_output_produces_complete_core_trace_schema():
     assert record["verifier"] is None
     assert record["schema_version"] == 5
     assert record["disposition"] == {"exception_type": None, "error_treatment": None, "server_error": None}
-    assert record["provenance"]["runner"] == "SkyRLGymTrajectoryRunner"
+    assert record["provenance"]["runner"] == "TaskRolloutWorker"
+
+
+def test_retained_trajectory_omits_private_task_resources_and_grader_inputs(tmp_path):
+    private = "private-reference-output"
+    encoded = base64.b64encode(private.encode()).decode()
+    request = _input()
+    task = source_task(
+        request["prompts"][0],
+        {"reward_spec": {"ground_truth": private}},
+        {},
+        Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
+    ).model_copy(
+        update={
+            "resources": ResourceGroups(
+                verifier=(TaskResource(path="tests/expected.txt", source=InlineFile(content_base64=encoded)),)
+            )
+        }
+    )
+    request["env_extras"][0] = {
+        "lowered_task_spec": lowered_task(task).model_dump_json(),
+        "group_grader": GroupGraderSpec(
+            name="nemotron_genrm",
+            parameters_json=GenRMGroupGraderParameters(principle=private, agent="genrm", config={}).model_dump_json(),
+        ).model_dump_json(),
+        "reward_spec": {"ground_truth": private},
+        "reward_model": {"ground_truth": private},
+        "extra_info": {"nemotron_ultra": {"record_json": json.dumps({"answer": private})}},
+        "data_source": "fixture",
+        "teacher_route": "route-a",
+        "difficulty": 1,
+    }
+    config = _config(tmp_path / "retained", sample_count_per_step=3)
+    sink = _sink(config)
+    sink.retain(request, _output())
+    sink.close()
+    persisted = _records(tmp_path / "retained")
+    assert len(persisted) == 3
+    serialized = json.dumps(persisted)
+    assert private not in serialized
+    assert encoded not in serialized
+    record = next(record for record in persisted if record["trajectory"]["instance_id"] == "a")
+    assert record["trajectory"]["environment_extras"] == {
+        "data_source": "fixture",
+        "teacher_route": "route-a",
+        "difficulty": 1,
+    }
+    assert record["prompt"]["messages"] == request["prompts"][0]
 
 
 def test_server_error_identity_is_retained_with_the_masked_row():
@@ -298,7 +345,7 @@ def test_server_error_identity_is_retained_with_the_masked_row():
         None,
     ]
     records = build_trajectory_records(
-        _input(), output, _config(Path("/unused")), _Tokenizer(), runner_name="SkyRLGymTrajectoryRunner"
+        _input(), output, _config(Path("/unused")), _Tokenizer(), runner_name="TaskRolloutWorker"
     )
 
     assert records[1].to_json()["disposition"]["server_error"] == {
@@ -426,7 +473,7 @@ def test_step_wise_rows_form_one_replayable_trajectory_with_explicit_boundaries(
         output,
         _config(Path("/unused")),
         _Tokenizer(),
-        runner_name="SkyRLGymTrajectoryRunner",
+        runner_name="TaskRolloutWorker",
     )[0].to_json()
 
     assert record["response"]["token_ids"] == [10, 20, 21]
@@ -469,7 +516,7 @@ def test_step_wise_retention_aggregates_final_row_overlong_penalty():
         output,
         _config(Path("/unused")),
         _Tokenizer(),
-        runner_name="SkyRLGymTrajectoryRunner",
+        runner_name="TaskRolloutWorker",
     )[0].to_json()
 
     assert record["reward"] == {
@@ -660,11 +707,11 @@ def test_record_contains_replay_provenance_and_trainable_boundaries():
         _output(),
         _config(Path("/unused")),
         _Tokenizer(),
-        runner_name="SkyRLGymTrajectoryRunner",
+        runner_name="TaskRolloutWorker",
     )[0].to_json()
 
     assert record["provenance"] == {
-        "runner": "SkyRLGymTrajectoryRunner",
+        "runner": "TaskRolloutWorker",
         "inference_backend": "vllm",
         "model_path": "org/model",
         "model_source_identity": "sha256:model",
@@ -832,7 +879,7 @@ def test_retained_record_preserves_calls_observations_and_verifier_diagnostics()
     output["evidence_messages"] = [messages, [], []]
     output["verification_results"] = [verdict, None, None]
     record = build_trajectory_records(
-        _input(), output, _config(Path("/unused")), _Tokenizer(), runner_name="SkyRLGymTrajectoryRunner"
+        _input(), output, _config(Path("/unused")), _Tokenizer(), runner_name="TaskRolloutWorker"
     )[0].to_json()
     assert record["response"]["messages"] == messages
     assert record["verification_result"] == asdict(verdict)

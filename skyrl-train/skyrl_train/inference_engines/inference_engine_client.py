@@ -35,7 +35,6 @@ import random
 import ray.exceptions
 from dataclasses import dataclass, field
 from http import HTTPStatus
-from skyrl_train.config.trajectory_runner_capabilities import opencode_exact_continuation_enabled
 from skyrl_train.inference_engines.chat_continuation import EXACT_PROMPT_TOKEN_IDS_KEY
 from skyrl_train.trajectory_runners.routed_experts import decode_routed_experts
 import base64
@@ -104,7 +103,6 @@ class InferenceEngineClient(InferenceEngineInterface):
         self.enable_http_endpoint = full_config.generator.enable_http_endpoint
         self.http_endpoint_host = full_config.generator.http_endpoint_host
         self.http_endpoint_port = full_config.generator.http_endpoint_port
-        self.enable_opencode_exact_continuation = opencode_exact_continuation_enabled(full_config)
         self.generation_paused_event = threading.Event()
         # One wake-up event per event loop that has passed the pause barrier since the last
         # release: the trainer's loop and, with the HTTP endpoint, the server thread's loop.
@@ -654,28 +652,11 @@ class InferenceEngineClient(InferenceEngineInterface):
     async def _chat_completion_with_retry(
         self, engine_idx: int, original_request_payload: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """
-        Keep sending `chat_completion` requests (with previous responses accumulated) until the finish_reason is not "abort".
+        """Continue an aborted chat response after generation resumes.
 
-        The retry mechanism is intended to be used in combination with `pause_generation()` and `resume_generation()` for
-        in-flight weight updates and partial rollouts.
-
-        This method is equivalent to a single `chat_completion()` call if we do not use `pause_generation()`.
-
-        For subsequent retry requests, we can reuse the original request with the following exceptions:
-        - Update the last assistant message content to accumulated content, where the role uses the first non-empty response's role.
-        - Set continue_final_message=True and add_generation_prompt=False.
-        - Adjust remaining max tokens if `max_tokens` or `max_completion_tokens` is present.
-        - If no tokens have been generated yet, resend the original request unchanged.
-
-        For the final response, we maintain all the first non-empty response's fields (i.e. prefilled already),
-        with the following exceptions:
-        - Accumulate the following across retry requests:
-          - `choices[0]["logprobs"]["content"]`
-          - `choices[0]["token_ids"]`
-          - `choices[0]["message"]["content"]`
-          - `choices[0]["routed_experts"]` when router replay is enabled
-        - Use the last response's finish_reason and stop_reason
+        The final response retains the first nonempty response's fields.
+        Token IDs, log probabilities, content, and routed experts accumulate
+        across requests. Finish and stop reasons come from the last response.
         """
         original_request_json: Dict[str, Any] = original_request_payload.get("json", {}).copy()
         headers: Dict[str, str] = original_request_payload.get("headers", {}).copy()
@@ -1230,7 +1211,6 @@ class InferenceEngineClient(InferenceEngineInterface):
                 "port": self.http_endpoint_port,
                 "log_level": "warning",
                 "bridge_stats": self._http_bridge_stats,
-                "enable_opencode_exact_continuation": self.enable_opencode_exact_continuation,
             },
             daemon=True,
         )
@@ -1316,6 +1296,12 @@ def _prepare_retry_request(
     cur_request_json["add_generation_prompt"] = False
     if accum.route_prompt_ids is not None:
         cur_request_json[EXACT_PROMPT_TOKEN_IDS_KEY] = accum.route_prompt_ids + accum.token_ids
+    elif EXACT_PROMPT_TOKEN_IDS_KEY in original_request_json:
+        if len(accum.token_ids) != accum.completion_tokens:
+            raise ValueError("Exact chat continuation requires token IDs for every sampled token")
+        cur_request_json[EXACT_PROMPT_TOKEN_IDS_KEY] = (
+            original_request_json[EXACT_PROMPT_TOKEN_IDS_KEY] + accum.token_ids
+        )
     if orig_max_tokens is not None:
         assert orig_max_tokens - accum.completion_tokens >= 0, (
             "orig_max_tokens - accum.completion_tokens must be non-negative"

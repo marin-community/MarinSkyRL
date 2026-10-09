@@ -82,6 +82,7 @@ _CATEGORY_TREATMENTS = {
     ErrorCategory.AGENT: ErrorTreatment.ZERO,
     ErrorCategory.PASSTHROUGH: ErrorTreatment.PASSTHROUGH,
 }
+_TASK_INFRASTRUCTURE_ERRORS = frozenset({"TaskMachineError", "TemplateError"})
 
 
 def classify_exception_type(exception_type: str, config: ErrorHandlingConfig) -> ErrorTreatment:
@@ -95,7 +96,11 @@ def classify_exception_type(exception_type: str, config: ErrorHandlingConfig) ->
         if exception_type in exception_types:
             return treatment
 
-    category = error_category(exception_type)
+    category = (
+        ErrorCategory.INFRASTRUCTURE
+        if exception_type in _TASK_INFRASTRUCTURE_ERRORS
+        else error_category(exception_type)
+    )
     if category is not ErrorCategory.UNKNOWN:
         return _CATEGORY_TREATMENTS[category]
 

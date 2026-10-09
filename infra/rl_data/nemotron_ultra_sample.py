@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import requests
+from skyrl_gym.envs.data_contracts import get_data_contract
 
 from infra.rl_data.nemotron_ultra_swe import (
     SWEProxyKey,
@@ -145,7 +146,6 @@ def write_generator_sample(
 ) -> dict[str, Any]:
     """Write a heterogeneous parquet containing one live row per blend generator."""
     import datasets
-    from skyrl_gym import get_data_contract
 
     if output_path.exists():
         raise FileExistsError(f"Refusing to overwrite generator sample: {output_path}")

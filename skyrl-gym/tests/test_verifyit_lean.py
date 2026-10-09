@@ -1,62 +1,131 @@
-"""Public source boundary tests use a local HTTP compiler-protocol fixture."""
-
-import json
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+"""Lean compiler results and correction turns through the Shellbox command boundary."""
 
 import pytest
+from shellbox.machine import ExitReason
+from taskcompendium.models import EnvironmentRequirements
+from taskcompendium.grading_result import Outcome
 
-from skyrl_gym.envs.nemotron_ultra.lean import verify_lean_attempt
-from skyrl_gym.envs.nemotron_ultra.sandbox import SandboxClient
+from skyrl_gym.lean_execution import compile_lean
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "output,reward,status",
+    "proof,reward,status",
+    [("trivial", 1.0, "completed"), ("bad_tactic", 0.0, "failed"), ("sorry", 0.0, "has_sorry")],
+)
+async def test_lean_session_retains_compiler_status_and_correction(
+    nemotron_session,
+    model_turn,
+    lean_compiler,
+    proof,
+    reward,
+    status,
+):
+    session = await nemotron_session(
+        "math_formal_lean_refinement_agent",
+        {"header": "import Mathlib\n", "formal_statement": "example : True := by\n"},
+        environment=EnvironmentRequirements(working_directory=lean_compiler),
+    )
+    result = await session.advance(model_turn(f"```lean4\nby\n  {proof}\n```"))
+    assert result.metrics["proof_status"] == status
+    assert result.metrics["predicted_proof"] == f"import Mathlib\nexample : True := by\n  {proof}"
+    if reward:
+        assert result.done and result.grade.reward == reward
+    else:
+        assert not result.done
+        assert result.reset_conversation[0]["role"] == "user"
+        assert proof in result.reset_conversation[0]["content"]
+        corrected = await session.advance(model_turn("```lean4\nby\n  trivial\n```"))
+        assert corrected.done and corrected.grade.reward == 1.0
+        assert (await session.grade(())).reward == 1.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "generation,expected",
     [
-        ({"process_status": "completed", "stdout": "", "stderr": ""}, 1, "completed"),
-        ({"process_status": "completed", "stdout": "error: proof failed", "stderr": ""}, 0, "failed"),
-        ({"process_status": "completed", "stdout": "warning: uses sorry", "stderr": ""}, 0, "has_sorry"),
-        ({"process_status": "timeout", "stdout": "", "stderr": ""}, 0, "timeout"),
-        ({"process_status": "completed", "stdout": "", "stderr": "", "output_truncated": True}, None, None),
-        ({"stdout": "", "stderr": ""}, None, None),
+        ("```lean4\nexample : False := by\n  trivial\n```", "by\n  trivial"),
+        ("```lean4\nlemma generated : True := by\n  trivial\n```", "by\n  trivial"),
+        ("```lean4\nexample : True := True.intro\n```", "True.intro"),
+        ("```lean4\ntrivial\n```", "by\n  trivial"),
     ],
 )
-def test_lean_source_boundary_preserves_completion_and_fails_closed(output, reward, status):
-    requests = []
+async def test_lean_session_keeps_the_source_theorem_and_replaces_its_placeholder_proof(
+    nemotron_session,
+    model_turn,
+    lean_compiler,
+    generation,
+    expected,
+):
+    session = await nemotron_session(
+        "math_formal_lean_refinement_agent",
+        {"header": "import Mathlib\n", "formal_statement": "example : True := by sorry"},
+        environment=EnvironmentRequirements(working_directory=lean_compiler),
+    )
+    result = await session.advance(model_turn(generation))
+    assert result.metrics["predicted_proof"] == "import Mathlib\nexample : True := " + expected
+    assert result.done and result.grade.reward == 1.0
 
-    class Handler(BaseHTTPRequestHandler):
-        def do_POST(self):
-            requests.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
-            body = json.dumps(output).encode()
-            self.send_response(200)
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
 
-        def log_message(self, *_):
-            pass
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "generation,stop_reason",
+    [
+        ("```lean4\ntheorem generated : True\n```", "length"),
+        ("An attempted proof:\nexample unfinished", "stop"),
+    ],
+)
+async def test_lean_session_malformed_declaration_allows_correction(
+    nemotron_session,
+    model_turn,
+    lean_compiler,
+    generation,
+    stop_reason,
+):
+    session = await nemotron_session(
+        "math_formal_lean_refinement_agent",
+        {"header": "import Mathlib\n", "formal_statement": "example : True := by\n"},
+        environment=EnvironmentRequirements(working_directory=lean_compiler),
+    )
+    result = await session.advance(model_turn(generation, stop_reason=stop_reason))
+    assert not result.done and result.reward == 0.0
+    assert result.grade.status is Outcome.UNAVAILABLE
+    assert result.metrics["proof_status"] == "failed"
+    assert result.metrics["compiler_output"]["exit_code"] == 1
+    assert result.reset_conversation[0]["role"] == "user"
+    assert generation in result.reset_conversation[0]["content"]
+    corrected = await session.advance(model_turn("```lean4\nby\n  trivial\n```"))
+    assert corrected.done and corrected.grade.reward == 1.0
+    assert (await session.grade(())).reward == 1.0
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    worker = threading.Thread(target=server.serve_forever, daemon=True)
-    worker.start()
-    try:
-        args = {
-            "generation": "```lean4\nby trivial\n```",
-            "record": {"header": "import Mathlib\n", "formal_statement": "theorem example_task : True := "},
-            "sandbox": SandboxClient(port=server.server_port),
-            "verifyit_enabled": True,
-        }
-        if reward is None:
-            with pytest.raises(RuntimeError, match="unavailable"):
-                verify_lean_attempt(**args)
-        else:
-            actual, details, feedback = verify_lean_attempt(**args)
-            assert actual == reward
-            assert details["proof_status"] == status
-            assert (feedback is None) == (reward == 1)
-        assert requests[0]["language"] == "lean4"
-        assert "theorem example_task" in requests[0]["generated_code"]
-    finally:
-        server.shutdown()
-        server.server_close()
-        worker.join()
+
+@pytest.mark.asyncio
+async def test_lean_timeout_releases_compiler_files(machine, lean_compiler):
+    output = await compile_lean(machine, "hang_compiler", project=lean_compiler, timeout=0.1)
+    assert output.reason == ExitReason.TIMED_OUT
+    assert output.exit_code is None
+    assert not list(machine.path(lean_compiler).iterdir())
+
+
+@pytest.mark.asyncio
+async def test_lean_truncated_diagnostics_cannot_be_a_success(nemotron_session, model_turn, lean_compiler):
+    session = await nemotron_session(
+        "math_formal_lean_refinement_agent",
+        {"header": "", "formal_statement": "example : True := by\n"},
+        environment=EnvironmentRequirements(working_directory=lean_compiler),
+    )
+    result = await session.advance(model_turn("truncated_output"))
+    assert result.done and result.grade.status is Outcome.INFRA_ERROR
+    assert result.grade.reward is None
+
+
+@pytest.mark.asyncio
+async def test_lean_missing_toolchain_is_an_infrastructure_failure(nemotron_session, model_turn, machine):
+    session = await nemotron_session(
+        "math_formal_lean_refinement_agent",
+        {"header": "", "formal_statement": "example : True := by\n"},
+        environment=EnvironmentRequirements(working_directory=str(machine.path("/missing-project"))),
+    )
+    result = await session.advance(model_turn("trivial"))
+    assert result.done and result.grade.status is Outcome.INFRA_ERROR
+    assert result.grade.reward is None

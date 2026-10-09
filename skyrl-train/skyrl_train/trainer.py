@@ -547,21 +547,9 @@ class RayPPOTrainer:
                 logger.info(f"Killed {n_killed} inference engine actor(s)")
 
     async def _teardown(self) -> None:
-        """Best-effort cleanup after training ends (normal or abnormal).
+        """Release trainer resources within cooperative and process deadlines.
 
-        Async steps use cooperative timeouts. A process watchdog also bounds
-        blocked cleanup and subsequent executor shutdown. Cleanup errors are
-        logged as warnings so teardown can continue.
-
-        Order matters:
-        1. Teacher oracle shutdown – releases teacher engines.
-        2. HTTP endpoint shutdown – cuts off the request path so in-flight
-           Harbor trials get connection-refused instead of retrying against
-           dead inference engines indefinitely.
-        3. Trajectory runner shutdown – waits for QueueOrchestrator to drain (should
-           be fast now that trials can't make new requests).
-        4. Inference engine teardown – sends teardown RPC to each engine.
-        5. Ray actor cleanup – force-kills remaining actors.
+        Cleanup errors remain warnings so teardown can continue.
         """
         # Teacher cleanup can block or resist cancellation. Arm the process guard
         # before any teardown awaits, including executor shutdown after asyncio.run.

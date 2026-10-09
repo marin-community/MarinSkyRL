@@ -1,7 +1,11 @@
-from omegaconf import DictConfig
-import skyrl_gym
+import json
 
 from examples.livecodebench.lcb_dataset import LIVECODEBENCH, process_example
+from skyrl_gym.source_task import session_parameters
+from taskcompendium.submission import conversation_messages
+
+from skyrl_train.dataset.tasks import source_row_task
+from tests.cpu.task_specs import session_spec
 
 
 REVERSE_SOLUTION = """```python
@@ -9,7 +13,7 @@ print(input()[::-1])
 ```"""
 
 
-def test_lcb_example_builder_emits_a_launchable_contract_row():
+def test_lcb_example_builder_preserves_executable_reference_tests():
     row = process_example(
         {
             "problem": "Read one line and print it in reverse.",
@@ -21,13 +25,16 @@ def test_lcb_example_builder_emits_a_launchable_contract_row():
         split="test",
     )
 
-    assert row is not None
-    assert row["env_class"] == "lcb"
-    assert "```python" in row["prompt"][0]["content"]
-
-    env = skyrl_gym.make(
-        row["env_class"],
-        env_config=DictConfig({"env_class": row["env_class"]}),
-        extras={"reward_model": row["reward_model"]},
-    )
-    assert env.step(REVERSE_SOLUTION)["reward"] == 1.0
+    task = source_row_task(
+        row,
+        0,
+        source_name=LIVECODEBENCH,
+        environment_configs={"session": session_spec().model_dump(exclude={"task_session"})},
+    ).task
+    public = conversation_messages(task.context.events)
+    parameters = session_parameters(task)
+    assert "```python" in public[0]["content"]
+    assert "cba" not in public[0]["content"]
+    assert json.loads(parameters.extras["reward_model"]["ground_truth"]) == [
+        {"input": "abc\n", "output": "cba\n", "testtype": "stdin"}
+    ]

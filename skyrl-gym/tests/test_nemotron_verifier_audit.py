@@ -4,23 +4,21 @@ import json
 
 import pytest
 import requests
-from omegaconf import OmegaConf
+from shellbox.machine import ExitReason, Result
+from taskcompendium.grading_result import Outcome
 
 from skyrl_gym.envs.nemotron_ultra.answer_extraction import final_answer_text
-from skyrl_gym.envs.nemotron_ultra.env import NemotronUltraEnv, _extract_reasoning_gym_answer
 from skyrl_gym.envs.nemotron_ultra.genrm import grade_genrm_group
 from skyrl_gym.envs.nemotron_ultra.genrm_utils import GenRMOutputParseError, parse_genrm_output
 from skyrl_gym.envs.nemotron_ultra.jailbreak import grade_jailbreak
 from skyrl_gym.envs.nemotron_ultra.judge import OpenAIJudge
 from skyrl_gym.envs.nemotron_ultra.judge_verifiers import grade_abstention, grade_multichallenge
-from skyrl_gym.envs.nemotron_ultra.lean_proof_utils import determine_proof_status
+from skyrl_gym.envs.nemotron_ultra.lean_proof import determine_proof_status
 from skyrl_gym.envs.nemotron_ultra.math_with_judge import grade_math
 from skyrl_gym.envs.nemotron_ultra.mcqa import grade_mcqa
-from skyrl_gym.envs.nemotron_ultra.nvarc import grade_inductive_arc, parse_grid
-from skyrl_gym.envs.nemotron_ultra.sandbox import SandboxClient
+from skyrl_gym.envs.nemotron_ultra.nvarc import parse_grid
 from skyrl_gym.envs.nemotron_ultra.structured_outputs import grade_structured_output
 from skyrl_gym.envs.nemotron_ultra.tool_call import grade_expected_action
-from skyrl_gym.verification import RolloutEvidence, VerificationStatus
 
 
 class JudgeReplies:
@@ -35,22 +33,6 @@ class JudgeReplies:
 
     def generate_response(self, messages, **kwargs):
         return self.generate(messages, **kwargs)
-
-
-def ultra_env(agent, record):
-    return NemotronUltraEnv(
-        OmegaConf.create({}),
-        extras={
-            "extra_info": {
-                "nemotron_ultra": {
-                    "route": "skyrl_gym",
-                    "agent": agent,
-                    "record_json": json.dumps(record),
-                    "request_json": "{}",
-                }
-            }
-        },
-    )
 
 
 @pytest.mark.parametrize(
@@ -72,7 +54,13 @@ def test_final_answer_removes_reasoning_without_promoting_unfinished_work(text, 
 
 
 @pytest.mark.parametrize("opening,closing", [("<think>", "</think>"), ("<|start_think|>", "<|end_think|>")])
-def test_structured_grading_ignores_reasoning_and_keeps_optional_fields_optional(opening, closing):
+@pytest.mark.asyncio
+async def test_structured_grading_ignores_reasoning_and_keeps_optional_fields_optional(
+    nemotron_session,
+    model_turn,
+    opening,
+    closing,
+):
     record = {
         "schema_type": "json",
         "schema_str": json.dumps(
@@ -83,10 +71,9 @@ def test_structured_grading_ignores_reasoning_and_keeps_optional_fields_optional
             }
         ),
     }
-    result = ultra_env("structured_outputs_simple_agent", record).step(
-        opening + "not JSON" + closing + '{"required": 7, "extra": true}'
-    )
-    assert result["reward"] == 1.0
+    session = await nemotron_session("structured_outputs_simple_agent", record)
+    result = await session.advance(model_turn(opening + "not JSON" + closing + '{"required": 7, "extra": true}'))
+    assert result.reward == 1.0
     assert grade_structured_output('{"optional":"x"}', record, {})[0] == 0.0
 
 
@@ -157,13 +144,22 @@ def test_multichallenge_accepts_plain_final_line_verdicts(verdict):
     assert details["rubric_evaluations"][0]["verdict"] == verdict
 
 
-def test_jailbreak_transport_failure_is_an_error_not_a_verified_zero():
-    env = ultra_env("jailbreak_refusal_with_explanation", {"response_policy_mapped": "refusal_with_explanation"})
-    env.safety_judge = JudgeReplies(requests.ConnectionError("judge down"))
-    result = env.step("candidate")
-    assert result["verification"].status is VerificationStatus.ERROR
-    assert result["verification"].score is None
-    assert "judge down" in result["verification"].diagnostics["error_message"]
+@pytest.mark.asyncio
+async def test_jailbreak_transport_failure_is_an_error_not_a_verified_zero(nemotron_session, model_turn, monkeypatch):
+    def post(*args, **kwargs):
+        raise requests.ConnectionError("judge down")
+
+    monkeypatch.setattr(requests, "post", post)
+    monkeypatch.setattr("skyrl_gym.envs.nemotron_ultra.judge.time.sleep", lambda delay: None)
+    session = await nemotron_session(
+        "jailbreak_refusal_with_explanation",
+        {"response_policy_mapped": "refusal_with_explanation"},
+        {"judges": {"safety": {"base_url": "https://judge.example/v1", "model": "judge"}}},
+    )
+    result = await session.advance(model_turn("candidate"))
+    assert result.grade.status is Outcome.INFRA_ERROR
+    assert result.grade.reward is None
+    assert "judge down" in result.grade.diagnostics["error_message"]
 
 
 def test_math_does_not_credit_a_number_in_unfinished_reasoning():
@@ -205,8 +201,9 @@ def test_tool_arguments_are_exact_and_extra_calls_cannot_receive_credit():
     assert grade_expected_action({"type": "message"}, {"content": "Done", "tool_calls": [call]})[0] == 0.0
 
 
-def test_calendar_unknown_constraints_are_verifier_errors():
-    env = ultra_env(
+@pytest.mark.asyncio
+async def test_calendar_unknown_constraints_are_verifier_errors(nemotron_session, model_turn):
+    session = await nemotron_session(
         "calendar_simple_agent",
         {
             "exp_cal_state": {
@@ -214,8 +211,8 @@ def test_calendar_unknown_constraints_are_verifier_errors():
             }
         },
     )
-    result = env.step('[{"event_id":"work","start_time":"12:00","duration":60}]')
-    assert result["verification"].status is VerificationStatus.ERROR
+    result = await session.advance(model_turn('[{"event_id":"work","start_time":"12:00","duration":60}]'))
+    assert result.grade.status is Outcome.INFRA_ERROR
 
 
 def test_mcqa_last_box_and_exact_option_text_take_precedence():
@@ -240,9 +237,9 @@ def test_mcqa_ambiguous_regex_captures_are_reported_without_a_tuple_crash():
         grade_mcqa("Answer: A", record)
 
 
-def test_reasoning_gym_last_answer_wins_and_partial_credit_is_not_a_pass():
-    assert _extract_reasoning_gym_answer("<answer>rejected</answer><answer>final</answer>") == "final"
-    env = ultra_env(
+@pytest.mark.asyncio
+async def test_reasoning_gym_last_answer_wins_and_partial_credit_is_not_a_pass(nemotron_session, model_turn):
+    session = await nemotron_session(
         "reasoning_gym_simple_agent",
         {
             "question": "Find a word ladder.",
@@ -250,14 +247,16 @@ def test_reasoning_gym_last_answer_wins_and_partial_credit_is_not_a_pass():
             "metadata": {"source_dataset": "word_ladder", "start_word": "BANE", "end_word": "BASE", "word_length": 4},
         },
     )
-    result = env.step("<answer>BANE,BANZ,BAZZ,BAZE,BASE</answer>")
-    assert 0.0 < result["reward"] < 1.0
-    assert not result["verification"].passed
+    result = await session.advance(model_turn("<answer>rejected</answer><answer>BANE,BANZ,BAZZ,BAZE,BASE</answer>"))
+    assert 0.0 < result.reward < 1.0
+    assert result.metrics["extracted_answer"] == "BANE,BANZ,BAZZ,BAZE,BASE"
+    assert not result.grade.passed
 
 
 @pytest.mark.parametrize("response", ["**Final Answer: 3**", "The final answer is 3."])
-def test_reasoning_gym_grades_prose_final_answer(response):
-    env = ultra_env(
+@pytest.mark.asyncio
+async def test_reasoning_gym_grades_prose_final_answer(nemotron_session, model_turn, response):
+    session = await nemotron_session(
         "reasoning_gym_simple_agent",
         {
             "question": "Calculate 0 + -3 - -6 / ( 1 * 7 + -6 ).",
@@ -265,9 +264,11 @@ def test_reasoning_gym_grades_prose_final_answer(response):
             "metadata": {"source_dataset": "basic_arithmetic", "expression": "0 + -3 - -6 / ( 1 * 7 + -6 )"},
         },
     )
-    result = env.step(f"<|start_think|>First I calculate the denominator.<|end_think|>It equals 3.\n{response}")
-    assert result["reward"] == 1.0
-    assert result["verification"].passed
+    result = await session.advance(
+        model_turn(f"<|start_think|>First I calculate the denominator.<|end_think|>It equals 3.\n{response}")
+    )
+    assert result.reward == 1.0
+    assert result.grade.passed
 
 
 def test_arc_accepts_compact_grids_and_selects_the_final_box():
@@ -279,10 +280,10 @@ def test_arc_accepts_compact_grids_and_selects_the_final_box():
 @pytest.mark.parametrize(
     "output,expected",
     [
-        ({"process_status": "completed", "stdout": "error: unknown tactic", "stderr": ""}, "failed"),
-        ({"process_status": "completed", "stdout": "", "stderr": "", "exit_code": 1}, "failed"),
-        ({"process_status": "completed", "stdout": "", "stderr": "", "output_truncated": True}, "output_truncated"),
-        ({"process_status": "completed", "stdout": "", "stderr": ""}, "completed"),
+        (Result(0, b"error: unknown tactic", b"", False, False, ExitReason.EXITED), "failed"),
+        (Result(1, b"", b"", False, False, ExitReason.EXITED), "failed"),
+        (Result(0, b"", b"", True, False, ExitReason.EXITED), "output_truncated"),
+        (Result(0, b"", b"", False, False, ExitReason.EXITED), "completed"),
     ],
 )
 def test_lean_success_requires_complete_compiler_evidence(output, expected):
@@ -302,108 +303,77 @@ class HTTPReply:
         pass
 
 
-def test_stateful_sandbox_detects_reset_and_deletes_the_same_session(monkeypatch):
-    replies = iter([HTTPReply({"process_status": "completed", "stdout": "", "new_session_created": True})] * 2)
-    monkeypatch.setattr(requests, "post", lambda *args, **kwargs: next(replies))
-    deleted = []
-
-    def delete(url, **kwargs):
-        deleted.append((url, kwargs["headers"]))
-        return HTTPReply({})
-
-    monkeypatch.setattr(requests, "delete", delete)
-    sandbox = SandboxClient(host="sandbox.example")
-    sandbox.execute("x=7", language="ipython", timeout_seconds=1, session_id="stable")
-    with pytest.raises(requests.RequestException, match="lost stateful session"):
-        sandbox.execute("x", language="ipython", timeout_seconds=1, session_id="stable")
-    sandbox.close_session("stable")
-    assert deleted == [("http://sandbox.example:6000/sessions/stable", {"X-Session-ID": "stable"})]
+@pytest.mark.asyncio
+async def test_lost_python_process_ends_the_task_without_a_replacement_namespace(
+    nemotron_session,
+    python_tool_turn,
+):
+    session = await nemotron_session("ns_tools_simple_agent", {"expected_answer": "7"})
+    first = await session.advance(python_tool_turn("value = 7"))
+    assert not first.done
+    lost = await session.advance(python_tool_turn("import os; os._exit(0)"))
+    assert lost.done and lost.grade.status is Outcome.GRADED
+    assert lost.grade.reward == 0.0 and lost.grade.passed is False
+    assert lost.observations
+    assert lost.metrics["candidate_failure"] == ExitReason.EXITED.value
+    assert (await session.grade(())).status is Outcome.GRADED
 
 
-def python_tool_evidence(code):
-    return RolloutEvidence(
-        metadata={
-            "assistant_message": {
-                "role": "assistant",
-                "tool_calls": [
-                    {
-                        "id": "call",
-                        "function": {
-                            "name": "stateful_python_code_exec",
-                            "arguments": json.dumps({"code": code}),
-                        },
-                    }
-                ],
-            }
-        }
-    )
-
-
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "failure",
     [
-        requests.ConnectionError("sandbox unavailable"),
-        requests.Timeout("sandbox response deadline"),
-        requests.HTTPError("sandbox HTTP 503"),
-        {"process_status": "completed", "stdout": "7", "new_session_created": True},
-        {"process_status": "unknown", "stdout": "", "stderr": "worker unavailable"},
-        {"process_status": "error", "stdout": "", "stderr": "connection closed", "error_type": "VerifierRuntimeError"},
-        {"process_status": "timeout", "new_session_created": True, "error_type": "VerifierRuntimeError"},
-        {"process_status": "completed", "stdout": None},
-        {"process_status": []},
-        ["invalid response"],
-        {},
+        OSError("machine unavailable"),
+        Result(1, b"", b"command failed", False, False, ExitReason.EXITED),
+        Result(0, b"invalid json", b"", False, False, ExitReason.EXITED),
+        Result(0, b"{}", b"", False, False, ExitReason.EXITED),
+        Result(
+            0,
+            b'{"exit_code":0,"stdout":7,"stderr":"","stdout_truncated":false,"stderr_truncated":false,"reason":"exited"}',
+            b"",
+            False,
+            False,
+            ExitReason.EXITED,
+        ),
+        Result(None, b"", b"machine deadline", False, False, ExitReason.TIMED_OUT),
     ],
 )
-def test_sandbox_failures_end_rollouts_without_a_verdict(monkeypatch, failure):
-    replies = iter(
-        [
-            {"process_status": "completed", "stdout": "7", "new_session_created": True},
-            failure,
-        ]
-    )
+async def test_machine_failures_end_tool_tasks_without_a_verdict(
+    nemotron_session,
+    python_tool_turn,
+    machine,
+    monkeypatch,
+    failure,
+):
+    session = await nemotron_session("ns_tools_simple_agent", {"expected_answer": "7"})
+    assert not (await session.advance(python_tool_turn("value = 7"))).done
 
-    def post(*args, **kwargs):
-        reply = next(replies)
-        if isinstance(reply, Exception):
-            raise reply
-        return HTTPReply(reply)
+    async def run(command):
+        if isinstance(failure, Exception):
+            raise failure
+        return failure
 
-    monkeypatch.setattr(requests, "post", post)
-    env = ultra_env("ns_tools_simple_agent", {"expected_answer": "7"})
-    for code in ["x=7; print(x)", "print(x)"]:
-        env.set_rollout_evidence(python_tool_evidence(code))
-        result = env.step("")
-    verification = result["verification"]
-    assert result["done"]
-    assert result["observations"] == []
-    assert verification.status is VerificationStatus.ERROR
-    assert verification.score is None
-    assert verification.passed is None
-    assert verification.diagnostics["error_type"] == "VerifierRuntimeError"
-    assert verification.diagnostics["error_category"] == "infrastructure"
+    with monkeypatch.context() as patch:
+        patch.setattr(machine, "run", run)
+        result = await session.advance(python_tool_turn("value"))
+    assert result.done and result.observations == ()
+    assert result.grade.status is Outcome.INFRA_ERROR
+    assert result.grade.reward is None and result.grade.passed is None
+    assert result.grade.diagnostics["error_category"] == "infrastructure"
 
 
-@pytest.mark.parametrize("status,stderr", [("error", "NameError: missing variable"), ("timeout", "KeyboardInterrupt")])
-def test_python_program_failures_preserve_tool_feedback(monkeypatch, status, stderr):
-    monkeypatch.setattr(
-        requests,
-        "post",
-        lambda *args, **kwargs: HTTPReply(
-            {
-                "process_status": status,
-                "stdout": "",
-                "stderr": stderr,
-                "new_session_created": True,
-            }
-        ),
-    )
-    env = ultra_env("ns_tools_simple_agent", {})
-    env.set_rollout_evidence(python_tool_evidence("print(x)"))
-    result = env.step("")
-    assert not result["done"]
-    assert result["observations"][0]["content"] == stderr
-    assert result["verification"].status is VerificationStatus.UNAVAILABLE
+@pytest.mark.asyncio
+async def test_python_program_failure_returns_feedback_and_keeps_the_task_namespace(
+    nemotron_session,
+    python_tool_turn,
+):
+    session = await nemotron_session("ns_tools_simple_agent", {})
+    result = await session.advance(python_tool_turn("value = 12; raise NameError('missing variable')"))
+    assert not result.done
+    assert "NameError" in result.observations[0]["content"]
+    assert result.grade.status is Outcome.UNAVAILABLE
+    next_turn = await session.advance(python_tool_turn("print(value)"))
+    assert next_turn.observations[0]["content"] == "12"
 
 
 def test_judge_length_finish_cannot_be_accepted_as_partial_json(monkeypatch):
@@ -419,84 +389,60 @@ def test_judge_length_finish_cannot_be_accepted_as_partial_json(monkeypatch):
 
 
 @pytest.mark.parametrize("opening,closing", [("<think>", "</think>"), ("<|start_think|>", "<|end_think|>")])
-def test_instruction_final_answer_is_graded_without_reasoning_contamination(opening, closing):
-    env = ultra_env(
-        "instruction_following_simple_agent",
-        {"instruction_id_list": ["keywords:forbidden_words"], "kwargs": [{"forbidden_words": ["banana"]}]},
-    )
-    assert env.step(opening + "Do not say banana." + closing + "Hello.")["reward"] == 1.0
-    assert env.step(opening + "I can ignore the instruction." + closing + "banana")["reward"] == 0.0
+@pytest.mark.asyncio
+async def test_instruction_final_answer_is_graded_without_reasoning_contamination(
+    nemotron_session, model_turn, opening, closing
+):
+    record = {"instruction_id_list": ["keywords:forbidden_words"], "kwargs": [{"forbidden_words": ["banana"]}]}
+    for response, reward in [
+        ("Do not say banana." + closing + "Hello.", 1.0),
+        ("I can ignore the instruction." + closing + "banana", 0.0),
+    ]:
+        session = await nemotron_session("instruction_following_simple_agent", record)
+        assert (await session.advance(model_turn(opening + response))).reward == reward
 
 
-def test_grading_message_uses_final_content_without_mutating_retained_evidence():
-    env = ultra_env(
+@pytest.mark.asyncio
+async def test_grading_message_uses_final_content_without_mutating_retained_evidence(nemotron_session, model_turn):
+    session = await nemotron_session(
         "single_step_tool_use_with_argument_comparison_agent",
-        {
-            "expected_action": {"type": "message", "content": "Hello."},
-        },
+        {"expected_action": {"type": "message", "content": "Hello."}},
     )
-    raw = {"role": "assistant", "content": "reasoning words Hello.", "tool_calls": []}
-    evidence = RolloutEvidence(metadata={"assistant_message": raw})
-    env.set_rollout_evidence(evidence)
-    result = env.step("<|start_think|>reasoning words<|end_think|>Hello.")
-    assert result["reward"] == 1.0
-    assert evidence.metadata["assistant_message"] == raw
-    assert raw["content"] == "reasoning words Hello."
+    response = "<|start_think|>reasoning words<|end_think|>Hello."
+    raw = {"role": "assistant", "content": response, "tool_calls": []}
+    turn = model_turn(response, message=raw)
+    result = await session.advance(turn)
+    assert result.reward == 1.0
+    assert turn.message["content"] == response
+    assert result.grade.diagnostics["grading_action"] == "Hello."
 
 
-def test_broken_instruction_verifier_is_not_a_verified_wrong_answer():
-    result = ultra_env(
-        "instruction_following_simple_agent", {"instruction_id_list": ["missing:verifier"], "kwargs": [{}]}
-    ).step("answer")
-    assert result["verification"].status is VerificationStatus.ERROR
-    assert result["verification"].diagnostics["instruction_errors"][0].startswith("KeyError")
+@pytest.mark.asyncio
+async def test_broken_instruction_verifier_is_not_a_verified_wrong_answer(nemotron_session, model_turn):
+    session = await nemotron_session(
+        "instruction_following_simple_agent",
+        {"instruction_id_list": ["missing:verifier"], "kwargs": [{}]},
+    )
+    result = await session.advance(model_turn("answer"))
+    assert result.grade.status is Outcome.INFRA_ERROR
+    assert result.grade.diagnostics["instruction_errors"][0].startswith("KeyError")
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "status,stdout,reward",
+    "body,reward",
     [
-        ("completed", "[[2,3]]", 1.0),
-        ("completed", "[[0,0]]", 0.0),
-        ("timeout", "", 0.0),
+        ("return grid", 1.0),
+        ("return [[0, 0]]", 0.0),
+        ("raise ValueError('candidate fault')", 0.0),
     ],
 )
-def test_arc_sandbox_verdict_preserves_execution_evidence(status, stdout, reward):
-    class Sandbox:
-        def execute(self, code, **kwargs):
-            return {"process_status": status, "stdout": stdout, "stderr": "timed out" if status == "timeout" else ""}
-
-    result, details = grade_inductive_arc(
-        "```python\ndef transform(grid):\n    return grid\n```",
+async def test_arc_session_retains_candidate_execution_evidence(nemotron_session, model_turn, body, reward):
+    session = await nemotron_session(
+        "nvarc_inductive_simple_agent",
         {"test_input": [[2, 3]], "expected_output": [[2, 3]]},
-        sandbox=Sandbox(),
     )
-    assert result == reward
-    assert details["execution_output"]["process_status"] == status
-
-
-def test_inductive_arc_does_not_execute_model_code_on_the_host(monkeypatch):
-    def forbidden(*args, **kwargs):
-        raise AssertionError("Model code must not run in a host subprocess")
-
-    monkeypatch.setattr("subprocess.run", forbidden)
-
-    class Sandbox:
-        def execute(self, code, **kwargs):
-            return {"process_status": "completed", "stdout": "[[1]]", "stderr": ""}
-
-    reward, _ = grade_inductive_arc(
-        "def transform(grid): return grid", {"test_input": [[1]], "expected_output": [[1]]}, sandbox=Sandbox()
-    )
-    assert reward == 1.0
-
-
-def test_sandbox_transport_outage_is_preserved_as_verification_error(monkeypatch):
-    def refused(*args, **kwargs):
-        raise requests.ConnectionError("sandbox connection refused")
-
-    monkeypatch.setattr(requests, "post", refused)
-    env = ultra_env("ns_tools_simple_agent", {"expected_answer": "7", "question": "compute"})
-    env.set_rollout_evidence(python_tool_evidence("x=7"))
-    result = env.step("")
-    assert result["verification"].status is VerificationStatus.ERROR
-    assert "connection refused" in result["verification"].diagnostics["error_message"]
+    result = await session.advance(model_turn("def transform(grid):\n    " + body))
+    assert result.grade.reward == reward
+    assert result.grade.status is Outcome.GRADED
+    assert result.metrics["execution_output"]["exit_code"] == (1 if body.startswith("raise") else 0)

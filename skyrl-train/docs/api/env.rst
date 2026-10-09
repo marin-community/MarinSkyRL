@@ -1,28 +1,32 @@
-Environment API
-===============
+Task session API
+================
 
-The core APIs are given below. 
+``TaskSession`` defines task operations. ``Transition`` contains observations,
+terminal state, rewards, and grading results. The engine owns model inference and token records.
 
-.. autoclass:: skyrl_gym.core.Env
+.. autoclass:: rolloutengine.contracts.TaskSession
    :members:
    :member-order: bysource
-   :undoc-members:
-   :show-inheritance:
 
-.. autoclass:: skyrl_gym.core.EnvStepOutput
+.. autoclass:: rolloutengine.contracts.SessionStart
    :members:
-   :member-order: bysource
-   :undoc-members:
-   :show-inheritance:
 
-.. autoclass:: skyrl_gym.envs.base_text_env.BaseTextEnv
+.. autoclass:: rolloutengine.contracts.Transition
    :members:
-   :member-order: bysource
-   :undoc-members:
-   :show-inheritance:
 
-.. autoclass:: skyrl_gym.envs.base_text_env.BaseTextEnvStepOutput
+.. autoclass:: rolloutengine.contracts.ModelTurn
    :members:
-   :member-order: bysource
-   :undoc-members:
-   :show-inheritance:
+
+.. autoclass:: taskcompendium.models.TaskSpec
+
+.. autoclass:: taskcompendium.models.EnvironmentRequirements
+
+.. autoclass:: rolloutengine.spec.MachineRuntimeSpec
+
+.. autoclass:: rolloutengine.spec.TaskRuntimeSpec
+
+.. autoclass:: rolloutengine.spec.TaskSessionSpec
+
+.. autoclass:: rolloutengine.spec.LoweredTaskSpec
+
+.. autoclass:: skyrl_gym.source_task.SessionParameters

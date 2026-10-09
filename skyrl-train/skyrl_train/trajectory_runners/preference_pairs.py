@@ -7,13 +7,15 @@ trainer's group machinery delivers adjacent rows that the DPO loss pairs in orde
 """
 
 from collections.abc import Mapping
+from typing import Any
 
 from loguru import logger
 
 from skyrl_train.dataset.preference_pairs import completion_text
-from skyrl_train.trajectory_runners.base import TrajectoryRunner
+from skyrl_train.rollouts.buffer import RolloutTask, RolloutWriter, write_trajectory_batch
+from skyrl_train.rollouts.finalization import finalize_trajectory_batch
+from skyrl_train.trajectory_runners.trajectory_retention import RetentionSink
 from skyrl_train.trajectory_runners.types import (
-    BatchMetadata,
     TrajectoryBatch,
     TrajectoryRequestBatch,
 )
@@ -33,13 +35,37 @@ def _token_ids(tokenizer, prompt) -> list[int]:
     return [int(token) for token in encoded]
 
 
-class PreferencePairTrajectoryRunner(TrajectoryRunner):
+class PreferencePairTrajectoryRunner:
     """Emit tokenized dataset completions without touching any inference engine."""
 
-    def __init__(self, tokenizer, *, max_generate_length: int, max_input_length: int):
+    def __init__(
+        self, tokenizer, *, max_generate_length: int, max_input_length: int, generator_config: Mapping[str, Any]
+    ):
         self.tokenizer = tokenizer
         self.max_generate_length = max_generate_length
         self.max_input_length = max_input_length
+        self.generator_config = generator_config
+        self.trajectory_sink: RetentionSink | None = None
+
+    async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> int:
+        batch = await self.run(task.request)
+        return await write_trajectory_batch(task, writer, batch)
+
+    def set_trajectory_sink(self, sink: RetentionSink) -> None:
+        sink.bind_runner(type(self).__name__)
+        self.trajectory_sink = sink
+
+    async def startup(self) -> None:
+        pass
+
+    async def shutdown(self) -> None:
+        pass
+
+    async def start_eval_session(self, *, run_name: str, eval_step: int, val_set_name: str | None = None) -> None:
+        logger.warning("preference-pair evaluation replays the fixed dataset completions without generation")
+
+    async def stop_eval_session(self) -> None:
+        pass
 
     def _tokenize_pair(self, prompt, chosen: str, rejected: str) -> tuple[list[int], list[list[int]]]:
         """Tokenize one pair, failing loudly when either side exceeds the rollout budget."""
@@ -82,7 +108,7 @@ class PreferencePairTrajectoryRunner(TrajectoryRunner):
             ) != (0, 1):
                 raise ValueError("preference pairs require trajectory IDs ordered as repetition 0 then 1")
 
-    async def _run(self, input_batch: TrajectoryRequestBatch, disable_tqdm: bool = False) -> TrajectoryBatch:
+    async def run(self, input_batch: TrajectoryRequestBatch) -> TrajectoryBatch:
         self._validate_request(input_batch)
         prompts = input_batch["prompts"]
         env_extras = input_batch["env_extras"] or []
@@ -141,7 +167,4 @@ class PreferencePairTrajectoryRunner(TrajectoryRunner):
             "exclude_from_baseline": None,
             "pair_roles": pair_roles,
         }
-        metadata: BatchMetadata | None = input_batch.get("batch_metadata")
-        if metadata is not None and metadata.training_phase == "eval":
-            logger.warning("preference-pair evaluation replays the fixed dataset completions without generation")
-        return batch
+        return await finalize_trajectory_batch(input_batch, batch, self.generator_config, self.trajectory_sink)

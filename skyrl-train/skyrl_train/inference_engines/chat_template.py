@@ -1,6 +1,8 @@
 """Chat-template error translation and compatibility repairs."""
 
+from collections.abc import Mapping
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
 
 from jinja2 import TemplateError
@@ -67,3 +69,76 @@ def sequentialize_multi_tool_call_turns(
                 normalized_assistant_index = first_normalized_index + len(tool_calls) - 1
 
     return normalized, normalized_assistant_index
+
+
+CUSTOM_CHAT_TEMPLATES = {
+    # chat template for qwen3 that preserves thinking tokens
+    "qwen3_with_thinking": (
+        "{% for message in messages %}"
+        "{% if (message['role'] != 'assistant') %}"
+        "{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}"
+        "{% elif (message['role'] == 'assistant')%}"
+        "{{'<|im_start|>' + message['role'] + '\n'}}"
+        "{% generation %}"
+        "{{message['content'] + '<|im_end|>'}}"
+        "{% endgeneration %}"
+        "{{'\n'}}"
+        "{% endif %}"
+        "{% endfor %}"
+    ),
+    # chat template for qwen3 that strips non-last-turn thinking tokens (same as the official Qwen3 chat
+    # template but we add `generation` and `endgeneration` tags)
+    "qwen3_without_thinking": (
+        "{% for message in messages %}"
+        "{% if (message['role'] != 'assistant') %}"
+        "{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}"
+        "{% elif (message['role'] == 'assistant')%}"
+        "{{'<|im_start|>' + message['role'] + '\n'}}"
+        "{% generation %}"
+        "{% set full_content = message['content'] %}"
+        "{% set mycontent = message['content'] %}"
+        "{% set is_last_message = loop.last and messages[-1]['role'] == 'assistant' %}"
+        "{% if '</think>' in full_content and not is_last_message %}"
+        "{% set mycontent = full_content.split('</think>')[-1].lstrip('\n') %}"
+        "{% endif %}"
+        "{{mycontent + '<|im_end|>'}}"
+        "{% endgeneration %}"
+        "{{'\n'}}"
+        "{% endif %}"
+        "{% endfor %}"
+    ),
+    # Qwen2.5 chat template but with `generation` and `endgeneration` tags, and simplified
+    "qwen2_5_with_generation_tag_simplified": (
+        "{% for message in messages %}"
+        "{% if (message.role == 'user') or (message.role == 'system' and not loop.first) %}"
+        "{{ '<|im_start|>' + message.role + '\n' + message.content + '<|im_end|>' + '\n' }}"
+        "{% elif message.role == 'assistant' %}"
+        "{{ '<|im_start|>' + message.role + '\n'}}"
+        "{% generation %}"
+        "{{ message.content + '<|im_end|>'}}"
+        "{% endgeneration %}"
+        "{{ '\n' }}"
+        "{% endif %}"
+        "{% endfor %}"
+        "{% if add_generation_prompt %}"
+        "{{ '<|im_start|>assistant\n' }}"
+        "{% endif %}"
+    ),
+}
+
+
+def get_custom_chat_template(config: Mapping[str, Any] | None) -> str | None:
+    """Read the named or file-based template used by the inference server."""
+    if config is None:
+        return None
+    source = config.get("source")
+    if source not in {"name", "file"}:
+        raise ValueError(f"Invalid chat template source: {source!r}")
+    name_or_path = config.get("name_or_path")
+    if not name_or_path:
+        return None
+    if source == "file":
+        return Path(name_or_path).read_text(encoding="utf-8")
+    if name_or_path not in CUSTOM_CHAT_TEMPLATES:
+        raise ValueError(f"Unknown chat template: {name_or_path!r}")
+    return CUSTOM_CHAT_TEMPLATES[name_or_path]

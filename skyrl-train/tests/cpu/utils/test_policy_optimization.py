@@ -24,10 +24,6 @@ from skyrl_train.objective.losses import PolicyLossInputs, TokenLoss, ppo_policy
 from skyrl_train.objective.objective import build_objective_micro_batch, compute_policy_objective
 from skyrl_train.objective.reduction import step_counts
 from skyrl_train.config.objective_spec import LossSpec, RatioAnchor
-from skyrl_train.config.trajectory_runner_capabilities import (
-    TrajectoryRunnerMode,
-    validate_trajectory_runner_capabilities,
-)
 from skyrl_train.utils.advantage_estimators import (
     compute_gae_advantage_return,
     compute_grpo_outcome_advantage,
@@ -343,6 +339,43 @@ def _validatable_dummy_config():
     return cfg
 
 
+@pytest.mark.parametrize("model_limit,expected_limit", [(None, 96), (64, 64), (128, 96)])
+def test_sequence_normalized_loss_uses_the_generation_context_bound(model_limit, expected_limit):
+    cfg = _validatable_dummy_config()
+    cfg.generator.max_input_length = 64
+    cfg.trainer.max_prompt_length = 64
+    cfg.generator.sampling_params.max_generate_length = 32
+    OmegaConf.update(cfg, "generator.engine_init_kwargs.max_model_len", model_limit, force_add=True)
+    cfg.generator.num_inference_engines = 1
+    cfg.generator.inference_engine_tensor_parallel_size = 1
+    cfg.trainer.algorithm.loss_reduction = "seq_mean_token_sum_norm"
+    cfg.trainer.algorithm.use_kl_loss = False
+    validate_cfg(cfg)
+    config = cfg.trainer.algorithm
+    log_probs = torch.zeros((1, 2), dtype=torch.float64, requires_grad=True)
+    mask = torch.ones_like(log_probs)
+    advantages = torch.ones_like(log_probs)
+    batch = build_objective_micro_batch(
+        action_log_probs=log_probs,
+        old_action_log_probs=log_probs.detach(),
+        base_action_log_probs=None,
+        advantages=advantages,
+        loss_mask=mask,
+        rollout_logprobs=None,
+        response_span_tags=None,
+        token_entropy=torch.zeros_like(log_probs),
+        think_token_weight=1,
+        teacher=None,
+    )
+    counts = step_counts([mask], [mask], [], [advantages], config.max_seq_len, lambda value: value)
+    objective = compute_policy_objective(
+        batch, loss=ppo_policy_loss, counts=counts, config=config, loss_scale=1, report_scale=1
+    )
+    objective.optimization_loss.backward()
+    torch.testing.assert_close(objective.optimization_loss, torch.tensor(-2 / expected_limit, dtype=torch.float64))
+    torch.testing.assert_close(log_probs.grad, torch.full_like(log_probs, -1 / expected_limit))
+
+
 @pytest.mark.parametrize(
     "loss_reduction",
     ["token_mean", "sequence_mean", "seq_mean_token_sum_norm", "seq_mean_token_sum_norm_global"],
@@ -440,15 +473,6 @@ def test_registry_cross_ray_process():
         def test_ray_registry_access(name: str):
             policy_loss = PolicyLossRegistry.get(name)
             adv_estimator = AdvantageEstimatorRegistry.get("cross_process_adv_test")
-
-            if name == "cross_process_test_2":
-                config = example_dummy_config()
-                config.trainer.algorithm.policy_loss_type = name
-                config.trainer.algorithm.off_policy_correction = "none"
-                spec = PolicyLossRegistry.spec(name)
-                validate_trajectory_runner_capabilities(config, TrajectoryRunnerMode.SKYRL_GYM, loss_spec=spec)
-                with pytest.raises(ValueError, match="cannot supply exact sampled completion"):
-                    validate_trajectory_runner_capabilities(config, TrajectoryRunnerMode.MINI_SWE, loss_spec=spec)
 
             log_probs = torch.tensor([[-0.4]], requires_grad=True)
             loss = policy_loss(

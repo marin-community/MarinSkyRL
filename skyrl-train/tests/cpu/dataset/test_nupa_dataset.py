@@ -13,8 +13,8 @@ from examples.nupa.nupa_dataset import (
     validate_records_against_verifier,
     write_parquet,
 )
-import skyrl_gym
-from omegaconf import DictConfig
+from rolloutengine.contracts import ModelTurn
+from skyrl_gym.answer_tasks import grade_nupa
 
 SYNTHETIC_SOURCE = {
     "add_Float_Float_Float": {
@@ -51,14 +51,6 @@ def synthetic_source(tmp_path):
     source = tmp_path / "test.json"
     source.write_text(json.dumps(SYNTHETIC_SOURCE))
     return source
-
-
-def make_nupa_env(ground_truth):
-    return skyrl_gym.make(
-        "nupa",
-        env_config=DictConfig({"env_class": "nupa"}),
-        extras={"reward_spec": {"method": "rule", "ground_truth": ground_truth}},
-    )
 
 
 def test_unique_texts_by_stratum_deduplicates_repeated_texts(synthetic_source):
@@ -104,17 +96,16 @@ def test_answer_format_follows_the_task_name(task_name, answer_format):
     assert answer_format_from_task_name(task_name) == answer_format
 
 
-def test_every_row_rewards_its_reference_answer_through_the_runtime_env(synthetic_source):
+def test_every_row_rewards_its_reference_answer_through_the_task_grader(synthetic_source):
     unique = unique_texts_by_stratum(synthetic_source)
     panel = build_panel_identities(unique, panel_size=7)
 
     for row in build_complement_records(unique, panel):
-        assert row["prompt"] == [{"role": "user", "content": row["prompt"][0]["content"]}]
         assert row["prompt"][0]["content"].endswith(" =")
-        env = make_nupa_env(row["reward_spec"]["ground_truth"])
         answer = json.loads(row["reward_spec"]["ground_truth"])["answer"]
-        assert env.step(answer)["reward"] == 1.0
-        assert env.step(answer + "0")["reward"] == 0.0
+        for response, reward in [(answer, 1.0), (answer + "0", 0.0)]:
+            turn = ModelTurn({"role": "assistant", "content": response}, (), (1,), None, "stop", text=response)
+            assert grade_nupa(turn, {}, {"reward_spec": row["reward_spec"]}).reward == reward
 
 
 def test_validate_records_against_verifier_counts_records_and_checks_each_task(synthetic_source):
