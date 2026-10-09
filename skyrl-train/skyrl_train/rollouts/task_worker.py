@@ -16,7 +16,7 @@ from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from shellbox.backends.docker.machine import DockerMachineFactory
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
-from shellbox.machine import Machine, MachineFactory
+from shellbox.machine import Backend, Machine, MachineFactory
 from taskcompendium.grading_result import Outcome
 from taskcompendium.models import NoGrader
 from rolloutengine.contracts import (
@@ -474,15 +474,15 @@ class TaskRolloutWorkerSpec:
         factories: dict[str, MachineFactory] = {"shellsim": ShellSimMachineFactory()}
         skopeo = shutil.which(str(Path(self.config.trajectory_runner.skopeo).expanduser()))
         if shutil.which("docker") is not None and skopeo is not None:
-            factories["docker"] = DockerMachineFactory(
+            factories[Backend.DOCKER] = DockerMachineFactory(
                 skopeo=Path(skopeo),
                 image_cache=Path(self.config.trajectory_runner.image_cache).expanduser(),
             )
         if harbor is not None:
             if harbor.environment.type != EnvironmentType.DOCKER:
-                factories[HARBOR_MACHINE_BACKEND] = harbor.machine_factory(self.config.trajectory_runner)
-            elif "docker" in factories:
-                factories[HARBOR_MACHINE_BACKEND] = factories["docker"]
+                factories[HARBOR_MACHINE_BACKEND] = harbor.machine_factory()
+            elif Backend.DOCKER in factories:
+                factories[HARBOR_MACHINE_BACKEND] = factories[Backend.DOCKER]
         return TaskRolloutWorker(
             runner_config,
             (

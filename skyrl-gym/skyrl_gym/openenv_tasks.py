@@ -22,6 +22,7 @@ HTTP_SERVICE_SCRIPT = Path(__file__).with_name("openenv_http.py")
 OPENENV_PORT = 8000
 REQUEST_TIMEOUT = 15.0
 STARTUP_TIMEOUT = 60.0
+CLEANUP_TIMEOUT = 10.0
 OPENENV_TASKS = {"echo_env", "coding_env", "openspiel-env", "atari-env", "sumo-rl-env", "finrl-env"}
 
 
@@ -167,7 +168,7 @@ class OpenEnvTaskSession:
         if not self.started:
             return
         result = await self.machine.run(
-            Command(("python", self.script, "close", self.directory, str(self.port)), timeout=10.0)
+            Command(("python", self.script, "close", self.directory, str(self.port)), timeout=CLEANUP_TIMEOUT)
         )
         if result.reason != ExitReason.EXITED or result.exit_code != 0:
             raise RuntimeError(f"OpenEnv cleanup failed: {result.stderr.decode(errors='replace')}")

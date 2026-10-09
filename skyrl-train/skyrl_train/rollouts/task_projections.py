@@ -17,7 +17,7 @@ from skyrl_gym.task_records import grade_skipped, skipped_grade
 from rolloutengine.contracts import RolloutContractError, RolloutData
 
 from skyrl_train.error_treatment import ErrorTreatment
-from skyrl_train.dataset.tasks import TASKCOMPENDIUM_ENVIRONMENT
+from skyrl_train.dataset.tasks import LOWERED_TASK_COLUMN, TASKCOMPENDIUM_ENVIRONMENT
 from skyrl_train.metric_names import TASK_ROLLOUT_METRIC_PREFIX
 from skyrl_train.trajectory_runners.projections import (
     StepWiseTrajectoryProjection,
@@ -315,7 +315,7 @@ def _task_error_policies(
     if harbor is None:
         return [default] * len(request["prompts"])
     return [
-        harbor if "harbor" in json.loads(extras["lowered_task_spec"])["task"]["tags"] else default
+        harbor if "harbor" in json.loads(extras[LOWERED_TASK_COLUMN])["task"]["tags"] else default
         for extras in request["env_extras"]
     ]
 

@@ -14,7 +14,7 @@ from taskcompendium.importers.harbor import harbor_task
 from harbor_config.models.task.config import EnvironmentConfig, TaskConfig
 from rolloutengine.lowering import SHELLBOX_SESSION
 from rolloutengine.spec import LoweredTaskSpec, MachineRuntimeSpec, TaskRuntimeSpec, TaskSessionSpec
-from shellbox.machine import NetworkPolicy
+from shellbox.machine import Backend, NetworkPolicy
 from taskcompendium.models import NoGrader, ScriptGrader, Source, TaskSpec, VerifyitGrader
 
 from marinskyrl.packed_tasks import PackedTaskMaterializer, PackedTaskReference, select_task_references
@@ -125,7 +125,7 @@ def harbor_task_ids(task_path: Path) -> set[str]:
 
 def harbor_machine(environment: EnvironmentConfig, user: str | int | None) -> MachineRuntimeSpec:
     return MachineRuntimeSpec(
-        backend="docker",
+        backend=Backend.DOCKER,
         network=NetworkPolicy.ALLOW if environment.allow_internet else NetworkPolicy.DENY,
         cpus=environment.cpus,
         memory_mb=environment.memory_mb,

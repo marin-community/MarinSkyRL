@@ -1,7 +1,7 @@
 """Projection of harness interaction records into trainer samples."""
 
 import copy
-from typing import Generic, Protocol, Sequence, TypeVar
+from typing import Protocol, Sequence
 
 import numpy as np
 from omegaconf import DictConfig
@@ -22,9 +22,6 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
 )
 
 
-InteractionT = TypeVar("InteractionT")
-
-
 class TrainableInteraction(Protocol):
     loss_mask: list[int]
     disposition: TrainingDisposition
@@ -34,12 +31,6 @@ class TrainableInteraction(Protocol):
 class RewardedInteraction(Protocol):
     reward: RewardResult
     response_span_tags: list[int] | None
-
-
-class TrajectoryProjection(Protocol, Generic[InteractionT]):
-    """Convert structured interaction results into a trainer batch."""
-
-    def project(self, outputs: InteractionT, request: TrajectoryRequestBatch) -> TrajectoryBatch: ...
 
 
 class WholeTrajectoryProjection:

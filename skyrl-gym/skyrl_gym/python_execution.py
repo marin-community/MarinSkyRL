@@ -97,7 +97,9 @@ class PythonKernel:
     async def close(self) -> None:
         if not self.started:
             return
-        result = await self.machine.run(Command(("python", self.script, "close", self.directory), timeout=10.0))
+        result = await self.machine.run(
+            Command(("python", self.script, "close", self.directory), timeout=KERNEL_CLEANUP_TIMEOUT)
+        )
         if result.reason != ExitReason.EXITED or result.exit_code != 0:
             raise RuntimeError(f"Python kernel cleanup failed: {result.stderr.decode(errors='replace')}")
         self.started = False

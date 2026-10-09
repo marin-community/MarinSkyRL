@@ -166,7 +166,7 @@ Cancellation returns control to the engine without an unbounded wait for active 
 Session cleanup retains pending thread operations before it releases their resources.
 The cleanup deadline bounds the caller's wait. Unfinished cleanup remains owned until it completes.
 Worker shutdown cancels active requests, including group grading and buffer submission.
-``trajectory_runner.shutdown_timeout`` bounds shutdown. Its default is 60 seconds.
+``trajectory_runner.shutdown_timeout`` bounds shutdown. Its default is 45 seconds.
 Half of that budget permits request cleanup. The remaining budget permits machine cleanup.
 Late machine creation uses the same owned close task as normal cleanup.
 If shutdown exceeds its budget, provider diagnostics identify open creations and machines, and shutdown reports a failure.

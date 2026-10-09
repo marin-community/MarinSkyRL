@@ -1,4 +1,4 @@
-"""Direct task sessions for synchronous answer graders."""
+"""Direct task sessions for answers, search, and code execution."""
 
 import asyncio
 import json
@@ -32,6 +32,7 @@ from skyrl_gym.tools.search import SearchClient
 
 AnswerGrader = Callable[[ModelTurn, dict[str, Any], dict[str, Any]], Transition]
 logger = logging.getLogger(__name__)
+SEARCH_CODE_TIMEOUT = 10.0
 
 
 class BlockingOperations:
@@ -301,9 +302,11 @@ class SearchCodeTaskSession:
         elif tool.group(1) == "search":
             output = await self.blocking.run(self.search.search, tool.group(2).strip())
         elif tool.group(1) == "python":
-            result = await self.python.execute("exec(" + repr(tool.group(2).strip()) + ", {})", timeout=10)
+            result = await self.python.execute(
+                "exec(" + repr(tool.group(2).strip()) + ", {})", timeout=SEARCH_CODE_TIMEOUT
+            )
             if result.reason == ExitReason.TIMED_OUT:
-                output = "Error executing Python code: Execution timed out after 10.0 seconds."
+                output = f"Error executing Python code: Execution timed out after {SEARCH_CODE_TIMEOUT} seconds."
             elif result.exit_code != 0 or result.stderr:
                 output = "Error executing Python code: " + (result.stdout + result.stderr).decode().strip()
             else:

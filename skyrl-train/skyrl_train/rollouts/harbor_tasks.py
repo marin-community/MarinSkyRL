@@ -1,15 +1,13 @@
 """Apply Harbor launch settings to tasks executed by the common rollout engine."""
 
 from dataclasses import dataclass, replace
-from pathlib import Path
 
 from harbor_config.models.job.config import RetryConfig
 from harbor_config.models.environment_type import EnvironmentType
 from harbor_config.models.trial.config import EnvironmentConfig, VerifierConfig
 from omegaconf import DictConfig
 from shellbox.backends.daytona.machine import DaytonaMachineFactory, DaytonaNetworkMode, DaytonaNetworkPolicy
-from shellbox.backends.docker.machine import DockerMachineFactory
-from shellbox.machine import MachineFactory
+from shellbox.machine import Backend, MachineFactory
 from taskcompendium.models import NoGrader
 from rolloutengine.spec import LoweredTaskSpec, MachineRuntimeSpec
 from taskcompendium.grading_result import GradingFailure, Outcome
@@ -88,12 +86,8 @@ class HarborTaskSettings:
     def grader_override(self) -> NoGrader | None:
         return NoGrader(reason="Harbor verification is disabled") if self.verifier.disable else None
 
-    def machine_factory(self, runner_config: DictConfig) -> MachineFactory:
+    def machine_factory(self) -> MachineFactory:
         match self.environment.type:
-            case EnvironmentType.DOCKER:
-                return DockerMachineFactory(
-                    skopeo=Path(runner_config.skopeo), image_cache=Path(runner_config.image_cache).expanduser()
-                )
             case EnvironmentType.DAYTONA:
                 policy = self.environment.kwargs.get("network_policy")
                 return DaytonaMachineFactory(
@@ -121,7 +115,7 @@ class HarborTaskSettings:
                 for name in ("cpus", "memory_mb", "storage_mb", "gpus")
                 if (value := getattr(self.environment, f"override_{name}")) is not None
             }
-            if original.backend == "docker":
+            if original.backend == Backend.DOCKER:
                 updates["backend"] = HARBOR_MACHINE_BACKEND
             if original.startup_timeout is not None:
                 updates["startup_timeout"] = original.startup_timeout * self.timeout_multiplier

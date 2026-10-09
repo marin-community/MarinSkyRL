@@ -98,6 +98,7 @@ class NemotronTaskSession:
         self.task = task
         self.machine = machine
         self.config = parameters.config
+        self.judge_timeout = self.config.get("verifyit_judge_total_timeout_seconds", 120.0)
         self.blocking = BlockingOperations(executor)
         self.verifyit_enabled = bool(self.config.get("verifyit_enabled", False))
         self.grading = GradingMode(self.config.get("grading", GradingMode.VERIFY))
@@ -215,7 +216,7 @@ class NemotronTaskSession:
                 grade_session,
                 self.ipi_session,
                 thinking_incomplete=stop_reason == LENGTH_STOP_REASON,
-                timeout=self.config.get("verifyit_judge_total_timeout_seconds", 120.0),
+                timeout=self.judge_timeout,
             )
             diagnostics.update(details)
         elif self.agent == LEAN_AGENT:
@@ -329,7 +330,7 @@ class NemotronTaskSession:
                     self.record,
                     judge,
                     kind=kind,
-                    timeout_seconds=self.config.get("verifyit_judge_total_timeout_seconds", 120.0),
+                    timeout_seconds=self.judge_timeout,
                 )
             scorers = {
                 "abstention": grade_abstention,
