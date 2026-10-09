@@ -83,6 +83,7 @@ fi
 "$python" - <<'PY'
 import memray
 from daytona import Daytona, DaytonaConfig
+from harbor.literal.native_api import NativeAPILimits
 from harbor.literal.rollout_build import build_rollout_details_from_pairs
 from harbor.models.agent.context import AgentContext
 from harbor.models.environment_type import EnvironmentType

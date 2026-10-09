@@ -2053,7 +2053,7 @@ wheels = [
 [[package]]
 name = "harbor"
 version = "0.8.1"
-source = { git = "https://github.com/marin-community/harbor.git?rev=1675efa0f23c0033f0b5028ea42d56ae09f15115#1675efa0f23c0033f0b5028ea42d56ae09f15115" }
+source = { git = "https://github.com/marin-community/harbor.git?rev=436d0c92ed2fbb679438cd750e5fab3328153c31#436d0c92ed2fbb679438cd750e5fab3328153c31" }
 dependencies = [
     { name = "dirhash" },
     { name = "fastapi" },
@@ -2062,6 +2062,7 @@ dependencies = [
     { name = "huggingface-hub", version = "1.32.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux' or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "jinja2" },
     { name = "litellm" },
+    { name = "orjson" },
     { name = "packaging" },
     { name = "pathspec" },
     { name = "pydantic" },
@@ -3144,7 +3145,7 @@ requires-dist = [
     { name = "flashinfer-python", marker = "sys_platform == 'linux' and extra == 'vllm'", specifier = "==0.6.18.post1" },
     { name = "fsspec", specifier = ">=2024.0.0" },
     { name = "func-timeout" },
-    { name = "harbor", extras = ["analysis", "datasets", "daytona"], marker = "sys_platform == 'linux' and extra == 'vllm'", git = "https://github.com/marin-community/harbor.git?rev=1675efa0f23c0033f0b5028ea42d56ae09f15115" },
+    { name = "harbor", extras = ["analysis", "datasets", "daytona"], marker = "sys_platform == 'linux' and extra == 'vllm'", git = "https://github.com/marin-community/harbor.git?rev=436d0c92ed2fbb679438cd750e5fab3328153c31" },
     { name = "harbor-config", marker = "sys_platform == 'linux' and extra == 'cuda'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-70a9fcaa9f6b4bb5eadecf32ee5e1de644ad91af/harbor_config-0.1.0-py3-none-any.whl" },
     { name = "harbor-config", marker = "sys_platform == 'linux' and extra == 'megatron'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-70a9fcaa9f6b4bb5eadecf32ee5e1de644ad91af/harbor_config-0.1.0-py3-none-any.whl" },
     { name = "harbor-config", marker = "sys_platform == 'linux' and extra == 'vllm'", url = "https://github.com/marin-community/harbor/releases/download/harbor-config-70a9fcaa9f6b4bb5eadecf32ee5e1de644ad91af/harbor_config-0.1.0-py3-none-any.whl" },
@@ -3266,7 +3267,7 @@ docs = [
     { name = "sphinx-copybutton", specifier = ">=0.5.0" },
     { name = "sphinx-rtd-theme", specifier = ">=2.0.0" },
 ]
-harbor-test = [{ name = "harbor", git = "https://github.com/marin-community/harbor.git?rev=1675efa0f23c0033f0b5028ea42d56ae09f15115" }]
+harbor-test = [{ name = "harbor", git = "https://github.com/marin-community/harbor.git?rev=436d0c92ed2fbb679438cd750e5fab3328153c31" }]
 
 [[package]]
 name = "markdown"

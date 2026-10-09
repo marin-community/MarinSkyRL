@@ -109,6 +109,7 @@ def _fake_frozen_runtime(
         "class VerifierConfig: pass\n",
     )
     _write_module(site_packages, "harbor/models/trial/result.py", "class TrialResult: pass\n")
+    _write_module(site_packages, "harbor/literal/native_api.py", "class NativeAPILimits: pass\n")
     _write_module(
         site_packages,
         "harbor/literal/rollout_build.py",
@@ -248,6 +249,7 @@ def test_bootstrap_exposes_cuda_linker_compatibility_paths(tmp_path: Path) -> No
     [
         ("daytona.py", "No module named 'daytona'"),
         ("harbor/utils/traces_utils.py", "harbor.utils.traces_utils"),
+        ("harbor/literal/native_api.py", "harbor.literal.native_api"),
         ("memray.py", "No module named 'memray'"),
         ("megatron/bridge", "megatron.bridge"),
         ("transformer_engine/common", "transformer_engine.common"),
