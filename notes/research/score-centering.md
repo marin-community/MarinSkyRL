@@ -45,4 +45,6 @@ OMP_NUM_THREADS=1 uv run --frozen --no-sync pytest -n 0 -q \
 uv run infra/pre-commit.py --changed-files --fix
 ```
 
-These checks cover numerical values and gradients, modeled tails and tiny masses, masked sentinels, loss reductions, THINK weights, microbatch/DP partitioning, evidence serialization, token alignment, and output construction before pipeline filtering. Scoring uses a real one-rank CPU Gloo group; the external Megatron model, scheduler and pipeline ranks are simulated. The pipeline check reproduces worker output assembly with the real container and collector. It is not a GPU peak-memory measurement or hardware qualification.
+The compact suite checks a dense PPO/TIS value and gradient reference through the training closure, chosen/candidate normalization with token alignment, evidence collation and local serialization through microbatching, and the two-row pipeline output regression. The [full earlier suite at `5872b106`](https://github.com/marin-community/MarinSkyRL/tree/research/score-centering-tests-full-20261009-01a0bb6f) retains the reduction/batching matrix, disabled-path coverage and numerical edge cases. Runtime code and declared support are unchanged.
+
+Scoring uses a real one-rank CPU Gloo group; the external Megatron model, scheduler and pipeline ranks are simulated. The pipeline check reproduces worker output assembly with the real container and collector. These checks establish no GPU peak-memory measurement or hardware qualification.
