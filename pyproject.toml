@@ -89,6 +89,7 @@ vllm = [
     "accelerate>=1.14,<2 ; sys_platform == 'linux'",
     "flashinfer-cubin==0.6.18.post1 ; sys_platform == 'linux'",
     "flashinfer-python==0.6.18.post1 ; sys_platform == 'linux'",
+    "harbor[analysis,datasets,daytona] ; sys_platform == 'linux'",
     "peft>=0.19 ; sys_platform == 'linux'",
     "quack-kernels==0.6.4 ; sys_platform == 'linux'",
     "runai-model-streamer[gcs,s3]==0.16.1 ; sys_platform == 'linux'",
@@ -182,8 +183,6 @@ no-build-isolation-package = [
     "transformer-engine-torch",
 ]
 override-dependencies = [
-    "marin-rigging[secrets,prometheus]==0.2.144.dev37540375919",
-    "harbor-config @ git+https://github.com/marin-community/harbor@6b2e76e1dae5c084eed05edefefffcec8c0c1ad9#subdirectory=packages/harbor-config",
     # Megatron Bridge declares this native extension but does not import or use it.
     "fast-hadamard-transform ; sys_platform == 'never'",
     "nvidia-resiliency-ext ; sys_platform == 'never'",
@@ -245,7 +244,6 @@ causal-conv1d = [
 mamba-ssm = [
     { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-torch2.13-20260910-6d12d7a0/mamba_ssm-2.3.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
 ]
-harbor-config = { git = "https://github.com/marin-community/harbor", rev = "6b2e76e1dae5c084eed05edefefffcec8c0c1ad9", subdirectory = "packages/harbor-config" }
 
 [[tool.uv.index]]
 name = "pytorch-cpu"

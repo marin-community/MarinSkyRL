@@ -98,6 +98,7 @@ def test_rollout_runtime_resolves_harbor_main_into_the_frozen_lock() -> None:
     harbor = next(package for package in lock["package"] if package["name"] == "harbor")
     assert harbor["source"]["git"].startswith("https://github.com/marin-community/harbor.git#")
     assert len(harbor["source"]["git"].rsplit("#", 1)[-1]) == 40
+    assert all(package["name"] != "harbor-config" for package in lock["package"])
 
 
 def _exported_requirements(extras: tuple[str, ...]) -> list[Requirement]:
