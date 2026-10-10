@@ -7,7 +7,6 @@ import threading
 
 import numpy as np
 import pytest
-from harbor_config.errors import ErrorCategory, error_category
 from jinja2 import Environment, StrictUndefined
 from skyrl_gym.task_records import fold_grades, grade_result
 from skyrl_gym.task_sessions import AnswerTaskSession
@@ -18,6 +17,7 @@ from skyrl_train.rollouts.task_projections import StepTaskProjection, WholeTaskP
 from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection, WholeTrajectoryProjection
 from skyrl_train.rollouts.buffer import RolloutLease, RolloutTask
 from skyrl_train.rollouts.task_worker import TaskRolloutWorker
+from skyrl_train.utils.harbor_errors import ErrorCategory, error_category
 from skyrl_gym.source_task import source_task
 from tests.cpu.task_specs import lowered_task
 from rolloutengine.contracts import RolloutContractError, SessionStart, Transition

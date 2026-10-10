@@ -11,7 +11,6 @@ from typing import Any
 from uuid import uuid4
 
 from jinja2 import TemplateError
-from harbor_config.models.environment_type import EnvironmentType
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from shellbox.backends.docker.machine import DockerMachineFactory
@@ -51,6 +50,7 @@ from skyrl_train.rollouts.harbor_tasks import (
     harbor_grading_failure,
     shape_harbor_rollouts,
 )
+from skyrl_train.rollouts.harbor_settings import EnvironmentType
 from skyrl_train.rollouts.machines import OwnedMachineFactory, TaskMachineError
 from skyrl_train.rollouts.workers import WorkerShard, detached_config
 from skyrl_train.rollouts.finalization import finalize_trajectory_batch, propagate_data_sources

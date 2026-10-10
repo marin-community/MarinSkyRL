@@ -10,8 +10,6 @@ from typing import Any
 
 from loguru import logger
 from transformers import PreTrainedTokenizerBase
-from taskcompendium.importers.harbor import harbor_task
-from harbor_config.models.task.config import EnvironmentConfig, TaskConfig
 from rolloutengine.lowering import SHELLBOX_SESSION
 from rolloutengine.spec import LoweredTaskSpec, MachineRuntimeSpec, TaskRuntimeSpec, TaskSessionSpec
 from shellbox.machine import Backend, NetworkPolicy
@@ -20,6 +18,7 @@ from taskcompendium.models import NoGrader, ScriptGrader, Source, TaskSpec, Veri
 from marinskyrl.packed_tasks import PackedTaskMaterializer, PackedTaskReference, select_task_references
 from marinskyrl.task_sources import DirectoryDataSource, TaskTroveParquetSource, data_source
 from skyrl_train.dataset.tasks import LOWERED_TASK_COLUMN, TaskDataset, cache_tasks
+from skyrl_train.dataset.harbor_package import EnvironmentConfig, TaskConfig, harbor_task
 
 MATERIALIZATION_BATCH_SIZE = 64
 HARBOR_ID_PREFIX = "harbor-id:"

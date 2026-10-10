@@ -1,8 +1,8 @@
 # Unified verification
 
-SkyRL task sessions use [verifyit](https://github.com/marin-community/marin/tree/main/lib/verifyit),
+SkyRL task sessions use [Verifyit](https://github.com/marin-community/marin/tree/main/lib/verifyit),
 Marin's shared verifier package, and retain source-specific response extraction and reward policy.
-The dependency is pinned in the root and standalone package manifests.
+The `marin-verifyit` PyPI release is selected by the root and standalone lockfiles.
 SkyRL pins math-verify for reproducible answer parsing.
 
 ## Install and reproduce

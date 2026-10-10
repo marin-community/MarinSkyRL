@@ -13,12 +13,7 @@ from skyrl_train.utils.harbor_errors import (
     retry_excluded_exception_types,
 )
 
-from harbor_config.models.trial.config import (
-    EnvironmentConfig,
-    VerifierConfig,
-)
-from harbor_config.models.job.config import RetryConfig
-from harbor_config.models.environment_type import EnvironmentType
+from skyrl_train.rollouts.harbor_settings import EnvironmentConfig, EnvironmentType, RetryConfig, VerifierConfig
 
 
 @dataclass
@@ -183,7 +178,7 @@ REWARD_SHAPING_SCHEMA = SectionSchema(
 # - "mask" exceptions: Excluded from baseline (neutral - infrastructure failures)
 # - "zero" exceptions: Included in baseline with reward=0 (agent failures)
 #
-# Default classification comes from the pinned harbor-config taxonomy. Lists
+# Default classification comes from SkyRL's Harbor error taxonomy. Lists
 # here are explicit campaign overrides and therefore default empty.
 ERROR_HANDLING_SCHEMA = SectionSchema(
     fields={

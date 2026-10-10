@@ -11,7 +11,7 @@ version = "0.1.0"
 description = "Marin's typed launcher and RL training runtime"
 requires-python = "==3.12.*"
 dependencies = [
-    "verifyit[answer,schema,reasoning-gym,judge] @ git+https://github.com/marin-community/marin.git@2ef4786903053025ca7fcee40ea76476276ca872#subdirectory=lib/verifyit",
+    "marin-verifyit[math,schema,reasoning-gym,judge]",
     "aiohttp>=3.13.3",
     "boto3",
     "datasets>=4.0.0",
@@ -20,7 +20,6 @@ dependencies = [
     "filelock>=3.16",
     "fsspec>=2024.0.0",
     "func_timeout",
-    "harbor-config @ git+https://github.com/marin-community/harbor@6b2e76e1dae5c084eed05edefefffcec8c0c1ad9#subdirectory=packages/harbor-config",
     "hf_transfer",
     "huggingface-hub>=0.34.0",
     "ijson>=3.5",
@@ -36,8 +35,8 @@ dependencies = [
     "marin-iris>=0.2.144.dev37540375919",
     "marin-iris-native",
     "marin-rigging[secrets]>=0.2.144.dev37540375919",
-    "marin-rolloutengine @ git+https://github.com/marin-community/marin.git@2ef4786903053025ca7fcee40ea76476276ca872#subdirectory=lib/rolloutengine",
-    "marin-shellbox[daytona,shellsim] @ git+https://github.com/marin-community/marin.git@2ef4786903053025ca7fcee40ea76476276ca872#subdirectory=lib/shellbox",
+    "marin-rolloutengine",
+    "marin-shellbox[daytona,shellsim]",
     "ninja",
     "nvidia-ml-py",
     "omegaconf",
@@ -54,7 +53,7 @@ dependencies = [
     "s3fs",
     "smart_open",
     "tensorboard",
-    "taskcompendium @ git+https://github.com/marin-community/marin.git@2ef4786903053025ca7fcee40ea76476276ca872#subdirectory=lib/taskcompendium",
+    "marin-taskcompendium",
     "tqdm>=4.66",
     "tokenizers==0.23.1",
     "transformers==5.16.1",
@@ -177,13 +176,12 @@ environments = [
     "sys_platform == 'linux' and platform_machine == 'x86_64'",
     "sys_platform == 'linux' and platform_machine == 'aarch64'",
 ]
+required-environments = ["sys_platform == 'darwin' and platform_machine == 'arm64'"]
 no-build-isolation-package = [
     "transformer-engine",
     "transformer-engine-torch",
 ]
 override-dependencies = [
-    "marin-rigging[secrets,prometheus]==0.2.144.dev37540375919",
-    "harbor-config @ git+https://github.com/marin-community/harbor@6b2e76e1dae5c084eed05edefefffcec8c0c1ad9#subdirectory=packages/harbor-config",
     # Megatron Bridge declares this native extension but does not import or use it.
     "fast-hadamard-transform ; sys_platform == 'never'",
     "nvidia-resiliency-ext ; sys_platform == 'never'",
@@ -245,7 +243,6 @@ causal-conv1d = [
 mamba-ssm = [
     { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-torch2.13-20260910-6d12d7a0/mamba_ssm-2.3.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
 ]
-harbor-config = { git = "https://github.com/marin-community/harbor", rev = "6b2e76e1dae5c084eed05edefefffcec8c0c1ad9", subdirectory = "packages/harbor-config" }
 
 [[tool.uv.index]]
 name = "pytorch-cpu"

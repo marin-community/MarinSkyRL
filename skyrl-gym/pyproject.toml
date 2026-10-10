@@ -14,10 +14,10 @@ readme = "README.md"
 requires-python = ">=3.12,<3.14"
 
 dependencies = [
-    "marin-rolloutengine @ git+https://github.com/marin-community/marin.git@2ef4786903053025ca7fcee40ea76476276ca872#subdirectory=lib/rolloutengine",
-    "marin-shellbox @ git+https://github.com/marin-community/marin.git@2ef4786903053025ca7fcee40ea76476276ca872#subdirectory=lib/shellbox",
-    "taskcompendium @ git+https://github.com/marin-community/marin.git@2ef4786903053025ca7fcee40ea76476276ca872#subdirectory=lib/taskcompendium",
-    "verifyit[answer,schema,reasoning-gym,judge] @ git+https://github.com/marin-community/marin.git@2ef4786903053025ca7fcee40ea76476276ca872#subdirectory=lib/verifyit",
+    "marin-rolloutengine",
+    "marin-shellbox",
+    "marin-taskcompendium",
+    "marin-verifyit[math,schema,reasoning-gym,judge]",
     "func_timeout",
     "loguru",
     "numpy",
@@ -48,10 +48,6 @@ dev = [
 
 [tool.ruff]
 line-length = 120
-
-[tool.uv]
-# Select a published package instead of the enclosing Git workspace.
-override-dependencies = ["marin-rigging>=0.2.144.dev37540375919"]
 
 [tool.ruff.lint]
 ignore = [
