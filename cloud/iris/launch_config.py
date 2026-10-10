@@ -15,7 +15,7 @@ from skyrl_train.config.mismatch_probe import validate_mismatch_probe_config
 from skyrl_train.config.objective_spec import validate_objective
 
 from cloud.iris.ray_storage import RaySpillBackend, resolve_ray_spill_target
-from cloud.iris.role_plan import derive_num_nodes, derive_role_plan
+from cloud.iris.role_plan import derive_num_nodes, derive_policy_export_role_plan, derive_role_plan
 from cloud.iris.rl_config_translation import (
     RL_ENTRYPOINTS,
     RLEntrypoint,
@@ -267,15 +267,15 @@ def _validate_inputs(inputs: dict[str, Any]) -> None:
 
 
 def validate_iris_allocation(config: dict[str, Any]) -> IrisAllocationConfig:
-    """Validate explicit Iris resources against the canonical SkyRL role plan."""
+    """Validate explicit Iris resources against the launch mode's active roles."""
     skyrl = config["skyrl"]
     if not isinstance(skyrl, dict):
         raise TypeError("skyrl must be a mapping")
-    plan = derive_role_plan(skyrl)
+    checkpoint_export = config["run"]["mode"] == RunMode.CHECKPOINT_EXPORT
+    plan = derive_policy_export_role_plan(skyrl) if checkpoint_export else derive_role_plan(skyrl)
     allocation = config["iris"]["allocation"]
     policy = plan.claim("policy")
-    checkpoint_export = config["run"]["mode"] == RunMode.CHECKPOINT_EXPORT
-    expected_nodes = policy.num_nodes if checkpoint_export else derive_num_nodes(plan)
+    expected_nodes = derive_num_nodes(plan)
     if allocation["num_nodes"] != expected_nodes:
         raise ValueError(
             f"iris.allocation.num_nodes={allocation['num_nodes']} does not match SkyRL role plan's "

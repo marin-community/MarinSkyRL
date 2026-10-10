@@ -221,6 +221,23 @@ def _role_plan_values(config: dict[str, Any]) -> _RolePlanValues:
     )
 
 
+def _policy_claim(config: dict[str, Any], values: _RolePlanValues) -> ModelRoleClaim:
+    return ModelRoleClaim(
+        role_id=ModelRoleKind.POLICY.value,
+        kind=ModelRoleKind.POLICY,
+        execution=RoleExecution.LOCAL,
+        backend=derive_strategy(config) or RuntimeProfile.MEGATRON.value,
+        colocation_group=ALL_ROLES_COLOCATION_GROUP if values.colocate_all else ModelRoleKind.POLICY.value,
+        num_nodes=values.policy_num_nodes,
+        gpus_per_node=values.policy_num_gpus_per_node,
+        replicas=values.policy_num_nodes * values.policy_num_gpus_per_node,
+        tensor_parallel_size=1,
+        pipeline_parallel_size=1,
+        data_parallel_size=values.policy_num_nodes * values.policy_num_gpus_per_node,
+        expert_parallel_size=1,
+    )
+
+
 def _core_model_claims(config: dict[str, Any], values: _RolePlanValues) -> list[ModelRoleClaim]:
     placement = _at(config, "trainer.placement")
     use_reference = reference_model_required(_at(config, "trainer.algorithm"))
@@ -230,23 +247,9 @@ def _core_model_claims(config: dict[str, Any], values: _RolePlanValues) -> list[
     ref_num_gpus_per_node = int(placement.get("ref_num_gpus_per_node") or values.policy_num_gpus_per_node)
 
     shared_group = ALL_ROLES_COLOCATION_GROUP
-    policy_group = shared_group if values.colocate_all else ModelRoleKind.POLICY.value
-    claims = [
-        ModelRoleClaim(
-            role_id=ModelRoleKind.POLICY.value,
-            kind=ModelRoleKind.POLICY,
-            execution=RoleExecution.LOCAL,
-            backend=strategy,
-            colocation_group=policy_group,
-            num_nodes=values.policy_num_nodes,
-            gpus_per_node=values.policy_num_gpus_per_node,
-            replicas=values.policy_num_nodes * values.policy_num_gpus_per_node,
-            tensor_parallel_size=1,
-            pipeline_parallel_size=1,
-            data_parallel_size=values.policy_num_nodes * values.policy_num_gpus_per_node,
-            expert_parallel_size=1,
-        )
-    ]
+    policy = _policy_claim(config, values)
+    policy_group = policy.colocation_group
+    claims = [policy]
     if use_reference:
         reference_group = (
             policy_group if values.colocate_all or values.colocate_policy_ref else ModelRoleKind.REFERENCE.value
@@ -395,10 +398,19 @@ def derive_role_plan(config: dict[str, Any]) -> SkyRLRolePlan:
         claims.append(_rollout_claim(config, values))
     claims.extend(_teacher_claims(config))
     claims.extend(_draft_trainer_claims(config, values))
-    bundles = _physical_bundles(tuple(claims))
+    return _role_plan(tuple(claims), values)
+
+
+def derive_policy_export_role_plan(config: dict[str, Any]) -> SkyRLRolePlan:
+    """Derive only the saved policy's footprint for checkpoint conversion."""
+    values = _role_plan_values(config)
+    return _role_plan((_policy_claim(config, values),), values)
+
+
+def _role_plan(claims: tuple[ModelRoleClaim, ...], values: _RolePlanValues) -> SkyRLRolePlan:
     return SkyRLRolePlan(
-        claims=tuple(claims),
-        bundles=bundles,
+        claims=claims,
+        bundles=_physical_bundles(claims),
         train_batch_size=values.train_batch_size,
         policy_mini_batch_size=values.policy_mini_batch_size,
         micro_train_batch_size_per_gpu=values.micro_train_batch_size_per_gpu,
