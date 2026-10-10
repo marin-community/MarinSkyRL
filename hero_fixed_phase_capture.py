@@ -50,4 +50,3 @@ def install(helper, output, client_factory, locate):
         locate=locate,
         update_indices=count(),
     )
-
