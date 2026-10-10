@@ -1,71 +1,11 @@
-from collections.abc import Iterable
 from dataclasses import dataclass, field
-from enum import StrEnum
+from collections.abc import Iterable
 from typing import Any, Mapping
 
+from harbor_config.errors import ErrorCategory, error_category, errors_by_category, known_error_types
 from loguru import logger
 
 from skyrl_train.error_treatment import ErrorTreatment
-
-
-class ErrorCategory(StrEnum):
-    INFRASTRUCTURE = "infrastructure"
-    AGENT = "agent"
-    PASSTHROUGH = "passthrough"
-    UNKNOWN = "unknown"
-
-
-# Persisted exception names from the Harbor revision in uv.lock. The Harbor
-# integration test compares this snapshot with that revision's taxonomy.
-_ERROR_CATEGORIES: dict[str, ErrorCategory] = {
-    "ContextManagementInfrastructureError": ErrorCategory.INFRASTRUCTURE,
-    "ArtifactUploadTimeoutError": ErrorCategory.INFRASTRUCTURE,
-    "ArtifactWriterBacklogError": ErrorCategory.INFRASTRUCTURE,
-    "EnvironmentStartTimeoutError": ErrorCategory.INFRASTRUCTURE,
-    "TrialTimeoutError": ErrorCategory.INFRASTRUCTURE,
-    "SandboxBuildFailedError": ErrorCategory.INFRASTRUCTURE,
-    "SnapshotQuotaExceeded": ErrorCategory.INFRASTRUCTURE,
-    "HealthcheckError": ErrorCategory.INFRASTRUCTURE,
-    "DaytonaSandboxStopError": ErrorCategory.INFRASTRUCTURE,
-    "BridgeOutageError": ErrorCategory.INFRASTRUCTURE,
-    "EnrootMemoryLimitExceededError": ErrorCategory.INFRASTRUCTURE,
-    "MissingExtraError": ErrorCategory.INFRASTRUCTURE,
-    "AgentKilledBySignalError": ErrorCategory.INFRASTRUCTURE,
-    "AgentSetupTimeoutError": ErrorCategory.INFRASTRUCTURE,
-    "ModelAuthenticationError": ErrorCategory.INFRASTRUCTURE,
-    "ContextBudgetExceededError": ErrorCategory.INFRASTRUCTURE,
-    "LLMRequestTimeoutError": ErrorCategory.INFRASTRUCTURE,
-    "OpenAITransportConnectTimeoutError": ErrorCategory.INFRASTRUCTURE,
-    "TmuxBatchProtocolError": ErrorCategory.INFRASTRUCTURE,
-    "TmuxCommandError": ErrorCategory.INFRASTRUCTURE,
-    "TmuxSessionEndedError": ErrorCategory.INFRASTRUCTURE,
-    "DownloadVerifierDirError": ErrorCategory.INFRASTRUCTURE,
-    "RewardFileNotFoundError": ErrorCategory.INFRASTRUCTURE,
-    "RewardFileEmptyError": ErrorCategory.INFRASTRUCTURE,
-    "VerifierRuntimeError": ErrorCategory.INFRASTRUCTURE,
-    "VerifierOutputParseError": ErrorCategory.INFRASTRUCTURE,
-    "AddTestsDirError": ErrorCategory.INFRASTRUCTURE,
-    "AgentTimeoutError": ErrorCategory.AGENT,
-    "ContextLengthExceededError": ErrorCategory.AGENT,
-    "NonZeroAgentExitCodeError": ErrorCategory.AGENT,
-    "OutputLengthExceededError": ErrorCategory.PASSTHROUGH,
-    "TurnCapExhaustedError": ErrorCategory.PASSTHROUGH,
-    "TrialNotScoredError": ErrorCategory.UNKNOWN,
-    "VerificationNotCompletedError": ErrorCategory.UNKNOWN,
-    "VerifierTimeoutError": ErrorCategory.UNKNOWN,
-}
-
-
-def error_category(exception_type: str) -> ErrorCategory:
-    return _ERROR_CATEGORIES.get(exception_type, ErrorCategory.UNKNOWN)
-
-
-def errors_by_category(category: ErrorCategory) -> frozenset[str]:
-    return frozenset(name for name, value in _ERROR_CATEGORIES.items() if value is category)
-
-
-def known_error_types() -> frozenset[str]:
-    return frozenset(_ERROR_CATEGORIES)
 
 
 AGENT_TIMEOUT_ERROR = "AgentTimeoutError"

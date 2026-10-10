@@ -183,7 +183,7 @@ REWARD_SHAPING_SCHEMA = SectionSchema(
 # - "mask" exceptions: Excluded from baseline (neutral - infrastructure failures)
 # - "zero" exceptions: Included in baseline with reward=0 (agent failures)
 #
-# Default classification comes from SkyRL's Harbor error taxonomy. Lists
+# Default classification comes from the pinned harbor-config taxonomy. Lists
 # here are explicit campaign overrides and therefore default empty.
 ERROR_HANDLING_SCHEMA = SectionSchema(
     fields={

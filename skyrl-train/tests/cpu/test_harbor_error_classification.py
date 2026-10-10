@@ -1,33 +1,18 @@
-import importlib
-
 from omegaconf import OmegaConf
 import pytest
+from harbor_config.errors import ErrorCategory, errors_by_category, known_error_types
 
 from skyrl_train.config.objective_spec import rollout_logprobs_required
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.utils.harbor_errors import (
     ErrorHandlingConfig,
-    ErrorCategory,
     ErrorTreatment,
     PASSTHROUGH_WITHOUT_LOGPROBS_ERROR,
     classify_exception_type,
-    error_category,
-    errors_by_category,
-    known_error_types,
     passthrough_logprob_error_type,
     retry_excluded_exception_types,
     treatment_excludes_from_baseline,
 )
-
-
-def test_local_taxonomy_matches_pinned_harbor_runtime():
-    pytest.importorskip("harbor")
-    harbor_taxonomy = importlib.import_module("harbor_config.errors")
-    names = known_error_types() | harbor_taxonomy.known_error_types()
-
-    assert {name: error_category(name).value for name in names} == {
-        name: harbor_taxonomy.error_category(name).value for name in names
-    }
 
 
 def test_error_handling_mapping_is_validated_at_config_boundary():

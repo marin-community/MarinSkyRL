@@ -89,7 +89,7 @@ vllm = [
     "accelerate>=1.14,<2 ; sys_platform == 'linux'",
     "flashinfer-cubin==0.6.18.post1 ; sys_platform == 'linux'",
     "flashinfer-python==0.6.18.post1 ; sys_platform == 'linux'",
-    "harbor[analysis,datasets,daytona] ; sys_platform == 'linux'",
+    "harbor[analysis,datasets] ; sys_platform == 'linux'",
     "peft>=0.19 ; sys_platform == 'linux'",
     "quack-kernels==0.6.4 ; sys_platform == 'linux'",
     "runai-model-streamer[gcs,s3]==0.16.1 ; sys_platform == 'linux'",
@@ -195,6 +195,7 @@ override-dependencies = [
     "opentelemetry-api ; sys_platform != 'linux'",
 ]
 constraint-dependencies = [
+    "gcsfs==2026.4.0",
     "botocore==1.42.97 ; sys_platform == 'linux'",
     "boto3==1.42.97 ; sys_platform == 'linux'",
     "s3transfer==0.16.1 ; sys_platform == 'linux'",
