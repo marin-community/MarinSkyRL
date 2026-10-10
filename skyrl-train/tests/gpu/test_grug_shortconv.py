@@ -59,6 +59,22 @@ def test_sequence_parallel_shortconv_matches_unsharded_gradients(tmp_path, dtype
     mp.spawn(_sequence_parallel_convolution, args=(f"file://{tmp_path / 'rendezvous'}", dtype), nprocs=2, join=True)
 
 
+def _assert_bf16_gradient_rounding(actual, expected, sum_abs_terms, bf16_rounds, fp32_rounds):
+    # Standard accumulation bound gamma(n) = n*u/(1-n*u), where u is half
+    # the dtype's epsilon. Relative error alone fails near cancellation.
+    bf16_u = torch.finfo(torch.bfloat16).eps / 2
+    fp32_u = torch.finfo(torch.float32).eps / 2
+    factor = bf16_rounds * bf16_u / (1 - bf16_rounds * bf16_u)
+    factor += fp32_rounds * fp32_u / (1 - fp32_rounds * fp32_u)
+    bound = factor * sum_abs_terms
+    difference = (actual.float() - expected.float()).abs()
+    assert not (difference > bound).any().item(), {
+        "max_abs_error": difference.max().item(),
+        "max_bound": bound.max().item(),
+        "violations": (difference > bound).sum().item(),
+    }
+
+
 def _context_parallel_convolution(rank, world_size, rendezvous, dtype):
     from skyrl_train.models.grug_shortconv import causal_short_conv
 
@@ -92,9 +108,28 @@ def _context_parallel_convolution(rank, world_size, rendezvous, dtype):
         dist.all_reduce(local_weight.grad)
         (reference * probe).sum().backward()
         torch.testing.assert_close(actual, reference[indices], rtol=0, atol=0)
-        tolerance = {"rtol": 1e-5, "atol": 1e-5} if dtype == torch.float32 else {}
-        torch.testing.assert_close(local_input.grad, full_input.grad[indices], **tolerance)
-        torch.testing.assert_close(local_weight.grad, weight.grad, **tolerance)
+        if dtype == torch.float32:
+            torch.testing.assert_close(local_input.grad, full_input.grad[indices], rtol=1e-5, atol=1e-5)
+            torch.testing.assert_close(local_weight.grad, weight.grad, rtol=1e-5, atol=1e-5)
+            return
+        dx_terms = torch.zeros_like(full_input, dtype=torch.float32)
+        dw_terms = torch.zeros_like(weight, dtype=torch.float32)
+        offset = 0
+        for length in lengths:
+            document = full_input.detach()[offset : offset + length].float()
+            upstream = probe[offset : offset + length].float()
+            for tap in range(4):
+                products = upstream[tap:] * weight.detach()[tap].float()
+                dx_terms[offset : offset + length - tap] += products.abs()
+                dw_terms[tap] += (document[: length - tap] * upstream[tap:]).abs().sum(dim=(0, 1))
+            offset += length
+        # For width4/CP<=4, each input has at most three chunk contributors.
+        # Eight rounds cover chunk casts, halo reduction, local accumulation
+        # and the reference cast. Weight gradients have sixteen chunk partials
+        # over two documents; twenty-four rounds cover their casts/reductions.
+        # The FP32 budgets also include the reference's at most96 product terms.
+        _assert_bf16_gradient_rounding(local_input.grad, full_input.grad[indices], dx_terms[indices], 8, 8)
+        _assert_bf16_gradient_rounding(local_weight.grad, weight.grad, dw_terms, 24, 192)
     finally:
         dist.destroy_process_group()
 
