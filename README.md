@@ -32,7 +32,8 @@ The repository root builds one `marinskyrl` wheel containing the typed Iris laun
 
 Runtime libraries published from `marin-community/marin` resolve as `marin-*` packages from PyPI. Run
 `uv lock` at the root and `uv lock --project skyrl-gym` when taking a new release; the frozen installs below
-then use those versions. The vLLM profile and Harbor test group install Harbor for their runtime imports.
+then use those versions. Raise the relevant `marin-*` minimum in `pyproject.toml` when new code needs a
+new release, and commit both lockfiles. The optional `harbor-test` group installs Harbor for its tests.
 
 ```bash
 uv sync --frozen

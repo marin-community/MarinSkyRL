@@ -13,12 +13,7 @@ from skyrl_train.utils.harbor_errors import (
     retry_excluded_exception_types,
 )
 
-from harbor_config.models.trial.config import (
-    EnvironmentConfig,
-    VerifierConfig,
-)
-from harbor_config.models.job.config import RetryConfig
-from harbor_config.models.environment_type import EnvironmentType
+from skyrl_train.rollouts.harbor_settings import EnvironmentConfig, EnvironmentType, RetryConfig, VerifierConfig
 
 
 @dataclass

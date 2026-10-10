@@ -49,9 +49,6 @@ dev = [
 [tool.ruff]
 line-length = 120
 
-[tool.uv]
-prerelease = "allow"
-
 [tool.ruff.lint]
 ignore = [
     "F722"
