@@ -533,7 +533,9 @@ class MeasuredAsyncPPOExp(BasePPOExp):
 @ray.remote(num_cpus=1, max_retries=0)
 def run_entrypoint(cfg):
     import skyrl_train.workers.megatron.megatron_worker as worker_module
+    from hero_serving_runtime import install_serving_observer
 
+    install_serving_observer()
     source = os.environ["HERO_SOURCE"]
     output = os.environ["HERO_OUTPUT"]
     worker_module.PolicyWorker = measured_worker(source)
