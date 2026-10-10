@@ -283,7 +283,7 @@ explicit = true
 [tool.marin-style]
 checks = ["ruff-check", "ruff-format"]
 ruff_version = "0.14.3"
-include = ["marinskyrl/**", "skyrl-train/**", "skyrl-gym/**", "skyrl-tx/**", "cloud/**", "scripts/**"]
+include = ["marinskyrl/**", "skyrl-train/**", "skyrl-gym/**", "skyrl-tx/**", "cloud/**", "scripts/**", "hero_*.py", "task_runtime_identity.py", "trainer_*probe.py"]
 
 [tool.ruff]
 line-length = 120
