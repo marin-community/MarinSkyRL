@@ -6,6 +6,7 @@ expert_model_parallel_size: 1
 expert_tensor_parallel_size: null
 
 ddp_config:
+  use_distributed_optimizer: true
   grad_reduce_in_fp32: true
   overlap_grad_reduce: false
   overlap_param_gather: false
