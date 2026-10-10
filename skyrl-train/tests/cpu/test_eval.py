@@ -33,7 +33,7 @@ def dummy_config():
         VerificationResult.skipped("grading disabled"),
     ],
 )
-def test_eval_excludes_ungraded_trials_and_retains_verified_policy_zero(ungraded):
+def test_eval_verifier_metrics_exclude_ungraded_results_and_keep_policy_zero(ungraded):
     batch: TrajectoryBatch = {
         "response_ids": [[1], [2], [3]],
         "rewards": [1.0, 0.0, 0.0],
