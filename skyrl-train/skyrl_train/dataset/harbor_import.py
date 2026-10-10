@@ -3,15 +3,12 @@
 
 """Convert single-stage Harbor packages with prebuilt images to TaskSpec."""
 
+import tomllib
+from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
-from harbor_config.models.task.config import (
-    ArtifactConfig,
-    EnvironmentConfig,
-    TaskConfig,
-    TaskOS,
-    VerifierEnvironmentMode,
-)
+from pydantic import BaseModel, Field
 
 from taskcompendium.models import (
     AnswerType,
@@ -33,6 +30,70 @@ from taskcompendium.models import (
     VerifierArtifact,
 )
 from taskcompendium.runtime.resources import inline_resource
+
+class TaskOS(StrEnum):
+    LINUX = "linux"
+    WINDOWS = "windows"
+
+
+class VerifierEnvironmentMode(StrEnum):
+    SHARED = "shared"
+    SEPARATE = "separate"
+
+
+class EnvironmentConfig(BaseModel):
+    """Harbor task fields used to create SkyRL's task and machine specs."""
+
+    build_timeout_sec: float = 600.0
+    docker_image: str | None = None
+    os: TaskOS = TaskOS.LINUX
+    cpus: int | None = None
+    memory_mb: int | None = None
+    storage_mb: int | None = None
+    gpus: int | None = None
+    gpu_types: list[str] | None = None
+    tpu: dict[str, Any] | None = None
+    allow_internet: bool = True
+    mcp_servers: list[dict[str, Any]] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    skills_dir: str | None = None
+    healthcheck: dict[str, Any] | None = None
+    workdir: str | None = None
+
+
+class VerifierConfig(BaseModel):
+    timeout_sec: float = 600.0
+    env: dict[str, str] = Field(default_factory=dict)
+    user: str | int | None = None
+    environment_mode: VerifierEnvironmentMode | None = None
+    environment: EnvironmentConfig | None = None
+    collect: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class AgentConfig(BaseModel):
+    timeout_sec: float | None = None
+    user: str | int | None = None
+
+
+class ArtifactConfig(BaseModel):
+    source: str
+    destination: str | None = None
+    exclude: list[str] = Field(default_factory=list)
+
+
+class TaskConfig(BaseModel):
+    """Parse the subset of task.toml that SkyRL executes."""
+
+    verifier: VerifierConfig = Field(default_factory=VerifierConfig)
+    agent: AgentConfig = Field(default_factory=AgentConfig)
+    environment: EnvironmentConfig = Field(default_factory=EnvironmentConfig)
+    multi_step_reward_strategy: str | None = None
+    steps: list[dict[str, Any]] | None = None
+    artifacts: list[str | ArtifactConfig] = Field(default_factory=list)
+
+    @classmethod
+    def model_validate_toml(cls, contents: str) -> "TaskConfig":
+        return cls.model_validate(tomllib.loads(contents))
 
 ARTIFACTS_PATH = "/logs/artifacts"
 REWARD_PATH = "/logs/verifier"

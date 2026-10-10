@@ -26,7 +26,6 @@ from typing import Any, Optional
 from urllib.parse import unquote, urlparse
 
 import yaml
-from harbor_config.models.environment_type import EnvironmentType
 from iris.client.client import IrisClient, Job
 from iris.cluster.constraints import CLUSTER_CONSTRAINT_KEY, Constraint, ConstraintOp, infer_preemptible_constraint
 from iris.cluster.platforms.k8s.coreweave_topology import gpu_gang_coscheduling_level
@@ -52,6 +51,7 @@ from marinskyrl.resource_locator import (
     is_cloud_uri,
     join_resource_path,
 )
+from skyrl_train.rollouts.harbor_settings import EnvironmentType
 from cloud.iris.runtime_bundle import build_runtime_bundle
 from marinskyrl.environment_contract import (
     DEBUG_ARTIFACT_DIR_ENV,

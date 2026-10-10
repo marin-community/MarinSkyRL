@@ -49,10 +49,6 @@ dev = [
 [tool.ruff]
 line-length = 120
 
-[tool.uv]
-# Select a published package instead of the enclosing Git workspace.
-override-dependencies = ["marin-rigging>=0.2.144.dev37540375919"]
-
 [tool.ruff.lint]
 ignore = [
     "F722"

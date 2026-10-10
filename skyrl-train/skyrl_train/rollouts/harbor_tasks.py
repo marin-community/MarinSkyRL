@@ -4,10 +4,6 @@ from dataclasses import dataclass, replace
 from functools import partial
 import os
 
-from daytona import AsyncDaytona, DaytonaConfig
-from harbor_config.models.job.config import RetryConfig
-from harbor_config.models.environment_type import EnvironmentType
-from harbor_config.models.trial.config import EnvironmentConfig, VerifierConfig
 from omegaconf import DictConfig
 from shellbox.backends.daytona.machine import DaytonaMachineFactory, DaytonaNetworkMode, DaytonaNetworkPolicy
 from shellbox.machine import Backend, MachineFactory
@@ -15,6 +11,8 @@ from taskcompendium.models import NoGrader
 from rolloutengine.spec import LoweredTaskSpec, MachineRuntimeSpec
 from taskcompendium.grading_result import GradingFailure, Outcome
 from rolloutengine.contracts import RolloutData, RolloutFailure
+
+from skyrl_train.rollouts.harbor_settings import EnvironmentConfig, EnvironmentType, RetryConfig, VerifierConfig
 
 from skyrl_train.trajectory_runners.harbor.configuration import HarborConfigBuilder
 from skyrl_train.trajectory_runners.harbor.identity_aware_reward import (

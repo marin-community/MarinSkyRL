@@ -51,7 +51,7 @@ def test_base_dependencies_are_cpu_only(built_wheel: BuiltWheel) -> None:
     requirements = Parser().parsestr(built_wheel.metadata).get_all("Requires-Dist", [])
     base_requirements = {requirement.partition(";")[0].strip().split("[")[0].split()[0].lower() for requirement in requirements if "extra ==" not in requirement}
 
-    assert base_requirements.isdisjoint({"flash-attn", "torch", "transformer-engine", "vllm"})
+    assert base_requirements.isdisjoint({"flash-attn", "torch", "transformer-engine", "vllm", "harbor", "harbor-config"})
 
 
 def test_training_extras_publish_hardware_policy_and_rollout_requirements(built_wheel: BuiltWheel) -> None:
@@ -64,10 +64,11 @@ def test_training_extras_publish_hardware_policy_and_rollout_requirements(built_
     assert any(requirement.startswith("torch==") and "extra == 'cpu'" in requirement for requirement in requirements)
     assert any(requirement.startswith("torch==") and "extra == 'cuda'" in requirement for requirement in requirements)
     assert any(requirement.startswith("vllm==") and "extra == 'vllm'" in requirement for requirement in requirements)
-    rollout_requirements = {Requirement(value).name: Requirement(value) for value in requirements if "extra ==" not in value}
-    for name in ("marin-rolloutengine", "marin-taskcompendium", "marin-shellbox", "marin-verifyit", "harbor-config"):
-        assert rollout_requirements[name].url, f"The wheel must locate {name} without uv source overrides"
-    assert {"daytona", "shellsim"} <= rollout_requirements["marin-shellbox"].extras
+    marin_requirements = [Requirement(value) for value in requirements if "extra ==" not in value]
+    assert {"marin-rolloutengine", "marin-shellbox", "marin-taskcompendium", "marin-verifyit"} <= {
+        requirement.name for requirement in marin_requirements
+    }
+    assert all(requirement.url is None for requirement in marin_requirements if requirement.name.startswith("marin-"))
     assert any(requirement.startswith("torch==") and "extra == 'vllm'" in requirement for requirement in requirements)
     assert any(requirement.startswith("memray") and "extra == 'telemetry'" in requirement for requirement in requirements)
     assert any(
