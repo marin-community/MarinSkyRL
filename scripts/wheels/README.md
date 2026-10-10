@@ -5,7 +5,7 @@ CUDA 13.2.2. `native-cu132.txt` pins the build environment, including NVCC, NVRT
 CRT, NVVM and CCCL 13.2.86. Each resulting wheel needs runtime qualification
 before adoption.
 
-The recipes include Transformer Engine Torch 2.19, Megatron Core 0.19.2,
+The recipes include Transformer Engine Torch 2.20.2, Megatron Core 0.19.2,
 Megatron Bridge 0.6.2, FlashAttention 2.8.3.post1, causal-conv1d 1.7,
 Mamba 2.3.2.post1 and fast-hadamard-transform 1.1 from the stable GitHub tag
 `v1.1.0.post2`. Sources and recursive submodules

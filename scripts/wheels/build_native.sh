@@ -43,7 +43,7 @@ case "$package" in
         ;;
     transformer-engine-torch)
         repository=NVIDIA/TransformerEngine
-        source_commit=5e52befd5262c06289106338c308079d6adb391f
+        source_commit=6ea2a74a9e98c99e6d7b164a33775cc457520027
         source_subdir=transformer_engine/pytorch
         package_environment+=(NVTE_PYTORCH_FORCE_BUILD=TRUE NVTE_NO_LOCAL_VERSION=1 NVTE_BUILD_MAX_JOBS=1)
         max_jobs=1

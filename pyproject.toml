@@ -193,7 +193,7 @@ no-build-isolation-package = [
     "transformer-engine-torch",
 ]
 override-dependencies = [
-    "marin-rigging[secrets,prometheus]==0.2.144.dev37540375919",
+    "marin-rigging[secrets,prometheus]==0.2.158.dev37984346192",
 ]
 constraint-dependencies = [
     "opentelemetry-api==1.43.0",
