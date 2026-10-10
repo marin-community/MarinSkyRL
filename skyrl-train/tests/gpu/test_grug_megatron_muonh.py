@@ -15,7 +15,6 @@ from skyrl_train.distributed.megatron.grug_muonh import MegatronGrugMuonH
 from skyrl_train.distributed.megatron.optimizer import (
     get_megatron_optimizer,
     get_megatron_optimizer_param_scheduler,
-    _init_megatron_optim_config,
 )
 from torch import nn
 
@@ -78,7 +77,7 @@ def _recipe(**kwargs):
 
 
 def _optimizer(model, recipe):
-    optimizer = get_megatron_optimizer([model], _init_megatron_optim_config(recipe, {}), grug_optimizer_config=recipe)
+    optimizer = get_megatron_optimizer([model], recipe, {})
     scheduler = get_megatron_optimizer_param_scheduler(optimizer, OmegaConf.create(recipe), num_training_steps=3)
     return optimizer, scheduler
 
