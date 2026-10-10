@@ -128,7 +128,7 @@ def _assert_weights(actual, expected):
 def test_native_factory_matches_three_jax_steps_and_adam(distributed_parallel_state, offload_momentum):
     torch.manual_seed(17)
     model = _TinyGrug()
-    path = Path(__file__).parents[1] / "cpu/distributed/fixtures/grug_muonh_jax_golden.npz"
+    path = Path(__file__).parents[1] / "cpu/distributed/fixtures/grug_muonh_gqa_jax_golden.npz"
     with np.load(path, allow_pickle=False) as archive:
         golden = {name: torch.from_numpy(value.copy()).cuda() for name, value in archive.items() if "__" in name}
 
@@ -178,7 +178,7 @@ def test_native_factory_clips_all_routes_by_the_global_norm(distributed_parallel
         success, norm, _ = _step(optimizer, model)
         assert success
         assert norm > 1.0
-        assert norm == pytest.approx(expected_norm.item(), rel=1e-6)
+        assert norm.item() == pytest.approx(expected_norm.item(), rel=1e-6)
         _assert_weights(model, reference)
 
 
