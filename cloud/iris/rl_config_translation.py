@@ -622,6 +622,8 @@ _OPTIONAL_HYDRA_PATTERNS = {
     ".hf_hub_",
     ".enable_db_registration",
     ".optimizer_kwargs",
+    ".optimizer_config_kwargs",
+    ".ddp_config",
     ".rope_scaling",
     ".wrap_policy",
     ".transformer_config_kwargs",
