@@ -2,6 +2,7 @@ import asyncio
 from dataclasses import replace
 import io as stdlib_io
 import json
+import pickle
 import math
 import os
 import re
@@ -11,7 +12,6 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 from jaxtyping import Float
-from pathlib import Path
 import ray
 from ray import ObjectRef
 import torch
@@ -2541,12 +2541,23 @@ class RayPPOTrainer:
         return data
 
     def dump_data(self, data: TrainingInputBatch, file_name: str):
-        """
-        Dump data to pickle file
-        """
-        data_save_dir = Path(self.cfg.trainer.export_path) / "dumped_data"
-        data_save_dir.mkdir(parents=True, exist_ok=True)
-        data.save(data_save_dir / f"{file_name}.pkl")
+        """Retain aligned learner evidence without serializing unused tensor storage."""
+        source_batch_size = data.batch_size
+        rows = self.cfg.trainer.dump_data_batch_rows
+        if rows is not None:
+            if rows < 1:
+                raise ValueError("dump_data_batch_rows must be positive when set")
+            data = data.slice(0, rows)
+        else:
+            data = data.slice(0, source_batch_size)
+        data.metadata = {
+            **data.metadata,
+            "global_step": self.global_step,
+            "source_batch_size": source_batch_size,
+            "retained_row_indices": list(range(data.batch_size)),
+        }
+        path = join_resource_path(self.cfg.trainer.export_path, "dumped_data", f"{file_name}.pkl")
+        io.write_bytes_atomic(path, pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL))
 
     def pad_batch(self, training_input: TrainingInputBatch) -> TrainingInputBatch:
         """Pad the batch to be divisible by dp size"""
@@ -3256,6 +3267,9 @@ class RayPPOTrainer:
         except Exception as e:
             serialised = f'{{"_serialize_error": "{e}"}}'
         logger.info(f"WANDB_MIRROR kind={kind} step={step} metrics={serialised}")
+        if self.cfg.trainer.dump_data_batch:
+            path = join_resource_path(self.cfg.trainer.export_path, "training_metrics", f"{kind}-{step:08d}.json")
+            io.write_bytes_atomic(path, (serialised + "\n").encode())
         if self._training_metrics_enabled:
             record_training_metrics(values, step=step, kind=kind)
 

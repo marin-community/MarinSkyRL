@@ -351,6 +351,7 @@ trainer:
   logger: "wandb"
   tracker_commit_each_step: true
   dump_data_batch: false
+  dump_data_batch_rows: null
   dump_eval_results: true
   log_level: "INFO"
 
