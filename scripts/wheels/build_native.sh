@@ -29,18 +29,6 @@ case "$package" in
         source_patch=flash-attn.patch
         package_environment+=(FLASH_ATTENTION_FORCE_BUILD=TRUE FLASH_ATTN_LOCAL_VERSION= "FLASH_ATTN_CUDA_ARCHS=$cuda_architecture")
         ;;
-    causal-conv1d)
-        repository=Dao-AILab/causal-conv1d
-        source_commit=cd81f0413cad2fc1e6f17e785ac39f59aae690cd
-        source_patch=causal-conv1d.patch
-        package_environment+=(CAUSAL_CONV1D_FORCE_BUILD=TRUE "CAUSAL_CONV1D_LOCAL_VERSION=$native_local_version")
-        ;;
-    mamba-ssm)
-        repository=state-spaces/mamba
-        source_commit=a14b1dff0454a3bc27d9eb31355dc01e4b2490ec
-        source_patch=mamba-ssm.patch
-        package_environment+=(MAMBA_FORCE_BUILD=TRUE "MAMBA_LOCAL_VERSION=$native_local_version")
-        ;;
     transformer-engine-torch)
         repository=NVIDIA/TransformerEngine
         source_commit=6ea2a74a9e98c99e6d7b164a33775cc457520027
