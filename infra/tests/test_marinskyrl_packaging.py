@@ -65,8 +65,9 @@ def test_training_extras_publish_hardware_policy_and_rollout_requirements(built_
     assert any(requirement.startswith("torch==") and "extra == 'cuda'" in requirement for requirement in requirements)
     assert any(requirement.startswith("vllm==") and "extra == 'vllm'" in requirement for requirement in requirements)
     rollout_requirements = {Requirement(value).name: Requirement(value) for value in requirements if "extra ==" not in value}
-    for name in ("marin-rolloutengine", "taskcompendium", "marin-shellbox", "verifyit", "harbor-config"):
-        assert rollout_requirements[name].url, f"The wheel must locate {name} without uv source overrides"
+    for name in ("marin-rolloutengine", "marin-taskcompendium", "marin-shellbox", "marin-verifyit"):
+        assert rollout_requirements[name].url is None, f"The wheel must resolve {name} from PyPI"
+    assert rollout_requirements["harbor-config"].url
     assert {"daytona", "shellsim"} <= rollout_requirements["marin-shellbox"].extras
     assert any(requirement.startswith("torch==") and "extra == 'vllm'" in requirement for requirement in requirements)
     assert any(requirement.startswith("memray") and "extra == 'telemetry'" in requirement for requirement in requirements)

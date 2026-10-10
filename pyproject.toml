@@ -11,7 +11,7 @@ version = "0.1.0"
 description = "Marin's typed launcher and RL training runtime"
 requires-python = "==3.12.*"
 dependencies = [
-    "verifyit[answer,schema,reasoning-gym,judge] @ git+https://github.com/marin-community/marin.git@2ef4786903053025ca7fcee40ea76476276ca872#subdirectory=lib/verifyit",
+    "marin-verifyit[math,schema,reasoning-gym,judge]",
     "aiohttp>=3.13.3",
     "boto3",
     "datasets>=4.0.0",
@@ -31,13 +31,13 @@ dependencies = [
     "langdetect==1.0.9",
     "loguru",
     "marin-finelog",
-    "marin-finelog-server",
+    "marin-finelog-server ; sys_platform == 'linux'",
     "marin-finestore>=0.2.135.dev36906221286",
     "marin-iris>=0.2.144.dev37540375919",
     "marin-iris-native",
     "marin-rigging[secrets]>=0.2.144.dev37540375919",
-    "marin-rolloutengine @ git+https://github.com/marin-community/marin.git@2ef4786903053025ca7fcee40ea76476276ca872#subdirectory=lib/rolloutengine",
-    "marin-shellbox[daytona,shellsim] @ git+https://github.com/marin-community/marin.git@2ef4786903053025ca7fcee40ea76476276ca872#subdirectory=lib/shellbox",
+    "marin-rolloutengine",
+    "marin-shellbox[daytona,shellsim]",
     "ninja",
     "nvidia-ml-py",
     "omegaconf",
@@ -54,7 +54,7 @@ dependencies = [
     "s3fs",
     "smart_open",
     "tensorboard",
-    "taskcompendium @ git+https://github.com/marin-community/marin.git@2ef4786903053025ca7fcee40ea76476276ca872#subdirectory=lib/taskcompendium",
+    "marin-taskcompendium",
     "tqdm>=4.66",
     "tokenizers==0.23.1",
     "transformers==5.16.1",
@@ -89,6 +89,7 @@ vllm = [
     "accelerate>=1.14,<2 ; sys_platform == 'linux'",
     "flashinfer-cubin==0.6.18.post1 ; sys_platform == 'linux'",
     "flashinfer-python==0.6.18.post1 ; sys_platform == 'linux'",
+    "harbor[analysis,datasets] ; sys_platform == 'linux'",
     "peft>=0.19 ; sys_platform == 'linux'",
     "quack-kernels==0.6.4 ; sys_platform == 'linux'",
     "runai-model-streamer[gcs,s3]==0.16.1 ; sys_platform == 'linux'",
@@ -182,8 +183,8 @@ no-build-isolation-package = [
     "transformer-engine-torch",
 ]
 override-dependencies = [
-    "marin-rigging[secrets,prometheus]==0.2.144.dev37540375919",
-    "harbor-config @ git+https://github.com/marin-community/harbor@6b2e76e1dae5c084eed05edefefffcec8c0c1ad9#subdirectory=packages/harbor-config",
+    # The native server has no current macOS arm64 wheel; remote Iris clients use finelog only.
+    "marin-finelog-server ; sys_platform == 'linux'",
     # Megatron Bridge declares this native extension but does not import or use it.
     "fast-hadamard-transform ; sys_platform == 'never'",
     "nvidia-resiliency-ext ; sys_platform == 'never'",
@@ -196,6 +197,7 @@ override-dependencies = [
     "opentelemetry-api ; sys_platform != 'linux'",
 ]
 constraint-dependencies = [
+    "gcsfs==2026.4.0",
     "botocore==1.42.97 ; sys_platform == 'linux'",
     "boto3==1.42.97 ; sys_platform == 'linux'",
     "s3transfer==0.16.1 ; sys_platform == 'linux'",
@@ -245,7 +247,6 @@ causal-conv1d = [
 mamba-ssm = [
     { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-torch2.13-20260910-6d12d7a0/mamba_ssm-2.3.1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
 ]
-harbor-config = { git = "https://github.com/marin-community/harbor", rev = "6b2e76e1dae5c084eed05edefefffcec8c0c1ad9", subdirectory = "packages/harbor-config" }
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
