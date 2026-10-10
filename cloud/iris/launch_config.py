@@ -267,7 +267,7 @@ def _validate_inputs(inputs: dict[str, Any]) -> None:
 
 
 def validate_iris_allocation(config: dict[str, Any]) -> IrisAllocationConfig:
-    """Validate explicit Iris resources against the canonical SkyRL role plan."""
+    """Validate explicit Iris resources against the launch mode's active roles."""
     skyrl = config["skyrl"]
     if not isinstance(skyrl, dict):
         raise TypeError("skyrl must be a mapping")
@@ -275,7 +275,7 @@ def validate_iris_allocation(config: dict[str, Any]) -> IrisAllocationConfig:
     plan = derive_policy_export_role_plan(skyrl) if checkpoint_export else derive_role_plan(skyrl)
     allocation = config["iris"]["allocation"]
     policy = plan.claim("policy")
-    expected_nodes = policy.num_nodes if checkpoint_export else derive_num_nodes(plan)
+    expected_nodes = derive_num_nodes(plan)
     if allocation["num_nodes"] != expected_nodes:
         raise ValueError(
             f"iris.allocation.num_nodes={allocation['num_nodes']} does not match SkyRL role plan's "
