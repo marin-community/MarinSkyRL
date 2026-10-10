@@ -3,6 +3,7 @@
 import sys
 from dataclasses import replace
 
+import pytest
 from omegaconf import OmegaConf
 
 from cloud.iris.export_hf_checkpoint import (
@@ -10,6 +11,8 @@ from cloud.iris.export_hf_checkpoint import (
     _run_export,
     checkpoint_export_launch_config,
 )
+from cloud.iris.launch_config import validate_iris_allocation
+from cloud.iris.role_plan import derive_num_nodes, derive_policy_export_role_plan, derive_role_plan
 from skyrl_train.hf_export_schema import HFExportRequest
 
 
@@ -104,6 +107,49 @@ def test_checkpoint_export_config_preserves_saved_policy_geometry_on_whole_nodes
 
     assert config.iris.allocation.gpus_per_node == 8
     assert config.skyrl.trainer.placement.policy_num_gpus_per_node == 4
+
+
+@pytest.mark.parametrize("policy_loss_type", ["dpo", "ftpo"])
+def test_checkpoint_export_allocation_excludes_unequal_reference_pool(policy_loss_type: str) -> None:
+    training = OmegaConf.merge(
+        _training_config(),
+        {
+            "iris": {"allocation": {"cpu": 16, "memory": "128GB", "disk": "256GB"}},
+            "skyrl": {
+                "trainer": {
+                    "placement": {
+                        "colocate_all": False,
+                        "colocate_policy_ref": False,
+                        "policy_num_nodes": 15,
+                        "ref_num_nodes": 8,
+                        "ref_num_gpus_per_node": 8,
+                    },
+                    "algorithm": {"policy_loss_type": policy_loss_type},
+                    "train_batch_size": 16,
+                    "policy_mini_batch_size": 16,
+                    "micro_train_batch_size_per_gpu": 2,
+                },
+                "generator": {
+                    "backend": "vllm",
+                    "run_engines_locally": True,
+                    "num_inference_engines": 8,
+                    "n_samples_per_prompt": 1,
+                },
+            },
+        },
+    )
+    request = replace(_request(), num_nodes=15, gpus_per_node=8)
+    export = checkpoint_export_launch_config(training, request, _spec(request))
+
+    allocation = validate_iris_allocation(OmegaConf.to_container(export, resolve=True))
+
+    assert allocation.num_nodes * allocation.gpus_per_node == 120
+    export_plan = derive_policy_export_role_plan(OmegaConf.to_container(export.skyrl, resolve=True))
+    assert [claim.role_id for claim in export_plan.claims] == ["policy"]
+    assert derive_num_nodes(export_plan) == 15
+    training_plan = derive_role_plan(OmegaConf.to_container(training.skyrl, resolve=True))
+    assert training_plan.claim("reference").num_nodes == 8
+    assert derive_num_nodes(training_plan) == 24
 
 
 def test_nested_export_keeps_parent_response_stream_clean(capfd) -> None:
