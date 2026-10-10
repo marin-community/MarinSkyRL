@@ -85,6 +85,11 @@ HERO_SYNC_NAMES = [
     "model.layers.0.shared_experts.1.up_proj.weight",
     "model.layers.0.self_attn.q_proj.weight",
 ]
+HERO_SHORTCONV_NAMES = [
+    f"model.layers.{layer}.{site}.weight"
+    for layer in range(4)
+    for site in ("self_attn.sconv_k", "sconv_attn", "sconv_mlp")
+]
 TIMEOUT_SECONDS = 180
 
 
@@ -159,15 +164,16 @@ def remove_shortconv_from_tiny_hero_checkpoint(model_path):
 
 @pytest.mark.vllm
 @pytest.mark.parametrize(
-    "name,hero",
+    "name,hero,shortconv",
     [
-        *(pytest.param(name, False, id=name) for name in GEOMETRIES),
-        pytest.param("equal-ep", True, id="hero-split-experts"),
-        pytest.param("single-serving-ep", True, id="hero-split-experts-single-serving"),
+        *(pytest.param(name, False, False, id=name) for name in GEOMETRIES),
+        pytest.param("equal-ep", True, False, id="hero-split-experts"),
+        pytest.param("single-serving-ep", True, False, id="hero-split-experts-single-serving"),
+        pytest.param("single-serving-ep", True, True, id="hero-shortconv-single-serving"),
     ],
 )
 def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flipped_one(
-    tmp_path, name, hero, monkeypatch
+    tmp_path, name, hero, shortconv, monkeypatch
 ):
     geometry = HERO_SINGLE_SERVING_GEOMETRY if name == "single-serving-ep" else GEOMETRIES[name]
     require_hoppers(geometry.gpus)
@@ -183,7 +189,8 @@ def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flippe
     model_path.mkdir()
     if hero:
         write_tiny_hero_checkpoint(model_path)
-        remove_shortconv_from_tiny_hero_checkpoint(model_path)
+        if not shortconv:
+            remove_shortconv_from_tiny_hero_checkpoint(model_path)
     else:
         _write_tiny_checkpoint(model_path)
     cfg = _config(str(model_path), world_size=geometry.policy_gpus, pp=geometry.policy_pp, ep=geometry.policy_ep)
@@ -198,7 +205,10 @@ def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flippe
     try:
         client = engine_client(cfg, str(model_path), geometry)
         policy = _init_policy(cfg, geometry.policy_gpus)
-        names = HERO_SYNC_NAMES if hero else [*PARAMETER_NAMES, *BIAS_NAMES, GATED_NORM_NAME, *SLICED_NAMES]
+        serving_names = HERO_SYNC_NAMES if hero else SYNC_NAMES
+        if shortconv:
+            serving_names = [*serving_names, *HERO_SHORTCONV_NAMES]
+        names = serving_names if hero else [*PARAMETER_NAMES, *BIAS_NAMES, GATED_NORM_NAME, *SLICED_NAMES]
         bias_names = HERO_BIAS_NAMES if hero else BIAS_NAMES
         expert_names = HERO_EXPERTS if hero else SERVING_EXPERT_INDEX_BY_NAME
         before = rank0_validation_snapshot(policy, names)
@@ -227,7 +237,7 @@ def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flippe
             await client.resume_generation()
 
         asyncio.run(prepare_and_sync(1))
-        assert_engine_weights(client, HERO_SYNC_NAMES if hero else SYNC_NAMES, trained, bias_names, expert_names)
+        assert_engine_weights(client, serving_names, trained, bias_names, expert_names)
 
         async def corrupt_and_verify():
             flipped = await client.engines[-1].inference_engine_actor.flip_installed_byte.remote()
@@ -247,7 +257,7 @@ def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flippe
         trained_again = rank0_validation_snapshot(policy, names)
         assert any(not torch.equal(trained_again[key], trained[key]) for key in changed_names)
         asyncio.run(prepare_and_sync(2))
-        assert_engine_weights(client, HERO_SYNC_NAMES if hero else SYNC_NAMES, trained_again, bias_names, expert_names)
+        assert_engine_weights(client, serving_names, trained_again, bias_names, expert_names)
         asyncio.run(sync.close())
         print(
             f"EXPERT_BLOCK_VERIFY_PASS geometry={name} policy_gpus={geometry.policy_gpus} policy_pp={geometry.policy_pp} "
