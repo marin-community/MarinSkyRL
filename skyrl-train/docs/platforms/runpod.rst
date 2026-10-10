@@ -59,7 +59,7 @@ snippet. The NUMA installation follows :ref:`system-dependencies`.
     echo "export LD_LIBRARY_PATH=$HOME/.local/lib:$LD_LIBRARY_PATH" >> ~/.bashrc
 
 Close the terminal and reopen it. Then launch a basic GSM8K training run with the following
-commands. For more, see :doc:`quickstart`.
+commands. For more, see :doc:`../getting-started/quickstart`.
 
 .. code-block:: bash
 

@@ -1,7 +1,7 @@
 import json
-import skyrl_gym
 import pytest
-from omegaconf import DictConfig
+
+from skyrl_gym.answer_tasks import grade_ifeval
 
 
 def _gt(**overrides) -> str:
@@ -115,58 +115,40 @@ def _gt(**overrides) -> str:
         ),
     ],
 )
-def test_compute_score(output, ground_truth, expected):
-    env = skyrl_gym.make(
-        "ifeval",
-        env_config=DictConfig({"env_class": "ifeval"}),
-        extras={"reward_model": {"method": "rule", "ground_truth": ground_truth}},
-    )
-    step_output = env.step(output)
-    assert step_output["reward"] == expected
+def test_task_grade_preserves_instruction_constraints(model_turn, output, ground_truth, expected):
+    result = grade_ifeval(model_turn(output), {}, {"reward_model": {"ground_truth": ground_truth}})
+    assert result.reward == expected
 
 
-def test_unknown_func_name_scores_zero():
-    # An unknown/unimplemented func_name must NOT crash the rollout (env.step is not
-    # wrapped in try/except in the SkyRL generator) — it logs + scores 0.
-    env = skyrl_gym.make(
-        "ifeval",
-        env_config=DictConfig({"env_class": "ifeval"}),
-        extras={
+def test_unknown_func_name_scores_zero(model_turn):
+    result = grade_ifeval(
+        model_turn("anything"),
+        {},
+        {
             "reward_model": {
                 "method": "rule",
                 "ground_truth": _gt(func_name="not_a_real_check"),
             }
         },
     )
-    step_output = env.step("anything")
-    assert step_output["reward"] == 0.0
+    assert result.reward == 0.0
 
 
-def test_missing_func_name_scores_zero():
-    env = skyrl_gym.make(
-        "ifeval",
-        env_config=DictConfig({"env_class": "ifeval"}),
-        extras={"reward_model": {"method": "rule", "ground_truth": _gt()}},  # func_name=None
-    )
-    step_output = env.step("anything")
-    assert step_output["reward"] == 0.0
+def test_missing_func_name_scores_zero(model_turn):
+    result = grade_ifeval(model_turn("anything"), {}, {"reward_model": {"ground_truth": _gt()}})
+    assert result.reward == 0.0
 
 
-def test_multiple_constraints_score_the_satisfied_fraction():
+def test_multiple_constraints_score_the_satisfied_fraction(model_turn):
     ground_truth = json.dumps(
         [
             {"func_name": "verify_sentence_constraint", "N": 2, "quantifier": "at least"},
             {"func_name": "verify_postscript", "postscript_marker": "P.S."},
         ]
     )
-    env = skyrl_gym.make(
-        "ifeval",
-        env_config=DictConfig({"env_class": "ifeval"}),
-        extras={"reward_model": {"ground_truth": ground_truth}},
+    result = grade_ifeval(
+        model_turn("First sentence. Second sentence."), {}, {"reward_model": {"ground_truth": ground_truth}}
     )
-
-    output = env.step("First sentence. Second sentence.")
-
-    assert output["reward"] == 0.5
-    assert output["metadata"]["constraints_satisfied"] == 1
-    assert output["metadata"]["constraints_total"] == 2
+    assert result.reward == 0.5
+    assert result.metrics["constraints_satisfied"] == 1
+    assert result.metrics["constraints_total"] == 2

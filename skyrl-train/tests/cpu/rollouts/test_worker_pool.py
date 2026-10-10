@@ -73,13 +73,21 @@ class _SessionWorker(_Worker):
 class _BlockingWorker:
     def __init__(self):
         self._started = asyncio.Event()
+        self._cleaned = asyncio.Event()
 
     async def run(self, *_args):
         self._started.set()
-        await asyncio.Event().wait()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            self._cleaned.set()
 
     async def wait_for_start(self):
         await self._started.wait()
+
+    async def wait_for_cleanup(self):
+        await self._cleaned.wait()
+        return True
 
 
 def _request(ids: list[TrajectoryID], phase: TrainingPhase | None = None) -> dict:
@@ -253,6 +261,8 @@ async def test_progress_deadline_resets_when_the_same_worker_completes_a_request
 @pytest.mark.asyncio
 async def test_stalled_worker_request_is_cancelled_remotely(ray_init, spec, monkeypatch):
     actor = _BlockingWorker.remote()
+    async with asyncio.timeout(30):
+        await actor.__ray_ready__.remote()
     pool = _pool([actor], spec, timeout=0.1)
     cancel_calls = []
     original_cancel = ray.cancel
@@ -264,15 +274,42 @@ async def test_stalled_worker_request_is_cancelled_remotely(ray_init, spec, monk
     monkeypatch.setattr(ray, "cancel", capture_cancel)
 
     run = asyncio.create_task(pool.run(_request([TrajectoryID("a", 0)])))
-    await actor.wait_for_start.remote()
-    with pytest.raises(RolloutWorkerStalledError):
-        await run
+    try:
+        async with asyncio.timeout(30):
+            await actor.wait_for_start.remote()
+            with pytest.raises(RolloutWorkerStalledError):
+                await run
 
-    assert len(cancel_calls) == 1
-    cancelled_ref, force, recursive = cancel_calls[0]
-    assert isinstance(cancelled_ref, ray.ObjectRef)
-    assert force is False
-    assert recursive is True
+        assert len(cancel_calls) == 1
+        cancelled_ref, force, recursive = cancel_calls[0]
+        assert isinstance(cancelled_ref, ray.ObjectRef)
+        assert force is False
+        assert recursive is True
+    finally:
+        run.cancel()
+        await asyncio.gather(run, return_exceptions=True)
+        ray.kill(actor)
+
+
+@pytest.mark.slow
+@pytest.mark.asyncio
+async def test_caller_cancellation_runs_remote_cleanup_without_pool_shutdown(ray_init, spec):
+    actor = _BlockingWorker.remote()
+    pool = _pool([actor], spec, timeout=60)
+    run = asyncio.create_task(pool.run(_request([TrajectoryID("a", 0)])))
+    try:
+        async with asyncio.timeout(30):
+            await actor.wait_for_start.remote()
+
+        run.cancel()
+        async with asyncio.timeout(10):
+            with pytest.raises(asyncio.CancelledError):
+                await run
+            assert await actor.wait_for_cleanup.remote()
+    finally:
+        run.cancel()
+        await asyncio.gather(run, return_exceptions=True)
+        ray.kill(actor)
 
 
 @pytest.mark.asyncio

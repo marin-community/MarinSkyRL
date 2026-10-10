@@ -2113,8 +2113,6 @@ def _write_final_config(
         train_data=(),
         validation_data=(),
         terminal_bench_data=(),
-        agent_api_base=None,
-        literal_log_path=None,
         policy_model_path=policy_model.local_path if policy_model else None,
         draft_model_uri=draft_model.source_uri if draft_model else None,
     )

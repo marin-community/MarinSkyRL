@@ -52,7 +52,6 @@ uv run --isolated --extra megatron --extra vllm -m skyrl_train.entrypoints.main_
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
   environment.env_class=text2sql \
-  generator.use_conversation_multi_turn=true \
   generator.n_samples_per_prompt=5 \
   generator.gpu_memory_utilization=0.7 \
   generator.max_turns=$MAX_TURNS \
@@ -60,7 +59,7 @@ uv run --isolated --extra megatron --extra vllm -m skyrl_train.entrypoints.main_
   generator.sampling_params.top_p=0.95 \
   generator.sampling_params.stop='["</sql>", "</solution>"]' \
   generator.eval_sampling_params.stop='["</sql>", "</solution>"]' \
-  environment.skyrl_gym.text2sql.db_path=$DB_PATH \
+  environment.task_sessions.text2sql.db_path=$DB_PATH \
   trainer.logger="wandb" \
   trainer.project_name="stepwise_multiturn" \
   trainer.run_name="skyrlsql_multiturn_qwen3" \

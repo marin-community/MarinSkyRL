@@ -5,20 +5,24 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "skyrl-gym"
 version = "0.1.1"
-description = "RL environments for LLMs implemented with the Gymnasium API."
+description = "Task sessions and graders for LLM reinforcement learning."
 authors = [
     { name = "NovaSkyAI AI Team"}
 ]
 license = { text = "MIT" }
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12,<3.14"
 
 dependencies = [
+    "marin-rolloutengine",
+    "marin-shellbox",
+    "marin-taskcompendium",
     "marin-verifyit[math,schema,reasoning-gym,judge]",
     "func_timeout",
     "loguru",
     "numpy",
     "pandas",
+    "pydantic>=2.12,<3",
     "requests",
     "omegaconf",
     "openapi-schema-validator",
@@ -36,13 +40,23 @@ include = ["skyrl_gym*"]
 
 [project.optional-dependencies]
 dev = [
-    "pytest"
+    "pytest",
+    "pytest-asyncio",
+    "psutil",
+    "ipython==9.6.0",
 ]
 
 [tool.ruff]
 line-length = 120
 
+[tool.uv]
+prerelease = "allow"
+
 [tool.ruff.lint]
 ignore = [
     "F722"
 ]
+
+[tool.pytest.ini_options]
+addopts = "-m 'not docker'"
+markers = ["docker: local Docker execution; run explicitly in the container test lane"]

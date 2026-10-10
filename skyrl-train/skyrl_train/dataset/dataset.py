@@ -52,6 +52,7 @@ class PromptDataset:
             loaded_datasets.append(ds)
 
         self.dataframe: datasets.Dataset = datasets.concatenate_datasets(loaded_datasets)
+        self.dataframe = self.prepare_dataset(self.dataframe)
 
         logger.info(f"Total dataset size: {len(self.dataframe)}")
 
@@ -65,6 +66,9 @@ class PromptDataset:
         )
 
         logger.info(f"Filtered dataset size: {len(self.dataframe)}")
+
+    def prepare_dataset(self, dataset):
+        return dataset
 
     def __getitem__(self, item):
         row_dict: dict = self.dataframe[item]

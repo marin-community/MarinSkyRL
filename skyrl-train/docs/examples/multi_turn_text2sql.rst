@@ -3,7 +3,7 @@ Multi-Turn GRPO Text2SQL with Async Rollouts
 
 In this example, we walk through how to train an effective multi-turn Text2SQL model (beating GPT-4o) with SkyRL using async rollouts.
 
-We provide an implementation of a multi-turn Text2SQL environment at :skyrl_gym_link:`skyrl_gym/envs/sql/env.py`.
+The multi-turn SQL task session is in :skyrl_gym_link:`skyrl_gym/sql_tasks.py`.
 
 You can find the exact recipe for reproducing our prior `SkyRL-SQL-7B <https://novasky-ai.notion.site/skyrl-sql>`_ release at :doc:`../recipes/skyrl-sql`.
 
@@ -84,7 +84,7 @@ Now that we have our dataset and database files, let's walk through the some of 
     uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
         #### Environment configuration
         environment.env_class=text2sql \
-        environment.skyrl_gym.text2sql.db_path=$DB_PATH \
+        environment.task_sessions.text2sql.db_path=$DB_PATH \
       
         #### Multi-turn Async Rollouts configuration
         # this is used to set the max turns for the environment
@@ -98,9 +98,6 @@ Now that we have our dataset and database files, let's walk through the some of 
         # generator.sampling_params.max_generate_length is the max length of the generated response for EACH turn
         generator.sampling_params.max_generate_length=3000 \
 
-        #### multi-turn generation format - see `skyrl_train/trajectory_runners/skyrl_gym.py` for more details
-        generator.use_conversation_multi_turn=false \
-        
         #### data configuration
         data.train_data="['$DATA_DIR/train.parquet']" \
         data.val_data="['$DATA_DIR/validation.parquet']" \
@@ -140,14 +137,11 @@ Now that we have our dataset and database files, let's walk through the some of 
 
 - All we have to do to enable multi-turn training is to set ``generator.max_turns`` to the maximum number of turns we want the agent to take.
 
-- Chat templating and loss masking for multi-turn conversations are handled by the ``SkyRLGymTrajectoryRunner`` class.
+- ``TaskRolloutWorker`` uses the backend chat template and the canonical engine's token masks for multi-turn conversations.
 
-  - In the above example, we set ``use_conversation_multi_turn=false`` to enforce that the multi-turn conversation is formatted as a single assistant response.
-  - We also set ``stop='["</sql>", "</solution>"]'`` for both ``sampling_params`` and ``eval_sampling_params`` as a part
-    of the training recipe.
-  - If you are using ``generator.use_conversation_multi_turn=true``, you might want to append an EOS token ID to the end of the response after these stop strings to adhere to the model's behavior (i.e. ending generation with an EOS token ID rather than say ``</solution>``). This can be done by setting ``generator.append_eos_token_after_stop_str_in_multi_turn=true`` in the generator config. The full script is available in `examples/text_to_sql/run_skyrl_sql_conversation_format.sh`.
-  - If you want to use a conversation-based format, you can set ``use_conversation_multi_turn=true`` and the model will generate a separate assistant response for each turn. This is supported only with ``backend="vllm"`` as of now.
-  - See :code_link:`skyrl_train/trajectory_runners/skyrl_gym.py` for more details on both options!
+  - The model produces a separate assistant response after each environment observation.
+  - The recipe sets ``stop='["</sql>", "</solution>"]'`` for training and evaluation.
+    Rollouts retain the sampled token IDs without an appended EOS token.
 
 Launching Your Training Run
 ---------------------------

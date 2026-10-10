@@ -2,10 +2,11 @@ defaults:
   - _self_
   - megatron_config@trainer.policy.megatron_config: policy
   - megatron_config@trainer.ref.megatron_config: ref
-  - skyrl_gym_config: default
+  - task_session_config: default
   - mismatch_probe@trainer.mismatch_probe: default
 
 data:
+  task_cache_dir: "~/.cache/marinskyrl/tasks"
   train_data: ["${oc.env:HOME}/data/gsm8k/train.parquet"]
   val_data: ["${oc.env:HOME}/data/gsm8k/validation.parquet"]
   shuffle: true
@@ -217,7 +218,6 @@ trainer:
     clip_ratio_c: 3.0
     off_policy_correction: null
     off_policy_correction_rules: null
-    tito_full: null
     tis_splice: true
     tis_lcs_alert_threshold: 0.005
     enable_token_reward_channel: false
@@ -436,10 +436,6 @@ generator:
     source: "name"
     name_or_path: null
 
-  # Require every environment row to use the structured-chat transport, which
-  # preserves sampled token IDs and exact prefixes across turns.
-  require_exact_chat_transport: false
-
   chat_template_kwargs: {}
 
   engine_init_kwargs: {}
@@ -460,10 +456,6 @@ generator:
     top_k: -1
     logprobs: null
     stop: null
-
-  use_conversation_multi_turn: true
-
-  append_eos_token_after_stop_str_in_multi_turn: true
 
   eval_sampling_params:
     max_generate_length: ${generator.sampling_params.max_generate_length}
@@ -536,12 +528,17 @@ environment:
   env_class: "gsm8k"
 
 trajectory_runner:
-  # Rollout worker processes, which run SkyRL-Gym and Harbor outside the trainer process. Every worker runs on the
-  # trainer's node; each runner type (Gym, and Harbor under terminal-bench routing) gets its own pool of this size.
+  command_timeout: 120
+  cleanup_timeout: 30
+  shutdown_timeout: 45
+  max_concurrent_tasks: 32
+  skopeo: skopeo
+  image_cache: ~/.cache/skyrl/task-images
+  # One worker pool executes all task families on the trainer's node.
   rollout_workers:
     num_workers: 4
     cpus_per_worker: 8
-    executor_threads: 256 # width of each worker's default thread pool, which Harbor's model client runs on
+    executor_threads: 256 # Default thread pool for blocking task operations.
     progress_timeout_seconds: 21600 # fail a worker's requests when none of them completes for this long
     # Workers start one at a time, this long after the previous one is up, so their imports and tokenizer loads
     # from a shared filesystem do not overlap; zero starts them all at once.

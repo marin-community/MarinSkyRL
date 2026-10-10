@@ -5,7 +5,8 @@ from omegaconf import OmegaConf
 from skyrl_gym.verification import VerificationResult
 
 from skyrl_train.trainer import RayPPOTrainer, _domain_reward_metrics
-from skyrl_train.trajectory_runners.base import TrajectoryBatch, propagate_data_sources
+from skyrl_train.trajectory_runners.types import TrajectoryBatch
+from skyrl_train.rollouts.finalization import propagate_data_sources
 from skyrl_train.trajectory_runners.types import TrajectoryID
 
 

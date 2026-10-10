@@ -12,20 +12,11 @@ context_budget:
 
 terminal_bench:
   harbor:
-    name: opencode
-    version: "1.18.2"
-    opencode_config:
-      compaction:
-        auto: true
-        reserved: 4096
-    collect_rollout_details: true
-    override_setup_timeout_sec: 600
     override_timeout_sec: 240
     verifier_override_timeout_sec: 120
     override_cpus: 1
     override_memory_mb: 4096
     override_storage_mb: 4096
-    auto_snapshot: true
     env_network_policy:
       mode: unrestricted
     max_retries: 1
@@ -33,22 +24,11 @@ terminal_bench:
     max_wait_sec: 60.0
     wait_multiplier: 2.0
     n_concurrent_trials: 4
-    log_level: INFO
     enable_reward_shaping: false
     enable_error_classification: true
     mask_exceptions: []
     zero_exceptions: []
     default_error_treatment: zero
-  model_info:
-  archiving:
-    enabled: false
-  trace_upload:
-    enabled: false
-    repo_org: DCAgent
-    episodes: last
-    dataset_type: SFT
-    cleanup: true
-
 trainer:
   strategy: megatron
   seed: 1729
@@ -114,8 +94,6 @@ generator:
   enable_chunked_prefill: true
   run_engines_locally: true
   weight_sync_backend: nccl
-  enable_http_endpoint: true
-  append_eos_token_after_stop_str_in_multi_turn: true
   sampling_params:
     temperature: 0.7
     top_p: 1.0
@@ -130,11 +108,8 @@ generator:
     tool_call_parser: hermes
 
 environment:
-  skyrl_gym:
+  task_sessions:
     nemotron_ultra:
-      sandbox:
-        host: snowball-nemo-skills-sandbox.iris.svc.cluster.local
-        port: 6000
       judges:
         general:
           base_url: https://api.together.xyz/v1
@@ -156,7 +131,6 @@ environment:
           response_transport: chat_completions
           reasoning_effort: low
           timeout_seconds: 600.0
-        num_rollouts_per_prompt: 2
         group_answer_length_penalty_coeff: 0.0
         group_reasoning_length_penalty_coeff: 0.0
         max_output_tokens: 512

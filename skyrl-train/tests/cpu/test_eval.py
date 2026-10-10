@@ -6,11 +6,11 @@ from unittest.mock import MagicMock
 
 import pytest
 from omegaconf import OmegaConf
-from skyrl_gym.envs.registration import registry
 from skyrl_gym.verification import VerificationResult
 
-from skyrl_train.evaluate import _calculate_eval_metrics, evaluate
-from skyrl_train.trajectory_runners.base import TrajectoryRunner, TrajectoryBatch
+from skyrl_train.evaluate import _calculate_eval_metrics, evaluate, evaluate_step_wise
+from tests.cpu.trajectory_runners.fixture_runner import FixtureRunner
+from skyrl_train.trajectory_runners.types import TrajectoryBatch
 from skyrl_train.trajectory_runners.trajectory_retention import (
     TrajectorySink,
     execute_publication,
@@ -56,14 +56,14 @@ class DummyStatefulDataLoader:
         return iter(self._batches)
 
 
-class DummyRunner(TrajectoryRunner):
+class DummyRunner(FixtureRunner):
     def __init__(self, output: TrajectoryBatch):
         self.output = output
         self.seen_inputs = []
 
-    async def _run(self, input_batch, disable_tqdm: bool = False):
+    async def _run(self, input_batch):
         self.seen_inputs.append(input_batch)
-        return self.output
+        return {**self.output, "trajectory_ids": input_batch["trajectory_ids"]}
 
 
 def test_eval_reports_normalized_verifier_score_alongside_raw_reward():
@@ -84,15 +84,20 @@ def test_eval_reports_normalized_verifier_score_alongside_raw_reward():
 
 
 @pytest.mark.asyncio
-async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path, monkeypatch):
-    monkeypatch.setitem(registry, "custom_env", registry["gsm8k"])
+@pytest.mark.parametrize("step_wise", [False, True])
+async def test_evaluate_exports_public_results_and_expected_metrics(dummy_config, tmp_path, step_wise):
     cfg = configure_eval(dummy_config, tmp_path)
+    cfg.trainer.dump_eval_results = True
 
     prompts_batch = [
         {
             "prompt": [{"role": "user", "content": "question-1"}],
             "env_class": None,
-            "env_extras": {"data_source": "dataset/a"},
+            "env_extras": {
+                "data_source": "dataset/a",
+                "task_spec": "private-reference",
+                "group_grader": '{"api_key":"private-judge-key"}',
+            },
             "uid": "uid-1",
         },
         {
@@ -113,6 +118,7 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path, monkey
         "rollout_logprobs": None,
         "env_classes": ["gsm8k", "custom_env"],
         "env_metrics": [{"truncated": 1}, {"truncated": 0}],
+        "is_last_step": [True, True],
     }
     runner = DummyRunner(trajectory_batch)
 
@@ -125,7 +131,8 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path, monkey
         publisher=InlineTrajectoryPublisher(execute_publication),
     )
 
-    metrics = await evaluate(
+    evaluation = evaluate_step_wise if step_wise else evaluate
+    metrics = await evaluation(
         eval_dataloader=eval_dataloader,
         trajectory_runner=runner,
         cfg=cfg,
@@ -149,6 +156,12 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path, monkey
 
     for key, expected_value in expected_metrics.items():
         assert metrics[key] == pytest.approx(expected_value)
+
+    dump = tmp_path / "dumped_evals/global_step_5_evals"
+    saved = "".join(path.read_text() for path in dump.glob("*.jsonl"))
+    assert saved
+    assert "private-reference" not in saved
+    assert "private-judge-key" not in saved
 
     assert len(runner.seen_inputs) == 1
     seen_batch = runner.seen_inputs[0]

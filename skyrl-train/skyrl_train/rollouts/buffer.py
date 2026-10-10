@@ -25,6 +25,7 @@ from skyrl_train.group_admission import (
     GroupAdmissionStalledError,
     TrainingGroupInvariantError,
 )
+from skyrl_train.rollout_observability import rollout_wait
 from skyrl_train.rollouts.loader import JudgedGroup
 from skyrl_train.telemetry import GeneratedWork
 from skyrl_train.trajectory_runners.trajectory_processing import get_outcome_rewards, get_trajectory_passes
@@ -167,6 +168,15 @@ class RolloutContentPolicy:
 
 class RolloutWriter(Protocol):
     async def write_rollout(self, lease: RolloutLease, group: RolloutGroup) -> None: ...
+
+
+async def write_trajectory_batch(task: RolloutTask, writer: RolloutWriter, batch: TrajectoryBatch) -> int:
+    """Write a completed batch under its prompt group's lease."""
+    with rollout_wait("enqueue"):
+        await writer.write_rollout(
+            task.lease, RolloutGroup(batch, task.prompt["uid"], task.lease.policy_step, task.prompt)
+        )
+    return sum(len(response) for response in batch["response_ids"])
 
 
 @dataclass(frozen=True)

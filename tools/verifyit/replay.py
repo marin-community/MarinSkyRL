@@ -6,8 +6,8 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-import skyrl_gym
-from omegaconf import OmegaConf
+from rolloutengine.contracts import ModelTurn
+from skyrl_gym.answer_tasks import grade_reasoning_gym
 
 from skyrl_gym.envs.nemotron_ultra.mcqa import grade_mcqa
 from skyrl_gym.envs.nemotron_ultra.judge import OpenAIJudge
@@ -45,12 +45,12 @@ def main():
             raise RuntimeError(f"MCQA parity mismatch: {results[-1]}")
     for row in fixtures["reasoning_gym"]:
         extras = {"reward_model": {"ground_truth": {"task": "simple_equations", "entry": row["entry"]}}}
-        original = skyrl_gym.make("reasoning_gym", env_config=OmegaConf.create({}), extras=extras)
-        cutover = skyrl_gym.make(
-            "reasoning_gym", env_config=OmegaConf.create({"verifyit_enabled": True}), extras=extras
-        )
-        source_result = original.step(row["response"])
-        cutover_result = cutover.step(row["response"])
+        text = row["response"]
+        turn = ModelTurn({"role": "assistant", "content": text}, (), (1,), None, "stop", text=text)
+        original = grade_reasoning_gym(turn, {}, extras)
+        cutover = grade_reasoning_gym(turn, {"verifyit_enabled": True}, extras)
+        source_result = {"reward": original.reward, "metadata": original.metrics}
+        cutover_result = {"reward": cutover.reward, "metadata": cutover.metrics}
         results.append(
             {"route": "reasoning_gym", "input": row, "original": source_result, "verifyit": cutover_result}
         )

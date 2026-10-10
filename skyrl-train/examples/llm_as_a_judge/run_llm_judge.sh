@@ -51,5 +51,5 @@ uv run --isolated --extra megatron --extra vllm --env-file .env.llm_judge -m exa
   trainer.resume_mode=null \
   trainer.ckpt_path="$HOME/ckpts/gsm8k_1.5B_ckpt" \
   environment.env_class=llm_as_a_judge \
-  environment.skyrl_gym.llm_as_a_judge.model="gpt-4o-mini" \
+  environment.task_sessions.llm_as_a_judge.model="gpt-4o-mini" \
   $@

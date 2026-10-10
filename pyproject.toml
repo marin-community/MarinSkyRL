@@ -23,6 +23,7 @@ dependencies = [
     "hf_transfer",
     "huggingface-hub>=0.34.0",
     "ijson>=3.5",
+    "jinja2>=3.1",
     "math-verify==0.9.0",
     "hydra-core==1.3.2",
     "jaxtyping",
@@ -31,11 +32,11 @@ dependencies = [
     "marin-finelog",
     "marin-finelog-server",
     "marin-finestore>=0.2.135.dev36906221286",
-    "marin-iris",
+    "marin-iris>=0.2.144.dev37540375919",
     "marin-iris-native",
-    "marin-rigging[secrets]>=0.2.123.dev35633925924",
+    "marin-rigging[secrets]>=0.2.144.dev37540375919",
     "marin-rolloutengine",
-    "marin-shellbox",
+    "marin-shellbox[daytona,shellsim]",
     "ninja",
     "nvidia-ml-py",
     "omegaconf",
@@ -87,7 +88,6 @@ vllm = [
     "accelerate>=1.14,<2 ; sys_platform == 'linux'",
     "flashinfer-cubin==0.6.18.post1 ; sys_platform == 'linux'",
     "flashinfer-python==0.6.18.post1 ; sys_platform == 'linux'",
-    "harbor[analysis,datasets,daytona] ; sys_platform == 'linux'",
     "peft>=0.19 ; sys_platform == 'linux'",
     "quack-kernels==0.6.4 ; sys_platform == 'linux'",
     "runai-model-streamer[gcs,s3]==0.16.1 ; sys_platform == 'linux'",
@@ -120,7 +120,7 @@ megatron = [
     "transformer-engine-torch==2.19.0 ; sys_platform == 'linux'",
 ]
 telemetry = [
-    "marin-rigging[prometheus]>=0.2.123.dev35633925924",
+    "marin-rigging[prometheus]",
     "memray ; sys_platform == 'linux'",
     "ray[default]",
 ]
@@ -156,11 +156,11 @@ dev = [
 ]
 harbor-test = ["harbor; sys_platform == 'linux'"]
 
+[tool.hatch.build.targets.wheel]
+packages = ["marinskyrl", "cloud", "skyrl-gym/skyrl_gym", "skyrl-train/skyrl_train"]
+
 [tool.hatch.build.targets.wheel.force-include]
 "chat_templates" = "chat_templates"
-"cloud/iris" = "cloud/iris"
-"skyrl-gym/skyrl_gym" = "skyrl_gym"
-"skyrl-train/skyrl_train" = "skyrl_train"
 
 [tool.uv]
 package = true
@@ -275,12 +275,12 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "skyrl-train/tests/cpu/models/test_models.py" = ["E402"]
 "skyrl-train/tests/cpu/test_ray_metrics.py" = ["E402"]
-"skyrl-train/skyrl_train/trajectory_runners/harbor/_harbor_compat.py" = ["F401"]
 
 [tool.pytest.ini_options]
-addopts = "-v -s"
+addopts = "-v -s -m 'not docker'"
 testpaths = ["skyrl-train/tests", "cloud/iris/tests"]
 markers = [
+    "docker: local Docker execution; run explicitly in the container test lane",
     "nightly: extended CPU learning and checkpoint-resume coverage",
     "vllm",
     "integrations",

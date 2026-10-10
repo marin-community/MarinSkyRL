@@ -30,7 +30,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from huggingface_hub import hf_hub_download
 
-from skyrl_gym import get_data_contract
+from skyrl_gym.envs.data_contracts import get_data_contract
 from skyrl_gym.envs.nupa.answers import INTEGER
 
 SOURCE_DATASET_NAME = "HaotongYang/NUPA_text"

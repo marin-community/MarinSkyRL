@@ -47,9 +47,8 @@ path. Preserve the behavior and delete the switch:
 - `SKYRL_GDN_MASK_FLA`; the supported default is the architecture-selected PyTorch path
 - `SKYRL_R3_TENSOR_CAPTURE`; routed-expert evidence uses the contiguous narrow array carrier whenever it exists
 
-`SKYRL_TITO_FULL` is also removed because `trainer.algorithm.tito_full` already owns the setting. The two deprecated TIS
-splice aliases are removed instead of becoming typed compatibility fields. This hard fork does not retain environment
-compatibility shims.
+`SKYRL_TITO_FULL` and `trainer.algorithm.tito_full` have no runtime consumer. Remove them with the deprecated TIS splice
+aliases. This hard fork does not retain environment compatibility shims.
 
 ## Environment contract
 

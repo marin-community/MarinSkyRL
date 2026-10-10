@@ -24,7 +24,7 @@ def request(chosen="calm waves at dusk", rejected="error: no poem", count=2):
 
 @pytest.mark.asyncio
 async def test_runner_emits_adjacent_pair_rows(tokenizer):
-    runner = PreferencePairTrajectoryRunner(tokenizer, max_generate_length=32, max_input_length=64)
+    runner = PreferencePairTrajectoryRunner(tokenizer, max_generate_length=32, max_input_length=64, generator_config={})
     batch = await runner.run(request())
     assert batch["pair_roles"] == [1, -1]
     assert batch["rewards"] == [1.0, 0.0]
@@ -41,7 +41,7 @@ async def test_runner_emits_adjacent_pair_rows(tokenizer):
 
 @pytest.mark.asyncio
 async def test_runner_accepts_message_list_completions(tokenizer):
-    runner = PreferencePairTrajectoryRunner(tokenizer, max_generate_length=32, max_input_length=64)
+    runner = PreferencePairTrajectoryRunner(tokenizer, max_generate_length=32, max_input_length=64, generator_config={})
     message_chosen = [{"role": "user", "content": "..."}, {"role": "assistant", "content": "silver mist rising"}]
     batch = await runner.run(request(chosen=message_chosen))
     assert batch["response_ids"][0] == tokenizer("silver mist rising", add_special_tokens=False)["input_ids"]
@@ -49,7 +49,7 @@ async def test_runner_accepts_message_list_completions(tokenizer):
 
 @pytest.mark.asyncio
 async def test_runner_rejects_broken_pair_layouts(tokenizer):
-    runner = PreferencePairTrajectoryRunner(tokenizer, max_generate_length=32, max_input_length=64)
+    runner = PreferencePairTrajectoryRunner(tokenizer, max_generate_length=32, max_input_length=64, generator_config={})
     with pytest.raises(ValueError, match="row pairs"):
         await runner.run(request(count=1))
     swapped = request()
@@ -64,16 +64,16 @@ async def test_runner_rejects_broken_pair_layouts(tokenizer):
 
 @pytest.mark.asyncio
 async def test_runner_rejects_overlong_completions(tokenizer):
-    runner = PreferencePairTrajectoryRunner(tokenizer, max_generate_length=4, max_input_length=64)
+    runner = PreferencePairTrajectoryRunner(tokenizer, max_generate_length=4, max_input_length=64, generator_config={})
     with pytest.raises(ValueError, match="max_generate_length"):
         await runner.run(request(chosen="a truly extravagantly long completion"))
-    runner = PreferencePairTrajectoryRunner(tokenizer, max_generate_length=32, max_input_length=1)
+    runner = PreferencePairTrajectoryRunner(tokenizer, max_generate_length=32, max_input_length=1, generator_config={})
     with pytest.raises(ValueError, match="sequence budget"):
         await runner.run(request())
 
 
 @pytest.mark.asyncio
 async def test_runner_rejects_empty_completions(tokenizer):
-    runner = PreferencePairTrajectoryRunner(tokenizer, max_generate_length=32, max_input_length=64)
+    runner = PreferencePairTrajectoryRunner(tokenizer, max_generate_length=32, max_input_length=64, generator_config={})
     with pytest.raises(ValueError, match="zero tokens"):
         await runner.run(request(chosen=""))

@@ -2,7 +2,8 @@ import json
 
 import pytest
 
-from skyrl_gym import get_data_contract
+from skyrl_gym.envs.data_contracts import get_data_contract
+from skyrl_gym.code_execution import validate_code_example
 
 
 LCB_CORRECT_RESPONSE = """```python
@@ -38,6 +39,7 @@ def test_ifeval_contract_canonicalizes_and_validates_constraint_specs():
     assert json.loads(ground_truth) == {"func_name": "verify_keywords", "keyword_list": ["alpha"]}
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "source_ground_truth",
     [
@@ -55,10 +57,9 @@ def test_ifeval_contract_canonicalizes_and_validates_constraint_specs():
         },
     ],
 )
-def test_lcb_contract_normalizes_source_schemas_and_executes_two_sided_preflight(source_ground_truth):
-    contract = get_data_contract("lcb")
-
-    ground_truth = contract.validate_example(
+async def test_lcb_contract_normalizes_source_schemas_and_executes_two_sided_preflight(machine, source_ground_truth):
+    ground_truth = await validate_code_example(
+        machine,
         source_ground_truth,
         LCB_CORRECT_RESPONSE,
         LCB_WRONG_RESPONSE,
@@ -67,10 +68,10 @@ def test_lcb_contract_normalizes_source_schemas_and_executes_two_sided_preflight
     assert json.loads(ground_truth) == [{"input": "abc\n", "output": "cba\n", "testtype": "stdin"}]
 
 
-def test_lcb_contract_normalizes_and_executes_functional_cases():
-    contract = get_data_contract("lcb")
-
-    ground_truth = contract.validate_example(
+@pytest.mark.asyncio
+async def test_lcb_contract_normalizes_and_executes_functional_cases(machine):
+    ground_truth = await validate_code_example(
+        machine,
         {"inputs": [[[1, 2, 3]]], "outputs": [6], "fn_name": "total"},
         "```python\ndef total(values):\n    return sum(values)\n```",
         "```python\ndef total(values):\n    return 0\n```",

@@ -29,7 +29,9 @@ This script downloads the GSM8K dataset, extracts ground truth answers, and form
 Environment Implementation
 ---------------------------
 
-The LLM judge environment is implemented in ``examples/llm_as_a_judge/llm_judge_env.py``. We use the OpenAI API to access the LLM judge.
+``examples/llm_as_a_judge/task_grading.py`` supplies the judge-backed grader.
+The entrypoint passes it to ``AnswerTaskSession`` through an explicit factory.
+The judge uses the configured HTTP endpoint. A missing verdict is an infrastructure failure.
 
 The environment sends the following prompt to the judge:
 
@@ -116,7 +118,7 @@ The training configuration uses GRPO with colocated training and generation. Key
      
      # Environment and LLM judge configuration
      environment.env_class=llm_as_a_judge \
-     environment.skyrl_gym.llm_as_a_judge.model="gpt-4o-mini" \
+     environment.task_sessions.llm_as_a_judge.model="gpt-4o-mini" \
      
      # Other parameters (see the `examples/llm_as_a_judge/run_llm_judge.sh` for the full script)
      ...

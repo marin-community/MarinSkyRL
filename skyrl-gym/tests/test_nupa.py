@@ -1,21 +1,14 @@
 import json
 
 import pytest
-import skyrl_gym
-from omegaconf import DictConfig
+from taskcompendium.grading_result import Outcome
 
-from skyrl_gym import get_data_contract
+from skyrl_gym.envs.data_contracts import get_data_contract
+from skyrl_gym.answer_tasks import grade_nupa
 from skyrl_gym.envs.nupa.answers import FRACTION, FLOAT, INTEGER, SCIENTIFIC, digit_parts, extract_answer, full_answer
 from skyrl_gym.envs.nupa.verifier import NUPAVerifier
+from skyrl_gym.metrics import aggregate_for_task
 from skyrl_gym.verification import RolloutEvidence, VerificationStatus
-
-
-def make_nupa_env(ground_truth):
-    return skyrl_gym.make(
-        "nupa",
-        env_config=DictConfig({"env_class": "nupa"}),
-        extras={"reward_spec": {"method": "rule", "ground_truth": json.dumps(ground_truth)}},
-    )
 
 
 @pytest.mark.parametrize(
@@ -61,38 +54,44 @@ def test_digit_components_preserve_representation_sensitivity():
         ("5.04e4", {"answer": "5.04e4", "answer_format": SCIENTIFIC}, 1.0, 1.0),
     ],
 )
-def test_env_rewards_the_policy_eval_exact_match_metric(response, ground_truth, reward, digit_match):
-    step = make_nupa_env(ground_truth).step(response)
-
-    assert step["reward"] == reward
-    assert step["metadata"]["exact_match"] == reward
-    assert step["metadata"]["digit_match"] == digit_match
-    assert step["metadata"]["acc"] is (reward == 1.0)
-
-
-def test_env_reports_no_answer_metrics_for_unparseable_responses():
-    step = make_nupa_env({"answer": "1/2", "answer_format": FRACTION}).step("I cannot solve this.")
-
-    assert step["reward"] == 0.0
-    assert step["metadata"]["format_valid"] == 0.0
-    assert step["metadata"]["no_answer"] == 1.0
-    assert step["metadata"]["dlength"] == 2.0
+def test_task_rewards_the_policy_eval_exact_match_metric(model_turn, response, ground_truth, reward, digit_match):
+    result = grade_nupa(model_turn(response), {}, {"reward_spec": {"ground_truth": json.dumps(ground_truth)}})
+    assert result.reward == reward
+    assert result.metrics["exact_match"] == reward
+    assert result.metrics["digit_match"] == digit_match
+    assert result.metrics["acc"] is (reward == 1.0)
 
 
-def test_env_scores_zero_on_malformed_ground_truth_instead_of_crashing():
+def test_task_reports_no_answer_metrics_for_unparseable_responses(model_turn):
+    result = grade_nupa(
+        model_turn("I cannot solve this."),
+        {},
+        {"reward_spec": {"ground_truth": {"answer": "1/2", "answer_format": FRACTION}}},
+    )
+    assert result.reward == 0.0
+    assert result.metrics["format_valid"] == 0.0
+    assert result.metrics["no_answer"] == 1.0
+    assert result.metrics["dlength"] == 2.0
+
+
+def test_malformed_ground_truth_has_no_grade(model_turn):
     for bad in ("not json", json.dumps({"answer": "1", "answer_format": "Roman"}), json.dumps({"answer": ""})):
-        step = make_nupa_env(bad).step("123")
+        result = grade_nupa(model_turn("123"), {}, {"reward_spec": {"ground_truth": bad}})
+        assert result.reward == 0.0
+        assert (result.grade.status, result.grade.reward) == (Outcome.INFRA_ERROR, None)
 
-        assert step["reward"] == 0.0
 
-
-def test_env_aggregates_metric_means():
+def test_task_aggregates_metric_means(model_turn):
     metrics = [
-        make_nupa_env({"answer": "9.9", "answer_format": FLOAT}).step("9.9")["metadata"],
-        make_nupa_env({"answer": "9.9", "answer_format": FLOAT}).step("9.11")["metadata"],
+        grade_nupa(
+            model_turn("9.9"), {}, {"reward_spec": {"ground_truth": {"answer": "9.9", "answer_format": FLOAT}}}
+        ).metrics,
+        grade_nupa(
+            model_turn("9.11"), {}, {"reward_spec": {"ground_truth": {"answer": "9.9", "answer_format": FLOAT}}}
+        ).metrics,
     ]
 
-    aggregated = skyrl_gym.make("nupa", env_config=DictConfig({}), extras={}).aggregate_metrics(metrics)
+    aggregated = aggregate_for_task("nupa", metrics)
 
     assert aggregated["nupa/acc"] == 0.5
     assert aggregated["nupa/exact_match"] == 0.5

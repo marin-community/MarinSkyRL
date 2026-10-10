@@ -1,7 +1,7 @@
 """Projection of harness interaction records into trainer samples."""
 
 import copy
-from typing import Generic, Protocol, Sequence, TypeVar
+from typing import Protocol, Sequence
 
 import numpy as np
 from omegaconf import DictConfig
@@ -22,9 +22,6 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
 )
 
 
-InteractionT = TypeVar("InteractionT")
-
-
 class TrainableInteraction(Protocol):
     loss_mask: list[int]
     disposition: TrainingDisposition
@@ -33,20 +30,15 @@ class TrainableInteraction(Protocol):
 
 class RewardedInteraction(Protocol):
     reward: RewardResult
-
-
-class TrajectoryProjection(Protocol, Generic[InteractionT]):
-    """Convert structured interaction results into a trainer batch."""
-
-    def project(self, outputs: InteractionT, request: TrajectoryRequestBatch) -> TrajectoryBatch: ...
+    response_span_tags: list[int] | None
 
 
 class WholeTrajectoryProjection:
     """Emit one trainer sample for each completed environment trajectory."""
 
     def __init__(self, runner_cfg: DictConfig, tokenizer):
-        self._cfg = runner_cfg
-        self._tokenizer = tokenizer
+        self.runner_config = runner_cfg
+        self.tokenizer = tokenizer
 
     def project(
         self,
@@ -55,9 +47,9 @@ class WholeTrajectoryProjection:
     ) -> TrajectoryBatch:
         responses = [list(output.evidence.response_token_ids) for output in outputs]
         rewards = projected_rewards(outputs, responses)
-        loss_masks = _loss_masks(outputs, responses, self._cfg, self._tokenizer)
+        loss_masks = _loss_masks(outputs, responses, self.runner_config, self.tokenizer)
         candidate_logprobs = [output.evidence.behavior_logprobs for output in outputs]
-        get_logprobs = _logprobs_requested(request, self._cfg)
+        get_logprobs = logprobs_requested(request, self.runner_config)
         rollout_logprobs = (
             candidate_logprobs if get_logprobs and all(x is not None for x in candidate_logprobs) else None
         )
@@ -97,8 +89,8 @@ class StepWiseTrajectoryProjection:
     """Emit one trainer sample for every environment transition."""
 
     def __init__(self, runner_cfg: DictConfig, tokenizer):
-        self._cfg = runner_cfg
-        self._tokenizer = tokenizer
+        self.runner_config = runner_cfg
+        self.tokenizer = tokenizer
 
     def project(
         self,
@@ -112,7 +104,7 @@ class StepWiseTrajectoryProjection:
         steps = [step for trajectory in outputs for step in trajectory]
         responses = [list(step.evidence.response_token_ids) for step in steps]
         rewards = [step.reward.to_trainer_reward() for step in steps]
-        loss_masks = _loss_masks(steps, responses, self._cfg, self._tokenizer)
+        loss_masks = _loss_masks(steps, responses, self.runner_config, self.tokenizer)
 
         projected_ids = []
         is_last_step = []
@@ -123,7 +115,7 @@ class StepWiseTrajectoryProjection:
                 projected_ids.append(projected_id)
                 is_last_step.append(step_index == len(trajectory) - 1)
 
-        get_logprobs = _logprobs_requested(request, self._cfg)
+        get_logprobs = logprobs_requested(request, self.runner_config)
         rollout_logprobs = [step.evidence.behavior_logprobs for step in steps] if get_logprobs else None
 
         batch = TrajectoryBatch(
@@ -250,9 +242,9 @@ def projected_rewards(
     ]
 
 
-def _logprobs_requested(request: TrajectoryRequestBatch, runner_cfg: DictConfig) -> bool:
+def logprobs_requested(request: TrajectoryRequestBatch, runner_cfg: DictConfig) -> bool:
     sampling_params = request.get("sampling_params")
-    if sampling_params is not None:
+    if sampling_params is not None and "logprobs" in sampling_params:
         return sampling_params.get("logprobs") is not None
     return runner_cfg.sampling_params.logprobs is not None
 
@@ -282,6 +274,11 @@ def _attach_reward_channels(
         batch["token_level_shaping"] = [
             list(credit) if credit is not None else [0.0] * len(response)
             for credit, response in zip(token_credit, responses)
+        ]
+    tags = [output.response_span_tags for output in outputs]
+    if any(value is not None for value in tags):
+        batch["response_span_tags"] = [
+            value if value is not None else [0] * len(response) for value, response in zip(tags, responses, strict=True)
         ]
 
 

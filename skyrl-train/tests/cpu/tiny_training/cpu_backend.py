@@ -14,11 +14,13 @@ import torch.distributed as dist
 from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl_train.inference_engines.base import (
+    SESSION_ID_HEADER,
     InferenceEngineInput,
     InferenceEngineInterface,
     InferenceEngineOutput,
     NamedWeightsUpdateRequest,
 )
+from skyrl_train.inference_engines.chat_continuation import EXACT_PROMPT_TOKEN_IDS_KEY
 from skyrl_train.io import io
 from skyrl_train.utils.torch_utils import chunked_entropy_from_logits, logprobs_from_logits
 from skyrl_train.workers.worker import PolicyWorkerBase
@@ -371,7 +373,61 @@ class CPUInferenceEngine(InferenceEngineInterface):
                 state[name].copy_(extra["tensor"])
 
     async def chat_completion(self, request_payload: dict[str, Any]) -> dict[str, Any]:
-        raise NotImplementedError("the CPU engine serves token-in-token-out generation only")
+        body = request_payload["json"]
+        prompt = body.get(EXACT_PROMPT_TOKEN_IDS_KEY)
+        if prompt is None:
+            prompt = (await self.tokenize({"json": {**body, "add_generation_prompt": True}}))["tokens"]
+        sampling = {
+            "temperature": body.get("temperature", 1.0),
+            "max_tokens": body["max_completion_tokens"],
+            "logprobs": body.get("logprobs"),
+            **{key: body[key] for key in (*NEUTRAL_SAMPLING_PARAMS, "min_tokens", "stop") if key in body},
+        }
+        result = await self.generate(
+            InferenceEngineInput(
+                prompt_token_ids=[prompt],
+                sampling_params=sampling,
+                session_ids=[request_payload.get("headers", {}).get(SESSION_ID_HEADER)],
+            )
+        )
+        tokens = result["response_ids"][0]
+        logprobs = result["response_logprobs"]
+        return {
+            "id": request_payload.get("headers", {}).get("x-request-id", "cpu-completion"),
+            "object": "chat.completion",
+            "model": body["model"],
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": result["responses"][0]},
+                    "token_ids": tokens,
+                    "finish_reason": result["stop_reasons"][0],
+                    "logprobs": None
+                    if logprobs is None
+                    else {
+                        "content": [
+                            {"token": self.tokenizer.decode([token]), "logprob": score, "top_logprobs": []}
+                            for token, score in zip(tokens, logprobs[0], strict=True)
+                        ]
+                    },
+                }
+            ],
+            "usage": {
+                "prompt_tokens": len(prompt),
+                "completion_tokens": len(tokens),
+                "total_tokens": len(prompt) + len(tokens),
+            },
+        }
+
+    async def tokenize(self, request_payload: dict[str, Any]) -> dict[str, Any]:
+        body = request_payload["json"]
+        encoded = self.tokenizer.apply_chat_template(
+            body["messages"],
+            tokenize=True,
+            return_dict=False,
+            add_generation_prompt=body.get("add_generation_prompt", False),
+        )
+        return {"tokens": encoded}
 
     async def completion(self, request_payload: dict[str, Any]) -> dict[str, Any]:
         raise NotImplementedError("the CPU engine serves token-in-token-out generation only")

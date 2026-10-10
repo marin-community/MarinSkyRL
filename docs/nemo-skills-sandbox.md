@@ -1,5 +1,10 @@
 # Stateful NeMo Skills sandbox
 
+MarinSkyRL task sessions execute Python through Shellbox and a task-local interpreter.
+They do not call this HTTP sandbox service.
+See [task tools](../skyrl-train/docs/tutorials/tools_guide.rst) for the current execution interface.
+This document describes the separate service and its state-retention fix for remaining service callers.
+
 Build the service image from the repository root:
 
 ```bash
@@ -18,11 +23,10 @@ variables even when the pod and HTTP worker remain healthy. Python's default int
 `KeyboardInterrupt`, allowing the shell to return a timeout observation and retain its namespace. Code that
 ignores interrupts can still require a hard kill; state lost in that case is an infrastructure failure.
 
-Sandbox transport failures, malformed responses, worker errors, and unexpected session recreation produce
-`VerificationStatus.ERROR` with no score or pass/fail verdict. Diagnostics use the existing `VerifierRuntimeError`
-identifier and `infrastructure` category; the original transport exception is retained as `cause_error_type`.
-SkyRL masks these trajectories from both loss and group baselines. Python exceptions and timeouts that preserve
-the session remain tool observations so the model can continue. Do not retry state-mutating calls in a new shell.
+Service callers must treat transport failures, malformed responses, worker errors, and unexpected session recreation
+as infrastructure failures without a score or pass/fail verdict.
+Python exceptions and timeouts that preserve the session can remain tool observations.
+Do not retry state-mutating calls in a new shell.
 
 Inspect worker logs as well as pod restart counts when state disappears. A worker log reporting a shell dying
 "during interrupt" distinguishes this timeout failure from pod OOM. The service memory limit must cover every

@@ -2,7 +2,11 @@
 uv run --isolated --group dev --extra cpu pytest tests/cpu/dataset/test_preprocess.py
 """
 
+import json
+import sys
+
 import numpy as np
+import pyarrow.parquet as pq
 import pytest
 import torch
 from omegaconf import OmegaConf
@@ -10,6 +14,49 @@ from skyrl_train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
 )
 from skyrl_train.dataset.routed_expert_batch import RoutedExpertRows
+from examples.mini_swe_agent import preprocess_swegym
+from rolloutengine.spec import LoweredTaskSpec
+
+
+def test_swe_preparation_cli_persists_task_execution_limits(tmp_path, monkeypatch):
+    image = "example.invalid/swe@sha256:" + "a" * 64
+    manifest = tmp_path / "images.json"
+    manifest.write_text(json.dumps({"fixture": image}))
+    monkeypatch.setattr(
+        preprocess_swegym.datasets,
+        "load_dataset",
+        lambda *args, **kwargs: [
+            {"instance_id": "fixture", "problem_statement": "Repair the repository", "eval_script": "exit 0"}
+        ],
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "preprocess_swegym.py",
+            "--output_dir",
+            str(tmp_path),
+            "--train_revision",
+            "fixture-train",
+            "--eval_revision",
+            "fixture-eval",
+            "--image_manifest",
+            str(manifest),
+            "--max_turns",
+            "20",
+            "--command_timeout",
+            "180",
+        ],
+    )
+    preprocess_swegym.main()
+    for filename in ("train.parquet", "validation.parquet"):
+        row = pq.read_table(tmp_path / filename).to_pylist()[0]
+        task = LoweredTaskSpec.model_validate_json(row["lowered_task_spec"])
+        assert task.session.max_turns == 20
+        assert task.session.command_timeout == 180
+        assert task.task.environment_requirements.docker_image == image
+        assert task.runtime.verifier_machine is not None
+        assert task.task.resources.verifier
 
 
 @pytest.fixture
