@@ -2,10 +2,14 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+import torch
+from omegaconf import OmegaConf
 
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.rollouts.buffer import RolloutGroup
 from skyrl_train.trainer import RayPPOTrainer
+import skyrl_train.trainer as trainer_module
+from skyrl_train.inference_engines.vllm.fixed_sampler_noise import FixedSamplerNoise
 from skyrl_train.trajectory_runners.base import TrajectoryID
 from skyrl_train.trajectory_selection import BestOfNTrajectorySelector
 
@@ -28,11 +32,14 @@ def _group(uid: str, policy_step: int, *, rewards: list[float] | None = None) ->
 @pytest.mark.parametrize("offload_enabled", [False, True])
 def test_weight_sync_respects_optimizer_offload_policy(reason, offload_enabled):
     trainer = object.__new__(RayPPOTrainer)
-    trainer.cfg = SimpleNamespace(trainer=SimpleNamespace(offload_optimizer_during_rollouts=offload_enabled))
+    trainer.cfg = SimpleNamespace(
+        generator={}, trainer=SimpleNamespace(offload_optimizer_during_rollouts=offload_enabled)
+    )
     trainer.colocate_all = False
     trainer.global_step = 0
     trainer.all_startup_timings = {}
     trainer.all_timings = {}
+    trainer.all_metrics = {}
     events = []
 
     class Policy:
@@ -65,6 +72,91 @@ def test_weight_sync_respects_optimizer_offload_policy(reason, offload_enabled):
     assert events == (["pause"] if paused else []) + (["offload"] if offload_enabled else []) + ["sync"] + (
         ["resume"] if paused else []
     )
+
+
+@pytest.mark.asyncio
+async def test_periodic_refresh_changes_actual_serving_weights_only_at_the_declared_boundary(monkeypatch):
+    trainer = object.__new__(RayPPOTrainer)
+    trainer.cfg = OmegaConf.create(
+        {
+            "generator": {"sampler_refresh_period": 3, "sampler_weight_noise_scale": 0, "sampler_weight_noise_seed": 0},
+            "trainer": {"offload_optimizer_during_rollouts": True, "step_wise_training": False},
+        }
+    )
+    trainer.colocate_all = False
+    trainer.global_step = 0
+    trainer.all_startup_timings = {}
+    trainer.all_timings = {}
+    trainer.all_metrics = {}
+    serving = torch.zeros(3)
+
+    class Policy:
+        weights = torch.zeros(3)
+        optimizer_on_gpu = True
+
+        def offload_to_cpu(self, *, offload_optimizer, offload_model):
+            assert offload_optimizer and not offload_model
+            self.optimizer_on_gpu = False
+
+        def async_run_ray_method(self, dispatch, method):
+            assert dispatch == "pass_through" and method == "barrier_all"
+            return []
+
+        async def async_run_method(self, dispatch, method, client):
+            assert dispatch == "pass_through" and method == "broadcast_to_inference_engines"
+            serving.copy_(self.weights)
+
+    class Engine:
+        noise = None
+
+        async def pause_generation(self):
+            pass
+
+        async def resume_generation(self):
+            pass
+
+        async def sampler_noise(self, action, scale, seed):
+            assert scale == 0
+            if action == "initialize":
+                self.noise = FixedSamplerNoise([("weight", serving)], scale, seed)
+            elif action == "refresh":
+                self.noise.after_sync()
+            elif action == "snapshot":
+                self.noise.snapshot_for_evaluation()
+            elif action == "restore":
+                self.noise.restore_after_evaluation()
+            elif action == "clean":
+                self.noise.set_enabled(False)
+            else:
+                raise AssertionError(action)
+            return {"policy_weights": serving.tolist()}
+
+    trainer.policy_model = Policy()
+    trainer.inference_engine_client = Engine()
+    trainer.eval_dataloader = None
+    trainer.trajectory_runner = None
+    trainer.tokenizer = None
+    trainer.trajectory_sink = None
+
+    async def evaluate_current_policy(**kwargs):
+        torch.testing.assert_close(serving, trainer.policy_model.weights, rtol=0, atol=0)
+        return {"score": 1.0}
+
+    monkeypatch.setattr(trainer_module, "evaluate", evaluate_current_policy)
+    await trainer._sync_policy_for_rollouts(reason="initial")
+    for step in range(1, 8):
+        trainer.global_step = step
+        trainer.policy_model.weights.fill_(step)
+        trainer.policy_model.optimizer_on_gpu = True
+        await trainer._sync_policy_for_rollouts(reason="training_step")
+        expected = 3 * (step // 3)
+        torch.testing.assert_close(serving, torch.full((3,), float(expected)), rtol=0, atol=0)
+        assert trainer._sampler_refresh_step == expected
+        assert not trainer.policy_model.optimizer_on_gpu
+        if step == 2:
+            assert await trainer.eval() == {"score": 1.0}
+            torch.testing.assert_close(serving, torch.zeros(3), rtol=0, atol=0)
+            assert trainer._sampler_refresh_step == 0
 
 
 def test_rollout_batch_conversion_reports_staleness_and_stage_timings(monkeypatch):

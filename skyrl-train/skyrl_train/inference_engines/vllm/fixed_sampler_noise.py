@@ -12,6 +12,7 @@ class FixedSamplerNoise:
         self.parameters = dict(parameters)
         self.delta = {}
         self.clean = {}
+        self._evaluation_snapshot = None
         for name, parameter in self.parameters.items():
             initial = parameter.detach().float().cpu()
             digest = hashlib.sha256(f"{seed}:{name}".encode()).digest()
@@ -43,3 +44,21 @@ class FixedSamplerNoise:
 
     def evidence(self) -> dict:
         return dict(self._evidence)
+
+    @torch.no_grad()
+    def snapshot_for_evaluation(self) -> None:
+        """Keep the actual serving weights and their clean base across a fresh-policy evaluation."""
+        if self._evaluation_snapshot is not None:
+            raise RuntimeError("A sampler evaluation snapshot is already active")
+        weights = {name: parameter.detach().cpu().clone() for name, parameter in self.parameters.items()}
+        self._evaluation_snapshot = (weights, self.clean)
+
+    @torch.no_grad()
+    def restore_after_evaluation(self) -> None:
+        """Restore the exact prior serving policy, including its original clean base."""
+        if self._evaluation_snapshot is None:
+            raise RuntimeError("No sampler evaluation snapshot is active")
+        weights, self.clean = self._evaluation_snapshot
+        for name, parameter in self.parameters.items():
+            parameter.copy_(weights[name].to(parameter.device))
+        self._evaluation_snapshot = None

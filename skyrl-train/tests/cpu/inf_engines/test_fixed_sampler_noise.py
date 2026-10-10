@@ -1,4 +1,5 @@
 import torch
+import pytest
 
 from skyrl_train.inference_engines.vllm.fixed_sampler_noise import FixedSamplerNoise
 
@@ -28,3 +29,27 @@ def test_same_initial_model_and_seed_give_same_delta_in_independent_sampler_repl
     FixedSamplerNoise([("model.weight", a)], 0.05, 2)
     FixedSamplerNoise([("model.weight", b)], 0.05, 2)
     torch.testing.assert_close(a, b, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("scale", [0.0, 0.05])
+def test_clean_current_evaluation_restores_frozen_bf16_sampler_and_its_original_base(scale):
+    initial = torch.arange(1, 17, dtype=torch.bfloat16).reshape(4, 4)
+    parameter = torch.nn.Parameter(initial.clone())
+    noise = FixedSamplerNoise([("model.weight", parameter)], scale, 2)
+    frozen = parameter.detach().clone()
+    identity = noise.evidence()
+
+    noise.snapshot_for_evaluation()
+    with torch.no_grad():
+        parameter.copy_(initial * 2)
+    noise.after_sync()
+    noise.set_enabled(False)
+    torch.testing.assert_close(parameter, initial * 2, atol=0, rtol=0)
+
+    noise.restore_after_evaluation()
+    torch.testing.assert_close(parameter, frozen, atol=0, rtol=0)
+    noise.set_enabled(False)
+    torch.testing.assert_close(parameter, initial, atol=0, rtol=0)
+    noise.set_enabled(True)
+    torch.testing.assert_close(parameter, frozen, atol=0, rtol=0)
+    assert noise.evidence() == identity

@@ -422,6 +422,7 @@ class RolloutBuffer:
         self.config = config
         self._policy = async_rollout_policy(config)
         self._policy_step = 0
+        self._sampler_policy_step = 0
         self._leases: dict[str, RolloutLease] = {}
         # Committed groups not yet assigned to a batch; only groups restored before the first publish wait here.
         self._ready: list[ReadyRollout] = []
@@ -448,7 +449,7 @@ class RolloutBuffer:
         """Wait for generation capacity and lease it at the current policy step."""
         async with self._changed:
             await self._changed.wait_for(lambda: self._lease_batch() is not None)
-            lease = RolloutLease(uuid.uuid4().hex, self._policy_step, self._lease_batch())
+            lease = RolloutLease(uuid.uuid4().hex, self._sampler_policy_step, self._lease_batch())
             self._leases[lease.lease_id] = lease
             return lease
 
@@ -465,15 +466,23 @@ class RolloutBuffer:
             self._select()
             self._changed.notify_all()
 
-    async def publish(self, policy_step: int) -> None:
+    async def publish(self, policy_step: int, *, sampler_policy_step: int | None = None) -> None:
         """Acknowledge the taken batch, if any, and lease at the newly synced policy step."""
         async with self._changed:
+            sampler_step = policy_step if sampler_policy_step is None else sampler_policy_step
+            if not 1 <= sampler_step <= policy_step:
+                raise ValueError("sampler policy step must name an already applied policy")
+            if sampler_step != policy_step and (
+                self.config.max_staleness_steps != 0 or self.config.batch_policy is not BatchPolicy.FULL_BATCH
+            ):
+                raise ValueError("periodically frozen samplers require a synchronous full-batch buffer")
             if policy_step <= self._policy_step:
                 raise ValueError(f"policy step must advance past {self._policy_step}, got {policy_step}")
             if self._policy_step and not self._batch_taken:
                 raise RuntimeError("cannot publish a new policy step before taking the current batch")
             self._admitted.pop(self._policy_step, None)
             self._policy_step = policy_step
+            self._sampler_policy_step = sampler_step
             self._unreported = list(self._admitted[policy_step])
             self._batch_taken = False
             self._select()

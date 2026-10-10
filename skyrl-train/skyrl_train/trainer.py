@@ -287,6 +287,7 @@ class RayPPOTrainer:
     # Set at startup when generator.weight_sync_transport is expert_block.
     _expert_block_sync: ExpertBlockSync | None = None
     _sampler_noise_initialized: bool = False
+    _sampler_refresh_step: int = 0
 
     _training_metrics_enabled: bool = False
     _rollout_spans_enabled: bool = False
@@ -313,6 +314,16 @@ class RayPPOTrainer:
             cfg.trainer.algorithm.resolved_group_advantage
         )
         self.colocate_all = cfg.trainer.placement.colocate_all
+        refresh_period = cfg.generator.get("sampler_refresh_period", 1)
+        if refresh_period < 1:
+            raise ValueError("sampler_refresh_period must be positive")
+        if refresh_period > 1 and (
+            self.colocate_all
+            or cfg.trainer.rollout_buffer.max_staleness_steps != 0
+            or cfg.trainer.rollout_buffer.batch_policy != "full_batch"
+            or cfg.trainer.resume_mode != "none"
+        ):
+            raise ValueError("periodic sampler freeze requires a fresh disaggregated synchronous full-batch run")
         self.tracker = tracker
         self.tokenizer = tokenizer
         self.train_dataset = train_dataset
@@ -468,9 +479,14 @@ class RayPPOTrainer:
             OmegaConf.update(cfg, f"generator.eval_sampling_params.{key}", value, force_add=True)
         evaluator = evaluate_step_wise if cfg.trainer.step_wise_training else evaluate
         noisy = self.cfg.generator.get("sampler_weight_noise_scale", 0) > 0
-        if noisy:
-            await self._sampler_noise_action("clean")
+        frozen = self.cfg.generator.get("sampler_refresh_period", 1) > 1
+        if frozen:
+            await self._sampler_noise_action("snapshot")
         try:
+            if frozen:
+                await self._sync_policy_for_rollouts(reason="evaluation")
+            if noisy or frozen:
+                await self._sampler_noise_action("clean")
             return await evaluator(
                 eval_dataloader=self.eval_dataloader,
                 trajectory_runner=self.trajectory_runner,
@@ -481,7 +497,9 @@ class RayPPOTrainer:
                 val_set_name=val_set_name,
             )
         finally:
-            if noisy:
+            if frozen:
+                await self._sampler_noise_action("restore")
+            elif noisy:
                 await self._sampler_noise_action("noisy")
 
     # ------------------------------------------------------------------
@@ -1125,6 +1143,13 @@ class RayPPOTrainer:
         if not self._inference_engines_configured():
             return
         timings = self.all_startup_timings if reason == "initial" else self.all_timings
+        period = self.cfg.generator.get("sampler_refresh_period", 1)
+        if reason == "training_step" and self.global_step % period:
+            await asyncio.to_thread(
+                self._offload_policy_optimizer, timings, timer_label="offload_policy_optimizer_to_cpu"
+            )
+            self.all_metrics["sampler/frozen_policy_completed_updates"] = self._sampler_refresh_step
+            return
         with Timer("sync_weights", timings) as update_timer:
             if self.colocate_all:
                 await asyncio.to_thread(self.policy_model.offload_to_cpu, offload_optimizer=True, offload_model=False)
@@ -1145,6 +1170,9 @@ class RayPPOTrainer:
                 await self.sync_policy_weights_to_inference_engines()
                 if pause:
                     await self.inference_engine_client.resume_generation()
+        if reason != "evaluation":
+            self._sampler_refresh_step = self.global_step
+            self.all_metrics["sampler/frozen_policy_completed_updates"] = self._sampler_refresh_step
         self._log_weight_update_completed(reason=reason, duration_seconds=update_timer.duration)
 
     async def sync_policy_weights_to_inference_engines(self) -> None:
@@ -1171,7 +1199,10 @@ class RayPPOTrainer:
             )
         # A hard sync point leaves every policy rank free before the next forward.
         await self._drain_policy_event_loops()
-        if self.cfg.generator.get("sampler_weight_noise_scale", 0) > 0:
+        if (
+            self.cfg.generator.get("sampler_weight_noise_scale", 0) > 0
+            or self.cfg.generator.get("sampler_refresh_period", 1) > 1
+        ):
             action = "refresh" if self._sampler_noise_initialized else "initialize"
             evidence = await self._sampler_noise_action(action)
             self._sampler_noise_initialized = True
@@ -1438,7 +1469,10 @@ class RayPPOTrainer:
     async def _publish(self, step: int) -> None:
         """Open rollout leases for training step ``step``, whose policy weights the engines now hold."""
         await self._begin_speculator_capture(step)
-        await self.context.publish(step)
+        if self.cfg.generator.get("sampler_refresh_period", 1) > 1:
+            await self.context.publish(step, sampler_policy_step=self._sampler_refresh_step + 1)
+        else:
+            await self.context.publish(step)
 
     async def _train_step(self, epoch: int, step_wall: StepWallTime) -> TrainingInputBatch:
         """Read this step's batch from the rollout buffer, train on it, sync the new weights, and return the batch."""

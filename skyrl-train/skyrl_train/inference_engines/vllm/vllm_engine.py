@@ -341,6 +341,10 @@ class WorkerWrap:
                 self._fixed_sampler_noise.after_sync()
             elif action in ("clean", "noisy"):
                 self._fixed_sampler_noise.set_enabled(action == "noisy")
+            elif action == "snapshot":
+                self._fixed_sampler_noise.snapshot_for_evaluation()
+            elif action == "restore":
+                self._fixed_sampler_noise.restore_after_evaluation()
             else:
                 raise ValueError(f"Unknown sampler noise action {action}")
         return self._fixed_sampler_noise.evidence()

@@ -225,9 +225,13 @@ class TrainingContext:
         await asyncio.gather(*tasks, return_exceptions=True)
         ray.kill(self._buffer)
 
-    async def publish(self, policy_step: int) -> None:
+    async def publish(self, policy_step: int, *, sampler_policy_step: int | None = None) -> None:
         """Acknowledge the previous batch and lease rollouts at ``policy_step``, whose weights are now live."""
-        await self._until_failure(self._buffer.publish.remote(policy_step))
+        if sampler_policy_step is None:
+            publication = self._buffer.publish.remote(policy_step)
+        else:
+            publication = self._buffer.publish.remote(policy_step, sampler_policy_step=sampler_policy_step)
+        await self._until_failure(publication)
         self._policy_step = policy_step
 
     async def next_batch(

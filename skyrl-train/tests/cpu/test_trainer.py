@@ -119,6 +119,8 @@ class _ResidencyInferenceClient:
 @pytest.mark.parametrize("save_error", [None, RuntimeError("storage of size 0")])
 def test_colocated_checkpoint_temporarily_backloads_policy_and_restores_rollout_residency(save_error, monkeypatch):
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = SimpleNamespace(generator={})
+    trainer.all_metrics = {}
     trainer.colocate_all = True
     trainer.policy_model = _ResidencyPolicyGroup()
     trainer.inference_engine_client = _ResidencyInferenceClient()

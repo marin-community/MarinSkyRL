@@ -105,6 +105,25 @@ async def test_on_policy_leases_one_batch_per_published_step(batch_policy):
 
 
 @pytest.mark.asyncio
+async def test_frozen_sampler_leases_keep_actual_policy_version_across_a_65_update_cycle():
+    buffer = _buffer(BatchPolicy.FULL_BATCH, batch_size=1, max_in_flight=1, max_staleness_steps=0)
+    ages = []
+    for step in range(1, 68):
+        sampler_step = 1 if step <= 65 else 66
+        await buffer.publish(step, sampler_policy_step=sampler_step)
+        lease = await asyncio.wait_for(buffer.acquire_lease(), PROGRESS_TIMEOUT)
+        assert lease.batch_id == step and lease.policy_step == sampler_step
+        await _commit(buffer, lease.lease_id, str(step))
+        admission = await buffer.admit(PROGRESS_TIMEOUT)
+        assert admission.selection is not None
+        assert admission.batch_id == step
+        assert admission.admitted[0].policy_step == sampler_step
+        ages.append(step - admission.admitted[0].policy_step)
+        assert await _lease_is_blocked(buffer)
+    assert ages == [*range(65), 0, 1]
+
+
+@pytest.mark.asyncio
 async def test_off_policy_generation_runs_ahead_by_the_staleness_bound(batch_policy):
     buffer = _buffer(batch_policy, batch_size=2, max_in_flight=8, max_staleness_steps=1)
     await buffer.publish(1)
