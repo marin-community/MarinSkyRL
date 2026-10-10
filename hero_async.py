@@ -113,7 +113,7 @@ def config(args):
     cfg.generator.weight_sync_transport = args.weight_sync_transport
     cfg.generator.expert_block_sync.verify = args.expert_block_verify
     cfg.generator.weight_sync_pause_timeout_seconds = args.weight_sync_pause_timeout_seconds
-    cfg.generator.use_conversation_multi_turn = False
+    cfg.generator.max_turns = 1
     cfg.generator.enable_http_endpoint = False
     cfg.generator.run_engines_locally = True
     cfg.generator.max_input_length = args.prompt_length
