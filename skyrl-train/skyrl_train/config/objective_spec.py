@@ -298,6 +298,18 @@ def validate_objective(cfg: DictConfig, *, loss_spec: LossSpec | None = None) ->
     if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
         raise ValueError("trainer.policy.max_consecutive_nonfinite_steps must be null or an integer >= 1")
     algorithm = cfg.trainer.algorithm
+    if cfg.generator.get("sampler_weight_noise_scale", 0) > 0:
+        if (
+            cfg.generator.backend != "vllm"
+            or not cfg.generator.run_engines_locally
+            or cfg.trainer.placement.colocate_all
+            or cfg.trainer.rollout_buffer.max_staleness_steps != 0
+            or str(cfg.trainer.rollout_buffer.batch_policy) != "full_batch"
+            or str(cfg.trainer.resume_mode) != "none"
+        ):
+            raise ValueError(
+                "fixed-noise reproduction requires local disaggregated vLLM, fresh full batches and no resume"
+            )
     for key in ("use_abs_kl", "use_kl_estimator_k3"):
         if key in algorithm:
             raise ValueError(f"trainer.algorithm.{key} is unsupported; configure trainer.algorithm.kl_estimator_type")

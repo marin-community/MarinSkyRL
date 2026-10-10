@@ -286,6 +286,7 @@ class RayPPOTrainer:
 
     # Set at startup when generator.weight_sync_transport is expert_block.
     _expert_block_sync: ExpertBlockSync | None = None
+    _sampler_noise_initialized: bool = False
 
     _training_metrics_enabled: bool = False
     _rollout_spans_enabled: bool = False
@@ -466,15 +467,22 @@ class RayPPOTrainer:
         for key, value in (sampling_params or {}).items():
             OmegaConf.update(cfg, f"generator.eval_sampling_params.{key}", value, force_add=True)
         evaluator = evaluate_step_wise if cfg.trainer.step_wise_training else evaluate
-        return await evaluator(
-            eval_dataloader=self.eval_dataloader,
-            trajectory_runner=self.trajectory_runner,
-            cfg=cfg,
-            global_step=self.global_step,
-            tokenizer=self.tokenizer,
-            trajectory_sink=self.trajectory_sink,
-            val_set_name=val_set_name,
-        )
+        noisy = self.cfg.generator.get("sampler_weight_noise_scale", 0) > 0
+        if noisy:
+            await self._sampler_noise_action("clean")
+        try:
+            return await evaluator(
+                eval_dataloader=self.eval_dataloader,
+                trajectory_runner=self.trajectory_runner,
+                cfg=cfg,
+                global_step=self.global_step,
+                tokenizer=self.tokenizer,
+                trajectory_sink=self.trajectory_sink,
+                val_set_name=val_set_name,
+            )
+        finally:
+            if noisy:
+                await self._sampler_noise_action("noisy")
 
     # ------------------------------------------------------------------
     # Teardown helpers
@@ -1163,6 +1171,18 @@ class RayPPOTrainer:
             )
         # A hard sync point leaves every policy rank free before the next forward.
         await self._drain_policy_event_loops()
+        if self.cfg.generator.get("sampler_weight_noise_scale", 0) > 0:
+            action = "refresh" if self._sampler_noise_initialized else "initialize"
+            evidence = await self._sampler_noise_action(action)
+            self._sampler_noise_initialized = True
+            logger.info("Fixed sampler noise installed: step={} evidence={}", self.global_step, evidence)
+
+    async def _sampler_noise_action(self, action: str):
+        return await self.inference_engine_client.sampler_noise(
+            action,
+            float(self.cfg.generator.sampler_weight_noise_scale),
+            int(self.cfg.generator.sampler_weight_noise_seed),
+        )
 
     async def _drain_policy_event_loops(self):
         """Wait for every actor loop to finish pending weight-sync work.

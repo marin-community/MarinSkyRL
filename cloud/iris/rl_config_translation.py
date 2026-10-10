@@ -110,7 +110,7 @@ _REQUIRED_CONTEXT_BUDGET_FIELDS = frozenset(
     }
 )
 _CONTEXT_BUDGET_FRACTION_FIELDS = frozenset({"generated_budget_fraction", "overlong_cache_fraction"})
-_CONTEXT_BUDGET_FIELDS = _REQUIRED_CONTEXT_BUDGET_FIELDS | _CONTEXT_BUDGET_FRACTION_FIELDS
+_CONTEXT_BUDGET_FIELDS = _REQUIRED_CONTEXT_BUDGET_FIELDS | _CONTEXT_BUDGET_FRACTION_FIELDS | {"max_prompt_tokens"}
 _DEFAULT_GENERATED_BUDGET_FRACTION = 0.5
 _DEFAULT_OVERLONG_CACHE_FRACTION = 0.25
 
@@ -133,12 +133,15 @@ class ContextBudget:
     request_window_tokens: int
     max_new_tokens_per_turn: int
     max_turns: int
+    max_prompt_tokens: int | None = None
     generated_budget_fraction: float = _DEFAULT_GENERATED_BUDGET_FRACTION
     overlong_cache_fraction: float = _DEFAULT_OVERLONG_CACHE_FRACTION
 
     @property
     def max_input_tokens(self) -> int:
         """Return the input allowance after reserving one complete response."""
+        if self.max_prompt_tokens is not None:
+            return self.max_prompt_tokens
         return self.request_window_tokens - self.max_new_tokens_per_turn
 
     @property
@@ -155,7 +158,7 @@ class ContextBudget:
 
     def as_dict(self) -> Dict[str, int | float]:
         """Return the persisted representation, including derived client input."""
-        return {
+        values = {
             "request_window_tokens": self.request_window_tokens,
             "max_new_tokens_per_turn": self.max_new_tokens_per_turn,
             "max_turns": self.max_turns,
@@ -165,6 +168,9 @@ class ContextBudget:
             "generated_tokens_per_trajectory": self.generated_tokens_per_trajectory,
             "overlong_cache_tokens": self.overlong_cache_tokens,
         }
+        if self.max_prompt_tokens is not None:
+            values["max_prompt_tokens"] = self.max_prompt_tokens
+        return values
 
 
 def _path_is_declared(mapping: Dict[str, Any], path: tuple[str, ...]) -> bool:
@@ -228,6 +234,11 @@ def resolve_context_budget(raw: Dict[str, Any], config_path: Path) -> ContextBud
             config["max_new_tokens_per_turn"], "max_new_tokens_per_turn", config_path
         ),
         max_turns=_require_positive_integer(config["max_turns"], "max_turns", config_path),
+        max_prompt_tokens=(
+            _require_positive_integer(config["max_prompt_tokens"], "max_prompt_tokens", config_path)
+            if "max_prompt_tokens" in config
+            else None
+        ),
         generated_budget_fraction=_require_fraction(
             config.get("generated_budget_fraction", _DEFAULT_GENERATED_BUDGET_FRACTION),
             "generated_budget_fraction",
@@ -241,7 +252,7 @@ def resolve_context_budget(raw: Dict[str, Any], config_path: Path) -> ContextBud
             allow_zero=True,
         ),
     )
-    if budget.max_input_tokens <= 0:
+    if budget.max_input_tokens <= 0 or budget.max_input_tokens >= budget.request_window_tokens:
         raise ValueError(
             f"{config_path}: request_window_tokens ({budget.request_window_tokens}) must exceed "
             f"max_new_tokens_per_turn ({budget.max_new_tokens_per_turn})"

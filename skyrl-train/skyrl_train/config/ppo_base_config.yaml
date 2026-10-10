@@ -361,6 +361,9 @@ trainer:
 
 
 generator:
+  # Research branch: fixed INITIAL-weight Gaussian delta, independently of trainer weights.
+  sampler_weight_noise_scale: 0.0
+  sampler_weight_noise_seed: ${trainer.seed}
   model_name: ${trainer.policy.model.path}
   model_dtype: "bfloat16"
   timeout_multiplier: 1.0

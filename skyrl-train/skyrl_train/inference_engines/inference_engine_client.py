@@ -256,6 +256,10 @@ class InferenceEngineClient(InferenceEngineInterface):
         awaitables = [getattr(engine, method_name)(*args, **kwargs) for engine in live_engines]
         return await asyncio.gather(*awaitables)
 
+    async def sampler_noise(self, action: str, scale: float, seed: int):
+        """Apply the controlled-mismatch research action to every local vLLM worker."""
+        return await self._run_on_all_engines("sampler_noise", action, scale, seed)
+
     async def _run_on_all_engines_before_deadline(self, method_name: str):
         """Fan out a weight-sync pause or resume, failing loudly if an engine never answers."""
         try:

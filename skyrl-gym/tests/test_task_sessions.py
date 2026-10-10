@@ -72,6 +72,8 @@ def task(name, extras, config=None):
         ("aime", {"reward_model": {"ground_truth": "42"}}, "Answer: \\boxed{43}", -1.0, -1.0),
         ("gsm8k", {"reward_model": {"ground_truth": "12"}}, "#### 12", 1.0, 1.0),
         ("cat_count", {"extra_info": {"n": 4}}, "cat cat cat", 0.0, 0.4725),
+        ("countdown_reference", {"info": {"numbers": [3, 5, 7], "target": 26}}, "<answer>3*7+5</answer>", 1, 1),
+        ("countdown_reference", {"info": {"numbers": [3, 5, 7], "target": 26}}, "<answer>26</answer>", 0, -1),
         ("mcq", {"reward_model": {"ground_truth": "B"}}, "\\boxed{B}", 1.0, 1.0),
     ],
 )

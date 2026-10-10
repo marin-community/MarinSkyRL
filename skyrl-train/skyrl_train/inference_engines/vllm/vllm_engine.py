@@ -71,6 +71,7 @@ from skyrl_train.inference_engines.vllm.numa import set_async_worker_numa_affini
 from skyrl_train.weight_sync.expert_block.receiver import ExpertBlockReceiver
 from skyrl_train.weight_sync.weight_loader import WeightLoader
 from skyrl_train.weight_sync.vllm_weight_conversion import load_weights_into_vllm
+from skyrl_train.inference_engines.vllm.fixed_sampler_noise import FixedSamplerNoise
 from skyrl_train.weight_sync.weight_extractor import is_weight_sync_dtype_compatible
 from skyrl_train.inference_engines.vllm.utils import (
     pop_vllm_wrapper_kwargs,
@@ -326,6 +327,24 @@ def setup_envvars_for_vllm(kwargs, bundle_indices):
 
 
 class WorkerWrap:
+    _fixed_sampler_noise: FixedSamplerNoise | None = None
+
+    def sampler_noise(self, action: str, scale: float, seed: int) -> dict:
+        if action == "initialize":
+            if self._fixed_sampler_noise is not None:
+                raise RuntimeError("The initial sampler perturbation is already fixed")
+            self._fixed_sampler_noise = FixedSamplerNoise(self.model_runner.model.named_parameters(), scale, seed)
+        else:
+            if self._fixed_sampler_noise is None:
+                raise RuntimeError("Sampler perturbation has not been initialized")
+            if action == "refresh":
+                self._fixed_sampler_noise.after_sync()
+            elif action in ("clean", "noisy"):
+                self._fixed_sampler_noise.set_enabled(action == "noisy")
+            else:
+                raise ValueError(f"Unknown sampler noise action {action}")
+        return self._fixed_sampler_noise.evidence()
+
     def set_numa_affinity(self):
         """Set CPU affinity to match this worker's GPU NUMA node.
 
@@ -1891,6 +1910,11 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         process_weights_after_loading (swap_w13_to_w31) re-applied EXACTLY once."""
         engine = self.llm
         return await engine.collective_rpc("skyrl_finish_weight_reload")
+
+    async def sampler_noise(self, action: str, scale: float, seed: int):
+        replies = await self.llm.collective_rpc("sampler_noise", args=(action, scale, seed))
+        await self.llm.reset_prefix_cache()
+        return replies
 
     async def teardown(self):
         await self._destroy_weights_update_group()
