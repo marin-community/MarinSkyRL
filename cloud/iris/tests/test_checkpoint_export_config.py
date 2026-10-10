@@ -1,7 +1,9 @@
 """Behavior tests for config-native checkpoint export derivation."""
 
+import json
 import sys
 from dataclasses import replace
+from pathlib import Path
 
 from omegaconf import OmegaConf
 
@@ -115,3 +117,25 @@ def test_nested_export_keeps_parent_response_stream_clean(capfd) -> None:
     captured = capfd.readouterr()
     assert "nested export response" not in captured.out
     assert "nested export response" in captured.err
+
+
+def test_nested_export_reads_cluster_config_relative_to_parent_launch(tmp_path: Path, monkeypatch) -> None:
+    cluster_config = tmp_path / "lib/iris/config/cw-rno2a.yaml"
+    cluster_config.parent.mkdir(parents=True)
+    cluster_config.write_text("platform:\n  coreweave:\n    kube_context: export-cluster\n")
+    output = tmp_path / "resolved-cluster.json"
+    monkeypatch.chdir(tmp_path)
+    spec = replace(_spec(_request()), no_wait=True)
+    command = [
+        sys.executable,
+        "-c",
+        "import json,sys,yaml; from pathlib import Path; "
+        "config=yaml.safe_load(Path(sys.argv[1]).read_text()); "
+        "Path(sys.argv[2]).write_text(json.dumps(config))",
+        "lib/iris/config/cw-rno2a.yaml",
+        str(output),
+    ]
+
+    _run_export(spec, command)
+
+    assert json.loads(output.read_text())["platform"]["coreweave"]["kube_context"] == "export-cluster"
