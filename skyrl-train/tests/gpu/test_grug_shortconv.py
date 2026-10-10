@@ -68,6 +68,7 @@ def _assert_bf16_gradient_rounding(actual, expected, sum_abs_terms, bf16_rounds,
     factor += fp32_rounds * fp32_u / (1 - fp32_rounds * fp32_u)
     bound = factor * sum_abs_terms
     difference = (actual.float() - expected.float()).abs()
+    assert torch.isfinite(difference).all().item() and torch.isfinite(bound).all().item()
     assert not (difference > bound).any().item(), {
         "max_abs_error": difference.max().item(),
         "max_bound": bound.max().item(),
