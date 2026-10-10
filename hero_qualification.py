@@ -126,9 +126,11 @@ def measured_worker(source):
 
     class MeasuredWorker(ReplayControl, MegatronPolicyWorkerBase):
         def _ppo_train_impl(self, train_data, timing):
+            from hero_sparse_gpu_trace import training_step
+
             torch.cuda.synchronize()
             started = time.perf_counter()
-            result = super()._ppo_train_impl(train_data, timing)
+            result = training_step(self, super()._ppo_train_impl, train_data, timing)
             torch.cuda.synchronize()
             self._qualification_train_seconds = time.perf_counter() - started
             result.metadata["qualification_phases"] = dict(timing._durations)
