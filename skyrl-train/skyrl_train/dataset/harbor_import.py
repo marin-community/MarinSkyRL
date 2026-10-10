@@ -95,6 +95,7 @@ class TaskConfig(BaseModel):
     def model_validate_toml(cls, contents: str) -> "TaskConfig":
         return cls.model_validate(tomllib.loads(contents))
 
+
 ARTIFACTS_PATH = "/logs/artifacts"
 REWARD_PATH = "/logs/verifier"
 AGENT_LOG_PATH = "/logs/agent"
