@@ -15,7 +15,6 @@ import ray
 from skyrl_train.entrypoints.main_base import config_dir, run_ray_driver
 from skyrl_train.rollouts.context import TrainingContext
 from skyrl_train.checkpoint_listing import extract_step_from_path
-from skyrl_train.config.trajectory_runner_capabilities import TrajectoryRunnerMode
 from skyrl_train.utils.trainer_utils import ResumeMode
 from tests.training_batch_replay import (
     BatchReplayProvenance,
@@ -201,7 +200,7 @@ def main(cfg: DictConfig) -> None:
         # before any model worker can be dispatched.
         load_training_batch_artifact(artifact_path, expected=provenance)
 
-    run_ray_driver(cfg, diagnostic_entrypoint, TrajectoryRunnerMode.SKYRL_GYM)
+    run_ray_driver(cfg, diagnostic_entrypoint)
 
 
 if __name__ == "__main__":

@@ -5,11 +5,9 @@ cloud/iris/export_hf_checkpoint.py
 cloud/iris/extract_tasks_from_parquet.py
 cloud/iris/hf_datasets.py
 cloud/iris/hf_model_cache.py
-cloud/iris/ingress_utils.py
 cloud/iris/iris_backend.py
 cloud/iris/launch.py
 cloud/iris/launch_config.py
-cloud/iris/literal_proxy_utils.py
 cloud/iris/model_paths.py
 cloud/iris/open_mopd_evaluation.py
 cloud/iris/open_mopd_evaluation_task.py
@@ -33,7 +31,6 @@ cloud/iris/training_driver.py
 marinskyrl/__init__.py
 marinskyrl/checkpoint_paths.py
 marinskyrl/distillation.py
-marinskyrl/harbor_agent_names.py
 marinskyrl/hf_model.py
 marinskyrl/inference_placement.py
 marinskyrl/hugging_face_retry.py
@@ -50,4 +47,5 @@ marinskyrl/speculative_decoding.py
 marinskyrl/task_sources.py
 chat_templates/delphi_v0.jinja2
 chat_templates/delphi_v1.jinja2
+chat_templates/gpt2_completion.jinja2
 chat_templates/qwen3_thinking_acc.jinja2

@@ -1,8 +1,8 @@
-import skyrl_gym
 import pytest
-from omegaconf import DictConfig
-from skyrl_gym.envs.aime.env import AIMEEnv
-from skyrl_gym.verification import RewardResult, RolloutEvidence, VerificationStatus
+
+from skyrl_gym.answer_tasks import grade_aime
+from skyrl_gym.metrics import aggregate_for_task
+from taskcompendium.grading_result import Outcome
 
 
 @pytest.mark.parametrize(
@@ -31,61 +31,42 @@ from skyrl_gym.verification import RewardResult, RolloutEvidence, VerificationSt
         ("Answer: \\boxed{42}|eot_id|>", "42", -1.0),
     ],
 )
-def test_compute_score(output, ground_truth, expected):
-    env = skyrl_gym.make(
-        "aime",
-        env_config=DictConfig({"env_class": "aime"}),
-        extras={"reward_model": {"method": "rule", "ground_truth": ground_truth}},
+def test_task_grade_preserves_math_equivalence(model_turn, output, ground_truth, expected):
+    result = grade_aime(model_turn(output), {}, {"reward_model": {"ground_truth": ground_truth}})
+    assert result.reward == expected
+
+
+def test_aime_verifier_reports_failed_response_over_evaluation_budget(model_turn):
+    result = grade_aime(
+        model_turn("Answer: \\boxed{43}", token_count=5),
+        {"evaluation_token_budget": 4},
+        {"reward_model": {"ground_truth": "42"}},
     )
-    step_output = env.step(output)
-    assert step_output["reward"] == expected
+    assert (result.grade.status, result.grade.reward) == (Outcome.GRADED, -1.0)
+    assert result.grade.passed is False
+    assert result.metrics["over_evaluation_budget"] is True
+    assert result.reward == -1.0
 
 
-def test_aime_verifier_reports_failed_response_over_evaluation_budget():
-    env = skyrl_gym.make(
-        "aime",
-        env_config=DictConfig({"evaluation_token_budget": 4}),
-        extras={"reward_model": {"ground_truth": "42"}},
-    )
-    env.set_rollout_evidence(
-        RolloutEvidence(
-            response="Answer: \\boxed{43}",
-            stop_reason="stop",
-            generated_token_count=5,
-            response_token_ids=(1, 2, 3, 4, 5),
-        )
-    )
-
-    step_output = env.step("Answer: \\boxed{43}")
-
-    verification = step_output["verification"]
-    assert verification.status is VerificationStatus.VERIFIED
-    assert verification.score == -1.0
-    assert verification.passed is False
-    assert verification.diagnostics["over_evaluation_budget"] is True
-    assert step_output["reward_result"] == RewardResult(unshaped_reward=-1.0, optimization_reward=-1.0)
-
-
-def test_aime_explicit_boxed_protocol_scores_answer_without_minerva_prefix():
+def test_aime_explicit_boxed_protocol_scores_answer_without_minerva_prefix(model_turn):
     response = "The final answer is \\boxed{42}.<|im_end|><|endoftext|>"
     extras = {"reward_model": {"ground_truth": "42"}}
-    legacy = skyrl_gym.make("aime", env_config=DictConfig({}), extras=extras)
-    boxed = skyrl_gym.make("aime", env_config=DictConfig({"strict_box_verify": True}), extras=extras)
-
-    assert legacy.step(response)["reward"] == -1.0
-    result = boxed.step(response)
-    assert result["reward"] == 1.0
-    assert result["verification"].diagnostics["prediction"] == "42"
+    assert grade_aime(model_turn(response), {}, extras).reward == -1.0
+    result = grade_aime(model_turn(response), {"strict_box_verify": True}, extras)
+    assert result.reward == 1.0
+    assert result.grade.diagnostics["prediction"] == "42"
 
 
 def test_aime_aggregates_evaluation_budget_diagnostics_by_outcome():
-    metrics = AIMEEnv.aggregate_metrics(
+    metrics = aggregate_for_task(
+        "aime",
         [
             {"acc": True, "over_evaluation_budget": False, "answered_within_evaluation_budget": True},
             {"acc": True, "over_evaluation_budget": True, "answered_within_evaluation_budget": False},
             {"acc": False, "over_evaluation_budget": True, "answered_within_evaluation_budget": False},
             {"acc": False, "over_evaluation_budget": True, "answered_within_evaluation_budget": False},
-        ]
+            {"turn_timeout": True},
+        ],
     )
 
     assert metrics["over_evaluation_budget_fraction"] == pytest.approx(0.75)
@@ -94,44 +75,45 @@ def test_aime_aggregates_evaluation_budget_diagnostics_by_outcome():
     assert metrics["answered_within_evaluation_budget_fraction"] == pytest.approx(0.25)
 
 
-def test_aime_aggregation_rejects_missing_budget_diagnostics():
-    with pytest.raises(KeyError):
-        AIMEEnv.aggregate_metrics([{"acc": True}])
-
-
-def test_aime_verifier_marks_missing_answer_unparseable():
-    env = skyrl_gym.make(
-        "aime",
-        env_config=DictConfig({"evaluation_token_budget": 8}),
-        extras={"reward_model": {"ground_truth": "42"}},
+def test_aime_verifier_marks_missing_answer_unparseable(model_turn):
+    result = grade_aime(
+        model_turn("I could not solve this.", token_count=4),
+        {"evaluation_token_budget": 8},
+        {"reward_model": {"ground_truth": "42"}},
     )
-    env.set_rollout_evidence(
-        RolloutEvidence(response="I could not solve this.", generated_token_count=4, response_token_ids=(1, 2, 3, 4))
+    assert result.grade.diagnostics["parseable_answer"] is False
+    assert result.grade.diagnostics["answered_within_evaluation_budget"] is False
+
+
+def test_aime_reward_policy_uses_generation_budget_from_evidence(model_turn):
+    result = grade_aime(
+        model_turn("Answer: \\boxed{42}", token_count=6, metadata={"generation_token_budget": 6}),
+        {"length_penalty_weight": 0.5, "target_length": 2, "min_response_length": 0},
+        {"reward_model": {"ground_truth": "42"}},
     )
-
-    verification = env.step("I could not solve this.")["verification"]
-
-    assert verification.diagnostics["parseable_answer"] is False
-    assert verification.diagnostics["answered_within_evaluation_budget"] is False
+    assert result.grade.reward == 1.0
+    assert result.reward == pytest.approx(0.5)
+    assert result.reward_components["length"] == pytest.approx(-0.5)
 
 
-def test_aime_reward_policy_uses_generation_budget_from_evidence():
-    env = skyrl_gym.make(
-        "aime",
-        env_config=DictConfig({"length_penalty_weight": 0.5, "target_length": 2, "min_response_length": 0}),
-        extras={"reward_model": {"ground_truth": "42"}},
+@pytest.mark.parametrize(
+    "reference,candidate,correct",
+    [
+        (r"(-\infty,1)\cup(1,\infty)", r"(1,\infty)\cup(-\infty,1)", True),
+        (r"(-\infty,1)\cup(1,\infty)", r"x\ne1", True),
+        (r"(-\infty,1)\cup(1,\infty)", r"(-\infty,\infty)", False),
+        ("[2,12)", "[2,12)", True),
+        ("[2,12)", "(2,12)", False),
+        ("[2,12)", "[2,12]", False),
+        ("(18,-24)", "(-24,18)", False),
+        ("3:4", "0.75", True),
+        ("2x-8", "2(x-4)", True),
+    ],
+)
+def test_math_task_scores_intervals_and_preserves_other_answer_semantics(model_turn, reference, candidate, correct):
+    result = grade_aime(
+        model_turn(f"Answer: \\boxed{{{candidate}}}"), {}, {"reward_model": {"ground_truth": reference}}
     )
-    env.set_rollout_evidence(
-        RolloutEvidence(
-            response="Answer: \\boxed{42}",
-            generated_token_count=6,
-            response_token_ids=(1, 2, 3, 4, 5, 6),
-            metadata={"generation_token_budget": 6},
-        )
-    )
-
-    step_output = env.step("Answer: \\boxed{42}")
-
-    assert step_output["verification"].score == 1.0
-    assert step_output["reward"] == pytest.approx(0.5)
-    assert step_output["reward_result"].components["length"] == pytest.approx(-0.5)
+    assert result.grade.status is Outcome.GRADED
+    assert result.grade.passed is correct
+    assert result.reward == (1.0 if correct else -1.0)

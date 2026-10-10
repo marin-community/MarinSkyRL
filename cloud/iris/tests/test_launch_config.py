@@ -9,6 +9,9 @@ from typing import Any
 import pytest
 import yaml
 from omegaconf import OmegaConf
+from rolloutengine.contracts import ModelTurn
+from skyrl_gym.answer_tasks import grade_gsm8k
+from skyrl_gym.task_sessions import AnswerTaskSession
 
 from cloud.iris import training_driver
 from cloud.iris.launch_config import LaunchTopology, load_launch_config, validate_launch_config
@@ -19,6 +22,7 @@ from cloud.iris.rl_config_translation import (
     parse_rl_config,
 )
 from skyrl_train.distributed.step_policy import NonfiniteStepPolicy, nonfinite_step_policy
+from skyrl_train.dataset.tasks import source_row_task
 
 
 def _raw_config() -> dict[str, Any]:
@@ -109,10 +113,44 @@ def _raw_config() -> dict[str, Any]:
     }
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text,reward", [("#### 12", 1.0), ("#### 12\nMore reasoning.", 0.0)])
+async def test_custom_session_settings_reach_private_grading_through_the_launch_config(
+    tmp_path: Path, text: str, reward: float
+) -> None:
+    raw = _raw_config()
+    raw["skyrl"]["environment"] = {"task_sessions": {"custom_math": {"reward_method": "final_line"}}}
+    path = tmp_path / "launch.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    config = load_launch_config(path)
+    task = source_row_task(
+        {
+            "prompt": [{"role": "user", "content": "What is six plus six?"}],
+            "env_class": "custom_math",
+            "reward_spec": {"ground_truth": "12"},
+        },
+        0,
+        source_name="fixture",
+        environment_configs=OmegaConf.to_container(config.skyrl.environment.task_sessions, resolve=True),
+    )
+    session = AnswerTaskSession(task, None, grader=grade_gsm8k)
+    start = await session.prepare()
+    try:
+        transition = await session.advance(
+            ModelTurn({"role": "assistant", "content": text}, (), (1,), None, "stop", text)
+        )
+        assert transition.done and transition.grade.reward == reward
+        assert (await session.grade(())).reward == reward
+        assert start.messages == ({"role": "user", "content": "What is six plus six?"},)
+    finally:
+        await session.close()
+
+
 @pytest.mark.parametrize("storage_prefix", ["s3://runs/smoke", "gs://runs/smoke"])
 @pytest.mark.parametrize(("loss", "reduction"), [("regular", "token_mean"), ("gspo", "sequence_mean")])
+@pytest.mark.parametrize("probe_enabled", [False, True])
 def test_launch_config_composes_and_loads_as_structured_hydra(
-    tmp_path: Path, loss: str, reduction: str, storage_prefix: str
+    tmp_path: Path, loss: str, reduction: str, storage_prefix: str, probe_enabled: bool
 ) -> None:
     path = tmp_path / "resolved-launch.yaml"
     raw = _raw_config()
@@ -124,6 +162,15 @@ def test_launch_config_composes_and_loads_as_structured_hydra(
         "archive_uri": f"{storage_prefix}/mismatch_probe",
         "reuse_probe": f"{storage_prefix}/source/mismatch_probe",
     }
+    if probe_enabled:
+        # The direct engine returns exact model tokens without a transport flag.
+        trainer["mismatch_probe"].update(
+            enabled=True, prompts={"count": 2, "samples_per_prompt": 1}, seed=17, updates=0
+        )
+        raw["skyrl"]["generator"].update(
+            sampling_params={"temperature": 1.0, "logprobs": 0},
+            engine_init_kwargs={"logprobs_mode": "processed_logprobs", "generation_config": "vllm"},
+        )
     path.write_text(yaml.safe_dump(raw, sort_keys=False))
 
     config = load_launch_config(path)

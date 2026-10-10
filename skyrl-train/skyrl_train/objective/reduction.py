@@ -92,6 +92,9 @@ def reduce_to_step(
         row_weights = data_weights.sum(-1)
         row_denominator = torch.where(row_weights > 0, row_weights, 1)
         return (weighted.sum(-1) / row_denominator).sum() / max(counts.rows, 1.0)
+    if mode == LossReduction.PAIR_MEAN:
+        # Both rows of a valid pair are nonempty, so half the global row count is the pair count.
+        return weighted.sum() / max(counts.rows / 2.0, 1.0)
     if mode == LossReduction.SEQ_MEAN_TOKEN_SUM_NORM:
         return weighted.sum() / (max(counts.rows, 1.0) * max_seq_len)
     if mode == LossReduction.SEQ_MEAN_TOKEN_SUM_NORM_GLOBAL:

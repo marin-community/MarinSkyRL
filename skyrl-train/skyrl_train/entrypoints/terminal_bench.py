@@ -4,49 +4,54 @@ Main entrypoint for training on terminal bench tasks.
 
 import ray
 import hydra
+from pathlib import Path
 from omegaconf import DictConfig
+from rolloutengine.spec import TaskSessionSpec
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, run_ray_driver
-from skyrl_train.config.trajectory_runner_capabilities import TrajectoryRunnerMode
 from skyrl_train.rollouts.workers import RolloutWorkerPool, RolloutWorkerResources
-from skyrl_train.trajectory_runners.harbor.execution import HarborRunnerSpec
+from skyrl_train.rollouts.task_worker import TaskRolloutWorkerSpec
+from skyrl_train.dataset.harbor import HarborTaskDataset
+from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
 
 
 class TerminalBenchExp(BasePPOExp):
     def get_trajectory_runner(self, cfg, tokenizer, inference_engine_client):
-        del tokenizer, inference_engine_client
-        return RolloutWorkerPool(HarborRunnerSpec.from_config(cfg), RolloutWorkerResources.from_config(cfg))
+        del tokenizer
+        return RolloutWorkerPool(
+            TaskRolloutWorkerSpec.from_config(
+                cfg, inference_engine_client.engines, harbor_config=cfg.terminal_bench_config
+            ),
+            RolloutWorkerResources.from_config(cfg),
+        )
+
+    def _task_dataset(self, data_files) -> HarborTaskDataset:
+        return HarborTaskDataset(
+            data_files=data_files,
+            tokenizer=self.tokenizer,
+            max_prompt_length=self.cfg.trainer.max_prompt_length,
+            cache_dir=Path(self.cfg.data.task_cache_dir),
+            session=TaskSessionSpec.model_validate(
+                {
+                    **dict(self.cfg.environment.task_sessions.session),
+                    "task_session": "shellbox",
+                }
+            ),
+            grader_override=HarborTaskSettings.from_config(self.cfg.terminal_bench_config).grader_override(),
+        )
 
     def get_train_dataset(self):
-        """Initializes the training dataset.
-
-        Returns:
-            TerminalBenchTaskDataset: The training dataset.
-        """
-        from skyrl_train.trajectory_runners.harbor.dataset import TerminalBenchTaskDataset  # noqa: PLC0415
-
-        prompts_dataset = TerminalBenchTaskDataset(
-            data_files=self.cfg.data.train_data,
-        )
+        prompts_dataset = self._task_dataset(self.cfg.data.train_data)
         # make sure the dataset is large enough to train on
         assert len(prompts_dataset) >= self.cfg.trainer.train_batch_size, (
-            f"dataset should be atleast as large as `train_batch_size` {self.cfg.trainer.train_batch_size}, got size {len(prompts_dataset)}"
+            f"dataset must be at least as large as `train_batch_size` {self.cfg.trainer.train_batch_size}, "
+            f"but has size {len(prompts_dataset)}"
         )
         return prompts_dataset
 
     def get_eval_dataset(self):
-        """Initializes the evaluation dataset.
-
-        Returns:
-            TerminalBenchTaskDataset: The evaluation dataset.
-        """
-        from skyrl_train.trajectory_runners.harbor.dataset import TerminalBenchTaskDataset  # noqa: PLC0415
-
-        if self.cfg.trainer.eval_interval > 0 and self.cfg.data.val_data:
-            prompts_dataset = TerminalBenchTaskDataset(
-                data_files=self.cfg.data.val_data,
-            )
-            return prompts_dataset
-        return None
+        if self.cfg.trainer.eval_interval <= 0 or not self.cfg.data.val_data:
+            return None
+        return self._task_dataset(self.cfg.data.val_data)
 
 
 @ray.remote(num_cpus=1, max_retries=0)
@@ -64,7 +69,7 @@ def skyrl_entrypoint(cfg: DictConfig):
 
 
 def run(cfg: DictConfig) -> None:
-    run_ray_driver(cfg, skyrl_entrypoint, TrajectoryRunnerMode.HARBOR)
+    run_ray_driver(cfg, skyrl_entrypoint)
 
 
 @hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)

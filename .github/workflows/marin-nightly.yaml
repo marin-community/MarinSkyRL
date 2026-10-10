@@ -150,7 +150,7 @@ jobs:
       actions: read
       contents: read
     steps:
-      - uses: marin-community/marin-style/actions/report-failure@727f180cd423246ca1a6164163a5883cda5bf52b
+      - uses: marin-community/marin-style/actions/report-failure@d855d6304ad0532c131ef2e208db84ed7acf4721
         with:
           lane: gsm8k-h100-and-grug-megatron-h100
           trigger-token: ${{ secrets.LOOM_TRIGGER_GH_TOKEN }}

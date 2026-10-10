@@ -322,7 +322,6 @@ def dump_per_dataset_eval_results(
     trajectory_batch: TrajectoryBatch,
     concat_data_sources: List[str],
     concat_all_envs: List[str],
-    concat_env_extras: List[Dict[str, Any]],
     eval_metrics: Dict[str, float],
 ):
     """Dump evaluation results per dataset and overall aggregated results."""
@@ -356,7 +355,6 @@ def dump_per_dataset_eval_results(
                     "error_treatment": (trajectory_batch.get("error_treatments") or [None] * len(input_prompts))[i],
                     "server_error": (trajectory_batch.get("server_errors") or [None] * len(input_prompts))[i],
                     "env_class": concat_all_envs[i],
-                    "env_extras": concat_env_extras[i],
                     "data_source": data_source,
                 }
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")

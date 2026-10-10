@@ -10,7 +10,6 @@ Invariants:
 
 import pytest
 
-from skyrl_train.trajectory_runners.harbor.runner import detect_termination_signals
 from skyrl_train.utils.reward_shaping import (
     detect_repeated_actions,
     shape_reward_from_output,
@@ -171,36 +170,6 @@ def test_total_shaping_cap_clamps_summed_penalties_on_failing_trajectory():
     assert comps["terminate"] == pytest.approx(-RED_PENALTY)
     assert comps["shaping_total"] == pytest.approx(-0.15)
     assert reward <= 0.0
-
-
-@pytest.mark.parametrize(
-    "chat,mark_complete",
-    [
-        pytest.param([_user("do it"), _assistant("ok <task_complete>true</task_complete>")], True, id="xml_marker"),
-        pytest.param([_assistant('{"plan": "x", "task_complete": true}')], True, id="json_marker"),
-        pytest.param(
-            [{"role": "assistant", "content": "", "tool_calls": [{"function_name": "mark_task_complete"}]}],
-            True,
-            id="tool_call_marker",
-        ),
-        pytest.param([_assistant("<task_complete>false</task_complete>")], False, id="false_marker"),
-        pytest.param(
-            [_user("do it"), _assistant("still working <think>hmm</think>"), _user("output")], False, id="no_marker"
-        ),
-        pytest.param([], False, id="empty_history"),
-    ],
-)
-def test_detect_termination_signals(chat, mark_complete):
-    ctx = detect_termination_signals(chat, 1.0)
-    assert ctx == _ctx(mark_complete, 1.0, not mark_complete)
-
-
-def test_detected_green_completion_earns_bonus():
-    chat = [_user("fix"), _assistant("done <task_complete>true</task_complete>")]
-    ctx = detect_termination_signals(chat, 1.0)
-    reward, comps = _shape(GREEN_STDOUT, 1.0, TERMINATE_ON, trajectory_context=ctx)
-    assert comps["terminate"] == pytest.approx(GREEN_BONUS)
-    assert reward == pytest.approx(1.0 + GREEN_BONUS)
 
 
 def test_antithrash_penalizes_identical_heredoc_writes():

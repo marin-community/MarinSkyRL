@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Any
+
+from verifyit.execution.worker import call_bounded
 
 
 def _line_regex(text: str, params: dict) -> tuple[bool, str]:
@@ -105,11 +108,7 @@ def _grade_format_ifeval(text: str, verifier: dict[str, Any]) -> tuple[float, di
 
 def grade_format_verifyit(text: str, verifier: dict[str, Any], timeout: float = 5.0) -> tuple[float, dict[str, Any]]:
     """Bound source-format checks with the shared process deadline."""
-    import math
-
     try:
-        from verifyit.bounded import call_bounded
-
         if (
             isinstance(timeout, bool)
             or not isinstance(timeout, (int, float))

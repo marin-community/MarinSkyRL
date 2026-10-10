@@ -8,10 +8,10 @@ from marinskyrl.runtime_options import TRAJECTORY_SELECTOR_TYPE_PATH, AdvantageE
 
 def validate_nemotron_ultra_grading(cfg: DictConfig, distillation_plan: DistillationPlan | None) -> None:
     """Allow skipped Nemotron Ultra grading only when nothing in training or eval reads the reward."""
-    grading = RolloutGrading(cfg.environment.skyrl_gym.nemotron_ultra.grading)
+    grading = RolloutGrading(cfg.environment.task_sessions.nemotron_ultra.grading)
     if grading is RolloutGrading.VERIFY:
         return
-    prefix = "environment.skyrl_gym.nemotron_ultra.grading=skip requires"
+    prefix = "environment.task_sessions.nemotron_ultra.grading=skip requires"
     if distillation_plan is None or distillation_plan.reward_mode is not DistillationRewardMode.REPLACE:
         raise ValueError(f"{prefix} trainer.algorithm.distillation.reward_mode=replace")
     if cfg.trainer.algorithm.advantage_estimator != AdvantageEstimator.UNIFORM:

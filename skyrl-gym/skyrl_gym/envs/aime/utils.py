@@ -14,7 +14,13 @@
 # Adapted from https://github.com/EleutherAI/lm-evaluation-harness/blob/main/lm_eval/tasks/hendrycks_math/utils.py
 # https://github.com/volcengine/verl/blob/1a62568f801ba35ac1f5387e27232a2df7eac488/verl/utils/reward_score/math_dapo.py
 
-from verifyit.adapters.skyrl import grade_aime_candidate, grade_literal_candidate
+from math_verify import parse
+from sympy import Basic, Set
+from verifyit.adapters.skyrl import grade_aime_extracted, grade_literal_candidate
+from verifyit.execution.worker import call_bounded
+from verifyit.grade import Reward
+from verifyit.modes.grade_math import grade_math_candidate
+from verifyit.spec import MathProfile, MathSpec, MathType
 
 import math
 import re
@@ -26,6 +32,16 @@ BOXED_ANSWER_INSTRUCTION = (
     " Please reason step by step. At the very end, output your final answer on its "
     "own line in the exact format: 'Answer: \\boxed{ANSWER}'."
 )
+
+
+def math_answer_reward(reference: str, candidate: str) -> Reward:
+    """Score extracted sets and expressions symbolically, retaining exact scalar matching."""
+    parsed = parse(f"${reference}$", parsing_timeout=5)
+    if any(isinstance(answer, Set) for answer in parsed):
+        return grade_math_candidate(MathSpec(expected=reference, math_type=MathType.SET), candidate)
+    if not reference.isalpha() and any(isinstance(answer, Basic) and answer.free_symbols for answer in parsed):
+        return grade_math_candidate(MathSpec(expected=reference, profile=MathProfile.BOXED), candidate)
+    return grade_aime_extracted(reference, candidate)
 
 
 def last_boxed_only_string(string: str) -> Optional[str]:
@@ -223,7 +239,7 @@ def is_correct_minerva(
     else:
         gt = normalize_final_answer(gt)
 
-    return grade_aime_candidate(gt, pred).reward == 1.0, pred
+    return call_bounded(math_answer_reward, gt, pred, timeout=10).reward == 1.0, pred
 
 
 def is_correct_strict_box(

@@ -1,48 +1,50 @@
-from typing import Any, Dict, List
-from skyrl_gym.envs.registration import registry, load_env_creator
+"""Metric reduction for task sessions."""
+
+from typing import Any
+
+NUPA_METRIC_KEYS = ("acc", "exact_match", "digit_match", "dlength", "format_valid", "no_answer")
 
 
-def default_aggregate_metrics(metrics: List[Dict[str, Any]]) -> Dict[str, float]:
-    """
-    A minimal default metric aggregator: average numeric fields across episode-level metric dicts.
-    """
+def mean_metrics(metrics: list[dict[str, Any]]) -> dict[str, float]:
+    """Average each numeric field across rows that contain it."""
+    values: dict[str, list[float]] = {}
+    for row in metrics:
+        for key, value in row.items():
+            if isinstance(value, (int, float)):
+                values.setdefault(key, []).append(float(value))
+    return {key: sum(items) / len(items) for key, items in values.items()}
+
+
+def _fraction(rows: list[dict[str, Any]], key: str) -> float:
+    return sum(bool(row[key]) for row in rows) / len(rows) if rows else 0.0
+
+
+def aime_metrics(metrics: list[dict[str, Any]]) -> dict[str, float]:
+    metrics = [row for row in metrics if "acc" in row]
+    correct = [row for row in metrics if bool(row["acc"])]
+    incorrect = [row for row in metrics if not bool(row["acc"])]
+    return {
+        **mean_metrics(metrics),
+        "over_evaluation_budget_fraction": _fraction(metrics, "over_evaluation_budget"),
+        "correct_over_evaluation_budget_fraction": _fraction(correct, "over_evaluation_budget"),
+        "incorrect_over_evaluation_budget_fraction": _fraction(incorrect, "over_evaluation_budget"),
+        "answered_within_evaluation_budget_fraction": _fraction(metrics, "answered_within_evaluation_budget"),
+    }
+
+
+def nupa_metrics(metrics: list[dict[str, Any]]) -> dict[str, float]:
+    means = mean_metrics(metrics)
+    return {f"nupa/{key}": means.get(key, 0.0) for key in NUPA_METRIC_KEYS}
+
+
+def math_metrics(metrics: list[dict[str, Any]]) -> dict[str, float]:
     if not metrics:
         return {}
-    aggregated_metrics: Dict[str, list[float]] = {}
-    for m in metrics:
-        for k, v in m.items():
-            if isinstance(v, bool):
-                v = float(v)
-            elif isinstance(v, (int, float)):
-                v = float(v)
-            else:
-                continue
-            aggregated_metrics.setdefault(k, []).append(v)
-    return {k: sum(vals) / len(vals) for k, vals in aggregated_metrics.items()}
+    return {"avg_steps": sum(float(row.get("steps", 0)) for row in metrics) / len(metrics)}
 
 
-def aggregate_for_environment(env_name: str, metrics: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    Call aggregate_metrics() for the class specified by env_name.
+METRIC_REDUCERS = {"aime": aime_metrics, "nupa": nupa_metrics, "gsm8k_multi_turn": math_metrics}
 
-    Args:
-        env_name: The registered environment name (e.g., "gsm8k")
-        metrics: List of metric dictionaries to aggregate
 
-    Returns:
-        Aggregated metrics for the environment class
-    """
-    # Look up the environment spec in the registry
-    env_spec = registry.get(env_name)
-    if env_spec is None:
-        raise ValueError(f"No registered env with id: {env_name}")
-
-    # Get the environment class from the entry_point
-    entry_point = env_spec.entry_point
-    if callable(entry_point):
-        env_cls = entry_point
-    else:
-        # Load the class from the string entry point
-        env_cls = load_env_creator(entry_point)
-
-    return env_cls.aggregate_metrics(metrics)
+def aggregate_for_task(name: str, metrics: list[dict[str, Any]]) -> dict[str, float]:
+    return METRIC_REDUCERS.get(name, mean_metrics)(metrics)

@@ -34,12 +34,9 @@ def _fake_frozen_runtime(
     )
 
     for package in (
-        "harbor/literal",
-        "harbor/models/agent",
-        "harbor/models/job",
-        "harbor/models/trial",
-        "harbor/trial",
-        "harbor/utils",
+        "shellbox/backends/daytona",
+        "shellbox/backends/shellsim",
+        "rolloutengine",
         "megatron/bridge",
         "nvidia/cu13/lib",
         "nvidia/cu13/bin",
@@ -50,15 +47,12 @@ def _fake_frozen_runtime(
     ):
         (site_packages / package).mkdir(parents=True, exist_ok=True)
     for package in (
-        "harbor",
-        "harbor/literal",
-        "harbor/models",
-        "harbor/models/agent",
-        "harbor/models/job",
-        "harbor/models/trial",
-        "harbor/trial",
-        "harbor/utils",
+        "shellbox",
+        "shellbox/backends",
         "megatron",
+        "shellbox/backends/daytona",
+        "shellbox/backends/shellsim",
+        "rolloutengine",
         "megatron/bridge",
         "quack",
         "skyrl_train",
@@ -69,7 +63,6 @@ def _fake_frozen_runtime(
     ):
         _write_module(site_packages, f"{package}/__init__.py")
 
-    _write_module(site_packages, "daytona.py", "class Daytona: pass\nclass DaytonaConfig: pass\n")
     _write_module(site_packages, "quack/activation.py")
     _write_module(site_packages, "flash_attn.py", "__version__ = '2.8.4'\n")
     _write_module(site_packages, "flash_attn_2_cuda.py")
@@ -100,32 +93,9 @@ def _fake_frozen_runtime(
         "skyrl_train/models/grug_moe.py",
         "GRUG_MOE_ARCHITECTURE = 'GrugMoeForCausalLM'\n",
     )
-    _write_module(site_packages, "harbor/models/environment_type.py", "class EnvironmentType: pass\n")
-    _write_module(site_packages, "harbor/models/agent/context.py", "class AgentContext: pass\n")
-    _write_module(site_packages, "harbor/models/job/config.py", "class RetryConfig: pass\n")
-    _write_module(
-        site_packages,
-        "harbor/models/trial/config.py",
-        "class TrialConfig: pass\n"
-        "class AgentConfig: pass\n"
-        "class TaskConfig: pass\n"
-        "class EnvironmentConfig: pass\n"
-        "class VerifierConfig: pass\n",
-    )
-    _write_module(site_packages, "harbor/models/trial/result.py", "class TrialResult: pass\n")
-    _write_module(
-        site_packages,
-        "harbor/literal/rollout_build.py",
-        "def build_rollout_details_from_pairs(pairs): return pairs\n",
-    )
-    _write_module(
-        site_packages,
-        "harbor/trial/hooks.py",
-        "class TrialEvent: pass\nclass TrialHookEvent: pass\n",
-    )
-    _write_module(site_packages, "harbor/trial/queue.py", "class TrialQueue: pass\n")
-    _write_module(site_packages, "harbor/utils/logger.py", "logger = object()\n")
-    _write_module(site_packages, "harbor/utils/traces_utils.py", "def normalize_message(message): return message\n")
+    _write_module(site_packages, "shellbox/backends/daytona/machine.py", "class DaytonaMachineFactory: pass\n")
+    _write_module(site_packages, "shellbox/backends/shellsim/machine.py", "class ShellSimMachineFactory: pass\n")
+    _write_module(site_packages, "rolloutengine/engine.py", "class ShellboxRolloutEngine: pass\n")
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -198,9 +168,9 @@ def test_export_bootstrap_does_not_require_rollout_or_telemetry_packages(tmp_pat
     _write_module(site_packages, "flash_attn_2_cuda.py")
     _write_module(site_packages, "ray.py")
     _write_module(site_packages, "skyrl_train/checkpoint_exporter.py", "class CheckpointExporter: pass\n")
-    (site_packages / "daytona.py").unlink()
+    (site_packages / "shellbox/backends/daytona/machine.py").unlink()
     (site_packages / "memray.py").unlink()
-    (site_packages / "harbor" / "utils" / "traces_utils.py").unlink()
+    (site_packages / "rolloutengine/engine.py").unlink()
 
     result = _run_bootstrap(environment, process_environment, "megatron-export")
 
@@ -250,8 +220,8 @@ def test_bootstrap_exposes_cuda_linker_compatibility_paths(tmp_path: Path) -> No
 @pytest.mark.parametrize(
     ("missing_module", "expected_error"),
     [
-        ("daytona.py", "No module named 'daytona'"),
-        ("harbor/utils/traces_utils.py", "harbor.utils.traces_utils"),
+        ("shellbox/backends/daytona/machine.py", "shellbox.backends.daytona.machine"),
+        ("rolloutengine/engine.py", "rolloutengine.engine"),
         ("memray.py", "No module named 'memray'"),
         ("megatron/bridge", "megatron.bridge"),
         ("transformer_engine/common", "transformer_engine.common"),

@@ -1,6 +1,8 @@
 # Training trajectory retention
 
-MarinSkyRL retains a bounded sample of normalized training trajectories for debugging, replay, and audit. Retention runs at the shared `TrajectoryRunner` output boundary, after reward shaping and alignment metrics. SkyRL Gym, StepWise, Terminal Bench, synchronous training, fully asynchronous training, and evaluation therefore use one record contract.
+MarinSkyRL retains a bounded sample of normalized training trajectories for debugging, replay, and audit.
+Retention runs at the shared `TrajectoryRunner` output boundary, after reward shaping and alignment metrics.
+Whole-task and step-wise projections, synchronous training, fully asynchronous training, and evaluation produce `TrajectoryBatch` records.
 
 ## Ownership and lifecycle
 

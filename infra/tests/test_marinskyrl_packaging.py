@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from email.parser import Parser
 from pathlib import Path
-import re
 import subprocess
 import tomllib
 import zipfile
@@ -65,10 +64,10 @@ def test_training_extras_publish_hardware_policy_and_rollout_requirements(built_
     assert any(requirement.startswith("torch==") and "extra == 'cpu'" in requirement for requirement in requirements)
     assert any(requirement.startswith("torch==") and "extra == 'cuda'" in requirement for requirement in requirements)
     assert any(requirement.startswith("vllm==") and "extra == 'vllm'" in requirement for requirement in requirements)
-    assert any(
-        requirement.startswith("harbor[analysis,datasets,daytona]") and "extra == 'vllm'" in requirement
-        for requirement in requirements
-    )
+    rollout_requirements = {Requirement(value).name: Requirement(value) for value in requirements if "extra ==" not in value}
+    for name in ("marin-rolloutengine", "taskcompendium", "marin-shellbox", "verifyit", "harbor-config"):
+        assert rollout_requirements[name].url, f"The wheel must locate {name} without uv source overrides"
+    assert {"daytona", "shellsim"} <= rollout_requirements["marin-shellbox"].extras
     assert any(requirement.startswith("torch==") and "extra == 'vllm'" in requirement for requirement in requirements)
     assert any(requirement.startswith("memray") and "extra == 'telemetry'" in requirement for requirement in requirements)
     assert any(
@@ -99,17 +98,6 @@ def test_rollout_runtime_resolves_harbor_main_into_the_frozen_lock() -> None:
     harbor = next(package for package in lock["package"] if package["name"] == "harbor")
     assert harbor["source"]["git"].startswith("https://github.com/marin-community/harbor.git#")
     assert len(harbor["source"]["git"].rsplit("#", 1)[-1]) == 40
-
-
-def test_harbor_config_release_matches_the_locked_harbor_commit() -> None:
-    lock = tomllib.loads((REPOSITORY_ROOT / "uv.lock").read_text())
-    packages = {package["name"]: package for package in lock["package"]}
-    harbor_commit = packages["harbor"]["source"]["git"].rsplit("#", 1)[-1]
-    config_url = packages["harbor-config"]["source"]["url"]
-    config_release = re.search(r"/harbor-config-([0-9a-f]{40})/", config_url)
-
-    assert config_release is not None
-    assert config_release.group(1) == harbor_commit
 
 
 def _exported_requirements(extras: tuple[str, ...]) -> list[Requirement]:

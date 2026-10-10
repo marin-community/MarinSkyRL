@@ -20,6 +20,7 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from transformers import PreTrainedTokenizerBase
 
 from marinskyrl.resource_locator import join_resource_path
+from skyrl_train.dataset.tasks import LOWERED_TASK_COLUMN
 from skyrl_train.trajectory_runners.types import (
     TrajectoryRequestBatch,
     TrajectoryBatch,
@@ -57,6 +58,7 @@ _SELECTION_FRACTION = "fraction"
 _SELECTION_MANDATORY = "mandatory"
 _ARCHIVE_DIRECTORY = "archives"
 _ARCHIVE_MANIFEST = "manifest.json"
+_PRIVATE_TASK_FIELDS = frozenset({LOWERED_TASK_COLUMN, "group_grader", "reward_model", "reward_spec", "extra_info"})
 
 
 @dataclass(frozen=True)
@@ -423,7 +425,13 @@ def build_trajectory_records(
                 repetition_id=trajectory_id.repetition_id,
                 row_indices=row_indices,
                 environment_class=input_batch["env_classes"][prompt_index],
-                environment_extras=to_jsonable(input_batch["env_extras"][prompt_index]),
+                environment_extras=to_jsonable(
+                    {
+                        key: value
+                        for key, value in input_batch["env_extras"][prompt_index].items()
+                        if key not in _PRIVATE_TASK_FIELDS
+                    }
+                ),
             ),
             prompt=_PromptTrace(
                 messages=to_jsonable(input_batch["prompts"][prompt_index]),

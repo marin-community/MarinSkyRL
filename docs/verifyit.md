@@ -1,57 +1,80 @@
 # Unified verification
 
-SkyRL clients call verifyit's existing verifier modes while retaining task-specific response extraction and framework reward reporting. The dependency is pinned to a published source commit in the project metadata. No local campaign checkout or unpublished wheel is needed. SkyRL uses math-verify 0.9.0, upgraded from 0.8.0 to satisfy the unified dependency. Math parsing or equivalence behavior can change with this upgrade; the 2026-10-01 campaign snapshot used math-verify 0.8.0. The offline comparisons use 0.9.0 on both paths.
+SkyRL task sessions use [verifyit](https://github.com/marin-community/marin/tree/main/lib/verifyit),
+Marin's shared verifier package, and retain source-specific response extraction and reward policy.
+The dependency is pinned in the root and standalone package manifests.
+SkyRL pins math-verify for reproducible answer parsing.
 
 ## Install and reproduce
 
-SkyRL Gym now requires Python >=3.11 (previously >=3.10), matching verifyit’s minimum. The root launcher remains Python 3.12. The commands below select Python 3.12.
-
-From this checkout, with Git and [uv](https://docs.astral.sh/uv/) installed:
+The task session package requires Python 3.12. From the repository root:
 
 ```bash
-uv venv --python 3.12 .venv-verifiers
-uv pip install --python .venv-verifiers/bin/python -e './skyrl-gym[dev]'
-.venv-verifiers/bin/python tools/verifyit/replay.py --output /tmp/skyrl-verifier-replay.json
-.venv-verifiers/bin/python -m pytest skyrl-gym/tests/test_verifyit_reasoning_mcqa.py
+uv sync --project skyrl-gym --frozen --extra dev
+uv run --project skyrl-gym --frozen python tools/verifyit/replay.py \
+  --output /tmp/skyrl-verifier-replay.json
+uv run --project skyrl-gym --frozen pytest skyrl-gym/tests/
 ```
 
-The replay uses checked-in response fixtures. It invokes both the original and cutover MCQA scorer and both original and cutover Reasoning Gym environments, and both math scoring entrypoints with a local HTTP judge fixture. The output retains each input and both results, including scored zero. A mismatch exits unsuccessfully. Math wrong-answer fallback receives the same fixed non-equivalence response from a local HTTP server on both paths; no model inference is involved. This is a scoring roundtrip, without model inference or a live judge. The fixtures are synthetic; they do not reproduce archived model-run scores.
+The replay compares the native and verifyit paths for MCQA, Reasoning Gym, and math.
+It uses fixed candidate responses and a local HTTP judge.
+It retains each input and result, including a scored zero.
+A mismatch causes a nonzero exit code.
+This evidence does not establish all-route parity or reproduce archived model scores.
 
-For a frozen gym installation, run `uv sync --project skyrl-gym --frozen --extra dev`, then `uv run --project skyrl-gym --frozen python tools/verifyit/replay.py --output /tmp/skyrl-verifier-replay.json`. The gym and root locks include the exact published verifyit revision and math-verify 0.9.0.
+CPU runtime fixtures execute trusted programs through local subprocesses.
+They do not establish container isolation.
+Python execution uses a stateful interpreter; SQL uses a read-only database snapshot.
+Lean boundary tests replace the external compiler process and retain the real command path.
+A real Lean compiler and task image require separate validation.
 
-The normal launcher installation uses the root project's CPU or GPU profile described in the README. The smaller installation above exercises verifiers without installing a training runtime. Code and Lean verification additionally require the configured sandbox runtime. Judge routes require their configured provider and credentials; they cannot be exercised through the offline fixtures.
+## Select the verifier
 
-The Gym CI job starts the real [NeMo Skills local sandbox](https://github.com/NVIDIA-NeMo/Skills/blob/bcf059af55c20a89f797724598f9908d126153e6/nemo_skills/code_execution/local_sandbox/local_sandbox_server.py) at revision `bcf059af55c20a89f797724598f9908d126153e6`, verifies its SHA256, and installs Flask 3.1.2, IPython 9.6.0, psutil 7.1.0, NumPy 2.2.6 and pandas 2.3.0 in a separate test environment. The service requires Linux resource limits; its setup, bounded health check and process-group cleanup are in [cpu_ci.yaml](../.github/workflows/cpu_ci.yaml). This supplies execution for code integration tests rather than substituting precomputed rewards.
+Set `verifyit_enabled: true` in the task configuration:
 
-## Enable verifyit
-
-For environments that retain their original scorer, pass `verifyit_enabled: true` in the environment configuration:
-
-```python
-import skyrl_gym
-from omegaconf import OmegaConf
-
-environment = skyrl_gym.make(
-    "reasoning_gym",
-    env_config=OmegaConf.create({"verifyit_enabled": True}),
-    extras={"reward_model": {"ground_truth": {
-        "task": "simple_equations",
-        "entry": {"answer": "42", "metadata": {"source_dataset": "simple_equations"}},
-    }}},
-)
-print(environment.step("Answer: 42"))
+```yaml
+environment:
+  task_sessions:
+    reasoning_gym:
+      verifyit_enabled: true
+    nemotron_ultra:
+      verifyit_enabled: true
 ```
 
-Set the option to `false` or omit it to run the original Reasoning Gym, IFEval, SQL, LiveCodeBench or Nemotron scorer. The [launcher acceptance configuration](../cloud/iris/configs/nemotron_ultra_rlvr_acceptance.yaml) shows the deployed sandbox host/port and judge `base_url`, `model`, and `api_key_env` settings. Set `environment.skyrl_gym.nemotron_ultra.verifyit_enabled: true` alongside those fields; the [trajectory runner](../skyrl-train/skyrl_train/trajectory_runners/skyrl_gym.py) passes each environment configuration to its constructor and propagates the option to GenRM. Other environments use `environment.skyrl_gym.<environment_name>.verifyit_enabled: true`.
+The source importer stores configuration and reference inputs in the private verifier payload.
+The rollout engine selects a direct TaskSession factory from the task's named interaction.
+There is no Gym environment or registry.
 
-Code and Lean use the [SandboxClient protocol](../skyrl-gym/skyrl_gym/envs/nemotron_ultra/sandbox.py): point the configured host/port to a running NeMo Skills sandbox with the benchmark’s Python dependencies or Lean project/toolchain. The acceptance configuration’s cluster hostname is an example deployment, not a public service. Judge settings are consumed by [OpenAIJudge](../skyrl-gym/skyrl_gym/envs/nemotron_ultra/judge.py); set the named environment variable locally with your provider credential before running judge routes. Direct source APIs expose `verifyit_enabled=True` where applicable; the checked-in replay demonstrates MCQA's switch.
+The flag defaults to false. Reasoning Gym, IFEval, and SQL retain native/verifyit selection.
+Nemotron retains the switch for math, Python-tool answer grading, tool calls, calendar,
+format checks, MCQA, structured outputs, instructions, judge profiles, and reasoning tasks.
+Code, ARC, chemistry, and Lean use shared execution or grading paths without that switch.
+Code execution uses verifyit's exact output comparator.
+GSM8K, AIME, MCQ, and search use shared primitives directly.
 
-GSM8K, AIME, MCQ, search exact match, ARC grid comparison and chemistry numeric comparison call the unified primitives directly. These clients do not have an original-path switch; compare them against the pinned source revision linked in the route inventory when investigating a difference.
+GenRM remains group grading in the trainer.
+Dataset preparation stores its private group-grader specification in trainer metadata.
+The [group grader](../skyrl-train/skyrl_train/rollouts/genrm_grading.py) reads `verifyit_enabled` from those parameters.
 
-Verification failures return minimum reward and retain framework verification/error information. A wrong candidate scoring zero is distinct from an invalid reference or unavailable verifier. Intentional corrections can change scores on malformed inputs; ordinary valid inputs should preserve source behavior.
+## Execution and failures
 
-## Coverage and limits
+Python, SQL, and Lean sessions use the Shellbox machine in TaskSpec.
+The [task configuration](../skyrl-train/skyrl_train/config/task_session_config/default.yaml)
+declares the Python build context and per-agent machines.
+Serialized build files use base64 content.
+Lean requires a project with its toolchain and dependencies in the selected image.
+The default Lean image reuses the repository's pinned NeMo runtime image and its `/lean4/my_project` project.
+It does not start the NeMo HTTP service.
 
-[The route inventory](../tools/verifyit/route-inventory.json) lists the 37 routes in the maintained packages and their original source locations. The replay command above produces fresh, local evidence for representative routes; it does not establish all-route parity.
+Judge routes require the configured endpoint, model, and credential.
+See the [acceptance configuration](../cloud/iris/configs/nemotron_ultra_rlvr_acceptance.yaml)
+and [judge client](../skyrl-gym/skyrl_gym/envs/nemotron_ultra/judge.py).
+Keep judge credentials and private reference answers outside the candidate machine.
 
-Exact, numeric, schema, instruction, code and judge clients reuse existing verifyit modes. No new verifier template is introduced. Source-specific setup, external services and sandbox requirements remain part of each benchmark's contract.
+An incorrect candidate can receive a valid zero or negative grade.
+A failed or unavailable verifier has no verdict and excludes the rollout from loss and group baselines.
+An explicit skipped grade retains trainable model tokens.
+
+[The route inventory](../tools/verifyit/route-inventory.json) records the 37 source routes and their pinned historical locations.
+Its configuration strings refer to that revision. Use the task configuration above for current settings.
+See [canonical task rollouts](../skyrl-train/docs/tutorials/task_rollouts.rst) for current execution and training policies.

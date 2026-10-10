@@ -547,21 +547,9 @@ class RayPPOTrainer:
                 logger.info(f"Killed {n_killed} inference engine actor(s)")
 
     async def _teardown(self) -> None:
-        """Best-effort cleanup after training ends (normal or abnormal).
+        """Release trainer resources within cooperative and process deadlines.
 
-        Async steps use cooperative timeouts. A process watchdog also bounds
-        blocked cleanup and subsequent executor shutdown. Cleanup errors are
-        logged as warnings so teardown can continue.
-
-        Order matters:
-        1. Teacher oracle shutdown – releases teacher engines.
-        2. HTTP endpoint shutdown – cuts off the request path so in-flight
-           Harbor trials get connection-refused instead of retrying against
-           dead inference engines indefinitely.
-        3. Trajectory runner shutdown – waits for QueueOrchestrator to drain (should
-           be fast now that trials can't make new requests).
-        4. Inference engine teardown – sends teardown RPC to each engine.
-        5. Ray actor cleanup – force-kills remaining actors.
+        Cleanup errors remain warnings so teardown can continue.
         """
         # Teacher cleanup can block or resist cancellation. Arm the process guard
         # before any teardown awaits, including executor shutdown after asyncio.run.
@@ -1125,6 +1113,8 @@ class RayPPOTrainer:
         memory the policy model releases. Separate engines keep serving rollouts, so they pause for the sync
         and their requests in flight resume on the new weights.
         """
+        if not self._inference_engines_configured():
+            return
         timings = self.all_startup_timings if reason == "initial" else self.all_timings
         with Timer("sync_weights", timings) as update_timer:
             if self.colocate_all:
@@ -1348,7 +1338,18 @@ class RayPPOTrainer:
         await self._finalize_training(completed_step=last_completed_step, epoch=self.cfg.trainer.epochs - 1)
         logger.info("Training done!")
 
+    def _inference_engines_configured(self) -> bool:
+        """False only for a client explicitly constructed with zero engines."""
+        client = self.inference_engine_client
+        if not isinstance(client, InferenceEngineClient):
+            # Test doubles and custom clients manage their own engines.
+            return True
+        return bool(client.engines)
+
     async def _init_weight_sync(self) -> None:
+        if not self._inference_engines_configured():
+            logger.info("Skipping weight sync: no inference engines are running for this objective")
+            return
         with Timer("init_weight_sync_state", self.all_startup_timings):
             if self.cfg.generator.weight_sync_transport != WeightSyncTransport.EXPERT_BLOCK:
                 self.init_weight_sync_state()
@@ -1398,9 +1399,9 @@ class RayPPOTrainer:
             async_step_metrics(
                 core_seconds=core_seconds,
                 cycle_seconds=time.perf_counter() - cycle_started,
-                buffer_wait_seconds=self.all_timings["wait_for_generation_buffer"],
+                buffer_wait_seconds=self.all_timings.get("wait_for_generation_buffer", 0.0),
                 training_seconds=self.all_timings["run_training"],
-                sync_seconds=self.all_timings["sync_weights"],
+                sync_seconds=self.all_timings.get("sync_weights", 0.0),
                 consumed_loss_tokens=consumed.loss_tokens,
                 consumed_response_tokens=consumed.response_tokens,
                 policy_gpus=placement.policy_num_nodes * placement.policy_num_gpus_per_node,
@@ -2171,6 +2172,11 @@ class RayPPOTrainer:
             training_input["token_level_shaping"] = token_level_shaping_tensor
         if response_span_tags_tensor is not None:
             training_input["response_span_tags"] = response_span_tags_tensor
+        pair_roles = trajectory_batch.get("pair_roles")
+        if pair_roles is not None:
+            if len(pair_roles) != len(response_ids):
+                raise ValueError("pair_roles must carry one role per response row")
+            training_input["pair_roles"] = torch.tensor(pair_roles, dtype=torch.float32)
         loop_advantages_tensor = collate_response_token_channel(
             loop_advantages,
             response_masks_tensor,

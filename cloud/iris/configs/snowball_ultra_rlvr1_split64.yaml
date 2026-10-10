@@ -12,16 +12,11 @@ context_budget:
 
 terminal_bench:
   harbor:
-    name: opencode
-    version: "1.18.2"
-    collect_rollout_details: true
-    override_setup_timeout_sec: 600
     override_timeout_sec: 1800
     verifier_override_timeout_sec: 300
     override_cpus: 1
     override_memory_mb: 4096
     override_storage_mb: 4096
-    auto_snapshot: true
     env_network_policy:
       mode: unrestricted
     max_retries: 3
@@ -29,12 +24,6 @@ terminal_bench:
     enable_reward_shaping: false
     enable_error_classification: true
     default_error_treatment: zero
-  model_info:
-  archiving:
-    enabled: false
-  trace_upload:
-    enabled: false
-
 trainer:
   strategy: megatron
   seed: 42
@@ -118,7 +107,6 @@ generator:
   enforce_eager: false
   run_engines_locally: true
   weight_sync_backend: nccl
-  enable_http_endpoint: true
   sampling_params:
     temperature: 1.0
     top_p: 1.0
@@ -128,11 +116,8 @@ generator:
     tool_call_parser: hermes
 
 environment:
-  skyrl_gym:
+  task_sessions:
     nemotron_ultra:
-      sandbox:
-        host: snowball-nemo-skills-sandbox.iris.svc.cluster.local
-        port: 6000
       judges:
         general:
           base_url: https://api.together.xyz/v1

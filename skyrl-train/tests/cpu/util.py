@@ -14,6 +14,40 @@ import torch.distributed as dist
 from skyrl_train.config.utils import get_default_config
 from omegaconf import OmegaConf
 
+# The `+algorithm_recipe=dpo` selection plus the pairing constraints every DPO test needs;
+# mirror the recipe file so the tested gates and the shipped recipe stay one block.
+DPO_OVERRIDES = {
+    "environment": {"env_class": "preference_pair"},
+    "trainer": {
+        "algorithm": {
+            "policy_loss_type": "dpo",
+            "advantage_estimator": "uniform",
+            "loss_reduction": "pair_mean",
+            "advantage_batch_normalize": False,
+            "use_kl_loss": False,
+            "use_kl_in_reward": False,
+            "use_entropy_loss": False,
+            "off_policy_correction": "none",
+            "dynamic_sampling": {"type": None},
+            "dpo": {"beta": 0.1, "label_smoothing": 0.0},
+        },
+        "placement": {"colocate_all": False, "colocate_policy_ref": True},
+        "use_sample_packing": False,
+        "micro_train_batch_size_per_gpu": 2,
+    },
+    "generator": {"n_samples_per_prompt": 2},
+}
+
+
+def dpo_test_config(**overrides):
+    """Compose the default config with the DPO recipe plus test-local overrides."""
+    cfg = get_default_config()
+    cfg = OmegaConf.merge(cfg, OmegaConf.create(DPO_OVERRIDES))
+    if overrides:
+        cfg = OmegaConf.merge(cfg, OmegaConf.create(overrides))
+    cfg.trainer.logger = "console"
+    return cfg
+
 
 def example_dummy_config():
     cfg = get_default_config()

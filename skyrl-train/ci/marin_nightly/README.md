@@ -2,23 +2,21 @@
 
 The nightly runs synchronous OPD, Grug Megatron training and the asynchronous
 CatCount learning canary on H100s. Colocated synchronous RL is not a production
-mode; CatCount covers learning. OpenCode runs manually through its launcher
-script. All policy updates use Megatron and the frozen root environment.
+mode; CatCount covers learning. All policy updates use Megatron and the frozen
+root environment.
 
 | file | role |
 | --- | --- |
 | `run_opd_h100.sh` | run synchronous OPD with separate policy, rollout, and teacher roles |
 | `run_grug_megatron.sh` | run Grug parity, training, and serving gates on four H100s |
-| `run_opencode.sh` | submit and gate the federated OpenCode RL canary |
 | `run_cat_count_h100.sh` | submit the CatCount coordinator and gate sampled learning on four H100s |
 | `gate.py` | score a training run against its spec |
 | `specs/cat-count-canary-qwen2.5-0.5b-async.json` | CatCount sampled learning and per-step mechanism requirements |
-| `specs/opencode-qwen3-8b.json` | OpenCode continuation and policy update thresholds |
 
 ## How the gate sees the run
 
-The trainer mirrors every tracker payload to stdout as a `WANDB_MIRROR` line, so a run's
-metrics are recoverable from its log alone — no wandb, no checkpoint, no cluster access:
+The trainer writes every tracker payload to stdout as a `WANDB_MIRROR` line.
+The gate reads these metrics from the run log:
 
 ```
 WANDB_MIRROR kind=train step=2 metrics={"policy/policy_loss": 0.41, "reward/avg_raw_reward": 0.25, ...}
@@ -31,7 +29,6 @@ improvement, and a minimum number of observations above or below a threshold. Tr
 payloads are separate streams. A selected observation must exist. Duplicate
 payloads for one stream and step count once;
 conflicting copies fail. The gate exits non-zero with one line per violation.
-`tests/cpu/test_marin_nightly_gate.py` covers it.
 
 ## Metric gates
 
@@ -83,12 +80,10 @@ and is not retried. The script records each attempt's wall time and exit status;
 The workflow uploads the combined native log and cancels its own named jobs
 in the shared cleanup step.
 
-## Two Ray instances cannot share a node
+## Ray startup collisions
 
-Ray persists session state under a temp directory. Two Ray instances that end up on one node find
-each other's and the second dies: "Session name ... does not match persisted value. Perhaps there
-was an error connecting to Redis." Observed on 2026-09-10 between two single-GPU jobs submitted six
-seconds apart.
+Ray instances on the same node can read each other's temporary session state.
+The second instance fails at startup with "Session name ... does not match persisted value. Perhaps there was an error connecting to Redis."
 
 The Grug tests start Ray through `initialize_ray`; CatCount starts it through
 the Marin task runtime. Both target `cw-rno2a`. A Ray startup error with that
@@ -109,60 +104,3 @@ The Grug lane runs `tests/gpu/test_grug_megatron.py`, the Levanter parity oracle
 and the two-GPU CP2
 FlashAttention forward/backward smoke with the frozen Megatron runtime closure;
 see `docs/grug-megatron-training.md` for the Grug tests.
-
-The OpenCode lane is deliberately a real federated RL launch rather than a mocked agent
-test. It provisions one RNO2A H100x8 node, creates eight air-gapped Daytona sandboxes,
-runs the pinned OpenCode 1.18.2 CLI at concurrency eight, captures every served token via
-RecordProxy, and completes one policy step. Run it manually with the RL-specific Daytona
-credential until the GitHub Iris service account can read the canonical secret. A healthy
-run targets about 15 minutes, or roughly 2 H100-hours plus eight short-lived Daytona
-sandboxes; its 40-minute hard allowance is a hang backstop, not the expected cost.
-
-To reproduce only this lane from an authenticated checkout:
-
-```bash
-LAUNCH_CONFIG=/path/to/resolved-opencode-launch.yaml \
-  bash skyrl-train/ci/marin_nightly/run_opencode.sh
-```
-
-The launch document is the complete Hydra YAML emitted by the Marin artifact. The script submits
-that document synchronously and gates its combined launcher and task log. Its log must contain one finite training
-step, eight correlated trials, at least 16 correlated turns, 100% exact behavior-logprob alignment with full token-in/token-out coverage,
-a finite positive correction weight no greater than 2, and no fallback, decline, skipped batch, or failed trajectory. A failure before those
-metrics should be triaged from the uploaded job log in this order: Iris allocation and
-runtime setup, Daytona snapshot/sandbox setup, OpenCode process errors, RecordProxy
-correlation, continuation declines, then policy forward/backward and weight sync.
-
-The same launcher has two manually triggered boundary suites. They use the checked-in
-`ci/opencode_smoke/tasks/boundary-mix` corpus and are intentionally not daily: each mode
-costs another H100x8 allocation and some cases deliberately fail or time out.
-
-```bash
-OPENCODE_MODE=compaction-stress \
-  LAUNCH_CONFIG=/path/to/resolved-compaction-launch.yaml \
-  LOG_PATH=opencode-compaction.log \
-  bash skyrl-train/ci/marin_nightly/run_opencode.sh
-
-OPENCODE_MODE=overflow-stress \
-  LAUNCH_CONFIG=/path/to/resolved-overflow-launch.yaml \
-  LOG_PATH=opencode-overflow.log \
-  bash skyrl-train/ci/marin_nightly/run_opencode.sh
-```
-
-The first mode requires automatic summarization to preserve an exact post-compaction
-training segment while invalid UTF-8 tool bytes, a capped single-turn response, and
-agent and verifier timeouts run beside normal trials. The second disables compaction and
-requires the same oversized tool result to become exactly one typed
-`ContextLengthExceededError`, with no retry storm. These mixed negative-path batches do
-not require an optimizer step: timeout and overflow samples without behavior logprobs
-are deliberately masked, while the positive-path gate owns the real policy-update
-and checkpoint contract. Instead, the stress specs require named log evidence for every
-boundary and a clean workflow shutdown. Update a threshold only from a cited real run,
-never merely to make a local fixture pass.
-
-To exercise the whole path — provision, train, gate, tear down — trigger the workflow:
-
-```bash
-gh workflow run marin-nightly.yaml \
-  -f target_cluster=cw-rno2a
-```

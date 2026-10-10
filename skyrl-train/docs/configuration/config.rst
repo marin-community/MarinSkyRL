@@ -353,6 +353,7 @@ Algorithm Configuration
   - ``sapo``: Smooth sigmoid-gated policy loss with separate positive- and negative-advantage temperatures; see the :doc:`objective usage guide </algorithms/objective_guide>`.
   - ``behavior_clip``: PPO clipping against the sampling policy, with a dual bound for negative advantages; see the :doc:`objective usage guide </algorithms/objective_guide>`.
   - ``sft``: Negative log likelihood on eligible response tokens, independent of advantages; see the :doc:`objective usage guide </algorithms/objective_guide>`.
+  - ``dpo``: Direct Preference Optimization over dataset-supplied chosen/rejected pairs against the frozen reference; requires ``algorithm.loss_reduction=pair_mean`` and ``environment.env_class=preference_pair``. See the :doc:`objective usage guide </algorithms/objective_guide>`.
   - Custom policy losses can be registered with the ``PolicyLossRegistry``
 
 
@@ -360,6 +361,7 @@ Algorithm Configuration
 
   - ``token_mean``: computes average loss over all valid tokens in the batch. Used in `DAPO <https://dapo-sia.github.io/>`_.
   - ``sequence_mean``: computes per-sequence avg token loss, then averages over the batch.
+  - ``pair_mean``: sums the per-token surrogate values and divides by the global pair count; used by ``dpo`` whose adjacent chosen/rejected rows form one training unit.
   - ``seq_mean_token_sum_norm``: computes the sum of token losses for each sequence, normalizes by the max sequence length (computed as ``cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length``), and then averages over the batch. This is used in `Dr. GRPO <https://arxiv.org/abs/2503.20783>`_.
   - ``seq_mean_token_sum_norm_global``: GLOBAL length-unbiased variant of Dr. GRPO. Sums the masked per-token loss over the whole DP batch and divides by a single global denominator ``Z = global_num_seqs * max_seq_len`` (computed once on the driver via a single all-reduce), instead of dividing each micro-batch by ``accumulation_steps``. This sidesteps the mean-of-per-microbatch-means size bias under gradient accumulation + async rollouts.
 
@@ -500,7 +502,6 @@ Generator Configuration
       min_p: 0.0
       top_k: -1
 
-    use_conversation_multi_turn: true
 
     # sampling params for evaluation
     eval_sampling_params:
@@ -620,6 +621,8 @@ Inference Engine Configuration
 Generation Parameters
 ~~~~~~~~~~~~~~~~~~~~~
 
+Multi-turn rollouts use structured conversation turns and retain the exact sampled token IDs.
+
 - ``generator.n_samples_per_prompt``: Number of samples to generate per prompt. Note that the total size of the training batch will be ``trainer.train_batch_size * generator.n_samples_per_prompt``.
 - ``generator.max_input_length``: Maximum input length for the inference engine. For single turn generation, this can be same as ``trainer.max_prompt_length`` (i.e., the initial prompt length). For multi-turn generation, this is the maximum input length used for multi-turn conversations at each turn.
 - ``generator.sampling_params``: Sampling parameters for the inference engine during trajectory generation phase.
@@ -632,7 +635,6 @@ Generation Parameters
 - ``generator.eval_sampling_params``: Sampling parameters for evaluation.
 - ``generator.eval_n_samples_per_prompt``: Number of samples to generate per prompt for evaluation.
 - ``generator.max_turns``: Maximum number of turns for generation with multi-turn RL.
-- ``generator.use_conversation_multi_turn``: Whether to use conversation format for multi-turn generation. If set to ``true`` then observations are appended to the chat history as a new turn. If set to ``false`` then observations are appended as-is to the assistant response in token space and generation is continued  (after removing any EOS token in the response).  We've observed some cases where model can be sensitive to chat history format (ex: in SkyRL-SQL), and thus ``false`` can be used for full control over the exact tokens added after environment interaction.
 - ``generator.engine_init_kwargs``: Inference engine arguments passed directly to the vLLM or SGLang engine. To specify an engine arg in the CLI override, use the format: +generator.engine_init_kwargs.[arg_name]=value. If duplicate kwargs are passed or kwargs clash with existing generator arguments (e.g., ``tensor_parallel_size``), an error is raised.
 - ``generator.chat_template``: Custom chat template configuration if needed.
     - ``generator.chat_template.source``: Source of the chat template. Can be either ``name`` or ``file``.
