@@ -30,6 +30,10 @@ MarinSkyRL is maintained as a hard snapshot; no upstream sync or merge-back is p
 The repository root builds one `marinskyrl` wheel containing the typed Iris launcher, `skyrl_train`, and
 `skyrl_gym`. Its base dependency set is CPU-only and supports launcher inspection, validation, and dry runs:
 
+Runtime libraries published from `marin-community/marin` resolve as `marin-*` packages from PyPI. Run
+`uv lock` at the root and `uv lock --project skyrl-gym` when taking a new release; the frozen installs below
+then use those versions. The vLLM profile and Harbor test group install Harbor for their runtime imports.
+
 ```bash
 uv sync --frozen
 uv run --frozen marinskyrl --help

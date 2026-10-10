@@ -1,6 +1,6 @@
 # Unified verification
 
-SkyRL clients call verifyit's existing verifier modes while retaining task-specific response extraction and framework reward reporting. The dependency is pinned to a published source commit in the project metadata. No local campaign checkout or unpublished wheel is needed. SkyRL uses math-verify 0.9.0, upgraded from 0.8.0 to satisfy the unified dependency. Math parsing or equivalence behavior can change with this upgrade; the 2026-10-01 campaign snapshot used math-verify 0.8.0. The offline comparisons use 0.9.0 on both paths.
+SkyRL clients call Verifyit's existing verifier modes while retaining task-specific response extraction and framework reward reporting. The project depends on `marin-verifyit` from PyPI; the lockfile selects its release. No local campaign checkout is needed. SkyRL uses math-verify 0.9.0, upgraded from 0.8.0 to satisfy the unified dependency. Math parsing or equivalence behavior can change with this upgrade; the 2026-10-01 campaign snapshot used math-verify 0.8.0. The offline comparisons use 0.9.0 on both paths.
 
 ## Install and reproduce
 
@@ -17,7 +17,7 @@ uv pip install --python .venv-verifiers/bin/python -e './skyrl-gym[dev]'
 
 The replay uses checked-in response fixtures. It invokes both the original and cutover MCQA scorer and both original and cutover Reasoning Gym environments, and both math scoring entrypoints with a local HTTP judge fixture. The output retains each input and both results, including scored zero. A mismatch exits unsuccessfully. Math wrong-answer fallback receives the same fixed non-equivalence response from a local HTTP server on both paths; no model inference is involved. This is a scoring roundtrip, without model inference or a live judge. The fixtures are synthetic; they do not reproduce archived model-run scores.
 
-For a frozen gym installation, run `uv sync --project skyrl-gym --frozen --extra dev`, then `uv run --project skyrl-gym --frozen python tools/verifyit/replay.py --output /tmp/skyrl-verifier-replay.json`. The gym and root locks include the exact published verifyit revision and math-verify 0.9.0.
+For a frozen gym installation, run `uv sync --project skyrl-gym --frozen --extra dev`, then `uv run --project skyrl-gym --frozen python tools/verifyit/replay.py --output /tmp/skyrl-verifier-replay.json`. The gym and root locks select exact `marin-verifyit` and math-verify releases.
 
 The normal launcher installation uses the root project's CPU or GPU profile described in the README. The smaller installation above exercises verifiers without installing a training runtime. Code and Lean verification additionally require the configured sandbox runtime. Judge routes require their configured provider and credentials; they cannot be exercised through the offline fixtures.
 
