@@ -201,7 +201,7 @@ def test_from_config_retries_s3_engine_gang_after_actor_startup_failure(monkeypa
 
 @pytest.mark.parametrize(
     ("training", "evaluation", "profile", "expected"),
-    [(16, 24, None, 25), (0, None, 5, 6), (None, None, None, 1)],
+    [(16, 24, None, 25), (0, None, 5, 6), (32, None, None, 33), (None, None, None, 1), (0, None, None, 1)],
 )
 def test_from_config_reserves_enough_rollout_logprobs(monkeypatch, training, evaluation, profile, expected):
     captured = {}

@@ -30,6 +30,8 @@ class ObjectiveMicroBatch:
     token_entropy: torch.Tensor
     teacher: TopKTeacherBatch | None
     correction_weights: torch.Tensor | None = None
+    # Differentiable per-token correction, before policy/THINK weights and global reduction.
+    score_centering: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -62,8 +64,9 @@ def build_objective_micro_batch(
     ftpo: FTPOInputs | None = None,
     pair_roles: torch.Tensor | None = None,
     correction_weights: torch.Tensor | None = None,
+    score_centering: torch.Tensor | None = None,
 ) -> ObjectiveMicroBatch:
-    """Prepare finite values at masked positions before objective formulas run."""
+    """Prepare finite values at masked positions, retaining correction gradients."""
     valid = loss_mask > 0
 
     def sanitize(value: torch.Tensor) -> torch.Tensor:
@@ -93,6 +96,7 @@ def build_objective_micro_batch(
         token_entropy=sanitize(token_entropy),
         teacher=teacher,
         correction_weights=None if correction_weights is None else sanitize(correction_weights).detach(),
+        score_centering=None if score_centering is None else sanitize(score_centering),
     )
 
 
@@ -122,6 +126,9 @@ def compute_policy_objective(
         numerator_weights=batch.correction_weights,
         **common,
     )
+    if batch.score_centering is not None:
+        # The correction already integrates TIS; sampled-action weights apply only to PPO.
+        policy_row += reduce_to_step(batch.score_centering, batch.policy_data_weights, counts.policy, mode, **common)
     mask = batch.policy.loss_mask
     entropy = reduce_to_step(batch.token_entropy, mask, counts.mask, LossReduction.TOKEN_MEAN, **common)
     if config.use_kl_loss:
