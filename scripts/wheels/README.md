@@ -6,8 +6,8 @@ CRT, NVVM and CCCL 13.2.86. Each resulting wheel needs runtime qualification
 before adoption.
 
 The recipes include Transformer Engine Torch 2.20.2, Megatron Core 0.19.2,
-Megatron Bridge 0.6.2, FlashAttention 2.8.3.post1, causal-conv1d 1.7,
-Mamba 2.3.2.post1 and fast-hadamard-transform 1.1 from the stable GitHub tag
+Megatron Bridge 0.6.2, FlashAttention 2.8.3.post1 and
+fast-hadamard-transform 1.1 from the stable GitHub tag
 `v1.1.0.post2`. Sources and recursive submodules
 are fetched by exact commit. Upstream prebuilt Torch extensions are bypassed.
 
@@ -46,14 +46,15 @@ dependency range. This is another maintained pure Python artifact and version
 patch, with no model or optimizer source changes. `speculators-build.txt` pins
 its separate CPython 3.12.13 builder; runtime dependencies come from the root lock.
 
-FlashAttention, causal-conv1d and Mamba force C++17 upstream. Their build patches
-select C++20, which Torch 2.14 headers require. These wheels use the local version
+FlashAttention forces C++17 upstream. Its build patch
+selects C++20, which Torch 2.14 headers require. Its wheels use the local version
 `+marin.cu132torch2141.1`. Fast-hadamard-transform inherits Torch's compiler
 standard without a patch.
 
-The Mamba patch also incorporates the upstream TVM FFI upper-bound correction to
-0.1.12 and selects the serving stack's TileLang 0.1.14. These are candidate compatibility changes; metadata
-resolution alone does not qualify their APIs or kernels.
+Snowball and Hero use the maintained Torch ShortConv path. Their combined
+runtime omits Mamba and causal-conv1d. The old build branches and their C++20
+and Mamba dependency patches are retired; historical artifacts and recipes
+remain available from their tagged releases.
 
 Core checks the separately versioned `flash-attn-4` distribution before importing
 its CuTe implementation. Its upstream import order loads the old CuTe code
@@ -84,8 +85,6 @@ bash scripts/wheels/build_native.sh megatron-core /tmp/build-core
 bash scripts/wheels/build_native.sh megatron-bridge /tmp/build-bridge
 bash scripts/wheels/build_native.sh speculators /tmp/build-speculators
 bash scripts/wheels/build_native.sh flash-attn /tmp/build-flash-attn
-bash scripts/wheels/build_native.sh causal-conv1d /tmp/build-causal-conv1d
-bash scripts/wheels/build_native.sh mamba-ssm /tmp/build-mamba
 bash scripts/wheels/build_native.sh fast-hadamard-transform /tmp/build-hadamard
 python scripts/wheels/restore_core_bounds.py /tmp/megatron_core-0.19.2+marin.torch2141.3-cp312-cp312-linux_x86_64.whl /tmp/repack-core-x86
 ```
