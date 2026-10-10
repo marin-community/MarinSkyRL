@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 import ray
 import torch
+import numpy as np
 from omegaconf import OmegaConf
 
 import skyrl_train.trainer as trainer_module
@@ -30,6 +31,8 @@ from skyrl_train.objective.reduction import reduce_to_step, step_counts
 from skyrl_train.training_batch import TrainingBatchIterator
 from skyrl_train.utils.trainer_utils import ResumeMode
 from skyrl_train.utils.utils import validate_batch_sizes
+from skyrl_train.utils.advantage_estimators import compute_grpo_outcome_advantage
+from skyrl_gym.verification import VerificationResult, VerificationStatus
 from skyrl_train.workers.worker import CriticWorkerBase, PolicyWorkerBase
 from tests.cpu.util import example_dummy_config
 
@@ -669,6 +672,35 @@ def test_loop_advantages_are_collated_with_response_tokens(dummy_config, dummy_t
     assert "teacher_action_log_probs" not in batch
     assert "teacher_valid_mask" not in batch
     assert "distillation_loss_weights" not in batch
+
+
+def test_reference_binary_rewards_keep_paper_advantages_across_native_reward_scales(dummy_config, dummy_tokenizer):
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = dummy_config
+    trainer.cfg.trainer.algorithm.reference_binary_rewards = True
+    trainer.group_advantage_invariant = GroupAdvantageInvariant.no_group_advantage(physical_group_size=1)
+    trainer.tokenizer = dummy_tokenizer
+    trainer.pad_batch = lambda batch: batch
+    scores = [1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    responses = [[4, 5, 6], [7], [8, 9], [10], [11, 12], [13], [14, 15], [16]]
+    trajectory = {
+        "prompt_token_ids": [[1, 2]] * 8,
+        "response_ids": responses,
+        "rewards": [[0.0, 0.0, 1.0], [0.0], [0.0, 1.0], [-1.0], [0.0, -2.0], [0.0], [0.0, -1.0], [0.0]],
+        "loss_masks": [[1] * len(row) for row in responses],
+        "rollout_logprobs": None,
+        "verification_results": [VerificationResult(VerificationStatus.VERIFIED, score=score) for score in scores],
+    }
+    original_rewards = copy.deepcopy(trajectory["rewards"])
+
+    batch = trainer.convert_to_training_input(trajectory, ["group"] * 8)
+    torch.testing.assert_close(batch["rewards"].sum(-1), torch.tensor([1.0, -1.0, 1.0, -1.0, -1.0, -1.0, -1.0, -1.0]))
+    advantages, _ = compute_grpo_outcome_advantage(
+        batch["rewards"], batch["response_mask"], np.array(["group"] * 8), grpo_norm_by_std=False
+    )
+    expected = torch.tensor([1.5, -0.5, 1.5, -0.5, -0.5, -0.5, -0.5, -0.5])[:, None] * batch["response_mask"]
+    torch.testing.assert_close(advantages, expected, rtol=0, atol=0)
+    assert trajectory["rewards"] == original_rewards
 
 
 def test_teacher_evidence_is_validated_and_collated_with_response_tokens(

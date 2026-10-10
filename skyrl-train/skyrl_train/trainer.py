@@ -2072,6 +2072,16 @@ class RayPPOTrainer:
         rewards: List[List[float]] = trajectory_batch["rewards"]
         loss_masks: List[List[int]] = trajectory_batch["loss_masks"]
 
+        if self.cfg.trainer.algorithm.get("reference_binary_rewards", False):
+            scores = normalized_verifier_scores(trajectory_batch)
+            if scores is None:
+                raise ValueError("reference_binary_rewards requires a binary verifier score for every response")
+            rewards = []
+            for score, response in zip(scores, response_ids, strict=True):
+                if score is None or score not in (0.0, 1.0):
+                    raise ValueError("reference_binary_rewards requires a binary verifier score for every response")
+                rewards.append(scalar_reward_token_credit(2 * score - 1, response))
+
         logprobs: Optional[List[np.ndarray]] = trajectory_batch.get("rollout_logprobs", None)
 
         # MoE router-replay capture rail (Stage 1): only pull routed_experts when

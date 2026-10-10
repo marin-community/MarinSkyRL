@@ -199,6 +199,7 @@ trainer:
     use_entropy_loss: false
     entropy_loss_coef: 0.01
     advantage_batch_normalize: false
+    reference_binary_rewards: false
     value_head_prefix: "value_head"
     policy_loss_type: "regular"
     # FTPOConfig owns the defaults; set policy_loss_type=ftpo to activate.
