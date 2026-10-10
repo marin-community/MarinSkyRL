@@ -2,7 +2,7 @@
 
 SkyRL task sessions use [verifyit](https://github.com/marin-community/marin/tree/main/lib/verifyit),
 Marin's shared verifier package, and retain source-specific response extraction and reward policy.
-The dependency is pinned in the root and standalone package manifests.
+The root and standalone package locks select the published `marin-verifyit` distribution.
 SkyRL pins math-verify for reproducible answer parsing.
 
 ## Install and reproduce
