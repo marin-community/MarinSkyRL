@@ -623,16 +623,18 @@ async def test_chat_grading_recovers_reasoning_boundaries_without_changing_repla
 
 
 @pytest.mark.asyncio
-async def test_chat_output_budget_fits_the_exact_backend_rendered_prompt():
+@pytest.mark.parametrize("prompt_length,total_limit,response_limit", [(4, 5, 3), (129, 512, 512), (134, 512, 512)])
+async def test_chat_output_budget_fits_the_exact_backend_rendered_prompt(prompt_length, total_limit, response_limit):
     engine = AsyncMock()
     engine.model_name = "snowball"
     engine.tokenizer = MagicMock()
     engine.tokenizer.decode.return_value = "7"
-    engine.tokenize.return_value = {"tokens": [1, 2, 3, 4]}
+    prompt_tokens = list(range(1, prompt_length + 1))
+    engine.tokenize.return_value = {"tokens": prompt_tokens}
 
     async def serve(request):
         tokens = request["json"]["max_completion_tokens"]
-        assert tokens == 1
+        assert tokens == total_limit - prompt_length
         return {
             "choices": [{"message": {"role": "assistant", "content": "7"}, "finish_reason": "stop", "token_ids": [7]}]
         }
@@ -641,14 +643,14 @@ async def test_chat_output_budget_fits_the_exact_backend_rendered_prompt():
     result = await DirectModelClient(engine).generate(
         {
             "prompts": [[{"role": "user", "content": "a correction prompt"}]],
-            "chat_completion_params": [{"max_output_tokens": 3}],
-            "sampling_params": {"max_generate_length": 3},
-            "max_context_length": 5,
+            "chat_completion_params": [{"max_output_tokens": response_limit}],
+            "sampling_params": {"max_generate_length": response_limit},
+            "max_context_length": total_limit,
         }
     )
     assert result["responses"] == ["7"]
-    assert result["prompt_ids"] == [[1, 2, 3, 4]]
-    assert result["generation_token_budgets"] == [1]
+    assert result["prompt_ids"] == [prompt_tokens]
+    assert result["generation_token_budgets"] == [total_limit - prompt_length]
 
 
 @pytest.mark.asyncio
