@@ -702,8 +702,8 @@ def get_outcome_rewards(trajectory_batch: TrajectoryBatch) -> List[float]:
 def normalized_verifier_scores(trajectory_batch: TrajectoryBatch) -> List[float | None] | None:
     """Return bounded task scores, or None if the batch has no verdict channel.
 
-    Entries are None for skipped or missing verdicts and zero for verifier
-    failures. A verifier may declare its native score range. This keeps
+    Entries are None whenever no verifier verdict exists, including verifier
+    errors. Verified failures retain their actual zero scores. This keeps
     GenRM's 1–5 ratings comparable with 0–1 verifiers in cross-task averages,
     while leaving the optimization rewards and raw verifier scores intact.
     """
@@ -714,10 +714,8 @@ def normalized_verifier_scores(trajectory_batch: TrajectoryBatch) -> List[float 
         raise ValueError("verification_results must have one entry per reward")
     scores: List[float | None] = []
     for result in results:
-        if result is None or result.status is VerificationStatus.SKIPPED:
+        if result is None or result.status is not VerificationStatus.VERIFIED:
             scores.append(None)
-        elif result.status is not VerificationStatus.VERIFIED:
-            scores.append(0.0)
         else:
             scores.append(normalized_verifier_score(result))
     return scores
