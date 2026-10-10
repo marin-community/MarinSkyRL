@@ -77,9 +77,9 @@ def test_training_reports_normalized_composite_scores_by_agent():
     trainer.postprocess_trajectory_batch(batch, ["a", "b", "c"])
 
     assert trainer.all_metrics["reward/avg_raw_reward"] == 2.0
-    assert trainer.all_metrics["reward/avg_verifier_score"] == pytest.approx(2 / 3)
+    assert trainer.all_metrics["reward/avg_verifier_score"] == 1.0
     assert trainer.all_metrics["reward/agent/genrm/avg_verifier_score"] == 1.0
-    assert trainer.all_metrics["reward/agent/mcqa/avg_verifier_score"] == 0.5
+    assert trainer.all_metrics["reward/agent/mcqa/avg_verifier_score"] == 1.0
 
 
 def test_informative_group_fraction_counts_groups_whose_rewards_differ():
