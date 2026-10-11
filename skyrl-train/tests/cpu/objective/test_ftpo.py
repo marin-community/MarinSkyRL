@@ -75,6 +75,7 @@ def test_ftpo_launch_selects_protocol_boundary_from_recipe(tmp_path: Path) -> No
         [[1, 1, 1]],
         candidates,
         scores,
+        prompt_ids=[[]],
         decode=lambda tokens: "".join(surfaces[token] for token in tokens),
         loop=LoopCreditConfig(),
         config=ftpo_config(config.skyrl.trainer.algorithm),
@@ -96,6 +97,7 @@ def test_ftpo_reuses_tail_detection_but_selects_first_repeat_and_filters_alterna
         masks,
         ids,
         scores,
+        prompt_ids=[[]] * len(response),
         decode=_surface,
         loop=LoopCreditConfig(),
         config=replace(FTPOConfig(), min_p=0.2, chosen_balance_strength=0),
@@ -114,7 +116,9 @@ def test_ftpo_balances_common_tokens_deterministically_without_retokenizing():
     ids = torch.tensor([2, 3]).expand(8, 6, 2).clone()
     ids[6:, :, 1] = 0
     scores = torch.tensor([0.7, 0.3]).log().expand_as(ids).clone()
-    kwargs = dict(decode=_surface, loop=LoopCreditConfig(), config=FTPOConfig(), seed=13, eligible=[True] * 8)
+    kwargs = dict(
+        prompt_ids=[[]] * 8, decode=_surface, loop=LoopCreditConfig(), config=FTPOConfig(), seed=13, eligible=[True] * 8
+    )
     chosen, weights = select_ftpo_candidates(responses, [[1] * 6] * 8, ids, scores, **kwargs)
     repeated, repeated_weights = select_ftpo_candidates(responses, [[1] * 6] * 8, ids, scores, **kwargs)
     assert torch.equal(chosen, repeated) and torch.equal(weights, repeated_weights)
@@ -157,6 +161,7 @@ def test_ftpo_protocol_selection_excludes_thinking_observations_and_quoted_marke
         masks,
         ids,
         scores,
+        prompt_ids=[[]] * len(responses),
         decode=lambda tokens: "".join(surfaces[token] for token in tokens),
         loop=LoopCreditConfig(),
         config=selected,
@@ -166,6 +171,50 @@ def test_ftpo_protocol_selection_excludes_thinking_observations_and_quoted_marke
     assert chosen.nonzero().tolist() == [[0, 2, 1], [3, 8, 1]]
     assert weights.nonzero().tolist() == [[0, 2], [3, 8]]
     assert ids[chosen].tolist() == [3, 3]
+
+
+@pytest.mark.parametrize("whitespace", ["", "\n", " \t\r\n"])
+def test_ftpo_protocol_targets_second_opener_after_recorded_assistant_header(config, whitespace):
+    surfaces = {
+        0: "<tool_call>",
+        1: "{",
+        2: "<|start_header_id|>",
+        3: "assistant",
+        4: "<|end_header_id|>",
+        5: "\n\n",
+        6: whitespace,
+        7: "<|start_think|>",
+        8: "<|end_think|>",
+        9: "tool",
+    }
+    header = [2, 3, 4, 5]
+    responses = [
+        [0, 6, 0],
+        [0, 6, 0] + header + [0, 6, 0],
+        [0, 6, 0],
+        [7, 0, 6, 0, 8, 0, 6, 0],
+        [0, 6, 0],
+    ]
+    masks = [[1] * len(row) for row in responses]
+    masks[1] = [0] * 7 + [1] * 3
+    prompts = [header, [], header + [7], header, [2, 9, 4, 5]]
+    candidates = torch.tensor([0, 1]).expand(5, 10, 2).clone()
+    scores = torch.tensor([0.8, 0.2]).log().expand_as(candidates)
+    config.trainer.algorithm.ftpo = {"boundary": "repeated_tool_opener", "chosen_balance_strength": 0}
+    chosen, weights = select_ftpo_candidates(
+        responses,
+        masks,
+        candidates,
+        scores,
+        prompt_ids=prompts,
+        decode=lambda tokens: "".join(surfaces[token] for token in tokens),
+        loop=LoopCreditConfig(),
+        config=ftpo_config(config.trainer.algorithm),
+        seed=42,
+        eligible=[True] * 5,
+    )
+    assert chosen.nonzero().tolist() == [[0, 2, 1], [1, 9, 1], [3, 7, 1]]
+    assert weights.nonzero().tolist() == [[0, 2], [1, 9], [3, 7]]
 
 
 def _scalar_reference(logits, reference, ids, masks, rejected, weights, params):

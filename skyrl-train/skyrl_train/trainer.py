@@ -2183,6 +2183,7 @@ class RayPPOTrainer:
                 loss_masks,
                 candidates,
                 scores,
+                prompt_ids=prompt_ids,
                 decode=self.tokenizer.decode,
                 loop=loop,
                 config=ftpo,
