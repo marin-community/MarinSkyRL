@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from functools import partial
 import os
 
+from daytona import AsyncDaytona, DaytonaConfig
 from harbor_config.models.job.config import RetryConfig
 from harbor_config.models.environment_type import EnvironmentType
 from harbor_config.models.trial.config import EnvironmentConfig, VerifierConfig
@@ -36,16 +37,6 @@ from skyrl_train.utils.reward_shaping import (
 
 HARBOR_MACHINE_BACKEND = "harbor"
 HARBOR_EVAL_MACHINE_BACKEND = "harbor_eval"
-
-
-def daytona_client(api_key_env: str):
-    """Build an account-specific client without changing process credentials."""
-    from daytona import AsyncDaytona, DaytonaConfig
-
-    api_key = os.environ.get(api_key_env)
-    if not api_key:
-        raise ValueError(f"Missing Daytona credential environment variable: {api_key_env}")
-    return AsyncDaytona(DaytonaConfig(api_key=api_key))
 
 
 @dataclass(frozen=True)
@@ -104,9 +95,14 @@ class HarborTaskSettings:
             case EnvironmentType.DAYTONA:
                 policy = self.environment.kwargs.get("network_policy")
                 key_env = self.environment.kwargs.get("eval_api_key_env" if phase == "eval" else "api_key_env")
-                client_kwargs = {} if key_env is None else {"client_factory": partial(daytona_client, key_env)}
+                client_factory = AsyncDaytona
+                if key_env is not None:
+                    api_key = os.environ.get(key_env)
+                    if not api_key:
+                        raise ValueError(f"Missing Daytona credential environment variable: {key_env}")
+                    client_factory = partial(AsyncDaytona, DaytonaConfig(api_key=api_key))
                 return DaytonaMachineFactory(
-                    **client_kwargs,
+                    client_factory=client_factory,
                     ttl_minutes=self.environment.kwargs.get("ttl_minutes", 360),
                     network_policy=None
                     if policy is None

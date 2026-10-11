@@ -31,7 +31,7 @@ from skyrl_train.dataset.harbor import HarborTaskDataset
 from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection, WholeTrajectoryProjection
 from skyrl_train.rollouts.buffer import RolloutLease, RolloutTask
 from skyrl_train.rollouts.task_worker import TaskRolloutWorker
-from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings, daytona_client
+from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
 from rolloutengine.spec import LoweredTaskSpec
 from tests.cpu.task_specs import NATIVE_ENVIRONMENT, SHELL_ENVIRONMENT, lowered_task, session_spec
 from skyrl_train.trajectory_runners.types import BatchMetadata, TokenProvenance, TrajectoryID
@@ -143,8 +143,11 @@ async def test_daytona_clients_keep_account_credentials_separate_during_concurre
 def test_missing_explicit_daytona_key_does_not_fall_back_to_ambient_account(monkeypatch):
     monkeypatch.delenv("DAYTONA_EVAL_API_KEY", raising=False)
     monkeypatch.setenv("DAYTONA_API_KEY", "wrong-ambient-key")
+    settings = HarborTaskSettings.from_config(
+        OmegaConf.create({"harbor": {"eval_daytona_api_key_env": "DAYTONA_EVAL_API_KEY"}})
+    )
     with pytest.raises(ValueError, match="DAYTONA_EVAL_API_KEY"):
-        daytona_client("DAYTONA_EVAL_API_KEY")
+        settings.machine_factory(phase="eval")
 
 
 @pytest.mark.asyncio
