@@ -135,7 +135,6 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
 
         def log_detail(line: str) -> None:
             print(line, flush=True)
-            record(line)
 
         mpu.initialize_model_parallel(
             tensor_model_parallel_size=1,
