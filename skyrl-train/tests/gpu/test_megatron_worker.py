@@ -350,9 +350,7 @@ async def test_megatron_forward(ray_init_fixture, worker_type, tp, pp, cp, ep, e
         with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
             output = model(sequences_fwd, attention_mask=attention_mask, position_ids=position_ids)
             log_probs = logprobs_from_logits(output["logits"], sequences_rolled)
-            # Entry k is the log-probability of the token at column k+1, so the response
-            # window (the final num_actions tokens) is the final num_actions entries.
-            action_log_probs = log_probs[:, -num_actions:].to("cpu").detach()
+            action_log_probs = log_probs[:, -num_actions - 1 : -1].to("cpu").detach()
 
         return attention_mask.to("cpu").detach(), action_log_probs.to("cpu").detach(), num_actions
 

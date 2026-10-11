@@ -87,15 +87,17 @@ not established by this suite alone.
 
 The verification itself surfaced two results worth recording beyond a pass/fail:
 
-1. **The trainer's action window is correct; two legacy test helpers were not.** The
-   trainer and the vLLM path read response log-probabilities as the final `num_actions`
-   entries of a predictor-aligned array (entry k is the log-probability of the token at
-   column k+1, so those entries are exactly the response tokens). The HF helpers in
-   `test_grug_megatron.py` and `test_megatron_worker.py` sliced `[:, -num_actions-1:-1]`,
-   which keeps the last prompt token's log-probability and drops the final response
-   token. Those gates passed anyway because their bf16 parity tolerances absorb
-   adjacent-token differences; both helpers now slice the same window as the trainer,
-   which is what let the fp32 backward comparison here close to 3.5e-6.
+1. **Response-window slicing depends on the array's width convention.** The response
+   log-probability window (the log-probs of the final `num_actions` tokens, predicted at
+   `num_actions` predictor positions) is `[:, -num_actions-1:-1]` of a sequence-width
+   array whose entry k scores the token at column k+1 (the convention used by
+   `logprobs_from_logits` and the existing forward-parity helpers), but
+   `[:, -num_actions:]` of an array whose last column was already dropped before
+   gathering (the trainer's reconstruction and the reference here). This experiment's
+   first reference used the wrong convention for its array and imprinted a clean,
+   fixture-independent metric shift — tracing it required making routing deterministic
+   (below) and dumping the objective's exact inputs. The trainer's own window was
+   correct throughout; no production change was needed.
 2. **Tiny random MoE fixtures need drift-free routing for cross-implementation
    comparison.** Near-tie biased selections flip between independent fp32 implementations
    (eager HF vs unfused Megatron) and imprint ~1e-2 per-token log-probability noise that
