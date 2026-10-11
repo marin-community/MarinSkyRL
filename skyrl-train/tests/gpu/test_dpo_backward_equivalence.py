@@ -195,7 +195,9 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
 
         # Per-token Megatron-vs-HF agreement on the eval path, over the same window the
         # loss consumes. Attention-masked window entries are zero by design on the
-        # Megatron side, so the loss-mask figures are the meaningful ones.
+        # Megatron side, so the loss-mask figures are the meaningful ones. The eval
+        # forward is a pipeline-collective schedule, so every rank runs it with its own
+        # shard exactly as the trainer's eval path does; only the last stage holds scores.
         forward_micros = [
             MegatronForwardMicroBatch(
                 sequences=p.sequences,
@@ -206,10 +208,10 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
             for p in payloads
         ]
         token_stats = torch.zeros(3, device="cuda")
+        scores = wrapper.forward(
+            forward_micros, seq_len=batch.sequences.shape[1], micro_batch_size=MICRO_BATCH_SIZE
+        )
         if mpu.is_pipeline_last_stage(ignore_virtual=True):
-            scores = wrapper.forward(
-                forward_micros, seq_len=batch.sequences.shape[1], micro_batch_size=MICRO_BATCH_SIZE
-            )
             expected_tokens = torch.cat(
                 [reference.action_log_probs[start : start + micro.sequences.shape[0]] for start, micro in micros]
             ).to(scores.device)
