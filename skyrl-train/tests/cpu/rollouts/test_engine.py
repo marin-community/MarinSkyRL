@@ -22,7 +22,7 @@ from skyrl_gym.source_task import source_task
 from tests.cpu.task_specs import lowered_task
 from rolloutengine.contracts import RolloutContractError, SessionStart, Transition
 from skyrl_train.trajectory_runners.types import TokenProvenance, TrajectoryID
-from skyrl_train.trajectory_runners.model_clients import ModelServerError
+from skyrl_train.trajectory_runners.model_clients import DirectModelClient, ModelServerError
 from tests.cpu.rollouts.engine_fakes import ConversationClient, InferenceClient, Tokenizer, Writer
 
 
@@ -60,17 +60,15 @@ async def test_protocol_replay_uses_raw_prefix_and_keeps_infrastructure_unscored
                 raise ModelServerError("model_server_error", "replay-request", 503)
             return {
                 "responses": [response],
-                "prompt_ids": [prefix],
                 "response_ids": [[3, 4]],
                 "response_logprobs": [[-0.1, -0.2]],
                 "stop_reasons": ["stop"],
-                "token_provenance": TokenProvenance.ENGINE,
             }
 
     worker = TaskRolloutWorker(
         config,
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
-        Client(),
+        DirectModelClient(Client()),
         {},
         shutdown_timeout=30,
     )

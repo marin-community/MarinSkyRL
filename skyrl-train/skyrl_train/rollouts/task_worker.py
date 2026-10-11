@@ -155,7 +155,9 @@ async def _model_turn(
     )
     return ModelTurn(
         message=message,
-        prompt_token_ids=tuple(output["prompt_ids"][0]),
+        prompt_token_ids=request.prompt_token_ids
+        if request.prompt_token_ids is not None
+        else tuple(output["prompt_ids"][0]),
         response_token_ids=tuple(output["response_ids"][0]),
         logprobs=None if logprobs is None else tuple(logprobs[0]),
         stop_reason=output["stop_reasons"][0],
