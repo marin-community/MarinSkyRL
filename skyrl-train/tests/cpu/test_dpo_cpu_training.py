@@ -2,7 +2,8 @@
 
 import math
 import multiprocessing
-from multiprocessing.context import ForkServerContext
+import sys
+from multiprocessing.context import BaseContext
 from pathlib import Path
 
 import pytest
@@ -23,14 +24,26 @@ def tiny_policy(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 @pytest.fixture(scope="module")
-def runs() -> ForkServerContext:
+def runs() -> BaseContext:
+    if sys.platform == "darwin":
+        # Forkserver preload clones initialized macOS proxy/preferences libraries; use a fresh interpreter.
+        return multiprocessing.get_context("spawn")
     context = multiprocessing.get_context("forkserver")
     context.set_forkserver_preload([preference_pairs.__name__])
     return context
 
 
-def _run(context: ForkServerContext, root: Path, model: Path, steps: int) -> None:
-    run = context.Process(target=preference_pairs.run_dpo_experiment, args=(root, model), kwargs={"steps": steps})
+def _run(
+    context: BaseContext,
+    root: Path,
+    model: Path,
+    steps: int,
+) -> None:
+    run = context.Process(
+        target=preference_pairs.run_dpo_experiment,
+        args=(root, model),
+        kwargs={"steps": steps},
+    )
     run.start()
     run.join(RUN_TIMEOUT_SECONDS)
     if run.exitcode is None:

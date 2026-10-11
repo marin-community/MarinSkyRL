@@ -62,7 +62,7 @@ from skyrl_train.utils.policy_math import compute_approx_kl, normalize_advantage
 from skyrl_train.utils.kl_controllers import get_kl_controller, FixedKLController, AdaptiveKLController
 from skyrl_train.utils.algorithm_registry import AdvantageEstimator
 from skyrl_train.utils.advantage_estimators import GRPO_FLAT_REWARD_STD_TOLERANCE, compute_advantages_and_returns
-from marinskyrl.runtime_options import reference_model_required
+from marinskyrl.runtime_options import PolicyLossType, reference_model_required
 from marinskyrl.distillation import (
     DistillationObjectiveKind,
     DistillationRewardMode,
@@ -300,6 +300,7 @@ class RayPPOTrainer:
         context: TrainingContext,
         colocate_pg: Optional[PlacementGroup] = None,
         eval_dataset: Optional[PromptDataset] = None,
+        eval_trajectory_runner: TrajectoryRunner | None = None,
         callbacks: Optional[List[TrainerCallback]] = None,
     ):
         self.cfg = cfg
@@ -317,9 +318,19 @@ class RayPPOTrainer:
         self.eval_dataset = eval_dataset
         self.inference_engine_client = inference_engine_client
         self.trajectory_runner = trajectory_runner
+        self.eval_trajectory_runner = eval_trajectory_runner or trajectory_runner
         self.trajectory_selector = trajectory_selector_from_config(cfg)
         self.trajectory_sink = make_trajectory_sink(cfg.generator, tokenizer)
         self.trajectory_runner.set_trajectory_sink(self.trajectory_sink)
+        self.eval_trajectory_sink = self.trajectory_sink
+        if self.eval_trajectory_runner is not self.trajectory_runner:
+            evaluation_config = OmegaConf.create(OmegaConf.to_container(cfg.generator, resolve=True))
+            if evaluation_config.trajectory_retention.enabled:
+                evaluation_config.trajectory_retention.output_path = join_resource_path(
+                    evaluation_config.trajectory_retention.output_path, "validation"
+                )
+            self.eval_trajectory_sink = make_trajectory_sink(evaluation_config, tokenizer)
+            self.eval_trajectory_runner.set_trajectory_sink(self.eval_trajectory_sink)
         self.total_training_steps = None
         self._configure_training_schedule()
 
@@ -339,6 +350,7 @@ class RayPPOTrainer:
         self.loaded_checkpoint_path: str | None = None
         self._last_saved_step: int | None = None
         self._last_evaluated_step: int | None = None
+        self._inference_policy_step: int | None = None
         self._pending_checkpoint_upload: tuple[asyncio.Task[tuple[float, float]], TrainerState] | None = None
         raw_speculative_decoding = cfg.generator.get("speculative_decoding")
         if raw_speculative_decoding is not None:
@@ -465,13 +477,15 @@ class RayPPOTrainer:
         for key, value in (sampling_params or {}).items():
             OmegaConf.update(cfg, f"generator.eval_sampling_params.{key}", value, force_add=True)
         evaluator = evaluate_step_wise if cfg.trainer.step_wise_training else evaluate
+        if self._inference_engines_configured() and self._inference_policy_step != self.global_step:
+            await self._sync_policy_for_rollouts(reason="evaluation")
         return await evaluator(
             eval_dataloader=self.eval_dataloader,
-            trajectory_runner=self.trajectory_runner,
+            trajectory_runner=self.eval_trajectory_runner,
             cfg=cfg,
             global_step=self.global_step,
             tokenizer=self.tokenizer,
-            trajectory_sink=self.trajectory_sink,
+            trajectory_sink=self.eval_trajectory_sink,
             val_set_name=val_set_name,
         )
 
@@ -572,7 +586,13 @@ class RayPPOTrainer:
             timeout=60,
             label="Trajectory runner shutdown",
         )
+        if self.eval_trajectory_runner is not self.trajectory_runner:
+            await self._guarded_async(
+                self.eval_trajectory_runner.shutdown(), timeout=60, label="Evaluation trajectory runner shutdown"
+            )
         self._guarded_sync(self.trajectory_sink.close, label="Trajectory retention shutdown")
+        if self.eval_trajectory_sink is not self.trajectory_sink:
+            self._guarded_sync(self.eval_trajectory_sink.close, label="Evaluation retention shutdown")
         self._draft_trainer_update_ref = None
         if self._speculator_refresh_task is not None:
             await self._guarded_async(
@@ -624,6 +644,8 @@ class RayPPOTrainer:
             if self._distillation_runtime is not None:
                 await self._distillation_runtime.start()
             await self._startup_trajectory_runner()
+            if self.eval_trajectory_runner is not self.trajectory_runner:
+                await self.eval_trajectory_runner.startup()
             await self._train_loop()
         except Exception as error:
             log_exception_as_text(f"Train loop failed at global_step {self.global_step}", error)
@@ -1115,6 +1137,11 @@ class RayPPOTrainer:
         """
         if not self._inference_engines_configured():
             return
+        if self.cfg.trainer.algorithm.policy_loss_type == PolicyLossType.DPO and reason not in (
+            "initial",
+            "evaluation",
+        ):
+            return
         timings = self.all_startup_timings if reason == "initial" else self.all_timings
         with Timer("sync_weights", timings) as update_timer:
             if self.colocate_all:
@@ -1137,6 +1164,7 @@ class RayPPOTrainer:
                 if pause:
                     await self.inference_engine_client.resume_generation()
         self._log_weight_update_completed(reason=reason, duration_seconds=update_timer.duration)
+        self._inference_policy_step = self.global_step
 
     async def sync_policy_weights_to_inference_engines(self) -> None:
         # Align policy actors before the weight extraction collectives.
@@ -2968,6 +2996,12 @@ class RayPPOTrainer:
             return
 
         protected_steps = protected_hf_export_steps(self.cfg.trainer.ckpt_path)
+        best_path = join_resource_path(self.cfg.trainer.ckpt_path, "best_checkpoint.json")
+        if io.exists(best_path):
+            with io.open_file(best_path, "r") as stream:
+                best = json.load(stream)
+            if best["model_format"] == "native":
+                protected_steps.add(best["step"])
 
         if not self._node_ids:
             self._node_ids = get_node_ids(self.policy_model, self.critic_model, self.ref_model)

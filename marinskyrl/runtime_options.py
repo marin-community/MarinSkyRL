@@ -59,6 +59,12 @@ class PolicyLossType(StrEnum):
 PREFERENCE_PAIR_ENV_CLASS = "preference_pair"
 
 
+class EvaluationRunner(StrEnum):
+    TRAINING = "training"
+    TASK = "task"
+    HARBOR = "harbor"
+
+
 def reference_model_required(algorithm: Mapping[str, Any]) -> bool:
     """Return whether the objective needs a frozen reference actor."""
     return bool(
@@ -75,3 +81,10 @@ def static_preference_pairs_requested(config: Mapping[str, Any]) -> bool:
     if environment is None:
         return False
     return environment.get("env_class") == PREFERENCE_PAIR_ENV_CLASS
+
+
+def inference_engines_required(config: Mapping[str, Any]) -> bool:
+    """Static preference training needs generation engines for task validation."""
+    if not static_preference_pairs_requested(config):
+        return True
+    return EvaluationRunner(config["trainer"]["evaluation_runner"]) is not EvaluationRunner.TRAINING

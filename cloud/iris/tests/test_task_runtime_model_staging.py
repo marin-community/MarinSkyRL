@@ -18,6 +18,7 @@ from cloud.iris.task_runtime import (
     prepare_policy_tokenizer,
 )
 from marinskyrl.speculative_decoding import SpeculatorModelConfig
+from marinskyrl.resource_locator import RolloutModelLoading
 
 
 @pytest.mark.parametrize(
@@ -63,6 +64,7 @@ def test_manifest_policy_stages_metadata_without_materializing_weights(tmp_path,
         model_revision="",
         runtime_profile="megatron",
         model_local_path="/tmp/materialized-model",
+        rollout_model_loading=RolloutModelLoading.STREAM,
     )
 
     policy_model = prepare_policy_model(args)
@@ -72,6 +74,40 @@ def test_manifest_policy_stages_metadata_without_materializing_weights(tmp_path,
     assert (staged / "config.json").read_text() == "{}"
     assert (staged / "tokenizer.json").is_file()
     assert not (staged / "model.safetensors").exists()
+
+
+@pytest.mark.parametrize("manifest_identity", [True, False])
+def test_local_rollout_staging_preserves_checkpoint_bytes_and_source(tmp_path, monkeypatch, manifest_identity) -> None:
+    policy_uri = str(tmp_path / "published-policy")
+    snapshot = _memory_model_snapshot(f"local-policy-source/{tmp_path.name}")
+    manifest = publish_hugging_face_snapshot(snapshot, policy_uri, model_id="org/policy", revision="a" * 40)
+    identity = manifest.identity if manifest_identity else "policy-export/step-57"
+    monkeypatch.setattr(task_runtime.tempfile, "gettempdir", lambda: str(tmp_path / "node"))
+    prepared = prepare_policy_model(
+        Namespace(
+            model_source_uri=policy_uri,
+            model_source_identity=identity,
+            runtime_profile="megatron",
+            rollout_model_loading=RolloutModelLoading.STAGE_LOCAL,
+        )
+    )
+    assert prepared is not None
+    assert prepared.source_uri == policy_uri
+    assert prepared.source_identity == identity
+    local = Path(prepared.local_path)
+    assert (local / "model.safetensors").read_bytes() == Path(policy_uri, "model.safetensors").read_bytes()
+    assert (local / "config.json").read_bytes() == Path(policy_uri, "config.json").read_bytes()
+    # A repeated startup uses the completed artifact, including all weight shards.
+    repeated = prepare_policy_model(
+        Namespace(
+            model_source_uri=policy_uri,
+            model_source_identity=identity,
+            runtime_profile="megatron",
+            rollout_model_loading=RolloutModelLoading.STAGE_LOCAL,
+        )
+    )
+    assert repeated == prepared
+    assert (local / "model.safetensors").read_bytes() == Path(policy_uri, "model.safetensors").read_bytes()
 
 
 def test_hugging_face_draft_mirror_uses_the_policy_tokenizer(tmp_path, monkeypatch) -> None:
