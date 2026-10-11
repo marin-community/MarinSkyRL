@@ -210,6 +210,13 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
                 f"hf={expected_tokens.flatten()[worst_flat].item():.8g} "
                 f"in_loss_mask={bool(loss_mask.flatten()[worst_flat])}"
             )
+            for dump_row in (0, 4):
+                emit(f"rank{rank} scores row {dump_row}: {[round(v, 4) for v in scores[dump_row].float().tolist()]}")
+                emit(f"rank{rank} expected row {dump_row}: {[round(v, 4) for v in expected_tokens[dump_row].tolist()]}")
+            emit(
+                f"rank{rank} per-row score sums: {[round(v, 4) for v in scores.float().sum(-1).tolist()]} "
+                f"loss-mask sums: {[int(v) for v in loss_mask.sum(-1).tolist()]}"
+            )
             token_stats[0] = token_diff.max()
             token_stats[1] = token_diff[loss_mask > 0].max() if bool((loss_mask > 0).any()) else 0.0
             token_stats[2] = 1.0

@@ -29,9 +29,13 @@ through the bridge conversion tasks — the same mapping the weight sync uses �
 meaningful and are revalidated on every run: deterministic per-token reference log-prob
 offsets separate the frozen reference from the initial policy (without them
 delta == 0 and every DPO pair weight, accuracy, and margin is degenerate), and the
-checkpoint's router weights are scaled so every biased expert selection clears a minimum
-margin, since a near-tie route that flips between independent fp32 implementations would
-look exactly like a backward-pass mismatch. Each rank computes the HF reference on its own
+checkpoint's router weights are zeroed so biased expert selection is decided by the
+constant router bias alone — a data-dependent router score could flip a near-tie route
+between independent fp32 implementations and look exactly like a backward-pass mismatch,
+and scaling the weights amplifies the score noise as much as the margin. Routing
+mechanics stay fully exercised (per-token top-k dispatch, stacked experts, combine
+weights, expert-parallel partitions) and the router weight still receives gradients
+through the combine-weight softmax. Each rank computes the HF reference on its own
 GPU, so compared gradients differ only by Megatron-vs-eager kernel arithmetic; a CPU
 reference on rank 0 doubles as a fixture-validity guard (routing flips jump ~1e-2, ordinary
 device drift stays ~1e-4). At the routing decisiveness the fixture needs, router-weight
@@ -63,7 +67,7 @@ required to differ from the pre-update ones.
 | gradients, fp32 Megatron vs fp32 HF (per-rank GPU) | rtol 2e-4, atol 3e-4 |
 | DPO metric rows (loss, accuracy, margin, rewards) | abs 2e-3 |
 | HF reference CPU-vs-GPU log-probs (fixture route guard) | abs 1e-3 |
-| minimum biased-router selection margin of the fixture | > 5e-3 |
+| minimum biased-router selection margin of the fixture | > 5e-3 (constant bias gaps) |
 | optimizer parameter/moments vs float64 reference | rtol 1e-5, atol 1e-8 |
 | returned gradient norm vs independent global norm | rel 1e-4 |
 | bf16 copy-back into gradient-buffer parameters | exact (rtol 0, atol 0) |

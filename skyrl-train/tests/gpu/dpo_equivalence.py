@@ -27,11 +27,13 @@ from tests.gpu.grug_tiny_checkpoint import write_tiny_checkpoint
 
 BETA = 0.1
 LABEL_SMOOTHING = 0.0
-# Router weights scaled up in the equivalence checkpoint so biased selection margins are
-# decisive: near-tie routes would flip between independent fp32 implementations and look
-# like backward-pass mismatches. The pair (scale, batch seed) was searched for the largest
-# worst-case margin; dpo_backward_fixture re-validates it on every run.
-ROUTE_DECISIVE_ROUTER_SCALE = 48.0
+# Router weights are zeroed in the equivalence checkpoint so biased expert selection is
+# decided by the constant router bias alone: the selection carries no data-dependent term,
+# so no amount of cross-implementation hidden-state drift can flip a route (scaling the
+# weights instead would scale the score noise as much as the margins). Routing mechanics
+# are still exercised end to end — per-token top-k dispatch, stacked experts, combine
+# weights, expert-parallel partitions — and the router weight still receives gradients
+# through the combine-weight softmax. ROUTE_MARGIN_MIN is the smallest constant bias gap.
 ROUTE_DECISIVE_BATCH_SEED = 27
 ROUTE_MARGIN_MIN = 5e-3
 
@@ -302,14 +304,14 @@ def dpo_gradient_names(num_layers: int) -> list[str]:
 
 
 def write_route_decisive_checkpoint(path) -> None:
-    """Write the tiny checkpoint with router weights scaled for decisive biased selection."""
+    """Write the tiny checkpoint with router weights zeroed for bias-decided selection."""
     from safetensors.torch import load_file, save_file
 
     write_tiny_checkpoint(path)
     tensors = load_file(path / "model.safetensors")
     for name, tensor in tensors.items():
         if name.endswith("mlp.router.weight"):
-            tensors[name] = tensor * ROUTE_DECISIVE_ROUTER_SCALE
+            tensors[name] = torch.zeros_like(tensor)
     save_file(tensors, path / "model.safetensors", metadata={"format": "pt"})
 
 
