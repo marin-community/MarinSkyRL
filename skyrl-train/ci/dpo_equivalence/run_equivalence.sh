@@ -20,7 +20,8 @@ test_targets=(
   skyrl-train/tests/gpu/test_dpo_vllm_transfer_equivalence.py
 )
 if [[ -n "${DPO_EQUIVALENCE_TESTS:-}" ]]; then
-  test_targets=("$DPO_EQUIVALENCE_TESTS")
+  # shellcheck disable=SC2206
+  test_targets=(${DPO_EQUIVALENCE_TESTS})
 fi
 "$PYTHON" "$REPOSITORY_ROOT/marinskyrl/environment_contract.py" \
   run-grug-gpu-gate "$REPOSITORY_ROOT" -- \
