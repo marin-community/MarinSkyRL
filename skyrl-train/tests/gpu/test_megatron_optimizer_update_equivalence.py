@@ -98,7 +98,7 @@ def run_optimizer_rank(rank, world_size, pp, ep, rendezvous, model_path, clip_ac
                 "adam_betas": list(ADAM_BETAS),
                 "weight_decay": WEIGHT_DECAY,
                 "max_grad_norm": MAX_GRAD_NORM,
-                "scheduler": "constant",
+                "scheduler": "constant_with_warmup",
                 "num_warmup_steps": 0,
                 "lr_warmup_steps": None,
                 "lr_warmup_steps_ratio": None,

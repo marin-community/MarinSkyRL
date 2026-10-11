@@ -52,7 +52,7 @@ ROLLOUT_WORLD_SIZE = 2
 
 def _dpo_config(model_path: str):
     cfg = _config(model_path, world_size=POLICY_WORLD_SIZE, pp=2, ep=1)
-    cfg.trainer.train_batch_size = 4
+    cfg.trainer.train_batch_size = 8
     cfg.trainer.policy_mini_batch_size = 8
     cfg.trainer.micro_train_batch_size_per_gpu = 2
     cfg.trainer.micro_forward_batch_size_per_gpu = 2

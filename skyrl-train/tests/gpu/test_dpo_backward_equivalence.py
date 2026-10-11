@@ -153,9 +153,13 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
             use_sharp=False,
             context_parallel_size=1,
         )
+        # Phase markers go straight to the diagnostics file so a hang or deadline kill
+        # still shows the last completed stage per rank.
+        log_detail(f"rank{rank} phase: groups ready (PP={pp} EP={ep})")
         # Every rank computes the independent reference on its own GPU, so the compared
         # quantities differ only by Megatron-vs-eager kernel arithmetic, not by device.
         reference = hf_dpo_reference(model_path, batch, device=f"cuda:{rank}", ref_log_prob_offsets=ref_offsets)
+        log_detail(f"rank{rank} phase: reference ready")
         bridge, provider, chunks, hf_config = build_grug_megatron_chunks(
             model_path,
             pipeline_model_parallel_size=pp,
@@ -163,6 +167,7 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
             bf16=False,
             attention_backend="unfused",
         )
+        log_detail(f"rank{rank} phase: chunks ready")
         cfg = dpo_wrapper_config(batch.sequences.shape[1])
         wrapper = MegatronModelWrapper(
             cfg,
@@ -184,7 +189,9 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
         metrics = wrapper.forward_backward_mini_batch(
             payloads, seq_len=batch.sequences.shape[1], micro_batch_size=MICRO_BATCH_SIZE
         )
+        log_detail(f"rank{rank} phase: forward-backward done")
         exports = export_parameter_gradients(bridge, chunks)
+        log_detail(f"rank{rank} phase: gradients exported")
 
         # Per-token Megatron-vs-HF agreement on the eval path, over the same window the
         # loss consumes. Attention-masked window entries are zero by design on the
@@ -285,4 +292,5 @@ def test_dpo_distributed_backward_matches_hf_reference(tmp_path, world_size, pp,
         run_backward_rank,
         (world_size, pp, ep, (tmp_path / "rendezvous").as_uri(), str(model_path), batch, ref_offsets),
         world_size,
+        timeout_seconds=900,
     )
