@@ -182,6 +182,28 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
             payloads, seq_len=batch.sequences.shape[1], micro_batch_size=MICRO_BATCH_SIZE
         )
         log_detail(f"rank{rank} phase: forward-backward done")
+        # Local main_grad probe: separates a wrong per-rank gradient from a wrong export
+        # gather. Each rank compares its own chunks' main_grads against the reference.
+        for probe_suffix in (
+            "model.norm.weight",
+            "layers.7.self_attn.q_proj.weight",
+            "layers.0.self_attn.q_proj.weight",
+        ):
+            for chunk in chunks:
+                for parameter_name, parameter in chunk.named_parameters():
+                    if not parameter_name.endswith(probe_suffix):
+                        continue
+                    main_grad = getattr(parameter, "main_grad", None)
+                    if main_grad is None:
+                        continue
+                    reference_grad = next(
+                        value for name, value in reference.gradients.items() if name.endswith(probe_suffix)
+                    )
+                    local_diff = (main_grad.detach().float().cpu() - reference_grad).abs().max().item()
+                    emit(
+                        f"rank{rank} local main_grad {probe_suffix}: "
+                        f"max_abs={local_diff:.8g} expected_max={reference_grad.abs().max().item():.8g}"
+                    )
         exports = export_parameter_gradients(bridge, chunks)
         log_detail(f"rank{rank} phase: gradients exported")
 
