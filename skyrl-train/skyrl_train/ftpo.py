@@ -103,9 +103,20 @@ def repeated_tool_opener_boundary(
         end = start + 1
         while end < len(response) and mask[end]:
             end += 1
-        span = list(response[start:end])
-        text = decode(span)
+        prefill: list[int] = []
         thinking = _assistant_initial_thinking(list(prompt) + list(response[:start]), decode)
+        # Replay prompts can end at the first opener. Retain its assistant
+        # context for parsing, but never select a token from that frozen prefix.
+        if start == 0 and prompt and decode([prompt[-1]]) == TOOL_OPEN:
+            for index in range(len(prompt) - 1, -1, -1):
+                if decode([prompt[index]]) != "<|start_header_id|>":
+                    continue
+                if decode(list(prompt[index:])).startswith("<|start_header_id|>assistant<|end_header_id|>"):
+                    prefill = list(prompt[index:])
+                    thinking = _assistant_initial_thinking(list(prompt[:-1]), decode)
+                break
+        span = prefill + list(response[start:end])
+        text = decode(span)
         for region in tool_call_regions(text, initial_thinking=thinking):
             if region.status != ToolCallStatus.REPEATED_OPENER:
                 continue
@@ -119,7 +130,8 @@ def repeated_tool_opener_boundary(
             repeated = open_positions[opener_index + 1]
             if decode(span[: repeated + 1]) != text[: region.end]:
                 raise ValueError("FTPO repeated opener changed during token decoding")
-            return start + repeated
+            if repeated >= len(prefill):
+                return start + repeated - len(prefill)
         start = end
     return None
 

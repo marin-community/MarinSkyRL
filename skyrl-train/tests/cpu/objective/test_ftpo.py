@@ -194,11 +194,25 @@ def test_ftpo_protocol_targets_second_opener_after_recorded_assistant_header(con
         [0, 6, 0],
         [7, 0, 6, 0, 8, 0, 6, 0],
         [0, 6, 0],
+        [6, 0],
+        [6, 0],
+        [6, 0],
+        [6, 0],
     ]
     masks = [[1] * len(row) for row in responses]
     masks[1] = [0] * 7 + [1] * 3
-    prompts = [header, [], header + [7], header, [2, 9, 4, 5]]
-    candidates = torch.tensor([0, 1]).expand(5, 10, 2).clone()
+    prompts = [
+        header,
+        [],
+        header + [7],
+        header,
+        [2, 9, 4, 5],
+        header + [8, 0],
+        header + [7, 0],
+        [2, 9, 4, 5, 8, 0],
+        header + [0],
+    ]
+    candidates = torch.tensor([0, 1]).expand(len(responses), 10, 2).clone()
     scores = torch.tensor([0.8, 0.2]).log().expand_as(candidates)
     config.trainer.algorithm.ftpo = {"boundary": "repeated_tool_opener", "chosen_balance_strength": 0}
     chosen, weights = select_ftpo_candidates(
@@ -211,10 +225,10 @@ def test_ftpo_protocol_targets_second_opener_after_recorded_assistant_header(con
         loop=LoopCreditConfig(),
         config=ftpo_config(config.trainer.algorithm),
         seed=42,
-        eligible=[True] * 5,
+        eligible=[True] * len(responses),
     )
-    assert chosen.nonzero().tolist() == [[0, 2, 1], [1, 9, 1], [3, 7, 1]]
-    assert weights.nonzero().tolist() == [[0, 2], [1, 9], [3, 7]]
+    assert chosen.nonzero().tolist() == [[0, 2, 1], [1, 9, 1], [3, 7, 1], [5, 1, 1], [8, 1, 1]]
+    assert weights.nonzero().tolist() == [[0, 2], [1, 9], [3, 7], [5, 1], [8, 1]]
 
 
 def _scalar_reference(logits, reference, ids, masks, rejected, weights, params):

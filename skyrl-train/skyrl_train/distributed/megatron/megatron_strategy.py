@@ -334,6 +334,12 @@ class MegatronStrategy(DistributedStrategy):
         model_sharded_state_dict = model.sharded_state_dict()
         sharded_state_dict["model"] = model_sharded_state_dict
         if optimizer:
+            # An empty training selection can reach checkpointing before the first
+            # update. Megatron's serializer still requires the lazy optimizer state.
+            optimizers = optimizer.chained_optimizers if isinstance(optimizer, ChainedOptimizer) else [optimizer]
+            for child in optimizers:
+                if child.optimizer is not None and child.init_state_fn is not None:
+                    child.init_state_fn(child.optimizer, child.config)
             sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(
                 model_sharded_state_dict,
                 metadata=_optimizer_checkpoint_metadata(self.megatron_config.optimizer_checkpoint_sharding_type),

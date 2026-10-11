@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+from enum import StrEnum
 from pathlib import Path
 
 from rolloutengine.spec import LoweredTaskSpec, TaskRuntimeSpec, TaskSessionSpec
@@ -13,17 +14,27 @@ from taskcompendium.models import Source
 from skyrl_train.dataset.tasks import write_tasks
 
 
-def replay_tasks(cases_path: Path, manifest_path: Path, session: TaskSessionSpec) -> list[LoweredTaskSpec]:
-    """Validate diagnostic identity and task exclusions before lowering any replay."""
+class ReplayPartition(StrEnum):
+    TRAIN = "train"
+    VALIDATION = "validation"
+
+
+def replay_tasks(
+    cases_path: Path, manifest_path: Path, session: TaskSessionSpec, *, partition: ReplayPartition
+) -> list[LoweredTaskSpec]:
+    """Validate replay identity and the selected task partition before lowering."""
     contents = cases_path.read_bytes()
     manifest = json.loads(manifest_path.read_text())
     digest = hashlib.sha256(contents).hexdigest()
     if digest != manifest["cases_sha256"]:
         raise ValueError("Replay cases do not match their immutable manifest")
-    reserved = set(manifest["diagnostic_reserved_task_ids"])
-    forbidden = set(manifest["train_task_ids"]) | set(manifest["parity_task_ids"])
-    if reserved & forbidden:
-        raise ValueError("Diagnostic task reservations overlap training or BFCL-Parity")
+    training = set(manifest["train_task_ids"])
+    validation = set(manifest["diagnostic_reserved_task_ids"])
+    parity = set(manifest["parity_task_ids"])
+    if training & validation or (training | validation) & parity:
+        raise ValueError("Replay task partitions overlap training, diagnostic, or BFCL-Parity")
+    reserved = training if partition is ReplayPartition.TRAIN else validation
+    count_key = "training_cases" if partition is ReplayPartition.TRAIN else "diagnostic_cases"
     tasks = []
     seen = set()
     for line in contents.splitlines():
@@ -51,8 +62,8 @@ def replay_tasks(cases_path: Path, manifest_path: Path, session: TaskSessionSpec
                 session=session.model_copy(update={"task_session": "tool_protocol_replay", "max_turns": 1}),
             )
         )
-    if not tasks or len(tasks) != manifest["diagnostic_cases"]:
-        raise ValueError("Replay count does not match the diagnostic manifest")
+    if not tasks or len(tasks) != manifest[count_key]:
+        raise ValueError("Replay count does not match the selected partition manifest")
     return tasks
 
 
@@ -62,11 +73,12 @@ def main() -> None:
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--session", type=Path, required=True, help="Explicit TaskSessionSpec JSON")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--partition", type=ReplayPartition, choices=list(ReplayPartition), required=True)
     args = parser.parse_args()
     if args.output.exists():
         raise FileExistsError(args.output)
     session = TaskSessionSpec.model_validate_json(args.session.read_text())
-    tasks = replay_tasks(args.cases, args.manifest, session)
+    tasks = replay_tasks(args.cases, args.manifest, session, partition=args.partition)
     write_tasks(args.output, tasks)
 
 

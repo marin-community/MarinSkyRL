@@ -29,7 +29,7 @@ from taskcompendium.models import (
 )
 from skyrl_train.rollouts.task_projections import StepTaskProjection, WholeTaskProjection
 from skyrl_train.dataset.tasks import TaskDataset, write_tasks
-from skyrl_train.dataset.protocol_replay import replay_tasks
+from skyrl_train.dataset.protocol_replay import ReplayPartition, replay_tasks
 from skyrl_train.dataset.harbor import HarborTaskDataset
 from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection, WholeTrajectoryProjection
 from skyrl_train.rollouts.buffer import RolloutLease, RolloutTask
@@ -748,7 +748,8 @@ async def test_harbor_concurrency_does_not_queue_gym_tasks(task_inputs, phase):
 
 
 @pytest.mark.asyncio
-async def test_harbor_source_materialization_runs_without_the_original_directory(tmp_path, task_inputs):
+@pytest.mark.parametrize("partition", list(ReplayPartition))
+async def test_harbor_source_materialization_runs_without_the_original_directory(tmp_path, task_inputs, partition):
     source = tmp_path / "source"
     (source / "environment").mkdir(parents=True)
     (source / "tests").mkdir()
@@ -780,19 +781,26 @@ async def test_harbor_source_materialization_runs_without_the_original_directory
         "train_task_ids": ["training-case"],
         "parity_task_ids": ["parity-case"],
         "diagnostic_cases": 1,
+        "training_cases": 1,
     }
+    if partition is ReplayPartition.TRAIN:
+        manifest["train_task_ids"], manifest["diagnostic_reserved_task_ids"] = (
+            manifest["diagnostic_reserved_task_ids"],
+            manifest["train_task_ids"],
+        )
     manifest_path.write_text(json.dumps(manifest))
-    write_tasks(replay_path, replay_tasks(cases_path, manifest_path, session_spec()))
+    write_tasks(replay_path, replay_tasks(cases_path, manifest_path, session_spec(), partition=partition))
     # Reject contamination before a validation artifact can enter the mixed loader.
-    manifest["train_task_ids"] = ["reserved-case"]
+    original_train = manifest["train_task_ids"]
+    manifest["train_task_ids"] = manifest["diagnostic_reserved_task_ids"]
     manifest_path.write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="overlap"):
-        replay_tasks(cases_path, manifest_path, session_spec())
-    manifest["train_task_ids"] = ["training-case"]
+        replay_tasks(cases_path, manifest_path, session_spec(), partition=partition)
+    manifest["train_task_ids"] = original_train
     manifest_path.write_text(json.dumps(manifest))
     cases_path.write_text(cases_path.read_text().replace("128000", "128001"))
     with pytest.raises(ValueError, match="immutable manifest"):
-        replay_tasks(cases_path, manifest_path, session_spec())
+        replay_tasks(cases_path, manifest_path, session_spec(), partition=partition)
     prepared = HarborTaskDataset(
         [str(source), str(replay_path)],
         Tokenizer(),
