@@ -230,6 +230,8 @@ def build_grug_megatron_chunks(
     from megatron.bridge import AutoBridge
     from megatron.core.distributed import DistributedDataParallelConfig
 
+    import skyrl_train.models.grug_megatron_bridge  # noqa: F401  # registers the Grug bridge with Megatron-Bridge
+
     hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
     bridge = AutoBridge.from_hf_pretrained(model_path, trust_remote_code=True)
     provider = bridge.to_megatron_provider()
