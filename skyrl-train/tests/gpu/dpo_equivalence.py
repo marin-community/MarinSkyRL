@@ -13,7 +13,7 @@ from importlib import util
 import hashlib
 
 import torch
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, open_dict
 from torch import nn
 from transformers import AutoConfig
 
@@ -200,7 +200,7 @@ def hf_dpo_reference(
 def dpo_wrapper_config(seq_len: int) -> DictConfig:
     """Full trainer config for MegatronModelWrapper with the shipped DPO recipe applied."""
     cfg = OmegaConf.merge(get_default_config(), OmegaConf.create(DPO_OVERRIDES))
-    with OmegaConf.open_dict(cfg):
+    with open_dict(cfg):
         cfg.trainer.algorithm.max_seq_len = seq_len
     return cfg
 
