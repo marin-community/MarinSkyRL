@@ -8,10 +8,11 @@ import pytest
 from omegaconf import OmegaConf
 from skyrl_gym.verification import VerificationStatus
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
-from shellbox.machine import Command, ShellSimBuiltins, NetworkPolicy
+from shellbox.machine import Backend, Command, ShellSimBuiltins, NetworkPolicy
 from taskcompendium.models import (
     AnswerType,
     ArtifactKind,
+    CommandSemantics,
     ConversationInput,
     EnvironmentRequirements,
     FileReward,
@@ -30,7 +31,7 @@ from skyrl_train.rollouts.buffer import RolloutLease, RolloutTask
 from skyrl_train.rollouts.task_worker import TaskRolloutWorker
 from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
 from rolloutengine.spec import LoweredTaskSpec
-from tests.cpu.task_specs import lowered_task, session_spec
+from tests.cpu.task_specs import NATIVE_ENVIRONMENT, SHELL_ENVIRONMENT, lowered_task, session_spec
 from skyrl_train.trajectory_runners.types import BatchMetadata, TokenProvenance, TrajectoryID
 from skyrl_train.trajectory_runners.model_clients import ModelServerError
 from tests.cpu.rollouts.engine_fakes import ConversationClient, FixtureImageFactory, InferenceClient, Tokenizer, Writer
@@ -41,12 +42,18 @@ async def test_mixed_harbor_and_native_tasks_keep_separate_providers_and_machine
     config, original = task_inputs
     lowered = LoweredTaskSpec.model_validate_json(original["env_extras"][0]["lowered_task_spec"])
     native = lowered.task.model_copy(
-        update={"environment_requirements": EnvironmentRequirements(docker_image="fixture@sha256:" + "a" * 64)}
+        update={
+            "environment_requirements": EnvironmentRequirements(
+                command_semantics=CommandSemantics.LINUX_PROCESS, docker_image="fixture@sha256:" + "a" * 64
+            )
+        }
     )
     harbor = native.model_copy(update={"id": "harbor", "tags": ("harbor",)})
     machines = {"docker": [], "harbor": []}
 
     class Factory:
+        backend = Backend.DOCKER
+
         def __init__(self, provider):
             self.provider = provider
 
@@ -127,6 +134,8 @@ async def test_disabled_harbor_verification_keeps_tokens_but_masks_training(
     )(config, Tokenizer())
 
     class ImageFactory:
+        backend = Backend.DOCKER
+
         async def create(self, spec):
             return await ShellSimMachineFactory().create(
                 replace(spec, source=ShellSimBuiltins(), workdir=spec.workdir or "/workspace")
@@ -161,9 +170,12 @@ async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected
     task = task.model_copy(
         update={
             "answer_type": AnswerType.WORKSPACE_STATE,
+            "environment_requirements": SHELL_ENVIRONMENT,
             "tags": ("harbor",),
             "grader": ScriptGrader(
-                environment=EnvironmentRequirements(docker_image="fixture@sha256:" + "0" * 64),
+                environment=EnvironmentRequirements(
+                    command_semantics=CommandSemantics.LINUX_PROCESS, docker_image="fixture@sha256:" + "0" * 64
+                ),
                 answer_path=None,
                 argv=("cat", "/workspace/reward"),
                 artifacts=(
@@ -186,6 +198,8 @@ async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected
     backoff = asyncio.Event()
 
     class Factory:
+        backend = Backend.SHELLSIM
+
         async def create(self, spec):
             nonlocal attempts
             attempts += 1
@@ -239,6 +253,8 @@ async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected
             }
 
     class VerifierFactory:
+        backend = Backend.DOCKER
+
         async def create(self, spec):
             machine = await ShellSimMachineFactory().create(
                 replace(spec, source=ShellSimBuiltins(), workdir=spec.workdir or "/workspace")
@@ -355,7 +371,9 @@ async def test_harbor_retry_policy_preserves_terminal_grades(task_inputs, phase,
         if failure == "exhausted"
         else f'if [ "$(cat /workspace/attempt)" -eq 1 ]; then {failing_command}; else echo 1 > /reward.txt; fi'
     )
-    verifier_environment = EnvironmentRequirements(docker_image="fixture@sha256:" + "0" * 64)
+    verifier_environment = EnvironmentRequirements(
+        command_semantics=CommandSemantics.LINUX_PROCESS, docker_image="fixture@sha256:" + "0" * 64
+    )
     verifier = ScriptGrader(
         environment=verifier_environment,
         answer_path=None,
@@ -375,6 +393,7 @@ async def test_harbor_retry_policy_preserves_terminal_grades(task_inputs, phase,
     task = task.model_copy(
         update={
             "answer_type": AnswerType.WORKSPACE_STATE,
+            "environment_requirements": SHELL_ENVIRONMENT,
             "tags": ("harbor",),
             "grader": verifier,
         }
@@ -391,6 +410,8 @@ async def test_harbor_retry_policy_preserves_terminal_grades(task_inputs, phase,
     waits = []
 
     class Factory:
+        backend = Backend.SHELLSIM
+
         async def create(self, spec):
             nonlocal attempts
             attempts += 1
@@ -401,6 +422,8 @@ async def test_harbor_retry_policy_preserves_terminal_grades(task_inputs, phase,
             return machine
 
     class VerifierFactory:
+        backend = Backend.DOCKER
+
         async def create(self, spec):
             nonlocal verifier_starts
             verifier_starts += 1
@@ -489,7 +512,9 @@ async def test_harbor_completion_reward_uses_the_engine_stop_reason(task_inputs,
     config, request = task_inputs
     task = LoweredTaskSpec.model_validate_json(request["env_extras"][0]["lowered_task_spec"]).task
     verifier = ScriptGrader(
-        environment=EnvironmentRequirements(docker_image="fixture@sha256:" + "0" * 64),
+        environment=EnvironmentRequirements(
+            command_semantics=CommandSemantics.LINUX_PROCESS, docker_image="fixture@sha256:" + "0" * 64
+        ),
         answer_path=None,
         argv=("sh", "-c", "echo '===== 1 passed in 0.1s ====='; echo 1 > /reward.txt"),
         reward=FileReward(files=(RewardFile(path="/reward.txt", format=RewardFileFormat.NUMBER),)),
@@ -497,12 +522,13 @@ async def test_harbor_completion_reward_uses_the_engine_stop_reason(task_inputs,
     task = task.model_copy(
         update={
             "answer_type": AnswerType.WORKSPACE_STATE,
+            "environment_requirements": NATIVE_ENVIRONMENT,
             "tags": ("harbor",),
             "grader": verifier,
         }
     )
     request["env_extras"][0]["lowered_task_spec"] = lowered_task(
-        task, "shellbox", backend="shellsim", verifier_backend="shellsim"
+        task, "shellbox", backend="docker", verifier_backend="docker"
     ).model_dump_json()
 
     class Client(InferenceClient):
@@ -527,7 +553,7 @@ async def test_harbor_completion_reward_uses_the_engine_stop_reason(task_inputs,
         config,
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         Client(),
-        {"shellsim": FixtureImageFactory()},
+        {"docker": FixtureImageFactory(), "harbor": FixtureImageFactory()},
         harbor=settings,
         shutdown_timeout=30,
     )
@@ -546,7 +572,9 @@ async def test_strict_harbor_parser_masks_only_the_affected_response(task_inputs
     tasks = []
     for output in ("unrecognized output", "tests/test_task.py::test_answer PASSED"):
         verifier = ScriptGrader(
-            environment=EnvironmentRequirements(docker_image="fixture@sha256:" + "0" * 64),
+            environment=EnvironmentRequirements(
+                command_semantics=CommandSemantics.LINUX_PROCESS, docker_image="fixture@sha256:" + "0" * 64
+            ),
             answer_path=None,
             argv=("sh", "-c", f"echo '{output}'; echo 1 > /reward.txt"),
             reward=FileReward(files=(RewardFile(path="/reward.txt", format=RewardFileFormat.NUMBER),)),
@@ -555,6 +583,7 @@ async def test_strict_harbor_parser_masks_only_the_affected_response(task_inputs
             base.model_copy(
                 update={
                     "answer_type": AnswerType.WORKSPACE_STATE,
+                    "environment_requirements": NATIVE_ENVIRONMENT,
                     "tags": ("harbor",),
                     "grader": verifier,
                 }
@@ -566,7 +595,7 @@ async def test_strict_harbor_parser_masks_only_the_affected_response(task_inputs
         env_extras=[
             {
                 "lowered_task_spec": lowered_task(
-                    task, "shellbox", backend="shellsim", verifier_backend="shellsim"
+                    task, "shellbox", backend="docker", verifier_backend="docker"
                 ).model_dump_json()
             }
             for task in tasks
@@ -590,7 +619,7 @@ async def test_strict_harbor_parser_masks_only_the_affected_response(task_inputs
         config,
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         InferenceClient(),
-        {"shellsim": FixtureImageFactory()},
+        {"docker": FixtureImageFactory(), "harbor": FixtureImageFactory()},
         harbor=settings,
         shutdown_timeout=30,
     )
@@ -690,6 +719,8 @@ async def test_harbor_source_materialization_runs_without_the_original_directory
     prompt, env, extras, uid = restored[0]
 
     class ImageFactory:
+        backend = Backend.DOCKER
+
         async def create(self, spec):
             return await ShellSimMachineFactory().create(
                 replace(spec, source=ShellSimBuiltins(), workdir=spec.workdir or "/workspace")

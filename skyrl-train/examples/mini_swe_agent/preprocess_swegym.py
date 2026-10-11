@@ -9,7 +9,7 @@ import datasets
 from rolloutengine.spec import LoweredTaskSpec, MachineRuntimeSpec, TaskRuntimeSpec, TaskSessionSpec
 from shellbox.machine import NetworkPolicy
 from taskcompendium.importers.swe import SWEInstance, swe_task
-from taskcompendium.models import EnvironmentRequirements, Source
+from taskcompendium.models import CommandSemantics, EnvironmentRequirements, Source
 from skyrl_train.dataset.tasks import write_tasks
 
 TRAIN_DATASET = "SumanthRH/SWE-Gym-Subset"
@@ -40,6 +40,7 @@ def materialize(
             row,
             source=Source(dataset=dataset, revision=revision, row=str(index), importer_revision="swe-v1"),
             environment=EnvironmentRequirements(
+                command_semantics=CommandSemantics.LINUX_PROCESS,
                 docker_image=images[row.instance_id],
                 working_directory="/testbed",
                 environment_variables=ENVIRONMENT_VARIABLES,

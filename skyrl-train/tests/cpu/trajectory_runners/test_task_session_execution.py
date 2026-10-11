@@ -177,8 +177,8 @@ async def test_multiplication_session_returns_feedback_then_rewards_the_final_an
         assert results[0].observations[0]["role"] == "user"
         assert results[1].done and results[1].reward == 1.0
         assert results[1].observations == ()
-        assert (await session.grade(())).reward == 1.0
-        assert (await session.grade(())).passed is True
+        assert (await session.grade((), stop_reason="stop")).reward == 1.0
+        assert (await session.grade((), stop_reason="stop")).passed is True
     finally:
         await session.close()
 

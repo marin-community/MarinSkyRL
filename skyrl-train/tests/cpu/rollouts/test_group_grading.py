@@ -11,7 +11,6 @@ from taskcompendium.grading_result import GradeResult, Outcome
 from taskcompendium.models import (
     AnswerType,
     ConversationInput,
-    EnvironmentRequirements,
     FileReward,
     NoGrader,
     PlainText,
@@ -31,7 +30,7 @@ from skyrl_train.rollouts.genrm_grading import grade_genrm_rollouts
 from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
 from skyrl_gym.source_task import source_task
 from rolloutengine.spec import LoweredTaskSpec
-from tests.cpu.task_specs import lowered_task
+from tests.cpu.task_specs import NATIVE_ENVIRONMENT, lowered_task
 from rolloutengine.contracts import ModelTurn, RolloutData, RolloutStep, Transition
 from skyrl_train.trajectory_runners.types import BatchMetadata, TrajectoryID
 from skyrl_train.trajectory_runners.model_clients import ModelServerError
@@ -67,7 +66,7 @@ async def test_harbor_task_worker_preserves_verdicts_and_shapes_group_rewards(
     tasks = []
     for index, verdict in enumerate(("FAILED", "PASSED")):
         verifier = ScriptGrader(
-            environment=EnvironmentRequirements(docker_image="fixture@sha256:" + "0" * 64),
+            environment=NATIVE_ENVIRONMENT,
             answer_path=None,
             argv=(
                 "sh",
@@ -81,7 +80,7 @@ async def test_harbor_task_worker_preserves_verdicts_and_shapes_group_rewards(
             TaskSpec(
                 id=f"harbor-{index}",
                 context=ConversationInput(events=(TextMessage(role="user", content="Complete the task."),)),
-                environment_requirements=EnvironmentRequirements(),
+                environment_requirements=NATIVE_ENVIRONMENT,
                 answer_type=AnswerType.WORKSPACE_STATE,
                 answer_format=PlainText(),
                 grader=verifier,

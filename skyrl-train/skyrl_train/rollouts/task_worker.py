@@ -6,8 +6,9 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 from uuid import uuid4
 
 from jinja2 import TemplateError
@@ -29,6 +30,7 @@ from rolloutengine.contracts import (
     RolloutInterrupted,
     RolloutOperation,
     TaskSession,
+    SessionStart,
 )
 from rolloutengine.engine import ShellboxRolloutEngine
 from rolloutengine.spec import LoweredTaskSpec
@@ -77,6 +79,21 @@ from skyrl_train.trajectory_runners.types import (
     TrajectoryBatch,
     TrajectoryRequestBatch,
 )
+
+
+class InstalledAgentWorker(Protocol):
+    async def startup(self) -> None: ...
+
+    async def shutdown(self) -> None: ...
+
+    async def run(
+        self,
+        machine: Machine | None,
+        complete: Callable[[SessionStart], Awaitable[ModelTurn]],
+        *,
+        lowered: LoweredTaskSpec,
+        session_id: str,
+    ) -> None: ...
 
 
 async def _model_turn(
@@ -224,6 +241,7 @@ class TaskRolloutWorker:
         sessions: Mapping[str, Callable[[LoweredTaskSpec, Machine | None], TaskSession]] | None = None,
         *,
         shutdown_timeout: float,
+        installed_agents: InstalledAgentWorker | None = None,
     ):
         self.trajectory_runner_cfg = trajectory_runner_cfg
         self.model_client = model_client
@@ -233,6 +251,7 @@ class TaskRolloutWorker:
         self.shutdown_timeout = shutdown_timeout
         self.chat_template_kwargs = dict(trajectory_runner_cfg.get("chat_template_kwargs", {}))
         self.harbor = harbor
+        self.installed_agents = installed_agents
         self.retry_wait = retry_wait
         self.group_graders = group_graders
         self.task_slots = asyncio.Semaphore(concurrent_tasks) if concurrent_tasks is not None else nullcontext()
@@ -325,7 +344,16 @@ class TaskRolloutWorker:
                     session_id=session_id,
                 )
 
-            engine = ShellboxRolloutEngine(model, self.factories, sessions=self.sessions)
+            engine = (
+                ShellboxRolloutEngine(
+                    model,
+                    self.factories,
+                    sessions=self.sessions,
+                    agent=partial(self.installed_agents.run, lowered=lowered, session_id=session_id),
+                )
+                if harbor is not None and self.installed_agents is not None
+                else ShellboxRolloutEngine(model, self.factories, sessions=self.sessions)
+            )
             harbor_slots = (
                 nullcontext()
                 if harbor is None
@@ -402,7 +430,8 @@ class TaskRolloutWorker:
         self.trajectory_sink = sink
 
     async def startup(self) -> None:
-        pass
+        if self.installed_agents is not None:
+            await self.installed_agents.startup()
 
     async def shutdown(self) -> None:
         """Cancel rollouts and release their machines before actor termination."""
@@ -427,6 +456,8 @@ class TaskRolloutWorker:
         finally:
             if self.verifier_executor is not None:
                 self.verifier_executor.shutdown(wait=False, cancel_futures=True)
+            if self.installed_agents is not None:
+                await self.installed_agents.shutdown()
         if failures:
             raise ExceptionGroup("Task worker shutdown failed", failures)
 
@@ -470,7 +501,24 @@ class TaskRolloutWorkerSpec:
         harbor = None if self.harbor_config is None else HarborTaskSettings.from_config(self.harbor_config)
         runner_config = self.config.generator
         client_config = OmegaConf.merge(self.config, {"generator": {"enable_http_endpoint": False}})
-        client = DirectModelClient(InferenceEngineClient(self.engines, tokenizer, client_config))
+        inference = InferenceEngineClient(self.engines, tokenizer, client_config)
+        client = DirectModelClient(inference)
+        installed_agents = None
+        if self.harbor_config is not None and self.harbor_config.get("installed_agent") is not None:
+            # Full Harbor is an optional dependency for installed-agent runs.
+            from skyrl_train.rollouts.agent_runtime import InstalledAgentRuntime, InstalledAgentSettings
+            from skyrl_train.rollouts.agent_backend import AgentInferenceBackend
+
+            settings = InstalledAgentSettings.model_validate(
+                OmegaConf.to_container(self.harbor_config.installed_agent, resolve=True)
+            )
+            installed_agents = InstalledAgentRuntime(
+                settings,
+                AgentInferenceBackend(
+                    inference.model_name, generation_context_limit(runner_config), inference.tokenize, tokenizer
+                ),
+                int(runner_config.sampling_params.max_generate_length),
+            )
         factories: dict[str, MachineFactory] = {"shellsim": ShellSimMachineFactory()}
         skopeo = shutil.which(str(Path(self.config.trajectory_runner.skopeo).expanduser()))
         if shutil.which("docker") is not None and skopeo is not None:
@@ -498,4 +546,5 @@ class TaskRolloutWorkerSpec:
             concurrent_harbor_tasks=None if harbor is None else max(1, harbor.concurrent_trials // shard.count),
             sessions=self.sessions,
             shutdown_timeout=float(self.config.trajectory_runner.shutdown_timeout),
+            installed_agents=installed_agents,
         )

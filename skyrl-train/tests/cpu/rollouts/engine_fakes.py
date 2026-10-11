@@ -2,7 +2,7 @@ from dataclasses import dataclass, field, replace
 
 import numpy as np
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
-from shellbox.machine import ShellSimBuiltins
+from shellbox.machine import Backend, ShellSimBuiltins
 from skyrl_train.rollouts.buffer import RolloutGroup, RolloutLease
 from skyrl_train.trajectory_runners.types import TokenProvenance
 
@@ -36,6 +36,8 @@ class Writer:
 
 class FixtureImageFactory:
     """Execute fixture image commands on the built-in filesystem."""
+
+    backend = Backend.DOCKER
 
     async def create(self, spec):
         return await ShellSimMachineFactory().create(

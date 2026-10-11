@@ -10,7 +10,7 @@ import pytest
 from omegaconf import OmegaConf
 from skyrl_gym.verification import VerificationStatus
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
-from shellbox.machine import ExitReason, Result, ShellSimBuiltins, UnsupportedMachineSpec
+from shellbox.machine import Backend, ExitReason, Result, ShellSimBuiltins, UnsupportedMachineSpec
 from taskcompendium.models import Source
 from skyrl_train.rollouts.task_projections import StepTaskProjection, WholeTaskProjection
 from skyrl_train.dataset.tasks import SourceTaskDataset, source_row_task
@@ -21,7 +21,7 @@ from skyrl_train.rollouts.task_worker import TaskRolloutWorker
 from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
 from skyrl_gym.source_task import source_task
 from skyrl_train.config.utils import get_default_config
-from tests.cpu.task_specs import lowered_task, machine_runtime, session_spec
+from tests.cpu.task_specs import NATIVE_ENVIRONMENT, lowered_task, machine_runtime, session_spec
 from skyrl_train.trajectory_runners.types import TrajectoryID
 from skyrl_train.trajectory_runners.model_clients import DirectModelClient, ModelServerError
 from skyrl_train.rollout_observability import observe_rollout_call
@@ -163,6 +163,8 @@ async def test_mixed_nemotron_tasks_run_without_the_original_sources(
             return output
 
     class ImageFactory:
+        backend = Backend.DOCKER
+
         async def create(self, spec):
             return await ShellSimMachineFactory().create(replace(spec, source=ShellSimBuiltins(), cpus=None))
 
@@ -585,9 +587,10 @@ async def test_lean_refinement_discards_the_failed_attempt(task_inputs, task_mac
         extras,
         {},
         Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
+        environment=NATIVE_ENVIRONMENT,
     )
     request["env_extras"] = [
-        {"lowered_task_spec": lowered_task(task, "nemotron_ultra", backend="shellsim").model_dump_json()}
+        {"lowered_task_spec": lowered_task(task, "nemotron_ultra", backend="docker").model_dump_json()}
     ]
     request["env_classes"] = ["nemotron_ultra"]
     client = ConversationClient(["", "by rfl"])
@@ -595,7 +598,7 @@ async def test_lean_refinement_discards_the_failed_attempt(task_inputs, task_mac
         config,
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         client,
-        {"shellsim": task_machine},
+        {"docker": task_machine},
         shutdown_timeout=30,
     )
     batch = await runner.run(request)
@@ -611,6 +614,7 @@ def task_machine():
     """Supply compiler and interpreter I/O for the training-projection tests."""
 
     class Machine:
+        backend = Backend.DOCKER
         closed = False
         output = "4"
 
@@ -657,13 +661,13 @@ async def test_source_machine_selection_controls_tool_results(task_inputs, task_
     config, request = task_inputs
     environment = {
         "machine": {
-            "requirements": {"environment_variables": {"PYTHON_OUTPUT": "4"}},
-            "runtime": machine_runtime("shellsim").model_dump(),
+            "requirements": {**NATIVE_ENVIRONMENT.model_dump(), "environment_variables": {"PYTHON_OUTPUT": "4"}},
+            "runtime": machine_runtime("docker").model_dump(),
         },
         "machines": {
             "ns_tools_simple_agent": {
-                "requirements": {"environment_variables": {"PYTHON_OUTPUT": "7"}},
-                "runtime": machine_runtime("shellsim").model_dump(),
+                "requirements": {**NATIVE_ENVIRONMENT.model_dump(), "environment_variables": {"PYTHON_OUTPUT": "7"}},
+                "runtime": machine_runtime("docker").model_dump(),
             }
         }
         if per_agent
@@ -704,7 +708,7 @@ async def test_source_machine_selection_controls_tool_results(task_inputs, task_
         config,
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         model,
-        {"shellsim": task_machine},
+        {"docker": task_machine},
         shutdown_timeout=30,
     )
     try:
@@ -763,6 +767,7 @@ async def test_python_startup_failure_is_masked_without_losing_its_graded_peer(
         extras,
         {},
         Source(dataset="python-startup", revision="1", row="0", importer_revision="1"),
+        environment=NATIVE_ENVIRONMENT,
     )
     request = {
         **original,
@@ -770,7 +775,7 @@ async def test_python_startup_failure_is_masked_without_losing_its_graded_peer(
         "env_classes": [session, "taskcompendium"],
         "env_extras": [
             {
-                "lowered_task_spec": lowered_task(failed, session, backend="shellsim").model_dump_json(),
+                "lowered_task_spec": lowered_task(failed, session, backend="docker").model_dump_json(),
                 "teacher_route": "python-startup",
             },
             original["env_extras"][0],
@@ -781,7 +786,7 @@ async def test_python_startup_failure_is_masked_without_losing_its_graded_peer(
         WholeTrajectoryProjection if projection_type is WholeTaskProjection else StepWiseTrajectoryProjection
     )(config, Tokenizer())
     worker = TaskRolloutWorker(
-        config, projection_type(projection), InferenceClient(), {"shellsim": task_machine}, shutdown_timeout=30
+        config, projection_type(projection), InferenceClient(), {"docker": task_machine}, shutdown_timeout=30
     )
     writer = Writer()
     try:
@@ -825,7 +830,7 @@ async def test_python_tool_observations_preserve_training_and_release_session(
         config,
         projection_type(projection),
         model,
-        {"shellsim": task_machine},
+        {"docker": task_machine},
         shutdown_timeout=30,
     )
     batch = await runner.run(request)

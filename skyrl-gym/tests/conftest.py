@@ -19,10 +19,10 @@ import pytest_asyncio
 import psutil
 from rolloutengine.contracts import ModelTurn
 from rolloutengine.engine import ShellboxRolloutEngine
-from shellbox.machine import Command, ExitReason, Result
+from shellbox.machine import Backend, Command, ExitReason, Result
 from rolloutengine.spec import LoweredTaskSpec, MachineRuntimeSpec, TaskRuntimeSpec, TaskSessionSpec
 from skyrl_gym.source_task import source_task
-from taskcompendium.models import Source
+from taskcompendium.models import CommandSemantics, Source
 
 from skyrl_gym.task_factories import session_factories
 from skyrl_gym.nemotron_tasks import NemotronTaskSession
@@ -31,6 +31,17 @@ from skyrl_gym.nemotron_tasks import NemotronTaskSession
 @pytest.fixture
 def task_lowering():
     def make(task, name, *, max_turns=3):
+        # The process fixture substitutes for native image execution, without isolation.
+        task = task.model_copy(
+            update={
+                "environment_requirements": task.environment_requirements.model_copy(
+                    update={
+                        "command_semantics": CommandSemantics.LINUX_PROCESS,
+                        "docker_image": "fixture@sha256:" + "0" * 64,
+                    }
+                )
+            }
+        )
         return LoweredTaskSpec(
             task=task,
             runtime=TaskRuntimeSpec(
@@ -203,7 +214,8 @@ class LocalProcessMachine:
 
 @pytest_asyncio.fixture
 async def machine():
-    with TemporaryDirectory(prefix="sb-test-") as directory:
+    # macOS's default temporary root exceeds the Unix-domain socket path limit.
+    with TemporaryDirectory(prefix="sb-test-", dir="/tmp") as directory:
         machine = LocalProcessMachine(Path(directory))
         try:
             yield machine
@@ -271,10 +283,12 @@ def lean_compiler(machine, monkeypatch):
 @pytest_asyncio.fixture
 async def rollout_session(task_lowering):
     """Run scripted model responses through the public engine and real SQLite processes."""
-    with TemporaryDirectory(prefix="sb-rollout-") as directory:
+    with TemporaryDirectory(prefix="sb-rollout-", dir="/tmp") as directory:
         machines = []
 
         class Factory:
+            backend = Backend.DOCKER
+
             async def create(self, spec):
                 root = Path(directory) / str(len(machines))
                 root.mkdir()
