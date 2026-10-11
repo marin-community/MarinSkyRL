@@ -7,19 +7,23 @@ covers micro-batch scaling (the loss scale that cancels the scheduler's micro-ba
 division and the DP gradient average), gradient reduction across pipeline stages and
 expert shards, and the batch-major output projection installed by the training worker.
 
+Every rank computes the HF reference on its own GPU so the comparison is GPU-vs-GPU; a
+CPU reference on rank 0 doubles as a fixture-validity guard, separating routing flips
+(about 1e-2 log-probability jumps) from kernel-level drift (about 1e-4). The checkpoint's
+router weights are scaled so biased selection margins stay decisive across independent
+implementations, and the batch is checked against a minimum-margin floor before use.
+
 Alignment: named tensors are aligned through the bridge conversion tasks — the same
 mapping the weight sync uses — by temporarily exporting ``param.main_grad`` in place of
 parameter data. Expert identifiers resolve through the stacked-expert export mapping;
-pipeline partitions through the collective export. The HF reference runs in float32 on
-CPU; a same-implementation CPU-vs-GPU log-probability agreement check on rank 0 separates
-route-flip artifacts from genuine mismatches.
+pipeline partitions through the collective export.
 
 Scope: the production BFCL run used TP1/PP15/CP1/EP8 at bf16 with the fused attention
-kernels. This experiment runs TP1/CP1 (the topology condition of the output-projection
-adaptation) at fp32 with the unfused attention backend so gradient agreement is tight;
-the production bf16 kernels are covered separately by the forward parity gates in
-test_grug_megatron.py. Pipeline and expert degrees here do not reach 15/8, so
-production-degree equivalence is not established by this test alone.
+kernels. This experiment runs TP1/CP1 (the topology condition of the output projection)
+at fp32 with the unfused attention backend so gradient agreement is tight; the production
+bf16 kernels are covered separately by the forward parity gates in test_grug_megatron.py.
+Pipeline and expert degrees here do not reach 15/8, so production-degree equivalence is
+not established by this test alone.
 """
 
 from datetime import timedelta
@@ -30,33 +34,30 @@ import pytest
 import torch
 import torch.distributed as dist
 from megatron.core import parallel_state as mpu
-from transformers import AutoTokenizer
 
 import skyrl_train
 from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
 from skyrl_train.workers.megatron.megatron_model_wrapper import MegatronModelWrapper, MegatronPolicyMicroBatch
 from tests.gpu.dpo_equivalence import (
-    DPOReference,
     PairBatch,
     build_grug_megatron_chunks,
+    dpo_backward_fixture,
     dpo_gradient_names,
     dpo_wrapper_config,
     export_parameter_gradients,
-    fixed_pair_batch,
     hf_dpo_reference,
 )
 from tests.gpu.grug_gpu_gates import require_hoppers
-from tests.gpu.grug_tiny_checkpoint import write_tiny_checkpoint
 from tests.gpu.utils import run_distributed_with_deadline
 
 # Registered before execution; see ci/dpo_equivalence/README.md for the measured values.
 GRADIENT_RTOL = 2e-4
 GRADIENT_ATOL = 3e-4
-# Metric rows drift with the fp32 CPU-vs-GPU policy log-probability difference that the
-# route guard bounds below; beta times that drift moves the loss fourth-decimal place.
-METRIC_ATOL = 5e-3
-# Same-implementation cross-device agreement bound for the HF reference itself.
-REFERENCE_DEVICE_ATOL = 1e-4
+METRIC_ATOL = 2e-3
+# Same-implementation CPU-vs-GPU log-probability bound: routing flips jump by ~1e-2
+# while fp32 kernel drift stays near 1e-4, so this guard detects a route-sensitive
+# fixture without failing on ordinary device drift.
+REFERENCE_DEVICE_ATOL = 1e-3
 MICRO_BATCH_SIZE = 2
 
 TOPOLOGIES = [
@@ -115,7 +116,7 @@ def _assert_gradient_close(name: str, actual: torch.Tensor, expected: torch.Tens
         raise error
 
 
-def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: PairBatch, reference: DPOReference):
+def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: PairBatch, ref_offsets: torch.Tensor):
     assert Path(skyrl_train.__file__).resolve().parent == Path(__file__).resolve().parents[2] / "skyrl_train"
     torch.cuda.set_device(rank)
     dist.init_process_group(
@@ -130,6 +131,9 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
             use_sharp=False,
             context_parallel_size=1,
         )
+        # Every rank computes the independent reference on its own GPU, so the compared
+        # quantities differ only by Megatron-vs-eager kernel arithmetic, not by device.
+        reference = hf_dpo_reference(model_path, batch, device=f"cuda:{rank}", ref_log_prob_offsets=ref_offsets)
         bridge, provider, chunks, hf_config = build_grug_megatron_chunks(
             model_path,
             pipeline_model_parallel_size=pp,
@@ -160,6 +164,25 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
         )
         exports = export_parameter_gradients(bridge, chunks)
 
+        if rank == 0:
+            print(
+                f"GPU={torch.cuda.get_device_name()} torch={torch.__version__} "
+                f"megatron-core={version('megatron-core')} TP=1 PP={pp} EP={ep} DP={dp_size}",
+                flush=True,
+            )
+            # Fixture-validity guard: the same eager implementation on CPU must agree with
+            # the GPU reference well enough that a routing flip would stand out.
+            on_cpu = hf_dpo_reference(model_path, batch, device="cpu", ref_log_prob_offsets=ref_offsets)
+            logprob_drift = (on_cpu.action_log_probs - reference.action_log_probs).abs()
+            print(
+                f"reference CPU-vs-GPU logprobs: max_abs={logprob_drift.max().item():.8g} "
+                f"mean_abs={logprob_drift.mean().item():.8g}",
+                flush=True,
+            )
+            assert logprob_drift.max().item() < REFERENCE_DEVICE_ATOL, (
+                "fixture is route-sensitive across devices; regenerate with a different seed"
+            )
+
         # Metric rows pool across data-parallel ranks like the trainer's step metrics.
         for key in reference.metrics:
             actual = torch.tensor(sum(item[key] for item in metrics) / len(metrics), device="cuda")
@@ -171,23 +194,6 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
                 assert abs(actual.item() - expected) < METRIC_ATOL, (key, actual.item(), expected)
 
         if rank == 0:
-            print(
-                f"GPU={torch.cuda.get_device_name()} torch={torch.__version__} "
-                f"megatron-core={version('megatron-core')} TP=1 PP={pp} EP={ep} DP={dp_size}",
-                flush=True,
-            )
-            # The route guard must pass before any comparison is meaningful: a CPU-vs-GPU
-            # routing flip inside the fixture would look like a Megatron-side mismatch.
-            on_device = hf_dpo_reference(model_path, batch, device="cuda")
-            logprob_drift = (on_device.action_log_probs - reference.action_log_probs).abs()
-            print(
-                f"reference CPU-vs-GPU logprobs: max_abs={logprob_drift.max().item():.8g} "
-                f"mean_abs={logprob_drift.mean().item():.8g}",
-                flush=True,
-            )
-            assert logprob_drift.max().item() < REFERENCE_DEVICE_ATOL, (
-                "fixture is route-sensitive across devices; regenerate with a different seed"
-            )
             no_gradient_names = set(dpo_gradient_names(hf_config.num_hidden_layers))
             exported = set(exports) - no_gradient_names
             missing = set(reference.gradients) - exported
@@ -206,15 +212,15 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
 @pytest.mark.parametrize(("world_size", "pp", "ep"), TOPOLOGIES, ids=["pp1", "pp2", "pp2_dp2", "pp2_ep2", "pp2_ep4"])
 def test_dpo_distributed_backward_matches_hf_reference(tmp_path, world_size, pp, ep):
     require_hoppers(world_size)
-    model_path = tmp_path / "model"
-    model_path.mkdir()
-    write_tiny_checkpoint(model_path)
-    pad_token_id = AutoTokenizer.from_pretrained(model_path).pad_token_id
-    batch = fixed_pair_batch(pad_token_id)
-    reference = hf_dpo_reference(str(model_path), batch)
-    print(f"input batch sha256={batch.sha256()} reference dpo/loss={reference.metrics['dpo/loss']:.8g}", flush=True)
+    model_path, batch = dpo_backward_fixture(tmp_path / "model")
+    # Fixed per-token offsets separate the frozen reference from the initial policy, as the
+    # production reference worker does; without them delta == 0 and the DPO pair weights,
+    # accuracy, and margin would all be degenerate.
+    ref_offsets = torch.randn(batch.loss_mask.shape, generator=torch.Generator().manual_seed(11)) * 0.3
+    ref_offsets = ref_offsets * batch.loss_mask
+    print(f"input batch sha256={batch.sha256()}", flush=True)
     run_distributed_with_deadline(
         run_backward_rank,
-        (world_size, pp, ep, (tmp_path / "rendezvous").as_uri(), str(model_path), batch, reference),
+        (world_size, pp, ep, (tmp_path / "rendezvous").as_uri(), str(model_path), batch, ref_offsets),
         world_size,
     )

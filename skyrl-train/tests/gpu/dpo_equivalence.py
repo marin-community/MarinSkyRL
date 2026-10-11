@@ -23,9 +23,17 @@ from skyrl_train.models.grug_moe import GRUG_ROUTER_BIAS_SUFFIX
 from skyrl_train.models.grug_moe import GrugMoeForCausalLM
 from skyrl_train.workers.megatron.output_projection_layout import install_dpo_batch_major_output_projection
 from tests.cpu.util import DPO_OVERRIDES
+from tests.gpu.grug_tiny_checkpoint import write_tiny_checkpoint
 
 BETA = 0.1
 LABEL_SMOOTHING = 0.0
+# Router weights scaled up in the equivalence checkpoint so biased selection margins are
+# decisive: near-tie routes would flip between independent fp32 implementations and look
+# like backward-pass mismatches. The pair (scale, batch seed) was searched for the largest
+# worst-case margin; dpo_backward_fixture re-validates it on every run.
+ROUTE_DECISIVE_ROUTER_SCALE = 12.0
+ROUTE_DECISIVE_BATCH_SEED = 8
+ROUTE_MARGIN_MIN = 1e-3
 
 
 @dataclass(frozen=True)
@@ -140,14 +148,16 @@ def hf_dpo_reference(
     beta: float = BETA,
     label_smoothing: float = LABEL_SMOOTHING,
     device: str = "cpu",
-) -> DPOReference:  # noqa: E501
+    ref_log_prob_offsets: torch.Tensor | None = None,
+) -> DPOReference:
     """Compute the DPO loss, its gradients, and both log-prob streams with eager HF GrugMoE.
 
     The formula is written out from the TRL "sigmoid" definition rather than calling any
     skyrl_train objective code: pair log-ratios are masked token sums of policy minus frozen
     reference log-probabilities, and the loss averages ``-(1-eps) log sigmoid(beta*delta) -
-    eps log sigmoid(-beta*delta)`` over pairs. The frozen reference is the same initial
-    checkpoint the trainer uses.
+    eps log sigmoid(-beta*delta)`` over pairs. ``ref_log_prob_offsets`` deterministically
+    separates the frozen reference from the initial policy, as the production reference
+    worker does; without it the fixture is degenerate (delta == 0, accuracy == 0).
     """
     model = GrugMoeForCausalLM.from_pretrained(model_path, dtype=torch.float32, attn_implementation="eager")
     model.to(device).train()
@@ -166,6 +176,8 @@ def hf_dpo_reference(
     action_log_probs = response_log_probs()
     with torch.no_grad():
         ref_action_log_probs = response_log_probs()
+        if ref_log_prob_offsets is not None:
+            ref_action_log_probs = ref_action_log_probs + ref_log_prob_offsets.to(device)
     mask = batch.loss_mask.to(device)
     sums = ((action_log_probs - ref_action_log_probs) * mask).sum(-1)
     pair_logratios = sums.reshape(-1, 2)
@@ -287,3 +299,63 @@ def export_parameter_gradients(bridge, chunks: list[nn.Module]) -> dict[str, tor
 def dpo_gradient_names(num_layers: int) -> list[str]:
     """Router-bias buffers carry no gradient; everything else the export emits must."""
     return [f"model.layers.{index}{GRUG_ROUTER_BIAS_SUFFIX}" for index in range(num_layers)]
+
+
+def write_route_decisive_checkpoint(path) -> None:
+    """Write the tiny checkpoint with router weights scaled for decisive biased selection."""
+    from safetensors.torch import load_file, save_file
+
+    write_tiny_checkpoint(path)
+    tensors = load_file(path / "model.safetensors")
+    for name, tensor in tensors.items():
+        if name.endswith("mlp.router.weight"):
+            tensors[name] = tensor * ROUTE_DECISIVE_ROUTER_SCALE
+    save_file(tensors, path / "model.safetensors", metadata={"format": "pt"})
+
+
+def dpo_backward_fixture(path):
+    """Route-decisive checkpoint plus its preference batch, validated for stable routing."""
+    from transformers import AutoTokenizer
+
+    write_route_decisive_checkpoint(path)
+    pad_token_id = AutoTokenizer.from_pretrained(path).pad_token_id
+    batch = fixed_pair_batch(pad_token_id, seed=ROUTE_DECISIVE_BATCH_SEED)
+    margin = min_routing_margin(str(path), batch)
+    print(f"fixture minimum biased-router margin: {margin:.6g}", flush=True)
+    if margin <= ROUTE_MARGIN_MIN:
+        raise AssertionError(f"fixture route margin {margin:.6g} must exceed {ROUTE_MARGIN_MIN:g}")
+    return path, batch
+
+
+def min_routing_margin(model_path: str, batch: PairBatch, device: str = "cpu") -> float:
+    """Smallest biased-router selection margin over unmasked tokens across all layers.
+
+    The margin is the gap between the k-th selected and the (k+1)-th biased router score,
+    matching the selection rule in GrugMoeRouter.forward; a flip of any top-k decision
+    changes expert gradients discretely, so the fixture must keep every decision far from
+    the tie boundary relative to cross-implementation score noise.
+    """
+    model = GrugMoeForCausalLM.from_pretrained(model_path, dtype=torch.float32, attn_implementation="eager")
+    model.to(device).eval()
+    margins: list[torch.Tensor] = []
+    hooks = []
+
+    def capture(module, args, _output):
+        hidden = args[0].detach().float()
+        scores = torch.nn.functional.linear(hidden, module.weight.detach().float())
+        scores = scores + module.bias.detach().float()
+        top = scores.topk(module.top_k + 1, dim=-1).values
+        margins.append((top[:, -2] - top[:, -1]).reshape(batch.attention_mask.shape))
+
+    for module in model.modules():
+        if module.__class__.__name__ == "GrugMoeRouter":
+            hooks.append(module.register_forward_hook(capture))
+    attention_mask = batch.attention_mask.to(device)
+    position_ids = attention_mask.long().cumsum(-1) - 1
+    position_ids = position_ids.masked_fill(attention_mask == 0, 0)
+    with torch.no_grad():
+        model(batch.sequences.to(device), attention_mask=attention_mask, position_ids=position_ids)
+    for hook in hooks:
+        hook.remove()
+    valid = attention_mask.bool().flatten()
+    return min(margin.flatten()[valid].min().item() for margin in margins)
