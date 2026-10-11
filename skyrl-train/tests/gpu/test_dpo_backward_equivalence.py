@@ -136,6 +136,8 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
         def log_detail(line: str) -> None:
             print(line, flush=True)
 
+        late_lines: list[str] = []
+
         mpu.initialize_model_parallel(
             tensor_model_parallel_size=1,
             pipeline_model_parallel_size=pp,
@@ -183,6 +185,7 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
         log_detail(f"rank{rank} phase: forward-backward done")
         # Local main_grad probe: separates a wrong per-rank gradient from a wrong export
         # gather. Each rank compares its own chunks' main_grads against the reference.
+        # Written at teardown so these lines end the diagnostics file.
         for probe_suffix in (
             "model.norm.weight",
             "layers.7.self_attn.q_proj.weight",
@@ -199,7 +202,7 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
                         value for name, value in reference.gradients.items() if name.endswith(probe_suffix)
                     )
                     local_diff = (main_grad.detach().float().cpu() - reference_grad).abs().max().item()
-                    emit(
+                    late_lines.append(
                         f"rank{rank} local main_grad {probe_suffix}: "
                         f"max_abs={local_diff:.8g} expected_max={reference_grad.abs().max().item():.8g}"
                     )
@@ -221,9 +224,7 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
             for p in payloads
         ]
         token_stats = torch.zeros(3, device="cuda")
-        scores = wrapper.forward(
-            forward_micros, seq_len=batch.sequences.shape[1], micro_batch_size=MICRO_BATCH_SIZE
-        )
+        scores = wrapper.forward(forward_micros, seq_len=batch.sequences.shape[1], micro_batch_size=MICRO_BATCH_SIZE)
         if mpu.is_pipeline_last_stage(ignore_virtual=True):
             expected_tokens = torch.cat(
                 [reference.action_log_probs[start : start + micro.sequences.shape[0]] for start, micro in micros]
@@ -293,6 +294,10 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
     finally:
         for line in report:
             print(line, flush=True)
+        # Late lines finish both the stdout stream and the diagnostics file, so the
+        # per-rank local-gradient probes survive log-tail truncation on failing runs.
+        for line in late_lines:
+            emit(line)
         mpu.destroy_model_parallel()
         dist.destroy_process_group()
 
