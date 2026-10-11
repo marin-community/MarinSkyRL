@@ -1,5 +1,6 @@
 import asyncio
 from dataclasses import replace
+import hashlib
 import json
 import shutil
 
@@ -9,6 +10,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 from omegaconf import OmegaConf
 from skyrl_gym.verification import VerificationStatus
+from skyrl_gym.tool_protocol_task import ToolProtocolReplaySession
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
 from shellbox.machine import Backend, Command, ShellSimBuiltins, NetworkPolicy
 from taskcompendium.models import (
@@ -26,7 +28,8 @@ from taskcompendium.models import (
     VerifierArtifact,
 )
 from skyrl_train.rollouts.task_projections import StepTaskProjection, WholeTaskProjection
-from skyrl_train.dataset.tasks import TaskDataset
+from skyrl_train.dataset.tasks import TaskDataset, write_tasks
+from skyrl_train.dataset.protocol_replay import replay_tasks
 from skyrl_train.dataset.harbor import HarborTaskDataset
 from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection, WholeTrajectoryProjection
 from skyrl_train.rollouts.buffer import RolloutLease, RolloutTask
@@ -758,12 +761,55 @@ async def test_harbor_source_materialization_runs_without_the_original_directory
         '#!/bin/sh\nif [ "$(cat /logs/artifacts/answer)" = "12" ]; then\n'
         "echo 0.75 > /logs/verifier/reward.txt\nelse\necho 0 > /logs/verifier/reward.txt\nfi\n"
     )
+    replay_path = tmp_path / "replay.parquet"
+    cases_path = tmp_path / "cases.jsonl"
+    manifest_path = tmp_path / "manifest.json"
+    cases_path.write_text(
+        json.dumps(
+            {
+                "task_source_id": "reserved-case",
+                "prompt_token_ids": [128000, 128005],
+                "prefix_sha256": hashlib.sha256(b"[128000,128005]").hexdigest(),
+            }
+        )
+        + "\n"
+    )
+    manifest = {
+        "cases_sha256": hashlib.sha256(cases_path.read_bytes()).hexdigest(),
+        "diagnostic_reserved_task_ids": ["reserved-case"],
+        "train_task_ids": ["training-case"],
+        "parity_task_ids": ["parity-case"],
+        "diagnostic_cases": 1,
+    }
+    manifest_path.write_text(json.dumps(manifest))
+    write_tasks(replay_path, replay_tasks(cases_path, manifest_path, session_spec()))
+    # Reject contamination before a validation artifact can enter the mixed loader.
+    manifest["train_task_ids"] = ["reserved-case"]
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="overlap"):
+        replay_tasks(cases_path, manifest_path, session_spec())
+    manifest["train_task_ids"] = ["training-case"]
+    manifest_path.write_text(json.dumps(manifest))
+    cases_path.write_text(cases_path.read_text().replace("128000", "128001"))
+    with pytest.raises(ValueError, match="immutable manifest"):
+        replay_tasks(cases_path, manifest_path, session_spec())
     prepared = HarborTaskDataset(
-        [str(source)], Tokenizer(), 100, session=session_spec(), cache_dir=tmp_path / "tasks", num_workers=1
+        [str(source), str(replay_path)],
+        Tokenizer(),
+        100,
+        session=session_spec(),
+        cache_dir=tmp_path / "tasks",
+        num_workers=1,
     )
     assert prepared.uid(0) == "source"
     shutil.rmtree(source)
     restored = TaskDataset([str(prepared.task_path)], Tokenizer(), 100, num_workers=1)
+    assert len(restored) == 2
+    assert restored[1][1] == "tool_protocol_replay"
+    replay_session = ToolProtocolReplaySession(
+        LoweredTaskSpec.model_validate_json(restored[1][2]["lowered_task_spec"]), None
+    )
+    assert (await replay_session.prepare()).prompt_token_ids == (128000, 128005)
     prompt, env, extras, uid = restored[0]
 
     class ImageFactory:

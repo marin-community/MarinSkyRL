@@ -14,10 +14,10 @@ readme = "README.md"
 requires-python = ">=3.12,<3.14"
 
 dependencies = [
-    "marin-rolloutengine @ git+https://github.com/marin-community/marin.git@78009f9f23f97abb6add6843273e8120a1aae83d#subdirectory=lib/rolloutengine",
-    "marin-shellbox @ git+https://github.com/marin-community/marin.git@78009f9f23f97abb6add6843273e8120a1aae83d#subdirectory=lib/shellbox",
-    "marin-taskcompendium @ git+https://github.com/marin-community/marin.git@78009f9f23f97abb6add6843273e8120a1aae83d#subdirectory=lib/taskcompendium",
-    "marin-verifyit[math,schema,reasoning-gym,judge] @ git+https://github.com/marin-community/marin.git@78009f9f23f97abb6add6843273e8120a1aae83d#subdirectory=lib/verifyit",
+"marin-rolloutengine @ git+https://github.com/marin-community/marin.git@49bb6fab1632988ace05a2db54647681da78a581#subdirectory=lib/rolloutengine",
+    "marin-shellbox @ git+https://github.com/marin-community/marin.git@49bb6fab1632988ace05a2db54647681da78a581#subdirectory=lib/shellbox",
+    "marin-taskcompendium @ git+https://github.com/marin-community/marin.git@49bb6fab1632988ace05a2db54647681da78a581#subdirectory=lib/taskcompendium",
+    "marin-verifyit[math,schema,reasoning-gym,judge] @ git+https://github.com/marin-community/marin.git@49bb6fab1632988ace05a2db54647681da78a581#subdirectory=lib/verifyit",
     "func_timeout",
     "loguru",
     "numpy",

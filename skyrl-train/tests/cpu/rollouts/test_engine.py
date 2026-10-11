@@ -27,6 +27,68 @@ from tests.cpu.rollouts.engine_fakes import ConversationClient, InferenceClient,
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response,expected_status,expected_reward",
+    [
+        ('{"name":"read","arguments":{"path":"a"}}</tool_call>', "valid", 1.0),
+        ("<tool_call><tool_call>", "repeated_opener", 0.0),
+        ('{"name":"read","arguments":{}}', "missing_closer", 0.0),
+        (None, None, None),
+    ],
+)
+async def test_protocol_replay_uses_raw_prefix_and_keeps_infrastructure_unscored(
+    task_inputs, response, expected_status, expected_reward
+):
+    config, request = task_inputs
+    prefix = [128000, 77, 128005]
+    task = source_task(
+        [{"role": "user", "content": "Diagnostic replay"}],
+        {"prompt_token_ids": prefix},
+        {},
+        Source(dataset="protocol", revision="1", row="case", importer_revision="1"),
+    )
+    request["env_extras"] = [{"lowered_task_spec": lowered_task(task, "tool_protocol_replay").model_dump_json()}]
+    request["env_classes"] = ["tool_protocol_replay"]
+
+    class Client:
+        async def generate(self, request):
+            assert request["prompt_token_ids"] == [prefix]
+            assert "prompts" not in request and "chat_completion_params" not in request
+            assert request["sampling_params"]["skip_special_tokens"] is False
+            assert request["sampling_params"]["include_stop_str_in_output"] is True
+            if response is None:
+                raise ModelServerError("model_server_error", "replay-request", 503)
+            return {
+                "responses": [response],
+                "prompt_ids": [prefix],
+                "response_ids": [[3, 4]],
+                "response_logprobs": [[-0.1, -0.2]],
+                "stop_reasons": ["stop"],
+                "token_provenance": TokenProvenance.ENGINE,
+            }
+
+    worker = TaskRolloutWorker(
+        config,
+        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        Client(),
+        {},
+        shutdown_timeout=30,
+    )
+    try:
+        (result,) = await worker.generate(request)
+    finally:
+        await worker.shutdown()
+    assert result.grade.reward == expected_reward
+    if response is None:
+        assert result.failure is not None
+        assert result.grade.status != Outcome.GRADED
+    else:
+        assert result.grade.diagnostics["protocol_status"] == expected_status
+        assert result.prompt_token_ids == tuple(prefix)
+        assert result.loss_mask == (1, 1)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("projection_type", [WholeTaskProjection, StepTaskProjection])
 @pytest.mark.parametrize(
     "verification,eligible,exception_type",

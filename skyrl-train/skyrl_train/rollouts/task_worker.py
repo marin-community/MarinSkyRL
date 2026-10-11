@@ -110,7 +110,7 @@ async def _model_turn(
     """Convert an inference response to the common exact-token record."""
     options = dict(request.options)
     template_kwargs = {**chat_template_kwargs, **options.get("chat_template_kwargs", {})}
-    if template_kwargs:
+    if template_kwargs and request.prompt_token_ids is None:
         options["chat_template_kwargs"] = template_kwargs
     continuation = None
     if request.assistant_message_index is not None:
@@ -120,8 +120,20 @@ async def _model_turn(
         )
     try:
         with rollout_wait("model_client_await"):
-            output = await client.generate(
-                InferenceEngineInput(
+            if request.prompt_token_ids is not None:
+                prompt_ids = list(request.prompt_token_ids)
+                remaining = max_context_length - len(prompt_ids)
+                if remaining <= 0 or (max_prompt_length is not None and len(prompt_ids) > max_prompt_length):
+                    raise GenerationLimitReached(tuple(prompt_ids))
+                raw_sampling = {**sampling_params, **options}
+                raw_sampling["max_tokens"] = min(int(raw_sampling.get("max_tokens", remaining)), remaining)
+                model_input = InferenceEngineInput(
+                    prompt_token_ids=[prompt_ids],
+                    session_ids=[session_id],
+                    sampling_params=raw_sampling,
+                )
+            else:
+                model_input = InferenceEngineInput(
                     prompts=[list(request.messages)],
                     chat_completion_params=[options],
                     chat_continuations=[continuation],
@@ -130,19 +142,24 @@ async def _model_turn(
                     max_context_length=max_context_length,
                     max_prompt_length=max_prompt_length,
                 )
-            )
+            output = await client.generate(model_input)
     except GenerationBudgetExceededError as limit:
         raise GenerationLimitReached(limit.prompt_token_ids) from limit
     if output["token_provenance"] != TokenProvenance.ENGINE:
         raise RolloutContractError("The canonical rollout engine requires exact model tokens")
     logprobs = output.get("response_logprobs")
+    message = (
+        {"role": "assistant", "content": output["responses"][0]}
+        if request.prompt_token_ids is not None
+        else output["assistant_messages"][0]
+    )
     return ModelTurn(
-        message=output["assistant_messages"][0],
+        message=message,
         prompt_token_ids=tuple(output["prompt_ids"][0]),
         response_token_ids=tuple(output["response_ids"][0]),
         logprobs=None if logprobs is None else tuple(logprobs[0]),
         stop_reason=output["stop_reasons"][0],
-        text=output.get("responses", [output["assistant_messages"][0].get("content") or ""])[0],
+        text=output.get("responses", [message.get("content") or ""])[0],
         metadata={
             **{
                 name: output[name][0]
