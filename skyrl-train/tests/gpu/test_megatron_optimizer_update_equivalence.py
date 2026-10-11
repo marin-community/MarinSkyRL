@@ -134,10 +134,14 @@ def run_optimizer_rank(rank, world_size, pp, ep, rendezvous, model_path, clip_ac
                     .to(device=parameter.main_grad.device, dtype=parameter.main_grad.dtype)
                     .view_as(parameter)
                 )
-            squares = torch.zeros((), dtype=torch.float64)
+            # The production clip threshold is the norm over every owned shard across all
+            # ranks (dense parameters shard across the data-parallel group, experts across
+            # the expert-parallel group), so the reference must reduce it world-wide.
+            squares = torch.zeros((), dtype=torch.float64, device="cuda")
             for name, (parameter_value, _, _) in reference.items():
                 gradient = fixed_gradient(name, parameter_value.numel(), step_index, scale)
-                squares += gradient.square().sum()
+                squares += gradient.square().sum().double().to("cuda")
+            dist.all_reduce(squares)
             global_norm = torch.sqrt(squares).item()
             if step_index == 1:
                 assert (global_norm > MAX_GRAD_NORM) == clip_active, global_norm
