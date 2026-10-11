@@ -167,6 +167,38 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
         captured_micros: list[dict] = []
         registered_loss = PolicyLossRegistry.get(cfg.trainer.algorithm.policy_loss_type)
 
+        # One-shot probe into the logprob reconstruction: recompute the single-roll
+        # contract (entry k = logprob of compact token k+1 from logits k) next to the
+        # array the production path actually returns, to localize any extra shift.
+        probe_state = {"fired": False}
+        original_token_logprobs = MegatronModelWrapper._token_logprobs
+
+        def probing_token_logprobs(wrapper_self, logits, sequences, attention_mask, packed_seq_params):
+            result = original_token_logprobs(wrapper_self, logits, sequences, attention_mask, packed_seq_params)
+            if not probe_state["fired"] and mpu.is_pipeline_last_stage(ignore_virtual=True):
+                probe_state["fired"] = True
+                bool_mask = attention_mask.bool()
+                seq_lens = bool_mask.sum(1)
+                compact_len = int(seq_lens.max())
+                compact = torch.zeros(sequences.shape[0], compact_len, dtype=sequences.dtype, device=sequences.device)
+                for row_index, row_len in enumerate(seq_lens.tolist()):
+                    compact[row_index, :row_len] = sequences[row_index][bool_mask[row_index]]
+                single = None
+                if logits.shape[1] == compact_len:
+                    soft = torch.log_softmax(logits[:, :-1].float(), dim=-1)
+                    single = soft.gather(-1, compact[:, 1:].unsqueeze(-1)).squeeze(-1)
+                emit(
+                    f"probe: logits shape={tuple(logits.shape)} compact_len={compact_len} result shape={tuple(result.shape)}"
+                )
+                if single is not None:
+                    emit(f"probe single-roll row0 last9: {[round(v, 4) for v in single[0, -9:].tolist()]}")
+                emit(f"probe actual     row0 last9: {[round(v, 4) for v in result[0, -9:].tolist()]}")
+                emit(f"probe sequences  row0 last9: {sequences[0, -9:].tolist()}")
+                emit(f"probe compact    row0 last9: {compact[0, -9:].tolist()}")
+            return result
+
+        MegatronModelWrapper._token_logprobs = probing_token_logprobs
+
         def capturing_policy_loss(inputs, config):
             captured_micros.append(
                 {
@@ -317,6 +349,8 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
     finally:
         for line in report:
             print(line, flush=True)
+        if "original_token_logprobs" in locals():
+            MegatronModelWrapper._token_logprobs = original_token_logprobs
         mpu.destroy_model_parallel()
         dist.destroy_process_group()
 
