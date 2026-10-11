@@ -37,7 +37,11 @@ from megatron.core import parallel_state as mpu
 
 import skyrl_train
 from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
-from skyrl_train.workers.megatron.megatron_model_wrapper import MegatronModelWrapper, MegatronPolicyMicroBatch
+from skyrl_train.workers.megatron.megatron_model_wrapper import (
+    MegatronForwardMicroBatch,
+    MegatronModelWrapper,
+    MegatronPolicyMicroBatch,
+)
 from tests.gpu.dpo_equivalence import (
     PairBatch,
     build_grug_megatron_chunks,
@@ -164,6 +168,54 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
         )
         exports = export_parameter_gradients(bridge, chunks)
 
+        # Per-token Megatron-vs-HF diagnostic: a routing flip between implementations
+        # shows up as a handful of tokens jumping ~1e-2 while kernel-level drift stays
+        # below ~1e-4. Printed before any assertion so a failing run still reports it.
+        forward_micros = [
+            MegatronForwardMicroBatch(
+                sequences=p.sequences,
+                attention_mask=p.attention_mask,
+                position_ids=p.position_ids,
+                num_actions=p.num_actions,
+            )
+            for p in payloads
+        ]
+        token_stats = torch.zeros(3, device="cuda")
+        if mpu.is_pipeline_last_stage(ignore_virtual=True):
+            scores = wrapper.forward(
+                forward_micros, seq_len=batch.sequences.shape[1], micro_batch_size=MICRO_BATCH_SIZE
+            )
+            expected_tokens = torch.cat(
+                [reference.action_log_probs[start : start + micro.sequences.shape[0]] for start, micro in micros]
+            )
+            loss_mask = torch.cat([micro.loss_mask for _, micro in micros])
+            token_diff = (scores.float() - expected_tokens).abs()
+            worst_flat = int(token_diff.flatten().argmax())
+            worst_row, worst_col = divmod(worst_flat, token_diff.shape[1])
+            print(
+                f"rank{rank} policy logprobs Megatron-vs-HF: max_abs={token_diff.max().item():.8g} "
+                f"mean_abs={token_diff.mean().item():.8g} "
+                f"counts>1e-4/1e-3={int((token_diff > 1e-4).sum())}/{int((token_diff > 1e-3).sum())}",
+                flush=True,
+            )
+            print(
+                f"rank{rank} worst token: row={worst_row} col={worst_col} "
+                f"megatron={scores.flatten()[worst_flat].item():.8g} "
+                f"hf={expected_tokens.flatten()[worst_flat].item():.8g} "
+                f"in_loss_mask={bool(loss_mask.flatten()[worst_flat])}",
+                flush=True,
+            )
+            token_stats[0] = token_diff.max()
+            token_stats[1] = token_diff[loss_mask > 0].max() if bool((loss_mask > 0).any()) else 0.0
+            token_stats[2] = 1.0
+        dist.all_reduce(token_stats, op=dist.ReduceOp.MAX)
+        if rank == 0:
+            print(
+                f"policy logprobs Megatron-vs-HF: global max_abs={token_stats[0].item():.8g} "
+                f"on_loss_mask={token_stats[1].item():.8g}",
+                flush=True,
+            )
+
         if rank == 0:
             print(
                 f"GPU={torch.cuda.get_device_name()} torch={torch.__version__} "
@@ -184,6 +236,7 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
             )
 
         # Metric rows pool across data-parallel ranks like the trainer's step metrics.
+        metric_failures = []
         for key in reference.metrics:
             actual = torch.tensor(sum(item[key] for item in metrics) / len(metrics), device="cuda")
             dist.all_reduce(actual, group=mpu.get_data_parallel_group(with_context_parallel=False))
@@ -191,7 +244,9 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
             if rank == 0:
                 expected = reference.metrics[key]
                 print(f"metric {key}: actual={actual.item():.8g} expected={expected:.8g}", flush=True)
-                assert abs(actual.item() - expected) < METRIC_ATOL, (key, actual.item(), expected)
+                if abs(actual.item() - expected) >= METRIC_ATOL:
+                    metric_failures.append((key, actual.item(), expected))
+        assert not metric_failures, metric_failures
 
         if rank == 0:
             no_gradient_names = set(dpo_gradient_names(hf_config.num_hidden_layers))
