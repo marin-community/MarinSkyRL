@@ -187,7 +187,7 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
             )
             expected_tokens = torch.cat(
                 [reference.action_log_probs[start : start + micro.sequences.shape[0]] for start, micro in micros]
-            )
+            ).to(scores.device)
             loss_mask = torch.cat([micro.loss_mask for _, micro in micros])
             token_diff = (scores.float() - expected_tokens).abs()
             worst_flat = int(token_diff.flatten().argmax())
