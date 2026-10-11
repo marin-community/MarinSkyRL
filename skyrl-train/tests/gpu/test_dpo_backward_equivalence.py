@@ -126,13 +126,24 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
         "nccl", init_method=rendezvous, rank=rank, world_size=world_size, timeout=timedelta(seconds=120)
     )
     try:
-        # Diagnostics are echoed again in the finally block so a failing assertion cannot
-        # push them out of the retained job-log tail.
+        # Essential lines are re-printed in the finally block, and every line is appended
+        # to dpo-diagnostics.log which the CI runner cats at the very end of the job
+        # stream — a failing assertion can push neither out of the retained tail.
         report: list[str] = []
+        diagnostics_path = Path.cwd() / "dpo-diagnostics.log"
+
+        def record(line: str) -> None:
+            with diagnostics_path.open("a") as handle:
+                handle.write(line + "\n")
 
         def emit(line: str) -> None:
             print(line, flush=True)
             report.append(line)
+            record(line)
+
+        def log_detail(line: str) -> None:
+            print(line, flush=True)
+            record(line)
 
         mpu.initialize_model_parallel(
             tensor_model_parallel_size=1,
@@ -217,6 +228,11 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
                 f"rank{rank} per-row score sums: {[round(v, 4) for v in scores.float().sum(-1).tolist()]} "
                 f"loss-mask sums: {[int(v) for v in loss_mask.sum(-1).tolist()]}"
             )
+            masked_mean = [
+                round(token_diff[r][loss_mask[r] > 0].mean().item(), 8) if bool((loss_mask[r] > 0).any()) else 0.0
+                for r in range(token_diff.shape[0])
+            ]
+            emit(f"rank{rank} masked mean diff per row: {masked_mean}")
             token_stats[0] = token_diff.max()
             token_stats[1] = token_diff[loss_mask > 0].max() if bool((loss_mask > 0).any()) else 0.0
             token_stats[2] = 1.0
@@ -266,7 +282,7 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
             assert not missing, f"reference gradients without a Megatron export: {sorted(missing)}"
             assert not extra, f"Megatron gradient exports absent from the reference: {sorted(extra)}"
             for name in sorted(reference.gradients):
-                emit(_assert_gradient_close(name, exports[name], reference.gradients[name], batch.sequences))
+                log_detail(_assert_gradient_close(name, exports[name], reference.gradients[name], batch.sequences))
             worst = max((exports[name] - reference.gradients[name]).abs().max().item() for name in reference.gradients)
             emit(f"gradient worst max_abs across all tensors: {worst:.8g}")
     finally:

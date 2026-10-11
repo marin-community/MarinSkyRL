@@ -23,9 +23,19 @@ if [[ -n "${DPO_EQUIVALENCE_TESTS:-}" ]]; then
   # shellcheck disable=SC2206
   test_targets=(${DPO_EQUIVALENCE_TESTS})
 fi
+set +e
 "$PYTHON" "$REPOSITORY_ROOT/marinskyrl/environment_contract.py" \
   run-grug-gpu-gate "$REPOSITORY_ROOT" -- \
   "$PYTHON" -m pytest ${DPO_EQUIVALENCE_PYTEST_ARGS:--x} -s \
   --junitxml="$JUNIT_XML" \
   "${test_targets[@]}"
+pytest_status=$?
+set -e
+if [[ -f "$REPOSITORY_ROOT/dpo-diagnostics.log" ]]; then
+  # Printed after pytest's own summary so these lines finish the job stream and survive
+  # log-tail truncation on failing runs.
+  echo "::: dpo diagnostics"
+  tail -n 400 "$REPOSITORY_ROOT/dpo-diagnostics.log"
+fi
+[[ $pytest_status -eq 0 ]] || exit $pytest_status
 "$PYTHON" -c "import xml.etree.ElementTree as ET; cases = ET.parse('$JUNIT_XML').getroot().findall('.//testcase'); assert cases and all(case.find('skipped') is None for case in cases), 'a DPO equivalence experiment did not execute'"
