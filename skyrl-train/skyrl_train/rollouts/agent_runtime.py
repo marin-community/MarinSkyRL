@@ -55,7 +55,8 @@ class InstalledAgentRuntime:
         try:
             self.port = await self.resources.enter_async_context(
                 serve_agent_app(
-                    create_app(), host="127.0.0.1",
+                    create_app(),
+                    host="127.0.0.1",
                     startup_timeout=self.settings.service_startup_timeout,
                     shutdown_timeout=self.settings.service_shutdown_timeout,
                 )
@@ -103,38 +104,56 @@ class InstalledAgentRuntime:
 
     async def _run_trial(self, machine, complete, lowered, trial_dir, instruction, attempt_id) -> None:
         run_timeout = lowered.session.total_turn_timeout or self.settings.run_timeout
-        proxy = RecordProxy(f"http://127.0.0.1:{self.port}", trial_dir / "engine" / "literal.jsonl", timeout=run_timeout)
-        async with aclosing(proxy), serve_agent_app(
-            proxy.app(self.limits), host="0.0.0.0",
-            startup_timeout=self.settings.service_startup_timeout,
-            shutdown_timeout=self.settings.service_shutdown_timeout,
-        ) as port, registered_agent_endpoint(port) as endpoint:
+        proxy = RecordProxy(
+            f"http://127.0.0.1:{self.port}", trial_dir / "engine" / "literal.jsonl", timeout=run_timeout
+        )
+        async with (
+            aclosing(proxy),
+            serve_agent_app(
+                proxy.app(self.limits),
+                host="0.0.0.0",
+                startup_timeout=self.settings.service_startup_timeout,
+                shutdown_timeout=self.settings.service_shutdown_timeout,
+            ) as port,
+            registered_agent_endpoint(port) as endpoint,
+        ):
             api_base = await endpoint.api_base(
                 required_lifetime=self.settings.setup_timeout + run_timeout + self.settings.cleanup_timeout
             )
             source = self.settings.agent
-            config = source.model_copy(update={
-                "model_name": source.model_name or f"hosted_vllm/{self.backend.model_name}",
-                "model_alias": f"hosted_vllm/{self.backend.model_name}",
-                "kwargs": {
-                    **source.kwargs, "api_base": api_base, "api_key": "capability-url",
-                    "collect_rollout_details": True,
-                    "model_info": {
-                        "max_input_tokens": self.backend.max_model_len,
-                        "max_output_tokens": self.limits.max_output_tokens,
+            config = source.model_copy(
+                update={
+                    "model_name": source.model_name or f"hosted_vllm/{self.backend.model_name}",
+                    "model_alias": f"hosted_vllm/{self.backend.model_name}",
+                    "kwargs": {
+                        **source.kwargs,
+                        "api_base": api_base,
+                        "api_key": "capability-url",
+                        "collect_rollout_details": True,
+                        "model_info": {
+                            "max_input_tokens": self.backend.max_model_len,
+                            "max_output_tokens": self.limits.max_output_tokens,
+                        },
                     },
-                },
-            })
+                }
+            )
             agent = AgentFactory.create_agent_from_config(config, logs_dir=trial_dir / "agent")
             if not isinstance(agent, BaseInstalledAgent):
                 raise ValueError("The selected agent must be an installed Harbor agent")
             environment = BorrowedMachineEnvironment(
-                machine, trial_dir, attempt_id,
+                machine,
+                trial_dir,
+                attempt_id,
                 EnvironmentConfig(allow_internet=lowered.runtime.task_machine.network == NetworkPolicy.ALLOW),
             )
             with environment.with_default_user(lowered.runtime.task_machine.user):
                 await run_installed_agent(
-                    agent, environment, self.backend, complete, instruction=instruction,
-                    setup_timeout=self.settings.setup_timeout, run_timeout=run_timeout,
+                    agent,
+                    environment,
+                    self.backend,
+                    complete,
+                    instruction=instruction,
+                    setup_timeout=self.settings.setup_timeout,
+                    run_timeout=run_timeout,
                     cleanup_timeout=self.settings.cleanup_timeout,
                 )

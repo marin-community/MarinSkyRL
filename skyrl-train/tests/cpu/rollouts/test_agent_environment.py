@@ -20,7 +20,9 @@ async def test_agent_environment_runs_commands_and_transfers_without_owning_mach
         with environment.scoped_exec_env({"SUFFIX": "scoped"}), environment.with_default_user("root"):
             result = await environment.exec(
                 'cat input.txt > output.txt; printf "%s" "$SUFFIX" >> output.txt',
-                cwd="/workspace/files", env={"SUFFIX": "request"}, timeout_sec=5,
+                cwd="/workspace/files",
+                env={"SUFFIX": "request"},
+                timeout_sec=5,
             )
         assert result.return_code == 0
         downloaded = tmp_path / "downloaded"

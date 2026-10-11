@@ -37,7 +37,9 @@ async def test_agent_endpoint_removes_registration_after_trial_or_token_failure(
         with iris_ctx_scope(IrisContext.from_job_info(info, IrisClient(Cluster()))):
             async with registered_agent_endpoint(8080) as endpoint:
                 assert endpoints[endpoint.name] == (
-                    "http://10.0.0.2:8080", info.task_attempt, EndpointAccess.ENDPOINT_ACCESS_LINK
+                    "http://10.0.0.2:8080",
+                    info.task_attempt,
+                    EndpointAccess.ENDPOINT_ACCESS_LINK,
                 )
                 if token_lifetime == 1:
                     with pytest.raises(ValueError, match="shorter than the configured agent attempt"):

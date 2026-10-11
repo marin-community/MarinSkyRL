@@ -59,7 +59,9 @@ class AgentInferenceBackend:
             raise ValueError("An agent session requires exactly one completion per request")
         options = {key: value for key, value in body.items() if key not in TRANSPORT_FIELDS}
         turn = await self.sessions[trial_id](SessionStart(tuple(body["messages"]), options))
-        finish_reason = "length" if turn.stop_reason == "length" else "tool_calls" if turn.message.get("tool_calls") else "stop"
+        finish_reason = (
+            "length" if turn.stop_reason == "length" else "tool_calls" if turn.message.get("tool_calls") else "stop"
+        )
         logprobs = None
         if turn.logprobs is not None:
             logprobs = {
@@ -79,13 +81,15 @@ class AgentInferenceBackend:
             "created": int(time.time()),
             "model": self.model_name,
             "prompt_token_ids": list(turn.prompt_token_ids),
-            "choices": [{
-                "index": 0,
-                "message": turn.message,
-                "finish_reason": finish_reason,
-                "logprobs": logprobs,
-                "token_ids": list(turn.response_token_ids),
-            }],
+            "choices": [
+                {
+                    "index": 0,
+                    "message": turn.message,
+                    "finish_reason": finish_reason,
+                    "logprobs": logprobs,
+                    "token_ids": list(turn.response_token_ids),
+                }
+            ],
             "usage": {
                 "prompt_tokens": len(turn.prompt_token_ids),
                 "completion_tokens": len(turn.response_token_ids),

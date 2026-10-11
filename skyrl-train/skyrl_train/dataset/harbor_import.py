@@ -148,4 +148,3 @@ def harbor_task(directory: Path, *, source: Source) -> TaskSpec:
         source=source,
         tags=("harbor",),
     )
-

@@ -33,13 +33,18 @@ async def test_http_agent_completion_retains_tool_call_and_exact_token_evidence(
     set_global_state(backend, None)
     try:
         with backend.session("trial", complete):
-            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app()), base_url="http://test") as client:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=create_app()), base_url="http://test"
+            ) as client:
                 response = await client.post(
                     "/v1/chat/completions",
                     headers={TRIAL_HEADER: "trial"},
                     json={
-                        "model": "model", "messages": [{"role": "user", "content": "Use shell."}],
-                        "stream": stream, "tool_choice": "auto", "max_tokens": 16,
+                        "model": "model",
+                        "messages": [{"role": "user", "content": "Use shell."}],
+                        "stream": stream,
+                        "tool_choice": "auto",
+                        "max_tokens": 16,
                     },
                 )
         assert response.status_code == 200

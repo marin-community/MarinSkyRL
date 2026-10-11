@@ -36,7 +36,11 @@ async def serve_agent_app(
         port = listener.getsockname()[1]
         server = _ReadyServer(
             uvicorn.Config(
-                app, host=host, port=port, log_level="warning", access_log=False,
+                app,
+                host=host,
+                port=port,
+                log_level="warning",
+                access_log=False,
                 timeout_graceful_shutdown=shutdown_timeout,
             )
         )

@@ -57,7 +57,9 @@ class HttpFixtureAgent(BaseInstalledAgent):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path,fail", [("direct", False), ("direct", True), ("worker", False)])
-async def test_native_runtime_routes_through_proxy_and_publishes_failed_attempts(tmp_path, monkeypatch, task_inputs, path, fail):
+async def test_native_runtime_routes_through_proxy_and_publishes_failed_attempts(
+    tmp_path, monkeypatch, task_inputs, path, fail
+):
     @asynccontextmanager
     async def local_endpoint(port):
         async def api_base(*, required_lifetime):
@@ -76,22 +78,32 @@ async def test_native_runtime_routes_through_proxy_and_publishes_failed_attempts
         return ModelTurn({"role": "assistant", "content": "12"}, (2,), (1,), (-0.25,), "stop")
 
     settings = InstalledAgentSettings(
-        agent=AgentConfig(import_path=f"{__name__}:HttpFixtureAgent", model_name="hosted_vllm/checkpoint", kwargs={"fail": fail}),
-        output_path=str(tmp_path / "published"), setup_timeout=5, run_timeout=5, cleanup_timeout=5,
-        service_startup_timeout=5, service_shutdown_timeout=5,
+        agent=AgentConfig(
+            import_path=f"{__name__}:HttpFixtureAgent", model_name="hosted_vllm/checkpoint", kwargs={"fail": fail}
+        ),
+        output_path=str(tmp_path / "published"),
+        setup_timeout=5,
+        run_timeout=5,
+        cleanup_timeout=5,
+        service_startup_timeout=5,
+        service_shutdown_timeout=5,
     )
     runtime = InstalledAgentRuntime(settings, AgentInferenceBackend("model", 32, tokenize, tokenizer), 8)
     worker_config, request = task_inputs
     task = LoweredTaskSpec.model_validate_json(request["env_extras"][0]["lowered_task_spec"]).task
-    task = task.model_copy(update={
-        "context": ConversationInput(events=(TextMessage(role="user", content="Original BFCL instruction"),)),
-        "tags": ("harbor",),
-        "environment_requirements": EnvironmentRequirements(
-            command_semantics=CommandSemantics.SHELL_SIMULATOR, capabilities=("shell", "filesystem")
-        ),
-    })
+    task = task.model_copy(
+        update={
+            "context": ConversationInput(events=(TextMessage(role="user", content="Original BFCL instruction"),)),
+            "tags": ("harbor",),
+            "environment_requirements": EnvironmentRequirements(
+                command_semantics=CommandSemantics.SHELL_SIMULATOR, capabilities=("shell", "filesystem")
+            ),
+        }
+    )
     lowered = lowered_task(
-        task, backend="shellsim", total_turn_timeout=5,
+        task,
+        backend="shellsim",
+        total_turn_timeout=5,
     )
     machine = await ShellSimMachineFactory().create(MachineSpec(ShellSimBuiltins()))
     await runtime.startup()
@@ -99,10 +111,13 @@ async def test_native_runtime_routes_through_proxy_and_publishes_failed_attempts
         if path == "worker":
             request["env_extras"] = [{"lowered_task_spec": lowered.model_dump_json()}]
             worker = TaskRolloutWorker(
-                worker_config, WholeTaskProjection(WholeTrajectoryProjection(worker_config, ProjectionTokenizer())),
-                InferenceClient(), {"shellsim": ShellSimMachineFactory()},
+                worker_config,
+                WholeTaskProjection(WholeTrajectoryProjection(worker_config, ProjectionTokenizer())),
+                InferenceClient(),
+                {"shellsim": ShellSimMachineFactory()},
                 harbor=HarborTaskSettings.from_config(OmegaConf.create({"harbor": {"max_retries": 0}})),
-                installed_agents=runtime, shutdown_timeout=10,
+                installed_agents=runtime,
+                shutdown_timeout=10,
             )
             try:
                 batch = await worker.run(request)

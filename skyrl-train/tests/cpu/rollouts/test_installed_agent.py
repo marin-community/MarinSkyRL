@@ -50,7 +50,9 @@ async def test_installed_agent_routes_http_and_retains_logs_after_execution(tmp_
             assert result.return_code == 0
 
         async def run(self, instruction, environment, context):
-            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app()), base_url="http://test") as client:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=create_app()), base_url="http://test"
+            ) as client:
                 response = await client.post(
                     "/v1/chat/completions",
                     headers={TRIAL_HEADER: self.rollout_correlation_id},
@@ -69,8 +71,14 @@ async def test_installed_agent_routes_http_and_retains_logs_after_execution(tmp_
     environment = BorrowedMachineEnvironment(machine, tmp_path / "trial", "trial", EnvironmentConfig())
     try:
         execution = run_installed_agent(
-            agent, environment, backend, complete, instruction="Solve the task.",
-            setup_timeout=5, run_timeout=5, cleanup_timeout=5,
+            agent,
+            environment,
+            backend,
+            complete,
+            instruction="Solve the task.",
+            setup_timeout=5,
+            run_timeout=5,
+            cleanup_timeout=5,
         )
         if outcome == "cancel":
             pending = asyncio.create_task(execution)
