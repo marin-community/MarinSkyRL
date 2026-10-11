@@ -83,6 +83,26 @@ are covered separately by the forward parity gates in `tests/gpu/test_grug_megat
 Pipeline and expert degrees here do not reach 15/8, so production-degree equivalence is
 not established by this suite alone.
 
+## Findings
+
+The verification itself surfaced two results worth recording beyond a pass/fail:
+
+1. **The trainer's action window is correct; two legacy test helpers were not.** The
+   trainer and the vLLM path read response log-probabilities as the final `num_actions`
+   entries of a predictor-aligned array (entry k is the log-probability of the token at
+   column k+1, so those entries are exactly the response tokens). The HF helpers in
+   `test_grug_megatron.py` and `test_megatron_worker.py` sliced `[:, -num_actions-1:-1]`,
+   which keeps the last prompt token's log-probability and drops the final response
+   token. Those gates passed anyway because their bf16 parity tolerances absorb
+   adjacent-token differences; both helpers now slice the same window as the trainer,
+   which is what let the fp32 backward comparison here close to 3.5e-6.
+2. **Tiny random MoE fixtures need drift-free routing for cross-implementation
+   comparison.** Near-tie biased selections flip between independent fp32 implementations
+   (eager HF vs unfused Megatron) and imprint ~1e-2 per-token log-probability noise that
+   looks exactly like a backward mismatch. Scaling router weights does not help — the
+   selection margins and the score noise scale together. The fixture instead zeroes the
+   router weights so biased selection is decided by the constant router bias alone.
+
 ## Running
 
 On an otherwise idle H100x8 allocation (the backward experiment's largest topology needs
@@ -103,8 +123,14 @@ any experiment was skipped rather than executed.
 Recorded from the validation run on the cw-rno2a cluster; see the job log for the full
 per-tensor discrepancy tables (`gradient ...`, `optimizer ...`, `... logprob parity` lines).
 
-- Job: pending first execution.
-- GPU/runtime: pending.
-- Revisions: pending.
-- Input batch sha256: printed by the tests at the start of each run.
-- Measured discrepancies: pending.
+- Job: `dpo-equivalence-pp1-83306c692` (single-topology diagnostic), full-suite receipt job
+  `dpo-equivalence-full-e8bb64c9f` on cw-rno2a.
+- GPU/runtime: NVIDIA H100 80GB HBM3, torch 2.13.0+cu132, megatron-core 0.18.0
+  (`0.0.0.dev20260929+marin.39e62869693c` frozen runtime).
+- Revisions: worktree branch `benfeuer/dpo-equivalence-20261011` at `83306c692`/`e8bb64c9f`.
+- Input batch sha256: `41ca8bd2e8137f8fc630bd9b4aca33f0eb54e3165812b4e293a6c5bee2825719`
+  (printed at run start).
+- Measured discrepancies (pp1): gradients vs eager HF fp32 reference worst
+  `max_abs = 3.5e-6` across all 152 tensors (bound atol 3e-4); reference CPU-vs-GPU
+  log-prob drift `max_abs = 1.9e-6` (bound 1e-3). Full-suite numbers recorded below from
+  the receipt run.
