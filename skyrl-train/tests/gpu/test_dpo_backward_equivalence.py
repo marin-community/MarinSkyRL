@@ -141,7 +141,11 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
         dp_rank = mpu.get_data_parallel_rank(with_context_parallel=False)
         micros = batch.dp_shard(dp_rank, dp_size, MICRO_BATCH_SIZE)
         payloads = [
-            _payload(micro, reference.action_log_probs[start:start + micro.sequences.shape[0]], reference.ref_action_log_probs[start:start + micro.sequences.shape[0]])
+            _payload(
+                micro,
+                reference.action_log_probs[start : start + micro.sequences.shape[0]],
+                reference.ref_action_log_probs[start : start + micro.sequences.shape[0]],
+            )
             for start, micro in micros
         ]
         metrics = wrapper.forward_backward_mini_batch(
@@ -163,10 +167,7 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
             assert not extra, f"Megatron gradient exports absent from the reference: {sorted(extra)}"
             for name in sorted(reference.gradients):
                 _assert_gradient_close(name, exports[name], reference.gradients[name])
-            worst = max(
-                (exports[name] - reference.gradients[name]).abs().max().item()
-                for name in reference.gradients
-            )
+            worst = max((exports[name] - reference.gradients[name]).abs().max().item() for name in reference.gradients)
             print(f"gradient worst max_abs across all tensors: {worst:.8g}", flush=True)
 
         # Metric rows pool across data-parallel ranks like the trainer's step metrics.

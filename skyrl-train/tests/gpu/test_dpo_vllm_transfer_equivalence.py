@@ -140,7 +140,9 @@ def test_dpo_update_transfers_to_vllm_tensors_and_logprobs(tmp_path):
         )
         names = [*GRUG_PARAMETER_NAMES, *GRUG_BIAS_NAMES]
         before = rank0_validation_snapshot(policy, names)
-        trainer_before = _megatron_response_logprobs(policy, _pair_training_batch(batch, torch.zeros_like(batch.loss_mask)))
+        trainer_before = _megatron_response_logprobs(
+            policy, _pair_training_batch(batch, torch.zeros_like(batch.loss_mask))
+        )
         served_before = asyncio.run(_vllm_logprobs(client, cfg, batch.sequences, batch.num_actions))
         _assert_logprob_parity("pre-update", served_before, trainer_before, batch.loss_mask)
 
@@ -155,7 +157,9 @@ def test_dpo_update_transfers_to_vllm_tensors_and_logprobs(tmp_path):
         assert_engine_weights(client, names, training, GRUG_BIAS_NAMES, GRUG_SERVING_EXPERT_INDEX_BY_NAME)
 
         asyncio.run(client.reset_prefix_cache())
-        trainer_after = _megatron_response_logprobs(policy, _pair_training_batch(batch, torch.zeros_like(batch.loss_mask)))
+        trainer_after = _megatron_response_logprobs(
+            policy, _pair_training_batch(batch, torch.zeros_like(batch.loss_mask))
+        )
         served_after = asyncio.run(_vllm_logprobs(client, cfg, batch.sequences, batch.num_actions))
         _assert_logprob_parity("post-sync", served_after, trainer_after, batch.loss_mask)
         drift = (served_after - served_before).abs()[batch.loss_mask.bool()]

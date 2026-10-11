@@ -13,7 +13,6 @@ from importlib import util
 import hashlib
 
 import torch
-from megatron.bridge import AutoBridge
 from omegaconf import DictConfig, OmegaConf
 from torch import nn
 from transformers import AutoConfig
@@ -92,10 +91,10 @@ def fixed_pair_batch(
     generator = torch.Generator().manual_seed(seed)
     rows = 2 * num_pairs
     left_pad = [3, 0, 5, 1]
-    total_length = prompt_length + response_length + 6
+    total_length = prompt_length + response_length + 5
     sequences, masks, action_masks = [], [], []
     for row in range(rows):
-        body_length = prompt_length + response_length - (row % 4)
+        body_length = prompt_length + response_length - (row % 2)
         body = torch.randint(10, 500, (body_length,), generator=generator).tolist()
         before = left_pad[row % len(left_pad)]
         after = total_length - body_length - before
@@ -112,10 +111,12 @@ def fixed_pair_batch(
         assert sum(window) >= 1, (row, body_length, before)
         action_masks.append(window)
     pair_roles = torch.tensor([1.0, -1.0], dtype=torch.float32).repeat(num_pairs)
+    # The loss mask covers exactly the action window (the final `response_length` columns).
+    loss_window = torch.tensor(action_masks, dtype=torch.float32)[:, -response_length:]
     return PairBatch(
         sequences=torch.tensor(sequences, dtype=torch.long),
         attention_mask=torch.tensor(masks, dtype=torch.long),
-        loss_mask=torch.tensor(action_masks, dtype=torch.float32),
+        loss_mask=loss_window,
         pair_roles=pair_roles,
         num_actions=response_length,
     )
@@ -132,7 +133,14 @@ class DPOReference:
     ref_action_log_probs: torch.Tensor
 
 
-def hf_dpo_reference(model_path: str, batch: PairBatch, *, beta: float = BETA, label_smoothing: float = LABEL_SMOOTHING, device: str = "cpu") -> DPOReference:  # noqa: E501
+def hf_dpo_reference(
+    model_path: str,
+    batch: PairBatch,
+    *,
+    beta: float = BETA,
+    label_smoothing: float = LABEL_SMOOTHING,
+    device: str = "cpu",
+) -> DPOReference:  # noqa: E501
     """Compute the DPO loss, its gradients, and both log-prob streams with eager HF GrugMoE.
 
     The formula is written out from the TRL "sigmoid" definition rather than calling any
@@ -176,9 +184,9 @@ def hf_dpo_reference(model_path: str, batch: PairBatch, *, beta: float = BETA, l
     metrics = {
         "dpo/loss": float(loss.detach()),
         "dpo/accuracy": float((delta > 0).float().mean()),
-        "dpo/margin": float((beta * (chosen - rejected)).mean()),
-        "dpo/chosen_reward": float((beta * chosen).mean()),
-        "dpo/rejected_reward": float((beta * rejected).mean()),
+        "dpo/margin": float((beta * (chosen - rejected)).detach().mean()),
+        "dpo/chosen_reward": float((beta * chosen).detach().mean()),
+        "dpo/rejected_reward": float((beta * rejected).detach().mean()),
     }
     return DPOReference(
         loss=float(loss.detach()),
@@ -219,7 +227,8 @@ def build_grug_megatron_chunks(
     overrides it with "unfused" because Transformer Engine's fused kernels are fp16/bf16-only,
     while the production bf16 kernels stay covered by the parity gates.
     """
-    from megatron.core.distributed import DistributedDataParallel, DistributedDataParallelConfig
+    from megatron.bridge import AutoBridge
+    from megatron.core.distributed import DistributedDataParallelConfig
 
     hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
     bridge = AutoBridge.from_hf_pretrained(model_path, trust_remote_code=True)
@@ -241,9 +250,7 @@ def build_grug_megatron_chunks(
     ddp_config = DistributedDataParallelConfig()
     if wrap_with_ddp:
         ddp_config.use_distributed_optimizer = True
-    chunks = provider.provide_distributed_model(
-        ddp_config=ddp_config, wrap_with_ddp=wrap_with_ddp, bf16=bf16
-    )
+    chunks = provider.provide_distributed_model(ddp_config=ddp_config, wrap_with_ddp=wrap_with_ddp, bf16=bf16)
     install_dpo_batch_major_output_projection(chunks, provider, policy_loss_type)
     return bridge, provider, chunks, hf_config
 

@@ -108,9 +108,7 @@ def run_optimizer_rank(rank, world_size, pp, ep, rendezvous, model_path, clip_ac
                 "optimizer_kwargs": {"eps": ADAM_EPS},
             }
         )
-        optim_config = init_megatron_optim_config(
-            OmegaConf.to_container(optimizer_config, resolve=True), {}
-        )
+        optim_config = init_megatron_optim_config(OmegaConf.to_container(optimizer_config, resolve=True), {})
         optimizer = get_megatron_optimizer(chunks, optim_config)
         scheduler = get_megatron_optimizer_param_scheduler(
             optimizer=optimizer, config=optimizer_config, num_training_steps=4
@@ -122,7 +120,11 @@ def run_optimizer_rank(rank, world_size, pp, ep, rendezvous, model_path, clip_ac
         parameters = {name: parameter for chunk in chunks for name, parameter in chunk.named_parameters()}
         initial = {name: parameter.detach().float().cpu().clone() for name, parameter in parameters.items()}
         reference = {
-            name: (value.flatten().double(), torch.zeros_like(value.flatten().double()), torch.zeros_like(value.flatten().double()))
+            name: (
+                value.flatten().double(),
+                torch.zeros_like(value.flatten().double()),
+                torch.zeros_like(value.flatten().double()),
+            )
             for name, value in initial.items()
         }
 
@@ -130,9 +132,9 @@ def run_optimizer_rank(rank, world_size, pp, ep, rendezvous, model_path, clip_ac
         for step_index in (1, 2):
             for name, parameter in parameters.items():
                 parameter.main_grad.copy_(
-                    fixed_gradient(name, parameter.numel(), step_index, scale).to(
-                        device=parameter.main_grad.device, dtype=parameter.main_grad.dtype
-                    ).view_as(parameter)
+                    fixed_gradient(name, parameter.numel(), step_index, scale)
+                    .to(device=parameter.main_grad.device, dtype=parameter.main_grad.dtype)
+                    .view_as(parameter)
                 )
             squares = torch.zeros((), dtype=torch.float64)
             for name, (parameter_value, _, _) in reference.items():
@@ -182,7 +184,10 @@ def run_optimizer_rank(rank, world_size, pp, ep, rendezvous, model_path, clip_ac
             total_numel = {}
             for peer in numel_everywhere:
                 total_numel.update(peer)
-            assert set(covered) == set(total_numel), (sorted(set(covered) - set(total_numel)), sorted(set(total_numel) - set(covered)))
+            assert set(covered) == set(total_numel), (
+                sorted(set(covered) - set(total_numel)),
+                sorted(set(total_numel) - set(covered)),
+            )
             for name, elements in covered.items():
                 assert elements == total_numel[name], (name, elements, total_numel[name])
             print(
@@ -209,9 +214,7 @@ def run_optimizer_rank(rank, world_size, pp, ep, rendezvous, model_path, clip_ac
                 torch.testing.assert_close(observed, expected, rtol=STATE_RTOL, atol=STATE_ATOL)
             assert int(state["step"]) == 2, state["step"]
             # The bf16 gradient-buffer parameter data must be the rounded fp32 shard value.
-            torch.testing.assert_close(
-                model_data.float().cpu(), expected_bf16.float().cpu(), rtol=0, atol=0
-            )
+            torch.testing.assert_close(model_data.float().cpu(), expected_bf16.float().cpu(), rtol=0, atol=0)
     finally:
         mpu.destroy_model_parallel()
         dist.destroy_process_group()
