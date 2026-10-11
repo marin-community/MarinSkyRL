@@ -2,12 +2,10 @@ from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from importlib.metadata import version
-import time
 
 import pytest
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
 from omegaconf import open_dict
 from megatron.core import parallel_state as mpu
 from megatron.core.distributed import DistributedDataParallel, DistributedDataParallelConfig
@@ -21,6 +19,7 @@ from skyrl_train.config.utils import get_default_config
 from skyrl_train.distillation import TeacherTopKInput
 from skyrl_train.objective.losses import importance_sampling_policy_loss
 from skyrl_train.workers.megatron.megatron_model_wrapper import MegatronModelWrapper, MegatronPolicyMicroBatch
+from tests.gpu.utils import run_distributed_with_deadline
 
 
 class TokenLogits(MegatronModule):
@@ -247,21 +246,7 @@ def run_scaling_rank(rank, world_size, cp_size, teacher, rendezvous):
 
 
 def run_distributed(target, world_size, args):
-    context = mp.spawn(target, args=args, nprocs=world_size, join=False)
-    deadline = time.monotonic() + 240
-    try:
-        while not context.join(timeout=1):
-            if time.monotonic() >= deadline:
-                raise TimeoutError("Megatron objective workers exceeded their 240-second deadline")
-    finally:
-        for process in context.processes:
-            if process.is_alive():
-                process.terminate()
-        for process in context.processes:
-            process.join(timeout=10)
-            if process.is_alive():
-                process.kill()
-                process.join()
+    run_distributed_with_deadline(target, args, world_size)
 
 
 @pytest.mark.parametrize(

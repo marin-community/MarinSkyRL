@@ -2,6 +2,7 @@ import asyncio
 import os
 import ray
 import torch
+import torch.multiprocessing as mp
 import time
 import requests
 import importlib
@@ -30,6 +31,25 @@ from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
 
 TEST_DATA_PATH = os.path.expanduser("~/data/gsm8k/validation.parquet")
+
+
+def run_distributed_with_deadline(target, args, world_size: int, timeout_seconds: int = 240):
+    """Spawn NCCL rank workers and guarantee no process outlives the deadline."""
+    context = mp.spawn(target, args=args, nprocs=world_size, join=False)
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        while not context.join(timeout=1):
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"distributed workers exceeded their {timeout_seconds}-second deadline")
+    finally:
+        for process in context.processes:
+            if process.is_alive():
+                process.terminate()
+        for process in context.processes:
+            process.join(timeout=10)
+            if process.is_alive():
+                process.kill()
+                process.join()
 
 
 def get_test_actor_config() -> DictConfig:
