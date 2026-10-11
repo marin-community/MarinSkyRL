@@ -11,11 +11,12 @@ from rolloutengine.contracts import ModelTurn
 from rolloutengine.engine import ShellboxRolloutEngine
 from rolloutengine.spec import LoweredTaskSpec, MachineRuntimeSpec, TaskRuntimeSpec, TaskSessionSpec
 from shellbox.backends.docker.machine import DockerMachineFactory, docker
-from shellbox.machine import Command, DockerImage, ExitReason, MachineSpec
+from shellbox.machine import Backend, Command, DockerImage, ExitReason, MachineSpec
 from taskcompendium.grading_result import Outcome
 from taskcompendium.models import (
     AnswerType,
     ArtifactKind,
+    CommandSemantics,
     ConversationInput,
     EnvironmentRequirements,
     FileReward,
@@ -155,6 +156,8 @@ async def test_docker_shell_rollout_keeps_timeout_feedback_and_private_grades(py
     machines = []
 
     class Factory:
+        backend = Backend.DOCKER
+
         async def create(self, spec):
             # The fixture pulled this exact digest before machine acquisition.
             machine = await DockerMachineFactory().create(replace(spec, source=python_image))
@@ -182,7 +185,10 @@ async def test_docker_shell_rollout_keeps_timeout_feedback_and_private_grades(py
         return ModelTurn(message, prompt, (20 + index,), (-0.5,), "stop")
 
     requirements = EnvironmentRequirements(
-        docker_image=PYTHON_IMAGE, working_directory="/tmp", capabilities=("shell", "filesystem")
+        command_semantics=CommandSemantics.LINUX_PROCESS,
+        docker_image=PYTHON_IMAGE,
+        working_directory="/tmp",
+        capabilities=("shell", "filesystem"),
     )
     verifier = ScriptGrader(
         environment=requirements,
