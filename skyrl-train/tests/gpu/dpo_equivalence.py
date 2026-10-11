@@ -249,7 +249,12 @@ def build_grug_megatron_chunks(
 
     import skyrl_train.models.grug_megatron_bridge  # noqa: F401  # registers the Grug bridge with Megatron-Bridge
 
+    def phase(label: str) -> None:
+        print(f"build_grug_megatron_chunks: {label}", flush=True)
+
+    phase("loading hf config")
     hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    phase("building bridge")
     bridge = AutoBridge.from_hf_pretrained(model_path, trust_remote_code=True)
     provider = bridge.to_megatron_provider()
     provider.tensor_model_parallel_size = tensor_model_parallel_size
@@ -264,12 +269,16 @@ def build_grug_megatron_chunks(
     provider.masked_softmax_fusion = True
     provider.moe_token_dispatcher_type = "alltoall"
     provider.gradient_accumulation_fusion = util.find_spec("fused_weight_gradient_mlp_cuda") is not None
+    phase("finalizing provider")
     provider.finalize()
+    phase("provider finalized")
 
     ddp_config = DistributedDataParallelConfig()
     if wrap_with_ddp:
         ddp_config.use_distributed_optimizer = True
+    phase("providing distributed model")
     chunks = provider.provide_distributed_model(ddp_config=ddp_config, wrap_with_ddp=wrap_with_ddp, bf16=bf16)
+    phase("chunks built")
     install_dpo_batch_major_output_projection(chunks, provider, policy_loss_type)
     return bridge, provider, chunks, hf_config
 
