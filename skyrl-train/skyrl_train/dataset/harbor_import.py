@@ -31,6 +31,7 @@ from taskcompendium.models import (
 )
 from taskcompendium.runtime.resources import inline_resource
 
+
 class TaskOS(StrEnum):
     LINUX = "linux"
     WINDOWS = "windows"

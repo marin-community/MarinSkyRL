@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from functools import partial
 import os
 
+from daytona import AsyncDaytona, DaytonaConfig
 from omegaconf import DictConfig
 from shellbox.backends.daytona.machine import DaytonaMachineFactory, DaytonaNetworkMode, DaytonaNetworkPolicy
 from shellbox.machine import Backend, MachineFactory
