@@ -98,25 +98,17 @@ def _payload(micro: PairBatch, old_log_probs: torch.Tensor, ref_log_probs: torch
     )
 
 
-def _assert_gradient_close(name: str, actual: torch.Tensor, expected: torch.Tensor, sequences: torch.Tensor) -> str:
+def _gradient_line(name: str, actual: torch.Tensor, expected: torch.Tensor) -> tuple[str, bool]:
     difference = (actual - expected).abs()
-    line = f"gradient {name}: max_abs={difference.max().item():.8g} mean_abs={difference.mean().item():.8g}"
+    line = (
+        f"gradient {name}: max_abs={difference.max().item():.8g} mean_abs={difference.mean().item():.8g} "
+        f"expected_max_abs={expected.abs().max().item():.8g}"
+    )
     try:
         torch.testing.assert_close(actual, expected, rtol=GRADIENT_RTOL, atol=GRADIENT_ATOL)
-    except AssertionError as error:
-        if name == "lm_head.weight":
-            rows = torch.nonzero((difference > GRADIENT_ATOL).any(dim=-1)).flatten().tolist()
-            targets = set(sequences[:, 1:].flatten().tolist())
-            window_targets = set(sequences[:, -9:].flatten().tolist())
-            line += (
-                f" | {len(rows)} mismatching vocab rows {rows[:32]}; "
-                f"in-targets={[row for row in rows if row in targets][:16]}; "
-                f"in-window-targets={[row for row in rows if row in window_targets][:16]}"
-            )
-        line += " | MISMATCH"
-        print(line, flush=True)
-        raise error
-    return line
+    except AssertionError:
+        return line + " | MISMATCH", True
+    return line, False
 
 
 def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: PairBatch, ref_offsets: torch.Tensor):
@@ -232,10 +224,9 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
             )
 
         if rank == 0:
-            print(
+            emit(
                 f"GPU={torch.cuda.get_device_name()} torch={torch.__version__} "
-                f"megatron-core={version('megatron-core')} TP=1 PP={pp} EP={ep} DP={dp_size}",
-                flush=True,
+                f"megatron-core={version('megatron-core')} TP=1 PP={pp} EP={ep} DP={dp_size}"
             )
             # Fixture-validity guard: the same eager implementation on CPU must agree with
             # the GPU reference well enough that a routing flip would stand out.
@@ -269,10 +260,15 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
             extra = exported - set(reference.gradients)
             assert not missing, f"reference gradients without a Megatron export: {sorted(missing)}"
             assert not extra, f"Megatron gradient exports absent from the reference: {sorted(extra)}"
+            gradient_failures = []
             for name in sorted(reference.gradients):
-                log_detail(_assert_gradient_close(name, exports[name], reference.gradients[name], batch.sequences))
+                line, failed = _gradient_line(name, exports[name], reference.gradients[name])
+                log_detail(line)
+                if failed:
+                    gradient_failures.append(name)
             worst = max((exports[name] - reference.gradients[name]).abs().max().item() for name in reference.gradients)
             emit(f"gradient worst max_abs across all tensors: {worst:.8g}")
+            assert not gradient_failures, gradient_failures
     finally:
         for line in report:
             print(line, flush=True)
