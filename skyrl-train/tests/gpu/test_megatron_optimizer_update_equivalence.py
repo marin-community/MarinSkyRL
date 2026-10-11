@@ -27,10 +27,9 @@ from omegaconf import OmegaConf
 
 from skyrl_train.distributed.megatron.megatron_strategy import MegatronStrategy
 from skyrl_train.distributed.megatron.optimizer import (
-    get_megatron_optimizer,
     get_megatron_last_lr,
+    get_megatron_optimizer,
     get_megatron_optimizer_param_scheduler,
-    init_megatron_optim_config,
 )
 from tests.gpu.dpo_equivalence import build_grug_megatron_chunks, dpo_wrapper_config
 from tests.gpu.grug_gpu_gates import require_hoppers
@@ -108,8 +107,7 @@ def run_optimizer_rank(rank, world_size, pp, ep, rendezvous, model_path, clip_ac
                 "optimizer_kwargs": {"eps": ADAM_EPS},
             }
         )
-        optim_config = init_megatron_optim_config(OmegaConf.to_container(optimizer_config, resolve=True), {})
-        optimizer = get_megatron_optimizer(chunks, optim_config)
+        optimizer = get_megatron_optimizer(chunks, OmegaConf.to_container(optimizer_config, resolve=True), {})
         scheduler = get_megatron_optimizer_param_scheduler(
             optimizer=optimizer, config=optimizer_config, num_training_steps=4
         )
