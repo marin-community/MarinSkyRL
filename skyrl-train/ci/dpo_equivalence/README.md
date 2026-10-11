@@ -34,7 +34,10 @@ margin, since a near-tie route that flips between independent fp32 implementatio
 look exactly like a backward-pass mismatch. Each rank computes the HF reference on its own
 GPU, so compared gradients differ only by Megatron-vs-eager kernel arithmetic; a CPU
 reference on rank 0 doubles as a fixture-validity guard (routing flips jump ~1e-2, ordinary
-device drift stays ~1e-4).
+device drift stays ~1e-4). At the routing decisiveness the fixture needs, router-weight
+gradients fall below the registered gradient atol, so the comparison is sensitive for
+attention, expert, embedding, and projection tensors but not for the router weight itself
+(the router bias is a buffer and never carries a gradient).
 
 **Optimizer update.** Fixed, named gradients are injected into the production path —
 `MegatronStrategy.optimizer_step` over the DistributedOptimizer the trainer builds for DPO
