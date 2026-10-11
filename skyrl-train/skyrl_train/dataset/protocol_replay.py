@@ -1,4 +1,4 @@
-"""Convert a versioned protocol replay diagnostic to the common task format."""
+"""Convert a versioned training or validation replay to the common task format."""
 
 import argparse
 import hashlib

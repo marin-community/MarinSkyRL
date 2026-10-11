@@ -17,6 +17,9 @@ from rolloutengine.tool_protocol import THINK_CLOSE, TOOL_OPEN, ToolCallStatus, 
 from skyrl_train.config.ftpo import FTPOBoundary, FTPOConfig
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import LoopCreditConfig, tail_loop
 
+ROLE_HEADER_START = "<|start_header_id|>"
+ASSISTANT_HEADER = "<|start_header_id|>assistant<|end_header_id|>"
+
 
 @dataclass(frozen=True)
 class FTPOTargets:
@@ -76,13 +79,12 @@ def compact_boundary_logits(
 
 def _assistant_initial_thinking(prefix: list[int], decode: Callable[[list[int]], str]) -> bool:
     for index in range(len(prefix) - 1, -1, -1):
-        if decode([prefix[index]]) != "<|start_header_id|>":
+        if decode([prefix[index]]) != ROLE_HEADER_START:
             continue
         text = decode(prefix[index:])
-        header = "<|start_header_id|>assistant<|end_header_id|>"
-        if not text.startswith(header):
+        if not text.startswith(ASSISTANT_HEADER):
             return True
-        return text[len(header) :].strip() not in ("", THINK_CLOSE)
+        return text[len(ASSISTANT_HEADER) :].strip() not in ("", THINK_CLOSE)
     return True
 
 
@@ -109,9 +111,9 @@ def repeated_tool_opener_boundary(
         # context for parsing, but never select a token from that frozen prefix.
         if start == 0 and prompt and decode([prompt[-1]]) == TOOL_OPEN:
             for index in range(len(prompt) - 1, -1, -1):
-                if decode([prompt[index]]) != "<|start_header_id|>":
+                if decode([prompt[index]]) != ROLE_HEADER_START:
                     continue
-                if decode(list(prompt[index:])).startswith("<|start_header_id|>assistant<|end_header_id|>"):
+                if decode(list(prompt[index:])).startswith(ASSISTANT_HEADER):
                     prefill = list(prompt[index:])
                     thinking = _assistant_initial_thinking(list(prompt[:-1]), decode)
                 break
