@@ -58,6 +58,13 @@ class AgentInferenceBackend:
         if body.get("n", 1) != 1:
             raise ValueError("An agent session requires exactly one completion per request")
         options = {key: value for key, value in body.items() if key not in TRANSPORT_FIELDS}
+        if "tools" in options:
+            # Session options use Responses-style tools; this endpoint accepts Chat tools.
+            options["tools"] = []
+            for tool in body["tools"]:
+                if tool["type"] != "function":
+                    raise ValueError("Installed-agent sessions require function tools")
+                options["tools"].append({"type": "function", **tool["function"]})
         turn = await self.sessions[trial_id](SessionStart(tuple(body["messages"]), options))
         finish_reason = (
             "length" if turn.stop_reason == "length" else "tool_calls" if turn.message.get("tool_calls") else "stop"

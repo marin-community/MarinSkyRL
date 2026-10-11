@@ -1,14 +1,19 @@
 import json
+from types import SimpleNamespace
 
 import httpx
 import pytest
-from rolloutengine.contracts import ModelTurn
+from openai.types.chat import ChatCompletionToolParam
+from pydantic import TypeAdapter
+from rolloutengine.contracts import ModelRequest, ModelTurn
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from transformers import PreTrainedTokenizerFast
 
 from skyrl_train.inference_engines.inference_engine_client_http_endpoint import create_app, set_global_state
 from skyrl_train.rollouts.agent_backend import AgentInferenceBackend, TRIAL_HEADER
+from skyrl_train.rollouts.task_worker import _model_turn
+from skyrl_train.trajectory_runners.model_clients import DirectModelClient
 
 
 @pytest.mark.asyncio
@@ -67,3 +72,62 @@ async def test_http_agent_completion_retains_tool_call_and_exact_token_evidence(
             await backend.chat_completion({"headers": {TRIAL_HEADER: "trial"}, "json": {}})
     finally:
         set_global_state(None, None)
+
+
+@pytest.mark.asyncio
+async def test_agent_chat_tools_reach_serving_without_double_wrapping():
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0, "done": 1})))
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "bash",
+                "description": "Execute a command.",
+                "parameters": {"type": "object", "properties": {"command": {"type": "string"}}},
+                "strict": True,
+            },
+        }
+    ]
+    serving_requests = []
+
+    async def tokenize(payload):
+        TypeAdapter(list[ChatCompletionToolParam]).validate_python(payload["json"]["tools"])
+        serving_requests.append(payload["json"])
+        return {"tokens": [7, 8]}
+
+    async def chat_completion(payload):
+        TypeAdapter(list[ChatCompletionToolParam]).validate_python(payload["json"]["tools"])
+        serving_requests.append(payload["json"])
+        return {
+            "choices": [
+                {"message": {"role": "assistant", "content": "done"}, "finish_reason": "stop", "token_ids": [1]}
+            ]
+        }
+
+    client = DirectModelClient(
+        SimpleNamespace(model_name="model", tokenizer=tokenizer, tokenize=tokenize, chat_completion=chat_completion)
+    )
+
+    async def complete(request):
+        return await _model_turn(
+            client,
+            ModelRequest(request.messages, request.options, (), None),
+            sampling_params={},
+            max_context_length=32,
+            max_prompt_length=None,
+            chat_template_kwargs={},
+            session_id="trial",
+        )
+
+    backend = AgentInferenceBackend("model", 32, tokenize, tokenizer)
+    with backend.session("trial", complete):
+        response = await backend.chat_completion(
+            {
+                "headers": {TRIAL_HEADER: "trial"},
+                "json": {"messages": [{"role": "user", "content": "Run a command."}], "tools": tools},
+            }
+        )
+    assert response["choices"][0]["message"]["content"] == "done"
+    assert response["prompt_token_ids"] == [7, 8]
+    assert response["choices"][0]["token_ids"] == [1]
+    assert [request["tools"] for request in serving_requests] == [tools, tools]
