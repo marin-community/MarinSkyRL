@@ -145,6 +145,11 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
             print(line, flush=True)
             record(line)
 
+        late_lines: list[str] = []
+
+        def emit_late(line: str) -> None:
+            late_lines.append(line)
+
         mpu.initialize_model_parallel(
             tensor_model_parallel_size=1,
             pipeline_model_parallel_size=pp,
@@ -191,10 +196,10 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
                     f"probe: logits shape={tuple(logits.shape)} compact_len={compact_len} result shape={tuple(result.shape)}"
                 )
                 if single is not None:
-                    emit(f"probe single-roll row0 last9: {[round(v, 4) for v in single[0, -9:].tolist()]}")
-                emit(f"probe actual     row0 last9: {[round(v, 4) for v in result[0, -9:].tolist()]}")
-                emit(f"probe sequences  row0 last9: {sequences[0, -9:].tolist()}")
-                emit(f"probe compact    row0 last9: {compact[0, -9:].tolist()}")
+                    emit_late(f"probe single-roll row0 last9: {[round(v, 4) for v in single[0, -9:].tolist()]}")
+                emit_late(f"probe actual     row0 last9: {[round(v, 4) for v in result[0, -9:].tolist()]}")
+                emit_late(f"probe sequences  row0 last9: {sequences[0, -9:].tolist()}")
+                emit_late(f"probe compact    row0 last9: {compact[0, -9:].tolist()}")
             return result
 
         MegatronModelWrapper._token_logprobs = probing_token_logprobs
@@ -347,6 +352,8 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
             worst = max((exports[name] - reference.gradients[name]).abs().max().item() for name in reference.gradients)
             emit(f"gradient worst max_abs across all tensors: {worst:.8g}")
     finally:
+        for line in late_lines:
+            emit(line)
         for line in report:
             print(line, flush=True)
         if "original_token_logprobs" in locals():
