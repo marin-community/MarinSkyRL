@@ -788,6 +788,12 @@ def _skyrl_config_sections(
     if hf_hub_repo_id:
         trainer["hf_hub_repo_id"] = hf_hub_repo_id
     terminal_bench = copy.deepcopy(parsed.terminal_bench)
+    if terminal_bench is not None and terminal_bench.get("installed_agent") is not None:
+        installed_agent = terminal_bench["installed_agent"]
+        if not installed_agent.get("output_path"):
+            installed_agent["output_path"] = join_resource_path(
+                generator["trajectory_retention"]["output_path"], "installed-agents"
+            )
 
     sections = {
         "trainer": trainer,
