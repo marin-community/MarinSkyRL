@@ -18,10 +18,6 @@ def _sequence_major_output(
 
 
 def use_batch_major_output_projection(projection: nn.Module) -> None:
-    """Make GPT's final batch-major conversion a view for TP1, non-sequence-parallel output layers.
-
-    Moving the smaller hidden-state tensor before projection avoids a second full-vocabulary
-    allocation in GPTModel._postprocess. Hooks retain the module and its checkpoint parameter names.
-    """
+    """Make GPT's final batch-major conversion a view for TP1, non-sequence-parallel output layers."""
     projection.register_forward_pre_hook(_batch_major_input)
     projection.register_forward_hook(_sequence_major_output)

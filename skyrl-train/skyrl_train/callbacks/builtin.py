@@ -33,7 +33,7 @@ from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_exp
 from skyrl_train.distillation import DISTILLATION_SCORED_TOKENS_METRIC
 from skyrl_train.json_serialization import to_jsonable
 from skyrl_train.io import io
-from marinskyrl.checkpoint_paths import POLICY_CHECKPOINT_SUBDIRECTORY
+from marinskyrl.checkpoint_paths import BEST_CHECKPOINT_FILENAME, POLICY_CHECKPOINT_SUBDIRECTORY
 from marinskyrl.resource_locator import join_resource_path
 from skyrl_train.inference_engines.vllm.stats import VLLM_NUM_ENGINES_METRIC, IntervalReadMode
 from skyrl_train.inference_observability import (
@@ -185,9 +185,6 @@ class EvaluationStopConfig:
         threshold = self.minimum if self.minimum is not None else self.min_improvement
         if not math.isfinite(threshold):
             raise ValueError("evaluation stop thresholds must be finite")
-
-
-BEST_CHECKPOINT_FILENAME = "best_checkpoint.json"
 
 
 @register_callback("best_checkpoint")

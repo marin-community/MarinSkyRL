@@ -98,6 +98,7 @@ from skyrl_train.group_admission import (
     assert_training_groups_eligible,
 )
 from marinskyrl.checkpoint_paths import (
+    BEST_CHECKPOINT_FILENAME,
     GLOBAL_STEP_PREFIX,
     LATEST_CHECKPOINT_FILE,
 )
@@ -2996,7 +2997,7 @@ class RayPPOTrainer:
             return
 
         protected_steps = protected_hf_export_steps(self.cfg.trainer.ckpt_path)
-        best_path = join_resource_path(self.cfg.trainer.ckpt_path, "best_checkpoint.json")
+        best_path = join_resource_path(self.cfg.trainer.ckpt_path, BEST_CHECKPOINT_FILENAME)
         if io.exists(best_path):
             with io.open_file(best_path, "r") as stream:
                 best = json.load(stream)
