@@ -98,12 +98,9 @@ def _payload(micro: PairBatch, old_log_probs: torch.Tensor, ref_log_probs: torch
     )
 
 
-def _assert_gradient_close(name: str, actual: torch.Tensor, expected: torch.Tensor, sequences: torch.Tensor) -> None:
+def _assert_gradient_close(name: str, actual: torch.Tensor, expected: torch.Tensor, sequences: torch.Tensor) -> str:
     difference = (actual - expected).abs()
-    print(
-        f"gradient {name}: max_abs={difference.max().item():.8g} mean_abs={difference.mean().item():.8g}",
-        flush=True,
-    )
+    line = f"gradient {name}: max_abs={difference.max().item():.8g} mean_abs={difference.mean().item():.8g}"
     try:
         torch.testing.assert_close(actual, expected, rtol=GRADIENT_RTOL, atol=GRADIENT_ATOL)
     except AssertionError as error:
@@ -111,13 +108,15 @@ def _assert_gradient_close(name: str, actual: torch.Tensor, expected: torch.Tens
             rows = torch.nonzero((difference > GRADIENT_ATOL).any(dim=-1)).flatten().tolist()
             targets = set(sequences[:, 1:].flatten().tolist())
             window_targets = set(sequences[:, -9:].flatten().tolist())
-            print(
-                f"gradient {name}: {len(rows)} mismatching vocab rows {rows[:32]}; "
+            line += (
+                f" | {len(rows)} mismatching vocab rows {rows[:32]}; "
                 f"in-targets={[row for row in rows if row in targets][:16]}; "
-                f"in-window-targets={[row for row in rows if row in window_targets][:16]}",
-                flush=True,
+                f"in-window-targets={[row for row in rows if row in window_targets][:16]}"
             )
+        line += " | MISMATCH"
+        print(line, flush=True)
         raise error
+    return line
 
 
 def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: PairBatch, ref_offsets: torch.Tensor):
@@ -127,6 +126,14 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
         "nccl", init_method=rendezvous, rank=rank, world_size=world_size, timeout=timedelta(seconds=120)
     )
     try:
+        # Diagnostics are echoed again in the finally block so a failing assertion cannot
+        # push them out of the retained job-log tail.
+        report: list[str] = []
+
+        def emit(line: str) -> None:
+            print(line, flush=True)
+            report.append(line)
+
         mpu.initialize_model_parallel(
             tensor_model_parallel_size=1,
             pipeline_model_parallel_size=pp,
@@ -192,28 +199,25 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
             token_diff = (scores.float() - expected_tokens).abs()
             worst_flat = int(token_diff.flatten().argmax())
             worst_row, worst_col = divmod(worst_flat, token_diff.shape[1])
-            print(
+            emit(
                 f"rank{rank} policy logprobs Megatron-vs-HF: max_abs={token_diff.max().item():.8g} "
                 f"mean_abs={token_diff.mean().item():.8g} "
-                f"counts>1e-4/1e-3={int((token_diff > 1e-4).sum())}/{int((token_diff > 1e-3).sum())}",
-                flush=True,
+                f"counts>1e-4/1e-3={int((token_diff > 1e-4).sum())}/{int((token_diff > 1e-3).sum())}"
             )
-            print(
+            emit(
                 f"rank{rank} worst token: row={worst_row} col={worst_col} "
                 f"megatron={scores.flatten()[worst_flat].item():.8g} "
                 f"hf={expected_tokens.flatten()[worst_flat].item():.8g} "
-                f"in_loss_mask={bool(loss_mask.flatten()[worst_flat])}",
-                flush=True,
+                f"in_loss_mask={bool(loss_mask.flatten()[worst_flat])}"
             )
             token_stats[0] = token_diff.max()
             token_stats[1] = token_diff[loss_mask > 0].max() if bool((loss_mask > 0).any()) else 0.0
             token_stats[2] = 1.0
         dist.all_reduce(token_stats, op=dist.ReduceOp.MAX)
         if rank == 0:
-            print(
+            emit(
                 f"policy logprobs Megatron-vs-HF: global max_abs={token_stats[0].item():.8g} "
-                f"on_loss_mask={token_stats[1].item():.8g}",
-                flush=True,
+                f"on_loss_mask={token_stats[1].item():.8g}"
             )
 
         if rank == 0:
@@ -226,10 +230,9 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
             # the GPU reference well enough that a routing flip would stand out.
             on_cpu = hf_dpo_reference(model_path, batch, device="cpu", ref_log_prob_offsets=ref_offsets)
             logprob_drift = (on_cpu.action_log_probs - reference.action_log_probs).abs()
-            print(
+            emit(
                 f"reference CPU-vs-GPU logprobs: max_abs={logprob_drift.max().item():.8g} "
-                f"mean_abs={logprob_drift.mean().item():.8g}",
-                flush=True,
+                f"mean_abs={logprob_drift.mean().item():.8g}"
             )
             assert logprob_drift.max().item() < REFERENCE_DEVICE_ATOL, (
                 "fixture is route-sensitive across devices; regenerate with a different seed"
@@ -243,7 +246,7 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
             actual /= dp_size
             if rank == 0:
                 expected = reference.metrics[key]
-                print(f"metric {key}: actual={actual.item():.8g} expected={expected:.8g}", flush=True)
+                emit(f"metric {key}: actual={actual.item():.8g} expected={expected:.8g}")
                 if abs(actual.item() - expected) >= METRIC_ATOL:
                     metric_failures.append((key, actual.item(), expected))
         assert not metric_failures, metric_failures
@@ -256,10 +259,12 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
             assert not missing, f"reference gradients without a Megatron export: {sorted(missing)}"
             assert not extra, f"Megatron gradient exports absent from the reference: {sorted(extra)}"
             for name in sorted(reference.gradients):
-                _assert_gradient_close(name, exports[name], reference.gradients[name], batch.sequences)
+                emit(_assert_gradient_close(name, exports[name], reference.gradients[name], batch.sequences))
             worst = max((exports[name] - reference.gradients[name]).abs().max().item() for name in reference.gradients)
-            print(f"gradient worst max_abs across all tensors: {worst:.8g}", flush=True)
+            emit(f"gradient worst max_abs across all tensors: {worst:.8g}")
     finally:
+        for line in report:
+            print(line, flush=True)
         mpu.destroy_model_parallel()
         dist.destroy_process_group()
 

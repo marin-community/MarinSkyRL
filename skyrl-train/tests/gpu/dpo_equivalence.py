@@ -31,9 +31,9 @@ LABEL_SMOOTHING = 0.0
 # decisive: near-tie routes would flip between independent fp32 implementations and look
 # like backward-pass mismatches. The pair (scale, batch seed) was searched for the largest
 # worst-case margin; dpo_backward_fixture re-validates it on every run.
-ROUTE_DECISIVE_ROUTER_SCALE = 12.0
-ROUTE_DECISIVE_BATCH_SEED = 8
-ROUTE_MARGIN_MIN = 1e-3
+ROUTE_DECISIVE_ROUTER_SCALE = 48.0
+ROUTE_DECISIVE_BATCH_SEED = 27
+ROUTE_MARGIN_MIN = 5e-3
 
 
 @dataclass(frozen=True)

@@ -60,7 +60,7 @@ required to differ from the pre-update ones.
 | gradients, fp32 Megatron vs fp32 HF (per-rank GPU) | rtol 2e-4, atol 3e-4 |
 | DPO metric rows (loss, accuracy, margin, rewards) | abs 2e-3 |
 | HF reference CPU-vs-GPU log-probs (fixture route guard) | abs 1e-3 |
-| minimum biased-router selection margin of the fixture | > 1e-3 |
+| minimum biased-router selection margin of the fixture | > 5e-3 |
 | optimizer parameter/moments vs float64 reference | rtol 1e-5, atol 1e-8 |
 | returned gradient norm vs independent global norm | rel 1e-4 |
 | bf16 copy-back into gradient-buffer parameters | exact (rtol 0, atol 0) |
