@@ -173,9 +173,7 @@ async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected
             "environment_requirements": SHELL_ENVIRONMENT,
             "tags": ("harbor",),
             "grader": ScriptGrader(
-                environment=EnvironmentRequirements(
-                    command_semantics=CommandSemantics.LINUX_PROCESS, docker_image="fixture@sha256:" + "0" * 64
-                ),
+                environment=NATIVE_ENVIRONMENT,
                 answer_path=None,
                 argv=("cat", "/workspace/reward"),
                 artifacts=(
@@ -371,9 +369,7 @@ async def test_harbor_retry_policy_preserves_terminal_grades(task_inputs, phase,
         if failure == "exhausted"
         else f'if [ "$(cat /workspace/attempt)" -eq 1 ]; then {failing_command}; else echo 1 > /reward.txt; fi'
     )
-    verifier_environment = EnvironmentRequirements(
-        command_semantics=CommandSemantics.LINUX_PROCESS, docker_image="fixture@sha256:" + "0" * 64
-    )
+    verifier_environment = NATIVE_ENVIRONMENT
     verifier = ScriptGrader(
         environment=verifier_environment,
         answer_path=None,
@@ -512,9 +508,7 @@ async def test_harbor_completion_reward_uses_the_engine_stop_reason(task_inputs,
     config, request = task_inputs
     task = LoweredTaskSpec.model_validate_json(request["env_extras"][0]["lowered_task_spec"]).task
     verifier = ScriptGrader(
-        environment=EnvironmentRequirements(
-            command_semantics=CommandSemantics.LINUX_PROCESS, docker_image="fixture@sha256:" + "0" * 64
-        ),
+        environment=NATIVE_ENVIRONMENT,
         answer_path=None,
         argv=("sh", "-c", "echo '===== 1 passed in 0.1s ====='; echo 1 > /reward.txt"),
         reward=FileReward(files=(RewardFile(path="/reward.txt", format=RewardFileFormat.NUMBER),)),
@@ -572,9 +566,7 @@ async def test_strict_harbor_parser_masks_only_the_affected_response(task_inputs
     tasks = []
     for output in ("unrecognized output", "tests/test_task.py::test_answer PASSED"):
         verifier = ScriptGrader(
-            environment=EnvironmentRequirements(
-                command_semantics=CommandSemantics.LINUX_PROCESS, docker_image="fixture@sha256:" + "0" * 64
-            ),
+            environment=NATIVE_ENVIRONMENT,
             answer_path=None,
             argv=("sh", "-c", f"echo '{output}'; echo 1 > /reward.txt"),
             reward=FileReward(files=(RewardFile(path="/reward.txt", format=RewardFileFormat.NUMBER),)),

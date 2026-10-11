@@ -11,7 +11,7 @@ from rolloutengine.contracts import ModelTurn
 from rolloutengine.spec import LoweredTaskSpec
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
 from shellbox.machine import MachineSpec, ShellSimBuiltins
-from taskcompendium.models import CommandSemantics, ConversationInput, EnvironmentRequirements, TextMessage
+from taskcompendium.models import ConversationInput, TextMessage
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from transformers import PreTrainedTokenizerFast
@@ -23,7 +23,7 @@ from skyrl_train.rollouts.task_worker import TaskRolloutWorker
 from skyrl_train.rollouts.task_projections import WholeTaskProjection
 from skyrl_train.trajectory_runners.projections import WholeTrajectoryProjection
 from tests.cpu.rollouts.engine_fakes import InferenceClient, Tokenizer as ProjectionTokenizer
-from tests.cpu.task_specs import lowered_task
+from tests.cpu.task_specs import SHELL_ENVIRONMENT, lowered_task
 
 
 class HttpFixtureAgent(BaseInstalledAgent):
@@ -95,9 +95,7 @@ async def test_native_runtime_routes_through_proxy_and_publishes_failed_attempts
         update={
             "context": ConversationInput(events=(TextMessage(role="user", content="Original BFCL instruction"),)),
             "tags": ("harbor",),
-            "environment_requirements": EnvironmentRequirements(
-                command_semantics=CommandSemantics.SHELL_SIMULATOR, capabilities=("shell", "filesystem")
-            ),
+            "environment_requirements": SHELL_ENVIRONMENT,
         }
     )
     lowered = lowered_task(

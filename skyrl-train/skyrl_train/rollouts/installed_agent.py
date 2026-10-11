@@ -3,6 +3,7 @@
 import asyncio
 import json
 import math
+import shlex
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 
@@ -54,7 +55,11 @@ async def run_installed_agent(
         return turn
 
     with backend.session(trial_id, recorded_complete):
-        prepared = await environment.exec("mkdir -p /logs/agent", user="root", timeout_sec=math.ceil(setup_timeout))
+        prepared = await environment.exec(
+            f"mkdir -p {shlex.quote(str(agent.environment_logs_dir))}",
+            user="root",
+            timeout_sec=math.ceil(setup_timeout),
+        )
         if prepared.return_code != 0:
             raise RuntimeError(f"Cannot create installed-agent logs directory: {prepared.stderr}")
         try:

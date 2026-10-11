@@ -15,6 +15,7 @@ from harbor.literal.native_api import NativeAPILimits
 from harbor.literal.proxy import RecordProxy
 from harbor.models.task.config import EnvironmentConfig
 from harbor.models.trial.config import AgentConfig
+from marinskyrl.resource_locator import join_resource_path
 from pydantic import BaseModel, ConfigDict
 from rolloutengine.contracts import ModelTurn, SessionStart
 from rolloutengine.spec import LoweredTaskSpec
@@ -86,7 +87,7 @@ class InstalledAgentRuntime:
         if len(messages) != 1 or messages[0]["role"] != "user" or not isinstance(messages[0]["content"], str):
             raise ValueError("Installed Harbor agents require one text task instruction")
         attempt_id = uuid4().hex
-        destination = self.settings.output_path.rstrip("/") + f"/{attempt_id}"
+        destination = join_resource_path(self.settings.output_path, attempt_id)
         trial_dir = Path(tempfile.mkdtemp(prefix="skyrl-agent-"))
         (trial_dir / "task.json").write_text(lowered.model_dump_json(indent=2))
         (trial_dir / "identity.json").write_text(
@@ -102,7 +103,15 @@ class InstalledAgentRuntime:
                 await asyncio.to_thread(shutil.copytree, trial_dir, destination)
             shutil.rmtree(trial_dir)
 
-    async def _run_trial(self, machine, complete, lowered, trial_dir, instruction, attempt_id) -> None:
+    async def _run_trial(
+        self,
+        machine: Machine,
+        complete: Callable[[SessionStart], Awaitable[ModelTurn]],
+        lowered: LoweredTaskSpec,
+        trial_dir: Path,
+        instruction: str,
+        attempt_id: str,
+    ) -> None:
         run_timeout = lowered.session.total_turn_timeout or self.settings.run_timeout
         proxy = RecordProxy(
             f"http://127.0.0.1:{self.port}", trial_dir / "engine" / "literal.jsonl", timeout=run_timeout
