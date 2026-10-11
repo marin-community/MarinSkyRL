@@ -58,7 +58,7 @@ class AgentInferenceBackend:
         if body.get("n", 1) != 1:
             raise ValueError("An agent session requires exactly one completion per request")
         options = {key: value for key, value in body.items() if key not in TRANSPORT_FIELDS}
-        if "tools" in options:
+        if options.get("tools") is not None:
             # Session options use Responses-style tools; this endpoint accepts Chat tools.
             options["tools"] = []
             for tool in body["tools"]:
