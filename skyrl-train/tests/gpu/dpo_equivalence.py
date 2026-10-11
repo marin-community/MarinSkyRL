@@ -173,7 +173,10 @@ def hf_dpo_reference(
         log_probs = torch.log_softmax(logits[:, :-1].float(), dim=-1)
         targets = sequences[:, 1:]
         token_log_probs = log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
-        return token_log_probs[:, -batch.num_actions - 1 : -1]
+        # Predictor entry k is the log-probability of the token at column k+1, so the
+        # action window (the final num_actions COLUMNS) is the final num_actions ENTRIES
+        # of this array — matching the trainer's token_logprobs[:, -num_actions:] slice.
+        return token_log_probs[:, -batch.num_actions :]
 
     action_log_probs = response_log_probs()
     with torch.no_grad():

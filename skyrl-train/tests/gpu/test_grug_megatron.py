@@ -181,7 +181,9 @@ def _hf_response_logprobs_direct(model_path: str, batch: TrainingInputBatch) -> 
     with torch.no_grad():
         logits = model(sequences, attention_mask=attention_mask, position_ids=position_ids).logits
         log_probs = logprobs_from_logits(logits, torch.roll(sequences, shifts=-1, dims=1))
-    return log_probs[:, -num_actions - 1 : -1].float().cpu()
+    # Entry k is the log-probability of the token at column k+1, so the response window is
+    # the final num_actions entries (the last num_actions tokens), matching the trainer.
+    return log_probs[:, -num_actions:].float().cpu()
 
 
 @ray.remote(num_gpus=1)

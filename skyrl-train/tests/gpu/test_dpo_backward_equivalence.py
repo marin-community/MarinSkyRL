@@ -145,11 +145,6 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
             print(line, flush=True)
             record(line)
 
-        late_lines: list[str] = []
-
-        def emit_late(line: str) -> None:
-            late_lines.append(line)
-
         mpu.initialize_model_parallel(
             tensor_model_parallel_size=1,
             pipeline_model_parallel_size=pp,
@@ -169,56 +164,10 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
             attention_backend="unfused",
         )
         cfg = dpo_wrapper_config(batch.sequences.shape[1])
-        captured_micros: list[dict] = []
-        registered_loss = PolicyLossRegistry.get(cfg.trainer.algorithm.policy_loss_type)
-
-        # One-shot probe into the logprob reconstruction: recompute the single-roll
-        # contract (entry k = logprob of compact token k+1 from logits k) next to the
-        # array the production path actually returns, to localize any extra shift.
-        probe_state = {"fired": False}
-        original_token_logprobs = MegatronModelWrapper._token_logprobs
-
-        def probing_token_logprobs(wrapper_self, logits, sequences, attention_mask, packed_seq_params):
-            result = original_token_logprobs(wrapper_self, logits, sequences, attention_mask, packed_seq_params)
-            if not probe_state["fired"] and mpu.is_pipeline_last_stage(ignore_virtual=True):
-                probe_state["fired"] = True
-                bool_mask = attention_mask.bool()
-                seq_lens = bool_mask.sum(1)
-                compact_len = int(seq_lens.max())
-                compact = torch.zeros(sequences.shape[0], compact_len, dtype=sequences.dtype, device=sequences.device)
-                for row_index, row_len in enumerate(seq_lens.tolist()):
-                    compact[row_index, :row_len] = sequences[row_index][bool_mask[row_index]]
-                single = None
-                if logits.shape[1] == compact_len:
-                    soft = torch.log_softmax(logits[:, :-1].float(), dim=-1)
-                    single = soft.gather(-1, compact[:, 1:].unsqueeze(-1)).squeeze(-1)
-                emit(
-                    f"probe: logits shape={tuple(logits.shape)} compact_len={compact_len} result shape={tuple(result.shape)}"
-                )
-                if single is not None:
-                    emit_late(f"probe single-roll row0 last9: {[round(v, 4) for v in single[0, -9:].tolist()]}")
-                emit_late(f"probe actual     row0 last9: {[round(v, 4) for v in result[0, -9:].tolist()]}")
-                emit_late(f"probe sequences  row0 last9: {sequences[0, -9:].tolist()}")
-                emit_late(f"probe compact    row0 last9: {compact[0, -9:].tolist()}")
-            return result
-
-        MegatronModelWrapper._token_logprobs = probing_token_logprobs
-
-        def capturing_policy_loss(inputs, config):
-            captured_micros.append(
-                {
-                    "log_probs": inputs.log_probs.detach().float().cpu(),
-                    "ref_log_probs": inputs.ref_log_probs.detach().float().cpu(),
-                    "loss_mask": inputs.loss_mask.detach().float().cpu(),
-                    "pair_roles": inputs.dpo.pair_roles.detach().float().cpu(),
-                }
-            )
-            return registered_loss(inputs, config)
-
         wrapper = MegatronModelWrapper(
             cfg,
             chunks,
-            policy_loss_fn=capturing_policy_loss,
+            policy_loss_fn=PolicyLossRegistry.get(cfg.trainer.algorithm.policy_loss_type),
             vocabulary_size=hf_config.vocab_size,
         )
         dp_size = mpu.get_data_parallel_world_size(with_context_parallel=False)
@@ -237,24 +186,9 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
         )
         exports = export_parameter_gradients(bridge, chunks)
 
-        # Ground truth of the training path: exactly what the objective consumed per micro.
-        if rank == 0:
-            for index, micro in enumerate(captured_micros):
-                sums = ((micro["log_probs"] - micro["ref_log_probs"]) * micro["loss_mask"]).sum(-1)
-                emit(
-                    f"training micro {index}: roles={micro['pair_roles'].tolist()} "
-                    f"sums={[round(v, 6) for v in sums.tolist()]}"
-                )
-                emit(f"training micro {index} row0 logprobs: {[round(v, 4) for v in micro['log_probs'][0].tolist()]}")
-                emit(
-                    f"training micro {index} row0 ref     : {[round(v, 4) for v in micro['ref_log_probs'][0].tolist()]}"
-                )
-            expected_sums = ((reference.action_log_probs - reference.ref_action_log_probs) * batch.loss_mask).sum(-1)
-            emit(f"reference row sums: {[round(v, 6) for v in expected_sums.tolist()]}")
-
-        # Per-token Megatron-vs-HF diagnostic: a routing flip between implementations
-        # shows up as a handful of tokens jumping ~1e-2 while kernel-level drift stays
-        # below ~1e-4. Printed before any assertion so a failing run still reports it.
+        # Per-token Megatron-vs-HF agreement on the eval path, over the same window the
+        # loss consumes. Attention-masked window entries are zero by design on the
+        # Megatron side, so the loss-mask figures are the meaningful ones.
         forward_micros = [
             MegatronForwardMicroBatch(
                 sequences=p.sequences,
@@ -274,31 +208,10 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
             ).to(scores.device)
             loss_mask = torch.cat([micro.loss_mask for _, micro in micros])
             token_diff = (scores.float() - expected_tokens).abs()
-            worst_flat = int(token_diff.flatten().argmax())
-            worst_row, worst_col = divmod(worst_flat, token_diff.shape[1])
             emit(
                 f"rank{rank} policy logprobs Megatron-vs-HF: max_abs={token_diff.max().item():.8g} "
-                f"mean_abs={token_diff.mean().item():.8g} "
-                f"counts>1e-4/1e-3={int((token_diff > 1e-4).sum())}/{int((token_diff > 1e-3).sum())}"
+                f"mean_abs={token_diff.mean().item():.8g}"
             )
-            emit(
-                f"rank{rank} worst token: row={worst_row} col={worst_col} "
-                f"megatron={scores.flatten()[worst_flat].item():.8g} "
-                f"hf={expected_tokens.flatten()[worst_flat].item():.8g} "
-                f"in_loss_mask={bool(loss_mask.flatten()[worst_flat])}"
-            )
-            for dump_row in (0, 4):
-                emit(f"rank{rank} scores row {dump_row}: {[round(v, 4) for v in scores[dump_row].float().tolist()]}")
-                emit(f"rank{rank} expected row {dump_row}: {[round(v, 4) for v in expected_tokens[dump_row].tolist()]}")
-            emit(
-                f"rank{rank} per-row score sums: {[round(v, 4) for v in scores.float().sum(-1).tolist()]} "
-                f"loss-mask sums: {[int(v) for v in loss_mask.sum(-1).tolist()]}"
-            )
-            masked_mean = [
-                round(token_diff[r][loss_mask[r] > 0].mean().item(), 8) if bool((loss_mask[r] > 0).any()) else 0.0
-                for r in range(token_diff.shape[0])
-            ]
-            emit(f"rank{rank} masked mean diff per row: {masked_mean}")
             token_stats[0] = token_diff.max()
             token_stats[1] = token_diff[loss_mask > 0].max() if bool((loss_mask > 0).any()) else 0.0
             token_stats[2] = 1.0
@@ -352,12 +265,8 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
             worst = max((exports[name] - reference.gradients[name]).abs().max().item() for name in reference.gradients)
             emit(f"gradient worst max_abs across all tensors: {worst:.8g}")
     finally:
-        for line in late_lines:
-            emit(line)
         for line in report:
             print(line, flush=True)
-        if "original_token_logprobs" in locals():
-            MegatronModelWrapper._token_logprobs = original_token_logprobs
         mpu.destroy_model_parallel()
         dist.destroy_process_group()
 
