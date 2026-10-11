@@ -49,6 +49,7 @@ from skyrl_train.rollouts.group_grader import GroupGraderSpec
 from skyrl_train.rollouts.group_grading import GROUP_GRADERS, GroupGrader, grade_groups
 from skyrl_train.rollouts.harbor_tasks import (
     HARBOR_MACHINE_BACKEND,
+    HARBOR_EVAL_MACHINE_BACKEND,
     HarborTaskSettings,
     harbor_grading_failure,
     shape_harbor_rollouts,
@@ -529,6 +530,8 @@ class TaskRolloutWorkerSpec:
         if harbor is not None:
             if harbor.environment.type != EnvironmentType.DOCKER:
                 factories[HARBOR_MACHINE_BACKEND] = harbor.machine_factory()
+                if harbor.environment.kwargs.get("eval_api_key_env"):
+                    factories[HARBOR_EVAL_MACHINE_BACKEND] = harbor.machine_factory(phase="eval")
             elif Backend.DOCKER in factories:
                 factories[HARBOR_MACHINE_BACKEND] = factories[Backend.DOCKER]
         return TaskRolloutWorker(

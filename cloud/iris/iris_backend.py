@@ -805,6 +805,7 @@ def launch(args: SimpleNamespace, expected_launcher_commit: str) -> LaunchOutcom
 
     if not _is_checkpoint_export(args) and _rl_config_uses_daytona(args.config):
         daytona_api_key = _resolve_daytona_rl_api_key()
+        os.environ[DAYTONA_RL_SECRET_NAME] = daytona_api_key
         os.environ["DAYTONA_API_KEY"] = daytona_api_key
 
     command = build_config_task_command(args)
@@ -999,6 +1000,14 @@ def launch(args: SimpleNamespace, expected_launcher_commit: str) -> LaunchOutcom
         if v:
             env_vars[k] = v
     env_vars.update(wandb_launch_environment(entity=args.wandb_entity))
+    if not _is_checkpoint_export(args) and _rl_config_uses_daytona(args.config):
+        for field in ("daytona_api_key_env", "eval_daytona_api_key_env"):
+            name = OmegaConf.select(args.config, f"skyrl.terminal_bench_config.harbor.{field}")
+            if name is not None:
+                value = os.environ.get(name)
+                if not value:
+                    raise ValueError(f"Missing Daytona credential environment variable: {name}")
+                env_vars[name] = value
 
     # Load the cluster config (pydantic IrisClusterConfig) and build the provider
     # bundle, then discover + tunnel to the controller. This mirrors the marin

@@ -5,6 +5,8 @@ import shutil
 
 import numpy as np
 import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestServer
 from omegaconf import OmegaConf
 from skyrl_gym.verification import VerificationStatus
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
@@ -29,7 +31,7 @@ from skyrl_train.dataset.harbor import HarborTaskDataset
 from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection, WholeTrajectoryProjection
 from skyrl_train.rollouts.buffer import RolloutLease, RolloutTask
 from skyrl_train.rollouts.task_worker import TaskRolloutWorker
-from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
+from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings, daytona_client
 from rolloutengine.spec import LoweredTaskSpec
 from tests.cpu.task_specs import NATIVE_ENVIRONMENT, SHELL_ENVIRONMENT, lowered_task, session_spec
 from skyrl_train.trajectory_runners.types import BatchMetadata, TokenProvenance, TrajectoryID
@@ -38,7 +40,8 @@ from tests.cpu.rollouts.engine_fakes import ConversationClient, FixtureImageFact
 
 
 @pytest.mark.asyncio
-async def test_mixed_harbor_and_native_tasks_keep_separate_providers_and_machine_specs(task_inputs):
+@pytest.mark.parametrize("phase", ["train", "eval"])
+async def test_mixed_harbor_and_native_tasks_keep_separate_providers_and_machine_specs(task_inputs, phase):
     config, original = task_inputs
     lowered = LoweredTaskSpec.model_validate_json(original["env_extras"][0]["lowered_task_spec"])
     native = lowered.task.model_copy(
@@ -49,7 +52,7 @@ async def test_mixed_harbor_and_native_tasks_keep_separate_providers_and_machine
         }
     )
     harbor = native.model_copy(update={"id": "harbor", "tags": ("harbor",)})
-    machines = {"docker": [], "harbor": []}
+    machines = {"docker": [], "harbor": [], "harbor_eval": []}
 
     class Factory:
         backend = Backend.DOCKER
@@ -63,7 +66,11 @@ async def test_mixed_harbor_and_native_tasks_keep_separate_providers_and_machine
                 replace(spec, source=ShellSimBuiltins(), cpus=None, workdir="/workspace")
             )
 
-    settings = HarborTaskSettings.from_config(OmegaConf.create({"harbor": {"override_cpus": 2, "max_retries": 0}}))
+    settings = HarborTaskSettings.from_config(
+        OmegaConf.create(
+            {"harbor": {"override_cpus": 2, "max_retries": 0, "eval_daytona_api_key_env": "DAYTONA_EVAL_API_KEY"}}
+        )
+    )
     request = {
         **original,
         "prompts": original["prompts"] * 2,
@@ -72,6 +79,7 @@ async def test_mixed_harbor_and_native_tasks_keep_separate_providers_and_machine
             {"lowered_task_spec": lowered_task(task, backend="docker").model_dump_json()} for task in (native, harbor)
         ],
         "trajectory_ids": [TrajectoryID(task.id, 0) for task in (native, harbor)],
+        "batch_metadata": BatchMetadata(0, phase),
     }
     worker = TaskRolloutWorker(
         config,
@@ -88,10 +96,55 @@ async def test_mixed_harbor_and_native_tasks_keep_separate_providers_and_machine
     assert batch["unshaped_rewards"] == [1.0, 1.0]
     assert [sum(reward) for reward in batch["rewards"]] == [1.0, 1.0]
     assert batch["exclude_from_baseline"] == [False, False]
-    assert len(machines["docker"]) == len(machines["harbor"]) == 1
+    selected = "harbor_eval" if phase == "eval" else "harbor"
+    unused = "harbor" if phase == "eval" else "harbor_eval"
+    assert len(machines["docker"]) == len(machines[selected]) == 1
+    assert machines[unused] == []
     assert machines["docker"][0].network is NetworkPolicy.DENY
     assert machines["docker"][0].cpus is None
-    assert machines["harbor"][0].cpus == 2
+    assert machines[selected][0].cpus == 2
+
+
+@pytest.mark.asyncio
+async def test_daytona_clients_keep_account_credentials_separate_during_concurrent_requests(monkeypatch):
+    received = []
+
+    async def list_sandboxes(request):
+        received.append(request.headers["Authorization"])
+        return web.json_response({"items": [], "nextCursor": None})
+
+    app = web.Application()
+    app.router.add_get("/{path:.*}", list_sandboxes)
+    monkeypatch.setenv("DAYTONA_RL_API_KEY", "training-key")
+    monkeypatch.setenv("DAYTONA_EVAL_API_KEY", "evaluation-key")
+    monkeypatch.setenv("DAYTONA_API_KEY", "wrong-ambient-key")
+    settings = HarborTaskSettings.from_config(
+        OmegaConf.create(
+            {
+                "harbor": {
+                    "daytona_api_key_env": "DAYTONA_RL_API_KEY",
+                    "eval_daytona_api_key_env": "DAYTONA_EVAL_API_KEY",
+                }
+            }
+        )
+    )
+    async with TestServer(app) as server:
+        monkeypatch.setenv("DAYTONA_API_URL", str(server.make_url("")).rstrip("/"))
+
+        async def inventory(phase):
+            factory = settings.machine_factory(phase=phase)
+            async with factory.client_factory() as client:
+                return [sandbox async for sandbox in client.list()]
+
+        assert await asyncio.gather(inventory("train"), inventory("eval")) == [[], []]
+    assert sorted(received) == ["Bearer evaluation-key", "Bearer training-key"]
+
+
+def test_missing_explicit_daytona_key_does_not_fall_back_to_ambient_account(monkeypatch):
+    monkeypatch.delenv("DAYTONA_EVAL_API_KEY", raising=False)
+    monkeypatch.setenv("DAYTONA_API_KEY", "wrong-ambient-key")
+    with pytest.raises(ValueError, match="DAYTONA_EVAL_API_KEY"):
+        daytona_client("DAYTONA_EVAL_API_KEY")
 
 
 @pytest.mark.asyncio
