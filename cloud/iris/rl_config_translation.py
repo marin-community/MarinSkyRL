@@ -9,7 +9,7 @@ from importlib.resources import files
 import json
 import math
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
@@ -19,6 +19,7 @@ from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig, OmegaConf
 
 from skyrl_train.config.objective_spec import validate_objective
+from skyrl_train.config.ftpo import FTPOConfig
 
 from cloud.iris.paths import resolve_paths_in_dict
 from cloud.iris.runtime_environment import CHECKPOINT_EXPORT_ENTRYPOINT as CHECKPOINT_EXPORT_MODULE
@@ -804,11 +805,13 @@ def _skyrl_config_sections(
 
 
 _OPEN_CONFIG_ROOTS = frozenset({"teachers", "teacher_routing", "terminal_bench_config"})
+_FTPO_CONFIG_PATHS = frozenset(f"trainer.algorithm.ftpo.{item.name}" for item in fields(FTPOConfig))
 
 
 def _path_allows_new_keys(path: str) -> bool:
     return (
-        path.startswith("environment.task_sessions.")
+        path in _FTPO_CONFIG_PATHS
+        or path.startswith("environment.task_sessions.")
         or path.split(".", 1)[0] in _OPEN_CONFIG_ROOTS
         or any(pattern in f".{path}" for pattern in _OPTIONAL_HYDRA_PATTERNS)
     )
