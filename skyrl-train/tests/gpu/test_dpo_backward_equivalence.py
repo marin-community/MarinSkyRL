@@ -209,6 +209,35 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
         exports = export_parameter_gradients(bridge, chunks)
         log_detail(f"rank{rank} phase: gradients exported")
 
+        # Probe-tensor comparison from every rank's own (collective) export, by HF name.
+        for probe_name in (
+            "model.norm.weight",
+            "model.layers.7.self_attn.q_proj.weight",
+            "model.layers.0.self_attn.q_proj.weight",
+        ):
+            if probe_name in exports:
+                difference = (exports[probe_name] - reference.gradients[probe_name]).abs().max().item()
+                late_lines.append(
+                    f"rank{rank} exported {probe_name}: max_abs={difference:.8g} "
+                    f"expected_max={reference.gradients[probe_name].abs().max().item():.8g}"
+                )
+        # The trainer finalizes gradient synchronization before its optimizer step; check
+        # whether an explicit finish_grad_sync changes the raw pipeline buffers.
+        if all(hasattr(chunk, "finish_grad_sync") for chunk in chunks):
+            for chunk in chunks:
+                chunk.finish_grad_sync()
+            synced = export_parameter_gradients(bridge, chunks)
+            for probe_name in (
+                "model.norm.weight",
+                "model.layers.7.self_attn.q_proj.weight",
+                "model.layers.0.self_attn.q_proj.weight",
+            ):
+                if probe_name in synced:
+                    difference = (synced[probe_name] - reference.gradients[probe_name]).abs().max().item()
+                    late_lines.append(
+                        f"rank{rank} after finish_grad_sync {probe_name}: max_abs={difference:.8g}"
+                    )
+
         # Per-token Megatron-vs-HF agreement on the eval path, over the same window the
         # loss consumes. Attention-masked window entries are zero by design on the
         # Megatron side, so the loss-mask figures are the meaningful ones. The eval
