@@ -8,11 +8,14 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
+import yaml
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from transformers import PreTrainedTokenizerFast, Qwen2Config, Qwen2ForCausalLM
+from cloud.iris.launch_config import load_launch_config
+from cloud.iris.tests.test_launch_config import _raw_config
 
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.group_admission import GroupAdvantageInvariant
@@ -52,6 +55,35 @@ def config():
 
 def _surface(ids):
     return {0: "Wait", 1: " So", 2: " Therefore", 3: "Done", 4: "\n", 5: "WAIT"}[ids[0]]
+
+
+def test_ftpo_launch_selects_protocol_boundary_from_recipe(tmp_path: Path) -> None:
+    raw = _raw_config()
+    raw["skyrl"]["config_groups"] = {"algorithm_recipe": "ftpo"}
+    raw["skyrl"]["trainer"]["algorithm"]["ftpo"] = {"boundary": "repeated_tool_opener"}
+    raw["skyrl"]["trainer"]["use_sample_packing"] = False
+    raw["skyrl"]["generator"]["sampling_params"] = {"logprobs": 2}
+    path = tmp_path / "launch.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    config = load_launch_config(path)
+    surfaces = {0: "<|end_think|>", 1: "<tool_call>", 2: " {"}
+    candidates = torch.tensor([1, 2]).expand(1, 3, 2)
+    scores = torch.tensor([0.8, 0.2]).log().expand_as(candidates)
+
+    chosen, weights = select_ftpo_candidates(
+        [[0, 1, 1]],
+        [[1, 1, 1]],
+        candidates,
+        scores,
+        decode=lambda tokens: "".join(surfaces[token] for token in tokens),
+        loop=LoopCreditConfig(),
+        config=ftpo_config(config.skyrl.trainer.algorithm),
+        seed=42,
+        eligible=[True],
+    )
+
+    assert chosen.nonzero().tolist() == [[0, 2, 1]]
+    assert weights.nonzero().tolist() == [[0, 2]]
 
 
 def test_ftpo_reuses_tail_detection_but_selects_first_repeat_and_filters_alternatives():

@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import torch
 import yaml
 from omegaconf import OmegaConf
 from rolloutengine.contracts import ModelTurn
@@ -24,9 +23,6 @@ from cloud.iris.rl_config_translation import (
 )
 from skyrl_train.distributed.step_policy import NonfiniteStepPolicy, nonfinite_step_policy
 from skyrl_train.dataset.tasks import source_row_task
-from skyrl_train.config.ftpo import ftpo_config
-from skyrl_train.ftpo import select_ftpo_candidates
-from skyrl_train.trajectory_runners.trajectory_reward_shaping import LoopCreditConfig
 
 
 def _raw_config() -> dict[str, Any]:
@@ -311,35 +307,6 @@ def test_evaluation_metric_names_survive_iris_path_resolution(tmp_path: Path) ->
 
     assert config.trainer.callbacks[0].metric_groups == groups
     assert config.trainer.callbacks[0].additional_evaluations == profiles
-
-
-def test_ftpo_launch_selects_protocol_boundary_from_recipe(tmp_path: Path) -> None:
-    raw = _raw_config()
-    raw["skyrl"]["config_groups"] = {"algorithm_recipe": "ftpo"}
-    raw["skyrl"]["trainer"]["algorithm"]["ftpo"] = {"boundary": "repeated_tool_opener"}
-    raw["skyrl"]["trainer"]["use_sample_packing"] = False
-    raw["skyrl"]["generator"]["sampling_params"] = {"logprobs": 2}
-    path = tmp_path / "launch.yaml"
-    path.write_text(yaml.safe_dump(raw))
-    config = load_launch_config(path)
-    surfaces = {0: "<|end_think|>", 1: "<tool_call>", 2: " {"}
-    candidates = torch.tensor([1, 2]).expand(1, 3, 2)
-    scores = torch.tensor([0.8, 0.2]).log().expand_as(candidates)
-
-    chosen, weights = select_ftpo_candidates(
-        [[0, 1, 1]],
-        [[1, 1, 1]],
-        candidates,
-        scores,
-        decode=lambda tokens: "".join(surfaces[token] for token in tokens),
-        loop=LoopCreditConfig(),
-        config=ftpo_config(config.skyrl.trainer.algorithm),
-        seed=42,
-        eligible=[True],
-    )
-
-    assert chosen.nonzero().tolist() == [[0, 2, 1]]
-    assert weights.nonzero().tolist() == [[0, 2]]
 
 
 def test_null_nonfinite_limit_in_launch_fails_on_first_invalid_step(tmp_path: Path) -> None:
