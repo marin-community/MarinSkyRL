@@ -17,7 +17,7 @@ from transformers import PreTrainedTokenizerFast, Qwen2Config, Qwen2ForCausalLM
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.group_admission import GroupAdvantageInvariant
 from skyrl_train.training_batch import TrainingBatchIterator
-from skyrl_train.config.ftpo import FTPOConfig, validate_ftpo
+from skyrl_train.config.ftpo import FTPOConfig, ftpo_config, validate_ftpo
 from skyrl_train.utils.utils import validate_cfg
 from skyrl_train.ftpo import (
     FTPOInputs,
@@ -91,6 +91,49 @@ def test_ftpo_balances_common_tokens_deterministically_without_retokenizing():
     rare = weights[6:].sum(-1)
     assert common[common > 0].mean() < rare[rare > 0].mean()
     assert torch.all(weights[~chosen.any(-1)] == 0)
+
+
+def test_ftpo_protocol_selection_excludes_thinking_observations_and_quoted_markers(config):
+    surfaces = {
+        0: "<tool_call>",
+        1: "<|end_think|>",
+        2: "<|start_think|>",
+        3: " {\n",
+        4: "</tool_call>",
+        5: " prose",
+        6: "{bad",
+        7: '{"name":"read","arguments":{"text":"',
+        8: '"}}',
+    }
+    responses = [
+        [1, 0, 0, 0],
+        [2, 0, 0, 0],
+        [1, 0, 0, 0],
+        [1, 0, 7, 0, 0, 8, 4, 0, 0],
+        [0, 0, 0],
+        [1, 0, 6, 0, 0],
+        [1, 0, 0, 0],
+    ]
+    masks = [[1] * len(row) for row in responses]
+    masks[2] = [0, 0, 1, 1]
+    ids = torch.tensor([0, 3, 4, 5]).expand(len(responses), 9, 4).clone()
+    scores = torch.tensor([0.6, 0.2, 0.1, 0.1]).log().expand_as(ids).clone()
+    config.trainer.algorithm.ftpo = {"boundary": "repeated_tool_opener", "chosen_balance_strength": 0}
+    selected = ftpo_config(config.trainer.algorithm)
+    chosen, weights = select_ftpo_candidates(
+        responses,
+        masks,
+        ids,
+        scores,
+        decode=lambda tokens: "".join(surfaces[token] for token in tokens),
+        loop=LoopCreditConfig(),
+        config=selected,
+        seed=42,
+        eligible=[True, True, True, True, True, True, False],
+    )
+    assert chosen.nonzero().tolist() == [[0, 2, 1], [3, 8, 1]]
+    assert weights.nonzero().tolist() == [[0, 2], [3, 8]]
+    assert ids[chosen].tolist() == [3, 3]
 
 
 def _scalar_reference(logits, reference, ids, masks, rejected, weights, params):
@@ -264,19 +307,28 @@ def test_ftpo_recipe_accepts_greedy_capture_and_rejects_unsupported_geometry(con
             validate_ftpo(changed)
 
 
-def test_ftpo_rollout_payload_survives_padding_serialization_and_microbatching(config, tmp_path):
+@pytest.mark.parametrize("boundary", ["tail_loop", "repeated_tool_opener"])
+def test_ftpo_rollout_payload_survives_padding_serialization_and_microbatching(config, tmp_path, boundary):
+    config.trainer.algorithm.ftpo = {"boundary": boundary}
+    words = (
+        ["Wait", "So", "Therefore", "Done", "[PAD]"]
+        if boundary == "tail_loop"
+        else ["<tool_call>", "{", "<|end_think|>", "Done", "[PAD]"]
+    )
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
     trainer.cfg = config
     trainer.global_step = 0
     trainer.all_metrics = {}
     trainer.group_advantage_invariant = GroupAdvantageInvariant.no_group_advantage(physical_group_size=1)
     trainer.tokenizer = PreTrainedTokenizerFast(
-        tokenizer_object=Tokenizer(WordLevel({"Wait": 0, "So": 1, "Therefore": 2, "Done": 3, "[PAD]": 4})),
+        tokenizer_object=Tokenizer(WordLevel({word: index for index, word in enumerate(words)})),
         pad_token="[PAD]",
     )
     trainer.policy_model = SimpleNamespace(actor_infos=[SimpleNamespace(rank=SimpleNamespace(dp_size=2))])
     trainer.ref_model = trainer.critic_model = None
     responses = [[0, 1] * 4, [2, 3], [0] * 5]
+    if boundary == "repeated_tool_opener":
+        responses[0] = [2] + [0] * 7
     trajectory = {
         "prompt_token_ids": [[2, 3], [3], [1, 2, 3]],
         "response_ids": responses,
@@ -295,9 +347,9 @@ def test_ftpo_rollout_payload_survives_padding_serialization_and_microbatching(c
     # The model sees compacted tokens; boundary logits must still refer to the
     # prefix just before the second copy of the loop, despite unequal prompts.
     compact_logits = torch.arange(4 * 10 * 5).reshape(4, 10, 5).float()
-    boundary = compact_boundary_logits(compact_logits, batch["attention_mask"], batch["ftpo_chosen_mask"])
-    torch.testing.assert_close(boundary[0], compact_logits[0, 3])
-    batch["ftpo_reference_logits"] = boundary
+    boundary_logits = compact_boundary_logits(compact_logits, batch["attention_mask"], batch["ftpo_chosen_mask"])
+    torch.testing.assert_close(boundary_logits[0], compact_logits[0, 3])
+    batch["ftpo_reference_logits"] = boundary_logits
     for key in ("action_log_probs", "base_action_log_probs", "values", "returns", "advantages"):
         batch[key] = torch.zeros_like(batch["loss_mask"])
     path = tmp_path / "batch.pt"
@@ -305,8 +357,9 @@ def test_ftpo_rollout_payload_survives_padding_serialization_and_microbatching(c
     restored = torch.load(path, weights_only=False)
     experiences = list(TrainingBatchIterator(restored, sample_batch_size=1))
     assert [bool(experience.ftpo.chosen_mask.any()) for experience in experiences] == [True, False, False, False]
-    torch.testing.assert_close(experiences[0].ftpo.reference_logits, boundary[:1])
-    assert experiences[0].ftpo.candidate_ids[experiences[0].ftpo.chosen_mask].tolist() == [1, 2, 3]
+    torch.testing.assert_close(experiences[0].ftpo.reference_logits, boundary_logits[:1])
+    expected_candidates = [1, 2, 3] if boundary == "tail_loop" else [1]
+    assert experiences[0].ftpo.candidate_ids[experiences[0].ftpo.chosen_mask].tolist() == expected_candidates
 
 
 @pytest.mark.asyncio

@@ -12,8 +12,9 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
+from rolloutengine.tool_protocol import TOOL_OPEN, ToolCallStatus, tool_call_regions
 
-from skyrl_train.config.ftpo import FTPOConfig
+from skyrl_train.config.ftpo import FTPOBoundary, FTPOConfig
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import LoopCreditConfig, tail_loop
 
 
@@ -73,6 +74,39 @@ def compact_boundary_logits(
     return logits[torch.arange(logits.shape[0], device=logits.device), positions]
 
 
+def repeated_tool_opener_boundary(
+    response: Sequence[int], mask: Sequence[int], decode: Callable[[list[int]], str]
+) -> int | None:
+    """Find an adjacent repeated opener after explicit end-thinking in an assistant span.
+
+    Unknown thinking state is excluded. Observations and quoted markers are
+    never selected. A malformed earlier call ends parsing for that span.
+    """
+    start = 0
+    while start < len(response):
+        if not mask[start]:
+            start += 1
+            continue
+        end = start + 1
+        while end < len(response) and mask[end]:
+            end += 1
+        span = list(response[start:end])
+        text = decode(span)
+        for region in tool_call_regions(text, initial_thinking=True):
+            if region.status != ToolCallStatus.REPEATED_OPENER:
+                continue
+            open_positions = [index for index, token in enumerate(span) if decode([token]) == TOOL_OPEN]
+            if len(open_positions) != text.count(TOOL_OPEN):
+                raise ValueError("FTPO tool markers must align with single special tokens")
+            position = open_positions[text[: region.start].count(TOOL_OPEN)]
+            if decode(span[: position + 1]) != text[: region.payload_start]:
+                raise ValueError("FTPO boundary changed during token decoding")
+            if position + 1 < len(span) and span[position + 1] == span[position]:
+                return start + position + 1
+        start = end
+    return None
+
+
 def select_ftpo_candidates(
     response_ids: Sequence[Sequence[int]],
     loss_masks: Sequence[Sequence[int]],
@@ -95,10 +129,15 @@ def select_ftpo_candidates(
     surfaces: dict[int, str] = {}
     rejected_by_row = {}
     for row, (response, mask, allowed) in enumerate(zip(response_ids, loss_masks, eligible, strict=True)):
-        hit = tail_loop(response, mask, loop) if allowed else None
-        if hit is None:
+        if not allowed:
             continue
-        position = hit.repeat_start
+        if config.boundary == FTPOBoundary.REPEATED_TOOL_OPENER:
+            position = repeated_tool_opener_boundary(response, mask, decode)
+        else:
+            hit = tail_loop(response, mask, loop)
+            position = None if hit is None else hit.repeat_start
+        if position is None:
+            continue
         rejected = response[position]
         ids = candidate_ids[row, position].tolist()
         scores = candidate_logprobs[row, position]
@@ -110,6 +149,8 @@ def select_ftpo_candidates(
             if token not in surfaces:
                 surfaces[token] = decode([token])
             surface = surfaces[token]
+            if config.boundary == FTPOBoundary.REPEATED_TOOL_OPENER and surface.strip() != "{":
+                continue
             if token == rejected or surface.lower() == rejected_surface:
                 continue
             if len(surface.strip()) < config.min_decoded_chars or (
