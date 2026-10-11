@@ -91,21 +91,26 @@ def _payload(micro: PairBatch, old_log_probs: torch.Tensor, ref_log_probs: torch
     )
 
 
-def _assert_gradient_close(name: str, actual: torch.Tensor, expected: torch.Tensor) -> None:
+def _assert_gradient_close(name: str, actual: torch.Tensor, expected: torch.Tensor, sequences: torch.Tensor) -> None:
     difference = (actual - expected).abs()
     print(
         f"gradient {name}: max_abs={difference.max().item():.8g} mean_abs={difference.mean().item():.8g}",
         flush=True,
     )
-    torch.testing.assert_close(
-        actual,
-        expected,
-        rtol=GRADIENT_RTOL,
-        atol=GRADIENT_ATOL,
-        msg=lambda message: (
-            f"{name}: max_abs={difference.max().item():.8g}, mean_abs={difference.mean().item():.8g}\n{message}"
-        ),
-    )
+    try:
+        torch.testing.assert_close(actual, expected, rtol=GRADIENT_RTOL, atol=GRADIENT_ATOL)
+    except AssertionError as error:
+        if name == "lm_head.weight":
+            rows = torch.nonzero((difference > GRADIENT_ATOL).any(dim=-1)).flatten().tolist()
+            targets = set(sequences[:, 1:].flatten().tolist())
+            window_targets = set(sequences[:, -9:].flatten().tolist())
+            print(
+                f"gradient {name}: {len(rows)} mismatching vocab rows {rows[:32]}; "
+                f"in-targets={[row for row in rows if row in targets][:16]}; "
+                f"in-window-targets={[row for row in rows if row in window_targets][:16]}",
+                flush=True,
+            )
+        raise error
 
 
 def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: PairBatch, reference: DPOReference):
@@ -153,6 +158,16 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
         )
         exports = export_parameter_gradients(bridge, chunks)
 
+        # Metric rows pool across data-parallel ranks like the trainer's step metrics.
+        for key in reference.metrics:
+            actual = torch.tensor(sum(item[key] for item in metrics) / len(metrics), device="cuda")
+            dist.all_reduce(actual, group=mpu.get_data_parallel_group(with_context_parallel=False))
+            actual /= dp_size
+            if rank == 0:
+                expected = reference.metrics[key]
+                print(f"metric {key}: actual={actual.item():.8g} expected={expected:.8g}", flush=True)
+                assert abs(actual.item() - expected) < METRIC_ATOL, (key, actual.item(), expected)
+
         if rank == 0:
             print(
                 f"GPU={torch.cuda.get_device_name()} torch={torch.__version__} "
@@ -166,19 +181,9 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
             assert not missing, f"reference gradients without a Megatron export: {sorted(missing)}"
             assert not extra, f"Megatron gradient exports absent from the reference: {sorted(extra)}"
             for name in sorted(reference.gradients):
-                _assert_gradient_close(name, exports[name], reference.gradients[name])
+                _assert_gradient_close(name, exports[name], reference.gradients[name], batch.sequences)
             worst = max((exports[name] - reference.gradients[name]).abs().max().item() for name in reference.gradients)
             print(f"gradient worst max_abs across all tensors: {worst:.8g}", flush=True)
-
-        # Metric rows pool across data-parallel ranks like the trainer's step metrics.
-        for key in reference.metrics:
-            actual = torch.tensor(sum(item[key] for item in metrics) / len(metrics), device="cuda")
-            dist.all_reduce(actual, group=mpu.get_data_parallel_group(with_context_parallel=False))
-            actual /= dp_size
-            if rank == 0:
-                expected = reference.metrics[key]
-                print(f"metric {key}: actual={actual.item():.8g} expected={expected:.8g}", flush=True)
-                assert abs(actual.item() - expected) < METRIC_ATOL, (key, actual.item(), expected)
 
         if rank == 0:
             on_device = hf_dpo_reference(model_path, batch, device="cuda")
