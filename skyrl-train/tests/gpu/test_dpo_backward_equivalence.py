@@ -164,10 +164,24 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
             attention_backend="unfused",
         )
         cfg = dpo_wrapper_config(batch.sequences.shape[1])
+        captured_micros: list[dict] = []
+        registered_loss = PolicyLossRegistry.get(cfg.trainer.algorithm.policy_loss_type)
+
+        def capturing_policy_loss(inputs, config):
+            captured_micros.append(
+                {
+                    "log_probs": inputs.log_probs.detach().float().cpu(),
+                    "ref_log_probs": inputs.ref_log_probs.detach().float().cpu(),
+                    "loss_mask": inputs.loss_mask.detach().float().cpu(),
+                    "pair_roles": inputs.dpo.pair_roles.detach().float().cpu(),
+                }
+            )
+            return registered_loss(inputs, config)
+
         wrapper = MegatronModelWrapper(
             cfg,
             chunks,
-            policy_loss_fn=PolicyLossRegistry.get(cfg.trainer.algorithm.policy_loss_type),
+            policy_loss_fn=capturing_policy_loss,
             vocabulary_size=hf_config.vocab_size,
         )
         dp_size = mpu.get_data_parallel_world_size(with_context_parallel=False)
@@ -185,6 +199,21 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
             payloads, seq_len=batch.sequences.shape[1], micro_batch_size=MICRO_BATCH_SIZE
         )
         exports = export_parameter_gradients(bridge, chunks)
+
+        # Ground truth of the training path: exactly what the objective consumed per micro.
+        if rank == 0:
+            for index, micro in enumerate(captured_micros):
+                sums = ((micro["log_probs"] - micro["ref_log_probs"]) * micro["loss_mask"]).sum(-1)
+                emit(
+                    f"training micro {index}: roles={micro['pair_roles'].tolist()} "
+                    f"sums={[round(v, 6) for v in sums.tolist()]}"
+                )
+                emit(f"training micro {index} row0 logprobs: {[round(v, 4) for v in micro['log_probs'][0].tolist()]}")
+                emit(
+                    f"training micro {index} row0 ref     : {[round(v, 4) for v in micro['ref_log_probs'][0].tolist()]}"
+                )
+            expected_sums = ((reference.action_log_probs - reference.ref_action_log_probs) * batch.loss_mask).sum(-1)
+            emit(f"reference row sums: {[round(v, 6) for v in expected_sums.tolist()]}")
 
         # Per-token Megatron-vs-HF diagnostic: a routing flip between implementations
         # shows up as a handful of tokens jumping ~1e-2 while kernel-level drift stays
