@@ -23,7 +23,7 @@ class ReplayPrompt(BaseModel):
 class ToolProtocolReplaySession:
     """Score a completed tool call without executing it or scoring the BFCL answer."""
 
-    def __init__(self, lowered: LoweredTaskSpec, machine: Machine | None):
+    def __init__(self, lowered: LoweredTaskSpec, _machine: Machine | None):
         self.task = lowered.task
         self.prompt = ReplayPrompt.model_validate(session_parameters(self.task).extras)
         self.result = GradeResult(Outcome.UNAVAILABLE, None, "No model continuation was completed")
