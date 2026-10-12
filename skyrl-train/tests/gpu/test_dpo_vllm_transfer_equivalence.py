@@ -42,8 +42,7 @@ from tests.gpu.grug_serving import (
 )
 from tests.gpu.grug_tiny_checkpoint import write_tiny_checkpoint
 from tests.gpu.test_grug_megatron import (
-    LOGPROB_MAX_ABS_TOLERANCE,
-    LOGPROB_MEAN_ABS_TOLERANCE,
+    _assert_logprobs_close,
     _config,
     _megatron_response_logprobs,
 )
@@ -108,22 +107,15 @@ async def _vllm_logprobs(client, cfg, sequences: torch.Tensor, num_actions: int)
 
 
 def _assert_logprob_parity(label: str, actual: torch.Tensor, expected: torch.Tensor, mask: torch.Tensor) -> None:
-    valid = mask.bool()
-    difference = (actual[valid] - expected[valid]).abs()
-    print(
-        f"{label} logprob parity over {valid.sum().item()} tokens: "
-        f"max abs {difference.max().item():.4f}, mean abs {difference.mean().item():.4f}",
-        flush=True,
-    )
-    assert difference.max().item() < LOGPROB_MAX_ABS_TOLERANCE, difference.max()
-    assert difference.mean().item() < LOGPROB_MEAN_ABS_TOLERANCE, difference.mean()
+    print(f"{label}: ", end="", flush=True)
+    _assert_logprobs_close(actual, expected, mask)
 
 
 def _dpo_train_step(policy, batch: TrainingInputBatch) -> dict[str, float]:
-    """Run one training step and assert the DPO loss row is finite.
+    """Run one training step and require a finite DPO loss.
 
-    Mirrors the shared PPO `_train_step`, whose `policy_loss` row does not exist for
-    the DPO objective (it reports `dpo/*` rows instead).
+    The shared PPO step helper asserts on `policy_loss`, which the DPO objective
+    does not report; this variant asserts on the DPO loss row instead.
     """
     train_output = ray.get(policy.async_run_ray_method("mesh", "ppo_train", batch))[0]
     status = train_output.metadata["train_status"]

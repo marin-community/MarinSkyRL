@@ -54,10 +54,11 @@ from tests.gpu.dpo_equivalence import (
     dpo_wrapper_config,
     export_parameter_gradients,
     hf_dpo_reference,
+    position_ids_from_mask,
 )
 from tests.gpu.grug_gpu_gates import require_hoppers
 from tests.gpu.grug_tiny_checkpoint import router_bias_names
-from tests.gpu.utils import run_distributed_with_deadline
+from tests.gpu.utils import DPO_DIAGNOSTICS_LOG, run_distributed_with_deadline
 
 # Registered before execution; see ci/dpo_equivalence/README.md for the measured values.
 GRADIENT_RTOL = 2e-4
@@ -81,8 +82,7 @@ TOPOLOGIES = [
 def _payload(micro: PairBatch, old_log_probs: torch.Tensor, ref_log_probs: torch.Tensor) -> MegatronPolicyMicroBatch:
     """Build the production policy micro-batch for one chosen/rejected pair."""
     device = torch.cuda.current_device()
-    position_ids = micro.attention_mask.long().cumsum(-1) - 1
-    position_ids = position_ids.masked_fill(micro.attention_mask == 0, 0)
+    position_ids = position_ids_from_mask(micro.attention_mask)
     zeros = torch.zeros_like(micro.loss_mask)
     return MegatronPolicyMicroBatch(
         sequences=micro.sequences.to(device),
@@ -129,7 +129,7 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
         # Phase markers print and append; verbose per-tensor detail (log_detail) prints
         # only, so it cannot flood the file.
         report: list[str] = []
-        diagnostics_path = Path.cwd() / "dpo-diagnostics.log"
+        diagnostics_path = Path.cwd() / DPO_DIAGNOSTICS_LOG
 
         def record(line: str) -> None:
             with diagnostics_path.open("a") as handle:
@@ -157,14 +157,12 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
             use_sharp=False,
             context_parallel_size=1,
         )
-        # Phase markers go straight to the diagnostics file so a hang or deadline kill
-        # still shows the last completed stage per rank.
         phase(f"rank{rank} phase: groups ready (PP={pp} EP={ep})")
         # Every rank computes the independent reference on its own GPU, so the compared
         # quantities differ only by Megatron-vs-eager kernel arithmetic, not by device.
         reference = hf_dpo_reference(model_path, batch, device=f"cuda:{rank}", ref_log_prob_offsets=ref_offsets)
         phase(f"rank{rank} phase: reference ready")
-        bridge, provider, chunks, hf_config = build_grug_megatron_chunks(
+        built = build_grug_megatron_chunks(
             model_path,
             pipeline_model_parallel_size=pp,
             expert_model_parallel_size=ep,
@@ -176,6 +174,7 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
             # verified element-exactly by the optimizer update experiment instead.
             distributed_optimizer=False,
         )
+        bridge, chunks, hf_config = built.bridge, built.chunks, built.hf_config
         phase(f"rank{rank} phase: chunks ready")
         cfg = dpo_wrapper_config(batch.sequences.shape[1])
         wrapper = MegatronModelWrapper(

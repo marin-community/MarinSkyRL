@@ -9,6 +9,7 @@ from omegaconf import OmegaConf
 
 from megatron.core.pipeline_parallel import get_forward_backward_func
 import megatron.core.parallel_state as mpu
+from megatron.core.distributed import DistributedDataParallel as MegatronDDP
 from megatron.core.distributed import finalize_model_grads
 from megatron.core.transformer.module import Float16Module
 
@@ -346,7 +347,7 @@ class MegatronModelWrapper:
 
             # Only the mixed-precision wrapper consumes the precision kwarg; a raw fp32
             # module (equivalence experiments) already returns module-precision outputs.
-            inner = model.module if hasattr(model, "module") else model
+            inner = model.module if isinstance(model, MegatronDDP) else model
             precision_kwargs = {"fp32_output": False} if isinstance(inner, Float16Module) else {}
             outputs = model(
                 model_sequences,

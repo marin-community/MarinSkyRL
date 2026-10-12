@@ -124,13 +124,13 @@ def run_optimizer_rank(rank, world_size, pp, ep, rendezvous, model_path, clip_ac
             use_sharp=False,
             context_parallel_size=1,
         )
-        _, _, chunks, _ = build_grug_megatron_chunks(
+        chunks = build_grug_megatron_chunks(
             model_path,
             pipeline_model_parallel_size=pp,
             expert_model_parallel_size=ep,
             bf16=True,
             policy_loss_type=None,
-        )
+        ).chunks
         optimizer_config = OmegaConf.create(
             {
                 "optimizer": "adamw",
@@ -200,27 +200,15 @@ def run_optimizer_rank(rank, world_size, pp, ep, rendezvous, model_path, clip_ac
             global_norm = reference_global_norm(owned, parameters, step_index, scale)
             if step_index == 1:
                 assert (global_norm > MAX_GRAD_NORM) == clip_active, global_norm
-                # prepare_grads is idempotent (the strategy re-calls it); probe here
-                # whether every owned shard the test compares actually reaches the
-                # torch optimizer with a gradient attached.
+                # Census the grad-buffer dtypes backing reference_gradient: the
+                # reference must round exactly as the buffers the optimizer reads.
                 optimizer.prepare_grads()
-                torch_param_ids = set()
-                for child in children:
-                    inner = getattr(child, "optimizer", None)
-                    if inner is None:
-                        continue
-                    torch_param_ids.update(id(param) for group in inner.param_groups for param in group["params"])
-                probe_problems = []
                 main_grad_dtypes = {}
-                for probe_name, probe_param in parameters.items():
+                for probe_param in parameters.values():
                     dtype = getattr(probe_param, "main_grad", None)
                     dtype = str(dtype.dtype) if dtype is not None else None
                     main_grad_dtypes[dtype] = main_grad_dtypes.get(dtype, 0) + 1
-                probe_summary = (
-                    f"rank{rank} prepare probe: {len(owned)} owned shards, "
-                    f"{len(probe_problems)} problems: {probe_problems[:8]} "
-                    f"main_grad dtypes: {main_grad_dtypes}"
-                )
+                probe_summary = f"rank{rank} grad-buffer dtypes: {main_grad_dtypes}"
                 print(probe_summary, flush=True)
             clip_coeff = min(1.0, MAX_GRAD_NORM / (global_norm + CLIP_EPS))
             result = strategy.optimizer_step(optimizer, chunks, scheduler, name="policy")
@@ -238,11 +226,10 @@ def run_optimizer_rank(rank, world_size, pp, ep, rendezvous, model_path, clip_ac
         assert scheduler.num_steps == 2
         assert get_megatron_last_lr(optimizer) == pytest.approx(LEARNING_RATE, rel=1e-12)
 
-        # Read each owned slice through the distributed optimizer's own group/range mapping:
-        # shard grads are model_param.main_grad.view(-1)[start:end] by construction, so the
-        # same slice of the reference tensor must match exactly.
-        # Structural dump: which children/groups each rank holds, so shard-mapping
-        # surprises (stub children, fp32 groups, unexpected DP groups) are visible.
+        # Compare each owned slice through the distributed optimizer's own group/range
+        # mapping, within STATE_RTOL/ATOL: values always, moments when the torch
+        # optimizer stepped the shard (see the loop below). The per-child group
+        # inventory prints first so a sharding surprise is attributable.
         local_structure = []
         for child in children:
 

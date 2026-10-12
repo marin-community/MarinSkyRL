@@ -135,6 +135,12 @@ def fixed_pair_batch(
     )
 
 
+def position_ids_from_mask(attention_mask: torch.Tensor) -> torch.Tensor:
+    """Number real tokens per row for rotary embeddings, holding padded slots at zero."""
+    position_ids = attention_mask.long().cumsum(-1) - 1
+    return position_ids.masked_fill(attention_mask == 0, 0)
+
+
 @dataclass(frozen=True)
 class DPOReference:
     """Independent DPO loss, metrics, gradients, and log-probabilities from eager HF GrugMoE."""
@@ -168,8 +174,7 @@ def hf_dpo_reference(
     model.to(device).train()
     sequences = batch.sequences.to(device)
     attention_mask = batch.attention_mask.to(device)
-    position_ids = attention_mask.long().cumsum(-1) - 1
-    position_ids = position_ids.masked_fill(attention_mask == 0, 0)
+    position_ids = position_ids_from_mask(attention_mask)
 
     def response_log_probs() -> torch.Tensor:
         logits = model(sequences, attention_mask=attention_mask, position_ids=position_ids).logits
@@ -225,6 +230,16 @@ def dpo_wrapper_config(seq_len: int) -> DictConfig:
     return cfg
 
 
+@dataclass(frozen=True)
+class GrugMegatronChunks:
+    """A built Grug model: bridge, provider, DDP-wrapped chunks, and HF config."""
+
+    bridge: object
+    provider: object
+    chunks: list
+    hf_config: object
+
+
 def build_grug_megatron_chunks(
     model_path: str,
     *,
@@ -240,13 +255,11 @@ def build_grug_megatron_chunks(
     distributed_optimizer: bool = True,
     policy_loss_type: str | None = "dpo",
 ):
-    """Build DDP-wrapped Megatron chunks through the same provider path as the training worker.
+    """Build DDP-wrapped Megatron chunks for a Grug checkpoint.
 
-    Mirrors MegatronWorker's bridge/provider setup, then installs the shared batch-major
-    output projection so experiments and the worker provably run the same adaptation.
-    ``attention_backend`` defaults to the worker's choice; the fp32 equivalence experiment
-    overrides it with "unfused" because Transformer Engine's fused kernels are fp16/bf16-only,
-    while the production bf16 kernels stay covered by the parity gates.
+    Returns the bridge, provider, model chunks, and HF config. ``attention_backend``
+    defaults to the worker's choice; pass "unfused" for fp32 runs because
+    Transformer Engine's fused kernels are fp16/bf16-only.
     """
 
     def phase(label: str) -> None:
@@ -278,7 +291,7 @@ def build_grug_megatron_chunks(
     chunks = provider.provide_distributed_model(ddp_config=ddp_config, wrap_with_ddp=wrap_with_ddp, bf16=bf16)
     phase("chunks built")
     install_dpo_batch_major_output_projection(chunks, provider, policy_loss_type)
-    return bridge, provider, chunks, hf_config
+    return GrugMegatronChunks(bridge=bridge, provider=provider, chunks=chunks, hf_config=hf_config)
 
 
 def export_parameter_gradients(bridge, chunks: list[nn.Module]) -> dict[str, torch.Tensor]:
@@ -354,8 +367,7 @@ def min_routing_margin(model_path: str, batch: PairBatch, device: str = "cpu") -
         if module.__class__.__name__ == "GrugMoeRouter":
             hooks.append(module.register_forward_hook(capture))
     attention_mask = batch.attention_mask.to(device)
-    position_ids = attention_mask.long().cumsum(-1) - 1
-    position_ids = position_ids.masked_fill(attention_mask == 0, 0)
+    position_ids = position_ids_from_mask(attention_mask)
     with torch.no_grad():
         model(batch.sequences.to(device), attention_mask=attention_mask, position_ids=position_ids)
     for hook in hooks:

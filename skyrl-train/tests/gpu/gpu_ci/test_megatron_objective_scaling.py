@@ -245,10 +245,6 @@ def run_scaling_rank(rank, world_size, cp_size, teacher, rendezvous):
         dist.destroy_process_group()
 
 
-def run_distributed(target, world_size, args):
-    run_distributed_with_deadline(target, args, world_size)
-
-
 @pytest.mark.parametrize(
     "cp_size,teacher", [(2, None), (1, "sparse_forward_kl"), (1, "sparse_reverse_kl"), (1, "sparse_jsd")]
 )
@@ -259,5 +255,7 @@ def test_megatron_objective_gradients_and_rows_match_full_batch(tmp_path, cp_siz
         f"megatron-core={version('megatron-core')} TP=1 PP=1",
         flush=True,
     )
-    run_distributed(run_scaling_rank, 1, (1, 1, teacher, (tmp_path / "single").as_uri()))
-    run_distributed(run_scaling_rank, 2 * cp_size, (2 * cp_size, cp_size, teacher, (tmp_path / "distributed").as_uri()))
+    run_distributed_with_deadline(run_scaling_rank, (1, 1, teacher, (tmp_path / "single").as_uri()), 1)
+    run_distributed_with_deadline(
+        run_scaling_rank, (2 * cp_size, cp_size, teacher, (tmp_path / "distributed").as_uri()), 2 * cp_size
+    )

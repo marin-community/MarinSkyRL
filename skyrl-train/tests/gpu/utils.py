@@ -32,6 +32,10 @@ from skyrl_train.inference_engines.remote_inference_engine import create_remote_
 
 TEST_DATA_PATH = os.path.expanduser("~/data/gsm8k/validation.parquet")
 
+# Rank diagnostics file the DPO equivalence runner cats at the end of the job stream.
+# run_equivalence.sh references the same filename; keep them in sync.
+DPO_DIAGNOSTICS_LOG = "dpo-diagnostics.log"
+
 
 def run_distributed_with_deadline(target, args, world_size: int, timeout_seconds: int = 240):
     """Spawn NCCL rank workers and guarantee no process outlives the deadline."""

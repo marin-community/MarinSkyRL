@@ -1,8 +1,7 @@
-"""The provider configuration the Grug training worker runs with, in one place.
+"""Canonical Megatron-Bridge provider settings for Grug checkpoints.
 
-The training worker and the DPO equivalence experiments both configure a Megatron-Bridge
-provider for Grug checkpoints. Keeping the attribute block in one function is what makes
-the experiments' "same provider path as the worker" claim true rather than copied.
+Sets topology sizes, pipeline dtype, and kernel/dispatcher choices on a provider
+object in place. Callers pass the values; this module owns the attribute set.
 """
 
 import importlib.util

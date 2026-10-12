@@ -32,9 +32,8 @@ def use_batch_major_output_projection(projection: nn.Module) -> None:
 def install_dpo_batch_major_output_projection(model_chunks, provider, policy_loss_type) -> None:
     """Install the batch-major projection on every post-process chunk when DPO can use it.
 
-    Shared by the training worker and the equivalence experiments so both provably run the
-    same adaptation under the same topology condition. The Megatron import stays inside the
-    function so importing this module needs no Megatron installation.
+    No-op unless the loss type is DPO and the topology is TP1 without context or
+    sequence parallelism. Requires Megatron-Core at call time only.
     """
     from megatron.core.utils import get_attr_wrapped_model
 
