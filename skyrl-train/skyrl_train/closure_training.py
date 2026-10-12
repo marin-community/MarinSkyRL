@@ -113,7 +113,13 @@ def closure_training_targets(
             repairs[row] = target
             continue
         chosen = verified_closure_candidates(
-            target, prompt, response, candidates[row, target.response_position].tolist(), decode=decode
+            target,
+            prompt,
+            response,
+            candidates[row, target.response_position].tolist(),
+            structure_prefix=contract.prefix,
+            verify_complete=lambda value: score_closure(value, contract.expected, contract.format).success,
+            decode=decode,
         )
         boundaries[row] = VerifiedFTPOBoundary(target.response_position, chosen)
     return ClosureTrainingTargets(boundaries, repairs)
