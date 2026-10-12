@@ -1,9 +1,12 @@
 import json
+from dataclasses import replace
 
 import pytest
-from skyrl_train.dataset.preference_pairs import PreferencePairDataset, PreferencePairFormat
+from skyrl_train.dataset.preference_pairs import PreferencePairFormat
+from skyrl_train.dataset.preference_pairs import PreferencePairDataset
 from skyrl_train.trajectory_runners.preference_pairs import PreferencePairTrajectoryRunner
-from skyrl_train.trajectory_runners.types import BatchMetadata, TrajectoryID
+from skyrl_train.trajectory_runners.types import BatchMetadata, TrajectoryID, TrajectoryMetadata, PreferenceRequestBatch
+from skyrl_train.trajectory_runners.trajectory_processing import prepare_trajectory_request
 
 QWEN2_5 = "Qwen/Qwen2.5-0.5B-Instruct"
 PROMPT = [{"role": "user", "content": "Write a haiku about the sea."}]
@@ -15,14 +18,13 @@ def tokenizer(load_tokenizer):
 
 
 def request(chosen="calm waves at dusk", rejected="error: no poem", count=2):
-    return {
-        "prompts": [PROMPT] * count,
-        "env_classes": ["preference_pair"] * count,
-        "env_extras": [{"chosen": chosen, "rejected": rejected}] * count,
-        "sampling_params": None,
-        "trajectory_ids": [TrajectoryID("0", 0), TrajectoryID("0", 1)][:count],
-        "batch_metadata": BatchMetadata(global_step=0, training_phase="train"),
-    }
+    return PreferenceRequestBatch(
+        prompts=(PROMPT,) * count,
+        preferences=({"chosen": chosen, "rejected": rejected},) * count,
+        metadata=(TrajectoryMetadata(uid="0", metric_class="preference_pair"),) * count,
+        trajectory_ids=(TrajectoryID("0", 0), TrajectoryID("0", 1))[:count],
+        batch_metadata=BatchMetadata(global_step=0, training_phase="train"),
+    )
 
 
 @pytest.mark.asyncio
@@ -91,13 +93,11 @@ async def test_runner_rejects_broken_pair_layouts(tokenizer):
     )
     with pytest.raises(ValueError, match="row pairs"):
         await runner.run(request(count=1))
-    swapped = request()
-    swapped["trajectory_ids"] = [TrajectoryID("0", 1), TrajectoryID("0", 0)]
+    swapped = replace(request(), trajectory_ids=(TrajectoryID("0", 1), TrajectoryID("0", 0)))
     with pytest.raises(ValueError, match="repetition 0 then 1"):
         await runner.run(swapped)
-    mismatched = request()
-    mismatched["env_extras"] = [{"chosen": "a"}, {"chosen": "b", "rejected": "c"}]
-    with pytest.raises(ValueError, match="same prompt and extras"):
+    mismatched = replace(request(), preferences=({"chosen": "a"}, {"chosen": "b", "rejected": "c"}))
+    with pytest.raises(ValueError, match="same prompt and preference record"):
         await runner.run(mismatched)
 
 
@@ -158,10 +158,7 @@ async def test_tokenized_dataset_and_runner_preserve_multiturn_assistant_masks(t
         max_completion_length=32,
         num_workers=1,
     )
-    [sample] = data.collate_fn([data[0]])
-    inputs = request()
-    inputs["prompts"] = [sample["prompt"]] * 2
-    inputs["env_extras"] = [sample["env_extras"]] * 2
+    inputs, _ = prepare_trajectory_request(data.collate_fn([data[0]]), 2, {}, "train", 0)
     runner = PreferencePairTrajectoryRunner(
         tokenizer,
         generator_config={},

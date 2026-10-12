@@ -3,10 +3,15 @@ from enum import StrEnum
 from typing import Any, Dict, List, Literal, NotRequired, Optional, TypedDict, Union
 
 import numpy as np
+from rolloutengine.lowering import SHELLBOX_SESSION
+from rolloutengine.spec import LoweredTaskSpec
+from rolloutengine.task_session import session_start
+from taskcompendium.runtime.shell import resolve_shell_tool
 
 from skyrl_gym.verification import VerificationResult
 from skyrl_train.distillation import PreparedTeacherInput, TeacherEvidenceBatch
 from skyrl_train.inference_engines.base import ConversationType
+from skyrl_train.rollouts.group_grader import GroupGraderSpec
 
 
 TrainingPhase = Literal["train", "eval"]
@@ -37,13 +42,69 @@ class BatchMetadata:
     training_phase: TrainingPhase
 
 
-class TrajectoryRequestBatch(TypedDict):
-    prompts: List[ConversationType]
-    env_classes: List[str]
-    env_extras: Optional[List[Dict[str, Any]]]
-    sampling_params: Optional[Dict[str, Any]]
-    trajectory_ids: Optional[List[TrajectoryID]]
-    batch_metadata: Optional[BatchMetadata]
+@dataclass(frozen=True)
+class TrajectoryMetadata:
+    uid: str
+    metric_class: str
+    data_source: str | None = None
+    teacher_route: str | None = None
+    metric_tags: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class TaskInput:
+    lowered: LoweredTaskSpec
+    metadata: TrajectoryMetadata
+    group_grader: GroupGraderSpec | None = None
+
+
+@dataclass(frozen=True)
+class PreferenceInput:
+    prompt: ConversationType | list[int]
+    preference: dict[str, Any]
+    metadata: TrajectoryMetadata
+
+
+@dataclass(frozen=True)
+class TaskRequestBatch:
+    rows: tuple[TaskInput, ...]
+    sampling_params: dict[str, Any] | None = None
+    trajectory_ids: tuple[TrajectoryID, ...] | None = None
+    batch_metadata: BatchMetadata | None = None
+
+    @property
+    def metadata(self) -> tuple[TrajectoryMetadata, ...]:
+        return tuple(row.metadata for row in self.rows)
+
+    @property
+    def public_prompts(self) -> tuple[ConversationType, ...]:
+        return tuple(task_messages(row.lowered) for row in self.rows)
+
+
+@dataclass(frozen=True)
+class PreferenceRequestBatch:
+    prompts: tuple[ConversationType | list[int], ...]
+    preferences: tuple[dict[str, Any], ...]
+    metadata: tuple[TrajectoryMetadata, ...]
+    sampling_params: dict[str, Any] | None = None
+    trajectory_ids: tuple[TrajectoryID, ...] | None = None
+    batch_metadata: BatchMetadata | None = None
+
+    @property
+    def public_prompts(self) -> tuple[ConversationType | list[int], ...]:
+        return self.prompts
+
+
+TrajectoryRequestBatch = TaskRequestBatch | PreferenceRequestBatch
+
+
+def task_messages(lowered: LoweredTaskSpec) -> ConversationType:
+    tool = (
+        resolve_shell_tool(lowered.task, lowered.session.shell_tool)
+        if lowered.session.task_session == SHELLBOX_SESSION
+        else None
+    )
+    return list(session_start(lowered.task, tool).messages)
 
 
 class RewardShapingComponents(TypedDict):

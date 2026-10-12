@@ -60,19 +60,17 @@ class RolloutRequestSpec:
 
     samples_per_prompt: int
     sampling_params: dict
-    environment_class: str
 
     @classmethod
     def from_config(cls, config: DictConfig) -> RolloutRequestSpec:
         return cls(
             samples_per_prompt=config.generator.n_samples_per_prompt,
             sampling_params=get_sampling_params_for_backend(config.generator.backend, config.generator.sampling_params),
-            environment_class=config.environment.env_class,
         )
 
     def request(self, prompt: dict, policy_step: int) -> TrajectoryRequestBatch:
         request, _ = prepare_trajectory_request(
-            [prompt], self.samples_per_prompt, self.sampling_params, self.environment_class, "train", policy_step
+            [prompt], self.samples_per_prompt, self.sampling_params, "train", policy_step
         )
         return request
 

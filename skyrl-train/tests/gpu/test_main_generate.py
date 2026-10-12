@@ -4,6 +4,9 @@ uv run --group dev --extra vllm --isolated pytest tests/gpu/test_main_generate.p
 
 import json
 import ray
+from omegaconf import OmegaConf
+from skyrl_gym.source_task import session_parameters
+from taskcompendium.submission import conversation_messages
 
 from skyrl_train.entrypoints.main_generate import EvalOnlyEntrypoint
 from skyrl_train.utils.utils import initialize_ray
@@ -11,12 +14,18 @@ from tests.gpu.utils import get_test_actor_config, get_test_trajectory_request
 
 
 def create_dataset(tmp_path, model_name: str):
-    input_batch = get_test_trajectory_request(model=model_name, num_prompts=1, n_samples_per_prompt=1)
+    input_batch = get_test_trajectory_request(
+        model=model_name,
+        num_prompts=1,
+        n_samples_per_prompt=1,
+        environment_configs=OmegaConf.to_container(get_test_actor_config().environment.task_sessions, resolve=True),
+    )
+    row = input_batch.rows[0]
     data = {
-        "prompt": input_batch["prompts"][0],
-        "env_class": input_batch["env_classes"][0],  # defaults to "gsm8k"
+        "prompt": conversation_messages(row.lowered.task.context.events),
+        "env_class": row.lowered.session.task_session,
         "data_source": "test",
-        **(input_batch["env_extras"][0] or {}),
+        **session_parameters(row.lowered.task).extras,
     }
     path = tmp_path / "data.json"
     with open(path, "w") as f:

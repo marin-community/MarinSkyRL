@@ -14,7 +14,8 @@ from skyrl_train.rollouts.workers import (
     RolloutWorkerStalledError,
     WorkerShard,
 )
-from skyrl_train.trajectory_runners.types import BatchMetadata, TrainingPhase, TrajectoryID
+from skyrl_train.trajectory_runners.types import BatchMetadata, TrainingPhase, TrajectoryID, TaskRequestBatch
+from tests.cpu.task_specs import lowered_task, text_task, task_input
 
 
 @dataclass(frozen=True)
@@ -49,9 +50,9 @@ class _Worker:
 class _SessionWorker(_Worker):
     def __init__(self, name: str, calls: list[tuple[str, str]]):
         async def run(input_batch):
-            phase = input_batch["batch_metadata"].training_phase
+            phase = input_batch.batch_metadata.training_phase
             calls.append((name, phase))
-            return _output(input_batch["trajectory_ids"])
+            return _output(input_batch.trajectory_ids)
 
         async def run_task(task, _writer, _observe):
             calls.append((name, f"task {task.prompt['uid']}"))
@@ -90,15 +91,13 @@ class _BlockingWorker:
         return True
 
 
-def _request(ids: list[TrajectoryID], phase: TrainingPhase | None = None) -> dict:
-    return {
-        "prompts": [f"prompt-{trajectory_id.to_string()}" for trajectory_id in ids],
-        "env_classes": ["terminal" for _ in ids],
-        "env_extras": [{} for _ in ids],
-        "sampling_params": {},
-        "trajectory_ids": ids,
-        "batch_metadata": BatchMetadata(global_step=1, training_phase=phase) if phase is not None else None,
-    }
+def _request(ids: list[TrajectoryID], phase: TrainingPhase | None = None) -> TaskRequestBatch:
+    return TaskRequestBatch(
+        rows=tuple(task_input(lowered_task(text_task(item.instance_id))) for item in ids),
+        sampling_params={},
+        trajectory_ids=tuple(ids),
+        batch_metadata=BatchMetadata(global_step=1, training_phase=phase) if phase is not None else None,
+    )
 
 
 def _output(ids: list[TrajectoryID]) -> dict:
@@ -110,7 +109,7 @@ def _output(ids: list[TrajectoryID]) -> dict:
         "loss_masks": [[1] for _ in values],
         "rollout_metrics": {},
         "rollout_logprobs": None,
-        "trajectory_ids": ids,
+        "trajectory_ids": list(ids),
     }
 
 
@@ -234,13 +233,13 @@ async def test_progress_deadline_resets_when_the_same_worker_completes_a_request
     class _TimedRemoteMethod:
         def remote(self, input_batch, _observe):
             nonlocal slow_result
-            instance_id = input_batch["trajectory_ids"][0].instance_id
+            instance_id = input_batch.trajectory_ids[0].instance_id
             result = asyncio.get_running_loop().create_future()
             if instance_id == "a":
                 slow_result = result
                 return result
 
-            result.set_result((_output(input_batch["trajectory_ids"]), None))
+            result.set_result((_output(input_batch.trajectory_ids), None))
             asyncio.get_running_loop().call_soon(slow_task.cancel)
             return result
 

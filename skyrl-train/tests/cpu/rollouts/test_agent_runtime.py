@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -8,7 +10,6 @@ from omegaconf import OmegaConf
 from harbor.agents.installed.base import BaseInstalledAgent
 from harbor.models.trial.config import AgentConfig
 from rolloutengine.contracts import ModelTurn
-from rolloutengine.spec import LoweredTaskSpec
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
 from shellbox.machine import MachineSpec, PackageSpec
 from taskcompendium.models import ConversationInput, TextMessage
@@ -22,7 +23,7 @@ from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
 from skyrl_train.rollouts.task_worker import TaskRolloutWorker
 from skyrl_train.rollouts.task_projections import WholeTaskProjection
 from tests.cpu.rollouts.engine_fakes import InferenceClient, Tokenizer as ProjectionTokenizer
-from tests.cpu.task_specs import SHELL_ENVIRONMENT, lowered_task
+from tests.cpu.task_specs import SHELL_ENVIRONMENT, lowered_task, task_input
 
 
 class HttpFixtureAgent(BaseInstalledAgent):
@@ -89,7 +90,7 @@ async def test_native_runtime_routes_through_proxy_and_publishes_failed_attempts
     )
     runtime = InstalledAgentRuntime(settings, AgentInferenceBackend("model", 32, tokenize, tokenizer), 8)
     worker_config, request = task_inputs
-    task = LoweredTaskSpec.model_validate_json(request["env_extras"][0]["lowered_task_spec"]).task
+    task = request.rows[0].lowered.task
     task = task.model_copy(
         update={
             "context": ConversationInput(events=(TextMessage(role="user", content="Original BFCL instruction"),)),
@@ -106,7 +107,7 @@ async def test_native_runtime_routes_through_proxy_and_publishes_failed_attempts
     await runtime.startup()
     try:
         if path == "worker":
-            request["env_extras"] = [{"lowered_task_spec": lowered.model_dump_json()}]
+            request = replace(request, rows=(task_input(lowered),))
             worker = TaskRolloutWorker(
                 worker_config,
                 WholeTaskProjection(worker_config, ProjectionTokenizer()),

@@ -1,3 +1,5 @@
+from taskcompendium.submission import conversation_messages
+
 import json
 
 import pytest
@@ -14,8 +16,8 @@ from taskcompendium.models import (
 )
 from verifyit.spec import NumericSpec
 from skyrl_gym.source_task import source_task
-from tests.cpu.task_specs import NATIVE_ENVIRONMENT, lowered_task
-from skyrl_train.trajectory_runners.types import TrajectoryID
+from tests.cpu.task_specs import NATIVE_ENVIRONMENT, lowered_task, task_input
+from skyrl_train.trajectory_runners.types import TrajectoryID, TaskRequestBatch
 
 
 @pytest.fixture
@@ -45,20 +47,10 @@ def task_inputs():
             },
         }
     )
-    request = {
-        "prompts": [[{"role": "user", "content": "What is six plus six?"}]],
-        "env_classes": ["taskcompendium"],
-        "env_extras": [
-            {
-                "lowered_task_spec": lowered_task(task, "shellbox").model_dump_json(),
-                "teacher_route": "arithmetic",
-                "data_source": "arithmetic",
-            }
-        ],
-        "trajectory_ids": [TrajectoryID("arithmetic", 0)],
-        "sampling_params": None,
-        "batch_metadata": None,
-    }
+    request = TaskRequestBatch(
+        rows=(task_input(lowered_task(task), teacher_route="arithmetic", data_source="arithmetic"),),
+        trajectory_ids=(TrajectoryID("arithmetic", 0),),
+    )
     return config, request
 
 
@@ -66,7 +58,7 @@ def task_inputs():
 def python_tool_task(task_inputs):
     config, request = task_inputs
     task = source_task(
-        request["prompts"][0],
+        conversation_messages(request.rows[0].lowered.task.context.events),
         extras={
             "extra_info": {
                 "nemotron_ultra": {
@@ -92,6 +84,4 @@ def python_tool_task(task_inputs):
         ],
     }
     task = lowered_task(task, "nemotron_ultra", backend="docker")
-    request["env_extras"] = [{"lowered_task_spec": task.model_dump_json()}]
-    request["env_classes"] = ["nemotron_ultra"]
     return task, message

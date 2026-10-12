@@ -19,6 +19,8 @@ from skyrl_train.trajectory_runners.trajectory_retention import (
 )
 from skyrl_train.trajectory_runners.trajectory_retention_publisher import InlineTrajectoryPublisher
 from tests.cpu.util import example_dummy_config
+from tests.cpu.task_specs import lowered_task, text_task, task_input
+from skyrl_train.rollouts.group_grader import GroupGraderSpec
 
 
 @pytest.fixture
@@ -93,7 +95,7 @@ class DummyRunner(FixtureRunner):
 
     async def _run(self, input_batch):
         self.seen_inputs.append(input_batch)
-        return {**self.output, "trajectory_ids": input_batch["trajectory_ids"]}
+        return {**self.output, "trajectory_ids": list(input_batch.trajectory_ids)}
 
 
 def test_eval_reports_normalized_verifier_score_alongside_raw_reward():
@@ -121,19 +123,19 @@ async def test_evaluate_exports_public_results_and_expected_metrics(dummy_config
 
     prompts_batch = [
         {
-            "prompt": [{"role": "user", "content": "question-1"}],
-            "env_class": None,
-            "env_extras": {
-                "data_source": "dataset/a",
-                "task_spec": "private-reference",
-                "group_grader": '{"api_key":"private-judge-key"}',
-            },
+            "input": task_input(
+                lowered_task(text_task("uid-1", prompt="question-1", source="dataset/a")),
+                metric_class="gsm8k",
+                group_grader=GroupGraderSpec(
+                    name="private-reference", parameters_json='{"api_key":"private-judge-key"}'
+                ),
+            ),
             "uid": "uid-1",
         },
         {
-            "prompt": [{"role": "user", "content": "question-2"}],
-            "env_class": "custom_env",
-            "env_extras": {"data_source": "dataset/b"},
+            "input": task_input(
+                lowered_task(text_task("uid-2", prompt="question-2", source="dataset/b")), metric_class="custom_env"
+            ),
             "uid": "uid-2",
         },
     ]
@@ -218,7 +220,7 @@ async def test_evaluate_exports_public_results_and_expected_metrics(dummy_config
 
     assert len(runner.seen_inputs) == 1
     seen_batch = runner.seen_inputs[0]
-    assert seen_batch["prompts"] == [prompt["prompt"] for prompt in prompts_batch]
-    assert seen_batch["env_classes"] == ["gsm8k", "custom_env"]
-    assert seen_batch["env_extras"] == [prompt["env_extras"] for prompt in prompts_batch]
-    assert seen_batch["batch_metadata"].training_phase == "eval"
+    assert [prompt[0]["content"] for prompt in seen_batch.public_prompts] == ["question-1", "question-2"]
+    assert [row.metric_class for row in seen_batch.metadata] == ["gsm8k", "custom_env"]
+    assert seen_batch.rows == tuple(prompt["input"] for prompt in prompts_batch)
+    assert seen_batch.batch_metadata.training_phase == "eval"

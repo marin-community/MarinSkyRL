@@ -8,8 +8,10 @@ from typing import Any
 
 from loguru import logger
 from transformers import PreTrainedTokenizerBase
+from marinskyrl.runtime_options import PREFERENCE_PAIR_ENV_CLASS
 
 from skyrl_train.dataset.dataset import PromptDataset, read_prompt_files
+from skyrl_train.trajectory_runners.types import PreferenceInput, TrajectoryMetadata
 
 
 class PreferencePairFormat(StrEnum):
@@ -89,6 +91,27 @@ class PreferencePairDataset(PromptDataset):
         self.data_format = data_format
         self.max_completion_length = max_completion_length
         super().__init__(tokenizer=tokenizer, **kwargs)
+
+    def collate_fn(self, rows) -> list[dict]:
+        inputs = []
+        for prompt, _, preference, uid in rows:
+            extra_info = preference.get("extra_info") or {}
+            inputs.append(
+                {
+                    "uid": uid,
+                    "input": PreferenceInput(
+                        prompt=prompt,
+                        preference=preference,
+                        metadata=TrajectoryMetadata(
+                            uid=uid,
+                            metric_class=PREFERENCE_PAIR_ENV_CLASS,
+                            data_source=extra_info.get("data_source", preference.get("data_source")),
+                            teacher_route=preference.get("teacher_route"),
+                        ),
+                    ),
+                }
+            )
+        return inputs
 
     def _read_files_and_tokenize(self):
         if self.data_format is PreferencePairFormat.TOKENIZED:

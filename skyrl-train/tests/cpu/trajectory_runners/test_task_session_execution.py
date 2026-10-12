@@ -1,5 +1,6 @@
 import json
 import pickle
+from dataclasses import replace
 from functools import partial
 
 import hydra
@@ -14,14 +15,14 @@ from transformers import AutoTokenizer
 from skyrl_gym.source_task import source_task
 from taskcompendium.models import NoGrader, Source
 from shellbox.backends.daytona.machine import DaytonaMachineFactory
-from tests.cpu.task_specs import lowered_task
+from tests.cpu.task_specs import lowered_task, task_input
 
 from skyrl_train.entrypoints.main_base import config_dir
 from skyrl_train.dataset.tasks import source_row_task
 from skyrl_train.rollouts.buffer import RolloutGroup, RolloutLease, RolloutTask
 from skyrl_train.rollouts.workers import WorkerShard
 from skyrl_train.rollouts.task_worker import TaskRolloutWorkerSpec
-from skyrl_train.trajectory_runners.types import TrajectoryID
+from skyrl_train.trajectory_runners.types import TrajectoryID, TaskRequestBatch
 from skyrl_train.utils.utils import validate_cfg
 from tests.cpu.tiny_training.cpu_backend import CPUInferenceEngine
 from tests.cpu.tiny_training.tiny_model import build_tiny_policy
@@ -87,14 +88,10 @@ async def test_cpu_worker_runs_machine_free_rows_and_checks_native_tools(
     )
     worker = pickle.loads(pickle.dumps(spec)).build(tokenizer, WorkerShard(index=0, count=1))
     try:
-        request = {
-            "prompts": [[{"role": "user", "content": "What is two? End with #### 2."}]],
-            "env_classes": [session],
-            "env_extras": [{"lowered_task_spec": lowered_task(task, session, max_turns=max_turns).model_dump_json()}],
-            "trajectory_ids": [TrajectoryID(task.id, 0)],
-            "batch_metadata": None,
-            "sampling_params": None,
-        }
+        request = TaskRequestBatch(
+            rows=(task_input(lowered_task(task, session, max_turns=max_turns)),),
+            trajectory_ids=(TrajectoryID(task.id, 0),),
+        )
         batch = await worker.run(request)
         native_row = {
             "prompt": [{"role": "user", "content": "Write a Python program that prints 2."}],
@@ -119,13 +116,11 @@ async def test_cpu_worker_runs_machine_free_rows_and_checks_native_tools(
             }
         )
         for backend, candidate in (("docker", native), ("harbor", harbor_task)):
-            mixed = {
-                **request,
-                "prompts": [*request["prompts"], native_row["prompt"]],
-                "env_classes": [session, candidate.session.task_session],
-                "env_extras": [*request["env_extras"], {"lowered_task_spec": candidate.model_dump_json()}],
-                "trajectory_ids": [TrajectoryID(task.id, 0), TrajectoryID(candidate.task.id, 0)],
-            }
+            mixed = replace(
+                request,
+                rows=(*request.rows, task_input(candidate)),
+                trajectory_ids=(TrajectoryID(task.id, 0), TrajectoryID(candidate.task.id, 0)),
+            )
             writer = RecordingWriter()
             operation = RolloutTask(RolloutLease("mixed", 0, 0), {"uid": "mixed"}, mixed)
             if missing_executable is None or (backend == "harbor" and harbor_backend == "daytona"):

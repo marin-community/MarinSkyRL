@@ -22,6 +22,7 @@ from transformers import PreTrainedTokenizerBase
 
 from skyrl_train.dataset.dataset import PromptDataset
 from skyrl_train.rollouts.group_grader import task_group_grader
+from skyrl_train.trajectory_runners.types import TaskInput, TrajectoryMetadata
 
 TASKCOMPENDIUM_ENVIRONMENT = "taskcompendium"
 LOWERED_TASK_COLUMN = "lowered_task_spec"
@@ -58,12 +59,36 @@ class TaskDataset(PromptDataset):
     def prepare_dataset(self, dataset):
         return dataset.map(_stored_task_prompt, num_proc=self.num_workers)
 
-    def __getitem__(self, item):
-        messages, environment, extras, uid = super().__getitem__(item)
-        task = LoweredTaskSpec.model_validate_json(extras[LOWERED_TASK_COLUMN]).task
-        if isinstance(task.grader, SessionGrader):
-            extras = {**session_parameters(task).extras, **extras}
-        return messages, environment, extras, uid
+    def collate_fn(self, rows) -> list[dict]:
+        inputs = []
+        for _, environment, extras, uid in rows:
+            lowered = LoweredTaskSpec.model_validate_json(extras[LOWERED_TASK_COLUMN])
+            if isinstance(lowered.task.grader, SessionGrader):
+                extras = {**session_parameters(lowered.task).extras, **extras}
+            extra_info = extras.get("extra_info") or {}
+            ultra = extra_info.get("nemotron_ultra")
+            metric_tags = (
+                (f"nemotron_ultra/coverage/{ultra['blend']}/{ultra['agent']}",)
+                if ultra is not None and "blend" in ultra and "agent" in ultra
+                else ()
+            )
+            inputs.append(
+                {
+                    "uid": uid,
+                    "input": TaskInput(
+                        lowered=lowered,
+                        metadata=TrajectoryMetadata(
+                            uid=uid,
+                            metric_class=environment,
+                            data_source=extra_info.get("data_source", extras.get("data_source")),
+                            teacher_route=extras.get("teacher_route"),
+                            metric_tags=metric_tags,
+                        ),
+                        group_grader=task_group_grader(lowered),
+                    ),
+                }
+            )
+        return inputs
 
 
 def _stored_task_prompt(row: dict) -> dict:
@@ -148,7 +173,7 @@ def cache_tasks(records: Iterable[LoweredTaskSpec], cache_dir: Path) -> Path:
     return path
 
 
-class SourceTaskDataset(PromptDataset):
+class SourceTaskDataset(TaskDataset):
     """Prepare source rows as in-memory prompts and private lowered tasks."""
 
     def __init__(

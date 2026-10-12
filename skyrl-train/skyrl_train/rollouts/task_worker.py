@@ -37,7 +37,6 @@ from rolloutengine.contracts import (
 from rolloutengine.engine import RolloutEngine
 from rolloutengine.spec import LoweredTaskSpec
 from rolloutengine.lowering import SHELLBOX_SESSION, validate_lowered_task
-from skyrl_train.dataset.tasks import LOWERED_TASK_COLUMN
 from skyrl_train.config.utils import generation_context_limit
 from skyrl_gym.task_factories import adapt_self_grading_session, session_factories
 from skyrl_gym.task_records import fold_grades, skipped_grade
@@ -47,7 +46,6 @@ from skyrl_train.inference_engines.base import ChatContinuation, InferenceEngine
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.rollouts.buffer import RolloutTask, RolloutWriter, write_trajectory_batch
-from skyrl_train.rollouts.group_grader import GroupGraderSpec
 from skyrl_train.rollouts.group_grading import GROUP_GRADERS, GroupGrader, grade_groups
 from skyrl_train.rollouts.harbor_tasks import (
     HARBOR_MACHINE_BACKEND,
@@ -78,7 +76,7 @@ from skyrl_train.trajectory_runners.types import (
     ROUTED_EXPERTS_KEY,
     TokenProvenance,
     TrajectoryBatch,
-    TrajectoryRequestBatch,
+    TaskRequestBatch,
 )
 
 
@@ -345,20 +343,14 @@ class TaskRolloutWorker:
         validate_lowered_task(lowered, factories=self.factories, sessions=sessions)
         return lowered, sessions
 
-    async def generate(self, request: TrajectoryRequestBatch) -> list[RolloutData]:
+    async def generate(self, request: TaskRequestBatch) -> list[RolloutData]:
         with self._active_request():
             return await self._generate(request)
 
-    async def _generate(self, request: TrajectoryRequestBatch) -> list[RolloutData]:
-        extras = request.get("env_extras")
-        if extras is None or len(extras) != len(request["prompts"]):
-            raise ValueError("Each rollout request must contain one lowered task per prompt")
-        lowered_tasks = [LoweredTaskSpec.model_validate_json(row[LOWERED_TASK_COLUMN]) for row in extras]
-        group_graders = [
-            GroupGraderSpec.model_validate_json(row["group_grader"]) if row.get("group_grader") is not None else None
-            for row in extras
-        ]
-        metadata = request.get("batch_metadata")
+    async def _generate(self, request: TaskRequestBatch) -> list[RolloutData]:
+        lowered_tasks = [row.lowered for row in request.rows]
+        group_graders = [row.group_grader for row in request.rows]
+        metadata = request.batch_metadata
         phase = "train" if metadata is None else metadata.training_phase
         harbor_settings = [self.harbor if "harbor" in item.task.tags else None for item in lowered_tasks]
         policies = [self.error_handling if harbor is None else harbor.error_handling for harbor in harbor_settings]
@@ -366,7 +358,7 @@ class TaskRolloutWorker:
             item if harbor is None else harbor.lowered(item, phase=phase)
             for item, harbor in zip(lowered_tasks, harbor_settings, strict=True)
         ]
-        trajectory_ids = request.get("trajectory_ids")
+        trajectory_ids = request.trajectory_ids
         session_ids = [
             trajectory_ids[index].to_string() if trajectory_ids is not None else uuid4().hex
             for index in range(len(lowered_tasks))
@@ -380,7 +372,7 @@ class TaskRolloutWorker:
         sampling = get_sampling_params_for_backend(
             self.trajectory_runner_cfg.backend, self.trajectory_runner_cfg.sampling_params
         )
-        sampling.update(request.get("sampling_params") or {})
+        sampling.update(request.sampling_params or {})
         require_logprobs = logprobs_requested(request, self.trajectory_runner_cfg)
         max_input_length = int(self.trajectory_runner_cfg.max_input_length)
         max_context_length = generation_context_limit(self.trajectory_runner_cfg)
@@ -466,12 +458,12 @@ class TaskRolloutWorker:
                 )
         return rollouts
 
-    async def run(self, input_batch: TrajectoryRequestBatch) -> TrajectoryBatch:
+    async def run(self, input_batch: TaskRequestBatch) -> TrajectoryBatch:
         with self._active_request():
             outputs = await self.generate(input_batch)
             return await self.training_batch(input_batch, outputs)
 
-    async def training_batch(self, request: TrajectoryRequestBatch, outputs: Sequence[RolloutData]) -> TrajectoryBatch:
+    async def training_batch(self, request: TaskRequestBatch, outputs: Sequence[RolloutData]) -> TrajectoryBatch:
         with rollout_phase("assemble"):
             batch = self.projection.project(outputs, request)
             propagate_data_sources(request, batch)

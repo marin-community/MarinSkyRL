@@ -26,7 +26,6 @@ class TerminalBenchGenerateExp(TerminalBenchExp):
             self.train_dataset.collate_fn(list(self.train_dataset)),
             self.cfg.generator.n_samples_per_prompt,
             get_sampling_params_for_backend(self.cfg.generator.backend, self.cfg.generator.sampling_params),
-            self.cfg.environment.env_class,
             "eval",
             0,
         )

@@ -39,6 +39,7 @@ from skyrl_train.rollouts.loader import PromptLoader, PromptLoaderState, JudgedG
 from skyrl_train.rollouts.payloads import MemoryPayloads, ObjectStorePayloads, PayloadStore
 from skyrl_train.utils import validate_cfg
 from tests.cpu.test_teacher_config_rejection import selected_topk_config
+from tests.cpu.task_specs import task_input, text_task, lowered_task
 
 SAMPLES_PER_PROMPT = 2
 STALL_TIMEOUT = 10.0
@@ -69,7 +70,7 @@ class _Prompts:
 
 
 def _prompt(uid: str) -> dict:
-    return {"uid": uid, "prompt": [], "env_class": None, "env_extras": {}}
+    return {"uid": uid, "input": task_input(lowered_task(text_task(uid)))}
 
 
 def _batch(*, masked: bool = False) -> dict:
@@ -221,7 +222,7 @@ def _context(
         config,
         start_buffer(config),
         CONTENT_POLICY,
-        RolloutRequestSpec(samples_per_prompt=SAMPLES_PER_PROMPT, sampling_params={}, environment_class="test"),
+        RolloutRequestSpec(samples_per_prompt=SAMPLES_PER_PROMPT, sampling_params={}),
         workers,
         payloads or MemoryPayloads(),
         rollout_spans=False,

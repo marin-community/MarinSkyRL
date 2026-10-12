@@ -2,9 +2,20 @@ import pytest
 
 from skyrl_train.batch_sampling import filter_trajectory_batch
 from tests.cpu.trajectory_runners.fixture_runner import FixtureRunner
-from skyrl_train.trajectory_runners.types import TrajectoryRequestBatch, TrajectoryBatch
+from skyrl_train.trajectory_runners.types import TrajectoryRequestBatch, TrajectoryBatch, TaskRequestBatch
 from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
 from skyrl_train.trajectory_runners.types import TrajectoryID
+from tests.cpu.task_specs import task_input, lowered_task, text_task
+
+
+def request(*, routes=(None,), sources=None, ids=None):
+    return TaskRequestBatch(
+        rows=tuple(
+            task_input(lowered_task(text_task(str(index))), teacher_route=route, data_source=source)
+            for index, (route, source) in enumerate(zip(routes, sources or [None] * len(routes), strict=True))
+        ),
+        trajectory_ids=None if ids is None else tuple(ids),
+    )
 
 
 class _AlignedRunner(FixtureRunner):
@@ -54,7 +65,7 @@ class _TwoRowRunner(FixtureRunner):
 
 @pytest.mark.asyncio
 async def test_run_adds_alignment_health_for_position_aligned_logprobs():
-    output = await _AlignedRunner().run({})
+    output = await _AlignedRunner().run(request())
 
     assert output["rollout_metrics"] == {
         "environment/score": 1.0,
@@ -85,7 +96,7 @@ async def test_run_preserves_measured_reconstruction_alignment_metrics():
         "generate/tis/lcs_fallback_alert": 1.0,
         "generate/tis/alignment_alert": 1.0,
     }
-    output = await _ReconstructedRunner().run({})
+    output = await _ReconstructedRunner().run(request())
 
     for name, value in measured_metrics.items():
         assert output["rollout_metrics"][name] == value
@@ -118,21 +129,14 @@ def test_concatenate_promotes_scalar_rewards_when_mixed_with_token_rewards():
 async def test_run_propagates_request_identity_when_runner_output_omits_it():
     trajectory_ids = [TrajectoryID(instance_id="task", repetition_id=0)]
 
-    output = await _AlignedRunner().run({"trajectory_ids": trajectory_ids})
+    output = await _AlignedRunner().run(request(ids=trajectory_ids))
 
     assert output["trajectory_ids"] == trajectory_ids
 
 
 @pytest.mark.asyncio
 async def test_run_propagates_explicit_teacher_routes_from_environment_metadata():
-    output = await _TwoRowRunner().run(
-        {
-            "env_extras": [
-                {"teacher_route": "math"},
-                {"teacher_route": "code"},
-            ]
-        }
-    )
+    output = await _TwoRowRunner().run(request(routes=("math", "code")))
 
     assert output["teacher_route_keys"] == ["math", "code"]
 
@@ -140,32 +144,18 @@ async def test_run_propagates_explicit_teacher_routes_from_environment_metadata(
 @pytest.mark.asyncio
 async def test_run_rejects_partially_routed_teacher_batch():
     with pytest.raises(ValueError, match="teacher_route.*every request row"):
-        await _TwoRowRunner().run(
-            {
-                "env_extras": [
-                    {"teacher_route": "math"},
-                    {},
-                ]
-            }
-        )
+        await _TwoRowRunner().run(request(routes=("math", None)))
 
 
 @pytest.mark.asyncio
 async def test_run_rejects_empty_teacher_route():
     with pytest.raises(ValueError, match="teacher_route must be a non-empty string"):
-        await _TwoRowRunner().run(
-            {
-                "env_extras": [
-                    {"teacher_route": "math"},
-                    {"teacher_route": ""},
-                ]
-            }
-        )
+        await _TwoRowRunner().run(request(routes=("math", "")))
 
 
 @pytest.mark.asyncio
 async def test_run_omits_teacher_routes_when_request_does_not_supply_them():
-    output = await _TwoRowRunner().run({"env_extras": [{}, {}]})
+    output = await _TwoRowRunner().run(request(routes=(None, None)))
 
     assert "teacher_route_keys" not in output
 
@@ -173,7 +163,7 @@ async def test_run_omits_teacher_routes_when_request_does_not_supply_them():
 @pytest.mark.asyncio
 async def test_non_gym_runner_does_not_propagate_task_uris_as_data_sources():
     output = await _TwoRowRunner().run(
-        {"env_extras": [{"data_source": "tasktrove://set/task-a"}, {"data_source": "tasktrove://set/task-b"}]}
+        request(routes=(None, None), sources=("tasktrove://set/task-a", "tasktrove://set/task-b"))
     )
 
     assert "data_sources" not in output
@@ -181,8 +171,8 @@ async def test_non_gym_runner_does_not_propagate_task_uris_as_data_sources():
 
 @pytest.mark.asyncio
 async def test_teacher_routes_survive_batch_concatenation_and_filtering():
-    math = await _AlignedRunner().run({"env_extras": [{"teacher_route": "math"}]})
-    code = await _AlignedRunner().run({"env_extras": [{"teacher_route": "code"}]})
+    math = await _AlignedRunner().run(request(routes=("math",)))
+    code = await _AlignedRunner().run(request(routes=("code",)))
 
     combined = concatenate_trajectory_batches([math, code], tis_lcs_alert_threshold=0.005)
     filtered = filter_trajectory_batch(combined, [1])
