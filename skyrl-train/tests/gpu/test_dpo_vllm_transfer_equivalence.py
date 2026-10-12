@@ -15,6 +15,7 @@ disaggregated vLLM engines over the NCCL path, and then checks transfer equivale
 """
 
 import asyncio
+import math
 
 import pytest
 import ray
@@ -44,7 +45,6 @@ from tests.gpu.test_grug_megatron import (
     LOGPROB_MEAN_ABS_TOLERANCE,
     _config,
     _megatron_response_logprobs,
-    _train_step,
 )
 from tests.gpu.utils import init_worker_with_type
 
@@ -116,6 +116,18 @@ def _assert_logprob_parity(label: str, actual: torch.Tensor, expected: torch.Ten
     assert difference.mean().item() < LOGPROB_MEAN_ABS_TOLERANCE, difference.mean()
 
 
+def _dpo_train_step(policy, batch: TrainingInputBatch) -> dict[str, float]:
+    """Run one training step and assert the DPO loss row is finite.
+
+    Mirrors the shared PPO `_train_step`, whose `policy_loss` row does not exist for
+    the DPO objective (it reports `dpo/*` rows instead).
+    """
+    train_output = ray.get(policy.async_run_ray_method("mesh", "ppo_train", batch))[0]
+    status = train_output.metadata["train_status"]
+    assert math.isfinite(status["dpo/loss"]), status
+    return status
+
+
 @pytest.mark.vllm
 def test_dpo_update_transfers_to_vllm_tensors_and_logprobs(tmp_path):
     require_hoppers(POLICY_WORLD_SIZE + ROLLOUT_WORLD_SIZE)
@@ -141,7 +153,7 @@ def test_dpo_update_transfers_to_vllm_tensors_and_logprobs(tmp_path):
         served_before = asyncio.run(_vllm_logprobs(client, cfg, batch.sequences, batch.num_actions))
         _assert_logprob_parity("pre-update", served_before, trainer_before, batch.loss_mask)
 
-        _train_step(policy, _pair_training_batch(batch, trainer_before.cpu()))
+        _dpo_train_step(policy, _pair_training_batch(batch, trainer_before.cpu()))
         training = rank0_validation_snapshot(policy, names)
         changed = [name for name in GRUG_PARAMETER_NAMES if not torch.equal(training[name], before[name])]
         assert changed, "the DPO step did not move any training tensors"
