@@ -1,6 +1,7 @@
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Any, Mapping
 
 from loguru import logger
@@ -17,43 +18,54 @@ class ErrorCategory(StrEnum):
 
 # Persisted exception names from the Harbor revision in uv.lock. The Harbor
 # integration test compares this snapshot with that revision's taxonomy.
-_ERROR_CATEGORIES: dict[str, ErrorCategory] = {
-    "ContextManagementInfrastructureError": ErrorCategory.INFRASTRUCTURE,
-    "ArtifactUploadTimeoutError": ErrorCategory.INFRASTRUCTURE,
-    "ArtifactWriterBacklogError": ErrorCategory.INFRASTRUCTURE,
-    "EnvironmentStartTimeoutError": ErrorCategory.INFRASTRUCTURE,
-    "TrialTimeoutError": ErrorCategory.INFRASTRUCTURE,
-    "SandboxBuildFailedError": ErrorCategory.INFRASTRUCTURE,
-    "SnapshotQuotaExceeded": ErrorCategory.INFRASTRUCTURE,
-    "HealthcheckError": ErrorCategory.INFRASTRUCTURE,
-    "DaytonaSandboxStopError": ErrorCategory.INFRASTRUCTURE,
-    "BridgeOutageError": ErrorCategory.INFRASTRUCTURE,
-    "EnrootMemoryLimitExceededError": ErrorCategory.INFRASTRUCTURE,
-    "MissingExtraError": ErrorCategory.INFRASTRUCTURE,
-    "AgentKilledBySignalError": ErrorCategory.INFRASTRUCTURE,
-    "AgentSetupTimeoutError": ErrorCategory.INFRASTRUCTURE,
-    "ModelAuthenticationError": ErrorCategory.INFRASTRUCTURE,
-    "ContextBudgetExceededError": ErrorCategory.INFRASTRUCTURE,
-    "LLMRequestTimeoutError": ErrorCategory.INFRASTRUCTURE,
-    "OpenAITransportConnectTimeoutError": ErrorCategory.INFRASTRUCTURE,
-    "TmuxBatchProtocolError": ErrorCategory.INFRASTRUCTURE,
-    "TmuxCommandError": ErrorCategory.INFRASTRUCTURE,
-    "TmuxSessionEndedError": ErrorCategory.INFRASTRUCTURE,
-    "DownloadVerifierDirError": ErrorCategory.INFRASTRUCTURE,
-    "RewardFileNotFoundError": ErrorCategory.INFRASTRUCTURE,
-    "RewardFileEmptyError": ErrorCategory.INFRASTRUCTURE,
-    "VerifierRuntimeError": ErrorCategory.INFRASTRUCTURE,
-    "VerifierOutputParseError": ErrorCategory.INFRASTRUCTURE,
-    "AddTestsDirError": ErrorCategory.INFRASTRUCTURE,
-    "AgentTimeoutError": ErrorCategory.AGENT,
-    "ContextLengthExceededError": ErrorCategory.AGENT,
-    "NonZeroAgentExitCodeError": ErrorCategory.AGENT,
-    "OutputLengthExceededError": ErrorCategory.PASSTHROUGH,
-    "TurnCapExhaustedError": ErrorCategory.PASSTHROUGH,
-    "TrialNotScoredError": ErrorCategory.UNKNOWN,
-    "VerificationNotCompletedError": ErrorCategory.UNKNOWN,
-    "VerifierTimeoutError": ErrorCategory.UNKNOWN,
-}
+_ERROR_CATEGORIES: Mapping[str, ErrorCategory] = MappingProxyType(
+    {
+        "ContextManagementInfrastructureError": ErrorCategory.INFRASTRUCTURE,
+        "ArtifactUploadTimeoutError": ErrorCategory.INFRASTRUCTURE,
+        "ArtifactWriterBacklogError": ErrorCategory.INFRASTRUCTURE,
+        "EnvironmentStartTimeoutError": ErrorCategory.INFRASTRUCTURE,
+        "TrialTimeoutError": ErrorCategory.INFRASTRUCTURE,
+        "SandboxBuildFailedError": ErrorCategory.INFRASTRUCTURE,
+        "SnapshotQuotaExceeded": ErrorCategory.INFRASTRUCTURE,
+        "HealthcheckError": ErrorCategory.INFRASTRUCTURE,
+        "DaytonaSandboxStopError": ErrorCategory.INFRASTRUCTURE,
+        "BridgeOutageError": ErrorCategory.INFRASTRUCTURE,
+        "EnrootMemoryLimitExceededError": ErrorCategory.INFRASTRUCTURE,
+        "MissingExtraError": ErrorCategory.INFRASTRUCTURE,
+        "AgentKilledBySignalError": ErrorCategory.INFRASTRUCTURE,
+        "AgentSetupTimeoutError": ErrorCategory.INFRASTRUCTURE,
+        "ModelAuthenticationError": ErrorCategory.INFRASTRUCTURE,
+        "ContextBudgetExceededError": ErrorCategory.INFRASTRUCTURE,
+        "LLMRequestTimeoutError": ErrorCategory.INFRASTRUCTURE,
+        "OpenAITransportConnectTimeoutError": ErrorCategory.INFRASTRUCTURE,
+        "TmuxBatchProtocolError": ErrorCategory.INFRASTRUCTURE,
+        "TmuxCommandError": ErrorCategory.INFRASTRUCTURE,
+        "TmuxSessionEndedError": ErrorCategory.INFRASTRUCTURE,
+        "DownloadVerifierDirError": ErrorCategory.INFRASTRUCTURE,
+        "RewardFileNotFoundError": ErrorCategory.INFRASTRUCTURE,
+        "RewardFileEmptyError": ErrorCategory.INFRASTRUCTURE,
+        "VerifierRuntimeError": ErrorCategory.INFRASTRUCTURE,
+        "VerifierOutputParseError": ErrorCategory.INFRASTRUCTURE,
+        "AddTestsDirError": ErrorCategory.INFRASTRUCTURE,
+        "ArtifactPersistenceError": ErrorCategory.INFRASTRUCTURE,
+        "ArtifactWriteTimeoutError": ErrorCategory.INFRASTRUCTURE,
+        "ContainerRegistryThrottledError": ErrorCategory.INFRASTRUCTURE,
+        "DaytonaProcessError": ErrorCategory.INFRASTRUCTURE,
+        "PhaseCancellationError": ErrorCategory.INFRASTRUCTURE,
+        "SandboxDiskFullError": ErrorCategory.INFRASTRUCTURE,
+        "Tau3RuntimeInfrastructureError": ErrorCategory.INFRASTRUCTURE,
+        "AgentTimeoutError": ErrorCategory.AGENT,
+        "AgentDiskFullError": ErrorCategory.AGENT,
+        "ContextLengthExceededError": ErrorCategory.AGENT,
+        "NonZeroAgentExitCodeError": ErrorCategory.AGENT,
+        "OutputLengthExceededError": ErrorCategory.PASSTHROUGH,
+        "TurnCapExhaustedError": ErrorCategory.PASSTHROUGH,
+        "MalformedModelResponseError": ErrorCategory.PASSTHROUGH,
+        "TrialNotScoredError": ErrorCategory.UNKNOWN,
+        "VerificationNotCompletedError": ErrorCategory.UNKNOWN,
+        "VerifierTimeoutError": ErrorCategory.UNKNOWN,
+    }
+)
 
 
 def error_category(exception_type: str) -> ErrorCategory:

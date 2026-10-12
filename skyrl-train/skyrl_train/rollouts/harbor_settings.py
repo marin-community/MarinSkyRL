@@ -1,4 +1,4 @@
-"""Harbor task settings consumed by SkyRL's rollout worker."""
+"""Harbor task runtime, verifier, and retry settings."""
 
 from enum import StrEnum
 from typing import Any
