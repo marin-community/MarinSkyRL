@@ -4,18 +4,24 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypedDict
 
 from rolloutengine.spec import LoweredTaskSpec, TaskRuntimeSpec, TaskSessionSpec
 from taskcompendium.models import Source
 
-from skyrl_gym.closure_task import ClosurePrompt
+from skyrl_gym.closure_task import STRUCTURE_CLOSURE_SESSION, ClosurePrompt
 from skyrl_gym.source_task import source_task
+
+
+class ConversionFailure(TypedDict):
+    row: int
+    error: str
 
 
 @dataclass(frozen=True)
 class ClosureConversion:
     tasks: tuple[LoweredTaskSpec, ...]
-    failures: tuple[dict[str, str | int], ...]
+    failures: tuple[ConversionFailure, ...]
 
 
 def closure_tasks(directory: Path, split: str, session: TaskSessionSpec) -> ClosureConversion:
@@ -32,7 +38,7 @@ def closure_tasks(directory: Path, split: str, session: TaskSessionSpec) -> Clos
     if digest != manifest["hashes"][split] or manifest["status"] != "local-token-roundtrip-passed":
         raise ValueError("Closure input does not match a passed immutable token audit")
     tasks = []
-    failures = []
+    failures: list[ConversionFailure] = []
     seen = set()
     for index, line in enumerate(contents.splitlines()):
         try:
@@ -57,7 +63,7 @@ def closure_tasks(directory: Path, split: str, session: TaskSessionSpec) -> Clos
                 LoweredTaskSpec(
                     task=task,
                     runtime=TaskRuntimeSpec(task_machine=None, verifier_machine=None),
-                    session=session.model_copy(update={"task_session": "structure_closure", "max_turns": 1}),
+                    session=session.model_copy(update={"task_session": STRUCTURE_CLOSURE_SESSION, "max_turns": 1}),
                 )
             )
         except (ValueError, KeyError, TypeError) as error:

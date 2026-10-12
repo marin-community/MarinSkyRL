@@ -14,6 +14,8 @@ from taskcompendium.grading_result import GradeResult, Outcome
 
 from skyrl_gym.source_task import session_parameters
 
+STRUCTURE_CLOSURE_SESSION = "structure_closure"
+
 
 class ClosurePrompt(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")

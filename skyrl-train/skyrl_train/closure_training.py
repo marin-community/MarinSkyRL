@@ -37,8 +37,8 @@ def closure_training_targets(
 ) -> ClosureTrainingTargets:
     """Use verified closure contracts; infrastructure failures produce no target.
 
-    Repeated-opener retention keeps the existing detector and JSON-opening
-    alternatives. Other families require a closing-only repair that preserves
+    Repeated-opener targets select JSON-opening alternatives at the first
+    repeated marker. Other families require a closing-only repair that preserves
     the task's required content. Missing suffixes are reserved for masked SFT.
     """
     boundaries = []

@@ -7,11 +7,13 @@ from pathlib import Path
 
 from rolloutengine.spec import TaskSessionSpec
 from skyrl_gym.closure_dataset import closure_tasks
+from skyrl_gym.closure_task import STRUCTURE_CLOSURE_SESSION
 
 from skyrl_train.dataset.tasks import write_tasks
 
 
 def prepare_closure_tasks(tokens: Path, session: TaskSessionSpec, output: Path) -> dict:
+    """Write task partitions and return their status, counts, failures, and hashes."""
     if output.exists():
         raise FileExistsError(output)
     output.mkdir(parents=True)
@@ -32,7 +34,7 @@ def prepare_closure_tasks(tokens: Path, session: TaskSessionSpec, output: Path) 
         "failures": failures,
         "hashes": hashes,
         "token_manifest_sha256": hashlib.sha256((tokens / "manifest.json").read_bytes()).hexdigest(),
-        "session": session.model_copy(update={"task_session": "structure_closure", "max_turns": 1}).model_dump(
+        "session": session.model_copy(update={"task_session": STRUCTURE_CLOSURE_SESSION, "max_turns": 1}).model_dump(
             mode="json"
         ),
     }
@@ -50,7 +52,7 @@ def main() -> None:
         args.tokens, TaskSessionSpec.model_validate_json(args.session.read_text()), args.output
     )
     print(json.dumps(report, indent=2))
-    raise SystemExit(report["status"] == "failed")
+    raise SystemExit(any(report["failures"].values()))
 
 
 if __name__ == "__main__":

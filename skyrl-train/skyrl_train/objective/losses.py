@@ -258,7 +258,7 @@ def compute_policy_loss_kl_cov(inputs: PolicyLossInputs, config: DictConfig) -> 
 
 @register_policy_loss(PolicyLossType.FTPO)
 def ftpo_policy_loss(inputs: PolicyLossInputs, config: DictConfig) -> TokenLoss:
-    """Optimize chosen alternatives at detected loop boundaries."""
+    """Optimize selected token alternatives and optional verified repair suffixes."""
     params = ftpo_config(config)
     if inputs.ftpo is None or params is None:
         raise ValueError("FTPO requires candidate masks and raw reference logits")
