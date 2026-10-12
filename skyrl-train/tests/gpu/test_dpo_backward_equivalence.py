@@ -10,13 +10,18 @@ expert shards, and the batch-major output projection installed by the training w
 Every rank computes the HF reference on its own GPU so the comparison is GPU-vs-GPU; a
 CPU reference on rank 0 doubles as a fixture-validity guard, separating routing flips
 (about 1e-2 log-probability jumps) from kernel-level drift (about 1e-4). The checkpoint's
-router weights are scaled so biased selection margins stay decisive across independent
-implementations, and the batch is checked against a minimum-margin floor before use.
+router weights are zeroed so biased expert selection is decided by the constant router
+bias alone — near-tie routes would otherwise flip between independent fp32 implementations
+and look exactly like a backward mismatch.
 
 Alignment: named tensors are aligned through the bridge conversion tasks — the same
 mapping the weight sync uses — by temporarily exporting ``param.main_grad`` in place of
 parameter data. Expert identifiers resolve through the stacked-expert export mapping;
-pipeline partitions through the collective export.
+pipeline partitions through the collective export. Gradients are reduced with DDP
+allreduce (``use_distributed_optimizer=False``) and finalized with ``finish_grad_sync``,
+so every rank's buffer holds the full data-parallel mean that the HF reference computes;
+the distributed optimizer's reduce-scatter shard path is verified element-exactly by the
+optimizer update experiment instead.
 
 Scope: the production BFCL run used TP1/PP15/CP1/EP8 at bf16 with the fused attention
 kernels. This experiment runs TP1/CP1 (the topology condition of the output projection)
@@ -136,8 +141,6 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
         def log_detail(line: str) -> None:
             print(line, flush=True)
 
-        late_lines: list[str] = []
-
         mpu.initialize_model_parallel(
             tensor_model_parallel_size=1,
             pipeline_model_parallel_size=pp,
@@ -159,6 +162,11 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
             expert_model_parallel_size=ep,
             bf16=False,
             attention_backend="unfused",
+            # Allreduce gradient reduction keeps every rank's main_grad the full
+            # data-parallel average, which the HF reference can be compared against
+            # tensor-wise. The distributed optimizer's reduce-scatter shard path is
+            # verified element-exactly by the optimizer update experiment instead.
+            distributed_optimizer=False,
         )
         log_detail(f"rank{rank} phase: chunks ready")
         cfg = dpo_wrapper_config(batch.sequences.shape[1])
@@ -183,60 +191,13 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
             payloads, seq_len=batch.sequences.shape[1], micro_batch_size=MICRO_BATCH_SIZE
         )
         log_detail(f"rank{rank} phase: forward-backward done")
-        # Local main_grad probe: separates a wrong per-rank gradient from a wrong export
-        # gather. Each rank compares its own chunks' main_grads against the reference.
-        # Written at teardown so these lines end the diagnostics file.
-        for probe_suffix in (
-            "model.norm.weight",
-            "layers.7.self_attn.q_proj.weight",
-            "layers.0.self_attn.q_proj.weight",
-        ):
-            for chunk in chunks:
-                for parameter_name, parameter in chunk.named_parameters():
-                    if not parameter_name.endswith(probe_suffix):
-                        continue
-                    main_grad = getattr(parameter, "main_grad", None)
-                    if main_grad is None:
-                        continue
-                    reference_grad = next(
-                        value for name, value in reference.gradients.items() if name.endswith(probe_suffix)
-                    )
-                    local_diff = (main_grad.detach().float().cpu() - reference_grad).abs().max().item()
-                    late_lines.append(
-                        f"rank{rank} local main_grad {probe_suffix}: "
-                        f"max_abs={local_diff:.8g} expected_max={reference_grad.abs().max().item():.8g}"
-                    )
+        # The trainer finalizes gradient synchronization before consuming gradients.
+        # With allreduce DDP this is idempotent and leaves every rank's main_grad the
+        # full data-parallel mean of the per-micro gradients.
+        for chunk in chunks:
+            chunk.finish_grad_sync()
         exports = export_parameter_gradients(bridge, chunks)
         log_detail(f"rank{rank} phase: gradients exported")
-
-        # Probe-tensor comparison from every rank's own (collective) export, by HF name.
-        for probe_name in (
-            "model.norm.weight",
-            "model.layers.7.self_attn.q_proj.weight",
-            "model.layers.0.self_attn.q_proj.weight",
-        ):
-            if probe_name in exports:
-                difference = (exports[probe_name] - reference.gradients[probe_name]).abs().max().item()
-                late_lines.append(
-                    f"rank{rank} exported {probe_name}: max_abs={difference:.8g} "
-                    f"expected_max={reference.gradients[probe_name].abs().max().item():.8g}"
-                )
-        # The trainer finalizes gradient synchronization before its optimizer step; check
-        # whether an explicit finish_grad_sync changes the raw pipeline buffers.
-        if all(hasattr(chunk, "finish_grad_sync") for chunk in chunks):
-            for chunk in chunks:
-                chunk.finish_grad_sync()
-            synced = export_parameter_gradients(bridge, chunks)
-            for probe_name in (
-                "model.norm.weight",
-                "model.layers.7.self_attn.q_proj.weight",
-                "model.layers.0.self_attn.q_proj.weight",
-            ):
-                if probe_name in synced:
-                    difference = (synced[probe_name] - reference.gradients[probe_name]).abs().max().item()
-                    late_lines.append(
-                        f"rank{rank} after finish_grad_sync {probe_name}: max_abs={difference:.8g}"
-                    )
 
         # Per-token Megatron-vs-HF agreement on the eval path, over the same window the
         # loss consumes. Attention-masked window entries are zero by design on the
@@ -323,10 +284,6 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
     finally:
         for line in report:
             print(line, flush=True)
-        # Late lines finish both the stdout stream and the diagnostics file, so the
-        # per-rank local-gradient probes survive log-tail truncation on failing runs.
-        for line in late_lines:
-            emit(line)
         mpu.destroy_model_parallel()
         dist.destroy_process_group()
 

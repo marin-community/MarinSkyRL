@@ -234,6 +234,7 @@ def build_grug_megatron_chunks(
     flash_attn: bool = False,
     attention_backend: str | None = None,
     wrap_with_ddp: bool = True,
+    distributed_optimizer: bool = True,
     policy_loss_type: str | None = "dpo",
 ):
     """Build DDP-wrapped Megatron chunks through the same provider path as the training worker.
@@ -274,7 +275,7 @@ def build_grug_megatron_chunks(
     phase("provider finalized")
 
     ddp_config = DistributedDataParallelConfig()
-    if wrap_with_ddp:
+    if wrap_with_ddp and distributed_optimizer:
         ddp_config.use_distributed_optimizer = True
     phase("providing distributed model")
     chunks = provider.provide_distributed_model(ddp_config=ddp_config, wrap_with_ddp=wrap_with_ddp, bf16=bf16)
