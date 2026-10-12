@@ -120,10 +120,11 @@ def test_closure_conversion_reports_all_invalid_rows_and_preserves_valid_task(tm
     ],
 )
 @pytest.mark.parametrize("terminator", ["", "<|eot_id|>", "<|end_of_text|>"])
+@pytest.mark.parametrize("trailing", ["", "\nextra output"])
 async def test_closure_replay_scores_exact_tokens_and_preserves_private_reference(
-    structure_format, prefix, expected, response, syntax, success, terminator
+    structure_format, prefix, expected, response, syntax, success, terminator, trailing
 ):
-    response += terminator
+    response += trailing + terminator
     prompt_ids = (100, 201, 301)
     specification = task(
         "structure_closure",
@@ -151,6 +152,9 @@ async def test_closure_replay_scores_exact_tokens_and_preserves_private_referenc
     assert rollout.grade.diagnostics["syntax_complete"] == syntax
     assert rollout.grade.diagnostics["content_preserved"] == success
     assert rollout.grade.diagnostics["closure"]["expected"] == expected
+    assert rollout.grade.diagnostics["scorer"] == "closure_region_v1"
+    assert rollout.grade.diagnostics["trailing_content"] == bool(syntax and trailing)
+    assert rollout.grade.diagnostics["whole_response_success"] == bool(success and not trailing)
 
 
 @pytest.mark.asyncio

@@ -1,10 +1,17 @@
 """One-turn structure completion from exact model-token prefixes."""
 
-from dataclasses import replace
+from dataclasses import asdict, replace
 from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from rolloutengine.closure_scoring import ClosureFormat, closure_response_content, closure_state, score_closure
+from rolloutengine.closure_scoring import (
+    CLOSURE_REGION_SCORER,
+    ClosureFormat,
+    closure_response_content,
+    closure_state,
+    score_closure,
+    score_closure_region,
+)
 from rolloutengine.contracts import ModelTurn, SessionStart, Transition
 from rolloutengine.spec import LoweredTaskSpec
 from rolloutengine.structure_closure import PrefixStatus
@@ -55,28 +62,24 @@ class ClosureReplaySession:
 
     async def advance(self, turn: ModelTurn) -> Transition:
         content = closure_response_content(turn.text, stop_reason=turn.stop_reason)
-        score = score_closure(self.prompt.prefix + content, self.prompt.expected, self.prompt.format)
+        score = score_closure_region(self.prompt.prefix + content, self.prompt.expected, self.prompt.format)
         self.result = GradeResult(
             Outcome.GRADED,
             float(score.success),
             passed=score.success,
             diagnostics={
                 "closure": self.prompt.model_dump(mode="json", exclude={"prompt_token_ids"}),
-                "syntax_complete": score.syntax_complete,
-                "content_preserved": score.content_preserved,
+                "scorer": CLOSURE_REGION_SCORER,
+                **asdict(score),
                 "stop_reason": turn.stop_reason,
             },
         )
-        metric = f"closure/{self.prompt.family}/{self.prompt.control}"
+        metric = f"{CLOSURE_REGION_SCORER}/{self.prompt.family}/{self.prompt.control}"
         return Transition(
             done=True,
             reward=float(score.success),
             grade=self.result,
-            metrics={
-                f"{metric}/success": float(score.success),
-                f"{metric}/syntax_complete": float(score.syntax_complete),
-                f"{metric}/content_preserved": float(score.content_preserved),
-            },
+            metrics={f"{metric}/{name}": float(value) for name, value in asdict(score).items()},
         )
 
     async def grade(self, messages: tuple[dict[str, Any], ...], *, stop_reason: str) -> GradeResult:
