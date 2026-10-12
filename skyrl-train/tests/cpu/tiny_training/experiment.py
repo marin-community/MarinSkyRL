@@ -162,6 +162,12 @@ class JsonlTracker:
         with self.path.open("a") as handle:
             handle.write(json.dumps({"step": step, **data}, default=float) + "\n")
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exception):
+        pass
+
 
 def read_metrics(root: Path) -> list[dict]:
     """Return the metrics records an experiment under ``root`` logged, in order."""

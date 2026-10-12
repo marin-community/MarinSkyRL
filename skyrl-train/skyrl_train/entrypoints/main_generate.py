@@ -68,8 +68,8 @@ class EvalOnlyEntrypoint(BasePPOExp):
         finally:
             await trajectory_runner.shutdown()
 
-        tracker = self.get_tracker()
-        tracker.log(results, step=0, commit=True)
+        with self.get_tracker() as tracker:
+            tracker.log(results, step=0, commit=True)
 
         return results
 

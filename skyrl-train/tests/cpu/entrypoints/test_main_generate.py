@@ -1,3 +1,5 @@
+from contextlib import nullcontext
+
 import pytest
 from omegaconf import OmegaConf
 
@@ -47,7 +49,7 @@ async def test_eval_only_uses_generation_engine_without_initial_wake(monkeypatch
 
     experiment.create_inference_engine_client = create_inference_engine_client
     experiment.get_trajectory_runner = lambda *_args: trajectory_runner
-    experiment.get_tracker = lambda: tracker
+    experiment.get_tracker = lambda: nullcontext(tracker)
     monkeypatch.setattr(main_generate, "build_eval_dataloader", lambda *_args, **_kwargs: "dataloader")
     monkeypatch.setattr(main_generate, "evaluate", evaluate)
 
