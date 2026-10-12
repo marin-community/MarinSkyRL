@@ -35,6 +35,7 @@ from tests.gpu.grug_serving import (
     GRUG_BIAS_NAMES,
     GRUG_PARAMETER_NAMES,
     GRUG_SERVING_EXPERT_INDEX_BY_NAME,
+    STACKED_EXPERT_NAME,
     assert_engine_weights,
     grug_engine_client,
     rank0_validation_snapshot,
@@ -164,7 +165,10 @@ def test_dpo_update_transfers_to_vllm_tensors_and_logprobs(tmp_path):
 
         ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
         ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
-        assert_engine_weights(client, names, training, GRUG_BIAS_NAMES, GRUG_SERVING_EXPERT_INDEX_BY_NAME)
+        # Serving engines map per-expert names only; the stacked training tensor stays
+        # in the snapshot so the helper can slice it per expert index.
+        sync_names = [name for name in names if name != STACKED_EXPERT_NAME] + list(GRUG_SERVING_EXPERT_INDEX_BY_NAME)
+        assert_engine_weights(client, sync_names, training, GRUG_BIAS_NAMES, GRUG_SERVING_EXPERT_INDEX_BY_NAME)
 
         asyncio.run(client.reset_prefix_cache())
         trainer_after = _megatron_response_logprobs(
