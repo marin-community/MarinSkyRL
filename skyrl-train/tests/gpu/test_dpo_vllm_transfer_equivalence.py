@@ -19,6 +19,7 @@ import asyncio
 import pytest
 import ray
 import torch
+from omegaconf import OmegaConf
 from transformers import AutoTokenizer
 
 from skyrl_train.inference_engines.base import InferenceEngineInput
@@ -26,6 +27,7 @@ from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.utils import initialize_ray
 from skyrl_train.utils.utils import validate_cfg
+from tests.cpu.util import DPO_OVERRIDES
 from tests.gpu.dpo_equivalence import fixed_pair_batch
 from tests.gpu.grug_gpu_gates import require_hoppers
 from tests.gpu.grug_serving import (
@@ -57,20 +59,9 @@ def _dpo_config(model_path: str):
     cfg.trainer.micro_train_batch_size_per_gpu = 2
     cfg.trainer.micro_forward_batch_size_per_gpu = 2
     cfg.trainer.update_epochs_per_batch = 1
-    cfg.trainer.algorithm.policy_loss_type = "dpo"
-    cfg.trainer.algorithm.advantage_estimator = "uniform"
-    cfg.trainer.algorithm.loss_reduction = "pair_mean"
-    cfg.trainer.algorithm.advantage_batch_normalize = False
-    cfg.trainer.algorithm.use_kl_loss = False
-    cfg.trainer.algorithm.use_kl_in_reward = False
-    cfg.trainer.algorithm.use_entropy_loss = False
-    cfg.trainer.algorithm.off_policy_correction = "none"
-    cfg.trainer.algorithm.dynamic_sampling.type = None
-    cfg.trainer.algorithm.dpo.beta = 0.1
-    cfg.trainer.algorithm.dpo.label_smoothing = 0.0
-    cfg.environment.env_class = "preference_pair"
-    cfg.trainer.use_sample_packing = False
-    cfg.generator.n_samples_per_prompt = 2
+    # The shipped DPO recipe, applied as one block so this experiment and the
+    # reference in dpo_equivalence.py cannot drift apart field by field.
+    cfg = OmegaConf.merge(cfg, OmegaConf.create(DPO_OVERRIDES))
     validate_cfg(cfg)
     return cfg
 
