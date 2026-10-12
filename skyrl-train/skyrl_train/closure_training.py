@@ -23,6 +23,36 @@ class ClosureTrainingTargets:
     repairs: list[ClosureTarget | None]
 
 
+def closure_target_metrics(
+    verifications: Sequence[VerificationResult | None],
+    targets: ClosureTrainingTargets,
+    chosen: torch.Tensor,
+    loss_mask: torch.Tensor,
+    repair_mask: torch.Tensor | None,
+) -> dict[str, float]:
+    """Count prepared supervision by format family and control, before learner consumption."""
+    selected = chosen.any(-1) & (loss_mask > 0)
+    if repair_mask is not None:
+        selected = selected & ~repair_mask
+    metrics: dict[str, float] = {}
+    for row, (verification, boundary) in enumerate(zip(verifications, targets.boundaries, strict=True)):
+        if verification is None or verification.status != VerificationStatus.VERIFIED:
+            continue
+        contract = verification.diagnostics["closure"]
+        prefix = f"closure/targets/{contract['family']}/{contract['control']}"
+        counts = {
+            "rows": 1,
+            "verified_boundaries": int(boundary is not None),
+            "boundaries_with_candidates": int(boundary is not None and bool(boundary.chosen_token_ids)),
+            "selected_ftpo_tokens": int(selected[row].sum()),
+            "repair_tokens": 0 if repair_mask is None else int((repair_mask[row] & (loss_mask[row] > 0)).sum()),
+        }
+        for name, value in counts.items():
+            key = f"{prefix}/{name}"
+            metrics[key] = metrics.get(key, 0.0) + value
+    return metrics
+
+
 def closure_training_targets(
     prompt_ids: Sequence[Sequence[int]],
     response_ids: Sequence[Sequence[int]],

@@ -72,7 +72,7 @@ from skyrl_train.objective.teacher import teacher_advantages
 from skyrl_train.objective.correction import compute_correction
 from skyrl_train.config.objective_spec import off_policy_correction
 from skyrl_train.config.ftpo import FTPOBoundary, ftpo_config
-from skyrl_train.closure_training import closure_training_targets
+from skyrl_train.closure_training import closure_target_metrics, closure_training_targets
 from skyrl_train.ftpo import select_ftpo_candidates
 from skyrl_train.distillation_adapters import collate_student_selected_rollout
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import parse_trajectory_reward_shaping_config
@@ -2285,6 +2285,16 @@ class RayPPOTrainer:
             training_input["loss_mask"] = weights
             self.all_metrics["ftpo/selected_boundaries"] = float(chosen.any(-1).sum())
             self.all_metrics["ftpo/chosen_candidates"] = float(chosen.sum())
+            if closure_targets is not None:
+                self.all_metrics.update(
+                    closure_target_metrics(
+                        trajectory_batch["verification_results"],
+                        closure_targets,
+                        chosen,
+                        weights,
+                        training_input.get("ftpo_repair_mask"),
+                    )
+                )
         # Stage B (F5/F4): attach the per-token shaping channel + span tags ONLY
         # when present, so the flag-off batch dict has exactly the same keys as
         # today (TensorBatch.__eq__ compares key sets).
