@@ -152,4 +152,14 @@ per-tensor discrepancy tables (`gradient ...`, `optimizer ...`, `... logprob par
   exact; scheduler steps twice with lr 4e-6. Worst pre-fix residual was a 2.2e-7
   single-slice `exp_avg` tail from unmirrored bf16 grad-buffer rounding, fixed by
   rounding reference gradients to `main_grad` dtype.
-- Transfer receipts: recorded below from the final receipt run.
+- Transfer (`dpo-equivalence-vllm-53ef94cea`): one DPO step through the Ray policy
+  worker at PP2 moves all 11 tracked training tensors; NCCL broadcast into
+  disaggregated vLLM engines passes byte-exact readback over the mapped names
+  (direct bf16/fp32 tensors plus per-expert slices; stacked
+  `...experts.<proj>.weight` tensors have no serving mapping and are covered via
+  their per-expert slices). Input batch sha256
+  `7b3a84eb66be82cd9f769f56dbc9a379187e1b3069ae2535c686a4f12af7d7a1`
+  (deterministic fixture). Pre-update trainer-vs-vLLM logprob parity over 38
+  tokens: max abs `0.0134`, mean abs `0.0019`; post-sync parity: max abs `0.0139`,
+  mean abs `0.0042` (bounds max 2e-1 / mean 3e-2); post-sync served logprobs differ
+  from pre-update, proving the updated tensors are installed.
