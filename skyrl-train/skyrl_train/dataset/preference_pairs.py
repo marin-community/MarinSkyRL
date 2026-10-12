@@ -11,7 +11,7 @@ from transformers import PreTrainedTokenizerBase
 from marinskyrl.runtime_options import PREFERENCE_PAIR_ENV_CLASS
 
 from skyrl_train.dataset.dataset import PromptDataset, read_prompt_files
-from skyrl_train.trajectory_runners.types import PreferenceInput, TrajectoryMetadata
+from skyrl_train.task_inputs import PreferenceInput, TrajectoryMetadata
 
 
 class PreferencePairFormat(StrEnum):

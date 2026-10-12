@@ -3,15 +3,14 @@ from collections import defaultdict
 from enum import StrEnum
 import numpy as np
 from skyrl_train.group_admission import group_is_fully_excluded_from_training
+from skyrl_train.task_inputs import TaskInput, PreferenceInput
 from skyrl_train.trajectory_runners.types import (
     TrajectoryBatch,
     TrajectoryRequestBatch,
     TrajectoryID,
     BatchMetadata,
     TrainingPhase,
-    TaskInput,
     TaskRequestBatch,
-    PreferenceInput,
     PreferenceRequestBatch,
 )
 from skyrl_train.trajectory_runners.trajectory_retention import RETENTION_METRIC_PREFIX

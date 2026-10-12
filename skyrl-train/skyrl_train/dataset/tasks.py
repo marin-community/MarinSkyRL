@@ -20,7 +20,7 @@ from transformers import PreTrainedTokenizerBase
 
 from skyrl_train.dataset.dataset import PromptDataset
 from skyrl_train.rollouts.group_grader import task_group_grader
-from skyrl_train.trajectory_runners.types import TaskInput, TrajectoryMetadata, task_messages
+from skyrl_train.task_inputs import TaskInput, TrajectoryMetadata, task_messages
 
 TASKCOMPENDIUM_ENVIRONMENT = "taskcompendium"
 LOWERED_TASK_COLUMN = "lowered_task_spec"

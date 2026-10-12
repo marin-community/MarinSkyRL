@@ -10,7 +10,7 @@ from skyrl_train.dataset import PromptDataset
 from skyrl_gym.source_task import session_parameters
 from skyrl_train.dataset.tasks import SourceTaskDataset, TaskDataset, source_row_task, write_tasks
 from skyrl_train.entrypoints.main_base import BasePPOExp
-from skyrl_train.trajectory_runners.types import task_messages
+from skyrl_train.task_inputs import task_messages
 
 
 class _StubTokenizer:

@@ -13,7 +13,7 @@ from taskcompendium.models import (
     TaskSpec,
     TextMessage,
 )
-from skyrl_train.trajectory_runners.types import TaskInput, TrajectoryMetadata
+from skyrl_train.task_inputs import TaskInput, TrajectoryMetadata
 
 SHELL_ENVIRONMENT = EnvironmentRequirements(
     command_semantics=CommandSemantics.SHELL_SIMULATOR, capabilities=("shell", "filesystem")

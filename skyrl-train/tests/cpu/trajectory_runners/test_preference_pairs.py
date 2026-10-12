@@ -5,7 +5,12 @@ import pytest
 from skyrl_train.dataset.preference_pairs import PreferencePairFormat
 from skyrl_train.dataset.preference_pairs import PreferencePairDataset
 from skyrl_train.trajectory_runners.preference_pairs import PreferencePairTrajectoryRunner
-from skyrl_train.trajectory_runners.types import BatchMetadata, TrajectoryID, TrajectoryMetadata, PreferenceRequestBatch
+from skyrl_train.task_inputs import TrajectoryMetadata
+from skyrl_train.trajectory_runners.types import (
+    BatchMetadata,
+    TrajectoryID,
+    PreferenceRequestBatch,
+)
 from skyrl_train.trajectory_runners.trajectory_processing import prepare_trajectory_request
 
 QWEN2_5 = "Qwen/Qwen2.5-0.5B-Instruct"

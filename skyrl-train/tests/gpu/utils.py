@@ -24,7 +24,10 @@ from skyrl_train.config.weight_sync_pause import resolve_weight_sync_pause_polic
 from skyrl_train.utils import get_ray_pg_ready_with_timeout
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.trajectory_runners.base import ConversationType
-from skyrl_train.trajectory_runners.types import TaskInput, TaskRequestBatch, TrajectoryMetadata
+from skyrl_train.task_inputs import TaskInput, TrajectoryMetadata
+from skyrl_train.trajectory_runners.types import (
+    TaskRequestBatch,
+)
 from skyrl_train.dataset.tasks import source_row_task
 from skyrl_train.utils.utils import peer_access_supported, print_mem, initialize_ray, validate_cfg
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
