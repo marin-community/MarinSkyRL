@@ -78,6 +78,18 @@ def adamw_reference_step(parameter, gradient, exp_avg, exp_avg_sq, step, clip_co
     return parameter, exp_avg, exp_avg_sq
 
 
+def reference_gradient(name: str, parameters, step_index: int, scale: float) -> torch.Tensor:
+    """Injected gradients exactly as the buffers hold them, in float64.
+
+    The test injects into bf16 main-grad buffers, rounding every value; production's
+    Adam consumes those rounded values (upcast exactly to fp32). The reference must
+    consume the identical values, or the moments diverge by bf16 rounding while the
+    scale-invariant update still matches.
+    """
+    gradient = fixed_gradient(name, parameters[name].numel(), step_index, scale)
+    return gradient.to(parameters[name].main_grad.dtype).double()
+
+
 def reference_global_norm(owned, parameters, step_index: int, scale: float) -> float:
     """Reference 2-norm over the owned shard slices, matching production's collection.
 
@@ -91,8 +103,8 @@ def reference_global_norm(owned, parameters, step_index: int, scale: float) -> f
             continue
         if not param_is_not_tensor_parallel_duplicate(shard_main_param, getattr(child, "tp_group", None)):
             continue
-        gradient = fixed_gradient(name, parameters[name].numel(), step_index, scale)
-        squares += gradient[start:end].double().square().sum()
+        gradient = reference_gradient(name, parameters, step_index, scale)
+        squares += gradient[start:end].square().sum()
     squares = squares.to("cuda")
     dist.all_reduce(squares)
     return torch.sqrt(squares).item()
@@ -218,7 +230,7 @@ def run_optimizer_rank(rank, world_size, pp, ep, rendezvous, model_path, clip_ac
                 global_norm,
             )
             for name, (parameter_value, exp_avg, exp_avg_sq) in reference.items():
-                gradient = fixed_gradient(name, parameter_value.numel(), step_index, scale)
+                gradient = reference_gradient(name, parameters, step_index, scale)
                 reference[name] = adamw_reference_step(
                     parameter_value, gradient, exp_avg, exp_avg_sq, step_index, clip_coeff
                 )
@@ -316,7 +328,14 @@ def run_optimizer_rank(rank, world_size, pp, ep, rendezvous, model_path, clip_ac
                 torch.testing.assert_close(observed_param, parameter_value[start:end], rtol=STATE_RTOL, atol=STATE_ATOL)
             except AssertionError:
                 slice_failures.append(
-                    ("parameter", name, start, end, difference.max().item(), parameter_value[start:end].abs().max().item())
+                    (
+                        "parameter",
+                        name,
+                        start,
+                        end,
+                        difference.max().item(),
+                        parameter_value[start:end].abs().max().item(),
+                    )
                 )
             for label, key, expected in (
                 ("exp_avg", "exp_avg", exp_avg[start:end]),
