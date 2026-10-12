@@ -199,14 +199,15 @@ def run_optimizer_rank(rank, world_size, pp, ep, rendezvous, model_path, clip_ac
                         continue
                     torch_param_ids.update(id(param) for group in inner.param_groups for param in group["params"])
                 probe_problems = []
-                for name, start, end, shard_main_param, child in owned:
-                    if id(shard_main_param) not in torch_param_ids:
-                        probe_problems.append((name, start, end, "shard absent from torch groups"))
-                    elif shard_main_param.grad is None:
-                        probe_problems.append((name, start, end, "shard grad is None after prepare"))
+                main_grad_dtypes = {}
+                for probe_name, probe_param in parameters.items():
+                    dtype = getattr(probe_param, "main_grad", None)
+                    dtype = str(dtype.dtype) if dtype is not None else None
+                    main_grad_dtypes[dtype] = main_grad_dtypes.get(dtype, 0) + 1
                 probe_summary = (
                     f"rank{rank} prepare probe: {len(owned)} owned shards, "
-                    f"{len(probe_problems)} problems: {probe_problems[:8]}"
+                    f"{len(probe_problems)} problems: {probe_problems[:8]} "
+                    f"main_grad dtypes: {main_grad_dtypes}"
                 )
                 print(probe_summary, flush=True)
             clip_coeff = min(1.0, MAX_GRAD_NORM / (global_norm + CLIP_EPS))
@@ -314,7 +315,9 @@ def run_optimizer_rank(rank, world_size, pp, ep, rendezvous, model_path, clip_ac
             try:
                 torch.testing.assert_close(observed_param, parameter_value[start:end], rtol=STATE_RTOL, atol=STATE_ATOL)
             except AssertionError:
-                slice_failures.append(("parameter", name, start, end, difference.max().item()))
+                slice_failures.append(
+                    ("parameter", name, start, end, difference.max().item(), parameter_value[start:end].abs().max().item())
+                )
             for label, key, expected in (
                 ("exp_avg", "exp_avg", exp_avg[start:end]),
                 ("exp_avg_sq", "exp_avg_sq", exp_avg_sq[start:end]),
