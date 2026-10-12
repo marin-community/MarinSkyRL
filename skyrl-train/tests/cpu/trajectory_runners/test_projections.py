@@ -111,8 +111,6 @@ def test_projection_retains_the_verifier_reason_when_harbor_classifies_it_as_a_f
     batch = WholeTaskProjection(config(), Tokenizer()).project([record], request())
     assert batch["verification_results"][0].reason == "Request timed out."
     assert batch["exception_types"] == ["VerifierRuntimeError"]
-
-
 def test_projection_preserves_partial_server_error_diagnostics():
     failed = replace(
         rollout([3], 0.0),
