@@ -119,9 +119,11 @@ def test_closure_conversion_reports_all_invalid_rows_and_preserves_valid_task(tm
         ("code_fence", "```json\n[]\n", "```json\n[]\n```", "~~~", False, False),
     ],
 )
+@pytest.mark.parametrize("terminator", ["", "<|eot_id|>", "<|end_of_text|>"])
 async def test_closure_replay_scores_exact_tokens_and_preserves_private_reference(
-    structure_format, prefix, expected, response, syntax, success
+    structure_format, prefix, expected, response, syntax, success, terminator
 ):
+    response += terminator
     prompt_ids = (100, 201, 301)
     specification = task(
         "structure_closure",

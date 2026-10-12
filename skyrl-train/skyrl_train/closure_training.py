@@ -10,7 +10,7 @@ from rolloutengine.closure_repair import (
     verified_closure_candidates,
     verified_closure_target,
 )
-from rolloutengine.closure_scoring import closure_state, score_closure
+from rolloutengine.closure_scoring import SNOWBALL_TURN_END_MARKERS, closure_state, score_closure
 from skyrl_gym.closure_task import ClosurePrompt
 from skyrl_gym.verification import VerificationResult, VerificationStatus
 
@@ -62,7 +62,11 @@ def closure_training_targets(
                 boundaries[row] = VerifiedFTPOBoundary(position, chosen)
             continue
         content_response = response
-        if response and response[-1] in eos_token_ids and verification.diagnostics.get("stop_reason") == "stop":
+        if (
+            response
+            and (response[-1] in eos_token_ids or decode([response[-1]]) in SNOWBALL_TURN_END_MARKERS)
+            and verification.diagnostics.get("stop_reason") == "stop"
+        ):
             content_response = response[:-1]
         target = verified_closure_target(
             prompt,

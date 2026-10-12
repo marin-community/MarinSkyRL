@@ -4,7 +4,7 @@ from dataclasses import replace
 from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from rolloutengine.closure_scoring import ClosureFormat, closure_state, score_closure
+from rolloutengine.closure_scoring import ClosureFormat, closure_response_content, closure_state, score_closure
 from rolloutengine.contracts import ModelTurn, SessionStart, Transition
 from rolloutengine.spec import LoweredTaskSpec
 from rolloutengine.structure_closure import PrefixStatus
@@ -54,7 +54,8 @@ class ClosureReplaySession:
         )
 
     async def advance(self, turn: ModelTurn) -> Transition:
-        score = score_closure(self.prompt.prefix + turn.text, self.prompt.expected, self.prompt.format)
+        content = closure_response_content(turn.text, stop_reason=turn.stop_reason)
+        score = score_closure(self.prompt.prefix + content, self.prompt.expected, self.prompt.format)
         self.result = GradeResult(
             Outcome.GRADED,
             float(score.success),
