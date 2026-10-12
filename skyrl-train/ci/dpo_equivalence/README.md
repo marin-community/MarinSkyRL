@@ -130,14 +130,17 @@ any experiment was skipped rather than executed.
 Recorded from the validation run on the cw-rno2a cluster; see the job log for the full
 per-tensor discrepancy tables (`gradient ...`, `optimizer ...`, `... logprob parity` lines).
 
-- Job: `dpo-equivalence-pp1-83306c692` (single-topology diagnostic), full-suite receipt job
-  `dpo-equivalence-full-e8bb64c9f` on cw-rno2a.
+- Job: full-suite receipt job `dpo-equivalence-suite-f57268174` and reruns on cw-rno2a; the
+  diagnostics file (`dpo-diagnostics.log`) printed by the runner carries the full
+  per-topology discrepancy tables.
 - GPU/runtime: NVIDIA H100 80GB HBM3, torch 2.13.0+cu132, megatron-core 0.18.0
   (`0.0.0.dev20260929+marin.39e62869693c` frozen runtime).
-- Revisions: worktree branch `benfeuer/dpo-equivalence-20261011` at `83306c692`/`e8bb64c9f`.
-- Input batch sha256: `41ca8bd2e8137f8fc630bd9b4aca33f0eb54e3165812b4e293a6c5bee2825719`
-  (printed at run start).
-- Measured discrepancies (pp1): gradients vs eager HF fp32 reference worst
-  `max_abs = 3.5e-6` across all 152 tensors (bound atol 3e-4); reference CPU-vs-GPU
-  log-prob drift `max_abs = 1.9e-6` (bound 1e-3). Full-suite numbers recorded below from
-  the receipt run.
+- Revisions: branch `benfeuer/dpo-equivalence-20261011` at `f57268174` (merged with main
+  `37ec019b7`); final receipt run at the pushed head of the PR branch.
+- Input batch sha256: printed at each run start (fixture is deterministic).
+- Backward gradients vs eager HF fp32 reference, worst `max_abs` over all named tensors per
+  topology (bound rtol 2e-4 / atol 3e-4): pp1 `3.5e-6`, pp2 `3.5e-6`, pp2_dp2 `6.3e-5`,
+  pp2_ep2 `6.3e-5`, pp2_ep4 `9.4e-5`. DPO metric rows agree within `3.6e-7`; eval-window
+  policy log-probs within `7.6e-6` on the loss mask; reference CPU-vs-GPU drift
+  `max_abs = 1.9e-6` (bound 1e-3).
+- Optimizer and transfer receipts: recorded below from the final receipt run.
