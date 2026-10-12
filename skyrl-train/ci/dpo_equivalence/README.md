@@ -75,7 +75,7 @@ required to differ from the pre-update ones.
 | DPO metric rows (loss, accuracy, margin, rewards) | abs 2e-3 |
 | HF reference CPU-vs-GPU log-probs (fixture route guard) | abs 1e-3 |
 | minimum biased-router selection margin of the fixture | > 5e-3 (constant bias gaps) |
-| optimizer parameter/moments vs float64 reference | rtol 1e-5, atol 5e-8 |
+| optimizer parameter/moments vs float64 reference | rtol 1e-5, atol 2e-7 |
 | returned gradient norm vs independent global norm | rel 1e-4 |
 | bf16 copy-back into gradient-buffer parameters | exact (rtol 0, atol 0) |
 | serving tensor readback vs training snapshot | exact (rtol 0, atol 0) |
