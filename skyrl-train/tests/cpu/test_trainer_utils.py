@@ -267,10 +267,14 @@ def test_dump_per_dataset_eval_results_preserves_dataset_and_metrics(tmp_path):
     all_envs = ["env1", "env2", "env3"]
     eval_metrics = {"eval/dataset1/avg_score": 0.8, "eval/unknown/avg_score": 0.6}
 
-    dump_per_dataset_eval_results(str(tmp_path), tokenizer, trajectory_batches, data_sources, all_envs, eval_metrics)
+    dump_per_dataset_eval_results(
+        str(tmp_path), tokenizer, trajectory_batches, data_sources, all_envs, eval_metrics, ["first", "second", "third"]
+    )
     dataset_rows = [json.loads(line) for line in (tmp_path / "dataset1.jsonl").read_text().splitlines()]
     unknown_rows = [json.loads(line) for line in (tmp_path / "unknown.jsonl").read_text().splitlines()]
     assert [row["output_response"] for row in dataset_rows] == ["[10, 11]", "[14, 15]"]
+    assert [row["uid"] for row in dataset_rows] == ["first", "third"]
+    assert unknown_rows[0]["uid"] == "second"
     assert unknown_rows[0]["data_source"] == "unknown"
     assert json.loads((tmp_path / "aggregated_results.jsonl").read_text()) == eval_metrics
 
@@ -282,7 +286,7 @@ def test_eval_dump_writes_to_cloud_uri_without_corrupting_scheme(monkeypatch):
     tokenizer = ListTokenizer()
     batch = {"prompt_token_ids": [[1]], "response_ids": [[2]], "rewards": [1.0]}
 
-    dump_per_dataset_eval_results(directory, tokenizer, batch, ["aime_2024"], ["aime"], {"accuracy": 1.0})
+    dump_per_dataset_eval_results(directory, tokenizer, batch, ["aime_2024"], ["aime"], {"accuracy": 1.0}, ["first"])
 
     expected = "s3://bucket/users/exports/dumped_evals/global_step_2_evals"
     assert directory == expected
@@ -302,7 +306,9 @@ def test_dump_per_dataset_eval_results_preserves_error_disposition(tmp_path):
         "error_treatments": [None, "mask"],
     }
 
-    dump_per_dataset_eval_results(str(tmp_path), tokenizer, batch, ["aime_2024"] * 2, ["aime"] * 2, {})
+    dump_per_dataset_eval_results(
+        str(tmp_path), tokenizer, batch, ["aime_2024"] * 2, ["aime"] * 2, {}, ["first", "second"]
+    )
 
     rows = [json.loads(line) for line in (tmp_path / "aime_2024.jsonl").read_text().splitlines()]
     assert [(row["exception_type"], row["error_treatment"]) for row in rows] == [
