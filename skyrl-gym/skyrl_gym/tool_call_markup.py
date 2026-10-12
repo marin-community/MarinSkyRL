@@ -7,7 +7,7 @@ import json
 import re
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
+from typing import NoReturn
 
 from verifyit.json_objects import unique_object
 
@@ -34,7 +34,7 @@ class ToolCallRegion:
     status: ToolCallStatus
 
 
-def _reject_constant(value: str) -> Any:
+def _reject_constant(value: str) -> NoReturn:
     raise ValueError(f"Non-JSON constant: {value}")
 
 
