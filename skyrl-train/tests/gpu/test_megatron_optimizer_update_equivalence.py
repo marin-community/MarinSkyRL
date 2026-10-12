@@ -197,36 +197,81 @@ def run_optimizer_rank(rank, world_size, pp, ep, rendezvous, model_path, clip_ac
         # Read each owned slice through the distributed optimizer's own group/range mapping:
         # shard grads are model_param.main_grad.view(-1)[start:end] by construction, so the
         # same slice of the reference tensor must match exactly.
+        # Structural dump: which children/groups each rank holds, so shard-mapping
+        # surprises (stub children, fp32 groups, unexpected DP groups) are visible.
+        local_structure = []
+        for child in children:
+
+            def group_names(groups):
+                out = []
+                for group in groups:
+                    for param in group:
+                        out.append(names_by_id.get(id(param), f"<unknown:{param.numel()}>"))
+                return out
+
+            dp_group = getattr(child, "data_parallel_group", None)
+            local_structure.append(
+                {
+                    "stub": bool(getattr(child, "is_stub_optimizer", False)),
+                    "float16": group_names(getattr(child, "model_float16_groups", [])),
+                    "fp32": group_names(getattr(child, "model_fp32_groups", [])),
+                    "dp_group_size": dp_group.size() if dp_group is not None else None,
+                }
+            )
+        all_structure = [None] * world_size
+        dist.all_gather_object(all_structure, local_structure)
+        if rank == 0:
+            for peer_index, peer_structure in enumerate(all_structure):
+                for entry in peer_structure:
+                    print(f"optimizer structure rank{peer_index}: {entry}", flush=True)
+
         gathered = [None] * world_size
         dist.all_gather_object(gathered, [(name, start, end) for name, start, end, _, _ in owned])
         numel_everywhere = [None] * world_size
         dist.all_gather_object(numel_everywhere, {name: value.numel() for name, value in initial.items()})
+        coverage_failures = []
         if rank == 0:
             covered = {}
-            for peer in gathered:
+            owned_by_rank = {}
+            for peer_index, peer in enumerate(gathered):
                 for name, start, end in peer:
                     covered[name] = covered.get(name, 0) + (end - start)
+                    owned_by_rank.setdefault(name, []).append((peer_index, start, end))
             # Every held element must be owned exactly once: replicated parameters
             # (dense tensors across EP ranks) contribute each replica's elements.
             held = {}
-            for peer in numel_everywhere:
+            held_by_rank = {}
+            for peer_index, peer in enumerate(numel_everywhere):
                 for name, numel in peer.items():
                     held[name] = held.get(name, 0) + numel
-            assert set(covered) == set(held), (
-                sorted(set(covered) - set(held)),
-                sorted(set(held) - set(covered)),
-            )
-            for name, elements in covered.items():
-                assert elements == held[name], (name, elements, held[name])
-            print(
-                f"optimizer shard coverage: {len(covered)} parameters cover their held elements exactly",
-                flush=True,
-            )
+                    held_by_rank.setdefault(name, []).append((peer_index, numel))
+            if set(covered) != set(held):
+                coverage_failures.append(
+                    (
+                        "name mismatch",
+                        sorted(set(covered) - set(held)),
+                        sorted(set(held) - set(covered)),
+                    )
+                )
+            for name in sorted(covered):
+                elements, total = covered[name], held[name]
+                print(
+                    f"optimizer coverage {name}: held={total} {held_by_rank[name]} "
+                    f"owned={elements} {owned_by_rank[name]}",
+                    flush=True,
+                )
+                if elements != total:
+                    coverage_failures.append((name, elements, total))
+        assert not coverage_failures, coverage_failures
 
         slice_failures = []
         for name, start, end, shard_main_param, child in owned:
             parameter_value, exp_avg, exp_avg_sq = reference[name]
-            state = child.optimizer.state[shard_main_param]
+            state = child.optimizer.state.get(shard_main_param)
+            missing = [key for key in ("step", "exp_avg", "exp_avg_sq") if state is None or key not in state]
+            if missing:
+                slice_failures.append((name, start, end, f"missing optimizer state keys: {missing}"))
+                continue
             expected_bf16 = shard_main_param.detach().to(torch.bfloat16)
             model_data = parameters[name].detach().view(-1)[start:end]
             for label, observed, expected in (
@@ -244,9 +289,13 @@ def run_optimizer_rank(rank, world_size, pp, ep, rendezvous, model_path, clip_ac
                     torch.testing.assert_close(observed, expected, rtol=STATE_RTOL, atol=STATE_ATOL)
                 except AssertionError:
                     slice_failures.append((label, name, start, end, difference.max().item()))
-            assert int(state["step"]) == 2, state["step"]
+            if int(state["step"]) != 2:
+                slice_failures.append((name, start, end, f"step={state['step']}"))
             # The bf16 gradient-buffer parameter data must be the rounded fp32 shard value.
-            torch.testing.assert_close(model_data.float().cpu(), expected_bf16.float().cpu(), rtol=0, atol=0)
+            try:
+                torch.testing.assert_close(model_data.float().cpu(), expected_bf16.float().cpu(), rtol=0, atol=0)
+            except AssertionError:
+                slice_failures.append((name, start, end, "bf16 copy-back mismatch"))
         assert not slice_failures, slice_failures
     finally:
         mpu.destroy_model_parallel()
