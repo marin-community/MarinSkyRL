@@ -8,7 +8,7 @@ from omegaconf import OmegaConf
 from rolloutengine.spec import LoweredTaskSpec
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.dataset import PromptDataset
-from skyrl_train.dataset.tasks import LOWERED_TASK_COLUMN, SourceTaskDataset
+from skyrl_train.dataset.tasks import LOWERED_TASK_COLUMN, SourceTaskDataset, TaskDataset, source_row_task, write_tasks
 from skyrl_train.entrypoints.main_base import BasePPOExp
 
 
@@ -123,6 +123,48 @@ def test_prompt_dataset_filtering_counts_batch_encoding_input_ids(mock_load_data
     )
 
     assert len(dataset) == 2
+
+
+@pytest.mark.parametrize("num_workers", [1, 2])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_native_tasks_with_different_extras_preserve_each_row(tmp_path, num_workers, reverse):
+    rows = [
+        {
+            "prompt": [{"role": "user", "content": "First question"}],
+            "env_class": "gsm8k",
+            "reward_spec": {"ground_truth": "1"},
+            "prompt_token_ids": [17, 23],
+        },
+        {
+            "prompt": [{"role": "user", "content": "Second question"}],
+            "env_class": "gsm8k",
+            "reward_spec": {"ground_truth": "2"},
+            "teacher_route": "math",
+        },
+    ]
+    if reverse:
+        rows.reverse()
+    configs = OmegaConf.to_container(get_default_config().environment.task_sessions, resolve=True)
+    tasks = [
+        source_row_task(row, index, source_name="mixed", environment_configs=configs) for index, row in enumerate(rows)
+    ]
+    path = tmp_path / "mixed.parquet"
+    write_tasks(path, tasks)
+
+    dataset = TaskDataset([str(path)], _StubTokenizer(), 100, num_workers=num_workers)
+
+    assert len(dataset) == 2
+    for index, source in enumerate(rows):
+        prompt, environment, extras, uid = dataset[index]
+        assert prompt == source["prompt"]
+        assert environment == source["env_class"]
+        assert uid == str(index)
+        assert LoweredTaskSpec.model_validate_json(extras[LOWERED_TASK_COLUMN]) == tasks[index]
+        for key in ("prompt_token_ids", "teacher_route"):
+            if key in source:
+                assert extras[key] == source[key]
+            else:
+                assert key not in extras
 
 
 @pytest.mark.parametrize(
