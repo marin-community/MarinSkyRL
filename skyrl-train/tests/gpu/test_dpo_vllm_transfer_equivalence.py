@@ -16,6 +16,7 @@ disaggregated vLLM engines over the NCCL path, and then checks transfer equivale
 
 import asyncio
 import math
+import re
 
 import pytest
 import ray
@@ -35,7 +36,6 @@ from tests.gpu.grug_serving import (
     GRUG_BIAS_NAMES,
     GRUG_PARAMETER_NAMES,
     GRUG_SERVING_EXPERT_INDEX_BY_NAME,
-    STACKED_EXPERT_NAME,
     assert_engine_weights,
     grug_engine_client,
     rank0_validation_snapshot,
@@ -165,9 +165,14 @@ def test_dpo_update_transfers_to_vllm_tensors_and_logprobs(tmp_path):
 
         ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
         ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
-        # Serving engines map per-expert names only; the stacked training tensor stays
-        # in the snapshot so the helper can slice it per expert index.
-        sync_names = [name for name in names if name != STACKED_EXPERT_NAME] + list(GRUG_SERVING_EXPERT_INDEX_BY_NAME)
+        # Serving engines map direct (replicated) names plus per-expert
+        # `...experts.<idx>.<proj>.weight` slices; stacked
+        # `...experts.<proj>.weight` tensors have no serving mapping, so verify
+        # them via the stacked training tensor only through the per-expert slices.
+        stacked_expert_re = re.compile(r"\.experts\.(gate_proj|up_proj|down_proj)\.weight$")
+        sync_names = [name for name in names if not stacked_expert_re.search(name)] + list(
+            GRUG_SERVING_EXPERT_INDEX_BY_NAME
+        )
         assert_engine_weights(client, sync_names, training, GRUG_BIAS_NAMES, GRUG_SERVING_EXPERT_INDEX_BY_NAME)
 
         asyncio.run(client.reset_prefix_cache())
