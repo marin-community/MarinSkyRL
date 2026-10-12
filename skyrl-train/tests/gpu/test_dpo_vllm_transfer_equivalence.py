@@ -124,6 +124,7 @@ def _dpo_train_step(policy, batch: TrainingInputBatch) -> dict[str, float]:
     """
     train_output = ray.get(policy.async_run_ray_method("mesh", "ppo_train", batch))[0]
     status = train_output.metadata["train_status"]
+    print(f"dpo train status keys: {sorted(status)}", flush=True)
     assert math.isfinite(status["dpo/loss"]), status
     return status
 
