@@ -64,11 +64,11 @@ def test_training_extras_publish_hardware_policy_and_rollout_requirements(built_
     assert any(requirement.startswith("torch==") and "extra == 'cpu'" in requirement for requirement in requirements)
     assert any(requirement.startswith("torch==") and "extra == 'cuda'" in requirement for requirement in requirements)
     assert any(requirement.startswith("vllm==") and "extra == 'vllm'" in requirement for requirement in requirements)
-    marin_requirements = [Requirement(value) for value in requirements if "extra ==" not in value]
+    base_requirements = [Requirement(value) for value in requirements if "extra ==" not in value]
     assert {"marin-rolloutengine", "marin-shellbox", "marin-taskcompendium", "marin-verifyit"} <= {
-        requirement.name for requirement in marin_requirements
+        requirement.name for requirement in base_requirements
     }
-    assert all(requirement.url is None for requirement in marin_requirements if requirement.name.startswith("marin-"))
+    assert all(requirement.url is None for requirement in base_requirements if requirement.name.startswith("marin-"))
     assert any(requirement.startswith("torch==") and "extra == 'vllm'" in requirement for requirement in requirements)
     assert any(requirement.startswith("memray") and "extra == 'telemetry'" in requirement for requirement in requirements)
     assert any(
