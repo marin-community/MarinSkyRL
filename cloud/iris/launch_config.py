@@ -12,6 +12,7 @@ from typing import Any, Mapping
 from omegaconf import MISSING, DictConfig, OmegaConf
 
 from skyrl_train.config.mismatch_probe import validate_mismatch_probe_config
+from skyrl_train.config.callbacks import validate_hf_export_config
 from skyrl_train.config.objective_spec import validate_objective
 
 from cloud.iris.ray_storage import RaySpillBackend, resolve_ray_spill_target
@@ -329,6 +330,7 @@ def validate_launch_config(config: DictConfig) -> LaunchTopology:
     run = raw["run"]
     if run["mode"] == RunMode.TRAIN:
         validate_objective(config.skyrl)
+        validate_hf_export_config(config.skyrl)
     runtime = raw["runtime"]
     entrypoint = runtime["entrypoint"]
     registered_rl_entrypoint_module(entrypoint)
