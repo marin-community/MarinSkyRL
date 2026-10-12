@@ -183,6 +183,7 @@ def harbor_task(directory: Path, *, source: Source) -> TaskSpec:
         artifacts=tuple(
             VerifierArtifact(
                 source=artifact.source,
+                # Harbor's destination names the host collection path, not the verifier path.
                 target=artifact.source,
                 kind=ArtifactKind.AUTO,
                 exclude=tuple(artifact.exclude),

@@ -331,6 +331,23 @@ class TaskRolloutWorker:
         finally:
             self.active_requests.discard(task)
 
+    def _selected_session(
+        self, lowered: LoweredTaskSpec, harbor: HarborTaskSettings | None, session_id: str
+    ) -> tuple[LoweredTaskSpec, Mapping[str, TaskSessionFactory]]:
+        sessions = self.sessions
+        if harbor is not None and self.installed_agents is not None:
+            if lowered.session.task_session != SHELLBOX_SESSION:
+                raise ValueError("SkyRL agents require a Shellbox task grader")
+            lowered = lowered.model_copy(
+                update={"session": lowered.session.model_copy(update={"task_session": SKYRL_AGENT_SESSION})}
+            )
+            sessions = {
+                **self.sessions,
+                SKYRL_AGENT_SESSION: partial(_agent_session_factory, self.installed_agents, session_id),
+            }
+        validate_lowered_task(lowered, factories=self.factories, sessions=sessions)
+        return lowered, sessions
+
     async def generate(self, request: TrajectoryRequestBatch) -> list[RolloutData]:
         with self._active_request():
             return await self._generate(request)
@@ -359,19 +376,8 @@ class TaskRolloutWorker:
         ]
         selected_sessions: list[Mapping[str, TaskSessionFactory]] = []
         for index, lowered in enumerate(lowered_tasks):
-            sessions = self.sessions
-            if harbor_settings[index] is not None and self.installed_agents is not None:
-                if lowered.session.task_session != SHELLBOX_SESSION:
-                    raise ValueError("SkyRL agents require a Shellbox task grader")
-                lowered = lowered.model_copy(
-                    update={"session": lowered.session.model_copy(update={"task_session": SKYRL_AGENT_SESSION})}
-                )
-                sessions = {
-                    **self.sessions,
-                    SKYRL_AGENT_SESSION: partial(_agent_session_factory, self.installed_agents, session_ids[index]),
-                }
-                lowered_tasks[index] = lowered
-            validate_lowered_task(lowered, factories=self.factories, sessions=sessions)
+            lowered, sessions = self._selected_session(lowered, harbor_settings[index], session_ids[index])
+            lowered_tasks[index] = lowered
             selected_sessions.append(sessions)
         tasks = [item.task for item in lowered_tasks]
         sampling = get_sampling_params_for_backend(

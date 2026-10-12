@@ -31,7 +31,7 @@ from skyrl_gym.tool_protocol_task import ToolProtocolReplaySession
 
 
 def self_grading_session(factory: Callable[[LoweredTaskSpec, Machine | None], TaskSession]) -> TaskSessionFactory:
-    """Register a session that implements its own grading logic."""
+    """Adapt a session that implements its own grading logic."""
 
     def create(lowered: LoweredTaskSpec, machine: Machine | None, _default_grader: TaskGrader) -> TaskSession:
         return factory(lowered, machine)
