@@ -132,7 +132,7 @@ any experiment was skipped rather than executed.
 Recorded from the validation run on the cw-rno2a cluster; see the job log for the full
 per-tensor discrepancy tables (`gradient ...`, `optimizer ...`, `... logprob parity` lines).
 
-- Job: full-suite receipt job `dpo-equivalence-suite-26886270c` on cw-rno2a; the
+- Job: full-suite receipt job `dpo-equivalence-suite-38d642353` on cw-rno2a; the
   diagnostics file (`dpo-diagnostics.log`) printed by the runner carries the full
   per-topology discrepancy tables.
 - GPU/runtime: NVIDIA H100 80GB HBM3, torch 2.13.0+cu132, megatron-core 0.18.0
