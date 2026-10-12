@@ -27,7 +27,7 @@ class MultiplyTaskSession:
         self.grades: list[GradeResult] = []
 
     async def prepare(self) -> SessionStart:
-        return session_start(self.task)
+        return session_start(self.task, shell_tool=None)
 
     async def advance(self, turn: ModelTurn) -> Transition:
         match = re.search(r"\\boxed\{([^}]+)\}", turn.text)
@@ -50,7 +50,7 @@ class MultiplyTaskSession:
             metrics={"parsed_answer": answer},
         )
 
-    async def grade(self, messages: tuple[dict[str, Any], ...]) -> GradeResult:
+    async def grade(self, messages: tuple[dict[str, Any], ...], *, stop_reason: str) -> GradeResult:
         return terminal_grade(self.grades)
 
     async def close(self) -> None:

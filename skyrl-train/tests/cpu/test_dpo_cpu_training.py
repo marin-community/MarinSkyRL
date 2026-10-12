@@ -2,7 +2,8 @@
 
 import math
 import multiprocessing
-from multiprocessing.context import ForkServerContext
+import sys
+from multiprocessing.context import BaseContext
 from pathlib import Path
 
 import pytest
@@ -23,14 +24,27 @@ def tiny_policy(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 @pytest.fixture(scope="module")
-def runs() -> ForkServerContext:
+def runs() -> BaseContext:
+    if sys.platform == "darwin":
+        # Forkserver preload clones initialized macOS proxy/preferences libraries; use a fresh interpreter.
+        return multiprocessing.get_context("spawn")
     context = multiprocessing.get_context("forkserver")
     context.set_forkserver_preload([preference_pairs.__name__])
     return context
 
 
-def _run(context: ForkServerContext, root: Path, model: Path, steps: int) -> None:
-    run = context.Process(target=preference_pairs.run_dpo_experiment, args=(root, model), kwargs={"steps": steps})
+def _run(
+    context: BaseContext,
+    root: Path,
+    model: Path,
+    steps: int,
+    run_experiment=preference_pairs.run_dpo_experiment,
+) -> None:
+    run = context.Process(
+        target=run_experiment,
+        args=(root, model),
+        kwargs={"steps": steps},
+    )
     run.start()
     run.join(RUN_TIMEOUT_SECONDS)
     if run.exitcode is None:
@@ -55,3 +69,15 @@ def test_dpo_training_widens_the_preference_margin(runs, tmp_path, tiny_policy):
     # The surrogate policy row carries the gradient, not the literal loss value.
     policy_rows = [record["policy/policy_loss"] for record in records]
     assert all(math.isfinite(row) for row in policy_rows)
+
+
+def test_dpo_generates_validation_before_during_and_after_updates(runs, tmp_path, tiny_policy):
+    _run(runs, tmp_path, tiny_policy, 3, preference_pairs.run_dpo_validation_experiment)
+    records = read_metrics(tmp_path)
+    training = [record for record in records if "policy/dpo/loss" in record]
+    validation = [record for record in records if "eval/all/num_attempted" in record]
+    assert [record["trainer/global_step"] for record in training] == [1, 2, 3]
+    assert [record["step"] for record in validation] == [0, 2, 3]
+    assert all(record["eval/all/num_attempted"] == 4 for record in validation)
+    assert all(record["eval/all/num_scored"] == 4 for record in validation)
+    assert all(math.isfinite(record["eval/all/avg_verifier_score"]) for record in validation)

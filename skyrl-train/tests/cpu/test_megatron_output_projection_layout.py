@@ -5,13 +5,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from tests.cpu.util import stub_megatron_modules
-
-stub_megatron_modules()
-
-from skyrl_train.workers.megatron.output_projection_layout import (  # noqa: E402
-    use_batch_major_output_projection,
-)
+from skyrl_train.workers.megatron.output_projection_layout import use_batch_major_output_projection
 
 
 class ColumnProjection(nn.Linear):

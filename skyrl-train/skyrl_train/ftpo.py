@@ -12,9 +12,13 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
+from rolloutengine.tool_protocol import THINK_CLOSE, TOOL_OPEN, ToolCallStatus, tool_call_regions
 
-from skyrl_train.config.ftpo import FTPOConfig
+from skyrl_train.config.ftpo import FTPOBoundary, FTPOConfig
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import LoopCreditConfig, tail_loop
+
+ROLE_HEADER_START = "<|start_header_id|>"
+ASSISTANT_HEADER = "<|start_header_id|>assistant<|end_header_id|>"
 
 
 @dataclass(frozen=True)
@@ -73,12 +77,74 @@ def compact_boundary_logits(
     return logits[torch.arange(logits.shape[0], device=logits.device), positions]
 
 
+def _assistant_initial_thinking(prefix: list[int], decode: Callable[[list[int]], str]) -> bool:
+    for index in range(len(prefix) - 1, -1, -1):
+        if decode([prefix[index]]) != ROLE_HEADER_START:
+            continue
+        text = decode(prefix[index:])
+        if not text.startswith(ASSISTANT_HEADER):
+            return True
+        return text[len(ASSISTANT_HEADER) :].strip() not in ("", THINK_CLOSE)
+    return True
+
+
+def repeated_tool_opener_boundary(
+    prompt: Sequence[int], response: Sequence[int], mask: Sequence[int], decode: Callable[[list[int]], str]
+) -> int | None:
+    """Find a repeated opener, allowing whitespace, in a known assistant span.
+
+    A bare assistant header establishes an outside-thinking start. Otherwise,
+    require explicit end-thinking. Observations and quoted markers are never
+    selected. A malformed earlier call ends parsing for that span.
+    """
+    start = 0
+    while start < len(response):
+        if not mask[start]:
+            start += 1
+            continue
+        end = start + 1
+        while end < len(response) and mask[end]:
+            end += 1
+        prefill: list[int] = []
+        thinking = _assistant_initial_thinking(list(prompt) + list(response[:start]), decode)
+        # Replay prompts can end at the first opener. Retain its assistant
+        # context for parsing, but never select a token from that frozen prefix.
+        if start == 0 and prompt and decode([prompt[-1]]) == TOOL_OPEN:
+            for index in range(len(prompt) - 1, -1, -1):
+                if decode([prompt[index]]) != ROLE_HEADER_START:
+                    continue
+                if decode(list(prompt[index:])).startswith(ASSISTANT_HEADER):
+                    prefill = list(prompt[index:])
+                    thinking = _assistant_initial_thinking(list(prompt[:-1]), decode)
+                break
+        span = prefill + list(response[start:end])
+        text = decode(span)
+        for region in tool_call_regions(text, initial_thinking=thinking):
+            if region.status != ToolCallStatus.REPEATED_OPENER:
+                continue
+            open_positions = [index for index, token in enumerate(span) if decode([token]) == TOOL_OPEN]
+            if len(open_positions) != text.count(TOOL_OPEN):
+                raise ValueError("FTPO tool markers must align with single special tokens")
+            opener_index = text[: region.start].count(TOOL_OPEN)
+            position = open_positions[opener_index]
+            if decode(span[: position + 1]) != text[: region.payload_start]:
+                raise ValueError("FTPO boundary changed during token decoding")
+            repeated = open_positions[opener_index + 1]
+            if decode(span[: repeated + 1]) != text[: region.end]:
+                raise ValueError("FTPO repeated opener changed during token decoding")
+            if repeated >= len(prefill):
+                return start + repeated - len(prefill)
+        start = end
+    return None
+
+
 def select_ftpo_candidates(
     response_ids: Sequence[Sequence[int]],
     loss_masks: Sequence[Sequence[int]],
     candidate_ids: torch.Tensor,
     candidate_logprobs: torch.Tensor,
     *,
+    prompt_ids: Sequence[Sequence[int]],
     decode: Callable[[list[int]], str],
     loop: LoopCreditConfig,
     config: FTPOConfig,
@@ -94,11 +160,18 @@ def select_ftpo_candidates(
     weights = torch.zeros(candidate_ids.shape[:2], dtype=torch.float32)
     surfaces: dict[int, str] = {}
     rejected_by_row = {}
-    for row, (response, mask, allowed) in enumerate(zip(response_ids, loss_masks, eligible, strict=True)):
-        hit = tail_loop(response, mask, loop) if allowed else None
-        if hit is None:
+    for row, (prompt, response, mask, allowed) in enumerate(
+        zip(prompt_ids, response_ids, loss_masks, eligible, strict=True)
+    ):
+        if not allowed:
             continue
-        position = hit.repeat_start
+        if config.boundary == FTPOBoundary.REPEATED_TOOL_OPENER:
+            position = repeated_tool_opener_boundary(prompt, response, mask, decode)
+        else:
+            hit = tail_loop(response, mask, loop)
+            position = None if hit is None else hit.repeat_start
+        if position is None:
+            continue
         rejected = response[position]
         ids = candidate_ids[row, position].tolist()
         scores = candidate_logprobs[row, position]
@@ -110,6 +183,8 @@ def select_ftpo_candidates(
             if token not in surfaces:
                 surfaces[token] = decode([token])
             surface = surfaces[token]
+            if config.boundary == FTPOBoundary.REPEATED_TOOL_OPENER and surface.strip() != "{":
+                continue
             if token == rejected or surface.lower() == rejected_surface:
                 continue
             if len(surface.strip()) < config.min_decoded_chars or (

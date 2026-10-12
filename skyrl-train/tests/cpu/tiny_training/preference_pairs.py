@@ -13,14 +13,17 @@ import ray
 from omegaconf import DictConfig, OmegaConf
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.entrypoints.main_base import BasePPOExp
+from skyrl_train.config.rollout_validation import EntrypointOperation
+from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 
 from tests.cpu.tiny_training.cpu_backend import CPUPolicyWorker, CPURefWorker
 from tests.cpu.tiny_training.experiment import (
     METRICS_FILE,
     JsonlTracker,
+    cpu_inference_engine_client,
     run_with_exp,
 )
-from tests.cpu.tiny_training.tiny_model import build_tiny_policy
+from tests.cpu.tiny_training.tiny_model import build_tiny_policy, write_gsm8k_dataset
 from tests.cpu.util import DPO_OVERRIDES
 
 # Correct completions are preferred over off-by-one distractors. The pairs are separable under
@@ -99,9 +102,30 @@ class PreferencePairCPUExp(BasePPOExp):
         return JsonlTracker(Path(self.cfg.trainer.export_path) / METRICS_FILE)
 
 
+class ValidatedPreferencePairCPUExp(PreferencePairCPUExp):
+    def create_inference_engine_client(
+        self, *, operation: EntrypointOperation = EntrypointOperation.TRAIN
+    ) -> InferenceEngineClient:
+        return cpu_inference_engine_client(self.cfg, self.tokenizer)
+
+
 def run_dpo_experiment(root: Path, model_dir: Path, *, steps: int) -> Path:
     cfg = preference_pair_training_config(root, model_dir, steps=steps)
     run_with_exp(cfg, PreferencePairCPUExp)
+    return root / "exports" / METRICS_FILE
+
+
+def run_dpo_validation_experiment(root: Path, model_dir: Path, *, steps: int) -> Path:
+    cfg = preference_pair_training_config(root, model_dir, steps=steps)
+    cfg.data.val_data = [str(write_gsm8k_dataset(root / "data" / "validation.jsonl", 4, max_turns=1))]
+    cfg.trainer.evaluation_runner = "task"
+    cfg.trainer.eval_interval = 2
+    cfg.trainer.eval_before_train = True
+    cfg.trainer.max_prompt_length = 512
+    cfg.generator.num_inference_engines = 1
+    cfg.generator.eval_n_samples_per_prompt = 1
+    cfg.generator.eval_sampling_params.max_generate_length = 16
+    run_with_exp(cfg, ValidatedPreferencePairCPUExp)
     return root / "exports" / METRICS_FILE
 
 

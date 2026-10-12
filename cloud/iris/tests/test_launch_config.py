@@ -140,7 +140,7 @@ async def test_custom_session_settings_reach_private_grading_through_the_launch_
             ModelTurn({"role": "assistant", "content": text}, (), (1,), None, "stop", text)
         )
         assert transition.done and transition.grade.reward == reward
-        assert (await session.grade(())).reward == reward
+        assert (await session.grade((), stop_reason="stop")).reward == reward
         assert start.messages == ({"role": "user", "content": "What is six plus six?"},)
     finally:
         await session.close()
@@ -307,6 +307,19 @@ def test_evaluation_metric_names_survive_iris_path_resolution(tmp_path: Path) ->
 
     assert config.trainer.callbacks[0].metric_groups == groups
     assert config.trainer.callbacks[0].additional_evaluations == profiles
+
+
+def test_installed_agent_artifacts_follow_launch_attempt_and_survive_reload(tmp_path: Path) -> None:
+    raw = _raw_config()
+    raw["skyrl"]["config_groups"] = {"terminal_bench_config": "terminal_bench"}
+    raw["skyrl"]["terminal_bench"] = {"installed_agent": {"agent": {"name": "pi"}}}
+    path = tmp_path / "launch.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    resolved = load_launch_config(path)
+    destination = resolved.skyrl.terminal_bench_config.installed_agent.output_path
+    assert destination == "s3://runs/smoke/attempts/trajectories/installed-agents"
+    OmegaConf.save(resolved, path)
+    assert load_launch_config(path).skyrl.terminal_bench_config.installed_agent.output_path == destination
 
 
 def test_null_nonfinite_limit_in_launch_fails_on_first_invalid_step(tmp_path: Path) -> None:

@@ -8,9 +8,10 @@ from itertools import batched
 from pathlib import Path
 from typing import Any
 
+import pyarrow.parquet as pq
 from loguru import logger
 from transformers import PreTrainedTokenizerBase
-from taskcompendium.importers.harbor import harbor_task
+from skyrl_train.dataset.harbor_import import harbor_task
 from harbor_config.models.task.config import EnvironmentConfig, TaskConfig
 from rolloutengine.lowering import SHELLBOX_SESSION
 from rolloutengine.spec import LoweredTaskSpec, MachineRuntimeSpec, TaskRuntimeSpec, TaskSessionSpec
@@ -169,9 +170,10 @@ def materialize_harbor_tasks(
     session: TaskSessionSpec,
     grader_override: NoGrader | None = None,
 ) -> Path:
-    """Convert selected directory and packed tasks to portable task Parquet."""
-    sources = TerminalBenchTaskDataset(data_files)
-    if not len(sources):
+    """Combine Harbor packages and pre-lowered task Parquet for one worker pool."""
+    task_files = [source for source in data_files if isinstance(source, str) and source.endswith(".parquet")]
+    sources = TerminalBenchTaskDataset([source for source in data_files if source not in task_files])
+    if not len(sources) and not task_files:
         raise ValueError("No Harbor tasks matched the configured sources")
 
     def tasks() -> Iterator[LoweredTaskSpec]:
@@ -221,6 +223,11 @@ def materialize_harbor_tasks(
                         }
                     )
                     yield lower_harbor_task(directory, task, session=session)
+        for path in task_files:
+            with pq.ParquetFile(path) as parquet:
+                for batch in parquet.iter_batches(batch_size=MATERIALIZATION_BATCH_SIZE, columns=[LOWERED_TASK_COLUMN]):
+                    for row in batch.to_pylist():
+                        yield LoweredTaskSpec.model_validate_json(row[LOWERED_TASK_COLUMN])
 
     return cache_tasks(tasks(), cache_dir)
 

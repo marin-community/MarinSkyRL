@@ -6,8 +6,9 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 from uuid import uuid4
 
 from jinja2 import TemplateError
@@ -29,6 +30,7 @@ from rolloutengine.contracts import (
     RolloutInterrupted,
     RolloutOperation,
     TaskSession,
+    SessionStart,
 )
 from rolloutengine.engine import ShellboxRolloutEngine
 from rolloutengine.spec import LoweredTaskSpec
@@ -47,6 +49,7 @@ from skyrl_train.rollouts.group_grader import GroupGraderSpec
 from skyrl_train.rollouts.group_grading import GROUP_GRADERS, GroupGrader, grade_groups
 from skyrl_train.rollouts.harbor_tasks import (
     HARBOR_MACHINE_BACKEND,
+    HARBOR_EVAL_MACHINE_BACKEND,
     HarborTaskSettings,
     harbor_grading_failure,
     shape_harbor_rollouts,
@@ -79,6 +82,21 @@ from skyrl_train.trajectory_runners.types import (
 )
 
 
+class InstalledAgentWorker(Protocol):
+    async def startup(self) -> None: ...
+
+    async def shutdown(self) -> None: ...
+
+    async def run(
+        self,
+        machine: Machine | None,
+        complete: Callable[[SessionStart], Awaitable[ModelTurn]],
+        *,
+        lowered: LoweredTaskSpec,
+        session_id: str,
+    ) -> None: ...
+
+
 async def _model_turn(
     client: ModelClient,
     request: ModelRequest,
@@ -92,7 +110,7 @@ async def _model_turn(
     """Convert an inference response to the common exact-token record."""
     options = dict(request.options)
     template_kwargs = {**chat_template_kwargs, **options.get("chat_template_kwargs", {})}
-    if template_kwargs:
+    if template_kwargs and request.prompt_token_ids is None:
         options["chat_template_kwargs"] = template_kwargs
     continuation = None
     if request.assistant_message_index is not None:
@@ -102,8 +120,20 @@ async def _model_turn(
         )
     try:
         with rollout_wait("model_client_await"):
-            output = await client.generate(
-                InferenceEngineInput(
+            if request.prompt_token_ids is not None:
+                prompt_ids = list(request.prompt_token_ids)
+                remaining = max_context_length - len(prompt_ids)
+                if remaining <= 0 or (max_prompt_length is not None and len(prompt_ids) > max_prompt_length):
+                    raise GenerationLimitReached(tuple(prompt_ids))
+                raw_sampling = {**sampling_params, **options}
+                raw_sampling["max_tokens"] = min(int(raw_sampling.get("max_tokens", remaining)), remaining)
+                model_input = InferenceEngineInput(
+                    prompt_token_ids=[prompt_ids],
+                    session_ids=[session_id],
+                    sampling_params=raw_sampling,
+                )
+            else:
+                model_input = InferenceEngineInput(
                     prompts=[list(request.messages)],
                     chat_completion_params=[options],
                     chat_continuations=[continuation],
@@ -112,19 +142,26 @@ async def _model_turn(
                     max_context_length=max_context_length,
                     max_prompt_length=max_prompt_length,
                 )
-            )
+            output = await client.generate(model_input)
     except GenerationBudgetExceededError as limit:
         raise GenerationLimitReached(limit.prompt_token_ids) from limit
     if output["token_provenance"] != TokenProvenance.ENGINE:
         raise RolloutContractError("The canonical rollout engine requires exact model tokens")
     logprobs = output.get("response_logprobs")
+    message = (
+        {"role": "assistant", "content": output["responses"][0]}
+        if request.prompt_token_ids is not None
+        else output["assistant_messages"][0]
+    )
     return ModelTurn(
-        message=output["assistant_messages"][0],
-        prompt_token_ids=tuple(output["prompt_ids"][0]),
+        message=message,
+        prompt_token_ids=request.prompt_token_ids
+        if request.prompt_token_ids is not None
+        else tuple(output["prompt_ids"][0]),
         response_token_ids=tuple(output["response_ids"][0]),
         logprobs=None if logprobs is None else tuple(logprobs[0]),
         stop_reason=output["stop_reasons"][0],
-        text=output.get("responses", [output["assistant_messages"][0].get("content") or ""])[0],
+        text=output.get("responses", [message.get("content") or ""])[0],
         metadata={
             **{
                 name: output[name][0]
@@ -224,6 +261,7 @@ class TaskRolloutWorker:
         sessions: Mapping[str, Callable[[LoweredTaskSpec, Machine | None], TaskSession]] | None = None,
         *,
         shutdown_timeout: float,
+        installed_agents: InstalledAgentWorker | None = None,
     ):
         self.trajectory_runner_cfg = trajectory_runner_cfg
         self.model_client = model_client
@@ -233,6 +271,7 @@ class TaskRolloutWorker:
         self.shutdown_timeout = shutdown_timeout
         self.chat_template_kwargs = dict(trajectory_runner_cfg.get("chat_template_kwargs", {}))
         self.harbor = harbor
+        self.installed_agents = installed_agents
         self.retry_wait = retry_wait
         self.group_graders = group_graders
         self.task_slots = asyncio.Semaphore(concurrent_tasks) if concurrent_tasks is not None else nullcontext()
@@ -325,7 +364,16 @@ class TaskRolloutWorker:
                     session_id=session_id,
                 )
 
-            engine = ShellboxRolloutEngine(model, self.factories, sessions=self.sessions)
+            engine = (
+                ShellboxRolloutEngine(
+                    model,
+                    self.factories,
+                    sessions=self.sessions,
+                    agent=partial(self.installed_agents.run, lowered=lowered, session_id=session_id),
+                )
+                if harbor is not None and self.installed_agents is not None
+                else ShellboxRolloutEngine(model, self.factories, sessions=self.sessions)
+            )
             harbor_slots = (
                 nullcontext()
                 if harbor is None
@@ -402,7 +450,8 @@ class TaskRolloutWorker:
         self.trajectory_sink = sink
 
     async def startup(self) -> None:
-        pass
+        if self.installed_agents is not None:
+            await self.installed_agents.startup()
 
     async def shutdown(self) -> None:
         """Cancel rollouts and release their machines before actor termination."""
@@ -427,6 +476,8 @@ class TaskRolloutWorker:
         finally:
             if self.verifier_executor is not None:
                 self.verifier_executor.shutdown(wait=False, cancel_futures=True)
+            if self.installed_agents is not None:
+                await self.installed_agents.shutdown()
         if failures:
             raise ExceptionGroup("Task worker shutdown failed", failures)
 
@@ -470,7 +521,24 @@ class TaskRolloutWorkerSpec:
         harbor = None if self.harbor_config is None else HarborTaskSettings.from_config(self.harbor_config)
         runner_config = self.config.generator
         client_config = OmegaConf.merge(self.config, {"generator": {"enable_http_endpoint": False}})
-        client = DirectModelClient(InferenceEngineClient(self.engines, tokenizer, client_config))
+        inference = InferenceEngineClient(self.engines, tokenizer, client_config)
+        client = DirectModelClient(inference)
+        installed_agents = None
+        if self.harbor_config is not None and self.harbor_config.get("installed_agent") is not None:
+            # Full Harbor is an optional dependency for installed-agent runs.
+            from skyrl_train.rollouts.agent_runtime import InstalledAgentRuntime, InstalledAgentSettings
+            from skyrl_train.rollouts.agent_backend import AgentInferenceBackend
+
+            settings = InstalledAgentSettings.model_validate(
+                OmegaConf.to_container(self.harbor_config.installed_agent, resolve=True)
+            )
+            installed_agents = InstalledAgentRuntime(
+                settings,
+                AgentInferenceBackend(
+                    inference.model_name, generation_context_limit(runner_config), inference.tokenize, tokenizer
+                ),
+                int(runner_config.sampling_params.max_generate_length),
+            )
         factories: dict[str, MachineFactory] = {"shellsim": ShellSimMachineFactory()}
         skopeo = shutil.which(str(Path(self.config.trajectory_runner.skopeo).expanduser()))
         if shutil.which("docker") is not None and skopeo is not None:
@@ -481,6 +549,8 @@ class TaskRolloutWorkerSpec:
         if harbor is not None:
             if harbor.environment.type != EnvironmentType.DOCKER:
                 factories[HARBOR_MACHINE_BACKEND] = harbor.machine_factory()
+                if harbor.environment.kwargs.get("eval_api_key_env"):
+                    factories[HARBOR_EVAL_MACHINE_BACKEND] = harbor.machine_factory(phase="eval")
             elif Backend.DOCKER in factories:
                 factories[HARBOR_MACHINE_BACKEND] = factories[Backend.DOCKER]
         return TaskRolloutWorker(
@@ -498,4 +568,5 @@ class TaskRolloutWorkerSpec:
             concurrent_harbor_tasks=None if harbor is None else max(1, harbor.concurrent_trials // shard.count),
             sessions=self.sessions,
             shutdown_timeout=float(self.config.trajectory_runner.shutdown_timeout),
+            installed_agents=installed_agents,
         )

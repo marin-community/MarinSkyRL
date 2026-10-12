@@ -14,7 +14,7 @@ from taskcompendium.models import (
 )
 from verifyit.spec import NumericSpec
 from skyrl_gym.source_task import source_task
-from tests.cpu.task_specs import lowered_task
+from tests.cpu.task_specs import NATIVE_ENVIRONMENT, lowered_task
 from skyrl_train.trajectory_runners.types import TrajectoryID
 
 
@@ -78,6 +78,7 @@ def python_tool_task(task_inputs):
             }
         },
         config={},
+        environment=NATIVE_ENVIRONMENT,
         source=Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
     )
     message = {
@@ -90,7 +91,7 @@ def python_tool_task(task_inputs):
             }
         ],
     }
-    task = lowered_task(task, "nemotron_ultra", backend="shellsim")
+    task = lowered_task(task, "nemotron_ultra", backend="docker")
     request["env_extras"] = [{"lowered_task_spec": task.model_dump_json()}]
     request["env_classes"] = ["nemotron_ultra"]
     return task, message

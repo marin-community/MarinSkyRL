@@ -9,7 +9,7 @@ from importlib.resources import files
 import json
 import math
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
@@ -19,6 +19,7 @@ from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig, OmegaConf
 
 from skyrl_train.config.objective_spec import validate_objective
+from skyrl_train.config.ftpo import FTPOConfig
 
 from cloud.iris.paths import resolve_paths_in_dict
 from cloud.iris.runtime_environment import CHECKPOINT_EXPORT_ENTRYPOINT as CHECKPOINT_EXPORT_MODULE
@@ -110,7 +111,7 @@ _REQUIRED_CONTEXT_BUDGET_FIELDS = frozenset(
     }
 )
 _CONTEXT_BUDGET_FRACTION_FIELDS = frozenset({"generated_budget_fraction", "overlong_cache_fraction"})
-_CONTEXT_BUDGET_FIELDS = _REQUIRED_CONTEXT_BUDGET_FIELDS | _CONTEXT_BUDGET_FRACTION_FIELDS
+_CONTEXT_BUDGET_FIELDS = _REQUIRED_CONTEXT_BUDGET_FIELDS | _CONTEXT_BUDGET_FRACTION_FIELDS | {"serving_window_tokens"}
 _DEFAULT_GENERATED_BUDGET_FRACTION = 0.5
 _DEFAULT_OVERLONG_CACHE_FRACTION = 0.25
 
@@ -133,6 +134,7 @@ class ContextBudget:
     request_window_tokens: int
     max_new_tokens_per_turn: int
     max_turns: int
+    serving_window_tokens: int
     generated_budget_fraction: float = _DEFAULT_GENERATED_BUDGET_FRACTION
     overlong_cache_fraction: float = _DEFAULT_OVERLONG_CACHE_FRACTION
 
@@ -157,6 +159,7 @@ class ContextBudget:
         """Return the persisted representation, including derived client input."""
         return {
             "request_window_tokens": self.request_window_tokens,
+            "serving_window_tokens": self.serving_window_tokens,
             "max_new_tokens_per_turn": self.max_new_tokens_per_turn,
             "max_turns": self.max_turns,
             "generated_budget_fraction": self.generated_budget_fraction,
@@ -228,6 +231,9 @@ def resolve_context_budget(raw: Dict[str, Any], config_path: Path) -> ContextBud
             config["max_new_tokens_per_turn"], "max_new_tokens_per_turn", config_path
         ),
         max_turns=_require_positive_integer(config["max_turns"], "max_turns", config_path),
+        serving_window_tokens=_require_positive_integer(
+            config.get("serving_window_tokens", config["request_window_tokens"]), "serving_window_tokens", config_path
+        ),
         generated_budget_fraction=_require_fraction(
             config.get("generated_budget_fraction", _DEFAULT_GENERATED_BUDGET_FRACTION),
             "generated_budget_fraction",
@@ -246,6 +252,8 @@ def resolve_context_budget(raw: Dict[str, Any], config_path: Path) -> ContextBud
             f"{config_path}: request_window_tokens ({budget.request_window_tokens}) must exceed "
             f"max_new_tokens_per_turn ({budget.max_new_tokens_per_turn})"
         )
+    if budget.serving_window_tokens < budget.request_window_tokens:
+        raise ValueError(f"{config_path}: serving_window_tokens must cover the complete request_window_tokens")
     return budget
 
 
@@ -262,7 +270,7 @@ def _materialize_context_budget(
     generator["max_input_length"] = budget.max_input_tokens
     generator["max_turns"] = budget.max_turns
     generator.setdefault("sampling_params", {})["max_generate_length"] = budget.max_new_tokens_per_turn
-    generator.setdefault("engine_init_kwargs", {})["max_model_len"] = budget.request_window_tokens
+    generator.setdefault("engine_init_kwargs", {})["max_model_len"] = budget.serving_window_tokens
     generator.setdefault("trajectory_reward_shaping", {})["overlong"] = {
         "l_max": budget.generated_tokens_per_trajectory,
         "l_cache": budget.overlong_cache_tokens,
@@ -780,6 +788,12 @@ def _skyrl_config_sections(
     if hf_hub_repo_id:
         trainer["hf_hub_repo_id"] = hf_hub_repo_id
     terminal_bench = copy.deepcopy(parsed.terminal_bench)
+    if terminal_bench is not None and terminal_bench.get("installed_agent") is not None:
+        installed_agent = terminal_bench["installed_agent"]
+        if not installed_agent.get("output_path"):
+            installed_agent["output_path"] = join_resource_path(
+                generator["trajectory_retention"]["output_path"], "installed-agents"
+            )
 
     sections = {
         "trainer": trainer,
@@ -797,11 +811,13 @@ def _skyrl_config_sections(
 
 
 _OPEN_CONFIG_ROOTS = frozenset({"teachers", "teacher_routing", "terminal_bench_config"})
+_FTPO_CONFIG_PATHS = frozenset(f"trainer.algorithm.ftpo.{item.name}" for item in fields(FTPOConfig))
 
 
 def _path_allows_new_keys(path: str) -> bool:
     return (
-        path.startswith("environment.task_sessions.")
+        path in _FTPO_CONFIG_PATHS
+        or path.startswith("environment.task_sessions.")
         or path.split(".", 1)[0] in _OPEN_CONFIG_ROOTS
         or any(pattern in f".{path}" for pattern in _OPTIONAL_HYDRA_PATTERNS)
     )

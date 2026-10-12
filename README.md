@@ -121,3 +121,6 @@ The script is designed to run on 8 GPUs single-node. If that is not your setup, 
 ```
 
 Verifier setup, opt-in configuration and offline comparison commands are documented in [Unified verification](docs/verifyit.md).
+
+Offline DPO data formats and generated validation are documented in
+[Preference training and task validation](docs/preference-training.md).

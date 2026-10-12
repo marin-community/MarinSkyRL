@@ -25,6 +25,35 @@ def dummy_config():
     return example_dummy_config()
 
 
+@pytest.mark.parametrize(
+    "ungraded",
+    [
+        VerificationResult.error("verifier timed out", diagnostics={"exception_type": "VerifierTimeoutError"}),
+        VerificationResult.unavailable("environment failed to start"),
+        VerificationResult.skipped("grading disabled"),
+    ],
+)
+def test_eval_verifier_metrics_exclude_ungraded_results_and_keep_policy_zero(ungraded):
+    batch: TrajectoryBatch = {
+        "response_ids": [[1], [2], [3]],
+        "rewards": [1.0, 0.0, 0.0],
+        "verification_results": [
+            VerificationResult.verified(1.0, passed=True),
+            VerificationResult.verified(0.0, passed=False, diagnostics={"exception_type": "AgentTimeoutError"}),
+            ungraded,
+        ],
+    }
+
+    metrics = _calculate_eval_metrics(batch, ["correct", "policy-failed", "ungraded"], ["bfcl"] * 3, 1)
+
+    assert metrics["eval/all/avg_verifier_score"] == 0.5
+    assert metrics["eval/all/verifier_score_coverage"] == pytest.approx(2 / 3)
+    assert metrics["eval/all/num_attempted"] == 3
+    assert metrics["eval/all/num_scored"] == 2
+    assert metrics["eval/all/avg_score"] == pytest.approx(1 / 3)
+    assert batch["rewards"] == [1.0, 0.0, 0.0]
+
+
 def configure_eval(cfg, tmp_path):
     cfg.generator.backend = "vllm"
     cfg.generator.eval_sampling_params = OmegaConf.create(

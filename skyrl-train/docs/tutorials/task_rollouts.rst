@@ -82,6 +82,44 @@ Harbor machine preparation executes commands with ``user="0"`` (root).
 The Shellbox Iris backend rejects per-command user overrides, so imported Harbor tasks cannot use that backend.
 Disabling Harbor verification removes private grader resources and selects skipped grading before runtime lowering.
 
+Installed Harbor agents
+-----------------------
+
+Set ``terminal_bench_config.installed_agent`` to run an installed Harbor agent
+for Harbor-tagged tasks. Without this block, the worker uses the generic shell
+session. The installed agent controls its prompts and tool loop; the shared
+engine retains model calls, sampled token IDs and log probabilities, grading, and machine ownership.
+The runtime requires the full Harbor package and an Iris worker with a
+controller-reachable advertised address. The Iris controller must issue capability
+URLs that the Daytona container can reach.
+Select Daytona through ``terminal_bench_config.harbor.environment_type``.
+
+The installed-agent block requires ``agent`` (a Harbor ``AgentConfig``),
+``output_path``, ``setup_timeout``, ``run_timeout``, ``cleanup_timeout``,
+``service_startup_timeout``, and ``service_shutdown_timeout``. Timeouts are in
+seconds. The task's total-turn timeout replaces ``run_timeout`` when set.
+The task context must contain exactly one user message with string content.
+``LoweredTaskSpec.runtime.task_machine`` must select a task machine.
+Private verifier files remain on the separate verifier machine.
+
+The worker creates a per-attempt protocol proxy and a leased Iris HTTP route.
+It supplies the agent's model alias, API address, and context limits from the
+active inference backend. Container commands use the selected Shellbox machine;
+this path does not use Iris container-exec RPCs. Streaming responses are buffered
+until the engine returns a complete model turn.
+
+Each attempt gets a unique directory under ``output_path``. It contains the
+serialized task with private grading data and execution settings, attempt identity,
+downloaded agent logs, and an ``engine``
+directory. ``engine/turns.jsonl`` records requests before generation and exact
+model turns after generation. It retains earlier turns even when an agent
+replaces its conversation and the training data retains only the new conversation.
+``engine/literal.jsonl`` records
+protocol traffic. Treat these artifacts as private: they can include reference
+inputs and tool outputs. Failed and cancelled attempts also attempt publication
+to ``output_path``. A publication failure is raised to the caller and preserves
+local staging for recovery; the original trial exception remains in the exception context.
+
 Exact tokens
 ------------
 

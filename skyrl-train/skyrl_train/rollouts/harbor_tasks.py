@@ -1,7 +1,10 @@
 """Apply Harbor launch settings to tasks executed by the common rollout engine."""
 
 from dataclasses import dataclass, replace
+from functools import partial
+import os
 
+from daytona import AsyncDaytona, DaytonaConfig
 from harbor_config.models.job.config import RetryConfig
 from harbor_config.models.environment_type import EnvironmentType
 from harbor_config.models.trial.config import EnvironmentConfig, VerifierConfig
@@ -33,6 +36,7 @@ from skyrl_train.utils.reward_shaping import (
 )
 
 HARBOR_MACHINE_BACKEND = "harbor"
+HARBOR_EVAL_MACHINE_BACKEND = "harbor_eval"
 
 
 @dataclass(frozen=True)
@@ -86,11 +90,19 @@ class HarborTaskSettings:
     def grader_override(self) -> NoGrader | None:
         return NoGrader(reason="Harbor verification is disabled") if self.verifier.disable else None
 
-    def machine_factory(self) -> MachineFactory:
+    def machine_factory(self, *, phase: str = "train") -> MachineFactory:
         match self.environment.type:
             case EnvironmentType.DAYTONA:
                 policy = self.environment.kwargs.get("network_policy")
+                key_env = self.environment.kwargs.get("eval_api_key_env" if phase == "eval" else "api_key_env")
+                client_factory = AsyncDaytona
+                if key_env is not None:
+                    api_key = os.environ.get(key_env)
+                    if not api_key:
+                        raise ValueError(f"Missing Daytona credential environment variable: {key_env}")
+                    client_factory = partial(AsyncDaytona, DaytonaConfig(api_key=api_key))
                 return DaytonaMachineFactory(
+                    client_factory=client_factory,
                     ttl_minutes=self.environment.kwargs.get("ttl_minutes", 360),
                     network_policy=None
                     if policy is None
@@ -116,7 +128,11 @@ class HarborTaskSettings:
                 if (value := getattr(self.environment, f"override_{name}")) is not None
             }
             if original.backend == Backend.DOCKER:
-                updates["backend"] = HARBOR_MACHINE_BACKEND
+                updates["backend"] = (
+                    HARBOR_EVAL_MACHINE_BACKEND
+                    if phase == "eval" and self.environment.kwargs.get("eval_api_key_env")
+                    else HARBOR_MACHINE_BACKEND
+                )
             if original.startup_timeout is not None:
                 updates["startup_timeout"] = original.startup_timeout * self.timeout_multiplier
             return original.model_copy(update=updates)

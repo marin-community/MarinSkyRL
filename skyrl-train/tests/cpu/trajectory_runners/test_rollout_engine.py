@@ -9,11 +9,12 @@ from omegaconf import OmegaConf
 from rolloutengine.contracts import GenerationLimitReached, RolloutContractError
 from rolloutengine.spec import LoweredTaskSpec, MachineRuntimeSpec, TaskRuntimeSpec, TaskSessionSpec
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
-from shellbox.machine import Command, NetworkPolicy, ShellSimBuiltins
+from shellbox.machine import Backend, Command, NetworkPolicy, ShellSimBuiltins
 from taskcompendium.grader import verifyit_package
 from taskcompendium.models import (
     AnswerType,
     ArtifactKind,
+    CommandSemantics,
     ConversationInput,
     EnvironmentRequirements,
     NoGrader,
@@ -91,6 +92,8 @@ class ReplayClient:
 
 @dataclass
 class ImageFactory:
+    backend = Backend.DOCKER
+
     machines: list = field(default_factory=list)
     failure: Exception | None = None
     failure_after: int = 0
@@ -127,9 +130,15 @@ def file_task(script=b'if [ "$(cat /workspace/answer)" = 12 ]; then echo 1; else
     return answer_task().model_copy(
         update={
             "answer_type": AnswerType.FILE,
-            "environment_requirements": EnvironmentRequirements(capabilities=("shell", "filesystem")),
+            "environment_requirements": EnvironmentRequirements(
+                command_semantics=CommandSemantics.LINUX_PROCESS,
+                docker_image=FIXTURE_IMAGE,
+                capabilities=("shell", "filesystem"),
+            ),
             "grader": ScriptGrader(
-                environment=EnvironmentRequirements(docker_image=FIXTURE_IMAGE),
+                environment=EnvironmentRequirements(
+                    command_semantics=CommandSemantics.LINUX_PROCESS, docker_image=FIXTURE_IMAGE
+                ),
                 answer_path=None,
                 argv=("sh", "/tests/grade.sh"),
                 artifacts=(

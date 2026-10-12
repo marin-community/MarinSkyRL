@@ -4,14 +4,11 @@ Main entrypoint for training on terminal bench tasks.
 
 import ray
 import hydra
-from pathlib import Path
 from omegaconf import DictConfig
-from rolloutengine.spec import TaskSessionSpec
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, run_ray_driver
 from skyrl_train.rollouts.workers import RolloutWorkerPool, RolloutWorkerResources
 from skyrl_train.rollouts.task_worker import TaskRolloutWorkerSpec
 from skyrl_train.dataset.harbor import HarborTaskDataset
-from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
 
 
 class TerminalBenchExp(BasePPOExp):
@@ -25,19 +22,7 @@ class TerminalBenchExp(BasePPOExp):
         )
 
     def _task_dataset(self, data_files) -> HarborTaskDataset:
-        return HarborTaskDataset(
-            data_files=data_files,
-            tokenizer=self.tokenizer,
-            max_prompt_length=self.cfg.trainer.max_prompt_length,
-            cache_dir=Path(self.cfg.data.task_cache_dir),
-            session=TaskSessionSpec.model_validate(
-                {
-                    **dict(self.cfg.environment.task_sessions.session),
-                    "task_session": "shellbox",
-                }
-            ),
-            grader_override=HarborTaskSettings.from_config(self.cfg.terminal_bench_config).grader_override(),
-        )
+        return self.harbor_task_dataset(data_files)
 
     def get_train_dataset(self):
         prompts_dataset = self._task_dataset(self.cfg.data.train_data)

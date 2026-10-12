@@ -1,17 +1,22 @@
 import asyncio
 from dataclasses import replace
+import hashlib
 import json
 import shutil
 
 import numpy as np
 import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestServer
 from omegaconf import OmegaConf
 from skyrl_gym.verification import VerificationStatus
+from skyrl_gym.tool_protocol_task import ToolProtocolReplaySession
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
-from shellbox.machine import Command, ShellSimBuiltins, NetworkPolicy
+from shellbox.machine import Backend, Command, ShellSimBuiltins, NetworkPolicy
 from taskcompendium.models import (
     AnswerType,
     ArtifactKind,
+    CommandSemantics,
     ConversationInput,
     EnvironmentRequirements,
     FileReward,
@@ -23,30 +28,38 @@ from taskcompendium.models import (
     VerifierArtifact,
 )
 from skyrl_train.rollouts.task_projections import StepTaskProjection, WholeTaskProjection
-from skyrl_train.dataset.tasks import TaskDataset
+from skyrl_train.dataset.tasks import TaskDataset, write_tasks
+from skyrl_train.dataset.protocol_replay import ReplayPartition, replay_tasks
 from skyrl_train.dataset.harbor import HarborTaskDataset
 from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection, WholeTrajectoryProjection
 from skyrl_train.rollouts.buffer import RolloutLease, RolloutTask
 from skyrl_train.rollouts.task_worker import TaskRolloutWorker
 from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
 from rolloutengine.spec import LoweredTaskSpec
-from tests.cpu.task_specs import lowered_task, session_spec
+from tests.cpu.task_specs import NATIVE_ENVIRONMENT, SHELL_ENVIRONMENT, lowered_task, session_spec
 from skyrl_train.trajectory_runners.types import BatchMetadata, TokenProvenance, TrajectoryID
 from skyrl_train.trajectory_runners.model_clients import ModelServerError
 from tests.cpu.rollouts.engine_fakes import ConversationClient, FixtureImageFactory, InferenceClient, Tokenizer, Writer
 
 
 @pytest.mark.asyncio
-async def test_mixed_harbor_and_native_tasks_keep_separate_providers_and_machine_specs(task_inputs):
+@pytest.mark.parametrize("phase", ["train", "eval"])
+async def test_mixed_harbor_and_native_tasks_keep_separate_providers_and_machine_specs(task_inputs, phase):
     config, original = task_inputs
     lowered = LoweredTaskSpec.model_validate_json(original["env_extras"][0]["lowered_task_spec"])
     native = lowered.task.model_copy(
-        update={"environment_requirements": EnvironmentRequirements(docker_image="fixture@sha256:" + "a" * 64)}
+        update={
+            "environment_requirements": EnvironmentRequirements(
+                command_semantics=CommandSemantics.LINUX_PROCESS, docker_image="fixture@sha256:" + "a" * 64
+            )
+        }
     )
     harbor = native.model_copy(update={"id": "harbor", "tags": ("harbor",)})
-    machines = {"docker": [], "harbor": []}
+    machines = {"docker": [], "harbor": [], "harbor_eval": []}
 
     class Factory:
+        backend = Backend.DOCKER
+
         def __init__(self, provider):
             self.provider = provider
 
@@ -56,7 +69,11 @@ async def test_mixed_harbor_and_native_tasks_keep_separate_providers_and_machine
                 replace(spec, source=ShellSimBuiltins(), cpus=None, workdir="/workspace")
             )
 
-    settings = HarborTaskSettings.from_config(OmegaConf.create({"harbor": {"override_cpus": 2, "max_retries": 0}}))
+    settings = HarborTaskSettings.from_config(
+        OmegaConf.create(
+            {"harbor": {"override_cpus": 2, "max_retries": 0, "eval_daytona_api_key_env": "DAYTONA_EVAL_API_KEY"}}
+        )
+    )
     request = {
         **original,
         "prompts": original["prompts"] * 2,
@@ -65,6 +82,7 @@ async def test_mixed_harbor_and_native_tasks_keep_separate_providers_and_machine
             {"lowered_task_spec": lowered_task(task, backend="docker").model_dump_json()} for task in (native, harbor)
         ],
         "trajectory_ids": [TrajectoryID(task.id, 0) for task in (native, harbor)],
+        "batch_metadata": BatchMetadata(0, phase),
     }
     worker = TaskRolloutWorker(
         config,
@@ -81,10 +99,58 @@ async def test_mixed_harbor_and_native_tasks_keep_separate_providers_and_machine
     assert batch["unshaped_rewards"] == [1.0, 1.0]
     assert [sum(reward) for reward in batch["rewards"]] == [1.0, 1.0]
     assert batch["exclude_from_baseline"] == [False, False]
-    assert len(machines["docker"]) == len(machines["harbor"]) == 1
+    selected = "harbor_eval" if phase == "eval" else "harbor"
+    unused = "harbor" if phase == "eval" else "harbor_eval"
+    assert len(machines["docker"]) == len(machines[selected]) == 1
+    assert machines[unused] == []
     assert machines["docker"][0].network is NetworkPolicy.DENY
     assert machines["docker"][0].cpus is None
-    assert machines["harbor"][0].cpus == 2
+    assert machines[selected][0].cpus == 2
+
+
+@pytest.mark.asyncio
+async def test_daytona_clients_keep_account_credentials_separate_during_concurrent_requests(monkeypatch):
+    received = []
+
+    async def list_sandboxes(request):
+        received.append(request.headers["Authorization"])
+        return web.json_response({"items": [], "nextCursor": None})
+
+    app = web.Application()
+    app.router.add_get("/{path:.*}", list_sandboxes)
+    monkeypatch.setenv("DAYTONA_RL_API_KEY", "training-key")
+    monkeypatch.setenv("DAYTONA_EVAL_API_KEY", "evaluation-key")
+    monkeypatch.setenv("DAYTONA_API_KEY", "wrong-ambient-key")
+    settings = HarborTaskSettings.from_config(
+        OmegaConf.create(
+            {
+                "harbor": {
+                    "daytona_api_key_env": "DAYTONA_RL_API_KEY",
+                    "eval_daytona_api_key_env": "DAYTONA_EVAL_API_KEY",
+                }
+            }
+        )
+    )
+    async with TestServer(app) as server:
+        monkeypatch.setenv("DAYTONA_API_URL", str(server.make_url("")).rstrip("/"))
+
+        async def inventory(phase):
+            factory = settings.machine_factory(phase=phase)
+            async with factory.client_factory() as client:
+                return [sandbox async for sandbox in client.list()]
+
+        assert await asyncio.gather(inventory("train"), inventory("eval")) == [[], []]
+    assert sorted(received) == ["Bearer evaluation-key", "Bearer training-key"]
+
+
+def test_missing_explicit_daytona_key_does_not_fall_back_to_ambient_account(monkeypatch):
+    monkeypatch.delenv("DAYTONA_EVAL_API_KEY", raising=False)
+    monkeypatch.setenv("DAYTONA_API_KEY", "wrong-ambient-key")
+    settings = HarborTaskSettings.from_config(
+        OmegaConf.create({"harbor": {"eval_daytona_api_key_env": "DAYTONA_EVAL_API_KEY"}})
+    )
+    with pytest.raises(ValueError, match="DAYTONA_EVAL_API_KEY"):
+        settings.machine_factory(phase="eval")
 
 
 @pytest.mark.asyncio
@@ -127,6 +193,8 @@ async def test_disabled_harbor_verification_keeps_tokens_but_masks_training(
     )(config, Tokenizer())
 
     class ImageFactory:
+        backend = Backend.DOCKER
+
         async def create(self, spec):
             return await ShellSimMachineFactory().create(
                 replace(spec, source=ShellSimBuiltins(), workdir=spec.workdir or "/workspace")
@@ -161,9 +229,10 @@ async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected
     task = task.model_copy(
         update={
             "answer_type": AnswerType.WORKSPACE_STATE,
+            "environment_requirements": SHELL_ENVIRONMENT,
             "tags": ("harbor",),
             "grader": ScriptGrader(
-                environment=EnvironmentRequirements(docker_image="fixture@sha256:" + "0" * 64),
+                environment=NATIVE_ENVIRONMENT,
                 answer_path=None,
                 argv=("cat", "/workspace/reward"),
                 artifacts=(
@@ -186,6 +255,8 @@ async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected
     backoff = asyncio.Event()
 
     class Factory:
+        backend = Backend.SHELLSIM
+
         async def create(self, spec):
             nonlocal attempts
             attempts += 1
@@ -239,6 +310,8 @@ async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected
             }
 
     class VerifierFactory:
+        backend = Backend.DOCKER
+
         async def create(self, spec):
             machine = await ShellSimMachineFactory().create(
                 replace(spec, source=ShellSimBuiltins(), workdir=spec.workdir or "/workspace")
@@ -355,7 +428,7 @@ async def test_harbor_retry_policy_preserves_terminal_grades(task_inputs, phase,
         if failure == "exhausted"
         else f'if [ "$(cat /workspace/attempt)" -eq 1 ]; then {failing_command}; else echo 1 > /reward.txt; fi'
     )
-    verifier_environment = EnvironmentRequirements(docker_image="fixture@sha256:" + "0" * 64)
+    verifier_environment = NATIVE_ENVIRONMENT
     verifier = ScriptGrader(
         environment=verifier_environment,
         answer_path=None,
@@ -375,6 +448,7 @@ async def test_harbor_retry_policy_preserves_terminal_grades(task_inputs, phase,
     task = task.model_copy(
         update={
             "answer_type": AnswerType.WORKSPACE_STATE,
+            "environment_requirements": SHELL_ENVIRONMENT,
             "tags": ("harbor",),
             "grader": verifier,
         }
@@ -391,6 +465,8 @@ async def test_harbor_retry_policy_preserves_terminal_grades(task_inputs, phase,
     waits = []
 
     class Factory:
+        backend = Backend.SHELLSIM
+
         async def create(self, spec):
             nonlocal attempts
             attempts += 1
@@ -401,6 +477,8 @@ async def test_harbor_retry_policy_preserves_terminal_grades(task_inputs, phase,
             return machine
 
     class VerifierFactory:
+        backend = Backend.DOCKER
+
         async def create(self, spec):
             nonlocal verifier_starts
             verifier_starts += 1
@@ -489,7 +567,7 @@ async def test_harbor_completion_reward_uses_the_engine_stop_reason(task_inputs,
     config, request = task_inputs
     task = LoweredTaskSpec.model_validate_json(request["env_extras"][0]["lowered_task_spec"]).task
     verifier = ScriptGrader(
-        environment=EnvironmentRequirements(docker_image="fixture@sha256:" + "0" * 64),
+        environment=NATIVE_ENVIRONMENT,
         answer_path=None,
         argv=("sh", "-c", "echo '===== 1 passed in 0.1s ====='; echo 1 > /reward.txt"),
         reward=FileReward(files=(RewardFile(path="/reward.txt", format=RewardFileFormat.NUMBER),)),
@@ -497,12 +575,13 @@ async def test_harbor_completion_reward_uses_the_engine_stop_reason(task_inputs,
     task = task.model_copy(
         update={
             "answer_type": AnswerType.WORKSPACE_STATE,
+            "environment_requirements": NATIVE_ENVIRONMENT,
             "tags": ("harbor",),
             "grader": verifier,
         }
     )
     request["env_extras"][0]["lowered_task_spec"] = lowered_task(
-        task, "shellbox", backend="shellsim", verifier_backend="shellsim"
+        task, "shellbox", backend="docker", verifier_backend="docker"
     ).model_dump_json()
 
     class Client(InferenceClient):
@@ -527,7 +606,7 @@ async def test_harbor_completion_reward_uses_the_engine_stop_reason(task_inputs,
         config,
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         Client(),
-        {"shellsim": FixtureImageFactory()},
+        {"docker": FixtureImageFactory(), "harbor": FixtureImageFactory()},
         harbor=settings,
         shutdown_timeout=30,
     )
@@ -546,7 +625,7 @@ async def test_strict_harbor_parser_masks_only_the_affected_response(task_inputs
     tasks = []
     for output in ("unrecognized output", "tests/test_task.py::test_answer PASSED"):
         verifier = ScriptGrader(
-            environment=EnvironmentRequirements(docker_image="fixture@sha256:" + "0" * 64),
+            environment=NATIVE_ENVIRONMENT,
             answer_path=None,
             argv=("sh", "-c", f"echo '{output}'; echo 1 > /reward.txt"),
             reward=FileReward(files=(RewardFile(path="/reward.txt", format=RewardFileFormat.NUMBER),)),
@@ -555,6 +634,7 @@ async def test_strict_harbor_parser_masks_only_the_affected_response(task_inputs
             base.model_copy(
                 update={
                     "answer_type": AnswerType.WORKSPACE_STATE,
+                    "environment_requirements": NATIVE_ENVIRONMENT,
                     "tags": ("harbor",),
                     "grader": verifier,
                 }
@@ -566,7 +646,7 @@ async def test_strict_harbor_parser_masks_only_the_affected_response(task_inputs
         env_extras=[
             {
                 "lowered_task_spec": lowered_task(
-                    task, "shellbox", backend="shellsim", verifier_backend="shellsim"
+                    task, "shellbox", backend="docker", verifier_backend="docker"
                 ).model_dump_json()
             }
             for task in tasks
@@ -590,7 +670,7 @@ async def test_strict_harbor_parser_masks_only_the_affected_response(task_inputs
         config,
         WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
         InferenceClient(),
-        {"shellsim": FixtureImageFactory()},
+        {"docker": FixtureImageFactory(), "harbor": FixtureImageFactory()},
         harbor=settings,
         shutdown_timeout=30,
     )
@@ -668,7 +748,8 @@ async def test_harbor_concurrency_does_not_queue_gym_tasks(task_inputs, phase):
 
 
 @pytest.mark.asyncio
-async def test_harbor_source_materialization_runs_without_the_original_directory(tmp_path, task_inputs):
+@pytest.mark.parametrize("partition", list(ReplayPartition))
+async def test_harbor_source_materialization_runs_without_the_original_directory(tmp_path, task_inputs, partition):
     source = tmp_path / "source"
     (source / "environment").mkdir(parents=True)
     (source / "tests").mkdir()
@@ -681,15 +762,67 @@ async def test_harbor_source_materialization_runs_without_the_original_directory
         '#!/bin/sh\nif [ "$(cat /logs/artifacts/answer)" = "12" ]; then\n'
         "echo 0.75 > /logs/verifier/reward.txt\nelse\necho 0 > /logs/verifier/reward.txt\nfi\n"
     )
+    replay_path = tmp_path / "replay.parquet"
+    cases_path = tmp_path / "cases.jsonl"
+    manifest_path = tmp_path / "manifest.json"
+    cases_path.write_text(
+        json.dumps(
+            {
+                "task_source_id": "reserved-case",
+                "prompt_token_ids": [128000, 128005],
+                "prefix_sha256": hashlib.sha256(b"[128000,128005]").hexdigest(),
+            }
+        )
+        + "\n"
+    )
+    manifest = {
+        "cases_sha256": hashlib.sha256(cases_path.read_bytes()).hexdigest(),
+        "diagnostic_reserved_task_ids": ["reserved-case"],
+        "train_task_ids": ["training-case"],
+        "parity_task_ids": ["parity-case"],
+        "diagnostic_cases": 1,
+        "training_cases": 1,
+    }
+    if partition is ReplayPartition.TRAIN:
+        manifest["train_task_ids"], manifest["diagnostic_reserved_task_ids"] = (
+            manifest["diagnostic_reserved_task_ids"],
+            manifest["train_task_ids"],
+        )
+    manifest_path.write_text(json.dumps(manifest))
+    write_tasks(replay_path, replay_tasks(cases_path, manifest_path, session_spec(), partition=partition))
+    # Reject contamination before a validation artifact can enter the mixed loader.
+    original_train = manifest["train_task_ids"]
+    manifest["train_task_ids"] = manifest["diagnostic_reserved_task_ids"]
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="overlap"):
+        replay_tasks(cases_path, manifest_path, session_spec(), partition=partition)
+    manifest["train_task_ids"] = original_train
+    manifest_path.write_text(json.dumps(manifest))
+    cases_path.write_text(cases_path.read_text().replace("128000", "128001"))
+    with pytest.raises(ValueError, match="immutable manifest"):
+        replay_tasks(cases_path, manifest_path, session_spec(), partition=partition)
     prepared = HarborTaskDataset(
-        [str(source)], Tokenizer(), 100, session=session_spec(), cache_dir=tmp_path / "tasks", num_workers=1
+        [str(source), str(replay_path)],
+        Tokenizer(),
+        100,
+        session=session_spec(),
+        cache_dir=tmp_path / "tasks",
+        num_workers=1,
     )
     assert prepared.uid(0) == "source"
     shutil.rmtree(source)
     restored = TaskDataset([str(prepared.task_path)], Tokenizer(), 100, num_workers=1)
+    assert len(restored) == 2
+    assert restored[1][1] == "tool_protocol_replay"
+    replay_session = ToolProtocolReplaySession(
+        LoweredTaskSpec.model_validate_json(restored[1][2]["lowered_task_spec"]), None
+    )
+    assert (await replay_session.prepare()).prompt_token_ids == (128000, 128005)
     prompt, env, extras, uid = restored[0]
 
     class ImageFactory:
+        backend = Backend.DOCKER
+
         async def create(self, spec):
             return await ShellSimMachineFactory().create(
                 replace(spec, source=ShellSimBuiltins(), workdir=spec.workdir or "/workspace")

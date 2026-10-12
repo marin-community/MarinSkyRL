@@ -2,7 +2,15 @@
 
 from rolloutengine.spec import LoweredTaskSpec, MachineRuntimeSpec, TaskRuntimeSpec, TaskSessionSpec
 from shellbox.machine import NetworkPolicy
-from taskcompendium.models import TaskSpec
+from taskcompendium.models import CommandSemantics, EnvironmentRequirements, TaskSpec
+
+SHELL_ENVIRONMENT = EnvironmentRequirements(
+    command_semantics=CommandSemantics.SHELL_SIMULATOR, capabilities=("shell", "filesystem")
+)
+NATIVE_ENVIRONMENT = EnvironmentRequirements(
+    command_semantics=CommandSemantics.LINUX_PROCESS,
+    docker_image="fixture@sha256:" + "0" * 64,
+)
 
 
 def machine_runtime(backend: str) -> MachineRuntimeSpec:

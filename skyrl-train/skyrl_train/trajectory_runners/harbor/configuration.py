@@ -61,6 +61,8 @@ ENVIRONMENT_SCHEMA = SectionSchema(
         "environment_type": FieldMapping("type", default=EnvironmentType.DAYTONA.value),
         "env_network_policy": FieldMapping("network_policy", field_type="kwargs"),
         "ttl_minutes": FieldMapping("ttl_minutes", field_type="kwargs"),
+        "daytona_api_key_env": FieldMapping("api_key_env", field_type="kwargs"),
+        "eval_daytona_api_key_env": FieldMapping("eval_api_key_env", field_type="kwargs"),
     }
 )
 
@@ -254,7 +256,7 @@ class HarborConfigBuilder:
     """Read task resources, deadlines, retries, and reward settings from SkyRL config."""
 
     def __init__(self, terminal_bench_cfg: DictConfig):
-        unknown = set(terminal_bench_cfg) - {"harbor"}
+        unknown = set(terminal_bench_cfg) - {"harbor", "installed_agent"}
         if unknown:
             raise ValueError(f"Unknown terminal task settings: {sorted(unknown)}")
         self._harbor_cfg = OmegaConf.to_container(terminal_bench_cfg.get("harbor", OmegaConf.create({})), resolve=True)

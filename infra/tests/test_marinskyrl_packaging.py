@@ -65,7 +65,7 @@ def test_training_extras_publish_hardware_policy_and_rollout_requirements(built_
     assert any(requirement.startswith("torch==") and "extra == 'cuda'" in requirement for requirement in requirements)
     assert any(requirement.startswith("vllm==") and "extra == 'vllm'" in requirement for requirement in requirements)
     rollout_requirements = {Requirement(value).name: Requirement(value) for value in requirements if "extra ==" not in value}
-    for name in ("marin-rolloutengine", "taskcompendium", "marin-shellbox", "verifyit", "harbor-config"):
+    for name in ("marin-rolloutengine", "marin-taskcompendium", "marin-shellbox", "marin-verifyit", "harbor-config"):
         assert rollout_requirements[name].url, f"The wheel must locate {name} without uv source overrides"
     assert {"daytona", "shellsim"} <= rollout_requirements["marin-shellbox"].extras
     assert any(requirement.startswith("torch==") and "extra == 'vllm'" in requirement for requirement in requirements)
@@ -90,14 +90,17 @@ def test_training_extras_publish_hardware_policy_and_rollout_requirements(built_
     assert "Extras `cpu` and `cuda` are incompatible" in conflict.stderr
 
 
-def test_rollout_runtime_resolves_harbor_main_into_the_frozen_lock() -> None:
-    sources = PYPROJECT["tool"]["uv"]["sources"]
-    lock = tomllib.loads((REPOSITORY_ROOT / "uv.lock").read_text())
-
-    assert sources["harbor"] == {"git": "https://github.com/marin-community/harbor.git"}
-    harbor = next(package for package in lock["package"] if package["name"] == "harbor")
-    assert harbor["source"]["git"].startswith("https://github.com/marin-community/harbor.git#")
-    assert len(harbor["source"]["git"].rsplit("#", 1)[-1]) == 40
+def test_rollout_runtime_exports_pinned_harbor_for_linux_training() -> None:
+    platform = {"sys_platform": "linux", "platform_machine": "x86_64"}
+    requirements = _exported_requirements(("megatron", "vllm"))
+    harbor = next(
+        requirement for requirement in requirements
+        if requirement.name == "harbor"
+        and (requirement.marker is None or requirement.marker.evaluate(platform))
+    )
+    assert harbor.url is not None
+    assert harbor.url.startswith("git+https://github.com/marin-community/harbor.git@")
+    assert harbor.url.rsplit("@", 1)[-1] == PYPROJECT["tool"]["uv"]["sources"]["harbor"]["rev"]
 
 
 def _exported_requirements(extras: tuple[str, ...]) -> list[Requirement]:

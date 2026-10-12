@@ -2,14 +2,21 @@
 
 import math
 from dataclasses import dataclass
+from enum import StrEnum
 
 from omegaconf import DictConfig, OmegaConf
 
 from marinskyrl.runtime_options import PolicyLossType
 
 
+class FTPOBoundary(StrEnum):
+    TAIL_LOOP = "tail_loop"
+    REPEATED_TOOL_OPENER = "repeated_tool_opener"
+
+
 @dataclass(frozen=True)
 class FTPOConfig:
+    boundary: FTPOBoundary = FTPOBoundary.TAIL_LOOP
     margin: float = 2.0
     lambda_mse: float = 0.4
     lambda_mse_target: float = 0.05
@@ -27,7 +34,10 @@ def ftpo_config(algorithm: DictConfig) -> FTPOConfig | None:
     """Resolve the FTPO parameters only for an FTPO policy objective."""
     if algorithm.get("policy_loss_type") != PolicyLossType.FTPO:
         return None
-    config = OmegaConf.to_object(OmegaConf.merge(OmegaConf.structured(FTPOConfig), algorithm.get("ftpo", {})))
+    values = dict(algorithm.get("ftpo", {}))
+    if "boundary" in values:
+        values["boundary"] = FTPOBoundary(values["boundary"])
+    config = OmegaConf.to_object(OmegaConf.merge(OmegaConf.structured(FTPOConfig), values))
     for value in (
         config.margin,
         config.lambda_mse,

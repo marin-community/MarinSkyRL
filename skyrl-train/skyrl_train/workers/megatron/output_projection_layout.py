@@ -1,7 +1,6 @@
 """Project unsharded GPT output in its consumer layout without duplicating vocabulary logits."""
 
 import torch
-from megatron.core.utils import get_attr_wrapped_model
 from torch import nn
 
 from marinskyrl.runtime_options import PolicyLossType
@@ -34,8 +33,11 @@ def install_dpo_batch_major_output_projection(model_chunks, provider, policy_los
     """Install the batch-major projection on every post-process chunk when DPO can use it.
 
     Shared by the training worker and the equivalence experiments so both provably run the
-    same adaptation under the same topology condition.
+    same adaptation under the same topology condition. The Megatron import stays inside the
+    function so importing this module needs no Megatron installation.
     """
+    from megatron.core.utils import get_attr_wrapped_model
+
     if (
         policy_loss_type == PolicyLossType.DPO
         and provider.tensor_model_parallel_size == 1

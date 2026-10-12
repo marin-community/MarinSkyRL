@@ -10,6 +10,7 @@ data:
   train_data: ["${oc.env:HOME}/data/gsm8k/train.parquet"]
   val_data: ["${oc.env:HOME}/data/gsm8k/validation.parquet"]
   shuffle: true
+  preference_pair_format: text # text completions or tokenized conversations with assistant masks
   # Optional task-directory sidechannel for mixed Nemotron Ultra RLVR. The
   # parquet dataloader remains authoritative; SWE rows resolve their instance ID
   # against these terminal-bench task roots at rollout time.
@@ -42,6 +43,7 @@ checkpoint_export:
   hf_upload_mode: latest
 
 trainer:
+  evaluation_runner: training # task or harbor selects generated validation for offline preference training
   trajectory_selector:
     type: null # null | best_of_n; selection runs after reward postprocessing and before teacher scoring
   # light is the shared default: fatal Python stacks, bounded NCCL flight recording,
@@ -357,6 +359,7 @@ trainer:
 
 
 generator:
+  model_loading: stream # stage_local copies immutable model weights before Ray starts on each node
   model_name: ${trainer.policy.model.path}
   model_dtype: "bfloat16"
   timeout_multiplier: 1.0

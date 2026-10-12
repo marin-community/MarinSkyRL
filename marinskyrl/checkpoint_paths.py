@@ -5,6 +5,7 @@ from marinskyrl.resource_locator import join_resource_path
 GLOBAL_STEP_PREFIX = "global_step_"
 LATEST_CHECKPOINT_FILE = "latest_ckpt_global_step.txt"
 HF_EXPORT_REQUEST_FILENAME = "hf_export_request.json"
+BEST_CHECKPOINT_FILENAME = "best_checkpoint.json"
 POLICY_CHECKPOINT_SUBDIRECTORY = "policy"
 
 

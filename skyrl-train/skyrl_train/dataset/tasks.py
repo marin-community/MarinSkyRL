@@ -17,6 +17,7 @@ from rolloutengine.lowering import SHELLBOX_SESSION
 from rolloutengine.task_session import session_start
 from skyrl_gym.source_task import session_parameters, source_task
 from taskcompendium.models import EnvironmentRequirements, SessionGrader, Source
+from taskcompendium.runtime.shell import resolve_shell_tool
 from transformers import PreTrainedTokenizerBase
 
 from skyrl_train.dataset.dataset import PromptDataset
@@ -32,10 +33,15 @@ def task_prompt(lowered: LoweredTaskSpec) -> dict:
     """Prepare public messages and private worker inputs from a lowered task."""
     task = lowered.task
     extras = session_parameters(task).extras if isinstance(task.grader, SessionGrader) else {}
+    shell_tool = (
+        resolve_shell_tool(task, lowered.session.shell_tool)
+        if lowered.session.task_session == SHELLBOX_SESSION
+        else None
+    )
     return {
         **extras,
         LOWERED_TASK_COLUMN: lowered.model_dump_json(),
-        "prompt": session_start(task).messages,
+        "prompt": session_start(task, shell_tool).messages,
         "env_class": TASKCOMPENDIUM_ENVIRONMENT
         if lowered.session.task_session == SHELLBOX_SESSION
         else lowered.session.task_session,

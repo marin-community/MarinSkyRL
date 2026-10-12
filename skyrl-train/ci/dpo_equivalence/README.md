@@ -25,7 +25,12 @@ TP1/CP1 at PP/EP/DP combinations up to PP2/EP4 on eight GPUs, covering micro-bat
 average), gradient reduction across pipeline stages and expert shards, and the batch-major
 output projection that the training worker installs for DPO. Named gradients are aligned
 through the bridge conversion tasks — the same mapping the weight sync uses — by exporting
-`param.main_grad` in place of parameter data. Two fixture properties keep the comparison
+`param.main_grad` in place of parameter data. Gradient reduction runs through DDP
+allreduce (`use_distributed_optimizer=False`) finalized with `finish_grad_sync`, which is
+idempotent under allreduce and leaves every rank's buffer the full data-parallel mean the
+reference computes; the distributed optimizer's reduce-scatter shard path is verified
+element-exactly by the optimizer experiment instead. Two fixture properties keep the
+comparison
 meaningful and are revalidated on every run: deterministic per-token reference log-prob
 offsets separate the frozen reference from the initial policy (without them
 delta == 0 and every DPO pair weight, accuracy, and margin is degenerate), and the

@@ -174,6 +174,7 @@ def _calculate_eval_metrics(
     overall_avg_score, overall_pass_at_n = get_metrics_from_trajectory_batch(batch, uids)
     metrics.update(
         {
+            "eval/all/num_attempted": float(len(batch["response_ids"])),
             "eval/all/avg_score": overall_avg_score,
             f"eval/all/pass_at_{samples_per_prompt}": overall_pass_at_n,
         }
@@ -181,6 +182,7 @@ def _calculate_eval_metrics(
     verifier_scores = normalized_verifier_scores(batch)
     if verifier_scores is not None:
         coverage, average = verifier_score_summary(verifier_scores)
+        metrics["eval/all/num_scored"] = float(sum(score is not None for score in verifier_scores))
         metrics["eval/all/verifier_score_coverage"] = coverage
         if average is not None:
             metrics["eval/all/avg_verifier_score"] = average

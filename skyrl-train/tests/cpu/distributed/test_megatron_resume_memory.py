@@ -9,11 +9,15 @@ gradients, which are not checkpointed, must be off the device for both calls.
 import contextlib
 from types import SimpleNamespace
 
+import pytest
+import torch
+
 from tests.cpu.util import stub_megatron_modules
 
 stub_megatron_modules()
 
 from skyrl_train.distributed.megatron import megatron_strategy  # noqa: E402
+from skyrl_train.distributed.megatron.grug_muonh import MegatronGrugMuonH  # noqa: E402
 
 
 class _Grads:
@@ -73,3 +77,77 @@ def test_resume_rebuilds_the_optimizer_state_with_the_gradients_off_the_device(m
     optimizer, grads = _load_with_fakes(monkeypatch, tmp_path)
     assert optimizer.grads_resident_during == {"sharded_state_dict": False, "load_state_dict": False}
     assert grads.resident, "training needs its gradient buffers back after the optimizer state is restored"
+
+
+class _CheckpointOptimizer:
+    """CPU boundary for Megatron's wrapper around a real lazy-state optimizer."""
+
+    def __init__(self, optimizer):
+        self.optimizer = optimizer
+        self.config = None
+        self.init_state_fn = lambda inner, config: inner.initialize_state()
+
+    def sharded_state_dict(self, model_state, *, metadata):
+        return [
+            {key: self.optimizer.state[parameter][key] for key in ("step", "exp_avg", "exp_avg_sq")}
+            for group in self.optimizer.param_groups
+            for parameter in group["params"]
+        ]
+
+
+class _CheckpointChain(megatron_strategy.ChainedOptimizer):
+    def __init__(self, children):
+        self.chained_optimizers = children
+
+    def sharded_state_dict(self, model_state, *, metadata):
+        return [child.sharded_state_dict(model_state, metadata=metadata) for child in self.chained_optimizers]
+
+
+@pytest.mark.parametrize("chained", [False, True])
+def test_save_before_first_update_initializes_missing_moments_without_changing_weights(monkeypatch, tmp_path, chained):
+    fresh = torch.nn.Parameter(torch.tensor([2.0, 3.0]))
+    existing = torch.nn.Parameter(torch.tensor([4.0, 5.0]))
+    inner = MegatronGrugMuonH(
+        [{"params": [fresh, existing], "optimizer": "grug_adamh"}],
+        lr=0.01,
+        betas=(0.9, 0.95),
+        momentum=0.9,
+        nesterov=True,
+        ns_steps=5,
+        eps=1e-8,
+        muon_eps=1e-8,
+        qkv_split_shapes=(1, 1, 1),
+    )
+    inner.state[existing] = {"step": torch.tensor(3), "exp_avg": torch.ones(2), "exp_avg_sq": torch.full((2,), 7.0)}
+    optimizer = _CheckpointOptimizer(inner)
+    if chained:
+        optimizer = _CheckpointChain([optimizer])
+
+    def save(**kwargs):
+        torch.save(kwargs["sharded_state_dict"], tmp_path / "state.pt")
+
+    monkeypatch.setattr(megatron_strategy.dist, "barrier", lambda: None)
+    monkeypatch.setattr(megatron_strategy.dist_checkpointing, "save", save)
+    monkeypatch.setattr(megatron_strategy, "get_default_save_sharded_strategy", lambda name: None)
+    monkeypatch.setattr(megatron_strategy, "FullyParallelSaveStrategyWrapper", lambda strategy, group: strategy)
+    monkeypatch.setattr(megatron_strategy.mpu, "get_data_parallel_group", lambda **kwargs: None, raising=False)
+    monkeypatch.setattr(megatron_strategy.ckpt_base, "async_calls", SimpleNamespace(close=lambda: None), raising=False)
+    strategy = megatron_strategy.MegatronStrategy.__new__(megatron_strategy.MegatronStrategy)
+    strategy.optimizer_config = None
+    strategy.megatron_config = SimpleNamespace(optimizer_checkpoint_sharding_type="fully_reshardable")
+    monkeypatch.setattr(strategy, "get_rng_state", lambda: {})
+    monkeypatch.setattr(strategy, "is_rank_0", lambda: False)
+    monkeypatch.setattr(strategy, "log", lambda *args: None)
+    module = SimpleNamespace(sharded_state_dict=lambda: {"fresh": fresh, "existing": existing})
+    strategy.save_checkpoint(SimpleNamespace(actor_module=[module]), str(tmp_path), 0, optimizer=optimizer)
+
+    saved = torch.load(tmp_path / "state.pt", weights_only=True)
+    moments = saved["optimizer"][0] if chained else saved["optimizer"]
+    torch.testing.assert_close(saved["model"]["fresh"], torch.tensor([2.0, 3.0]), rtol=0, atol=0)
+    torch.testing.assert_close(saved["model"]["existing"], torch.tensor([4.0, 5.0]), rtol=0, atol=0)
+    assert moments[0]["step"].item() == 0
+    assert torch.equal(moments[0]["exp_avg"], torch.zeros(2))
+    assert torch.equal(moments[0]["exp_avg_sq"], torch.zeros(2))
+    assert moments[1]["step"].item() == 3
+    assert torch.equal(moments[1]["exp_avg"], torch.ones(2))
+    assert torch.equal(moments[1]["exp_avg_sq"], torch.full((2,), 7.0))

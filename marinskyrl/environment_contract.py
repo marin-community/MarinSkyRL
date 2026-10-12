@@ -313,6 +313,8 @@ _BUILD_BOUNDARY_WRITERS = frozenset({EnvVarWriter.SHELL_EXPORT, EnvVarWriter.DOC
 # process, task, container, or build boundaries, but they are not training controls.
 _SECRET_BOUNDARIES = {
     "DAYTONA_API_KEY",
+    "DAYTONA_RL_API_KEY",
+    "DAYTONA_EVAL_API_KEY",
     "KUBECONFIG",
     "MLFLOW_TRACKING_TOKEN",
     "WANDB_API_KEY",
