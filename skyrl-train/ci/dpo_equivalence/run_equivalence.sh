@@ -13,9 +13,6 @@ nvidia-smi --query-gpu=name,driver_version --format=csv
 
 echo "::: running the DPO equivalence experiments"
 cd "$REPOSITORY_ROOT"
-# Every checkpoint, tokenizer, and config the tests read is local; hub HEAD requests
-# from concurrent spawned ranks only invite rate-limit backoffs.
-export HF_HUB_OFFLINE=1
 JUNIT_XML="$REPOSITORY_ROOT/dpo-equivalence-junit.xml"
 test_targets=(
   skyrl-train/tests/gpu/test_dpo_backward_equivalence.py
