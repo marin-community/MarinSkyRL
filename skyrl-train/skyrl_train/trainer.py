@@ -2232,7 +2232,7 @@ class RayPPOTrainer:
                 ):
                     raise ValueError("Closure repair training does not support sampled-token auxiliary channels")
                 # Preserve the recorded rollout. Only the learner's response
-                # branch replaces a terminal EOS or appends a verified suffix.
+                # branch replaces the suffix after the verified repair boundary.
                 response_ids = [
                     response if repair is None else response[: repair.response_position] + list(repair.repair_token_ids)
                     for response, repair in zip(response_ids, closure_targets.repairs, strict=True)
@@ -2257,6 +2257,9 @@ class RayPPOTrainer:
                     None,
                 )
                 width = response_masks_tensor.shape[1]
+                candidates = candidates[:, :width]
+                chosen = chosen[:, :width]
+                weights = weights[:, :width]
                 extra = width - weights.shape[1]
                 candidates = torch.cat(
                     (candidates, candidates.new_full((len(response_ids), extra, candidates.shape[-1]), -1)), dim=1

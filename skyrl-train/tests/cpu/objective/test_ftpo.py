@@ -554,7 +554,10 @@ async def test_ftpo_empty_rollout_batch_skips_training(config):
 
 
 @pytest.mark.parametrize("terminal_eos", [False, True])
-def test_verified_closure_trainer_preserves_rollouts_and_trains_verified_repairs(config, tmp_path, terminal_eos):
+@pytest.mark.parametrize("repair_response", [" ", ' ,"other":2'])
+def test_verified_closure_trainer_preserves_rollouts_and_trains_verified_repairs(
+    config, tmp_path, terminal_eos, repair_response
+):
     config.trainer.algorithm.ftpo = {
         "boundary": "verified_closure",
         "chosen_balance_strength": 0,
@@ -581,7 +584,7 @@ def test_verified_closure_trainer_preserves_rollouts_and_trains_verified_repairs
     trainer.ref_model = trainer.critic_model = None
     prefix = '[{"a":1'
     prompt = tokenizer.encode("assistant " + prefix, add_special_tokens=False)
-    responses = [tokenizer.encode(text, add_special_tokens=False) for text in (" ]x", " ", " ]x", " ]x")]
+    responses = [tokenizer.encode(text, add_special_tokens=False) for text in (" ]x", repair_response, " ]x", " ]x")]
     if terminal_eos:
         responses[1].append(tokenizer.eos_token_id)
     original_responses = deepcopy(responses)
