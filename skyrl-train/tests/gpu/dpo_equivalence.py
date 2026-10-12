@@ -9,7 +9,6 @@ TRL-style DPO formula, computed outside the skyrl_train objective stack.
 """
 
 from dataclasses import dataclass
-from importlib import util
 import hashlib
 
 import torch
@@ -21,6 +20,7 @@ from skyrl_train.config.utils import get_default_config
 from skyrl_train.distributed.megatron.megatron_utils import materialize_megatron_params
 from skyrl_train.models.grug_moe import GRUG_ROUTER_BIAS_SUFFIX
 from skyrl_train.models.grug_moe import GrugMoeForCausalLM
+from skyrl_train.workers.megatron.grug_provider_config import configure_grug_provider
 from skyrl_train.workers.megatron.output_projection_layout import install_dpo_batch_major_output_projection
 from tests.cpu.util import DPO_OVERRIDES
 from tests.gpu.grug_tiny_checkpoint import write_tiny_checkpoint
@@ -258,18 +258,16 @@ def build_grug_megatron_chunks(
     phase("building bridge")
     bridge = AutoBridge.from_hf_pretrained(model_path, trust_remote_code=True)
     provider = bridge.to_megatron_provider()
-    provider.tensor_model_parallel_size = tensor_model_parallel_size
-    provider.pipeline_model_parallel_size = pipeline_model_parallel_size
-    provider.pipeline_dtype = torch.bfloat16 if bf16 else torch.float32
-    provider.context_parallel_size = context_parallel_size
-    provider.expert_model_parallel_size = expert_model_parallel_size
-    provider.expert_tensor_parallel_size = expert_tensor_parallel_size
-    provider.sequence_parallel = tensor_model_parallel_size > 1
-    provider.attention_backend = attention_backend or ("flash" if flash_attn else "fused")
-    provider.variable_seq_lengths = True
-    provider.masked_softmax_fusion = True
-    provider.moe_token_dispatcher_type = "alltoall"
-    provider.gradient_accumulation_fusion = util.find_spec("fused_weight_gradient_mlp_cuda") is not None
+    configure_grug_provider(
+        provider,
+        tensor_model_parallel_size=tensor_model_parallel_size,
+        pipeline_model_parallel_size=pipeline_model_parallel_size,
+        context_parallel_size=context_parallel_size,
+        expert_model_parallel_size=expert_model_parallel_size,
+        expert_tensor_parallel_size=expert_tensor_parallel_size,
+        bf16=bf16,
+        attention_backend=attention_backend or ("flash" if flash_attn else "fused"),
+    )
     phase("finalizing provider")
     provider.finalize()
     phase("provider finalized")

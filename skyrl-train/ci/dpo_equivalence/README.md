@@ -51,11 +51,14 @@ attention, expert, embedding, and projection tensors but not for the router weig
 **Optimizer update.** Fixed, named gradients are injected into the production path —
 `MegatronStrategy.optimizer_step` over the DistributedOptimizer the trainer builds for DPO
 (AdamW, lr 4e-6, betas (0.9, 0.999), weight decay 0, clip 0.5, bf16 parameters with fp32
-shards) at PP2/EP2/DP2 on four GPUs. Two consecutive steps compare every owned parameter
+shards) at PP2/EP2 on four GPUs (dense data-parallel degree 1; dense tensors replicate
+across the two EP ranks of each stage). Two consecutive steps compare every owned parameter
 slice's value, `exp_avg`, `exp_avg_sq`, the step counter, the returned gradient norm, and
-the bf16 copy-back against the literal float64 reference; the owned slices must tile every
-parameter exactly once across ranks. Both a clipping-active and a clipping-inactive case
-run.
+the bf16 copy-back against the literal float64 reference; the owned slices must cover
+every held element exactly once across ranks (replicated parameters contribute each
+replica). The reference gradient norm sums the same owned slices production's norm sums —
+shared/TP-duplicate filtering mirrored — so replication counts identically on both sides.
+Both a clipping-active and a clipping-inactive case run.
 
 **Transfer to inference.** Exactly one DPO optimizer step runs through the Ray policy
 worker at PP2; the updated training tensors are broadcast into disaggregated vLLM engines

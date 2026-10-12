@@ -7,11 +7,13 @@ with fp32 shards) — and compares every owned parameter slice's post-step value
 moments, and step counters against a literal AdamW-with-clipping calculation on the CPU
 in float64.
 
-The owned slices are read from the distributed optimizer's own shard mapping and must tile
-every parameter exactly once across ranks, which checks the DP/PP/EP shard alignment as
-part of the comparison. A clipping-active case (gradient norm above the 0.5 threshold)
-and a clipping-inactive case are both covered, and two consecutive steps exercise moment
-accumulation and the step counter. The bf16 copy-back into the gradient buffers' parameter
+The owned slices are read from the distributed optimizer's own shard mapping and must cover
+every held element exactly once across ranks (replicated parameters contribute each
+replica), which checks the DP/PP/EP shard alignment as part of the comparison. The
+reference gradient norm sums the same owned slices production's norm sums, so replicated
+parameters count identically on both sides. A clipping-active case (gradient norm above
+the 0.5 threshold) and a clipping-inactive case are both covered, and two consecutive
+steps exercise moment accumulation and the step counter. The bf16 copy-back into the gradient buffers' parameter
 data must match the fp32 shard values rounded to bf16 exactly.
 """
 
@@ -23,6 +25,8 @@ import torch
 import torch.distributed as dist
 from megatron.core import parallel_state as mpu
 from megatron.core.optimizer import ChainedOptimizer
+from megatron.core.tensor_parallel import param_is_not_tensor_parallel_duplicate
+from megatron.core.transformer.module import param_is_not_shared
 from omegaconf import OmegaConf
 
 from skyrl_train.distributed.megatron.megatron_strategy import MegatronStrategy
@@ -126,7 +130,22 @@ def run_optimizer_rank(rank, world_size, pp, ep, rendezvous, model_path, clip_ac
             for name, value in initial.items()
         }
 
-        scale = 1.0 if clip_active else 1e-4
+        # Owned shard ranges are static for a fixed model and optimizer: hoist them so
+        # the reference norm below can sum exactly the slices production will sum.
+        names_by_id = {id(parameter): name for name, parameter in parameters.items()}
+        children = optimizer.chained_optimizers if isinstance(optimizer, ChainedOptimizer) else [optimizer]
+        owned = []
+        for child in children:
+            for model_group, shard_group in zip(child.model_float16_groups, child.shard_fp32_from_float16_groups):
+                for model_param, shard_main_param in zip(model_group, shard_group):
+                    param_range = child._get_model_param_range_map(model_param)["param"]
+                    owned.append(
+                        (names_by_id[id(model_param)], param_range.start, param_range.end, shard_main_param, child)
+                    )
+
+        # Inactive-case gradients must sit clearly below the clip threshold under either
+        # unique or replicated norm accounting (true norm ~0.14 vs threshold 0.5).
+        scale = 1.0 if clip_active else 3e-5
         for step_index in (1, 2):
             for name, parameter in parameters.items():
                 parameter.main_grad.copy_(
@@ -134,13 +153,19 @@ def run_optimizer_rank(rank, world_size, pp, ep, rendezvous, model_path, clip_ac
                     .to(device=parameter.main_grad.device, dtype=parameter.main_grad.dtype)
                     .view_as(parameter)
                 )
-            # The production clip threshold is the norm over every owned shard across all
-            # ranks (dense parameters shard across the data-parallel group, experts across
-            # the expert-parallel group), so the reference must reduce it world-wide.
-            squares = torch.zeros((), dtype=torch.float64, device="cuda")
-            for name, (parameter_value, _, _) in reference.items():
-                gradient = fixed_gradient(name, parameter_value.numel(), step_index, scale)
-                squares += gradient.square().sum().double().to("cuda")
+            # Production's grad norm is the 2-norm over the owned shard grads
+            # (get_main_grads_for_grad_norm filters shared/TP-duplicate shards, then the
+            # squared sum all-reduces over the distopt instance): sum the identical
+            # slices of the injected gradients here, in float64.
+            squares = torch.zeros((), dtype=torch.float64)
+            for name, start, end, shard_main_param, child in owned:
+                if not param_is_not_shared(shard_main_param):
+                    continue
+                if not param_is_not_tensor_parallel_duplicate(shard_main_param, getattr(child, "tp_group", None)):
+                    continue
+                gradient = fixed_gradient(name, parameters[name].numel(), step_index, scale)
+                squares += gradient[start:end].double().square().sum()
+            squares = squares.to("cuda")
             dist.all_reduce(squares)
             global_norm = torch.sqrt(squares).item()
             if step_index == 1:
@@ -164,16 +189,6 @@ def run_optimizer_rank(rank, world_size, pp, ep, rendezvous, model_path, clip_ac
         # Read each owned slice through the distributed optimizer's own group/range mapping:
         # shard grads are model_param.main_grad.view(-1)[start:end] by construction, so the
         # same slice of the reference tensor must match exactly.
-        names_by_id = {id(parameter): name for name, parameter in parameters.items()}
-        children = optimizer.chained_optimizers if isinstance(optimizer, ChainedOptimizer) else [optimizer]
-        owned = []
-        for child in children:
-            for model_group, shard_group in zip(child.model_float16_groups, child.shard_fp32_from_float16_groups):
-                for model_param, shard_main_param in zip(model_group, shard_group):
-                    param_range = child._get_model_param_range_map(model_param)["param"]
-                    owned.append(
-                        (names_by_id[id(model_param)], param_range.start, param_range.end, shard_main_param, child)
-                    )
         gathered = [None] * world_size
         dist.all_gather_object(gathered, [(name, start, end) for name, start, end, _, _ in owned])
         numel_everywhere = [None] * world_size
@@ -183,17 +198,20 @@ def run_optimizer_rank(rank, world_size, pp, ep, rendezvous, model_path, clip_ac
             for peer in gathered:
                 for name, start, end in peer:
                     covered[name] = covered.get(name, 0) + (end - start)
-            total_numel = {}
+            # Every held element must be owned exactly once: replicated parameters
+            # (dense tensors across EP ranks) contribute each replica's elements.
+            held = {}
             for peer in numel_everywhere:
-                total_numel.update(peer)
-            assert set(covered) == set(total_numel), (
-                sorted(set(covered) - set(total_numel)),
-                sorted(set(total_numel) - set(covered)),
+                for name, numel in peer.items():
+                    held[name] = held.get(name, 0) + numel
+            assert set(covered) == set(held), (
+                sorted(set(covered) - set(held)),
+                sorted(set(held) - set(covered)),
             )
             for name, elements in covered.items():
-                assert elements == total_numel[name], (name, elements, total_numel[name])
+                assert elements == held[name], (name, elements, held[name])
             print(
-                f"optimizer shard coverage: {len(covered)} parameters tile their elements exactly",
+                f"optimizer shard coverage: {len(covered)} parameters cover their held elements exactly",
                 flush=True,
             )
 
