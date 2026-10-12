@@ -7,7 +7,6 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from functools import partial
-from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
 
@@ -540,12 +539,8 @@ class TaskRolloutWorkerSpec:
                 int(runner_config.sampling_params.max_generate_length),
             )
         factories: dict[str, MachineFactory] = {"shellsim": ShellSimMachineFactory()}
-        skopeo = shutil.which(str(Path(self.config.trajectory_runner.skopeo).expanduser()))
-        if shutil.which("docker") is not None and skopeo is not None:
-            factories[Backend.DOCKER] = DockerMachineFactory(
-                skopeo=Path(skopeo),
-                image_cache=Path(self.config.trajectory_runner.image_cache).expanduser(),
-            )
+        if shutil.which("docker") is not None:
+            factories[Backend.DOCKER] = DockerMachineFactory()
         if harbor is not None:
             if harbor.environment.type != EnvironmentType.DOCKER:
                 factories[HARBOR_MACHINE_BACKEND] = harbor.machine_factory()

@@ -34,10 +34,9 @@ in `preprocess_swegym.py`. The grader timeout is 3600 seconds.
 
 ## Run training
 
-The Docker factory requires a Docker daemon and Skopeo on each rollout worker.
-It resolves registry images into `trajectory_runner.image_cache` and reuses them
-for task and verifier machines. Set `trajectory_runner.skopeo` to the executable
-path if Skopeo is not on `PATH`.
+The Docker factory requires the Docker CLI and daemon on each rollout worker.
+Docker pulls missing registry images and manages its own image cache for task
+and verifier machines. Skopeo is not required.
 List the task images from the materialized files:
 
 ```bash
