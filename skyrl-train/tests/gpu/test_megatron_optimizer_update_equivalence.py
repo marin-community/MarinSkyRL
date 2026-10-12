@@ -158,7 +158,14 @@ def run_optimizer_rank(rank, world_size, pp, ep, rendezvous, model_path, clip_ac
         children = optimizer.chained_optimizers if isinstance(optimizer, ChainedOptimizer) else [optimizer]
         owned = []
         for child in children:
-            for model_group, shard_group in zip(child.model_float16_groups, child.shard_fp32_from_float16_groups):
+            model_groups = child.model_float16_groups
+            shard_groups = child.shard_fp32_from_float16_groups
+            if len(model_groups) != len(shard_groups):
+                print(
+                    f"rank{rank} group length mismatch: {len(model_groups)} model vs {len(shard_groups)} shard",
+                    flush=True,
+                )
+            for model_group, shard_group in zip(model_groups, shard_groups):
                 for model_param, shard_main_param in zip(model_group, shard_group):
                     param_range = child._get_model_param_range_map(model_param)["param"]
                     owned.append(
@@ -178,6 +185,27 @@ def run_optimizer_rank(rank, world_size, pp, ep, rendezvous, model_path, clip_ac
             global_norm = reference_global_norm(owned, parameters, step_index, scale)
             if step_index == 1:
                 assert (global_norm > MAX_GRAD_NORM) == clip_active, global_norm
+                # prepare_grads is idempotent (the strategy re-calls it); probe here
+                # whether every owned shard the test compares actually reaches the
+                # torch optimizer with a gradient attached.
+                optimizer.prepare_grads()
+                torch_param_ids = set()
+                for child in children:
+                    inner = getattr(child, "optimizer", None)
+                    if inner is None:
+                        continue
+                    torch_param_ids.update(id(param) for group in inner.param_groups for param in group["params"])
+                probe_problems = []
+                for name, start, end, shard_main_param, child in owned:
+                    if id(shard_main_param) not in torch_param_ids:
+                        probe_problems.append((name, start, end, "shard absent from torch groups"))
+                    elif shard_main_param.grad is None:
+                        probe_problems.append((name, start, end, "shard grad is None after prepare"))
+                probe_summary = (
+                    f"rank{rank} prepare probe: {len(owned)} owned shards, "
+                    f"{len(probe_problems)} problems: {probe_problems[:8]}"
+                )
+                print(probe_summary, flush=True)
             clip_coeff = min(1.0, MAX_GRAD_NORM / (global_norm + CLIP_EPS))
             result = strategy.optimizer_step(optimizer, chunks, scheduler, name="policy")
             assert result.applied and result.grad_norm is not None
@@ -296,6 +324,7 @@ def run_optimizer_rank(rank, world_size, pp, ep, rendezvous, model_path, clip_ac
                 torch.testing.assert_close(model_data.float().cpu(), expected_bf16.float().cpu(), rtol=0, atol=0)
             except AssertionError:
                 slice_failures.append((name, start, end, "bf16 copy-back mismatch"))
+        print(probe_summary, flush=True)
         assert not slice_failures, slice_failures
     finally:
         mpu.destroy_model_parallel()
