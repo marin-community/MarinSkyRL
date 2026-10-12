@@ -42,4 +42,3 @@ def task_messages(lowered: LoweredTaskSpec) -> ConversationType:
         else None
     )
     return list(session_start(lowered.task, tool).messages)
-
