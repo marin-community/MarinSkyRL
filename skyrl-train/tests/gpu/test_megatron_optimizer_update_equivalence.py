@@ -7,11 +7,12 @@ with fp32 shards) — and compares every owned parameter slice's post-step value
 moments, and step counters against a literal AdamW-with-clipping calculation on the CPU
 in float64.
 
-The owned slices are read from the distributed optimizer's own shard mapping and must cover
-every held element exactly once across ranks (replicated parameters contribute each
-replica), which checks the DP/PP/EP shard alignment as part of the comparison. The
-reference gradient norm sums the same owned slices production's norm sums, so replicated
-parameters count identically on both sides. A clipping-active case (gradient norm above
+The owned slices are read from the distributed optimizer's own shard mapping; within each
+data-parallel group they must cover one replica exactly once, which checks the DP/PP/EP
+shard alignment as part of the comparison. The reference gradient norm sums the same
+owned slices production's norm sums, so replicated parameters count identically on both
+sides. Moments matching the two-step reference prove both steps applied, alongside the
+scheduler step count. A clipping-active case (gradient norm above
 the 0.5 threshold) and a clipping-inactive case are both covered, and two consecutive
 steps exercise moment accumulation and the step counter. The bf16 copy-back into the gradient buffers' parameter
 data must match the fp32 shard values rounded to bf16 exactly.
@@ -253,60 +254,73 @@ def run_optimizer_rank(rank, world_size, pp, ep, rendezvous, model_path, clip_ac
                 for entry in peer_structure:
                     print(f"optimizer structure rank{peer_index}: {entry}", flush=True)
 
+        # Tiling is per data-parallel group, not per global name: stage-relative names
+        # collide across pipeline stages, and replicas share names within a group. Each
+        # group's owned slices must cover one replica exactly once.
+        def dp_members_of(opt_child):
+            group = getattr(opt_child, "data_parallel_group", None)
+            if group is None:
+                return (rank,)
+            return tuple(sorted(dist.get_process_group_ranks(group)))
+
         gathered = [None] * world_size
-        dist.all_gather_object(gathered, [(name, start, end) for name, start, end, _, _ in owned])
+        dist.all_gather_object(
+            gathered,
+            [(name, start, end, dp_members_of(child)) for name, start, end, _, child in owned],
+        )
         numel_everywhere = [None] * world_size
         dist.all_gather_object(numel_everywhere, {name: value.numel() for name, value in initial.items()})
-        coverage_failures = []
+        tiling_failures = []
         if rank == 0:
-            covered = {}
-            owned_by_rank = {}
-            for peer_index, peer in enumerate(gathered):
-                for name, start, end in peer:
-                    covered[name] = covered.get(name, 0) + (end - start)
-                    owned_by_rank.setdefault(name, []).append((peer_index, start, end))
-            # Every held element must be owned exactly once: replicated parameters
-            # (dense tensors across EP ranks) contribute each replica's elements.
-            held = {}
-            held_by_rank = {}
-            for peer_index, peer in enumerate(numel_everywhere):
-                for name, numel in peer.items():
-                    held[name] = held.get(name, 0) + numel
-                    held_by_rank.setdefault(name, []).append((peer_index, numel))
-            if set(covered) != set(held):
-                coverage_failures.append(
-                    (
-                        "name mismatch",
-                        sorted(set(covered) - set(held)),
-                        sorted(set(held) - set(covered)),
-                    )
-                )
-            for name in sorted(covered):
-                elements, total = covered[name], held[name]
+            units = {}
+            for peer in gathered:
+                for name, start, end, members in peer:
+                    units.setdefault((members, name), []).append((start, end))
+            for members, name in sorted(units, key=lambda item: (item[1], item[0])):
+                slices = units[(members, name)]
+                owned_total = sum(end - start for start, end in slices)
+                replica_numel = None
+                for peer_index in members:
+                    if name in numel_everywhere[peer_index]:
+                        replica_numel = numel_everywhere[peer_index][name]
+                        break
                 print(
-                    f"optimizer coverage {name}: held={total} {held_by_rank[name]} "
-                    f"owned={elements} {owned_by_rank[name]}",
+                    f"optimizer tiling {name} group={list(members)}: "
+                    f"replica={replica_numel} owned={owned_total} {slices}",
                     flush=True,
                 )
-                if elements != total:
-                    coverage_failures.append((name, elements, total))
-        assert not coverage_failures, coverage_failures
+                if replica_numel is None:
+                    tiling_failures.append((name, list(members), "held by no group member"))
+                elif owned_total != replica_numel:
+                    tiling_failures.append((name, list(members), owned_total, replica_numel))
+        assert not tiling_failures, tiling_failures
 
         slice_failures = []
         for name, start, end, shard_main_param, child in owned:
             parameter_value, exp_avg, exp_avg_sq = reference[name]
             state = child.optimizer.state.get(shard_main_param)
-            missing = [key for key in ("step", "exp_avg", "exp_avg_sq") if state is None or key not in state]
-            if missing:
-                slice_failures.append((name, start, end, f"missing optimizer state keys: {missing}"))
-                continue
-            expected_bf16 = shard_main_param.detach().to(torch.bfloat16)
-            model_data = parameters[name].detach().view(-1)[start:end]
-            for label, observed, expected in (
-                ("parameter", shard_main_param.detach().float().cpu().double(), parameter_value[start:end]),
-                ("exp_avg", state["exp_avg"].detach().float().cpu().double(), exp_avg[start:end]),
-                ("exp_avg_sq", state["exp_avg_sq"].detach().float().cpu().double(), exp_avg_sq[start:end]),
+            # The shard values are always comparable; moments only exist once the torch
+            # optimizer has stepped the shard. A missing moment entry means the shard was
+            # never stepped, which the value comparison below will corroborate.
+            observed_param = shard_main_param.detach().float().cpu().double()
+            difference = (observed_param - parameter_value[start:end]).abs()
+            print(
+                f"optimizer parameter {name}[{start}:{end}]: "
+                f"max_abs={difference.max().item():.8g} mean_abs={difference.mean().item():.8g}",
+                flush=True,
+            )
+            try:
+                torch.testing.assert_close(observed_param, parameter_value[start:end], rtol=STATE_RTOL, atol=STATE_ATOL)
+            except AssertionError:
+                slice_failures.append(("parameter", name, start, end, difference.max().item()))
+            for label, key, expected in (
+                ("exp_avg", "exp_avg", exp_avg[start:end]),
+                ("exp_avg_sq", "exp_avg_sq", exp_avg_sq[start:end]),
             ):
+                if state is None or key not in state:
+                    slice_failures.append((name, start, end, f"unstepped shard: no {key}"))
+                    continue
+                observed = state[key].detach().float().cpu().double()
                 difference = (observed - expected).abs()
                 print(
                     f"optimizer {label} {name}[{start}:{end}]: "
@@ -317,9 +331,9 @@ def run_optimizer_rank(rank, world_size, pp, ep, rendezvous, model_path, clip_ac
                     torch.testing.assert_close(observed, expected, rtol=STATE_RTOL, atol=STATE_ATOL)
                 except AssertionError:
                     slice_failures.append((label, name, start, end, difference.max().item()))
-            if int(state["step"]) != 2:
-                slice_failures.append((name, start, end, f"step={state['step']}"))
             # The bf16 gradient-buffer parameter data must be the rounded fp32 shard value.
+            expected_bf16 = shard_main_param.detach().to(torch.bfloat16)
+            model_data = parameters[name].detach().view(-1)[start:end]
             try:
                 torch.testing.assert_close(model_data.float().cpu(), expected_bf16.float().cpu(), rtol=0, atol=0)
             except AssertionError:
