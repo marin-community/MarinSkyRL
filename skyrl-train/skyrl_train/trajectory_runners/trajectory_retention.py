@@ -50,7 +50,7 @@ from skyrl_train.io import io
 
 RETENTION_METRIC_PREFIX = "generate/trajectory_retention"
 RETENTION_SCHEMA_VERSION = 1
-TRAJECTORY_RECORD_SCHEMA_VERSION = 6
+TRAJECTORY_RECORD_SCHEMA_VERSION = 7
 _LEDGER_NAME = "_retention_ledger.json"
 _SELECTION_COUNT = "count"
 _SELECTION_FRACTION = "fraction"

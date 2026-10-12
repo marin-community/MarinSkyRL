@@ -183,18 +183,7 @@ async def test_mixed_nemotron_tasks_run_without_the_original_sources(
     config.error_handling = {"enable_error_classification": True, "default_error_treatment": "mask"}
     request = replace(
         request,
-        rows=tuple(
-            task_input(
-                LoweredTaskSpec.model_validate_json(extra["lowered_task_spec"]),
-                metric_class=environment,
-                teacher_route=extra["teacher_route"],
-                data_source=extra["data_source"],
-                metric_tags=(
-                    f"nemotron_ultra/coverage/{row['extra_info']['nemotron_ultra']['blend']}/{row['extra_info']['nemotron_ultra']['agent']}",
-                ),
-            )
-            for extra, environment, row in zip(extras, environments, rows, strict=True)
-        ),
+        rows=tuple(row["input"] for row in prepared.collate_fn(list(prepared))),
         trajectory_ids=tuple(TrajectoryID(uid, 0) for uid in uids),
     )
     worker = TaskRolloutWorker(

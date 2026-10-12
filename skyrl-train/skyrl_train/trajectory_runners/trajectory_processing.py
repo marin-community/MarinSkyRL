@@ -716,10 +716,10 @@ def prepare_trajectory_request(
     training_phase: TrainingPhase,
     global_step: int,
 ) -> Tuple[TrajectoryRequestBatch, List[str]]:
-    """Repeat typed task inputs or static preferences and assign attempt IDs."""
+    """Return repeated typed inputs with attempt IDs and one UID per repeated input."""
     inputs = tuple(prompt["input"] for prompt in prompts for _ in range(n_samples_per_prompt))
     trajectory_ids = tuple(
-        TrajectoryID(instance_id=prompt["uid"], repetition_id=repetition)
+        TrajectoryID(instance_id=prompt["input"].metadata.uid, repetition_id=repetition)
         for prompt in prompts
         for repetition in range(n_samples_per_prompt)
     )

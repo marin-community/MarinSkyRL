@@ -9,7 +9,7 @@ import threading
 import zipfile
 
 import pytest
-from taskcompendium.models import ConversationInput, TextMessage, InlineFile, ResourceGroups, Source, TaskResource
+from taskcompendium.models import InlineFile, ResourceGroups, Source, TaskResource
 from skyrl_gym.source_task import source_task
 
 from skyrl_train.config.utils import get_default_config
@@ -142,11 +142,7 @@ def _input(step: int = 7, phase: str = "train") -> TrajectoryRequestBatch:
     return TaskRequestBatch(
         rows=tuple(
             task_input(
-                lowered_task(
-                    text_task(uid).model_copy(
-                        update={"context": ConversationInput(events=(TextMessage(role="user", content=content),))}
-                    )
-                ),
+                lowered_task(text_task(uid, prompt=content)),
                 metric_class="math",
             )
             for uid, content in zip(("a", "b", "c"), ("first", "second", "third"), strict=True)
@@ -289,10 +285,10 @@ def test_normalized_output_produces_complete_core_trace_schema():
         "metrics",
         "provenance",
     }
-    assert record["prompt"]["messages"][0] == {"role": "user", "content": "first"}
+    assert record["prompt"]["messages"] == _input().public_prompts[0]
     assert record["response"]["text"] == "10 11"
     assert record["verifier"] is None
-    assert record["schema_version"] == 6
+    assert record["schema_version"] == 7
     assert record["disposition"] == {"exception_type": None, "error_treatment": None, "server_error": None}
     assert record["provenance"]["runner"] == "TaskRolloutWorker"
 

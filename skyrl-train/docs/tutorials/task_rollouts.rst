@@ -185,6 +185,8 @@ Ineligible attempts receive no comparison score.
 Evaluation exports contain public prompts, responses, labels, scores, and failure fields.
 Private task records and grading configuration remain outside these exports.
 Retained trajectory files omit private task records, grader parameters, and references.
+Trajectory record schema 7 stores only ``data_source`` and ``teacher_route`` in ``environment_extras``.
+Other source-row extras do not enter retained traces.
 They also omit source metadata that contains grader inputs.
 They retain public source labels, teacher routes, prompts, responses, and verifier results.
 

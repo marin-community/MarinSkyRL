@@ -169,7 +169,6 @@ async def run_trajectory_runner_end_to_end(
         data_path=data_path,
         env_class=env_class,
     )
-    # Attach request-time sampling params into the trajectory request
     sampling_params = get_sampling_params_for_backend(
         "vllm",
         DictConfig(

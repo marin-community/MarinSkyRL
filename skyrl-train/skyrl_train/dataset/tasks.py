@@ -14,15 +14,13 @@ import pyarrow.parquet as pq
 from datasets import Dataset
 from rolloutengine.spec import LoweredTaskSpec, MachineRuntimeSpec, TaskRuntimeSpec, TaskSessionSpec
 from rolloutengine.lowering import SHELLBOX_SESSION
-from rolloutengine.task_session import session_start
 from skyrl_gym.source_task import session_parameters, source_task
 from taskcompendium.models import EnvironmentRequirements, SessionGrader, Source
-from taskcompendium.runtime.shell import resolve_shell_tool
 from transformers import PreTrainedTokenizerBase
 
 from skyrl_train.dataset.dataset import PromptDataset
 from skyrl_train.rollouts.group_grader import task_group_grader
-from skyrl_train.trajectory_runners.types import TaskInput, TrajectoryMetadata
+from skyrl_train.trajectory_runners.types import TaskInput, TrajectoryMetadata, task_messages
 
 TASKCOMPENDIUM_ENVIRONMENT = "taskcompendium"
 LOWERED_TASK_COLUMN = "lowered_task_spec"
@@ -34,22 +32,14 @@ def task_prompt(lowered: LoweredTaskSpec) -> dict:
     """Prepare public messages and private worker inputs from a lowered task."""
     task = lowered.task
     extras = session_parameters(task).extras if isinstance(task.grader, SessionGrader) else {}
-    shell_tool = (
-        resolve_shell_tool(task, lowered.session.shell_tool)
-        if lowered.session.task_session == SHELLBOX_SESSION
-        else None
-    )
     return {
         **extras,
         LOWERED_TASK_COLUMN: lowered.model_dump_json(),
-        "prompt": session_start(task, shell_tool).messages,
+        "prompt": task_messages(lowered),
         "env_class": TASKCOMPENDIUM_ENVIRONMENT
         if lowered.session.task_session == SHELLBOX_SESSION
         else lowered.session.task_session,
         "data_source": task.source.dataset,
-        "group_grader": specification.model_dump_json()
-        if (specification := task_group_grader(lowered)) is not None
-        else None,
     }
 
 
