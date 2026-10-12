@@ -54,8 +54,10 @@ ROLLOUT_WORLD_SIZE = 2
 
 def _dpo_config(model_path: str):
     cfg = _config(model_path, world_size=POLICY_WORLD_SIZE, pp=2, ep=1)
-    cfg.trainer.train_batch_size = 8
-    cfg.trainer.policy_mini_batch_size = 8
+    # Batch sizes count prompts: 4 pairs expand to 8 learner rows, exactly one
+    # per-GPU mini-batch (4 prompts x 2 samples), so the accumulation buffer flushes.
+    cfg.trainer.train_batch_size = 4
+    cfg.trainer.policy_mini_batch_size = 4
     cfg.trainer.micro_train_batch_size_per_gpu = 2
     cfg.trainer.micro_forward_batch_size_per_gpu = 2
     cfg.trainer.update_epochs_per_batch = 1
