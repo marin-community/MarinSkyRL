@@ -183,22 +183,10 @@ class DirectModelClient:
         return ModelClientOutput(**output, token_provenance=TokenProvenance.ENGINE)
 
     @staticmethod
-    def _chat_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        converted = []
-        for tool in tools:
-            if tool.get("type") != "function":
-                raise ValueError(f"Only function tools are supported, got {tool.get('type')!r}")
-            function = {key: value for key, value in tool.items() if key != "type"}
-            converted.append({"type": "function", "function": function})
-        return converted
-
-    @classmethod
-    def _chat_options(cls, options: dict[str, Any], sampling_params: dict[str, Any]) -> dict[str, Any]:
+    def _chat_options(options: dict[str, Any], sampling_params: dict[str, Any]) -> dict[str, Any]:
         result = dict(options)
         result.pop("input", None)
-        if result.get("tools"):
-            result["tools"] = cls._chat_tools(result["tools"])
-        else:
+        if not result.get("tools"):
             result.pop("tools", None)
         if "max_output_tokens" in result:
             result["max_completion_tokens"] = result.pop("max_output_tokens")
