@@ -145,4 +145,11 @@ per-tensor discrepancy tables (`gradient ...`, `optimizer ...`, `... logprob par
   pp2_ep2 `6.3e-5`, pp2_ep4 `9.4e-5`. DPO metric rows agree within `3.6e-7`; eval-window
   policy log-probs within `7.6e-6` on the loss mask; reference CPU-vs-GPU drift
   `max_abs = 1.9e-6` (bound 1e-3).
-- Optimizer and transfer receipts: recorded below from the final receipt run.
+- Optimizer update (`dpo-equivalence-opt-343bf23e1`): both clip regimes pass. Every owned
+  shard's post-step value, `exp_avg`, `exp_avg_sq` match the literal float64 AdamW
+  reference within rtol 1e-5 / atol 2e-7; the returned grad norm matches within 1e-4;
+  owned slices tile one replica exactly once per data-parallel group; bf16 copy-back
+  exact; scheduler steps twice with lr 4e-6. Worst pre-fix residual was a 2.2e-7
+  single-slice `exp_avg` tail from unmirrored bf16 grad-buffer rounding, fixed by
+  rounding reference gradients to `main_grad` dtype.
+- Transfer receipts: recorded below from the final receipt run.
