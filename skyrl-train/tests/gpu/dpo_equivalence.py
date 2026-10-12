@@ -23,7 +23,7 @@ import skyrl_train.models.grug_megatron_bridge  # noqa: F401  # registers the Gr
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.distributed.megatron.megatron_utils import materialize_megatron_params
 from skyrl_train.models.grug_moe import GrugMoeForCausalLM
-from skyrl_train.workers.megatron.grug_provider_config import configure_grug_provider
+from skyrl_train.workers.megatron.bridge_provider_config import configure_bridge_provider
 from skyrl_train.workers.megatron.output_projection_layout import install_dpo_batch_major_output_projection
 from tests.cpu.util import DPO_OVERRIDES
 from tests.gpu.grug_tiny_checkpoint import write_tiny_checkpoint
@@ -249,17 +249,16 @@ def build_grug_megatron_chunks(
     expert_model_parallel_size: int = 1,
     expert_tensor_parallel_size: int = 1,
     bf16: bool = False,
-    flash_attn: bool = False,
-    attention_backend: str | None = None,
+    attention_backend: str = "fused",
     wrap_with_ddp: bool = True,
     distributed_optimizer: bool = True,
     policy_loss_type: str | None = "dpo",
 ):
     """Build DDP-wrapped Megatron chunks for a Grug checkpoint.
 
-    Returns the bridge, provider, model chunks, and HF config. ``attention_backend``
-    defaults to the worker's choice; pass "unfused" for fp32 runs because
-    Transformer Engine's fused kernels are fp16/bf16-only.
+    Returns the bridge, provider, model chunks, and HF config. Pass
+    ``attention_backend="unfused"`` for fp32 runs because Transformer Engine's
+    fused kernels are fp16/bf16-only.
     """
 
     def phase(label: str) -> None:
@@ -270,7 +269,7 @@ def build_grug_megatron_chunks(
     phase("building bridge")
     bridge = AutoBridge.from_hf_pretrained(model_path, trust_remote_code=True)
     provider = bridge.to_megatron_provider()
-    configure_grug_provider(
+    configure_bridge_provider(
         provider,
         tensor_model_parallel_size=tensor_model_parallel_size,
         pipeline_model_parallel_size=pipeline_model_parallel_size,
@@ -278,7 +277,7 @@ def build_grug_megatron_chunks(
         expert_model_parallel_size=expert_model_parallel_size,
         expert_tensor_parallel_size=expert_tensor_parallel_size,
         bf16=bf16,
-        attention_backend=attention_backend or ("flash" if flash_attn else "fused"),
+        attention_backend=attention_backend,
     )
     phase("finalizing provider")
     provider.finalize()

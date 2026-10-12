@@ -220,7 +220,7 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
             )
             for p in payloads
         ]
-        token_stats = torch.zeros(3, device="cuda")
+        token_stats = torch.zeros(2, device="cuda")
         scores = wrapper.forward(forward_micros, seq_len=batch.sequences.shape[1], micro_batch_size=MICRO_BATCH_SIZE)
         if mpu.is_pipeline_last_stage(ignore_virtual=True):
             expected_tokens = torch.cat(
@@ -234,7 +234,6 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
             )
             token_stats[0] = token_diff.max()
             token_stats[1] = token_diff[loss_mask > 0].max() if bool((loss_mask > 0).any()) else 0.0
-            token_stats[2] = 1.0
         dist.all_reduce(token_stats, op=dist.ReduceOp.MAX)
         if rank == 0:
             emit(

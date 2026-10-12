@@ -1,15 +1,11 @@
-"""Canonical Megatron-Bridge provider settings for Grug checkpoints.
-
-Sets topology sizes, pipeline dtype, and kernel/dispatcher choices on a provider
-object in place. Callers pass the values; this module owns the attribute set.
-"""
+"""Provider topology and kernel settings for Megatron-Bridge models, in one place."""
 
 import importlib.util
 
 import torch
 
 
-def configure_grug_provider(
+def configure_bridge_provider(
     provider,
     *,
     tensor_model_parallel_size: int,

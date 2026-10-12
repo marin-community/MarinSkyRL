@@ -59,7 +59,7 @@ from skyrl_train.workers.megatron.megatron_model_wrapper import (
     MegatronModelWrapper,
     MegatronPolicyMicroBatch,
 )
-from skyrl_train.workers.megatron.grug_provider_config import configure_grug_provider
+from skyrl_train.workers.megatron.bridge_provider_config import configure_bridge_provider
 from skyrl_train.workers.megatron.router_replay_install import install_megatron_router_replay
 from skyrl_train.workers.megatron.output_projection_layout import install_dpo_batch_major_output_projection
 from skyrl_train.workers.megatron.weight_extractor import BucketedMegatronWeightExtractor, mapping_hf_names
@@ -148,7 +148,7 @@ class MegatronWorker:
         if model_source_uri:
             self.remote_hf_state = install_remote_hf_state(bridge, model_source_uri, model_path)
         provider = bridge.to_megatron_provider()
-        configure_grug_provider(
+        configure_bridge_provider(
             provider,
             tensor_model_parallel_size=megatron_config.tensor_model_parallel_size,
             pipeline_model_parallel_size=megatron_config.pipeline_model_parallel_size,

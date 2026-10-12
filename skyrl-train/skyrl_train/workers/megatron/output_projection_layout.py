@@ -33,7 +33,7 @@ def install_dpo_batch_major_output_projection(model_chunks, provider, policy_los
     """Install the batch-major projection on every post-process chunk when DPO can use it.
 
     No-op unless the loss type is DPO and the topology is TP1 without context or
-    sequence parallelism. Requires Megatron-Core at call time only.
+    sequence parallelism.
     """
     from megatron.core.utils import get_attr_wrapped_model
 

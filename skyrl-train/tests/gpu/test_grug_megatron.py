@@ -52,7 +52,7 @@ PROMPT_LENGTH = 12
 
 
 def _spot_check_name(suffix: str) -> str:
-    """Single source for spot-check names already covered by the broad parameter list."""
+    """First broad-coverage parameter name with the given suffix."""
     return next(name for name in PARAMETER_NAMES if name.endswith(suffix))
 
 

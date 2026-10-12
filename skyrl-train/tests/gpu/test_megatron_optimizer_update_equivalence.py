@@ -49,10 +49,9 @@ MAX_GRAD_NORM = 0.5
 ADAM_EPS = 1e-8
 # Registered before execution; see ci/dpo_equivalence/README.md for measured values.
 STATE_RTOL = 1e-5
-# fp32 Adam arithmetic over two steps leaves ~1e-8 absolute noise, with rare
-# sub-percent effective-gradient rescalings (invisible in the scale-invariant update
-# ratio) pushing single-slice exp_avg diffs to ~7e-8; 2e-7 keeps 3x margin while staying
-# orders of magnitude below bf16 parameter resolution.
+# The reference rounds gradients to the grad-buffer dtype exactly as the injected
+# values are rounded, so the residual is fp32 Adam arithmetic noise; 2e-7 keeps 3x
+# margin over the measured tails while staying far below bf16 parameter resolution.
 STATE_ATOL = 2e-7
 GRAD_NORM_RTOL = 1e-4
 CLIP_EPS = 1e-6
@@ -301,9 +300,8 @@ def run_optimizer_rank(rank, world_size, pp, ep, rendezvous, model_path, clip_ac
         for name, start, end, shard_main_param, child in owned:
             parameter_value, exp_avg, exp_avg_sq = reference[name]
             state = child.optimizer.state.get(shard_main_param)
-            # The shard values are always comparable; moments only exist once the torch
-            # optimizer has stepped the shard. A missing moment entry means the shard was
-            # never stepped, which the value comparison below will corroborate.
+            # The shard values are always comparable; a shard the torch optimizer never
+            # stepped keeps no moments, which the comparison below records as a failure.
             observed_param = shard_main_param.detach().float().cpu().double()
             difference = (observed_param - parameter_value[start:end]).abs()
             print(
