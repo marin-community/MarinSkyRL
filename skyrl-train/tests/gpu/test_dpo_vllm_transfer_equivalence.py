@@ -62,6 +62,10 @@ def _dpo_config(model_path: str):
     # The shipped DPO recipe, applied as one block so this experiment and the
     # reference in dpo_equivalence.py cannot drift apart field by field.
     cfg = OmegaConf.merge(cfg, OmegaConf.create(DPO_OVERRIDES))
+    # No reference worker is created (base log-probs arrive in-batch); match its
+    # sizing to policy so the colocated-recipe validation passes.
+    cfg.trainer.placement.ref_num_nodes = 1
+    cfg.trainer.placement.ref_num_gpus_per_node = POLICY_WORLD_SIZE
     validate_cfg(cfg)
     return cfg
 
