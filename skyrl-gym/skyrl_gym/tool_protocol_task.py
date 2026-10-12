@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from rolloutengine.contracts import ModelTurn, SessionStart, Transition
 from rolloutengine.spec import LoweredTaskSpec
 from rolloutengine.task_session import session_start
-from rolloutengine.tool_protocol import TOOL_CLOSE, ToolCallStatus, score_tool_call_continuation
+from skyrl_gym.tool_call_markup import TOOL_CLOSE, ToolCallStatus, score_tool_call_continuation
 from shellbox.machine import Machine
 from taskcompendium.grading_result import GradeResult, Outcome
 
