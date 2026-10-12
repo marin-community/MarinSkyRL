@@ -19,6 +19,7 @@ from shellbox.backends.shellsim.machine import ShellSimMachineFactory
 from shellbox.machine import Backend, Machine, MachineFactory
 from taskcompendium.grading_result import Outcome
 from taskcompendium.models import NoGrader
+from rolloutengine.agent_session import AgentTaskSession
 from rolloutengine.contracts import (
     GenerationLimitReached,
     ModelRequest,
@@ -364,15 +365,18 @@ class TaskRolloutWorker:
                     session_id=session_id,
                 )
 
-            engine = (
-                ShellboxRolloutEngine(
-                    model,
-                    self.factories,
-                    sessions=self.sessions,
-                    agent=partial(self.installed_agents.run, lowered=lowered, session_id=session_id),
-                )
-                if harbor is not None and self.installed_agents is not None
-                else ShellboxRolloutEngine(model, self.factories, sessions=self.sessions)
+            agent_runtime = self.installed_agents if harbor is not None else None
+
+            def wrap_session(session: TaskSession, machine: Machine | None) -> TaskSession:
+                assert agent_runtime is not None
+                runner = partial(agent_runtime.run, machine, lowered=lowered, session_id=session_id)
+                return AgentTaskSession(runner, session.grade)
+
+            engine = ShellboxRolloutEngine(
+                model,
+                self.factories,
+                sessions=self.sessions,
+                session_wrapper=wrap_session if agent_runtime is not None else None,
             )
             harbor_slots = (
                 nullcontext()
