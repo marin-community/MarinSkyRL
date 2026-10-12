@@ -87,8 +87,9 @@ Installed Harbor agents
 
 Set ``terminal_bench_config.installed_agent`` to run an installed Harbor agent
 for Harbor-tagged tasks. Without this block, the worker uses the generic shell
-session. The installed agent controls its prompts and tool loop; the shared
-engine retains model calls, sampled token IDs and log probabilities, grading, and machine ownership.
+session. The worker selects its ``skyrl_agent`` session when this block is set.
+The agent session controls its prompts and tool loop. RolloutEngine retains
+model calls, sampled token IDs and log probabilities, grading, and machine ownership.
 The runtime requires the full Harbor package and an Iris worker with a
 controller-reachable advertised address. The Iris controller must issue capability
 URLs that the Daytona container can reach.

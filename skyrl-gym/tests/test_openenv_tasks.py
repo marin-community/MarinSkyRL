@@ -172,7 +172,7 @@ async def test_openenv_engine_preserves_tokens_and_releases_server(openenv_sessi
     engine = ShellboxRolloutEngine(
         factories={"local": Factory()},
         model=model,
-        sessions={"openenv": lambda task, machine: case.session},
+        sessions={"openenv": lambda _task, _machine, _grader: case.session},
     )
     rollout = await engine.run(case.task)
     assert rollout.grade.reward == 0.25
