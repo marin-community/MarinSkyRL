@@ -73,6 +73,26 @@ def adamw_reference_step(parameter, gradient, exp_avg, exp_avg_sq, step, clip_co
     return parameter, exp_avg, exp_avg_sq
 
 
+def reference_global_norm(owned, parameters, step_index: int, scale: float) -> float:
+    """Reference 2-norm over the owned shard slices, matching production's collection.
+
+    Production's grad norm sums the owned shard grads (get_main_grads_for_grad_norm
+    filters shared/TP-duplicate shards, then the squared sum all-reduces over the
+    distopt instance): sum the identical slices of the injected gradients here.
+    """
+    squares = torch.zeros((), dtype=torch.float64)
+    for name, start, end, shard_main_param, child in owned:
+        if not param_is_not_shared(shard_main_param):
+            continue
+        if not param_is_not_tensor_parallel_duplicate(shard_main_param, getattr(child, "tp_group", None)):
+            continue
+        gradient = fixed_gradient(name, parameters[name].numel(), step_index, scale)
+        squares += gradient[start:end].double().square().sum()
+    squares = squares.to("cuda")
+    dist.all_reduce(squares)
+    return torch.sqrt(squares).item()
+
+
 def run_optimizer_rank(rank, world_size, pp, ep, rendezvous, model_path, clip_active):
     torch.cuda.set_device(rank)
     dist.init_process_group(
@@ -153,21 +173,7 @@ def run_optimizer_rank(rank, world_size, pp, ep, rendezvous, model_path, clip_ac
                     .to(device=parameter.main_grad.device, dtype=parameter.main_grad.dtype)
                     .view_as(parameter)
                 )
-            # Production's grad norm is the 2-norm over the owned shard grads
-            # (get_main_grads_for_grad_norm filters shared/TP-duplicate shards, then the
-            # squared sum all-reduces over the distopt instance): sum the identical
-            # slices of the injected gradients here, in float64.
-            squares = torch.zeros((), dtype=torch.float64)
-            for name, start, end, shard_main_param, child in owned:
-                if not param_is_not_shared(shard_main_param):
-                    continue
-                if not param_is_not_tensor_parallel_duplicate(shard_main_param, getattr(child, "tp_group", None)):
-                    continue
-                gradient = fixed_gradient(name, parameters[name].numel(), step_index, scale)
-                squares += gradient[start:end].double().square().sum()
-            squares = squares.to("cuda")
-            dist.all_reduce(squares)
-            global_norm = torch.sqrt(squares).item()
+            global_norm = reference_global_norm(owned, parameters, step_index, scale)
             if step_index == 1:
                 assert (global_norm > MAX_GRAD_NORM) == clip_active, global_norm
             clip_coeff = min(1.0, MAX_GRAD_NORM / (global_norm + CLIP_EPS))

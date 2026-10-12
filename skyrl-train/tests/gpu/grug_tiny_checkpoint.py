@@ -6,6 +6,7 @@ import torch
 from transformers import AutoTokenizer
 
 from skyrl_train.models.grug_moe import GrugMoeConfig, GrugMoeForCausalLM
+from skyrl_train.models.grug_moe import GRUG_ROUTER_BIAS_SUFFIX
 
 TOKENIZER = "Qwen/Qwen2.5-0.5B-Instruct"
 TOY_SHAPE = dict(
@@ -19,6 +20,11 @@ TOY_SHAPE = dict(
     head_dim=64,
     sliding_window=16,
 )
+
+
+def router_bias_names(num_layers: int) -> list[str]:
+    """Per-layer router-bias buffer names, which carry no gradient and are excluded."""
+    return [f"model.layers.{index}{GRUG_ROUTER_BIAS_SUFFIX}" for index in range(num_layers)]
 
 
 def write_tiny_checkpoint(

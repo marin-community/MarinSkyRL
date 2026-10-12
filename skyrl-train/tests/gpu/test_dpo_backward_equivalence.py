@@ -51,12 +51,12 @@ from tests.gpu.dpo_equivalence import (
     PairBatch,
     build_grug_megatron_chunks,
     dpo_backward_fixture,
-    dpo_gradient_names,
     dpo_wrapper_config,
     export_parameter_gradients,
     hf_dpo_reference,
 )
 from tests.gpu.grug_gpu_gates import require_hoppers
+from tests.gpu.grug_tiny_checkpoint import router_bias_names
 from tests.gpu.utils import run_distributed_with_deadline
 
 # Registered before execution; see ci/dpo_equivalence/README.md for the measured values.
@@ -123,9 +123,11 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
         "nccl", init_method=rendezvous, rank=rank, world_size=world_size, timeout=timedelta(seconds=120)
     )
     try:
-        # Essential lines are re-printed in the finally block, and every line is appended
-        # to dpo-diagnostics.log which the CI runner cats at the very end of the job
-        # stream — a failing assertion can push neither out of the retained tail.
+        # Receipt lines (emit) print, replay in the finally block, and append to
+        # dpo-diagnostics.log, which the CI runner cats at the very end of the job
+        # stream — a failing assertion can push none of them out of the retained tail.
+        # Phase markers print and append; verbose per-tensor detail (log_detail) prints
+        # only, so it cannot flood the file.
         report: list[str] = []
         diagnostics_path = Path.cwd() / "dpo-diagnostics.log"
 
@@ -141,6 +143,12 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
         def log_detail(line: str) -> None:
             print(line, flush=True)
 
+        def phase(line: str) -> None:
+            # Phase markers go to the diagnostics file as well as the live stream, so a
+            # hang or deadline kill still shows the last completed stage per rank.
+            print(line, flush=True)
+            record(line)
+
         mpu.initialize_model_parallel(
             tensor_model_parallel_size=1,
             pipeline_model_parallel_size=pp,
@@ -151,11 +159,11 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
         )
         # Phase markers go straight to the diagnostics file so a hang or deadline kill
         # still shows the last completed stage per rank.
-        log_detail(f"rank{rank} phase: groups ready (PP={pp} EP={ep})")
+        phase(f"rank{rank} phase: groups ready (PP={pp} EP={ep})")
         # Every rank computes the independent reference on its own GPU, so the compared
         # quantities differ only by Megatron-vs-eager kernel arithmetic, not by device.
         reference = hf_dpo_reference(model_path, batch, device=f"cuda:{rank}", ref_log_prob_offsets=ref_offsets)
-        log_detail(f"rank{rank} phase: reference ready")
+        phase(f"rank{rank} phase: reference ready")
         bridge, provider, chunks, hf_config = build_grug_megatron_chunks(
             model_path,
             pipeline_model_parallel_size=pp,
@@ -168,7 +176,7 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
             # verified element-exactly by the optimizer update experiment instead.
             distributed_optimizer=False,
         )
-        log_detail(f"rank{rank} phase: chunks ready")
+        phase(f"rank{rank} phase: chunks ready")
         cfg = dpo_wrapper_config(batch.sequences.shape[1])
         wrapper = MegatronModelWrapper(
             cfg,
@@ -190,14 +198,14 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
         metrics = wrapper.forward_backward_mini_batch(
             payloads, seq_len=batch.sequences.shape[1], micro_batch_size=MICRO_BATCH_SIZE
         )
-        log_detail(f"rank{rank} phase: forward-backward done")
+        phase(f"rank{rank} phase: forward-backward done")
         # The trainer finalizes gradient synchronization before consuming gradients.
         # With allreduce DDP this is idempotent and leaves every rank's main_grad the
         # full data-parallel mean of the per-micro gradients.
         for chunk in chunks:
             chunk.finish_grad_sync()
         exports = export_parameter_gradients(bridge, chunks)
-        log_detail(f"rank{rank} phase: gradients exported")
+        phase(f"rank{rank} phase: gradients exported")
 
         # Per-token Megatron-vs-HF agreement on the eval path, over the same window the
         # loss consumes. Attention-masked window entries are zero by design on the
@@ -266,7 +274,7 @@ def run_backward_rank(rank, world_size, pp, ep, rendezvous, model_path, batch: P
         assert not metric_failures, metric_failures
 
         if rank == 0:
-            no_gradient_names = set(dpo_gradient_names(hf_config.num_hidden_layers))
+            no_gradient_names = set(router_bias_names(hf_config.num_hidden_layers))
             exported = set(exports) - no_gradient_names
             missing = set(reference.gradients) - exported
             extra = exported - set(reference.gradients)

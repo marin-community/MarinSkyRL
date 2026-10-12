@@ -12,13 +12,16 @@ from dataclasses import dataclass
 import hashlib
 
 import torch
+from megatron.bridge import AutoBridge
+from megatron.core.distributed import DistributedDataParallelConfig
 from omegaconf import DictConfig, OmegaConf, open_dict
+from safetensors.torch import load_file, save_file
 from torch import nn
-from transformers import AutoConfig
+from transformers import AutoConfig, AutoTokenizer
 
+import skyrl_train.models.grug_megatron_bridge  # noqa: F401  # registers the Grug bridge with Megatron-Bridge
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.distributed.megatron.megatron_utils import materialize_megatron_params
-from skyrl_train.models.grug_moe import GRUG_ROUTER_BIAS_SUFFIX
 from skyrl_train.models.grug_moe import GrugMoeForCausalLM
 from skyrl_train.workers.megatron.grug_provider_config import configure_grug_provider
 from skyrl_train.workers.megatron.output_projection_layout import install_dpo_batch_major_output_projection
@@ -245,10 +248,6 @@ def build_grug_megatron_chunks(
     overrides it with "unfused" because Transformer Engine's fused kernels are fp16/bf16-only,
     while the production bf16 kernels stay covered by the parity gates.
     """
-    from megatron.bridge import AutoBridge
-    from megatron.core.distributed import DistributedDataParallelConfig
-
-    import skyrl_train.models.grug_megatron_bridge  # noqa: F401  # registers the Grug bridge with Megatron-Bridge
 
     def phase(label: str) -> None:
         print(f"build_grug_megatron_chunks: {label}", flush=True)
@@ -309,15 +308,8 @@ def export_parameter_gradients(bridge, chunks: list[nn.Module]) -> dict[str, tor
     return exports
 
 
-def dpo_gradient_names(num_layers: int) -> list[str]:
-    """Router-bias buffers carry no gradient; everything else the export emits must."""
-    return [f"model.layers.{index}{GRUG_ROUTER_BIAS_SUFFIX}" for index in range(num_layers)]
-
-
 def write_route_decisive_checkpoint(path) -> None:
     """Write the tiny checkpoint with router weights zeroed for bias-decided selection."""
-    from safetensors.torch import load_file, save_file
-
     write_tiny_checkpoint(path)
     tensors = load_file(path / "model.safetensors")
     for name, tensor in tensors.items():
@@ -328,8 +320,6 @@ def write_route_decisive_checkpoint(path) -> None:
 
 def dpo_backward_fixture(path):
     """Route-decisive checkpoint plus its preference batch, validated for stable routing."""
-    from transformers import AutoTokenizer
-
     write_route_decisive_checkpoint(path)
     pad_token_id = AutoTokenizer.from_pretrained(path).pad_token_id
     batch = fixed_pair_batch(pad_token_id, seed=ROUTE_DECISIVE_BATCH_SEED)

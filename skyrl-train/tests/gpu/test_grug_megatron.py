@@ -49,11 +49,15 @@ from tests.gpu.utils import get_test_actor_config, init_worker_with_type
 ROLLOUT_WORLD_SIZE = 2
 RESPONSE_LENGTH = 8
 PROMPT_LENGTH = 12
-LONG_LAYER_Q_NAME = "model.layers.3.self_attn.q_proj.weight"
-ATTN_GATE_NAME = "model.layers.1.self_attn.attn_gate.weight"
-GATED_NORM_NAME = "model.layers.1.attn_gated_norm.up_proj.weight"
-FINAL_NORM_NAME = "model.norm.weight"
-EMBED_GATE_NAME = "model.embed_gated_norm.down_proj.weight"
+
+
+def _spot_check_name(suffix: str) -> str:
+    """Single source for spot-check names already covered by the broad parameter list."""
+    return next(name for name in PARAMETER_NAMES if name.endswith(suffix))
+
+
+ATTN_GATE_NAME = _spot_check_name(".self_attn.attn_gate.weight")
+GATED_NORM_NAME = _spot_check_name(".attn_gated_norm.up_proj.weight")
 LOGPROB_MAX_ABS_TOLERANCE = 2e-1
 LOGPROB_MEAN_ABS_TOLERANCE = 3e-2
 TRAIN_EVAL_LOGPROB_MAX_ABS_TOLERANCE = 1e-3
@@ -441,7 +445,7 @@ def test_grug_megatron_four_gpu_pp2_disaggregated_rollout_train_broadcast_rollou
         first_logprob = asyncio.run(client.generate(score_input))["prompt_logprobs"][0][-1][first_token]
 
         policy = _init_policy(cfg, policy_world_size)
-        names = [*PARAMETER_NAMES, *BIAS_NAMES, GATED_NORM_NAME]
+        names = [*PARAMETER_NAMES, *BIAS_NAMES]
         before = rank0_validation_snapshot(policy, names)
         _train_step(policy, rollout_training_batch(prompts, first_rollout))
         training = rank0_validation_snapshot(policy, names)
