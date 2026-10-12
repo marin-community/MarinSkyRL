@@ -263,6 +263,19 @@ def ftpo_policy_loss(inputs: PolicyLossInputs, config: DictConfig) -> TokenLoss:
     if inputs.ftpo is None or params is None:
         raise ValueError("FTPO requires candidate masks and raw reference logits")
     values, metrics = ftpo_loss(inputs.ftpo, params)
+    repair_mask = inputs.ftpo.targets.repair_mask
+    counts = inputs.ftpo.counts
+    if counts.repair_tokens:
+        if params.repair_sft_weight is None:
+            raise ValueError("Joint closure training requires an explicit repair_sft_weight")
+        # The outer reducer divides by the combined active weights. Undo that
+        # denominator separately for each objective so repair length cannot
+        # dilute the FTPO preference or its reference regularization.
+        total_weight = counts.examples + counts.repair_tokens
+        values = values * (total_weight / (counts.examples or 1.0))
+        if repair_mask is not None:
+            repair_values = torch.where(repair_mask, -inputs.log_probs, 0)
+            values = values + params.repair_sft_weight * repair_values * total_weight / counts.repair_tokens
     return TokenLoss(values, metrics)
 
 

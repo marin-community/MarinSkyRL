@@ -28,6 +28,7 @@ from skyrl_gym.task_sessions import (
 from skyrl_gym.nemotron_tasks import NemotronTaskSession
 from skyrl_gym.sql_tasks import SQLTaskSession, SeededSQLTaskSession
 from skyrl_gym.tool_protocol_task import ToolProtocolReplaySession
+from skyrl_gym.closure_task import ClosureReplaySession
 
 
 def session_factories(
@@ -58,4 +59,5 @@ def session_factories(
         "text2sql": partial(SQLTaskSession, executor=executor),
         "text_to_sql": partial(SeededSQLTaskSession, executor=executor),
         "tool_protocol_replay": ToolProtocolReplaySession,
+        "structure_closure": ClosureReplaySession,
     }

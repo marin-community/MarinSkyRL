@@ -22,19 +22,34 @@ ASSISTANT_HEADER = "<|start_header_id|>assistant<|end_header_id|>"
 
 
 @dataclass(frozen=True)
+class VerifiedFTPOBoundary:
+    response_position: int
+    chosen_token_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True)
 class FTPOTargets:
     """Existing candidate IDs plus FTPO selection and frozen boundary logits."""
 
     candidate_ids: torch.Tensor
     chosen_mask: torch.Tensor
     reference_logits: torch.Tensor
+    repair_mask: torch.Tensor | None = None
 
     def to(self, device: torch.device) -> "FTPOTargets":
-        return FTPOTargets(self.candidate_ids.to(device), self.chosen_mask.to(device), self.reference_logits.to(device))
+        return FTPOTargets(
+            self.candidate_ids.to(device),
+            self.chosen_mask.to(device),
+            self.reference_logits.to(device),
+            None if self.repair_mask is None else self.repair_mask.to(device),
+        )
 
     def pin_memory(self) -> "FTPOTargets":
         return FTPOTargets(
-            self.candidate_ids.pin_memory(), self.chosen_mask.pin_memory(), self.reference_logits.pin_memory()
+            self.candidate_ids.pin_memory(),
+            self.chosen_mask.pin_memory(),
+            self.reference_logits.pin_memory(),
+            None if self.repair_mask is None else self.repair_mask.pin_memory(),
         )
 
 
@@ -43,6 +58,7 @@ class FTPOCounts:
     examples: float
     targets: float
     other: float
+    repair_tokens: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -150,8 +166,9 @@ def select_ftpo_candidates(
     config: FTPOConfig,
     seed: int,
     eligible: Sequence[bool],
+    verified_boundaries: Sequence[VerifiedFTPOBoundary | None] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Select alternatives at each first repeat and balance within this rollout batch.
+    """Select detected or verified boundary alternatives and balance the batch.
 
     Rejected frequency controls example weights. Chosen frequency caps prune
     alternatives using a seeded permutation. No cross-batch state is needed.
@@ -160,18 +177,28 @@ def select_ftpo_candidates(
     weights = torch.zeros(candidate_ids.shape[:2], dtype=torch.float32)
     surfaces: dict[int, str] = {}
     rejected_by_row = {}
+    if config.boundary == FTPOBoundary.VERIFIED_CLOSURE:
+        if verified_boundaries is None or len(verified_boundaries) != len(response_ids):
+            raise ValueError("Verified closure FTPO requires one verified boundary entry per response")
     for row, (prompt, response, mask, allowed) in enumerate(
         zip(prompt_ids, response_ids, loss_masks, eligible, strict=True)
     ):
         if not allowed:
             continue
-        if config.boundary == FTPOBoundary.REPEATED_TOOL_OPENER:
+        verified = None
+        if config.boundary == FTPOBoundary.VERIFIED_CLOSURE:
+            assert verified_boundaries is not None
+            verified = verified_boundaries[row]
+            position = None if verified is None else verified.response_position
+        elif config.boundary == FTPOBoundary.REPEATED_TOOL_OPENER:
             position = repeated_tool_opener_boundary(prompt, response, mask, decode)
         else:
             hit = tail_loop(response, mask, loop)
             position = None if hit is None else hit.repeat_start
         if position is None:
             continue
+        if not 0 <= position < len(response) or not mask[position]:
+            raise ValueError("FTPO boundary must identify an unmasked response token")
         rejected = response[position]
         ids = candidate_ids[row, position].tolist()
         scores = candidate_logprobs[row, position]
@@ -180,6 +207,10 @@ def select_ftpo_candidates(
         rejected_surface = decode([rejected]).lower()
         retained = []
         for column, token in enumerate(ids):
+            if verified is not None:
+                if token != rejected and token in verified.chosen_token_ids:
+                    retained.append(column)
+                continue
             if token not in surfaces:
                 surfaces[token] = decode([token])
             surface = surfaces[token]
@@ -229,13 +260,17 @@ def ftpo_counts(
     all_reduce_sum: Callable[[torch.Tensor], torch.Tensor],
 ) -> FTPOCounts:
     """Count weighted examples and vocabulary entries across the optimizer step."""
-    counts = torch.zeros(3, dtype=torch.float64, device=weights[0].device)
+    counts = torch.zeros(4, dtype=torch.float64, device=weights[0].device)
     for target, weight in zip(targets, weights, strict=True):
         active_weights = weight * target.chosen_mask.any(-1)
         target_count = target.chosen_mask.sum(-1) + 1  # chosen IDs and the rejected ID
         counts[0] += active_weights.sum()
         counts[1] += (active_weights * target_count).sum()
         counts[2] += (active_weights * (target.reference_logits.shape[-1] - target_count)).sum()
+        if target.repair_mask is not None:
+            if target.repair_mask.shape != weight.shape or torch.any(target.repair_mask & target.chosen_mask.any(-1)):
+                raise ValueError("Repair masks must align with responses and exclude FTPO boundary tokens")
+            counts[3] += (weight * target.repair_mask).sum()
     return FTPOCounts(*all_reduce_sum(counts).tolist())
 
 

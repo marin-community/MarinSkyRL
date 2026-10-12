@@ -1,6 +1,7 @@
 """Serialized tasks through direct sessions, exact-token execution, and private grading."""
 
 import json
+import hashlib
 
 import pytest
 from rolloutengine.contracts import ModelTurn
@@ -12,6 +13,7 @@ from taskcompendium.models import Source
 
 from skyrl_gym.task_factories import session_factories
 from skyrl_gym.task_sessions import CodeTaskSession
+from skyrl_gym.closure_dataset import closure_tasks
 
 
 class ReplayModel:
@@ -63,6 +65,90 @@ def task(name, extras, config=None):
             cleanup_timeout=5,
         ),
     )
+
+
+def test_closure_conversion_reports_all_invalid_rows_and_preserves_valid_task(tmp_path):
+    record = {
+        "case_id": "one",
+        "split": "train",
+        "prompt_token_ids": [10, 11],
+        "format": "json",
+        "family": "json_array",
+        "control": "close_required",
+        "prefix": "[1",
+        "expected": "[1]",
+        "instruction": "Finish the array.",
+    }
+    records = [
+        record,
+        record | {"case_id": "two", "split": "validation"},
+        record | {"case_id": "three", "expected": "[2]"},
+    ]
+    contents = "".join(json.dumps(row) + "\n" for row in records).encode()
+    (tmp_path / "train.jsonl").write_bytes(contents)
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(
+            {
+                "hashes": {"train": hashlib.sha256(contents).hexdigest()},
+                "status": "local-token-roundtrip-passed",
+                "counts": {"train/json_array/close_required": 3},
+            }
+        )
+    )
+    result = closure_tasks(tmp_path, "train", task("structure_closure", {}).session)
+    assert len(result.tasks) == 1
+    assert [failure["row"] for failure in result.failures] == [1, 2]
+    restored = LoweredTaskSpec.model_validate_json(result.tasks[0].model_dump_json())
+    assert restored.task.source.row == "one"
+    assert restored.runtime.task_machine is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "structure_format,prefix,expected,response,syntax,success",
+    [
+        ("json", '{"x":[1', '{"x":[1]}', "]}", True, True),
+        ("json", '{"x":[1', '{"x":[1]}', "}", False, False),
+        ("json", '{"x":[1', '{"x":[1]}', "", False, False),
+        ("json", '["part', '["partial"]', '"]', True, False),
+        ("json", "[", "[true]", "1]", True, False),
+        ("json", "[", "[1]", "1e999]", True, False),
+        ("tool", '<tool_call>{"x":1}', '<tool_call>{"x":1}</tool_call>', "</tool_call>", True, True),
+        ("reasoning", "<|start_think|>Done.", "<|start_think|>Done.<|end_think|>", "<|end_think|>", True, True),
+        ("code_fence", "```json\n[]\n", "```json\n[]\n```", "```", True, True),
+        ("code_fence", "```json\n[]\n", "```json\n[]\n```", "~~~", False, False),
+    ],
+)
+async def test_closure_replay_scores_exact_tokens_and_preserves_private_reference(
+    structure_format, prefix, expected, response, syntax, success
+):
+    prompt_ids = (100, 201, 301)
+    specification = task(
+        "structure_closure",
+        {
+            "prompt_token_ids": list(prompt_ids),
+            "format": structure_format,
+            "family": structure_format,
+            "control": "continue_required",
+            "prefix": prefix,
+            "expected": expected,
+        },
+    )
+    specification = LoweredTaskSpec.model_validate_json(specification.model_dump_json())
+
+    async def model(request):
+        assert request.prompt_token_ids == prompt_ids
+        assert request.messages == ({"role": "user", "content": "Public task question"},)
+        return ModelTurn({"role": "assistant", "content": response}, prompt_ids, (5,), (-0.1,), "stop", text=response)
+
+    rollout = await engine(model).run(specification)
+    assert rollout.prompt_token_ids == prompt_ids
+    assert rollout.response_token_ids == (5,)
+    assert rollout.loss_mask == (1,)
+    assert rollout.grade.reward == float(success)
+    assert rollout.grade.diagnostics["syntax_complete"] == syntax
+    assert rollout.grade.diagnostics["content_preserved"] == success
+    assert rollout.grade.diagnostics["closure"]["expected"] == expected
 
 
 @pytest.mark.asyncio

@@ -71,7 +71,8 @@ from marinskyrl.distillation import (
 from skyrl_train.objective.teacher import teacher_advantages
 from skyrl_train.objective.correction import compute_correction
 from skyrl_train.config.objective_spec import off_policy_correction
-from skyrl_train.config.ftpo import ftpo_config
+from skyrl_train.config.ftpo import FTPOBoundary, ftpo_config
+from skyrl_train.closure_training import closure_training_targets
 from skyrl_train.ftpo import select_ftpo_candidates
 from skyrl_train.distillation_adapters import collate_student_selected_rollout
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import parse_trajectory_reward_shaping_config
@@ -2178,6 +2179,26 @@ class RayPPOTrainer:
             if final is None:
                 final = [True] * len(response_ids)
             loop = parse_trajectory_reward_shaping_config(self.cfg.generator.get("trajectory_reward_shaping")).loop
+            eligible = [last and not exclude for last, exclude in zip(final, excluded, strict=True)]
+            verified_boundaries = None
+            closure_targets = None
+            if ftpo.boundary == FTPOBoundary.VERIFIED_CLOSURE:
+                closure_targets = closure_training_targets(
+                    prompt_ids,
+                    response_ids,
+                    loss_masks,
+                    candidates,
+                    trajectory_batch["verification_results"],
+                    eligible=eligible,
+                    encode=lambda text: self.tokenizer.encode(text, add_special_tokens=False),
+                    decode=lambda tokens: self.tokenizer.decode(
+                        tokens, skip_special_tokens=False, clean_up_tokenization_spaces=False
+                    ),
+                    eos_token_ids=frozenset()
+                    if self.tokenizer.eos_token_id is None
+                    else frozenset({self.tokenizer.eos_token_id}),
+                )
+                verified_boundaries = closure_targets.boundaries
             chosen, weights = select_ftpo_candidates(
                 response_ids,
                 loss_masks,
@@ -2188,8 +2209,68 @@ class RayPPOTrainer:
                 loop=loop,
                 config=ftpo,
                 seed=self.cfg.trainer.seed + self.global_step,
-                eligible=[last and not exclude for last, exclude in zip(final, excluded, strict=True)],
+                eligible=eligible,
+                verified_boundaries=verified_boundaries,
             )
+            if closure_targets is not None and any(closure_targets.repairs):
+                if ftpo.repair_sft_weight is None:
+                    raise ValueError("Verified suffix repairs require an explicit repair_sft_weight")
+                if (
+                    routed_experts is not None
+                    or token_level_shaping is not None
+                    or response_span_tags is not None
+                    or loop_advantages is not None
+                ):
+                    raise ValueError("Closure repair training does not support sampled-token auxiliary channels")
+                # Preserve the recorded rollout. Only the learner's response
+                # branch replaces a terminal EOS or appends a verified suffix.
+                response_ids = [
+                    response if repair is None else response[: repair.response_position] + list(repair.repair_token_ids)
+                    for response, repair in zip(response_ids, closure_targets.repairs, strict=True)
+                ]
+                (
+                    sequences_tensor,
+                    attention_masks_tensor,
+                    response_masks_tensor,
+                    rewards_tensor,
+                    _,
+                    _,
+                    _,
+                    _,
+                ) = convert_prompts_responses_to_batch_tensors(
+                    self.tokenizer,
+                    prompt_ids,
+                    response_ids,
+                    [[0.0] * len(response) for response in response_ids],
+                    [[1] * len(response) for response in response_ids],
+                    None,
+                    None,
+                    None,
+                )
+                width = response_masks_tensor.shape[1]
+                extra = width - weights.shape[1]
+                candidates = torch.cat(
+                    (candidates, candidates.new_full((len(response_ids), extra, candidates.shape[-1]), -1)), dim=1
+                )
+                chosen = torch.cat((chosen, chosen.new_zeros((len(response_ids), extra, chosen.shape[-1]))), dim=1)
+                weights = torch.cat((weights, weights.new_zeros((len(response_ids), extra))), dim=1)
+                repair_mask = torch.zeros_like(weights, dtype=torch.bool)
+                for row, repair in enumerate(closure_targets.repairs):
+                    if repair is not None:
+                        repair_mask[row, repair.response_position : len(response_ids[row])] = True
+                        candidates[row] = -1
+                weights = weights + repair_mask
+                training_input.update(
+                    {
+                        "sequences": sequences_tensor,
+                        "attention_mask": attention_masks_tensor,
+                        "response_mask": response_masks_tensor,
+                        "rewards": rewards_tensor,
+                        "rollout_logprobs": None,
+                        "ftpo_repair_mask": repair_mask,
+                    }
+                )
+                self.all_metrics["closure/repair_tokens"] = float(repair_mask.sum())
             training_input["student_topk_indices"] = candidates
             training_input["ftpo_chosen_mask"] = chosen
             training_input["loss_mask"] = weights
