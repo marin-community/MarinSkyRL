@@ -676,7 +676,7 @@ def build_debug_launch_env(args: SimpleNamespace) -> dict[str, str]:
 
 
 def config_task_environment(config: DictConfig) -> dict[str, str]:
-    """Resolve task settings and explicitly named judge secrets at submission."""
+    """Resolve task settings and explicitly named backend secrets at submission."""
     extra = dict(config.runtime.task_env)
     skyrl_controls = sorted(str(key) for key in extra if str(key).startswith("SKYRL_"))
     if skyrl_controls:
@@ -692,9 +692,10 @@ def config_task_environment(config: DictConfig) -> dict[str, str]:
             v = int(v)
         out[str(k)] = str(v)
     if config.runtime.entrypoint != CHECKPOINT_EXPORT_ENTRYPOINT:
-        judge_key_env = OmegaConf.select(config, "skyrl.environment.task_sessions.remote_judge.api_key_env")
-        if judge_key_env is not None:
-            out[judge_key_env] = os.environ[judge_key_env]
+        for backend in ("remote_judge", "daytona"):
+            key_env = OmegaConf.select(config, f"skyrl.environment.task_sessions.{backend}.api_key_env")
+            if key_env is not None:
+                out[key_env] = os.environ[key_env]
     return out
 
 

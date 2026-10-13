@@ -13,10 +13,12 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from jinja2 import TemplateError
+from daytona import AsyncDaytona, DaytonaConfig
 from harbor_config.models.environment_type import EnvironmentType
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from shellbox.backends.docker.machine import DockerMachineFactory
+from shellbox.backends.daytona.machine import DaytonaMachineFactory
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
 from shellbox.machine import Backend, Machine, MachineFactory
 from taskcompendium.grading_result import Outcome
@@ -558,6 +560,12 @@ class TaskRolloutWorkerSpec:
                 int(runner_config.sampling_params.max_generate_length),
             )
         factories: dict[str, MachineFactory] = {"shellsim": ShellSimMachineFactory()}
+        daytona = self.config.environment.task_sessions.get("daytona")
+        if daytona is not None:
+            factories[Backend.DAYTONA] = DaytonaMachineFactory(
+                client_factory=partial(AsyncDaytona, DaytonaConfig(api_key=os.environ[daytona.api_key_env])),
+                ttl_minutes=int(daytona.ttl_minutes),
+            )
         if shutil.which("docker") is not None:
             factories[Backend.DOCKER] = DockerMachineFactory()
         if harbor is not None:

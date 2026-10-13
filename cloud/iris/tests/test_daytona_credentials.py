@@ -7,14 +7,15 @@ import cloud.iris.iris_backend as launcher
 
 
 @pytest.mark.parametrize("export", [False, True])
-def test_judge_secret_is_resolved_for_training_without_mutating_launch_config(monkeypatch, export):
+@pytest.mark.parametrize("backend", ["remote_judge", "daytona"])
+def test_backend_secret_is_resolved_for_training_without_mutating_launch_config(monkeypatch, export, backend):
     config = OmegaConf.create(
         {
             "runtime": {
                 "entrypoint": launcher.CHECKPOINT_EXPORT_ENTRYPOINT if export else "train",
                 "task_env": {"SETTING": 1},
             },
-            "skyrl": {"environment": {"task_sessions": {"remote_judge": {"api_key_env": "JUDGE_TEST_KEY"}}}},
+            "skyrl": {"environment": {"task_sessions": {backend: {"api_key_env": "JUDGE_TEST_KEY"}}}},
         }
     )
     serialized = OmegaConf.to_yaml(config)

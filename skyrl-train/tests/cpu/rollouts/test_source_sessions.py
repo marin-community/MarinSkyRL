@@ -8,6 +8,8 @@ import httpx
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestServer
 from omegaconf import OmegaConf
 from skyrl_gym.verification import VerificationStatus
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
@@ -20,7 +22,8 @@ from skyrl_train.rollouts.task_projections import StepTaskProjection, WholeTaskP
 from skyrl_train.dataset.tasks import SourceTaskDataset, source_row_task
 from skyrl_train.dataset.nemotron_ultra import NemotronTaskDataset
 from skyrl_train.rollouts.buffer import RolloutLease, RolloutTask
-from skyrl_train.rollouts.task_worker import RemoteJudgeSettings, TaskRolloutWorker
+from skyrl_train.rollouts.task_worker import RemoteJudgeSettings, TaskRolloutWorker, TaskRolloutWorkerSpec
+from skyrl_train.rollouts.workers import WorkerShard
 from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
 from skyrl_gym.source_task import source_task
 from skyrl_train.config.utils import get_default_config
@@ -30,6 +33,32 @@ from skyrl_train.trajectory_runners.trajectory_processing import validate_trajec
 from skyrl_train.trajectory_runners.model_clients import DirectModelClient, ModelServerError
 from skyrl_train.rollout_observability import observe_rollout_call
 from tests.cpu.rollouts.engine_fakes import ConversationClient, FixtureImageFactory, InferenceClient, Tokenizer, Writer
+
+
+@pytest.mark.asyncio
+async def test_native_daytona_worker_uses_explicit_account_at_http_boundary(monkeypatch):
+    received = []
+
+    async def inventory(request):
+        received.append(request.headers["Authorization"])
+        return web.json_response({"items": [], "nextCursor": None})
+
+    app = web.Application()
+    app.router.add_get("/{path:.*}", inventory)
+    monkeypatch.setenv("TEST_NATIVE_DAYTONA_KEY", "native-training-key")
+    monkeypatch.setenv("DAYTONA_API_KEY", "wrong-ambient-key")
+    config = get_default_config()
+    config.environment.task_sessions.daytona = {"api_key_env": "TEST_NATIVE_DAYTONA_KEY", "ttl_minutes": 60}
+    async with TestServer(app) as server:
+        monkeypatch.setenv("DAYTONA_API_URL", str(server.make_url("")).rstrip("/"))
+        worker = TaskRolloutWorkerSpec.from_config(config, []).build(Tokenizer(), WorkerShard(0, 1))
+        try:
+            async with worker.factories[Backend.DAYTONA].factory.client_factory() as client:
+                assert [sandbox async for sandbox in client.list()] == []
+        finally:
+            await worker.shutdown()
+    assert received == ["Bearer native-training-key"]
+    assert "native-training-key" not in OmegaConf.to_yaml(config)
 
 
 @pytest.mark.asyncio
