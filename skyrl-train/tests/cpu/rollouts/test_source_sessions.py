@@ -14,7 +14,6 @@ from skyrl_gym.verification import VerificationStatus
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
 from shellbox.machine import Backend, ExitReason, Result, PackageSpec, UnsupportedMachineSpec
 from taskcompendium.models import Source
-from rolloutengine.spec import LoweredTaskSpec
 from skyrl_train.rollouts.task_projections import StepTaskProjection, WholeTaskProjection
 from skyrl_train.dataset.tasks import SourceTaskDataset, source_row_task
 from skyrl_train.dataset.nemotron_ultra import NemotronTaskDataset
@@ -24,8 +23,8 @@ from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
 from skyrl_gym.source_task import source_task
 from skyrl_train.config.utils import get_default_config
 from tests.cpu.task_specs import NATIVE_ENVIRONMENT, lowered_task, machine_runtime, session_spec, task_input
-from skyrl_train.trajectory_runners.types import TrajectoryID, TaskRequestBatch
-from skyrl_train.trajectory_runners.trajectory_processing import validate_trajectory_batch
+from skyrl_train.trajectory_runners.types import TrajectoryID
+from skyrl_train.trajectory_runners.trajectory_processing import prepare_trajectory_request, validate_trajectory_batch
 from skyrl_train.trajectory_runners.model_clients import DirectModelClient, ModelServerError
 from skyrl_train.rollout_observability import observe_rollout_call
 from tests.cpu.rollouts.engine_fakes import ConversationClient, InferenceClient, Tokenizer, Writer
@@ -250,7 +249,8 @@ async def test_source_tasks_run_without_the_original_dataset(tmp_path, task_inpu
         num_workers=1,
     )
     source.unlink()
-    prompt, env, extras, uid = prepared[0]
+    row = prepared.collate_fn([prepared[0]])[0]
+    uid = row["uid"]
     config, _ = task_inputs
     client = ConversationClient(["#### 12"])
     worker = TaskRolloutWorker(
@@ -260,24 +260,13 @@ async def test_source_tasks_run_without_the_original_dataset(tmp_path, task_inpu
         {},
         shutdown_timeout=30,
     )
-    request = TaskRequestBatch(
-        rows=(
-            task_input(
-                LoweredTaskSpec.model_validate_json(extras["lowered_task_spec"]),
-                metric_class=env,
-                teacher_route=extras["teacher_route"],
-                data_source=extras["data_source"],
-            ),
-        ),
-        trajectory_ids=(TrajectoryID(uid, 0),),
-    )
+    request, _ = prepare_trajectory_request([row], 1, {}, "train", 0)
     writer = Writer()
     await worker.run_task(RolloutTask(RolloutLease("lease", 0, 1), {"uid": uid}, request), writer)
     batch = writer.groups[0][1].trajectory_batch
     assert batch["unshaped_rewards"] == [1.0]
     assert batch["teacher_route_keys"] == ["math"]
     assert batch["data_sources"] == ["arithmetic"]
-    assert extras["extra_info"] == {"grade": 3}
     assert "ground_truth" not in json.dumps(client.requests[0]["prompts"])
     assert batch["response_ids"] == [[3, 4]]
     np.testing.assert_allclose(batch["rollout_logprobs"], [[-0.1, -0.2]])

@@ -31,9 +31,7 @@ PARQUET_BATCH_SIZE = 1024
 def task_prompt(lowered: LoweredTaskSpec) -> dict:
     """Prepare public messages and private worker inputs from a lowered task."""
     task = lowered.task
-    extras = session_parameters(task).extras if isinstance(task.grader, SessionGrader) else {}
     return {
-        **extras,
         LOWERED_TASK_COLUMN: lowered.model_dump_json(),
         "prompt": task_messages(lowered),
         "env_class": TASKCOMPENDIUM_ENVIRONMENT
@@ -82,10 +80,7 @@ class TaskDataset(PromptDataset):
 
 
 def _stored_task_prompt(row: dict) -> dict:
-    prepared = task_prompt(LoweredTaskSpec.model_validate_json(row[LOWERED_TASK_COLUMN]))
-    # Session-specific extras stay in the serialized task: mixed task families
-    # do not share an Arrow schema. Restore them when yielding a training row.
-    return {key: prepared[key] for key in (LOWERED_TASK_COLUMN, "prompt", "env_class", "data_source", "group_grader")}
+    return task_prompt(LoweredTaskSpec.model_validate_json(row[LOWERED_TASK_COLUMN]))
 
 
 def source_row_task(
