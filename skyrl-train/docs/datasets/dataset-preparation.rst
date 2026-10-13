@@ -146,6 +146,38 @@ or specify HuggingFace dataset(s) prepared in the expected format:
 
 
 
+Prepared TaskSpec API
+---------------------
+
+The preparation modules store bare ``TaskSpec`` definitions in the ``task_spec`` column.
+Tasks contain public context, private grader inputs, and environment requirements.
+Runtime machines and session limits do not belong to the stored task definition.
+Optional columns contain ``data_source``, ``teacher_route``, ``metric_tags``, and a curriculum bin in ``extra_info``.
+
+Prepare local source rows with explicit private grader settings:
+
+.. code-block:: bash
+
+   uv run -m marinskyrl.task_preparation \
+     --input rows.parquet --output tasks.parquet --source arithmetic \
+     --config grader.json
+
+The ``--environment`` option accepts ``EnvironmentRequirements`` JSON for tasks that require a machine.
+Executable tasks require prebuilt, digest-pinned images.
+``marinskyrl.harbor_preparation`` prepares separate-verifier Harbor packages and writes their execution overrides.
+``marinskyrl.nemotron_preparation`` prepares mixed Nemotron sources against a prepared Harbor artifact.
+``marinskyrl.protocol_replay`` prepares manifest-validated token-prefix replay tasks.
+
+``skyrl_train.dataset.prepared_tasks.TaskSpecDataset`` accepts these artifacts, a tokenizer, and explicit execution settings.
+Its ``execution`` argument contains ``TaskExecutionSettings`` with a ``TaskRuntimeSpec`` and a ``TaskSessionSpec``.
+Its ``source_executions`` argument selects overrides by exact ``TaskSpec.source.dataset`` values.
+Different session types require distinct source names for run-specific session selection.
+The preparation CLI rejects different ``env_class`` values under the same source name.
+Harbor preparation rejects duplicate task IDs before it writes execution overrides.
+The loader retains task definitions and returns typed ``TaskInput`` records with run-specific ``LoweredTaskSpec`` values.
+The standard trainer entrypoint uses the source-row format above.
+
+
 Reference Scripts
 -----------------
 

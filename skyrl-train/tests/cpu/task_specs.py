@@ -1,5 +1,7 @@
 """Explicit runtime settings for task execution tests."""
 
+from collections.abc import Mapping
+
 from rolloutengine.spec import LoweredTaskSpec, MachineRuntimeSpec, TaskRuntimeSpec, TaskSessionSpec
 from shellbox.machine import NetworkPolicy
 from taskcompendium.models import (
@@ -14,6 +16,8 @@ from taskcompendium.models import (
     TextMessage,
 )
 from skyrl_train.task_inputs import TaskInput, TrajectoryMetadata
+from skyrl_train.dataset.prepared_tasks import TaskSpecDataset
+from skyrl_train.rollouts.task_lowering import TaskExecutionSettings
 
 SHELL_ENVIRONMENT = EnvironmentRequirements(
     command_semantics=CommandSemantics.SHELL_SIMULATOR, capabilities=("shell", "filesystem")
@@ -110,4 +114,29 @@ def lowered_task(
             verifier_machine=None if verifier_backend is None else machine_runtime(verifier_backend),
         ),
         session=session_spec(session_name, max_turns=max_turns, **limits),
+    )
+
+
+def task_dataset(
+    paths: list[str],
+    tokenizer,
+    max_prompt_length: int = 100,
+    *,
+    session: TaskSessionSpec | None = None,
+    source_executions: Mapping[str, TaskExecutionSettings] | None = None,
+    num_workers: int = 1,
+) -> TaskSpecDataset:
+    return TaskSpecDataset(
+        paths,
+        tokenizer,
+        max_prompt_length,
+        execution=TaskExecutionSettings(
+            runtime=TaskRuntimeSpec(
+                task_machine=machine_runtime("docker"),
+                verifier_machine=machine_runtime("docker"),
+            ),
+            session=session_spec() if session is None else session,
+        ),
+        source_executions={} if source_executions is None else source_executions,
+        num_workers=num_workers,
     )

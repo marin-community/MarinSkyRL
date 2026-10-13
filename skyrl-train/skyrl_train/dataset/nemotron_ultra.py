@@ -12,7 +12,8 @@ from rolloutengine.spec import LoweredTaskSpec, TaskSessionSpec
 from taskcompendium.models import NoGrader
 from transformers import PreTrainedTokenizerBase
 
-from skyrl_train.dataset.harbor import HARBOR_ID_PREFIX, materialize_harbor_tasks
+from skyrl_train.dataset.harbor import materialize_harbor_tasks
+from marinskyrl.task_format import HARBOR_ID_PREFIX
 from skyrl_train.dataset.tasks import (
     LOWERED_TASK_COLUMN,
     PARQUET_BATCH_SIZE,

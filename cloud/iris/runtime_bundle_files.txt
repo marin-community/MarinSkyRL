@@ -32,12 +32,16 @@ marinskyrl/__init__.py
 marinskyrl/checkpoint_paths.py
 marinskyrl/distillation.py
 marinskyrl/hf_model.py
+marinskyrl/harbor_import.py
+marinskyrl/harbor_preparation.py
 marinskyrl/inference_placement.py
 marinskyrl/hugging_face_retry.py
 marinskyrl/iris_harbor_environment.py
 marinskyrl/model_manifest.py
+marinskyrl/nemotron_preparation.py
 marinskyrl/packed_tasks.py
 marinskyrl/process_diagnostics.py
+marinskyrl/protocol_replay.py
 marinskyrl/remote_io.py
 marinskyrl/resource_locator.py
 marinskyrl/environment_contract.py
@@ -45,6 +49,8 @@ marinskyrl/rollout_grading.py
 marinskyrl/runtime_options.py
 marinskyrl/speculative_decoding.py
 marinskyrl/task_sources.py
+marinskyrl/task_format.py
+marinskyrl/task_preparation.py
 chat_templates/delphi_v0.jinja2
 chat_templates/delphi_v1.jinja2
 chat_templates/gpt2_completion.jinja2

@@ -4,10 +4,9 @@ import json
 import pytest
 from skyrl_gym.source_task import source_task
 from taskcompendium.models import Source
-from tests.cpu.task_specs import lowered_task, session_spec
 
-from skyrl_train.dataset.harbor import TerminalBenchTaskDataset, materialize_harbor_tasks
-from skyrl_train.dataset.nemotron_ultra import resolve_terminal_task, terminal_task_index
+from marinskyrl.harbor_preparation import TerminalBenchTaskDataset, materialize_harbor_tasks
+from marinskyrl.nemotron_preparation import resolve_terminal_task, terminal_task_index
 
 
 def _write_task(root: Path, name: str) -> Path:
@@ -48,7 +47,6 @@ def test_terminal_task_selection_fails_before_execution(tmp_path, selection):
     path = materialize_harbor_tasks(
         [str(sources if selection == "ambiguous" else sources / "first")],
         cache_dir=tmp_path / "cache",
-        session=session_spec(),
     )
     if selection == "ambiguous":
         with pytest.raises(ValueError, match="Duplicate terminal-bench task ID"):
@@ -70,4 +68,24 @@ def test_terminal_task_selection_fails_before_execution(tmp_path, selection):
         Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
     )
     with pytest.raises(ValueError, match="absent from the configured task data"):
-        resolve_terminal_task(lowered_task(task, "nemotron_ultra"), terminal_task_index(path))
+        resolve_terminal_task(task, terminal_task_index(path))
+
+
+def test_harbor_preparation_rejects_duplicate_ids_before_execution_overrides(tmp_path):
+    sources = []
+    for index, parent in enumerate(("first", "second")):
+        root = tmp_path / parent
+        root.mkdir()
+        task = _write_task(root, "same-id")
+        (task / "tests").mkdir()
+        (task / "tests/test.sh").write_text("echo 1 > /logs/verifier/reward.txt\n")
+        (task / "task.toml").write_text(
+            '[environment]\ndocker_image = "fixture@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\n'
+            f"cpus = {index + 1}\n"
+            '[verifier]\nenvironment_mode = "separate"\n'
+        )
+        sources.append(str(task))
+    execution_output = tmp_path / "execution.json"
+    with pytest.raises(ValueError, match="Duplicate Harbor task ID"):
+        materialize_harbor_tasks(sources, cache_dir=tmp_path / "cache", execution_output=execution_output)
+    assert not execution_output.exists()

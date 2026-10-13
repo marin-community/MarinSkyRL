@@ -4,6 +4,7 @@ import os
 from collections.abc import Mapping
 from typing import List
 from transformers import PreTrainedTokenizerBase
+from marinskyrl.resource_locator import parse_hf_dataset_selector
 
 
 def read_prompt_files(sources: list[str]) -> datasets.Dataset:
@@ -16,9 +17,16 @@ def read_prompt_files(sources: list[str]) -> datasets.Dataset:
         elif ext in [".json", ".jsonl"]:
             data = datasets.load_dataset("json", data_files=source, keep_in_memory=False)["train"]
         else:
-            name, separator, split = source.partition(":")
+            name, separator, split = source.partition(":") if "::" not in source else (source, "", "")
             split = split if separator else "train"
-            available = datasets.load_dataset(path=name, keep_in_memory=False)
+            selector = parse_hf_dataset_selector(name)
+            available = (
+                datasets.load_dataset(
+                    path=selector.repo_id, revision=selector.revision, data_dir=selector.subdir, keep_in_memory=False
+                )
+                if selector is not None
+                else datasets.load_dataset(path=name, keep_in_memory=False)
+            )
             if split not in available:
                 raise ValueError(
                     f"Split `{split}` not found in dataset `{name}`. Configured split was `{split}` and default is `train`"

@@ -1,7 +1,7 @@
 # Copyright The Marin Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Convert single-stage Harbor packages with prebuilt images to TaskSpec."""
+"""Prepare single-stage Harbor packages with prebuilt images as TaskSpecs."""
 
 from pathlib import Path
 

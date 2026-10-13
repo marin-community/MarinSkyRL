@@ -29,7 +29,8 @@ from marinskyrl.task_sources import (
     TaskTroveSelectionSnapshot,
     TaskTroveTagMatch,
 )
-from skyrl_train.dataset.harbor import TerminalBenchTaskDataset, materialize_harbor_tasks
+from skyrl_train.dataset.harbor import materialize_harbor_tasks
+from marinskyrl.harbor_preparation import TerminalBenchTaskDataset
 from taskcompendium.grading_result import Outcome
 from taskcompendium.models import NoGrader
 from taskcompendium.runtime.resources import resource_bytes

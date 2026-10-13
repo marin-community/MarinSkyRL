@@ -182,8 +182,8 @@ Private task records and grading configuration remain outside these exports.
 Retained trajectory files omit private task records, grader parameters, and references.
 Trajectory record schema 7 stores only ``data_source`` and ``teacher_route`` in ``environment_extras``.
 Other source-row extras do not enter retained traces.
-They also omit source metadata that contains grader inputs.
-They retain public source labels, teacher routes, prompts, responses, and verifier results.
+Retained traces also omit source metadata that contains grader inputs.
+Retained traces include public source labels, teacher routes, prompts, responses, and verifier results.
 
 ``generator.error_handling`` controls exception policies.
 ``mask`` excludes the rollout from loss and baseline calculations.

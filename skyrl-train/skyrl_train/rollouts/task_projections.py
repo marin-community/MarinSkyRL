@@ -18,7 +18,7 @@ from skyrl_gym.task_records import grade_skipped, skipped_grade
 from rolloutengine.contracts import RolloutContractError, RolloutData
 
 from skyrl_train.error_treatment import ErrorTreatment
-from skyrl_train.dataset.tasks import TASKCOMPENDIUM_ENVIRONMENT
+from marinskyrl.task_format import TASKCOMPENDIUM_ENVIRONMENT
 from skyrl_train.distillation import INVALID_TOPK_INDEX
 from skyrl_train.metric_names import TASK_ROLLOUT_METRIC_PREFIX
 from skyrl_train.trajectory_runners.trajectory_processing import (
