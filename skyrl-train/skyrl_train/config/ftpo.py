@@ -6,7 +6,7 @@ from enum import StrEnum
 
 from omegaconf import DictConfig, OmegaConf
 
-from marinskyrl.runtime_options import PolicyLossType
+from marinskyrl.runtime_options import PolicyLossType, ftpo_requested
 
 
 class FTPOBoundary(StrEnum):
@@ -46,7 +46,7 @@ class FTPOConfig:
 def ftpo_config(algorithm: DictConfig) -> FTPOConfig | None:
     """Resolve standalone or explicitly weighted auxiliary FTPO parameters."""
     values = dict(algorithm.get("ftpo", {}))
-    if algorithm.get("policy_loss_type") != PolicyLossType.FTPO and values.get("auxiliary_weight") is None:
+    if not ftpo_requested(algorithm):
         return None
     if "boundary" in values:
         values["boundary"] = FTPOBoundary(values["boundary"])

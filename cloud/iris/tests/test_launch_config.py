@@ -23,6 +23,7 @@ from cloud.iris.rl_config_translation import (
 )
 from skyrl_train.distributed.step_policy import NonfiniteStepPolicy, nonfinite_step_policy
 from skyrl_train.dataset.tasks import source_row_task
+from marinskyrl.runtime_options import reference_model_required
 
 
 def _raw_config() -> dict[str, Any]:
@@ -198,6 +199,22 @@ def test_launch_config_composes_and_loads_as_structured_hydra(
         path.write_text(yaml.safe_dump(raw, sort_keys=False))
         with pytest.raises(ValueError, match="gspo requires trainer.algorithm.loss_reduction=sequence_mean"):
             load_launch_config(path)
+
+
+def test_auxiliary_ftpo_launch_retains_task_objective_and_topk(tmp_path: Path) -> None:
+    # Smartie's mixed objective previously failed the launcher's distillation-only top-K gate.
+    raw = _raw_config()
+    raw["skyrl"]["trainer"]["use_sample_packing"] = False
+    raw["skyrl"]["trainer"]["algorithm"].update(policy_loss_type="regular", ftpo={"auxiliary_weight": 0.1})
+    raw["skyrl"]["generator"]["sampling_params"] = {"temperature": 1.0, "logprobs": 32}
+    path = tmp_path / "joint-launch.yaml"
+    path.write_text(yaml.safe_dump(raw))
+
+    config = load_launch_config(path)
+
+    assert config.skyrl.trainer.algorithm.policy_loss_type == "regular"
+    assert config.skyrl.generator.sampling_params.logprobs == 32
+    assert reference_model_required(config.skyrl.trainer.algorithm)
 
 
 @pytest.mark.parametrize("switch", ["use_abs_kl", "use_kl_estimator_k3"])
