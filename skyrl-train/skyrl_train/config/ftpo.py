@@ -13,6 +13,11 @@ class FTPOBoundary(StrEnum):
     TAIL_LOOP = "tail_loop"
     REPEATED_TOOL_OPENER = "repeated_tool_opener"
     VERIFIED_CLOSURE = "verified_closure"
+    VERIFIED_CLOSURE_AND_CONTINUATION = "verified_closure_and_continuation"
+
+    @property
+    def uses_verified_boundaries(self) -> bool:
+        return self in (FTPOBoundary.VERIFIED_CLOSURE, FTPOBoundary.VERIFIED_CLOSURE_AND_CONTINUATION)
 
 
 @dataclass(frozen=True)
@@ -69,7 +74,7 @@ def validate_ftpo(cfg: DictConfig) -> None:
     config = ftpo_config(cfg.trainer.algorithm)
     if config is None:
         return
-    if config.boundary == FTPOBoundary.VERIFIED_CLOSURE and config.repair_sft_weight is None:
+    if config.boundary.uses_verified_boundaries and config.repair_sft_weight is None:
         raise ValueError("Verified closure training requires an explicit repair_sft_weight")
     algorithm = cfg.trainer.algorithm
     if cfg.trainer.strategy != "megatron":

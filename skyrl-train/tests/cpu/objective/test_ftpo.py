@@ -555,11 +555,12 @@ async def test_ftpo_empty_rollout_batch_skips_training(config):
 
 @pytest.mark.parametrize("terminal_eos", [False, True])
 @pytest.mark.parametrize("repair_response", [" ", ' ,"other":2'])
+@pytest.mark.parametrize("boundary", ["verified_closure", "verified_closure_and_continuation"])
 def test_verified_closure_trainer_preserves_rollouts_and_trains_verified_repairs(
-    config, tmp_path, terminal_eos, repair_response
+    config, tmp_path, terminal_eos, repair_response, boundary
 ):
     config.trainer.algorithm.ftpo = {
-        "boundary": "verified_closure",
+        "boundary": boundary,
         "chosen_balance_strength": 0,
         "repair_sft_weight": 0.7,
     }

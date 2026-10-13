@@ -177,7 +177,7 @@ def select_ftpo_candidates(
     weights = torch.zeros(candidate_ids.shape[:2], dtype=torch.float32)
     surfaces: dict[int, str] = {}
     rejected_by_row = {}
-    if config.boundary == FTPOBoundary.VERIFIED_CLOSURE:
+    if config.boundary.uses_verified_boundaries:
         if verified_boundaries is None or len(verified_boundaries) != len(response_ids):
             raise ValueError("Verified closure FTPO requires one verified boundary entry per response")
     for row, (prompt, response, mask, allowed) in enumerate(
@@ -186,7 +186,7 @@ def select_ftpo_candidates(
         if not allowed:
             continue
         verified = None
-        if config.boundary == FTPOBoundary.VERIFIED_CLOSURE:
+        if config.boundary.uses_verified_boundaries:
             assert verified_boundaries is not None
             verified = verified_boundaries[row]
             position = None if verified is None else verified.response_position

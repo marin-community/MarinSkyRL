@@ -9,12 +9,14 @@ from rolloutengine.closure_repair import (
     ClosureTargetKind,
     verified_closure_candidates,
     verified_closure_target,
+    verified_continuation_boundary,
 )
 from rolloutengine.closure_scoring import SNOWBALL_TURN_END_MARKERS, closure_state, score_closure
 from skyrl_gym.closure_task import ClosurePrompt
 from skyrl_gym.verification import VerificationResult, VerificationStatus
 
 from skyrl_train.ftpo import VerifiedFTPOBoundary, repeated_tool_opener_boundary
+from skyrl_train.config.ftpo import FTPOBoundary
 
 
 @dataclass(frozen=True)
@@ -60,6 +62,7 @@ def closure_training_targets(
     candidates: torch.Tensor,
     verifications: Sequence[VerificationResult | None],
     *,
+    boundary: FTPOBoundary,
     eligible: Sequence[bool],
     encode: Callable[[str], list[int]],
     decode: Callable[[list[int]], str],
@@ -70,6 +73,8 @@ def closure_training_targets(
     Repeated-opener targets select JSON-opening alternatives at the first
     repeated marker. Other families require a closing-only repair that preserves
     the task's required content. Missing suffixes are reserved for masked SFT.
+    The continuation mode also selects exact-reference alternatives at verified
+    premature closing tokens, without supplying content-repair SFT.
     """
     boundaries = []
     repairs = []
@@ -98,6 +103,19 @@ def closure_training_targets(
             and verification.diagnostics.get("stop_reason") == "stop"
         ):
             content_response = response[:-1]
+        if boundary == FTPOBoundary.VERIFIED_CLOSURE_AND_CONTINUATION:
+            continuation = verified_continuation_boundary(
+                prompt,
+                content_response,
+                candidates[row].tolist(),
+                structure_prefix=contract.prefix,
+                expected=contract.expected,
+                structure_format=contract.format,
+                decode=decode,
+            )
+            if continuation is not None:
+                boundaries[row] = VerifiedFTPOBoundary(continuation.response_position, continuation.candidate_token_ids)
+                continue
         target = verified_closure_target(
             prompt,
             content_response,

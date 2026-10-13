@@ -71,7 +71,7 @@ from marinskyrl.distillation import (
 from skyrl_train.objective.teacher import teacher_advantages
 from skyrl_train.objective.correction import compute_correction
 from skyrl_train.config.objective_spec import off_policy_correction
-from skyrl_train.config.ftpo import FTPOBoundary, ftpo_config
+from skyrl_train.config.ftpo import ftpo_config
 from skyrl_train.closure_training import closure_target_metrics, closure_training_targets
 from skyrl_train.ftpo import select_ftpo_candidates
 from skyrl_train.distillation_adapters import collate_student_selected_rollout
@@ -2191,13 +2191,14 @@ class RayPPOTrainer:
             eligible = [last and not exclude for last, exclude in zip(final, excluded, strict=True)]
             verified_boundaries = None
             closure_targets = None
-            if ftpo.boundary == FTPOBoundary.VERIFIED_CLOSURE:
+            if ftpo.boundary.uses_verified_boundaries:
                 closure_targets = closure_training_targets(
                     prompt_ids,
                     response_ids,
                     loss_masks,
                     candidates,
                     trajectory_batch["verification_results"],
+                    boundary=ftpo.boundary,
                     eligible=eligible,
                     encode=lambda text: self.tokenizer.encode(text, add_special_tokens=False),
                     decode=lambda tokens: self.tokenizer.decode(

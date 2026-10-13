@@ -4,7 +4,70 @@ import torch
 from rolloutengine.closure_repair import ClosureTargetKind
 from skyrl_gym.verification import VerificationResult
 from skyrl_train.closure_training import ClosureTrainingTargets, closure_target_metrics, closure_training_targets
-from skyrl_train.ftpo import VerifiedFTPOBoundary
+from skyrl_train.ftpo import VerifiedFTPOBoundary, select_ftpo_candidates
+from skyrl_train.config.ftpo import FTPOBoundary, FTPOConfig
+from skyrl_train.trajectory_runners.trajectory_reward_shaping import LoopCreditConfig
+
+
+@pytest.mark.parametrize("boundary", [FTPOBoundary.VERIFIED_CLOSURE, FTPOBoundary.VERIFIED_CLOSURE_AND_CONTINUATION])
+@pytest.mark.parametrize("has_continuation", [False, True])
+def test_early_closure_selects_only_recorded_continuations_at_one_token(boundary, has_continuation):
+    pieces = {1_000_000: '"]', 1_000_001: "ultiple", 1_000_002: "ult", 1_000_003: "wrong"}
+
+    def decode(tokens):
+        return "".join(pieces[token] if token in pieces else chr(token) for token in tokens)
+
+    prefix = '["m'
+    prompt = list(map(ord, "assistant " + prefix))
+    response = [1_000_000, ord(" ")]
+    ids = [1_000_000, 1_000_001, 1_000_002, 1_000_003] if has_continuation else [1_000_000, 1_000_003, 120, 121]
+    candidates = torch.tensor([[ids, ids]])
+    verification = VerificationResult.verified(
+        0,
+        diagnostics={
+            "closure": {
+                "prefix": prefix,
+                "expected": '["multiple"]',
+                "format": "json",
+                "family": "json_array",
+                "control": "continue_required",
+            }
+        },
+    )
+    targets = closure_training_targets(
+        [prompt],
+        [response],
+        [[1, 1]],
+        candidates,
+        [verification],
+        boundary=boundary,
+        eligible=[True],
+        encode=lambda text: list(map(ord, text)),
+        decode=decode,
+        eos_token_ids=frozenset(),
+    )
+    chosen, weights = select_ftpo_candidates(
+        [response],
+        [[1, 1]],
+        candidates,
+        torch.tensor([[[-0.1, -1.0, -10.0, -0.2]] * 2]),
+        prompt_ids=[prompt],
+        decode=decode,
+        loop=LoopCreditConfig(),
+        config=FTPOConfig(boundary=boundary, min_p=0.01, chosen_balance_strength=0),
+        seed=42,
+        eligible=[True],
+        verified_boundaries=targets.boundaries,
+    )
+    assert targets.repairs == [None]
+    if boundary == FTPOBoundary.VERIFIED_CLOSURE_AND_CONTINUATION and has_continuation:
+        assert targets.boundaries == [VerifiedFTPOBoundary(0, (1_000_001, 1_000_002))]
+        assert chosen.nonzero().tolist() == [[0, 0, 1]]
+        assert weights.tolist() == [[1.0, 0.0]]
+        assert decode(prompt + [int(candidates[chosen][0])]) == 'assistant ["multiple'
+    else:
+        assert not chosen.any()
+        assert not weights.any()
 
 
 @pytest.mark.parametrize("terminator", ["<|eot_id|>", "<|end_of_text|>"])
@@ -40,6 +103,7 @@ def test_stopped_turn_repairs_only_missing_closure_tokens(terminator, continuati
         [[1] * len(response)],
         torch.full((1, len(response), 1), -1),
         [verification],
+        boundary=FTPOBoundary.VERIFIED_CLOSURE,
         eligible=[True],
         encode=encode,
         decode=decode,
