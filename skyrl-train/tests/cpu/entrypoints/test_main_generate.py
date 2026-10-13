@@ -37,7 +37,10 @@ class RecordingTracker:
 async def test_eval_only_uses_generation_engine_without_initial_wake(monkeypatch):
     experiment = object.__new__(EvalOnlyEntrypoint)
     experiment.cfg = OmegaConf.create(
-        {"trainer": {"policy": {"model": {"lora": {"adapter_path": None}}}}, "generator": {}}
+        {
+            "trainer": {"evaluation_runner": "training", "policy": {"model": {"lora": {"adapter_path": None}}}},
+            "generator": {},
+        }
     )
     experiment.eval_dataset = ["prompt"]
     experiment.tokenizer = object()

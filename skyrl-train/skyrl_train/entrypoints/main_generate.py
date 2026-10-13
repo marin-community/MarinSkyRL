@@ -10,6 +10,7 @@ import hydra
 import ray
 from loguru import logger
 from omegaconf import DictConfig
+from marinskyrl.runtime_options import EvaluationRunner
 
 from skyrl_train.config.rollout_validation import EntrypointOperation
 from skyrl_train.entrypoints.main_base import (
@@ -55,7 +56,16 @@ class EvalOnlyEntrypoint(BasePPOExp):
 
         inference_engine_client = self.create_inference_engine_client(operation=EntrypointOperation.GENERATE)
         await load_initial_policy_adapter(inference_engine_client, self.cfg)
-        trajectory_runner = self.get_trajectory_runner(self.cfg, self.tokenizer, inference_engine_client)
+        evaluation_runner = EvaluationRunner(self.cfg.trainer.evaluation_runner)
+        trajectory_runner = (
+            self.get_trajectory_runner(self.cfg, self.tokenizer, inference_engine_client)
+            if evaluation_runner is EvaluationRunner.TRAINING
+            else self.get_task_runner(
+                self.cfg,
+                inference_engine_client,
+                harbor_config=self.cfg.terminal_bench_config if evaluation_runner is EvaluationRunner.HARBOR else None,
+            )
+        )
 
         trajectory_sink = make_trajectory_sink(self.cfg.generator, self.tokenizer)
         trajectory_runner.set_trajectory_sink(trajectory_sink)
