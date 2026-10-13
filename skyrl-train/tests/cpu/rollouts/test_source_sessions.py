@@ -158,7 +158,7 @@ async def test_mixed_nemotron_tasks_run_without_the_original_sources(
     class ImageFactory:
         backend = Backend.DOCKER
 
-        def check_environment(self, requirements, spec):
+        def check_environment(self, _requirements, _spec):
             pass
 
         async def create(self, spec):
@@ -606,7 +606,7 @@ def task_machine():
         closed = False
         output = "4"
 
-        def check_environment(self, requirements, spec):
+        def check_environment(self, _requirements, _spec):
             pass
 
         async def create(self, spec):

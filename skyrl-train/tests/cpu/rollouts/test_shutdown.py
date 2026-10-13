@@ -60,7 +60,7 @@ async def test_owned_machine_preserves_fault_categories(tmp_path, operation, err
     class Factory:
         backend = Backend.SHELLSIM
 
-        def check_environment(self, requirements, spec):
+        def check_environment(self, _requirements, _spec):
             pass
 
         async def create(self, spec):
@@ -119,7 +119,7 @@ async def test_one_machine_cleanup_failure_does_not_abort_the_buffer_group(task_
     class Factory:
         backend = Backend.SHELLSIM
 
-        def check_environment(self, requirements, spec):
+        def check_environment(self, _requirements, _spec):
             pass
 
         async def create(self, spec):
@@ -195,7 +195,7 @@ async def test_worker_shutdown_cancels_model_and_deletes_its_machine(task_inputs
     class Factory:
         backend = Backend.SHELLSIM
 
-        def check_environment(self, requirements, spec):
+        def check_environment(self, _requirements, _spec):
             pass
 
         async def create(self, spec):
@@ -236,7 +236,7 @@ async def test_worker_shutdown_owns_late_creation_and_bounds_a_blocked_provider(
     class Factory:
         backend = Backend.SHELLSIM
 
-        def check_environment(self, requirements, spec):
+        def check_environment(self, _requirements, _spec):
             pass
 
         async def create(self, spec):
@@ -356,7 +356,7 @@ async def test_agent_deadlines_grade_the_workspace_and_commit_training_tokens(
     class Factory:
         backend = Backend.DOCKER
 
-        def check_environment(self, requirements, spec):
+        def check_environment(self, _requirements, _spec):
             pass
 
         async def create(self, spec):
@@ -614,7 +614,7 @@ async def test_worker_shutdown_reports_late_provider_close_failure_without_unhan
     class Factory:
         backend = Backend.SHELLSIM
 
-        def check_environment(self, requirements, spec):
+        def check_environment(self, _requirements, _spec):
             pass
 
         async def create(self, spec):

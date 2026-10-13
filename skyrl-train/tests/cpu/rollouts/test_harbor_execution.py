@@ -59,7 +59,7 @@ async def test_mixed_harbor_and_native_tasks_keep_separate_providers_and_machine
     class Factory:
         backend = Backend.DOCKER
 
-        def check_environment(self, requirements, spec):
+        def check_environment(self, _requirements, _spec):
             pass
 
         def __init__(self, provider):
@@ -194,7 +194,7 @@ async def test_disabled_harbor_verification_keeps_tokens_but_masks_training(
     class ImageFactory:
         backend = Backend.DOCKER
 
-        def check_environment(self, requirements, spec):
+        def check_environment(self, _requirements, _spec):
             pass
 
         async def create(self, spec):
@@ -259,7 +259,7 @@ async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected
     class Factory:
         backend = Backend.SHELLSIM
 
-        def check_environment(self, requirements, spec):
+        def check_environment(self, _requirements, _spec):
             pass
 
         async def create(self, spec):
@@ -317,7 +317,7 @@ async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected
     class VerifierFactory:
         backend = Backend.DOCKER
 
-        def check_environment(self, requirements, spec):
+        def check_environment(self, _requirements, _spec):
             pass
 
         async def create(self, spec):
@@ -475,7 +475,7 @@ async def test_harbor_retry_policy_preserves_terminal_grades(task_inputs, phase,
     class Factory:
         backend = Backend.SHELLSIM
 
-        def check_environment(self, requirements, spec):
+        def check_environment(self, _requirements, _spec):
             pass
 
         async def create(self, spec):
@@ -490,7 +490,7 @@ async def test_harbor_retry_policy_preserves_terminal_grades(task_inputs, phase,
     class VerifierFactory:
         backend = Backend.DOCKER
 
-        def check_environment(self, requirements, spec):
+        def check_environment(self, _requirements, _spec):
             pass
 
         async def create(self, spec):
@@ -837,7 +837,7 @@ async def test_harbor_source_materialization_runs_without_the_original_directory
     class ImageFactory:
         backend = Backend.DOCKER
 
-        def check_environment(self, requirements, spec):
+        def check_environment(self, _requirements, _spec):
             pass
 
         async def create(self, spec):

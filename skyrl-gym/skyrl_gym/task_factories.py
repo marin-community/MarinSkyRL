@@ -32,8 +32,6 @@ from skyrl_gym.closure_task import STRUCTURE_CLOSURE_SESSION, ClosureReplaySessi
 
 
 def adapt_self_grading_session(factory: Callable[[LoweredTaskSpec, Machine | None], TaskSession]) -> TaskSessionFactory:
-    """Adapt a session that implements its own grading logic."""
-
     def create(context: TaskSessionContext) -> TaskSession:
         return factory(context.lowered, context.machine)
 

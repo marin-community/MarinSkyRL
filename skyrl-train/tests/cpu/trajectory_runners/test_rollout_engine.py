@@ -93,7 +93,7 @@ class ReplayClient:
 class ImageFactory:
     backend = Backend.DOCKER
 
-    def check_environment(self, requirements, spec):
+    def check_environment(self, _requirements, _spec):
         pass
 
     machines: list = field(default_factory=list)

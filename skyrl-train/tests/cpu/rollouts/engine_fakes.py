@@ -39,7 +39,7 @@ class FixtureImageFactory:
 
     backend = Backend.DOCKER
 
-    def check_environment(self, requirements, spec):
+    def check_environment(self, _requirements, _spec):
         pass
 
     async def create(self, spec):
