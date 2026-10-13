@@ -72,8 +72,13 @@ from skyrl_train.objective.teacher import teacher_advantages
 from skyrl_train.objective.correction import compute_correction
 from skyrl_train.config.objective_spec import off_policy_correction
 from skyrl_train.config.ftpo import FTPOBoundary, ftpo_config
-from skyrl_train.closure_training import closure_target_metrics, closure_training_targets
-from skyrl_train.ftpo import repeated_tool_opener_boundary, select_ftpo_candidates
+from skyrl_train.closure_training import (
+    boundary_route_metrics,
+    closure_target_metrics,
+    closure_training_targets,
+    mixed_boundary_modes,
+)
+from skyrl_train.ftpo import select_ftpo_candidates
 from skyrl_train.distillation_adapters import collate_student_selected_rollout
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import parse_trajectory_reward_shaping_config
 from skyrl_train.distributed.dispatch import (
@@ -2215,17 +2220,13 @@ class RayPPOTrainer:
                 verified_boundaries = closure_targets.boundaries
             boundary_modes = None
             if ftpo.boundary == FTPOBoundary.MIXED:
-                boundary_modes = []
-                for prompt, response, mask, verification in zip(
-                    prompt_ids, response_ids, loss_masks, trajectory_batch["verification_results"], strict=True
-                ):
-                    if verification is not None and "closure" in verification.diagnostics:
-                        mode = FTPOBoundary.VERIFIED_CLOSURE_AND_CONTINUATION
-                    elif repeated_tool_opener_boundary(prompt, response, mask, self.tokenizer.decode) is not None:
-                        mode = FTPOBoundary.REPEATED_TOOL_OPENER
-                    else:
-                        mode = FTPOBoundary.TAIL_LOOP
-                    boundary_modes.append(mode)
+                boundary_modes = mixed_boundary_modes(
+                    prompt_ids,
+                    response_ids,
+                    loss_masks,
+                    trajectory_batch["verification_results"],
+                    self.tokenizer.decode,
+                )
             chosen, weights = select_ftpo_candidates(
                 response_ids,
                 loss_masks,
@@ -2337,23 +2338,11 @@ class RayPPOTrainer:
             self.all_metrics["ftpo/selected_boundaries"] = float(chosen.any(-1).sum())
             self.all_metrics["ftpo/chosen_candidates"] = float(chosen.sum())
             if boundary_modes is not None:
-                repair_mask = training_input.get("ftpo_repair_mask")
-                for mode in (
-                    FTPOBoundary.TAIL_LOOP,
-                    FTPOBoundary.REPEATED_TOOL_OPENER,
-                    FTPOBoundary.VERIFIED_CLOSURE_AND_CONTINUATION,
-                ):
-                    rows = [row for row, routed in enumerate(boundary_modes) if routed == mode]
-                    prefix = f"ftpo/routes/{mode.value}"
-                    self.all_metrics.update(
-                        {
-                            f"{prefix}/rows": float(len(rows)),
-                            f"{prefix}/eligible_rows": float(sum(eligible[row] for row in rows)),
-                            f"{prefix}/selected_boundaries": float(chosen[rows].any(-1).sum()),
-                            f"{prefix}/target_weight": float(weights[rows].sum()),
-                            f"{prefix}/repair_tokens": 0.0 if repair_mask is None else float(repair_mask[rows].sum()),
-                        }
+                self.all_metrics.update(
+                    boundary_route_metrics(
+                        boundary_modes, eligible, chosen, weights, training_input.get("ftpo_repair_mask")
                     )
+                )
             if closure_targets is not None:
                 self.all_metrics.update(
                     closure_target_metrics(

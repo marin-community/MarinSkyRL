@@ -2886,7 +2886,7 @@ secrets = [
 [[package]]
 name = "marin-rolloutengine"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frolloutengine&rev=f6acc0157a3008d8aae6fe0a12cf573a03a0fed9#f6acc0157a3008d8aae6fe0a12cf573a03a0fed9" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frolloutengine&rev=89d57c0ff0f16047258164aeaeb97e355820b6ee#89d57c0ff0f16047258164aeaeb97e355820b6ee" }
 dependencies = [
     { name = "marin-shellbox" },
     { name = "marin-taskcompendium" },
@@ -2897,7 +2897,7 @@ dependencies = [
 [[package]]
 name = "marin-shellbox"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fshellbox&rev=f6acc0157a3008d8aae6fe0a12cf573a03a0fed9#f6acc0157a3008d8aae6fe0a12cf573a03a0fed9" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fshellbox&rev=89d57c0ff0f16047258164aeaeb97e355820b6ee#89d57c0ff0f16047258164aeaeb97e355820b6ee" }
 dependencies = [
     { name = "bubblewrap-bin", marker = "sys_platform == 'linux' or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "httpx" },
@@ -2927,7 +2927,7 @@ dependencies = [
 [[package]]
 name = "marin-taskcompendium"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=f6acc0157a3008d8aae6fe0a12cf573a03a0fed9#f6acc0157a3008d8aae6fe0a12cf573a03a0fed9" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=89d57c0ff0f16047258164aeaeb97e355820b6ee#89d57c0ff0f16047258164aeaeb97e355820b6ee" }
 dependencies = [
     { name = "marin-rigging", extra = ["prometheus", "secrets"] },
     { name = "marin-shellbox" },
@@ -2939,7 +2939,7 @@ dependencies = [
 [[package]]
 name = "marin-verifyit"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fverifyit&rev=f6acc0157a3008d8aae6fe0a12cf573a03a0fed9#f6acc0157a3008d8aae6fe0a12cf573a03a0fed9" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fverifyit&rev=89d57c0ff0f16047258164aeaeb97e355820b6ee#89d57c0ff0f16047258164aeaeb97e355820b6ee" }
 dependencies = [
     { name = "tomli-w" },
 ]
@@ -3165,10 +3165,10 @@ requires-dist = [
     { name = "marin-iris-native" },
     { name = "marin-rigging", extras = ["prometheus"], marker = "extra == 'telemetry'" },
     { name = "marin-rigging", extras = ["secrets"], specifier = ">=0.2.144.dev37540375919" },
-    { name = "marin-rolloutengine", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frolloutengine&rev=f6acc0157a3008d8aae6fe0a12cf573a03a0fed9" },
-    { name = "marin-shellbox", extras = ["daytona", "shellsim"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fshellbox&rev=f6acc0157a3008d8aae6fe0a12cf573a03a0fed9" },
-    { name = "marin-taskcompendium", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=f6acc0157a3008d8aae6fe0a12cf573a03a0fed9" },
-    { name = "marin-verifyit", extras = ["math", "schema", "reasoning-gym", "judge"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fverifyit&rev=f6acc0157a3008d8aae6fe0a12cf573a03a0fed9" },
+    { name = "marin-rolloutengine", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frolloutengine&rev=89d57c0ff0f16047258164aeaeb97e355820b6ee" },
+    { name = "marin-shellbox", extras = ["daytona", "shellsim"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fshellbox&rev=89d57c0ff0f16047258164aeaeb97e355820b6ee" },
+    { name = "marin-taskcompendium", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=89d57c0ff0f16047258164aeaeb97e355820b6ee" },
+    { name = "marin-verifyit", extras = ["math", "schema", "reasoning-gym", "judge"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fverifyit&rev=89d57c0ff0f16047258164aeaeb97e355820b6ee" },
     { name = "math-verify", specifier = "==0.9.0" },
     { name = "megatron-bridge", marker = "sys_platform == 'linux' and extra == 'megatron'", specifier = "==0.6.0" },
     { name = "megatron-core", marker = "sys_platform == 'linux' and extra == 'megatron'", specifier = "==0.18.0" },

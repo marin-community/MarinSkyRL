@@ -25,6 +25,54 @@ class ClosureTrainingTargets:
     repairs: list[ClosureTarget | None]
 
 
+def mixed_boundary_modes(
+    prompts: Sequence[Sequence[int]],
+    responses: Sequence[Sequence[int]],
+    masks: Sequence[Sequence[int]],
+    verifications: Sequence[VerificationResult | None],
+    decode: Callable[[list[int]], str],
+) -> list[FTPOBoundary]:
+    """Honor closure contracts before detecting repeated openers or tail loops."""
+    modes = []
+    for prompt, response, mask, verification in zip(prompts, responses, masks, verifications, strict=True):
+        if verification is not None and "closure" in verification.diagnostics:
+            mode = FTPOBoundary.VERIFIED_CLOSURE_AND_CONTINUATION
+        elif repeated_tool_opener_boundary(prompt, response, mask, decode) is not None:
+            mode = FTPOBoundary.REPEATED_TOOL_OPENER
+        else:
+            mode = FTPOBoundary.TAIL_LOOP
+        modes.append(mode)
+    return modes
+
+
+def boundary_route_metrics(
+    modes: Sequence[FTPOBoundary],
+    eligible: Sequence[bool],
+    chosen: torch.Tensor,
+    weights: torch.Tensor,
+    repair_mask: torch.Tensor | None,
+) -> dict[str, float]:
+    """Count prepared structural supervision, including zero counts for absent routes."""
+    metrics = {}
+    for mode in (
+        FTPOBoundary.TAIL_LOOP,
+        FTPOBoundary.REPEATED_TOOL_OPENER,
+        FTPOBoundary.VERIFIED_CLOSURE_AND_CONTINUATION,
+    ):
+        rows = [row for row, routed in enumerate(modes) if routed == mode]
+        prefix = f"ftpo/routes/{mode.value}"
+        metrics.update(
+            {
+                f"{prefix}/rows": float(len(rows)),
+                f"{prefix}/eligible_rows": float(sum(eligible[row] for row in rows)),
+                f"{prefix}/selected_boundaries": float(chosen[rows].any(-1).sum()),
+                f"{prefix}/target_weight": float(weights[rows].sum()),
+                f"{prefix}/repair_tokens": 0.0 if repair_mask is None else float(repair_mask[rows].sum()),
+            }
+        )
+    return metrics
+
+
 def closure_target_metrics(
     verifications: Sequence[VerificationResult | None],
     targets: ClosureTrainingTargets,
