@@ -70,7 +70,7 @@ class TaskDataset(PromptDataset):
                         metadata=TrajectoryMetadata(
                             uid=uid,
                             metric_class=environment,
-                            data_source=extra_info.get("data_source", extras.get("data_source")),
+                            data_source=extra_info.get("data_source") or extras.get("data_source"),
                             teacher_route=extras.get("teacher_route"),
                             metric_tags=metric_tags,
                         ),

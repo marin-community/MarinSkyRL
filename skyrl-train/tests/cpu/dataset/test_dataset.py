@@ -86,7 +86,7 @@ def test_source_tasks_preserve_global_row_indices_without_cache_files(tmp_path, 
             "reward_spec": {"ground_truth": "PRIVATE_ANSWER"},
             "teacher_route": "math",
             "data_source": "fixture",
-            "extra_info": {"grade": index},
+            "extra_info": {"grade": index, "data_source": None},
         }
         for index, content in enumerate(("First question", "x" * 200, "Last question"))
     ]
@@ -104,6 +104,7 @@ def test_source_tasks_preserve_global_row_indices_without_cache_files(tmp_path, 
     assert [task_messages(row["input"].lowered) for row in prepared] == [rows[0]["prompt"], rows[2]["prompt"]]
     tasks = [row["input"].lowered.task for row in prepared]
     assert [task.source.row for task in tasks] == ["0", "2"]
+    assert [row["input"].metadata.data_source for row in prepared] == ["fixture", "fixture"]
     assert dataset.dataframe.cache_files == []
 
 

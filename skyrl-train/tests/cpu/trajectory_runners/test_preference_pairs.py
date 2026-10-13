@@ -150,6 +150,8 @@ async def test_tokenized_dataset_and_runner_preserve_multiturn_assistant_masks(t
         "rejected_input_ids": [10, rejected_setup, 30, 35, 40, 41, 55],
         "rejected_assistant_masks": [0, 0, 0, 1, 1, 0, 1],
         "task_source_id": "complement-task",
+        "data_source": "preference-source",
+        "extra_info": {"data_source": None},
     }
     path = tmp_path / "pairs.jsonl"
     path.write_text(json.dumps(row) + "\n")
@@ -164,6 +166,7 @@ async def test_tokenized_dataset_and_runner_preserve_multiturn_assistant_masks(t
         num_workers=1,
     )
     inputs, _ = prepare_trajectory_request(data.collate_fn([data[0]]), 2, {}, "train", 0)
+    assert [row.data_source for row in inputs.metadata] == ["preference-source"] * 2
     runner = PreferencePairTrajectoryRunner(
         tokenizer,
         generator_config={},
