@@ -71,9 +71,9 @@ from marinskyrl.distillation import (
 from skyrl_train.objective.teacher import teacher_advantages
 from skyrl_train.objective.correction import compute_correction
 from skyrl_train.config.objective_spec import off_policy_correction
-from skyrl_train.config.ftpo import ftpo_config
+from skyrl_train.config.ftpo import FTPOBoundary, ftpo_config
 from skyrl_train.closure_training import closure_target_metrics, closure_training_targets
-from skyrl_train.ftpo import select_ftpo_candidates
+from skyrl_train.ftpo import repeated_tool_opener_boundary, select_ftpo_candidates
 from skyrl_train.distillation_adapters import collate_student_selected_rollout
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import parse_trajectory_reward_shaping_config
 from skyrl_train.distributed.dispatch import (
@@ -1577,7 +1577,11 @@ class RayPPOTrainer:
         self.tracker.log(startup_eval, step=self.global_step, commit=False)
 
     async def _run_training(self, training_input: TrainingInputBatch, *, step_wall: StepWallTime | None = None):
-        if "ftpo_chosen_mask" in training_input and not training_input["loss_mask"].any():
+        if (
+            "ftpo_chosen_mask" in training_input
+            and not training_input["loss_mask"].any()
+            and not training_input.get("ftpo_weights", training_input["loss_mask"]).any()
+        ):
             self.all_timings["train_critic_and_policy"] = 0.0
             self.all_metrics["policy/policy_update_steps"] = 0.0
             self.all_metrics["ftpo/empty_batch"] = 1.0
@@ -2209,6 +2213,19 @@ class RayPPOTrainer:
                     else frozenset({self.tokenizer.eos_token_id}),
                 )
                 verified_boundaries = closure_targets.boundaries
+            boundary_modes = None
+            if ftpo.boundary == FTPOBoundary.MIXED:
+                boundary_modes = []
+                for prompt, response, mask, verification in zip(
+                    prompt_ids, response_ids, loss_masks, trajectory_batch["verification_results"], strict=True
+                ):
+                    if verification is not None and "closure" in verification.diagnostics:
+                        mode = FTPOBoundary.VERIFIED_CLOSURE_AND_CONTINUATION
+                    elif repeated_tool_opener_boundary(prompt, response, mask, self.tokenizer.decode) is not None:
+                        mode = FTPOBoundary.REPEATED_TOOL_OPENER
+                    else:
+                        mode = FTPOBoundary.TAIL_LOOP
+                    boundary_modes.append(mode)
             chosen, weights = select_ftpo_candidates(
                 response_ids,
                 loss_masks,
@@ -2221,7 +2238,18 @@ class RayPPOTrainer:
                 seed=self.cfg.trainer.seed + self.global_step,
                 eligible=eligible,
                 verified_boundaries=verified_boundaries,
+                boundary_modes=boundary_modes,
             )
+            structural_only = [False] * len(response_ids)
+            if ftpo.auxiliary_weight is not None and closure_targets is not None:
+                structural_only = [
+                    verification is not None and "closure" in verification.diagnostics
+                    for verification in trajectory_batch["verification_results"]
+                ]
+                for row, synthetic in enumerate(structural_only):
+                    if synthetic:
+                        training_input["loss_mask"][row] = 0
+                        training_input["rewards"][row] = 0
             if closure_targets is not None and any(closure_targets.repairs):
                 if ftpo.repair_sft_weight is None:
                     raise ValueError("Verified suffix repairs require an explicit repair_sft_weight")
@@ -2243,17 +2271,32 @@ class RayPPOTrainer:
                     attention_masks_tensor,
                     response_masks_tensor,
                     rewards_tensor,
-                    _,
-                    _,
+                    learner_loss_masks,
+                    learner_logprobs,
                     _,
                     _,
                 ) = convert_prompts_responses_to_batch_tensors(
                     self.tokenizer,
                     prompt_ids,
                     response_ids,
-                    [[0.0] * len(response) for response in response_ids],
-                    [[1] * len(response) for response in response_ids],
-                    None,
+                    [
+                        rewards[row]
+                        if ftpo.auxiliary_weight is not None and not structural_only[row]
+                        else [0.0] * len(response)
+                        for row, response in enumerate(response_ids)
+                    ],
+                    [
+                        loss_masks[row]
+                        if ftpo.auxiliary_weight is not None and not structural_only[row]
+                        else [0] * len(response)
+                        for row, response in enumerate(response_ids)
+                    ],
+                    None
+                    if ftpo.auxiliary_weight is None or logprobs is None
+                    else [
+                        logprobs[row] if not structural_only[row] else np.zeros(len(response), dtype=np.float32)
+                        for row, response in enumerate(response_ids)
+                    ],
                     None,
                     None,
                 )
@@ -2279,16 +2322,38 @@ class RayPPOTrainer:
                         "attention_mask": attention_masks_tensor,
                         "response_mask": response_masks_tensor,
                         "rewards": rewards_tensor,
-                        "rollout_logprobs": None,
+                        "rollout_logprobs": learner_logprobs,
+                        "loss_mask": learner_loss_masks,
                         "ftpo_repair_mask": repair_mask,
                     }
                 )
                 self.all_metrics["closure/repair_tokens"] = float(repair_mask.sum())
             training_input["student_topk_indices"] = candidates
             training_input["ftpo_chosen_mask"] = chosen
-            training_input["loss_mask"] = weights
+            if ftpo.auxiliary_weight is None:
+                training_input["loss_mask"] = weights
+            else:
+                training_input["ftpo_weights"] = weights
             self.all_metrics["ftpo/selected_boundaries"] = float(chosen.any(-1).sum())
             self.all_metrics["ftpo/chosen_candidates"] = float(chosen.sum())
+            if boundary_modes is not None:
+                repair_mask = training_input.get("ftpo_repair_mask")
+                for mode in (
+                    FTPOBoundary.TAIL_LOOP,
+                    FTPOBoundary.REPEATED_TOOL_OPENER,
+                    FTPOBoundary.VERIFIED_CLOSURE_AND_CONTINUATION,
+                ):
+                    rows = [row for row, routed in enumerate(boundary_modes) if routed == mode]
+                    prefix = f"ftpo/routes/{mode.value}"
+                    self.all_metrics.update(
+                        {
+                            f"{prefix}/rows": float(len(rows)),
+                            f"{prefix}/eligible_rows": float(sum(eligible[row] for row in rows)),
+                            f"{prefix}/selected_boundaries": float(chosen[rows].any(-1).sum()),
+                            f"{prefix}/target_weight": float(weights[rows].sum()),
+                            f"{prefix}/repair_tokens": 0.0 if repair_mask is None else float(repair_mask[rows].sum()),
+                        }
+                    )
             if closure_targets is not None:
                 self.all_metrics.update(
                     closure_target_metrics(
@@ -2666,7 +2731,7 @@ class RayPPOTrainer:
 
                 if key == "is_last_step":
                     padding_tensor = torch.ones(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
-                elif key == "loss_mask":
+                elif key in ("loss_mask", "ftpo_weights"):
                     # ensures that padding tensors don't count towards the loss
                     padding_tensor = torch.zeros(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
                 else:

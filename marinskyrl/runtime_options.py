@@ -72,6 +72,7 @@ def reference_model_required(algorithm: Mapping[str, Any]) -> bool:
         or algorithm.get("use_kl_in_reward")
         or algorithm.get("policy_loss_type") == PolicyLossType.FTPO
         or algorithm.get("policy_loss_type") == PolicyLossType.DPO
+        or algorithm.get("ftpo", {}).get("auxiliary_weight") is not None
     )
 
 

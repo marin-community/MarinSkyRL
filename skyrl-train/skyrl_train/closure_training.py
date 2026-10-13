@@ -40,6 +40,8 @@ def closure_target_metrics(
     for row, (verification, boundary) in enumerate(zip(verifications, targets.boundaries, strict=True)):
         if verification is None or verification.status != VerificationStatus.VERIFIED:
             continue
+        if "closure" not in verification.diagnostics:
+            continue
         contract = verification.diagnostics["closure"]
         prefix = f"closure/targets/{contract['family']}/{contract['control']}"
         counts = {
@@ -86,6 +88,8 @@ def closure_training_targets(
         repairs.append(None)
         if not allowed or verification is None or verification.status != VerificationStatus.VERIFIED:
             continue
+        if boundary == FTPOBoundary.MIXED and "closure" not in verification.diagnostics:
+            continue
         contract = ClosurePrompt.model_validate(
             {**verification.diagnostics["closure"], "prompt_token_ids": list(prompt)}
         )
@@ -104,7 +108,7 @@ def closure_training_targets(
             and verification.diagnostics.get("stop_reason") == "stop"
         ):
             content_response = response[:-1]
-        if boundary == FTPOBoundary.VERIFIED_CLOSURE_AND_CONTINUATION:
+        if boundary in (FTPOBoundary.VERIFIED_CLOSURE_AND_CONTINUATION, FTPOBoundary.MIXED):
             continuation = verified_continuation_boundary(
                 prompt,
                 content_response,
