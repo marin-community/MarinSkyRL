@@ -1,9 +1,36 @@
-"""Daytona credential selection for task backends."""
+"""Credential selection for task backends and remote graders."""
 
 import pytest
 from omegaconf import OmegaConf
 
 import cloud.iris.iris_backend as launcher
+
+
+@pytest.mark.parametrize("export", [False, True])
+def test_judge_secret_is_resolved_for_training_without_mutating_launch_config(monkeypatch, export):
+    config = OmegaConf.create(
+        {
+            "runtime": {
+                "entrypoint": launcher.CHECKPOINT_EXPORT_ENTRYPOINT if export else "train",
+                "task_env": {"SETTING": 1},
+            },
+            "skyrl": {"environment": {"task_sessions": {"remote_judge": {"api_key_env": "JUDGE_TEST_KEY"}}}},
+        }
+    )
+    serialized = OmegaConf.to_yaml(config)
+    monkeypatch.setenv("JUDGE_TEST_KEY", "secret-at-submission")
+    monkeypatch.setenv("UNRELATED_SECRET", "do-not-forward")
+    expected = {"SETTING": "1"}
+    if not export:
+        expected["JUDGE_TEST_KEY"] = "secret-at-submission"
+    assert launcher.config_task_environment(config) == expected
+    assert OmegaConf.to_yaml(config) == serialized
+    monkeypatch.delenv("JUDGE_TEST_KEY")
+    if export:
+        assert launcher.config_task_environment(config) == expected
+    else:
+        with pytest.raises(KeyError, match="JUDGE_TEST_KEY"):
+            launcher.config_task_environment(config)
 
 
 def test_resolve_daytona_rl_api_key_prefers_explicit_rl_key(monkeypatch):

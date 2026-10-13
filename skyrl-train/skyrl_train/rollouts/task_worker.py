@@ -2,6 +2,7 @@
 
 import asyncio
 import math
+import os
 import shutil
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -20,6 +21,7 @@ from shellbox.backends.shellsim.machine import ShellSimMachineFactory
 from shellbox.machine import Backend, Machine, MachineFactory
 from taskcompendium.grading_result import Outcome
 from taskcompendium.models import NoGrader
+from verifyit.modes.grade_judge import JudgeConnection
 from rolloutengine.contracts import (
     GenerationLimitReached,
     ModelRequest,
@@ -242,6 +244,16 @@ def _failed_rollout(
     )
 
 
+@dataclass(frozen=True)
+class RemoteJudgeSettings:
+    base_url: str
+    api_key_env: str
+
+    def connection(self) -> JudgeConnection:
+        """Resolve the judge credential on the rollout worker, outside task data."""
+        return JudgeConnection(self.base_url, os.environ[self.api_key_env])
+
+
 class TaskRolloutWorker:
     """Run canonical task rollouts and submit complete groups to the buffer."""
 
@@ -261,9 +273,11 @@ class TaskRolloutWorker:
         *,
         shutdown_timeout: float,
         installed_agents: InstalledAgentWorker | None = None,
+        judge_connection: JudgeConnection | None = None,
     ):
         self.trajectory_runner_cfg = trajectory_runner_cfg
         self.model_client = model_client
+        self.judge_connection = judge_connection
         self.factories = {name: OwnedMachineFactory(factory, name) for name, factory in factories.items()}
         self.active_requests: set[asyncio.Task] = set()
         self.closing = False
@@ -369,9 +383,12 @@ class TaskRolloutWorker:
                     self.factories,
                     sessions=self.sessions,
                     agent=partial(self.installed_agents.run, lowered=lowered, session_id=session_id),
+                    judge_connection=self.judge_connection,
                 )
                 if harbor is not None and self.installed_agents is not None
-                else ShellboxRolloutEngine(model, self.factories, sessions=self.sessions)
+                else ShellboxRolloutEngine(
+                    model, self.factories, sessions=self.sessions, judge_connection=self.judge_connection
+                )
             )
             harbor_slots = (
                 nullcontext()
@@ -517,6 +534,8 @@ class TaskRolloutWorkerSpec:
         )
 
     def build(self, tokenizer, shard: WorkerShard) -> TaskRolloutWorker:
+        judge_config = self.config.environment.task_sessions.get("remote_judge")
+        judge = None if judge_config is None else RemoteJudgeSettings(**dict(judge_config)).connection()
         harbor = None if self.harbor_config is None else HarborTaskSettings.from_config(self.harbor_config)
         runner_config = self.config.generator
         client_config = OmegaConf.merge(self.config, {"generator": {"enable_http_endpoint": False}})
@@ -564,4 +583,5 @@ class TaskRolloutWorkerSpec:
             sessions=self.sessions,
             shutdown_timeout=float(self.config.trajectory_runner.shutdown_timeout),
             installed_agents=installed_agents,
+            judge_connection=judge,
         )

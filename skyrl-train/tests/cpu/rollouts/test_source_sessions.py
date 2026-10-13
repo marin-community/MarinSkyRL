@@ -4,6 +4,7 @@ import shutil
 from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
+import httpx
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
@@ -12,11 +13,14 @@ from skyrl_gym.verification import VerificationStatus
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
 from shellbox.machine import Backend, ExitReason, Result, ShellSimBuiltins, UnsupportedMachineSpec
 from taskcompendium.models import Source
+from taskcompendium.grader import verifyit_package
+from rolloutengine.spec import LoweredTaskSpec
+from verifyit.spec import JudgeSpec
 from skyrl_train.rollouts.task_projections import StepTaskProjection, WholeTaskProjection
 from skyrl_train.dataset.tasks import SourceTaskDataset, source_row_task
 from skyrl_train.dataset.nemotron_ultra import NemotronTaskDataset
 from skyrl_train.rollouts.buffer import RolloutLease, RolloutTask
-from skyrl_train.rollouts.task_worker import TaskRolloutWorker
+from skyrl_train.rollouts.task_worker import RemoteJudgeSettings, TaskRolloutWorker
 from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
 from skyrl_gym.source_task import source_task
 from skyrl_train.config.utils import get_default_config
@@ -25,7 +29,64 @@ from skyrl_train.trajectory_runners.types import TrajectoryID
 from skyrl_train.trajectory_runners.trajectory_processing import validate_trajectory_batch
 from skyrl_train.trajectory_runners.model_clients import DirectModelClient, ModelServerError
 from skyrl_train.rollout_observability import observe_rollout_call
-from tests.cpu.rollouts.engine_fakes import ConversationClient, InferenceClient, Tokenizer, Writer
+from tests.cpu.rollouts.engine_fakes import ConversationClient, FixtureImageFactory, InferenceClient, Tokenizer, Writer
+
+
+@pytest.mark.asyncio
+async def test_worker_remote_judge_uses_runtime_secret_and_emits_training_reward(task_inputs, monkeypatch):
+    config, request = task_inputs
+    task = LoweredTaskSpec.model_validate_json(request["env_extras"][0]["lowered_task_spec"])
+    grader = verifyit_package(
+        JudgeSpec(
+            rubric="labels",
+            model="fixture-judge",
+            references=("12",),
+            system_prompt="Grade the answer",
+            prompt_template="{reference}\n{candidate}",
+            label_scores={"PASS": 1.0, "FAIL": 0.0},
+        ),
+        environment=NATIVE_ENVIRONMENT,
+    ).grader
+    task = lowered_task(task.task.model_copy(update={"grader": grader}), verifier_backend="docker")
+    request["env_extras"][0]["lowered_task_spec"] = task.model_dump_json()
+    monkeypatch.setenv("TEST_ROLLOUT_JUDGE_KEY", "worker-only-secret")
+    settings = RemoteJudgeSettings("https://judge.invalid/v1", "TEST_ROLLOUT_JUDGE_KEY")
+    observed = []
+
+    def send(client, outbound, **kwargs):
+        observed.append(outbound)
+        return httpx.Response(
+            200,
+            request=outbound,
+            json={
+                "id": "judge",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "fixture-judge",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "PASS"}, "finish_reason": "stop"}],
+            },
+        )
+
+    monkeypatch.setattr(httpx.Client, "send", send)
+    worker = TaskRolloutWorker(
+        config,
+        WholeTaskProjection(config, Tokenizer()),
+        InferenceClient(),
+        {"docker": FixtureImageFactory()},
+        shutdown_timeout=30,
+        judge_connection=settings.connection(),
+    )
+    writer = Writer()
+    try:
+        await worker.run_task(RolloutTask(RolloutLease("judge", 0, 1), {"uid": task.task.id}, request), writer)
+    finally:
+        await worker.shutdown()
+    batch = writer.groups[0][1].trajectory_batch
+    assert batch["rewards"] == [1.0]
+    assert batch["loss_masks"] == [[1, 1]]
+    assert observed[0].headers["authorization"] == "Bearer worker-only-secret"
+    assert "worker-only-secret" not in repr(request)
+    assert "worker-only-secret" not in repr(settings)
 
 
 @pytest.mark.asyncio

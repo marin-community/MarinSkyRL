@@ -11,7 +11,7 @@ version = "0.1.0"
 description = "Marin's typed launcher and RL training runtime"
 requires-python = "==3.12.*"
 dependencies = [
-"marin-verifyit[math,schema,reasoning-gym,judge] @ git+https://github.com/marin-community/marin.git@89d57c0ff0f16047258164aeaeb97e355820b6ee#subdirectory=lib/verifyit",
+"marin-verifyit[math,schema,reasoning-gym,judge] @ git+https://github.com/marin-community/marin.git@929b6e7fbdf4cc6a62b680ad0331dfaea6b38ab2#subdirectory=lib/verifyit",
     "aiohttp>=3.13.3",
     "boto3",
     "datasets>=4.0.0",
@@ -36,8 +36,8 @@ dependencies = [
     "marin-iris>=0.2.144.dev37540375919",
     "marin-iris-native",
     "marin-rigging[secrets]>=0.2.144.dev37540375919",
-    "marin-rolloutengine @ git+https://github.com/marin-community/marin.git@89d57c0ff0f16047258164aeaeb97e355820b6ee#subdirectory=lib/rolloutengine",
-    "marin-shellbox[daytona,shellsim] @ git+https://github.com/marin-community/marin.git@89d57c0ff0f16047258164aeaeb97e355820b6ee#subdirectory=lib/shellbox",
+    "marin-rolloutengine @ git+https://github.com/marin-community/marin.git@929b6e7fbdf4cc6a62b680ad0331dfaea6b38ab2#subdirectory=lib/rolloutengine",
+    "marin-shellbox[daytona,shellsim] @ git+https://github.com/marin-community/marin.git@929b6e7fbdf4cc6a62b680ad0331dfaea6b38ab2#subdirectory=lib/shellbox",
     "ninja",
     "nvidia-ml-py",
     "omegaconf",
@@ -54,7 +54,7 @@ dependencies = [
     "s3fs",
     "smart_open",
     "tensorboard",
-    "marin-taskcompendium @ git+https://github.com/marin-community/marin.git@89d57c0ff0f16047258164aeaeb97e355820b6ee#subdirectory=lib/taskcompendium",
+    "marin-taskcompendium @ git+https://github.com/marin-community/marin.git@929b6e7fbdf4cc6a62b680ad0331dfaea6b38ab2#subdirectory=lib/taskcompendium",
     "tqdm>=4.66",
     "tokenizers==0.23.1",
     "transformers==5.16.1",
