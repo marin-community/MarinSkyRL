@@ -200,7 +200,6 @@ async def test_evaluate_exports_public_results_and_expected_metrics(dummy_config
     assert "private-verifier-reason" not in saved
     assert "private-key" not in saved
     records = [json.loads((dump / f"dataset_{name}.jsonl").read_text()) for name in ("a", "b")]
-    # Identical decoded prompts must retain distinct identities and exact tokens.
     assert records[0]["input_prompt"] == records[1]["input_prompt"]
     assert records[0]["uid"] != records[1]["uid"]
     assert [record["prompt_token_ids"] for record in records] == [[101], [102]]
