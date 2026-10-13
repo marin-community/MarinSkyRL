@@ -2,7 +2,7 @@ Native tasks with RolloutEngine
 ===============================
 
 The ``taskcompendium`` entrypoint executes native TaskCompendium tasks through
-Marin's ``ShellboxRolloutEngine`` and SkyRL's common task worker.
+Marin's ``RolloutEngine`` and SkyRL's common task worker.
 
 This entrypoint supports single-stage tasks and whole-rollout or step-wise training. Multiple
 model turns can occur within one task. Shell commands use the ``docker`` backend.

@@ -1,11 +1,11 @@
 Canonical task rollouts
 =======================
 
-``TaskRolloutWorker`` runs TaskCompendium tasks through Marin's ``ShellboxRolloutEngine``.
+``TaskRolloutWorker`` runs TaskCompendium tasks through Marin's ``RolloutEngine``.
 The engine owns model calls, conversation and exact-token accumulation, deadlines, and resource cleanup.
 The worker controls concurrency, retries, group grading, and training projections.
 
-``ShellboxRolloutEngine.run(lowered)`` asynchronously executes one task. The worker
+``RolloutEngine.run(lowered)`` asynchronously executes one task. The worker
 starts one coroutine for each task, and inference runs on the worker's event
 loop. Synchronous graders use a separate executor. Shellbox commands use asynchronous machine operations.
 ``trajectory_runner.max_concurrent_tasks`` limits active task coroutines.
@@ -47,6 +47,8 @@ teacher routes, and source labels. A teacher route identifies the configured tea
 
 The worker supplies explicit factories from ``skyrl_gym/task_factories.py``.
 Each factory creates a direct implementation of Marin's ``TaskSession`` protocol.
+The engine passes a ``TaskSessionContext`` to each factory. ``skyrl-gym`` sessions grade
+themselves; the installed Harbor-agent session uses the context's task grader.
 The session prepares the task, executes model actions, returns observations, and grades the result.
 The engine creates its Shellbox machine and closes the session before the machine.
 Pure answer graders use ``runtime.task_machine=None`` and do not create a machine.
@@ -132,7 +134,9 @@ next prompt to start with ``[1, 2, 3, 4]``.
 The engine gives model tokens a loss mask of ``1``. It gives observation and
 chat-boundary tokens a mask of ``0`` and a log probability of ``0``.
 It does not reconstruct sampled responses from text or add sampled EOS tokens.
-Sessions cannot replace sampled actions with different text.
+The engine records the sampled assistant message before calling the session's
+``advance`` method. Sessions can parse it and choose the next prompt, but cannot
+replace that recorded message with different text.
 Token-contract violations abort the prompt group.
 
 One transition follows each model response, including the final response.

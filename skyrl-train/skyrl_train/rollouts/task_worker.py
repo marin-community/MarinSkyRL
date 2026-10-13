@@ -30,11 +30,11 @@ from rolloutengine.contracts import (
     RolloutInterrupted,
     RolloutOperation,
     TaskSession,
-    TaskGrader,
+    TaskSessionContext,
     TaskSessionFactory,
     SessionStart,
 )
-from rolloutengine.engine import ShellboxRolloutEngine
+from rolloutengine.engine import RolloutEngine
 from rolloutengine.spec import LoweredTaskSpec
 from rolloutengine.lowering import SHELLBOX_SESSION, validate_lowered_task
 from skyrl_train.dataset.tasks import LOWERED_TASK_COLUMN
@@ -106,12 +106,10 @@ SKYRL_AGENT_SESSION = "skyrl_agent"
 def _agent_session_factory(
     runtime: InstalledAgentWorker,
     session_id: str,
-    lowered: LoweredTaskSpec,
-    machine: Machine | None,
-    grader: TaskGrader,
+    context: TaskSessionContext,
 ) -> TaskSession:
-    runner = partial(runtime.run, machine, lowered=lowered, session_id=session_id)
-    return AgentTaskSession(runner, grader)
+    runner = partial(runtime.run, context.machine, lowered=context.lowered, session_id=session_id)
+    return AgentTaskSession(runner, context.require_task_grader())
 
 
 async def _model_turn(
@@ -404,7 +402,7 @@ class TaskRolloutWorker:
                     session_id=session_id,
                 )
 
-            engine = ShellboxRolloutEngine(
+            engine = RolloutEngine(
                 model,
                 self.factories,
                 sessions=selected_sessions[index],

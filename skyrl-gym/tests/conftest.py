@@ -18,7 +18,7 @@ import pytest
 import pytest_asyncio
 import psutil
 from rolloutengine.contracts import ModelTurn
-from rolloutengine.engine import ShellboxRolloutEngine
+from rolloutengine.engine import RolloutEngine
 from shellbox.machine import Backend, Command, ExitReason, Result
 from rolloutengine.spec import LoweredTaskSpec, MachineRuntimeSpec, TaskRuntimeSpec, TaskSessionSpec
 from skyrl_gym.source_task import source_task
@@ -312,7 +312,7 @@ async def rollout_session(task_lowering):
                 {} if config is None else config,
                 Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
             )
-            engine = ShellboxRolloutEngine(model, {"local": Factory()}, sessions=session_factories())
+            engine = RolloutEngine(model, {"local": Factory()}, sessions=session_factories())
             return await engine.run(task_lowering(task, name, max_turns=max_turns))
 
         try:

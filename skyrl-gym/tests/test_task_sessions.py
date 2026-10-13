@@ -4,7 +4,7 @@ import json
 
 import pytest
 from rolloutengine.contracts import ModelTurn
-from rolloutengine.engine import ShellboxRolloutEngine
+from rolloutengine.engine import RolloutEngine
 from taskcompendium.grading_result import Outcome
 from rolloutengine.spec import LoweredTaskSpec, TaskRuntimeSpec, TaskSessionSpec
 from skyrl_gym.source_task import source_task
@@ -38,7 +38,7 @@ class ReplayModel:
 
 
 def engine(model):
-    return ShellboxRolloutEngine(model, {}, sessions=session_factories())
+    return RolloutEngine(model, {}, sessions=session_factories())
 
 
 def task(name, extras, config=None):

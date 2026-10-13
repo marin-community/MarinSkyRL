@@ -4,7 +4,7 @@ from collections.abc import Callable
 from concurrent.futures import Executor
 from functools import partial
 
-from rolloutengine.contracts import TaskGrader, TaskSession, TaskSessionFactory
+from rolloutengine.contracts import TaskSession, TaskSessionContext, TaskSessionFactory
 from shellbox.machine import Machine
 from rolloutengine.spec import LoweredTaskSpec
 
@@ -33,8 +33,8 @@ from skyrl_gym.tool_protocol_task import ToolProtocolReplaySession
 def self_grading_session(factory: Callable[[LoweredTaskSpec, Machine | None], TaskSession]) -> TaskSessionFactory:
     """Adapt a session that implements its own grading logic."""
 
-    def create(lowered: LoweredTaskSpec, machine: Machine | None, _default_grader: TaskGrader) -> TaskSession:
-        return factory(lowered, machine)
+    def create(context: TaskSessionContext) -> TaskSession:
+        return factory(context.lowered, context.machine)
 
     return create
 

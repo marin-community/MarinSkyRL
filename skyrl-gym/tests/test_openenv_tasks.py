@@ -10,7 +10,7 @@ from pathlib import Path
 import psutil
 import pytest
 import pytest_asyncio
-from rolloutengine.engine import ShellboxRolloutEngine
+from rolloutengine.engine import RolloutEngine
 from rolloutengine.spec import LoweredTaskSpec
 from skyrl_gym.source_task import source_task
 from taskcompendium.models import Source
@@ -169,10 +169,10 @@ async def test_openenv_engine_preserves_tokens_and_releases_server(openenv_sessi
     async def model(request):
         return model_turn("<action>done</action>")
 
-    engine = ShellboxRolloutEngine(
+    engine = RolloutEngine(
         factories={"local": Factory()},
         model=model,
-        sessions={"openenv": lambda _task, _machine, _grader: case.session},
+        sessions={"openenv": lambda _context: case.session},
     )
     rollout = await engine.run(case.task)
     assert rollout.grade.reward == 0.25
