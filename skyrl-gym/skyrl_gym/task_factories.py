@@ -28,6 +28,7 @@ from skyrl_gym.task_sessions import (
 from skyrl_gym.nemotron_tasks import NemotronTaskSession
 from skyrl_gym.sql_tasks import SQLTaskSession, SeededSQLTaskSession
 from skyrl_gym.tool_protocol_task import ToolProtocolReplaySession
+from skyrl_gym.closure_task import STRUCTURE_CLOSURE_SESSION, ClosureReplaySession
 
 
 def adapt_self_grading_session(factory: Callable[[LoweredTaskSpec, Machine | None], TaskSession]) -> TaskSessionFactory:
@@ -65,5 +66,6 @@ def session_factories(*, executor: Executor | None = None) -> dict[str, TaskSess
         "text2sql": partial(SQLTaskSession, executor=executor),
         "text_to_sql": partial(SeededSQLTaskSession, executor=executor),
         "tool_protocol_replay": ToolProtocolReplaySession,
+        STRUCTURE_CLOSURE_SESSION: ClosureReplaySession,
     }
     return {name: adapt_self_grading_session(factory) for name, factory in constructors.items()}

@@ -2,7 +2,6 @@
 
 from collections.abc import Sequence
 
-import numpy as np
 from rolloutengine.contracts import ModelTurn, Transition
 from taskcompendium.grading_result import GradeResult, Outcome
 
@@ -30,9 +29,7 @@ def rollout_evidence(turn: ModelTurn) -> RolloutEvidence:
         response=turn.text,
         stop_reason=turn.stop_reason,
         generated_token_count=len(turn.response_token_ids),
-        prompt_token_ids=turn.prompt_token_ids,
         response_token_ids=turn.response_token_ids,
-        behavior_logprobs=None if turn.logprobs is None else np.asarray(turn.logprobs, dtype=np.float32),
         metadata=turn.metadata,
     )
 

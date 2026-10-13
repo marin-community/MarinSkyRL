@@ -31,7 +31,6 @@ from skyrl_train.rollouts.task_projections import StepTaskProjection, WholeTaskP
 from skyrl_train.dataset.tasks import TaskDataset, write_tasks
 from skyrl_train.dataset.protocol_replay import ReplayPartition, replay_tasks
 from skyrl_train.dataset.harbor import HarborTaskDataset
-from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection, WholeTrajectoryProjection
 from skyrl_train.rollouts.buffer import RolloutLease, RolloutTask
 from skyrl_train.rollouts.task_worker import TaskRolloutWorker
 from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
@@ -86,7 +85,7 @@ async def test_mixed_harbor_and_native_tasks_keep_separate_providers_and_machine
     }
     worker = TaskRolloutWorker(
         config,
-        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        WholeTaskProjection(config, Tokenizer()),
         InferenceClient(),
         {provider: Factory(provider) for provider in machines},
         harbor=settings,
@@ -188,9 +187,6 @@ async def test_disabled_harbor_verification_keeps_tokens_but_masks_training(
     assert LoweredTaskSpec.model_validate_json(extras["lowered_task_spec"]).task.resources.verifier == ()
     request.update(prompts=[prompt], env_classes=[env], env_extras=[extras], trajectory_ids=[TrajectoryID(uid, 0)])
     request["batch_metadata"] = BatchMetadata(0, phase)
-    projection = (
-        WholeTrajectoryProjection if projection_type is WholeTaskProjection else StepWiseTrajectoryProjection
-    )(config, Tokenizer())
 
     class ImageFactory:
         backend = Backend.DOCKER
@@ -202,7 +198,7 @@ async def test_disabled_harbor_verification_keeps_tokens_but_masks_training(
 
     worker = TaskRolloutWorker(
         config,
-        projection_type(projection),
+        projection_type(config, Tokenizer()),
         ConversationClient(["Done"]),
         {"harbor": ImageFactory()},
         harbor=settings,
@@ -351,7 +347,7 @@ async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected
     )
     worker = TaskRolloutWorker(
         config,
-        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        WholeTaskProjection(config, Tokenizer()),
         Client(),
         {"shellsim": Factory(), "verifier": VerifierFactory()},
         harbor=settings,
@@ -534,7 +530,7 @@ async def test_harbor_retry_policy_preserves_terminal_grades(task_inputs, phase,
     )
     worker = TaskRolloutWorker(
         config,
-        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        WholeTaskProjection(config, Tokenizer()),
         Client(),
         {"shellsim": Factory(), "verifier": VerifierFactory()},
         harbor=settings,
@@ -604,7 +600,7 @@ async def test_harbor_completion_reward_uses_the_engine_stop_reason(task_inputs,
     )
     worker = TaskRolloutWorker(
         config,
-        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        WholeTaskProjection(config, Tokenizer()),
         Client(),
         {"docker": FixtureImageFactory(), "harbor": FixtureImageFactory()},
         harbor=settings,
@@ -668,7 +664,7 @@ async def test_strict_harbor_parser_masks_only_the_affected_response(task_inputs
     )
     worker = TaskRolloutWorker(
         config,
-        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        WholeTaskProjection(config, Tokenizer()),
         InferenceClient(),
         {"docker": FixtureImageFactory(), "harbor": FixtureImageFactory()},
         harbor=settings,
@@ -725,7 +721,7 @@ async def test_harbor_concurrency_does_not_queue_gym_tasks(task_inputs, phase):
     )
     worker = TaskRolloutWorker(
         config,
-        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        WholeTaskProjection(config, Tokenizer()),
         WaitingClient(),
         {},
         harbor=HarborTaskSettings.from_config(OmegaConf.create({"harbor": {"n_concurrent_trials": 2}})),
@@ -851,7 +847,7 @@ async def test_harbor_source_materialization_runs_without_the_original_directory
     request.update(prompts=[prompt], env_classes=[env], env_extras=[extras], trajectory_ids=[TrajectoryID(uid, 0)])
     worker = TaskRolloutWorker(
         config,
-        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        WholeTaskProjection(config, Tokenizer()),
         client,
         {"docker": ImageFactory()},
         shutdown_timeout=30,

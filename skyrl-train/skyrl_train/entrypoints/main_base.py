@@ -612,23 +612,13 @@ class BasePPOExp:
             config=self.cfg,
         )
 
-    def _setup_trainer(self):
-        """Setup and return the trainer.
-
-        Instantiates the trainer and all the associated models for training.
-
-        Returns:
-            RayPPOTrainer: The trainer.
-        """
+    def _setup_trainer(self, tracker):
+        """Construct the trainer and models with the experiment's active tracker."""
         logger.info(self.get_cfg_as_str(self.cfg))
         os.makedirs(self.cfg.trainer.export_path, exist_ok=True)
         os.makedirs(self.cfg.trainer.ckpt_path, exist_ok=True)
 
         PolicyWorker, CriticWorker, RefWorker = self.get_worker_classes()
-
-        # NOTE (sumanthrh): Instantiate tracker before trainer init.
-        # We have custom validation before this step to give better error messages.
-        tracker = self.get_tracker()
 
         tokenizer = self.tokenizer
         from skyrl_train.teacher_runtime import prepare_distillation_runtime, start_distillation_runtime  # noqa: PLC0415
@@ -701,24 +691,18 @@ class BasePPOExp:
         # See agent_logs/2026-05-29_skyrl_uvloop_integration_and_robustness_research.md
         asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
 
-        trainer = None
-        try:
-            trainer = self._setup_trainer()
-            # Start the training loop
-            asyncio.run(trainer.train())
-        finally:
-            # Clean up any resources that were created, even if _setup_trainer()
-            # or train() failed.  When the skyrl_entrypoint actor dies (e.g. SIGABRT)
-            # and Ray retries it, the original actor's sub-actors (policy, ref,
-            # inference engines) may still hold GPUs.  Cleaning up here ensures
-            # those resources are released before the process exits.
-            if trainer is not None:
-                try:
-                    # train() owns normal teardown. This idempotent fallback covers
-                    # failures around the event-loop boundary.
-                    asyncio.run(trainer.shutdown())
-                except Exception as e:
-                    logger.warning(f"Error shutting down trainer: {e}")
+        with self.get_tracker() as tracker:
+            trainer = None
+            try:
+                trainer = self._setup_trainer(tracker)
+                asyncio.run(trainer.train())
+            finally:
+                # Release GPU actors before a Ray retry can start another attempt.
+                if trainer is not None:
+                    try:
+                        asyncio.run(trainer.shutdown())
+                    except Exception as e:
+                        logger.warning(f"Error shutting down trainer: {e}")
 
 
 @ray.remote(num_cpus=1, max_retries=0)

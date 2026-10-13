@@ -14,7 +14,6 @@ import asyncio
 import copy
 import math
 import os
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -28,67 +27,42 @@ from skyrl_train.distributed.megatron.grug_muonh import MegatronGrugMuonH, _offl
 from skyrl_train.distributed.megatron.megatron_utils import load_megatron_optimizer, offload_megatron_optimizer
 from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl_train.models.grug_moe import GRUG_ROUTER_BIAS_SUFFIX, GrugMoeConfig, GrugMoeForCausalLM
+from skyrl_train.models.grug_moe import GrugMoeForCausalLM
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.utils import initialize_ray
 from skyrl_train.utils.torch_utils import logprobs_from_logits
 from tests.gpu.grug_gpu_gates import require_hoppers
 from tests.gpu.grug_serving import (
+    GRUG_BIAS_NAMES as BIAS_NAMES,
+    GRUG_PARAMETER_NAMES as PARAMETER_NAMES,
+    GRUG_SERVING_EXPERT_INDEX_BY_NAME as SERVING_EXPERT_INDEX_BY_NAME,
     LM_HEAD_NAME,
     ROUTER_NAME,
-    STACKED_EXPERT_NAME,
     assert_engine_weights,
     grug_engine_client,
     rank0_validation_snapshot,
     rollout_training_batch,
 )
+from tests.gpu.grug_tiny_checkpoint import TOY_SHAPE, write_tiny_checkpoint
 from tests.gpu.utils import get_test_actor_config, init_worker_with_type
 
-TOKENIZER = "Qwen/Qwen2.5-0.5B-Instruct"
-NUM_LAYERS = 8
-NUM_EXPERTS = 8
 ROLLOUT_WORLD_SIZE = 2
 RESPONSE_LENGTH = 8
 PROMPT_LENGTH = 12
-SERVING_EXPERT_INDEX_BY_NAME = {
-    "model.layers.0.mlp.experts.0.gate_proj.weight": 0,
-    "model.layers.0.mlp.experts.5.gate_proj.weight": 5,
-}
-LONG_LAYER_Q_NAME = "model.layers.3.self_attn.q_proj.weight"
-ATTN_GATE_NAME = "model.layers.1.self_attn.attn_gate.weight"
-GATED_NORM_NAME = "model.layers.1.attn_gated_norm.up_proj.weight"
-FINAL_NORM_NAME = "model.norm.weight"
-EMBED_GATE_NAME = "model.embed_gated_norm.down_proj.weight"
-PARAMETER_NAMES = [
-    "model.layers.0.self_attn.q_proj.weight",
-    LONG_LAYER_Q_NAME,
-    ATTN_GATE_NAME,
-    GATED_NORM_NAME,
-    EMBED_GATE_NAME,
-    FINAL_NORM_NAME,
-    STACKED_EXPERT_NAME,
-    "model.layers.7.mlp.experts.down_proj.weight",
-    "model.layers.2.shared_expert.up_proj.weight",
-    LM_HEAD_NAME,
-    ROUTER_NAME,
-]
-BIAS_NAMES = [f"model.layers.{idx}{GRUG_ROUTER_BIAS_SUFFIX}" for idx in range(NUM_LAYERS)]
+
+
+def _spot_check_name(suffix: str) -> str:
+    """First broad-coverage parameter name with the given suffix."""
+    return next(name for name in PARAMETER_NAMES if name.endswith(suffix))
+
+
+ATTN_GATE_NAME = _spot_check_name(".self_attn.attn_gate.weight")
+GATED_NORM_NAME = _spot_check_name(".attn_gated_norm.up_proj.weight")
 LOGPROB_MAX_ABS_TOLERANCE = 2e-1
 LOGPROB_MEAN_ABS_TOLERANCE = 3e-2
 TRAIN_EVAL_LOGPROB_MAX_ABS_TOLERANCE = 1e-3
 
 
-TOY_SHAPE = dict(
-    hidden_size=64,
-    intermediate_size=64,
-    shared_expert_intermediate_size=64,
-    num_local_experts=NUM_EXPERTS,
-    num_hidden_layers=NUM_LAYERS,
-    num_attention_heads=2,
-    num_key_value_heads=1,
-    head_dim=64,
-    sliding_window=16,
-)
 # Snowball's attention geometry, expert count, and window at a fraction of its width and depth.
 SNOWBALL_LIKE_SHAPE = dict(
     hidden_size=2560,
@@ -104,39 +78,6 @@ SNOWBALL_LIKE_SHAPE = dict(
 # Snowball's width with few experts, so each expert sees as many tokens per micro-batch
 # as it does at full scale (about 700 for 2700-token rows across two EP ranks).
 SNOWBALL_LIKE_DENSE_EXPERTS_SHAPE = {**SNOWBALL_LIKE_SHAPE, "num_local_experts": 32}
-
-
-def _write_tiny_checkpoint(
-    path: Path,
-    max_position_embeddings: int = 128,
-    num_experts_per_tok: int = 2,
-    shape: dict | None = None,
-    vocab_size_multiple: int = 1,
-) -> None:
-    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
-    shape = TOY_SHAPE if shape is None else shape
-    config = GrugMoeConfig(
-        vocab_size=((len(tokenizer) + vocab_size_multiple - 1) // vocab_size_multiple) * vocab_size_multiple,
-        num_experts_per_tok=num_experts_per_tok,
-        max_position_embeddings=max_position_embeddings,
-        initializer_range=0.02,
-        qk_mult=1.37,
-        qk_mult_long_scale=1.1,
-        **shape,
-    )
-    torch.manual_seed(17)
-    model = GrugMoeForCausalLM(config)
-    with torch.no_grad():
-        # Non-trivial gates and router biases so the Megatron port has to reproduce them.
-        for module in model.modules():
-            if module.__class__.__name__ == "GrugMoeGatedNorm":
-                module.down_proj.weight.normal_(std=0.2)
-                module.up_proj.weight.normal_(std=0.2)
-        for layer in model.model.layers:
-            layer.self_attn.attn_gate.weight.normal_(std=0.2)
-            layer.mlp.router.bias.copy_(torch.linspace(-0.3, 0.3, config.num_local_experts))
-    model.save_pretrained(path, safe_serialization=True)
-    tokenizer.save_pretrained(path)
 
 
 def _config(model_path: str, *, world_size: int, pp: int, ep: int):
@@ -289,7 +230,7 @@ def test_grug_megatron_forward_matches_hf(tmp_path, world_size: int, pp: int, ep
     require_hoppers(world_size)
     model_path = tmp_path / "model"
     model_path.mkdir()
-    _write_tiny_checkpoint(model_path)
+    write_tiny_checkpoint(model_path)
     cfg = _config(str(model_path), world_size=world_size, pp=pp, ep=ep)
     pad_token_id = AutoTokenizer.from_pretrained(model_path).pad_token_id
     batch = _padded_batch(pad_token_id)
@@ -346,7 +287,7 @@ def test_grug_megatron_train_forward_matches_eval_forward(
     require_hoppers(world_size)
     model_path = tmp_path / "model"
     model_path.mkdir()
-    _write_tiny_checkpoint(
+    write_tiny_checkpoint(
         model_path, max_position_embeddings=16384, num_experts_per_tok=num_experts_per_tok, shape=shape
     )
     cfg = _config(str(model_path), world_size=world_size, pp=pp, ep=ep)
@@ -411,7 +352,7 @@ def test_grug_megatron_eval_forward_is_independent_of_peer_rank_batch(
     require_hoppers(world_size)
     model_path = tmp_path / "model"
     model_path.mkdir()
-    _write_tiny_checkpoint(
+    write_tiny_checkpoint(
         model_path, max_position_embeddings=4096, num_experts_per_tok=num_experts_per_tok, shape=shape
     )
     cfg = _config(str(model_path), world_size=world_size, pp=pp, ep=ep)
@@ -441,7 +382,7 @@ def test_grug_megatron_pp2_train_step_updates_weights_and_exports(tmp_path):
     require_hoppers(world_size)
     model_path = tmp_path / "model"
     model_path.mkdir()
-    _write_tiny_checkpoint(model_path)
+    write_tiny_checkpoint(model_path)
     cfg = _config(str(model_path), world_size=world_size, pp=2, ep=1)
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     batch = _padded_batch(tokenizer.pad_token_id)
@@ -485,7 +426,7 @@ def test_grug_megatron_four_gpu_pp2_disaggregated_rollout_train_broadcast_rollou
     require_hoppers(policy_world_size + ROLLOUT_WORLD_SIZE)
     model_path = tmp_path / "model"
     model_path.mkdir()
-    _write_tiny_checkpoint(model_path)
+    write_tiny_checkpoint(model_path)
     cfg = _config(str(model_path), world_size=policy_world_size, pp=2, ep=1)
     initialize_ray(cfg)
     client = grug_engine_client(cfg, str(model_path))
@@ -504,7 +445,7 @@ def test_grug_megatron_four_gpu_pp2_disaggregated_rollout_train_broadcast_rollou
         first_logprob = asyncio.run(client.generate(score_input))["prompt_logprobs"][0][-1][first_token]
 
         policy = _init_policy(cfg, policy_world_size)
-        names = [*PARAMETER_NAMES, *BIAS_NAMES, GATED_NORM_NAME]
+        names = [*PARAMETER_NAMES, *BIAS_NAMES]
         before = rank0_validation_snapshot(policy, names)
         _train_step(policy, rollout_training_batch(prompts, first_rollout))
         training = rank0_validation_snapshot(policy, names)
@@ -542,7 +483,7 @@ def test_grug_megatron_two_gpu_colocated_sleep_sync_preserves_grouped_experts(tm
     require_hoppers(world_size)
     model_path = tmp_path / "model"
     model_path.mkdir()
-    _write_tiny_checkpoint(model_path)
+    write_tiny_checkpoint(model_path)
     cfg = _config(str(model_path), world_size=world_size, pp=1, ep=2)
     cfg.trainer.placement.colocate_all = True
     if moe_backend == "flashinfer_cutlass":

@@ -12,6 +12,12 @@ from marinskyrl.runtime_options import PolicyLossType
 class FTPOBoundary(StrEnum):
     TAIL_LOOP = "tail_loop"
     REPEATED_TOOL_OPENER = "repeated_tool_opener"
+    VERIFIED_CLOSURE = "verified_closure"
+    VERIFIED_CLOSURE_AND_CONTINUATION = "verified_closure_and_continuation"
+
+    @property
+    def uses_verified_boundaries(self) -> bool:
+        return self in (FTPOBoundary.VERIFIED_CLOSURE, FTPOBoundary.VERIFIED_CLOSURE_AND_CONTINUATION)
 
 
 @dataclass(frozen=True)
@@ -28,6 +34,7 @@ class FTPOConfig:
     rejected_balance_strength: float = 0.3
     chosen_balance_strength: float = 0.5
     early_stopping_chosen_win: float | None = None
+    repair_sft_weight: float | None = None
 
 
 def ftpo_config(algorithm: DictConfig) -> FTPOConfig | None:
@@ -55,6 +62,10 @@ def ftpo_config(algorithm: DictConfig) -> FTPOConfig | None:
         )
     if config.early_stopping_chosen_win is not None and not 0 < config.early_stopping_chosen_win <= 1:
         raise ValueError("FTPO early_stopping_chosen_win must be in (0, 1]")
+    if config.repair_sft_weight is not None and (
+        not math.isfinite(config.repair_sft_weight) or config.repair_sft_weight <= 0
+    ):
+        raise ValueError("FTPO repair_sft_weight must be finite and positive")
     return config
 
 
@@ -63,6 +74,8 @@ def validate_ftpo(cfg: DictConfig) -> None:
     config = ftpo_config(cfg.trainer.algorithm)
     if config is None:
         return
+    if config.boundary.uses_verified_boundaries and config.repair_sft_weight is None:
+        raise ValueError("Verified closure training requires an explicit repair_sft_weight")
     algorithm = cfg.trainer.algorithm
     if cfg.trainer.strategy != "megatron":
         raise ValueError("FTPO requires the Megatron trainer")

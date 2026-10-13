@@ -19,7 +19,8 @@ import dataclasses
 from enum import Enum
 from functools import partial
 from pathlib import Path
-from typing import Any, Dict, List, Union
+from types import TracebackType
+from typing import Any, Dict, List, Self, Union
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 import pprint
@@ -28,6 +29,7 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 
 _WANDB_STEP_METRIC = "trainer/global_step"
+_WANDB_LOGGER_SHUTDOWN_TIMEOUT = 30
 
 
 @ray.remote
@@ -57,6 +59,9 @@ class WandbNodeLogger:
         )
         self.wandb = run
 
+    def close(self) -> None:
+        self.wandb.finish()
+
 
 # TODO(tgriggs): Test all backends.
 class Tracking:
@@ -69,6 +74,7 @@ class Tracking:
             assert backend in self.supported_backends, f"{backend} is not supported"
 
         self.logger = {}
+        self.remote_loggers = []
 
         if "wandb" in backends:
             import wandb
@@ -145,8 +151,6 @@ class Tracking:
             try:
                 # current_node_ip (head) is already set in __init__
                 nodes = ray.nodes()
-                self.remote_loggers = []
-
                 for node in nodes:
                     if not node["Alive"]:
                         continue
@@ -189,22 +193,32 @@ class Tracking:
             else:
                 logger_instance.log(data=data, step=step)
 
-    def __del__(self):
-        # NOTE (sumanthrh): We use a try-except block here while finishing tracking.
-        # This is because wandb often errors out with a BrokenPipeError when closing.
-        # https://github.com/wandb/wandb/issues/6449
-        # TODO (sumanthrh): Check if this is really needed. Trackers like wandb will automatically finish at program exit.
-        try:
-            if "wandb" in self.logger:
-                self.logger["wandb"].finish(exit_code=0)
-            if "swanlab" in self.logger:
-                self.logger["swanlab"].finish()
-            if "tensorboard" in self.logger:
-                self.logger["tensorboard"].finish()
-            if "mlflow" in self.logger:
-                self.logger["mlflow"].finish()
-        except Exception as e:
-            logger.warning(f"Attempted to finish tracking but got error {e}")
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exception_type: type[BaseException] | None,
+        _exception: BaseException | None,
+        _traceback: TracebackType | None,
+    ) -> None:
+        self.close(exit_code=0 if exception_type is None else 1)
+
+    def close(self, *, exit_code: int) -> None:
+        """Flush tracker backends without changing the workload's result."""
+        if self.remote_loggers:
+            try:
+                ray.get([actor.close.remote() for actor in self.remote_loggers], timeout=_WANDB_LOGGER_SHUTDOWN_TIMEOUT)
+            except Exception as error:
+                logger.warning("Remote W&B tracker shutdown failed: {}", error)
+        for name, backend in self.logger.items():
+            try:
+                if name == "wandb":
+                    backend.finish(exit_code=exit_code)
+                else:
+                    backend.finish()
+            except Exception as error:
+                logger.warning("Tracker backend {} shutdown failed: {}", name, error)
 
 
 class ConsoleLogger:

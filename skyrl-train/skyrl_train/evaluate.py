@@ -210,6 +210,7 @@ def _dump_eval_results(
             data_sources,
             rollouts.env_classes,
             metrics,
+            rollouts.uids,
         )
 
 

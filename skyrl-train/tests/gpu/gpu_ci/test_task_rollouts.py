@@ -14,7 +14,6 @@ from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.dataset.tasks import source_row_task
 from skyrl_train.rollouts.task_worker import TaskRolloutWorker
 from skyrl_train.rollouts.task_projections import WholeTaskProjection
-from skyrl_train.trajectory_runners.projections import WholeTrajectoryProjection
 from skyrl_train.trajectory_runners.model_clients import DirectModelClient
 from skyrl_train.trajectory_runners.base import TrajectoryRequestBatch
 from tests.gpu.utils import Timer, get_test_trajectory_request
@@ -154,7 +153,7 @@ async def run_trajectory_runner_end_to_end(
 
     trajectory_runner = TaskRolloutWorker(
         trajectory_runner_cfg=generator_cfg,
-        projection=WholeTaskProjection(WholeTrajectoryProjection(generator_cfg, tokenizer)),
+        projection=WholeTaskProjection(generator_cfg, tokenizer),
         model_client=DirectModelClient(inference_engine_client),
         factories={"docker": DockerMachineFactory()},
         max_verifier_workers=max_verifier_workers,

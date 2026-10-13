@@ -18,7 +18,7 @@ from skyrl_train.hf_export import (
 from skyrl_train.hf_export_schema import HFExportRequest, HFExportStatus
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils.trainer_utils import cleanup_old_checkpoints
-from skyrl_train.utils.utils import validate_hf_export_config
+from skyrl_train.config.callbacks import validate_hf_export_config
 
 
 def _trainer_config(
@@ -204,6 +204,25 @@ def test_default_hf_export_interval_tracks_checkpoint_override():
 
     assert cfg.trainer.hf_save_interval == 10
     validate_hf_export_config(cfg)
+
+
+def test_terminal_artifact_export_rejects_disabled_request_callback():
+    cfg = get_default_config()
+    cfg.trainer.export_hf_artifact = True
+    cfg.trainer.ckpt_interval = 1
+    cfg.trainer.hf_save_interval = -1
+
+    with pytest.raises(ValueError, match="Terminal HF artifact export"):
+        validate_hf_export_config(cfg)
+
+    cfg.trainer.hf_save_interval = 2
+    validate_hf_export_config(cfg)
+    handler = DefaultCallbackHandler(cfg)
+    state = TrainerState(global_step=2, epoch=0, total_steps=2, num_steps_per_epoch=2)
+    control = handler.call_event("on_train_end", state, TrainerControl())
+
+    assert control.should_save
+    assert control.should_save_hf_model
 
 
 def test_request_rejects_operator_override_instead_of_ignoring_it(tmp_path):

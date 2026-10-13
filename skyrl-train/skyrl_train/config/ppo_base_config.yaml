@@ -535,8 +535,6 @@ trajectory_runner:
   cleanup_timeout: 30
   shutdown_timeout: 45
   max_concurrent_tasks: 32
-  skopeo: skopeo
-  image_cache: ~/.cache/skyrl/task-images
   # One worker pool executes all task families on the trainer's node.
   rollout_workers:
     num_workers: 4

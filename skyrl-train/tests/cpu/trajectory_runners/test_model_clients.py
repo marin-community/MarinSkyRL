@@ -166,10 +166,12 @@ async def test_direct_model_client_uses_vllm_chat_rendering_for_row_request_opti
                     "tools": [
                         {
                             "type": "function",
-                            "name": "search",
-                            "description": "Search",
-                            "parameters": {"type": "object"},
-                            "strict": True,
+                            "function": {
+                                "name": "search",
+                                "description": "Search",
+                                "parameters": {"type": "object"},
+                                "strict": True,
+                            },
                         }
                     ],
                     "parallel_tool_calls": False,

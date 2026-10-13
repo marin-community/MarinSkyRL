@@ -4,13 +4,15 @@ from typing import Any, Dict, List, Literal, NotRequired, Optional, TypedDict, U
 
 import numpy as np
 
-from skyrl_gym.verification import RewardResult, RolloutEvidence, TrainingDisposition, VerificationResult
+from skyrl_gym.verification import VerificationResult
 from skyrl_train.distillation import PreparedTeacherInput, TeacherEvidenceBatch
 from skyrl_train.inference_engines.base import ConversationType
 
 
 TrainingPhase = Literal["train", "eval"]
 REWARD_SHAPING_COMPONENT_NAMES = ("passthrough", "non_termination", "overlong", "successful_length")
+ROUTED_EXPERTS_KEY = "routed_experts"
+RESPONSE_SPAN_TAGS_KEY = "response_span_tags"
 
 
 class TokenProvenance(StrEnum):
@@ -18,21 +20,6 @@ class TokenProvenance(StrEnum):
 
     ENGINE = "engine"
     RECONSTRUCTED = "reconstructed"
-
-
-@dataclass
-class AgentLoopOutput:
-    """One normalized SkyRL-Gym interaction result."""
-
-    evidence: RolloutEvidence
-    verification: VerificationResult
-    reward: RewardResult
-    disposition: TrainingDisposition
-    loss_mask: List[int]
-    env_metrics: Dict[str, Any]
-    token_provenance: TokenProvenance = TokenProvenance.ENGINE
-    error_treatment: Optional[str] = None
-    response_span_tags: Optional[List[int]] = None
 
 
 @dataclass

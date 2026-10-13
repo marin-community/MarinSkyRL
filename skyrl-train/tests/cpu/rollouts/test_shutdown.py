@@ -25,7 +25,6 @@ from taskcompendium.models import (
     VerifierArtifact,
 )
 from skyrl_train.rollouts.task_projections import StepTaskProjection, WholeTaskProjection
-from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection, WholeTrajectoryProjection
 from skyrl_train.rollouts.buffer import RolloutLease, RolloutTask
 from skyrl_train.rollouts.task_worker import TaskRolloutWorker
 from skyrl_train.rollouts.group_grader import GroupGraderSpec
@@ -124,12 +123,9 @@ async def test_one_machine_cleanup_failure_does_not_abort_the_buffer_group(task_
             machines.append(machine)
             return Machine(machine) if len(machines) == 1 else machine
 
-    projection = (
-        WholeTrajectoryProjection if projection_type is WholeTaskProjection else StepWiseTrajectoryProjection
-    )(config, Tokenizer())
     worker = TaskRolloutWorker(
         config,
-        projection_type(projection),
+        projection_type(config, Tokenizer()),
         InferenceClient(),
         {"shellsim": Factory()},
         shutdown_timeout=30,
@@ -199,7 +195,7 @@ async def test_worker_shutdown_cancels_model_and_deletes_its_machine(task_inputs
 
     worker = TaskRolloutWorker(
         config,
-        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        WholeTaskProjection(config, Tokenizer()),
         Client(),
         {"fixture": Factory()},
         shutdown_timeout=30,
@@ -239,7 +235,7 @@ async def test_worker_shutdown_owns_late_creation_and_bounds_a_blocked_provider(
 
     worker = TaskRolloutWorker(
         config,
-        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        WholeTaskProjection(config, Tokenizer()),
         InferenceClient(),
         {"fixture-provider": Factory()},
         shutdown_timeout=0.05 if not complete_during_shutdown else 5,
@@ -378,12 +374,9 @@ async def test_agent_deadlines_grade_the_workspace_and_commit_training_tokens(
             ]
             return output
 
-    projection = (
-        WholeTrajectoryProjection if projection_type is WholeTaskProjection else StepWiseTrajectoryProjection
-    )(config, Tokenizer())
     worker = TaskRolloutWorker(
         config,
-        projection_type(projection),
+        projection_type(config, Tokenizer()),
         Client(),
         {"docker": Factory(), "harbor": Factory()},
         harbor=settings,
@@ -500,7 +493,7 @@ async def test_blocking_grader_cannot_extend_attempt_or_cleanup_deadlines(task_i
     request["env_classes"] = ["blocking"]
     worker = TaskRolloutWorker(
         config,
-        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        WholeTaskProjection(config, Tokenizer()),
         InferenceClient(),
         {},
         sessions={"blocking": partial(AnswerTaskSession, grader=grade)},
@@ -555,7 +548,7 @@ async def test_worker_shutdown_cancels_the_whole_request_before_buffer_commit(ta
         ).model_dump_json()
     worker = TaskRolloutWorker(
         config,
-        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        WholeTaskProjection(config, Tokenizer()),
         InferenceClient(),
         {},
         group_graders={"fixture": blocking_grader},
@@ -612,7 +605,7 @@ async def test_worker_shutdown_reports_late_provider_close_failure_without_unhan
 
     worker = TaskRolloutWorker(
         config,
-        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        WholeTaskProjection(config, Tokenizer()),
         InferenceClient(),
         {"fixture-provider": Factory()},
         shutdown_timeout=0.02,

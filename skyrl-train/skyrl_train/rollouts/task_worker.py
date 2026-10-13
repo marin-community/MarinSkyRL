@@ -1,13 +1,13 @@
 """TaskCompendium execution and projection into SkyRL training batches."""
 
 import asyncio
+import math
 import shutil
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from functools import partial
-from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
 
@@ -68,17 +68,14 @@ from skyrl_train.trajectory_runners.model_clients import (
     ModelClient,
     ModelServerError,
 )
-from skyrl_train.trajectory_runners.projections import (
-    StepWiseTrajectoryProjection,
-    WholeTrajectoryProjection,
-    logprobs_requested,
-)
 from skyrl_train.rollouts.task_projections import (
     StepTaskProjection,
     WholeTaskProjection,
+    logprobs_requested,
 )
 from skyrl_train.utils.harbor_errors import ErrorHandlingConfig
 from skyrl_train.trajectory_runners.types import (
+    ROUTED_EXPERTS_KEY,
     TokenProvenance,
     TrajectoryBatch,
     TrajectoryRequestBatch,
@@ -163,6 +160,8 @@ async def _model_turn(
     if output["token_provenance"] != TokenProvenance.ENGINE:
         raise RolloutContractError("The canonical rollout engine requires exact model tokens")
     logprobs = output.get("response_logprobs")
+    if logprobs is not None and any(not math.isfinite(value) for value in logprobs[0]):
+        raise RolloutContractError("Behavior logprobs must be finite")
     message = (
         {"role": "assistant", "content": output["responses"][0]}
         if request.prompt_token_ids is not None
@@ -180,7 +179,7 @@ async def _model_turn(
         metadata={
             **{
                 name: output[name][0]
-                for name in ("student_topk_indices", "behavior_topk_logprobs", "routed_experts")
+                for name in ("student_topk_indices", "behavior_topk_logprobs", ROUTED_EXPERTS_KEY)
                 if output.get(name) is not None
             },
             "generation_token_budget": (output.get("generation_token_budgets") or [None])[0],
@@ -462,7 +461,7 @@ class TaskRolloutWorker:
                     request,
                     self.harbor,
                     int(self.trajectory_runner_cfg.sampling_params.max_generate_length),
-                    self.projection.projection.tokenizer,
+                    self.projection.tokenizer,
                     harbor_tasks=[harbor is not None for harbor in harbor_settings],
                 )
         return rollouts
@@ -573,12 +572,8 @@ class TaskRolloutWorkerSpec:
                 int(runner_config.sampling_params.max_generate_length),
             )
         factories: dict[str, MachineFactory] = {"shellsim": ShellSimMachineFactory()}
-        skopeo = shutil.which(str(Path(self.config.trajectory_runner.skopeo).expanduser()))
-        if shutil.which("docker") is not None and skopeo is not None:
-            factories[Backend.DOCKER] = DockerMachineFactory(
-                skopeo=Path(skopeo),
-                image_cache=Path(self.config.trajectory_runner.image_cache).expanduser(),
-            )
+        if shutil.which("docker") is not None:
+            factories[Backend.DOCKER] = DockerMachineFactory()
         if harbor is not None:
             if harbor.environment.type != EnvironmentType.DOCKER:
                 factories[HARBOR_MACHINE_BACKEND] = harbor.machine_factory()
@@ -589,9 +584,9 @@ class TaskRolloutWorkerSpec:
         return TaskRolloutWorker(
             runner_config,
             (
-                StepTaskProjection(StepWiseTrajectoryProjection(runner_config, tokenizer))
+                StepTaskProjection(runner_config, tokenizer)
                 if self.config.trainer.step_wise_training
-                else WholeTaskProjection(WholeTrajectoryProjection(runner_config, tokenizer))
+                else WholeTaskProjection(runner_config, tokenizer)
             ),
             client,
             factories,

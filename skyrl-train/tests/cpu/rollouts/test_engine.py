@@ -14,7 +14,6 @@ from skyrl_gym.verification import VerificationResult, VerificationStatus
 from taskcompendium.grading_result import GradeResult, Outcome
 from taskcompendium.models import Source
 from skyrl_train.rollouts.task_projections import StepTaskProjection, WholeTaskProjection
-from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection, WholeTrajectoryProjection
 from skyrl_train.rollouts.buffer import RolloutLease, RolloutTask
 from skyrl_train.rollouts.task_worker import TaskRolloutWorker
 from skyrl_train.utils.harbor_errors import ErrorCategory, error_category
@@ -67,7 +66,7 @@ async def test_protocol_replay_uses_raw_prefix_and_keeps_infrastructure_unscored
 
     worker = TaskRolloutWorker(
         config,
-        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        WholeTaskProjection(config, Tokenizer()),
         DirectModelClient(Client()),
         {},
         shutdown_timeout=30,
@@ -111,12 +110,9 @@ async def test_session_verifier_failures_reach_training_eligibility(
     )
     request["env_extras"] = [{"lowered_task_spec": lowered_task(task, "verifier").model_dump_json()}]
     request["env_classes"] = ["verifier"]
-    projection = (
-        WholeTrajectoryProjection if projection_type is WholeTaskProjection else StepWiseTrajectoryProjection
-    )(config, Tokenizer())
     worker = TaskRolloutWorker(
         config,
-        projection_type(projection),
+        projection_type(config, Tokenizer()),
         InferenceClient(),
         {},
         sessions={"verifier": partial(AnswerTaskSession, grader=grader)},
@@ -152,7 +148,7 @@ async def test_task_replay_preserves_inference_session(task_inputs):
 
     worker = TaskRolloutWorker(
         config,
-        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        WholeTaskProjection(config, Tokenizer()),
         Client(),
         {},
         shutdown_timeout=30,
@@ -182,7 +178,7 @@ async def test_task_grade_and_exact_tokens_reach_the_leased_buffer(task_inputs, 
 
     runner = TaskRolloutWorker(
         config,
-        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        WholeTaskProjection(config, Tokenizer()),
         Client(),
         {},
         shutdown_timeout=30,
@@ -241,7 +237,7 @@ async def test_model_programming_failure_does_not_commit_a_partial_group(task_in
     )
     runner = TaskRolloutWorker(
         config,
-        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        WholeTaskProjection(config, Tokenizer()),
         FailedClient(),
         {},
         shutdown_timeout=30,
@@ -292,7 +288,7 @@ async def test_task_programming_failure_does_not_commit_a_masked_group(task_inpu
 
     worker = TaskRolloutWorker(
         config,
-        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        WholeTaskProjection(config, Tokenizer()),
         InferenceClient(),
         {},
         sessions={"fixture": Session},
@@ -342,10 +338,7 @@ async def test_model_template_failure_is_masked_without_losing_its_graded_peer(
         ],
         "trajectory_ids": [TrajectoryID(failed.id, 0), TrajectoryID("arithmetic", 0)],
     }
-    projection = (
-        WholeTrajectoryProjection if projection_type is WholeTaskProjection else StepWiseTrajectoryProjection
-    )(config, Tokenizer())
-    worker = TaskRolloutWorker(config, projection_type(projection), TemplateClient(), {}, shutdown_timeout=30)
+    worker = TaskRolloutWorker(config, projection_type(config, Tokenizer()), TemplateClient(), {}, shutdown_timeout=30)
     writer = Writer()
     try:
         await worker.run_task(RolloutTask(RolloutLease("lease", 0, 1), {"uid": failed.id}, request), writer)
@@ -452,12 +445,9 @@ async def test_interrupted_tasks_keep_verified_turns_and_apply_training_policy(
     request["env_extras"] = [{"lowered_task_spec": lowered_task(task, "interrupted").model_dump_json()}]
     request["env_classes"] = ["interrupted"]
     request["sampling_params"] = {"max_tokens": 3}
-    projection = (
-        WholeTrajectoryProjection if projection_type is WholeTaskProjection else StepWiseTrajectoryProjection
-    )(config, Tokenizer())
     worker = TaskRolloutWorker(
         config,
-        projection_type(projection),
+        projection_type(config, Tokenizer()),
         InterruptedClient(["first", "unverified"]),
         {},
         sessions={"interrupted": InterruptedSession},
@@ -497,7 +487,7 @@ async def test_interrupted_tasks_keep_verified_turns_and_apply_training_policy(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("violation", ["prefix", "logprobs", "provenance"])
+@pytest.mark.parametrize("violation", ["prefix", "logprobs", "provenance", "nan", "infinity"])
 async def test_invalid_model_evidence_aborts_the_group_even_with_error_masking(task_inputs, violation):
     class InvalidClient(ConversationClient):
         async def generate(self, request):
@@ -507,6 +497,8 @@ async def test_invalid_model_evidence_aborts_the_group_even_with_error_masking(t
                     output["prompt_ids"][0][0] = 99
                 elif violation == "logprobs":
                     output["response_logprobs"][0].pop()
+                elif violation in {"nan", "infinity"}:
+                    output["response_logprobs"][0][0] = float("nan" if violation == "nan" else "inf")
                 else:
                     output["token_provenance"] = TokenProvenance.RECONSTRUCTED
             return output
@@ -522,7 +514,7 @@ async def test_invalid_model_evidence_aborts_the_group_even_with_error_masking(t
     request["env_extras"] = [{"lowered_task_spec": lowered_task(task, "gsm8k_multi_turn").model_dump_json()}]
     worker = TaskRolloutWorker(
         config,
-        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        WholeTaskProjection(config, Tokenizer()),
         InvalidClient(["#### 13", "#### 12"]),
         {},
         shutdown_timeout=30,
@@ -550,7 +542,7 @@ async def test_overlong_filter_uses_sampled_end_tokens(task_inputs, stop_reason,
     config.apply_overlong_filtering = True
     worker = TaskRolloutWorker(
         config,
-        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        WholeTaskProjection(config, Tokenizer()),
         StoppedClient(),
         {},
         shutdown_timeout=30,
@@ -600,12 +592,9 @@ async def test_native_rewards_and_credit_remain_aligned_across_tool_observations
         Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
     )
     request["env_extras"] = [{"lowered_task_spec": lowered_task(task, "credit").model_dump_json()}]
-    projection = (
-        WholeTrajectoryProjection if projection_type is WholeTaskProjection else StepWiseTrajectoryProjection
-    )(config, Tokenizer())
     runner = TaskRolloutWorker(
         config,
-        projection_type(projection),
+        projection_type(config, Tokenizer()),
         ConversationClient(["first", "second"]),
         {},
         sessions={"credit": CreditSession},
@@ -639,7 +628,7 @@ async def test_step_projection_preserves_served_prompts_grades_and_teacher_route
     request["env_classes"] = ["gsm8k_multi_turn"]
     runner = TaskRolloutWorker(
         config,
-        StepTaskProjection(StepWiseTrajectoryProjection(config, Tokenizer())),
+        StepTaskProjection(config, Tokenizer()),
         ConversationClient(["#### 13", "#### 12"]),
         {},
         shutdown_timeout=30,
@@ -672,7 +661,7 @@ async def test_worker_keeps_blocking_inference_available_during_rollout(task_inp
     config, request = task_inputs
     worker = TaskRolloutWorker(
         config,
-        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        WholeTaskProjection(config, Tokenizer()),
         BlockingClient(),
         {},
         concurrent_tasks=1,

@@ -22,7 +22,6 @@ from taskcompendium.models import (
     TextMessage,
 )
 from skyrl_train.rollouts.task_projections import StepTaskProjection, WholeTaskProjection
-from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection, WholeTrajectoryProjection
 from skyrl_train.rollouts.buffer import RolloutLease, RolloutTask
 from skyrl_train.rollouts.task_worker import TaskRolloutWorker
 from skyrl_train.rollouts.group_grader import GenRMGroupGraderParameters, GroupGraderSpec, task_group_grader
@@ -102,12 +101,9 @@ async def test_harbor_task_worker_preserves_verdicts_and_shapes_group_rewards(
         trajectory_ids=[TrajectoryID("harbor", index) for index in range(2)],
         batch_metadata=BatchMetadata(0, phase),
     )
-    projection = (
-        WholeTrajectoryProjection if projection_type is WholeTaskProjection else StepWiseTrajectoryProjection
-    )(config, SpanTokenizer())
     worker = TaskRolloutWorker(
         config,
-        projection_type(projection),
+        projection_type(config, SpanTokenizer()),
         InferenceClient(),
         {"shellsim": FixtureImageFactory()},
         harbor=settings,
@@ -299,7 +295,7 @@ async def test_genrm_final_grades_and_credit_reach_training_batch(
 
     runner = TaskRolloutWorker(
         config,
-        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        WholeTaskProjection(config, Tokenizer()),
         CohortClient(["better", "failed", "worse"] if failed_peer else ["better", "worse"]),
         {},
         shutdown_timeout=30,
@@ -395,7 +391,7 @@ async def test_task_group_grader_preserves_separate_samples_and_private_inputs(t
     model = ConversationClient(["1", "2", "3", "4"])
     worker = TaskRolloutWorker(
         config,
-        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        WholeTaskProjection(config, Tokenizer()),
         model,
         {},
         concurrent_tasks=1,

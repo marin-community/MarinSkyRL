@@ -14,7 +14,11 @@ from skyrl_train.utils.trainer_utils import (
     build_eval_dataloader,
 )
 from skyrl_train.trajectory_runners.base import TrajectoryRequestBatch, TrajectoryBatch
-from skyrl_train.trajectory_runners.trajectory_processing import validate_trajectory_batch
+from skyrl_train.trajectory_runners.trajectory_processing import (
+    concatenate_trajectory_batches,
+    validate_trajectory_batch,
+)
+from skyrl_gym.verification import VerificationResult
 from typing import Union
 import ray
 import os
@@ -29,6 +33,33 @@ from skyrl_train.io import io
 from tests.cpu.util import example_dummy_config
 
 BasicType = Union[int, float, str, bool, type(None)]
+
+
+def test_batch_metrics_use_reward_sign_only_when_no_verdict_exists():
+    graded = {
+        "prompt_token_ids": [[1], [1]],
+        "response_ids": [[2], [2, 3]],
+        "loss_masks": [[1], [1, 1]],
+        "rewards": [1.0, 0.7],
+        "verification_results": [
+            VerificationResult.verified(1.0, passed=True),
+            VerificationResult.verified(0.0, passed=False),
+        ],
+    }
+    preference = {
+        "prompt_token_ids": [[1]],
+        "response_ids": [[2, 3, 4]],
+        "loss_masks": [[1, 1, 1]],
+        "rewards": [1.0],
+        "verification_results": [None],
+    }
+    joined = concatenate_trajectory_batches([graded, preference], tis_lcs_alert_threshold=0.005)
+
+    assert joined["rollout_metrics"]["generate/avg_tokens_non_zero_rewards"] == 2.0
+    assert joined["rollout_metrics"]["generate/avg_tokens_zero_rewards"] == 2.0
+    filtered = filter_trajectory_batch(joined, [2])
+    assert filtered["rollout_metrics"]["generate/avg_tokens_non_zero_rewards"] == 3.0
+    assert filtered["rollout_metrics"]["generate/avg_tokens_zero_rewards"] == 0.0
 
 
 class ListTokenizer:
@@ -267,10 +298,14 @@ def test_dump_per_dataset_eval_results_preserves_dataset_and_metrics(tmp_path):
     all_envs = ["env1", "env2", "env3"]
     eval_metrics = {"eval/dataset1/avg_score": 0.8, "eval/unknown/avg_score": 0.6}
 
-    dump_per_dataset_eval_results(str(tmp_path), tokenizer, trajectory_batches, data_sources, all_envs, eval_metrics)
+    dump_per_dataset_eval_results(
+        str(tmp_path), tokenizer, trajectory_batches, data_sources, all_envs, eval_metrics, ["first", "second", "third"]
+    )
     dataset_rows = [json.loads(line) for line in (tmp_path / "dataset1.jsonl").read_text().splitlines()]
     unknown_rows = [json.loads(line) for line in (tmp_path / "unknown.jsonl").read_text().splitlines()]
     assert [row["output_response"] for row in dataset_rows] == ["[10, 11]", "[14, 15]"]
+    assert [row["uid"] for row in dataset_rows] == ["first", "third"]
+    assert unknown_rows[0]["uid"] == "second"
     assert unknown_rows[0]["data_source"] == "unknown"
     assert json.loads((tmp_path / "aggregated_results.jsonl").read_text()) == eval_metrics
 
@@ -282,7 +317,7 @@ def test_eval_dump_writes_to_cloud_uri_without_corrupting_scheme(monkeypatch):
     tokenizer = ListTokenizer()
     batch = {"prompt_token_ids": [[1]], "response_ids": [[2]], "rewards": [1.0]}
 
-    dump_per_dataset_eval_results(directory, tokenizer, batch, ["aime_2024"], ["aime"], {"accuracy": 1.0})
+    dump_per_dataset_eval_results(directory, tokenizer, batch, ["aime_2024"], ["aime"], {"accuracy": 1.0}, ["first"])
 
     expected = "s3://bucket/users/exports/dumped_evals/global_step_2_evals"
     assert directory == expected
@@ -302,7 +337,9 @@ def test_dump_per_dataset_eval_results_preserves_error_disposition(tmp_path):
         "error_treatments": [None, "mask"],
     }
 
-    dump_per_dataset_eval_results(str(tmp_path), tokenizer, batch, ["aime_2024"] * 2, ["aime"] * 2, {})
+    dump_per_dataset_eval_results(
+        str(tmp_path), tokenizer, batch, ["aime_2024"] * 2, ["aime"] * 2, {}, ["first", "second"]
+    )
 
     rows = [json.loads(line) for line in (tmp_path / "aime_2024.jsonl").read_text().splitlines()]
     assert [(row["exception_type"], row["error_treatment"]) for row in rows] == [

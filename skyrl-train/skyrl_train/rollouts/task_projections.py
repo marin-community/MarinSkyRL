@@ -1,14 +1,16 @@
 """Convert common rollout records into whole-trajectory or per-step training data."""
 
 from collections.abc import Sequence
+import copy
 from dataclasses import dataclass, replace
 import json
 
 import numpy as np
+from omegaconf import DictConfig
+from transformers import PreTrainedTokenizerBase
 from skyrl_gym.verification import (
     VERIFIER_RUNTIME_ERROR,
     RewardResult,
-    RolloutEvidence,
     TrainingDisposition,
     VerificationResult,
 )
@@ -18,16 +20,21 @@ from rolloutengine.contracts import RolloutContractError, RolloutData
 
 from skyrl_train.error_treatment import ErrorTreatment
 from skyrl_train.dataset.tasks import LOWERED_TASK_COLUMN, TASKCOMPENDIUM_ENVIRONMENT
+from skyrl_train.distillation import INVALID_TOPK_INDEX
 from skyrl_train.metric_names import TASK_ROLLOUT_METRIC_PREFIX
-from skyrl_train.trajectory_runners.projections import (
-    StepWiseTrajectoryProjection,
-    WholeTrajectoryProjection,
-    logprobs_requested,
+from skyrl_train.trajectory_runners.trajectory_processing import (
+    apply_overlong_filtering,
+    get_batch_failure_metrics,
+    get_rollout_metrics,
+    scalar_reward_token_credit,
 )
-
-from skyrl_train.trajectory_runners.selected_topk import align_student_topk
-from skyrl_train.trajectory_runners.trajectory_processing import get_batch_failure_metrics
-from skyrl_train.trajectory_runners.types import AgentLoopOutput, TrajectoryBatch, TrajectoryRequestBatch
+from skyrl_train.trajectory_runners.selected_topk import AlignedStudentTopK, align_student_topk
+from skyrl_train.trajectory_runners.types import (
+    RESPONSE_SPAN_TAGS_KEY,
+    ROUTED_EXPERTS_KEY,
+    TrajectoryBatch,
+    TrajectoryRequestBatch,
+)
 from skyrl_train.utils.harbor_errors import (
     DEFAULT_ERROR_HANDLING_CONFIG,
     ErrorHandlingConfig,
@@ -37,6 +44,14 @@ from skyrl_train.utils.harbor_errors import (
 )
 
 MASKED_TOKEN_ID = 0
+
+
+@dataclass(frozen=True)
+class _TrainingDecision:
+    verification: VerificationResult
+    reward: RewardResult
+    disposition: TrainingDisposition
+    error_treatment: str | None
 
 
 def verification_result(grade: GradeResult) -> VerificationResult:
@@ -134,69 +149,40 @@ def _rollout_rewards(rollout: RolloutData) -> RewardResult:
     )
 
 
-def _model_evidence(rollout: RolloutData) -> RolloutEvidence:
+def _student_topk(rollout: RolloutData) -> AlignedStudentTopK | None:
     candidates = [step.turn.metadata.get("student_topk_indices") for step in rollout.steps]
     scores = [step.turn.metadata.get("behavior_topk_logprobs") for step in rollout.steps]
-    selected = None
-    if any(value is not None for value in (*candidates, *scores)):
-        if any(value is None for value in (*candidates, *scores)):
-            raise RolloutContractError("Student top-K evidence must be present on every model turn")
-        generated = []
-        admitted_candidates = []
-        admitted_scores = []
-        for step, step_candidates, step_scores in zip(rollout.steps, candidates, scores, strict=True):
-            start = step.response_end + 1 - len(step.turn.response_token_ids)
-            for offset, (token, ids, values) in enumerate(
-                zip(step.turn.response_token_ids, step_candidates, step_scores, strict=True)
-            ):
-                if rollout.loss_mask[start + offset]:
-                    generated.append(token)
-                    admitted_candidates.append(ids)
-                    admitted_scores.append(values)
-        selected = align_student_topk(
-            rollout.response_token_ids,
-            rollout.loss_mask,
-            generated,
-            admitted_candidates,
-            admitted_scores,
-        )
-    routes = [step.turn.metadata.get("routed_experts") for step in rollout.steps]
-    template = next((value for value in routes if value is not None), None)
-    routed_experts = None
-    if template is not None:
-        routed_experts = np.zeros((len(rollout.response_token_ids), *template.shape[1:]), dtype=template.dtype)
-        for step, values in zip(rollout.steps, routes, strict=True):
-            if values is not None:
-                if len(values) != len(step.turn.response_token_ids):
-                    raise ValueError("Expert routes must align with generated tokens")
-                routed_experts[step.response_end + 1 - len(values) : step.response_end + 1] = values
-    return RolloutEvidence(
-        messages=rollout.messages,
-        response=rollout.steps[-1].turn.text if rollout.steps else None,
-        stop_reason=rollout.stop_reason,
-        generated_token_count=sum(rollout.loss_mask),
-        prompt_token_ids=rollout.prompt_token_ids or (MASKED_TOKEN_ID,),
-        response_token_ids=rollout.response_token_ids or (MASKED_TOKEN_ID,),
-        behavior_logprobs=(
-            np.asarray([0.0], dtype=np.float32)
-            if not rollout.response_token_ids
-            else None
-            if rollout.logprobs is None
-            else np.asarray(rollout.logprobs, dtype=np.float32)
-        ),
-        student_topk_indices=None if selected is None else selected.indices,
-        behavior_topk_logprobs=None if selected is None else selected.topk_logprobs,
-        routed_experts=routed_experts,
+    if all(value is None for value in (*candidates, *scores)):
+        return None
+    if any(value is None for value in (*candidates, *scores)):
+        raise RolloutContractError("Student top-K evidence must be present on every model turn")
+    generated = []
+    admitted_candidates = []
+    admitted_scores = []
+    for step, step_candidates, step_scores in zip(rollout.steps, candidates, scores, strict=True):
+        start = step.response_end + 1 - len(step.turn.response_token_ids)
+        for offset, (token, ids, values) in enumerate(
+            zip(step.turn.response_token_ids, step_candidates, step_scores, strict=True)
+        ):
+            if rollout.loss_mask[start + offset]:
+                generated.append(token)
+                admitted_candidates.append(ids)
+                admitted_scores.append(values)
+    return align_student_topk(
+        rollout.response_token_ids,
+        rollout.loss_mask,
+        generated,
+        admitted_candidates,
+        admitted_scores,
     )
 
 
-def training_output(
+def _training_decision(
     rollout: RolloutData,
     error_handling: ErrorHandlingConfig,
     *,
     logprobs_required: bool,
-) -> AgentLoopOutput:
-    """Project token evidence and rewards with the configured training eligibility policy."""
+) -> _TrainingDecision:
     graded = rollout.grade.status in {Outcome.GRADED, Outcome.SUBMISSION_FAILURE}
     verification = verification_result(rollout.grade)
     if graded:
@@ -243,70 +229,245 @@ def training_output(
                 token_credit=None if reward.token_credit is None else (0.0,) * len(reward.token_credit),
                 components={},
             )
-    tagged_steps = [step.turn.metadata.get("response_span_tags") for step in rollout.steps]
-    response_span_tags = None
-    if any(tags is not None for tags in tagged_steps):
-        response_span_tags = [0] * len(rollout.response_token_ids)
-        for step, tags in zip(rollout.steps, tagged_steps, strict=True):
-            if tags is not None:
-                if len(tags) != len(step.turn.response_token_ids):
-                    raise ValueError("Span tags must align with generated tokens")
-                response_span_tags[step.response_end + 1 - len(tags) : step.response_end + 1] = tags
-    evidence = _model_evidence(rollout)
-    if evidence.behavior_logprobs is None and not disposition.loss_eligible:
-        evidence = replace(evidence, behavior_logprobs=np.zeros(len(rollout.response_token_ids), dtype=np.float32))
-    return AgentLoopOutput(
-        evidence=evidence,
-        verification=verification,
-        reward=reward,
-        disposition=disposition,
-        loss_mask=list(rollout.loss_mask) if rollout.response_token_ids else [0],
-        env_metrics=dict(rollout.metrics),
-        error_treatment=error_treatment,
-        response_span_tags=response_span_tags,
-    )
+    return _TrainingDecision(verification, reward, disposition, error_treatment)
 
 
 @dataclass(frozen=True)
 class WholeTaskProjection:
-    projection: WholeTrajectoryProjection
+    """Emit one training sample from each RolloutEngine record."""
+
+    runner_config: DictConfig
+    tokenizer: PreTrainedTokenizerBase
     error_handling: ErrorHandlingConfig = DEFAULT_ERROR_HANDLING_CONFIG
     harbor_error_handling: ErrorHandlingConfig | None = None
 
     def project(self, rollouts: Sequence[RolloutData], request: TrajectoryRequestBatch) -> TrajectoryBatch:
-        required = logprobs_requested(request, self.projection.runner_config)
+        required = logprobs_requested(request, self.runner_config)
         policies = _task_error_policies(request, self.error_handling, self.harbor_error_handling)
-        outputs = [
-            training_output(rollout, policy, logprobs_required=required)
+        decisions = [
+            _training_decision(rollout, policy, logprobs_required=required)
             for rollout, policy in zip(rollouts, policies, strict=True)
         ]
-        for index, environment in enumerate(request.get("env_classes") or []):
-            if environment == TASKCOMPENDIUM_ENVIRONMENT:
-                outputs[index] = replace(outputs[index], env_metrics={})
-        batch = self.projection.project(outputs, request)
+        batch = _training_batch(
+            rollouts, decisions, required, self.runner_config, self.tokenizer, request.get("env_classes")
+        )
         _merge_task_metrics(batch, rollouts, request)
         return batch
 
 
 @dataclass(frozen=True)
 class StepTaskProjection:
-    projection: StepWiseTrajectoryProjection
+    """Emit one training sample per model turn, with its exact served prompt."""
+
+    runner_config: DictConfig
+    tokenizer: PreTrainedTokenizerBase
     error_handling: ErrorHandlingConfig = DEFAULT_ERROR_HANDLING_CONFIG
     harbor_error_handling: ErrorHandlingConfig | None = None
 
     def project(self, rollouts: Sequence[RolloutData], request: TrajectoryRequestBatch) -> TrajectoryBatch:
-        required = logprobs_requested(request, self.projection.runner_config)
+        trajectory_ids = request.get("trajectory_ids")
+        if trajectory_ids is None:
+            raise ValueError("Per-turn training samples require trajectory_ids")
+        required = logprobs_requested(request, self.runner_config)
         policies = _task_error_policies(request, self.error_handling, self.harbor_error_handling)
-        outputs = [
-            _step_training_outputs(rollout, policy, logprobs_required=required)
-            for rollout, policy in zip(rollouts, policies, strict=True)
-        ]
-        for index, environment in enumerate(request.get("env_classes") or []):
-            if environment == TASKCOMPENDIUM_ENVIRONMENT:
-                outputs[index] = [replace(output, env_metrics={}) for output in outputs[index]]
-        batch = self.projection.project(outputs, request)
+        samples = []
+        decisions = []
+        projected_ids = []
+        final_steps = []
+        for rollout, policy, trajectory_id in zip(rollouts, policies, trajectory_ids, strict=True):
+            turns = _step_rollouts(rollout)
+            for index, sample in enumerate(turns):
+                last = index == len(turns) - 1
+                decision = _training_decision(sample, policy, logprobs_required=required)
+                if (
+                    not last
+                    and not sample.steps[0].transition.done
+                    and sample.grade.status == Outcome.UNAVAILABLE
+                    and not grade_skipped(sample.grade)
+                    and (rollout.grade.status == Outcome.GRADED or grade_skipped(rollout.grade))
+                    and rollout.failure is None
+                ):
+                    decision = replace(decision, disposition=TrainingDisposition.train())
+                samples.append(sample)
+                decisions.append(decision)
+                projected_id = copy.copy(trajectory_id)
+                projected_id.step = index
+                projected_ids.append(projected_id)
+                final_steps.append(last)
+        batch = _training_batch(samples, decisions, required, self.runner_config, self.tokenizer, None)
+        batch["trajectory_ids"] = projected_ids
+        batch["is_last_step"] = final_steps
         _merge_task_metrics(batch, rollouts, request)
         return batch
+
+
+def logprobs_requested(request: TrajectoryRequestBatch, runner_config: DictConfig) -> bool:
+    sampling_params = request.get("sampling_params")
+    if sampling_params is not None and "logprobs" in sampling_params:
+        return sampling_params["logprobs"] is not None
+    return runner_config.sampling_params.logprobs is not None
+
+
+def _training_batch(
+    rollouts: Sequence[RolloutData],
+    decisions: Sequence[_TrainingDecision],
+    logprobs_required: bool,
+    runner_config: DictConfig,
+    tokenizer: PreTrainedTokenizerBase,
+    env_metric_classes: Sequence[str] | None,
+) -> TrajectoryBatch:
+    responses = [list(rollout.response_token_ids) or [MASKED_TOKEN_ID] for rollout in rollouts]
+    rewards = [decision.reward.to_trainer_reward() for decision in decisions]
+    if any(isinstance(reward, list) for reward in rewards):
+        rewards = [
+            reward if isinstance(reward, list) else scalar_reward_token_credit(reward, response)
+            for reward, response in zip(rewards, responses, strict=True)
+        ]
+    masks = [
+        list(rollout.loss_mask)
+        if decision.disposition.loss_eligible and rollout.response_token_ids
+        else [0] * len(response)
+        for rollout, decision, response in zip(rollouts, decisions, responses, strict=True)
+    ]
+    if runner_config.apply_overlong_filtering:
+        masks = apply_overlong_filtering(masks, responses, tokenizer.eos_token_id)
+    logprobs = [
+        _row_logprobs(rollout, decision, logprobs_required)
+        for rollout, decision in zip(rollouts, decisions, strict=True)
+    ]
+    verification = [decision.verification for decision in decisions]
+    batch = TrajectoryBatch(
+        prompt_token_ids=[list(rollout.prompt_token_ids) or [MASKED_TOKEN_ID] for rollout in rollouts],
+        response_ids=responses,
+        rewards=rewards,
+        verification_results=verification,
+        evidence_messages=[[dict(message) for message in rollout.messages] for rollout in rollouts],
+        loss_masks=masks,
+        stop_reasons=[rollout.stop_reason for rollout in rollouts],
+        rollout_metrics={},
+        rollout_logprobs=logprobs if logprobs_required else None,
+        exclude_from_baseline=[not decision.disposition.baseline_eligible for decision in decisions],
+    )
+    _attach_reward_channels(batch, decisions)
+    _attach_failure_channels(batch, decisions)
+    _attach_student_topk(batch, rollouts)
+    _attach_routed_experts(batch, rollouts)
+    _attach_span_tags(batch, rollouts)
+    metrics = None
+    if env_metric_classes is not None:
+        metrics = [
+            {} if environment == TASKCOMPENDIUM_ENVIRONMENT else dict(rollout.metrics)
+            for rollout, environment in zip(rollouts, env_metric_classes, strict=True)
+        ]
+        if any(metrics):
+            batch["env_metrics"] = metrics
+            batch["env_classes"] = list(env_metric_classes)
+    batch["rollout_metrics"] = get_rollout_metrics(responses, rewards, metrics, env_metric_classes, verification)
+    return batch
+
+
+def _row_logprobs(rollout: RolloutData, decision: _TrainingDecision, required: bool) -> np.ndarray | None:
+    if not rollout.response_token_ids:
+        return np.zeros(1, dtype=np.float32)
+    if rollout.logprobs is not None:
+        values = np.asarray(rollout.logprobs, dtype=np.float32)
+        if values.shape != (len(rollout.response_token_ids),) or not np.isfinite(values).all():
+            raise RolloutContractError("Behavior logprobs must be finite and align with response tokens")
+        return values
+    if not decision.disposition.loss_eligible:
+        return np.zeros(len(rollout.response_token_ids), dtype=np.float32)
+    if required:
+        raise RolloutContractError("A trainable rollout is missing requested behavior logprobs")
+    return None
+
+
+def _attach_reward_channels(batch: TrajectoryBatch, decisions: Sequence[_TrainingDecision]) -> None:
+    batch["unshaped_rewards"] = [decision.reward.unshaped_reward or 0.0 for decision in decisions]
+    availability = [decision.reward.unshaped_reward is not None for decision in decisions]
+    if not all(availability):
+        batch["unshaped_reward_available"] = availability
+    if any(decision.reward.token_credit is not None for decision in decisions):
+        batch["token_level_shaping"] = [
+            list(decision.reward.token_credit) if decision.reward.token_credit is not None else [0.0] * len(response)
+            for decision, response in zip(decisions, batch["response_ids"], strict=True)
+        ]
+
+
+def _attach_failure_channels(batch: TrajectoryBatch, decisions: Sequence[_TrainingDecision]) -> None:
+    exception_types = [decision.disposition.exception_type for decision in decisions]
+    if any(value is not None for value in exception_types):
+        batch["exception_types"] = exception_types
+    error_treatments = [decision.error_treatment for decision in decisions]
+    if any(value is not None for value in error_treatments):
+        batch["error_treatments"] = error_treatments
+    server_errors = [
+        {
+            "category": decision.verification.diagnostics["error_category"],
+            "request_id": decision.verification.diagnostics.get("request_id"),
+            "status_code": decision.verification.diagnostics.get("status_code"),
+        }
+        if "error_category" in decision.verification.diagnostics
+        else None
+        for decision in decisions
+    ]
+    if any(error is not None for error in server_errors):
+        batch["server_errors"] = server_errors
+
+
+def _attach_student_topk(batch: TrajectoryBatch, rollouts: Sequence[RolloutData]) -> None:
+    selected = [_student_topk(rollout) for rollout in rollouts]
+    template = next((value for value in selected if value is not None), None)
+    if template is not None:
+        width = template.indices.shape[1]
+        indices = []
+        scores = []
+        for value, response, mask in zip(selected, batch["response_ids"], batch["loss_masks"], strict=True):
+            if value is None:
+                if any(mask):
+                    raise ValueError("Student top-K evidence is missing for a trainable rollout")
+                indices.append(np.full((len(response), width), INVALID_TOPK_INDEX, dtype=template.indices.dtype))
+                scores.append(np.zeros((len(response), width), dtype=np.float32))
+                continue
+            if value.indices.shape[1] != width:
+                raise ValueError("Student top-K evidence widths must agree across rollouts")
+            indices.append(value.indices)
+            scores.append(value.topk_logprobs)
+        batch["student_topk_indices"] = indices
+        batch["behavior_topk_logprobs"] = scores
+
+
+def _model_channel(
+    rollout: RolloutData, key: str, length: int, trailing_shape: tuple[int, ...], dtype: np.dtype | type[np.generic]
+) -> np.ndarray:
+    values = np.zeros((length, *trailing_shape), dtype=dtype)
+    for step in rollout.steps:
+        captured = step.turn.metadata.get(key)
+        if captured is None:
+            continue
+        if len(captured) != len(step.turn.response_token_ids):
+            raise ValueError(f"{key} must align with generated tokens")
+        values[step.response_end + 1 - len(captured) : step.response_end + 1] = captured
+    return values
+
+
+def _attach_routed_experts(batch: TrajectoryBatch, rollouts: Sequence[RolloutData]) -> None:
+    routes = [step.turn.metadata.get(ROUTED_EXPERTS_KEY) for rollout in rollouts for step in rollout.steps]
+    route_template = next((value for value in routes if value is not None and len(value)), None)
+    if route_template is not None:
+        batch["rollout_routed_experts"] = [
+            _model_channel(rollout, ROUTED_EXPERTS_KEY, len(response), route_template.shape[1:], route_template.dtype)
+            for rollout, response in zip(rollouts, batch["response_ids"], strict=True)
+        ]
+
+
+def _attach_span_tags(batch: TrajectoryBatch, rollouts: Sequence[RolloutData]) -> None:
+    if any(
+        step.turn.metadata.get(RESPONSE_SPAN_TAGS_KEY) is not None for rollout in rollouts for step in rollout.steps
+    ):
+        batch["response_span_tags"] = [
+            _model_channel(rollout, RESPONSE_SPAN_TAGS_KEY, len(response), (), np.int64).tolist()
+            for rollout, response in zip(rollouts, batch["response_ids"], strict=True)
+        ]
 
 
 def _task_error_policies(
@@ -360,15 +521,10 @@ def _merge_task_metrics(
             metrics[key] = metrics.get(key, 0.0) + value
 
 
-def _step_training_outputs(
-    rollout: RolloutData,
-    error_handling: ErrorHandlingConfig,
-    *,
-    logprobs_required: bool,
-) -> list[AgentLoopOutput]:
+def _step_rollouts(rollout: RolloutData) -> list[RolloutData]:
     """Use exact served prompts and score each transition at its final action token."""
     if not rollout.steps:
-        return [training_output(rollout, error_handling, logprobs_required=logprobs_required)]
+        return [rollout]
     outputs = []
     for index, step in enumerate(rollout.steps):
         last = index == len(rollout.steps) - 1
@@ -380,30 +536,17 @@ def _step_training_outputs(
             reward = 0.0
         transition = replace(step.transition, reward=reward, grade=grade)
         turn = step.turn
-        output = training_output(
-            replace(
-                rollout,
-                messages=step.messages,
-                prompt_token_ids=turn.prompt_token_ids,
-                response_token_ids=turn.response_token_ids,
-                loss_mask=(1,) * len(turn.response_token_ids),
-                logprobs=turn.logprobs,
-                grade=grade,
-                stop_reason=rollout.stop_reason if last else turn.stop_reason,
-                steps=(replace(step, response_end=len(turn.response_token_ids) - 1, transition=transition),),
-                metrics=step.transition.metrics,
-            ),
-            error_handling,
-            logprobs_required=logprobs_required,
+        output = replace(
+            rollout,
+            messages=step.messages,
+            prompt_token_ids=turn.prompt_token_ids,
+            response_token_ids=turn.response_token_ids,
+            loss_mask=(1,) * len(turn.response_token_ids),
+            logprobs=turn.logprobs,
+            grade=grade,
+            stop_reason=rollout.stop_reason if last else turn.stop_reason,
+            steps=(replace(step, response_end=len(turn.response_token_ids) - 1, transition=transition),),
+            metrics=step.transition.metrics,
         )
-        if (
-            not last
-            and not step.transition.done
-            and grade.status == Outcome.UNAVAILABLE
-            and not grade_skipped(grade)
-            and (rollout.grade.status == Outcome.GRADED or grade_skipped(rollout.grade))
-            and rollout.failure is None
-        ):
-            output.disposition = TrainingDisposition.train()
         outputs.append(output)
     return outputs

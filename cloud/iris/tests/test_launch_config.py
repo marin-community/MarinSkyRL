@@ -113,6 +113,16 @@ def _raw_config() -> dict[str, Any]:
     }
 
 
+def test_launch_rejects_terminal_export_without_request_callback(tmp_path):
+    raw = _raw_config()
+    raw["skyrl"]["trainer"].update(export_hf_artifact=True, ckpt_interval=1, hf_save_interval=-1)
+    path = tmp_path / "launch.yaml"
+    path.write_text(yaml.safe_dump(raw))
+
+    with pytest.raises(ValueError, match="Terminal HF artifact export"):
+        load_launch_config(path)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("text,reward", [("#### 12", 1.0), ("#### 12\nMore reasoning.", 0.0)])
 async def test_custom_session_settings_reach_private_grading_through_the_launch_config(

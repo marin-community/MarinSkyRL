@@ -46,7 +46,6 @@ from skyrl_train.rollouts.buffer import (
 from skyrl_train.dataset.tasks import LOWERED_TASK_COLUMN, TASKCOMPENDIUM_ENVIRONMENT
 from skyrl_train.rollouts.task_projections import WholeTaskProjection
 from skyrl_train.rollouts.task_worker import TaskRolloutWorker
-from skyrl_train.trajectory_runners.projections import WholeTrajectoryProjection
 from skyrl_train.trajectory_runners.model_clients import ModelServerError
 from skyrl_train.trajectory_runners.types import TokenProvenance, TrajectoryID
 
@@ -195,7 +194,7 @@ def runner(client, factories=None, *, error_handling=None):
     )
     return TaskRolloutWorker(
         config,
-        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        WholeTaskProjection(config, Tokenizer()),
         client,
         factories or {},
         shutdown_timeout=30,

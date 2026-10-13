@@ -15,7 +15,6 @@ from taskcompendium.models import Source
 from skyrl_train.rollouts.task_projections import StepTaskProjection, WholeTaskProjection
 from skyrl_train.dataset.tasks import SourceTaskDataset, source_row_task
 from skyrl_train.dataset.nemotron_ultra import NemotronTaskDataset
-from skyrl_train.trajectory_runners.projections import StepWiseTrajectoryProjection, WholeTrajectoryProjection
 from skyrl_train.rollouts.buffer import RolloutLease, RolloutTask
 from skyrl_train.rollouts.task_worker import TaskRolloutWorker
 from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
@@ -23,20 +22,16 @@ from skyrl_gym.source_task import source_task
 from skyrl_train.config.utils import get_default_config
 from tests.cpu.task_specs import NATIVE_ENVIRONMENT, lowered_task, machine_runtime, session_spec
 from skyrl_train.trajectory_runners.types import TrajectoryID
+from skyrl_train.trajectory_runners.trajectory_processing import validate_trajectory_batch
 from skyrl_train.trajectory_runners.model_clients import DirectModelClient, ModelServerError
 from skyrl_train.rollout_observability import observe_rollout_call
 from tests.cpu.rollouts.engine_fakes import ConversationClient, InferenceClient, Tokenizer, Writer
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "projection_type,expected_rewards",
-    [(WholeTaskProjection, [[0.0, 0.0], [0.0, 1.0]]), (StepTaskProjection, [[0.0, 0.0], 1.0])],
-)
+@pytest.mark.parametrize("projection_type", [WholeTaskProjection, StepTaskProjection])
 @pytest.mark.parametrize("session", ["nupa", "reasoning_gym"])
-async def test_corrupt_source_task_is_masked_without_losing_its_graded_peer(
-    task_inputs, projection_type, expected_rewards, session
-):
+async def test_corrupt_source_task_is_masked_without_losing_its_graded_peer(task_inputs, projection_type, session):
     config, original = task_inputs
     failed = source_task(
         original["prompts"][0],
@@ -54,12 +49,9 @@ async def test_corrupt_source_task_is_masked_without_losing_its_graded_peer(
         ],
         "trajectory_ids": [TrajectoryID("corrupt", 0), TrajectoryID("arithmetic", 0)],
     }
-    projection = (
-        WholeTrajectoryProjection if projection_type is WholeTaskProjection else StepWiseTrajectoryProjection
-    )(config, Tokenizer())
     worker = TaskRolloutWorker(
         config,
-        projection_type(projection),
+        projection_type(config, Tokenizer()),
         InferenceClient(),
         {},
         shutdown_timeout=30,
@@ -70,11 +62,12 @@ async def test_corrupt_source_task_is_masked_without_losing_its_graded_peer(
     finally:
         await worker.shutdown()
     batch = writer.groups[0][1].trajectory_batch
+    validate_trajectory_batch(2, batch)
     assert len(writer.groups) == 1
     assert batch["response_ids"] == [[3, 4], [3, 4]]
     assert batch["loss_masks"] == [[0, 0], [1, 1]]
     assert batch["exclude_from_baseline"] == [True, False]
-    assert batch["rewards"] == expected_rewards
+    assert batch["rewards"] == [[0.0, 0.0], [0.0, 1.0]]
     assert batch["exception_types"] == ["VerifierRuntimeError", None]
     assert [result.status for result in batch["verification_results"]] == [
         VerificationStatus.ERROR,
@@ -193,12 +186,9 @@ async def test_mixed_nemotron_tasks_run_without_the_original_sources(
         env_extras=list(extras),
         trajectory_ids=[TrajectoryID(uid, 0) for uid in uids],
     )
-    projection = (
-        WholeTrajectoryProjection if projection_type is WholeTaskProjection else StepWiseTrajectoryProjection
-    )(config, Tokenizer())
     worker = TaskRolloutWorker(
         config,
-        projection_type(projection),
+        projection_type(config, Tokenizer()),
         MixedClient(),
         {"harbor": ImageFactory()},
         harbor=settings,
@@ -265,7 +255,7 @@ async def test_source_tasks_run_without_the_original_dataset(tmp_path, task_inpu
     client = ConversationClient(["#### 12"])
     worker = TaskRolloutWorker(
         config,
-        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        WholeTaskProjection(config, Tokenizer()),
         client,
         {},
         shutdown_timeout=30,
@@ -322,7 +312,7 @@ async def test_unified_gym_tasks_preserve_grading_and_turn_credit(task_inputs, e
     model = ConversationClient(responses)
     runner = TaskRolloutWorker(
         config,
-        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        WholeTaskProjection(config, Tokenizer()),
         model,
         {},
         shutdown_timeout=30,
@@ -375,9 +365,7 @@ async def test_source_row_turn_limit_controls_correction_and_terminal_grade(
     request["env_extras"] = [{"lowered_task_spec": task.model_dump_json()}]
     request["env_classes"] = ["gsm8k_multi_turn"]
     model = ConversationClient(["#### 13", "#### 12"])
-    worker = TaskRolloutWorker(
-        config, WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())), model, {}, shutdown_timeout=30
-    )
+    worker = TaskRolloutWorker(config, WholeTaskProjection(config, Tokenizer()), model, {}, shutdown_timeout=30)
     batch = await worker.run(request)
     assert len(model.requests) == turns
     assert batch["unshaped_rewards"] == [float(turns == 2)]
@@ -397,9 +385,7 @@ async def test_materialized_turn_limit_precedes_source_row_metadata(task_inputs)
     request["env_extras"] = [{"lowered_task_spec": lowered_task(task, "gsm8k_multi_turn").model_dump_json()}]
     request["env_classes"] = ["gsm8k_multi_turn"]
     model = ConversationClient(["#### 13", "#### 12"])
-    worker = TaskRolloutWorker(
-        config, WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())), model, {}, shutdown_timeout=30
-    )
+    worker = TaskRolloutWorker(config, WholeTaskProjection(config, Tokenizer()), model, {}, shutdown_timeout=30)
     batch = await worker.run(request)
     assert len(model.requests) == 2
     assert batch["unshaped_rewards"] == [1.0]
@@ -451,7 +437,7 @@ async def test_aime_rollout_preserves_length_reward_and_phase_metrics(
     engine.chat_completion.side_effect = serve
     runner = TaskRolloutWorker(
         config,
-        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        WholeTaskProjection(config, Tokenizer()),
         DirectModelClient(engine),
         {},
         max_verifier_workers=1,
@@ -544,10 +530,9 @@ async def test_context_limits_preserve_only_completed_gym_turns(
 
     engine.tokenize.side_effect = tokenize
     engine.chat_completion.side_effect = serve
-    projection = (
-        WholeTrajectoryProjection if projection_type is WholeTaskProjection else StepWiseTrajectoryProjection
-    )(config, Tokenizer())
-    worker = TaskRolloutWorker(config, projection_type(projection), DirectModelClient(engine), {}, shutdown_timeout=30)
+    worker = TaskRolloutWorker(
+        config, projection_type(config, Tokenizer()), DirectModelClient(engine), {}, shutdown_timeout=30
+    )
     writer = Writer()
     await worker.run_task(RolloutTask(RolloutLease("lease", 0, 1), {"uid": task.id}, request), writer)
     batch = writer.groups[0][1].trajectory_batch
@@ -596,7 +581,7 @@ async def test_lean_refinement_discards_the_failed_attempt(task_inputs, task_mac
     client = ConversationClient(["", "by rfl"])
     runner = TaskRolloutWorker(
         config,
-        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        WholeTaskProjection(config, Tokenizer()),
         client,
         {"docker": task_machine},
         shutdown_timeout=30,
@@ -706,7 +691,7 @@ async def test_source_machine_selection_controls_tool_results(task_inputs, task_
     model = ConversationClient(["", expected], messages=[message, {"role": "assistant", "content": expected}])
     worker = TaskRolloutWorker(
         config,
-        WholeTaskProjection(WholeTrajectoryProjection(config, Tokenizer())),
+        WholeTaskProjection(config, Tokenizer()),
         model,
         {"docker": task_machine},
         shutdown_timeout=30,
@@ -782,11 +767,8 @@ async def test_python_startup_failure_is_masked_without_losing_its_graded_peer(
         ],
         "trajectory_ids": [TrajectoryID(failed.id, 0), TrajectoryID("arithmetic", 0)],
     }
-    projection = (
-        WholeTrajectoryProjection if projection_type is WholeTaskProjection else StepWiseTrajectoryProjection
-    )(config, Tokenizer())
     worker = TaskRolloutWorker(
-        config, projection_type(projection), InferenceClient(), {"docker": task_machine}, shutdown_timeout=30
+        config, projection_type(config, Tokenizer()), InferenceClient(), {"docker": task_machine}, shutdown_timeout=30
     )
     writer = Writer()
     try:
@@ -821,14 +803,9 @@ async def test_python_tool_observations_preserve_training_and_release_session(
     config, request = task_inputs
     _, message = python_tool_task
     model = ConversationClient(["", "4"], messages=[message, {"role": "assistant", "content": "4"}])
-    projection = (
-        WholeTrajectoryProjection(config, Tokenizer())
-        if projection_type is WholeTaskProjection
-        else StepWiseTrajectoryProjection(config, Tokenizer())
-    )
     runner = TaskRolloutWorker(
         config,
-        projection_type(projection),
+        projection_type(config, Tokenizer()),
         model,
         {"docker": task_machine},
         shutdown_timeout=30,

@@ -58,9 +58,19 @@ class TaskDataset(PromptDataset):
     def prepare_dataset(self, dataset):
         return dataset.map(_stored_task_prompt, num_proc=self.num_workers)
 
+    def __getitem__(self, item):
+        messages, environment, extras, uid = super().__getitem__(item)
+        task = LoweredTaskSpec.model_validate_json(extras[LOWERED_TASK_COLUMN]).task
+        if isinstance(task.grader, SessionGrader):
+            extras = {**session_parameters(task).extras, **extras}
+        return messages, environment, extras, uid
+
 
 def _stored_task_prompt(row: dict) -> dict:
-    return task_prompt(LoweredTaskSpec.model_validate_json(row[LOWERED_TASK_COLUMN]))
+    prepared = task_prompt(LoweredTaskSpec.model_validate_json(row[LOWERED_TASK_COLUMN]))
+    # Session-specific extras stay in the serialized task: mixed task families
+    # do not share an Arrow schema. Restore them when yielding a training row.
+    return {key: prepared[key] for key in (LOWERED_TASK_COLUMN, "prompt", "env_class", "data_source", "group_grader")}
 
 
 def source_row_task(

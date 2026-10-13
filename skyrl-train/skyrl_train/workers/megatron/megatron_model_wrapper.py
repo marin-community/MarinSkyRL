@@ -9,7 +9,9 @@ from omegaconf import OmegaConf
 
 from megatron.core.pipeline_parallel import get_forward_backward_func
 import megatron.core.parallel_state as mpu
+from megatron.core.distributed import DistributedDataParallel as MegatronDDP
 from megatron.core.distributed import finalize_model_grads
+from megatron.core.transformer.module import Float16Module
 
 from skyrl_train.distributed.megatron.model_utils import (
     from_parallel_logits_to_logprobs,
@@ -343,12 +345,16 @@ class MegatronModelWrapper:
                 )
                 packed_seq_params = None
 
+            # Only the mixed-precision wrapper consumes the precision kwarg; a raw fp32
+            # module (equivalence experiments) already returns module-precision outputs.
+            inner = model.module if isinstance(model, MegatronDDP) else model
+            precision_kwargs = {"fp32_output": False} if isinstance(inner, Float16Module) else {}
             outputs = model(
                 model_sequences,
                 model_position_ids,
                 model_attention_mask,
                 packed_seq_params=packed_seq_params,
-                fp32_output=False,
+                **precision_kwargs,
             )
             if armed:
                 self.router_replay.end_forward()

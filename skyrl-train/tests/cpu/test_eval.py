@@ -2,6 +2,7 @@
 uv run --isolated --group dev --extra cpu pytest tests/cpu/test_eval.py
 """
 
+import json
 from unittest.mock import MagicMock
 
 import pytest
@@ -147,6 +148,10 @@ async def test_evaluate_exports_public_results_and_expected_metrics(dummy_config
         "rollout_logprobs": None,
         "env_classes": ["gsm8k", "custom_env"],
         "env_metrics": [{"truncated": 1}, {"truncated": 0}],
+        "verification_results": [
+            VerificationResult.verified(1.0, passed=True, diagnostics={"reference": "private-verifier-reference"}),
+            VerificationResult.unavailable("private-verifier-reason", diagnostics={"api_key": "private-key"}),
+        ],
         "is_last_step": [True, True],
     }
     runner = DummyRunner(trajectory_batch)
@@ -191,6 +196,24 @@ async def test_evaluate_exports_public_results_and_expected_metrics(dummy_config
     assert saved
     assert "private-reference" not in saved
     assert "private-judge-key" not in saved
+    assert "private-verifier-reference" not in saved
+    assert "private-verifier-reason" not in saved
+    assert "private-key" not in saved
+    records = [json.loads((dump / f"dataset_{name}.jsonl").read_text()) for name in ("a", "b")]
+    assert records[0]["input_prompt"] == records[1]["input_prompt"]
+    assert records[0]["uid"] != records[1]["uid"]
+    assert [record["prompt_token_ids"] for record in records] == [[101], [102]]
+    assert [record["response_token_ids"] for record in records] == [[201], [202]]
+    assert [record["env_metrics"]["truncated"] for record in records] == [1, 0]
+    assert records[0]["verification"] == {
+        "status": "verified",
+        "score": 1.0,
+        "passed": True,
+        "score_min": 0.0,
+        "score_max": 1.0,
+    }
+    assert records[1]["verification"]["status"] == "unavailable"
+    assert records[1]["verification"]["score"] is None
 
     assert len(runner.seen_inputs) == 1
     seen_batch = runner.seen_inputs[0]

@@ -9,11 +9,34 @@ from transformers import AutoTokenizer
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 from skyrl_train.training_batch import TrainingInputBatch
+from tests.gpu.grug_tiny_checkpoint import TOY_SHAPE, router_bias_names
 
 MAX_MODEL_LEN = 128
 STACKED_EXPERT_NAME = "model.layers.0.mlp.experts.gate_proj.weight"
 LM_HEAD_NAME = "lm_head.weight"
 ROUTER_NAME = "model.layers.0.mlp.router.weight"
+# Broad HF-named parameter coverage for training-vs-serving readback: attention, gated
+# norms, embeddings, stacked and per-expert MoE weights, shared expert, output head,
+# router, and the frozen router biases. The bias list derives from the toy fixture shape
+# so it cannot drift from the checkpoint the serving tests load.
+GRUG_BIAS_NAMES = router_bias_names(TOY_SHAPE["num_hidden_layers"])
+GRUG_PARAMETER_NAMES = [
+    "model.layers.0.self_attn.q_proj.weight",
+    "model.layers.3.self_attn.q_proj.weight",
+    "model.layers.1.self_attn.attn_gate.weight",
+    "model.layers.1.attn_gated_norm.up_proj.weight",
+    "model.embed_gated_norm.down_proj.weight",
+    "model.norm.weight",
+    STACKED_EXPERT_NAME,
+    "model.layers.7.mlp.experts.down_proj.weight",
+    "model.layers.2.shared_expert.up_proj.weight",
+    LM_HEAD_NAME,
+    ROUTER_NAME,
+]
+GRUG_SERVING_EXPERT_INDEX_BY_NAME = {
+    "model.layers.0.mlp.experts.0.gate_proj.weight": 0,
+    "model.layers.0.mlp.experts.5.gate_proj.weight": 5,
+}
 # Alternating per-row advantages so one PPO step pushes sampled tokens in both directions.
 ADVANTAGE_PATTERN = torch.tensor([[-1.0, -0.25, 0.5, 1.0], [1.0, 0.5, -0.25, -1.0]])
 

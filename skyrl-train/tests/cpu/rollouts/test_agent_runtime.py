@@ -21,7 +21,6 @@ from skyrl_train.rollouts.agent_runtime import InstalledAgentRuntime, InstalledA
 from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
 from skyrl_train.rollouts.task_worker import TaskRolloutWorker
 from skyrl_train.rollouts.task_projections import WholeTaskProjection
-from skyrl_train.trajectory_runners.projections import WholeTrajectoryProjection
 from tests.cpu.rollouts.engine_fakes import InferenceClient, Tokenizer as ProjectionTokenizer
 from tests.cpu.task_specs import SHELL_ENVIRONMENT, lowered_task
 
@@ -110,7 +109,7 @@ async def test_native_runtime_routes_through_proxy_and_publishes_failed_attempts
             request["env_extras"] = [{"lowered_task_spec": lowered.model_dump_json()}]
             worker = TaskRolloutWorker(
                 worker_config,
-                WholeTaskProjection(WholeTrajectoryProjection(worker_config, ProjectionTokenizer())),
+                WholeTaskProjection(worker_config, ProjectionTokenizer()),
                 InferenceClient(),
                 {"shellsim": ShellSimMachineFactory()},
                 harbor=HarborTaskSettings.from_config(OmegaConf.create({"harbor": {"max_retries": 0}})),

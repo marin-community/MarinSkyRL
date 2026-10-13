@@ -11,7 +11,7 @@ import torch
 import yaml
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
-from tokenizers import Tokenizer
+from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 from tokenizers.models import WordLevel
 from transformers import PreTrainedTokenizerFast, Qwen2Config, Qwen2ForCausalLM
 from cloud.iris.launch_config import load_launch_config
@@ -35,6 +35,7 @@ from skyrl_train.objective.losses import ftpo_policy_loss
 from skyrl_train.objective.objective import build_objective_micro_batch, compute_policy_objective
 from skyrl_train.objective.reduction import step_counts
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import LoopCreditConfig, tail_loop
+from skyrl_gym.verification import VerificationResult
 
 
 @pytest.fixture
@@ -337,6 +338,84 @@ def test_ftpo_saturated_preferences_stop_and_reference_tether_penalizes_other_to
     assert metrics["ftpo/chosen_win_sum"] == 1
 
 
+@pytest.mark.parametrize("micro_size", [1, 2, 4])
+@pytest.mark.parametrize("mode", ["mixed", "repair_only", "ftpo_only"])
+def test_joint_closure_loss_and_gradients_match_separate_means(config, micro_size, mode):
+    torch.manual_seed(19)
+    config.trainer.algorithm.ftpo = {"repair_sft_weight": 0.7}
+    params = ftpo_config(config.trainer.algorithm)
+    logits = torch.randn(4, 3, 7, requires_grad=True)
+    reference = torch.randn(4, 7)
+    ids = torch.tensor([1, 2]).expand(4, 3, 2).clone()
+    chosen = torch.zeros_like(ids, dtype=torch.bool)
+    if mode != "repair_only":
+        chosen[0, 1, :] = True
+        chosen[1, 0, 0] = True
+    repair = torch.zeros(4, 3, dtype=torch.bool)
+    if mode != "ftpo_only":
+        repair[2, 1:] = True
+        repair[3, 0] = True
+    preference_weights = chosen.any(-1).float() * torch.tensor([0.3, 0.7, 0, 0])[:, None]
+    weights = preference_weights + repair.float()
+    rejected = torch.zeros(4, dtype=torch.long)
+    boundary = boundary_values(logits, chosen)
+    log_probs = logits.log_softmax(-1)[..., 0]
+    targets = FTPOTargets(ids, chosen, reference, repair)
+    normalization = ftpo_counts([targets], [weights], lambda value: value)
+    counts = step_counts([weights], [weights], [], [torch.zeros_like(weights)], 3, lambda value: value)
+    expected = logits.sum() * 0
+    if mode != "repair_only":
+        expected = expected + _scalar_reference(
+            boundary,
+            reference,
+            boundary_values(ids, chosen),
+            boundary_values(chosen, chosen),
+            rejected,
+            preference_weights.sum(-1),
+            params,
+        )
+    if mode != "ftpo_only":
+        expected = expected - 0.7 * log_probs[repair].mean()
+    expected_gradient = torch.autograd.grad(expected, logits, retain_graph=True)[0]
+    actual = logits.new_zeros(())
+    for start in range(0, 4, micro_size):
+        chunk = slice(start, start + micro_size)
+        ftpo = FTPOInputs(
+            boundary[chunk],
+            FTPOTargets(ids[chunk], chosen[chunk], reference[chunk], repair[chunk]),
+            rejected[chunk],
+            normalization,
+        )
+        batch = build_objective_micro_batch(
+            action_log_probs=log_probs[chunk],
+            old_action_log_probs=torch.zeros_like(weights[chunk]),
+            base_action_log_probs=None,
+            advantages=torch.zeros_like(weights[chunk]),
+            loss_mask=weights[chunk],
+            rollout_logprobs=None,
+            response_span_tags=None,
+            token_entropy=torch.zeros_like(weights[chunk]),
+            think_token_weight=1,
+            teacher=None,
+            ftpo=ftpo,
+        )
+        actual = (
+            actual
+            + compute_policy_objective(
+                batch,
+                loss=ftpo_policy_loss,
+                counts=counts,
+                config=config.trainer.algorithm,
+                loss_scale=1,
+                report_scale=1,
+            ).optimization_loss
+        )
+    actual_gradient = torch.autograd.grad(actual, logits)[0]
+    torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(actual_gradient, expected_gradient, atol=1e-6, rtol=1e-6)
+    assert torch.count_nonzero(actual_gradient[~(chosen.any(-1) | repair)]) == 0
+
+
 def test_full_weight_ftpo_update_and_resume_match_uninterrupted_training(tmp_path):
     torch.manual_seed(7)
     model = Qwen2ForCausalLM(
@@ -472,3 +551,91 @@ async def test_ftpo_empty_rollout_batch_skips_training(config):
     )
     assert status["policy_update_steps"] == 0
     assert trainer.all_metrics["ftpo/empty_batch"] == 1
+
+
+@pytest.mark.parametrize("terminal_eos", [False, True])
+@pytest.mark.parametrize("repair_response", [" ", ' ,"other":2'])
+@pytest.mark.parametrize("boundary", ["verified_closure", "verified_closure_and_continuation"])
+def test_verified_closure_trainer_preserves_rollouts_and_trains_verified_repairs(
+    config, tmp_path, terminal_eos, repair_response, boundary
+):
+    config.trainer.algorithm.ftpo = {
+        "boundary": boundary,
+        "chosen_balance_strength": 0,
+        "repair_sft_weight": 0.7,
+    }
+    validate_cfg(config)
+    backend = Tokenizer(models.BPE())
+    backend.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+    backend.decoder = decoders.ByteLevel()
+    backend.train_from_iterator(
+        ['assistant [{"a":1}]'],
+        trainers.BpeTrainer(
+            vocab_size=258, initial_alphabet=pre_tokenizers.ByteLevel.alphabet(), special_tokens=["[PAD]", "[EOS]"]
+        ),
+    )
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend, pad_token="[PAD]", eos_token="[EOS]")
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = config
+    trainer.global_step = 0
+    trainer.all_metrics = {}
+    trainer.group_advantage_invariant = GroupAdvantageInvariant.no_group_advantage(physical_group_size=1)
+    trainer.tokenizer = tokenizer
+    trainer.policy_model = SimpleNamespace(actor_infos=[SimpleNamespace(rank=SimpleNamespace(dp_size=2))])
+    trainer.ref_model = trainer.critic_model = None
+    prefix = '[{"a":1'
+    prompt = tokenizer.encode("assistant " + prefix, add_special_tokens=False)
+    responses = [tokenizer.encode(text, add_special_tokens=False) for text in (" ]x", repair_response, " ]x", " ]x")]
+    if terminal_eos:
+        responses[1].append(tokenizer.eos_token_id)
+    original_responses = deepcopy(responses)
+    candidates = [tokenizer.encode(text, add_special_tokens=False)[0] for text in ("]", "}", "x", "\n")]
+    verification = VerificationResult.verified(
+        0,
+        diagnostics={
+            "stop_reason": "stop" if terminal_eos else "length",
+            "closure": {
+                "format": "json",
+                "family": "json_nested",
+                "control": "close_required",
+                "prefix": prefix,
+                "expected": '[{"a":1}]',
+            },
+        },
+    )
+    trajectory = {
+        "prompt_token_ids": [prompt] * 4,
+        "response_ids": responses,
+        "loss_masks": [[1] * len(row) for row in responses],
+        "rewards": [[0.0] * len(row) for row in responses],
+        "student_topk_indices": [np.tile(candidates, (len(row), 1)) for row in responses],
+        "behavior_topk_logprobs": [
+            np.tile(np.log([0.5, 0.3, 0.15, 0.05]), (len(row), 1)).astype(np.float32) for row in responses
+        ],
+        "verification_results": [
+            verification,
+            verification,
+            VerificationResult.unavailable("transport failed"),
+            verification,
+        ],
+        "is_last_step": [True] * 4,
+        "exclude_from_baseline": [False, False, False, True],
+    }
+    batch = trainer.convert_to_training_input(trajectory, ["a", "b", "c", "d"])
+    assert batch["loss_mask"].nonzero().tolist() == [[0, 1], [1, 1], [1, 2]]
+    assert batch["ftpo_repair_mask"].nonzero().tolist() == [[1, 1], [1, 2]]
+    assert trajectory["response_ids"] == original_responses
+    repaired = batch["sequences"][1][batch["attention_mask"][1].bool()].tolist()
+    assert tokenizer.decode(repaired, clean_up_tokenization_spaces=False) == 'assistant [{"a":1 }]'
+    assert batch["rollout_logprobs"] is None
+    assert batch["student_topk_indices"][batch["ftpo_chosen_mask"]].tolist() == [candidates[1]]
+    assert trainer.all_metrics["ftpo/selected_boundaries"] == 1
+    batch["ftpo_reference_logits"] = torch.zeros(4, len(tokenizer))
+    for key in ("action_log_probs", "base_action_log_probs", "values", "returns", "advantages"):
+        batch[key] = torch.zeros_like(batch["loss_mask"])
+    path = tmp_path / "closure-batch.pt"
+    torch.save(batch, path)
+    restored = torch.load(path, weights_only=False)
+    experiences = list(TrainingBatchIterator(restored, sample_batch_size=1))
+    assert [int(experience.ftpo.repair_mask.sum()) for experience in experiences] == [0, 2, 0, 0]
+    torch.testing.assert_close(experiences[1].ftpo.to("cpu").repair_mask, batch["ftpo_repair_mask"][1:2])

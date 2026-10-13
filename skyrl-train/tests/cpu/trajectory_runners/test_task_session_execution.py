@@ -39,7 +39,7 @@ class RecordingWriter:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("harbor_backend", ["docker", "daytona"])
-@pytest.mark.parametrize("missing_executable", ["docker", "skopeo", None])
+@pytest.mark.parametrize("missing_executable", ["docker", None])
 @pytest.mark.parametrize("session,max_turns,rewards", [("custom_math", 1, [0.0]), ("gsm8k_multi_turn", 2, [0.0, 0.0])])
 async def test_cpu_worker_runs_machine_free_rows_and_checks_native_tools(
     tmp_path, monkeypatch, session, max_turns, rewards, missing_executable, harbor_backend
@@ -60,13 +60,11 @@ async def test_cpu_worker_runs_machine_free_rows_and_checks_native_tools(
     cfg.generator.sampling_params.logprobs = None
     tools = tmp_path / "tools"
     tools.mkdir()
-    for name in {"docker", "skopeo"} - {missing_executable}:
+    for name in {"docker"} - {missing_executable}:
         executable = tools / name
         executable.write_text("#!/bin/sh\nexit 1\n")
         executable.chmod(0o755)
     monkeypatch.setenv("PATH", str(tools))
-    cfg.trajectory_runner.skopeo = str(tools / "skopeo")
-    cfg.trajectory_runner.image_cache = str(tmp_path / "image-cache")
     validate_cfg(cfg)
 
     async def unavailable_daytona(_factory, _spec):

@@ -21,7 +21,7 @@ from skyrl_train.trajectory_runners.harbor.identity_aware_reward import (
     identity_aware_pass_ratios,
 )
 from skyrl_train.trajectory_runners.harbor.truncation_penalty import apply_truncation_penalty, detect_turn_truncation
-from skyrl_train.trajectory_runners.types import TrajectoryRequestBatch
+from skyrl_train.trajectory_runners.types import RESPONSE_SPAN_TAGS_KEY, TrajectoryRequestBatch
 from skyrl_train.metric_names import IDENTITY_AWARE_REWARD_METRIC_PREFIX
 from skyrl_train.utils.harbor_errors import ErrorHandlingConfig, ErrorTreatment, classify_exception_type
 from skyrl_train.utils.pbs_shaping import compute_pbs_token_shaping
@@ -346,7 +346,7 @@ def shape_harbor_rollouts(
                 turn = step.turn
                 if config["enable_span_tagging"]:
                     turn = replace(
-                        turn, metadata={**turn.metadata, "response_span_tags": tags[start : step.response_end + 1]}
+                        turn, metadata={**turn.metadata, RESPONSE_SPAN_TAGS_KEY: tags[start : step.response_end + 1]}
                     )
                 annotated.append(
                     replace(
