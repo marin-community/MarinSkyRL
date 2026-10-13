@@ -143,7 +143,12 @@ async def test_runner_rejects_empty_completions(tokenizer):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rejected_setup", [20, 25])
-async def test_tokenized_dataset_and_runner_preserve_multiturn_assistant_masks(tmp_path, rejected_setup):
+@pytest.mark.parametrize(
+    ("nested_source", "expected_source"), [(None, "preference-source"), ("nested-source", "nested-source")]
+)
+async def test_tokenized_pairs_preserve_multiturn_masks_and_source_labels(
+    tmp_path, rejected_setup, nested_source, expected_source
+):
     row = {
         "chosen_input_ids": [10, 20, 30, 31, 40, 41, 50, 51, 60],
         "chosen_assistant_masks": [0, 0, 0, 1, 1, 0, 0, 1, 1],
@@ -151,7 +156,7 @@ async def test_tokenized_dataset_and_runner_preserve_multiturn_assistant_masks(t
         "rejected_assistant_masks": [0, 0, 0, 1, 1, 0, 1],
         "task_source_id": "complement-task",
         "data_source": "preference-source",
-        "extra_info": {"data_source": None},
+        "extra_info": {"data_source": nested_source},
     }
     path = tmp_path / "pairs.jsonl"
     path.write_text(json.dumps(row) + "\n")
@@ -166,7 +171,7 @@ async def test_tokenized_dataset_and_runner_preserve_multiturn_assistant_masks(t
         num_workers=1,
     )
     inputs, _ = prepare_trajectory_request(data.collate_fn([data[0]]), 2, {}, "train", 0)
-    assert [row.data_source for row in inputs.metadata] == ["preference-source"] * 2
+    assert [row.data_source for row in inputs.metadata] == [expected_source] * 2
     runner = PreferencePairTrajectoryRunner(
         tokenizer,
         generator_config={},

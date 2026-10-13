@@ -78,7 +78,10 @@ def test_eval_dataset_filtering(mock_tokenizer, sample_dataset, tmp_path, probe_
 
 
 @pytest.mark.parametrize("num_workers", [1, 2])
-def test_source_tasks_preserve_global_row_indices_without_cache_files(tmp_path, num_workers):
+@pytest.mark.parametrize(("nested_source", "expected_source"), [(None, "fixture"), ("nested-source", "nested-source")])
+def test_source_tasks_preserve_row_indices_and_source_labels_after_filtering(
+    tmp_path, num_workers, nested_source, expected_source
+):
     rows = [
         {
             "prompt": [{"role": "user", "content": content}],
@@ -86,7 +89,7 @@ def test_source_tasks_preserve_global_row_indices_without_cache_files(tmp_path, 
             "reward_spec": {"ground_truth": "PRIVATE_ANSWER"},
             "teacher_route": "math",
             "data_source": "fixture",
-            "extra_info": {"grade": index, "data_source": None},
+            "extra_info": {"grade": index, "data_source": nested_source},
         }
         for index, content in enumerate(("First question", "x" * 200, "Last question"))
     ]
@@ -104,7 +107,7 @@ def test_source_tasks_preserve_global_row_indices_without_cache_files(tmp_path, 
     assert [task_messages(row["input"].lowered) for row in prepared] == [rows[0]["prompt"], rows[2]["prompt"]]
     tasks = [row["input"].lowered.task for row in prepared]
     assert [task.source.row for task in tasks] == ["0", "2"]
-    assert [row["input"].metadata.data_source for row in prepared] == ["fixture", "fixture"]
+    assert [row["input"].metadata.data_source for row in prepared] == [expected_source, expected_source]
     assert dataset.dataframe.cache_files == []
 
 
