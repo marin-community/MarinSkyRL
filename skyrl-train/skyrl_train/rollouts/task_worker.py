@@ -39,7 +39,7 @@ from rolloutengine.spec import LoweredTaskSpec
 from rolloutengine.lowering import SHELLBOX_SESSION, validate_lowered_task
 from skyrl_train.dataset.tasks import LOWERED_TASK_COLUMN
 from skyrl_train.config.utils import generation_context_limit
-from skyrl_gym.task_factories import self_grading_session, session_factories
+from skyrl_gym.task_factories import adapt_self_grading_session, session_factories
 from skyrl_gym.task_records import fold_grades, skipped_grade
 from skyrl_gym.verification import VERIFIER_RUNTIME_ERROR
 
@@ -311,7 +311,7 @@ class TaskRolloutWorker:
         )
         self.sessions = session_factories(executor=self.verifier_executor)
         if sessions is not None:
-            self.sessions.update({name: self_grading_session(factory) for name, factory in sessions.items()})
+            self.sessions.update({name: adapt_self_grading_session(factory) for name, factory in sessions.items()})
         self.trajectory_sink: RetentionSink | None = None
 
     @contextmanager
@@ -329,7 +329,7 @@ class TaskRolloutWorker:
         finally:
             self.active_requests.discard(task)
 
-    def _selected_session(
+    def _configured_task_and_sessions(
         self, lowered: LoweredTaskSpec, harbor: HarborTaskSettings | None, session_id: str
     ) -> tuple[LoweredTaskSpec, Mapping[str, TaskSessionFactory]]:
         sessions = self.sessions
@@ -374,7 +374,7 @@ class TaskRolloutWorker:
         ]
         selected_sessions: list[Mapping[str, TaskSessionFactory]] = []
         for index, lowered in enumerate(lowered_tasks):
-            lowered, sessions = self._selected_session(lowered, harbor_settings[index], session_ids[index])
+            lowered, sessions = self._configured_task_and_sessions(lowered, harbor_settings[index], session_ids[index])
             lowered_tasks[index] = lowered
             selected_sessions.append(sessions)
         tasks = [item.task for item in lowered_tasks]

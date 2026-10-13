@@ -30,7 +30,7 @@ from skyrl_gym.sql_tasks import SQLTaskSession, SeededSQLTaskSession
 from skyrl_gym.tool_protocol_task import ToolProtocolReplaySession
 
 
-def self_grading_session(factory: Callable[[LoweredTaskSpec, Machine | None], TaskSession]) -> TaskSessionFactory:
+def adapt_self_grading_session(factory: Callable[[LoweredTaskSpec, Machine | None], TaskSession]) -> TaskSessionFactory:
     """Adapt a session that implements its own grading logic."""
 
     def create(context: TaskSessionContext) -> TaskSession:
@@ -66,4 +66,4 @@ def session_factories(*, executor: Executor | None = None) -> dict[str, TaskSess
         "text_to_sql": partial(SeededSQLTaskSession, executor=executor),
         "tool_protocol_replay": ToolProtocolReplaySession,
     }
-    return {name: self_grading_session(factory) for name, factory in constructors.items()}
+    return {name: adapt_self_grading_session(factory) for name, factory in constructors.items()}

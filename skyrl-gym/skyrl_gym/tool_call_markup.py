@@ -96,8 +96,8 @@ def tool_call_regions(text: str, *, initial_thinking: bool) -> tuple[ToolCallReg
     return tuple(regions)
 
 
-def score_tool_call_continuation(text: str) -> ToolCallStatus:
-    """Score one completed continuation of an outside-thinking opening delimiter.
+def classify_tool_call_continuation(text: str) -> ToolCallStatus:
+    """Classify one completed continuation of an outside-thinking opening delimiter.
 
     The fixed prompt ends with ``<tool_call>``. The generated text must contain
     a nonempty function name, object arguments, and the closing delimiter.
