@@ -1,14 +1,14 @@
 import pytest
 from harbor.models.task.config import EnvironmentConfig
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
-from shellbox.machine import Command, MachineSpec, ShellSimBuiltins
+from shellbox.machine import Command, MachineSpec, PackageSpec
 
 from skyrl_train.rollouts.agent_environment import BorrowedMachineEnvironment
 
 
 @pytest.mark.asyncio
 async def test_agent_environment_runs_commands_and_transfers_without_owning_machine(tmp_path):
-    machine = await ShellSimMachineFactory().create(MachineSpec(ShellSimBuiltins()))
+    machine = await ShellSimMachineFactory().create(MachineSpec(PackageSpec()))
     try:
         environment = BorrowedMachineEnvironment(
             machine, tmp_path / "trial", "trial", EnvironmentConfig(allow_internet=False)

@@ -7,7 +7,7 @@ from harbor.agents.installed.base import BaseInstalledAgent
 from harbor.models.task.config import EnvironmentConfig
 from rolloutengine.contracts import ModelTurn
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
-from shellbox.machine import Command, MachineSpec, ShellSimBuiltins
+from shellbox.machine import Command, MachineSpec, PackageSpec
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from transformers import PreTrainedTokenizerFast
@@ -36,7 +36,7 @@ async def test_installed_agent_routes_http_and_retains_logs_after_execution(tmp_
 
     backend = AgentInferenceBackend("model", 32, tokenize, tokenizer)
     set_global_state(backend, None)
-    machine = await ShellSimMachineFactory().create(MachineSpec(ShellSimBuiltins()))
+    machine = await ShellSimMachineFactory().create(MachineSpec(PackageSpec()))
 
     class HttpAgent(BaseInstalledAgent):
         rollout_correlation_id = "trial"

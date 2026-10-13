@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from rolloutengine.closure_repair import ClosureTargetKind
+from skyrl_train.closure_repair import ClosureTargetKind
 from skyrl_gym.verification import VerificationResult
 from skyrl_train.closure_training import ClosureTrainingTargets, closure_target_metrics, closure_training_targets
 from skyrl_train.ftpo import VerifiedFTPOBoundary, select_ftpo_candidates

@@ -11,7 +11,7 @@ version = "0.1.0"
 description = "Marin's typed launcher and RL training runtime"
 requires-python = "==3.12.*"
 dependencies = [
-    "marin-verifyit[math,schema,reasoning-gym,judge]",
+    "marin-verifyit[math,schema,reasoning-gym,judge]>=0.2.171.dev38477406391",
     "aiohttp>=3.13.3",
     "boto3",
     "datasets>=4.0.0",
@@ -35,7 +35,7 @@ dependencies = [
     "marin-iris>=0.2.144.dev37540375919",
     "marin-iris-native",
     "marin-rigging[secrets]>=0.2.144.dev37540375919",
-    "marin-rolloutengine",
+    "marin-rolloutengine>=0.2.171.dev38477406391",
     "marin-shellbox[daytona,shellsim]",
     "ninja",
     "nvidia-ml-py",

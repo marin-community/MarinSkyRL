@@ -289,6 +289,10 @@ async def rollout_session(task_lowering):
         class Factory:
             backend = Backend.DOCKER
 
+            def check_environment(self, requirements, spec):
+                # This local fixture supports the declared test environments.
+                pass
+
             async def create(self, spec):
                 root = Path(directory) / str(len(machines))
                 root.mkdir()

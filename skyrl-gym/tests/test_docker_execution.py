@@ -158,6 +158,9 @@ async def test_docker_shell_rollout_keeps_timeout_feedback_and_private_grades(py
     class Factory:
         backend = Backend.DOCKER
 
+        def check_environment(self, requirements, spec):
+            DockerMachineFactory().check_environment(requirements, spec)
+
         async def create(self, spec):
             # The fixture pulled this exact digest before machine acquisition.
             machine = await DockerMachineFactory().create(replace(spec, source=python_image))

@@ -2,7 +2,7 @@ from dataclasses import dataclass, field, replace
 
 import numpy as np
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
-from shellbox.machine import Backend, ShellSimBuiltins
+from shellbox.machine import Backend, PackageSpec
 from skyrl_train.rollouts.buffer import RolloutGroup, RolloutLease
 from skyrl_train.trajectory_runners.types import TokenProvenance
 
@@ -39,9 +39,12 @@ class FixtureImageFactory:
 
     backend = Backend.DOCKER
 
+    def check_environment(self, requirements, spec):
+        pass
+
     async def create(self, spec):
         return await ShellSimMachineFactory().create(
-            replace(spec, source=ShellSimBuiltins(), workdir=spec.workdir or "/workspace")
+            replace(spec, source=PackageSpec(), workdir=spec.workdir or "/workspace")
         )
 
 

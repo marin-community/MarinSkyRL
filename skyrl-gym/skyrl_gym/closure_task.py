@@ -4,7 +4,7 @@ from dataclasses import asdict, replace
 from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from rolloutengine.closure_scoring import (
+from verifyit.closure_scoring import (
     CLOSURE_REGION_SCORER,
     ClosureFormat,
     closure_response_content,
@@ -14,7 +14,7 @@ from rolloutengine.closure_scoring import (
 )
 from rolloutengine.contracts import ModelTurn, SessionStart, Transition
 from rolloutengine.spec import LoweredTaskSpec
-from rolloutengine.structure_closure import PrefixStatus
+from verifyit.structure_closure import PrefixStatus
 from rolloutengine.task_session import session_start
 from shellbox.machine import Machine
 from taskcompendium.grading_result import GradeResult, Outcome
@@ -22,6 +22,7 @@ from taskcompendium.grading_result import GradeResult, Outcome
 from skyrl_gym.source_task import session_parameters
 
 STRUCTURE_CLOSURE_SESSION = "structure_closure"
+SNOWBALL_TURN_END_MARKERS = ("<|eot_id|>", "<|end_of_text|>")
 
 
 class ClosurePrompt(BaseModel):
@@ -61,7 +62,9 @@ class ClosureReplaySession:
         )
 
     async def advance(self, turn: ModelTurn) -> Transition:
-        content = closure_response_content(turn.text, stop_reason=turn.stop_reason)
+        content = closure_response_content(
+            turn.text, stop_reason=turn.stop_reason, terminal_markers=SNOWBALL_TURN_END_MARKERS
+        )
         score = score_closure_region(self.prompt.prefix + content, self.prompt.expected, self.prompt.format)
         self.result = GradeResult(
             Outcome.GRADED,

@@ -12,7 +12,7 @@ from omegaconf import OmegaConf
 from skyrl_gym.verification import VerificationStatus
 from skyrl_gym.tool_protocol_task import ToolProtocolReplaySession
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
-from shellbox.machine import Backend, Command, ShellSimBuiltins, NetworkPolicy
+from shellbox.machine import Backend, Command, PackageSpec, NetworkPolicy
 from taskcompendium.models import (
     AnswerType,
     ArtifactKind,
@@ -59,13 +59,16 @@ async def test_mixed_harbor_and_native_tasks_keep_separate_providers_and_machine
     class Factory:
         backend = Backend.DOCKER
 
+        def check_environment(self, requirements, spec):
+            pass
+
         def __init__(self, provider):
             self.provider = provider
 
         async def create(self, spec):
             machines[self.provider].append(spec)
             return await ShellSimMachineFactory().create(
-                replace(spec, source=ShellSimBuiltins(), cpus=None, workdir="/workspace")
+                replace(spec, source=PackageSpec(), cpus=None, workdir="/workspace")
             )
 
     settings = HarborTaskSettings.from_config(
@@ -191,9 +194,12 @@ async def test_disabled_harbor_verification_keeps_tokens_but_masks_training(
     class ImageFactory:
         backend = Backend.DOCKER
 
+        def check_environment(self, requirements, spec):
+            pass
+
         async def create(self, spec):
             return await ShellSimMachineFactory().create(
-                replace(spec, source=ShellSimBuiltins(), workdir=spec.workdir or "/workspace")
+                replace(spec, source=PackageSpec(), workdir=spec.workdir or "/workspace")
             )
 
     worker = TaskRolloutWorker(
@@ -253,13 +259,16 @@ async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected
     class Factory:
         backend = Backend.SHELLSIM
 
+        def check_environment(self, requirements, spec):
+            pass
+
         async def create(self, spec):
             nonlocal attempts
             attempts += 1
             if failure_stage == "startup" and attempts < 3:
                 raise TimeoutError("Sandbox startup timed out")
             machine = await ShellSimMachineFactory().create(
-                replace(spec, source=ShellSimBuiltins(), workdir=spec.workdir or "/workspace")
+                replace(spec, source=PackageSpec(), workdir=spec.workdir or "/workspace")
             )
             machines.append(machine)
             if failure_stage not in {"verifier", "cancel"} or attempts == 3:
@@ -308,9 +317,12 @@ async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected
     class VerifierFactory:
         backend = Backend.DOCKER
 
+        def check_environment(self, requirements, spec):
+            pass
+
         async def create(self, spec):
             machine = await ShellSimMachineFactory().create(
-                replace(spec, source=ShellSimBuiltins(), workdir=spec.workdir or "/workspace")
+                replace(spec, source=PackageSpec(), workdir=spec.workdir or "/workspace")
             )
             machines.append(machine)
             return machine
@@ -463,11 +475,14 @@ async def test_harbor_retry_policy_preserves_terminal_grades(task_inputs, phase,
     class Factory:
         backend = Backend.SHELLSIM
 
+        def check_environment(self, requirements, spec):
+            pass
+
         async def create(self, spec):
             nonlocal attempts
             attempts += 1
             machine = await ShellSimMachineFactory().create(
-                replace(spec, source=ShellSimBuiltins(), workdir=spec.workdir or "/workspace")
+                replace(spec, source=PackageSpec(), workdir=spec.workdir or "/workspace")
             )
             await machine.run(Command(("sh", "-c", f"echo {attempts} > /workspace/attempt")))
             return machine
@@ -475,13 +490,16 @@ async def test_harbor_retry_policy_preserves_terminal_grades(task_inputs, phase,
     class VerifierFactory:
         backend = Backend.DOCKER
 
+        def check_environment(self, requirements, spec):
+            pass
+
         async def create(self, spec):
             nonlocal verifier_starts
             verifier_starts += 1
             if failure.startswith("grade_timeout"):
                 raise TimeoutError("Verifier machine startup timed out")
             return await ShellSimMachineFactory().create(
-                replace(spec, source=ShellSimBuiltins(), workdir=spec.workdir or "/workspace")
+                replace(spec, source=PackageSpec(), workdir=spec.workdir or "/workspace")
             )
 
     class Client(InferenceClient):
@@ -819,9 +837,12 @@ async def test_harbor_source_materialization_runs_without_the_original_directory
     class ImageFactory:
         backend = Backend.DOCKER
 
+        def check_environment(self, requirements, spec):
+            pass
+
         async def create(self, spec):
             return await ShellSimMachineFactory().create(
-                replace(spec, source=ShellSimBuiltins(), workdir=spec.workdir or "/workspace")
+                replace(spec, source=PackageSpec(), workdir=spec.workdir or "/workspace")
             )
 
     client = ConversationClient(

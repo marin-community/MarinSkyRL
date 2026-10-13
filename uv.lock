@@ -2794,21 +2794,21 @@ wheels = [
 
 [[package]]
 name = "marin-finestore"
-version = "0.2.165.dev38153482028"
+version = "0.2.171.dev38477406391"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "marin-rigging", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin' or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "pyarrow", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin' or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "pydantic", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin' or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f3/fd/9fff018005114a778e25356aa02ea1cfa2d4331c5f940f5ff06a12f1bd5b/marin_finestore-0.2.165.dev38153482028.tar.gz", hash = "sha256:1831b774122ef083aaac74930ccf7fce3ea68e51dd57ab298dceb5d9ef798314", size = 61148, upload-time = "2026-10-11T16:02:31.873Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/4b/6c/6bff1afd3ebd076a7897bf0cdc6d5fc8b24ad9d8499e1c96f6b6e7c13181/marin_finestore-0.2.171.dev38477406391.tar.gz", hash = "sha256:5ee43a20eca49c211f0c0ae1581c256463f7890027803878b0b5ff936a531777", size = 61143, upload-time = "2026-10-13T22:25:41.004Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/0b/d3/b6495f249497208632b75dcfc7d54b6eef0192850a8d9b61957617480206/marin_finestore-0.2.165.dev38153482028-py3-none-any.whl", hash = "sha256:b95db2bc07adabba34e08178f801504fdd07ae4cb0331d84bde60c4fd418a945", size = 47596, upload-time = "2026-10-11T16:02:10.992Z" },
+    { url = "https://files.pythonhosted.org/packages/5a/7a/5cf67a36d0845c268107573f58b871af299678a5ec08c80f667d03a54d52/marin_finestore-0.2.171.dev38477406391-py3-none-any.whl", hash = "sha256:eaec74d90c402fbd2b3fc9909828a5b1b54a04d24985a52faef62f389a75a04f", size = 47596, upload-time = "2026-10-13T22:25:21.556Z" },
 ]
 
 [[package]]
 name = "marin-iris"
-version = "0.2.165.dev38153482028"
+version = "0.2.171.dev38477406391"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin' or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
@@ -2839,9 +2839,9 @@ dependencies = [
     { name = "uvicorn", extra = ["standard"], marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin' or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "zstandard", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin' or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/0c/a0/bcedc67d06eb22a6b8c3b1a3689a330a7a33c79bc42939499c9a75f4bb15/marin_iris-0.2.165.dev38153482028.tar.gz", hash = "sha256:68f52d93ed5b3ccc7308a124af4c66aa0c86a5bd9f33e8fdbe19deebefe58d2c", size = 953343, upload-time = "2026-10-11T16:02:35.754Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b8/8b/23719421116effbbc36f8899df35dc122ffd4d6b935434ebd2889ed640a2/marin_iris-0.2.171.dev38477406391.tar.gz", hash = "sha256:1c486292233be9c7a60dfa3911621c4a9fe4ee1495b128b55fb6ff9b579b03e1", size = 953540, upload-time = "2026-10-13T22:25:44.603Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/de/ba/e200483c3db89d1e60d44a582bcaaf9da8377ba610bec0c51788839f69c8/marin_iris-0.2.165.dev38153482028-py3-none-any.whl", hash = "sha256:73ef542cfa0e834ad8c82367bafd7755091d5ab56fcd740c1e6a4373b9db3222", size = 1151253, upload-time = "2026-10-11T16:02:16.177Z" },
+    { url = "https://files.pythonhosted.org/packages/8b/75/4170e4fe8bc604809c55083fdb794c2d317dfc968e8c4733c805dede610e/marin_iris-0.2.171.dev38477406391-py3-none-any.whl", hash = "sha256:dc50609907d28e5c4d5634a1c171af0b18dd320349c58088e078fb66ccbe2a57", size = 1151443, upload-time = "2026-10-13T22:25:26.429Z" },
 ]
 
 [[package]]
@@ -2858,7 +2858,7 @@ wheels = [
 
 [[package]]
 name = "marin-rigging"
-version = "0.2.165.dev38153482028"
+version = "0.2.171.dev38477406391"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiobotocore", version = "3.7.0", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
@@ -2880,9 +2880,9 @@ dependencies = [
     { name = "starlette", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin' or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "zstandard", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin' or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f8/a3/31861ac15d42267771c0ea628757822b4e515aa7ad865d13d0f76b6b0d96/marin_rigging-0.2.165.dev38153482028.tar.gz", hash = "sha256:0107dbb6fc9e36b01d1b02f2a20c804859e32be929d550a48e13e7d5d858face", size = 227071, upload-time = "2026-10-11T16:02:39.255Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/29/39/c84ff6fcce7e3d22fc3b1888a92dfe69d07f50a179b883262ff6b6e364ec/marin_rigging-0.2.171.dev38477406391.tar.gz", hash = "sha256:e6f27efa888a1ce38e205d11c9c1c82fd0c900bbabdb1e43a10cca38568f710e", size = 227061, upload-time = "2026-10-13T22:25:47.521Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/62/97/4574b4d2a89793f1d2821469e2cb7bc893ece01ab9ef34b573eed07a672e/marin_rigging-0.2.165.dev38153482028-py3-none-any.whl", hash = "sha256:f483787052a0cbbbc4dc5240605492a0cb2e41db94fec3c7d74f04096118292d", size = 541073, upload-time = "2026-10-11T16:02:20.567Z" },
+    { url = "https://files.pythonhosted.org/packages/f8/f8/3bc3184266903daaade4c210d22ff24e740a98412f29fc033d61187dfdee/marin_rigging-0.2.171.dev38477406391-py3-none-any.whl", hash = "sha256:b0fa6cfd95966c8675b8e700f045012de0024569c33bf3e3113c7b710bd473d8", size = 541477, upload-time = "2026-10-13T22:25:30.395Z" },
 ]
 
 [package.optional-dependencies]
@@ -2895,29 +2895,29 @@ secrets = [
 
 [[package]]
 name = "marin-rolloutengine"
-version = "0.2.165.dev38153482028"
+version = "0.2.171.dev38477406391"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "marin-shellbox", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin' or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "marin-taskcompendium", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin' or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "pydantic", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin' or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/25/5d/d9c0ca7ebe6477890daae978b3a5829840309f009725b6e17db8b226a94f/marin_rolloutengine-0.2.165.dev38153482028.tar.gz", hash = "sha256:6eb84097bb8a97173d0d6e75de8b876a22d530cc8fb72e07af35a4913be9b969", size = 27897, upload-time = "2026-10-11T16:02:40.78Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c4/83/4353fe0ebc781076a8c173b836995f4805e004cb6b4627309b3932e13100/marin_rolloutengine-0.2.171.dev38477406391.tar.gz", hash = "sha256:0502ee8d4fda7c60fa7de95be6ae699d5db39b917fb395faa09a86b63af11f32", size = 31861, upload-time = "2026-10-13T22:25:48.577Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d1/c7/51ece153a46ab73431d6d6fe006eb21c56ce3c4c9e94274bf5eb545a14b3/marin_rolloutengine-0.2.165.dev38153482028-py3-none-any.whl", hash = "sha256:2f86bf4c898f6440670c0bcd3ab357b65e6674406f18667d4b90ad06e327e1b3", size = 16178, upload-time = "2026-10-11T16:02:22.113Z" },
+    { url = "https://files.pythonhosted.org/packages/a5/85/9d4356380700d9da6e9e3b16aaa2dc1779e3b79407f6e7dfab23ffab2bee/marin_rolloutengine-0.2.171.dev38477406391-py3-none-any.whl", hash = "sha256:d4555f464a8c231d68ebc29fb9202952913f598d534772e649713b52cd09f9fc", size = 18380, upload-time = "2026-10-13T22:25:32.641Z" },
 ]
 
 [[package]]
 name = "marin-shellbox"
-version = "0.2.165.dev38153482028"
+version = "0.2.171.dev38477406391"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "bubblewrap-bin", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "httpx", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin' or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/2b/50/ad16221c82a68932225ddcfd149902fd1584ec9bd9d2fd9cfe749402eb15/marin_shellbox-0.2.165.dev38153482028.tar.gz", hash = "sha256:b2e6b63f49d6f0bec0e952daa6813dcd0aec8e5d132ef5a6795d824321e85a45", size = 99639, upload-time = "2026-10-11T16:02:42.027Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b0/50/20397ea632e48a43cc1fd85048ca5f89fec18d0dcd3ee0e1b65d54d82ef5/marin_shellbox-0.2.171.dev38477406391.tar.gz", hash = "sha256:7bf6381d7c1f1e0c731ffd319932bf6ffb5d751d62b6d5ce649a4f3109a6b1d0", size = 103100, upload-time = "2026-10-13T22:25:49.501Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/38/a6/cd41366fa3ad37b71334e678e39be33615baeb6cc6d05c68331b1eb57827/marin_shellbox-0.2.165.dev38153482028-py3-none-any.whl", hash = "sha256:8cc20b6c16b2d6d09df429c9a453930abd757188f63afc1ea33dd3c4c21d1e83", size = 72325, upload-time = "2026-10-11T16:02:23.526Z" },
+    { url = "https://files.pythonhosted.org/packages/19/e3/46368ccb685797282898436430cf5c3e84ec29b7c0eeaa2907c39f188a96/marin_shellbox-0.2.171.dev38477406391-py3-none-any.whl", hash = "sha256:2032aa6493a80ed5e34706554fe200dfdaefda14164a302f1c3ffbe24b4a6ebc", size = 75381, upload-time = "2026-10-13T22:25:34.133Z" },
 ]
 
 [package.optional-dependencies]
@@ -2927,7 +2927,7 @@ daytona = [
 ]
 shellsim = [
     { name = "marin-rigging", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin' or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
-    { name = "shellsim", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin' or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
+    { name = "shellsim", extra = ["pypi"], marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin' or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
 ]
 
 [[package]]
@@ -2943,7 +2943,7 @@ dependencies = [
 
 [[package]]
 name = "marin-taskcompendium"
-version = "0.2.165.dev38153482028"
+version = "0.2.171.dev38477406391"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "marin-rigging", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin' or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
@@ -2952,21 +2952,21 @@ dependencies = [
     { name = "pydantic", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin' or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "tomlkit", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin' or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/b0/4d/622a62e6717a67c5f6be0b8f408758c4dad73742fb0c613e300ca29b380b/marin_taskcompendium-0.2.165.dev38153482028.tar.gz", hash = "sha256:3b07a9426984b63448f22fe8b6649b967d3ae849e7a8f3d0312ccc6ba03f4a3a", size = 206484, upload-time = "2026-10-11T16:02:43.182Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/24/d1/1a042190babbf32c5db18af95825f78672e1113b416766815f49f43106b7/marin_taskcompendium-0.2.171.dev38477406391.tar.gz", hash = "sha256:e03226d9f89dd806bc3b8ca4cfe83b1f167eec2af4c87621811d146e6ba56773", size = 210857, upload-time = "2026-10-13T22:25:50.598Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/63/96/5cfc4a8436209c45b79c355c1f9a2b364cbe436a452b926d826182d064c4/marin_taskcompendium-0.2.165.dev38153482028-py3-none-any.whl", hash = "sha256:6a074fa36d7dd9e8d7114c3b30020e277a0fbb3415fdf748329968f798f6539a", size = 148047, upload-time = "2026-10-11T16:02:25.294Z" },
+    { url = "https://files.pythonhosted.org/packages/0c/66/c8c8e9e0796c88dafb23484303888d25288305aa2c0a31ecde34f51c5030/marin_taskcompendium-0.2.171.dev38477406391-py3-none-any.whl", hash = "sha256:78753c4522badada3b02d1bc2049f6fe15004ac293cce63dddf771a79e60a6a3", size = 149496, upload-time = "2026-10-13T22:25:35.562Z" },
 ]
 
 [[package]]
 name = "marin-verifyit"
-version = "0.2.165.dev38153482028"
+version = "0.2.171.dev38477406391"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "tomli-w", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin' or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/de/e1/4d1e2fb9ee4d985808466cccc8efa5c1acc5b10c87ae087b3a660a29a790/marin_verifyit-0.2.165.dev38153482028.tar.gz", hash = "sha256:96ca64fceb173545a72c6bc43037055fc6b3e1859d4b75e88e4c3052c2b7d1ca", size = 102050, upload-time = "2026-10-11T16:02:44.323Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/2d/ba/0684616c2e3d92eb767c4c82db7c057f55694b7084463b82b37f11c30fc2/marin_verifyit-0.2.171.dev38477406391.tar.gz", hash = "sha256:d196f4d71750a0d1098a4cfa223f9f7754e5b0a36dcdc7dd45d4e927a9568811", size = 109453, upload-time = "2026-10-13T22:25:51.778Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b1/8a/7857a55631d27a8c58014ea8a3b7c284eedef23a47c70a3d443a6103e74c/marin_verifyit-0.2.165.dev38153482028-py3-none-any.whl", hash = "sha256:4df4da1a792085711f226a20a41e09dffff76760a9953fe61a523e945760168b", size = 137567, upload-time = "2026-10-11T16:02:26.917Z" },
+    { url = "https://files.pythonhosted.org/packages/89/7b/5be6dbb89b5b3eabb70edb76f66d4a5f296d9f42cdf9d806f4846aae7288/marin_verifyit-0.2.171.dev38477406391-py3-none-any.whl", hash = "sha256:943836791b20664f5efdb7efd6538c1efa42c87add5c4218d70b9451c6503421", size = 146648, upload-time = "2026-10-13T22:25:36.874Z" },
 ]
 
 [package.optional-dependencies]
@@ -3189,10 +3189,10 @@ requires-dist = [
     { name = "marin-iris-native" },
     { name = "marin-rigging", extras = ["prometheus"], marker = "extra == 'telemetry'" },
     { name = "marin-rigging", extras = ["secrets"], specifier = ">=0.2.144.dev37540375919" },
-    { name = "marin-rolloutengine" },
+    { name = "marin-rolloutengine", specifier = ">=0.2.171.dev38477406391" },
     { name = "marin-shellbox", extras = ["daytona", "shellsim"] },
     { name = "marin-taskcompendium" },
-    { name = "marin-verifyit", extras = ["math", "schema", "reasoning-gym", "judge"] },
+    { name = "marin-verifyit", extras = ["math", "schema", "reasoning-gym", "judge"], specifier = ">=0.2.171.dev38477406391" },
     { name = "math-verify", specifier = "==0.9.0" },
     { name = "megatron-bridge", marker = "sys_platform == 'linux' and extra == 'megatron'", specifier = "==0.6.0" },
     { name = "megatron-core", marker = "sys_platform == 'linux' and extra == 'megatron'", specifier = "==0.18.0" },
@@ -6202,14 +6202,21 @@ wheels = [
 
 [[package]]
 name = "shellsim"
-version = "0.1.29"
+version = "0.1.35"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/e6/48/9f87a4a2705a0f7b038037ac6b6cd9faa8e0d9753d984385bd7ce8355b0a/shellsim-0.1.29.tar.gz", hash = "sha256:bc7c49371cb51e76f3081816557f717720e46b2ede5a98ca0dbc9ab2b01d0ffa", size = 1483437, upload-time = "2026-10-05T21:54:02.998Z" }
+dependencies = [
+    { name = "packaging", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin' or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/17/0b/e3183524d062d6d3673bf5111fcb954b36463b2521c57d1aec508ad9314b/shellsim-0.1.35.tar.gz", hash = "sha256:7b16f666a0a40fd4b62246cb1fb41cb369792739a243ed9b342afafe3d5f8284", size = 2696302, upload-time = "2026-10-12T21:02:53.131Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/69/17/bec33ba0d9d65feeb3b1055d66b08074c169453157295dcf59608964c679/shellsim-0.1.29-cp39-abi3-macosx_10_12_x86_64.whl", hash = "sha256:f29a92470aff55832c55027759f5238deda5810365965508d50d2f7748c57f05", size = 5540664, upload-time = "2026-10-05T21:53:54.247Z" },
-    { url = "https://files.pythonhosted.org/packages/d0/32/ea49a06d0d377dcd35d566cbfd1054dd66f4c5a131597305e9e5d5db60cf/shellsim-0.1.29-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:b16ba40bd7fd381ceb14e851ac3e75eed0842644c369695386e6ab2ff91a446c", size = 5122333, upload-time = "2026-10-05T21:53:56.068Z" },
-    { url = "https://files.pythonhosted.org/packages/d8/1f/fc61a5420e25ff699fc822bbb75ef0b06f796419cd4b60bd4c0ef7357a2a/shellsim-0.1.29-cp39-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:869395d6d0afc5e40cd6356c616cddf71c8936778083563ddbf2cdbc73b87dab", size = 5710906, upload-time = "2026-10-05T21:53:57.885Z" },
-    { url = "https://files.pythonhosted.org/packages/66/16/2573742f2619dd99898b807c9e4e666f5763ff13f2f5f282580ddd9ee1a5/shellsim-0.1.29-cp39-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:e1921934d4b5d10645dfdd79afa4fb4639248d3a71f3acbc9239accefacc71e8", size = 5968747, upload-time = "2026-10-05T21:53:59.5Z" },
+    { url = "https://files.pythonhosted.org/packages/5e/74/859a83bf9adb21a5f1d908dad307a98029cbdeae8653d5813c297a6e9376/shellsim-0.1.35-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:9d44033316694408c977c735aa7205db7c65f81399ca64d94d1125dde89528d8", size = 5799979, upload-time = "2026-10-12T21:02:46.81Z" },
+    { url = "https://files.pythonhosted.org/packages/75/a3/93050cff9a8d62ffd97a28dd10e4035d4061ce3687d10a53b12e398dba8b/shellsim-0.1.35-cp39-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:12096492ac7e66d1a86c272bcd5d4cb2a0c3b28ec606e728d98203e19e134dfa", size = 6405099, upload-time = "2026-10-12T21:02:49.396Z" },
+    { url = "https://files.pythonhosted.org/packages/6c/a9/97d1ce8e723b63888d6b1b66d822c393b612003e19d40b6261501dd27c5d/shellsim-0.1.35-cp39-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:660180fab7245ae66c3421bade2db239f4024764342afda752b0d798db88a805", size = 6698641, upload-time = "2026-10-12T21:02:51.239Z" },
+]
+
+[package.optional-dependencies]
+pypi = [
+    { name = "uv", marker = "(platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (platform_machine != 'aarch64' and platform_machine != 'x86_64' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin' or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (sys_platform != 'linux' and extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
 ]
 
 [[package]]
@@ -7251,6 +7258,20 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/53/0c/06f8b233b8fd13b9e5ee11424ef85419ba0d8ba0b3138bf360be2ff56953/urllib3-2.7.0.tar.gz", hash = "sha256:231e0ec3b63ceb14667c67be60f2f2c40a518cb38b03af60abc813da26505f4c", size = 433602, upload-time = "2026-05-07T16:13:18.596Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/7f/3e/5db95bcf282c52709639744ca2a8b149baccf648e39c8cc87553df9eae0c/urllib3-2.7.0-py3-none-any.whl", hash = "sha256:9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897", size = 131087, upload-time = "2026-05-07T16:13:17.151Z" },
+]
+
+[[package]]
+name = "uv"
+version = "0.13.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/05/ba/01146b98d782872d5f62b8568325d1faee9e190d97f7cef647bd19e243b3/uv-0.13.0.tar.gz", hash = "sha256:9a38bd3406b2106288a38888df785f12c5ddc6db22871aacfe0a0ee766f9f6c0", size = 7257649, upload-time = "2026-10-09T19:46:06.945Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ff/27/2a2dde8a643337b6746a8e632b3ba8aef7c82b9bc28642bb94dd3a046ef5/uv-0.13.0-py3-none-macosx_10_12_x86_64.whl", hash = "sha256:93265932cb2efd1486d4d182211281b3f0b31637e2fc160c4c8d7b15294188d1", size = 18315461, upload-time = "2026-10-09T19:45:21.262Z" },
+    { url = "https://files.pythonhosted.org/packages/9e/d4/d42eabbd9b61a965e0a262e06bf8452744593e7a3110a5c4273c4e917729/uv-0.13.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:a5f93ae362b751737cecef0bbc0294624be68a843ff9b32d86e6862a26101630", size = 14803271, upload-time = "2026-10-09T19:45:23.781Z" },
+    { url = "https://files.pythonhosted.org/packages/65/0e/9e707b242c041dd10d31688a7d0acf90ee321ef7627bdf0978b3d19e3325/uv-0.13.0-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.musllinux_1_1_aarch64.whl", hash = "sha256:5163a516b9a488bccb4001f727720b775719dfb6dcb144a9bc0ef23e5cfdd269", size = 18640482, upload-time = "2026-10-09T19:45:26.242Z" },
+    { url = "https://files.pythonhosted.org/packages/c3/75/1901383808ba0d421f32060ba0e9884169b685a722e1af5d87fdd4225ba6/uv-0.13.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:52c7da0fd9056d9551124777ec77de53f0df7017daf8f98a19e947b7837416ed", size = 17941073, upload-time = "2026-10-09T19:45:42.446Z" },
+    { url = "https://files.pythonhosted.org/packages/fd/f2/0b7d95cf3070d5c7fa734cd50394d22ef61203fb9052a157ce9d053fa9cf/uv-0.13.0-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:f840e640fe16591f6d71a94e8863707b7ba43c5786d1fe662868a9fb44c53e50", size = 17264080, upload-time = "2026-10-09T19:45:45.087Z" },
+    { url = "https://files.pythonhosted.org/packages/19/5a/b57c401bf3032a382b745396a6fbb5a09f77b9f31e7d6217c7e320cf3148/uv-0.13.0-py3-none-musllinux_1_1_x86_64.whl", hash = "sha256:5cb956988442f5b1ca281344818a6b9fa296a799d7024cc53ae571d464150ca2", size = 20041871, upload-time = "2026-10-09T19:45:56.306Z" },
 ]
 
 [[package]]

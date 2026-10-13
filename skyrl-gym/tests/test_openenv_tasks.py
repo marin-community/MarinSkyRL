@@ -163,6 +163,9 @@ async def test_openenv_engine_preserves_tokens_and_releases_server(openenv_sessi
     class Factory:
         backend = "docker"
 
+        def check_environment(self, requirements, spec):
+            pass
+
         async def create(self, spec):
             return machine
 

@@ -10,7 +10,7 @@ import pytest
 from omegaconf import OmegaConf
 from skyrl_gym.verification import VerificationStatus
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
-from shellbox.machine import Backend, ExitReason, Result, ShellSimBuiltins, UnsupportedMachineSpec
+from shellbox.machine import Backend, ExitReason, Result, PackageSpec, UnsupportedMachineSpec
 from taskcompendium.models import Source
 from skyrl_train.rollouts.task_projections import StepTaskProjection, WholeTaskProjection
 from skyrl_train.dataset.tasks import SourceTaskDataset, source_row_task
@@ -158,8 +158,11 @@ async def test_mixed_nemotron_tasks_run_without_the_original_sources(
     class ImageFactory:
         backend = Backend.DOCKER
 
+        def check_environment(self, requirements, spec):
+            pass
+
         async def create(self, spec):
-            return await ShellSimMachineFactory().create(replace(spec, source=ShellSimBuiltins(), cpus=None))
+            return await ShellSimMachineFactory().create(replace(spec, source=PackageSpec(), cpus=None))
 
     settings = HarborTaskSettings.from_config(
         OmegaConf.create(
@@ -602,6 +605,9 @@ def task_machine():
         backend = Backend.DOCKER
         closed = False
         output = "4"
+
+        def check_environment(self, requirements, spec):
+            pass
 
         async def create(self, spec):
             self.output = spec.env.get("PYTHON_OUTPUT", "4")

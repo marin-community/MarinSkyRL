@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
-from skyrl_gym.tool_call_markup import THINK_CLOSE, TOOL_OPEN, ToolCallStatus, tool_call_regions
+from verifyit.tool_call_markup import THINK_CLOSE, TOOL_OPEN, ToolCallStatus, tool_call_regions
 
 from skyrl_train.config.ftpo import FTPOBoundary, FTPOConfig
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import LoopCreditConfig, tail_loop

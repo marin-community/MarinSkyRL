@@ -14,10 +14,10 @@ readme = "README.md"
 requires-python = ">=3.12,<3.14"
 
 dependencies = [
-    "marin-rolloutengine",
+    "marin-rolloutengine>=0.2.171.dev38477406391",
     "marin-shellbox",
     "marin-taskcompendium",
-    "marin-verifyit[math,schema,reasoning-gym,judge]",
+    "marin-verifyit[math,schema,reasoning-gym,judge]>=0.2.171.dev38477406391",
     "func_timeout",
     "loguru",
     "numpy",

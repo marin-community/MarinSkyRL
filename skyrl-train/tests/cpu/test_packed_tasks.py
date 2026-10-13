@@ -14,7 +14,7 @@ from omegaconf import OmegaConf
 
 from cloud.iris import rl_data
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
-from shellbox.machine import Backend, ShellSimBuiltins
+from shellbox.machine import Backend, PackageSpec
 
 from marinskyrl.packed_tasks import (
     EmptyTaskSelectionError,
@@ -246,8 +246,11 @@ async def test_packed_tasks_execute_after_source_removal(tmp_path, verification)
     class Factory:
         backend = Backend.DOCKER
 
+        def check_environment(self, requirements, spec):
+            pass
+
         async def create(self, spec):
-            return await ShellSimMachineFactory().create(replace(spec, source=ShellSimBuiltins()))
+            return await ShellSimMachineFactory().create(replace(spec, source=PackageSpec()))
 
     class Model:
         async def complete(self, request):

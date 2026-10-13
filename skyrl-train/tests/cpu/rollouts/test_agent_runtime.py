@@ -10,7 +10,7 @@ from harbor.models.trial.config import AgentConfig
 from rolloutengine.contracts import ModelTurn
 from rolloutengine.spec import LoweredTaskSpec
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
-from shellbox.machine import MachineSpec, ShellSimBuiltins
+from shellbox.machine import MachineSpec, PackageSpec
 from taskcompendium.models import ConversationInput, TextMessage
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
@@ -102,7 +102,7 @@ async def test_native_runtime_routes_through_proxy_and_publishes_failed_attempts
         backend="shellsim",
         total_turn_timeout=5,
     )
-    machine = await ShellSimMachineFactory().create(MachineSpec(ShellSimBuiltins()))
+    machine = await ShellSimMachineFactory().create(MachineSpec(PackageSpec()))
     await runtime.startup()
     try:
         if path == "worker":
