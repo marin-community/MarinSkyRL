@@ -2,13 +2,12 @@ set -x
 
 # Colocated GRPO training+generation for Qwen2.5-Coder-7B-Instruct on SkyRL-SQL-653 data.
 # Uses 1 node with 8 GPUs.
-# huggingface-cli download NovaSky-AI/SkyRL-SQL-653-data-newfmt --local-dir $HOME/data/sql --repo-type dataset
+# Prepare TaskSpecs as described in examples/text_to_sql/sql.md.
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/step_wise/run_skyrl_sql_step_wise.sh
 
 # change these paths to your own
 DATA_DIR="$HOME/data/sql"
-DB_PATH="$HOME/data/sql/db_files/data"
 CKPT_PATH="$HOME/ckpts/skyrl_sql_7B_ckpt_new"
 
 NUM_GPUS=8
@@ -48,7 +47,9 @@ uv run --isolated --extra megatron --extra vllm -m skyrl_train.entrypoints.main_
   generator.backend=vllm \
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
-  environment.env_class=text2sql \
+  environment.task_sessions.session.task_session=text2sql \
+  environment.task_sessions.runtime.task_machine.cpus=1 \
+  environment.task_sessions.runtime.task_machine.memory_mb=8192 \
   generator.n_samples_per_prompt=5 \
   generator.gpu_memory_utilization=0.7 \
   generator.max_turns=$MAX_TURNS \
@@ -56,7 +57,6 @@ uv run --isolated --extra megatron --extra vllm -m skyrl_train.entrypoints.main_
   generator.sampling_params.top_p=0.95 \
   generator.sampling_params.stop='["</sql>", "</solution>"]' \
   generator.eval_sampling_params.stop='["</sql>", "</solution>"]' \
-  environment.task_sessions.text2sql.db_path=$DB_PATH \
   trainer.logger="wandb" \
   trainer.project_name="stepwise_multiturn" \
   trainer.run_name="skyrlsql_multiturn_test_7b" \

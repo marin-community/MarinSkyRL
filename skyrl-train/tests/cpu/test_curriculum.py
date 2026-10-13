@@ -6,6 +6,37 @@ from datasets import Dataset
 
 from skyrl_train.curriculum import CurriculumConfig, CurriculumOrder, SamplingKind, WeightingKind, dataset_bins
 from skyrl_train.rollouts.loader import JudgedGroup
+from marinskyrl.task_format import TaskDatasetRow
+from marinskyrl.task_preparation import curriculum_bin, source_row_task, write_task_rows
+from tests.cpu.task_specs import session_spec, task_dataset
+from tests.cpu.rollouts.engine_fakes import Tokenizer
+
+
+def test_prepared_artifact_preserves_curriculum_bin_membership(tmp_path):
+    rows = [
+        {
+            "prompt": [{"role": "user", "content": "What is 2 + 2?"}],
+            "reward_spec": {"ground_truth": "4"},
+            "extra_info": {"data_source": name, "grade": grade},
+        }
+        for name, grade in (("hard", 10), ("easy", 1), ("easy", 1))
+    ]
+    path = tmp_path / "prepared.parquet"
+    write_task_rows(
+        path,
+        (
+            TaskDatasetRow(
+                source_row_task(row, index, source_name="math", config={}), curriculum_bin=curriculum_bin(row)
+            )
+            for index, row in enumerate(rows)
+        ),
+    )
+    dataset = task_dataset([str(path)], Tokenizer(), session=session_spec("gsm8k"))
+    bins = dataset_bins(dataset)
+    assert bins.names == ["easy", "hard"]
+    assert bins.grades.tolist() == [1, 10]
+    assert bins.row_to_bin.tolist() == [1, 0, 0]
+    assert bins.row_counts.tolist() == [2, 1]
 
 
 class _StubCurriculumDataset:
@@ -14,19 +45,23 @@ class _StubCurriculumDataset:
     bins maps data_source name -> (grade, row_count), rows laid out in insertion order.
     """
 
-    def __init__(self, bins: dict[str, tuple[int, int]]):
+    def __init__(self, bins: dict[str, tuple[int, int]], *, task_ids: tuple[str, ...] | None = None):
         prompts, infos = [], []
         for name, (grade, rows) in bins.items():
             for _ in range(rows):
                 prompts.append(f"prompt-{len(prompts)}")
                 infos.append({"data_source": name, "grade": grade})
         self.dataframe = Dataset.from_dict({"prompt": prompts, "extra_info": infos})
+        self.task_ids = tuple(str(index) for index in range(len(prompts))) if task_ids is None else task_ids
 
     def __len__(self):
         return len(self.dataframe)
 
     def __getitem__(self, idx):
         return idx
+
+    def uid(self, index: int) -> str:
+        return self.task_ids[index]
 
     def collate_fn(self, batch):
         return batch
@@ -51,6 +86,17 @@ def _draws(order, count):
 
 
 TWO_BINS = {"g0-easy": (0, 1), "g1-hard": (1, 1)}
+
+
+def test_task_ids_update_the_correct_curriculum_bin():
+    dataset = _StubCurriculumDataset(TWO_BINS, task_ids=("task:3", "task:9"))
+    order = CurriculumOrder(dataset, CurriculumConfig(kind=SamplingKind.NAIVE), seed=0, window_size=2)
+
+    metrics = order.observe([JudgedGroup("task:9", (1.0, 0.0))])
+
+    assert metrics["curriculum/g0-easy/groups"] == 0
+    assert metrics["curriculum/g1-hard/groups"] == 1
+    assert metrics["curriculum/g1-hard/pass_rate"] == 0.5
 
 
 def test_draws_deterministic_given_seed():

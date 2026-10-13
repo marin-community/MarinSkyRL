@@ -4,12 +4,13 @@ from dataclasses import dataclass
 from enum import StrEnum
 import os
 import posixpath
-from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit
 
 CLOUD_URI_SCHEMES = frozenset({"s3", "gs", "gcs"})
 CLOUD_URI_PREFIXES = tuple(f"{scheme}://" for scheme in sorted(CLOUD_URI_SCHEMES))
 HF_SELECTOR_REVISION_SEPARATOR = "@"
 HF_SELECTOR_SUBDIR_SEPARATOR = "::"
+HF_SELECTOR_SPLIT_SEPARATOR = ":"
 
 
 class RolloutModelLoading(StrEnum):
@@ -69,12 +70,6 @@ class HFDatasetSelector:
         subdir = f"{HF_SELECTOR_SUBDIR_SEPARATOR}{self.subdir}" if self.subdir else ""
         return f"{self.repo_id}{revision}{subdir}"
 
-    def cache_name(self) -> str:
-        """Return a reversible cache key that includes every selector component."""
-        components = (("repo", self.repo_id), ("subdir", self.subdir), ("revision", self.revision))
-        encoded = ((name, quote(value, safe="-._")) for name, value in components if value is not None)
-        return "__".join(f"{name}-{len(value)}-{value}" for name, value in encoded)
-
 
 def parse_hf_dataset_selector(value: str) -> HFDatasetSelector | None:
     """Parse ``org/repo[@revision][::subdir]`` without accepting local paths."""
@@ -93,6 +88,14 @@ def parse_hf_dataset_selector(value: str) -> HFDatasetSelector | None:
         revision=revision if revision_separator else None,
         subdir=subdir if subdir_separator else None,
     )
+
+
+def dataset_reference_parts(value: str) -> tuple[str, str | None]:
+    """Separate a dataset selector from its optional split, after a subdirectory."""
+    selector, separator, split = value.rpartition(HF_SELECTOR_SPLIT_SEPARATOR)
+    if not separator or selector.endswith(HF_SELECTOR_SPLIT_SEPARATOR):
+        return value, None
+    return selector, split
 
 
 @dataclass(frozen=True)

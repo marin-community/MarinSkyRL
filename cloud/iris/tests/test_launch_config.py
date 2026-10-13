@@ -10,8 +10,7 @@ import pytest
 import yaml
 from omegaconf import OmegaConf
 from rolloutengine.contracts import ModelTurn
-from skyrl_gym.answer_tasks import grade_gsm8k
-from skyrl_gym.task_sessions import AnswerTaskSession
+from skyrl_gym.task_factories import session_factories
 
 from cloud.iris import training_driver
 from cloud.iris.launch_config import LaunchTopology, load_launch_config, validate_launch_config
@@ -22,7 +21,8 @@ from cloud.iris.rl_config_translation import (
     parse_rl_config,
 )
 from skyrl_train.distributed.step_policy import NonfiniteStepPolicy, nonfinite_step_policy
-from skyrl_train.dataset.tasks import source_row_task
+from marinskyrl.task_preparation import source_row_task
+from skyrl_train.rollouts.task_lowering import source_execution_settings, lowered_task
 
 
 def _raw_config() -> dict[str, Any]:
@@ -77,7 +77,6 @@ def _raw_config() -> dict[str, Any]:
                 "tokenizer_uri": "s3://models/qwen-tokenizer",
                 "tokenizer_revision": "a" * 40,
             },
-            "data_kind": "tasks",
             "train_data": [],
             "validation_data": [],
         },
@@ -114,26 +113,35 @@ def _raw_config() -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("source_override", [False, True], ids=["shared-session", "source-session"])
 @pytest.mark.parametrize("text,reward", [("#### 12", 1.0), ("#### 12\nMore reasoning.", 0.0)])
-async def test_custom_session_settings_reach_private_grading_through_the_launch_config(
-    tmp_path: Path, text: str, reward: float
+async def test_prepared_grader_parameters_reach_the_launch_selected_session(
+    tmp_path: Path, text: str, reward: float, source_override: bool
 ) -> None:
     raw = _raw_config()
-    raw["skyrl"]["environment"] = {"task_sessions": {"custom_math": {"reward_method": "final_line"}}}
+    raw["skyrl"]["environment"] = {
+        "task_sessions": {
+            "session": {"task_session": "aime" if source_override else "gsm8k"},
+            "sources": {"fixture": {"session": {"task_session": "gsm8k"}}} if source_override else {},
+        }
+    }
     path = tmp_path / "launch.yaml"
     path.write_text(yaml.safe_dump(raw))
     config = load_launch_config(path)
     task = source_row_task(
         {
             "prompt": [{"role": "user", "content": "What is six plus six?"}],
-            "env_class": "custom_math",
             "reward_spec": {"ground_truth": "12"},
         },
         0,
         source_name="fixture",
-        environment_configs=OmegaConf.to_container(config.skyrl.environment.task_sessions, resolve=True),
+        config={"reward_method": "final_line"},
     )
-    session = AnswerTaskSession(task, None, grader=grade_gsm8k)
+    execution, sources = source_execution_settings(
+        OmegaConf.to_container(config.skyrl.environment.task_sessions, resolve=True)
+    )
+    task = lowered_task(task, sources.get(task.source.dataset, execution))
+    session = session_factories()[task.session.task_session](task, None)
     start = await session.prepare()
     try:
         transition = await session.advance(
@@ -207,7 +215,6 @@ def test_composed_launch_rejects_kl_switches(tmp_path: Path, switch: str) -> Non
     [
         ("standard", 0, "sync"),
         ("standard", 2, "async"),
-        ("terminal_bench", 1, "async"),
         ("generate", 0, None),
     ],
 )
@@ -251,7 +258,6 @@ def test_qwen_smoke_hugging_face_model_input_reaches_the_runner_without_a_model_
         "tokenizer_uri": "Qwen/Qwen3-0.6B",
         "tokenizer_revision": "main",
     }
-    config["inputs"]["data_kind"] = "parquet"
     path = tmp_path / "qwen-launch.yaml"
     path.write_text(yaml.safe_dump(config, sort_keys=False))
     seen = []

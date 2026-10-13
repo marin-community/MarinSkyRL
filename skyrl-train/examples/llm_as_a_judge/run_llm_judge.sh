@@ -2,7 +2,7 @@ set -x
 
 # Colocated GRPO training+generation for Qwen2.5-Coder-1.5B-Instruct on GSM8k dataset.
 # Uses 1 node with 4 GPUs.
-# uv run examples/llm_as_a_judge/gsm8k_dataset_judge.py --output_dir $HOME/data/gsm8k_llm_judge
+# Prepare TaskSpecs with --judge_model and --judge_base_url before training.
 # add OPENAI_API_KEY and WANDB_API_KEY to .env.llm_judge
 # bash examples/llm_as_a_judge/run_llm_judge.sh
 
@@ -50,6 +50,5 @@ uv run --isolated --extra megatron --extra vllm --env-file .env.llm_judge -m exa
   trainer.run_name="gsm8k_llm_as_a_judge" \
   trainer.resume_mode=null \
   trainer.ckpt_path="$HOME/ckpts/gsm8k_1.5B_ckpt" \
-  environment.env_class=llm_as_a_judge \
-  environment.task_sessions.llm_as_a_judge.model="gpt-4o-mini" \
+  environment.task_sessions.session.task_session=llm_as_a_judge \
   $@

@@ -1,22 +1,22 @@
 # OpenEnv task sessions
 
-OpenEnv uses the common TaskSession interface and a Shellbox machine per rollout.
-The session starts the configured server inside that machine, sends reset and step requests, and returns observations and rewards.
-The engine closes the session before the machine.
+OpenEnv uses RolloutEngine and one Shellbox machine per task.
+The session starts the server in that machine and sends reset and step requests.
+It returns observations and rewards. The engine closes the session before the machine.
 
-The OpenEnv SDK is not a host dependency.
-Supply an image and `server_command` in `environment.task_sessions.openenv`.
-Select an image with the HTTP reset/step API. The included image installer lists fixed source revisions for five task types.
-
-Supported types are Echo, Coding, OpenSpiel, Atari, SUMO, and FinRL.
-FinRL requires a user-supplied image.
-The example data script supplies Echo and Coding rows.
-
-From `skyrl-train/`:
+From `skyrl-train`, prepare TaskSpecs with an explicit image and private server parameters:
 
 ```bash
 uv run --project .. integrations/openenv/prepare_dummy_dataset.py \
-  --output_dir "$HOME/data/openenv/echo_env" --env_name echo_env
+  --output_dir "$HOME/data/openenv/echo_env" --env_name echo_env \
+  --environment /path/to/environment.json --config /path/to/server.json
 ```
 
-See the [OpenEnv configuration example](../../docs/examples/openenv.rst) for the machine image, server command, and training entrypoint.
+The environment file declares Linux process semantics and a prebuilt image with an `@sha256` digest.
+The server file contains `server_command` and optional HTTP limits.
+The preparer keeps server parameters in private verifier data.
+It does not select a machine backend or turn limit.
+
+The example entrypoint registers `OpenEnvTaskSession`.
+The run config selects `environment.task_sessions.session.task_session=openenv`, machine resources, and execution limits.
+See the [OpenEnv guide](../../docs/examples/openenv.rst) for the file formats and launch command.

@@ -353,7 +353,7 @@ Algorithm Configuration
   - ``sapo``: Smooth sigmoid-gated policy loss with separate positive- and negative-advantage temperatures; see the :doc:`objective usage guide </algorithms/objective_guide>`.
   - ``behavior_clip``: PPO clipping against the sampling policy, with a dual bound for negative advantages; see the :doc:`objective usage guide </algorithms/objective_guide>`.
   - ``sft``: Negative log likelihood on eligible response tokens, independent of advantages; see the :doc:`objective usage guide </algorithms/objective_guide>`.
-  - ``dpo``: Direct Preference Optimization over dataset-supplied chosen/rejected pairs against the frozen reference; requires ``algorithm.loss_reduction=pair_mean`` and ``environment.env_class=preference_pair``. See the :doc:`objective usage guide </algorithms/objective_guide>`.
+  - ``dpo``: Direct Preference Optimization over dataset-supplied chosen/rejected pairs against the frozen reference; requires ``algorithm.loss_reduction=pair_mean`` and ``data.preference_pair_format=text``. See the :doc:`objective usage guide </algorithms/objective_guide>`.
   - Custom policy losses can be registered with the ``PolicyLossRegistry``
 
 

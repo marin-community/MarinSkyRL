@@ -9,12 +9,14 @@ independent target evaluation.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Iterator
 import hashlib
 import json
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import pyarrow.parquet as pq
 from skyrl_train.io import io
@@ -23,6 +25,8 @@ from cloud.iris.artifacts import fs_and_path
 from cloud.iris.open_mopd_fidelity import load_config
 from marinskyrl.checkpoint_paths import LATEST_CHECKPOINT_FILE
 from marinskyrl.resource_locator import join_resource_path
+from marinskyrl.task_format import TaskDatasetRow
+from marinskyrl.task_preparation import source_row_task, write_task_rows
 
 ROOT = Path(__file__).resolve().parents[3]
 FIDELITY_CONFIG = ROOT / "cloud/iris/configs/open_mopd_fidelity.json"
@@ -31,6 +35,7 @@ SCHEDULE_ROWS = 204_800
 SCHEDULE_STEPS = 200
 POLICY_GPUS = 4
 CHECKPOINT_INTERVAL = load_config(FIDELITY_CONFIG).training.save_every
+AIME_SOURCE = "open_mopd_aime24"
 
 
 def hydra_arguments(
@@ -104,10 +109,8 @@ def hydra_arguments(
         "generator.max_num_seqs=64",
         "generator.run_engines_locally=true",
         "generator.weight_sync_backend=nccl",
-        "environment.env_class=prompt_only",
-        f"environment.task_sessions.aime.evaluation_token_budget={training.response_limit}",
-        "environment.task_sessions.aime.strict_box_verify=true",
-        f"environment.task_sessions.aime.max_gen_length={training.response_limit}",
+        "environment.task_sessions.session.task_session=prompt_only",
+        f"++environment.task_sessions.sources.{AIME_SOURCE}.session.task_session=aime",
         "trajectory_runner.rollout_workers.num_workers=1",
         "trajectory_runner.rollout_workers.cpus_per_worker=4",
     ]
@@ -151,6 +154,27 @@ def stage_validation(source_uri: str, destination: Path, expected_sha256: str) -
     columns = set(metadata.schema.to_arrow_schema().names)
     if metadata.num_rows != 30 or not {"prompt", "env_class", "reward_model"} <= columns:
         raise ValueError(f"AIME validation dataset has {metadata.num_rows} rows and columns {sorted(columns)}")
+
+
+def prepare_dataset(source: Path, destination: Path, *, source_name: str, config: dict[str, Any]) -> None:
+    """Prepare verified source rows before the trainer starts."""
+
+    def records() -> Iterator[TaskDatasetRow]:
+        index = 0
+        for batch in pq.ParquetFile(source).iter_batches():
+            for row in batch.to_pylist():
+                prompt = row["prompt"]
+                if isinstance(prompt, str):
+                    row["prompt"] = [{"role": "user", "content": prompt}]
+                if source_name == AIME_SOURCE:
+                    row["data_source"] = AIME_SOURCE
+                yield TaskDatasetRow(
+                    source_row_task(row, index, source_name=source_name, config=config),
+                    teacher_route=row.get("teacher_route"),
+                )
+                index += 1
+
+    write_task_rows(destination, records())
 
 
 def _verified_parquet(source_uri: str, destination: Path, expected_sha256: str) -> pq.FileMetaData:
@@ -202,10 +226,24 @@ def run(
         if not marker_fs.exists(marker_path):
             raise FileNotFoundError(f"Open-MOPD resume has no durable checkpoint marker: {checkpoint_uri}")
     with tempfile.TemporaryDirectory(prefix="open-mopd-native-") as directory:
-        schedule = Path(directory) / "weighted_200step_schedule.parquet"
-        validation = Path(directory) / "aime24.parquet"
-        stage_schedule(dataset_uri, schedule)
-        stage_validation(validation_uri, validation, validation_sha256)
+        raw_schedule = Path(directory) / "released_schedule.parquet"
+        raw_validation = Path(directory) / "released_aime24.parquet"
+        schedule = Path(directory) / "schedule_tasks.parquet"
+        validation = Path(directory) / "aime24_tasks.parquet"
+        stage_schedule(dataset_uri, raw_schedule)
+        stage_validation(validation_uri, raw_validation, validation_sha256)
+        prepare_dataset(raw_schedule, schedule, source_name="open_mopd_schedule", config={})
+        response_limit = load_config(FIDELITY_CONFIG).training.response_limit
+        prepare_dataset(
+            raw_validation,
+            validation,
+            source_name=AIME_SOURCE,
+            config={
+                "evaluation_token_budget": response_limit,
+                "strict_box_verify": True,
+                "max_gen_length": response_limit,
+            },
+        )
         command = [
             sys.executable,
             "-m",

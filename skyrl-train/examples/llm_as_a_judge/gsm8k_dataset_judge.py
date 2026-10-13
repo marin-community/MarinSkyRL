@@ -20,6 +20,8 @@ import re
 import os
 
 import datasets
+from marinskyrl.task_format import TASK_SPEC_COLUMN
+from marinskyrl.task_preparation import source_row_task
 
 
 def extract_solution(solution_str):
@@ -33,6 +35,8 @@ def extract_solution(solution_str):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--output_dir", default="~/data/gsm8k_llm_judge")
+    parser.add_argument("--judge_model", required=True)
+    parser.add_argument("--judge_base_url", required=True)
 
     args = parser.parse_args()
 
@@ -64,8 +68,6 @@ if __name__ == "__main__":
                         "content": question,
                     }
                 ],
-                # TODO: just repeating the full data preprocess script for a single env change isn't very convenient.
-                "env_class": "llm_as_a_judge",
                 "reward_spec": {
                     "method": "rule",
                     "ground_truth": solution,
@@ -77,12 +79,22 @@ if __name__ == "__main__":
                     "question": question_raw,
                 },
             }
-            return data
+            task = source_row_task(
+                data,
+                idx,
+                source_name=data_source,
+                config={"model": args.judge_model, "base_url": args.judge_base_url},
+            )
+            return {TASK_SPEC_COLUMN: task.model_dump_json()}
 
         return process_fn
 
-    train_dataset = train_dataset.map(function=make_map_fn("train"), with_indices=True)
-    val_dataset = val_dataset.map(function=make_map_fn("test"), with_indices=True)
+    train_dataset = train_dataset.map(
+        function=make_map_fn("train"), with_indices=True, remove_columns=train_dataset.column_names
+    )
+    val_dataset = val_dataset.map(
+        function=make_map_fn("test"), with_indices=True, remove_columns=val_dataset.column_names
+    )
 
     output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)

@@ -27,14 +27,33 @@ huggingface-cli download seeklhy/OmniSQL-datasets data.zip --repo-type dataset -
 unzip $HOME/data/sql/db_files/data.zip -d $HOME/data/sql/db_files/
 ```
 
-If you modify the db_files path, update `DB_PATH` in `run_skyrl_sql.sh` accordingly.
+## Prepare TaskSpecs
+
+The downloads contain raw source rows, not training inputs. Convert each split before training:
+
+```bash
+uv run --project .. python -m marinskyrl.task_preparation \
+  --input raw/train.parquet --output prepared/train.parquet --source skyrl_sql \
+  --config sql-grader.json --environment python-environment.json
+```
+
+Use the same command for the validation split. `sql-grader.json` contains
+`db_path`: the database root on each rollout worker. The session reads the private
+reference database there and sends a database copy to the task machine.
+Make that path accessible on every rollout worker before launch.
+
+`python-environment.json` declares `command_semantics="linux_process"` and a
+prebuilt Python `docker_image` with an `@sha256` digest. The task keeps database
+identifiers, reference SQL, and grader parameters in private verifier data.
+The run config selects the `text2sql` session and execution limits.
+The training scripts request 1 CPU and 8192 MB for each task machine.
 
 ## Training
 
-See the bash scripts in this repo to launch training. Take a look at the file of interest, and modify any training configuration parameters as needed.
+Set `DATA_DIR` in the training script to the prepared TaskSpec directory.
 
 To start training, run:
 
 ```bash
-bash examples/text_to_sql/<run_XXX>.sh
+bash examples/text_to_sql/run_skyrl_sql.sh
 ```

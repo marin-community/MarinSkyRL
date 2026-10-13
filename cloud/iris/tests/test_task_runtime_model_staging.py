@@ -170,7 +170,7 @@ def test_staged_models_are_written_as_structured_config(tmp_path, monkeypatch) -
                     "engine_init_kwargs": {"served_model_name": "policy"},
                     "speculative_decoding": {"model": {"source_uri": "old", "source_identity": "old"}},
                 },
-                "data": {"train_data": [], "val_data": [], "terminal_bench_data": []},
+                "data": {"train_data": [], "val_data": []},
             },
         }
     )
@@ -201,7 +201,7 @@ def test_staged_policy_model_supplies_its_embedded_tokenizer(tmp_path, monkeypat
                     "ref": {"model": {"path": "/tmp/stale-model", "tokenizer_path": "/tmp/stale-model"}},
                 },
                 "generator": {"engine_init_kwargs": {"served_model_name": "policy"}},
-                "data": {"train_data": [], "val_data": [], "terminal_bench_data": []},
+                "data": {"train_data": [], "val_data": []},
             },
         }
     )

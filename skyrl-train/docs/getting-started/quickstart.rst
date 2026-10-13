@@ -49,7 +49,7 @@ Next, let's set up the training configuration. You can find a complete example i
 
       # Environment class for the dataset
       # Can be specified here to apply to the full dataset, or at the per-prompt level during preprocessing
-      environment.env_class=gsm8k \
+      environment.task_sessions.session.task_session=gsm8k \
 
       # WandB logging
       trainer.logger="wandb" \

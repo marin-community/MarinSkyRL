@@ -22,14 +22,15 @@ import ray
 from omegaconf import DictConfig, OmegaConf
 from skyrl_train.config.rollout_validation import validate_rollout_launch
 from skyrl_train.config.utils import get_default_config
-from skyrl_train.dataset.tasks import SourceTaskDataset
+from skyrl_train.dataset.prepared_tasks import TaskSpecDataset
+from skyrl_train.rollouts.task_lowering import source_execution_settings
 from skyrl_train.entrypoints.main_base import BasePPOExp, EntrypointOperation
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import RayWrappedInferenceEngine
 from skyrl_train.utils import validate_cfg
 
 from tests.cpu.tiny_training.cpu_backend import CPUInferenceEngine, CPUPolicyWorker
-from tests.cpu.tiny_training.tiny_model import build_tiny_policy, write_gsm8k_dataset
+from tests.cpu.tiny_training.tiny_model import CURRICULUM_BINS, build_tiny_policy, write_gsm8k_dataset
 
 # Eight logical CPUs leave room for rollout workers and a second run's policy actor in a shared session.
 LOGICAL_CPUS = 8
@@ -96,8 +97,8 @@ def tiny_training_config(
     cfg = get_default_config()
     overrides = {
         "data": {
-            "train_data": [str(write_gsm8k_dataset(root / "data" / "train.jsonl", num_prompts, max_turns=max_turns))],
-            "val_data": [str(write_gsm8k_dataset(root / "data" / "validation.jsonl", 8, max_turns=max_turns))],
+            "train_data": [str(write_gsm8k_dataset(root / "data" / "train.jsonl", num_prompts))],
+            "val_data": [str(write_gsm8k_dataset(root / "data" / "validation.jsonl", 8))],
             "sampling": {"kind": sampling_kind(mode, shape)},
         },
         "trainer": {
@@ -148,7 +149,15 @@ def tiny_training_config(
         # Local workers read a warm page cache, so they start together.
         "trajectory_runner": {"rollout_workers": {"num_workers": 2, "cpus_per_worker": 1, "start_interval_seconds": 0}},
     }
-    return OmegaConf.merge(cfg, overrides)
+    cfg = OmegaConf.merge(cfg, overrides)
+    for source in CURRICULUM_BINS:
+        OmegaConf.update(
+            cfg,
+            f"environment.task_sessions.sources.{source}",
+            {"session": {"task_session": "gsm8k" if max_turns == 1 else "gsm8k_multi_turn"}},
+            force_add=True,
+        )
+    return cfg
 
 
 class JsonlTracker:
@@ -189,22 +198,14 @@ def cpu_inference_engine_client(cfg: DictConfig, tokenizer) -> InferenceEngineCl
 class TinyTrainingExp(BasePPOExp):
     """The standard entrypoint with CPU policy workers and CPU inference engines."""
 
-    def get_train_dataset(self):
-        # Filtering a few dozen prompts in one process beats spawning preprocessing workers.
-        return SourceTaskDataset(
-            datasets=self.cfg.data.train_data,
-            environment_configs=OmegaConf.to_container(self.cfg.environment.task_sessions, resolve=True),
-            tokenizer=self.tokenizer,
-            max_prompt_length=self.cfg.trainer.max_prompt_length,
-            num_workers=1,
+    def task_dataset(self, data_files):
+        execution, sources = source_execution_settings(
+            OmegaConf.to_container(self.cfg.environment.task_sessions, resolve=True)
         )
-
-    def get_eval_dataset(self):
-        if self.cfg.trainer.eval_interval <= 0 or not self.cfg.data.val_data:
-            return None
-        return SourceTaskDataset(
-            datasets=self.cfg.data.val_data,
-            environment_configs=OmegaConf.to_container(self.cfg.environment.task_sessions, resolve=True),
+        return TaskSpecDataset(
+            datasets=data_files,
+            execution=execution,
+            source_executions=sources,
             tokenizer=self.tokenizer,
             max_prompt_length=self.cfg.trainer.max_prompt_length,
             num_workers=1,

@@ -38,19 +38,19 @@ Pin the resolved model artifact before launching rather than relying on the muta
 
 Prepare RLVR1 and RLVR2 independently from NVIDIA's pinned
 [`nvidia/Nemotron-RL-Ultra-Training-Blends`](https://huggingface.co/datasets/nvidia/Nemotron-RL-Ultra-Training-Blends/tree/79f8eda15ea12e1adf7bb14dcb338a29d391b80e)
-revision. The upstream files are JSONL; Marin's `infra.rl_data` preparation converts their embedded records into
-SkyRL-shaped rows and normally writes Parquet. `data.kind: parquet` selects this record-dataset launcher route;
-the downstream dataset reader still detects JSON, JSONL, or Parquet by filename. Do not pass NVIDIA's raw JSONL
-directly without the schema preparation step.
+revision. The upstream files are JSONL. Marin's `infra.rl_data` tools extract their embedded records.
+Then use `marinskyrl.nemotron_preparation` to write bare TaskSpecs.
+The trainer accepts these prepared records. It does not accept raw Nemotron rows.
+See the [preparation guide](../skyrl-train/examples/nemotron/README.md) for the image and verifier inputs.
 
 Keep the released order, reserve the final 100 prepared rows for validation, and pass the remaining rows through
 `--train_data`. RLVR2 must contain all 99,016 training rows, yielding 194 batches at batch size 512. The trainer's
 step target is absolute after resume, so a replacement artifact with fewer than 178 batches would terminate before
-the intended cumulative step 178. The SWE rows also require the task directories produced by
-`infra/rl_data/nemotron_ultra_swe.py` in `data.terminal_bench_data`. Populate that field with an immutable artifact
-selector before launch. Non-SWE rows use `NemotronTaskSession` and task-local Shellbox machines.
-Configure judge endpoints in `skyrl-train/skyrl_train/config/task_session_config/default.yaml`;
-do not use its loopback placeholders in a production run.
+the intended cumulative step 178. Convert the SWE packages to Harbor TaskSpecs before Nemotron preparation.
+Pass that artifact through `--terminal-tasks` and keep its execution settings in the run config.
+The trainer does not require the original package directories.
+Non-SWE tasks use `NemotronTaskSession` and optional task-local Shellbox machines.
+Declare verifier parameters during preparation. Select machine backends and execution limits in the run config.
 
 Use the same Iris job name and checkpoint path for each topology's two phases so `resume_mode: latest` finds the
 RLVR1 checkpoint. Run a bounded startup and 65K-context memory smoke before committing the full 64-GPU gang.

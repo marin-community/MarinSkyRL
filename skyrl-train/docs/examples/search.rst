@@ -95,11 +95,8 @@ Let's walk through configuration for running GRPO to train a 4-turn search agent
         generator.sampling_params.stop='["</search>", "</answer>"]' \
 
         # - Environment: environment class, max env workers, search env settings
-        environment.env_class="search" \
+        environment.task_sessions.session.task_session="search" \
         environment.task_sessions.max_verifier_workers=16 \
-        environment.task_sessions.search.log_requests=false \
-        environment.task_sessions.search.search_url="http://127.0.0.1:8000/retrieve" \
-        environment.task_sessions.search.topk=3 \
 
         # - Evaluation: batch size, intervals, sampling params
         trainer.eval_batch_size=256 \

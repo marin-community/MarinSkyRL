@@ -1,12 +1,12 @@
 set -x
 
-# Colocated GRPO training+generation for Qwen2.5-Coder-3B-Instruct on SearchR1 data.
+# Code training from prepared TaskSpecs with a prebuilt Python image.
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/livecodebench/run_lcb.sh
 
 DATA_DIR="$HOME/data/lcb"
-train_data="['${DATA_DIR}/deepcoder_train.json']"
-val_data="['${DATA_DIR}/test_livecodebench.json']"
+train_data="['${DATA_DIR}/deepcoder_train.parquet']"
+val_data="['${DATA_DIR}/test_livecodebench.parquet']"
 
 # NOTE (sumanthrh): micro_train_batch_size and micro_forward_batch_size can be tuned
 uv run --isolated --frozen --extra megatron --extra vllm -m skyrl_train.entrypoints.main_base \
@@ -35,7 +35,9 @@ uv run --isolated --frozen --extra megatron --extra vllm -m skyrl_train.entrypoi
   generator.backend=vllm \
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
-  environment.env_class=lcb \
+  environment.task_sessions.session.task_session=lcb \
+  environment.task_sessions.runtime.task_machine.cpus=1 \
+  environment.task_sessions.runtime.task_machine.memory_mb=8192 \
   generator.n_samples_per_prompt=5 \
   generator.gpu_memory_utilization=0.7 \
   generator.sampling_params.temperature=0.6 \

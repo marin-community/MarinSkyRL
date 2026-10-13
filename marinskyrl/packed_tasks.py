@@ -5,7 +5,6 @@ from __future__ import annotations
 import gzip
 import hashlib
 import io
-import json
 import os
 import shutil
 import tarfile
@@ -15,7 +14,7 @@ from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Iterable, Sequence
+from typing import Sequence
 from urllib.parse import quote
 
 import pyarrow as pa
@@ -70,13 +69,6 @@ class PackedTaskReference:
         return f"{self.dataset_identity}/{self.source}/{self.path}"
 
 
-@dataclass(frozen=True)
-class TaskSelectionSummary:
-    references: tuple[PackedTaskReference, ...]
-    digest: str
-    distinct_environment_count: int
-
-
 def _validate_schema(schema: pa.Schema) -> None:
     for name, expected in _REQUIRED_TYPES.items():
         index = schema.get_field_index(name)
@@ -106,23 +98,6 @@ def _limit_key(reference: PackedTaskReference, seed: int) -> bytes:
     return hashlib.sha256(value).digest()
 
 
-def _selection_digest(references: Iterable[PackedTaskReference]) -> str:
-    digest = hashlib.sha256()
-    for reference in references:
-        identity = {
-            "dataset_identity": reference.dataset_identity,
-            "dockerfile_id": reference.dockerfile_id,
-            "mode": reference.mode,
-            "path": reference.path,
-            "row": reference.row,
-            "row_group": reference.row_group,
-            "source": reference.source,
-        }
-        digest.update(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode())
-        digest.update(b"\n")
-    return digest.hexdigest()
-
-
 @contextmanager
 def _parquet_file(path: str):
     filesystem, storage_path = fs_and_path(path)
@@ -134,7 +109,7 @@ def select_task_references(
     source: TaskTroveParquetSource,
     *,
     dataset_path: str | None = None,
-) -> TaskSelectionSummary:
+) -> tuple[PackedTaskReference, ...]:
     """Return deterministic metadata matches without reading task payload columns."""
     path = dataset_path or source.uri
     references: list[PackedTaskReference] = []
@@ -177,12 +152,7 @@ def select_task_references(
             : source.selection.limit
         ]
     references.sort(key=lambda value: (value.row_group, value.row))
-    result = tuple(references)
-    return TaskSelectionSummary(
-        references=result,
-        digest=_selection_digest(result),
-        distinct_environment_count=len({reference.dockerfile_id for reference in result}),
-    )
+    return tuple(references)
 
 
 def _safe_archive_files(blob: bytes) -> dict[str, tuple[bytes, int]]:
@@ -230,7 +200,7 @@ class PackedTaskMaterializer:
         self._parquet_files: dict[str, pq.ParquetFile] = {}
 
     def close(self) -> None:
-        """Close Parquet readers held for reuse across rollout batches."""
+        """Close the cached Parquet readers."""
         for parquet in self._parquet_files.values():
             parquet.close()
         self._parquet_files.clear()
@@ -309,3 +279,10 @@ class PackedTaskMaterializer:
                 for reference in group:
                     results[reference] = self._task_path(reference)
         return results
+
+    def materialize_archive(self, blob: bytes) -> Path:
+        """Extract one archive with the same checks as a packed task reference."""
+        target = self.cache_root / "tasks" / hashlib.sha256(blob).hexdigest()
+        if not (target / _COMPLETE_MARKER_FILENAME).is_file():
+            self._write_task(target, blob)
+        return target

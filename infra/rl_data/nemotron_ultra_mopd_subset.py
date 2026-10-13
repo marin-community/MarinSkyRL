@@ -6,8 +6,8 @@ order, so the sample follows the blend's own generator mix; ``--swe-rows`` caps 
 slice. Math rows that NVIDIA ships as Hugging Face placeholders are restored from their source
 datasets. SWE rows are bound to TaskTrove proxy tasks, and SWE states TaskTrove lacks are skipped.
 
-Every generator is routed, so rows whose verifier needs a judge only train under
-``environment.task_sessions.nemotron_ultra.grading: skip``.
+Every generator has a teacher route. Set grading to skip in the private task preparation
+configuration when a distillation-only run does not supply the required judges.
 """
 
 from __future__ import annotations

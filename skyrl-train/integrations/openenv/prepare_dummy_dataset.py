@@ -11,15 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
-Preprocess the OpenEnv dataset to parquet format
-"""
+"""Prepare OpenEnv TaskSpecs with an explicit server image."""
 
 import argparse
+import json
 import os
 from typing import List
-from datasets import Dataset
 import math
+from pathlib import Path
+
+from taskcompendium.models import EnvironmentRequirements
+from marinskyrl.task_preparation import source_row_task, write_tasks
 
 
 def example_question(env_name: str) -> List[str]:
@@ -54,8 +56,10 @@ def example_question(env_name: str) -> List[str]:
     return [f"{ex}\n\n{instruction}" for ex in examples]
 
 
-def build_dataset(env_name: str, output_dir: str, data_source="openenv", target_size=32):
-    """Generate and save train/validation datasets for one environment."""
+def build_dataset(
+    env_name: str, output_dir: str, *, environment: EnvironmentRequirements, config: dict, target_size=32
+):
+    """Prepare bare TaskSpecs for one OpenEnv server image."""
     base_questions = example_question(env_name)
     repeat_factor = math.ceil(target_size / len(base_questions))
     questions = (base_questions * repeat_factor)[:target_size]
@@ -65,48 +69,41 @@ def build_dataset(env_name: str, output_dir: str, data_source="openenv", target_
     train_questions = questions[:split_index]
     val_questions = questions[split_index:]
 
-    def make_map_fn(split):
-        def process_fn(example, idx):
-            return {
-                "data_source": data_source,
-                "prompt": [{"role": "user", "content": example["question"]}],
-                "env_class": "openenv",
-                "env_name": env_name,
-            }
-
-        return process_fn
-
-    train_dataset = Dataset.from_dict({"question": train_questions})
-    val_dataset = Dataset.from_dict({"question": val_questions})
-
-    train_dataset = train_dataset.map(make_map_fn("train"), with_indices=True)
-    val_dataset = val_dataset.map(make_map_fn("validation"), with_indices=True)
-
     os.makedirs(output_dir, exist_ok=True)
-    train_dataset.to_parquet(os.path.join(output_dir, "train.parquet"))
-    val_dataset.to_parquet(os.path.join(output_dir, "validation.parquet"))
-
-    print(f"Saved {len(train_dataset)} train and {len(val_dataset)} validation examples to {output_dir}")
+    for split, questions, filename in (
+        ("train", train_questions, "train.parquet"),
+        ("validation", val_questions, "validation.parquet"),
+    ):
+        write_tasks(
+            Path(output_dir) / filename,
+            (
+                source_row_task(
+                    {
+                        "prompt": [{"role": "user", "content": question}],
+                        "env_name": env_name,
+                    },
+                    index,
+                    source_name=f"openenv/{env_name}/{split}",
+                    config=config,
+                    environment=environment,
+                )
+                for index, question in enumerate(questions)
+            ),
+        )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--output_dir", default="~/data/openenv")
-    parser.add_argument("--env_name", default=None)
+    parser.add_argument("--env_name", choices=("echo_env", "coding_env"), required=True)
+    parser.add_argument("--environment", type=Path, required=True, help="EnvironmentRequirements JSON")
+    parser.add_argument("--config", type=Path, required=True, help="Private server parameters in JSON")
     args = parser.parse_args()
 
     args.output_dir = os.path.expanduser(args.output_dir)
-    all_envs = ["echo_env", "coding_env"]
-
-    if args.env_name is None:
-        print("No --env_name specified. Preparing datasets for all available environments:")
-        for env in all_envs:
-            print(f" - {env}")
-        print()
-        for env in all_envs:
-            build_dataset(env, os.path.join(args.output_dir, env))
-    else:
-        if args.env_name not in all_envs:
-            print(f"Error: Unknown environment '{args.env_name}'. Available environments are: {', '.join(all_envs)}")
-            exit(1)
-        build_dataset(args.env_name, os.path.join(args.output_dir, args.env_name))
+    build_dataset(
+        args.env_name,
+        args.output_dir,
+        environment=EnvironmentRequirements.model_validate_json(args.environment.read_text()),
+        config=json.loads(args.config.read_text()),
+    )

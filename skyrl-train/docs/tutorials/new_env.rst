@@ -57,18 +57,25 @@ The worker sends this factory map to its Ray workers.
 Prepare source rows
 -------------------
 
-Each source row declares its task name and private reference:
+Prepare the source row as a TaskSpec before the training run:
 
 .. code-block:: python
 
    row = {
        "prompt": [{"role": "user", "content": "6 * 7"}],
-       "env_class": "multiply",
        "reward_spec": {"method": "rule", "ground_truth": "42"},
        "data_source": "synthetic_multiply",
    }
 
-``SourceTaskDataset`` converts these rows directly to serialized tasks in the prepared dataset.
+.. code-block:: python
+
+   from pathlib import Path
+   from marinskyrl.task_preparation import source_row_task, write_tasks
+
+   task = source_row_task(row, 0, source_name="synthetic_multiply", config={})
+   write_tasks(Path("tasks.parquet"), [task])
+
+``TaskSpecDataset`` loads the ``task_spec`` column and adds run-specific execution settings.
 The prompt contains public messages. The verifier resources contain the private reference and task configuration.
 Keep the reference out of model-visible observations.
 
@@ -80,7 +87,10 @@ The session reads its turn limit and deadlines from ``LoweredTaskSpec.session``.
 The multiplication session does not read a source row's ``max_turns`` field.
 Set ``generator.max_turns=5`` for this example.
 An explicit ``environment.task_sessions.session.max_turns`` overrides that launch value.
-A task-specific ``environment.task_sessions.multiply.session.max_turns`` overrides the common session value.
+Set ``environment.task_sessions.session.task_session=multiply`` to select the factory.
+``environment.task_sessions.sources.synthetic_multiply.session.max_turns`` overrides the common turn limit for this source.
+Source keys must match ``TaskSpec.source.dataset`` values in the loaded train or evaluation tasks.
+Unknown source keys cause rejection before GPU allocation.
 ``TaskSpec.grader`` is a ``SessionGrader`` for a custom session.
 ``TaskSpec.answer_format`` declares the answer format.
 The session reads ``session_parameters(task)`` from ``skyrl_gym.source_task``.
@@ -99,10 +109,9 @@ From ``skyrl-train/``, prepare the example data and run the supplied entrypoint:
 Execution and rewards
 ---------------------
 
-For an executable task, declare ``machine`` in
-``environment.task_sessions.<task_name>``.
-Its ``requirements`` block contains ``EnvironmentRequirements``.
-Its ``runtime`` block contains ``MachineRuntimeSpec``.
+For an executable task, declare the prebuilt image and process requirements in ``TaskSpec.environment_requirements``.
+Select the machine backend, resources, user, and machine deadlines in ``environment.task_sessions.runtime.task_machine``.
+The corresponding verifier settings belong to ``environment.task_sessions.runtime.verifier_machine``.
 Use ``Machine.run``, ``upload``, and ``download`` for task execution.
 The engine owns the machine lifecycle. See :doc:`tools_guide`.
 

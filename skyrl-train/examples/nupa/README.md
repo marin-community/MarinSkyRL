@@ -40,15 +40,9 @@ uv run --project .. examples/nupa/nupa_dataset.py --output_dir ~/data/nupa_rl
 The builder downloads the 688 MB pinned source from the Hugging Face Hub
 (pass `--source-file` to reuse a local copy), validates one known-good and
 known-bad response per task against the runtime verifier, and writes
-`train.parquet`. Row schema:
-
-| column | value |
-| --- | --- |
-| `data_source` | `HaotongYang/NUPA_text` |
-| `prompt` | one user message with the eval-identical prompt (`"<problem>  ="`) |
-| `env_class` | `nupa` |
-| `reward_spec` | `{"method": "rule", "ground_truth": "{\"answer\": ..., \"answer_format\": ...}"}` |
-| `extra_info` | `task_name`, `operation`, `answer_format`, `digit`, `length_bucket`, `source_sha256` |
+`train.parquet`. The `task_spec` column contains a bare TaskSpec in JSON.
+The public prompt is one user message (`"<problem>  ="`). Private verifier data
+contains the reference answer, answer format, task identity, and source digest.
 
 There is no validation split: the held-out measurement for this data is the
 `NUPA5K-Loose` eval itself, which must never be trained on. Report eval results
@@ -56,6 +50,6 @@ under the `NUPA5K-Loose` name and keep them separate from RL training metrics.
 
 ## Train
 
-Point a config at the built parquet, e.g. modeled on `examples/gsm8k` with
+Point a config at the prepared Parquet, as in `examples/gsm8k`, with
 `train_batch_files: [{data_path: ~/data/nupa_rl/train.parquet}]` and the
-`nupa` env class. The environment needs no environment-specific config.
+session setting `environment.task_sessions.session.task_session=nupa`.

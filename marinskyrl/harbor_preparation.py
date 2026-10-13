@@ -5,13 +5,15 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import closing
 from itertools import batched
 from pathlib import Path
 from typing import Any
 
+import pyarrow.parquet as pq
 from loguru import logger
+from rolloutengine.lowering import SHELLBOX_SESSION
 from harbor_config.models.task.config import EnvironmentConfig, TaskConfig
 from marinskyrl.harbor_import import harbor_task
 from taskcompendium.models import NoGrader, Source, TaskSpec
@@ -22,6 +24,7 @@ from marinskyrl.task_preparation import cache_tasks
 from marinskyrl.task_format import HARBOR_ID_PREFIX
 
 MATERIALIZATION_BATCH_SIZE = 64
+HARBOR_SOURCE_PREFIX = "harbor/"
 
 
 def _machine_overrides(environment: EnvironmentConfig, user: str | int | None) -> dict:
@@ -46,7 +49,7 @@ def harbor_execution_overrides(directory: Path) -> dict:
             ),
         },
         "session": {
-            "task_session": "shellbox",
+            "task_session": SHELLBOX_SESSION,
             "total_turn_timeout": config.agent.timeout_sec,
             "verifier_timeout": config.verifier.timeout_sec,
         },
@@ -80,19 +83,7 @@ class TerminalBenchTaskDataset:
         return []
 
     def _packed_tasks(self, source: TaskTroveParquetSource) -> list[PackedTaskReference]:
-        summary = select_task_references(source, dataset_path=source.resolved_path())
-        if source.snapshot is None:
-            return list(summary.references)
-        if source.snapshot.count != len(summary.references):
-            raise ValueError(
-                f"TaskTrove selection count changed: launch selected {source.snapshot.count}, "
-                f"Ray selected {len(summary.references)}"
-            )
-        if source.snapshot.digest != summary.digest:
-            raise ValueError("TaskTrove selection digest changed between launch and Ray")
-        if source.snapshot.distinct_environment_count != summary.distinct_environment_count:
-            raise ValueError("TaskTrove environment count changed between launch and Ray")
-        return list(summary.references)
+        return list(select_task_references(source, dataset_path=source.resolved_path()))
 
     def _load_data_files(self) -> list[Path | PackedTaskReference]:
         items: list[Path | PackedTaskReference] = []
@@ -160,14 +151,8 @@ def materialize_harbor_tasks(
 ) -> Path:
     """Prepare Harbor packages as a bare TaskSpec artifact."""
     sources = TerminalBenchTaskDataset(data_files)
-    if not len(sources):
-        raise ValueError("No Harbor tasks matched the configured sources")
-    if execution_output is not None and execution_output.exists():
-        raise FileExistsError(execution_output)
-    execution = {}
-    seen_task_ids = set()
 
-    def tasks() -> Iterator[TaskSpec]:
+    def items() -> Iterator[tuple[str, str, Path]]:
         with closing(PackedTaskMaterializer(cache_dir / "archives")) as materializer:
             for batch in batched(sources, MATERIALIZATION_BATCH_SIZE):
                 references = [item for item in batch if isinstance(item, PackedTaskReference)]
@@ -176,49 +161,57 @@ def materialize_harbor_tasks(
                     if isinstance(item, Path):
                         directory = item
                         uid = item.name
-                        source_name = f"harbor/{uid}"
+                        source_name = f"{HARBOR_SOURCE_PREFIX}{uid}"
                     else:
                         directory = directories[item]
                         source_name = item.stable_uri()
                         uid = item.uid()
-                    if uid in seen_task_ids:
-                        raise ValueError(f"Duplicate Harbor task ID {uid!r}")
-                    seen_task_ids.add(uid)
-                    task = harbor_task(
-                        directory,
-                        source=Source(
-                            dataset=source_name,
-                            revision="unhashed",
-                            row=uid,
-                            importer_revision="skyrl-harbor-v1",
-                        ),
-                    )
-                    if execution_output is not None:
-                        execution[source_name] = harbor_execution_overrides(directory)
-                    if grader_override is not None:
-                        task = task.model_copy(
-                            update={
-                                "grader": grader_override,
-                                "resources": task.resources.model_copy(update={"verifier": ()}),
-                            }
-                        )
-                    content = json.dumps(task.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
-                    task = task.model_copy(
-                        update={
-                            "id": uid,
-                            "tags": (
-                                *task.tags,
-                                *(
-                                    f"{HARBOR_ID_PREFIX}{identifier}"
-                                    for identifier in sorted(harbor_task_ids(directory))
-                                ),
-                            ),
-                            "source": task.source.model_copy(
-                                update={"revision": f"sha256:{hashlib.sha256(content).hexdigest()}"}
-                            ),
-                        }
-                    )
-                    yield task
+                    yield uid, source_name, directory
+
+    return _cache_harbor_tasks(items(), cache_dir, grader_override, execution_output)
+
+
+def _prepared_harbor_task(directory: Path, uid: str, source_name: str, *, grader_override: NoGrader | None) -> TaskSpec:
+    task = harbor_task(
+        directory,
+        source=Source(dataset=source_name, revision="unhashed", row=uid, importer_revision="skyrl-harbor-v1"),
+    )
+    if grader_override is not None:
+        task = task.model_copy(
+            update={"grader": grader_override, "resources": task.resources.model_copy(update={"verifier": ()})}
+        )
+    content = json.dumps(task.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
+    identifiers = (harbor_task_ids(directory) - {directory.name.casefold()}) | {Path(uid).name.casefold()}
+    return task.model_copy(
+        update={
+            "id": uid,
+            "tags": (*task.tags, *(f"{HARBOR_ID_PREFIX}{identifier}" for identifier in sorted(identifiers))),
+            "source": task.source.model_copy(update={"revision": f"sha256:{hashlib.sha256(content).hexdigest()}"}),
+        }
+    )
+
+
+def _cache_harbor_tasks(
+    items: Iterable[tuple[str, str, Path]],
+    cache_dir: Path,
+    grader_override: NoGrader | None,
+    execution_output: Path | None,
+) -> Path:
+    if execution_output is not None and execution_output.exists():
+        raise FileExistsError(execution_output)
+    execution = {}
+    seen = set()
+
+    def tasks() -> Iterator[TaskSpec]:
+        for uid, source_name, directory in items:
+            if uid in seen:
+                raise ValueError(f"Duplicate Harbor task ID {uid!r}")
+            seen.add(uid)
+            if execution_output is not None:
+                execution[source_name] = harbor_execution_overrides(directory)
+            yield _prepared_harbor_task(directory, uid, source_name, grader_override=grader_override)
+        if not seen:
+            raise ValueError("No Harbor tasks matched the configured sources")
 
     path = cache_tasks(tasks(), cache_dir)
     if execution_output is not None:
@@ -226,23 +219,46 @@ def materialize_harbor_tasks(
     return path
 
 
+def materialize_harbor_archives(
+    input_path: Path, *, cache_dir: Path, execution_output: Path, grader_override: NoGrader | None
+) -> Path:
+    """Prepare path/task_binary Parquet archives as a bare TaskSpec artifact."""
+
+    def items() -> Iterator[tuple[str, str, Path]]:
+        materializer = PackedTaskMaterializer(cache_dir / "archives")
+        with pq.ParquetFile(input_path) as parquet:
+            for batch in parquet.iter_batches(columns=["path", "task_binary"], batch_size=MATERIALIZATION_BATCH_SIZE):
+                for row in batch.to_pylist():
+                    uid = row["path"]
+                    directory = materializer.materialize_archive(row["task_binary"])
+                    yield uid, f"{HARBOR_SOURCE_PREFIX}{uid}", directory
+
+    return _cache_harbor_tasks(items(), cache_dir, grader_override, execution_output)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", type=Path, help="Harbor package directory")
-    parser.add_argument("--packed-source", type=Path, help="TaskTrove source descriptor in JSON")
+    inputs = parser.add_mutually_exclusive_group(required=True)
+    inputs.add_argument("--input", type=Path, help="Harbor package directory")
+    inputs.add_argument("--packed-source", type=Path, help="TaskTrove source descriptor in JSON")
+    inputs.add_argument("--archive-input", type=Path, help="path/task_binary Parquet archive artifact")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--execution-output", type=Path, required=True, help="Run settings in JSON")
     parser.add_argument("--disable-verification", action="store_true")
     args = parser.parse_args()
-    if (args.input is None) == (args.packed_source is None):
-        parser.error("Select one --input or --packed-source")
-    sources = [str(args.input)] if args.packed_source is None else [json.loads(args.packed_source.read_text())]
-    path = materialize_harbor_tasks(
-        sources,
-        cache_dir=args.output_dir,
-        grader_override=NoGrader(reason="Verification is disabled") if args.disable_verification else None,
-        execution_output=args.execution_output,
-    )
+    grader = NoGrader(reason="Verification is disabled") if args.disable_verification else None
+    if args.archive_input is not None:
+        path = materialize_harbor_archives(
+            args.archive_input,
+            cache_dir=args.output_dir,
+            execution_output=args.execution_output,
+            grader_override=grader,
+        )
+    else:
+        sources = [str(args.input)] if args.packed_source is None else [json.loads(args.packed_source.read_text())]
+        path = materialize_harbor_tasks(
+            sources, cache_dir=args.output_dir, grader_override=grader, execution_output=args.execution_output
+        )
     print(path)
 
 

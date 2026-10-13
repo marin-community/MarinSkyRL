@@ -1,7 +1,7 @@
 SWE tasks with Shellbox
 =======================
 
-SWE-Gym and SWE-Bench use ``skyrl_train.entrypoints.taskcompendium`` and the
+SWE-Gym and SWE-Bench use ``skyrl_train.entrypoints.main_base`` and the
 common Shellbox rollout engine. The model calls the shell tool to change the
 repository. The grader transfers the resulting Git patch to a fresh task
 machine and runs the private evaluation script.
@@ -18,6 +18,7 @@ The source datasets are ``SumanthRH/SWE-Gym-Subset`` and
     uv run --no-sync --project .. examples/mini_swe_agent/preprocess_swegym.py \
       --train_revision TRAIN_DATASET_COMMIT \
       --eval_revision EVAL_DATASET_COMMIT \
+      --image_manifest /path/to/instance-images.json \
       --output_dir ~/data/swe_gym_subset
 
 Replace the revision values with pinned dataset commit IDs. The output Parquet

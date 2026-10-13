@@ -100,6 +100,6 @@ def grade_genrm_group(
         answer_bonus=float(config.get("answer_bonus", 0.5)),
         top_percentile=float(config.get("top_percentile", 0.2)),
         group_reasoning_length_penalty_coeff=float(config.get("group_reasoning_length_penalty_coeff", 0.1)),
-        group_answer_length_penalty_coeff=float(config["group_answer_length_penalty_coeff"]),
+        group_answer_length_penalty_coeff=float(config.get("group_answer_length_penalty_coeff", 0.1)),
     )
     return rewards, metrics

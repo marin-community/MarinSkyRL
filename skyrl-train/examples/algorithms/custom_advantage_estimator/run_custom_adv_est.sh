@@ -42,7 +42,7 @@ uv run --isolated --extra megatron --extra vllm -m examples.algorithm.custom_adv
   generator.backend=vllm \
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
-  environment.env_class=gsm8k \
+  environment.task_sessions.session.task_session=gsm8k \
   generator.n_samples_per_prompt=5 \
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \

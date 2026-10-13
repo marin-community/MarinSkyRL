@@ -15,7 +15,7 @@ Negative scores remain in the failure token-length bucket.
 
 AIME metrics include the fraction of responses above the evaluation token budget and the fraction with a parseable answer within that budget.
 Correct and incorrect over-budget fractions remain separate.
-Configure the budget and reward policy in `environment.task_sessions.aime`.
+Set the budget and reward policy in the private grader configuration at task preparation time.
 
 See [the AIME grader](../../skyrl-gym/skyrl_gym/answer_tasks.py),
 [the native verifier](../../skyrl-gym/skyrl_gym/envs/aime/verifier.py),

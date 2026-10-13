@@ -24,5 +24,5 @@ uv run --isolated --extra $INFERENCE_BACKEND \
   generator.gpu_memory_utilization=0.9 \
   generator.eval_sampling_params.max_generate_length=1024 \
   generator.eval_sampling_params.temperature=0.7 \
-  environment.env_class=gsm8k \
+  environment.task_sessions.session.task_session=gsm8k \
   "$@"

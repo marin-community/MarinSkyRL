@@ -2,21 +2,15 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from enum import StrEnum
 from numbers import Integral
 from typing import Any
 
 from loguru import logger
 from transformers import PreTrainedTokenizerBase
-from marinskyrl.runtime_options import PREFERENCE_PAIR_ENV_CLASS
+from marinskyrl.runtime_options import PREFERENCE_PAIR_ENV_CLASS, PreferencePairFormat
 
 from skyrl_train.dataset.dataset import PromptDataset, read_prompt_files
 from skyrl_train.task_inputs import PreferenceInput, TrajectoryMetadata
-
-
-class PreferencePairFormat(StrEnum):
-    TEXT = "text"
-    TOKENIZED = "tokenized"
 
 
 @dataclass(frozen=True)
@@ -92,26 +86,22 @@ class PreferencePairDataset(PromptDataset):
         self.max_completion_length = max_completion_length
         super().__init__(tokenizer=tokenizer, **kwargs)
 
-    def collate_fn(self, rows) -> list[dict]:
-        inputs = []
-        for prompt, _, preference, uid in rows:
-            extra_info = preference.get("extra_info") or {}
-            inputs.append(
-                {
-                    "uid": uid,
-                    "input": PreferenceInput(
-                        prompt=prompt,
-                        preference=preference,
-                        metadata=TrajectoryMetadata(
-                            uid=uid,
-                            metric_class=PREFERENCE_PAIR_ENV_CLASS,
-                            data_source=extra_info.get("data_source") or preference.get("data_source"),
-                            teacher_route=preference.get("teacher_route"),
-                        ),
-                    ),
-                }
-            )
-        return inputs
+    def __getitem__(self, index: int) -> PreferenceInput:
+        prompt, preference, uid = super().__getitem__(index)
+        extra_info = preference.get("extra_info") or {}
+        return PreferenceInput(
+            prompt=prompt,
+            preference=preference,
+            metadata=TrajectoryMetadata(
+                uid=uid,
+                metric_class=PREFERENCE_PAIR_ENV_CLASS,
+                data_source=extra_info.get("data_source") or preference.get("data_source"),
+                teacher_route=preference.get("teacher_route"),
+            ),
+        )
+
+    def collate_fn(self, rows: list[PreferenceInput]) -> list[dict]:
+        return [{"uid": row.metadata.uid, "input": row} for row in rows]
 
     def _read_files_and_tokenize(self):
         if self.data_format is PreferencePairFormat.TOKENIZED:

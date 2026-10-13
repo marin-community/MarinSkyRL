@@ -16,7 +16,8 @@ We provide a script to download the dataset from huggingface, and preprocess it 
 
 .. code-block:: bash
 
-    uv run --isolated examples/search/searchr1_dataset.py --local_dir ~/data/searchR1
+    uv run --project .. examples/search/searchr1_dataset.py \
+      --local_dir ~/data/searchR1 --search_url http://127.0.0.1:8000/retrieve
 
 Start the Search Engine
 ------------------------
@@ -63,7 +64,8 @@ Prepare Datasets
 
 .. code-block:: bash
 
-    python examples/search/searchr1_dataset.py --local_dir $local_dir
+    uv run --project .. examples/search/searchr1_dataset.py \
+      --local_dir $local_dir --search_url http://127.0.0.1:8000/retrieve
 
 
 Start the Local Flat e5 Retrieval Server 

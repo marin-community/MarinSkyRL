@@ -3,7 +3,7 @@
 Direct Preference Optimization (arXiv:2305.18290) trains on dataset-supplied chosen/rejected
 completion pairs instead of generated rollouts. MarinSkyRL runs DPO through the unified
 objective stack: `+algorithm_recipe=dpo` selects the loss, and
-`environment.env_class=preference_pair` selects the static pair runner, which tokenizes the
+`data.preference_pair_format=text` selects the static pair runner, which tokenizes the
 dataset's completions and emits adjacent chosen (+1) / rejected (-1) rows per prompt. No
 inference engines are constructed, so the full GPU budget serves the policy and the frozen
 reference model.

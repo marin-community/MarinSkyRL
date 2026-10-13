@@ -4,7 +4,7 @@ import os
 from collections.abc import Mapping
 from typing import List
 from transformers import PreTrainedTokenizerBase
-from marinskyrl.resource_locator import parse_hf_dataset_selector
+from marinskyrl.resource_locator import dataset_reference_parts, parse_hf_dataset_selector
 
 
 def read_prompt_files(sources: list[str]) -> datasets.Dataset:
@@ -17,8 +17,8 @@ def read_prompt_files(sources: list[str]) -> datasets.Dataset:
         elif ext in [".json", ".jsonl"]:
             data = datasets.load_dataset("json", data_files=source, keep_in_memory=False)["train"]
         else:
-            name, separator, split = source.partition(":") if "::" not in source else (source, "", "")
-            split = split if separator else "train"
+            name, split = dataset_reference_parts(source)
+            split = "train" if split is None else split
             selector = parse_hf_dataset_selector(name)
             available = (
                 datasets.load_dataset(
@@ -44,12 +44,10 @@ class PromptDataset:
         max_prompt_length: int,
         num_workers: int = 8,
         prompt_key: str = "prompt",
-        env_class_key: str = "env_class",
     ):
         self.tokenizer = tokenizer
         self.max_prompt_length = max_prompt_length
         self.prompt_key = prompt_key
-        self.env_class_key = env_class_key
         self.num_workers = num_workers
 
         self.datasets = datasets
@@ -81,20 +79,10 @@ class PromptDataset:
     def __getitem__(self, item):
         row_dict: dict = self.dataframe[item]
         messages = row_dict.pop(self.prompt_key)
-        env_class = row_dict.pop(self.env_class_key, None)
-
-        extra = {key: value for key, value in row_dict.items() if key != self.prompt_key and key != self.env_class_key}
-
-        return messages, env_class, extra, self.uid(item)
+        return messages, row_dict, self.uid(item)
 
     def uid(self, index: int) -> str:
         return str(index)
-
-    def collate_fn(self, item_list):
-        all_inputs = []
-        for prompt, env_class, env_extras, item_uids in item_list:
-            all_inputs.append({"prompt": prompt, "env_class": env_class, "env_extras": env_extras, "uid": item_uids})
-        return all_inputs
 
     def __len__(self):
         return len(self.dataframe)

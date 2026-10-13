@@ -80,19 +80,17 @@ def _artifact_path(cfg: DictConfig) -> Path:
     return Path(str(_diagnostic_value(cfg, "artifact_path"))).expanduser().resolve()
 
 
-def _terminal_bench_experiment_class():
-    # Harbor is a production-image dependency, not a CPU-test dependency. Keep
-    # the TerminalBench import lazy so --help and pre-Ray validation work in the
-    # ordinary development environment.
-    from skyrl_train.entrypoints.terminal_bench import TerminalBenchExp  # noqa: PLC0415
+def _training_experiment_class():
+    # Load training dependencies after command-line and pre-Ray validation.
+    from skyrl_train.entrypoints.main_base import BasePPOExp  # noqa: PLC0415
 
-    return TerminalBenchExp
+    return BasePPOExp
 
 
 def _capture_experiment_class():
-    TerminalBenchExp = _terminal_bench_experiment_class()
+    BasePPOExp = _training_experiment_class()
 
-    class CaptureTerminalBenchExp(TerminalBenchExp):
+    class CaptureBasePPOExp(BasePPOExp):
         def get_trainer(
             self,
             cfg,
@@ -118,13 +116,13 @@ def _capture_experiment_class():
                 capture_provenance=_provenance(cfg),
             )
 
-    return CaptureTerminalBenchExp
+    return CaptureBasePPOExp
 
 
 def _replay_experiment_class():
-    TerminalBenchExp = _terminal_bench_experiment_class()
+    BasePPOExp = _training_experiment_class()
 
-    class ReplayTerminalBenchExp(TerminalBenchExp):
+    class ReplayBasePPOExp(BasePPOExp):
         """Build training actors only; never construct rollout/inference engines."""
 
         def _setup_replay_trainer(self):
@@ -169,7 +167,7 @@ def _replay_experiment_class():
             finally:
                 trainer.cleanup_ray_actors()
 
-    return ReplayTerminalBenchExp
+    return ReplayBasePPOExp
 
 
 @ray.remote(num_cpus=1, max_retries=0)

@@ -8,6 +8,8 @@ from examples.cat_count.cpu_canary import HELD_OUT_N, PROMPT, TRAIN_N
 from omegaconf import DictConfig, OmegaConf
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.utils.algorithm_registry import AdvantageEstimatorRegistry
+from skyrl_gym.source_task import source_task
+from taskcompendium.models import Source
 
 from tests.cpu.tiny_training.experiment import run_tiny_training
 
@@ -22,15 +24,20 @@ def flipped_grpo(**kwargs):
 def write_rows(path: Path, ns: list[int], source: str, repeats: int = 1) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w") as handle:
-        for _ in range(repeats):
-            for n in ns:
+        for repetition in range(repeats):
+            for index, n in enumerate(ns):
+                task = source_task(
+                    [{"role": "user", "content": PROMPT.format(N=n)}],
+                    {"extra_info": {"n": n}},
+                    {},
+                    Source(
+                        dataset=source, revision="1", row=str(repetition * len(ns) + index), importer_revision="fixture"
+                    ),
+                )
                 handle.write(
                     json.dumps(
                         {
-                            "prompt": [{"role": "user", "content": PROMPT.format(N=n)}],
-                            "env_class": "cat_count",
-                            "data_source": source,
-                            "extra_info": {"n": n, "data_source": source},
+                            "task_spec": task.model_dump_json(),
                         }
                     )
                     + "\n"
@@ -52,6 +59,7 @@ def cat_count_config(
     return OmegaConf.merge(
         get_default_config(),
         {
+            "environment": {"task_sessions": {"session": {"task_session": "cat_count"}}},
             "data": {
                 "train_data": [str(write_rows(root / "data/train.jsonl", TRAIN_N, "train", 50))],
                 "val_data": [

@@ -150,7 +150,6 @@ class InputsConfig:
     """Immutable model and data locators resolved by Marin."""
 
     model: LaunchModelLocator = field(default_factory=LaunchModelLocator)
-    data_kind: str = "tasks"
     train_data: list[dict[str, Any]] = field(default_factory=list)
     validation_data: list[dict[str, Any]] = field(default_factory=list)
 
@@ -221,7 +220,6 @@ def _compose_source_recipe(config: DictConfig) -> DictConfig:
         compiled.entrypoint, max_staleness_steps=compiled.config.trainer.rollout_buffer.max_staleness_steps
     )
     resolved.runtime.training_type = None if training_type is None else training_type.value
-    resolved.inputs.data_kind = parsed.data_kind
     resolved.skyrl = compiled.config
     return compose_launch_config(resolved)
 
@@ -303,8 +301,6 @@ def validate_launch_config(config: DictConfig) -> LaunchTopology:
         raise ValueError(f"unsupported run.mode: {raw['run']['mode']!r}")
     if raw["run"]["submission"] not in set(SubmissionMode):
         raise ValueError(f"unsupported run.submission: {raw['run']['submission']!r}")
-    if raw["inputs"]["data_kind"] not in {"tasks", "parquet"}:
-        raise ValueError(f"unsupported inputs.data_kind: {raw['inputs']['data_kind']!r}")
     if raw["iris"]["timeout"] < 0:
         raise ValueError("iris.timeout cannot be negative")
     _validate_inputs(raw["inputs"])

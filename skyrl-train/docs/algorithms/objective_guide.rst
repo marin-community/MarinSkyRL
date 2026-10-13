@@ -135,7 +135,7 @@ Maximize likelihood on eligible response tokens; advantages and teacher credit d
 ~~~~~~~
 
 Direct Preference Optimization (`Rafailov et al.`_) over dataset-supplied chosen/rejected
-pairs. Requires ``environment.env_class=preference_pair`` (the static pair runner),
+pairs. Requires ``data.preference_pair_format=text`` (the static pair runner),
 ``generator.n_samples_per_prompt=2``, and no sample packing; a frozen reference model is
 provisioned automatically and no inference engines are launched. The optimizer sees a
 per-token surrogate with the exact DPO gradient; the true loss is reported as ``dpo/loss``
@@ -330,9 +330,10 @@ two nodes of one GPU each; prepare GSM8K parquet as in
      max_new_tokens_per_turn: 512
      max_turns: 1
    environment:
-     env_class: gsm8k
+     task_sessions:
+       session:
+         task_session: gsm8k
    data:
-     kind: parquet
      train_data: [/data/gsm8k/train.parquet]
      val_data: [/data/gsm8k/validation.parquet]
    trainer:

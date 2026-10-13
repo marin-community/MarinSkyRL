@@ -15,22 +15,20 @@ uv run --no-sync --project .. examples/mini_swe_agent/preprocess_swegym.py \
   --train_revision TRAIN_DATASET_COMMIT \
   --eval_revision EVAL_DATASET_COMMIT \
   --image_manifest /path/to/instance-images.json \
-  --max_turns 20 \
-  --command_timeout 180 \
   --output_dir ~/data/swe_gym_subset
 ```
 
 Replace the two revision values with pinned dataset commit IDs. The converter
 reads `SumanthRH/SWE-Gym-Subset` for training and
 `SumanthRH/SWE-bench_Verified` for evaluation. Each output row contains one
-serialized `LoweredTaskSpec` in the `lowered_task_spec` column. The evaluation script stays in
+serialized bare `TaskSpec` in the `task_spec` column. The evaluation script stays in
 the private verifier fields.
 
 The image manifest maps every selected instance ID to a prebuilt image reference with its SHA-256 digest.
 Prepare those images before conversion. Image tags and task-specific builds cause rejection.
 The converter does not build or resolve images. Task commands use `/testbed`.
-The task environment permits network access and uses the environment variables
-in `preprocess_swegym.py`. The grader timeout is 3600 seconds.
+The task definition keeps the environment variables and setup commands.
+The training scripts select network access, machine resources, and execution deadlines.
 
 ## Run training
 
@@ -44,11 +42,11 @@ List the task images from the materialized files:
 uv run --no-sync --project .. python - <<'PY'
 from pathlib import Path
 from datasets import Dataset
-from rolloutengine.spec import LoweredTaskSpec
+from taskcompendium.models import TaskSpec
 
 directory = Path("~/data/swe_gym_subset").expanduser()
 images = {
-    LoweredTaskSpec.model_validate_json(row["lowered_task_spec"]).task.environment_requirements.docker_image
+    TaskSpec.model_validate_json(row["task_spec"]).environment_requirements.docker_image
     for name in ("train.parquet", "validation.parquet")
     for row in Dataset.from_parquet(str(directory / name))
 }
@@ -63,18 +61,16 @@ bash examples/mini_swe_agent/run_mini_swe_8B.sh
 bash examples/mini_swe_agent/run_mini_swe_30B.sh
 ```
 
-The scripts use `skyrl_train.entrypoints.taskcompendium`.
+The scripts use `skyrl_train.entrypoints.main_base`.
 Edit `DATA_DIR` and `CKPT_PATH` in the script to select task Parquet and checkpoint directories.
 The two-node example requires a Ray cluster with eight GPUs per node.
 See the [cluster setup](../../docs/getting-started/installation.rst#initialize-ray-cluster).
-The materialized session settings control execution limits.
-The preparation command above selects 20 turns and a 180-second command timeout for the 8B example.
-For the 30B example, prepare the data with `--max_turns 50`.
+The run config controls execution limits without changes to the prepared TaskSpec.
+The 8B script selects 20 turns and a 180-second command timeout.
+The 30B script selects 50 turns and a 120-second command timeout.
 Each tool turn has a separate 600-second timeout. The cumulative turn deadline is 3600 seconds.
 Final verification has a separate 3600-second deadline. Each cleanup action has a 30-second limit.
-Select turn and command limits with the preparation flags.
-Change the other deadlines in `preprocess_swegym.py` before materialization.
-The launch-time `generator.max_turns` setting does not override a materialized task.
+Use `environment.task_sessions.session` for deadlines and `generator.max_turns` for the turn count.
 
 To change task setup, add commands to `environment_requirements.setup_commands` during materialization.
 The verifier's `environment_requirements` declares setup for its fresh grading machine.

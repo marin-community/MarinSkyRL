@@ -43,7 +43,8 @@ uv run --isolated --extra megatron --extra $INFERENCE_BACKEND -m skyrl_train.ent
   generator.backend=$INFERENCE_BACKEND \
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
-  environment.env_class=$ENV_CLASS \
+  environment.task_sessions.session.task_session=$ENV_CLASS \
+  generator.max_turns=5 \
   generator.n_samples_per_prompt=5 \
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \

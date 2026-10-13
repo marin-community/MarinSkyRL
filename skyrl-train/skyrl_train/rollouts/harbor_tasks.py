@@ -87,9 +87,6 @@ class HarborTaskSettings:
             return None
         return min(self.retry.min_wait_sec * self.retry.wait_multiplier**retries, self.retry.max_wait_sec)
 
-    def grader_override(self) -> NoGrader | None:
-        return NoGrader(reason="Harbor verification is disabled") if self.verifier.disable else None
-
     def machine_factory(self, *, phase: str = "train") -> MachineFactory:
         match self.environment.type:
             case EnvironmentType.DAYTONA:

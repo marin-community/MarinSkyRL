@@ -1,6 +1,6 @@
 # Preference training and task validation
 
-Select `algorithm_recipe=dpo` and set `environment.env_class=preference_pair`.
+Select `algorithm_recipe=dpo` and set `data.preference_pair_format=text`.
 Each training row is one chosen/rejected pair. Set
 `generator.n_samples_per_prompt=2`; the runner emits the chosen completion
 first and the rejected completion second.
@@ -30,19 +30,13 @@ pinned tokenizer and chat template before loading these rows.
 `trainer.evaluation_runner=training` reuses the training runner. Offline DPO
 needs a separate generation runner to measure task performance:
 
-- `task` loads `data.val_data` as JSON/Parquet source task rows with `prompt`,
-  `env_class`, and the selected session's task fields. See
-  [source-row conversion](../skyrl-train/skyrl_train/dataset/tasks.py).
-- `harbor` loads `data.val_data` as Harbor task directories or packed task
-  sources, using `terminal_bench_config` for environment and verifier settings.
-  A directory source can be a task directory with `instruction.md` and
-  `task.toml`, or its parent containing several tasks. Packed-source fields
-  are defined in [task sources](../marinskyrl/task_sources.py).
+- `task` loads prepared TaskSpec JSON from the `task_spec` column in `data.val_data`.
+  See [prepared task loading](../skyrl-train/skyrl_train/dataset/prepared_tasks.py).
+  Prepare Harbor directories or packed archives before the training command.
 
-Both generation options use the shared rollout engine. Harbor task validation
-uses its shell session; it does not select a native Pi, Claude Code, or Codex
-agent. Selecting either option makes the role plan include the inference role;
-configure its engine count and parallelism through the usual generator fields. DPO
+Task validation uses the shared rollout engine. Harbor tasks use the Shellbox session.
+Selecting task validation makes the role plan include the inference role.
+Configure its engine count and parallelism through the generator fields. DPO
 synchronizes updated policy weights before evaluation, without synchronizing
 after every training update. Validation has a separate `validation/` trace
 retention path when it uses a separate runner.
@@ -74,9 +68,8 @@ metadata and leaves weight shards remote.
 increasing client or training sequence limits. If `serving_window_tokens` is
 omitted, it takes the value of `request_window_tokens`.
 
-Retained trajectory schema version 6 includes `prompt_token_ids` in each
+Retained trajectory archives include `prompt_token_ids` in each
 response step boundary. These IDs preserve the exact context for each step,
 including steps whose conversation context changed. This is retained evidence
-for replay consumers, not a new replay command. Older records lack these
-per-step prompt IDs. See [trajectory retention](trajectory-retention-design.md)
+for replay consumers. See [trajectory retention](trajectory-retention-design.md)
 for retention configuration and archive contents.

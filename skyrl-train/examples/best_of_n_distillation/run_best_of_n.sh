@@ -76,7 +76,7 @@ python -m skyrl_train.entrypoints.main_base \
   trainer.algorithm.use_kl_in_reward=$USE_KL_IN_REWARD \
   generator.backend=vllm \
   generator.run_engines_locally=true \
-  environment.env_class=aime \
+  environment.task_sessions.session.task_session=aime \
   generator.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
   trainer.trajectory_selector.type=best_of_n \
   generator.gpu_memory_utilization=0.8 \

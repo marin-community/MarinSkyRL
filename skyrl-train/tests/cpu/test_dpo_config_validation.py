@@ -10,6 +10,13 @@ def test_dpo_config_validates():
     validate_cfg(dpo_test_config())
 
 
+def test_retired_environment_selector_cannot_silently_select_a_runner():
+    config = dpo_test_config()
+    OmegaConf.update(config, "environment.env_class", "gsm8k", force_add=True)
+    with pytest.raises(ValueError, match="environment.env_class is unsupported"):
+        validate_cfg(config)
+
+
 def test_dpo_recipe_matches_valid_config():
     from hydra import compose, initialize_config_dir  # noqa: PLC0415 — hydra state is per-test
 
@@ -39,7 +46,7 @@ def test_dpo_recipe_matches_valid_config():
         ({"trainer": {"algorithm": {"loss_reduction": "token_mean"}}}, "pair_mean"),
         ({"trainer": {"algorithm": {"dpo": {"beta": 0.0}}}}, "beta"),
         ({"trainer": {"algorithm": {"dpo": {"label_smoothing": 0.5}}}}, "label_smoothing"),
-        ({"environment": {"env_class": "gsm8k"}}, "preference_pair"),
+        ({"data": {"preference_pair_format": None}}, "preference_pair_format"),
         ({"generator": {"n_samples_per_prompt": 4}}, "n_samples_per_prompt=2"),
         ({"trainer": {"algorithm": {"use_kl_loss": True}}}, "use_kl_loss"),
         ({"trainer": {"algorithm": {"advantage_estimator": "grpo"}}}, "uniform"),

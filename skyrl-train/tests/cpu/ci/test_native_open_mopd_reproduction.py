@@ -3,6 +3,10 @@ from pathlib import Path
 import sys
 
 import pytest
+from skyrl_gym.source_task import session_parameters
+from taskcompendium.models import TaskSpec
+
+from marinskyrl.task_format import TASK_SPEC_COLUMN
 
 SCRIPT_ROOT = Path(__file__).parents[3] / "ci" / "opd" / "open_mopd_repro"
 SPEC = spec_from_file_location("open_mopd_dataset", SCRIPT_ROOT / "dataset.py")
@@ -36,16 +40,16 @@ def test_open_mopd_rows_preserve_prompts_and_assign_explicit_teacher_routes():
 
     converted = DATASET.convert_rows(rows)
 
-    assert converted.to_pylist() == [
-        {
-            "data_source": row["data_source"],
-            "prompt": row["prompt"],
-            "env_class": "prompt_only",
-            "teacher_route": row["domain"],
-            "source_index": index,
-        }
-        for index, row in enumerate(rows)
+    prepared = converted.to_pylist()
+    assert [row["teacher_route"] for row in prepared] == ["math", "code", "if"]
+    tasks = [TaskSpec.model_validate_json(row[TASK_SPEC_COLUMN]) for row in prepared]
+    assert [task.source.dataset for task in tasks] == ["math_dapo_boxed", "code_deepcoder", "if_nemotron"]
+    assert [[event.content for event in task.context.events] for task in tasks] == [
+        ["Solve carefully.", "What is 2 + 2?"],
+        ["Implement a sort."],
+        ["Reply in JSON."],
     ]
+    assert [session_parameters(task).extras["source_index"] for task in tasks] == [0, 1, 2]
 
 
 def test_open_mopd_rows_reject_unknown_teacher_domain():

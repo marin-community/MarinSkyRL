@@ -23,7 +23,7 @@ from tests.cpu.tiny_training.experiment import (
     cpu_inference_engine_client,
     run_with_exp,
 )
-from tests.cpu.tiny_training.tiny_model import build_tiny_policy, write_gsm8k_dataset
+from tests.cpu.tiny_training.tiny_model import CURRICULUM_BINS, build_tiny_policy, write_gsm8k_dataset
 from tests.cpu.util import DPO_OVERRIDES
 
 # Correct completions are preferred over off-by-one distractors. The pairs are separable under
@@ -117,7 +117,7 @@ def run_dpo_experiment(root: Path, model_dir: Path, *, steps: int) -> Path:
 
 def run_dpo_validation_experiment(root: Path, model_dir: Path, *, steps: int) -> Path:
     cfg = preference_pair_training_config(root, model_dir, steps=steps)
-    cfg.data.val_data = [str(write_gsm8k_dataset(root / "data" / "validation.jsonl", 4, max_turns=1))]
+    cfg.data.val_data = [str(write_gsm8k_dataset(root / "data" / "validation.jsonl", 4))]
     cfg.trainer.evaluation_runner = "task"
     cfg.trainer.eval_interval = 2
     cfg.trainer.eval_before_train = True
@@ -125,6 +125,10 @@ def run_dpo_validation_experiment(root: Path, model_dir: Path, *, steps: int) ->
     cfg.generator.num_inference_engines = 1
     cfg.generator.eval_n_samples_per_prompt = 1
     cfg.generator.eval_sampling_params.max_generate_length = 16
+    for source in CURRICULUM_BINS:
+        OmegaConf.update(
+            cfg, f"environment.task_sessions.sources.{source}", {"session": {"task_session": "gsm8k"}}, force_add=True
+        )
     run_with_exp(cfg, ValidatedPreferencePairCPUExp)
     return root / "exports" / METRICS_FILE
 

@@ -26,9 +26,9 @@ from pathlib import Path
 from typing import Any
 
 import ijson
-import pyarrow as pa
-import pyarrow.parquet as pq
 from huggingface_hub import hf_hub_download
+
+from marinskyrl.task_preparation import source_row_task, write_tasks
 
 from skyrl_gym.envs.data_contracts import get_data_contract
 from skyrl_gym.envs.nupa.answers import INTEGER
@@ -43,28 +43,6 @@ DATA_SOURCE = "HaotongYang/NUPA_text"
 # (eval/chat_benchmarks/NUPA5K-Loose/data/nupa5k_manifest.jsonl, panel.MANIFEST_SHA256).
 PANEL_SIZE = 5_000
 PANEL_MANIFEST_SHA256 = "27f122972d76dc2a1170a3d105a9856b55beedabe037f697c1a1aa2baeb67036"
-
-PARQUET_SCHEMA = pa.schema(
-    [
-        ("data_source", pa.string()),
-        ("prompt", pa.list_(pa.struct([("role", pa.string()), ("content", pa.string())]))),
-        ("env_class", pa.string()),
-        ("reward_spec", pa.struct([("method", pa.string()), ("ground_truth", pa.string())])),
-        (
-            "extra_info",
-            pa.struct(
-                [
-                    ("task_name", pa.string()),
-                    ("operation", pa.string()),
-                    ("answer_format", pa.string()),
-                    ("digit", pa.int64()),
-                    ("length_bucket", pa.string()),
-                    ("source_sha256", pa.string()),
-                ]
-            ),
-        ),
-    ]
-)
 
 Stratum = tuple[str, int]
 
@@ -248,21 +226,12 @@ def validate_records_against_verifier(records: Iterator[dict[str, Any]]) -> tupl
     return record_count, len(validated_tasks)
 
 
-def write_parquet(records: Iterator[dict[str, Any]], output_path: Path, *, batch_size: int = 50_000) -> None:
+def write_parquet(records: Iterator[dict[str, Any]], output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    written = 0
-    batch: list[dict[str, Any]] = []
-    with pq.ParquetWriter(output_path, PARQUET_SCHEMA) as writer:
-        for record in records:
-            batch.append(record)
-            if len(batch) >= batch_size:
-                writer.write_table(pa.Table.from_pylist(batch, schema=PARQUET_SCHEMA))
-                written += len(batch)
-                batch = []
-        if batch:
-            writer.write_table(pa.Table.from_pylist(batch, schema=PARQUET_SCHEMA))
-            written += len(batch)
-    print(f"Wrote {written} rows to {output_path}")
+    write_tasks(
+        output_path,
+        (source_row_task(row, index, source_name=DATA_SOURCE, config={}) for index, row in enumerate(records)),
+    )
 
 
 def main() -> None:

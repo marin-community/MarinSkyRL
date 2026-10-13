@@ -6,12 +6,9 @@
 #
 # The sample (infra/rl_data/nemotron_ultra_mopd_subset.py --rows) routes every generator of the
 # blend, so rows keep their teacher_route column and the stock shuffle preserves the blend's mix.
-# grading: skip lets judge-backed rows train without a judge; the distillation loss ignores the
-# reward. ns_tools and Lean rows execute in task-local Shellbox machines.
+# Skipped grading belongs to the prepared TaskSpec, not the training config.
 #
-# Harbor SWE rows (--swe-rows N) use TaskRolloutWorker. Supply the sample's
-# swe-tasks/tasks.parquet as data.terminal_bench_data and TOGETHER_API_KEY for the TaskTrove
-# verifiers. Without that task data the Harbor settings below are unused.
+# Prepare SWE packages as TaskSpecs before launch.
 #
 # Pass the student with --model-path (open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92
 # pinned to a commit) and the sample's train.parquet with --train-data.
@@ -43,10 +40,13 @@ terminal_bench:
     enable_error_classification: true
     default_error_treatment: zero
 environment:
-  env_class: nemotron_ultra
   task_sessions:
-    nemotron_ultra:
-      grading: skip
+    session:
+      task_session: nemotron_ultra
+    runtime:
+      task_machine:
+        cpus: 1
+        memory_mb: 8192
 
 trainer:
   strategy: megatron
@@ -206,10 +206,8 @@ teacher_routing:
         weight: 1.0
 
 data:
-  kind: parquet
   train_data: []
   val_data: []
-  terminal_bench_data: []
   shuffle: true
 
 extra_env:

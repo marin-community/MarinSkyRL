@@ -28,7 +28,6 @@ def test_snowball_mopd_32k_recipe_composes_against_the_base_config():
     ).config
 
     assert cfg.trainer.policy.megatron_config.context_parallel_size == 1
-    assert cfg.environment.task_sessions.nemotron_ultra.grading == "skip"
     settings = HarborTaskSettings.from_config(cfg.terminal_bench_config)
     assert settings.agent_timeout == cfg.terminal_bench_config.harbor.override_timeout_sec
 

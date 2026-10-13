@@ -126,18 +126,6 @@ async def run_trajectory_runner_end_to_end(
     )
 
     generator_cfg = default_cfg.generator
-    OmegaConf.update(
-        default_cfg,
-        "environment.task_sessions",
-        {
-            "search": {
-                "log_requests": True,
-                "search_url": "http://127.0.0.1:8000/retrieve",
-            },
-            "max_verifier_workers": max_verifier_workers,
-        },
-    )
-    env_cfg = default_cfg.environment.task_sessions
 
     cfg = get_test_actor_config()
     cfg.trainer.policy.model.path = model
@@ -162,29 +150,30 @@ async def run_trajectory_runner_end_to_end(
 
     input_batch: TrajectoryRequestBatch = get_test_trajectory_request(
         model=model,
-        environment_configs=OmegaConf.to_container(env_cfg, resolve=True),
         num_prompts=num_prompts,
         n_samples_per_prompt=n_samples_per_prompt,
         max_prompt_length=max_prompt_length,
         data_path=data_path,
         env_class=env_class,
+        max_turns=max_turns,
     )
-    sampling_params = get_sampling_params_for_backend(
-        "vllm",
-        DictConfig(
-            {
-                "temperature": 1.0,
-                "top_p": 1.0,
-                "top_k": -1,
-                "max_generate_length": max_generate_length,
-                "min_p": 0.0,
-                "logprobs": None,
-                "stop": ["</search>", "</answer>"] if env_class == "search" else None,
-            }
+    input_batch = replace(
+        input_batch,
+        sampling_params=get_sampling_params_for_backend(
+            "vllm",
+            DictConfig(
+                {
+                    "temperature": 1.0,
+                    "top_p": 1.0,
+                    "top_k": -1,
+                    "max_generate_length": max_generate_length,
+                    "min_p": 0.0,
+                    "logprobs": None,
+                    "stop": ["</search>", "</answer>"] if env_class == "search" else None,
+                }
+            ),
         ),
     )
-
-    input_batch = replace(input_batch, sampling_params=sampling_params)
 
     try:
         with Timer("generate_responses"):

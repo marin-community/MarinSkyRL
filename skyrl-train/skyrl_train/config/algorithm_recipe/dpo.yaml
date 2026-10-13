@@ -1,6 +1,6 @@
 # @package trainer.algorithm
 # DPO (arXiv:2305.18290) over dataset-supplied chosen/rejected pairs.
-# Requires environment.env_class=preference_pair, generator.n_samples_per_prompt=2,
+# Requires data.preference_pair_format=text or tokenized, generator.n_samples_per_prompt=2,
 # use_sample_packing=false, and trainer.placement.colocate_all=false; validate_dpo
 # enforces the full set.
 policy_loss_type: dpo

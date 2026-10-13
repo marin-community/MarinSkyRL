@@ -2,6 +2,9 @@ import pandas as pd
 import polars as pl
 from pathlib import Path
 
+from marinskyrl.task_format import TASK_SPEC_COLUMN
+from marinskyrl.task_preparation import source_row_task
+
 # Define input and output files
 DATA_DIR = Path.home() / "data/dapo"
 FILES = {
@@ -26,5 +29,9 @@ for name, filename in FILES.items():
     cleaned = pl_df.filter(pl.col("n_rm") == 1).drop("n_rm")
 
     # Convert back to pandas and save
-    cleaned.to_pandas().to_parquet(out_path)
+    tasks = [
+        {TASK_SPEC_COLUMN: source_row_task(row, index, source_name=name, config={}).model_dump_json()}
+        for index, row in enumerate(cleaned.to_dicts())
+    ]
+    pd.DataFrame(tasks).to_parquet(out_path)
     print(f"Cleaned file saved to: {out_path}")

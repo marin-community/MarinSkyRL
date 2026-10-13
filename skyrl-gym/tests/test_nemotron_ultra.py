@@ -144,7 +144,6 @@ def test_genrm_group_limits_comparison_concurrency():
         judge=FakeJudge(),
         config={
             "max_concurrent_comparisons": 2,
-            "group_answer_length_penalty_coeff": 0.1,
         },
     )
 

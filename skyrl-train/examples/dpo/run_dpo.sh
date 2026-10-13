@@ -24,7 +24,7 @@ uv run --isolated --extra megatron -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train_prefs.parquet']" \
   data.val_data="[]" \
   +algorithm_recipe=dpo \
-  environment.env_class=preference_pair \
+  data.preference_pair_format=text \
   trainer.strategy=megatron \
   trainer.placement.colocate_all=false \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \

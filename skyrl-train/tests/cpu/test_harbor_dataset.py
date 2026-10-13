@@ -1,11 +1,25 @@
 from pathlib import Path
 import json
+import io
+import tarfile
+import shutil
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
+from rolloutengine.contracts import ModelTurn
+from rolloutengine.engine import ShellboxRolloutEngine
 from skyrl_gym.source_task import source_task
-from taskcompendium.models import Source
+from taskcompendium.models import Source, TaskSpec
+from taskcompendium.grading_result import Outcome
+from tests.cpu.task_specs import lowered_task
+from tests.cpu.rollouts.engine_fakes import FixtureImageFactory
 
-from marinskyrl.harbor_preparation import TerminalBenchTaskDataset, materialize_harbor_tasks
+from marinskyrl.harbor_preparation import (
+    TerminalBenchTaskDataset,
+    materialize_harbor_tasks,
+    materialize_harbor_archives,
+)
 from marinskyrl.nemotron_preparation import resolve_terminal_task, terminal_task_index
 
 
@@ -89,3 +103,83 @@ def test_harbor_preparation_rejects_duplicate_ids_before_execution_overrides(tmp
     with pytest.raises(ValueError, match="Duplicate Harbor task ID"):
         materialize_harbor_tasks(sources, cache_dir=tmp_path / "cache", execution_output=execution_output)
     assert not execution_output.exists()
+
+
+@pytest.mark.asyncio
+async def test_swe_archive_preparation_preserves_identity_and_executes_after_source_removal(tmp_path):
+    contents = {
+        "instruction.md": b"Write one to the artifact answer file.",
+        "task.toml": (
+            '[environment]\nworkdir = "/workspace"\n'
+            'docker_image = "fixture@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\n'
+            '[verifier]\nenvironment_mode = "separate"\n'
+        ).encode(),
+        "tests/test.sh": b"cat /logs/artifacts/answer > /logs/verifier/reward.txt\n",
+    }
+    archive_bytes = io.BytesIO()
+    with tarfile.open(fileobj=archive_bytes, mode="w:gz") as archive:
+        for name, content in contents.items():
+            member = tarfile.TarInfo(name)
+            member.size = len(content)
+            member.mode = 0o644
+            archive.addfile(member, io.BytesIO(content))
+    source = tmp_path / "swe-tasks.parquet"
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {"path": "repo/pivot-state", "task_binary": archive_bytes.getvalue()},
+                {"path": "repo/another-state", "task_binary": archive_bytes.getvalue()},
+            ]
+        ),
+        source,
+    )
+    execution = tmp_path / "execution.json"
+    prepared = materialize_harbor_archives(
+        source, cache_dir=tmp_path / "prepared", execution_output=execution, grader_override=None
+    )
+    source.unlink()
+    shutil.rmtree(tmp_path / "prepared" / "archives")
+    task = TaskSpec.model_validate_json(pq.read_table(prepared)["task_spec"][0].as_py())
+    assert task.id == "repo/pivot-state"
+    assert terminal_task_index(prepared)["repo/pivot-state"] == task
+    assert terminal_task_index(prepared)["pivot-state"] == task
+    assert terminal_task_index(prepared)["another-state"].id == "repo/another-state"
+    assert task.source.dataset in json.loads(execution.read_text())["environment"]["task_sessions"]["sources"]
+
+    async def model(request):
+        return ModelTurn(
+            message={
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "answer",
+                        "type": "function",
+                        "function": {
+                            "name": "shell",
+                            "arguments": json.dumps({"command": "echo 1 > /logs/artifacts/answer"}),
+                        },
+                    }
+                ],
+            },
+            prompt_token_ids=(1, 2),
+            response_token_ids=(3,),
+            logprobs=(-0.1,),
+            stop_reason="stop",
+        )
+
+    engine = ShellboxRolloutEngine(model, {"docker": FixtureImageFactory()})
+    result = await engine.run(lowered_task(task, max_turns=1, backend="docker", verifier_backend="docker"))
+    assert (result.grade.status, result.grade.reward) == (Outcome.GRADED, 1.0)
+
+
+def test_empty_archive_preparation_does_not_publish_execution_settings(tmp_path):
+    source = tmp_path / "empty.parquet"
+    pq.write_table(
+        pa.table({"path": pa.array([], type=pa.string()), "task_binary": pa.array([], type=pa.binary())}), source
+    )
+    execution = tmp_path / "execution.json"
+    with pytest.raises(ValueError, match="No Harbor tasks matched"):
+        materialize_harbor_archives(
+            source, cache_dir=tmp_path / "prepared", execution_output=execution, grader_override=None
+        )
+    assert not execution.exists()

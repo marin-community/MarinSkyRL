@@ -13,7 +13,9 @@ context_budget:
   max_turns: 1
 
 environment:
-  env_class: aime
+  task_sessions:
+    session:
+      task_session: aime
 
 trainer:
   strategy: megatron
@@ -92,7 +94,6 @@ generator:
     top_p: 1.0
 
 data:
-  kind: parquet
   train_data: []
   val_data: []
 

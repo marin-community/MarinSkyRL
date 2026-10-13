@@ -12,7 +12,6 @@ import pyarrow.parquet as pq
 import pytest
 from omegaconf import OmegaConf
 
-from cloud.iris import rl_data
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
 from shellbox.machine import Backend, ShellSimBuiltins
 
@@ -24,18 +23,16 @@ from marinskyrl.packed_tasks import (
     select_task_references,
 )
 from marinskyrl.task_sources import (
+    data_source_dict,
     TaskTroveParquetSource,
     TaskTroveSelection,
-    TaskTroveSelectionSnapshot,
     TaskTroveTagMatch,
 )
-from skyrl_train.dataset.harbor import materialize_harbor_tasks
-from marinskyrl.harbor_preparation import TerminalBenchTaskDataset
+from marinskyrl.harbor_preparation import TerminalBenchTaskDataset, materialize_harbor_tasks
 from taskcompendium.grading_result import Outcome
-from taskcompendium.models import NoGrader
+from taskcompendium.models import NoGrader, TaskSpec
 from taskcompendium.runtime.resources import resource_bytes
-from rolloutengine.spec import LoweredTaskSpec
-from tests.cpu.task_specs import session_spec
+from tests.cpu.task_specs import lowered_task
 from rolloutengine.contracts import ModelTurn
 from rolloutengine.engine import ShellboxRolloutEngine
 
@@ -139,13 +136,12 @@ def test_tasktrove_selection_combines_source_tags_and_modes(tmp_path: Path) -> N
         TaskTroveSelection(sources=("source-a",), tags=("bash",), modes=("script",)),
     )
 
-    summary = select_task_references(source)
+    references = select_task_references(source)
 
-    assert [(reference.row_group, reference.path) for reference in summary.references] == [
+    assert [(reference.row_group, reference.path) for reference in references] == [
         (0, "task-1"),
         (1, "task-3"),
     ]
-    assert summary.distinct_environment_count == 1
 
 
 def test_tasktrove_any_tags_and_limit_have_stable_nested_membership(tmp_path: Path) -> None:
@@ -161,7 +157,7 @@ def test_tasktrove_any_tags_and_limit_have_stable_nested_membership(tmp_path: Pa
     two = select_task_references(_source(dataset_path, selection))
     three = select_task_references(_source(dataset_path, TaskTroveSelection(**{**asdict(selection), "limit": 3})))
 
-    assert {reference.uid() for reference in two.references} < {reference.uid() for reference in three.references}
+    assert {reference.uid() for reference in two} < {reference.uid() for reference in three}
 
 
 def test_tasktrove_selection_rejects_unknown_source(tmp_path: Path) -> None:
@@ -176,9 +172,8 @@ def test_packed_dataset_materializes_reference_from_runtime_yaml(tmp_path: Path)
     dataset_path = tmp_path / "tasks.parquet"
     _write_dataset(dataset_path)
     source = _source(dataset_path, TaskTroveSelection(sources=("source-a",)))
-    resolved = rl_data.resolve_rl_train_data_with_sources([asdict(source)], kind="tasks", verbose=False)
     config_path = tmp_path / "runtime-config.yaml"
-    OmegaConf.save(OmegaConf.create({"data": {"train_data": list(resolved.paths)}}), config_path)
+    OmegaConf.save(OmegaConf.create({"data": {"train_data": [data_source_dict(source)]}}), config_path)
     document = OmegaConf.load(config_path)
     dataset = TerminalBenchTaskDataset(OmegaConf.to_container(document, resolve=True)["data"]["train_data"])
     cache = tmp_path / "cache"
@@ -196,12 +191,9 @@ def test_packed_selection_becomes_portable_task_parquet(tmp_path: Path) -> None:
     dataset_path = tmp_path / "source.parquet"
     _write_dataset(dataset_path)
     source = _source(dataset_path, TaskTroveSelection(sources=("source-a",)))
-    output = materialize_harbor_tasks([asdict(source)], cache_dir=tmp_path / "cache", session=session_spec())
+    output = materialize_harbor_tasks([asdict(source)], cache_dir=tmp_path / "cache")
     dataset_path.unlink()
-    tasks = [
-        LoweredTaskSpec.model_validate_json(value).task
-        for value in pq.read_table(output)["lowered_task_spec"].to_pylist()
-    ]
+    tasks = [TaskSpec.model_validate_json(value) for value in pq.read_table(output)["task_spec"].to_pylist()]
     assert [task.context.events[0].content for task in tasks] == ["Do one", "Do three"]
     assert [task.id for task in tasks] == [
         "tasktrove/clean@fixture:abc123/source-a/task-1",
@@ -238,7 +230,6 @@ async def test_packed_tasks_execute_after_source_removal(tmp_path, verification)
     output = materialize_harbor_tasks(
         [asdict(source)],
         cache_dir=cache,
-        session=session_spec(max_turns=1),
         grader_override=None if verification else NoGrader(reason="Verification is disabled"),
     )
     dataset_path.unlink()
@@ -260,7 +251,12 @@ async def test_packed_tasks_execute_after_source_removal(tmp_path, verification)
         {"docker": Factory()},
     )
     row = pq.read_table(output).to_pylist()[0]
-    task = LoweredTaskSpec.model_validate_json(row["lowered_task_spec"])
+    task = lowered_task(
+        TaskSpec.model_validate_json(row["task_spec"]),
+        max_turns=1,
+        backend="docker",
+        verifier_backend="docker" if verification else None,
+    )
     result = await engine.run(task)
     assert (result.grade.status, result.grade.reward) == (
         (Outcome.GRADED, 1.0) if verification else (Outcome.UNAVAILABLE, None)
@@ -273,7 +269,7 @@ async def test_packed_tasks_execute_after_source_removal(tmp_path, verification)
 def test_packed_materializer_reuses_reader_across_batches(tmp_path: Path) -> None:
     dataset_path = tmp_path / "tasks.parquet"
     _write_dataset(dataset_path)
-    references = select_task_references(_source(dataset_path, TaskTroveSelection(sources=("source-a",)))).references
+    references = select_task_references(_source(dataset_path, TaskTroveSelection(sources=("source-a",))))
     materializer = PackedTaskMaterializer(tmp_path / "cache")
 
     first = materializer.materialize_batch([references[0]])[references[0]]
@@ -285,29 +281,11 @@ def test_packed_materializer_reuses_reader_across_batches(tmp_path: Path) -> Non
     assert (second / "instruction.md").read_text() == "Do three"
 
 
-def test_packed_dataset_rejects_changed_launch_selection(tmp_path: Path) -> None:
-    dataset_path = tmp_path / "tasks.parquet"
-    _write_dataset(dataset_path)
-    source = _source(dataset_path, TaskTroveSelection(sources=("source-a",)))
-    summary = select_task_references(source)
-    changed = replace(
-        source,
-        snapshot=TaskTroveSelectionSnapshot(
-            count=len(summary.references),
-            digest="changed",
-            distinct_environment_count=summary.distinct_environment_count,
-        ),
-    )
-
-    with pytest.raises(ValueError, match="digest changed"):
-        TerminalBenchTaskDataset([asdict(changed)])
-
-
 def test_packed_materializer_rejects_solution_files(tmp_path: Path) -> None:
     dataset_path = tmp_path / "tasks.parquet"
     _write_dataset(dataset_path, include_solution=True)
     source = _source(dataset_path, TaskTroveSelection(sources=("source-c",)))
-    reference = select_task_references(source).references[0]
+    reference = select_task_references(source)[0]
 
     with pytest.raises(PackedTaskArchiveError, match="solution"):
         PackedTaskMaterializer(tmp_path / "cache").materialize_batch([reference])
@@ -317,7 +295,7 @@ def test_packed_materializer_rejects_parent_traversal(tmp_path: Path) -> None:
     dataset_path = tmp_path / "tasks.parquet"
     _write_dataset(dataset_path, include_unsafe_path=True)
     source = _source(dataset_path, TaskTroveSelection(sources=("source-c",)))
-    reference = select_task_references(source).references[0]
+    reference = select_task_references(source)[0]
 
     with pytest.raises(PackedTaskArchiveError, match="Unsafe task archive path"):
         PackedTaskMaterializer(tmp_path / "cache").materialize_batch([reference])

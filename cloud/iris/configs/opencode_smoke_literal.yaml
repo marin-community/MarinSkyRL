@@ -1,5 +1,5 @@
 
-entrypoint: terminal_bench
+entrypoint: standard
 
 config_groups:
   terminal_bench_config: terminal_bench

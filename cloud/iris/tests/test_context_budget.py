@@ -43,17 +43,6 @@ def test_iris_config_materializes_one_coherent_context_budget(config_path):
         assert parsed.terminal_bench["harbor"]["max_turns"] == budget.max_turns
 
 
-@pytest.mark.parametrize(
-    "config_path", sorted((_REPO_ROOT / "cloud/iris/configs").glob("snowball_ultra_*.yaml")), ids=lambda p: p.name
-)
-def test_snowball_ultra_judges_read_credentials_from_the_environment(config_path):
-    ultra = yaml.safe_load(config_path.read_text())["environment"]["task_sessions"]["nemotron_ultra"]
-
-    for judge in (ultra["judges"]["general"], ultra["judges"]["safety"], ultra["genrm"]["judge"]):
-        assert judge["api_key_env"]
-        assert "api_key" not in judge
-
-
 def test_context_budget_derives_all_hydra_length_arguments():
     parsed = parse_rl_config(str(_REPO_ROOT / "cloud/iris/configs/tasktrove_dq_sweep_30b.yaml"))
     cfg = compose_skyrl_config(parsed, {"job_name": "context-test", "num_nodes": 4}, _HPCStub()).config

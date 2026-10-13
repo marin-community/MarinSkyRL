@@ -1,3 +1,7 @@
+from marinskyrl.rollout_grading import validate_task_grading
+from marinskyrl.distillation import compile_distillation_plan_from_config
+from skyrl_gym.source_task import source_task
+from taskcompendium.models import Source
 from hydra import compose, initialize_config_dir
 import pytest
 import torch
@@ -5,9 +9,6 @@ from omegaconf import DictConfig, OmegaConf
 
 from skyrl_train.entrypoints.main_base import config_dir
 from skyrl_train.utils import validate_cfg
-from skyrl_train.utils.utils import validate_megatron_cfg
-from cloud.iris.rl_config_translation import compose_skyrl_config, parse_rl_config
-from cloud.iris.tests.test_nemotron_ultra_grading_config import _HPCStub, _skipped_grading_config
 from skyrl_train.objective.losses import PolicyLossInputs
 from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
 from skyrl_train.config.objective_spec import topk_loss_params
@@ -85,20 +86,28 @@ def test_sampled_teacher_add_rejects_sft_that_ignores_teacher_credit():
 
 def skipped_grading_config() -> DictConfig:
     cfg = replace_mode_config()
-    cfg.environment.task_sessions.nemotron_ultra.grading = "skip"
     cfg.trainer.algorithm.advantage_estimator = "uniform"
     cfg.trainer.eval_before_train = False
     cfg.trainer.eval_interval = -1
     return cfg
 
 
-def test_skipped_grading_is_accepted_for_pure_distillation(tmp_path):
-    parsed = parse_rl_config(str(_skipped_grading_config(tmp_path, eval_interval=-1)))
-    cfg = compose_skyrl_config(parsed, {"job_name": "grading-test", "num_nodes": 1}, _HPCStub()).config
-    cfg.trainer.flash_attn = False
-    # Successful validation is the contract for training with teacher credit and no environment grading.
-    validate_cfg(cfg)
-    validate_megatron_cfg(cfg)
+def skipped_task():
+    return source_task(
+        [{"role": "user", "content": "A distillation task."}],
+        {},
+        {"grading": "skip"},
+        Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
+    )
+
+
+def test_prepared_task_skips_grading_only_with_reward_independent_training():
+    cfg = skipped_grading_config()
+    # Teacher credit permits this task to omit the environment reward.
+    validate_task_grading(skipped_task(), cfg, compile_distillation_plan_from_config(cfg))
+    cfg.trainer.eval_interval = 5
+    with pytest.raises(ValueError, match="eval_interval<=0"):
+        validate_task_grading(skipped_task(), cfg, compile_distillation_plan_from_config(cfg))
 
 
 @pytest.mark.parametrize(
@@ -116,7 +125,7 @@ def test_skipped_grading_rejects_configs_that_read_the_reward(path, value, messa
     OmegaConf.update(cfg, path, value)
 
     with pytest.raises(ValueError, match=message):
-        validate_cfg(cfg)
+        validate_task_grading(skipped_task(), cfg, compile_distillation_plan_from_config(cfg))
 
 
 def selected_topk_config() -> DictConfig:

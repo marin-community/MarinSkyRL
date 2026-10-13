@@ -28,18 +28,36 @@ def task_row(prompt: str, index: int) -> dict:
     return {TASK_SPEC_COLUMN: text_task(f"fixture-{index}", prompt=prompt, source="fixture").model_dump_json()}
 
 
-def test_prepared_hf_selector_reads_the_requested_revision_and_subdirectory(monkeypatch):
+@pytest.mark.parametrize("split", [None, "validation"])
+def test_prepared_hf_selector_reads_the_requested_revision_subdirectory_and_split(monkeypatch, split):
     revision = "a" * 40
 
     def read_hub_dataset(path, *, revision=None, data_dir=None, keep_in_memory=False):
         prompt = (
             "Pinned question" if (path, revision, data_dir) == ("org/tasks", "a" * 40, "prepared") else "Wrong source"
         )
-        return {"train": Dataset.from_list([task_row(prompt, 0)])}
+        return {
+            "train": Dataset.from_list([task_row(prompt if split is None else "Wrong split", 0)]),
+            "validation": Dataset.from_list([task_row(prompt, 0)]),
+        }
 
     monkeypatch.setattr("datasets.load_dataset", read_hub_dataset)
-    dataset = task_dataset([f"org/tasks@{revision}::prepared"], PromptTokenizer(), num_workers=1)
+    suffix = "" if split is None else f":{split}"
+    dataset = task_dataset([f"org/tasks@{revision}::prepared{suffix}"], PromptTokenizer(), num_workers=1)
     assert dataset[0].lowered.task.context.events[0].content == "Pinned question"
+
+
+def test_prepared_session_grader_requires_a_session_before_worker_allocation(tmp_path):
+    task = source_row_task(
+        {"prompt": [{"role": "user", "content": "What is twelve?"}], "reward_spec": {"ground_truth": "12"}},
+        0,
+        source_name="arithmetic",
+        config={},
+    )
+    source = tmp_path / "task.jsonl"
+    source.write_text(json.dumps({TASK_SPEC_COLUMN: task.model_dump_json()}))
+    with pytest.raises(ValueError, match="requires a registered task session"):
+        task_dataset([str(source)], PromptTokenizer())
 
 
 @pytest.mark.parametrize("source_max_turns", [None, 3])

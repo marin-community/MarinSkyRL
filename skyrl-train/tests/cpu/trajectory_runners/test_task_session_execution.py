@@ -15,10 +15,9 @@ from transformers import AutoTokenizer
 from skyrl_gym.source_task import source_task
 from taskcompendium.models import NoGrader, Source
 from shellbox.backends.daytona.machine import DaytonaMachineFactory
-from tests.cpu.task_specs import lowered_task, task_input
+from tests.cpu.task_specs import lowered_task, task_input, NATIVE_ENVIRONMENT
 
 from skyrl_train.entrypoints.main_base import config_dir
-from skyrl_train.dataset.tasks import source_row_task
 from skyrl_train.rollouts.buffer import RolloutGroup, RolloutLease, RolloutTask
 from skyrl_train.rollouts.workers import WorkerShard
 from skyrl_train.rollouts.task_worker import TaskRolloutWorkerSpec
@@ -100,11 +99,16 @@ async def test_cpu_worker_runs_machine_free_rows_and_checks_native_tools(
             "env_class": "lcb",
             "reward_model": {"ground_truth": json.dumps([{"input": "", "output": "2", "testtype": "stdin"}])},
         }
-        native = source_row_task(
-            native_row,
-            1,
-            source_name="tiny",
-            environment_configs=OmegaConf.to_container(cfg.environment.task_sessions, resolve=True),
+        native = lowered_task(
+            source_task(
+                native_row["prompt"],
+                {"reward_model": native_row["reward_model"]},
+                {},
+                Source(dataset="tiny", revision="1", row="native", importer_revision="1"),
+                environment=NATIVE_ENVIRONMENT,
+            ),
+            "lcb",
+            backend="docker",
         )
         harbor_task = native.model_copy(
             update={

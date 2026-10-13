@@ -1,187 +1,73 @@
-Dataset Preparation
-===================
+Prepared task datasets
+======================
 
-This guide covers:
+Generated RL accepts bare ``TaskSpec`` records. Prepare raw source rows before the
+training command. The trainer does not infer task families or convert Harbor packages.
+Static DPO uses its separate chosen/rejected format.
 
-1. The dataset format that SkyRL expects for training, and
-2. How to prepare and format a new dataset
+Input format
+------------
 
-
-Format Requirements
--------------------
-
-Each dataset entry is a dictionary with the following required (and some optional) values:
-
-.. code-block:: python
-
-   data = {
-       "data_source": data_source,     # String: Name/identifier of the data source
-       "prompt": [                     # List: Conversation format
-           {
-               "role": "user",            
-               "content": question,       
-           }
-       ],
-       "env_class": env_class,         # String: Environment class identifier
-       "reward_model": {
-           "ground_truth": solution,   # Environment-specific verifier input
-       },
-       "extra_info": {                 # Dict: Optional additional metadata
-           # ... add your own fields here
-       },
-   }
-
-SkyRL supports loading datasets of this format from a local parquet file, a json file, or by Hugging Face dataset name that SkyRL will download. We load the dataset as a huggingface `DatasetDict <https://huggingface.co/docs/datasets/en/package_reference/main_classes#datasets.DatasetDict>`_. 
-
-**Key Requirements:**
-
-- **data_source**: String identifier for the dataset origin (e.g., "gsm8k", "AIME24", etc.)
-- **prompt**: List of dictionaries following standard OpenAI chat format
-- **env_class**: Name of environment that the data sample corresponds to. This is used to tell the Generator which environment to instantiate for this prompt.
-
-  - Note: **env_class** can also be specified in the training configuration to apply to all dataset entries.
-- **reward_model**: Dictionary passed to the selected environment as ``extras["reward_model"]``. Its schema is environment-specific; AIME and IFEval both require a ``ground_truth`` field.
-
-  - **ground_truth**: The expected answer or serialized constraint used by the environment verifier.
-
-- **extra_info**: Extensible dictionary for additional metadata - you can add custom fields as needed.
-
-Verifier-backed datasets
-------------------------
-
-Use the environment's preparation contract before writing an artifact. It validates
-the registered ``env_class``, canonicalizes ground truth, and can verify a known-good
-and known-bad response with the exact runtime scorer. Runtime environments remain
-permissive and score malformed rows as incorrect, so this preflight belongs in the
-dataset builder rather than a distributed rollout worker.
+Each row contains ``task_spec``: a JSON string that satisfies the TaskCompendium
+``TaskSpec`` schema. Optional ``teacher_route`` and ``metric_tags`` columns contain
+training labels, not task requirements. A teacher route selects a configured teacher
+for distillation. Metric tags supply coverage labels.
+Curriculum sampling uses ``extra_info.data_source`` and ``extra_info.grade`` for bin labels.
+These fields contain no verifier answers.
+An optional ``data_source`` column supplies the training source label when a row
+uses a task from another source. Runtime source overrides still match ``TaskSpec.source.dataset``.
 
 .. code-block:: python
 
-   from skyrl_gym.envs.data_contracts import get_data_contract
+   row = {"task_spec": task.model_dump_json(), "teacher_route": "math", "metric_tags": ["math"]}
 
-   contract = get_data_contract("aime")
-   ground_truth = contract.validate_example(
-       raw_answer,
-       positive_response="Answer: \\boxed{42}",
-       negative_response="",
-   )
+The loader accepts prepared Parquet, JSON, JSONL, or Hugging Face datasets. It derives
+public prompts from the TaskSpec for length filtering. It does not write an intermediate
+dataset. Task IDs must be unique within a split.
 
-``get_data_contract`` currently supports ``aime`` and ``ifeval``. Registering a new
-environment is not enough to make it a supported training-data target: add its
-normalizer and verifier contract first.
+Source preparation
+------------------
 
-
-Data Preparation Scripts
-------------------------
-
-We provide several example scripts to help you prepare your dataset, including for gsm8k, LiveCodeBench, SearchR1, and the SynSQL text-to-SQL dataset. 
-
-**To use a new dataset for training, you can use the provided scripts as a template to create your own.**
-
-Generally, only a single method (`make_map_fn`) must be implemented to convert the new dataset into the required format. Below is an example of converting the SynSQL text-to-SQL dataset into the required format:
-
-.. code-block:: python
-
-  def make_map_fn(split):
-        def process_fn(example, idx):
-            """Transform each dataset example into the required format"""
-            if split == "train":
-                user_content = ("{db_details}:" + example["schema"] + 
-                              ";\n {external_knowledge}: " + example["external_knowledge"] + 
-                              ";\n {question}: " + example["question"])
-            else:
-                user_content = ("{db_details}:" + example["schema"] + 
-                              "; {question}: " + example["question"])
-            
-            data = {
-                "data_source": "synsql",
-                "prompt": [
-                    {"role": "system", "content": short_system_prompt},
-                    {
-                        "role": "user",
-                        "content": user_content,
-                    },
-                ],
-                "env_class": "text2sql",
-                "reward_model": {
-                    "ground_truth": example["sql"],
-                },
-                # Custom fields specific to the SynSQL dataset:
-                "db_id": example["db_id"],
-                "data": example["data"],
-            }
-            return data
-        
-        return process_fn
-
-Then, the mapping function is called on each sample in the dataset, and the final converted dataset is saved to a parquet file:
-
-.. code-block:: python
-
-  train_dataset = input_dataset.map(function=make_map_fn("train"), with_indices=True)
-  train_dataset.to_parquet(os.path.join(args.output, "train.parquet"))
-
-Note, however, that SkyRL can also load datasets from a local json file or by Hugging Face dataset name.
-
-Using Dataset to Train
-----------------------
-
-With your correctly formatted datasets, you can pass the dataset file paths to the training script:
+``marinskyrl.task_preparation`` converts source chat rows to bare TaskSpecs.
+It keeps answers and grader parameters in private verifier resources.
+It does not select the session factory, machine backend, or execution limits.
+Different session types require distinct source names.
+The preparation CLI rejects different ``env_class`` values under one source name.
+Harbor preparation rejects duplicate task IDs before it writes execution overrides.
 
 .. code-block:: bash
 
-  # Dataset file paths
-  uv run -m skyrl_train.entrypoints.main_base \
-    data.train_data="['path/to/train.parquet']" \
-    data.val_data="['path/to/validation.parquet']" \
-
-or specify HuggingFace dataset(s) prepared in the expected format:
-
-.. code-block:: bash
-
-  # Huggingface dataset
-  uv run -m skyrl_train.entrypoints.main_base \
-    data.train_data="['username/my_dataset:train']" \
-    data.val_data="['username/my_dataset:validation']" \
-
-
-
-Prepared TaskSpec API
----------------------
-
-The preparation modules store bare ``TaskSpec`` definitions in the ``task_spec`` column.
-Tasks contain public context, private grader inputs, and environment requirements.
-Runtime machines and session limits do not belong to the stored task definition.
-Optional columns contain ``data_source``, ``teacher_route``, ``metric_tags``, and a curriculum bin in ``extra_info``.
-
-Prepare local source rows with explicit private grader settings:
-
-.. code-block:: bash
-
-   uv run -m marinskyrl.task_preparation \
-     --input rows.parquet --output tasks.parquet --source arithmetic \
+   uv run --project .. python -m marinskyrl.task_preparation \
+     --input raw.parquet --output tasks.parquet --source my_dataset \
      --config grader.json
 
-The ``--environment`` option accepts ``EnvironmentRequirements`` JSON for tasks that require a machine.
-Executable tasks require prebuilt, digest-pinned images.
-``marinskyrl.harbor_preparation`` prepares separate-verifier Harbor packages and writes their execution overrides.
-``marinskyrl.nemotron_preparation`` prepares mixed Nemotron sources against a prepared Harbor artifact.
-``marinskyrl.protocol_replay`` prepares manifest-validated token-prefix replay tasks.
+``grader.json`` contains grader parameters, not credentials. Use ``--environment``
+with an ``EnvironmentRequirements`` JSON file when the task requires a machine.
+Native executables require Linux process semantics and a prebuilt, digest-pinned image.
+The source builder must also declare the workspace resources that the task requires.
 
-``skyrl_train.dataset.prepared_tasks.TaskSpecDataset`` accepts these artifacts, a tokenizer, and explicit execution settings.
-Its ``execution`` argument contains ``TaskExecutionSettings`` with a ``TaskRuntimeSpec`` and a ``TaskSessionSpec``.
-Its ``source_executions`` argument selects overrides by exact ``TaskSpec.source.dataset`` values.
-Different session types require distinct source names for run-specific session selection.
-The preparation CLI rejects different ``env_class`` values under the same source name.
-Harbor preparation rejects duplicate task IDs before it writes execution overrides.
-The loader retains task definitions and returns typed ``TaskInput`` records with run-specific ``LoweredTaskSpec`` values.
-The standard trainer entrypoint uses the source-row format above.
+The GSM8K, multiplication, multi-turn math, SearchR1, NUPA, and code examples write
+prepared TaskSpecs directly. Code preparation requires an explicit Python image.
+Use ``marinskyrl.harbor_preparation`` for supported Harbor packages and
+``marinskyrl.nemotron_preparation`` for mixed Nemotron rows.
+These commands run before training, not in a rollout worker.
 
+Run settings
+------------
 
-Reference Scripts
------------------
+Select the session factory and runtime settings in the run config:
 
-Use the following scripts as a template to prepare your dataset:
+.. code-block:: bash
 
-- `gsm8k_dataset.py <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/gsm8k/gsm8k_dataset.py>`_
-- `multiply_dataset.py <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/multiply/multiply_dataset.py>`_
+   uv run --project .. -m skyrl_train.entrypoints.main_base \
+     data.train_data="['tasks.parquet']" \
+     data.val_data="['validation_tasks.parquet']" \
+     environment.task_sessions.session.task_session=gsm8k
+
+``environment.task_sessions.sources`` supplies overrides keyed by
+``TaskSpec.source.dataset``. Each override contains ``runtime`` and ``session``
+settings. SkyRL preserves the TaskSpec when it creates a ``LoweredTaskSpec``.
+Unknown source keys cause rejection before GPU allocation.
+The driver matches these keys against the loaded train and evaluation task sources.
+Native graders use the Shellbox session. Custom graders use the selected session factory.
+See :doc:`../tutorials/task_rollouts` for machine settings and deadlines.

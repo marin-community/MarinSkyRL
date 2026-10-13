@@ -16,7 +16,7 @@ from omegaconf import OmegaConf
 # The `+algorithm_recipe=dpo` selection plus the pairing constraints every DPO test needs;
 # mirror the recipe file so the tested gates and the shipped recipe stay one block.
 DPO_OVERRIDES = {
-    "environment": {"env_class": "preference_pair"},
+    "data": {"preference_pair_format": "text"},
     "trainer": {
         "algorithm": {
             "policy_loss_type": "dpo",

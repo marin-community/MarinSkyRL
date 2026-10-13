@@ -1,4 +1,4 @@
-entrypoint: terminal_bench
+entrypoint: standard
 
 
 config_groups:

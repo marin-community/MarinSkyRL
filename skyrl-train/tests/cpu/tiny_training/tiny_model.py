@@ -10,6 +10,8 @@ Training updates every parameter, so the model is free to leave the bigram form.
 """
 
 import json
+from skyrl_gym.source_task import source_task
+from taskcompendium.models import Source
 from pathlib import Path
 
 import torch
@@ -91,23 +93,20 @@ def build_tiny_policy(output_dir: Path) -> Path:
     return output_dir
 
 
-def write_gsm8k_dataset(path: Path, num_prompts: int, *, max_turns: int) -> Path:
-    """Write ``num_prompts`` GSM8K-environment rows whose ground truth is always ``1``.
-
-    Rows alternate between the two ``CURRICULUM_BINS``, so curriculum sampling can read the dataset. With
-    ``max_turns`` above one, the rows use the multi-turn GSM8K environment, which asks again after each wrong
-    answer until the turns run out.
-    """
+def write_gsm8k_dataset(path: Path, num_prompts: int) -> Path:
+    """Write prepared arithmetic tasks and curriculum bins with ground truth ``1``."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w") as handle:
         for index in range(num_prompts):
             grade = index % len(CURRICULUM_BINS)
-            row = {
-                "prompt": [{"role": "user", "content": f"Question {index}: what is one? End with '#### 1'."}],
-                "env_class": "gsm8k" if max_turns == 1 else "gsm8k_multi_turn",
-                "reward_spec": {"method": "rule", "ground_truth": GROUND_TRUTH},
-                "extra_info": {"data_source": CURRICULUM_BINS[grade], "grade": grade, "max_turns": max_turns},
-            }
+            metadata = {"data_source": CURRICULUM_BINS[grade], "grade": grade}
+            task = source_task(
+                [{"role": "user", "content": f"Question {index}: what is one? End with '#### 1'."}],
+                {"reward_spec": {"method": "rule", "ground_truth": GROUND_TRUTH}},
+                {},
+                Source(dataset=CURRICULUM_BINS[grade], revision="1", row=str(index), importer_revision="fixture"),
+            )
+            row = {"task_spec": task.model_dump_json(), "extra_info": metadata}
             handle.write(json.dumps(row) + "\n")
     return path
 

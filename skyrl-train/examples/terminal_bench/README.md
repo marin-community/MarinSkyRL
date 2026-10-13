@@ -1,20 +1,24 @@
-### Terminal-Bench integration (WIP)
+# Harbor task preparation
 
-Integration with Terminal-Bench is a work in progress. For now, training tasks are hard-coded as "hello-world" in the prototype. The next TODO is to support specifying a training set of Terminal-Bench tasks.
+Prepare Harbor packages before the training command. From the repository root:
 
-This integration requires the `harbor` repo (ie, the new and improved terminal bench):
 ```bash
-cd SkyRL/skyrl-train
-git clone https://github.com/laude-institute/harbor.git
+uv run --frozen python -m marinskyrl.harbor_preparation \
+  --input /path/to/harbor-packages \
+  --output-dir /path/to/prepared-tasks \
+  --execution-output /path/to/execution.json
 ```
 
+The command prints the TaskSpec Parquet path. It also writes per-source machine
+resources, users, network policies, and deadlines to `execution.json`.
+Merge its `environment.task_sessions.sources` mapping into the same path in the run config.
+The training command does not read the execution JSON automatically.
+Select the Shellbox backend in the run config.
 
-- **Training**:
-```bash
-bash examples/terminal_bench/run_tbench.sh
-```
+The importer accepts single-stage tasks with prebuilt, digest-pinned images and
+separate verifier environments. It rejects shared grading, image builds, and multi-stage packages.
 
-- **Generation only**: launch the generator/serving process. This entrypoint is primarily for rapid debugging to avoid the trainer setup overhead.
-```bash
-bash examples/terminal_bench/run_tbench_gen.sh
-```
+Use `skyrl_train.entrypoints.main_base` for training or
+`skyrl_train.entrypoints.task_generate` for generation without policy updates.
+The trainer receives prepared TaskSpecs, not Harbor directories.
+See [task rollouts](../../docs/tutorials/task_rollouts.rst) for runtime settings.

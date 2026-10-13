@@ -11,7 +11,9 @@ policy_chat_template: chat_templates/delphi_v0.jinja2
 model_num_attention_heads: 42
 
 environment:
-  env_class: ifeval
+  task_sessions:
+    session:
+      task_session: ifeval
 
 trainer:
   strategy: megatron
@@ -76,6 +78,5 @@ extra_env:
   NCCL_SOCKET_IFNAME: "^ibs,ibp,lo,docker,veth,cilium,lxc"
 
 data:
-  kind: parquet
   train_data: []
   val_data: []

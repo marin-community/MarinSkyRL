@@ -31,7 +31,7 @@ from verifyit.spec import NumericSpec
 
 from skyrl_gym.verification import VerificationStatus
 from skyrl_train.config.utils import get_default_config
-from skyrl_train.dataset.tasks import TaskDataset
+from skyrl_train.dataset.prepared_tasks import TaskSpecDataset
 from skyrl_train.dynamic_sampling import GroupSelectionPolicy
 from skyrl_train.group_admission import GroupAdmissionPolicy, GroupAdvantageInvariant
 from skyrl_train.rollouts.buffer import (
@@ -42,7 +42,8 @@ from skyrl_train.rollouts.buffer import (
     RolloutContentPolicy,
     RolloutTask,
 )
-from skyrl_train.dataset.tasks import LOWERED_TASK_COLUMN
+from marinskyrl.task_format import TASK_SPEC_COLUMN
+from skyrl_train.rollouts.task_lowering import source_execution_settings
 from skyrl_train.rollouts.task_projections import WholeTaskProjection
 from skyrl_train.rollouts.task_worker import TaskRolloutWorker
 from skyrl_train.trajectory_runners.model_clients import ModelServerError
@@ -477,11 +478,16 @@ async def test_native_reconstructed_tokens_fail_the_transport_contract():
 async def test_native_dataset_group_round_trips_through_leased_buffer(tmp_path):
     record = lowered(answer_task())
     path = tmp_path / "tasks.jsonl"
-    path.write_text(json.dumps({LOWERED_TASK_COLUMN: record.model_dump_json()}))
-    dataset = TaskDataset(
+    path.write_text(json.dumps({TASK_SPEC_COLUMN: record.task.model_dump_json()}))
+    execution, source_executions = source_execution_settings(
+        OmegaConf.to_container(get_default_config().environment.task_sessions, resolve=True)
+    )
+    dataset = TaskSpecDataset(
         [str(path)],
         Tokenizer(),
         max_prompt_length=128,
+        execution=execution,
+        source_executions=source_executions,
         num_workers=1,
     )
     prompt = dataset.collate_fn([dataset[0]])[0]

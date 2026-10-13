@@ -20,9 +20,9 @@ from skyrl_train.config.ftpo import validate_ftpo
 from skyrl_train.dynamic_sampling import DynamicSamplingType
 
 from marinskyrl.runtime_options import (
-    PREFERENCE_PAIR_ENV_CLASS,
     AdvantageEstimator,
     PolicyLossType,
+    static_preference_pairs_requested,
 )
 
 
@@ -217,8 +217,8 @@ def validate_dpo(cfg: DictConfig) -> None:
         raise ValueError("trainer.algorithm.dpo.label_smoothing must be in [0, 0.5)")
     if LossReduction(algorithm.loss_reduction) is not LossReduction.PAIR_MEAN:
         raise ValueError("dpo requires trainer.algorithm.loss_reduction=pair_mean")
-    if str(cfg.environment.env_class) != PREFERENCE_PAIR_ENV_CLASS:
-        raise ValueError(f"dpo requires environment.env_class={PREFERENCE_PAIR_ENV_CLASS} (the static pair runner)")
+    if not static_preference_pairs_requested(cfg):
+        raise ValueError("dpo requires data.preference_pair_format=text or tokenized (the static pair runner)")
     if algorithm.advantage_estimator != AdvantageEstimator.UNIFORM or algorithm.advantage_batch_normalize:
         raise ValueError("dpo ignores advantages; use advantage_estimator=uniform and advantage_batch_normalize=false")
     if (

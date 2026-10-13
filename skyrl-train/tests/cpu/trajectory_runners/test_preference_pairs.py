@@ -2,7 +2,7 @@ import json
 from dataclasses import replace
 
 import pytest
-from skyrl_train.dataset.preference_pairs import PreferencePairFormat
+from marinskyrl.runtime_options import PreferencePairFormat
 from skyrl_train.dataset.preference_pairs import PreferencePairDataset
 from skyrl_train.trajectory_runners.preference_pairs import PreferencePairTrajectoryRunner
 from skyrl_train.task_inputs import TrajectoryMetadata

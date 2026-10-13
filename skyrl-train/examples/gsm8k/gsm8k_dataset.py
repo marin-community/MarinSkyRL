@@ -20,6 +20,8 @@ import re
 import os
 
 import datasets
+from marinskyrl.task_format import TASK_SPEC_COLUMN
+from marinskyrl.task_preparation import source_row_task
 
 
 def extract_solution(solution_str):
@@ -64,7 +66,6 @@ if __name__ == "__main__":
                         "content": question,
                     }
                 ],
-                "env_class": "gsm8k",
                 "reward_spec": {
                     "method": "rule",
                     "ground_truth": solution,
@@ -76,12 +77,20 @@ if __name__ == "__main__":
                     "question": question_raw,
                 },
             }
-            return data
+            return {
+                TASK_SPEC_COLUMN: source_row_task(
+                    data, idx, source_name=data_source, config={"reward_method": "strict"}
+                ).model_dump_json()
+            }
 
         return process_fn
 
-    train_dataset = train_dataset.map(function=make_map_fn("train"), with_indices=True)
-    val_dataset = val_dataset.map(function=make_map_fn("test"), with_indices=True)
+    train_dataset = train_dataset.map(
+        function=make_map_fn("train"), with_indices=True, remove_columns=train_dataset.column_names
+    )
+    val_dataset = val_dataset.map(
+        function=make_map_fn("test"), with_indices=True, remove_columns=val_dataset.column_names
+    )
 
     output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)

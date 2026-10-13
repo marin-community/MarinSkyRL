@@ -11,6 +11,16 @@ if str(_REPOSITORY_ROOT) not in sys.path:
 
 from cloud.iris.runtime_bundle import BUNDLE_FILE_MANIFEST, read_manifest_paths  # noqa: E402
 
+# Source conversion runs before launch and is not part of the task runtime.
+_PREPARATION_MODULES = {
+    "marinskyrl/harbor_import.py",
+    "marinskyrl/harbor_preparation.py",
+    "marinskyrl/nemotron_preparation.py",
+    "marinskyrl/packed_tasks.py",
+    "marinskyrl/protocol_replay.py",
+    "marinskyrl/task_preparation.py",
+}
+
 
 def test_every_runtime_module_is_in_the_runtime_bundle() -> None:
     """Ship both Python packages imported by the task runtime."""
@@ -20,7 +30,7 @@ def test_every_runtime_module_is_in_the_runtime_bundle() -> None:
         for package in ("cloud/iris", "marinskyrl")
         for path in (_REPOSITORY_ROOT / package).glob("*.py")
     }
-    missing = on_disk - manifest
+    missing = on_disk - manifest - _PREPARATION_MODULES
     assert not missing, (
         f"runtime modules not shipped to Iris tasks: {sorted(missing)}. "
         f"Add them to {BUNDLE_FILE_MANIFEST} or add an explicit exclusion in this test."

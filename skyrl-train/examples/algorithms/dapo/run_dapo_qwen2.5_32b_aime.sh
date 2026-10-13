@@ -92,7 +92,7 @@ uv run --isolated --extra megatron --extra vllm -m examples.algorithms.dapo.main
   generator.backend=vllm \
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
-  environment.env_class=aime \
+  environment.task_sessions.session.task_session=aime \
   generator.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
   generator.eval_n_samples_per_prompt=$EVAL_N_SAMPLES_PER_PROMPT \
   generator.gpu_memory_utilization=0.8 \

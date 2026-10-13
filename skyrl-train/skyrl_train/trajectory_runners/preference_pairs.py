@@ -11,7 +11,8 @@ from typing import Any
 
 from loguru import logger
 
-from skyrl_train.dataset.preference_pairs import PreferencePairFormat, completion_text, tokenized_pair
+from marinskyrl.runtime_options import PreferencePairFormat
+from skyrl_train.dataset.preference_pairs import completion_text, tokenized_pair
 from skyrl_train.rollouts.buffer import RolloutTask, RolloutWriter, write_trajectory_batch
 from skyrl_train.rollouts.finalization import finalize_trajectory_batch
 from skyrl_train.trajectory_runners.trajectory_retention import RetentionSink

@@ -2,7 +2,7 @@
 
 Samples K completions per IMDb prefix from an SFT'd GPT-2, scores them with the paper's
 sentiment classifier, and writes best/worst pairs per prefix: prompt (messages), chosen,
-rejected. Pairs are separable preference data for ``environment.env_class=preference_pair``.
+rejected. Pairs are separable preference data for ``data.preference_pair_format=text``.
 
 Usage (GPU recommended; CPU works but samples slowly)::
 

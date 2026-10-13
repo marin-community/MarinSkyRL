@@ -26,7 +26,7 @@ from cloud.iris.artifacts import fs_and_path
 from cloud.iris.rl_data import (
     check_rl_environment,
     compute_num_inference_engines,
-    resolve_rl_train_data_with_sources,
+    resolve_rl_train_data,
 )
 from marinskyrl.process_diagnostics import ProcessOutcomeKind, write_process_outcome
 from marinskyrl.resource_locator import is_cloud_uri, model_source_for_path
@@ -144,13 +144,13 @@ class LocalRLRunner:
         with filesystem.open(path, "w") as destination:
             json.dump(record, destination, sort_keys=True)
 
-    def _resolve_data_inputs(self, data_kind: str) -> None:
+    def _resolve_data_inputs(self) -> None:
         for role, attribute in (("train", "train_data"), ("validation", "val_data")):
             values = getattr(self.config, attribute)
             if not values:
                 continue
-            print(f"\nResolving {role} data (kind={data_kind}): {values}")
-            resolved = resolve_rl_train_data_with_sources(values, kind=data_kind)
+            print(f"\nResolving {role} data: {values}")
+            resolved = resolve_rl_train_data(values)
             paths = list(resolved.paths)
             sources = list(resolved.sources)
             setattr(self.config, attribute, paths)
@@ -168,19 +168,13 @@ class LocalRLRunner:
         if launch_config.run.mode == RunMode.CHECKPOINT_EXPORT:
             self._write_resolved_config(launch_config)
             return self._run_skyrl(launch_config)
-        self._resolve_data_inputs(str(launch_config.inputs.data_kind))
-        terminal_bench_data = skyrl_config.get("data", {}).get("terminal_bench_data", ())
-        if terminal_bench_data:
-            terminal_bench_data = tuple(
-                resolve_rl_train_data_with_sources(list(terminal_bench_data), kind="tasks").paths
-            )
+        self._resolve_data_inputs()
         self._setup_environment()
         skyrl_config = apply_task_local_values(
             skyrl_config,
             TaskLocalSkyRLValues(
                 train_data=tuple(self.config.train_data),
                 validation_data=tuple(self.config.val_data),
-                terminal_bench_data=terminal_bench_data,
             ),
         )
         launch_config.skyrl = skyrl_config

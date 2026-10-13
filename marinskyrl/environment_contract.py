@@ -117,21 +117,21 @@ ENV_VAR_SPECS = (
     # isolated grading child, using the benchmark's existing provider settings.
     EnvVarSpec(
         "VERIFYIT_JUDGE_BASE_URL",
-        "environment.task_sessions.nemotron_ultra.judges",
+        "TaskSpec verifier resources: judges",
         EnvVarSource.EXTERNAL,
         frozenset({EnvVarScope.TASK_RUNTIME}),
         frozenset({EnvVarWriter.PYTHON_ASSIGNMENT}),
     ),
     EnvVarSpec(
         "VERIFYIT_JUDGE_MODEL",
-        "environment.task_sessions.nemotron_ultra.judges",
+        "TaskSpec verifier resources: judges",
         EnvVarSource.EXTERNAL,
         frozenset({EnvVarScope.TASK_RUNTIME}),
         frozenset({EnvVarWriter.PYTHON_ASSIGNMENT}),
     ),
     EnvVarSpec(
         "VERIFYIT_JUDGE_API_KEY",
-        "environment.task_sessions.nemotron_ultra.judges",
+        "TaskSpec verifier resources: judges",
         EnvVarSource.SECRET,
         frozenset({EnvVarScope.TASK_RUNTIME}),
         frozenset({EnvVarWriter.PYTHON_ASSIGNMENT}),

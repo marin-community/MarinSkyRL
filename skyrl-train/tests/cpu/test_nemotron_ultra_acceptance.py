@@ -1,18 +1,6 @@
 import json
 
-import requests
-
 from ci.nemotron_ultra.gate import check_log, expected_coverage
-from skyrl_train.entrypoints.nemotron_ultra_acceptance import verifier_server
-
-
-def test_acceptance_verifier_server_returns_judge_and_comparison_results():
-    with verifier_server() as base_url:
-        judge = requests.post(f"{base_url}/chat/completions", json={"messages": []}, timeout=2).json()
-        genrm = requests.post(f"{base_url}/responses", json={"input": []}, timeout=2).json()
-
-    assert "[[SAFE]]" in judge["choices"][0]["message"]["content"]
-    assert json.loads(genrm["output"][0]["content"][0]["text"])["score_1"] == 3
 
 
 def test_acceptance_gate_requires_every_phase_generator_pair():

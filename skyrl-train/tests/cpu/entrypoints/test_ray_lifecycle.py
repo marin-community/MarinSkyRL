@@ -8,7 +8,7 @@ import ray
 from ray.util.queue import Queue
 
 from skyrl_train.config.rollout_validation import EntrypointOperation
-from skyrl_train.entrypoints import ray_lifecycle, terminal_bench, terminal_bench_generate, taskcompendium
+from skyrl_train.entrypoints import ray_lifecycle, task_generate
 from skyrl_train.entrypoints.main_base import EntrypointSupervisor, resolve_entrypoint_node_id, run_ray_driver
 from skyrl_train.config.utils import get_default_config
 from skyrl_train import telemetry
@@ -83,7 +83,7 @@ def test_ray_teardown_follows_the_cluster_owner(monkeypatch, owner, exit_args, e
     assert events == expected_events
 
 
-@pytest.mark.parametrize("entrypoint", [main_base, terminal_bench, terminal_bench_generate, taskcompendium])
+@pytest.mark.parametrize("entrypoint", [main_base, task_generate])
 def test_runner_evidence_rejection_happens_before_ray_initialization(monkeypatch, entrypoint):
     cfg = get_default_config()
     cfg.trainer.logger = "console"

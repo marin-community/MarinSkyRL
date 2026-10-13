@@ -1,24 +1,11 @@
 OpenEnv task sessions
 =====================
 
-``OpenEnvTaskSession`` implements the common task interface.
-Shellbox creates one machine for each rollout from a prebuilt, digest-pinned image.
-The session starts the configured OpenEnv server in that machine.
-HTTP reset and step requests run inside the machine.
-
-The initial server observation enters the model conversation.
-Each action produces a reward and, for a nonterminal turn, an observation.
-A server terminal result or the turn limit ends the rollout.
-An invalid candidate action receives -1 and correction feedback.
+OpenEnv uses the shared RolloutEngine and a Shellbox machine per task.
+The session starts an HTTP server inside the machine.
+Reset and step results become model observations and turn rewards.
+A server terminal result or the session turn limit ends the rollout.
 Server failures remain infrastructure failures.
-
-Supported action formats are:
-
-- ``echo_env``: text inside ``<action>...</action>``.
-- ``coding_env``: Python code inside those tags. Multiline code is permitted.
-- ``openspiel-env`` and ``atari-env``: an integer action ID, for example ``<action>2</action>``.
-- ``sumo-rl-env``: an integer phase ID inside the action tags.
-- ``finrl-env``: a list of numeric actions, for example ``<action>[0.1, -0.2]</action>``.
 
 The session factory is explicit:
 
@@ -29,136 +16,65 @@ The session factory is explicit:
 
    experiment = BasePPOExp(cfg, sessions={"openenv": OpenEnvTaskSession})
 
-Machine configuration
----------------------
+Prepare tasks
+-------------
 
-Save this configuration as ``/absolute/path/openenv.yaml``.
-Replace ``IMAGE@sha256:DIGEST`` with the full digest-pinned reference for your prepared image:
-
-.. code-block:: yaml
-
-   defaults:
-     - ppo_base_config
-     - _self_
-
-   environment:
-     task_sessions:
-       openenv:
-         machine:
-           requirements:
-             docker_image: IMAGE@sha256:DIGEST
-             working_directory: /app
-           runtime:
-             backend: docker
-             network: deny
-             cpus: 1
-             memory_mb: 1024
-             storage_mb: null
-             gpus: 0
-             user: null
-             startup_timeout: 600
-             cleanup_timeout: null
-         server_command:
-           - python
-           - -m
-           - uvicorn
-           - envs.echo_env.server.app:app
-           - --host
-           - 127.0.0.1
-           - --port
-           - "8000"
-         server_port: 8000
-
-Session limits come from ``environment.task_sessions.session``.
-An ``openenv.session`` block can override them.
-The session reads its turn limit from the lowered record.
-
-The selected image must supply the HTTP API that this integration calls.
-The server accepts ``POST /reset`` with an empty object.
-For ``<action>hello</action>``, the Echo request to ``POST /step`` is:
+The image must contain the selected server and its dependencies.
+Save the environment requirements in ``environment.json``:
 
 .. code-block:: json
 
-   {"action": {"message": "hello"}, "timeout_s": 15}
-
-The other action payloads are:
-
-- Coding: ``{"code": "print(42)"}``.
-- OpenSpiel: ``{"action_id": 2, "game_name": "catch", "game_params": {}}``. The row can override ``game_name``.
-- Atari: ``{"action_id": 2, "game_name": "pong", "obs_type": "rgb", "full_action_space": false}``.
-- SUMO: ``{"phase_id": 2, "ts_id": "0"}``.
-- FinRL: ``{"actions": [0.1, -0.2]}``.
-
-Each response contains an ``observation`` object, a numeric or null ``reward``, and a boolean ``done``.
-The session converts a null reward to zero.
-The final grade is the mean of completed turn rewards, including invalid actions and null rewards.
-``GET /health`` returns a successful HTTP status before the server startup deadline.
-The host does not require the OpenEnv Python SDK or exposed container ports.
-
-For mixed task types, ``environment.task_sessions.openenv.machines`` maps each row's ``env_name`` to its machine configuration.
-Each entry contains ``requirements`` and ``runtime``, as the ``machine`` block above shows.
-The selected entry overrides the common ``machine`` block.
-The server command remains common to all entries.
-Different applications therefore require prepared images with the same server entrypoint, for example:
-
-.. code-block:: yaml
-
-   environment:
-     task_sessions:
-       openenv:
-         server_command: [/app/start-server]
-         machines:
-           echo_env:
-             requirements:
-               docker_image: ECHO_IMAGE@sha256:DIGEST
-               working_directory: /app
-             runtime: &openenv_runtime
-               backend: docker
-               network: deny
-               cpus: 1
-               memory_mb: 1024
-               storage_mb: null
-               gpus: 0
-               user: null
-               startup_timeout: 600
-               cleanup_timeout: null
-           coding_env:
-             requirements:
-               docker_image: CODING_IMAGE@sha256:DIGEST
-               working_directory: /app
-             runtime: *openenv_runtime
-
-This row selects the ``echo_env`` entry:
-
-.. code-block:: python
-
-   row = {
-       "prompt": [{"role": "user", "content": "Return the action text."}],
-       "env_class": "openenv",
-       "env_name": "echo_env",
+   {
+     "command_semantics": "linux_process",
+     "docker_image": "IMAGE@sha256:DIGEST",
+     "working_directory": "/app"
    }
 
-Source conversion puts selected requirements in ``TaskSpec.environment_requirements``.
-It puts the machine selection in ``LoweredTaskSpec.runtime.task_machine``.
-The remaining settings, including the server command, stay in the private verifier payload.
+Replace the image reference with a full, digest-pinned reference.
+Save the private server parameters in ``server.json``:
 
-Prepare and launch
-------------------
+.. code-block:: json
 
-From ``skyrl-train/``, prepare the source rows:
+   {
+     "server_command": ["python", "-m", "uvicorn", "envs.echo_env.server.app:app", "--host", "127.0.0.1", "--port", "8000"],
+     "server_port": 8000
+   }
+
+From ``skyrl-train``, prepare the Echo tasks:
 
 .. code-block:: bash
 
    uv run --project .. integrations/openenv/prepare_dummy_dataset.py \
-     --output_dir "$HOME/data/openenv" --env_name echo_env
+     --output_dir "$HOME/data/openenv/echo_env" --env_name echo_env \
+     --environment /path/to/environment.json --config /path/to/server.json
 
-Then run the example with the machine configuration above:
+Each output row contains a bare TaskSpec.
+Public context contains the action instruction.
+Private verifier data contains the task type and server command.
+Prepare each task type with its own image and server parameters.
+The example builder supplies Echo and Coding tasks.
+Other task types require benchmark-specific TaskSpec preparation.
+
+Run tasks
+---------
+
+The example entrypoint registers ``OpenEnvTaskSession``.
+Select the session and machine settings in the run config:
 
 .. code-block:: bash
 
    bash integrations/openenv/run_openenv.sh \
-     --config-dir /absolute/path --config-name openenv
+     environment.task_sessions.runtime.task_machine.backend=docker \
+     environment.task_sessions.runtime.task_machine.cpus=1 \
+     environment.task_sessions.runtime.task_machine.memory_mb=1024
 
-The example data script supplies Echo and Coding rows.
-Other task types require benchmark-specific data and prebuilt images.
-See :doc:`../tutorials/task_rollouts` for reward projection and cleanup.
+Set ``generator.max_turns`` for the turn limit.
+The TaskSpec declares the image. The run config declares execution settings.
+The host does not require the OpenEnv SDK or exposed container ports.
+
+Supported action forms are text for Echo, Python code for Coding, integer actions
+for OpenSpiel, Atari, and SUMO, and numeric lists for FinRL.
+Each model response puts its action inside ``<action>...</action>``.
+The server accepts ``POST /reset``, ``POST /step``, and ``GET /health``.
+The final grade is the mean of completed turn rewards.
+See :doc:`../tutorials/task_rollouts` for projection and cleanup.

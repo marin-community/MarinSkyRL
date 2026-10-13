@@ -7,6 +7,8 @@ import re
 import os
 
 import datasets
+from marinskyrl.task_format import TASK_SPEC_COLUMN
+from marinskyrl.task_preparation import source_row_task
 
 
 def extract_solution(solution_str):
@@ -20,7 +22,6 @@ def extract_solution(solution_str):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--output_dir", default="~/data/gsm8k_multi_turn")
-    parser.add_argument("--max_turns", type=int, default=5)
 
     args = parser.parse_args()
 
@@ -52,25 +53,27 @@ if __name__ == "__main__":
                         "content": question,
                     }
                 ],
-                "env_class": "gsm8k_multi_turn",
                 "reward_spec": {
                     "method": "rule",
                     "ground_truth": solution,
                 },
                 "extra_info": {
-                    "max_turns": args.max_turns,
                     "split": split,
                     "index": idx,
                     "answer": answer_raw,
                     "question": question_raw,
                 },
             }
-            return data
+            return {TASK_SPEC_COLUMN: source_row_task(data, idx, source_name=data_source, config={}).model_dump_json()}
 
         return process_fn
 
-    train_dataset = train_dataset.map(function=make_map_fn("train"), with_indices=True)
-    val_dataset = val_dataset.map(function=make_map_fn("test"), with_indices=True)
+    train_dataset = train_dataset.map(
+        function=make_map_fn("train"), with_indices=True, remove_columns=train_dataset.column_names
+    )
+    val_dataset = val_dataset.map(
+        function=make_map_fn("test"), with_indices=True, remove_columns=val_dataset.column_names
+    )
 
     output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)

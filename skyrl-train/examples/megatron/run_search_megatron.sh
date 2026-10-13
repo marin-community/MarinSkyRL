@@ -72,11 +72,8 @@ uv run --isolated --frozen --extra vllm --extra megatron -m skyrl_train.entrypoi
   generator.sampling_params.temperature=1.0 \
   generator.sampling_params.top_p=1.0 \
   generator.sampling_params.stop='["</search>", "</answer>"]' \
-  environment.env_class="search" \
+  environment.task_sessions.session.task_session="search" \
   environment.task_sessions.max_verifier_workers=16 \
-  environment.task_sessions.search.log_requests=false \
-  environment.task_sessions.search.search_url="http://172.25.102.175:8000/retrieve" \
-  environment.task_sessions.search.topk=3 \
   trainer.logger="wandb" \
   trainer.project_name="skyrl-search" \
   trainer.run_name="skyrl-search_4turns_maxgeneratelen_500_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_qwen30b" \

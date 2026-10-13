@@ -15,6 +15,10 @@ from examples.nupa.nupa_dataset import (
 )
 from rolloutengine.contracts import ModelTurn
 from skyrl_gym.answer_tasks import grade_nupa
+from skyrl_gym.source_task import session_parameters
+from taskcompendium.models import TaskSpec
+
+from marinskyrl.task_format import TASK_SPEC_COLUMN
 
 SYNTHETIC_SOURCE = {
     "add_Float_Float_Float": {
@@ -124,8 +128,13 @@ def test_write_parquet_round_trips_rows(synthetic_source, tmp_path):
 
     table = pq.read_table(output)
     assert table.num_rows == 8
-    assert table.schema.names == ["data_source", "prompt", "env_class", "reward_spec", "extra_info"]
-    assert all(row == "nupa" for row in table.column("env_class").to_pylist())
+    for serialized in table.column(TASK_SPEC_COLUMN).to_pylist():
+        task = TaskSpec.model_validate_json(serialized)
+        parameters = session_parameters(task)
+        answer = json.loads(parameters.extras["reward_spec"]["ground_truth"])["answer"]
+        turn = ModelTurn({"role": "assistant", "content": answer}, (), (1,), None, "stop", text=answer)
+        assert task.context.events[0].content.endswith(" =")
+        assert grade_nupa(turn, parameters.config, parameters.extras).reward == 1.0
 
 
 def test_split_prompt_answer_rejects_text_without_delimiter():

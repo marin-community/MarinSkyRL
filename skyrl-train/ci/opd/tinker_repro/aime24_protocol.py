@@ -4,6 +4,7 @@ AIME24_DATASET = "HuggingFaceH4/aime_2024"
 AIME24_REVISION = "2fe88a2f1091d5048c0f36abc874fb997b3dd99a"
 AIME24_SPLIT = "train"
 AIME24_SIZE = 30
+AIME_SOURCE = "aime_2024"
 MODEL_NAME = "Qwen/Qwen3.5-9B-Base"
 RENDERER_NAME = "qwen3_5"
 SYSTEM_PROMPT = "Put your final answer in \\boxed{}."
@@ -28,7 +29,5 @@ def evaluation_hydra_arguments() -> tuple[str, ...]:
         f"generator.eval_sampling_params.top_p={TOP_P}",
         f"generator.eval_sampling_params.top_k={TOP_K}",
         f"generator.eval_n_samples_per_prompt={NUM_SAMPLES}",
-        f"environment.task_sessions.aime.evaluation_token_budget={MAX_TOKENS}",
-        "environment.task_sessions.aime.strict_box_verify=true",
-        f"environment.task_sessions.aime.max_gen_length={MAX_TOKENS}",
+        f"++environment.task_sessions.sources.{AIME_SOURCE}.session.task_session=aime",
     )

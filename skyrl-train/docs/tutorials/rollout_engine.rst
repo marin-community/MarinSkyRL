@@ -1,7 +1,7 @@
 Native tasks with RolloutEngine
 ===============================
 
-The ``taskcompendium`` entrypoint executes native TaskCompendium tasks through
+The standard training entrypoint executes prepared TaskSpecs through
 Marin's ``ShellboxRolloutEngine`` and SkyRL's common task worker.
 
 This entrypoint supports single-stage tasks and whole-rollout or step-wise training. Multiple
@@ -12,8 +12,8 @@ Input rows
 ----------
 
 Use JSON, JSONL, Parquet, or a Hugging Face dataset. Each row contains a
-``lowered_task_spec`` field with a serialized ``LoweredTaskSpec``. ``TaskDataset``
-derives public messages and private worker inputs from that record. Private
+``task_spec`` field with a serialized ``TaskSpec``. ``TaskSpecDataset`` adds
+machine selections and session settings from the run configuration. Private
 verifier inputs remain inside the task record. The engine sends only public
 instructions and tool observations to the model.
 
@@ -24,7 +24,6 @@ This example writes one machine-free arithmetic task:
    import json
    from pathlib import Path
 
-   from rolloutengine.spec import LoweredTaskSpec, TaskRuntimeSpec, TaskSessionSpec
    from taskcompendium.grader import verifyit_package
    from taskcompendium.models import (
        AnswerType, ConversationInput, EnvironmentRequirements, PlainText, Source, TaskSpec, TextMessage,
@@ -40,24 +39,7 @@ This example writes one machine-free arithmetic task:
        grader=verifyit_package(NumericSpec("12", tolerance_abs=0, tolerance_rel=0)).grader,
        source=Source(dataset="example", revision="1", row="0", importer_revision="1"),
    )
-   lowered = LoweredTaskSpec(
-       task=task,
-       runtime=TaskRuntimeSpec(task_machine=None, verifier_machine=None),
-       session=TaskSessionSpec(
-           task_session="shellbox",
-           max_turns=1,
-           model_turn_timeout=60,
-           command_timeout=None,
-           tool_turn_timeout=None,
-           total_turn_timeout=60,
-           attempt_timeout=90,
-           verifier_timeout=30,
-           cleanup_timeout=10,
-       ),
-   )
-   row = {
-       "lowered_task_spec": lowered.model_dump_json(),
-   }
+   row = {"task_spec": task.model_dump_json()}
    Path("tasks.jsonl").write_text(json.dumps(row) + "\n")
 
 Select the module in a training command:
@@ -65,15 +47,15 @@ Select the module in a training command:
 .. code-block:: bash
 
    uv run --extra vllm --extra megatron \
-     python -m skyrl_train.entrypoints.taskcompendium \
+     python -m skyrl_train.entrypoints.main_base \
      data.train_data='[tasks.jsonl]'
 
 The command requires policy, inference, and topology settings. See
 :doc:`../getting-started/quickstart` for a full training command.
-An Iris launch recipe selects ``entrypoint: taskcompendium``.
+An Iris launch recipe selects ``entrypoint: standard``.
 Its ``context_budget.request_window_tokens`` sets the context window.
 ``context_budget.max_new_tokens_per_turn`` limits each response.
-The task record supplies session turn limits and execution deadlines.
+``environment.task_sessions.session`` supplies turn limits and execution deadlines.
 
 Iris launches support machine-free tasks. Docker-backed tasks require Docker,
 Skopeo, and access to a Docker daemon on the rollout worker host.
@@ -83,7 +65,8 @@ Machine-free tasks do not require those executables.
 Machines and grading
 --------------------
 
-Records that execute shell commands select ``task_machine.backend="docker"``.
+``environment.task_sessions.runtime`` supplies task and verifier machine settings.
+Tasks that execute shell commands select ``task_machine.backend="docker"``.
 The task declares a prebuilt, digest-pinned Docker image. A shell verifier also
 selects a separate ``verifier_machine`` and declares its own digest-pinned image.
 See the `SWE example <../../examples/mini_swe_agent/README.md>`_ for image,
@@ -94,12 +77,13 @@ model turn loop. It does not install private grader files on the task machine.
 ``command_timeout`` applies to each command. A larger ``tool_turn_timeout`` can
 limit all tool calls from one response. The engine returns command-timeout
 observations to the model. Cleanup occurs outside the attempt deadline and uses
-the record's finite cleanup limit.
+the session's finite cleanup limit.
 
 Training output
 ---------------
 
-The task worker uses SkyRL's model client, worker pool, training projection,
+The task worker projects ``RolloutData`` directly into training batches. It uses
+SkyRL's model client, worker pool,
 reward shaping, retained trajectory records, and leased rollout buffer. Exact served
 tokens and behavior logprobs remain aligned. Tool observation tokens have zero
 loss masks. Reconstructed model tokens cause a transport-contract error.
@@ -132,7 +116,25 @@ failure, the exception policy applies. Explicitly skipped grading can use a sess
 An empty response becomes one fully masked token in the trainer row. Its behavior
 logprob is zero. The original rollout evidence remains unchanged.
 
-Source-row conversion uses the standard entrypoint. Harbor task directories use the
-``terminal_bench`` entrypoint. All use the same worker, with retries and group
-grading before projection. Multi-stage tasks and task-specific image builds are
-not supported. See :doc:`task_rollouts` for session and backend selection.
+Prepare source rows and Harbor packages as TaskSpecs before training.
+The trainer does not extract task archives or join source datasets.
+
+For source rows that already contain prompts and private grader inputs, use an
+explicit preparation command:
+
+.. code-block:: bash
+
+   uv run python -m marinskyrl.task_preparation \
+     --input raw.parquet --output tasks.parquet --source my-dataset \
+     --config grader.json --environment task-environment.json
+
+``grader.json`` contains task grader parameters. ``task-environment.json``
+contains ``EnvironmentRequirements``. Omit these options for tasks that use
+neither extra grader parameters nor a machine environment.
+Select the session factory in the run config. The preparation command does not
+select a backend, session factory, or deadline.
+The trainer does not convert source rows or open task directories.
+All generated RL uses the same worker, with retries and group grading before projection.
+Static DPO uses a separate chosen/rejected dataset path.
+Multi-stage tasks and task-specific image builds are not supported.
+See :doc:`task_rollouts` for session and backend selection.

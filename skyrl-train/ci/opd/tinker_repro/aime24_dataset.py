@@ -9,17 +9,22 @@ from typing import Any
 import datasets
 import pyarrow as pa
 
+from marinskyrl.task_format import TASK_SPEC_COLUMN
+from marinskyrl.task_preparation import source_row_task
+
 from aime24_protocol import (
     AIME24_DATASET,
     AIME24_REVISION,
     AIME24_SIZE,
+    AIME_SOURCE,
+    MAX_TOKENS,
     SYSTEM_PROMPT,
     USER_INSTRUCTION,
 )
 
 
 def convert_rows(rows: Iterable[Mapping[str, Any]]) -> pa.Table:
-    """Return AIME examples in MarinSkyRL's scored prompt schema."""
+    """Return bare TaskSpecs with private AIME answers and grader parameters."""
     converted = []
     for index, row in enumerate(rows):
         problem = row.get("problem")
@@ -32,18 +37,21 @@ def convert_rows(rows: Iterable[Mapping[str, Any]]) -> pa.Table:
             raise ValueError(f"AIME 2024 row {index} has an invalid answer") from error
         if not 0 <= int(normalized_answer) <= 999:
             raise ValueError(f"AIME 2024 row {index} has an answer outside [0, 999]")
-        converted.append(
+        task = source_row_task(
             {
-                "data_source": "aime_2024",
+                "data_source": AIME_SOURCE,
                 "prompt": [
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": f"{problem.strip()}\n\n{USER_INSTRUCTION}"},
                 ],
-                "env_class": "aime",
                 "reward_model": {"ground_truth": normalized_answer},
                 "extra_info": {"source_id": str(row.get("id", index))},
-            }
+            },
+            index,
+            source_name=AIME_SOURCE,
+            config={"evaluation_token_budget": MAX_TOKENS, "strict_box_verify": True, "max_gen_length": MAX_TOKENS},
         )
+        converted.append({TASK_SPEC_COLUMN: task.model_dump_json()})
     return pa.Table.from_pylist(converted)
 
 

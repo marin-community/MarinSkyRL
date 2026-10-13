@@ -15,10 +15,10 @@ from skyrl_train.dataset.preprocess import (
 )
 from skyrl_train.dataset.routed_expert_batch import RoutedExpertRows
 from examples.mini_swe_agent import preprocess_swegym
-from rolloutengine.spec import LoweredTaskSpec
+from taskcompendium.models import TaskSpec
 
 
-def test_swe_preparation_cli_persists_task_execution_limits(tmp_path, monkeypatch):
+def test_swe_preparation_cli_preserves_task_image_and_private_verifier(tmp_path, monkeypatch):
     image = "example.invalid/swe@sha256:" + "a" * 64
     manifest = tmp_path / "images.json"
     manifest.write_text(json.dumps({"fixture": image}))
@@ -42,21 +42,15 @@ def test_swe_preparation_cli_persists_task_execution_limits(tmp_path, monkeypatc
             "fixture-eval",
             "--image_manifest",
             str(manifest),
-            "--max_turns",
-            "20",
-            "--command_timeout",
-            "180",
         ],
     )
     preprocess_swegym.main()
     for filename in ("train.parquet", "validation.parquet"):
         row = pq.read_table(tmp_path / filename).to_pylist()[0]
-        task = LoweredTaskSpec.model_validate_json(row["lowered_task_spec"])
-        assert task.session.max_turns == 20
-        assert task.session.command_timeout == 180
-        assert task.task.environment_requirements.docker_image == image
-        assert task.runtime.verifier_machine is not None
-        assert task.task.resources.verifier
+        task = TaskSpec.model_validate_json(row["task_spec"])
+        assert task.environment_requirements.docker_image == image
+        assert task.resources.verifier
+        assert task.context.events[0].content == "Repair the repository"
 
 
 @pytest.fixture

@@ -13,8 +13,13 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from hydra import compose, initialize_config_dir
+from skyrl_gym.source_task import session_parameters
+from skyrl_train import objective as objective
 from skyrl_train.inference_engines.utils import get_vllm_sampling_params
 from skyrl_train.utils.utils import validate_cfg
+from taskcompendium.models import TaskSpec
+
+from marinskyrl.task_format import TASK_SPEC_COLUMN
 
 SCRIPT = Path(__file__).parents[3] / "ci" / "opd" / "open_mopd_native_full.py"
 CONFIG_ROOT = Path(__file__).parents[3] / "skyrl_train" / "config"
@@ -77,7 +82,11 @@ def test_resume_requires_the_same_run_and_a_durable_checkpoint(monkeypatch, tmp_
     monkeypatch.setattr(MODULE, "fs_and_path", lambda uri: (filesystem, uri.removeprefix("s3://")))
     schedule_file = tmp_path / "schedule.parquet"
     validation_file = tmp_path / "aime24.parquet"
-    pq.write_table(pa.table({"prompt": ["first", "second"]}), schedule_file, row_group_size=1)
+    pq.write_table(
+        pa.table({"prompt": ["first", "second"], "teacher_route": ["math", "code"]}),
+        schedule_file,
+        row_group_size=1,
+    )
     pq.write_table(
         pa.Table.from_pylist(
             [
@@ -98,10 +107,19 @@ def test_resume_requires_the_same_run_and_a_durable_checkpoint(monkeypatch, tmp_
     sources = {dataset: schedule_file, validation: validation_file}
     monkeypatch.setattr(MODULE.io, "download_file", lambda source, target: shutil.copyfile(sources[source], target))
     commands = []
+    prepared = []
 
     def train(command, *, check):
         assert check is False
         commands.append(command)
+        with initialize_config_dir(config_dir=str(CONFIG_ROOT), version_base=None):
+            config = compose(config_name="ppo_base_config", overrides=command[3:])
+        prepared.append(
+            (
+                pq.read_table(config.data.train_data[0]).to_pylist(),
+                pq.read_table(config.data.val_data[0]).to_pylist(),
+            )
+        )
         return SimpleNamespace(returncode=1 if len(commands) == 1 else 0)
 
     monkeypatch.setattr(MODULE.subprocess, "run", train)
@@ -123,4 +141,15 @@ def test_resume_requires_the_same_run_and_a_durable_checkpoint(monkeypatch, tmp_
     assert initial.trainer.resume_mode is None
     assert resumed.trainer.resume_mode == "latest"
     assert resumed.trainer.eval_interval == 2
+    training_rows, validation_rows = prepared[0]
+    assert prepared[1] == prepared[0]
+    assert [row["teacher_route"] for row in training_rows] == ["math", "code"]
+    assert [TaskSpec.model_validate_json(row[TASK_SPEC_COLUMN]).context.events[0].content for row in training_rows] == [
+        "first",
+        "second",
+    ]
+    validation_task = TaskSpec.model_validate_json(validation_rows[0][TASK_SPEC_COLUMN])
+    assert session_parameters(validation_task).extras["reward_model"]["ground_truth"] == "1"
+    assert session_parameters(validation_task).config["strict_box_verify"] is True
+    assert initial.environment.task_sessions.sources[validation_task.source.dataset].session.task_session == "aime"
     assert json.loads(filesystem.cat_file(manifest.removeprefix("s3://")))["status"] == "complete"

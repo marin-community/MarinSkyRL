@@ -8,9 +8,9 @@ from typing import Any
 import pyarrow as pa
 
 from cloud.iris.open_mopd_fidelity import DOMAINS
+from marinskyrl.task_format import TASK_SPEC_COLUMN
+from marinskyrl.task_preparation import source_row_task
 from skyrl_train.domain_sampling import ROUTE_COLUMN
-
-PROMPT_ONLY_ENV = "prompt_only"
 
 
 def convert_rows(rows: Iterable[Mapping[str, Any]]) -> pa.Table:
@@ -33,13 +33,15 @@ def convert_rows(rows: Iterable[Mapping[str, Any]]) -> pa.Table:
         data_source = row.get("data_source")
         if not isinstance(data_source, str) or not data_source:
             raise ValueError(f"Open-MOPD row {index} has no data_source")
-        converted.append(
+        task = source_row_task(
             {
                 "data_source": data_source,
                 "prompt": prompt,
-                "env_class": PROMPT_ONLY_ENV,
-                ROUTE_COLUMN: domain,
                 "source_index": index,
-            }
+            },
+            index,
+            source_name=data_source,
+            config={},
         )
+        converted.append({TASK_SPEC_COLUMN: task.model_dump_json(), ROUTE_COLUMN: domain})
     return pa.Table.from_pylist(converted)

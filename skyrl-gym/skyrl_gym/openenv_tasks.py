@@ -79,7 +79,7 @@ class OpenEnvTaskSession:
         self.name = self.extras["env_name"]
         if self.name not in OPENENV_TASKS:
             raise ValueError(f"Unknown OpenEnv task: {self.name}")
-        self.max_turns = min(self.extras.get("max_turns", lowered.session.max_turns), lowered.session.max_turns)
+        self.max_turns = lowered.session.max_turns
         self.server_command = config["server_command"]
         self.port = config.get("server_port", OPENENV_PORT)
         self.timeout = config.get("timeout", REQUEST_TIMEOUT)

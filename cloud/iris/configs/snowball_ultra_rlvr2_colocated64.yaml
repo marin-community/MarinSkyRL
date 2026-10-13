@@ -119,40 +119,17 @@ generator:
 
 environment:
   task_sessions:
-    nemotron_ultra:
-      judges:
-        general:
-          base_url: https://api.together.xyz/v1
-          model: openai/gpt-oss-120b
-          api_key_env: TOGETHER_API_KEY
-          reasoning_effort: low
-          timeout_seconds: 600.0
-        safety:
-          base_url: https://api.together.xyz/v1
-          model: openai/gpt-oss-120b
-          api_key_env: TOGETHER_API_KEY
-          reasoning_effort: low
-          timeout_seconds: 600.0
-      genrm:
-        judge:
-          base_url: https://api.together.xyz/v1
-          model: openai/gpt-oss-120b
-          api_key_env: TOGETHER_API_KEY
-          response_transport: chat_completions
-          reasoning_effort: low
-          timeout_seconds: 600.0
-        max_output_tokens: 512
-        temperature: 0.0
-        top_p: 1.0
+    session:
+      task_session: nemotron_ultra
+    runtime:
+      task_machine:
+        cpus: 1
+        memory_mb: 8192
 
 data:
-  kind: parquet
-  train_data:
-    - s3://marin-us-east-02a/marin/users/benfeuer/datasets/snowball-ultra-rlvr/20260912-79f8eda15ea12e1adf7bb14dcb338a29d391b80e/tasktrove-v1/rlvr2/train.parquet
-  val_data:
-    - s3://marin-us-east-02a/marin/users/benfeuer/datasets/snowball-ultra-rlvr/20260912-79f8eda15ea12e1adf7bb14dcb338a29d391b80e/tasktrove-v1/rlvr2/validation.parquet
-  terminal_bench_data:
-    - s3://marin-us-east-02a/marin/users/benfeuer/datasets/snowball-ultra-rlvr/20260912-79f8eda15ea12e1adf7bb14dcb338a29d391b80e/tasktrove-swe-v1/tasks.parquet
+  # The launch inputs supply prepared TaskSpec artifacts.
+  train_data: []
+  val_data: []
   shuffle: false
 
 extra_env:

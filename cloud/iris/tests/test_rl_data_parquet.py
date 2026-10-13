@@ -1,26 +1,26 @@
 # Copyright The Marin Authors
 # SPDX-License-Identifier: Apache-2.0
-"""resolve_rl_train_data(kind='parquet') staging routing.
+"""Prepared data staging.
 
-Local paths / HF ids pass through unchanged; an object-store URI is staged to node-local
+Local paths stay local and HF selectors use immutable revisions. An object-store URI is staged to node-local
 disk (datasets.load_dataset refuses a remote URI under HF_HUB_OFFLINE=1 → OfflineModeIsEnabled).
 """
 
 from pathlib import Path
 
 import fsspec
-import pyarrow as pa
-import pyarrow.parquet as pq
+from types import SimpleNamespace
+from huggingface_hub import HfApi
 
-from cloud.iris.rl_data import resolve_rl_train_data, resolve_rl_train_data_with_sources
-from infra.rl_data.nemotron_ultra_swe import _tar_bytes
+from cloud.iris.rl_data import resolve_rl_train_data
 
 
-def test_parquet_local_and_hf_pass_through(tmp_path):
+def test_local_parquet_and_hf_inputs_keep_immutable_source_references(tmp_path, monkeypatch):
     p = tmp_path / "train.parquet"
     p.write_bytes(b"local")
-    out = resolve_rl_train_data([str(p), "allenai/RLVR-MATH"], kind="parquet", verbose=False)
-    assert out == [str(p), "allenai/RLVR-MATH"]  # unchanged: no staging for local path / HF id
+    monkeypatch.setattr(HfApi, "dataset_info", lambda *_args, **_kwargs: SimpleNamespace(sha="a" * 40))
+    out = resolve_rl_train_data([str(p), "org/tasks::train"], verbose=False)
+    assert out.paths == out.sources == (str(p), "org/tasks@" + "a" * 40 + "::train")
 
 
 def test_structured_directory_source_resolves_to_materialized_parquet():
@@ -32,7 +32,7 @@ def test_structured_directory_source_resolves_to_materialized_parquet():
         "relative_path": "train.parquet",
     }
 
-    resolved = resolve_rl_train_data_with_sources([source], kind="parquet", verbose=False)
+    resolved = resolve_rl_train_data([source], verbose=False)
 
     assert resolved.paths == ("/tmp/marinskyrl/data/gsm8k/train.parquet",)
     assert resolved.sources == (source,)
@@ -45,33 +45,20 @@ def test_parquet_remote_uri_staged_to_local(tmp_path):
     out = resolve_rl_train_data(
         [remote],
         scratch_dir=str(tmp_path),
-        kind="parquet",
         verbose=False,
     )
-    staged = Path(out[0])
+    staged = Path(out.paths[0])
     assert staged.is_absolute() and staged.exists()
     assert staged.name == "train.parquet"
-    assert "://" not in out[0]  # a local path, not the remote URI
+    assert "://" not in out.paths[0]  # a local path, not the remote URI
     assert staged.read_bytes() == b"PARQUET-BYTES"
 
 
-def test_remote_task_parquet_is_staged_and_extracted(tmp_path):
-    archive = _tar_bytes(
-        {
-            "instruction.md": (b"Repair the project.\n", 0o644),
-            "environment/Dockerfile": (b"FROM ubuntu:22.04\n", 0o644),
-            "task.toml": (b'version = "1.0"\n', 0o644),
-        }
-    )
-    remote = "memory://snowball/swe-tasks.parquet"
-    with fsspec.open(remote, "wb") as destination:
-        pq.write_table(
-            pa.Table.from_pylist([{"path": "task-one", "task_binary": archive}]),
-            destination,
-        )
-
-    out = resolve_rl_train_data([remote], scratch_dir=str(tmp_path), kind="tasks", verbose=False)
-
-    task_root = Path(out[0])
-    assert task_root.is_dir()
-    assert (task_root / "task-one" / "instruction.md").read_text() == "Repair the project.\n"
+def test_remote_inputs_with_the_same_filename_keep_distinct_contents(tmp_path):
+    uris = ["memory://first/train.parquet", "memory://second/train.parquet"]
+    for uri, content in zip(uris, [b"FIRST", b"SECOND"], strict=True):
+        with fsspec.open(uri, "wb") as destination:
+            destination.write(content)
+    paths = resolve_rl_train_data(uris, scratch_dir=str(tmp_path), verbose=False).paths
+    assert paths[0] != paths[1]
+    assert [Path(path).read_bytes() for path in paths] == [b"FIRST", b"SECOND"]

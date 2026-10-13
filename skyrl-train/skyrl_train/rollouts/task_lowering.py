@@ -46,6 +46,8 @@ def source_execution_settings(
 
 def lowered_task(task: TaskSpec, settings: TaskExecutionSettings) -> LoweredTaskSpec:
     """Select machines for the task requirements without changing the task definition."""
+    if isinstance(task.grader, SessionGrader) and settings.session.task_session == SHELLBOX_SESSION:
+        raise ValueError(f"Task {task.id!r} requires a registered task session instead of the Shellbox session")
     session = (
         settings.session
         if isinstance(task.grader, SessionGrader)

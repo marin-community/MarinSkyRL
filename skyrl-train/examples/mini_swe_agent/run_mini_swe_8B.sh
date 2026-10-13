@@ -16,7 +16,7 @@ TP_SIZE=2
 LOGGER=wandb
 
 # We use a small batch size here for demonstration
-uv run --project .. --extra megatron --extra vllm -m skyrl_train.entrypoints.taskcompendium \
+uv run --project .. --extra megatron --extra vllm -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
@@ -45,6 +45,14 @@ uv run --project .. --extra megatron --extra vllm -m skyrl_train.entrypoints.tas
   generator.sampling_params.max_generate_length=4096 \
   generator.max_input_length=30720 \
   generator.max_turns=20 \
+  environment.task_sessions.runtime.task_machine.network=allow \
+  environment.task_sessions.runtime.task_machine.memory_mb=8192 \
+  environment.task_sessions.runtime.verifier_machine.network=allow \
+  environment.task_sessions.runtime.verifier_machine.memory_mb=8192 \
+  environment.task_sessions.session.command_timeout=180 \
+  environment.task_sessions.session.total_turn_timeout=3600 \
+  environment.task_sessions.session.verifier_timeout=3600 \
+  environment.task_sessions.session.cleanup_timeout=30 \
   trainer.policy.optimizer_config.lr=1.0e-6 \
   trainer.algorithm.use_kl_loss=true \
   generator.backend=vllm \

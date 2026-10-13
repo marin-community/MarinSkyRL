@@ -24,26 +24,40 @@ def test_resolve_daytona_rl_api_key_rejects_generic_key(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("entrypoint", "terminal_bench_data", "backend", "expected"),
+    ("harbor", "expected"),
     [
-        ("skyrl_train.entrypoints.main_base", [], "daytona", False),
-        ("skyrl_train.entrypoints.terminal_bench", [], "daytona", True),
-        ("skyrl_train.entrypoints.terminal_bench_generate", [], "daytona", True),
-        ("skyrl_train.entrypoints.terminal_bench", [], "docker", False),
-        ("skyrl_train.entrypoints.main_base", ["s3://bucket/tasks.parquet"], "docker", False),
-        # Nemotron Ultra routing sends its SWE rows to Harbor from the standard entrypoint.
-        ("skyrl_train.entrypoints.main_base", ["s3://bucket/tasks.parquet"], "daytona", True),
+        (None, False),
+        ({"harbor": {"environment_type": "daytona"}}, True),
+        ({"harbor": {"environment_type": "docker"}}, False),
     ],
 )
-def test_daytona_preflight_follows_task_backend(entrypoint, terminal_bench_data, backend, expected):
+def test_daytona_preflight_follows_task_backend(harbor, expected):
     config = OmegaConf.create(
         {
-            "runtime": {"entrypoint": entrypoint},
             "skyrl": {
-                "data": {"terminal_bench_data": terminal_bench_data},
-                "terminal_bench_config": {"harbor": {"environment_type": backend}},
+                "terminal_bench_config": harbor,
             },
         }
     )
 
     assert launcher._rl_config_uses_daytona(config) is expected
+
+
+@pytest.mark.parametrize("harbor_source", [False, True])
+def test_daytona_preflight_ignores_unused_harbor_settings_in_nemotron_runs(harbor_source):
+    config = OmegaConf.create(
+        {
+            "skyrl": {
+                "terminal_bench_config": {"harbor": {"environment_type": "daytona"}},
+                "environment": {
+                    "task_sessions": {
+                        "session": {"task_session": "nemotron_ultra"},
+                        "sources": {"harbor/fixture": {"session": {"task_session": "shellbox"}}}
+                        if harbor_source
+                        else {},
+                    }
+                },
+            }
+        }
+    )
+    assert launcher._rl_config_uses_daytona(config) is harbor_source

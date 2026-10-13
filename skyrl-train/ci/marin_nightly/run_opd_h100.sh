@@ -162,7 +162,7 @@ START=$(date +%s)
   generator.gpu_memory_utilization=0.7 \
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
-  environment.env_class=gsm8k \
+  environment.task_sessions.session.task_session=gsm8k \
   2>&1 | tee "$LOG"
 ELAPSED=$(( $(date +%s) - START ))
 

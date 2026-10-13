@@ -6,6 +6,8 @@ import argparse
 import random
 import os
 from datasets import Dataset
+from marinskyrl.task_format import TASK_SPEC_COLUMN
+from marinskyrl.task_preparation import source_row_task
 
 
 def generate_multiplication_problem(num_digits):
@@ -44,7 +46,6 @@ def create_dataset(num_examples, num_digits, split_name):
                     "content": question,
                 },
             ],
-            "env_class": "multiply",
             "reward_spec": {
                 "method": "rule",
                 "ground_truth": answer,
@@ -54,7 +55,13 @@ def create_dataset(num_examples, num_digits, split_name):
                 "split": split_name,
             },
         }
-        examples.append(data)
+        examples.append(
+            {
+                TASK_SPEC_COLUMN: source_row_task(
+                    data, idx, source_name="synthetic_multiply", config={}
+                ).model_dump_json()
+            }
+        )
 
     return Dataset.from_list(examples)
 

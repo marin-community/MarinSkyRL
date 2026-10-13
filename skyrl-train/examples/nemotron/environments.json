@@ -1,0 +1,22 @@
+{
+  "ns_tools_simple_agent": {
+    "command_semantics": "linux_process",
+    "docker_image": "us-east1-docker.pkg.dev/hai-gcp-models/marin/nemo-skills-sandbox@sha256:280e0871b02f5dc935c1b3fdfbf75c394cceb087a0a284b13918aeb22e10b104",
+    "working_directory": "/workspace"
+  },
+  "code_gen_simple_agent": {
+    "command_semantics": "linux_process",
+    "docker_image": "us-east1-docker.pkg.dev/hai-gcp-models/marin/nemo-skills-sandbox@sha256:280e0871b02f5dc935c1b3fdfbf75c394cceb087a0a284b13918aeb22e10b104",
+    "working_directory": "/workspace"
+  },
+  "nvarc_inductive_simple_agent": {
+    "command_semantics": "linux_process",
+    "docker_image": "us-east1-docker.pkg.dev/hai-gcp-models/marin/nemo-skills-sandbox@sha256:280e0871b02f5dc935c1b3fdfbf75c394cceb087a0a284b13918aeb22e10b104",
+    "working_directory": "/workspace"
+  },
+  "math_formal_lean_refinement_agent": {
+    "command_semantics": "linux_process",
+    "docker_image": "us-east1-docker.pkg.dev/hai-gcp-models/marin/nemo-skills-sandbox@sha256:280e0871b02f5dc935c1b3fdfbf75c394cceb087a0a284b13918aeb22e10b104",
+    "working_directory": "/lean4/my_project"
+  }
+}

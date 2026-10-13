@@ -484,6 +484,9 @@ class CurriculumOrder:
             raise ValueError(f"window_size must be positive, got {window_size}")
         self.config = config
         self.bins = dataset_bins(dataset)
+        self.row_by_uid = {dataset.uid(index): index for index in range(len(dataset))}
+        if len(self.row_by_uid) != len(dataset):
+            raise ValueError("Curriculum sampling requires distinct task IDs")
         self.window_size = window_size
         self.rng = np.random.default_rng(seed)
         self.stats = BinStats(self.bins, decay=config.decay, reversion_mass=config.reversion_mass)
@@ -517,8 +520,8 @@ class CurriculumOrder:
         """
         outcomes = [
             GroupOutcome(
-                row=int(group.uid),
-                bin_index=int(self.bins.row_to_bin[int(group.uid)]),
+                row=self.row_by_uid[group.uid],
+                bin_index=int(self.bins.row_to_bin[self.row_by_uid[group.uid]]),
                 size=len(group.rewards),
                 solved=sum(reward > 0 for reward in group.rewards),
                 informative=any(reward != group.rewards[0] for reward in group.rewards),

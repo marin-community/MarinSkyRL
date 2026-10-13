@@ -7,8 +7,12 @@ Additional Reference: [Verl+Sglang Instructions](https://github.com/zhaochenyang
 ## Prepare Datasets 
 ```bash
 local_dir=~/data/searchR1
-uv run --isolated examples/search/searchr1_dataset.py --local_dir $local_dir
+uv run --project .. examples/search/searchr1_dataset.py \
+  --local_dir $local_dir --search_url http://127.0.0.1:8000/retrieve
 ```
+
+The output contains bare TaskSpecs. Each task keeps its search endpoint and grader
+parameters in private verifier data. Use an endpoint that each rollout worker can access.
 
 # Start the Search Engine
 Since faiss-gpu is not available via pip, we setup a separate conda environment for the local retrieval server. Running this server will use around 6GB of GPU memory per GPU, so make sure to account for this in your training run configuration.

@@ -18,10 +18,15 @@ import logging
 import os
 import tempfile
 
-import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 from huggingface_hub import hf_hub_download
 from huggingface_hub.utils import EntryNotFoundError
 import shutil
+
+from marinskyrl.task_format import TASK_SPEC_COLUMN
+from marinskyrl.task_preparation import source_row_task
+from skyrl_gym.tools.search import DEFAULT_TIMEOUT
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_SFT_LOGGING_LEVEL", "WARN"))
@@ -174,23 +179,13 @@ DEFAULT_USER_CONTENT_PREFIX = (
 )
 
 
-def process_single_row(row, current_split_name, row_index):
-    """
-    Process a single row of data for SearchR1-like format.
-
-    Args:
-        row: DataFrame row containing the original data
-        current_split_name: Name of the current split (train/test)
-        row_index: Index of the row in the DataFrame
-
-    Returns:
-        pd.Series: Processed row data in the required format
-    """
+def process_single_row(row, current_split_name, row_index, *, config):
+    """Prepare a search TaskSpec with private answers and tool parameters."""
     question = row.get("question", "")
 
     # Build prompt structure
-    user_content = user_content_prefix.rstrip("\n") + question
-    prompt = [{"role": "system", "content": system_content}, {"role": "user", "content": user_content}]
+    user_content = DEFAULT_USER_CONTENT_PREFIX.rstrip("\n") + question
+    prompt = [{"role": "system", "content": DEFAULT_SYSTEM_CONTENT}, {"role": "user", "content": user_content}]
 
     # Extract ground truth from the "reward" field or fallback to golden_answers
     reward_data = row.get("reward_model")
@@ -218,17 +213,20 @@ def process_single_row(row, current_split_name, row_index):
         "tools_kwargs": tools_kwargs,
     }
 
-    return pd.Series(
+    task = source_row_task(
         {
             "data_source": data_source_tagged,
             "prompt": prompt,
             "ability": row.get("ability"),
-            "env_class": "search",
             "reward_spec": reward_data,
             "extra_info": extra_info,
             "metadata": row.get("metadata"),
-        }
+        },
+        row_index,
+        source_name=data_source_tagged,
+        config=config,
     )
+    return {TASK_SPEC_COLUMN: task.model_dump_json()}
 
 
 def main():
@@ -258,49 +256,49 @@ def main():
                 )
 
                 # Load and process Parquet file
-                df_raw = pd.read_parquet(local_parquet_filepath)
+                raw_table = pq.read_table(local_parquet_filepath)
                 if args.max_rows is not None:
-                    if split == "train":
-                        df_raw = df_raw.iloc[: args.max_rows]
-                    else:
-                        df_raw = df_raw.iloc[: min(args.max_rows, 10)]
+                    limit = args.max_rows if split == "train" else min(args.max_rows, 10)
+                    raw_table = raw_table.slice(0, limit)
 
-                logger.info(f"Loaded {len(df_raw)} rows from {parquet_filename}")
+                logger.info(f"Loaded {raw_table.num_rows} rows from {parquet_filename}")
+                prepared = [
+                    process_single_row(
+                        row,
+                        current_split_name=split,
+                        row_index=index,
+                        config={
+                            "search_url": args.search_url,
+                            "topk": args.topk,
+                            "timeout": args.timeout,
+                            "log_requests": args.log_requests,
+                        },
+                    )
+                    for index, row in enumerate(raw_table.to_pylist())
+                ]
 
-                def apply_process_row(row, split_name=split):
-                    return process_single_row(row, current_split_name=split_name, row_index=row.name)
-
-                df_processed = df_raw.apply(apply_process_row, axis=1)
-
-                # Save processed DataFrame
                 if split == "test":
                     logger.info("Saving `test.parquet` from HF as `validation.parquet` locally")
                     output_file_path = os.path.join(local_save_dir, "validation.parquet")
                 else:
                     output_file_path = os.path.join(local_save_dir, f"{split}.parquet")
-                df_processed.to_parquet(output_file_path, index=False)
-                logger.info(f"Saved {len(df_processed)} processed rows to {output_file_path}")
+                pq.write_table(pa.Table.from_pylist(prepared), output_file_path)
+                logger.info(f"Saved {len(prepared)} prepared tasks to {output_file_path}")
                 processed_files.append(output_file_path)
 
             except EntryNotFoundError:
                 logger.warning(f"{parquet_filename} not found in repository {args.hf_repo_id}")
-            except Exception as e:
-                logger.error(f"Error processing {split} split: {e}")
 
     if not processed_files:
-        logger.warning("No data was processed or saved")
-        return
+        raise ValueError("No source data matched the selected splits")
 
     logger.info(f"Successfully processed {len(processed_files)} files to {local_save_dir}")
 
     # Copy to HDFS if specified
     if args.hdfs_dir:
-        try:
-            makedirs(args.hdfs_dir)
-            copy(src=local_save_dir, dst=args.hdfs_dir)
-            logger.info(f"Successfully copied files to HDFS: {args.hdfs_dir}")
-        except Exception as e:
-            logger.error(f"Error copying files to HDFS: {e}")
+        makedirs(args.hdfs_dir)
+        copy(src=local_save_dir, dst=args.hdfs_dir)
+        logger.info(f"Copied prepared tasks to HDFS: {args.hdfs_dir}")
 
 
 if __name__ == "__main__":
@@ -313,14 +311,14 @@ if __name__ == "__main__":
     )
     parser.add_argument("--hdfs_dir", default=None, help="Optional HDFS directory to copy the Parquet files to.")
     parser.add_argument("--max_rows", type=int, default=None, help="Maximum number of rows to process from each split.")
+    parser.add_argument("--search_url", required=True)
+    parser.add_argument("--topk", type=int, default=3)
+    parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
+    parser.add_argument("--log_requests", action="store_true")
     parser.add_argument(
         "--split", choices=["train", "test"], default=None, help="If set, only download this split (train or test)."
     )
 
     args = parser.parse_args()
-
-    # System and user content configuration
-    system_content = DEFAULT_SYSTEM_CONTENT
-    user_content_prefix = DEFAULT_USER_CONTENT_PREFIX
 
     main()

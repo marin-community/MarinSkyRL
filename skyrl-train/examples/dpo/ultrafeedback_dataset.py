@@ -1,7 +1,7 @@
 """Convert UltraFeedback binarized preferences to the MarinSkyRL preference-pair parquet.
 
 Rows carry the chat ``prompt`` plus ``chosen`` and ``rejected`` completion text, ready for
-``environment.env_class=preference_pair`` with ``+algorithm_recipe=dpo``.
+``data.preference_pair_format=text`` with ``+algorithm_recipe=dpo``.
 
 Usage::
 

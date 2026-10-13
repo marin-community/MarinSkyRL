@@ -1,6 +1,4 @@
-"""
-Main entrypoint for generating rollouts on terminal bench tasks.
-"""
+"""Generate rollout groups from prepared TaskSpecs."""
 
 import ray
 import asyncio
@@ -8,16 +6,16 @@ import hydra
 from omegaconf import DictConfig
 
 from skyrl_train.entrypoints.main_base import (
+    BasePPOExp,
     config_dir,
     run_ray_driver,
 )
-from skyrl_train.entrypoints.terminal_bench import TerminalBenchExp
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.config.rollout_validation import EntrypointOperation
 from skyrl_train.trajectory_runners.trajectory_processing import prepare_trajectory_request
 
 
-class TerminalBenchGenerateExp(TerminalBenchExp):
+class TaskGenerateExp(BasePPOExp):
     async def _generate(self) -> None:
         inference_engine_client = self.create_inference_engine_client(operation=EntrypointOperation.GENERATE)
         trajectory_runner = self.get_trajectory_runner(self.cfg, self.tokenizer, inference_engine_client)
@@ -47,8 +45,7 @@ class TerminalBenchGenerateExp(TerminalBenchExp):
 
 @ray.remote(num_cpus=1, max_retries=0)
 def skyrl_entrypoint(cfg: DictConfig):
-    # make sure that the training loop is not run on the head node.
-    exp = TerminalBenchGenerateExp(cfg)
+    exp = TaskGenerateExp(cfg)
     exp.run()
 
 

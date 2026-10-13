@@ -1,17 +1,21 @@
 """Config rules for training without per-rollout verification."""
 
 from omegaconf import DictConfig, OmegaConf
+from skyrl_gym.source_task import session_parameters
+from taskcompendium.models import SessionGrader, TaskSpec
 
 from marinskyrl.distillation import DistillationPlan, DistillationRewardMode
 from marinskyrl.runtime_options import TRAJECTORY_SELECTOR_TYPE_PATH, AdvantageEstimator, RolloutGrading
 
 
-def validate_nemotron_ultra_grading(cfg: DictConfig, distillation_plan: DistillationPlan | None) -> None:
-    """Allow skipped Nemotron Ultra grading only when nothing in training or eval reads the reward."""
-    grading = RolloutGrading(cfg.environment.task_sessions.nemotron_ultra.grading)
+def validate_task_grading(task: TaskSpec, cfg: DictConfig, distillation_plan: DistillationPlan | None) -> None:
+    """Reject skipped task grading when training or evaluation uses the reward."""
+    if not isinstance(task.grader, SessionGrader):
+        return
+    grading = RolloutGrading(session_parameters(task).config.get("grading", RolloutGrading.VERIFY))
     if grading is RolloutGrading.VERIFY:
         return
-    prefix = "environment.task_sessions.nemotron_ultra.grading=skip requires"
+    prefix = f"Task {task.id!r} with skipped grading requires"
     if distillation_plan is None or distillation_plan.reward_mode is not DistillationRewardMode.REPLACE:
         raise ValueError(f"{prefix} trainer.algorithm.distillation.reward_mode=replace")
     if cfg.trainer.algorithm.advantage_estimator != AdvantageEstimator.UNIFORM:

@@ -1,4 +1,4 @@
-"""Typed data sources shared by the launch host and SkyRL runtime."""
+"""Typed source descriptors for explicit task preparation."""
 
 from __future__ import annotations
 
@@ -48,13 +48,6 @@ class TaskTroveSelection:
             raise ValueError("TaskTrove selection limit must be positive")
 
 
-@dataclass(frozen=True)
-class TaskTroveSelectionSnapshot:
-    count: int
-    digest: str
-    distinct_environment_count: int
-
-
 def _resolved_path(local_path: str, relative_path: str) -> str:
     relative = Path(relative_path)
     if relative.is_absolute() or ".." in relative.parts:
@@ -82,7 +75,6 @@ class TaskTroveParquetSource:
     relative_path: str
     verifier_ref: str
     selection: TaskTroveSelection
-    snapshot: TaskTroveSelectionSnapshot | None = None
     kind: Literal[DataSourceKind.TASKTROVE_PARQUET] = DataSourceKind.TASKTROVE_PARQUET
 
     def resolved_path(self) -> str:
@@ -117,11 +109,8 @@ def data_source(value: Mapping[str, Any]) -> DataSource:
     selection_fields["tags"] = tuple(selection_fields.get("tags", ()))
     selection_fields["modes"] = tuple(selection_fields.get("modes", ()))
     selection_fields["tag_match"] = TaskTroveTagMatch(selection_fields.get("tag_match", "all"))
-    snapshot_value = fields.pop("snapshot", None)
-    snapshot = TaskTroveSelectionSnapshot(**snapshot_value) if snapshot_value is not None else None
     return TaskTroveParquetSource(
         kind=kind,
         selection=TaskTroveSelection(**selection_fields),
-        snapshot=snapshot,
         **fields,
     )

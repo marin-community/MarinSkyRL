@@ -1,17 +1,9 @@
 set -x
 
-# Colocated GRPO training+generation for Qwen2.5-0.5B-Instruct on OpenEnv.
+# GRPO training with OpenEnv TaskSpecs.
 
-# uv run examples/openenv/dummy_openenv_dataset.py --output_dir $HOME/data/openenv --env_name echo_env
-# Env name: echo_env, coding_env, openspiel-env, atari-env, sumo-rl-env, finrl-env
-
-# Supply environment.task_sessions.openenv.machine and server_command overrides.
-# Shellbox starts one task machine. The session starts its HTTP server there.
-
-# export WANDB_API_KEY=<your_key_here>
-# bash examples/openenv/run_dummy_openenv.sh
-
-# You can override the default values with e.g.: `NUM_GPUS=1 bash examples/openenv/run_dummy_openenv.sh`.
+# Prepare TaskSpecs with integrations/openenv/prepare_dummy_dataset.py.
+# See integrations/openenv/README.md for the image and server parameters.
 
 : "${ENV_NAME:="echo_env"}"
 : "${DATA_DIR:="$HOME/data/openenv/$ENV_NAME"}"
@@ -57,7 +49,7 @@ uv run --project .. --extra megatron --extra "$INFERENCE_BACKEND" -m integration
   generator.backend=$INFERENCE_BACKEND \
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
-  environment.env_class=openenv \
+  environment.task_sessions.session.task_session=openenv \
   generator.n_samples_per_prompt=4 \
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
