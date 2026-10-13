@@ -22,6 +22,7 @@ from skyrl_train.rollouts.task_worker import TaskRolloutWorker
 from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
 from skyrl_gym.source_task import source_task
 from skyrl_train.config.utils import get_default_config
+from skyrl_train.curriculum import dataset_bins
 from tests.cpu.task_specs import NATIVE_ENVIRONMENT, lowered_task, machine_runtime, session_spec, task_input
 from skyrl_train.trajectory_runners.types import TrajectoryID
 from skyrl_train.trajectory_runners.trajectory_processing import prepare_trajectory_request, validate_trajectory_batch
@@ -232,7 +233,7 @@ async def test_source_tasks_run_without_the_original_dataset(tmp_path, task_inpu
                     "reward_spec": {"ground_truth": "12"},
                     "teacher_route": "math",
                     "data_source": "arithmetic",
-                    "extra_info": {"grade": 3},
+                    "extra_info": {"data_source": "arithmetic", "grade": 3},
                 }
             ]
         ),
@@ -249,6 +250,9 @@ async def test_source_tasks_run_without_the_original_dataset(tmp_path, task_inpu
         num_workers=1,
     )
     source.unlink()
+    bins = dataset_bins(prepared)
+    assert bins.names == ["arithmetic"]
+    np.testing.assert_array_equal(bins.grades, [3])
     row = prepared.collate_fn([prepared[0]])[0]
     uid = row["uid"]
     config, _ = task_inputs

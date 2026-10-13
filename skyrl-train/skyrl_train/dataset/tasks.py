@@ -128,7 +128,9 @@ def source_row_task(
 
 
 def _source_task_prompt(row: dict, index: int, *, source_name: str, environment_configs: Mapping[str, dict]) -> dict:
-    return task_prompt(source_row_task(row, index, source_name=source_name, environment_configs=environment_configs))
+    lowered = source_row_task(row, index, source_name=source_name, environment_configs=environment_configs)
+    # Curriculum sampling reads source metadata before collation.
+    return {**session_parameters(lowered.task).extras, **task_prompt(lowered)}
 
 
 def write_tasks(path: Path, records: Iterable[LoweredTaskSpec]) -> None:
