@@ -1169,7 +1169,7 @@ wheels = [
 [[package]]
 name = "marin-rolloutengine"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frolloutengine&rev=c0b0d23f774c7b3bea1d6bb84e010921ff434ea9#c0b0d23f774c7b3bea1d6bb84e010921ff434ea9" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frolloutengine&rev=f6acc0157a3008d8aae6fe0a12cf573a03a0fed9#f6acc0157a3008d8aae6fe0a12cf573a03a0fed9" }
 dependencies = [
     { name = "marin-shellbox" },
     { name = "marin-taskcompendium" },
@@ -1180,7 +1180,7 @@ dependencies = [
 [[package]]
 name = "marin-shellbox"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fshellbox&rev=c0b0d23f774c7b3bea1d6bb84e010921ff434ea9#c0b0d23f774c7b3bea1d6bb84e010921ff434ea9" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fshellbox&rev=f6acc0157a3008d8aae6fe0a12cf573a03a0fed9#f6acc0157a3008d8aae6fe0a12cf573a03a0fed9" }
 dependencies = [
     { name = "bubblewrap-bin", marker = "sys_platform == 'linux'" },
     { name = "httpx" },
@@ -1189,7 +1189,7 @@ dependencies = [
 [[package]]
 name = "marin-taskcompendium"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=c0b0d23f774c7b3bea1d6bb84e010921ff434ea9#c0b0d23f774c7b3bea1d6bb84e010921ff434ea9" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=f6acc0157a3008d8aae6fe0a12cf573a03a0fed9#f6acc0157a3008d8aae6fe0a12cf573a03a0fed9" }
 dependencies = [
     { name = "marin-rigging" },
     { name = "marin-shellbox" },
@@ -1201,7 +1201,7 @@ dependencies = [
 [[package]]
 name = "marin-verifyit"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fverifyit&rev=c0b0d23f774c7b3bea1d6bb84e010921ff434ea9#c0b0d23f774c7b3bea1d6bb84e010921ff434ea9" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fverifyit&rev=f6acc0157a3008d8aae6fe0a12cf573a03a0fed9#f6acc0157a3008d8aae6fe0a12cf573a03a0fed9" }
 dependencies = [
     { name = "tomli-w" },
 ]
@@ -2236,10 +2236,10 @@ requires-dist = [
     { name = "func-timeout" },
     { name = "ipython", marker = "extra == 'dev'", specifier = "==9.6.0" },
     { name = "loguru" },
-    { name = "marin-rolloutengine", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frolloutengine&rev=c0b0d23f774c7b3bea1d6bb84e010921ff434ea9" },
-    { name = "marin-shellbox", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fshellbox&rev=c0b0d23f774c7b3bea1d6bb84e010921ff434ea9" },
-    { name = "marin-taskcompendium", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=c0b0d23f774c7b3bea1d6bb84e010921ff434ea9" },
-    { name = "marin-verifyit", extras = ["math", "schema", "reasoning-gym", "judge"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fverifyit&rev=c0b0d23f774c7b3bea1d6bb84e010921ff434ea9" },
+    { name = "marin-rolloutengine", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frolloutengine&rev=f6acc0157a3008d8aae6fe0a12cf573a03a0fed9" },
+    { name = "marin-shellbox", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fshellbox&rev=f6acc0157a3008d8aae6fe0a12cf573a03a0fed9" },
+    { name = "marin-taskcompendium", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=f6acc0157a3008d8aae6fe0a12cf573a03a0fed9" },
+    { name = "marin-verifyit", extras = ["math", "schema", "reasoning-gym", "judge"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fverifyit&rev=f6acc0157a3008d8aae6fe0a12cf573a03a0fed9" },
     { name = "math-verify", specifier = "==0.9.0" },
     { name = "numpy" },
     { name = "omegaconf" },
