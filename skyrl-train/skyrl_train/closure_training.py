@@ -71,8 +71,9 @@ def closure_training_targets(
     """Use verified closure contracts; infrastructure failures produce no target.
 
     Repeated-opener targets select JSON-opening alternatives at the first
-    repeated marker. Other families require a closing-only repair that preserves
-    the task's required content. Missing suffixes are reserved for masked SFT.
+    repeated marker. Without a repeated marker, retention examples use the same
+    content-preserving closure targets as other families. Missing suffixes are
+    reserved for masked SFT.
     The continuation mode also selects exact-reference alternatives at verified
     premature closing tokens, without supplying content-repair SFT.
     """
@@ -95,7 +96,7 @@ def closure_training_targets(
             if position is not None:
                 chosen = tuple(token for token in candidates[row, position].tolist() if decode([token]).strip() == "{")
                 boundaries[row] = VerifiedFTPOBoundary(position, chosen)
-            continue
+                continue
         content_response = response
         if (
             response

@@ -119,6 +119,80 @@ def test_stopped_turn_repairs_only_missing_closure_tokens(terminator, continuati
         assert decode(target.repair_token_ids) == repair
 
 
+@pytest.mark.parametrize("boundary", [FTPOBoundary.VERIFIED_CLOSURE, FTPOBoundary.VERIFIED_CLOSURE_AND_CONTINUATION])
+@pytest.mark.parametrize(
+    "body,suffix,expected_kind",
+    [
+        ('{"name":"write_result","arguments":{"result":[]}}', [], "repair"),
+        ('{"name":"wrong","arguments":{"result":[]}}', [], "none"),
+        ('{"name":"write_result","arguments":{"result":', [], "none"),
+        ('{"name":"write_result","arguments":{"result":[]}}', [1_000_001], "none"),
+        ("", [1_000_000], "opener"),
+    ],
+)
+def test_retention_targets_repair_closers_without_changing_opener_selection(boundary, body, suffix, expected_kind):
+    pieces = {
+        1_000_000: "<tool_call>",
+        1_000_001: "</tool_call>",
+        1_000_002: "<|eot_id|>",
+        1_000_003: "<|start_header_id|>",
+        1_000_004: "<|end_header_id|>",
+    }
+
+    def decode(tokens):
+        return "".join(pieces[token] if token in pieces else chr(token) for token in tokens)
+
+    def encode(text):
+        if text == "</tool_call>":
+            return [1_000_001]
+        return list(map(ord, text))
+
+    prompt = [1_000_003, *encode("assistant"), 1_000_004, 1_000_000]
+    response = [*encode(body), *suffix, 1_000_002]
+    expected = '<tool_call>{"name":"write_result","arguments":{"result":[]}}</tool_call>'
+    verification = VerificationResult.verified(
+        0,
+        diagnostics={
+            "stop_reason": "stop",
+            "closure": {
+                "prefix": "<tool_call>",
+                "expected": expected,
+                "format": "tool",
+                "family": "repeated_opener_retention",
+                "control": "opener_retention",
+            },
+        },
+    )
+    targets = closure_training_targets(
+        [prompt],
+        [response],
+        [[1] * len(response)],
+        torch.full((1, len(response), 1), ord("{")),
+        [verification],
+        boundary=boundary,
+        eligible=[True],
+        encode=encode,
+        decode=decode,
+        eos_token_ids=frozenset(),
+    )
+    if expected_kind == "opener":
+        assert targets.boundaries == [VerifiedFTPOBoundary(0, (ord("{"),))]
+        assert targets.repairs == [None]
+    elif expected_kind == "repair":
+        assert targets.boundaries == [None]
+        repair = targets.repairs[0]
+        assert repair.kind == ClosureTargetKind.MISSING_SUFFIX
+        assert repair.response_position == len(body)
+        assert repair.repair_token_ids == (1_000_001,)
+        assert (
+            decode(response[: repair.response_position] + list(repair.repair_token_ids))
+            == expected[len("<tool_call>") :]
+        )
+    else:
+        assert targets.boundaries == [None]
+        assert targets.repairs == [None]
+
+
 def test_target_metrics_separate_candidates_filtered_ftpo_and_repairs():
     verification = VerificationResult.verified(
         0.0, diagnostics={"closure": {"family": "json_nested", "control": "close_required"}}
