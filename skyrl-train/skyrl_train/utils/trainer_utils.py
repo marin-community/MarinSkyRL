@@ -362,11 +362,12 @@ def dump_per_dataset_eval_results(
                     "env_class": concat_all_envs[i],
                     "data_source": data_source,
                     "env_metrics": (trajectory_batch.get("env_metrics") or [{}] * len(input_prompts))[i],
-                    # Verifier diagnostics and reasons can contain private references or credentials.
+                    # Full diagnostics stay in private retained trajectories.
                     "verification": None
                     if verification is None
                     else {
                         "status": verification.status.value,
+                        "reason": verification.reason,
                         "score": verification.score,
                         "passed": verification.passed,
                         "score_min": verification.score_min,

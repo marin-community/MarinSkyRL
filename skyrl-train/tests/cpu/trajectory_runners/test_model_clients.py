@@ -9,7 +9,14 @@ from omegaconf import OmegaConf
 from rolloutengine.contracts import ModelTurn
 from skyrl_gym.source_task import source_task
 from skyrl_gym.task_sessions import SearchTaskSession
-from taskcompendium.models import Source
+from taskcompendium.chat import chat_conversation
+from taskcompendium.convert.answers import answer_task
+from taskcompendium.grader import verifyit_package
+from taskcompendium.grading import grade_answer
+from taskcompendium.grading_result import Outcome
+from taskcompendium.models import AnswerType, FinalAction, FunctionDefinition, GradingAttempt, JsonValueAnswer, Source
+from taskcompendium.pipeline.models import RawRow
+from verifyit.spec import FunctionCall, PredictedActionSpec, StructuredExactSpec
 
 from skyrl_train.inference_engines.chat_template import SINGLE_TOOL_CALL_TEMPLATE_ERROR
 from skyrl_train.inference_engines.chat_continuation import render_exact_chat_continuation
@@ -621,7 +628,7 @@ async def test_chat_grading_recovers_reasoning_boundaries_without_changing_repla
     assert result["response_ids"] == [[3, 4, 5]]
     assert result["response_logprobs"] == [[-0.1, -0.2, -0.3]]
     np.testing.assert_array_equal(result["routed_experts"][0], [[[0, 0]], [[1, 2]], [[3, 4]]])
-    assert result["assistant_messages"] == [raw_message]
+    assert result["assistant_messages"] == [{**raw_message, "content": expected}]
 
 
 @pytest.mark.asyncio
@@ -725,3 +732,58 @@ async def test_chat_output_keeps_the_per_turn_limit_of_vllm_sampling_params():
     )
     assert served[0]["max_completion_tokens"] == 6528
     assert "max_tokens" not in served[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native_call", [False, True])
+async def test_chat_thinking_tokens_produce_gradeable_structured_answers_and_keep_native_calls(
+    load_tokenizer, native_call
+):
+    tokenizer = load_tokenizer("Qwen/Qwen3-0.6B", revision="c1899de")
+    tokens = tokenizer.encode('<|start_think|>This is not JSON.<|end_think|>{"answer":7}', add_special_tokens=False)
+    message = {"role": "assistant", "content": 'This is not JSON.{"answer":7}'}
+    if native_call:
+        message = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"id": "call-7", "type": "function", "function": {"name": "report", "arguments": '{"answer":7}'}}
+            ],
+        }
+    engine = AsyncMock()
+    engine.model_name = "snowball"
+    engine.tokenizer = tokenizer
+    engine.tokenize.return_value = {"tokens": [1, 2]}
+    engine.chat_completion.return_value = {
+        "choices": [{"message": message, "finish_reason": "tool_calls" if native_call else "stop", "token_ids": tokens}]
+    }
+    result = await DirectModelClient(engine).generate(
+        {"prompts": [[{"role": "user", "content": "Return seven."}]], "chat_completion_params": [{}]}
+    )
+    task = answer_task(
+        RawRow("structured", Source(dataset="fixture", revision="1", row="0", importer_revision="1"), {}),
+        prompt="Return seven.",
+        spec=StructuredExactSpec(expected={"answer": 7}),
+    )
+    task = task.model_copy(update={"answer_type": AnswerType.JSON, "answer_format": JsonValueAnswer()})
+    if native_call:
+        task = task.model_copy(
+            update={
+                "answer_type": AnswerType.NATIVE_ACTION,
+                "answer_format": FinalAction(require_call=True, max_calls=1),
+                "final_tools": (
+                    FunctionDefinition(
+                        name="report", parameters={"type": "object", "properties": {"answer": {"type": "integer"}}}
+                    ),
+                ),
+                "grader": verifyit_package(
+                    PredictedActionSpec(expected_calls=(FunctionCall(name="report", arguments={"answer": 7}),))
+                ).grader,
+            }
+        )
+    trace = chat_conversation([{"role": "user", "content": "Return seven."}, result["assistant_messages"][0]])
+    grade = grade_answer(task, GradingAttempt(trace))
+    assert (grade.status, grade.reward) == (Outcome.GRADED, 1.0)
+    assert result["response_ids"] == [tokens]
+    if native_call:
+        assert result["assistant_messages"][0]["tool_calls"] == message["tool_calls"]
