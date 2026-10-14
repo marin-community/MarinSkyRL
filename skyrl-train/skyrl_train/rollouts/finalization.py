@@ -21,19 +21,15 @@ from skyrl_train.rollout_observability import rollout_phase
 
 def propagate_teacher_routes(input_batch: TrajectoryRequestBatch, output: TrajectoryBatch) -> None:
     """Carry explicit dataset routing through a trajectory-runner boundary."""
-    env_extras = input_batch.get("env_extras")
-    if not env_extras:
+    route_keys = [row.teacher_route for row in input_batch.metadata]
+    if not any(key is not None for key in route_keys):
         return
-    supplied = ["teacher_route" in extras for extras in env_extras]
-    if not any(supplied):
-        return
-    if not all(supplied):
+    if any(key is None for key in route_keys):
         raise ValueError("teacher_route must be present on every request row when teacher routing is used")
 
-    route_keys = [extras["teacher_route"] for extras in env_extras]
     if any(not isinstance(route_key, str) or not route_key.strip() for route_key in route_keys):
         raise ValueError("teacher_route must be a non-empty string on every request row")
-    request_ids = input_batch.get("trajectory_ids")
+    request_ids = input_batch.trajectory_ids
     output_ids = output.get("trajectory_ids")
     if request_ids is not None and output_ids is not None:
         if len(request_ids) != len(route_keys):
@@ -53,18 +49,9 @@ def propagate_teacher_routes(input_batch: TrajectoryRequestBatch, output: Trajec
 
 def propagate_data_sources(input_batch: TrajectoryRequestBatch, output: TrajectoryBatch) -> None:
     """Keep request source labels aligned with whole or step-wise rollout rows."""
-    env_extras = input_batch.get("env_extras")
-    if env_extras is None:
-        return
-    sources = []
-    for extras in env_extras:
-        extra_info = extras.get("extra_info")
-        source = extra_info.get("data_source") if isinstance(extra_info, dict) else None
-        if source is None:
-            source = extras.get("data_source")
-        sources.append(source if isinstance(source, str) else None)
+    sources = [row.data_source for row in input_batch.metadata]
 
-    request_ids = input_batch.get("trajectory_ids")
+    request_ids = input_batch.trajectory_ids
     output_ids = output.get("trajectory_ids")
     if request_ids is None or output_ids is None:
         if len(sources) == len(output["response_ids"]):
@@ -88,17 +75,15 @@ async def finalize_trajectory_batch(
     sink: RetentionSink | None,
 ) -> TrajectoryBatch:
     """Attach request identity, apply rewards, and retain the completed output."""
-    trajectory_ids = input_batch.get("trajectory_ids")
+    trajectory_ids = input_batch.trajectory_ids
     if trajectory_ids is not None and output.get("trajectory_ids") is None:
         if len(trajectory_ids) != len(output["response_ids"]):
             raise ValueError("trajectory runner output rows must align with request trajectory IDs")
         output["trajectory_ids"] = list(trajectory_ids)
     propagate_teacher_routes(input_batch, output)
     metrics = output.get("rollout_metrics") or {}
-    for extras in input_batch.get("env_extras") or []:
-        ultra = (extras.get("extra_info") or {}).get("nemotron_ultra")
-        if ultra is not None and "blend" in ultra and "agent" in ultra:
-            key = f"nemotron_ultra/coverage/{ultra['blend']}/{ultra['agent']}"
+    for row in input_batch.metadata:
+        for key in row.metric_tags:
             metrics[key] = metrics.get(key, 0) + 1
     output["rollout_metrics"] = metrics
     with rollout_phase("finalize"):

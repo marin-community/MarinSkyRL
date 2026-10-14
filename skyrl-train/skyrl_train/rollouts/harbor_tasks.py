@@ -209,8 +209,8 @@ def shape_harbor_rollouts(
     rewards = [rollout.grade.reward if rollout.grade.status == Outcome.GRADED else 0.0 for rollout in rollouts]
     components = [{} for _ in rollouts]
     collections = [None for _ in rollouts]
-    identifiers = request.get("trajectory_ids")
-    metadata = request.get("batch_metadata")
+    identifiers = request.trajectory_ids
+    metadata = request.batch_metadata
     eligible = [
         harbor and rollout.grade.status == Outcome.GRADED and rollout.failure is None
         for harbor, rollout in zip(harbor_tasks, rollouts, strict=True)

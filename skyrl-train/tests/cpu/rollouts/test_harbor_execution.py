@@ -35,7 +35,7 @@ from skyrl_train.rollouts.buffer import RolloutLease, RolloutTask
 from skyrl_train.rollouts.task_worker import TaskRolloutWorker
 from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
 from rolloutengine.spec import LoweredTaskSpec
-from tests.cpu.task_specs import NATIVE_ENVIRONMENT, SHELL_ENVIRONMENT, lowered_task, session_spec
+from tests.cpu.task_specs import NATIVE_ENVIRONMENT, SHELL_ENVIRONMENT, lowered_task, session_spec, task_input
 from skyrl_train.trajectory_runners.types import BatchMetadata, TokenProvenance, TrajectoryID
 from skyrl_train.trajectory_runners.model_clients import ModelServerError
 from tests.cpu.rollouts.engine_fakes import ConversationClient, FixtureImageFactory, InferenceClient, Tokenizer, Writer
@@ -45,7 +45,7 @@ from tests.cpu.rollouts.engine_fakes import ConversationClient, FixtureImageFact
 @pytest.mark.parametrize("phase", ["train", "eval"])
 async def test_mixed_harbor_and_native_tasks_keep_separate_providers_and_machine_specs(task_inputs, phase):
     config, original = task_inputs
-    lowered = LoweredTaskSpec.model_validate_json(original["env_extras"][0]["lowered_task_spec"])
+    lowered = original.rows[0].lowered
     native = lowered.task.model_copy(
         update={
             "environment_requirements": EnvironmentRequirements(
@@ -76,16 +76,12 @@ async def test_mixed_harbor_and_native_tasks_keep_separate_providers_and_machine
             {"harbor": {"override_cpus": 2, "max_retries": 0, "eval_daytona_api_key_env": "DAYTONA_EVAL_API_KEY"}}
         )
     )
-    request = {
-        **original,
-        "prompts": original["prompts"] * 2,
-        "env_classes": ["taskcompendium"] * 2,
-        "env_extras": [
-            {"lowered_task_spec": lowered_task(task, backend="docker").model_dump_json()} for task in (native, harbor)
-        ],
-        "trajectory_ids": [TrajectoryID(task.id, 0) for task in (native, harbor)],
-        "batch_metadata": BatchMetadata(0, phase),
-    }
+    request = replace(
+        original,
+        rows=tuple(task_input(lowered_task(task, backend="docker")) for task in (native, harbor)),
+        trajectory_ids=tuple(TrajectoryID(task.id, 0) for task in (native, harbor)),
+        batch_metadata=BatchMetadata(0, phase),
+    )
     worker = TaskRolloutWorker(
         config,
         WholeTaskProjection(config, Tokenizer()),
@@ -188,8 +184,12 @@ async def test_disabled_harbor_verification_keeps_tokens_but_masks_training(
     )
     prompt, env, extras, uid = prepared[0]
     assert LoweredTaskSpec.model_validate_json(extras["lowered_task_spec"]).task.resources.verifier == ()
-    request.update(prompts=[prompt], env_classes=[env], env_extras=[extras], trajectory_ids=[TrajectoryID(uid, 0)])
-    request["batch_metadata"] = BatchMetadata(0, phase)
+    request = replace(
+        request,
+        rows=(task_input(LoweredTaskSpec.model_validate_json(extras["lowered_task_spec"]), metric_class=env),),
+        trajectory_ids=(TrajectoryID(uid, 0),),
+    )
+    request = replace(request, batch_metadata=BatchMetadata(0, phase))
 
     class ImageFactory:
         backend = Backend.DOCKER
@@ -227,7 +227,7 @@ async def test_disabled_harbor_verification_keeps_tokens_but_masks_training(
 @pytest.mark.parametrize("failure_stage", ["startup", "model", "verifier", "attempt", "cancel", "cancel_model"])
 async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected_result(task_inputs, failure_stage):
     config, request = task_inputs
-    task = LoweredTaskSpec.model_validate_json(request["env_extras"][0]["lowered_task_spec"]).task
+    task = request.rows[0].lowered.task
     task = task.model_copy(
         update={
             "answer_type": AnswerType.WORKSPACE_STATE,
@@ -248,9 +248,9 @@ async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected
             ),
         }
     )
-    request["env_extras"][0]["lowered_task_spec"] = lowered_task(
-        task, "shellbox", backend="shellsim", verifier_backend="verifier"
-    ).model_dump_json()
+    request = replace(
+        request, rows=(task_input(lowered_task(task, "shellbox", backend="shellsim", verifier_backend="verifier")),)
+    )
     attempts = 0
     machines = []
     waits = []
@@ -420,7 +420,7 @@ async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected
 )
 async def test_harbor_retry_policy_preserves_terminal_grades(task_inputs, phase, failure):
     config, request = task_inputs
-    task = LoweredTaskSpec.model_validate_json(request["env_extras"][0]["lowered_task_spec"]).task
+    task = request.rows[0].lowered.task
     failing_command = {
         "missing": "true",
         "retry_missing": "true",
@@ -461,13 +461,20 @@ async def test_harbor_retry_policy_preserves_terminal_grades(task_inputs, phase,
             "grader": verifier,
         }
     )
-    request["env_extras"][0]["lowered_task_spec"] = lowered_task(
-        task,
-        "shellbox",
-        backend="shellsim",
-        verifier_backend="verifier",
-    ).model_dump_json()
-    request["batch_metadata"] = BatchMetadata(0, phase)
+    request = replace(
+        request,
+        rows=(
+            task_input(
+                lowered_task(
+                    task,
+                    "shellbox",
+                    backend="shellsim",
+                    verifier_backend="verifier",
+                )
+            ),
+        ),
+    )
+    request = replace(request, batch_metadata=BatchMetadata(0, phase))
     attempts = 0
     verifier_starts = 0
     waits = []
@@ -579,7 +586,7 @@ async def test_harbor_retry_policy_preserves_terminal_grades(task_inputs, phase,
 @pytest.mark.parametrize("stop_reason,expected", [("stop", 1.3), ("length", 0.8)])
 async def test_harbor_completion_reward_uses_the_engine_stop_reason(task_inputs, stop_reason, expected):
     config, request = task_inputs
-    task = LoweredTaskSpec.model_validate_json(request["env_extras"][0]["lowered_task_spec"]).task
+    task = request.rows[0].lowered.task
     verifier = ScriptGrader(
         environment=NATIVE_ENVIRONMENT,
         answer_path=None,
@@ -594,9 +601,9 @@ async def test_harbor_completion_reward_uses_the_engine_stop_reason(task_inputs,
             "grader": verifier,
         }
     )
-    request["env_extras"][0]["lowered_task_spec"] = lowered_task(
-        task, "shellbox", backend="docker", verifier_backend="docker"
-    ).model_dump_json()
+    request = replace(
+        request, rows=(task_input(lowered_task(task, "shellbox", backend="docker", verifier_backend="docker")),)
+    )
 
     class Client(InferenceClient):
         async def generate(self, request):
@@ -635,7 +642,7 @@ async def test_harbor_completion_reward_uses_the_engine_stop_reason(task_inputs,
 @pytest.mark.parametrize("shaper", ["threshold", "identity_aware_pass_ratio"])
 async def test_strict_harbor_parser_masks_only_the_affected_response(task_inputs, shaper):
     config, request = task_inputs
-    base = LoweredTaskSpec.model_validate_json(request["env_extras"][0]["lowered_task_spec"]).task
+    base = request.rows[0].lowered.task
     tasks = []
     for output in ("unrecognized output", "tests/test_task.py::test_answer PASSED"):
         verifier = ScriptGrader(
@@ -654,18 +661,10 @@ async def test_strict_harbor_parser_masks_only_the_affected_response(task_inputs
                 }
             )
         )
-    request.update(
-        prompts=request["prompts"] * 2,
-        env_classes=["taskcompendium"] * 2,
-        env_extras=[
-            {
-                "lowered_task_spec": lowered_task(
-                    task, "shellbox", backend="docker", verifier_backend="docker"
-                ).model_dump_json()
-            }
-            for task in tasks
-        ],
-        trajectory_ids=[TrajectoryID(base.id, index) for index in range(2)],
+    request = replace(
+        request,
+        rows=tuple(task_input(lowered_task(task, backend="docker", verifier_backend="docker")) for task in tasks),
+        trajectory_ids=tuple(TrajectoryID(base.id, index) for index in range(2)),
     )
     settings = HarborTaskSettings.from_config(
         OmegaConf.create(
@@ -701,7 +700,7 @@ async def test_strict_harbor_parser_masks_only_the_affected_response(task_inputs
 @pytest.mark.parametrize("phase", ["train", "eval"])
 async def test_harbor_concurrency_does_not_queue_gym_tasks(task_inputs, phase):
     config, request = task_inputs
-    base = LoweredTaskSpec.model_validate_json(request["env_extras"][0]["lowered_task_spec"]).task
+    base = request.rows[0].lowered.task
     tasks = [base.model_copy(update={"id": "harbor", "tags": ("harbor",)})] * 2 + [base]
     admitted = []
     active_harbor = 0
@@ -730,11 +729,10 @@ async def test_harbor_concurrency_does_not_queue_gym_tasks(task_inputs, phase):
         )
         for task in tasks[:2]
     ]
-    request.update(
-        prompts=request["prompts"] * 3,
-        env_classes=["taskcompendium"] * 3,
-        env_extras=[{"lowered_task_spec": lowered_task(task, "shellbox").model_dump_json()} for task in tasks],
-        trajectory_ids=[TrajectoryID(str(index), 0) for index in range(3)],
+    request = replace(
+        request,
+        rows=tuple(task_input(lowered_task(task)) for task in tasks),
+        trajectory_ids=tuple(TrajectoryID(str(index), 0) for index in range(3)),
         batch_metadata=BatchMetadata(0, phase),
     )
     worker = TaskRolloutWorker(
@@ -865,7 +863,11 @@ async def test_harbor_source_materialization_runs_without_the_original_directory
         ],
     )
     config, request = task_inputs
-    request.update(prompts=[prompt], env_classes=[env], env_extras=[extras], trajectory_ids=[TrajectoryID(uid, 0)])
+    request = replace(
+        request,
+        rows=(task_input(LoweredTaskSpec.model_validate_json(extras["lowered_task_spec"]), metric_class=env),),
+        trajectory_ids=(TrajectoryID(uid, 0),),
+    )
     worker = TaskRolloutWorker(
         config,
         WholeTaskProjection(config, Tokenizer()),

@@ -1,5 +1,4 @@
 from omegaconf import OmegaConf
-from rolloutengine.spec import LoweredTaskSpec
 from tests.cpu.task_specs import session_spec
 
 from skyrl_train.config.rollout_validation import EntrypointOperation
@@ -93,15 +92,12 @@ def test_terminal_bench_generate_builds_complete_evaluation_request(tmp_path):
 
     assert runner.events == ["startup", "start_eval generate 0", "run", "stop_eval", "shutdown"]
     assert runner.request is not None
-    assert [prompt[0]["content"] for prompt in runner.request["prompts"]] == ["task-a"] * 8 + ["task-b"] * 8
-    trajectory_ids = runner.request["trajectory_ids"]
+    assert [prompt[0]["content"] for prompt in runner.request.public_prompts] == ["task-a"] * 8 + ["task-b"] * 8
+    trajectory_ids = runner.request.trajectory_ids
     assert trajectory_ids is not None
     assert [trajectory_id.to_string() for trajectory_id in trajectory_ids] == [
         f"task-{task}_{repetition_id}" for task in ("a", "b") for repetition_id in range(8)
     ]
-    assert runner.request["env_classes"] == ["taskcompendium"] * 16
-    assert [
-        LoweredTaskSpec.model_validate_json(extra["lowered_task_spec"]).task.id
-        for extra in runner.request["env_extras"]
-    ] == (["task-a"] * 8 + ["task-b"] * 8)
-    assert runner.request["batch_metadata"] == BatchMetadata(global_step=0, training_phase="eval")
+    assert [row.metadata.metric_class for row in runner.request.rows] == ["taskcompendium"] * 16
+    assert [row.lowered.task.id for row in runner.request.rows] == (["task-a"] * 8 + ["task-b"] * 8)
+    assert runner.request.batch_metadata == BatchMetadata(global_step=0, training_phase="eval")

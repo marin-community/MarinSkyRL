@@ -71,9 +71,9 @@ class _WholeTrajectoryAccumulator:
     uids: List[str]
 
     def record(self, request: TrajectoryRequestBatch, batch: TrajectoryBatch, uids: List[str]) -> None:
-        validate_trajectory_batch(len(request["prompts"]), batch)
-        self.env_classes.extend(request["env_classes"])
-        self.data_sources.extend(extras.get("data_source") for extras in request["env_extras"])
+        validate_trajectory_batch(len(request.metadata), batch)
+        self.env_classes.extend(row.metric_class for row in request.metadata)
+        self.data_sources.extend(row.data_source for row in request.metadata)
         self.uids.extend(uids)
 
 
@@ -85,15 +85,13 @@ class _StepWiseAccumulator:
 
     def record(self, request: TrajectoryRequestBatch, batch: TrajectoryBatch, uids: List[str]) -> None:
         del uids
-        trajectory_ids = request.get("trajectory_ids")
+        trajectory_ids = request.trajectory_ids
         output_ids = batch.get("trajectory_ids")
         if trajectory_ids is None or output_ids is None:
             raise ValueError("step-wise evaluation requires trajectory IDs")
         inputs_by_id = {
-            trajectory_id.instance_id: (env_class, env_extra.get("data_source"))
-            for trajectory_id, env_class, env_extra in zip(
-                trajectory_ids, request["env_classes"], request["env_extras"]
-            )
+            trajectory_id.instance_id: (row.metric_class, row.data_source)
+            for trajectory_id, row in zip(trajectory_ids, request.metadata, strict=True)
         }
         for trajectory_id in output_ids:
             if trajectory_id.instance_id not in inputs_by_id:
@@ -133,7 +131,6 @@ async def _collect_evaluation_rollouts(
                 prompts,
                 cfg.generator.eval_n_samples_per_prompt,
                 get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.eval_sampling_params),
-                cfg.environment.env_class,
                 "eval",
                 global_step,
             )
@@ -159,7 +156,7 @@ async def _collect_evaluation_rollouts(
         env_classes=accumulator.env_classes,
         data_sources=accumulator.data_sources,
         uids=accumulator.uids,
-        example_prompt=last_request["prompts"][0],
+        example_prompt=last_request.public_prompts[0],
         example_batch=last_batch,
     )
 

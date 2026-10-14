@@ -88,12 +88,6 @@ class PromptDataset:
     def uid(self, index: int) -> str:
         return str(index)
 
-    def collate_fn(self, item_list):
-        all_inputs = []
-        for prompt, env_class, env_extras, item_uids in item_list:
-            all_inputs.append({"prompt": prompt, "env_class": env_class, "env_extras": env_extras, "uid": item_uids})
-        return all_inputs
-
     def __len__(self):
         return len(self.dataframe)
 

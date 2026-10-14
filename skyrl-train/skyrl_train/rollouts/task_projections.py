@@ -3,7 +3,6 @@
 from collections.abc import Sequence
 import copy
 from dataclasses import dataclass, replace
-import json
 
 import numpy as np
 from omegaconf import DictConfig
@@ -19,7 +18,7 @@ from skyrl_gym.task_records import grade_skipped, skipped_grade
 from rolloutengine.contracts import RolloutContractError, RolloutData
 
 from skyrl_train.error_treatment import ErrorTreatment
-from skyrl_train.dataset.tasks import LOWERED_TASK_COLUMN, TASKCOMPENDIUM_ENVIRONMENT
+from skyrl_train.dataset.tasks import TASKCOMPENDIUM_ENVIRONMENT
 from skyrl_train.distillation import INVALID_TOPK_INDEX
 from skyrl_train.metric_names import TASK_ROLLOUT_METRIC_PREFIX
 from skyrl_train.trajectory_runners.trajectory_processing import (
@@ -33,7 +32,7 @@ from skyrl_train.trajectory_runners.types import (
     RESPONSE_SPAN_TAGS_KEY,
     ROUTED_EXPERTS_KEY,
     TrajectoryBatch,
-    TrajectoryRequestBatch,
+    TaskRequestBatch,
 )
 from skyrl_train.utils.harbor_errors import (
     DEFAULT_ERROR_HANDLING_CONFIG,
@@ -241,7 +240,7 @@ class WholeTaskProjection:
     error_handling: ErrorHandlingConfig = DEFAULT_ERROR_HANDLING_CONFIG
     harbor_error_handling: ErrorHandlingConfig | None = None
 
-    def project(self, rollouts: Sequence[RolloutData], request: TrajectoryRequestBatch) -> TrajectoryBatch:
+    def project(self, rollouts: Sequence[RolloutData], request: TaskRequestBatch) -> TrajectoryBatch:
         required = logprobs_requested(request, self.runner_config)
         policies = _task_error_policies(request, self.error_handling, self.harbor_error_handling)
         decisions = [
@@ -249,7 +248,12 @@ class WholeTaskProjection:
             for rollout, policy in zip(rollouts, policies, strict=True)
         ]
         batch = _training_batch(
-            rollouts, decisions, required, self.runner_config, self.tokenizer, request.get("env_classes")
+            rollouts,
+            decisions,
+            required,
+            self.runner_config,
+            self.tokenizer,
+            [row.metadata.metric_class for row in request.rows],
         )
         _merge_task_metrics(batch, rollouts, request)
         return batch
@@ -264,8 +268,8 @@ class StepTaskProjection:
     error_handling: ErrorHandlingConfig = DEFAULT_ERROR_HANDLING_CONFIG
     harbor_error_handling: ErrorHandlingConfig | None = None
 
-    def project(self, rollouts: Sequence[RolloutData], request: TrajectoryRequestBatch) -> TrajectoryBatch:
-        trajectory_ids = request.get("trajectory_ids")
+    def project(self, rollouts: Sequence[RolloutData], request: TaskRequestBatch) -> TrajectoryBatch:
+        trajectory_ids = request.trajectory_ids
         if trajectory_ids is None:
             raise ValueError("Per-turn training samples require trajectory_ids")
         required = logprobs_requested(request, self.runner_config)
@@ -301,8 +305,8 @@ class StepTaskProjection:
         return batch
 
 
-def logprobs_requested(request: TrajectoryRequestBatch, runner_config: DictConfig) -> bool:
-    sampling_params = request.get("sampling_params")
+def logprobs_requested(request: TaskRequestBatch, runner_config: DictConfig) -> bool:
+    sampling_params = request.sampling_params
     if sampling_params is not None and "logprobs" in sampling_params:
         return sampling_params["logprobs"] is not None
     return runner_config.sampling_params.logprobs is not None
@@ -471,19 +475,14 @@ def _attach_span_tags(batch: TrajectoryBatch, rollouts: Sequence[RolloutData]) -
 
 
 def _task_error_policies(
-    request: TrajectoryRequestBatch, default: ErrorHandlingConfig, harbor: ErrorHandlingConfig | None
+    request: TaskRequestBatch, default: ErrorHandlingConfig, harbor: ErrorHandlingConfig | None
 ) -> list[ErrorHandlingConfig]:
     if harbor is None:
-        return [default] * len(request["prompts"])
-    return [
-        harbor if "harbor" in json.loads(extras[LOWERED_TASK_COLUMN])["task"]["tags"] else default
-        for extras in request["env_extras"]
-    ]
+        return [default] * len(request.rows)
+    return [harbor if "harbor" in row.lowered.task.tags else default for row in request.rows]
 
 
-def _merge_task_metrics(
-    batch: TrajectoryBatch, rollouts: Sequence[RolloutData], request: TrajectoryRequestBatch
-) -> None:
+def _merge_task_metrics(batch: TrajectoryBatch, rollouts: Sequence[RolloutData], request: TaskRequestBatch) -> None:
     """Count task evidence and preserve environment-specific metrics."""
     metrics = batch.get("rollout_metrics") or {}
     failed = [
@@ -511,9 +510,7 @@ def _merge_task_metrics(
     }
     metrics.update({f"{TASK_ROLLOUT_METRIC_PREFIX}{name}": float(value) for name, value in counters.items()})
     batch["rollout_metrics"] = metrics
-    environments = request.get("env_classes")
-    if environments is None:
-        return
+    environments = [row.metadata.metric_class for row in request.rows]
     for rollout, environment in zip(rollouts, environments, strict=True):
         if environment != TASKCOMPENDIUM_ENVIRONMENT:
             continue

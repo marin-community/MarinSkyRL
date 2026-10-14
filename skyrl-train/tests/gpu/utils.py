@@ -23,7 +23,12 @@ from skyrl_train.entrypoints.main_base import config_dir
 from skyrl_train.config.weight_sync_pause import resolve_weight_sync_pause_policy
 from skyrl_train.utils import get_ray_pg_ready_with_timeout
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
-from skyrl_train.trajectory_runners.base import TrajectoryRequestBatch, ConversationType
+from skyrl_train.trajectory_runners.base import ConversationType
+from skyrl_train.task_inputs import TaskInput, TrajectoryMetadata
+from skyrl_train.trajectory_runners.types import (
+    TaskRequestBatch,
+)
+from skyrl_train.dataset.tasks import source_row_task
 from skyrl_train.utils.utils import peer_access_supported, print_mem, initialize_ray, validate_cfg
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -287,39 +292,37 @@ def get_test_prompts(model: str, num_samples: int = 20) -> List[ConversationType
 
 def get_test_trajectory_request(
     model: str,
+    *,
+    environment_configs: dict,
     num_prompts: int = 20,
     n_samples_per_prompt: int = 1,
     max_prompt_length: int = 512,
     data_path: str = TEST_DATA_PATH,
     env_class: str = "gsm8k",
-):
+) -> TaskRequestBatch:
     tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
-    # Ensure pad_token is set correctly
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-
     dataset = PromptDataset(
         datasets=[data_path],
         tokenizer=tokenizer,
         max_prompt_length=max_prompt_length,
     )
-
-    prompts = []
-    env_extras = []
-    for i in range(min(num_prompts, len(dataset))):
-        prompt_data, _, env_extra, _ = dataset[i]  # dataset returns (messages, env_class, extra, uid)
-        prompts.extend([prompt_data] * n_samples_per_prompt)
-        env_extras.extend([env_extra] * n_samples_per_prompt)
-
-    env_classes = [env_class] * len(prompts)
-
-    input_batch: TrajectoryRequestBatch = {
-        "prompts": prompts,
-        "env_classes": env_classes,
-        "env_extras": env_extras,
-    }
-
-    return input_batch
+    rows = []
+    for index in range(min(num_prompts, len(dataset))):
+        prompt, _, extras, uid = dataset[index]
+        lowered = source_row_task(
+            {"prompt": prompt, "env_class": env_class, **extras},
+            index,
+            source_name="gpu-test",
+            environment_configs=environment_configs,
+        )
+        row = TaskInput(
+            lowered=lowered,
+            metadata=TrajectoryMetadata(uid=uid, metric_class=env_class, data_source=lowered.task.source.dataset),
+        )
+        rows.extend([row] * n_samples_per_prompt)
+    return TaskRequestBatch(rows=tuple(rows))
 
 
 def get_model_logits_from_actor(actor_group: PPORayActorGroup, input_sequences, attention_mask):

@@ -1,5 +1,9 @@
 """Task Parquet through canonical execution and the leased buffer writer."""
 
+from dataclasses import replace
+
+from taskcompendium.submission import conversation_messages
+
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
@@ -18,7 +22,7 @@ from skyrl_train.rollouts.buffer import RolloutLease, RolloutTask
 from skyrl_train.rollouts.task_worker import TaskRolloutWorker
 from skyrl_train.utils.harbor_errors import ErrorCategory, error_category
 from skyrl_gym.source_task import source_task
-from tests.cpu.task_specs import lowered_task
+from tests.cpu.task_specs import lowered_task, task_input
 from rolloutengine.contracts import RolloutContractError, SessionStart, Transition
 from skyrl_train.trajectory_runners.types import TokenProvenance, TrajectoryID
 from skyrl_train.trajectory_runners.model_clients import DirectModelClient, ModelServerError
@@ -46,8 +50,7 @@ async def test_protocol_replay_uses_raw_prefix_and_keeps_infrastructure_unscored
         {},
         Source(dataset="protocol", revision="1", row="case", importer_revision="1"),
     )
-    request["env_extras"] = [{"lowered_task_spec": lowered_task(task, "tool_protocol_replay").model_dump_json()}]
-    request["env_classes"] = ["tool_protocol_replay"]
+    request = replace(request, rows=(task_input(lowered_task(task, "tool_protocol_replay")),))
 
     class Client:
         async def generate(self, request):
@@ -103,13 +106,12 @@ async def test_session_verifier_failures_reach_training_eligibility(
 
     config, request = task_inputs
     task = source_task(
-        request["prompts"][0],
+        conversation_messages(request.rows[0].lowered.task.context.events),
         {},
         {},
         Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
     )
-    request["env_extras"] = [{"lowered_task_spec": lowered_task(task, "verifier").model_dump_json()}]
-    request["env_classes"] = ["verifier"]
+    request = replace(request, rows=(task_input(lowered_task(task, "verifier")),))
     worker = TaskRolloutWorker(
         config,
         projection_type(config, Tokenizer()),
@@ -156,7 +158,7 @@ async def test_task_replay_preserves_inference_session(task_inputs):
     try:
         await worker.generate(request)
         await worker.generate(request)
-        await worker.generate({**request, "trajectory_ids": [TrajectoryID("arithmetic", 1)]})
+        await worker.generate(replace(request, trajectory_ids=(TrajectoryID("arithmetic", 1),)))
     finally:
         await worker.shutdown()
     assert sessions == ["arithmetic_0", "arithmetic_0", "arithmetic_1"]
@@ -229,11 +231,8 @@ async def test_model_programming_failure_does_not_commit_a_partial_group(task_in
 
     writer = Writer()
     config, request = task_inputs
-    request.update(
-        prompts=request["prompts"] * 2,
-        env_classes=request["env_classes"] * 2,
-        env_extras=request["env_extras"] * 2,
-        trajectory_ids=[TrajectoryID("arithmetic", index) for index in range(2)],
+    request = replace(
+        request, rows=request.rows * 2, trajectory_ids=tuple(TrajectoryID("arithmetic", index) for index in range(2))
     )
     runner = TaskRolloutWorker(
         config,
@@ -255,12 +254,12 @@ async def test_task_programming_failure_does_not_commit_a_masked_group(task_inpu
     config, request = task_inputs
     config.error_handling = {"enable_error_classification": True, "default_error_treatment": "mask"}
     task = source_task(
-        request["prompts"][0],
+        conversation_messages(request.rows[0].lowered.task.context.events),
         {},
         {},
         Source(dataset="programming-failure", revision="1", row="0", importer_revision="1"),
     )
-    request["env_extras"] = [{"lowered_task_spec": lowered_task(task, "fixture").model_dump_json()}]
+    request = replace(request, rows=(task_input(lowered_task(task, "fixture")),))
     closed = []
 
     class Session:
@@ -271,7 +270,7 @@ async def test_task_programming_failure_does_not_commit_a_masked_group(task_inpu
         async def prepare(self):
             if operation == "prepare":
                 raise error_type("Invalid session implementation")
-            return SessionStart(tuple(request["prompts"][0]), {})
+            return SessionStart(tuple(request.public_prompts[0]), {})
 
         async def advance(self, turn):
             if operation == "advance":
@@ -328,16 +327,11 @@ async def test_model_template_failure_is_masked_without_losing_its_graded_peer(
         {},
         Source(dataset="template", revision="1", row="0", importer_revision="1"),
     )
-    request = {
-        **original,
-        "prompts": [prompt, original["prompts"][0]],
-        "env_classes": ["gsm8k", "taskcompendium"],
-        "env_extras": [
-            {"lowered_task_spec": lowered_task(failed, "gsm8k").model_dump_json(), "teacher_route": "template"},
-            original["env_extras"][0],
-        ],
-        "trajectory_ids": [TrajectoryID(failed.id, 0), TrajectoryID("arithmetic", 0)],
-    }
+    request = replace(
+        original,
+        rows=(task_input(lowered_task(failed, "gsm8k"), teacher_route="template"), original.rows[0]),
+        trajectory_ids=(TrajectoryID(failed.id, 0), TrajectoryID("arithmetic", 0)),
+    )
     worker = TaskRolloutWorker(config, projection_type(config, Tokenizer()), TemplateClient(), {}, shutdown_timeout=30)
     writer = Writer()
     try:
@@ -390,7 +384,7 @@ async def test_interrupted_tasks_keep_verified_turns_and_apply_training_policy(
         async def prepare(self):
             if phase == "prepare":
                 raise TimeoutError("private initialization details")
-            return SessionStart(tuple(request["prompts"][0]), {})
+            return SessionStart(tuple(request.public_prompts[0]), {})
 
         async def advance(self, turn):
             self.turn += 1
@@ -437,14 +431,13 @@ async def test_interrupted_tasks_keep_verified_turns_and_apply_training_policy(
         "preserve_logprobs_on_timeout": preserve,
     }
     task = source_task(
-        request["prompts"][0],
+        conversation_messages(request.rows[0].lowered.task.context.events),
         {},
         {},
         Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
     )
-    request["env_extras"] = [{"lowered_task_spec": lowered_task(task, "interrupted").model_dump_json()}]
-    request["env_classes"] = ["interrupted"]
-    request["sampling_params"] = {"max_tokens": 3}
+    request = replace(request, rows=(task_input(lowered_task(task, "interrupted")),))
+    request = replace(request, sampling_params={"max_tokens": 3})
     worker = TaskRolloutWorker(
         config,
         projection_type(config, Tokenizer()),
@@ -506,12 +499,12 @@ async def test_invalid_model_evidence_aborts_the_group_even_with_error_masking(t
     config, request = task_inputs
     config.error_handling = {"enable_error_classification": True, "default_error_treatment": "mask"}
     task = source_task(
-        request["prompts"][0],
+        conversation_messages(request.rows[0].lowered.task.context.events),
         {"reward_spec": {"ground_truth": "12"}},
         {},
         Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
     )
-    request["env_extras"] = [{"lowered_task_spec": lowered_task(task, "gsm8k_multi_turn").model_dump_json()}]
+    request = replace(request, rows=(task_input(lowered_task(task, "gsm8k_multi_turn")),))
     worker = TaskRolloutWorker(
         config,
         WholeTaskProjection(config, Tokenizer()),
@@ -562,7 +555,7 @@ async def test_native_rewards_and_credit_remain_aligned_across_tool_observations
             self.grades = []
 
         async def prepare(self):
-            return SessionStart(tuple(request["prompts"][0]), {})
+            return SessionStart(tuple(request.public_prompts[0]), {})
 
         async def advance(self, turn):
             self.turn += 1
@@ -586,12 +579,12 @@ async def test_native_rewards_and_credit_remain_aligned_across_tool_observations
 
     config, request = task_inputs
     task = source_task(
-        request["prompts"][0],
+        conversation_messages(request.rows[0].lowered.task.context.events),
         {},
         {},
         Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
     )
-    request["env_extras"] = [{"lowered_task_spec": lowered_task(task, "credit").model_dump_json()}]
+    request = replace(request, rows=(task_input(lowered_task(task, "credit")),))
     runner = TaskRolloutWorker(
         config,
         projection_type(config, Tokenizer()),
@@ -617,15 +610,12 @@ async def test_native_rewards_and_credit_remain_aligned_across_tool_observations
 async def test_step_projection_preserves_served_prompts_grades_and_teacher_routes(task_inputs):
     config, request = task_inputs
     task = source_task(
-        request["prompts"][0],
+        conversation_messages(request.rows[0].lowered.task.context.events),
         extras={"reward_spec": {"ground_truth": "12"}},
         config={},
         source=Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
     )
-    request["env_extras"] = [
-        {"lowered_task_spec": lowered_task(task, "gsm8k_multi_turn").model_dump_json(), "teacher_route": "arithmetic"}
-    ]
-    request["env_classes"] = ["gsm8k_multi_turn"]
+    request = replace(request, rows=(task_input(lowered_task(task, "gsm8k_multi_turn"), teacher_route="arithmetic"),))
     runner = TaskRolloutWorker(
         config,
         StepTaskProjection(config, Tokenizer()),

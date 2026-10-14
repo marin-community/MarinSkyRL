@@ -173,10 +173,8 @@ class ProbeCollector:
                         trainer.cfg.generator.backend, trainer.cfg.generator.sampling_params
                     )
                     sampling["seed"] = seed
-                    request, _ = prepare_trajectory_request(
-                        [prompt], 1, sampling, trainer.cfg.environment.env_class, "eval", 0
-                    )
-                    request["trajectory_ids"][0].repetition_id = repetition
+                    request, _ = prepare_trajectory_request([prompt], 1, sampling, "eval", 0)
+                    request.trajectory_ids[0].repetition_id = repetition
                     batch = await trainer.trajectory_runner.run(request)
                     batches.append(batch)
                     seeds.append(seed)

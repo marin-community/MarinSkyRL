@@ -322,5 +322,5 @@ class RolloutWorkerPool:
 
 
 def _training_phase(input_batch: TrajectoryRequestBatch) -> TrainingPhase:
-    metadata = input_batch.get("batch_metadata")
+    metadata = input_batch.batch_metadata
     return metadata.training_phase if metadata is not None else "train"

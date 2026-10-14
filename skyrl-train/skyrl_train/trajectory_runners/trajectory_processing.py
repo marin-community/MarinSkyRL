@@ -3,12 +3,15 @@ from collections import defaultdict
 from enum import StrEnum
 import numpy as np
 from skyrl_train.group_admission import group_is_fully_excluded_from_training
+from skyrl_train.task_inputs import TaskInput, PreferenceInput
 from skyrl_train.trajectory_runners.types import (
     TrajectoryBatch,
     TrajectoryRequestBatch,
     TrajectoryID,
     BatchMetadata,
     TrainingPhase,
+    TaskRequestBatch,
+    PreferenceRequestBatch,
 )
 from skyrl_train.trajectory_runners.trajectory_retention import RETENTION_METRIC_PREFIX
 from skyrl_train.metric_names import (
@@ -706,59 +709,39 @@ def get_batch_failure_metrics(
 
 
 def prepare_trajectory_request(
-    prompts: List[Any],
+    rows: List[dict],
     n_samples_per_prompt: int,
     sampling_params: Dict[str, Any],
-    default_env_class: str,
     training_phase: TrainingPhase,
     global_step: int,
 ) -> Tuple[TrajectoryRequestBatch, List[str]]:
-    """Prepare a trajectory request for training and eval
-
-    Args:
-        prompts (List[Any]): list of prompts
-        n_samples_per_prompt (int): how many samples to create per prompt
-        sampling_params (Dict[str, Any]): sampling parameters
-        default_env_class (str): env class to use if env class missing from prompts
-        training_phase (TrainingPhase): training or eval
-        global_step (int): current global step
-
-    Returns:
-        Tuple[TrajectoryRequestBatch, List[str]]: trajectory request and list of uuids
-    """
-
-    all_prompts = [prompt["prompt"] for prompt in prompts for _ in range(n_samples_per_prompt)]
-
-    all_envs = [
-        prompt["env_class"] if prompt["env_class"] is not None else default_env_class
-        for prompt in prompts
-        for _ in range(n_samples_per_prompt)
-    ]
-
-    # all the other columns are env_extras
-    env_extras = [prompt["env_extras"] for prompt in prompts for _ in range(n_samples_per_prompt)]
-
-    # Create TrajectoryID objects - one UID per row, repetition_id for multiple samples
-    trajectory_ids = []
-    uids = []
-    for _, prompt in enumerate(prompts):
-        uid: str = prompt["uid"]
-
-        # Create TrajectoryID for each repetition
-        for repetition_id in range(n_samples_per_prompt):
-            trajectory_ids.append(TrajectoryID(instance_id=uid, repetition_id=repetition_id))
-            uids.append(uid)
-
-    trajectory_request: TrajectoryRequestBatch = {
-        "prompts": all_prompts,
-        "env_classes": all_envs,
-        "env_extras": env_extras,
-        "sampling_params": sampling_params,
-        "trajectory_ids": trajectory_ids,
-        "batch_metadata": BatchMetadata(global_step=global_step, training_phase=training_phase),
-    }
-
-    return trajectory_request, uids
+    """Return repeated typed inputs with attempt IDs and one UID per repeated input."""
+    inputs = tuple(row["input"] for row in rows for _ in range(n_samples_per_prompt))
+    trajectory_ids = tuple(
+        TrajectoryID(instance_id=row["input"].metadata.uid, repetition_id=repetition)
+        for row in rows
+        for repetition in range(n_samples_per_prompt)
+    )
+    metadata = BatchMetadata(global_step=global_step, training_phase=training_phase)
+    if all(isinstance(row, TaskInput) for row in inputs):
+        request = TaskRequestBatch(
+            rows=inputs,
+            sampling_params=sampling_params,
+            trajectory_ids=trajectory_ids,
+            batch_metadata=metadata,
+        )
+    elif all(isinstance(row, PreferenceInput) for row in inputs):
+        request = PreferenceRequestBatch(
+            prompts=tuple(row.prompt for row in inputs),
+            preferences=tuple(row.preference for row in inputs),
+            metadata=tuple(row.metadata for row in inputs),
+            sampling_params=sampling_params,
+            trajectory_ids=trajectory_ids,
+            batch_metadata=metadata,
+        )
+    else:
+        raise TypeError("A request must contain TaskInput rows or static PreferenceInput rows, not a mixture")
+    return request, [item.instance_id for item in trajectory_ids]
 
 
 def _re_sentinel_rows(n: int, sentinel_row: np.ndarray) -> np.ndarray:
