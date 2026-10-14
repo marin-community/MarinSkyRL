@@ -130,7 +130,17 @@ def test_prompt_dataset_filtering_counts_batch_encoding_input_ids(mock_load_data
 def test_native_tasks_with_different_extras_preserve_each_row(tmp_path, num_workers, reverse):
     rows = [
         {
-            "prompt": [{"role": "user", "content": "First question"}],
+            "prompt": [
+                {"role": "user", "content": "First question"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"id": "call-1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}
+                    ],
+                },
+                {"role": "tool", "content": "Result", "tool_call_id": "call-1"},
+            ],
             "env_class": "gsm8k",
             "reward_spec": {"ground_truth": "1"},
             "prompt_token_ids": [17, 23],

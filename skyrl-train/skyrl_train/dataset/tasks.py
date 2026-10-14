@@ -56,7 +56,7 @@ class TaskDataset(PromptDataset):
     """Render public conversation fields and retain private lowered tasks for workers."""
 
     def prepare_dataset(self, dataset):
-        return dataset.map(_stored_task_prompt, num_proc=self.num_workers)
+        return dataset.map(_stored_task_prompt, num_proc=self.num_workers).with_transform(_restore_task_prompts)
 
     def __getitem__(self, item):
         messages, environment, extras, uid = super().__getitem__(item)
@@ -70,7 +70,15 @@ def _stored_task_prompt(row: dict) -> dict:
     prepared = task_prompt(LoweredTaskSpec.model_validate_json(row[LOWERED_TASK_COLUMN]))
     # Session-specific extras stay in the serialized task: mixed task families
     # do not share an Arrow schema. Restore them when yielding a training row.
-    return {key: prepared[key] for key in (LOWERED_TASK_COLUMN, "prompt", "env_class", "data_source", "group_grader")}
+    stored = {key: prepared[key] for key in (LOWERED_TASK_COLUMN, "env_class", "data_source", "group_grader")}
+    # Message fields vary across tasks. JSON preserves missing fields and nested
+    # values without inferring a different Arrow struct in each map worker.
+    stored["prompt"] = json.dumps(prepared["prompt"], ensure_ascii=False)
+    return stored
+
+
+def _restore_task_prompts(batch: dict) -> dict:
+    return {**batch, "prompt": [json.loads(prompt) for prompt in batch["prompt"]]}
 
 
 def source_row_task(
