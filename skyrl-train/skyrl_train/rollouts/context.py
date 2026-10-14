@@ -70,10 +70,16 @@ class RolloutRequestSpec:
             environment_class=config.environment.env_class,
         )
 
-    def request(self, prompt: dict, policy_step: int) -> TrajectoryRequestBatch:
+    def request(self, prompt: dict, policy_step: int, *, batch_id: int | None = None) -> TrajectoryRequestBatch:
         request, _ = prepare_trajectory_request(
-            [prompt], self.samples_per_prompt, self.sampling_params, self.environment_class, "train", policy_step
+            [prompt],
+            self.samples_per_prompt,
+            self.sampling_params,
+            self.environment_class,
+            "train",
+            policy_step if batch_id is None else batch_id,
         )
+        request["batch_metadata"].generating_policy_step = policy_step
         return request
 
 
@@ -225,9 +231,16 @@ class TrainingContext:
         await asyncio.gather(*tasks, return_exceptions=True)
         ray.kill(self._buffer)
 
-    async def publish(self, policy_step: int) -> None:
-        """Acknowledge the previous batch and lease rollouts at ``policy_step``, whose weights are now live."""
-        await self._until_failure(self._buffer.publish.remote(policy_step))
+    async def publish(self, policy_step: int, *, sampler_policy_step: int | None = None) -> None:
+        """Acknowledge the learner batch and lease rollouts using the live ``sampler_policy_step`` weights.
+
+        Fresh sampling defaults to ``policy_step``; a frozen sampler can name an older weight version separately.
+        """
+        if sampler_policy_step is None:
+            publication = self._buffer.publish.remote(policy_step)
+        else:
+            publication = self._buffer.publish.remote(policy_step, sampler_policy_step=sampler_policy_step)
+        await self._until_failure(publication)
         self._policy_step = policy_step
 
     async def next_batch(
@@ -377,7 +390,9 @@ class TrainingContext:
                     async with self._uids_released:
                         prompt = await self._uids_released.wait_for(lambda: self.loader.next_prompt(self._live_uids))
                         self._live_uids[prompt["uid"]] += 1
-                task = RolloutTask(lease, prompt, self._request_spec.request(prompt, lease.policy_step))
+                task = RolloutTask(
+                    lease, prompt, self._request_spec.request(prompt, lease.policy_step, batch_id=lease.batch_id)
+                )
                 self._in_flight[lease.lease_id] = task
                 running = asyncio.create_task(self._run(task))
                 self._running.add(running)

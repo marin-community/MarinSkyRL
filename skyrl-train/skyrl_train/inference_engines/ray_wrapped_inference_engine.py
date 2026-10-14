@@ -352,6 +352,9 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def finish_weight_reload(self):
         return await self.inference_engine_actor.finish_weight_reload.remote()
 
+    async def sampler_noise(self, action: str, scale: float, seed: int):
+        return await self.inference_engine_actor.sampler_noise.remote(action, scale, seed)
+
     async def teardown(self):
         return await self.inference_engine_actor.teardown.remote()
 

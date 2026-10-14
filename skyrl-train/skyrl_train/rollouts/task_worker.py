@@ -470,7 +470,10 @@ class TaskRolloutWorkerSpec:
         harbor = None if self.harbor_config is None else HarborTaskSettings.from_config(self.harbor_config)
         runner_config = self.config.generator
         client_config = OmegaConf.merge(self.config, {"generator": {"enable_http_endpoint": False}})
-        client = DirectModelClient(InferenceEngineClient(self.engines, tokenizer, client_config))
+        client = DirectModelClient(
+            InferenceEngineClient(self.engines, tokenizer, client_config),
+            preserve_full_response_text=runner_config.get("preserve_full_response_text", False),
+        )
         factories: dict[str, MachineFactory] = {"shellsim": ShellSimMachineFactory()}
         skopeo = shutil.which(str(Path(self.config.trajectory_runner.skopeo).expanduser()))
         if shutil.which("docker") is not None and skopeo is not None:

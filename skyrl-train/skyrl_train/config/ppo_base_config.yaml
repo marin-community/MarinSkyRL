@@ -199,6 +199,7 @@ trainer:
     use_entropy_loss: false
     entropy_loss_coef: 0.01
     advantage_batch_normalize: false
+    reference_binary_rewards: false
     value_head_prefix: "value_head"
     policy_loss_type: "regular"
     # FTPOConfig owns the defaults; set policy_loss_type=ftpo to activate.
@@ -351,6 +352,7 @@ trainer:
   logger: "wandb"
   tracker_commit_each_step: true
   dump_data_batch: false
+  dump_data_batch_rows: null
   dump_eval_results: true
   log_level: "INFO"
 
@@ -361,6 +363,12 @@ trainer:
 
 
 generator:
+  # Research branch: fixed INITIAL-weight Gaussian delta, independently of trainer weights.
+  sampler_weight_noise_scale: 0.0
+  sampler_weight_noise_seed: ${trainer.seed}
+  sampler_refresh_period: 1
+  # Some task graders (including the released Countdown recipe) grade the full completion.
+  preserve_full_response_text: false
   model_name: ${trainer.policy.model.path}
   model_dtype: "bfloat16"
   timeout_multiplier: 1.0
@@ -517,6 +525,9 @@ generator:
     required: false
     publish_timeout_seconds: 120
     shutdown_timeout_seconds: 30
+    reuse_publication_process: false
+    append_only: false
+    publication_retries: 0
     redact_fields: []
     model_path: ${trainer.policy.model.path}
     model_source_identity: ${trainer.policy.model.source_identity}

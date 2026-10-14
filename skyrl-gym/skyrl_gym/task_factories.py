@@ -11,6 +11,7 @@ from rolloutengine.spec import LoweredTaskSpec
 from skyrl_gym.answer_tasks import (
     grade_aime,
     grade_cat_count,
+    grade_countdown_reference,
     grade_gsm8k,
     grade_ifeval,
     grade_mcq,
@@ -36,6 +37,7 @@ def session_factories(
     answer_graders = {
         "aime": grade_aime,
         "cat_count": grade_cat_count,
+        "countdown_reference": grade_countdown_reference,
         "gsm8k": grade_gsm8k,
         "ifeval": grade_ifeval,
         "mcq": grade_mcq,

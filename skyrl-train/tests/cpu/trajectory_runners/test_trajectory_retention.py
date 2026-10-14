@@ -3,6 +3,7 @@ import base64
 from skyrl_gym.verification import VerificationResult
 import gzip
 import json
+import os
 from pathlib import Path
 import asyncio
 import threading
@@ -701,6 +702,32 @@ def test_sample_count_is_global_and_order_independent_across_async_completions(t
     assert retained_ids[0] == retained_ids[1]
 
 
+@pytest.mark.parametrize("phase,step,version", [("train", 7, 6), ("eval", 7, 7), ("eval", 0, 0)])
+def test_evaluation_provenance_names_the_completed_policy_update(phase, step, version):
+    record = build_trajectory_records(
+        _input(step=step, phase=phase),
+        _output(),
+        _config(Path("/unused"), phases=["train", "eval"]),
+        _Tokenizer(),
+        runner_name="TaskRolloutWorker",
+    )[0].to_json()
+    assert record["provenance"]["model_version_step"] == version
+    assert record["global_step"] == step
+
+
+def test_stale_sampler_records_keep_learner_updates_distinct_from_generating_versions(tmp_path):
+    sink = _sink(_config(tmp_path, sample_count_per_step=0, sample_fraction=1.0))
+    for step in (194, 195):
+        request = _input(step=step)
+        request["batch_metadata"].generating_policy_step = 131
+        sink.retain(request, _output())
+    sink.close()
+    records = _records(tmp_path)
+    assert {record["global_step"] for record in records} == {194, 195}
+    assert {record["provenance"]["model_version_step"] for record in records} == {130}
+    assert len({record["record_id"] for record in records}) == 6
+
+
 def test_record_contains_replay_provenance_and_trainable_boundaries():
     record = build_trajectory_records(
         _input(),
@@ -748,17 +775,46 @@ def test_disabled_sink_is_a_noop(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
-def test_storage_worker_is_terminated_at_the_publication_deadline():
+@pytest.mark.parametrize("reuse", [False, True])
+def test_storage_worker_is_terminated_at_the_publication_deadline(reuse):
     publisher = ProcessTrajectoryPublisher(
         _never_finishes,
         publish_timeout_seconds=0.05,
         shutdown_timeout_seconds=0.05,
+        reuse_process=reuse,
     )
 
-    result = publisher.execute(PublicationRequest("blocked", PublicationOperation.PUBLISH, "/unused"))
+    result = publisher.execute(
+        PublicationRequest("blocked", PublicationOperation.PUBLISH, "/unused", archives={"large.zip": b"x" * 8_000_000})
+    )
 
     assert result.timed_out
     assert result.error is not None
+
+
+def _exit_without_result(request):
+    os._exit(23)
+
+
+@pytest.mark.parametrize("reuse", [False, True])
+def test_storage_worker_exit_is_reported_to_execute_and_submit(tmp_path, reuse):
+    publisher = ProcessTrajectoryPublisher(
+        _exit_without_result,
+        publish_timeout_seconds=120,
+        shutdown_timeout_seconds=30,
+        reuse_process=reuse,
+    )
+    request = PublicationRequest("worker-exit", PublicationOperation.PUBLISH, str(tmp_path), record_count=1)
+    try:
+        result = publisher.execute(request)
+        assert result.request_id == request.request_id and result.record_count == 1
+        assert result.error is not None and not result.timed_out
+        assert publisher.submit(request)
+        result = publisher.close()
+        assert result is not None and result.request_id == request.request_id
+        assert result.error is not None and not result.timed_out
+    finally:
+        publisher.close()
 
 
 def test_storage_worker_process_writes_archives_and_returns_the_ledger(tmp_path):
@@ -781,6 +837,75 @@ def test_storage_worker_process_writes_archives_and_returns_the_ledger(tmp_path)
     assert result.error is None
     assert result.ledger == _empty_ledger()
     assert (tmp_path / "archive.zip").read_bytes() == b"payload"
+
+
+@pytest.mark.parametrize("append_only", [False, True])
+def test_reused_storage_worker_publishes_multiple_archives_without_losing_records(tmp_path, append_only):
+    config = _config(
+        tmp_path,
+        reuse_publication_process=True,
+        append_only=append_only,
+        sample_count_per_step=0,
+        sample_fraction=1.0,
+        max_bytes_per_step=None,
+        max_bytes_per_run=None,
+    )
+    sink = _sink(
+        config,
+        publisher=ProcessTrajectoryPublisher(
+            execute_publication, publish_timeout_seconds=120, shutdown_timeout_seconds=30, reuse_process=True
+        ),
+    )
+    try:
+        for step in (7, 8, 9):
+            metrics = sink.retain(_input(step=step), _output())
+            assert metrics["generate/trajectory_retention/written"] == 3
+    finally:
+        sink.close()
+    records = _records(tmp_path)
+    assert len(records) == 9
+    assert {record["global_step"] for record in records} == {7, 8, 9}
+    # Rebuild from committed archives and avoid publishing the same records again.
+    resumed = _sink(config)
+    try:
+        metrics = resumed.retain(_input(step=7), _output())
+        assert metrics["generate/trajectory_retention/duplicates"] == 3
+        assert metrics["generate/trajectory_retention/written"] == 0
+    finally:
+        resumed.close()
+    assert len(_records(tmp_path)) == 9
+
+
+def test_required_append_only_publication_recovers_lost_ack_without_duplicate_records(tmp_path):
+    class LostAcknowledgementPublisher(InlineTrajectoryPublisher):
+        lost_ack = False
+
+        def execute(self, request):
+            result = super().execute(request)
+            if request.operation is PublicationOperation.PUBLISH and not self.lost_ack:
+                self.lost_ack = True
+                return PublicationResult(
+                    request.request_id, request.record_count, error="lost acknowledgement", timed_out=True
+                )
+            return result
+
+    config = _config(
+        tmp_path,
+        append_only=True,
+        publication_retries=1,
+        sample_fraction=1.0,
+        sample_count_per_step=0,
+        max_bytes_per_step=None,
+        max_bytes_per_run=None,
+    )
+    sink = _sink(config, publisher=LostAcknowledgementPublisher(execute_publication))
+    try:
+        metrics = sink.retain(_input(), _output())
+    finally:
+        sink.close()
+    assert metrics["generate/trajectory_retention/written"] == 3
+    assert metrics["generate/trajectory_retention/publish_timeouts"] == 1
+    assert len(_records(tmp_path)) == 3
 
 
 def test_initialization_reconciles_archive_written_before_ledger_commit(tmp_path):

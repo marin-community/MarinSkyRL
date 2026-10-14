@@ -7,6 +7,7 @@ import pytest
 from jinja2 import TemplateError
 from omegaconf import OmegaConf
 from rolloutengine.contracts import ModelTurn
+from skyrl_gym.countdown_reference import compute_reward as countdown_reward
 from skyrl_gym.source_task import source_task
 from skyrl_gym.task_sessions import SearchTaskSession
 from taskcompendium.models import Source
@@ -75,6 +76,37 @@ async def test_chat_answer_omits_stop_text_but_keeps_stop_token_evidence(load_to
     assert result["assistant_messages"] == [{"role": "assistant", "content": "20"}]
     assert result["response_ids"] == [tokens]
     assert result["response_logprobs"] == [[-0.5] * len(tokens)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("preserve,expected_reward", [(False, 0.0), (True, 1.0)])
+async def test_full_completion_grading_preserves_answer_inside_unfinished_thinking(
+    load_tokenizer, preserve, expected_reward
+):
+    tokenizer = load_tokenizer("Qwen/Qwen3-0.6B", revision="c1899de")
+    text = "<thinking>Trying arithmetic.\n<answer> (96 + 36) + (95 + 25) </answer>"
+    tokens = tokenizer.encode(text + "<|im_end|>", add_special_tokens=False)
+    engine = AsyncMock()
+    engine.model_name = "qwen"
+    engine.tokenizer = tokenizer
+    engine.tokenize.return_value = {"tokens": [1, 2]}
+    engine.chat_completion.return_value = {
+        "choices": [
+            {
+                "message": {"role": "assistant", "content": text},
+                "finish_reason": "stop",
+                "token_ids": tokens,
+                "logprobs": {"content": [{"logprob": -0.5} for _ in tokens]},
+            }
+        ]
+    }
+    result = await DirectModelClient(engine, preserve_full_response_text=preserve).generate(
+        {"prompts": [[{"role": "user", "content": "Use 25,36,95,96 to make252"}]], "chat_completion_params": [{}]}
+    )
+    assert countdown_reward(result["responses"][0], [25, 36, 95, 96], 252) == expected_reward
+    assert result["response_ids"] == [tokens]
+    assert result["response_logprobs"] == [[-0.5] * len(tokens)]
+    assert result["assistant_messages"] == [{"role": "assistant", "content": text}]
 
 
 @pytest.mark.asyncio
@@ -623,16 +655,18 @@ async def test_chat_grading_recovers_reasoning_boundaries_without_changing_repla
 
 
 @pytest.mark.asyncio
-async def test_chat_output_budget_fits_the_exact_backend_rendered_prompt():
+@pytest.mark.parametrize("prompt_length,total_limit,response_limit", [(4, 5, 3), (129, 512, 512), (134, 512, 512)])
+async def test_chat_output_budget_fits_the_exact_backend_rendered_prompt(prompt_length, total_limit, response_limit):
     engine = AsyncMock()
     engine.model_name = "snowball"
     engine.tokenizer = MagicMock()
     engine.tokenizer.decode.return_value = "7"
-    engine.tokenize.return_value = {"tokens": [1, 2, 3, 4]}
+    prompt_tokens = list(range(1, prompt_length + 1))
+    engine.tokenize.return_value = {"tokens": prompt_tokens}
 
     async def serve(request):
         tokens = request["json"]["max_completion_tokens"]
-        assert tokens == 1
+        assert tokens == total_limit - prompt_length
         return {
             "choices": [{"message": {"role": "assistant", "content": "7"}, "finish_reason": "stop", "token_ids": [7]}]
         }
@@ -641,14 +675,14 @@ async def test_chat_output_budget_fits_the_exact_backend_rendered_prompt():
     result = await DirectModelClient(engine).generate(
         {
             "prompts": [[{"role": "user", "content": "a correction prompt"}]],
-            "chat_completion_params": [{"max_output_tokens": 3}],
-            "sampling_params": {"max_generate_length": 3},
-            "max_context_length": 5,
+            "chat_completion_params": [{"max_output_tokens": response_limit}],
+            "sampling_params": {"max_generate_length": response_limit},
+            "max_context_length": total_limit,
         }
     )
     assert result["responses"] == ["7"]
-    assert result["prompt_ids"] == [[1, 2, 3, 4]]
-    assert result["generation_token_budgets"] == [1]
+    assert result["prompt_ids"] == [prompt_tokens]
+    assert result["generation_token_budgets"] == [total_limit - prompt_length]
 
 
 @pytest.mark.asyncio

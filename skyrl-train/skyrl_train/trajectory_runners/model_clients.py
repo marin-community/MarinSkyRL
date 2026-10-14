@@ -173,8 +173,9 @@ async def _render_chat_prompt(
 class DirectModelClient:
     """Delegate model requests to the colocated inference-engine client."""
 
-    def __init__(self, inference_engine_client: InferenceEngineClient):
+    def __init__(self, inference_engine_client: InferenceEngineClient, *, preserve_full_response_text: bool = False):
         self._client = inference_engine_client
+        self._preserve_full_response_text = preserve_full_response_text
 
     async def generate(self, request: InferenceEngineInput) -> ModelClientOutput:
         if request.get("chat_completion_params") is not None:
@@ -305,7 +306,9 @@ class DirectModelClient:
                 if message.get("content") is not None:
                     message = {**message, "content": text}
             decoded = tokenizer.decode(semantic_ids, skip_special_tokens=False)
-            if any(marker in decoded for pair in REASONING_DELIMITERS for marker in pair):
+            if self._preserve_full_response_text:
+                text = decoded
+            elif any(marker in decoded for pair in REASONING_DELIMITERS for marker in pair):
                 text = final_answer_text(decoded)
             logprob_items = (choice.get("logprobs") or {}).get("content")
             response_logprobs = (

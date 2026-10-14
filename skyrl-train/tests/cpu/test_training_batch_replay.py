@@ -1,5 +1,6 @@
 import copy
 import json
+import pickle
 from pathlib import Path
 from types import MethodType
 
@@ -66,6 +67,31 @@ def _bare_trainer(trainer_type):
 
     trainer._drain_policy_event_loops = MethodType(drain_policy_event_loops, trainer)
     return trainer, events
+
+
+def test_bounded_learner_dump_preserves_token_evidence_and_training_metrics(tmp_path: Path):
+    trainer, _ = _bare_trainer(RayPPOTrainer)
+    trainer.cfg.trainer.export_path = str(tmp_path)
+    trainer.cfg.trainer.dump_data_batch = True
+    trainer.cfg.trainer.dump_data_batch_rows = 1
+    trainer.global_step = 7
+    trainer._training_metrics_enabled = False
+    original = _batch()
+    metadata = copy.deepcopy(original.metadata)
+
+    trainer.dump_data(original, "step-7")
+    loaded = pickle.loads((tmp_path / "dumped_data" / "step-7.pkl").read_bytes())
+    for key in original:
+        torch.testing.assert_close(loaded[key], original[key][:1], rtol=0, atol=0)
+    assert loaded.metadata["source_batch_size"] == 2
+    assert loaded.metadata["retained_row_indices"] == [0]
+    assert loaded.metadata["global_step"] == 7
+    assert original.metadata == metadata
+    assert original.batch_size == 2
+
+    metrics = {"policy/grad_norm": 0.25, "policy/policy_update_steps": 1.0}
+    trainer._log_metrics_stdout(metrics, step=7, kind="train")
+    assert json.loads((tmp_path / "training_metrics" / "train-00000007.json").read_text()) == metrics
 
 
 def test_training_batch_artifact_round_trips_tensors_metadata_and_manifest(tmp_path: Path):

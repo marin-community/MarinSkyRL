@@ -2,6 +2,7 @@ import asyncio
 from dataclasses import replace
 import io as stdlib_io
 import json
+import pickle
 import math
 import os
 import re
@@ -11,7 +12,6 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 from jaxtyping import Float
-from pathlib import Path
 import ray
 from ray import ObjectRef
 import torch
@@ -286,6 +286,8 @@ class RayPPOTrainer:
 
     # Set at startup when generator.weight_sync_transport is expert_block.
     _expert_block_sync: ExpertBlockSync | None = None
+    _sampler_noise_initialized: bool = False
+    _sampler_refresh_step: int = 0
 
     _training_metrics_enabled: bool = False
     _rollout_spans_enabled: bool = False
@@ -312,6 +314,16 @@ class RayPPOTrainer:
             cfg.trainer.algorithm.resolved_group_advantage
         )
         self.colocate_all = cfg.trainer.placement.colocate_all
+        refresh_period = cfg.generator.get("sampler_refresh_period", 1)
+        if refresh_period < 1:
+            raise ValueError("sampler_refresh_period must be positive")
+        if refresh_period > 1 and (
+            self.colocate_all
+            or cfg.trainer.rollout_buffer.max_staleness_steps != 0
+            or cfg.trainer.rollout_buffer.batch_policy != "full_batch"
+            or cfg.trainer.resume_mode != "none"
+        ):
+            raise ValueError("periodic sampler freeze requires a fresh disaggregated synchronous full-batch run")
         self.tracker = tracker
         self.tokenizer = tokenizer
         self.train_dataset = train_dataset
@@ -466,15 +478,29 @@ class RayPPOTrainer:
         for key, value in (sampling_params or {}).items():
             OmegaConf.update(cfg, f"generator.eval_sampling_params.{key}", value, force_add=True)
         evaluator = evaluate_step_wise if cfg.trainer.step_wise_training else evaluate
-        return await evaluator(
-            eval_dataloader=self.eval_dataloader,
-            trajectory_runner=self.trajectory_runner,
-            cfg=cfg,
-            global_step=self.global_step,
-            tokenizer=self.tokenizer,
-            trajectory_sink=self.trajectory_sink,
-            val_set_name=val_set_name,
-        )
+        noisy = self.cfg.generator.get("sampler_weight_noise_scale", 0) > 0
+        frozen = self.cfg.generator.get("sampler_refresh_period", 1) > 1
+        if frozen:
+            await self._sampler_noise_action("snapshot")
+        try:
+            if frozen:
+                await self._sync_policy_for_rollouts(reason="evaluation")
+            if noisy or frozen:
+                await self._sampler_noise_action("clean")
+            return await evaluator(
+                eval_dataloader=self.eval_dataloader,
+                trajectory_runner=self.trajectory_runner,
+                cfg=cfg,
+                global_step=self.global_step,
+                tokenizer=self.tokenizer,
+                trajectory_sink=self.trajectory_sink,
+                val_set_name=val_set_name,
+            )
+        finally:
+            if frozen:
+                await self._sampler_noise_action("restore")
+            elif noisy:
+                await self._sampler_noise_action("noisy")
 
     # ------------------------------------------------------------------
     # Teardown helpers
@@ -1117,6 +1143,13 @@ class RayPPOTrainer:
         if not self._inference_engines_configured():
             return
         timings = self.all_startup_timings if reason == "initial" else self.all_timings
+        period = self.cfg.generator.get("sampler_refresh_period", 1)
+        if reason == "training_step" and self.global_step % period:
+            await asyncio.to_thread(
+                self._offload_policy_optimizer, timings, timer_label="offload_policy_optimizer_to_cpu"
+            )
+            self.all_metrics["sampler/frozen_policy_completed_updates"] = self._sampler_refresh_step
+            return
         with Timer("sync_weights", timings) as update_timer:
             if self.colocate_all:
                 await asyncio.to_thread(self.policy_model.offload_to_cpu, offload_optimizer=True, offload_model=False)
@@ -1137,6 +1170,9 @@ class RayPPOTrainer:
                 await self.sync_policy_weights_to_inference_engines()
                 if pause:
                     await self.inference_engine_client.resume_generation()
+        if reason != "evaluation":
+            self._sampler_refresh_step = self.global_step
+            self.all_metrics["sampler/frozen_policy_completed_updates"] = self._sampler_refresh_step
         self._log_weight_update_completed(reason=reason, duration_seconds=update_timer.duration)
 
     async def sync_policy_weights_to_inference_engines(self) -> None:
@@ -1163,6 +1199,21 @@ class RayPPOTrainer:
             )
         # A hard sync point leaves every policy rank free before the next forward.
         await self._drain_policy_event_loops()
+        if (
+            self.cfg.generator.get("sampler_weight_noise_scale", 0) > 0
+            or self.cfg.generator.get("sampler_refresh_period", 1) > 1
+        ):
+            action = "refresh" if self._sampler_noise_initialized else "initialize"
+            evidence = await self._sampler_noise_action(action)
+            self._sampler_noise_initialized = True
+            logger.info("Fixed sampler noise installed: step={} evidence={}", self.global_step, evidence)
+
+    async def _sampler_noise_action(self, action: str):
+        return await self.inference_engine_client.sampler_noise(
+            action,
+            float(self.cfg.generator.sampler_weight_noise_scale),
+            int(self.cfg.generator.sampler_weight_noise_seed),
+        )
 
     async def _drain_policy_event_loops(self):
         """Wait for every actor loop to finish pending weight-sync work.
@@ -1418,7 +1469,10 @@ class RayPPOTrainer:
     async def _publish(self, step: int) -> None:
         """Open rollout leases for training step ``step``, whose policy weights the engines now hold."""
         await self._begin_speculator_capture(step)
-        await self.context.publish(step)
+        if self.cfg.generator.get("sampler_refresh_period", 1) > 1:
+            await self.context.publish(step, sampler_policy_step=self._sampler_refresh_step + 1)
+        else:
+            await self.context.publish(step)
 
     async def _train_step(self, epoch: int, step_wall: StepWallTime) -> TrainingInputBatch:
         """Read this step's batch from the rollout buffer, train on it, sync the new weights, and return the batch."""
@@ -1641,15 +1695,25 @@ class RayPPOTrainer:
         """Concatenate one batch of admitted groups and convert it to a training batch."""
         batch_size = self.context.config.batch_size
         max_staleness_steps = self.context.config.max_staleness_steps
+        refresh_period = int(getattr(self.cfg, "generator", {}).get("sampler_refresh_period", 1))
         assert len(groups) == batch_size, f"Expected {batch_size} groups, got {len(groups)}"
         with Timer("assemble_generation_group_mini_batch", self.all_timings):
             uids = [group.uid for group in groups for _ in group.trajectory_batch["response_ids"]]
             stalenesses = [self.global_step - group.policy_step for group in groups]
             staleness_by_uid = {group.uid: staleness for group, staleness in zip(groups, stalenesses, strict=True)}
             record_rollout_staleness(stalenesses, self.global_step)
-            assert max(stalenesses) <= max_staleness_steps, (
-                f"batch assembly returned staleness {max(stalenesses)} above max {max_staleness_steps}"
-            )
+            if refresh_period > 1:
+                # Buffer delay stays zero; policy age follows the declared refresh cycle.
+                expected_policy_step = 1 + ((self.global_step - 1) // refresh_period) * refresh_period
+                assert all(group.policy_step == expected_policy_step for group in groups), (
+                    f"frozen sampler batch must use policy step {expected_policy_step}, "
+                    f"got {[group.policy_step for group in groups]}"
+                )
+                assert max_staleness_steps == 0
+            else:
+                assert max(stalenesses) <= max_staleness_steps, (
+                    f"batch assembly returned staleness {max(stalenesses)} above max {max_staleness_steps}"
+                )
 
             trajectory_batch = concatenate_trajectory_batches(
                 [group.trajectory_batch for group in groups],
@@ -2051,6 +2115,16 @@ class RayPPOTrainer:
         response_ids: List[List[int]] = trajectory_batch["response_ids"]
         rewards: List[List[float]] = trajectory_batch["rewards"]
         loss_masks: List[List[int]] = trajectory_batch["loss_masks"]
+
+        if self.cfg.trainer.algorithm.get("reference_binary_rewards", False):
+            scores = normalized_verifier_scores(trajectory_batch)
+            if scores is None:
+                raise ValueError("reference_binary_rewards requires a binary verifier score for every response")
+            rewards = []
+            for score, response in zip(scores, response_ids, strict=True):
+                if score is None or score not in (0.0, 1.0):
+                    raise ValueError("reference_binary_rewards requires a binary verifier score for every response")
+                rewards.append(scalar_reward_token_credit(2 * score - 1, response))
 
         logprobs: Optional[List[np.ndarray]] = trajectory_batch.get("rollout_logprobs", None)
 
@@ -2521,12 +2595,23 @@ class RayPPOTrainer:
         return data
 
     def dump_data(self, data: TrainingInputBatch, file_name: str):
-        """
-        Dump data to pickle file
-        """
-        data_save_dir = Path(self.cfg.trainer.export_path) / "dumped_data"
-        data_save_dir.mkdir(parents=True, exist_ok=True)
-        data.save(data_save_dir / f"{file_name}.pkl")
+        """Retain aligned learner evidence without serializing unused tensor storage."""
+        source_batch_size = data.batch_size
+        rows = self.cfg.trainer.dump_data_batch_rows
+        if rows is not None:
+            if rows < 1:
+                raise ValueError("dump_data_batch_rows must be positive when set")
+            data = data.slice(0, rows)
+        else:
+            data = data.slice(0, source_batch_size)
+        data.metadata = {
+            **data.metadata,
+            "global_step": self.global_step,
+            "source_batch_size": source_batch_size,
+            "retained_row_indices": list(range(data.batch_size)),
+        }
+        path = join_resource_path(self.cfg.trainer.export_path, "dumped_data", f"{file_name}.pkl")
+        io.write_bytes_atomic(path, pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL))
 
     def pad_batch(self, training_input: TrainingInputBatch) -> TrainingInputBatch:
         """Pad the batch to be divisible by dp size"""
@@ -3236,6 +3321,9 @@ class RayPPOTrainer:
         except Exception as e:
             serialised = f'{{"_serialize_error": "{e}"}}'
         logger.info(f"WANDB_MIRROR kind={kind} step={step} metrics={serialised}")
+        if self.cfg.trainer.dump_data_batch:
+            path = join_resource_path(self.cfg.trainer.export_path, "training_metrics", f"{kind}-{step:08d}.json")
+            io.write_bytes_atomic(path, (serialised + "\n").encode())
         if self._training_metrics_enabled:
             record_training_metrics(values, step=step, kind=kind)
 

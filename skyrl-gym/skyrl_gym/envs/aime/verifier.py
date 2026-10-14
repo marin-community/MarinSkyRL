@@ -13,6 +13,7 @@ class AIMEVerifier:
     ground_truth: str
     evaluation_token_budget: int = 8192
     strict_box_verify: bool = False
+    allow_general_math_reference: bool = False
 
     def __post_init__(self) -> None:
         if self.evaluation_token_budget <= 0:
@@ -20,7 +21,12 @@ class AIMEVerifier:
 
     def verify(self, evidence: RolloutEvidence) -> VerificationResult:
         response = evidence.response or ""
-        correct, prediction = verify(response[-300:], self.ground_truth, self.strict_box_verify)
+        correct, prediction = verify(
+            response if self.allow_general_math_reference else response[-300:],
+            self.ground_truth,
+            self.strict_box_verify,
+            allow_general_math_reference=self.allow_general_math_reference,
+        )
         generated_tokens = evidence.generated_token_count
         over_budget = generated_tokens is not None and generated_tokens > self.evaluation_token_budget
         parseable_answer = prediction is not None and str(prediction).strip() not in {"", "[INVALID]"}

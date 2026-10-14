@@ -55,6 +55,16 @@ def _send_publication_result(run: PublicationOperationRunner, request: Publicati
         sender.close()
 
 
+def _serve_publications(run: PublicationOperationRunner, connection: Connection) -> None:
+    try:
+        while (request := connection.recv()) is not None:
+            connection.send(run(request))
+    except EOFError:
+        pass
+    finally:
+        connection.close()
+
+
 class InlineTrajectoryPublisher:
     """Run each storage operation synchronously in the calling thread, with no deadline.
 
@@ -92,6 +102,7 @@ class ProcessTrajectoryPublisher:
         *,
         publish_timeout_seconds: float,
         shutdown_timeout_seconds: float,
+        reuse_process: bool = False,
     ):
         self._run = run
         self._publish_timeout_seconds = publish_timeout_seconds
@@ -101,6 +112,9 @@ class ProcessTrajectoryPublisher:
         self._pending_event: threading.Event | None = None
         self._pending_result: PublicationResult | None = None
         self._child: multiprocessing.Process | None = None
+        self._connection: Connection | None = None
+        self._reuse_process = reuse_process
+        self._operation_lock = threading.Lock()
 
     def execute(self, request: PublicationRequest) -> PublicationResult:
         return self._execute(request)
@@ -131,11 +145,14 @@ class ProcessTrajectoryPublisher:
         with self._lock:
             event = self._pending_event
         if event is None:
+            self._terminate_child()
             return None
         if not event.wait(self._shutdown_timeout_seconds):
             self._terminate_child()
             event.wait(1)
-        return self._take_pending_result()
+        result = self._take_pending_result()
+        self._terminate_child()
+        return result
 
     def _execute_in_background(self, request: PublicationRequest) -> None:
         result = self._execute(request)
@@ -145,6 +162,9 @@ class ProcessTrajectoryPublisher:
             self._pending_event.set()
 
     def _execute(self, request: PublicationRequest) -> PublicationResult:
+        if self._reuse_process:
+            with self._operation_lock:
+                return self._execute_reused(request)
         context = multiprocessing.get_context("spawn")
         receiver, sender = context.Pipe(duplex=False)
         process = context.Process(target=_send_publication_result, args=(self._run, request, sender), daemon=True)
@@ -176,12 +196,65 @@ class ProcessTrajectoryPublisher:
                         record_count=request.record_count,
                         error=f"storage worker exited with code {process.exitcode} without a result",
                     )
+        except (EOFError, BrokenPipeError, OSError) as error:
+            self._stop_process(process)
+            return PublicationResult(request.request_id, request.record_count, error=str(error))
         finally:
             receiver.close()
             sender.close()
             with self._lock:
                 if self._child is process:
                     self._child = None
+
+    def _execute_reused(self, request: PublicationRequest) -> PublicationResult:
+        context = multiprocessing.get_context("spawn")
+        with self._lock:
+            process, connection = self._child, self._connection
+        if process is None or not process.is_alive():
+            self._terminate_child()
+            connection, child_connection = context.Pipe()
+            process = context.Process(target=_serve_publications, args=(self._run, child_connection), daemon=True)
+            with self._lock:
+                self._child, self._connection = process, connection
+            process.start()
+            child_connection.close()
+        assert connection is not None
+        deadline = time.monotonic() + self._publish_timeout_seconds
+
+        # A large archive can fill the pipe before the worker finishes importing.
+        # Keep that write off this thread so the publication deadline still applies.
+        def send_request() -> None:
+            try:
+                connection.send(request)
+            except (EOFError, BrokenPipeError, OSError):
+                pass  # Worker exit or the deadline closes the pipe below.
+
+        sender = threading.Thread(target=send_request, daemon=True)
+        try:
+            sender.start()
+            remaining = max(0, deadline - time.monotonic())
+            ready = wait((connection, process.sentinel), timeout=remaining)
+            if connection in ready and connection.poll():
+                result = connection.recv()
+                assert result.request_id == request.request_id
+                return result
+            if process.sentinel in ready:
+                self._terminate_child()
+                return PublicationResult(
+                    request.request_id, request.record_count, error="storage worker exited without a result"
+                )
+            self._terminate_child()
+            return PublicationResult(
+                request.request_id,
+                request.record_count,
+                error=f"storage operation exceeded {self._publish_timeout_seconds:g} seconds",
+                timed_out=True,
+            )
+        except (EOFError, BrokenPipeError, OSError) as error:
+            self._terminate_child()
+            return PublicationResult(request.request_id, request.record_count, error=str(error))
+        finally:
+            sender.join(timeout=1)
 
     def _take_pending_result(self) -> PublicationResult | None:
         with self._lock:
@@ -200,8 +273,12 @@ class ProcessTrajectoryPublisher:
     def _terminate_child(self) -> None:
         with self._lock:
             process = self._child
+            connection = self._connection
+            self._child, self._connection = None, None
         if process is not None:
             self._stop_process(process)
+        if connection is not None:
+            connection.close()
 
     @staticmethod
     def _stop_process(process: multiprocessing.Process) -> None:

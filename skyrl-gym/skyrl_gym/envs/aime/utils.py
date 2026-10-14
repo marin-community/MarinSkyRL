@@ -18,7 +18,7 @@ from math_verify import parse
 from sympy import Basic, Set
 from verifyit.adapters.skyrl import grade_aime_extracted, grade_literal_candidate
 from verifyit.execution.worker import call_bounded
-from verifyit.grade import Reward
+from verifyit.grade import InvalidTask, Reward
 from verifyit.modes.grade_math import grade_math_candidate
 from verifyit.spec import MathProfile, MathSpec, MathType
 
@@ -42,6 +42,36 @@ def math_answer_reward(reference: str, candidate: str) -> Reward:
     if not reference.isalpha() and any(isinstance(answer, Basic) and answer.free_symbols for answer in parsed):
         return grade_math_candidate(MathSpec(expected=reference, profile=MathProfile.BOXED), candidate)
     return grade_aime_extracted(reference, candidate)
+
+
+def general_math_answer_reward(reference: str, candidate: str) -> Reward:
+    """Keep exact AIME matching while accepting the native curriculum's other answer types."""
+
+    def clock_text(text: str) -> str:
+        text = re.sub(r"\\+(?:!|,|;|quad|qquad)", "", text).casefold().replace(".", "").replace("\\", "")
+        match = re.fullmatch(r"(\d{1,2}):(\d{1,2})([ap]m)?", text)
+        if match and int(match[2]) < 60:
+            return f"{int(match[1])}:{int(match[2]):02d}{match[3] or ''}"
+        return text
+
+    if re.search(r"[ap]\.m\.", reference, re.IGNORECASE) or re.fullmatch(r"\d{1,2}:00", clock_text(reference)):
+        # A clock answer is not a ratio; 8:34 p.m. must not equal 16:68 p.m.
+        return grade_literal_candidate(clock_text(reference), clock_text(candidate))
+    if "%" in reference:
+        # The boxed benchmark answer names percentage points; the percent unit is optional.
+        points = reference.replace("%", "").rstrip("\\")
+        candidate_points = candidate.replace("%", "").rstrip("\\")
+        try:
+            return math_answer_reward(points, candidate_points)
+        except InvalidTask:
+            return grade_math_candidate(MathSpec(expected=reference, profile=MathProfile.BOXED), candidate)
+    if reference.isalpha():
+        return grade_literal_candidate(reference, candidate)
+    try:
+        return math_answer_reward(reference, candidate)
+    except InvalidTask:
+        # Boxed math supports matrices; the exact-number AIME adapter does not.
+        return grade_math_candidate(MathSpec(expected=reference, profile=MathProfile.BOXED), candidate)
 
 
 def last_boxed_only_string(string: str) -> Optional[str]:
@@ -189,6 +219,11 @@ def normalize_final_answer(final_answer: str) -> str:
     return final_answer.strip()
 
 
+def normalize_curriculum_answer(answer: str) -> str:
+    """Remove math delimiters while preserving coefficients outside them."""
+    return normalize_final_answer(answer.replace("$", ""))
+
+
 _TEX_FRACTION = re.compile(r"\\[dt]?frac\{(-?\d+(?:\.\d+)?)\}\{(-?\d+(?:\.\d+)?)\}")
 _SLASH_FRACTION = re.compile(r"(-?\d+(?:\.\d+)?)/(-?\d+(?:\.\d+)?)")
 _RATIO = re.compile(r"(-?\d+):(-?\d+)")
@@ -212,7 +247,11 @@ def rational_value(answer: str) -> Optional[Fraction]:
 
 
 def is_correct_minerva(
-    solution_str: str, gt: str, gt_need_extract: bool = False, answer_pattern: str = r"(?i)Answer\s*:\s*([^\n<]+)"
+    solution_str: str,
+    gt: str,
+    gt_need_extract: bool = False,
+    answer_pattern: str = r"(?i)Answer\s*:\s*([^\n<]+)",
+    allow_general_math_reference: bool = False,
 ) -> tuple[bool, str]:
     """Check if the solution is correct according to Minerva criteria.
 
@@ -231,15 +270,23 @@ def is_correct_minerva(
     # Extract answer from solution
     match = re.findall(answer_pattern, solution_str)
     extracted_answer = match[-1] if match else "[INVALID]"
-    pred = normalize_final_answer(extracted_answer)
+    if allow_general_math_reference:
+        markers = list(re.finditer(r"(?i)Answer\s*:\s*", solution_str))
+        if markers:
+            boxed = last_boxed_only_string(solution_str[markers[-1].end() :])
+            if boxed is not None:
+                extracted_answer = remove_boxed(boxed)
+    normalize = normalize_curriculum_answer if allow_general_math_reference else normalize_final_answer
+    pred = normalize(extracted_answer)
 
     # Process ground truth
     if gt_need_extract:
-        gt = normalize_final_answer(remove_boxed(last_boxed_only_string(gt)))
+        gt = normalize(remove_boxed(last_boxed_only_string(gt)))
     else:
-        gt = normalize_final_answer(gt)
+        gt = normalize(gt)
 
-    return call_bounded(math_answer_reward, gt, pred, timeout=10).reward == 1.0, pred
+    grader = general_math_answer_reward if allow_general_math_reference else math_answer_reward
+    return call_bounded(grader, gt, pred, timeout=10).reward == 1.0, pred
 
 
 def is_correct_strict_box(
@@ -271,7 +318,11 @@ def is_correct_strict_box(
 
 
 def verify(
-    solution_str: str, answer: str, strict_box_verify: bool = False, pause_tokens_index: Optional[list[int]] = None
+    solution_str: str,
+    answer: str,
+    strict_box_verify: bool = False,
+    pause_tokens_index: Optional[list[int]] = None,
+    allow_general_math_reference: bool = False,
 ) -> bool:
     """Verify if the solution is correct.
 
@@ -288,7 +339,7 @@ def verify(
         correct, pred = is_correct_strict_box(solution_str, answer, pause_tokens_index)
         return correct == 1, pred
 
-    correct, pred = is_correct_minerva(solution_str, answer)
+    correct, pred = is_correct_minerva(solution_str, answer, allow_general_math_reference=allow_general_math_reference)
     return correct, pred
 
 

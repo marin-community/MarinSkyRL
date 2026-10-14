@@ -36,6 +36,43 @@ def test_task_grade_preserves_math_equivalence(model_turn, output, ground_truth,
     assert result.reward == expected
 
 
+@pytest.mark.parametrize(
+    "reference,candidate,correct",
+    [
+        (r"40\\%", r"40\%", True),
+        (r"40\\%", "40", True),
+        (r"40\\%", "0.4", False),
+        (r"40\\%", r"41\%", False),
+        (r"\begin{pmatrix}4/5\\3/5\end{pmatrix}", r"\begin{pmatrix}0.8\\0.6\end{pmatrix}", True),
+        (
+            r"\begin{pmatrix}4/5\\3/5\end{pmatrix}",
+            "\\begin{pmatrix}0.8\\\\\n0.6\\end{pmatrix}",
+            True,
+        ),
+        (r"\begin{pmatrix}4/5\\3/5\end{pmatrix}", r"\begin{pmatrix}0.6\\0.8\end{pmatrix}", False),
+        (r"8\!:\!34\text{ p.m.}", r"8:34\text{ p.m.}", True),
+        (r"8\\!:\\!34\\text{ p.m.}", r"8:34\text{ pm}", True),
+        (r"8\!:\!34\text{ p.m.}", r"16:68\text{ p.m.}", False),
+        (r"8\!:\!34\text{ p.m.}", r"8:34\text{ a.m.}", False),
+        (r"05\\!:\\!00", "5:00", True),
+        (r"05\\!:\\!00", "10:00", False),
+        (r"-2$$\sqrt{2}$$", r"-\sqrt{8}", True),
+        (r"-2$$\sqrt{2}$$", r"\sqrt{8}", False),
+    ],
+)
+def test_opt_in_curriculum_grader_handles_rich_answers_without_scalar_clock_matching(
+    model_turn, reference, candidate, correct
+):
+    result = grade_aime(
+        model_turn(f"Answer: \\boxed{{{candidate}}}"),
+        {"allow_general_math_reference": True},
+        {"reward_model": {"ground_truth": reference}},
+    )
+    assert result.grade.status is Outcome.GRADED
+    assert result.grade.passed is correct
+    assert result.reward == (1.0 if correct else -1.0)
+
+
 def test_aime_verifier_reports_failed_response_over_evaluation_budget(model_turn):
     result = grade_aime(
         model_turn("Answer: \\boxed{43}", token_count=5),

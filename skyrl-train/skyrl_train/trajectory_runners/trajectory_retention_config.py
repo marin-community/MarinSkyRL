@@ -24,6 +24,9 @@ class TrajectoryRetentionConfig:
     required: bool = False
     publish_timeout_seconds: float = 120.0
     shutdown_timeout_seconds: float = 30.0
+    reuse_publication_process: bool = False
+    append_only: bool = False
+    publication_retries: int = 0
     redact_fields: tuple[str, ...] = ()
     model_path: str | None = None
     model_source_identity: str | None = None
@@ -69,6 +72,9 @@ def parse_trajectory_retention_config(config: Mapping[str, Any] | None) -> Traje
         required=bool(config.get("required", defaults.required)),
         publish_timeout_seconds=float(config.get("publish_timeout_seconds", defaults.publish_timeout_seconds)),
         shutdown_timeout_seconds=float(config.get("shutdown_timeout_seconds", defaults.shutdown_timeout_seconds)),
+        reuse_publication_process=bool(config.get("reuse_publication_process", defaults.reuse_publication_process)),
+        append_only=bool(config.get("append_only", defaults.append_only)),
+        publication_retries=int(config.get("publication_retries", defaults.publication_retries)),
         redact_fields=tuple(str(field) for field in redact_value),
         model_path=_optional_string(config.get("model_path", defaults.model_path)),
         model_source_identity=_optional_string(config.get("model_source_identity", defaults.model_source_identity)),
@@ -111,5 +117,15 @@ def _validate_config(config: TrajectoryRetentionConfig) -> None:
         raise ValueError("trajectory retention per-step bound cannot exceed its run bound")
     if config.publish_timeout_seconds <= 0 or config.shutdown_timeout_seconds <= 0:
         raise ValueError("trajectory retention publication timeouts must be positive")
+    if config.publication_retries < 0:
+        raise ValueError("trajectory retention publication_retries must be non-negative")
+    if config.append_only and (
+        not config.required
+        or config.sample_fraction != 1.0
+        or config.sample_count_per_step != 0
+        or config.max_bytes_per_step is not None
+        or config.max_bytes_per_run is not None
+    ):
+        raise ValueError("append-only retention requires synchronous full capture without sampling or byte bounds")
     if not config.accepted_stop_reasons:
         raise ValueError("trajectory_retention.accepted_stop_reasons cannot be empty")

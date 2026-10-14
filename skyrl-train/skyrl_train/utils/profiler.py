@@ -57,7 +57,7 @@ class Profiler:
         table_path = os.path.join(self.save_path, f"prof_rank_{self.rank}.txt")
         sort_key = "self_cuda_time_total" if torch.cuda.is_available() else "self_cpu_time_total"
         with open(table_path, "w", encoding="utf-8") as table_file:
-            table_file.write(self.prof.key_averages().table(sort_by=sort_key, row_limit=50))
+            table_file.write(self.prof.key_averages().table(sort_by=sort_key, row_limit=-1))
         logger.info(f"[Profiler] Saved operator table to {table_path}")
         self.prof = None
 

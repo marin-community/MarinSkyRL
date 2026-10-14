@@ -11,6 +11,7 @@ from verifyit.spec import McqSpec
 
 from skyrl_gym.envs.aime.verifier import AIMERewardPolicy, AIMEVerifier
 from skyrl_gym.envs.cat_count.reward import cat_count_score
+from skyrl_gym.countdown_reference import compute_reward as countdown_reward, extract_answer as countdown_answer
 from skyrl_gym.envs.gsm8k.utils import compute_score as gsm8k_score
 from skyrl_gym.envs.ifeval.utils import compute_score as instruction_score
 from skyrl_gym.envs.mcq.utils import extract_mcq_answer
@@ -42,11 +43,24 @@ def grade_gsm8k(turn: ModelTurn, config: dict, extras: dict) -> Transition:
     return Transition(done=True, reward=score, grade=GradeResult(Outcome.GRADED, score))
 
 
+def grade_countdown_reference(turn: ModelTurn, config: dict, extras: dict) -> Transition:
+    """Preserve the released verifier while supplying its +1/-1 training reward."""
+    info = extras["info"]
+    score = countdown_reward(turn.text, info["numbers"], info["target"])
+    return Transition(
+        done=True,
+        reward=2 * score - 1,
+        grade=GradeResult(Outcome.GRADED, score, passed=score == 1),
+        metrics={"solved": score, "answer_tag_present": countdown_answer(turn.text) is not None},
+    )
+
+
 def grade_aime(turn: ModelTurn, config: dict, extras: dict) -> Transition:
     verifier = AIMEVerifier(
         ground_truth=ground_truth(extras),
         evaluation_token_budget=int(config.get("evaluation_token_budget", 8192)),
         strict_box_verify=bool(config.get("strict_box_verify", False)),
+        allow_general_math_reference=bool(config.get("allow_general_math_reference", False)),
     )
     policy = AIMERewardPolicy(
         length_penalty_weight=float(config.get("length_penalty_weight", 0.0)),
