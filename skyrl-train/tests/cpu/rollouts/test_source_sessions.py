@@ -13,7 +13,7 @@ from aiohttp.test_utils import TestServer
 from omegaconf import OmegaConf
 from skyrl_gym.verification import VerificationStatus
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
-from shellbox.machine import Backend, ExitReason, Result, ShellSimBuiltins, UnsupportedMachineSpec
+from shellbox.machine import Backend, ExitReason, Result, PackageSpec, UnsupportedMachineSpec
 from taskcompendium.models import Source
 from taskcompendium.grader import verifyit_package
 from rolloutengine.spec import LoweredTaskSpec
@@ -248,8 +248,11 @@ async def test_mixed_nemotron_tasks_run_without_the_original_sources(
     class ImageFactory:
         backend = Backend.DOCKER
 
+        def check_environment(self, _requirements, _spec):
+            pass
+
         async def create(self, spec):
-            return await ShellSimMachineFactory().create(replace(spec, source=ShellSimBuiltins(), cpus=None))
+            return await ShellSimMachineFactory().create(replace(spec, source=PackageSpec(), cpus=None))
 
     settings = HarborTaskSettings.from_config(
         OmegaConf.create(
@@ -692,6 +695,9 @@ def task_machine():
         backend = Backend.DOCKER
         closed = False
         output = "4"
+
+        def check_environment(self, _requirements, _spec):
+            pass
 
         async def create(self, spec):
             self.output = spec.env.get("PYTHON_OUTPUT", "4")

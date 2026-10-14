@@ -4,7 +4,7 @@ from collections.abc import Callable
 from concurrent.futures import Executor
 from functools import partial
 
-from rolloutengine.contracts import TaskSession
+from rolloutengine.contracts import TaskSession, TaskSessionContext, TaskSessionFactory
 from shellbox.machine import Machine
 from rolloutengine.spec import LoweredTaskSpec
 
@@ -31,9 +31,14 @@ from skyrl_gym.tool_protocol_task import ToolProtocolReplaySession
 from skyrl_gym.closure_task import STRUCTURE_CLOSURE_SESSION, ClosureReplaySession
 
 
-def session_factories(
-    *, executor: Executor | None = None
-) -> dict[str, Callable[[LoweredTaskSpec, Machine | None], TaskSession]]:
+def adapt_self_grading_session(factory: Callable[[LoweredTaskSpec, Machine | None], TaskSession]) -> TaskSessionFactory:
+    def create(context: TaskSessionContext) -> TaskSession:
+        return factory(context.lowered, context.machine)
+
+    return create
+
+
+def session_factories(*, executor: Executor | None = None) -> dict[str, TaskSessionFactory]:
     """Return factories that apply each lowered task's session settings."""
     answer_graders = {
         "aime": grade_aime,
@@ -46,7 +51,7 @@ def session_factories(
         "prompt_only": grade_prompt_only,
         "reasoning_gym": grade_reasoning_gym,
     }
-    return {
+    constructors: dict[str, Callable[[LoweredTaskSpec, Machine | None], TaskSession]] = {
         **{
             name: partial(AnswerTaskSession, grader=grader, executor=executor)
             for name, grader in answer_graders.items()
@@ -61,3 +66,4 @@ def session_factories(
         "tool_protocol_replay": ToolProtocolReplaySession,
         STRUCTURE_CLOSURE_SESSION: ClosureReplaySession,
     }
+    return {name: adapt_self_grading_session(factory) for name, factory in constructors.items()}

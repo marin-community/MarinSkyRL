@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from loguru import logger
-from shellbox.machine import Backend, Command, Machine, MachineFactory, MachineSpec, Result
+from shellbox.machine import Backend, Command, ExecutionRequirements, Machine, MachineFactory, MachineSpec, Result
 
 _PASSTHROUGH_ERRORS = (TypeError, ValueError, AttributeError, LookupError, AssertionError)
 
@@ -79,6 +79,9 @@ class OwnedMachineFactory:
     @property
     def backend(self) -> Backend:
         return self.factory.backend
+
+    def check_environment(self, requirements: ExecutionRequirements, spec: MachineSpec) -> None:
+        self.factory.check_environment(requirements, spec)
 
     def stop_creating(self) -> None:
         self.closing = True

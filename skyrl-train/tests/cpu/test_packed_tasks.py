@@ -14,7 +14,7 @@ from omegaconf import OmegaConf
 
 from cloud.iris import rl_data
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
-from shellbox.machine import Backend, ShellSimBuiltins
+from shellbox.machine import Backend, PackageSpec
 
 from marinskyrl.packed_tasks import (
     EmptyTaskSelectionError,
@@ -36,7 +36,7 @@ from taskcompendium.runtime.resources import resource_bytes
 from rolloutengine.spec import LoweredTaskSpec
 from tests.cpu.task_specs import session_spec
 from rolloutengine.contracts import ModelTurn
-from rolloutengine.engine import ShellboxRolloutEngine
+from rolloutengine.engine import RolloutEngine
 
 
 def _task_binary(name: str, *, solution: bool = False, unsafe_path: bool = False) -> bytes:
@@ -246,15 +246,18 @@ async def test_packed_tasks_execute_after_source_removal(tmp_path, verification)
     class Factory:
         backend = Backend.DOCKER
 
+        def check_environment(self, _requirements, _spec):
+            pass
+
         async def create(self, spec):
-            return await ShellSimMachineFactory().create(replace(spec, source=ShellSimBuiltins()))
+            return await ShellSimMachineFactory().create(replace(spec, source=PackageSpec()))
 
     class Model:
         async def complete(self, request):
             prompt = (*request.prefix_token_ids, 90) if request.prefix_token_ids else (10,)
             return ModelTurn({"role": "assistant", "content": "Done."}, prompt, (20,), (-0.5,), "stop")
 
-    engine = ShellboxRolloutEngine(
+    engine = RolloutEngine(
         Model().complete,
         {"docker": Factory()},
     )

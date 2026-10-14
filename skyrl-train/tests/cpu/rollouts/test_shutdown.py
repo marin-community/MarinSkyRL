@@ -11,7 +11,7 @@ from omegaconf import OmegaConf
 from skyrl_gym.task_sessions import AnswerTaskSession
 from taskcompendium.grading_result import GradeResult, Outcome
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
-from shellbox.machine import Backend, Command, MachineSpec, ShellSimBuiltins
+from shellbox.machine import Backend, Command, MachineSpec, PackageSpec
 from taskcompendium.models import (
     AnswerType,
     ArtifactKind,
@@ -60,6 +60,9 @@ async def test_owned_machine_preserves_fault_categories(tmp_path, operation, err
     class Factory:
         backend = Backend.SHELLSIM
 
+        def check_environment(self, _requirements, _spec):
+            pass
+
         async def create(self, spec):
             if operation == "create":
                 raise error_type("Provider operation failed")
@@ -68,7 +71,7 @@ async def test_owned_machine_preserves_fault_categories(tmp_path, operation, err
     factory = OwnedMachineFactory(Factory(), "fixture")
     try:
         with pytest.raises(expected_type) as failure:
-            machine = await factory.create(MachineSpec(ShellSimBuiltins()))
+            machine = await factory.create(MachineSpec(PackageSpec()))
             if operation == "run":
                 await machine.run(Command(("true",)))
             elif operation == "upload":
@@ -116,9 +119,12 @@ async def test_one_machine_cleanup_failure_does_not_abort_the_buffer_group(task_
     class Factory:
         backend = Backend.SHELLSIM
 
+        def check_environment(self, _requirements, _spec):
+            pass
+
         async def create(self, spec):
             machine = await ShellSimMachineFactory().create(
-                replace(spec, source=ShellSimBuiltins(), workdir=spec.workdir or "/workspace")
+                replace(spec, source=PackageSpec(), workdir=spec.workdir or "/workspace")
             )
             machines.append(machine)
             return Machine(machine) if len(machines) == 1 else machine
@@ -189,6 +195,9 @@ async def test_worker_shutdown_cancels_model_and_deletes_its_machine(task_inputs
     class Factory:
         backend = Backend.SHELLSIM
 
+        def check_environment(self, _requirements, _spec):
+            pass
+
         async def create(self, spec):
             machine = await ShellSimMachineFactory().create(spec)
             return DeletionMachine(machine, deletions, deleted)
@@ -226,6 +235,9 @@ async def test_worker_shutdown_owns_late_creation_and_bounds_a_blocked_provider(
 
     class Factory:
         backend = Backend.SHELLSIM
+
+        def check_environment(self, _requirements, _spec):
+            pass
 
         async def create(self, spec):
             started.set()
@@ -344,9 +356,12 @@ async def test_agent_deadlines_grade_the_workspace_and_commit_training_tokens(
     class Factory:
         backend = Backend.DOCKER
 
+        def check_environment(self, _requirements, _spec):
+            pass
+
         async def create(self, spec):
             machine = await ShellSimMachineFactory().create(
-                replace(spec, source=ShellSimBuiltins(), workdir=spec.workdir or "/workspace")
+                replace(spec, source=PackageSpec(), workdir=spec.workdir or "/workspace")
             )
             machines.append(machine)
             return Machine(machine)
@@ -598,6 +613,9 @@ async def test_worker_shutdown_reports_late_provider_close_failure_without_unhan
 
     class Factory:
         backend = Backend.SHELLSIM
+
+        def check_environment(self, _requirements, _spec):
+            pass
 
         async def create(self, spec):
             machine = await ShellSimMachineFactory().create(spec)

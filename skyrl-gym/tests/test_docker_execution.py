@@ -8,7 +8,7 @@ from dataclasses import replace
 import pytest
 import pytest_asyncio
 from rolloutengine.contracts import ModelTurn
-from rolloutengine.engine import ShellboxRolloutEngine
+from rolloutengine.engine import RolloutEngine
 from rolloutengine.spec import LoweredTaskSpec, MachineRuntimeSpec, TaskRuntimeSpec, TaskSessionSpec
 from shellbox.backends.docker.machine import DockerMachineFactory, docker
 from shellbox.machine import Backend, Command, DockerImage, ExitReason, MachineSpec
@@ -158,6 +158,9 @@ async def test_docker_shell_rollout_keeps_timeout_feedback_and_private_grades(py
     class Factory:
         backend = Backend.DOCKER
 
+        def check_environment(self, requirements, spec):
+            DockerMachineFactory().check_environment(requirements, spec)
+
         async def create(self, spec):
             # The fixture pulled this exact digest before machine acquisition.
             machine = await DockerMachineFactory().create(replace(spec, source=python_image))
@@ -243,7 +246,7 @@ async def test_docker_shell_rollout_keeps_timeout_feedback_and_private_grades(py
             cleanup_timeout=30,
         ),
     )
-    record = await ShellboxRolloutEngine(complete, {"docker": Factory()}).run(lowered)
+    record = await RolloutEngine(complete, {"docker": Factory()}).run(lowered)
     assert (record.grade.status, record.grade.reward) == (Outcome.GRADED, reward)
     assert record.failure is None
     assert json.loads(requests[1].messages[-1]["content"])["reason"] == first_reason

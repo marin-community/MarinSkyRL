@@ -14,7 +14,6 @@ from uuid import uuid4
 
 from jinja2 import TemplateError
 from daytona import AsyncDaytona, DaytonaConfig
-from harbor_config.models.environment_type import EnvironmentType
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from shellbox.backends.docker.machine import DockerMachineFactory
@@ -24,6 +23,7 @@ from shellbox.machine import Backend, Machine, MachineFactory
 from taskcompendium.grading_result import Outcome
 from taskcompendium.models import NoGrader
 from verifyit.modes.grade_judge import JudgeConnection
+from rolloutengine.agent_session import AgentTaskSession
 from rolloutengine.contracts import (
     GenerationLimitReached,
     ModelRequest,
@@ -34,14 +34,16 @@ from rolloutengine.contracts import (
     RolloutInterrupted,
     RolloutOperation,
     TaskSession,
+    TaskSessionContext,
+    TaskSessionFactory,
     SessionStart,
 )
-from rolloutengine.engine import ShellboxRolloutEngine
+from rolloutengine.engine import RolloutEngine
 from rolloutengine.spec import LoweredTaskSpec
 from rolloutengine.lowering import SHELLBOX_SESSION, validate_lowered_task
 from skyrl_train.dataset.tasks import LOWERED_TASK_COLUMN
 from skyrl_train.config.utils import generation_context_limit
-from skyrl_gym.task_factories import session_factories
+from skyrl_gym.task_factories import adapt_self_grading_session, session_factories
 from skyrl_gym.task_records import fold_grades, skipped_grade
 from skyrl_gym.verification import VERIFIER_RUNTIME_ERROR
 
@@ -58,6 +60,7 @@ from skyrl_train.rollouts.harbor_tasks import (
     harbor_grading_failure,
     shape_harbor_rollouts,
 )
+from skyrl_train.rollouts.harbor_settings import EnvironmentType
 from skyrl_train.rollouts.machines import OwnedMachineFactory, TaskMachineError
 from skyrl_train.rollouts.workers import WorkerShard, detached_config
 from skyrl_train.rollouts.finalization import finalize_trajectory_batch, propagate_data_sources
@@ -96,6 +99,18 @@ class InstalledAgentWorker(Protocol):
         lowered: LoweredTaskSpec,
         session_id: str,
     ) -> None: ...
+
+
+SKYRL_AGENT_SESSION = "skyrl_agent"
+
+
+def _agent_session_factory(
+    runtime: InstalledAgentWorker,
+    session_id: str,
+    context: TaskSessionContext,
+) -> TaskSession:
+    runner = partial(runtime.run, context.machine, lowered=context.lowered, session_id=session_id)
+    return AgentTaskSession(runner, context.require_task_grader())
 
 
 async def _model_turn(
@@ -311,7 +326,7 @@ class TaskRolloutWorker:
         )
         self.sessions = session_factories(executor=self.verifier_executor)
         if sessions is not None:
-            self.sessions.update(sessions)
+            self.sessions.update({name: adapt_self_grading_session(factory) for name, factory in sessions.items()})
         self.trajectory_sink: RetentionSink | None = None
 
     @contextmanager
@@ -328,6 +343,23 @@ class TaskRolloutWorker:
             yield
         finally:
             self.active_requests.discard(task)
+
+    def _configured_task_and_sessions(
+        self, lowered: LoweredTaskSpec, harbor: HarborTaskSettings | None, session_id: str
+    ) -> tuple[LoweredTaskSpec, Mapping[str, TaskSessionFactory]]:
+        sessions = self.sessions
+        if harbor is not None and self.installed_agents is not None:
+            if lowered.session.task_session != SHELLBOX_SESSION:
+                raise ValueError("SkyRL agents require a Shellbox task grader")
+            lowered = lowered.model_copy(
+                update={"session": lowered.session.model_copy(update={"task_session": SKYRL_AGENT_SESSION})}
+            )
+            sessions = {
+                **self.sessions,
+                SKYRL_AGENT_SESSION: partial(_agent_session_factory, self.installed_agents, session_id),
+            }
+        validate_lowered_task(lowered, factories=self.factories, sessions=sessions)
+        return lowered, sessions
 
     async def generate(self, request: TrajectoryRequestBatch) -> list[RolloutData]:
         with self._active_request():
@@ -350,8 +382,16 @@ class TaskRolloutWorker:
             item if harbor is None else harbor.lowered(item, phase=phase)
             for item, harbor in zip(lowered_tasks, harbor_settings, strict=True)
         ]
-        for lowered in lowered_tasks:
-            validate_lowered_task(lowered, factories=self.factories, sessions=self.sessions)
+        trajectory_ids = request.get("trajectory_ids")
+        session_ids = [
+            trajectory_ids[index].to_string() if trajectory_ids is not None else uuid4().hex
+            for index in range(len(lowered_tasks))
+        ]
+        selected_sessions: list[Mapping[str, TaskSessionFactory]] = []
+        for index, lowered in enumerate(lowered_tasks):
+            lowered, sessions = self._configured_task_and_sessions(lowered, harbor_settings[index], session_ids[index])
+            lowered_tasks[index] = lowered
+            selected_sessions.append(sessions)
         tasks = [item.task for item in lowered_tasks]
         sampling = get_sampling_params_for_backend(
             self.trajectory_runner_cfg.backend, self.trajectory_runner_cfg.sampling_params
@@ -361,12 +401,10 @@ class TaskRolloutWorker:
         max_input_length = int(self.trajectory_runner_cfg.max_input_length)
         max_context_length = generation_context_limit(self.trajectory_runner_cfg)
 
-        trajectory_ids = request.get("trajectory_ids")
-
         async def run(index, lowered):
             task = lowered.task
             harbor = harbor_settings[index]
-            session_id = trajectory_ids[index].to_string() if trajectory_ids is not None else uuid4().hex
+            session_id = session_ids[index]
 
             async def model(request):
                 return await _model_turn(
@@ -379,18 +417,11 @@ class TaskRolloutWorker:
                     session_id=session_id,
                 )
 
-            engine = (
-                ShellboxRolloutEngine(
-                    model,
-                    self.factories,
-                    sessions=self.sessions,
-                    agent=partial(self.installed_agents.run, lowered=lowered, session_id=session_id),
-                    judge_connection=self.judge_connection,
-                )
-                if harbor is not None and self.installed_agents is not None
-                else ShellboxRolloutEngine(
-                    model, self.factories, sessions=self.sessions, judge_connection=self.judge_connection
-                )
+            engine = RolloutEngine(
+                model,
+                self.factories,
+                sessions=selected_sessions[index],
+                judge_connection=self.judge_connection,
             )
             harbor_slots = (
                 nullcontext()

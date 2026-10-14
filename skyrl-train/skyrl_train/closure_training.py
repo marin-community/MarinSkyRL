@@ -4,15 +4,15 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 import torch
-from rolloutengine.closure_repair import (
+from skyrl_train.closure_repair import (
     ClosureTarget,
     ClosureTargetKind,
     verified_closure_candidates,
     verified_closure_target,
     verified_continuation_boundary,
 )
-from rolloutengine.closure_scoring import SNOWBALL_TURN_END_MARKERS, closure_state, score_closure
-from skyrl_gym.closure_task import ClosurePrompt
+from verifyit.closure_scoring import closure_state, score_closure
+from skyrl_gym.closure_task import SNOWBALL_TURN_END_MARKERS, ClosurePrompt
 from skyrl_gym.verification import VerificationResult, VerificationStatus
 
 from skyrl_train.ftpo import VerifiedFTPOBoundary, repeated_tool_opener_boundary
