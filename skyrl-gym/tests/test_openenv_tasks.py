@@ -201,7 +201,12 @@ async def test_openenv_cancellation_releases_server_and_http_command(openenv_ses
         await pending
     assert machine.closed
     async with asyncio.timeout(5.0):
-        while psutil.pid_exists(server_pid) and psutil.Process(server_pid).status() != psutil.STATUS_ZOMBIE:
+        while True:
+            try:
+                if psutil.Process(server_pid).status() == psutil.STATUS_ZOMBIE:
+                    break
+            except psutil.NoSuchProcess:
+                break
             await asyncio.sleep(0)
     await session.close()
 
