@@ -709,17 +709,17 @@ def get_batch_failure_metrics(
 
 
 def prepare_trajectory_request(
-    prompts: List[dict],
+    rows: List[dict],
     n_samples_per_prompt: int,
     sampling_params: Dict[str, Any],
     training_phase: TrainingPhase,
     global_step: int,
 ) -> Tuple[TrajectoryRequestBatch, List[str]]:
     """Return repeated typed inputs with attempt IDs and one UID per repeated input."""
-    inputs = tuple(prompt["input"] for prompt in prompts for _ in range(n_samples_per_prompt))
+    inputs = tuple(row["input"] for row in rows for _ in range(n_samples_per_prompt))
     trajectory_ids = tuple(
-        TrajectoryID(instance_id=prompt["input"].metadata.uid, repetition_id=repetition)
-        for prompt in prompts
+        TrajectoryID(instance_id=row["input"].metadata.uid, repetition_id=repetition)
+        for row in rows
         for repetition in range(n_samples_per_prompt)
     )
     metadata = BatchMetadata(global_step=global_step, training_phase=training_phase)
