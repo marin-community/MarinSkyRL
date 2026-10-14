@@ -150,7 +150,7 @@ async def test_evaluate_exports_public_results_and_expected_metrics(dummy_config
         "env_metrics": [{"truncated": 1}, {"truncated": 0}],
         "verification_results": [
             VerificationResult.verified(1.0, passed=True, diagnostics={"reference": "private-verifier-reference"}),
-            VerificationResult.unavailable("private-verifier-reason", diagnostics={"api_key": "private-key"}),
+            VerificationResult.unavailable("Request timed out.", diagnostics={"api_key": "private-key"}),
         ],
         "is_last_step": [True, True],
     }
@@ -197,7 +197,6 @@ async def test_evaluate_exports_public_results_and_expected_metrics(dummy_config
     assert "private-reference" not in saved
     assert "private-judge-key" not in saved
     assert "private-verifier-reference" not in saved
-    assert "private-verifier-reason" not in saved
     assert "private-key" not in saved
     records = [json.loads((dump / f"dataset_{name}.jsonl").read_text()) for name in ("a", "b")]
     assert records[0]["input_prompt"] == records[1]["input_prompt"]
@@ -207,11 +206,13 @@ async def test_evaluate_exports_public_results_and_expected_metrics(dummy_config
     assert [record["env_metrics"]["truncated"] for record in records] == [1, 0]
     assert records[0]["verification"] == {
         "status": "verified",
+        "reason": None,
         "score": 1.0,
         "passed": True,
         "score_min": 0.0,
         "score_max": 1.0,
     }
+    assert records[1]["verification"]["reason"] == "Request timed out."
     assert records[1]["verification"]["status"] == "unavailable"
     assert records[1]["verification"]["score"] is None
 
