@@ -1,0 +1,9 @@
+# Identify the FlashInfer-adjusted Bridge wheel independently of native 0.6.2. Remove this local version with the remaining Bridge compatibility patch; qualify the replacement artifact.
+
+diff --git a/src/megatron/bridge/package_info.py b/src/megatron/bridge/package_info.py
+index b4b20cb..881fb56 100644
+--- a/src/megatron/bridge/package_info.py
++++ b/src/megatron/bridge/package_info.py
+@@ -19 +19 @@ PATCH = 2
+-PRE_RELEASE = ""
++PRE_RELEASE = "+marin.torch2141.2"

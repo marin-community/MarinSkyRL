@@ -53,7 +53,6 @@ def test_host_memory_policy_binds_to_allowed_cpu_nodes(monkeypatch):
 
 
 def test_runtime_environment_forwards_numa_activation(monkeypatch):
-    monkeypatch.setattr("skyrl_train.utils.utils.peer_access_supported", lambda **_: False)
     monkeypatch.setenv(NUMA_AFFINITY_ENV, "1")
 
     env = prepare_runtime_environment(example_dummy_config())

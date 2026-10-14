@@ -6,7 +6,9 @@ from pathlib import PurePosixPath
 import time
 
 from loguru import logger
+from fsspec import AbstractFileSystem
 from torch.distributed.checkpoint import FileSystemReader, LoadPlan, LoadPlanner
+from torch.distributed.checkpoint._fsspec_filesystem import FileSystem as FsspecFileSystem
 from torch.distributed.checkpoint.filesystem import _StorageInfo
 from torch.distributed.checkpoint.metadata import Metadata
 from torch.futures import Future
@@ -14,6 +16,13 @@ from torch.futures import Future
 
 class RecordCheckpointReader(FileSystemReader):
     """Buffer one S3 record and release its decoded tensor before the next read."""
+
+    # Torch 2.14.1 leaves the last decoded tensor alive while loading the next,
+    # and torch.load's zip seeks become multiple uncached S3 range requests:
+    # https://github.com/pytorch/pytorch/blob/5c4886908584029761b579af026dcfb627c84070/torch/distributed/checkpoint/filesystem.py
+    # Remove when a native remote reader releases each decoded record and matches
+    # bounded memory/request cost. Verify real S3 continuation and repeated load
+    # timings; local correctness or one local timing does not establish that cost.
 
     def __init__(self, path: str) -> None:
         super().__init__(path)
@@ -57,3 +66,12 @@ class RecordCheckpointReader(FileSystemReader):
         future: Future[None] = Future()
         future.set_result(None)
         return future
+
+
+def s3_checkpoint_reader(checkpoint_dir: str, filesystem: AbstractFileSystem) -> RecordCheckpointReader:
+    """Read bounded DCP records through the caller's resolved S3 filesystem."""
+    reader = RecordCheckpointReader(checkpoint_dir)
+    reader.fs = FsspecFileSystem()
+    reader.fs.fs = filesystem
+    reader.path = checkpoint_dir
+    return reader

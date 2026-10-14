@@ -370,18 +370,24 @@ def load_megatron_optimizer(optimizers):
 
 
 def restore_offloaded_optimizer_state(optimizer) -> None:
-    """Repair MCore 0.18's CPU-offloaded optimizer state after bucket restore."""
-    # Revisit on MCore upgrades; remove once native restore passes two-update
-    # continuation parity for mixed CPU/GPU state. Upstream step fix (partial):
+    """Repair optional HDO state after distributed bucket restoration."""
+    # Required MuonH profiles reject HDO. Core 0.19.2 now rebinds HDO for its
+    # fully-reshardable loader, but its dp_reshardable loader still replaces
+    # bucket state without that hook:
+    # https://github.com/NVIDIA/Megatron-LM/blob/4b4acac9a1d28ea6829c8d4f566d75698a21249d/megatron/core/optimizer/distrib_optimizer.py#L2061
+    # The native step fix below does not establish binding/continuation parity:
     # https://github.com/NVIDIA/Megatron-LM/pull/7629
+    # Remove after unpatched mixed CPU/GPU HDO restore preserves counters,
+    # masters and moment bindings through two updates for both saved formats.
+    # The selected MuonH qualification does not exercise this optional repair.
     optimizers = optimizer.chained_optimizers if isinstance(optimizer, ChainedOptimizer) else [optimizer]
     for distributed_optimizer in optimizers:
         inner = distributed_optimizer.optimizer
         if not isinstance(inner, HybridDeviceOptimizer):
             continue
-        # MCore 0.18's bucket load overwrites CPU Adam's saved step with local
-        # state. Only the inner GPU groups should retain step, or HDO resets it
-        # before every update.
+        # Preserve the saved per-parameter CPU Adam counter rather than the
+        # legacy group counter; the matching native HDO removal test remains
+        # separate from required MuonH continuation.
         for group in inner.param_groups:
             for parameter in group["params"]:
                 state = inner.state[parameter]

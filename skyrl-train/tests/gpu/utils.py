@@ -24,7 +24,7 @@ from skyrl_train.config.weight_sync_pause import resolve_weight_sync_pause_polic
 from skyrl_train.utils import get_ray_pg_ready_with_timeout
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.trajectory_runners.base import TrajectoryRequestBatch, ConversationType
-from skyrl_train.utils.utils import peer_access_supported, print_mem, initialize_ray, validate_cfg
+from skyrl_train.utils.utils import print_mem, initialize_ray, validate_cfg
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput
@@ -352,9 +352,6 @@ def log_once(msg):
 
 def ray_init_for_tests():
     env_vars = {}
-    if not peer_access_supported(max_num_gpus_per_node=4):
-        log_once("Disabling NCCL P2P for test environment")
-        env_vars = {"NCCL_P2P_DISABLE": "1", "NCCL_SHM_DISABLE": "1"}
     # TODO (erictang000): refactor this to use the same prepare_runtime_environment function as in utils.py for tests
     # to remove duplicate code
     env_vars["PYTHONPATH"] = os.environ.get("PYTHONPATH", "")

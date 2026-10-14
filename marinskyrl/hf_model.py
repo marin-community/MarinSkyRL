@@ -17,6 +17,11 @@ _OFFLINE_ENVIRONMENT_VARIABLES = (HF_HUB_OFFLINE_ENV, TRANSFORMERS_OFFLINE_ENV)
 
 def normalize_fast_tokenizer_metadata_bytes(payload: bytes, *, has_tokenizer_json: bool, source: str) -> bytes:
     """Rewrite Transformers 5 fast-tokenizer metadata for Transformers 4."""
+    # The existing Open-MOPD control uses TF 4.57.6, whose native class lookup
+    # cannot resolve TokenizersBackend; PreTrainedTokenizerFast is available:
+    # https://github.com/huggingface/transformers/blob/v4.57.6/src/transformers/models/auto/tokenization_auto.py
+    # Remove after every export consumer accepts native TF5 metadata. Verify
+    # an exported tokenizer's encode/decode round trip in each consumer.
     config = json.loads(payload)
     if config.get("tokenizer_class") != "TokenizersBackend":
         return payload
@@ -34,6 +39,11 @@ def immutable_model_cache_key(source: str, identity: str) -> str:
 @contextlib.contextmanager
 def hugging_face_hub_online():
     """Temporarily allow an explicit Hub operation from an offline runtime."""
+    # Hub 1.32 reads HF_HUB_OFFLINE at import, and its native HTTP hook still
+    # rejects requests after the environment variable is removed:
+    # https://github.com/huggingface/huggingface_hub/blob/v1.32.0/src/huggingface_hub/utils/_http.py#L283
+    # Remove when a native per-operation online option bypasses that hook.
+    # Verify explicit uncached fetch plus restoration of both offline settings.
     previous_environment = {name: os.environ.pop(name) for name in _OFFLINE_ENVIRONMENT_VARIABLES if name in os.environ}
     previous_offline = huggingface_hub.constants.HF_HUB_OFFLINE
     huggingface_hub.constants.HF_HUB_OFFLINE = False

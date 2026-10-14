@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import threading
 from typing import List, Any, Dict, Optional, Tuple, Iterator, AsyncGenerator
-from dataclasses import asdict, dataclass, fields as _dataclass_fields, replace
+from dataclasses import asdict, dataclass, replace
 from loguru import logger
 from http import HTTPStatus
 import ray
@@ -16,6 +16,7 @@ from zmq.error import ZMQError
 from types import SimpleNamespace
 from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
+from vllm.exceptions import VLLMValidationError
 from vllm.distributed.parallel_state import get_dp_group, get_ep_group, get_pp_group
 from vllm.distributed.weight_transfer.base import WeightTransferUpdateRequest
 from vllm.renderers.online_renderer import OnlineRenderer
@@ -117,17 +118,14 @@ def _create_async_engine(engine_args, stat_loggers, data_parallel_master_ports):
 
 def _create_async_engine_with_port_collision_retries(engine_args, stat_loggers):
     """Start one independent engine, retrying opportunistically selected ports."""
-    import random
-
+    # Native 0.30 returns an unreserved port after closing its probe socket:
+    # https://github.com/vllm-project/vllm/blob/ced6857afa0ea7b2e3f0846a62e1394e90f15607/vllm/utils/network_utils.py#L243
+    # Remove retries when native startup owns the socket through worker bind.
+    # Verify an owned port conflict and cleanup; this independent-engine retry
+    # must not be used for a multi-rank DP gang with peers awaiting old ports.
     max_attempts = 5
     backoff_base_seconds = 15.0
     for attempt in range(max_attempts):
-        stagger = random.uniform(1.5, 3.0)
-        logger.info(
-            f"Engine startup stagger: sleeping {stagger:.2f}s "
-            f"(attempt {attempt + 1}/{max_attempts}) to avoid port collisions"
-        )
-        time.sleep(stagger)
         try:
             return _create_async_engine(engine_args, stat_loggers, data_parallel_master_ports=None)
         except (DistNetworkError, RuntimeError, ZMQError) as error:
@@ -180,50 +178,34 @@ def _build_error_response(message: str, type_phrase: str, code: int) -> Dict[str
 _NORM_META_FAKES_REGISTERED = False
 
 
+# Upstream vLLM 0.30 registers these ops for CUDA only:
+# https://github.com/vllm-project/vllm/blob/ced6857afa0ea7b2e3f0846a62e1394e90f15607/csrc/libtorch_stable/torch_bindings.cpp#L792
+# Direct Meta calls with Torch 2.14.1 and Marin wheel 3a054c458ca8 raise
+# NotImplementedError without this helper; both succeed with it. This primitive
+# probe establishes the missing dispatch, not complete CP/PP transfer parity.
+# The ops mutate their inputs and return nothing, so their fake returns None.
+# Actual CUDA execution continues to use the native normalization kernels.
+#
+# Remove after native Meta registrations exist or reload no longer traces these
+# ops on Meta tensors. Verify the unpatched primitive calls and the existing
+# repeated expert-block/ShortConv transfer gates on H100 and GB200. Register
+# after loading the extension; retry later if its schemas are not loaded yet.
+
+
 def ensure_norm_meta_fakes_registered() -> None:
-    """Register Meta/fake kernels for vLLM's RMSNorm custom ops (idempotent).
-
-    WHY: the layerwise weight-reload bracket (``skyrl_begin_weight_reload`` ->
-    ``initialize_layerwise_reload``) restores every layer's params/buffers onto
-    the **meta** device, then the CP>1 finalize path materializes those meta
-    tensors and traces ``process_weights_after_loading`` over them. That trace
-    dispatches ``torch.ops._C.rms_norm`` (and its sibling
-    ``fused_add_rms_norm``) with Meta tensors, but the vLLM fork registers those
-    C++ ops for ``torch::kCUDA`` ONLY (csrc/torch_bindings.cpp) — no Meta/fake
-    kernel — so the dispatch dies with:
-      ``NotImplementedError: _C::rms_norm: attempted to run this operator with
-      Meta tensors, but there was no fake impl or Meta kernel registered``
-    which killed all 3 inference engines during ``sync_weights`` on the CP4
-    30B-A3B RL cell (agent_logs/2026-07-07_grid30bc_rmsnorm_meta_sync_weights.md).
-    The CP1 sibling cell never traces these on meta, so it survived — hence this
-    is CP>1-specific.
-
-    Both ops are shape/dtype-preserving in-place normalizations whose C++ schema
-    (torch_bindings.cpp) returns nothing:
-      ``rms_norm(Tensor! result, Tensor input, Tensor weight, float epsilon) -> ()``
-      ``fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor weight, float epsilon) -> ()``
-    The correct fake for a mutating op that returns nothing is a no-op returning
-    ``None`` (identical shape to vLLM's own ``_C::scaled_fp4_quant.out`` fake).
-    This ONLY fires under meta-tensor tracing (the CP>1 sync path); real CUDA
-    execution keeps using the registered CUDA kernel, so numerics/MoE routing are
-    UNCHANGED. Ships via the /app source sync (no gpu-rl image rebuild).
-
-    Called from the weight-reload bracket rather than at import time because the
-    ``_C`` custom-op library is only guaranteed loaded once the vLLM model is
-    built — by the first weight sync ``torch.ops._C.rms_norm`` exists.
-    """
+    """Register both missing mutating-op Meta kernels once their schemas exist."""
     global _NORM_META_FAKES_REGISTERED
     if _NORM_META_FAKES_REGISTERED:
         return
 
     _C = getattr(torch.ops, "_C", None)
-    if _C is None:  # vLLM C-extension not loaded yet; try again on the next call.
+    if _C is None or not all(hasattr(_C, name) for name in ("rms_norm", "fused_add_rms_norm")):
+        # Do not mark registration complete before the extension has loaded.
         return
 
     from torch.library import register_fake
 
-    # (name, arg-count) pairs. Fake matches the C++ schema exactly: a mutating op
-    # that returns nothing => the fake returns None (no output tensors to fake).
+    # A mutating op with no return value needs a fake that returns None.
     def _rms_norm_fake(result, input, weight, epsilon):  # -> ()
         return None
 
@@ -231,19 +213,12 @@ def ensure_norm_meta_fakes_registered() -> None:
         return None
 
     registrations = (
-        ("rms_norm", "_C::rms_norm", _rms_norm_fake),
-        ("fused_add_rms_norm", "_C::fused_add_rms_norm", _fused_add_rms_norm_fake),
+        ("_C::rms_norm", _rms_norm_fake),
+        ("_C::fused_add_rms_norm", _fused_add_rms_norm_fake),
     )
-    for attr, qualname, fake in registrations:
-        if not hasattr(_C, attr):
-            continue  # op not present in this vLLM build; nothing to register.
-        try:
-            register_fake(qualname, fake)
-            logger.info(f"Registered Meta/fake kernel for {qualname} (CP>1 weight-sync fix)")
-        except RuntimeError as e:
-            # A fake already exists (e.g. a future vLLM registers one, or a
-            # sibling engine in-process already ran this) — that's fine, leave it.
-            logger.debug(f"Skipping fake registration for {qualname}: {e}")
+    for qualname, fake in registrations:
+        register_fake(qualname, fake)
+        logger.info(f"Registered Meta/fake kernel for {qualname} (CP>1 weight-sync fix)")
 
     _NORM_META_FAKES_REGISTERED = True
 
@@ -257,15 +232,7 @@ class Logprob:
 
 def setup_envvars_for_vllm(kwargs, bundle_indices):
     noset_visible_devices = kwargs.pop("noset_visible_devices")
-    os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"  # TODO(Charlie): may not be needed.
 
-    # When custom all-reduce is disabled (e.g. for TP=2 on H100 where
-    # SymmMemCommunicator rendezvous fails), also disable symmetric memory
-    # via env var — the engine arg alone doesn't prevent SymmMemCommunicator
-    # from being instantiated.
-    if kwargs.get("disable_custom_all_reduce"):
-        os.environ["VLLM_ALLREDUCE_USE_SYMM_MEM"] = "0"
-        logger.info("setup_envvars_for_vllm: set VLLM_ALLREDUCE_USE_SYMM_MEM=0 (disable_custom_all_reduce=True)")
     if kwargs.get("distributed_executor_backend") == "ray":
         # a hack to make the script work.
         # stop ray from manipulating *_VISIBLE_DEVICES
@@ -448,63 +415,6 @@ class WorkerWrap:
             device=self.device,
         )
 
-    @staticmethod
-    def _apply_fp8_weight_loader_patches(*, fuse_weights: bool = False):
-        """Patch Fp8LinearMethod.process_weights_after_loading to preserve weight_loader.
-
-        Following verl's approach: after FP8 processing creates new Parameter objects,
-        copy custom attributes (weight_loader, output_dim, input_dim, subclass_type)
-        from the original specialized parameter so weight sync can reload weights.
-        """
-        if not fuse_weights:
-            return
-
-        try:
-            from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
-        except ImportError:
-            return
-
-        original_process = Fp8LinearMethod.process_weights_after_loading
-
-        def patched_process(self_method, layer, *args, **kwargs):
-            # Save original param attributes before processing
-            saved_attrs = {}
-            for pname, param in layer.named_parameters():
-                attrs = {}
-                for attr in (
-                    "weight_loader",
-                    "output_dim",
-                    "input_dim",
-                    "_output_dim",
-                    "_input_dim",
-                    "packed_dim",
-                    "packed_factor",
-                    "tp_rank",
-                    "tp_size",
-                    "logical_widths",
-                    "output_sizes",
-                ):
-                    if hasattr(param, attr):
-                        attrs[attr] = getattr(param, attr)
-                attrs["subclass_type"] = type(param)
-                saved_attrs[pname] = attrs
-
-            # Call original process_weights_after_loading
-            result = original_process(layer, *args, **kwargs)
-
-            # Restore attributes on new parameters
-            for pname, param in layer.named_parameters():
-                if pname in saved_attrs:
-                    for attr, value in saved_attrs[pname].items():
-                        try:
-                            setattr(param, attr, value)
-                        except (AttributeError, TypeError):
-                            pass
-
-            return result
-
-        Fp8LinearMethod.process_weights_after_loading = patched_process
-
     def skyrl_begin_weight_reload(self) -> None:
         """RENAMED from ``start_weight_update`` AND NOW WIRED (the #1685 fix).
 
@@ -611,92 +521,11 @@ class WorkerWrap:
 
         return isinstance(quant_config, Fp8Config)
 
-    def _quantize_weights_for_fp8(self, weights):
-        """Quantize BF16 weights to FP8 before loading into FP8 model.
-
-        Follows verl's approach: quantize each weight tensor to FP8 with
-        per-tensor scale, then yield (name, fp8_tensor) and (name_scale, scale).
-        Non-linear weights (layernorm, embedding) are passed through as-is.
-        """
-        import torch
-        from vllm._custom_ops import scaled_fp8_quant
-
-        model = self.model_runner.model
-        # Build set of parameter names that are FP8 quantized
-        # These are the linear layer weights (not biases, not layernorms, not embeddings)
-        fp8_param_names = set()
-        for name, module in model.named_modules():
-            from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
-
-            if hasattr(module, "quant_method") and isinstance(module.quant_method, Fp8LinearMethod):
-                for pname, _ in module.named_parameters():
-                    if "weight" in pname and "scale" not in pname:
-                        full_name = f"{name}.{pname}" if name else pname
-                        fp8_param_names.add(full_name)
-
-        for name, tensor in weights:
-            # Check if this weight maps to an FP8-quantized parameter
-            # The name might be "layers.0.self_attn.q_proj.weight" but the
-            # FP8 param is "layers.0.self_attn.qkv_proj.weight"
-            # We need to check the ORIGINAL unfused name against the fused params
-            is_fp8 = False
-            packed_mapping = getattr(model, "packed_modules_mapping", {})
-            # Reverse mapping: q_proj -> qkv_proj, gate_proj -> gate_up_proj
-            reverse_map = {}
-            for fused, originals in packed_mapping.items():
-                for orig in originals:
-                    reverse_map[orig] = fused
-
-            # Try to find the FP8 param name
-            check_name = name
-            parts = name.rsplit(".", 2)
-            if len(parts) >= 2:
-                module_part = parts[-2]  # e.g. "q_proj"
-                if module_part in reverse_map:
-                    check_name = name.replace(module_part, reverse_map[module_part])
-
-            if check_name in fp8_param_names or name in fp8_param_names:
-                is_fp8 = True
-
-            if is_fp8 and tensor.dtype != torch.float8_e4m3fn:
-                # Move to GPU, quantize, move back to CPU
-                gpu_tensor = tensor.to(device="cuda", dtype=torch.bfloat16)
-                fp8_tensor, scale = scaled_fp8_quant(gpu_tensor)
-                yield (name, fp8_tensor.cpu())
-                # Yield the scale with the FUSED param name
-                scale_name = check_name.replace(".weight", ".weight_scale")
-                yield (scale_name, scale.cpu())
-                del gpu_tensor, fp8_tensor
-            else:
-                yield (name, tensor)
-
-    def _restore_param_subclasses(self, model):
-        """Temporarily restore param __class__ to subclass_type for weight loading.
-
-        After process_weights_after_loading, params are plain Parameter but have
-        subclass_type saved. Restoring __class__ makes weight_loader dispatch work.
-        Returns list of (param, original_class) for cleanup.
-        """
-        patched = []
-        for name, param in model.named_parameters():
-            subclass_type = getattr(param, "subclass_type", None)
-            if subclass_type is not None and type(param) is not subclass_type:
-                original_class = type(param)
-                param.__class__ = subclass_type
-                patched.append((param, original_class))
-        return patched
-
-    def _undo_param_subclasses(self, patched):
-        """Undo the temporary __class__ patching."""
-        for param, original_class in patched:
-            param.__class__ = original_class
-
     def end_weight_update(self) -> None:
         """Flush accumulated weights via model.load_weights().
 
-        For FP8 models: quantizes BF16 weights to FP8 before loading,
-        following verl's approach. Also temporarily restores param subclass
-        types so weight_loader dispatch works correctly with FP8 params.
+        FP8 receivers pack and quantize BF16 policy tensors before copying
+        them into the serving model's native weight and scale storage.
         """
         import gc
 
@@ -1386,7 +1215,7 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
             f"vllm.__version__={vllm.__version__}, "
             f"VLLM_ENABLE_V1_MULTIPROCESSING={os.environ.get('VLLM_ENABLE_V1_MULTIPROCESSING', '<unset>')}"
         )
-        if vllm_v1_disable_multiproc or vllm.__version__ == "0.8.2":
+        if vllm_v1_disable_multiproc:
             # https://github.com/vllm-project/vllm/blob/effc5d24fae10b29996256eb7a88668ff7941aed/examples/offline_inference/reproduciblity.py#L11
             os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
             logger.info("AsyncVLLMInferenceEngine: set VLLM_ENABLE_V1_MULTIPROCESSING=0")
@@ -1589,22 +1418,10 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         # Use factory to inject engine ID into stat logger
         stat_loggers = [self._create_stat_logger_factory()]
 
-        # Source-built vLLM forks can report misleading version strings, so use
-        # the installed constructor fields as the compatibility boundary.
-        try:
-            _engine_arg_fields = {f.name for f in _dataclass_fields(vllm.AsyncEngineArgs)}
-        except TypeError:
-            _engine_arg_fields = set()
         # The custom interval logger keeps vLLM stats enabled. This flag only
         # omits vLLM's duplicate console logger; its Prometheus logger remains.
-        if "disable_log_stats" in _engine_arg_fields:
-            kwargs["disable_log_stats"] = True
-        if "enable_log_requests" in _engine_arg_fields:
-            engine_args = vllm.AsyncEngineArgs(enable_log_requests=False, **kwargs)
-        elif "disable_log_requests" in _engine_arg_fields:
-            engine_args = vllm.AsyncEngineArgs(disable_log_requests=True, **kwargs)
-        else:
-            engine_args = vllm.AsyncEngineArgs(**kwargs)
+        kwargs["disable_log_stats"] = True
+        engine_args = vllm.AsyncEngineArgs(enable_log_requests=False, **kwargs)
 
         if data_parallel_master_ports is not None:
             # Explicit rendezvous ports identify a coordinated DP launch. Rank
@@ -1783,9 +1600,8 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
             unfinished_request_ids = list(output_processor.request_states.keys())
             await engine.abort(unfinished_request_ids)
 
-        # TODO(team): remove once vllm fixes this
-        # otherwise waking it up will output gibberish: https://github.com/vllm-project/vllm/issues/17103
-        await self.reset_prefix_cache()
+        # vLLM 0.30 EngineCore.sleep clears prefix/MM/encoder caches itself
+        # before releasing GPU storage (core.py:sleep -> pause_scheduler).
         level = 1 if self._is_lora else kwargs.get("level", 2)
         await self.llm.sleep(level=level)
 
@@ -1966,16 +1782,9 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
             # entrypoint actor's file descriptors and aborts its uvloop event
             # loop (uv__epoll_ctl_prep SIGABRT) -> ray.WorkerCrashedError.
             # See project notes: nemotron-junit a3 #11 (chain 521442-448).
-            is_input_overflow = False
-            try:
-                from vllm.exceptions import VLLMValidationError
-
-                if isinstance(e, VLLMValidationError):
-                    param = getattr(e, "parameter", None)
-                    is_input_overflow = param == "input_tokens" or "input tokens" in str(e)
-            except ImportError:
-                # Older vLLM without VLLMValidationError: fall back to message match.
-                is_input_overflow = "input tokens" in str(e) and "context length" in str(e)
+            is_input_overflow = isinstance(e, VLLMValidationError) and (
+                e.parameter == "input_tokens" or "input tokens" in str(e)
+            )
 
             status = HTTPStatus.BAD_REQUEST if is_input_overflow else HTTPStatus.INTERNAL_SERVER_ERROR
             message = str(e)
@@ -2069,15 +1878,9 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
                 yield ensure_token_ids_in_sse_chunk(chunk)
 
         except Exception as e:
-            is_input_overflow = False
-            try:
-                from vllm.exceptions import VLLMValidationError
-
-                if isinstance(e, VLLMValidationError):
-                    param = getattr(e, "parameter", None)
-                    is_input_overflow = param == "input_tokens" or "input tokens" in str(e)
-            except ImportError:
-                is_input_overflow = "input tokens" in str(e) and "context length" in str(e)
+            is_input_overflow = isinstance(e, VLLMValidationError) and (
+                e.parameter == "input_tokens" or "input tokens" in str(e)
+            )
 
             status = HTTPStatus.BAD_REQUEST if is_input_overflow else HTTPStatus.INTERNAL_SERVER_ERROR
             err = _build_error_response(str(e), status.phrase, status.value)

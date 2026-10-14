@@ -16,7 +16,6 @@ from tests.cpu.util import example_dummy_config
 
 
 def test_runtime_environment_does_not_enable_nonblocking_communicators(monkeypatch):
-    monkeypatch.setattr("skyrl_train.utils.utils.peer_access_supported", lambda **_: False)
     monkeypatch.delenv("TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC", raising=False)
     env = prepare_runtime_environment(example_dummy_config())
 
@@ -28,7 +27,6 @@ def test_runtime_environment_does_not_enable_nonblocking_communicators(monkeypat
 
 
 def test_monitor_heartbeat_is_capped_by_collective_timeout(monkeypatch):
-    monkeypatch.setattr("skyrl_train.utils.utils.peer_access_supported", lambda **_: False)
     monkeypatch.setenv("TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC", "300")
     cfg = example_dummy_config()
     OmegaConf.update(cfg, "trainer.distributed.worker_collective_timeout_seconds", 30)
@@ -38,7 +36,6 @@ def test_monitor_heartbeat_is_capped_by_collective_timeout(monkeypatch):
 
 
 def test_debug_preset_preserves_collective_timeout_cap(monkeypatch):
-    monkeypatch.setattr("skyrl_train.utils.utils.peer_access_supported", lambda **_: False)
     cfg = example_dummy_config()
     OmegaConf.update(cfg, "trainer.debug_mode", "distributed")
     OmegaConf.update(cfg, "trainer.distributed.worker_collective_timeout_seconds", 30)

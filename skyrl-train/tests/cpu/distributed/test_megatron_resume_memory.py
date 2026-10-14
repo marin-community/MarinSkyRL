@@ -131,7 +131,6 @@ def test_save_before_first_update_initializes_missing_moments_without_changing_w
     monkeypatch.setattr(megatron_strategy, "get_default_save_sharded_strategy", lambda name: None)
     monkeypatch.setattr(megatron_strategy, "FullyParallelSaveStrategyWrapper", lambda strategy, group: strategy)
     monkeypatch.setattr(megatron_strategy.mpu, "get_data_parallel_group", lambda **kwargs: None, raising=False)
-    monkeypatch.setattr(megatron_strategy.ckpt_base, "async_calls", SimpleNamespace(close=lambda: None), raising=False)
     strategy = megatron_strategy.MegatronStrategy.__new__(megatron_strategy.MegatronStrategy)
     strategy.optimizer_config = None
     strategy.megatron_config = SimpleNamespace(optimizer_checkpoint_sharding_type="fully_reshardable")

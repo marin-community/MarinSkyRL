@@ -132,62 +132,20 @@ def init_custom_process_group(
         # different systems (e.g. RPC) in case the store is multi-tenant.
         store = PrefixStore(group_name, store)
 
-    # NOTE: The pg_options parameter was renamed into backend_options in PyTorch 2.6.0
-    # https://github.com/pytorch/pytorch/commit/a0c7029a75628cd5fa8df83c0de0ea98ee7fd844
-    # Determine the accepted kwarg by INSPECTING the installed _new_process_group_helper
-    # signature rather than a lexicographic version-string compare. The old
-    # `str(torch.__version__) >= "2.6"` test breaks at torch 2.10/2.11 because
-    # "2.11.0+cu130" < "2.6" lexicographically -> it wrongly picked "pg_options",
-    # which torch 2.11 _new_process_group_helper rejects (TypeError: unexpected
-    # keyword argument 'pg_options'). Signature inspection is correct on every
-    # torch (2.9 baked SIF picks backend_options exactly as before -> no regression).
-    import inspect as _inspect
-
-    _helper_params = _inspect.signature(_new_process_group_helper).parameters
-    if "backend_options" in _helper_params:
-        pg_options_param_name = "backend_options"
-    elif "pg_options" in _helper_params:
-        pg_options_param_name = "pg_options"
-    else:
-        raise RuntimeError(
-            "_new_process_group_helper accepts neither 'backend_options' nor "
-            f"'pg_options' (torch {torch.__version__}); signature: {_inspect.signature(_new_process_group_helper)}"
-        )
-    # Force the standalone store-based ncclUniqueId rendezvous path for THIS group, by
-    # temporarily un-binding the caller's default process group's device across the helper call.
+    # Torch 2.6+ calls this option backend_options; both the CPU 2.11 and GPU
+    # 2.14.1 helpers accept it. Older API guessing is unnecessary in our profiles.
     #
-    # This process group spans processes that live in SEPARATE torch.distributed worlds — the
-    # trainer's world plus each inference engine's world — so it is NOT a subgroup of any existing
-    # world. We create it by calling ``_new_process_group_helper`` directly with an empty
-    # ``global_ranks_in_group`` ([]) so torch treats it as a "default-style" standalone group.
-    #
-    # ``_new_process_group_helper`` auto-enables an ``ncclCommSplit`` optimization whenever the
-    # CALLER's own default process group is eager/device-bound (its ``bound_device_id`` is set):
-    #
-    #     if is_initialized() and _get_default_group().bound_device_id:
-    #         split_from = _get_split_source(_get_default_group())
-    #     ...
-    #     if split_from:  # -> ProcessGroupNCCL created via ncclCommSplit(parent=default_comm)
-    #
-    # The megatron policy worker pins its default PG with an explicit ``device_id``
-    # (``init_worker_process_group_with_device``). So on the TRAINER (rank 0) this makes the
-    # weight-sync comm get built by SPLITTING from the trainer's default group — which contains
-    # only the trainer's ranks, NOT the engines. The inference engines' default PG is not
-    # device-bound, so THEY build the same weight-sync comm the plain way: a fresh
-    # ``ncclCommInitRank`` whose ncclUniqueId is exchanged through the c10d store. The two
-    # comm-creation paths are mutually incompatible for this cross-world group: rank 0 never
-    # publishes (``store->set``) the uniqueId the engine ranks block on (``store->get('0')``), so
-    # every rank deadlocks in ``broadcastUniqueNCCLID`` until the 30-minute store timeout fires and
-    # the group dies before the first rollout (reproduced on cw-us-east-02a AND cw-rno2a,
-    # 2026-07-20). Binding a ``device_id`` to THIS group did not help because the split is triggered
-    # by the DEFAULT group's ``bound_device_id``, not this group's.
-    #
-    # Un-binding the default group's device for the duration of the helper call forces
-    # ``split_from = None`` on every rank, so trainer and engines take the IDENTICAL fresh
-    # store-uniqueId ``ncclCommInitRank`` path and rank 0 reliably ``store->set``s the uniqueId
-    # before the engines ``store->get`` it. The default group is restored immediately afterward and
-    # is otherwise unchanged; the new group is created device-unbound (as before), so no other path
-    # is affected.
+    # Torch 2.14.1's _new_process_group_helper splits from a device-bound default
+    # NCCL group. Our weight-sync group joins separate trainer and engine worlds,
+    # so it cannot split from the trainer-only group. Otherwise the trainer never
+    # publishes the uniqueId which engines await (both H100 clusters hung at the
+    # first broadcast, 2026-07-20). Native causal source:
+    # https://github.com/pytorch/pytorch/blob/v2.14.1/torch/distributed/distributed_c10d.py
+    # Temporarily clearing the binding forces the standalone store rendezvous on
+    # every participant; finally restores the default group even if creation fails.
+    # Remove when a native independent-group API bypasses automatic splitting.
+    # Verify repeated non-colocated NCCL/expert-block transfer on H100 and GB200,
+    # plus tests/cpu/distributed/test_init_custom_process_group_split.py for cleanup.
     default_pg = _get_default_group() if torch.distributed.is_initialized() else None
     saved_bound_device_id = default_pg.bound_device_id if default_pg is not None else None
     if default_pg is not None and saved_bound_device_id is not None:
@@ -200,7 +158,7 @@ def init_custom_process_group(
             backend,
             store,
             group_name=group_name,
-            **{pg_options_param_name: pg_options},
+            backend_options=pg_options,
             timeout=timeout,
         )
     finally:

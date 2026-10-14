@@ -68,15 +68,11 @@ DEBUG_MODE_ENV = "SKYRL_DEBUG_MODE"
 DEBUG_ARTIFACT_DIR_ENV = "SKYRL_DEBUG_ARTIFACT_DIR"
 COLLECTIVE_PHASE_DIAGNOSTICS_ENV = "SKYRL_COLLECTIVE_PHASE_DIAGNOSTICS"
 PYTHONFAULTHANDLER_ENV = "PYTHONFAULTHANDLER"
-RAY_USE_UVLOOP_ENV = "RAY_USE_UVLOOP"
-UV_USE_IO_URING_ENV = "UV_USE_IO_URING"
 FR_DUMP_TEMP_FILE_ENV = "TORCH_FR_DUMP_TEMP_FILE"
 NCCL_DEBUG_INFO_TEMP_FILE_ENV = "TORCH_NCCL_DEBUG_INFO_TEMP_FILE"
 NCCL_BUFFER_SIZE_ENV_VAR = "NCCL_BUFFSIZE"
 PYTHONPATH_ENV = "PYTHONPATH"
-VLLM_USE_V1_ENV = "VLLM_USE_V1"
 VLLM_USE_V2_MODEL_RUNNER_ENV = "VLLM_USE_V2_MODEL_RUNNER"
-VLLM_USE_DEEP_GEMM_ENV = "VLLM_USE_DEEP_GEMM"
 VLLM_BATCH_INVARIANT_ENV = "VLLM_BATCH_INVARIANT"
 VLLM_ALLOW_INSECURE_SERIALIZATION_ENV = "VLLM_ALLOW_INSECURE_SERIALIZATION"
 RUNAI_STREAMER_LOG_TO_STDERR_ENV = "RUNAI_STREAMER_LOG_TO_STDERR"
@@ -89,6 +85,8 @@ TRANSFORMERS_OFFLINE_ENV = "TRANSFORMERS_OFFLINE"
 LD_LIBRARY_PATH_ENV = "LD_LIBRARY_PATH"
 NVRTC_HOME_ENV = "NVRTC_HOME"
 CUDA_HOME_ENV = "CUDA_HOME"
+TRITON_PTXAS_PATH_ENV = "TRITON_PTXAS_PATH"
+TRITON_PTXAS_BLACKWELL_PATH_ENV = "TRITON_PTXAS_BLACKWELL_PATH"
 LIBRARY_PATH_ENV = "LIBRARY_PATH"
 MAX_JOBS_ENV = "MAX_JOBS"
 CUDA_WHEEL_NAMESPACE = "cu13"
@@ -148,18 +146,6 @@ ENV_VAR_SPECS = (
         EnvVarSource.DERIVED,
         ALL_RUNTIME_SCOPES,
     ),
-    EnvVarSpec(
-        RAY_USE_UVLOOP_ENV,
-        "trainer.debug_mode",
-        EnvVarSource.DERIVED,
-        frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.INFERENCE_WORKER}),
-    ),
-    EnvVarSpec(
-        UV_USE_IO_URING_ENV,
-        "trainer.debug_mode",
-        EnvVarSource.DERIVED,
-        frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.INFERENCE_WORKER}),
-    ),
     EnvVarSpec("TORCH_FR_BUFFER_SIZE", "trainer.debug_mode", EnvVarSource.DERIVED, ALL_RUNTIME_SCOPES),
     EnvVarSpec("TORCH_CPP_LOG_LEVEL", "trainer.debug_mode", EnvVarSource.DERIVED, ALL_RUNTIME_SCOPES),
     EnvVarSpec(FR_DUMP_TEMP_FILE_ENV, "trainer.debug_mode", EnvVarSource.DERIVED, ALL_RUNTIME_SCOPES),
@@ -175,19 +161,12 @@ ENV_VAR_SPECS = (
     EnvVarSpec("TORCH_SHOW_CPP_STACKTRACES", "trainer.debug_mode", EnvVarSource.DERIVED, ALL_RUNTIME_SCOPES),
     EnvVarSpec("TORCH_SYMBOLIZE_MODE", "trainer.debug_mode", EnvVarSource.DERIVED, ALL_RUNTIME_SCOPES),
     EnvVarSpec(PYTHONPATH_ENV, "ci.marin_nightly.grug", EnvVarSource.EXTERNAL, frozenset({EnvVarScope.DRIVER})),
-    EnvVarSpec(VLLM_USE_V1_ENV, "ci.marin_nightly.grug", EnvVarSource.EXTERNAL, frozenset({EnvVarScope.DRIVER})),
     EnvVarSpec(
         VLLM_USE_V2_MODEL_RUNNER_ENV,
         "generator.backend",
         EnvVarSource.DERIVED,
         frozenset({EnvVarScope.INFERENCE_WORKER}),
         frozenset({EnvVarWriter.PYTHON_ASSIGNMENT}),
-    ),
-    EnvVarSpec(
-        VLLM_USE_DEEP_GEMM_ENV,
-        "ci.marin_nightly.grug",
-        EnvVarSource.EXTERNAL,
-        frozenset({EnvVarScope.DRIVER}),
     ),
     EnvVarSpec(
         VLLM_BATCH_INVARIANT_ENV,
@@ -236,6 +215,18 @@ ENV_VAR_SPECS = (
     ),
     EnvVarSpec(
         CUDA_HOME_ENV,
+        "runtime.bootstrap",
+        EnvVarSource.EXTERNAL,
+        frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.TASK_RUNTIME}),
+    ),
+    EnvVarSpec(
+        TRITON_PTXAS_PATH_ENV,
+        "runtime.bootstrap",
+        EnvVarSource.EXTERNAL,
+        frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.TASK_RUNTIME}),
+    ),
+    EnvVarSpec(
+        TRITON_PTXAS_BLACKWELL_PATH_ENV,
         "runtime.bootstrap",
         EnvVarSource.EXTERNAL,
         frozenset({EnvVarScope.RAY_WORKER, EnvVarScope.TASK_RUNTIME}),
@@ -388,7 +379,6 @@ _RUNTIME_BOUNDARIES = {
     "RANK",
     "RAY_ADDRESS",
     "RAY_DEDUP_LOGS",
-    "RAY_USE_UVLOOP",
     "RL_ENV_DIR",
     "RL_SYNC",
     "SKYRL_HOME",
@@ -407,12 +397,10 @@ _RUNTIME_BOUNDARIES = {
     "TORCH_NCCL_TRACE_CPP_STACK",
     "TRAIN_FILE",
     TRANSFORMERS_OFFLINE_ENV,
-    "UV_USE_IO_URING",
     "VLLM_ALLOW_INSECURE_SERIALIZATION",
     "VLLM_ALLOW_ROUTED_EXPERTS_DCP",
     "VLLM_ALLOW_RUNTIME_LORA_UPDATING",
     "VLLM_ALLREDUCE_USE_SYMM_MEM",
-    "VLLM_DISABLE_COMPILE_CACHE",
     "VLLM_ENABLE_V1_MULTIPROCESSING",
     "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
     "VLLM_MQ_MAX_CHUNK_BYTES_MB",
@@ -421,8 +409,6 @@ _RUNTIME_BOUNDARIES = {
     "VLLM_RAY_PER_WORKER_GPUS",
     "VLLM_ROUTED_EXPERTS_SIDE_TIMEOUT_SECONDS",
     "VLLM_USE_DEEP_GEMM",
-    "VLLM_USE_FLASHINFER_SAMPLER",
-    "VLLM_USE_V1",
     "WANDB_DIR",
     "WORLD_SIZE",
 }
@@ -495,12 +481,12 @@ class EnvVarManager:
     def from_config(cls, config: Any, *, environ: Mapping[str, str] | None = None) -> "EnvVarManager":
         ambient = os.environ if environ is None else environ
         values = {}
-        values[RAY_USE_UVLOOP_ENV] = "0"
-        values[UV_USE_IO_URING_ENV] = "0"
         passthrough_names = (
             LD_LIBRARY_PATH_ENV,
             NVRTC_HOME_ENV,
             CUDA_HOME_ENV,
+            TRITON_PTXAS_PATH_ENV,
+            TRITON_PTXAS_BLACKWELL_PATH_ENV,
             LIBRARY_PATH_ENV,
             MAX_JOBS_ENV,
             TELEMETRY_ENDPOINT_ENV,
@@ -577,11 +563,16 @@ class EnvVarManager:
 
         library_path = os.pathsep.join(str(path) for path in library_paths)
         cuda_root = cuda_roots[0]
+        ptxas = cuda_root / "bin" / "ptxas"
+        if not ptxas.is_file() or not os.access(ptxas, os.X_OK):
+            raise RuntimeError(f"The frozen GPU runtime has no executable CUDA assembler: {ptxas}")
         return cls(
             {
                 LD_LIBRARY_PATH_ENV: library_path,
                 NVRTC_HOME_ENV: str(cuda_root),
                 CUDA_HOME_ENV: str(cuda_root),
+                TRITON_PTXAS_PATH_ENV: str(ptxas),
+                TRITON_PTXAS_BLACKWELL_PATH_ENV: str(ptxas),
                 LIBRARY_PATH_ENV: str(cuda_root.parents[3]),
                 MAX_JOBS_ENV: DEFAULT_CUDA_JIT_MAX_JOBS,
             }
@@ -716,11 +707,7 @@ def grug_gpu_gate_environment(repository_root: str, *, environ: Mapping[str, str
     source_paths = f"{repository_root}/skyrl-gym:{repository_root}/skyrl-train"
     if pythonpath := ambient.get(PYTHONPATH_ENV):
         source_paths = f"{source_paths}:{pythonpath}"
-    return {
-        PYTHONPATH_ENV: source_paths,
-        VLLM_USE_V1_ENV: "1",
-        VLLM_USE_DEEP_GEMM_ENV: "0",
-    }
+    return {PYTHONPATH_ENV: source_paths}
 
 
 def wandb_launch_environment(*, entity: str | None, environ: Mapping[str, str] | None = None) -> dict[str, str]:

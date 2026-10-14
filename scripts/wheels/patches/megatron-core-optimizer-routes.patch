@@ -1,0 +1,28 @@
+# Core 0.19.2 sends secondary registered Hero routes into the Adam/SGD/Lion fallback, which raises unsupported-optimizer at line 626.
+# Source: https://github.com/NVIDIA/Megatron-LM/blob/4b4acac9a1d28ea6829c8d4f566d75698a21249d/megatron/core/optimizer/__init__.py#L884
+# Using one native optimizer with a custom grug_route field loses the QKV/AdamH
+# distinction on restore: Core's fixed identifiers collapse those saved groups.
+# The exact-method CPU probe exercises group matching, not a full GPU restore.
+# Source: https://github.com/NVIDIA/Megatron-LM/blob/4b4acac9a1d28ea6829c8d4f566d75698a21249d/megatron/core/optimizer/optimizer.py#L597
+# Remove when the native factory dispatches each same-class registered route through its own entry. Verify independent MuonH/AdamH values, gradients, clipping and checkpoint continuation on both architectures with skyrl-train/tests/gpu/test_grug_megatron_muonh.py.
+
+diff --git a/megatron/core/optimizer/__init__.py b/megatron/core/optimizer/__init__.py
+index 70f757f..ca57766 100644
+--- a/megatron/core/optimizer/__init__.py
++++ b/megatron/core/optimizer/__init__.py
+@@ -884,4 +884,8 @@ def _get_megatron_emerging_optimizer(
+-        # Only the primary emerging optimizer (stored in ``eopt_name``, e.g., Muon) is
+-        # constructed via ``_create_emerging_optimizer``. Scalar optimizers that also appear
+-        # in ``_EMERGING_OPTIMIZERS`` (e.g., Lion) fall through to the standard fallback path.
+-        if opt_name == eopt_name and opt_name in _EMERGING_OPTIMIZERS:
++        # Routes registered with the primary optimizer's class use its factory.
++        # Different classes (e.g., Lion alongside Muon) retain the standard
++        # fallback path.
++        if (
++            opt_name in _EMERGING_OPTIMIZERS
++            and _EMERGING_OPTIMIZERS[opt_name].optimizer_cls
++            is _EMERGING_OPTIMIZERS[eopt_name].optimizer_cls
++        ):
+@@ -889 +893 @@ def _get_megatron_emerging_optimizer(
+-                config, groups, eopt_name, model_chunks, pg_collection
++                config, groups, opt_name, model_chunks, pg_collection

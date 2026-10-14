@@ -1,0 +1,11 @@
+{
+  "local_version": "marin.cu132torch2141.1",
+  "sources": {
+    "flash-attn": "a8aa52b1ab3e9ca574c8a33b3f35afc017ffa2e2",
+    "transformer-engine-torch": "6ea2a74a9e98c99e6d7b164a33775cc457520027",
+    "megatron-core": "4b4acac9a1d28ea6829c8d4f566d75698a21249d",
+    "megatron-bridge": "c0e164ed2aedac4ad1c877780e2564a19d5d54ec",
+    "speculators": "ecac1b16278063e9640004135153882c02de5801",
+    "fast-hadamard-transform": "e7706faf8d1c3b9f241e36860640ad1dac644ede"
+  }
+}

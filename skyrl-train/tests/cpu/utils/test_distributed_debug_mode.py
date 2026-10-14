@@ -118,7 +118,6 @@ def test_apply_mode_writes_resolved_driver_manifest(tmp_path, monkeypatch):
 
 
 def test_distributed_mode_overrides_legacy_dump_destination(monkeypatch):
-    monkeypatch.setattr("skyrl_train.utils.utils.peer_access_supported", lambda **_: False)
     monkeypatch.delenv(DEBUG_MODE_ENV, raising=False)
     monkeypatch.delenv(DEBUG_ARTIFACT_DIR_ENV, raising=False)
     monkeypatch.setenv(FR_DUMP_TEMP_FILE_ENV, "/tmp/nccl_fr_rank")

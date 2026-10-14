@@ -1,0 +1,11 @@
+# Core 0.19.2 pins frontend[cutedsl] 1.26.0. Its DSL requirement conflicts with vLLM 0.30 DSL 4.7.1; TE 2.20.2 also requires frontend >=1.29.
+# Source: https://github.com/NVIDIA/Megatron-LM/blob/4b4acac9a1d28ea6829c8d4f566d75698a21249d/pyproject.toml#L104
+# Remove when a stable native Core requirement admits the qualified frontend/DSL pair. Re-run the resolver without this edit, then normal frozen startup and the existing expert/attention value and gradient gates on both architectures. Resolver failure proves a dependency conflict, not runtime incompatibility.
+
+diff --git a/pyproject.toml b/pyproject.toml
+index b2474f7..eb43dae 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -104 +104 @@ dev = [
+-    "nvidia-cudnn-frontend[cutedsl]==1.26.0",
++    "nvidia-cudnn-frontend[cutedsl]==1.30.0",

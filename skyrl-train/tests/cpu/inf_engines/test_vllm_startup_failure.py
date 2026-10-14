@@ -20,7 +20,6 @@ def test_independent_engine_retries_port_collisions(monkeypatch):
 
     engine = object()
     create_attempts = iter((RuntimeError("EADDRINUSE"), engine))
-    sleeps = []
 
     def create_engine(*_args, **_kwargs):
         result = next(create_attempts)
@@ -29,13 +28,11 @@ def test_independent_engine_retries_port_collisions(monkeypatch):
         return result
 
     monkeypatch.setattr(vllm_engine, "_create_async_engine", create_engine)
-    monkeypatch.setattr("random.uniform", lambda *_args: 2.0)
-    monkeypatch.setattr(vllm_engine.time, "sleep", sleeps.append)
+    monkeypatch.setattr(vllm_engine.time, "sleep", lambda *_args: None)
 
     result = vllm_engine._create_async_engine_with_port_collision_retries(object(), [])
 
     assert result is engine
-    assert sleeps == [2.0, 15.0, 2.0]
 
 
 def test_independent_engine_does_not_retry_other_failures(monkeypatch):
@@ -50,7 +47,6 @@ def test_independent_engine_does_not_retry_other_failures(monkeypatch):
         raise RuntimeError("model configuration is invalid")
 
     monkeypatch.setattr(vllm_engine, "_create_async_engine", create_engine)
-    monkeypatch.setattr("random.uniform", lambda *_args: 2.0)
     monkeypatch.setattr(vllm_engine.time, "sleep", lambda *_args: None)
 
     with pytest.raises(RuntimeError, match="model configuration is invalid"):

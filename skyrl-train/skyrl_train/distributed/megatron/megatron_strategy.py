@@ -32,11 +32,10 @@ from skyrl_train.distributed.megatron.direct_checkpoint import (
     DirectS3TorchDistLoadShardedStrategy,
     DirectS3TorchDistSaveShardedStrategy,
 )
+from skyrl_train.distributed.megatron.checkpoint_factories import reuse_checkpoint_factory_buffers
 from skyrl_train.distributed.megatron.checkpoint_metadata import remote_checkpoint_metadata
 from marinskyrl.remote_io import abort_multipart_uploads
 
-from megatron.core.dist_checkpointing.strategies import base as ckpt_base
-from megatron.core.dist_checkpointing.strategies.async_utils import AsyncCallsQueue
 from megatron.core import dist_checkpointing
 from megatron.core.dist_checkpointing.serialization import (
     get_default_save_sharded_strategy,
@@ -101,6 +100,10 @@ def _muonh_fp32_substates(optimizer_state: dict) -> list[dict]:
 
 def _muonh_fp32_groups_as_mapping(optimizer_state: dict) -> None:
     """Avoid mixed empty/nonempty list merges across PP and EP ranks."""
+    # Core 0.19.2 extracts populated lists as dicts but keeps empty lists, then
+    # its native merge rejects the mixed types across Hero PP/EP ranks:
+    # https://github.com/NVIDIA/Megatron-LM/blob/4b4acac9a1d28ea6829c8d4f566d75698a21249d/megatron/core/dist_checkpointing/dict_utils.py
+    # Remove after native mixed empty/populated FP32 group save/resume works.
     for state in _muonh_fp32_substates(optimizer_state):
         groups = state.get("fp32_from_fp16_params")
         if groups is not None:
@@ -133,6 +136,10 @@ def _muonh_adamh_states(optimizer):
 
 def _muonh_adamh_step(optimizer) -> int:
     """Return the shared AdamH step, including ranks without an output head."""
+    # Core's wrapper checkpoints per-parameter tensor state; our scalar AdamH
+    # step is absent on PP ranks without that route. Preserve the recipe's shared
+    # counter explicitly until native optimizer sharding preserves it across
+    # empty PP groups. Verify continued updates against the unbroken reference.
     local_steps = {
         int(step.item()) for state, _ in _muonh_adamh_states(optimizer) if (step := state.get("step")) is not None
     }
@@ -166,10 +173,6 @@ class MegatronStrategy(DistributedStrategy):
         self.hf_config = None  # Set by the megatron worker once configs are initialized.
         if optimizer_config is not None:
             _optimizer_checkpoint_metadata(megatron_config.optimizer_checkpoint_sharding_type)
-
-        # NOTE: Set Megatron dist checkpoint async backend to persistent to avoid `os.fork()`-ing
-        # short-lived background workers, which does not work well with Ray.
-        ckpt_base.async_calls = AsyncCallsQueue(persistent=True)
 
     def set_seed(self, seed: int) -> None:
         random.seed(seed)
@@ -334,8 +337,12 @@ class MegatronStrategy(DistributedStrategy):
         model_sharded_state_dict = model.sharded_state_dict()
         sharded_state_dict["model"] = model_sharded_state_dict
         if optimizer:
-            # An empty training selection can reach checkpointing before the first
-            # update. Megatron's serializer still requires the lazy optimizer state.
+            # Core 0.19.2 only initializes lazy state when is_loading is true:
+            # https://github.com/NVIDIA/Megatron-LM/blob/4b4acac9a1d28ea6829c8d4f566d75698a21249d/megatron/core/optimizer/optimizer.py#L1145
+            # An empty training selection can save before its first update.
+            # Initialize missing moments without changing existing state. Remove
+            # when native serialization supports that first save; verify the
+            # chained/unchained pre-update save and checkpoint continuation tests.
             optimizers = optimizer.chained_optimizers if isinstance(optimizer, ChainedOptimizer) else [optimizer]
             for child in optimizers:
                 if child.optimizer is not None and child.init_state_fn is not None:
@@ -397,8 +404,6 @@ class MegatronStrategy(DistributedStrategy):
                     torch.save({"client_state": client_state, "tag": tag}, f)
 
         dist.barrier()
-        ckpt_base.async_calls.close()
-        ckpt_base.async_calls = AsyncCallsQueue(persistent=True)
         self.log(f"Checkpoint successfully saved to {ckpt_dir}")
 
     def load_checkpoint(
@@ -442,11 +447,9 @@ class MegatronStrategy(DistributedStrategy):
                     if muonh
                     else _saved_optimizer_sharding_type(common_state)
                 )
-                # Gradients are not checkpointed. Free their GPU buffers now: building the
-                # optimizer's sharded state dict for loading allocates a full set of moments
-                # before optimizer.load_state_dict allocates the checkpointed ones, and with the
-                # gradients resident that second copy is what OOMs a policy that trains fine.
-                # The empty buffers come back after the optimizer state is restored below.
+                # Gradients are not checkpointed. Free their GPU buffers while the optimizer
+                # initializes its load destinations and DCP decodes checkpoint records.
+                # The empty buffers come back after optimizer restore.
                 offload_megatron_grads_to_cpu(model)
                 sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(
                     model_sharded_state_dict,
@@ -456,6 +459,7 @@ class MegatronStrategy(DistributedStrategy):
                 if muonh:
                     _muonh_fp32_groups_as_mapping(sharded_state_dict["optimizer"])
             # Load the checkpoint in parallel.
+            reuse_checkpoint_factory_buffers(sharded_state_dict)
             if not muonh:
                 load_strategy = FullyParallelLoadStrategyWrapper(
                     load_strategy, mpu.get_data_parallel_group(with_context_parallel=True)

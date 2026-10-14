@@ -433,15 +433,6 @@ class GrugMoELayer(MoELayer):
 
     def __init__(self, config, *args, **kwargs):
         super().__init__(config, *args, **kwargs)
-        # MCore 0.18 marks expert parameters as dense when EP=1. With a
-        # smaller expert TP group, those replicas instead belong to expert DP
-        # (which includes the extra attention-TP ranks).
-        if (
-            config.expert_model_parallel_size == 1
-            and config.tensor_model_parallel_size != config.expert_tensor_parallel_size
-        ):
-            for param in self.experts.parameters():
-                param.allreduce = False
         if config.moe_latent_size:
             self.latent_norm = TENorm(config=config, hidden_size=config.moe_latent_size, eps=config.layernorm_epsilon)
 

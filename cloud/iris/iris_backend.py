@@ -775,7 +775,6 @@ def _build_task_shell(
         f"export SKYRL_HOME={shlex.quote(SKYRL_HOME)}; "
         f"source {shlex.quote(MARINSKYRL_ACTIVATION_FILE)}; "
         f"export PYTHONPATH={shlex.quote(pythonpath)}:${{PYTHONPATH:-}}; "
-        f"export VLLM_USE_V1=1; "
         f"{gdn_branch}"
     )
     return ["bash", "-c", bash]

@@ -124,6 +124,13 @@ class _AbortableFsspecFileSystem(FsspecFileSystem):
 class StreamingFsspecWriter(FileSystemWriter):
     """Stream one aggregated DCP object per rank with bounded tensor copy-ahead."""
 
+    # Native Torch 2.14.1 aggregate writes retain every resolved CPU tensor:
+    # https://github.com/pytorch/pytorch/blob/5c4886908584029761b579af026dcfb627c84070/torch/distributed/checkpoint/filesystem.py
+    # Its public per-tensor layout bounds those copies but changes object count;
+    # native Core 0.19.2 does not expose that setting, and MSC 0.51 buffers each
+    # entire object. Remove after a native bounded stream/layout passes real S3
+    # continuation, peak-memory and repeated save-time checks for both models.
+
     def __init__(
         self,
         path: str,

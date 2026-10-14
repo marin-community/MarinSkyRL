@@ -19,12 +19,12 @@ from skyrl_train.utils import initialize_ray
 from skyrl_train.utils.utils import validate_cfg
 from tests.gpu.grug_gpu_gates import require_hoppers
 from tests.gpu.grug_serving import rank0_validation_snapshot
+from tests.gpu.grug_tiny_checkpoint import write_tiny_checkpoint
 from tests.gpu.test_grug_megatron import (
     _config,
     _init_policy,
     _megatron_response_logprobs,
     _padded_batch,
-    _write_tiny_checkpoint,
 )
 
 
@@ -50,7 +50,7 @@ def write_tiny_hero_checkpoint(path: Path):
         head_dim=16,
         sliding_window=8,
     )
-    _write_tiny_checkpoint(path, shape=shape, num_experts_per_tok=8)
+    write_tiny_checkpoint(path, shape=shape, num_experts_per_tok=8)
     config = GrugMoeConfig.from_pretrained(path)
     state = load_file(str(path / "model.safetensors"))
     torch.manual_seed(23)
@@ -107,6 +107,8 @@ def write_tiny_hero_checkpoint(path: Path):
         pytest.param(1, 1, 2, 1, True, 0.5, False, id="half-offloaded-adamw"),
         pytest.param(1, 1, 2, 1, True, 1.0, False, id="cpu-adamw"),
         pytest.param(1, 2, 2, 1, False, None, True, id="pp2-ep2-muonh-cpu-momentum"),
+        pytest.param(1, 1, 1, 2, True, None, True, id="cp2-muonh-cpu-momentum"),
+        pytest.param(1, 1, 1, 4, True, None, True, id="cp4-muonh-cpu-momentum"),
     ],
 )
 def test_hero_worker_repeated_updates(tmp_path, monkeypatch, tp, pp, ep, cp, packing, optimizer_offload, muonh):

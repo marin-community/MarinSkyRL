@@ -203,8 +203,6 @@ class LocalRLRunner:
         )
         os.environ["POLICY_NUM_NODES"] = str(self.config.num_nodes)
 
-        os.environ["VLLM_USE_V1"] = "1"
-
         wandb_dir = os.path.join(self.config.experiments_dir, "wandb")
         os.makedirs(wandb_dir, exist_ok=True)
         os.environ["WANDB_DIR"] = wandb_dir

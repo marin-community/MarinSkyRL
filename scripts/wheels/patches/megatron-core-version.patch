@@ -1,0 +1,9 @@
+# Identify the patched Core wheel independently of the upstream 0.19.2 artifact. Remove this local version when all Core compatibility patches are removed; rebuilt bytes still need qualification.
+
+diff --git a/megatron/core/package_info.py b/megatron/core/package_info.py
+index 24c6794..2269224 100644
+--- a/megatron/core/package_info.py
++++ b/megatron/core/package_info.py
+@@ -8 +8 @@ PATCH = 2
+-PRE_RELEASE = ""
++PRE_RELEASE = "+marin.torch2141.4"

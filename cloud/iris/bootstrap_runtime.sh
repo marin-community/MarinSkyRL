@@ -66,6 +66,11 @@ printf 'export PATH=%q${PATH:+:$PATH}\n' "$environment/bin" >> "$runtime_file"
 source "$runtime_file"
 # FlashInfer's CUDA 13 JIT still links through CUDA_HOME/lib64, while the
 # NVIDIA wheel installs its libraries in CUDA_HOME/lib.
+# Native FlashInfer 0.6.18.post1 jit/cpp_ext.py links through lib64 and its stubs
+# with -lcudart/-lcuda. Source: https://github.com/flashinfer-ai/flashinfer/blob/v0.6.18.post1/flashinfer/jit/cpp_ext.py#L254
+# NVRTC/TE and JIT linking also need unversioned linker names. Keep these aliases
+# outside uv's cache. Remove when native wheels/JITs provide matching paths/names;
+# verify a cold FlashInfer MoE build and normal TE/serving startup on both arches.
 if [[ ! -e "$CUDA_HOME/lib64" ]]; then
   ln -s "$CUDA_HOME/lib" "$CUDA_HOME/lib64"
 fi

@@ -1,0 +1,13 @@
+# Bridge 0.6.2 requires FlashInfer Python/cubin 0.6.8.post1; vLLM 0.30 requires 0.6.18.post1. Their exact pins cannot resolve in one environment.
+# Source: https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/c0e164ed2aedac4ad1c877780e2564a19d5d54ec/pyproject.toml#L101
+# Remove when stable native requirements agree. Test unpatched resolution, then normal frozen HF import/export and trainer/serving transfer on both architectures. Current proof covers these Grug paths, not all Bridge FlashInfer features.
+
+diff --git a/pyproject.toml b/pyproject.toml
+index be45bc8..33404de 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -101,2 +101,2 @@ dependencies = [
+-    "flashinfer-python==0.6.8.post1",  # keep flashinfer-python and flashinfer-cubin in lockstep:
+-    "flashinfer-cubin==0.6.8.post1",   # the runtime version-match check fails otherwise
++    "flashinfer-python==0.6.18.post1",  # keep flashinfer-python and flashinfer-cubin in lockstep:
++    "flashinfer-cubin==0.6.18.post1",   # the runtime version-match check fails otherwise

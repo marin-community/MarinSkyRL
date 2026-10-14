@@ -1,0 +1,12 @@
+# Core 0.19.2 imports FA2 2.8.3.post1 bundled CuTe code before checking for the separately versioned FA4 distribution. No eligible FA4 is installed in the qualified DSL 4.7.1 group.
+# Source: https://github.com/NVIDIA/Megatron-LM/blob/4b4acac9a1d28ea6829c8d4f566d75698a21249d/megatron/core/transformer/attention.py#L85
+# Remove when the native import checks distribution eligibility first, or the actual bundled code imports with the selected DSL. Verify unpatched ordinary startup without FA4 and existing FA2/TE context-parallel gates. Those gates do not qualify the optional FA4 path.
+
+diff --git a/megatron/core/transformer/attention.py b/megatron/core/transformer/attention.py
+--- a/megatron/core/transformer/attention.py
++++ b/megatron/core/transformer/attention.py
+@@ -94 +93,0 @@
+-    from flash_attn.cute import flash_attn_varlen_func as flash_attn4_varlen_func
+@@ -100,0 +100,2 @@
++    if HAVE_FA4:
++        from flash_attn.cute import flash_attn_varlen_func as flash_attn4_varlen_func

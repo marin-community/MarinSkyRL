@@ -15,15 +15,18 @@ from megatron.core.dist_checkpointing.strategies.torch import (
     mcore_to_pyt_state_dict,
 )
 from torch.distributed import checkpoint
-from torch.distributed.checkpoint._fsspec_filesystem import FileSystem as FsspecFileSystem
 
 from marinskyrl.remote_io import create_s3_filesystem
 from skyrl_train.io.torch_distributed_checkpoint import StreamingFsspecWriter
-from skyrl_train.io.checkpoint_reader import RecordCheckpointReader
+from skyrl_train.io.checkpoint_reader import s3_checkpoint_reader
 
 
-# MCore 0.18 does not expose a storage-writer hook. Keep the adapter narrow: it
-# preserves MCore's state translation and planner and replaces only the writer.
+# Core 0.19.2's native MSC path passes a tiny real S3 round trip, but its save
+# interface selects an aggregated writer without a per-tensor layout option:
+# https://github.com/NVIDIA/Megatron-LM/blob/4b4acac9a1d28ea6829c8d4f566d75698a21249d/megatron/core/dist_checkpointing/strategies/torch.py
+# MSC 0.51 buffers that entire rank object until close. Keep Core's translation
+# and planners while using our bounded stream. Remove when native Core/MSC
+# bounds remote staging; verify full-model save/resume memory and throughput.
 class DirectS3TorchDistSaveShardedStrategy(TorchDistSaveShardedStrategy):
     """Save MCore torch-dist shards directly to S3 through PyTorch DCP."""
 
@@ -78,10 +81,7 @@ class DirectS3TorchDistLoadShardedStrategy(TorchDistLoadShardedStrategy):
         converted, flat_mapping, rename_mapping = _replace_state_dict_keys_with_sharded_keys(original)
         pytorch_state_dict = mcore_to_pyt_state_dict(converted, True)
 
-        reader = RecordCheckpointReader(self.checkpoint_dir)
-        reader.fs = FsspecFileSystem()
-        reader.fs.fs = self.filesystem
-        reader.path = self.checkpoint_dir
+        reader = s3_checkpoint_reader(self.checkpoint_dir, self.filesystem)
         checkpoint.load(
             pytorch_state_dict,
             storage_reader=reader,

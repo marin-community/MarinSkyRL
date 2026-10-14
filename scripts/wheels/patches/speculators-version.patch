@@ -1,0 +1,8 @@
+# Give the corrected nightly wheel a distinct post-release identity. The native nightly path avoids a build-host file URL for hs-connectors. Remove when a qualified native release supplies the required APIs and portable dependency metadata.
+
+diff --git a/setup.py b/setup.py
+--- a/setup.py
++++ b/setup.py
+@@ -80 +80 @@
+-        version = Version(f"{version}.a{build_iteration}")
++        version = Version(f"{version}.a{build_iteration}.post1")

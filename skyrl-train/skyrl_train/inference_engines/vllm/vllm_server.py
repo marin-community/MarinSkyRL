@@ -1,4 +1,3 @@
-import os
 import signal
 import uvloop
 from vllm import AsyncLLMEngine
@@ -38,8 +37,6 @@ class VllmServer:
 
         signal.signal(signal.SIGTERM, signal_handler)
 
-        # TODO(tgriggs): Move this elsewhere, make configurable.
-        os.environ["VLLM_USE_V1"] = "1"
         engine_args = AsyncEngineArgs.from_cli_args(self.server_args)
         engine = AsyncLLMEngine.from_engine_args(
             engine_args=engine_args,

@@ -1,0 +1,10 @@
+# The ecac1b fork widened Transformers through 5.18. Restore the native <5.17 cap; the qualified training graph uses 5.12.1. This remains a maintained fork-bound correction.
+# Source: https://github.com/marin-community/speculators/blob/ecac1b16278063e9640004135153882c02de5801/pyproject.toml#L76
+# Remove when adopting a source whose native bounds and required EAGLE3/Grug behavior agree. Test native resolution and the existing online EAGLE3 update/offload/checkpoint gates on both architectures.
+
+diff --git a/pyproject.toml b/pyproject.toml
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -76 +76 @@
+-    "transformers>=5.0.0,<=5.18.0",
++    "transformers>=5.0.0,<5.17.0",
