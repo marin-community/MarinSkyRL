@@ -170,6 +170,21 @@ def test_from_config_streams_object_store_policy_weights(monkeypatch):
     assert "revision" not in captured["engine_init_kwargs"]
 
 
+def test_from_config_loads_staged_policy_weights_locally(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(rwie, "create_ray_wrapped_inference_engines", lambda **kwargs: captured.update(kwargs) or [])
+    cfg = get_default_config()
+    cfg.generator.model_loading = "stage_local"
+    cfg.trainer.policy.model.path = "/tmp/staged-policy"
+    cfg.trainer.policy.model.source_uri = "s3://models/policy"
+
+    main_base.create_ray_wrapped_inference_engines_from_config(cfg, colocate_pg=None, tokenizer=None)
+
+    assert captured["pretrain"] == "/tmp/staged-policy"
+    assert captured["engine_init_kwargs"].get("load_format") != "runai_streamer"
+    assert "model_loader_extra_config" not in captured["engine_init_kwargs"]
+
+
 def test_from_config_retries_s3_engine_gang_after_actor_startup_failure(monkeypatch):
     attempts = []
 

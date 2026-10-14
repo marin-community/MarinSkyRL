@@ -44,6 +44,7 @@ from marinskyrl.runtime_options import (
     inference_engines_required,
     static_preference_pairs_requested,
 )
+from marinskyrl.resource_locator import RolloutModelLoading
 from skyrl_train.dataset.preference_pairs import PreferencePairFormat
 
 if TYPE_CHECKING:
@@ -165,8 +166,9 @@ def create_ray_wrapped_inference_engines_from_config(
     if tokenizer_revision is not None:
         engine_init_kwargs["tokenizer_revision"] = tokenizer_revision
     policy_source_uri = cfg.trainer.policy.model.get("source_uri")
-    rollout_model_path = runai_model_uri(policy_source_uri) if policy_source_uri else cfg.trainer.policy.model.path
-    if policy_source_uri is not None:
+    stream_policy_model = policy_source_uri is not None and cfg.generator.model_loading == RolloutModelLoading.STREAM
+    rollout_model_path = runai_model_uri(policy_source_uri) if stream_policy_model else cfg.trainer.policy.model.path
+    if stream_policy_model:
         engine_init_kwargs["load_format"] = "runai_streamer"
         model_loader_extra_config = engine_init_kwargs.setdefault("model_loader_extra_config", {})
         model_loader_extra_config.setdefault("distributed", True)
@@ -244,7 +246,7 @@ def create_ray_wrapped_inference_engines_from_config(
             )
             engine_kwargs["enforce_eager"] = False
 
-    if policy_source_uri is not None and rollout_model_path.startswith("s3://") and cfg.generator.backend == "vllm":
+    if stream_policy_model and rollout_model_path.startswith("s3://") and cfg.generator.backend == "vllm":
         retry = cfg.trainer.model_load_retry
 
         def create_engines(remaining_timeout_seconds: float):
