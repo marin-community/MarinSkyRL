@@ -103,6 +103,16 @@ def test_whole_projection_preserves_tokens_rewards_and_tool_masks():
     assert "trajectory_ids" not in batch
 
 
+def test_projection_retains_the_verifier_reason_when_harbor_classifies_it_as_a_failure():
+    record = replace(
+        rollout([3, 4], 0.0, grade=GradeResult(Outcome.INFRA_ERROR, None, error="Request timed out.")),
+        failure=RolloutFailure("VerifierRuntimeError"),
+    )
+    batch = WholeTaskProjection(config(), Tokenizer()).project([record], request())
+    assert batch["verification_results"][0].reason == "Request timed out."
+    assert batch["exception_types"] == ["VerifierRuntimeError"]
+
+
 def test_projection_preserves_partial_server_error_diagnostics():
     failed = replace(
         rollout([3], 0.0),

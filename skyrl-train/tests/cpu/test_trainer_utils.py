@@ -335,6 +335,7 @@ def test_dump_per_dataset_eval_results_preserves_error_disposition(tmp_path):
         "stop_reasons": ["stop", "error"],
         "exception_types": [None, "TimeoutError"],
         "error_treatments": [None, "mask"],
+        "verification_results": [VerificationResult.verified(1.0), VerificationResult.error("Request timed out.")],
     }
 
     dump_per_dataset_eval_results(
@@ -342,6 +343,7 @@ def test_dump_per_dataset_eval_results_preserves_error_disposition(tmp_path):
     )
 
     rows = [json.loads(line) for line in (tmp_path / "aime_2024.jsonl").read_text().splitlines()]
+    assert [row["verification"]["reason"] for row in rows] == [None, "Request timed out."]
     assert [(row["exception_type"], row["error_treatment"]) for row in rows] == [
         (None, None),
         ("TimeoutError", "mask"),

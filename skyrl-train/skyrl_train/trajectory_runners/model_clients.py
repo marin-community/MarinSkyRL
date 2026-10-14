@@ -295,6 +295,8 @@ class DirectModelClient:
             decoded = tokenizer.decode(semantic_ids, skip_special_tokens=False)
             if any(marker in decoded for pair in REASONING_DELIMITERS for marker in pair):
                 text = final_answer_text(decoded)
+                if not message.get("tool_calls"):
+                    message = {**message, "content": text}
             logprob_items = (choice.get("logprobs") or {}).get("content")
             response_logprobs = (
                 [float(item["logprob"]) for item in logprob_items] if logprob_items is not None else None

@@ -219,7 +219,7 @@ def _training_decision(
         verification = (
             replace(verification, diagnostics=diagnostics)
             if graded
-            else VerificationResult.error("Rollout execution failed", diagnostics=diagnostics)
+            else VerificationResult.error(verification.reason or "Rollout execution failed", diagnostics=diagnostics)
         )
         if treatment is not ErrorTreatment.PASSTHROUGH or not graded:
             reward = replace(
