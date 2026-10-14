@@ -20,7 +20,7 @@ from taskcompendium.models import EnvironmentRequirements, SessionGrader, Source
 from taskcompendium.runtime.shell import resolve_shell_tool
 from transformers import PreTrainedTokenizerBase
 
-from skyrl_train.dataset.dataset import PromptDataset
+from skyrl_train.dataset.dataset import PromptDataset, _prompt_token_count
 from skyrl_train.rollouts.group_grader import task_group_grader
 
 TASKCOMPENDIUM_ENVIRONMENT = "taskcompendium"
@@ -58,6 +58,10 @@ class TaskDataset(PromptDataset):
     def prepare_dataset(self, dataset):
         return dataset.map(_stored_task_prompt, num_proc=self.num_workers).with_transform(_restore_task_prompts)
 
+    @staticmethod
+    def prompt_token_count(tokenizer: PreTrainedTokenizerBase, row: dict, prompt_key: str) -> int:
+        return task_prompt_token_count(tokenizer, row, prompt_key)
+
     def __getitem__(self, item):
         messages, environment, extras, uid = super().__getitem__(item)
         task = LoweredTaskSpec.model_validate_json(extras[LOWERED_TASK_COLUMN]).task
@@ -79,6 +83,16 @@ def _stored_task_prompt(row: dict) -> dict:
 
 def _restore_task_prompts(batch: dict) -> dict:
     return {**batch, "prompt": [json.loads(prompt) for prompt in batch["prompt"]]}
+
+
+def task_prompt_token_count(tokenizer: PreTrainedTokenizerBase, row: dict, prompt_key: str) -> int:
+    """Include native task tools in the initial prompt's length budget."""
+    lowered = LoweredTaskSpec.model_validate_json(row[LOWERED_TASK_COLUMN])
+    if lowered.session.task_session != SHELLBOX_SESSION:
+        return _prompt_token_count(tokenizer, row[prompt_key])
+    shell_tool = resolve_shell_tool(lowered.task, lowered.session.shell_tool)
+    start = session_start(lowered.task, shell_tool)
+    return _prompt_token_count(tokenizer, list(start.messages), **start.options)
 
 
 def source_row_task(
@@ -178,6 +192,10 @@ class SourceTaskDataset(PromptDataset):
                 _source_task_prompt, source_name=", ".join(self.datasets), environment_configs=self.environment_configs
             ),
         )
+
+    @staticmethod
+    def prompt_token_count(tokenizer: PreTrainedTokenizerBase, row: dict, prompt_key: str) -> int:
+        return task_prompt_token_count(tokenizer, row, prompt_key)
 
     def _map_task_rows(self, dataset: Dataset, mapper: Callable[[dict, int], dict]) -> Dataset:
         return dataset.map(

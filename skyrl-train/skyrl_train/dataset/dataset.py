@@ -59,8 +59,10 @@ class PromptDataset:
         # filter out too long prompts
         tokenizer = self.tokenizer
         prompt_key = self.prompt_key
+        max_prompt_length = self.max_prompt_length
+        token_count = type(self).prompt_token_count
         self.dataframe = self.dataframe.filter(
-            lambda doc: _prompt_token_count(tokenizer, doc[prompt_key]) <= self.max_prompt_length,
+            lambda doc: token_count(tokenizer, doc, prompt_key) <= max_prompt_length,
             num_proc=self.num_workers,
             desc=f"Filtering prompts longer than {self.max_prompt_length} tokens",
         )
@@ -69,6 +71,10 @@ class PromptDataset:
 
     def prepare_dataset(self, dataset):
         return dataset
+
+    @staticmethod
+    def prompt_token_count(tokenizer: PreTrainedTokenizerBase, row: dict, prompt_key: str) -> int:
+        return _prompt_token_count(tokenizer, row[prompt_key])
 
     def __getitem__(self, item):
         row_dict: dict = self.dataframe[item]
@@ -92,9 +98,9 @@ class PromptDataset:
         return len(self.dataframe)
 
 
-def _prompt_token_count(tokenizer: PreTrainedTokenizerBase, prompt) -> int:
+def _prompt_token_count(tokenizer: PreTrainedTokenizerBase, prompt, **template_options) -> int:
     """Count token IDs, including with Transformers 5.x ``BatchEncoding`` output."""
-    encoded = tokenizer.apply_chat_template(prompt, add_generation_prompt=True)
+    encoded = tokenizer.apply_chat_template(prompt, add_generation_prompt=True, **template_options)
     if isinstance(encoded, Mapping):
         encoded = encoded.get("input_ids")
     if encoded is None:
