@@ -2319,6 +2319,7 @@ class RayPPOTrainer:
                         "response_mask": response_masks_tensor,
                         "rewards": rewards_tensor,
                         "rollout_logprobs": None,
+                        "rollout_staleness": None,
                         "ftpo_repair_mask": repair_mask,
                     }
                 )
