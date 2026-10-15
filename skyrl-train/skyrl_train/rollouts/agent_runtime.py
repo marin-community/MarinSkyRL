@@ -5,9 +5,11 @@ import json
 import shutil
 import tempfile
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AbstractAsyncContextManager
 from contextlib import AsyncExitStack, aclosing, asynccontextmanager
 from functools import partial
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from harbor.agents.factory import AgentFactory
@@ -19,7 +21,7 @@ from harbor.models.trial.config import AgentConfig, EnvironmentConfig as TrialEn
 from harbor.models.trial.result import TrialResult
 from harbor.trial.trial import Trial
 from marinskyrl.resource_locator import join_resource_path
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from rolloutengine.contracts import ModelTurn, SessionStart
 from rolloutengine.spec import LoweredTaskSpec
 from shellbox.machine import Machine, NetworkPolicy
@@ -34,6 +36,7 @@ from skyrl_train.rollouts.agent_endpoint import registered_agent_endpoint
 from skyrl_train.rollouts.agent_environment import BorrowedMachineEnvironment
 from skyrl_train.rollouts.agent_service import serve_agent_app
 from skyrl_train.rollouts.installed_agent import run_installed_agent
+from skyrl_train.rollouts.pi_teacher_binding import PiTeacherBinding
 from skyrl_train.rollouts.harbor_trial_session import HarborTrialSession, run_harbor_trial
 from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
 
@@ -51,6 +54,7 @@ class InstalledAgentSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     agent: AgentConfig
+    teacher: PiTeacherBinding | None = None
     output_path: str
     setup_timeout: float
     run_timeout: float
@@ -60,14 +64,90 @@ class InstalledAgentSettings(BaseModel):
     environment_snapshots: dict[str, str] = Field(default_factory=dict)
     trial_reward_key: str = "reward"
 
+    @model_validator(mode="after")
+    def require_supported_pi_contract(self) -> "InstalledAgentSettings":
+        """Reject unattributed teacher execution and unimplemented actor plans."""
+        pi = self.agent.pi
+        if pi is None or pi.mode == "literal":
+            if self.teacher is not None:
+                raise ValueError("Pi teacher binding cannot be used for student-only execution")
+            return self
+        if pi.mode != "teacher_trace" or self.teacher is None:
+            raise ValueError("Pi teacher modes need bound teacher routing and hydrated evidence")
+        if self.agent.model_name != f"hosted_vllm/{self.teacher.model}":
+            raise ValueError("Pi teacher trace must address the bound independent teacher model")
+        return self
+
+
+def trial_agent_config(
+    source: AgentConfig,
+    *,
+    api_base: str,
+    model_name: str,
+    max_input_tokens: int,
+    max_output_tokens: int,
+    trial_id: str,
+    policy_step: int,
+) -> AgentConfig:
+    """Bind one installed Pi agent and immutable identity to the leased policy."""
+    if not trial_id or type(policy_step) is not int or policy_step < 0:
+        raise ValueError("Installed trial requires a valid identity and leased policy step")
+    pi = source.pi
+    if pi is not None:
+        if (pi.trial_id is not None and pi.trial_id != trial_id) or (
+            pi.policy_step is not None and pi.policy_step != policy_step
+        ):
+            raise ValueError("Pi trial identity differs from the policy-step lease")
+        pi = pi.model_copy(update={"trial_id": trial_id, "policy_step": policy_step})
+    config = source.model_copy(
+        update={
+            "pi": pi,
+            "model_name": source.model_name or f"hosted_vllm/{model_name}",
+            "model_alias": f"hosted_vllm/{model_name}",
+            "kwargs": {
+                **source.kwargs,
+                "api_base": api_base,
+                "api_key": "capability-url",
+                **({"collect_rollout_details": True} if source.pi is None else {}),
+                "model_info": {"max_input_tokens": max_input_tokens, "max_output_tokens": max_output_tokens},
+            },
+        }
+    )
+    return AgentConfig.model_validate(config.model_dump())
+
 
 class InstalledAgentRuntime:
-    def __init__(self, settings: InstalledAgentSettings, backend: AgentInferenceBackend, max_output_tokens: int):
+    def __init__(
+        self,
+        settings: InstalledAgentSettings,
+        backend: AgentInferenceBackend,
+        max_output_tokens: int,
+        *,
+        owned_teacher_transport: Any | None = None,
+        endpoint_factory: Callable[[int], AbstractAsyncContextManager[Any]] = registered_agent_endpoint,
+    ):
         self.settings = settings
+        if settings.teacher is not None and (
+            backend.model_name != settings.teacher.model
+            or backend.model_revision != settings.teacher.revision
+            or backend.source_kind != settings.teacher.source
+            or backend.model_endpoint != settings.teacher.endpoint
+        ):
+            raise ValueError(
+                "Pi teacher backend source, model or revision differs from the independent teacher binding"
+            )
         self.backend = backend
+        self.endpoint_factory = endpoint_factory
         self.limits = NativeAPILimits(backend.model_name, backend.max_model_len, max_output_tokens)
         self.resources = AsyncExitStack()
+        if owned_teacher_transport is not None:
+            self.resources.push_async_callback(owned_teacher_transport.close)
         self.port: int | None = None
+
+    @property
+    def student_only(self) -> bool:
+        pi = self.settings.agent.pi
+        return pi is not None and pi.mode == "literal"
 
     async def startup(self) -> None:
         set_global_state(self.backend, None)
@@ -98,7 +178,8 @@ class InstalledAgentRuntime:
         *,
         lowered: LoweredTaskSpec,
         session_id: str,
-    ) -> None:
+        policy_step: int = 0,
+    ) -> dict[str, Any] | None:
         if self.port is None or machine is None:
             raise RuntimeError("Installed agents require a started HTTP service and task machine")
         messages = conversation_messages(lowered.task.context.events)
@@ -112,7 +193,9 @@ class InstalledAgentRuntime:
             json.dumps({"session_id": session_id, "attempt_id": attempt_id, "task_id": lowered.task.id})
         )
         try:
-            await self._run_trial(machine, complete, lowered, trial_dir, messages[0]["content"], attempt_id)
+            return await self._run_trial(
+                machine, complete, lowered, trial_dir, messages[0]["content"], attempt_id, session_id, policy_step
+            )
         finally:
             await publish_attempt(trial_dir, destination)
 
@@ -214,7 +297,14 @@ class InstalledAgentRuntime:
 
     @asynccontextmanager
     async def _served_agent(
-        self, trial_dir: Path, run_timeout: float, *, capability_lifetime: float, agent: AgentConfig | None = None
+        self,
+        trial_dir: Path,
+        run_timeout: float,
+        *,
+        capability_lifetime: float,
+        agent: AgentConfig | None = None,
+        trial_id: str | None = None,
+        policy_step: int = 0,
     ) -> AsyncIterator[AgentConfig]:
         proxy = RecordProxy(
             f"http://127.0.0.1:{self.port}", trial_dir / "engine" / "literal.jsonl", timeout=run_timeout
@@ -227,10 +317,23 @@ class InstalledAgentRuntime:
                 startup_timeout=self.settings.service_startup_timeout,
                 shutdown_timeout=self.settings.service_shutdown_timeout,
             ) as port,
-            registered_agent_endpoint(port, request_timeout=run_timeout) as endpoint,
+            self.endpoint_factory(port) as endpoint,
         ):
             api_base = await endpoint.api_base(required_lifetime=capability_lifetime)
             source = self.settings.agent if agent is None else agent
+            if trial_id is not None:
+                yield trial_agent_config(
+                    source,
+                    api_base=api_base,
+                    model_name=self.backend.model_name,
+                    max_input_tokens=self.backend.max_model_len,
+                    max_output_tokens=self.limits.max_output_tokens,
+                    trial_id=trial_id,
+                    policy_step=policy_step,
+                )
+                return
+            if source.pi is not None and source.pi.mode == "teacher_trace":
+                raise ValueError("Pi teacher trials require a bound policy-step identity")
             yield source.model_copy(
                 update={
                     "model_name": source.model_name or f"hosted_vllm/{self.backend.model_name}",
@@ -256,12 +359,16 @@ class InstalledAgentRuntime:
         trial_dir: Path,
         instruction: str,
         attempt_id: str,
-    ) -> None:
+        session_id: str,
+        policy_step: int,
+    ) -> dict[str, Any] | None:
         run_timeout = lowered.session.total_turn_timeout or self.settings.run_timeout
         async with self._served_agent(
             trial_dir,
             run_timeout,
             capability_lifetime=self.settings.setup_timeout + run_timeout + self.settings.cleanup_timeout,
+            trial_id=session_id,
+            policy_step=policy_step,
         ) as config:
             agent = AgentFactory.create_agent_from_config(config, logs_dir=trial_dir / "agent")
             if not isinstance(agent, BaseInstalledAgent):
@@ -273,7 +380,7 @@ class InstalledAgentRuntime:
                 EnvironmentConfig(allow_internet=lowered.runtime.task_machine.network == NetworkPolicy.ALLOW),
             )
             with environment.with_default_user(lowered.runtime.task_machine.user):
-                await run_installed_agent(
+                return await run_installed_agent(
                     agent,
                     environment,
                     self.backend,

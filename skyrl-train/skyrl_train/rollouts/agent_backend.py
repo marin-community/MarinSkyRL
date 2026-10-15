@@ -41,8 +41,15 @@ class AgentInferenceBackend:
         max_model_len: int,
         tokenize: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]],
         decoder: TokenDecoder,
+        *,
+        model_revision: str | None = None,
+        source_kind: str | None = None,
+        model_endpoint: str | None = None,
     ):
         self.model_name = model_name
+        self.model_revision = model_revision
+        self.source_kind = source_kind
+        self.model_endpoint = model_endpoint
         self.max_model_len = max_model_len
         self.tokenize = tokenize
         self.decoder = decoder

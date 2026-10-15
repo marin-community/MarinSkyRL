@@ -4,6 +4,7 @@ import asyncio
 import math
 import shlex
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 from harbor.agents.installed.base import BaseInstalledAgent
 from harbor.models.agent.context import AgentContext
@@ -24,7 +25,7 @@ async def run_installed_agent(
     setup_timeout: float,
     run_timeout: float,
     cleanup_timeout: float,
-) -> None:
+) -> dict[str, Any] | None:
     """Register before setup and retain logs before the engine closes the machine.
 
     Exact requests and turns are retained separately from the training projection,
@@ -60,3 +61,6 @@ async def run_installed_agent(
             agent.populate_context_post_run(context)
             (evidence_dir / "agent-context.json").write_text(context.model_dump_json(indent=2))
             (evidence_dir / "agent-info.json").write_text(agent.to_agent_info().model_dump_json(indent=2))
+    # Pi owns this trial-local capture. The persisted turn trace is diagnostic,
+    # not an alternative source from which to reconstruct missing evidence.
+    return (context.metadata or {}).get("pi_hydrated_trajectory")
