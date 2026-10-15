@@ -11,6 +11,8 @@ context_budget:
   max_turns: 2
 terminal_bench:
   harbor:
+    environment_type: daytona
+    daytona_api_key_env: DAYTONA_API_KEY
     override_timeout_sec: 600
     verifier_override_timeout_sec: 120
     n_concurrent_trials: 1
@@ -21,6 +23,8 @@ terminal_bench:
     agent:
       name: pi
       model_name: hosted_vllm/pi-qwen-teacher
+      kwargs:
+        thinking_format: qwen-chat-template
     teacher:
       source: skyrl_managed
       model: pi-qwen-teacher
@@ -54,7 +58,7 @@ trainer:
   micro_forward_batch_size_per_gpu: 1
   micro_train_batch_size_per_gpu: 1
   eval_before_train: false
-  eval_interval: 1
+  eval_interval: -1
   ckpt_interval: 1
   resume_mode: none
   logger: console
@@ -93,12 +97,9 @@ generator:
     enable_auto_tool_choice: true
     tool_call_parser: hermes
 data:
-  kind: parquet
+  kind: tasks
   train_data:
-    - ${oc.env:PI_SMOKE_TRAIN_DATA}
-  val_data:
-    - ${oc.env:PI_SMOKE_EVAL_TASK_DATA}
-  terminal_bench_data:
     - ${oc.env:PI_SMOKE_TASK_DATA}
+  val_data: []
 extra_env:
   PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True

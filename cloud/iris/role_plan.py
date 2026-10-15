@@ -422,7 +422,7 @@ def _role_plan(claims: tuple[ModelRoleClaim, ...], values: _RolePlanValues) -> S
 
 def _pi_teacher_claims(config: dict[str, Any], values: _RolePlanValues) -> tuple[ModelRoleClaim, ...]:
     """Reserve a separate Pi trace teacher bundle, or record its external source."""
-    if _optional_at(config, "scenario.preset") != "teacher_demo_pi_base":
+    if _optional_at(config, "scenario.preset") not in ("teacher_demo_pi_base", "teacher_demo_pi_verified_base"):
         return ()
     raw = _at(config, "terminal_bench_config.installed_agent.teacher")
     teacher = PiTeacherBinding.model_validate(raw)

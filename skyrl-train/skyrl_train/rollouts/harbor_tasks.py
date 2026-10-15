@@ -116,7 +116,18 @@ class HarborTaskSettings:
     def lowered(self, lowered: LoweredTaskSpec, *, phase: str) -> LoweredTaskSpec:
         """Apply deployment overrides without changing the task definition."""
         if self.verifier.disable and not isinstance(lowered.task.grader, NoGrader):
-            raise ValueError("Disabled Harbor verification must be selected before task import")
+            task = lowered.task
+            lowered = lowered.model_copy(
+                update={
+                    "task": task.model_copy(
+                        update={
+                            "grader": NoGrader(reason="Harbor verification is disabled"),
+                            "resources": task.resources.model_copy(update={"verifier": ()}),
+                        }
+                    ),
+                    "runtime": lowered.runtime.model_copy(update={"verifier_machine": None}),
+                }
+            )
 
         def machine(original: MachineRuntimeSpec | None) -> MachineRuntimeSpec | None:
             if original is None:

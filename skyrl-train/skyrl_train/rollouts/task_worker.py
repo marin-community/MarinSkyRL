@@ -16,7 +16,7 @@ from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from shellbox.backends.docker.machine import DockerMachineFactory
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
-from shellbox.machine import Backend, Machine, MachineFactory
+from shellbox.machine import Backend, Machine, MachineFactory, NetworkPolicy
 from taskcompendium.grading_result import Outcome
 from taskcompendium.models import NoGrader
 from rolloutengine.agent_session import AgentTaskSession
@@ -39,7 +39,7 @@ from rolloutengine.spec import LoweredTaskSpec
 from rolloutengine.lowering import SHELLBOX_SESSION, validate_lowered_task
 from skyrl_train.config.utils import generation_context_limit
 from skyrl_gym.task_factories import adapt_self_grading_session, session_factories
-from skyrl_gym.task_records import fold_grades, skipped_grade
+from skyrl_gym.task_records import fold_grades, grade_skipped, skipped_grade
 from skyrl_gym.verification import VERIFIER_RUNTIME_ERROR
 
 from skyrl_train.inference_engines.base import ChatContinuation, InferenceEngineInterface, InferenceEngineInput
@@ -392,6 +392,11 @@ class TaskRolloutWorker:
             item if harbor is None else harbor.lowered(item, phase=phase)
             for item, harbor in zip(lowered_tasks, harbor_settings, strict=True)
         ]
+        if self.pi_scenario is not None and any(
+            item.runtime.task_machine is not None and item.runtime.task_machine.network is NetworkPolicy.DENY
+            for item in lowered_tasks
+        ):
+            raise ValueError("Harbor Pi installation needs sandbox internet access for apt, nvm and npm")
         trajectory_ids = request.trajectory_ids
         session_ids = [
             trajectory_ids[index].to_string() if trajectory_ids is not None else uuid4().hex
@@ -541,25 +546,38 @@ class TaskRolloutWorker:
                 batch = self.projection.project(outputs, request)
             else:
                 if metadata is None or not outputs:
-                    raise ValueError("Pi training requires a policy-step lease and a graded trial")
+                    raise ValueError("Pi training requires a policy-step lease and a completed trial")
                 batches = []
+                rejected_teacher_trials = 0
                 identities = request.trajectory_ids
                 expanded_ids = []
                 for index, rollout in enumerate(outputs):
                     if not isinstance(rollout, PiRolloutData) or rollout.failure is not None:
                         raise ValueError("Pi training requires the validated, collated trial result")
-                    if rollout.grade.status not in (Outcome.GRADED, Outcome.SUBMISSION_FAILURE):
-                        raise ValueError("Pi training requires a completed verifier outcome")
-                    if rollout.grade.reward is None:
+                    if grade_skipped(rollout.grade):
+                        if self.pi_scenario is not PiScenario.TEACHER_TRACE:
+                            raise ValueError("Only unfiltered Pi teacher SFT can skip verification")
+                        status = "skipped"
+                    elif rollout.grade.status in (Outcome.GRADED, Outcome.SUBMISSION_FAILURE):
+                        status = rollout.grade.status.value
+                    else:
+                        raise ValueError("Pi trial has no usable verifier outcome")
+                    if status != "skipped" and rollout.grade.reward is None:
                         raise ValueError("Pi trial has no verifier score")
+                    if self.pi_scenario is PiScenario.TEACHER_TRACE_VERIFIED and (
+                        status != "graded" or rollout.grade.passed is None
+                    ):
+                        raise ValueError("Verified Pi teacher SFT needs an explicit graded pass/fail verdict")
                     payload = {
                         **rollout.pi_trajectory,
                         "judge": None,
-                        "verifier_status": rollout.grade.status.value,
-                        "verifier_reward": rollout.grade.reward,
-                        "verifier_passed": rollout.grade.passed,
+                        "verifier_status": status,
+                        "verifier_reward": None if status == "skipped" else rollout.grade.reward,
+                        "verifier_passed": None if status == "skipped" else rollout.grade.passed,
                     }
                     segment = self.etl_pi_trial(payload, trial_id=rollout.session_id, policy_step=metadata.global_step)
+                    if self.pi_scenario is PiScenario.TEACHER_TRACE_VERIFIED and rollout.grade.passed is False:
+                        rejected_teacher_trials += 1
                     batches.append(segment)
                     if identities is not None:
                         expanded_ids.extend([identities[index]] * len(segment["response_ids"]))
@@ -578,6 +596,12 @@ class TaskRolloutWorker:
                 )
                 if identities is not None:
                     batch["trajectory_ids"] = expanded_ids
+                if self.pi_scenario is PiScenario.TEACHER_TRACE_VERIFIED:
+                    batch["rollout_metrics"] = {
+                        **(batch.get("rollout_metrics") or {}),
+                        "pi/teacher_verified_trials": float(len(outputs)),
+                        "pi/teacher_rejected_trials": float(rejected_teacher_trials),
+                    }
             propagate_data_sources(request, batch)
         return await finalize_trajectory_batch(request, batch, self.trajectory_runner_cfg, self.trajectory_sink)
 

@@ -24,7 +24,7 @@ class PreparedPiTeacher:
 
 def prepare_pi_teacher(cfg: DictConfig) -> PreparedPiTeacher | None:
     """Load the teacher tokenizer and authenticate/inspect an external endpoint before actor allocation."""
-    if OmegaConf.select(cfg, "scenario.preset") != "teacher_demo_pi_base":
+    if OmegaConf.select(cfg, "scenario.preset") not in ("teacher_demo_pi_base", "teacher_demo_pi_verified_base"):
         return None
     settings = InstalledAgentSettings.model_validate(
         OmegaConf.to_container(cfg.terminal_bench_config.installed_agent, resolve=True)
