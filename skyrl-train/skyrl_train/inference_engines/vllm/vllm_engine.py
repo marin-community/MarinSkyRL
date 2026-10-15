@@ -68,7 +68,7 @@ from skyrl_train.inference_engines.chat_continuation import EXACT_PROMPT_TOKEN_I
 from marinskyrl.inference_placement import InferenceWorkerPlacement
 from skyrl_train.inference_engines.placement import inference_worker_placement
 from skyrl_train.inference_engines.vllm.numa import set_async_worker_numa_affinity
-from skyrl_train.inference_engines.vllm.policy_steps import UNSAMPLED_POLICY_STEP, PolicyStepStamps
+from skyrl_train.inference_engines.vllm.policy_steps import PolicyStepStamps
 from skyrl_train.weight_sync.expert_block.receiver import ExpertBlockReceiver
 from skyrl_train.weight_sync.weight_loader import WeightLoader
 from skyrl_train.weight_sync.vllm_weight_conversion import load_weights_into_vllm
@@ -1703,7 +1703,7 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         return result
 
     async def _collect_outputs(self, prompt_token_ids, request_id: str, sampling_params: SamplingParams):
-        """Collect outputs for a single prompt."""
+        """Collect a single prompt's final output and the policy steps of its tokens."""
         # Check if LoRA is enabled and create LoRA request
         final_output = None
         lora_request = None
@@ -1725,7 +1725,7 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         ):
             final_output = request_output
 
-        return final_output
+        return final_output, self._response_policy_steps(request_id, len(final_output.outputs[0].token_ids))
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
         """Generate responses using vLLM's async engine.
@@ -1763,7 +1763,7 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
             task = asyncio.create_task(self._collect_outputs(prompt, request_id, row_sampling_params))
             tasks.append(task)
         try:
-            outputs = await asyncio.gather(*tasks)
+            collected = await asyncio.gather(*tasks)
         except BaseException as e:
             # Cancel any sibling asyncio tasks still in flight.
             for t in tasks:
@@ -1784,25 +1784,20 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
                     e,
                     abort_exc,
                 )
-            self._policy_steps.discard(request_ids)
             raise
 
-        result = self._postprocess_outputs(outputs, self._response_top_k(sampling_params), sampling_params)
-        result["response_policy_steps"] = [
-            self._response_policy_steps(request_id, len(response))
-            for request_id, response in zip(request_ids, result["response_ids"], strict=True)
-        ]
+        outputs, policy_steps = zip(*collected)
+        result = self._postprocess_outputs(list(outputs), self._response_top_k(sampling_params), sampling_params)
+        result["response_policy_steps"] = list(policy_steps)
         return result
 
     def _response_policy_steps(self, request_id: str, response_length: int) -> list[int]:
-        """Pop the request's stamps, trimmed to the tokens vLLM kept after its stop checks."""
+        """Pop the stamps of the request's first ``response_length`` returned tokens."""
         stamps = self._policy_steps.finish(request_id)
-        if stamps is None:
-            return [UNSAMPLED_POLICY_STEP] * response_length
         assert len(stamps) >= response_length, (
             f"request {request_id} returned more tokens than its engine steps sampled"
         )
-        return stamps[:response_length].tolist()
+        return stamps[:response_length]
 
     async def wake_up(self, *args: Any, **kwargs: Any):
         await self.llm.wake_up(tags=kwargs.get("tags", None))
@@ -1990,14 +1985,14 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
                 response["request_id"] = request_id
                 response["error_category"] = "server_error"
                 return response
-            # vLLM generates under the response id for chat and under its first prompt's item id for completions.
-            generate_id = response["id"] if endpoint == "/chat/completions" else f"{response['id']}-0"
             choice = response["choices"][0]
-            # Parallel samples of one request share its generate id, so only a single-choice response is stamped.
-            if len(response["choices"]) == 1 and choice.get("token_ids") is not None:
-                choice["policy_steps"] = self._response_policy_steps(generate_id, len(choice["token_ids"]))
-            else:
-                self._policy_steps.discard([generate_id])
+            # vLLM generates a chat completion under its response id, which parallel samples share.
+            if (
+                endpoint == "/chat/completions"
+                and len(response["choices"]) == 1
+                and choice.get("token_ids") is not None
+            ):
+                choice["policy_steps"] = self._response_policy_steps(response["id"], len(choice["token_ids"]))
             return response
 
         except Exception as e:
@@ -2177,7 +2172,7 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
     async def resume_generation(self, policy_step: int | None = None) -> None:
         """Release the EngineCore scheduler after the weight reload completes, stamping later tokens with ``policy_step``."""
         if policy_step is not None:
-            self._policy_steps.install(policy_step)
+            self._policy_steps.install(policy_step, time.monotonic())
         self._forget_unclaimed_policy_steps()
         await self.llm.resume_generation()
         logger.info("resume_generation() finished, EngineCore scheduler released, policy_step={}", policy_step)

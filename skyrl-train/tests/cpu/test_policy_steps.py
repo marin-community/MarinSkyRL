@@ -33,40 +33,30 @@ from tests.cpu.util import example_dummy_config
 
 
 def test_policy_step_stamps_follow_the_step_installed_before_each_engine_step():
-    clock = [10.0]
-    stamps = PolicyStepStamps(clock=lambda: clock[0])
+    stamps = PolicyStepStamps()
     stamps.observe("a", 2, 10.0)
-    clock[0] = 11.0
-    stamps.install(1)
-    clock[0] = 12.0
+    stamps.install(1, 11.0)
     stamps.observe("a", 3, 11.5)
-    stamps.install(2)
-    clock[0] = 13.0
+    stamps.install(2, 12.0)
     # Sampled before the second install and delivered after it: the step timestamp decides, not the arrival.
     stamps.observe("a", 1, 11.9)
     stamps.observe("a", 2, 12.5)
-    stamps.observe("b", 4, 12.5)
 
-    finished = stamps.finish("a")
-
-    assert finished.dtype.name == "int32"
-    assert finished.tolist() == [-1, -1, 1, 1, 1, 1, 2, 2]
-    assert stamps.finish("a") is None
-    stamps.discard(["b"])
-    assert stamps.finish("b") is None
+    assert stamps.finish("a") == [-1, -1, 1, 1, 1, 1, 2, 2]
+    assert stamps.finish("a") == []
 
 
 def test_policy_step_stamps_forget_requests_unclaimed_since_the_previous_sync():
-    stamps = PolicyStepStamps(clock=lambda: 1.0)
+    stamps = PolicyStepStamps()
     for request_id in ("streamed", "awaiting", "resident"):
         stamps.observe(request_id, 2, 0.5)
 
     stamps.forget_unclaimed({"resident"})
-    assert stamps.finish("awaiting").tolist() == [-1, -1]
+    assert stamps.finish("awaiting") == [-1, -1]
     stamps.forget_unclaimed({"resident"})
 
-    assert stamps.finish("streamed") is None
-    assert stamps.finish("resident").tolist() == [-1, -1]
+    assert stamps.finish("streamed") == []
+    assert stamps.finish("resident") == [-1, -1]
 
 
 class Tokenizer:
