@@ -66,6 +66,9 @@ async def test_installed_agent_routes_http_and_retains_logs_after_execution(tmp_
             if outcome == "failure":
                 raise RuntimeError("Agent failed after its model response")
 
+        def populate_context_post_run(self, context):
+            context.metadata = {"pi_hydrated_trajectory": {"schema_version": 1, "turns": ["sample"]}}
+
     logs = tmp_path / "trial" / "agent"
     agent = HttpAgent(logs_dir=logs, version="fixture", model_name="hosted_vllm/model")
     environment = BorrowedMachineEnvironment(machine, tmp_path / "trial", "trial", EnvironmentConfig())
@@ -90,7 +93,7 @@ async def test_installed_agent_routes_http_and_retains_logs_after_execution(tmp_
             with pytest.raises(RuntimeError, match="Agent failed after its model response"):
                 await execution
         else:
-            await execution
+            assert await execution == {"schema_version": 1, "turns": ["sample"]}
         assert (logs / "setup.txt").read_text() == "installed\n"
         evidence = tmp_path / "trial" / "engine"
         records = [json.loads(line) for line in (evidence / "turns.jsonl").read_text().splitlines()]

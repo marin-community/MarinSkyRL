@@ -6,7 +6,7 @@ import shutil
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from functools import partial
 from typing import Any, Protocol
 from uuid import uuid4
@@ -16,7 +16,7 @@ from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from shellbox.backends.docker.machine import DockerMachineFactory
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
-from shellbox.machine import Backend, Machine, MachineFactory
+from shellbox.machine import Backend, Machine, MachineFactory, NetworkPolicy
 from taskcompendium.grading_result import Outcome
 from taskcompendium.models import NoGrader
 from rolloutengine.agent_session import AgentTaskSession
@@ -39,7 +39,7 @@ from rolloutengine.spec import LoweredTaskSpec
 from rolloutengine.lowering import SHELLBOX_SESSION, validate_lowered_task
 from skyrl_train.config.utils import generation_context_limit
 from skyrl_gym.task_factories import adapt_self_grading_session, session_factories
-from skyrl_gym.task_records import fold_grades, skipped_grade
+from skyrl_gym.task_records import fold_grades, grade_skipped, skipped_grade
 from skyrl_gym.verification import VERIFIER_RUNTIME_ERROR
 
 from skyrl_train.inference_engines.base import ChatContinuation, InferenceEngineInterface, InferenceEngineInput
@@ -55,11 +55,13 @@ from skyrl_train.rollouts.harbor_tasks import (
     shape_harbor_rollouts,
 )
 from skyrl_train.rollouts.harbor_settings import EnvironmentType
+from skyrl_train.rollouts.pi_scenario_etl import PiScenario, scenario_rows_from_config, training_rows_to_batch
 from skyrl_train.rollouts.machines import OwnedMachineFactory, TaskMachineError
 from skyrl_train.rollouts.workers import WorkerShard, detached_config
 from skyrl_train.rollouts.finalization import finalize_trajectory_batch, propagate_data_sources
 from skyrl_train.rollout_observability import rollout_phase, rollout_wait
 from skyrl_train.trajectory_runners.trajectory_retention import RetentionSink
+from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
 from skyrl_train.trajectory_runners.model_clients import (
     DirectModelClient,
     GenerationBudgetExceededError,
@@ -81,6 +83,9 @@ from skyrl_train.trajectory_runners.types import (
 
 
 class InstalledAgentWorker(Protocol):
+    @property
+    def student_only(self) -> bool: ...
+
     async def startup(self) -> None: ...
 
     async def shutdown(self) -> None: ...
@@ -92,18 +97,33 @@ class InstalledAgentWorker(Protocol):
         *,
         lowered: LoweredTaskSpec,
         session_id: str,
-    ) -> None: ...
+        policy_step: int,
+    ) -> dict[str, Any] | None: ...
 
 
 SKYRL_AGENT_SESSION = "skyrl_agent"
 
 
+@dataclass(frozen=True)
+class PiRolloutData(RolloutData):
+    """Keep Pi's collated private evidence attached to its graded trial result."""
+
+    pi_trajectory: dict[str, Any] = field(default_factory=dict)
+    session_id: str = ""
+
+
 def _agent_session_factory(
     runtime: InstalledAgentWorker,
     session_id: str,
+    policy_step: int,
+    pi_payload: list[dict[str, Any] | None],
     context: TaskSessionContext,
 ) -> TaskSession:
-    runner = partial(runtime.run, context.machine, lowered=context.lowered, session_id=session_id)
+    async def runner(complete: Callable[[SessionStart], Awaitable[ModelTurn]]) -> None:
+        pi_payload[0] = await runtime.run(
+            context.machine, complete, lowered=context.lowered, session_id=session_id, policy_step=policy_step
+        )
+
     return AgentTaskSession(runner, context.require_task_grader())
 
 
@@ -274,6 +294,7 @@ class TaskRolloutWorker:
         *,
         shutdown_timeout: float,
         installed_agents: InstalledAgentWorker | None = None,
+        pi_scenario: Mapping[str, Any] | None = None,
     ):
         self.trajectory_runner_cfg = trajectory_runner_cfg
         self.model_client = model_client
@@ -284,6 +305,7 @@ class TaskRolloutWorker:
         self.chat_template_kwargs = dict(trajectory_runner_cfg.get("chat_template_kwargs", {}))
         self.harbor = harbor
         self.installed_agents = installed_agents
+        self.pi_scenario = None if pi_scenario is None else PiScenario.from_config(pi_scenario)
         self.retry_wait = retry_wait
         self.group_graders = group_graders
         self.task_slots = asyncio.Semaphore(concurrent_tasks) if concurrent_tasks is not None else nullcontext()
@@ -327,7 +349,12 @@ class TaskRolloutWorker:
             self.active_requests.discard(task)
 
     def _configured_task_and_sessions(
-        self, lowered: LoweredTaskSpec, harbor: HarborTaskSettings | None, session_id: str
+        self,
+        lowered: LoweredTaskSpec,
+        harbor: HarborTaskSettings | None,
+        session_id: str,
+        policy_step: int,
+        pi_payload: list[dict[str, Any] | None],
     ) -> tuple[LoweredTaskSpec, Mapping[str, TaskSessionFactory]]:
         sessions = self.sessions
         if harbor is not None and self.installed_agents is not None:
@@ -338,7 +365,9 @@ class TaskRolloutWorker:
             )
             sessions = {
                 **self.sessions,
-                SKYRL_AGENT_SESSION: partial(_agent_session_factory, self.installed_agents, session_id),
+                SKYRL_AGENT_SESSION: partial(
+                    _agent_session_factory, self.installed_agents, session_id, policy_step, pi_payload
+                ),
             }
         validate_lowered_task(lowered, factories=self.factories, sessions=sessions)
         return lowered, sessions
@@ -352,20 +381,37 @@ class TaskRolloutWorker:
         group_graders = [row.group_grader for row in request.rows]
         metadata = request.batch_metadata
         phase = "train" if metadata is None else metadata.training_phase
+        if self.pi_scenario is not None and metadata is None:
+            raise ValueError("Pi scenario requires a leased policy step before sampling")
+        if self.pi_scenario is not None and phase == "eval":
+            if self.installed_agents is None or not self.installed_agents.student_only:
+                raise ValueError("Pi evaluation requires a student-only literal agent before sampling")
         harbor_settings = [self.harbor if "harbor" in item.task.tags else None for item in lowered_tasks]
         policies = [self.error_handling if harbor is None else harbor.error_handling for harbor in harbor_settings]
         lowered_tasks = [
             item if harbor is None else harbor.lowered(item, phase=phase)
             for item, harbor in zip(lowered_tasks, harbor_settings, strict=True)
         ]
+        if self.pi_scenario is not None and any(
+            item.runtime.task_machine is not None and item.runtime.task_machine.network is NetworkPolicy.DENY
+            for item in lowered_tasks
+        ):
+            raise ValueError("Harbor Pi installation needs sandbox internet access for apt, nvm and npm")
         trajectory_ids = request.trajectory_ids
         session_ids = [
             trajectory_ids[index].to_string() if trajectory_ids is not None else uuid4().hex
             for index in range(len(lowered_tasks))
         ]
         selected_sessions: list[Mapping[str, TaskSessionFactory]] = []
+        pi_payloads: list[list[dict[str, Any] | None]] = [[None] for _ in lowered_tasks]
         for index, lowered in enumerate(lowered_tasks):
-            lowered, sessions = self._configured_task_and_sessions(lowered, harbor_settings[index], session_ids[index])
+            lowered, sessions = self._configured_task_and_sessions(
+                lowered,
+                harbor_settings[index],
+                session_ids[index],
+                0 if metadata is None else metadata.global_step,
+                pi_payloads[index],
+            )
             lowered_tasks[index] = lowered
             selected_sessions.append(sessions)
         tasks = [item.task for item in lowered_tasks]
@@ -407,6 +453,7 @@ class TaskRolloutWorker:
             )
             retries = 0
             while True:
+                pi_payloads[index][0] = None
                 try:
                     async with harbor_slots, self.task_slots:
                         result = await engine.run(lowered)
@@ -456,6 +503,22 @@ class TaskRolloutWorker:
                     self.projection.tokenizer,
                     harbor_tasks=[harbor is not None for harbor in harbor_settings],
                 )
+        if self.pi_scenario is not None and phase != "eval":
+            missing = [
+                (index, rollouts[index].failure)
+                for index, holder in enumerate(pi_payloads)
+                if not isinstance(holder[0], dict)
+            ]
+            if missing:
+                raise ValueError(f"Installed Pi trial did not return one collated trajectory: {missing}")
+            rollouts = [
+                PiRolloutData(
+                    **{item.name: getattr(rollout, item.name) for item in fields(RolloutData)},
+                    pi_trajectory=pi_payloads[index][0],
+                    session_id=session_ids[index],
+                )
+                for index, rollout in enumerate(rollouts)
+            ]
         return rollouts
 
     async def run(self, input_batch: TaskRequestBatch) -> TrajectoryBatch:
@@ -463,9 +526,82 @@ class TaskRolloutWorker:
             outputs = await self.generate(input_batch)
             return await self.training_batch(input_batch, outputs)
 
+    def etl_pi_trial(self, payload: Mapping[str, Any], *, trial_id: str, policy_step: int) -> TrajectoryBatch:
+        """Project one complete Pi trial without querying model or artifact logs."""
+        if self.pi_scenario is None:
+            raise ValueError("Pi ETL requires a reviewed scenario.preset")
+        rows = scenario_rows_from_config(
+            {"preset": self.pi_scenario.value},
+            payload,
+            self.projection.tokenizer,
+            expected_trial_id=trial_id,
+            expected_policy_step=policy_step,
+        )
+        return training_rows_to_batch(rows)
+
     async def training_batch(self, request: TaskRequestBatch, outputs: Sequence[RolloutData]) -> TrajectoryBatch:
         with rollout_phase("assemble"):
-            batch = self.projection.project(outputs, request)
+            metadata = request.batch_metadata
+            if self.pi_scenario is None or (metadata is not None and metadata.training_phase == "eval"):
+                batch = self.projection.project(outputs, request)
+            else:
+                if metadata is None or not outputs:
+                    raise ValueError("Pi training requires a policy-step lease and a completed trial")
+                batches = []
+                rejected_teacher_trials = 0
+                identities = request.trajectory_ids
+                expanded_ids = []
+                for index, rollout in enumerate(outputs):
+                    if not isinstance(rollout, PiRolloutData) or rollout.failure is not None:
+                        raise ValueError("Pi training requires the validated, collated trial result")
+                    if grade_skipped(rollout.grade):
+                        if self.pi_scenario is not PiScenario.TEACHER_TRACE:
+                            raise ValueError("Only unfiltered Pi teacher SFT can skip verification")
+                        status = "skipped"
+                    elif rollout.grade.status in (Outcome.GRADED, Outcome.SUBMISSION_FAILURE):
+                        status = rollout.grade.status.value
+                    else:
+                        raise ValueError("Pi trial has no usable verifier outcome")
+                    if status != "skipped" and rollout.grade.reward is None:
+                        raise ValueError("Pi trial has no verifier score")
+                    if self.pi_scenario is PiScenario.TEACHER_TRACE_VERIFIED and (
+                        status != "graded" or rollout.grade.passed is None
+                    ):
+                        raise ValueError("Verified Pi teacher SFT needs an explicit graded pass/fail verdict")
+                    payload = {
+                        **rollout.pi_trajectory,
+                        "judge": None,
+                        "verifier_status": status,
+                        "verifier_reward": None if status == "skipped" else rollout.grade.reward,
+                        "verifier_passed": None if status == "skipped" else rollout.grade.passed,
+                    }
+                    segment = self.etl_pi_trial(payload, trial_id=rollout.session_id, policy_step=metadata.global_step)
+                    if self.pi_scenario is PiScenario.TEACHER_TRACE_VERIFIED and rollout.grade.passed is False:
+                        rejected_teacher_trials += 1
+                    batches.append(segment)
+                    if identities is not None:
+                        expanded_ids.extend([identities[index]] * len(segment["response_ids"]))
+                if any(
+                    (segment["rollout_logprobs"] is None) != (batches[0]["rollout_logprobs"] is None)
+                    for segment in batches
+                ):
+                    raise ValueError("Pi training cannot mix student behavior and teacher SFT evidence")
+                batch = (
+                    batches[0]
+                    if len(batches) == 1
+                    else concatenate_trajectory_batches(
+                        batches,
+                        tis_lcs_alert_threshold=0.005,
+                    )
+                )
+                if identities is not None:
+                    batch["trajectory_ids"] = expanded_ids
+                if self.pi_scenario is PiScenario.TEACHER_TRACE_VERIFIED:
+                    batch["rollout_metrics"] = {
+                        **(batch.get("rollout_metrics") or {}),
+                        "pi/teacher_verified_trials": float(len(outputs)),
+                        "pi/teacher_rejected_trials": float(rejected_teacher_trials),
+                    }
             propagate_data_sources(request, batch)
         return await finalize_trajectory_batch(request, batch, self.trajectory_runner_cfg, self.trajectory_sink)
 
@@ -524,6 +660,8 @@ class TaskRolloutWorkerSpec:
     engines: list[InferenceEngineInterface]
     sessions: dict[str, Callable[[LoweredTaskSpec, Machine | None], TaskSession]] = field(default_factory=dict)
     harbor_config: DictConfig | None = None
+    teacher_engines: list[InferenceEngineInterface] | None = None
+    teacher_tokenizer: Any | None = None
 
     @classmethod
     def from_config(
@@ -533,12 +671,16 @@ class TaskRolloutWorkerSpec:
         *,
         harbor_config: DictConfig | None = None,
         sessions: Mapping[str, Callable[[LoweredTaskSpec, Machine | None], TaskSession]] | None = None,
+        teacher_engines: Sequence[InferenceEngineInterface] | None = None,
+        teacher_tokenizer: Any | None = None,
     ):
         return cls(
             detached_config(config),
             list(engines),
             {} if sessions is None else dict(sessions),
             None if harbor_config is None else detached_config(harbor_config),
+            None if teacher_engines is None else list(teacher_engines),
+            teacher_tokenizer,
         )
 
     def build(self, tokenizer, shard: WorkerShard) -> TaskRolloutWorker:
@@ -552,16 +694,66 @@ class TaskRolloutWorkerSpec:
             # Full Harbor is an optional dependency for installed-agent runs.
             from skyrl_train.rollouts.agent_runtime import InstalledAgentRuntime, InstalledAgentSettings
             from skyrl_train.rollouts.agent_backend import AgentInferenceBackend
+            from skyrl_train.inference_engines.pi_external_vllm import ExternalPiTeacherEngine
 
             settings = InstalledAgentSettings.model_validate(
                 OmegaConf.to_container(self.harbor_config.installed_agent, resolve=True)
             )
+            teacher = settings.teacher
+            owned_teacher_transport = None
+            if teacher is not None:
+                if teacher.student_model != self.config.trainer.policy.model.path:
+                    raise ValueError("Pi teacher binding must identify the configured student policy")
+                if teacher.source == "skyrl_managed":
+                    if not self.teacher_engines or self.teacher_tokenizer is None:
+                        raise ValueError("SkyRL-managed Pi teacher needs independent teacher engines and tokenizer")
+                    if any(
+                        teacher_engine is student_engine
+                        for teacher_engine in self.teacher_engines
+                        for student_engine in self.engines
+                    ):
+                        raise ValueError("Pi teacher cannot reuse a student inference engine")
+                    if any(engine.max_model_len != teacher.max_context_tokens for engine in self.teacher_engines):
+                        raise ValueError("Pi teacher engine context limit differs from the bound model")
+                    teacher_engines = self.teacher_engines
+                    teacher_tokenizer = self.teacher_tokenizer
+                else:
+                    if self.teacher_engines is not None:
+                        raise ValueError("External Pi teacher must not reuse a managed engine")
+                    if self.teacher_tokenizer is None:
+                        raise ValueError("External Pi teacher needs its own pinned tokenizer")
+                    assert teacher.endpoint is not None and teacher.auth is not None
+                    owned_teacher_transport = ExternalPiTeacherEngine(
+                        endpoint=teacher.endpoint,
+                        model=teacher.model,
+                        auth=teacher.auth,
+                        max_model_len=teacher.max_context_tokens,
+                    )
+                    teacher_engines = [owned_teacher_transport]
+                    teacher_tokenizer = self.teacher_tokenizer
+                teacher_config = OmegaConf.merge(
+                    client_config, {"generator": {"engine_init_kwargs": {"served_model_name": teacher.model}}}
+                )
+                teacher_inference = InferenceEngineClient(teacher_engines, teacher_tokenizer, teacher_config)
+                client = DirectModelClient(teacher_inference)
+                backend = AgentInferenceBackend(
+                    teacher_inference.model_name,
+                    teacher.max_context_tokens,
+                    teacher_inference.tokenize,
+                    teacher_tokenizer,
+                    model_revision=teacher.revision,
+                    source_kind=teacher.source,
+                    model_endpoint=teacher.endpoint,
+                )
+            else:
+                backend = AgentInferenceBackend(
+                    inference.model_name, generation_context_limit(runner_config), inference.tokenize, tokenizer
+                )
             installed_agents = InstalledAgentRuntime(
                 settings,
-                AgentInferenceBackend(
-                    inference.model_name, generation_context_limit(runner_config), inference.tokenize, tokenizer
-                ),
+                backend,
                 int(runner_config.sampling_params.max_generate_length),
+                owned_teacher_transport=owned_teacher_transport,
             )
         factories: dict[str, MachineFactory] = {"shellsim": ShellSimMachineFactory()}
         if shutil.which("docker") is not None:
@@ -589,4 +781,7 @@ class TaskRolloutWorkerSpec:
             sessions=self.sessions,
             shutdown_timeout=float(self.config.trajectory_runner.shutdown_timeout),
             installed_agents=installed_agents,
+            pi_scenario=None
+            if self.config.get("scenario") is None
+            else OmegaConf.to_container(self.config.scenario, resolve=True),
         )
