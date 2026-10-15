@@ -131,6 +131,25 @@ Maximize likelihood on eligible response tokens; advantages and teacher credit d
    advantage_estimator: uniform
    off_policy_correction: none
 
+``dpo``
+~~~~~~~
+
+Direct Preference Optimization (`Rafailov et al.`_) over dataset-supplied chosen/rejected
+pairs. Requires ``environment.env_class=preference_pair`` (the static pair runner),
+``generator.n_samples_per_prompt=2``, and no sample packing; a frozen reference model is
+provisioned automatically and no inference engines are launched. The optimizer sees a
+per-token surrogate with the exact DPO gradient; the true loss is reported as ``dpo/loss``
+(the same convention as the ``gspo`` surrogate row).
+
+.. code-block:: yaml
+
+   policy_loss_type: dpo
+   advantage_estimator: uniform
+   loss_reduction: pair_mean
+   dpo:
+     beta: 0.1
+     label_smoothing: 0.0
+
 Averaging modes
 ---------------
 
@@ -146,6 +165,8 @@ Set ``trainer.algorithm.loss_reduction``; formulas and examples are in
      - Give each eligible data-weighted token equal weight.
    * - ``sequence_mean``
      - Give each nonempty response equal weight.
+   * - ``pair_mean``
+     - Give each chosen/rejected pair equal weight; required by ``dpo``.
    * - ``seq_mean_token_sum_norm``
      - Normalize response sums by the configured total sequence length for Dr.GRPO.
    * - ``seq_mean_token_sum_norm_global``
@@ -502,3 +523,4 @@ Deployment requirements are in :doc:`opd`.
 .. _GSPO: https://arxiv.org/abs/2507.18071
 .. _MiniMax-M1: https://arxiv.org/abs/2506.13585
 .. _MOPD: https://arxiv.org/abs/2606.30406
+.. _Rafailov et al.: https://arxiv.org/abs/2305.18290

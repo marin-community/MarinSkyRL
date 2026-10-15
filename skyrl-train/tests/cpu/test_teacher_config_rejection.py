@@ -85,7 +85,7 @@ def test_sampled_teacher_add_rejects_sft_that_ignores_teacher_credit():
 
 def skipped_grading_config() -> DictConfig:
     cfg = replace_mode_config()
-    cfg.environment.skyrl_gym.nemotron_ultra.grading = "skip"
+    cfg.environment.task_sessions.nemotron_ultra.grading = "skip"
     cfg.trainer.algorithm.advantage_estimator = "uniform"
     cfg.trainer.eval_before_train = False
     cfg.trainer.eval_interval = -1

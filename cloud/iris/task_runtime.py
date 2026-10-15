@@ -52,11 +52,15 @@ from cloud.iris.hf_model_cache import (
     download_hugging_face_snapshot,
     ensure_hugging_face_model_cache,
     load_model_manifest,
+    stage_artifact_model,
     stage_artifact_model_metadata,
     stage_model_metadata,
 )
 from marinskyrl.environment_contract import (
     DEBUG_ARTIFACT_DIR_ENV,
+    DebugMode,
+    EnvVarManager,
+    EnvVarScope,
     FR_DUMP_TEMP_FILE_ENV,
     NCCL_DEBUG_INFO_TEMP_FILE_ENV,
     RUN_ID_ENV,
@@ -69,7 +73,7 @@ from marinskyrl.environment_contract import (
 from marinskyrl.hf_model import immutable_model_cache_key, validate_hf_model_weights
 from marinskyrl.model_manifest import MODEL_MANIFEST_FILENAME
 from cloud.iris.telemetry_env import telemetry_environment
-from marinskyrl.resource_locator import is_cloud_uri, is_hugging_face_repo_id, join_resource_path
+from marinskyrl.resource_locator import RolloutModelLoading, is_cloud_uri, is_hugging_face_repo_id, join_resource_path
 from marinskyrl.speculative_decoding import SpeculatorModelConfig, SpeculatorModelSourceKind
 from marinskyrl.distillation import TeacherModelSpec, TeacherSource, compile_distillation_plan_from_config
 from marinskyrl.process_diagnostics import (
@@ -304,6 +308,19 @@ TOKENIZER_METADATA_PATTERNS = (
     "vocab.txt",
 )
 
+# AutoTokenizer resolves the tokenizer class from config.json's model_type when
+# tokenizer_config.json carries no tokenizer_class (common for older exports). A
+# staged tokenizer directory without it falls back to PreTrainedTokenizerFast with
+# no serialised backend and fails to load at all.
+TOKENIZER_CLASS_RESOLUTION_FILES = ("config.json",)
+
+
+def _stage_tokenizer_class_resolution(source: Path, destination: Path) -> None:
+    for name in TOKENIZER_CLASS_RESOLUTION_FILES:
+        candidate = source / name
+        if candidate.is_file():
+            shutil.copy2(candidate, destination / name)
+
 
 def prepare_policy_model(args: argparse.Namespace) -> PreparedPolicyModel | None:
     """Resolve one immutable policy source and stage what its runtime needs."""
@@ -327,6 +344,14 @@ def prepare_policy_model(args: argparse.Namespace) -> PreparedPolicyModel | None
     assert source_uri and source_identity
     RuntimeProfile(args.runtime_profile)
     local_path = _metadata_path(source_uri, source_identity)
+    if args.rollout_model_loading is RolloutModelLoading.STAGE_LOCAL:
+        staged_bytes = stage_artifact_model(source_uri, source_identity, local_path)
+        validate_hf_model_weights({path.name for path in Path(local_path).iterdir()}, source_uri)
+        _log(
+            f"Policy checkpoint staged on rank {_rank()}/{_num_tasks()}: {source_uri} -> {local_path} "
+            f"(identity={source_identity}; local_disk_high_water_bytes={staged_bytes})"
+        )
+        return PreparedPolicyModel(source_uri, source_identity, local_path)
     if manifest is None:
         metadata_bytes = stage_artifact_model_metadata(source_uri, source_identity, local_path)
     else:
@@ -376,12 +401,13 @@ def prepare_policy_tokenizer(args: argparse.Namespace) -> PreparedPolicyTokenize
             staging.mkdir()
             if os.path.isdir(tokenizer_path):
                 _copy_tokenizer_metadata(Path(tokenizer_path), staging)
+                _stage_tokenizer_class_resolution(Path(tokenizer_path), staging)
             elif is_hugging_face_repo_id(tokenizer_path):
                 download_hugging_face_snapshot(
                     tokenizer_path,
                     revision=revision or None,
                     destination=staging,
-                    allow_patterns=TOKENIZER_METADATA_PATTERNS,
+                    allow_patterns=TOKENIZER_METADATA_PATTERNS + TOKENIZER_CLASS_RESOLUTION_FILES,
                 )
                 _require_tokenizer_metadata(staging, tokenizer_path)
             else:
@@ -503,7 +529,15 @@ def apply_policy_chat_template(model_path: str, template_repo_rel: str) -> None:
         json.dump(tc, f, ensure_ascii=False, indent=2)
 
     # Verify the loaded tokenizer now renders delphi_v0 and keeps the think protocol tokens.
-    tok = AutoTokenizer.from_pretrained(snap, trust_remote_code=True)
+    try:
+        tok = AutoTokenizer.from_pretrained(snap, trust_remote_code=True)
+    except Exception:
+        listing = sorted(os.listdir(snap)) if os.path.isdir(snap) else None
+        _log(
+            f"apply_policy_chat_template: fast tokenizer load failed for {model_path} "
+            f"(snapshot files: {listing}); retrying with use_fast=False"
+        )
+        tok = AutoTokenizer.from_pretrained(snap, trust_remote_code=True, use_fast=False)
     ct = tok.chat_template
     if not ct or ct.strip() != delphi.strip():
         raise RuntimeError(
@@ -511,16 +545,18 @@ def apply_policy_chat_template(model_path: str, template_repo_rel: str) -> None:
             f"(loaded len={len(ct) if ct else None}, expected {len(delphi)})"
         )
     vocab = tok.get_vocab()
-    missing = [t for t in _REQUIRED_CHAT_TEMPLATE_TOKENS if t not in vocab]
+    # The think-protocol gate applies only when the template itself carries the tokens;
+    # completion-style templates for base models (e.g. GPT-2) legitimately omit them.
+    missing = [t for t in _REQUIRED_CHAT_TEMPLATE_TOKENS if t in delphi and t not in vocab]
     if missing:
         raise RuntimeError(
-            f"delphi_v0 think-protocol tokens {missing} are NOT single registered tokens in "
+            f"chat-template protocol tokens {missing} are NOT single registered tokens in "
             f"{model_path}'s tokenizer (lossy SFT export?) — they would fragment to bytes and "
             f"break the reward/parse contract. Aborting before a silent reward-zero run."
         )
     _log(
-        f"apply_policy_chat_template: delphi_v0 applied + verified for {model_path} "
-        f"(chat_template len={len(ct)}, tokens OK) on rank {_rank()}/{_num_tasks()} (snapshot={snap})"
+        f"apply_policy_chat_template: template applied + verified for {model_path} "
+        f"(chat_template len={len(ct)}, protocol tokens OK) on rank {_rank()}/{_num_tasks()} (snapshot={snap})"
     )
 
 
@@ -757,6 +793,20 @@ def ensure_fr_dump_dir() -> None:
             f"WARNING: could not create FR dump dir {dump_dir} ({exc}); "
             f"NCCL flight-recorder dumps may fail to write on a collective timeout."
         )
+
+
+def ensure_task_debug_artifact_directory(debug_mode: DebugMode = DebugMode.LIGHT) -> None:
+    """Give the task uploader and its Ray workers the same artifact root."""
+    if debug_mode is DebugMode.OFF:
+        return
+    environment = EnvVarManager.for_debug_launch(
+        job_name=os.environ.get(RUN_ID_ENV, "run"),
+        artifact_root=os.environ.get(DEBUG_ARTIFACT_DIR_ENV),
+    ).environment_for(EnvVarScope.TASK_RUNTIME)
+    # The trainer resolves its diagnostic preset; the supervisor only owns the root.
+    EnvVarManager({DEBUG_ARTIFACT_DIR_ENV: environment[DEBUG_ARTIFACT_DIR_ENV]}).apply_to_process(
+        EnvVarScope.TASK_RUNTIME
+    )
 
 
 def _rendezvous_uri(rendezvous_dir: str) -> str:
@@ -1737,7 +1787,14 @@ def _persist_failure_artifacts_bounded(action, timeout: float) -> None:
         _log(f"Failure artifact upload exceeded {timeout}s; continuing task teardown")
 
 
-def run_head(args: argparse.Namespace, config_path: Path, derived_gloo_ifname: str | None = None) -> int:
+def run_head(
+    args: argparse.Namespace,
+    config_path: Path,
+    derived_gloo_ifname: str | None = None,
+    *,
+    debug_mode: DebugMode = DebugMode.LIGHT,
+) -> int:
+    ensure_task_debug_artifact_directory(debug_mode)
     num_tasks = _num_tasks()
     gang_epoch = uuid.uuid4().hex
     head_ip = _own_ip()
@@ -1887,7 +1944,8 @@ def run_head(args: argparse.Namespace, config_path: Path, derived_gloo_ifname: s
     return exit_code
 
 
-def run_worker(args: argparse.Namespace) -> int:
+def run_worker(args: argparse.Namespace, *, debug_mode: DebugMode = DebugMode.LIGHT) -> int:
+    ensure_task_debug_artifact_directory(debug_mode)
     worker_start = time.time()
     rank = _rank()
     num_tasks = _num_tasks()
@@ -2028,6 +2086,7 @@ def _runtime_namespace(config: DictConfig) -> argparse.Namespace:
         model_local_path=str(model.local_path),
         model_source_identity=model_identity if is_cloud_uri(model_uri) else "",
         runtime_profile=str(config.runtime.profile),
+        rollout_model_loading=RolloutModelLoading(generator.get("model_loading", RolloutModelLoading.STREAM)),
         policy_tokenizer=str(model.tokenizer_uri),
         policy_tokenizer_revision=str(model.tokenizer_revision),
         policy_chat_template=str(model.chat_template or ""),
@@ -2189,6 +2248,7 @@ def main() -> None:
         )
         apply_policy_chat_template(model_path, args.policy_chat_template)
     rank = _rank()
+    debug_mode = DebugMode(str(launch_config.skyrl.get("trainer", {}).get("debug_mode", DebugMode.LIGHT.value)))
     if rank == 0:
         final_config_path = _write_final_config(
             launch_config,
@@ -2196,9 +2256,9 @@ def main() -> None:
             policy_tokenizer=policy_tokenizer,
             draft_model=draft_model,
         )
-        exit_code = run_head(args, final_config_path, derived_gloo_ifname)
+        exit_code = run_head(args, final_config_path, derived_gloo_ifname, debug_mode=debug_mode)
     else:
-        exit_code = run_worker(args)
+        exit_code = run_worker(args, debug_mode=debug_mode)
     if exit_code != 0:
         sys.exit(exit_code)
 

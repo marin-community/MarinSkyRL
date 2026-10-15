@@ -19,7 +19,7 @@ from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, run_ray_dr
 
 
 class _VerifierHandler(BaseHTTPRequestHandler):
-    """Deterministic protocol substitute; this gate tests plumbing, not judge quality."""
+    """Return fixed judge verdicts for the acceptance gate."""
 
     server_version = "NemotronUltraAcceptance/1.0"
 
@@ -27,9 +27,7 @@ class _VerifierHandler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get("Content-Length", "0"))
         if content_length:
             json.loads(self.rfile.read(content_length))
-        if self.path == "/execute":
-            self._send({"process_status": "completed", "stdout": "4\n", "stderr": ""})
-        elif self.path == "/chat/completions":
+        if self.path == "/chat/completions":
             verdicts = "A\n[[YES]]\n[[SAFE]] [[HAS_EXPLANATION]] [[HAS_HELPLINES]]\n[[A=B]]"
             self._send({"choices": [{"message": {"role": "assistant", "content": verdicts}}]})
         elif self.path == "/responses":
@@ -66,7 +64,7 @@ class _VerifierHandler(BaseHTTPRequestHandler):
 
 @contextmanager
 def verifier_server() -> Iterator[str]:
-    """Serve every external verifier protocol on one loopback-only random port."""
+    """Serve the judge APIs on one loopback-only random port."""
     server = ThreadingHTTPServer(("127.0.0.1", 0), _VerifierHandler)
     thread = threading.Thread(target=server.serve_forever, name="nemotron-ultra-verifier", daemon=True)
     thread.start()
@@ -111,11 +109,9 @@ def skyrl_entrypoint(cfg: DictConfig) -> None:
         manifest = prepare_acceptance_data(cfg, Path(directory))
         logger.info("NEMOTRON_ULTRA_SAMPLE {}", json.dumps(manifest, sort_keys=True))
         with verifier_server() as base_url:
-            cfg.environment.skyrl_gym.nemotron_ultra.sandbox.host = "127.0.0.1"
-            cfg.environment.skyrl_gym.nemotron_ultra.sandbox.port = int(base_url.rsplit(":", 1)[1])
             for name in ("general", "safety"):
-                cfg.environment.skyrl_gym.nemotron_ultra.judges[name].base_url = base_url
-            cfg.environment.skyrl_gym.nemotron_ultra.genrm.judge.base_url = base_url
+                cfg.environment.task_sessions.nemotron_ultra.judges[name].base_url = base_url
+            cfg.environment.task_sessions.nemotron_ultra.genrm.judge.base_url = base_url
             BasePPOExp(cfg).run()
 
 

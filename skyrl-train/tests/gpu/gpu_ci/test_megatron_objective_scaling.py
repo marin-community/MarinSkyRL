@@ -2,12 +2,10 @@ from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from importlib.metadata import version
-import time
 
 import pytest
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
 from omegaconf import open_dict
 from megatron.core import parallel_state as mpu
 from megatron.core.distributed import DistributedDataParallel, DistributedDataParallelConfig
@@ -21,6 +19,7 @@ from skyrl_train.config.utils import get_default_config
 from skyrl_train.distillation import TeacherTopKInput
 from skyrl_train.objective.losses import importance_sampling_policy_loss
 from skyrl_train.workers.megatron.megatron_model_wrapper import MegatronModelWrapper, MegatronPolicyMicroBatch
+from tests.gpu.utils import run_distributed_with_deadline
 
 
 class TokenLogits(MegatronModule):
@@ -246,24 +245,6 @@ def run_scaling_rank(rank, world_size, cp_size, teacher, rendezvous):
         dist.destroy_process_group()
 
 
-def run_distributed(target, world_size, args):
-    context = mp.spawn(target, args=args, nprocs=world_size, join=False)
-    deadline = time.monotonic() + 240
-    try:
-        while not context.join(timeout=1):
-            if time.monotonic() >= deadline:
-                raise TimeoutError("Megatron objective workers exceeded their 240-second deadline")
-    finally:
-        for process in context.processes:
-            if process.is_alive():
-                process.terminate()
-        for process in context.processes:
-            process.join(timeout=10)
-            if process.is_alive():
-                process.kill()
-                process.join()
-
-
 @pytest.mark.parametrize(
     "cp_size,teacher", [(2, None), (1, "sparse_forward_kl"), (1, "sparse_reverse_kl"), (1, "sparse_jsd")]
 )
@@ -274,5 +255,7 @@ def test_megatron_objective_gradients_and_rows_match_full_batch(tmp_path, cp_siz
         f"megatron-core={version('megatron-core')} TP=1 PP=1",
         flush=True,
     )
-    run_distributed(run_scaling_rank, 1, (1, 1, teacher, (tmp_path / "single").as_uri()))
-    run_distributed(run_scaling_rank, 2 * cp_size, (2 * cp_size, cp_size, teacher, (tmp_path / "distributed").as_uri()))
+    run_distributed_with_deadline(run_scaling_rank, (1, 1, teacher, (tmp_path / "single").as_uri()), 1)
+    run_distributed_with_deadline(
+        run_scaling_rank, (2 * cp_size, cp_size, teacher, (tmp_path / "distributed").as_uri()), 2 * cp_size
+    )

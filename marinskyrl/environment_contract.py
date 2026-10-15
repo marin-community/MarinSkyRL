@@ -72,6 +72,7 @@ RAY_USE_UVLOOP_ENV = "RAY_USE_UVLOOP"
 UV_USE_IO_URING_ENV = "UV_USE_IO_URING"
 FR_DUMP_TEMP_FILE_ENV = "TORCH_FR_DUMP_TEMP_FILE"
 NCCL_DEBUG_INFO_TEMP_FILE_ENV = "TORCH_NCCL_DEBUG_INFO_TEMP_FILE"
+NCCL_BUFFER_SIZE_ENV_VAR = "NCCL_BUFFSIZE"
 PYTHONPATH_ENV = "PYTHONPATH"
 VLLM_USE_V1_ENV = "VLLM_USE_V1"
 VLLM_USE_V2_MODEL_RUNNER_ENV = "VLLM_USE_V2_MODEL_RUNNER"
@@ -116,21 +117,21 @@ ENV_VAR_SPECS = (
     # isolated grading child, using the benchmark's existing provider settings.
     EnvVarSpec(
         "VERIFYIT_JUDGE_BASE_URL",
-        "environment.skyrl_gym.nemotron_ultra.judges",
+        "environment.task_sessions.nemotron_ultra.judges",
         EnvVarSource.EXTERNAL,
         frozenset({EnvVarScope.TASK_RUNTIME}),
         frozenset({EnvVarWriter.PYTHON_ASSIGNMENT}),
     ),
     EnvVarSpec(
         "VERIFYIT_JUDGE_MODEL",
-        "environment.skyrl_gym.nemotron_ultra.judges",
+        "environment.task_sessions.nemotron_ultra.judges",
         EnvVarSource.EXTERNAL,
         frozenset({EnvVarScope.TASK_RUNTIME}),
         frozenset({EnvVarWriter.PYTHON_ASSIGNMENT}),
     ),
     EnvVarSpec(
         "VERIFYIT_JUDGE_API_KEY",
-        "environment.skyrl_gym.nemotron_ultra.judges",
+        "environment.task_sessions.nemotron_ultra.judges",
         EnvVarSource.SECRET,
         frozenset({EnvVarScope.TASK_RUNTIME}),
         frozenset({EnvVarWriter.PYTHON_ASSIGNMENT}),
@@ -312,6 +313,8 @@ _BUILD_BOUNDARY_WRITERS = frozenset({EnvVarWriter.SHELL_EXPORT, EnvVarWriter.DOC
 # process, task, container, or build boundaries, but they are not training controls.
 _SECRET_BOUNDARIES = {
     "DAYTONA_API_KEY",
+    "DAYTONA_RL_API_KEY",
+    "DAYTONA_EVAL_API_KEY",
     "KUBECONFIG",
     "MLFLOW_TRACKING_TOKEN",
     "WANDB_API_KEY",
@@ -375,6 +378,7 @@ _RUNTIME_BOUNDARIES = {
     "NUM_INFERENCE_ENGINES",
     "NVTE_FUSED_ATTN",
     "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
     "OT_AGENT_IRIS_RAY_PORT",
     "OT_AGENT_IRIS_RENDEZVOUS_DIR",
     "POLICY_NUM_NODES",

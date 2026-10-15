@@ -1,9 +1,7 @@
 import pytest
-import skyrl_gym
-from omegaconf import DictConfig
 
+from skyrl_gym.answer_tasks import grade_cat_count
 from skyrl_gym.envs.cat_count.reward import cat_count_score
-from skyrl_gym.verification import RolloutEvidence
 
 NS = [1, 2, 4, 7, 10, 20]
 
@@ -74,14 +72,6 @@ def test_empty_reply_loses_to_any_reply_within_2n_cats(n):
         assert reward(cats(k), n) > empty
 
 
-def make_environment(n):
-    return skyrl_gym.make(
-        "cat_count",
-        env_config=DictConfig({"env_class": "cat_count"}),
-        extras={"extra_info": {"n": n}},
-    )
-
-
 @pytest.mark.parametrize(
     "n,completion,stop_reason,expected_reward,exact,n_words,truncated",
     [
@@ -94,18 +84,14 @@ def make_environment(n):
         (20, cats(25), "length", 0.368347953216, False, 25, True),
     ],
 )
-def test_environment_scores_completion_and_reports_verification_and_metrics(
-    n, completion, stop_reason, expected_reward, exact, n_words, truncated
+def test_task_scores_completion_and_reports_native_grade_and_metrics(
+    model_turn, n, completion, stop_reason, expected_reward, exact, n_words, truncated
 ):
-    env = make_environment(n)
-    prompt = f"Reply with the word cat exactly {n} times, separated by single spaces. Nothing else."
-    env.init([{"role": "user", "content": prompt}])
-    env.set_rollout_evidence(RolloutEvidence(stop_reason=stop_reason))
-    step = env.step(completion)
-    assert step["reward"] == pytest.approx(expected_reward)
-    assert step["verification"].score == float(exact)
-    assert step["verification"].passed is exact
-    metrics = env.get_metrics()
+    result = grade_cat_count(model_turn(completion, stop_reason=stop_reason or "unknown"), {}, {"extra_info": {"n": n}})
+    assert result.reward == pytest.approx(expected_reward)
+    assert result.grade.reward == float(exact)
+    assert result.grade.passed is exact
+    metrics = result.metrics
     assert metrics[f"exact_n{n}"] == float(exact)
     assert metrics[f"n_words_n{n}"] == float(n_words)
     assert metrics["has_cat"] == 1.0

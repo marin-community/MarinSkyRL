@@ -276,6 +276,43 @@ failure is a separate runtime event.
      - Non-finite loss/gradients or an exhausted skip allowance.
      - Inspect the affected batch, objective and gradient diagnostics; correct the numerical cause before resuming.
 
+Verified closure and continuation targets
+-----------------------------------------
+
+With ``trainer.algorithm.policy_loss_type: ftpo``, select
+``trainer.algorithm.ftpo.boundary: verified_closure`` for closure-task
+supervision. ``verification.diagnostics["closure"]`` must supply ``prefix``,
+``expected``, ``format``, ``family``, and ``control``, as defined by
+``skyrl_gym.closure_task.ClosurePrompt``. A wrong-token target uses verified
+alternatives from the rollout's recorded top-k next tokens. A missing suffix
+uses supervised loss on missing closing delimiters, with preceding sampled
+tokens excluded from that loss. ``repair_sft_weight`` must be positive in both
+verified modes. For ``family: repeated_opener_retention``, alternatives that
+decode to ``{`` after whitespace stripping target the first repeated opener.
+
+``verified_closure_and_continuation`` adds a target for premature completion
+of an exact reference prefix. The sampled text must differ from the supplied
+reference only by closing early: its first complete outer structure must be
+an exact strict reference prefix plus the parser's closing-only suffix.
+Spelling and whitespace changes do not qualify; output after the complete
+outer structure is ignored. At the first token that completes the outer
+structure, the preceding decoded text must still be an exact reference prefix.
+Each chosen next token replaces that closing token, preserves all preceding
+sampled tokens, and extends their
+decoded text along that reference. Content drift before this boundary yields
+no continuation target; the selector does not move to an earlier token.
+It adds no supervised content-repair suffix.
+
+Both modes retain the FTPO probability and frequency filters. ``min_p`` is
+relative to the most likely verified alternative, not the most likely token
+in the whole vocabulary. Empty candidate sets or sets emptied by filtering produce no FTPO
+loss. Metrics under ``closure/targets/<family>/<control>`` distinguish
+``verified_boundaries`` and ``boundaries_with_candidates`` (response counts),
+``selected_ftpo_tokens`` (sampled positions with at least one selected
+alternative and positive loss mask), and ``repair_tokens`` (supervised token
+positions with positive loss mask). These are driver preparation counts; they do not establish
+that an optimizer consumed the targets.
+
 Non-finite optimizer steps
 --------------------------
 

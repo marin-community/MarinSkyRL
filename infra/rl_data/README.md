@@ -101,7 +101,7 @@ the source does not carry canonical satisfying responses for arbitrary constrain
 normalize their source-specific tests into the LiveCodeBench runtime schema. They deliberately do
 not execute downloaded reference solutions during preparation because the verifier is not a security sandbox.
 
-Set `environment.skyrl_gym.lcb.reward_mode=fractional` to reward Eurus code trajectories by the
+Set `environment.task_sessions.lcb.reward_mode=fractional` to reward Eurus code trajectories by the
 fraction of unit tests passed. The default `binary` mode remains all-or-nothing. Nemotron IF rows
 retain all constraints in one example and receive the fraction satisfied. A free-form SCP-116K
 judge environment is not yet available; use the existing `openscience` MCQ source for the STEM

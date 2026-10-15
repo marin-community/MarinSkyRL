@@ -186,22 +186,10 @@ class DirectModelClient:
         return ModelClientOutput(**output, token_provenance=TokenProvenance.ENGINE)
 
     @staticmethod
-    def _chat_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        converted = []
-        for tool in tools:
-            if tool.get("type") != "function":
-                raise ValueError(f"Only function tools are supported, got {tool.get('type')!r}")
-            function = {key: value for key, value in tool.items() if key != "type"}
-            converted.append({"type": "function", "function": function})
-        return converted
-
-    @classmethod
-    def _chat_options(cls, options: dict[str, Any], sampling_params: dict[str, Any]) -> dict[str, Any]:
+    def _chat_options(options: dict[str, Any], sampling_params: dict[str, Any]) -> dict[str, Any]:
         result = dict(options)
         result.pop("input", None)
-        if result.get("tools"):
-            result["tools"] = cls._chat_tools(result["tools"])
-        else:
+        if not result.get("tools"):
             result.pop("tools", None)
         if "max_output_tokens" in result:
             result["max_completion_tokens"] = result.pop("max_output_tokens")
@@ -262,7 +250,7 @@ class DirectModelClient:
                 **{key: value for key, value in sampling_params.items() if key not in _CHAT_SAMPLING_EXCLUSIONS},
                 **chat_options,
                 "return_token_ids": True,
-                "include_stop_str_in_output": False,
+                "include_stop_str_in_output": True,
             }
             body[EXACT_PROMPT_TOKEN_IDS_KEY] = prompt_ids
             if sampling_params.get("stop") is not None:
@@ -302,9 +290,16 @@ class DirectModelClient:
             semantic_ids = (
                 response_ids[:-1] if response_ids and response_ids[-1] == tokenizer.eos_token_id else response_ids
             )
+            if len(semantic_ids) != len(response_ids):
+                eos_text = tokenizer.decode(response_ids[-1:], skip_special_tokens=False)
+                text = text.removesuffix(eos_text)
+                if message.get("content") is not None:
+                    message = {**message, "content": text}
             decoded = tokenizer.decode(semantic_ids, skip_special_tokens=False)
             if any(marker in decoded for pair in REASONING_DELIMITERS for marker in pair):
                 text = final_answer_text(decoded)
+                if not message.get("tool_calls"):
+                    message = {**message, "content": text}
             logprob_items = (choice.get("logprobs") or {}).get("content")
             response_logprobs = (
                 [float(item["logprob"]) for item in logprob_items] if logprob_items is not None else None
@@ -316,6 +311,17 @@ class DirectModelClient:
                 selected = [
                     select_chat_response_topk(item.get("top_logprobs") or [], requested_top_k) for item in logprob_items
                 ]
+            stop_reason = choice["finish_reason"]
+            token_budget = chat_options.get("max_completion_tokens")
+            if (
+                stop_reason == "tool_calls"
+                and token_budget is not None
+                and len(response_ids) >= token_budget
+                and choice.get("stop_reason") is None
+                and response_ids[-1] != tokenizer.eos_token_id
+            ):
+                # A tool parser can replace the backend's output-budget stop reason.
+                stop_reason = "length"
             return _ChatResult(
                 prompt_ids,
                 response_ids,
@@ -323,9 +329,9 @@ class DirectModelClient:
                 None if selected is None else [ids for ids, _ in selected],
                 None if selected is None else [scores for _, scores in selected],
                 text,
-                choice["finish_reason"],
+                stop_reason,
                 message,
-                chat_options.get("max_completion_tokens"),
+                token_budget,
                 _choice_routed_experts(choice, prompt_ids, response_ids),
                 None if choice.get("policy_steps") is None else np.asarray(choice["policy_steps"], dtype=np.int32),
             )

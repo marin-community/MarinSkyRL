@@ -1,9 +1,9 @@
 """Where each vLLM inference worker runs, as the worker itself reports it.
 
-A TP=1 engine with DP>1 is one replica in its own placement group. Each worker reports its
-host, GPU UUID and ranks, and the engine factory checks the reports against the bundles Ray
-allocated. This module imports nothing from the trainer, because config validation imports
-it before any model module.
+Each worker reports its host, GPU UUID and ranks. The engine factory checks the reports
+against the bundles Ray allocated, including a single serving worker for expert-block sync.
+This module imports nothing from the trainer, because config validation imports it before
+any model module.
 """
 
 from collections.abc import Mapping, Sequence
@@ -16,7 +16,7 @@ from marinskyrl.runtime_options import WeightSyncTransport
 def validate_expert_block_transport(config: Mapping[str, Any]) -> None:
     """Reject ``expert_block`` unless the config meets its requirements.
 
-    It needs the megatron strategy at TP=1 and ETP=1, local TP=1 vLLM engines with EP=DP>1, and
+    It needs the megatron strategy at TP=1 and ETP=1, local TP=1 vLLM engines with EP=DP>=1, and
     the NCCL weight-sync backend.
     """
     generator = config["generator"]
@@ -43,7 +43,7 @@ def validate_expert_block_transport(config: Mapping[str, Any]) -> None:
     if generator["weight_sync_backend"] != "nccl":
         problems.append("generator.weight_sync_backend must be nccl")
     # The transport matches trainer ranks to the checked worker placements, which the engine
-    # factory records for local TP=1 vLLM engines with DP>1.
+    # factory records for local TP=1 vLLM engines, including DP=1.
     if generator["backend"] != "vllm" or not generator["run_engines_locally"] or trainer["placement"]["colocate_all"]:
         problems.append("the engines must be local, non-colocated vLLM engines")
     tp_pp_size = (
@@ -53,8 +53,8 @@ def validate_expert_block_transport(config: Mapping[str, Any]) -> None:
         problems.append("the engines must use the Ray executor, not the mp backend")
     if generator["inference_engine_tensor_parallel_size"] != 1:
         problems.append("the engines must use TP=1")
-    if generator["inference_engine_data_parallel_size"] < 2:
-        problems.append("the engines must use DP>1, not DP=1")
+    if generator["inference_engine_data_parallel_size"] < 1:
+        problems.append("the engines must use positive DP")
     if generator["inference_engine_expert_parallel_size"] != generator["inference_engine_data_parallel_size"]:
         problems.append("the engines must use EP equal to DP")
     if int(generator["expert_block_sync"]["timeout_seconds"]) <= 0:
@@ -99,7 +99,7 @@ def validate_inference_replica_topology(
     pipeline_parallel_size: int = 1,
     node_hosts: Mapping[str, str],
 ) -> None:
-    """Check that every worker runs in its bundle and each stage's DP group is on one node.
+    """Check each worker against its bundle, GPU identity and requested parallel groups.
 
     A worker's bundle index is ``dp_rank * PP + pp_rank``, which is also its torch rank in the engine.
     """
@@ -116,6 +116,7 @@ def validate_inference_replica_topology(
         raise ValueError("Inference weight receiver ranks must be unique and cover the broadcast group")
     # A dense model has no EP group: every worker reports size 1.
     expert_parallel = expert_parallel_size > 1 and any(row.worker.ep_world_size != 1 for row in placements)
+    cross_node_ep = expert_parallel and pipeline_parallel_size == 1 and expert_parallel_size == data_parallel_size
     expected_ep_size = data_parallel_size if expert_parallel else 1
     for replica in range(num_replicas):
         rows = [row for row in placements if row.replica == replica]
@@ -123,7 +124,9 @@ def validate_inference_replica_topology(
             raise ValueError(f"Inference replica {replica} has incomplete placement bundles")
         for stage in range(pipeline_parallel_size):
             stage_rows = [row for row in rows if row.worker.pp_rank == stage]
-            if len({row.node_id for row in stage_rows}) != 1 or len({row.worker.host for row in stage_rows}) != 1:
+            if not cross_node_ep and (
+                len({row.node_id for row in stage_rows}) != 1 or len({row.worker.host for row in stage_rows}) != 1
+            ):
                 raise ValueError(f"Inference replica {replica} stage {stage} spans nodes")
         for row in rows:
             worker = row.worker

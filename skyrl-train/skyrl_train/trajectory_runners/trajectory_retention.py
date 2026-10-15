@@ -50,7 +50,7 @@ from skyrl_train.io import io
 
 RETENTION_METRIC_PREFIX = "generate/trajectory_retention"
 RETENTION_SCHEMA_VERSION = 1
-TRAJECTORY_RECORD_SCHEMA_VERSION = 5
+TRAJECTORY_RECORD_SCHEMA_VERSION = 7
 _LEDGER_NAME = "_retention_ledger.json"
 _SELECTION_COUNT = "count"
 _SELECTION_FRACTION = "fraction"
@@ -157,6 +157,7 @@ class _PromptTrace:
 @dataclass(frozen=True)
 class _StepBoundary:
     row_index: int
+    prompt_token_ids: tuple[int, ...]
     token_start: int
     token_end: int
     stop_reason: str | None
@@ -282,7 +283,7 @@ def _trajectory_key(trajectory_id: TrajectoryID) -> tuple[str, int]:
 def _group_rows(input_batch: TrajectoryRequestBatch, output: TrajectoryBatch) -> list[_TrajectoryRows]:
     batch_size = len(output["response_ids"])
     output_ids = output.get("trajectory_ids")
-    input_ids = input_batch.get("trajectory_ids")
+    input_ids = input_batch.trajectory_ids
     if output_ids is None:
         if input_ids is None or len(input_ids) != batch_size:
             raise ValueError("trajectory retention requires one trajectory ID per normalized output row")
@@ -335,6 +336,7 @@ def _step_boundaries(
         boundaries.append(
             _StepBoundary(
                 row_index=row_index,
+                prompt_token_ids=tuple(output["prompt_token_ids"][row_index]),
                 token_start=token_start,
                 token_end=token_end,
                 stop_reason=stop_reasons[row_index],
@@ -373,7 +375,7 @@ def build_trajectory_records(
     runner_name: str,
 ) -> list[TrajectoryRecord]:
     """Build runner-neutral records from one normalized batch."""
-    metadata = input_batch.get("batch_metadata")
+    metadata = input_batch.batch_metadata
     if metadata is None:
         raise ValueError("trajectory retention requires batch metadata")
     stop_reasons = output.get("stop_reasons") or [None] * len(output["response_ids"])
@@ -395,6 +397,8 @@ def build_trajectory_records(
         raise ValueError("verifier tests must have one entry per trajectory row")
     # A request's step names the policy version being trained, which has completed one fewer update.
     model_version_step = max(0, metadata.global_step - 1)
+    prompts = input_batch.public_prompts
+    rows = input_batch.metadata
 
     records = []
     for group in _group_rows(input_batch, output):
@@ -422,11 +426,14 @@ def build_trajectory_records(
                 instance_id=trajectory_id.instance_id,
                 repetition_id=trajectory_id.repetition_id,
                 row_indices=row_indices,
-                environment_class=input_batch["env_classes"][prompt_index],
-                environment_extras=to_jsonable(input_batch["env_extras"][prompt_index]),
+                environment_class=rows[prompt_index].metric_class,
+                environment_extras={
+                    "data_source": rows[prompt_index].data_source,
+                    "teacher_route": rows[prompt_index].teacher_route,
+                },
             ),
             prompt=_PromptTrace(
-                messages=to_jsonable(input_batch["prompts"][prompt_index]),
+                messages=to_jsonable(prompts[prompt_index]),
                 token_ids=tuple(prompt_ids),
             ),
             response=_ResponseTrace(
@@ -444,8 +451,8 @@ def build_trajectory_records(
                 trainable_spans=tuple(_active_spans(loss_mask)),
                 step_boundaries=tuple(_step_boundaries(output, row_indices, stop_reasons)),
                 stop_reason=stop_reasons[final_index],
-                generation_limit=(input_batch.get("sampling_params") or {}).get(
-                    "max_tokens", (input_batch.get("sampling_params") or {}).get("max_generate_length")
+                generation_limit=(input_batch.sampling_params or {}).get(
+                    "max_tokens", (input_batch.sampling_params or {}).get("max_generate_length")
                 ),
                 loop_spans=tuple(() if loop_spans is None else loop_spans[final_index]),
             ),
@@ -471,7 +478,7 @@ def build_trajectory_records(
                 model_source_identity=config.model_source_identity,
                 resume_path=config.resume_path,
                 model_version_step=model_version_step,
-                sampling=to_jsonable(input_batch.get("sampling_params") or {}),
+                sampling=to_jsonable(input_batch.sampling_params or {}),
                 reward_shaping_schema_version=None if shaping_versions is None else shaping_versions[final_index],
             ),
         )
@@ -813,7 +820,7 @@ class TrajectorySink:
         """Retain eligible records, or return no metrics when retention does not apply."""
         if not self.config.enabled:
             return {}
-        metadata = input_batch.get("batch_metadata")
+        metadata = input_batch.batch_metadata
         if metadata is None or metadata.training_phase not in self.config.phases:
             return {}
         if self._runner_name is None:

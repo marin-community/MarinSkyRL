@@ -7,9 +7,6 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Mapping, Protocol, TypeAlias
 
-import numpy as np
-
-
 Message: TypeAlias = Mapping[str, Any]
 UNKNOWN_STOP_REASON = "unknown"
 VERIFIER_RUNTIME_ERROR = "VerifierRuntimeError"
@@ -34,42 +31,12 @@ class RolloutEvidence:
     response: str | None = None
     stop_reason: str = UNKNOWN_STOP_REASON
     generated_token_count: int | None = None
-    prompt_token_ids: tuple[int, ...] = ()
     response_token_ids: tuple[int, ...] = ()
-    behavior_logprobs: np.ndarray | None = None
-    student_topk_indices: np.ndarray | None = None
-    behavior_topk_logprobs: np.ndarray | None = None
-    routed_experts: np.ndarray | None = None
-    policy_steps: np.ndarray | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.generated_token_count is not None and self.generated_token_count < 0:
             raise ValueError("generated_token_count must be non-negative")
-        if self.behavior_logprobs is not None:
-            if not isinstance(self.behavior_logprobs, np.ndarray) or self.behavior_logprobs.ndim != 1:
-                raise ValueError("behavior_logprobs must be a one-dimensional array")
-            if self.behavior_logprobs.shape[0] != len(self.response_token_ids):
-                raise ValueError("behavior_logprobs must align with response_token_ids")
-            if not np.isfinite(self.behavior_logprobs).all():
-                raise ValueError("behavior_logprobs must be finite")
-        if (self.student_topk_indices is None) != (self.behavior_topk_logprobs is None):
-            raise ValueError("student top-K IDs and behavior scores must be provided together")
-        if self.student_topk_indices is not None:
-            if not isinstance(self.student_topk_indices, np.ndarray) or self.student_topk_indices.ndim != 2:
-                raise ValueError("student top-K IDs must be a two-dimensional array")
-            if not isinstance(self.behavior_topk_logprobs, np.ndarray) or self.behavior_topk_logprobs.ndim != 2:
-                raise ValueError("student top-K behavior scores must be a two-dimensional array")
-            if self.student_topk_indices.shape[0] != len(self.response_token_ids):
-                raise ValueError("student top-K rows must align with response_token_ids")
-            if self.student_topk_indices.shape != self.behavior_topk_logprobs.shape:
-                raise ValueError("student top-K IDs and behavior scores must have matching widths")
-        if self.routed_experts is not None:
-            if len(self.routed_experts) != len(self.response_token_ids):
-                raise ValueError("routed_experts must align with response_token_ids")
-        if self.policy_steps is not None:
-            if len(self.policy_steps) != len(self.response_token_ids):
-                raise ValueError("policy_steps must align with response_token_ids")
 
 
 class VerificationStatus(StrEnum):

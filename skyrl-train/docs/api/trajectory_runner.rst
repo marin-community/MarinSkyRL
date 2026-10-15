@@ -1,15 +1,16 @@
 Trajectory runner API
 =====================
 
-A trajectory runner acquires harness interactions and returns normalized trajectories for training.
+The task worker returns canonical rollouts and projects them into training batches.
 
 Core APIs
 ---------
 
-.. autoclass:: skyrl_train.trajectory_runners.TrajectoryRunner
+.. autoclass:: skyrl_train.rollouts.task_worker.TaskRolloutWorker
    :members:
    :member-order: bysource
-   :undoc-members:
+
+See :doc:`data` for request and training batch types.
 
 .. autoclass:: skyrl_train.inference_engines.base.InferenceEngineInterface
    :members:

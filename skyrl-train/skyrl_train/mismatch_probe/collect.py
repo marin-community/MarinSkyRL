@@ -43,7 +43,6 @@ from skyrl_train.mismatch_probe.protocol import (
 )
 from skyrl_train.mismatch_probe.modes import NATIVE_MODE, REPEAT_MODE, TRAINER_MODES
 from skyrl_train.mismatch_probe.provenance import manifest
-from skyrl_train.metric_names import TOKEN_PROVENANCE_RECONSTRUCTED_FRACTION_METRIC
 from skyrl_train.models.megatron_router_replay import SENTINEL_EXPERT_ID
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.trajectory_runners.trajectory_processing import (
@@ -174,13 +173,9 @@ class ProbeCollector:
                         trainer.cfg.generator.backend, trainer.cfg.generator.sampling_params
                     )
                     sampling["seed"] = seed
-                    request, _ = prepare_trajectory_request(
-                        [prompt], 1, sampling, trainer.cfg.environment.env_class, "eval", 0
-                    )
-                    request["trajectory_ids"][0].repetition_id = repetition
+                    request, _ = prepare_trajectory_request([prompt], 1, sampling, "eval", 0)
+                    request.trajectory_ids[0].repetition_id = repetition
                     batch = await trainer.trajectory_runner.run(request)
-                    if (batch.get("rollout_metrics") or {}).get(TOKEN_PROVENANCE_RECONSTRUCTED_FRACTION_METRIC, 0):
-                        raise ValueError("mismatch probe rejects re-tokenized responses")
                     batches.append(batch)
                     seeds.append(seed)
                     sample_ids.append(f"{prompt['uid']}:{repetition}")

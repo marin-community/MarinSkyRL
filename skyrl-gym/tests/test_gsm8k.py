@@ -1,7 +1,7 @@
-import skyrl_gym
 import pytest
-from omegaconf import DictConfig
-from skyrl_gym.verification import RolloutEvidence
+
+from skyrl_gym.answer_tasks import grade_gsm8k
+from skyrl_gym.envs.gsm8k.utils import compute_score
 
 
 @pytest.mark.parametrize(
@@ -17,15 +17,10 @@ from skyrl_gym.verification import RolloutEvidence
         ("The answer is 42", "42", 0.0),
     ],
 )
-def test_compute_score(output, ground_truth, expected):
-    env = skyrl_gym.make(
-        "gsm8k",
-        env_config=DictConfig({"env_class": "gsm8k"}),
-        extras={"reward_spec": {"method": "rule", "ground_truth": ground_truth}},
-    )
-    # Skip init() since it's not used in this test
-    step_output = env.step(output)
-    assert step_output["reward"] == expected
+def test_task_grade_preserves_numeric_answer_formats(model_turn, output, ground_truth, expected):
+    result = grade_gsm8k(model_turn(output), {}, {"reward_spec": {"ground_truth": ground_truth}})
+    assert result.reward == expected
+    assert result.grade.reward == expected
 
 
 @pytest.mark.parametrize(
@@ -43,28 +38,20 @@ def test_compute_score(output, ground_truth, expected):
         ("The answer is 42.", "42", "stop", 0.0),
     ],
 )
-def test_completed_final_line_reward(output, ground_truth, stop_reason, expected):
-    env = skyrl_gym.make(
-        "gsm8k",
-        env_config=DictConfig({"reward_method": "final_line"}),
-        extras={"reward_spec": {"method": "rule", "ground_truth": ground_truth}},
+def test_completed_final_line_reward(model_turn, output, ground_truth, stop_reason, expected):
+    result = grade_gsm8k(
+        model_turn(output, stop_reason=stop_reason),
+        {"reward_method": "final_line"},
+        {"reward_spec": {"ground_truth": ground_truth}},
     )
-    env.set_rollout_evidence(RolloutEvidence(response=output, stop_reason=stop_reason))
-    assert env.step(output)["reward"] == expected
+    assert result.reward == expected
 
 
-def test_prepared_reward_model_extras_reach_the_verifier():
-    env = skyrl_gym.make(
-        "gsm8k",
-        env_config=DictConfig({"env_class": "gsm8k"}),
-        extras={"reward_model": {"method": "rule", "ground_truth": "42"}},
-    )
-    assert env.ground_truth == "42"
-    assert env.step("The answer is #### 42")["reward"] == 1.0
+def test_prepared_reward_model_extras_reach_the_verifier(model_turn):
+    result = grade_gsm8k(model_turn("The answer is #### 42"), {}, {"reward_model": {"ground_truth": "42"}})
+    assert result.reward == 1.0
 
 
 @pytest.mark.parametrize("method", ["strict", "flexible", "final_line"])
 def test_invalid_reference_cannot_receive_format_credit(method):
-    from skyrl_gym.envs.gsm8k.utils import compute_score
-
     assert compute_score("#### 10", None, method=method, format_score=0.5) == 0

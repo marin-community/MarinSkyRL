@@ -1,26 +1,33 @@
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 
-import numpy as np
 import pytest
 import torch
 from omegaconf import OmegaConf
-from rolloutengine.contracts import ModelTurn, RolloutData, RolloutStep, Transition
-from taskcompendium.grading import GradeResult, Outcome, numeric_answer
-from taskcompendium.models import AnswerType, ConversationInput, EnvironmentRequirements, Source, TaskSpec, TextMessage
+from taskcompendium.grader import verifyit_package
+from taskcompendium.models import (
+    AnswerType,
+    ConversationInput,
+    EnvironmentRequirements,
+    PlainText,
+    Source,
+    TaskSpec,
+    TextMessage,
+)
+from verifyit.spec import NumericSpec
 
 from skyrl_train.group_admission import GroupAdvantageInvariant
 from skyrl_train.inference_engines.chat_continuation import EXACT_PROMPT_TOKEN_IDS_KEY
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.vllm.policy_steps import PolicyStepStamps
 from skyrl_train.rollouts.buffer import RolloutGroup, RolloutLease, RolloutTask
-from skyrl_train.rollouts.task_projections import WholeTaskProjection, training_output
+from skyrl_train.rollouts.task_projections import WholeTaskProjection
 from skyrl_train.rollouts.task_worker import TaskRolloutWorker
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.trajectory_runners.model_clients import DirectModelClient
-from skyrl_train.trajectory_runners.projections import WholeTrajectoryProjection
-from skyrl_train.trajectory_runners.types import TrajectoryID
+from skyrl_train.trajectory_runners.types import TaskRequestBatch, TrajectoryID
 from skyrl_train.utils.importance_ratio_diagnostics import mismatch_ratio_metrics
+from tests.cpu.task_specs import lowered_task, task_input
 from tests.cpu.util import example_dummy_config
 
 
@@ -46,35 +53,6 @@ def test_policy_step_stamps_follow_the_step_installed_before_each_engine_step():
     assert stamps.finish("a").tolist() == []
     stamps.discard(["b"])
     assert stamps.finish("b").tolist() == []
-
-
-def test_projection_leaves_observation_tokens_between_stamped_turns_unsampled():
-    def turn(prompt, response, step):
-        return ModelTurn(
-            {"role": "assistant", "content": "x"},
-            prompt,
-            response,
-            None,
-            "stop",
-            metadata={"response_policy_steps": np.full(len(response), step, dtype=np.int32)},
-        )
-
-    rollout = RolloutData(
-        task_id="task",
-        messages=(),
-        prompt_token_ids=(1, 2),
-        response_token_ids=(3, 4, 5, 6, 99),
-        loss_mask=(1, 1, 0, 1, 1),
-        logprobs=None,
-        grade=GradeResult(Outcome.GRADED, 1.0),
-        stop_reason="stop",
-        steps=(
-            RolloutStep(turn((1, 2), (3, 4), 7), Transition(done=False), response_end=1, messages=()),
-            RolloutStep(turn((1, 2, 3, 4, 5), (6, 99), 8), Transition(done=True), response_end=4, messages=()),
-        ),
-    )
-
-    assert training_output(rollout).evidence.policy_steps.tolist() == [7, 7, -1, 8, 8]
 
 
 class Tokenizer:
@@ -130,23 +108,20 @@ class Writer:
         self.groups.append(group)
 
 
-def _task_request(repetition: int):
+def _task_request(repetition: int) -> TaskRequestBatch:
     task = TaskSpec(
         id="arithmetic",
         context=ConversationInput(events=(TextMessage(role="user", content="What is six plus six?"),)),
         environment_requirements=EnvironmentRequirements(),
         answer_type=AnswerType.NUMBER,
-        verifier=numeric_answer(12, tolerance_abs=0, tolerance_rel=0),
+        answer_format=PlainText(),
+        grader=verifyit_package(NumericSpec("12", tolerance_abs=0, tolerance_rel=0)).grader,
         source=Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
     )
-    return {
-        "prompts": [[{"role": "user", "content": "What is six plus six?"}]],
-        "env_classes": ["taskcompendium"],
-        "env_extras": [{"task_spec": task.model_dump_json(), "data_source": "arithmetic"}],
-        "trajectory_ids": [TrajectoryID("arithmetic", repetition)],
-        "sampling_params": None,
-        "batch_metadata": None,
-    }
+    return TaskRequestBatch(
+        rows=(task_input(lowered_task(task), data_source="arithmetic"),),
+        trajectory_ids=(TrajectoryID("arithmetic", repetition),),
+    )
 
 
 @pytest.mark.asyncio
@@ -183,10 +158,10 @@ async def test_token_staleness_reaches_the_training_batch_through_stamped_rollou
     engine = StampingEngine()
     worker = TaskRolloutWorker(
         runner_config,
-        WholeTaskProjection(WholeTrajectoryProjection(runner_config, tokenizer)),
+        WholeTaskProjection(runner_config, tokenizer),
         DirectModelClient(InferenceEngineClient([engine], tokenizer, client_config)),
         {},
-        command_timeout=5,
+        shutdown_timeout=30,
     )
     writer = Writer()
     try:

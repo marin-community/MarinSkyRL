@@ -20,6 +20,11 @@ import reasoning_gym
 import requests
 from skyrl_gym.envs.aime.utils import last_boxed_only_string, remove_boxed
 from skyrl_gym.envs.mcq.utils import extract_mcq_answer
+from skyrl_gym.envs.nemotron_ultra import (
+    NEMOTRON_ULTRA_MOPD_AGENTS,
+    NEMOTRON_ULTRA_RLVR1_AGENTS,
+    NEMOTRON_ULTRA_RLVR2_AGENTS,
+)
 from skyrl_gym.envs.text_to_sql import scoring as text_to_sql_scoring
 
 from infra.rl_data.contracts import VerifierDataContract
@@ -90,44 +95,9 @@ class Source:
     deduplicate_by_prompt: bool = True
 
 
-NEMOTRON_ULTRA_RLVR1_AGENTS = frozenset(
-    {
-        "abstention_simple_agent",
-        "calendar_simple_agent",
-        "code_gen_simple_agent",
-        "genrm_simple_agent",
-        "genrm_simple_agent_reasoning_off",
-        "instruction_following_simple_agent",
-        "jailbreak_engagement_with_disclaimer",
-        "jailbreak_hard_refusal_no_redirection",
-        "jailbreak_hard_refusal_with_helplines",
-        "jailbreak_refusal_with_explanation",
-        "math_formal_lean_refinement_agent",
-        "math_with_judge_simple_agent",
-        "mcqa_simple_agent",
-        "multichallenge_simple_agent",
-        "ns_tools_simple_agent",
-        "nvarc_inductive_simple_agent",
-        "nvarc_transductive_simple_agent",
-        "reasoning_gym_simple_agent",
-        "single_step_tool_use_with_argument_comparison_agent",
-        "structured_outputs_simple_agent",
-        "swe_pivot_single_step_tool_use_with_argument_comparison_agent",
-        "toolcall_schema_single_step_tool_use_with_argument_comparison_agent",
-    }
-)
-NEMOTRON_ULTRA_RLVR2_AGENTS = NEMOTRON_ULTRA_RLVR1_AGENTS | {
-    "citation_format_simple_agent",
-    "freeform_formatting_simple_agent",
-    "rdkit_chemistry_agent",
-    "structured_outputs_v3_simple_agent",
-}
 NEMOTRON_ULTRA_SWE_AGENT = "swe_pivot_single_step_tool_use_with_argument_comparison_agent"
 # Row metadata key naming the TaskTrove proxy task bound to a Harbor SWE row.
 TASKTROVE_PROXY_PATH_KEY = "tasktrove_proxy_path"
-# The MOPD blend adds one generator whose verifier has not been ported, so its rows train only
-# under environment.skyrl_gym.nemotron_ultra.grading: skip.
-NEMOTRON_ULTRA_MOPD_AGENTS = NEMOTRON_ULTRA_RLVR2_AGENTS | {"indirect_prompt_injection_simple_agent"}
 _NEMOTRON_PLACEHOLDER_KEY = "_hf_question_placeholder"
 _NEMOTRON_DAPO_PREFIX = (
     "Solve the following math problem step by step. The last line of your response "
@@ -252,7 +222,7 @@ def _prepare_nemotron_ultra(
     if not isinstance(agent, str) or agent not in agents:
         raise ValueError(f"Nemotron Ultra row has unsupported agent_ref.name {agent!r}.")
 
-    route = "terminal_bench" if agent == NEMOTRON_ULTRA_SWE_AGENT else "skyrl_gym"
+    route = "terminal_bench" if agent == NEMOTRON_ULTRA_SWE_AGENT else "task_session"
     metadata = example.get("metadata")
     instance_id = metadata.get("instance_id") if isinstance(metadata, Mapping) else None
     if route == "terminal_bench" and not isinstance(instance_id, str):

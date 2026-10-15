@@ -49,9 +49,14 @@ class Model(torch.nn.Module):
             self.model.layers.append(layer)
 
 
-def vllm_config(model_type="grug_moe", quantization=None, tp=1, eplb=False, layers=1):
+def vllm_config(model_type="grug_moe", quantization=None, tp=1, eplb=False, layers=1, latent_dim=None):
     hf = SimpleNamespace(
-        model_type=model_type, num_experts=4, hidden_size=3, moe_intermediate_size=2, num_hidden_layers=layers
+        model_type=model_type,
+        num_experts=4,
+        hidden_size=3,
+        latent_dim=latent_dim,
+        moe_intermediate_size=2,
+        num_hidden_layers=layers,
     )
     return SimpleNamespace(
         model_config=SimpleNamespace(hf_config=hf, quantization=quantization),
@@ -78,6 +83,12 @@ def test_inventory_reports_the_dense_parameters_and_serving_map():
     assert (report["pp_rank"], report["pp_size"], report["layers"]) == (0, 1, [0])
     assert list(report["dense"]) == ["model.layers.0.mlp.router.weight"]
     assert report["model"]["num_hidden_layers"] == 1
+
+
+def test_inventory_reports_the_latent_expert_width_separately_from_backbone_width():
+    report = receiver(config=vllm_config(latent_dim=2)).inventory()
+    assert report["model"]["hidden_size"] == 3
+    assert report["model"]["expert_hidden_size"] == 2
 
 
 def test_padded_vocabulary_tensors_report_their_hf_rows():

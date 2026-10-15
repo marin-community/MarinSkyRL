@@ -8,6 +8,8 @@ import math
 import random
 from typing import Any
 
+from verifyit.execution.worker import call_bounded
+
 
 class ReferenceError(ValueError):
     """A supplied instruction descriptor cannot define a valid task."""
@@ -381,8 +383,6 @@ def _evaluate(kind: str, text: str, data: Any, *, runtime: bool = False) -> dict
 
 def _execute(kind: str, text: str, data: Any, timeout: float) -> tuple[float, dict]:
     try:
-        from verifyit.bounded import call_bounded
-
         if (
             isinstance(timeout, bool)
             or not isinstance(timeout, (int, float))

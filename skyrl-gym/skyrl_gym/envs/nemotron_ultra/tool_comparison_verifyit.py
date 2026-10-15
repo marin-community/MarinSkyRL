@@ -6,8 +6,7 @@ from typing import Any
 
 from verifyit.adapters.skyrl import grade_literal_candidate
 from verifyit.modes.grade_json_schema import grade_json_schema_candidate
-from verifyit.modes.grade_math import grade_numeric_candidate
-from verifyit.spec import NumericSpec
+from verifyit.modes.grade_math import grade_numeric_candidate_float
 
 from skyrl_gym.envs.nemotron_ultra.tool_call import StepRewardCategory
 
@@ -55,9 +54,7 @@ def _compare(expected: Any, actual: Any) -> StepRewardCategory | None:
     if isinstance(expected, float):
         if not math.isfinite(actual) or abs(actual - expected) >= FLOAT_THRESHOLD:
             return StepRewardCategory.ARGUMENT_VALUE_DIFFERENT
-        verdict = grade_numeric_candidate(
-            NumericSpec(expected=expected, tolerance_abs=FLOAT_THRESHOLD, tolerance_rel=0.0), actual
-        )
+        verdict = grade_numeric_candidate_float(expected, actual, tolerance_abs=FLOAT_THRESHOLD)
     else:
         verdict = grade_literal_candidate(json.dumps(expected), json.dumps(actual))
     return None if verdict.reward == 1.0 else StepRewardCategory.ARGUMENT_VALUE_DIFFERENT

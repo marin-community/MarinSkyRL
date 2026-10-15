@@ -9,11 +9,34 @@ from transformers import AutoTokenizer
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 from skyrl_train.training_batch import TrainingInputBatch
+from tests.gpu.grug_tiny_checkpoint import TOY_SHAPE, router_bias_names
 
 MAX_MODEL_LEN = 128
 STACKED_EXPERT_NAME = "model.layers.0.mlp.experts.gate_proj.weight"
 LM_HEAD_NAME = "lm_head.weight"
 ROUTER_NAME = "model.layers.0.mlp.router.weight"
+# Broad HF-named parameter coverage for training-vs-serving readback: attention, gated
+# norms, embeddings, stacked and per-expert MoE weights, shared expert, output head,
+# router, and the frozen router biases. The bias list derives from the toy fixture shape
+# so it cannot drift from the checkpoint the serving tests load.
+GRUG_BIAS_NAMES = router_bias_names(TOY_SHAPE["num_hidden_layers"])
+GRUG_PARAMETER_NAMES = [
+    "model.layers.0.self_attn.q_proj.weight",
+    "model.layers.3.self_attn.q_proj.weight",
+    "model.layers.1.self_attn.attn_gate.weight",
+    "model.layers.1.attn_gated_norm.up_proj.weight",
+    "model.embed_gated_norm.down_proj.weight",
+    "model.norm.weight",
+    STACKED_EXPERT_NAME,
+    "model.layers.7.mlp.experts.down_proj.weight",
+    "model.layers.2.shared_expert.up_proj.weight",
+    LM_HEAD_NAME,
+    ROUTER_NAME,
+]
+GRUG_SERVING_EXPERT_INDEX_BY_NAME = {
+    "model.layers.0.mlp.experts.0.gate_proj.weight": 0,
+    "model.layers.0.mlp.experts.5.gate_proj.weight": 5,
+}
 # Alternating per-row advantages so one PPO step pushes sampled tokens in both directions.
 ADVANTAGE_PATTERN = torch.tensor([[-1.0, -0.25, 0.5, 1.0], [1.0, 0.5, -0.25, -1.0]])
 
@@ -41,7 +64,7 @@ def grug_engine_client(
         seed=23,
         vllm_v1_disable_multiproc=True,
         enable_prefix_caching=False,
-        enforce_eager=False,
+        enforce_eager=cfg.generator.enforce_eager,
         engine_init_timeout_seconds=cfg.generator.engine_init_timeout_seconds,
         shared_pg=shared_pg,
         gpu_memory_utilization=cfg.generator.gpu_memory_utilization,
@@ -97,9 +120,9 @@ def assert_engine_weights(
 ) -> dict[str, int]:
     """Check that every serving rank holding a named weight matches the training snapshot.
 
-    Router biases and router weights must arrive in fp32 and everything else in bf16;
-    per-expert serving weights are compared against slices of the stacked training
-    tensor. Returns the serving EP rank that owns each named expert.
+    Router biases and router weights must arrive in fp32 and everything else in bf16.
+    Split experts use their named training tensor; stacked experts use its slice.
+    Returns the serving EP rank that owns each named expert.
     """
     found = {name: False for name in names}
     expert_owners = {name: set() for name in serving_expert_index_by_name}
@@ -125,7 +148,7 @@ def assert_engine_weights(
                 expert_index = serving_expert_index_by_name.get(name)
                 if expert_index is not None:
                     expert_owners[name].add(serving_ep_rank)
-                expected = training[STACKED_EXPERT_NAME][expert_index] if expert_index is not None else training[name]
+                expected = training[name] if name in training else training[STACKED_EXPERT_NAME][expert_index]
                 actual = entry["tensor"]
                 if name not in bias_names:
                     expected = expected.to(torch.bfloat16).to(actual.dtype)

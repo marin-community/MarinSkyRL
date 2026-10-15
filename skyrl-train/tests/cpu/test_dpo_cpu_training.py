@@ -1,0 +1,83 @@
+"""End-to-end CPU DPO training on synthetic preference pairs through the production trainer."""
+
+import math
+import multiprocessing
+import sys
+from multiprocessing.context import BaseContext
+from pathlib import Path
+
+import pytest
+
+from tests.cpu.tiny_training import preference_pairs
+from tests.cpu.tiny_training.experiment import read_metrics
+from tests.cpu.tiny_training.tiny_model import build_tiny_policy
+
+pytestmark = pytest.mark.slow
+
+NUM_STEPS = 6
+RUN_TIMEOUT_SECONDS = 300
+
+
+@pytest.fixture(scope="module")
+def tiny_policy(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return build_tiny_policy(tmp_path_factory.mktemp("tiny_dpo_policy"))
+
+
+@pytest.fixture(scope="module")
+def runs() -> BaseContext:
+    if sys.platform == "darwin":
+        # Forkserver preload clones initialized macOS proxy/preferences libraries; use a fresh interpreter.
+        return multiprocessing.get_context("spawn")
+    context = multiprocessing.get_context("forkserver")
+    context.set_forkserver_preload([preference_pairs.__name__])
+    return context
+
+
+def _run(
+    context: BaseContext,
+    root: Path,
+    model: Path,
+    steps: int,
+    run_experiment=preference_pairs.run_dpo_experiment,
+) -> None:
+    run = context.Process(
+        target=run_experiment,
+        args=(root, model),
+        kwargs={"steps": steps},
+    )
+    run.start()
+    run.join(RUN_TIMEOUT_SECONDS)
+    if run.exitcode is None:
+        run.kill()
+        run.join()
+        pytest.fail(f"the DPO run did not finish within {RUN_TIMEOUT_SECONDS} seconds")
+    assert run.exitcode == 0
+
+
+def test_dpo_training_widens_the_preference_margin(runs, tmp_path, tiny_policy):
+    _run(runs, tmp_path, tiny_policy, NUM_STEPS)
+
+    records = [record for record in read_metrics(tmp_path) if "policy/dpo/loss" in record]
+    assert [record["trainer/global_step"] for record in records] == list(range(1, NUM_STEPS + 1))
+    losses = [record["policy/dpo/loss"] for record in records]
+    margins = [record["policy/dpo/margin"] for record in records]
+    accuracies = [record["policy/dpo/accuracy"] for record in records]
+    assert all(math.isfinite(loss) for loss in losses)
+    assert margins[-1] > margins[0], f"DPO did not widen the margin: {margins}"
+    assert accuracies[-1] >= accuracies[0], f"DPO did not improve pair accuracy: {accuracies}"
+    assert losses[-1] < losses[0], f"DPO loss did not decrease: {losses}"
+    # The surrogate policy row carries the gradient, not the literal loss value.
+    policy_rows = [record["policy/policy_loss"] for record in records]
+    assert all(math.isfinite(row) for row in policy_rows)
+
+
+def test_dpo_generates_validation_before_during_and_after_updates(runs, tmp_path, tiny_policy):
+    _run(runs, tmp_path, tiny_policy, 3, preference_pairs.run_dpo_validation_experiment)
+    records = read_metrics(tmp_path)
+    training = [record for record in records if "policy/dpo/loss" in record]
+    validation = [record for record in records if "eval/all/num_attempted" in record]
+    assert [record["trainer/global_step"] for record in training] == [1, 2, 3]
+    assert [record["step"] for record in validation] == [0, 2, 3]
+    assert all(record["eval/all/num_attempted"] == 4 for record in validation)
+    assert all(record["eval/all/num_scored"] == 4 for record in validation)
+    assert all(math.isfinite(record["eval/all/avg_verifier_score"]) for record in validation)

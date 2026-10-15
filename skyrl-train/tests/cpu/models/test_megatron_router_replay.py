@@ -338,11 +338,11 @@ class TestMetrics:
         scores = torch.randn(8, 8)
         targets, mask = _masked_target_rows(8, 2, 8, n_masked=4)
         targets[2] = SENTINEL_EXPERT_ID  # masked row whose target row is sentinel: a layout bug
-        response_mask = torch.zeros(8, dtype=torch.bool)
-        response_mask[:6] = True  # two response rows fell through to native (capture loss)
+        prediction_mask = torch.zeros(8, dtype=torch.bool)
+        prediction_mask[:6] = True  # two prediction rows fell through to native (capture loss)
         controller = MegatronRouterReplay(local_layer_indices=[0], recompute_enabled=False)
         handle = LayerReplayHandle(controller, layer_idx=0)
-        controller.begin_forward({0: targets}, mask, response_mask)
+        controller.begin_forward({0: targets}, mask, prediction_mask)
         handle.get_replay_topk(scores, 2, None, None, _fake_compute_topk)
         controller.end_forward()
         metrics = controller.pop_metrics()
@@ -403,10 +403,10 @@ class TestExpandMoeLayerFreq:
 class TestDenseReplayTargets:
     @pytest.mark.parametrize(
         ("batch_size", "seq_len", "response_len", "num_layers", "topk", "num_experts"),
-        [(3, 12, 5, 4, 2, 8), (1, 8, 8, 1, 4, 6), (2, 10, 3, 2, 2, 4)],
-        ids=["padded", "full_response", "short_response"],
+        [(3, 12, 5, 4, 2, 8), (1, 9, 8, 1, 4, 6), (2, 10, 3, 2, 2, 4)],
+        ids=["padded", "minimal_prompt", "short_response"],
     )
-    def test_fills_response_window_and_masks_lost_capture(
+    def test_fills_prediction_positions_and_masks_lost_capture(
         self, batch_size, seq_len, response_len, num_layers, topk, num_experts
     ):
         torch.manual_seed(4)
@@ -417,14 +417,25 @@ class TestDenseReplayTargets:
         full, mask = dense_replay_targets(rollout, batch_size, seq_len, response_len)
 
         for b in range(batch_size):
-            prompt_start = seq_len - response_len
-            # Outside the response window: sentinel everywhere, mask False.
-            assert (full[b, :prompt_start] == SENTINEL_EXPERT_ID).all()
-            assert not mask[b, :prompt_start].any()
+            prediction_start = seq_len - response_len - 1
+            # The final prompt token predicts response token zero.
+            assert (full[b, :prediction_start] == SENTINEL_EXPERT_ID).all()
+            assert not mask[b, :prediction_start].any()
             for t in range(response_len):
-                row = full[b, prompt_start + t]
+                row = full[b, prediction_start + t]
                 row_is_sentinel = all(
                     row[layer][k] == SENTINEL_EXPERT_ID for layer in range(num_layers) for k in range(topk)
                 )
                 assert torch.equal(row[:, :], rollout[b, t])
-                assert mask[b, prompt_start + t].item() == (not row_is_sentinel)
+                assert mask[b, prediction_start + t].item() == (not row_is_sentinel)
+            assert (full[b, -1] == SENTINEL_EXPERT_ID).all()
+            assert not mask[b, -1]
+
+    def test_compact_rows_start_at_first_prediction_position(self):
+        captured = torch.tensor([[[[1, 2]], [[3, 4]]]])
+        full, mask = dense_replay_targets(captured, batch_size=1, seq_len=8, num_actions=5)
+
+        torch.testing.assert_close(full[0, 2:4], captured[0])
+        assert mask.tolist() == [[False, False, True, True, False, False, False, False]]
+        assert (full[0, :2] == SENTINEL_EXPERT_ID).all()
+        assert (full[0, 4:] == SENTINEL_EXPERT_ID).all()

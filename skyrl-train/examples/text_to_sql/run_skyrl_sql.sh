@@ -55,7 +55,7 @@ uv run --isolated --extra megatron --extra vllm -m skyrl_train.entrypoints.main_
   generator.sampling_params.top_p=0.95 \
   generator.sampling_params.stop='["</sql>", "</solution>"]' \
   generator.eval_sampling_params.stop='["</sql>", "</solution>"]' \
-  environment.skyrl_gym.text2sql.db_path=$DB_PATH \
+  environment.task_sessions.text2sql.db_path=$DB_PATH \
   trainer.logger="wandb" \
   trainer.project_name="skyrlsql" \
   trainer.run_name="skyrlsql_repro" \

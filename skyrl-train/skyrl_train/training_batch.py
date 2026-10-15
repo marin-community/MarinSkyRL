@@ -364,6 +364,7 @@ class TrainingInput(TypedDict, total=False):
     teacher_on_student_logprobs: Optional[Float[torch.Tensor, "batch_size seq_len top_k"]]
     ftpo_chosen_mask: Optional[Integer[torch.Tensor, "batch_size seq_len top_k"]]
     ftpo_reference_logits: Optional[Float[torch.Tensor, "batch_size vocab"]]
+    ftpo_repair_mask: Optional[Integer[torch.Tensor, "batch_size seq_len"]]
     teacher_valid_mask: Optional[Integer[torch.Tensor, "batch_size seq_len"]]
     distillation_loss_weights: Optional[Float[torch.Tensor, "batch_size seq_len"]]
     # Dense replay targets are used by diagnostic input batches. Generated compact
@@ -383,6 +384,9 @@ class TrainingInput(TypedDict, total=False):
     # {OTHER=0, THINK=1, ACTION=2, EDIT=3}, aligned 1:1 with the response tokens
     # (same exact-token-id layout TIS uses). Present only when the channel is on.
     response_span_tags: Optional[Integer[torch.Tensor, "batch_size seq_len"]]
+    # DPO pairing evidence: +1 chosen / -1 rejected per row, present only when the
+    # static preference-pair runner emitted the batch as adjacent pairs.
+    pair_roles: Optional[Float[torch.Tensor, "batch_size"]]  # noqa: F821
 
 
 class TrainingInputBatch(TensorBatch[TrainingInput]):
@@ -538,11 +542,13 @@ class TrainingBatchIterator(Iterator[Experience]):
                 batch["student_topk_indices"],
                 batch["ftpo_chosen_mask"] & (batch["loss_mask"] > 0).unsqueeze(-1),
                 batch["ftpo_reference_logits"],
+                batch.get("ftpo_repair_mask"),
             )
             if "ftpo_chosen_mask" in batch
             else None,
             rollout_routed_experts=batch.routed_experts_tensor(),
             response_span_tags=batch.get("response_span_tags"),
+            pair_roles=batch.get("pair_roles"),
             info={},
             metadata=batch.metadata,
         )

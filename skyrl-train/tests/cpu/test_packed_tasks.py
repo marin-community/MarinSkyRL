@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import gzip
 import io
 import shutil
@@ -15,7 +14,7 @@ from omegaconf import OmegaConf
 
 from cloud.iris import rl_data
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
-from shellbox.machine import ShellSimBuiltins
+from shellbox.machine import Backend, PackageSpec
 
 from marinskyrl.packed_tasks import (
     EmptyTaskSelectionError,
@@ -31,19 +30,22 @@ from marinskyrl.task_sources import (
     TaskTroveTagMatch,
 )
 from skyrl_train.dataset.harbor import TerminalBenchTaskDataset, materialize_harbor_tasks
-from taskcompendium.environment import DockerBuild, EnvironmentKind, ShellVerifierSpec
-from taskcompendium.grading import Outcome, skipped_verifier
-from taskcompendium.parquet import read_tasks
+from taskcompendium.grading_result import Outcome
+from taskcompendium.models import NoGrader
+from taskcompendium.runtime.resources import resource_bytes
+from rolloutengine.spec import LoweredTaskSpec
+from tests.cpu.task_specs import session_spec
 from rolloutengine.contracts import ModelTurn
-from rolloutengine.engine import ShellboxRolloutEngine
-from taskcompendium.submission import AnswerFormat, SubmissionConvention
+from rolloutengine.engine import RolloutEngine
 
 
 def _task_binary(name: str, *, solution: bool = False, unsafe_path: bool = False) -> bytes:
     files = {
         "instruction.md": f"Do {name}".encode(),
-        "task.toml": b"[environment]\n",
-        "environment/Dockerfile": b"FROM python:3.12-slim\n",
+        "task.toml": (
+            b'[environment]\ndocker_image = "fixture@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\n'
+            b'[verifier]\nenvironment_mode = "separate"\n'
+        ),
         "tests/test.sh": b"#!/bin/sh\nexit 0\n",
     }
     if solution:
@@ -181,10 +183,10 @@ def test_packed_dataset_materializes_reference_from_runtime_yaml(tmp_path: Path)
     cache = tmp_path / "cache"
 
     first = dataset[0]
-    reference = PackedTaskReference(**first["env_extras"]["packed_task"])
+    assert isinstance(first, PackedTaskReference)
 
-    assert first["prompt"].startswith("tasktrove://")
-    task_path = PackedTaskMaterializer(cache).materialize_batch([reference])[reference]
+    assert first.stable_uri().startswith("tasktrove://")
+    task_path = PackedTaskMaterializer(cache).materialize_batch([first])[first]
     assert (task_path / "instruction.md").read_text() == "Do one"
     assert not (task_path / "solution").exists()
 
@@ -193,9 +195,12 @@ def test_packed_selection_becomes_portable_task_parquet(tmp_path: Path) -> None:
     dataset_path = tmp_path / "source.parquet"
     _write_dataset(dataset_path)
     source = _source(dataset_path, TaskTroveSelection(sources=("source-a",)))
-    output = materialize_harbor_tasks([asdict(source)], cache_dir=tmp_path / "cache")
+    output = materialize_harbor_tasks([asdict(source)], cache_dir=tmp_path / "cache", session=session_spec())
     dataset_path.unlink()
-    tasks = list(read_tasks(str(output)))
+    tasks = [
+        LoweredTaskSpec.model_validate_json(value).task
+        for value in pq.read_table(output)["lowered_task_spec"].to_pylist()
+    ]
     assert [task.context.events[0].content for task in tasks] == ["Do one", "Do three"]
     assert [task.id for task in tasks] == [
         "tasktrove/clean@fixture:abc123/source-a/task-1",
@@ -203,46 +208,25 @@ def test_packed_selection_becomes_portable_task_parquet(tmp_path: Path) -> None:
     ]
     assert output.stat().st_mode & 0o777 == 0o600
     for task in tasks:
-        assert isinstance(task.environment.image, DockerBuild)
-        assert {file.path: file.content for file in task.environment.image.files} == {
-            "/Dockerfile": b"FROM python:3.12-slim\n"
+        assert {resource.path: resource_bytes(resource) for resource in task.resources.verifier} == {
+            "test.sh": b"#!/bin/sh\nexit 0\n"
         }
-        verifier = ShellVerifierSpec.model_validate_json(task.verifier.parameters_json)
-        assert {file.path: file.content for file in verifier.files} == {"/tests/test.sh": b"#!/bin/sh\nexit 0\n"}
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("staged", [False, True])
-@pytest.mark.parametrize("registry_image", [False, True])
 @pytest.mark.parametrize("verification", [True, False])
-async def test_packed_tasks_execute_after_source_removal(tmp_path, staged, registry_image, verification):
-    config = '[environment]\nworkdir = "/workspace"\nallow_internet = false\n'
-    files = {"setup_files/input": b"first\n"}
-    if registry_image:
-        config += 'docker_image = "fixture"\n'
-    else:
-        files["environment/Dockerfile"] = b"FROM busybox\n"
-    grader = b'test "$(cat /workspace/state)" = first && echo 1 > /logs/verifier/reward.txt\n'
-    if staged:
-        config += '[[steps]]\nname = "first"\nmin_reward = 1\n[[steps]]\nname = "second"\n'
-        files.update(
-            {
-                "steps/first/instruction.md": b"First stage.",
-                "steps/first/workdir/setup.sh": b"cp /setup_files/input /workspace/state\n",
-                "steps/first/tests/test.sh": grader,
-                "steps/second/instruction.md": b"Second stage.",
-                "steps/second/workdir/setup.sh": (
-                    b'test "$(cat /workspace/state)" = first && echo second > /workspace/state\n'
-                ),
-                "steps/second/tests/test.sh": grader.replace(b"= first", b"= second"),
-            }
-        )
-    else:
-        files["instruction.md"] = b"Single stage."
-        files["tests/test.sh"] = grader.replace(b"/workspace/state", b"/setup_files/input")
-    files["task.toml"] = config.encode()
+async def test_packed_tasks_execute_after_source_removal(tmp_path, verification):
+    config = 'artifacts = ["/setup_files/input"]\n[environment]\nworkdir = "/workspace"\nallow_internet = false\n'
+    config += 'docker_image = "fixture@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\n'
+    config += '[verifier]\nenvironment_mode = "separate"\n'
+    files = {
+        "setup_files/input": b"first\n",
+        "instruction.md": b"Single task.",
+        "tests/test.sh": b'test "$(cat /setup_files/input)" = first && echo 1 > /logs/verifier/reward.txt\n',
+        "task.toml": config.encode(),
+    }
     if not verification:
-        files = {path: data for path, data in files.items() if "tests" not in Path(path).parts}
+        files.pop("tests/test.sh")
     dataset_path = tmp_path / "source.parquet"
     _write_dataset(dataset_path)
     table = pq.read_table(dataset_path)
@@ -253,34 +237,39 @@ async def test_packed_tasks_execute_after_source_removal(tmp_path, staged, regis
     output = materialize_harbor_tasks(
         [asdict(source)],
         cache_dir=cache,
-        verifier_override=None if verification else skipped_verifier("Verification is disabled"),
+        session=session_spec(max_turns=1),
+        grader_override=None if verification else NoGrader(reason="Verification is disabled"),
     )
     dataset_path.unlink()
     shutil.rmtree(cache / "archives")
 
     class Factory:
+        backend = Backend.DOCKER
+
+        def check_environment(self, _requirements, _spec):
+            pass
+
         async def create(self, spec):
-            return await ShellSimMachineFactory().create(replace(spec, source=ShellSimBuiltins()))
+            return await ShellSimMachineFactory().create(replace(spec, source=PackageSpec()))
 
     class Model:
         async def complete(self, request):
             prompt = (*request.prefix_token_ids, 90) if request.prefix_token_ids else (10,)
             return ModelTurn({"role": "assistant", "content": "Done."}, prompt, (20,), (-0.5,), "stop")
 
-    engine = ShellboxRolloutEngine(
+    engine = RolloutEngine(
         Model().complete,
-        {EnvironmentKind.DOCKER: Factory()},
-        max_turns=1,
-        command_timeout=5,
-        convention=SubmissionConvention(id="plain", answer_format=AnswerFormat.PLAIN),
+        {"docker": Factory()},
     )
-    result = (await asyncio.to_thread(list, engine.generate(read_tasks(str(output)))))[0]
+    row = pq.read_table(output).to_pylist()[0]
+    task = LoweredTaskSpec.model_validate_json(row["lowered_task_spec"])
+    result = await engine.run(task)
     assert (result.grade.status, result.grade.reward) == (
-        (Outcome.GRADED, 1.0) if verification else (Outcome.SKIPPED, None)
+        (Outcome.GRADED, 1.0) if verification else (Outcome.UNAVAILABLE, None)
     )
-    assert result.response_token_ids == ((20, 90, 20) if staged else (20,))
-    assert result.loss_mask == ((1, 0, 1) if staged else (1,))
-    assert result.logprobs == ((-0.5, 0.0, -0.5) if staged else (-0.5,))
+    assert result.response_token_ids == (20,)
+    assert result.loss_mask == (1,)
+    assert result.logprobs == (-0.5,)
 
 
 def test_packed_materializer_reuses_reader_across_batches(tmp_path: Path) -> None:

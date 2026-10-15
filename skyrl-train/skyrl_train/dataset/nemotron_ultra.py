@@ -1,41 +1,61 @@
 """Prepare mixed Nemotron rows as portable tasks before rollout execution."""
 
 from collections.abc import Mapping, Sequence
+from functools import partial
 from pathlib import Path
 from typing import Any
 
+import pyarrow.parquet as pq
 from datasets import Dataset
-from taskcompendium.environment import ExternalVerifierSpec
-from taskcompendium.models import TaskSpec, VerifierSpec
-from taskcompendium.parquet import read_tasks
+from skyrl_gym.source_task import session_parameters
+from rolloutengine.spec import LoweredTaskSpec, TaskSessionSpec
+from taskcompendium.models import NoGrader
 from transformers import PreTrainedTokenizerBase
 
-from skyrl_train.dataset.harbor import materialize_harbor_tasks
-from skyrl_train.dataset.tasks import TaskDataset, cache_tasks, gym_tasks
+from skyrl_train.dataset.harbor import HARBOR_ID_PREFIX, materialize_harbor_tasks
+from skyrl_train.dataset.tasks import (
+    LOWERED_TASK_COLUMN,
+    PARQUET_BATCH_SIZE,
+    SourceTaskDataset,
+    source_row_task,
+    task_prompt,
+)
 
 
-def terminal_task_index(path: Path) -> dict[str, TaskSpec]:
-    """Index portable Harbor tasks by their directory and source instance IDs."""
+def terminal_task_index(path: Path) -> dict[str, LoweredTaskSpec]:
+    """Index lowered Harbor tasks by their package and source instance identities."""
     result = {}
-    for task in read_tasks(str(path)):
-        for identifier in {task.id.casefold(), *task.metadata["harbor_task_ids"]}:
-            if identifier in result and result[identifier] != task:
-                raise ValueError(f"Duplicate terminal-bench task ID {identifier!r}")
-            result[identifier] = task
+    with pq.ParquetFile(path) as parquet:
+        for batch in parquet.iter_batches(batch_size=PARQUET_BATCH_SIZE, columns=[LOWERED_TASK_COLUMN]):
+            for row in batch.to_pylist():
+                record = LoweredTaskSpec.model_validate_json(row[LOWERED_TASK_COLUMN])
+                identifiers = {
+                    record.task.id.casefold(),
+                    *(
+                        tag.removeprefix(HARBOR_ID_PREFIX)
+                        for tag in record.task.tags
+                        if tag.startswith(HARBOR_ID_PREFIX)
+                    ),
+                }
+                for identifier in identifiers:
+                    if identifier in result and result[identifier] != record:
+                        raise ValueError(f"Duplicate terminal-bench task ID {identifier!r}")
+                    result[identifier] = record
     return result
 
 
-def resolve_terminal_task(task: TaskSpec, terminals: Mapping[str, TaskSpec]) -> TaskSpec:
-    """Keep source metadata while replacing a terminal row with its executable task."""
-    verifier = ExternalVerifierSpec.model_validate_json(task.verifier.parameters_json)
-    extras = verifier.parameters["extras"]
+def resolve_terminal_task(lowered: LoweredTaskSpec, terminals: Mapping[str, LoweredTaskSpec]) -> LoweredTaskSpec:
+    """Resolve a terminal source row before rollout execution."""
+    task = lowered.task
+    parameters = session_parameters(task)
+    extras = parameters.extras
     ultra = (extras.get("extra_info") or {}).get("nemotron_ultra")
     if ultra is None:
-        return task
+        return lowered
     if not all(isinstance(ultra.get(key), str) and ultra[key] for key in ("blend", "agent")):
         raise ValueError("Nemotron Ultra tasks require non-empty blend and agent fields")
     if ultra.get("route") != "terminal_bench":
-        return task
+        return lowered
     identifier = ultra.get("terminal_bench_instance_id")
     if not isinstance(identifier, str) or not identifier:
         raise ValueError("A terminal-bench row must provide terminal_bench_instance_id")
@@ -44,20 +64,26 @@ def resolve_terminal_task(task: TaskSpec, terminals: Mapping[str, TaskSpec]) -> 
     terminal = terminals[identifier.casefold()]
     return terminal.model_copy(
         update={
-            "id": task.id,
-            "source": task.source,
-            "metadata": {
-                **terminal.metadata,
-                **task.metadata,
-                "skyrl_extras": extras,
-                "harbor_source": terminal.source.model_dump(mode="json"),
-            },
+            "task": terminal.task.model_copy(update={"id": task.id, "source": task.source}),
         }
     )
 
 
-class NemotronTaskDataset(TaskDataset):
-    """Convert Gym and terminal source rows to one task Parquet file."""
+def _nemotron_task_prompt(
+    row: dict,
+    index: int,
+    *,
+    source_name: str,
+    environment_configs: Mapping[str, dict],
+    terminals: Mapping[str, LoweredTaskSpec],
+) -> dict:
+    source = source_row_task(row, index, source_name=source_name, environment_configs=environment_configs)
+    extras = session_parameters(source.task).extras
+    return {**extras, **task_prompt(resolve_terminal_task(source, terminals))}
+
+
+class NemotronTaskDataset(SourceTaskDataset):
+    """Convert answer, tool, and terminal source rows to portable tasks."""
 
     def __init__(
         self,
@@ -68,17 +94,33 @@ class NemotronTaskDataset(TaskDataset):
         environment_configs: Mapping[str, dict],
         terminal_bench_data: Sequence[str | Mapping[str, Any]],
         cache_dir: Path,
-        verifier_override: VerifierSpec | None = None,
+        grader_override: NoGrader | None = None,
         num_workers: int = 8,
     ):
-        self.environment_configs = environment_configs
-        self.cache_dir = cache_dir.expanduser()
+        cache_dir = cache_dir.expanduser()
         self.terminals = terminal_task_index(
-            materialize_harbor_tasks(terminal_bench_data, cache_dir=self.cache_dir, verifier_override=verifier_override)
+            materialize_harbor_tasks(
+                terminal_bench_data,
+                cache_dir=cache_dir,
+                grader_override=grader_override,
+                session=TaskSessionSpec.model_validate({**environment_configs["session"], "task_session": "shellbox"}),
+            )
         )
-        super().__init__(list(datasets), tokenizer, max_prompt_length, num_workers=num_workers)
+        super().__init__(
+            datasets,
+            tokenizer,
+            max_prompt_length,
+            environment_configs=environment_configs,
+            num_workers=num_workers,
+        )
 
     def prepare_dataset(self, dataset: Dataset) -> Dataset:
-        tasks = gym_tasks(dataset, source_name=", ".join(self.datasets), environment_configs=self.environment_configs)
-        self.task_path = cache_tasks((resolve_terminal_task(task, self.terminals) for task in tasks), self.cache_dir)
-        return super().prepare_dataset(Dataset.from_parquet(str(self.task_path)))
+        return self._map_task_rows(
+            dataset,
+            partial(
+                _nemotron_task_prompt,
+                source_name=", ".join(self.datasets),
+                environment_configs=self.environment_configs,
+                terminals=self.terminals,
+            ),
+        )

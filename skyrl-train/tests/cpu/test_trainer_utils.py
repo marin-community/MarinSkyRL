@@ -13,8 +13,12 @@ from skyrl_train.utils.trainer_utils import (
     dump_per_dataset_eval_results,
     build_eval_dataloader,
 )
-from skyrl_train.trajectory_runners.base import TrajectoryRequestBatch, TrajectoryBatch
-from skyrl_train.trajectory_runners.trajectory_processing import validate_trajectory_batch
+from skyrl_train.trajectory_runners.base import TrajectoryBatch
+from skyrl_train.trajectory_runners.trajectory_processing import (
+    concatenate_trajectory_batches,
+    validate_trajectory_batch,
+)
+from skyrl_gym.verification import VerificationResult
 from typing import Union
 import ray
 import os
@@ -29,6 +33,33 @@ from skyrl_train.io import io
 from tests.cpu.util import example_dummy_config
 
 BasicType = Union[int, float, str, bool, type(None)]
+
+
+def test_batch_metrics_use_reward_sign_only_when_no_verdict_exists():
+    graded = {
+        "prompt_token_ids": [[1], [1]],
+        "response_ids": [[2], [2, 3]],
+        "loss_masks": [[1], [1, 1]],
+        "rewards": [1.0, 0.7],
+        "verification_results": [
+            VerificationResult.verified(1.0, passed=True),
+            VerificationResult.verified(0.0, passed=False),
+        ],
+    }
+    preference = {
+        "prompt_token_ids": [[1]],
+        "response_ids": [[2, 3, 4]],
+        "loss_masks": [[1, 1, 1]],
+        "rewards": [1.0],
+        "verification_results": [None],
+    }
+    joined = concatenate_trajectory_batches([graded, preference], tis_lcs_alert_threshold=0.005)
+
+    assert joined["rollout_metrics"]["generate/avg_tokens_non_zero_rewards"] == 2.0
+    assert joined["rollout_metrics"]["generate/avg_tokens_zero_rewards"] == 2.0
+    filtered = filter_trajectory_batch(joined, [2])
+    assert filtered["rollout_metrics"]["generate/avg_tokens_non_zero_rewards"] == 3.0
+    assert filtered["rollout_metrics"]["generate/avg_tokens_zero_rewards"] == 0.0
 
 
 class ListTokenizer:
@@ -265,15 +296,16 @@ def test_dump_per_dataset_eval_results_preserves_dataset_and_metrics(tmp_path):
     }
     data_sources = ["dataset1", None, "dataset1"]
     all_envs = ["env1", "env2", "env3"]
-    env_extras = [{"extra1": "val1"}, {"extra2": "val2"}, {"extra3": "val3"}]
     eval_metrics = {"eval/dataset1/avg_score": 0.8, "eval/unknown/avg_score": 0.6}
 
     dump_per_dataset_eval_results(
-        str(tmp_path), tokenizer, trajectory_batches, data_sources, all_envs, env_extras, eval_metrics
+        str(tmp_path), tokenizer, trajectory_batches, data_sources, all_envs, eval_metrics, ["first", "second", "third"]
     )
     dataset_rows = [json.loads(line) for line in (tmp_path / "dataset1.jsonl").read_text().splitlines()]
     unknown_rows = [json.loads(line) for line in (tmp_path / "unknown.jsonl").read_text().splitlines()]
     assert [row["output_response"] for row in dataset_rows] == ["[10, 11]", "[14, 15]"]
+    assert [row["uid"] for row in dataset_rows] == ["first", "third"]
+    assert unknown_rows[0]["uid"] == "second"
     assert unknown_rows[0]["data_source"] == "unknown"
     assert json.loads((tmp_path / "aggregated_results.jsonl").read_text()) == eval_metrics
 
@@ -285,7 +317,7 @@ def test_eval_dump_writes_to_cloud_uri_without_corrupting_scheme(monkeypatch):
     tokenizer = ListTokenizer()
     batch = {"prompt_token_ids": [[1]], "response_ids": [[2]], "rewards": [1.0]}
 
-    dump_per_dataset_eval_results(directory, tokenizer, batch, ["aime_2024"], ["aime"], [{}], {"accuracy": 1.0})
+    dump_per_dataset_eval_results(directory, tokenizer, batch, ["aime_2024"], ["aime"], {"accuracy": 1.0}, ["first"])
 
     expected = "s3://bucket/users/exports/dumped_evals/global_step_2_evals"
     assert directory == expected
@@ -303,11 +335,15 @@ def test_dump_per_dataset_eval_results_preserves_error_disposition(tmp_path):
         "stop_reasons": ["stop", "error"],
         "exception_types": [None, "TimeoutError"],
         "error_treatments": [None, "mask"],
+        "verification_results": [VerificationResult.verified(1.0), VerificationResult.error("Request timed out.")],
     }
 
-    dump_per_dataset_eval_results(str(tmp_path), tokenizer, batch, ["aime_2024"] * 2, ["aime"] * 2, [{}, {}], {})
+    dump_per_dataset_eval_results(
+        str(tmp_path), tokenizer, batch, ["aime_2024"] * 2, ["aime"] * 2, {}, ["first", "second"]
+    )
 
     rows = [json.loads(line) for line in (tmp_path / "aime_2024.jsonl").read_text().splitlines()]
+    assert [row["verification"]["reason"] for row in rows] == [None, "Request timed out."]
     assert [(row["exception_type"], row["error_treatment"]) for row in rows] == [
         (None, None),
         ("TimeoutError", "mask"),
@@ -368,12 +404,7 @@ def test_filter_trajectory_batch():
 
 def test_validate_trajectory_batch_valid_case():
     """Test validate_trajectory_batch with valid case."""
-    input_batch = TrajectoryRequestBatch(
-        prompts=["prompt1", "prompt2", "prompt3"],
-        env_classes=["env1", "env2", "env3"],
-        env_extras=[{"extra": 1}, {"extra": 2}, {"extra": 3}],
-        sampling_params={"temperature": 0.7},
-    )
+    batch_size = 3
 
     trajectory_batch = TrajectoryBatch(
         prompt_token_ids=[[1, 2, 3, 4], [5, 6], [7, 8, 9]],
@@ -386,22 +417,20 @@ def test_validate_trajectory_batch_valid_case():
     )
 
     # Should not raise any exceptions
-    validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
+    validate_trajectory_batch(batch_size, trajectory_batch)
 
     # per trajectory rewards should work too
     trajectory_batch["rewards"] = [0.5, 0.6, 0.7]
-    validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
+    validate_trajectory_batch(batch_size, trajectory_batch)
 
     # valid rollout logprobs
     trajectory_batch["rollout_logprobs"] = [[0.11, 0.12, 0.13], [0.2, 0.3], [0.4]]
-    validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
+    validate_trajectory_batch(batch_size, trajectory_batch)
 
 
 def test_validate_trajectory_batch_empty_response_ids():
     """Test validate_trajectory_batch raises RuntimeError when response_ids is empty."""
-    input_batch = TrajectoryRequestBatch(
-        prompts=["prompt1"], env_classes=["env1"], env_extras=None, sampling_params=None
-    )
+    batch_size = 1
 
     trajectory_batch = TrajectoryBatch(
         prompt_token_ids=[[1, 2, 3]],
@@ -413,17 +442,12 @@ def test_validate_trajectory_batch_empty_response_ids():
     )
 
     with pytest.raises(RuntimeError, match="No outputs generated"):
-        validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
+        validate_trajectory_batch(batch_size, trajectory_batch)
 
 
 def test_validate_trajectory_batch_mismatched_prompts_responses():
     """Test validate_trajectory_batch raises AssertionError when prompts and response_ids lengths don't match."""
-    input_batch = TrajectoryRequestBatch(
-        prompts=["prompt1", "prompt2", "prompt3"],  # 3 prompts
-        env_classes=["env1", "env2", "env3"],
-        env_extras=None,
-        sampling_params=None,
-    )
+    batch_size = 3
 
     trajectory_batch = TrajectoryBatch(
         prompt_token_ids=[[1, 2], [3, 4]],
@@ -435,14 +459,12 @@ def test_validate_trajectory_batch_mismatched_prompts_responses():
     )
 
     with pytest.raises(AssertionError, match=re.escape("Mismatch between prompts (3) and responses (2)")):
-        validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
+        validate_trajectory_batch(batch_size, trajectory_batch)
 
 
 def test_validate_trajectory_batch_mismatched_list_lengths():
     """Test validate_trajectory_batch rejects mismatched trajectory batch lists."""
-    input_batch = TrajectoryRequestBatch(
-        prompts=["prompt1", "prompt2"], env_classes=["env1", "env2"], env_extras=None, sampling_params=None
-    )
+    batch_size = 2
 
     trajectory_batch = TrajectoryBatch(
         prompt_token_ids=[[1, 2, 3], [4, 5, 6]],
@@ -454,17 +476,12 @@ def test_validate_trajectory_batch_mismatched_list_lengths():
     )
 
     with pytest.raises(AssertionError, match="Trajectory batch rewards length must equal response_ids length"):
-        validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
+        validate_trajectory_batch(batch_size, trajectory_batch)
 
 
 def test_validate_trajectory_batch_element_length_mismatch():
     """Test validate_trajectory_batch with element length mismatch."""
-    input_batch = TrajectoryRequestBatch(
-        prompts=["prompt1", "prompt2", "prompt3"],
-        env_classes=["env1", "env2", "env3"],
-        env_extras=[{"extra": 1}, {"extra": 2}, {"extra": 3}],
-        sampling_params={"temperature": 0.7},
-    )
+    batch_size = 3
 
     trajectory_batch = TrajectoryBatch(
         prompt_token_ids=[[1, 2, 3, 4], [5, 6], [7, 8, 9]],
@@ -477,12 +494,12 @@ def test_validate_trajectory_batch_element_length_mismatch():
     )
 
     with pytest.raises(AssertionError, match="Response ids and loss masks must have the same length"):
-        validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
+        validate_trajectory_batch(batch_size, trajectory_batch)
 
     trajectory_batch["loss_masks"] = [[1, 1, 1], [1, 1], [1]]  # add correct loss masks
     trajectory_batch["rewards"] = [[0.5, 0.6], [0.8], [1.0, 2.0]]  # add incorrect rewards
     with pytest.raises(AssertionError, match="Token rewards and response ids must have the same length"):
-        validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
+        validate_trajectory_batch(batch_size, trajectory_batch)
 
     trajectory_batch = TrajectoryBatch(
         prompt_token_ids=[[1, 2, 3], [4, 5, 6], [7, 8, 9]],
@@ -494,7 +511,7 @@ def test_validate_trajectory_batch_element_length_mismatch():
     )
 
     with pytest.raises(AssertionError, match="Response ids and rollout logprobs must have the same length"):
-        validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
+        validate_trajectory_batch(batch_size, trajectory_batch)
 
 
 class MultiItemDataset:
@@ -534,9 +551,7 @@ def test_eval_dataloader_num_prompts_is_bounded_and_reproducible(dummy_config):
 
 def test_validate_trajectory_batch_invalid_rewards():
     """Test validate_trajectory_batch raises AssertionError when rewards is neither List[float-like] nor List[List[float-like]]."""
-    input_batch = TrajectoryRequestBatch(
-        prompts=["prompt1", "prompt2"], env_classes=["env1", "env2"], env_extras=None, sampling_params=None
-    )
+    batch_size = 2
 
     trajectory_batch = TrajectoryBatch(
         prompt_token_ids=[[1, 2, 3], [4, 5, 6]],
@@ -551,10 +566,10 @@ def test_validate_trajectory_batch_invalid_rewards():
         AssertionError,
         match=re.escape("rewards must be `List[float]` or `List[List[float]]`"),
     ):
-        validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
+        validate_trajectory_batch(batch_size, trajectory_batch)
 
     trajectory_batch["rewards"] = [0.5, 0.7]
-    validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
+    validate_trajectory_batch(batch_size, trajectory_batch)
 
     trajectory_batch["rewards"] = [[0.5, 0.6], [0.7, 0.8]]
-    validate_trajectory_batch(len(input_batch["prompts"]), trajectory_batch)
+    validate_trajectory_batch(batch_size, trajectory_batch)

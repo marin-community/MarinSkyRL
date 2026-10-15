@@ -63,6 +63,14 @@ def test_inference_engine_forwards_only_supported_nccl_diagnostics(monkeypatch):
     assert runtime_env == {"env_vars": {"TORCH_NCCL_ENABLE_MONITORING": "1"}}
 
 
+def test_inference_engine_uses_policy_nccl_buffer_size_for_weight_sync(monkeypatch):
+    monkeypatch.setenv("NCCL_BUFFSIZE", "4194304")
+
+    runtime_env = _build_inference_engine_runtime_env(nccl_buffer_size_bytes=262144)
+
+    assert runtime_env["env_vars"]["NCCL_BUFFSIZE"] == "262144"
+
+
 def test_selected_id_teacher_forces_v1_runner_without_changing_default(monkeypatch):
     for variable in _NCCL_FR_ENV_PASSTHROUGH:
         monkeypatch.delenv(variable, raising=False)

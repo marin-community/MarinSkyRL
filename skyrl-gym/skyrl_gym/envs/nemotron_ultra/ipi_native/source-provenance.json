@@ -1,0 +1,53 @@
+{
+  "repository": "NVIDIA-NeMo/Gym",
+  "revision": "804c12a7d56a151a98ae150a352350e3c856ba47",
+  "path": "resources_servers/indirect_prompt_injection",
+  "changes": "Package imports are relocated and two incorrect upstream docstrings are corrected; executable native logic is preserved.",
+  "files": {
+    "common_tools.py": {
+      "upstream_sha256": "fd57479d7dc87436273423bddbe164d091520d4b33a731272be96756d913855d",
+      "packaged_sha256": "fd57479d7dc87436273423bddbe164d091520d4b33a731272be96756d913855d"
+    },
+    "education_tools.py": {
+      "upstream_sha256": "9e4897115a27f785031a374b7d89ff114054b729d0f42de741118698837d57c3",
+      "packaged_sha256": "ebccb633b5ad2a8c89590907ff3535ec0698072d43734974b9cde21f06db9f32"
+    },
+    "insurance_tools.py": {
+      "upstream_sha256": "e31b30b357d941930b368b0c3c893cf3747ddc7bfc669bd2a5adac526087cb89",
+      "packaged_sha256": "557bc7fb3c5101a4afa8f099c13f2a77ffcaaaa2ab5688cae9f270e40f146667"
+    },
+    "logistics_tools.py": {
+      "upstream_sha256": "c96e764f791e9f1c6c736808263623dcfe6680fd842ddb52fe68c81cded722bc",
+      "packaged_sha256": "c96e764f791e9f1c6c736808263623dcfe6680fd842ddb52fe68c81cded722bc"
+    },
+    "hr_tools.py": {
+      "upstream_sha256": "a172822126fa565af12da1142bcd40c66a55495721a894171af5ff818d8c5b50",
+      "packaged_sha256": "a172822126fa565af12da1142bcd40c66a55495721a894171af5ff818d8c5b50"
+    },
+    "legal_tools.py": {
+      "upstream_sha256": "229108f4d6854dde85c71ac814fe2b58abcfdde7de01649339fd4dc992e5145e",
+      "packaged_sha256": "0c7cb27796e4cc7294bba0ed0a6ff35ec31b5708b0ae51f60fa08feb3a33ed81"
+    },
+    "ecommerce_tools.py": {
+      "upstream_sha256": "7e84f9a026e64de3127669f86fd2941b3b8b383a893013dbee21253dbb4b3b63",
+      "packaged_sha256": "6c777844df33b304e9f3b4b1b19601b22e17b05956579eea81ff4b4a054f0092"
+    },
+    "healthcare_tools.py": {
+      "upstream_sha256": "73f9280dd198a63bf24d9890a8e9c3a8a963c720c7353d7c98bea63d5415b7f5",
+      "packaged_sha256": "e6fc78787fd654fedee4645ba3b146bdece7311eb5c381a5143aa56a0d41b490"
+    },
+    "real_estate_tools.py": {
+      "upstream_sha256": "82c808ae95fe42916bde54c62265d15c18100bf50dd0beb77b6596c74122d9b8",
+      "packaged_sha256": "58e4062902bfcaae6eac28fc42405bfd1155dcecfd675fe0d5b05226c18ac65e"
+    },
+    "it_helpdesk_tools.py": {
+      "upstream_sha256": "083dffe4f333a29858ff6cfb4bfd642da37904fe3eebc2be6ec88303781765c5",
+      "packaged_sha256": "83bb27fcf7c0496638ef6cc3ed097e30017323ec2f6be2d5e38cbe7763476d2a"
+    },
+    "verifier.py": {
+      "upstream_sha256": "f537e5f2961ee97679e40175c8f5edcae0da32180267a1ed4b6aeedc2b292606",
+      "packaged_sha256": "fe648d34cf04f7d58e285b724ddb3f42499de6ac888fbc438ba2a4eff5a57b26"
+    }
+  },
+  "validation": "All eleven implementation ASTs match the pinned originals after import relocation and excluding docstrings."
+}

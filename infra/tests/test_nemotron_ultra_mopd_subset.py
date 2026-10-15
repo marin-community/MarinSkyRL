@@ -114,7 +114,7 @@ def test_prepared_rows_carry_routes_and_harbor_task_ids():
     assert [row[ROUTE_COLUMN] for row in prepared] == ["terminal", "swe"]
     assert [row["extra_info"]["index"] for row in prepared] == [0, 1]
     calendar, swe_ultra = (row["extra_info"]["nemotron_ultra"] for row in prepared)
-    assert (calendar["blend"], calendar["route"]) == ("mopd", "skyrl_gym")
+    assert (calendar["blend"], calendar["route"]) == ("mopd", "task_session")
     assert json.loads(calendar["record_json"])["exp_cal_state"] == {}
     assert (swe_ultra["route"], swe_ultra["terminal_bench_instance_id"]) == ("terminal_bench", "proxies/t1")
 

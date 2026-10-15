@@ -7,7 +7,14 @@ from skyrl_gym.verification import VerificationResult
 
 from skyrl_train.dynamic_sampling import DynamicSamplingType, GroupSelectionResult
 from skyrl_train.group_admission import AdmissionRejection, GroupAdmissionStalledError
-from skyrl_train.rollouts.buffer import BatchPolicy, GroupRewards, RolloutBuffer, RolloutBufferConfig, RolloutVerdict
+from skyrl_train.rollouts.buffer import (
+    BatchPolicy,
+    GroupRewards,
+    PayloadReference,
+    RolloutBuffer,
+    RolloutBufferConfig,
+    RolloutVerdict,
+)
 from skyrl_train.rollouts.loader import JudgedGroup
 from skyrl_train.telemetry import GeneratedWork
 
@@ -54,7 +61,7 @@ def _verdict(
 
 async def _commit(buffer: RolloutBuffer, lease_id: str, uid: str, **verdict) -> None:
     """Commit a group whose payload stands in for its object reference with its UID."""
-    await buffer.commit(lease_id, {"uid": uid}, _verdict(uid, **verdict), [uid])
+    await buffer.commit(lease_id, {"uid": uid}, _verdict(uid, **verdict), PayloadReference(uid))
 
 
 async def _generate(buffer: RolloutBuffer, uid: str, **verdict) -> None:
@@ -63,11 +70,11 @@ async def _generate(buffer: RolloutBuffer, uid: str, **verdict) -> None:
 
 
 async def _take_batch(buffer: RolloutBuffer) -> tuple[list[str], dict[str, float]]:
-    """Admit until the batch completes, returning its payloads in admission order and its metrics."""
+    """Admit until the batch completes, resolving each admitted index in order."""
     payloads = []
     while True:
         admission = await buffer.admit(PROGRESS_TIMEOUT)
-        payloads.extend(admission.payloads)
+        payloads.extend(buffer.payload_refs(admission.batch_id, [group.index for group in admission.admitted]))
         if admission.selection is not None:
             return payloads, admission.selection.metrics
 
@@ -143,11 +150,13 @@ async def test_groups_stream_to_the_trainer_before_the_batch_completes(batch_pol
     await buffer.publish(1)
     await _generate(buffer, "a")
     first = await buffer.admit(PROGRESS_TIMEOUT)
-    assert (first.payloads, first.selection) == (["a"], None)
+    assert ([group.index for group in first.admitted], first.selection) == ([0], None)
+    assert buffer.payload_refs(first.batch_id, [0]) == ["a"]
 
     await _generate(buffer, "b")
     second = await buffer.admit(PROGRESS_TIMEOUT)
-    assert second.payloads == ["b"]
+    assert [group.index for group in second.admitted] == [1]
+    assert buffer.payload_refs(second.batch_id, [1, 0]) == ["b", "a"]
     assert second.selection is not None
 
 
@@ -163,7 +172,7 @@ async def test_stale_group_returns_its_prompt_for_regeneration():
 
     await _commit(buffer, stale.lease_id, "stale")
     admission = await buffer.admit(PROGRESS_TIMEOUT)
-    assert admission.payloads == []
+    assert admission.admitted == []
     assert admission.retries == [{"uid": "stale"}]
 
     await _generate(buffer, "fresh")

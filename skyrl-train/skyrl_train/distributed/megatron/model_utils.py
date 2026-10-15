@@ -258,6 +258,40 @@ class ChunkedDistributedLogprob(torch.autograd.Function):
         return grad_input, None, None, None, None, None, None
 
 
+def _parallel_logprobs(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    vocab_start_index: int,
+    vocab_end_index: int,
+    group: dist.ProcessGroup,
+    inference_only: bool,
+    chunk_size: int | None,
+) -> torch.Tensor:
+    if logits.is_cuda and logits.dtype in (torch.bfloat16, torch.float32) and dist.get_world_size(group) == 1:
+        # CPU test profiles import this module without the optional TE package.
+        from transformer_engine.pytorch.cross_entropy import parallel_cross_entropy
+
+        # TE reuses its model-dtype training workspace as the gradient.
+        # Bound workspace copies during scoring, when no gradient is needed.
+        with torch.set_grad_enabled(torch.is_grad_enabled() and not inference_only):
+            if not torch.is_grad_enabled() and chunk_size is not None:
+                return torch.cat(
+                    [
+                        -parallel_cross_entropy(x, y, dist_process_group=group, overwrite_input=False)
+                        for x, y in zip(logits.split(chunk_size, dim=1), targets.split(chunk_size, dim=1), strict=True)
+                    ],
+                    dim=1,
+                )
+            return -parallel_cross_entropy(logits, targets, dist_process_group=group, overwrite_input=False)
+    if chunk_size is not None:
+        return ChunkedDistributedLogprob.apply(
+            logits, targets, vocab_start_index, vocab_end_index, chunk_size, group, inference_only
+        ).contiguous()
+    return DistributedLogprob.apply(
+        logits, targets, vocab_start_index, vocab_end_index, group, inference_only
+    ).contiguous()
+
+
 def from_parallel_logits_to_logprobs(
     vocab_parallel_logits: torch.Tensor,
     target: torch.Tensor,
@@ -290,8 +324,6 @@ def from_parallel_logits_to_logprobs(
     """
     target = target.roll(shifts=-1, dims=-1)
     cp_size = 1 if cp_group is None else torch.distributed.get_world_size(cp_group)
-    pad_len = 0
-    # if cp_size > 1:
     # Pad the targets to local size * cp_size
     pad_len = vocab_parallel_logits.shape[1] * cp_size - target.shape[1]
     if pad_len > 0:
@@ -301,25 +333,9 @@ def from_parallel_logits_to_logprobs(
     cp_rank = torch.distributed.get_rank(cp_group)
     target = _get_tokens_on_this_cp_rank(target, cp_rank, cp_size, seq_dim=1)
 
-    if chunk_size is not None:
-        logprobs: torch.Tensor = ChunkedDistributedLogprob.apply(  # type: ignore
-            vocab_parallel_logits,
-            target,
-            vocab_start_index,
-            vocab_end_index,
-            chunk_size,
-            tp_group,
-            inference_only,
-        ).contiguous()
-    else:
-        logprobs: torch.Tensor = DistributedLogprob.apply(  # type: ignore
-            vocab_parallel_logits,
-            target,
-            vocab_start_index,
-            vocab_end_index,
-            tp_group,
-            inference_only,
-        ).contiguous()
+    logprobs = _parallel_logprobs(
+        vocab_parallel_logits, target, vocab_start_index, vocab_end_index, tp_group, inference_only, chunk_size
+    )
 
     if cp_size > 1:
         # we need to gather the logits by context parallelism
@@ -386,30 +402,14 @@ def from_parallel_logits_to_logprobs_packed_sequences(
             rolled_seq_targets, cp_rank, cp_size, seq_dim=0
         )
 
-    # Add batch dimension back for DistributedLogprob
+    # Logprob kernels consume [batch, sequence, vocabulary] tensors.
     rolled_targets = rolled_targets.unsqueeze(0)
     vocab_parallel_logits = vocab_parallel_logits.unsqueeze(0)
 
     # Apply distributed log probability computation
-    if chunk_size is not None:
-        probs: torch.Tensor = ChunkedDistributedLogprob.apply(  # type: ignore
-            vocab_parallel_logits,
-            rolled_targets,
-            vocab_start_index,
-            vocab_end_index,
-            chunk_size,
-            group,
-            inference_only,
-        ).contiguous()
-    else:
-        probs: torch.Tensor = DistributedLogprob.apply(  # type: ignore
-            vocab_parallel_logits,
-            rolled_targets,
-            vocab_start_index,
-            vocab_end_index,
-            group,
-            inference_only,
-        ).contiguous()
+    probs = _parallel_logprobs(
+        vocab_parallel_logits, rolled_targets, vocab_start_index, vocab_end_index, group, inference_only, chunk_size
+    )
 
     # Remove batch dimension for filtering
     probs = probs.squeeze(0)

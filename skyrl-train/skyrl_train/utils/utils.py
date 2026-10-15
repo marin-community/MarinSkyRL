@@ -19,16 +19,13 @@ from ray.util.placement_group import (
 )
 
 from skyrl_train.batch_invariant import BATCH_INVARIANT_NCCL_ENV
-from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_export_enabled
+from skyrl_train.config.callbacks import validate_hf_export_config
+from skyrl_train.config.utils import generation_context_limit
 from skyrl_train.config.query_bias import resolve_grug_query_bias_update
 from skyrl_train.config.weight_sync_pause import resolve_weight_sync_pause_policy
 from skyrl_train.config.behavior_logprobs import configure_behavior_logprob_sampling
 from skyrl_train.config.mismatch_probe import validate_mismatch_probe_config
 from skyrl_train.config.objective_spec import rollout_logprobs_required, validate_objective
-from skyrl_train.callbacks.types import (
-    CHECKPOINT_CALLBACK_TYPE,
-    HF_MODEL_SAVE_CALLBACK_TYPE,
-)
 from skyrl_train.debug_mode import apply_debug_mode
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import parse_trajectory_reward_shaping_config
 from skyrl_train.trajectory_runners.trajectory_retention_config import parse_trajectory_retention_config
@@ -71,14 +68,13 @@ def moe_router_replay_requested(cfg: DictConfig, role: str = "policy") -> bool:
 
 
 def policy_strict_spread_eligible(cfg: DictConfig) -> bool:
-    """Whether a dedicated STRICT_SPREAD policy placement group should be used.
+    """Whether to reserve policy nodes before inference engines start.
 
     Pure (Ray-free) predicate so it is unit-testable. Eligible only when ALL of:
       - `trainer.placement.policy_strict_spread_pg` is enabled (opt-in; default
         false, so every existing run is byte-for-byte unchanged),
       - the run is disaggregated (`colocate_all=false`), and
-      - no reference model is used (`use_kl_loss` and `use_kl_in_reward` both
-        false) — i.e. the policy placement group is NOT shared with a ref model.
+      - a reference model, when used, shares the policy placement group.
     """
     placement = cfg.trainer.placement
     if not bool(getattr(placement, "policy_strict_spread_pg", False)):
@@ -87,7 +83,7 @@ def policy_strict_spread_eligible(cfg: DictConfig) -> bool:
         return False
     algo = cfg.trainer.algorithm
     use_ref_model = reference_model_required(algo)
-    return not use_ref_model
+    return not use_ref_model or bool(placement.colocate_policy_ref)
 
 
 def resolve_pinned_local_rank(
@@ -231,7 +227,7 @@ def policy_spread_bundles(cfg: DictConfig):
     return [{"GPU": num_gpus_per_node, "CPU": num_gpus_per_node} for _ in range(num_nodes)]
 
 
-def use_per_engine_strict_pack_pg(
+def use_per_engine_pg(
     *,
     use_hybrid_engine: bool,
     use_mp_backend: bool,
@@ -239,13 +235,11 @@ def use_per_engine_strict_pack_pg(
     pipeline_parallel_size: int,
     data_parallel_size: int,
 ) -> bool:
-    """Return whether each engine needs a node-local placement group.
+    """Return whether placement needs a separate group per multi-GPU engine.
 
-    Tensor, pipeline, and data-parallel ranks communicate within an engine and
-    must share a node. A single-GPU engine uses the flat PACK group so many
-    engines fill whole nodes instead of fragmenting the policy allocation.
-    Hybrid placement supplies its own group, and the multiprocessing backend
-    reserves each tensor/pipeline slice in one node-atomic bundle.
+    The engine factory uses PACK for supported cross-node EP. Single-GPU engines
+    share a PACK group; hybrid placement supplies its own group, and the mp
+    backend reserves each tensor/pipeline slice in one node-atomic bundle.
     """
     if use_hybrid_engine or use_mp_backend:
         return False
@@ -452,35 +446,6 @@ def _iter_config_kwargs(node):
             yield (key,), value
 
 
-def validate_hf_export_config(cfg: DictConfig) -> None:
-    """Validate checkpoint and model-save callback interval alignment."""
-    callbacks = cfg.trainer.get("callbacks")
-    if has_explicit_callbacks(cfg):
-
-        def callback_intervals(callback_type: str) -> list[int]:
-            return [
-                int(callback.get("save_steps", -1))
-                for callback in callbacks
-                if callback.get("type") == callback_type and int(callback.get("save_steps", -1)) > 0
-            ]
-
-        checkpoint_intervals = callback_intervals(CHECKPOINT_CALLBACK_TYPE)
-        export_intervals = callback_intervals(HF_MODEL_SAVE_CALLBACK_TYPE)
-    else:
-        checkpoint_interval = int(cfg.trainer.get("ckpt_interval", -1))
-        checkpoint_intervals = [checkpoint_interval] if checkpoint_interval > 0 else []
-        export_intervals = [int(cfg.trainer.hf_save_interval)] if interval_hf_export_enabled(cfg) else []
-
-    for export_interval in export_intervals:
-        if not checkpoint_intervals or not any(
-            export_interval % checkpoint_interval == 0 for checkpoint_interval in checkpoint_intervals
-        ):
-            raise ValueError(
-                f"HF export interval {export_interval} must be a multiple of trainer.ckpt_interval "
-                f"or an explicit checkpoint callback interval; found {checkpoint_intervals or 'none'}"
-            )
-
-
 def validate_cfg(cfg: DictConfig):
     validate_mismatch_probe_config(cfg)
     if cfg.trainer.strategy != "megatron":
@@ -602,11 +567,8 @@ def validate_cfg(cfg: DictConfig):
         minimum_group_size=algorithm_config.group_advantage_min_size,
     )
     algorithm_config.resolved_group_advantage = group_advantage.to_config()
-    # NOTE (erictang000): this is the max sequence length including the prompt, since max response length
-    # per batch can be variable based on the prompt length. This is used to normalize the loss for
-    # seq_mean_token_sum_norm loss reduction. Potentially revisit this if we update to use a
-    # fixed max response budget.
-    algorithm_config.max_seq_len = cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
+    # Sequence-normalized losses use the same bound as model generation.
+    algorithm_config.max_seq_len = generation_context_limit(cfg.generator)
 
     cfg.trainer.algorithm = algorithm_config
 

@@ -43,6 +43,30 @@ import numpy as np
 
 ABORT_FINISH_REASON = "abort"
 
+
+def _route_rows(rows: Any, response_length: int) -> np.ndarray:
+    """Keep prediction-position routes aligned with the response token they produced."""
+    try:
+        result = np.asarray(rows)
+    except (TypeError, ValueError) as error:
+        raise ValueError("routed_experts must be uniform integer rows") from error
+    if response_length == 0 and result.size == 0:
+        return np.empty((0, 0, 0), dtype=np.uint8)
+    if (
+        result.ndim != 3
+        or result.shape[0] != response_length
+        or result.shape[1] == 0
+        or result.shape[2] == 0
+        or not np.issubdtype(result.dtype, np.integer)
+        or np.any(result < 0)
+        or np.any(result > np.iinfo(np.uint32).max)
+    ):
+        raise ValueError("routed_experts must be nonnegative integer rows aligned with response tokens")
+    maximum = int(result.max())
+    dtype = np.uint8 if maximum <= 255 else np.uint16 if maximum <= 65535 else np.uint32
+    return result.astype(dtype, copy=False)
+
+
 # Cap on the session -> engine memo so it cannot grow unbounded across a long run.
 # Sessions are evicted LRU once the cap is exceeded (a re-appearing evicted session
 # is simply re-assigned by load, which is harmless).
@@ -222,6 +246,9 @@ class InferenceEngineClient(InferenceEngineInterface):
         """
         Call a method on all live engines concurrently and gather the results.
         """
+        if not self.engines:
+            # A zero-engine client (static preference-pair training) has nothing to fan out to.
+            return []
         live_engines = [engine for i, engine in enumerate(self.engines) if i not in self._dead_engines]
         if not live_engines:
             raise RuntimeError("All inference engines have died")
@@ -354,6 +381,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         stop_reasons: list[str] = [""] * n
         response_logprobs: List[Optional[List[float]]] = [None for _ in range(n)]
         response_ids: List[List[int]] = [[] for _ in range(n)]
+        routed_experts: List[Optional[np.ndarray]] = [None for _ in range(n)]
         prompt_logprobs: List[Optional[Any]] = [None for _ in range(n)]
         student_topk_indices: List[Optional[List[List[int]]]] = [None for _ in range(n)]
         behavior_topk_logprobs: List[Optional[List[List[float]]]] = [None for _ in range(n)]
@@ -362,6 +390,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         add_resp_logprobs = False
         add_prompt_logprobs = False
         add_student_topk = False
+        add_routed_experts = False
 
         for indices, result in zip(indices_list, results):
             policy_steps = result.get("response_policy_steps")
@@ -376,10 +405,19 @@ class InferenceEngineClient(InferenceEngineInterface):
                 if len(selected_ids) != len(indices) or len(selected_scores) != len(indices):
                     raise ValueError("Inference engine student top-K rows must align with responses")
                 add_student_topk = True
+            captured_routes = result.get("routed_experts")
+            if captured_routes is not None:
+                if len(captured_routes) != len(indices):
+                    raise ValueError("Inference engine routed-expert rows must align with responses")
+                add_routed_experts = True
             for local_idx, original_idx in enumerate(indices):
                 responses[original_idx] = result["responses"][local_idx]
                 stop_reasons[original_idx] = result["stop_reasons"][local_idx]
                 response_ids[original_idx] = result["response_ids"][local_idx]
+                if captured_routes is not None:
+                    routed_experts[original_idx] = _route_rows(
+                        captured_routes[local_idx], len(response_ids[original_idx])
+                    )
                 if result.get("response_logprobs", None):
                     add_resp_logprobs = True
                     response_logprobs[original_idx] = result["response_logprobs"][local_idx]
@@ -406,6 +444,10 @@ class InferenceEngineClient(InferenceEngineInterface):
                 raise ValueError("Inference engine omitted student top-K evidence for part of the batch")
             output["student_topk_indices"] = student_topk_indices
             output["behavior_topk_logprobs"] = behavior_topk_logprobs
+        if add_routed_experts:
+            if any(routes is None for routes in routed_experts):
+                raise ValueError("Inference engine omitted routed experts for part of a batch")
+            output["routed_experts"] = [routes for routes in routed_experts if routes is not None]
         if all(row is not None for row in response_policy_steps):
             output["response_policy_steps"] = response_policy_steps
         return output
@@ -481,8 +523,10 @@ class InferenceEngineClient(InferenceEngineInterface):
         accum_response_logprobs: List[float] = []
         accum_student_topk_indices: List[List[int]] = []
         accum_behavior_topk_logprobs: List[List[float]] = []
+        accum_routed_experts: List[np.ndarray] = []
         accum_policy_steps: List[np.ndarray] = []
         saw_student_topk: Optional[bool] = None
+        saw_routed_experts: Optional[bool] = None
         stop_reason: str = ABORT_FINISH_REASON
 
         # We only use it if generation is completed in one turn to maintain original behavior with no retry.
@@ -523,8 +567,10 @@ class InferenceEngineClient(InferenceEngineInterface):
                 accum_response_logprobs = []
                 accum_student_topk_indices = []
                 accum_behavior_topk_logprobs = []
+                accum_routed_experts = []
                 accum_policy_steps = []
                 saw_student_topk = None
+                saw_routed_experts = None
                 num_turns = 0
                 stop_reason = ABORT_FINISH_REASON
                 continue
@@ -564,6 +610,20 @@ class InferenceEngineClient(InferenceEngineInterface):
                 accum_student_topk_indices.extend(selected_ids[0])
                 accum_behavior_topk_logprobs.extend(selected_scores[0])
 
+            captured_routes = partial_response.get("routed_experts")
+            has_routes = captured_routes is not None
+            if saw_routed_experts is not None and saw_routed_experts != has_routes:
+                raise ValueError("Inference engine omitted routed experts for part of a response")
+            saw_routed_experts = has_routes
+            if has_routes:
+                if len(captured_routes) != 1:
+                    raise ValueError("Inference engine routed-expert rows must align with responses")
+                rows = _route_rows(captured_routes[0], len(new_response_ids))
+                if rows.size:
+                    if accum_routed_experts and rows.shape[1:] != accum_routed_experts[0].shape[1:]:
+                        raise ValueError("Inference engine routed-expert geometry changed during retry")
+                    accum_routed_experts.append(rows)
+
             # 3.5 Accumulate outputs
             accum_response_ids.extend(new_response_ids)
             if new_response_logprobs is not None:
@@ -592,6 +652,12 @@ class InferenceEngineClient(InferenceEngineInterface):
         if saw_student_topk:
             output["student_topk_indices"] = [accum_student_topk_indices]
             output["behavior_topk_logprobs"] = [accum_behavior_topk_logprobs]
+        if saw_routed_experts:
+            output["routed_experts"] = [
+                np.concatenate(accum_routed_experts, axis=0)
+                if accum_routed_experts
+                else np.empty((0, 0, 0), dtype=np.uint8)
+            ]
         if accum_policy_steps:
             output["response_policy_steps"] = [np.concatenate(accum_policy_steps)]
         return output
@@ -599,28 +665,11 @@ class InferenceEngineClient(InferenceEngineInterface):
     async def _chat_completion_with_retry(
         self, engine_idx: int, original_request_payload: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """
-        Keep sending `chat_completion` requests (with previous responses accumulated) until the finish_reason is not "abort".
+        """Continue an aborted chat response after generation resumes.
 
-        The retry mechanism is intended to be used in combination with `pause_generation()` and `resume_generation()` for
-        in-flight weight updates and partial rollouts.
-
-        This method is equivalent to a single `chat_completion()` call if we do not use `pause_generation()`.
-
-        For subsequent retry requests, we can reuse the original request with the following exceptions:
-        - Update the last assistant message content to accumulated content, where the role uses the first non-empty response's role.
-        - Set continue_final_message=True and add_generation_prompt=False.
-        - Adjust remaining max tokens if `max_tokens` or `max_completion_tokens` is present.
-        - If no tokens have been generated yet, resend the original request unchanged.
-
-        For the final response, we maintain all the first non-empty response's fields (i.e. prefilled already),
-        with the following exceptions:
-        - Accumulate the following across retry requests:
-          - `choices[0]["logprobs"]["content"]`
-          - `choices[0]["token_ids"]`
-          - `choices[0]["message"]["content"]`
-          - `choices[0]["routed_experts"]` when router replay is enabled
-        - Use the last response's finish_reason and stop_reason
+        The final response retains the first nonempty response's fields.
+        Token IDs, log probabilities, content, and routed experts accumulate
+        across requests. Finish and stop reasons come from the last response.
         """
         original_request_json: Dict[str, Any] = original_request_payload.get("json", {}).copy()
         headers: Dict[str, str] = original_request_payload.get("headers", {}).copy()

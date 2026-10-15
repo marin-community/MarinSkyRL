@@ -6,17 +6,11 @@ from ci.nemotron_ultra.gate import check_log, expected_coverage
 from skyrl_train.entrypoints.nemotron_ultra_acceptance import verifier_server
 
 
-def test_acceptance_verifier_server_implements_all_external_protocols():
+def test_acceptance_verifier_server_returns_judge_and_comparison_results():
     with verifier_server() as base_url:
-        sandbox = requests.post(
-            f"{base_url}/execute",
-            json={"generated_code": "#check Nat", "language": "lean4"},
-            timeout=2,
-        ).json()
         judge = requests.post(f"{base_url}/chat/completions", json={"messages": []}, timeout=2).json()
         genrm = requests.post(f"{base_url}/responses", json={"input": []}, timeout=2).json()
 
-    assert sandbox["process_status"] == "completed"
     assert "[[SAFE]]" in judge["choices"][0]["message"]["content"]
     assert json.loads(genrm["output"][0]["content"][0]["text"])["score_1"] == 3
 

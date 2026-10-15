@@ -5,9 +5,8 @@ set -x
 # uv run examples/openenv/dummy_openenv_dataset.py --output_dir $HOME/data/openenv --env_name echo_env
 # Env name: echo_env, coding_env, openspiel-env, atari-env, sumo-rl-env, finrl-env
 
-# Prestart the docker environment with 
-# cd /skyrl-gym
-# uv run envs/openenv/install_environment.py
+# Supply environment.task_sessions.openenv.machine and server_command overrides.
+# Shellbox starts one task machine. The session starts its HTTP server there.
 
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/openenv/run_dummy_openenv.sh
@@ -24,7 +23,7 @@ set -x
 # : "${INFERENCE_BACKEND:=sglang}"
 : "${MAX_TURNS:=1}"
 
-uv run --isolated --extra megatron --extra $INFERENCE_BACKEND --with "openenv@git+https://github.com/meta-pytorch/OpenEnv.git" --with "litellm>=1.75.5" -m integrations.openenv.entrypoints.main_openenv \
+uv run --project .. --extra megatron --extra "$INFERENCE_BACKEND" -m integrations.openenv.entrypoints.main_openenv \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
@@ -67,4 +66,4 @@ uv run --isolated --extra megatron --extra $INFERENCE_BACKEND --with "openenv@gi
   trainer.resume_mode=latest \
   trainer.ckpt_path=$CKPT_PATH \
   trainer.dump_data_batch=true \
-  $@  
+  "$@"

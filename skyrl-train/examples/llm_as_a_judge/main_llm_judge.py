@@ -4,22 +4,17 @@ Main entrypoint for the LLM-as-a-judge example.
 
 import ray
 import hydra
+from functools import partial
 from omegaconf import DictConfig
 from skyrl_train.utils import initialize_ray
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
-from skyrl_gym.envs import register
+from skyrl_gym.task_sessions import AnswerTaskSession
+from examples.llm_as_a_judge.task_grading import grade_judged_answer
 
 
 @ray.remote(num_cpus=1)
 def skyrl_entrypoint(cfg: DictConfig):
-    # Register the llm_as_a_judge environment inside the entrypoint task (no need to modify the skyrl-gym package).
-    register(
-        id="llm_as_a_judge",
-        entry_point="examples.llm_as_a_judge.llm_judge_env:GSM8kLLMJudgeEnv",
-    )
-
-    # make sure that the training loop is not run on the head node.
-    exp = BasePPOExp(cfg)
+    exp = BasePPOExp(cfg, sessions={"llm_as_a_judge": partial(AnswerTaskSession, grader=grade_judged_answer)})
     exp.run()
 
 

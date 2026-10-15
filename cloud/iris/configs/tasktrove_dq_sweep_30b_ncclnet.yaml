@@ -45,7 +45,6 @@ terminal_bench:
       - ConnectionError
       - RewardFileNotFoundError
       - RewardFileEmptyError
-      - AgentEnvironmentTimeoutError
     default_error_treatment: zero
     passthrough_exceptions:
       - AgentTimeoutError
@@ -67,7 +66,6 @@ trainer:
     eps_clip_high: 0.05
     loss_reduction: sequence_mean
     policy_loss_type: behavior_clip
-    tito_full: true
 
   epochs: 2
   max_steps: 80

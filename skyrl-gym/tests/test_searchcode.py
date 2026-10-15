@@ -1,64 +1,54 @@
-import skyrl_gym
+"""Python and retrieval observations through direct Shellbox task sessions."""
+
+import json
+
 import pytest
-from omegaconf import DictConfig
 
 
-@pytest.fixture
-def searchcode_env():
-    env = skyrl_gym.make(
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code,output", [("print('hello world')", "hello world"), ("print(1 + 1)", "2")])
+async def test_python_tool_output_reaches_the_next_model_turn(rollout_session, code, output):
+    rollout = await rollout_session(
         "searchcode",
-        env_config=DictConfig({"env_class": "searchcode"}),
-        extras={"reward_spec": {"method": "rule", "ground_truth": "random"}, "max_turns": 2},
+        [f"<tool><python>{code}</python></tool>", "<solution>#### 2</solution>"],
+        {"reward_spec": {"ground_truth": "2"}},
     )
-    env.init([])
-    return env
+    observation = rollout.steps[0].transition.observations[0]
+    assert observation == {"role": "user", "content": output}
+    assert rollout.steps[1].messages[-2] == observation
+    assert rollout.steps[1].transition.reward == 1.0
+    assert rollout.loss_mask == (1, 1, 0, 0, 1, 1)
 
 
-@pytest.mark.parametrize(
-    "action, expected_tool_name, expected_tool_input",
-    [
-        (
-            "<tool><search>how to reverse a string in Python</search></tool>",
-            "search",
-            ["how to reverse a string in Python"],
-        ),
-        ("<tool><python>print('hello')</python></tool>", "python", ["print('hello')"]),
-        ("<tool><search>binary search in Java</search></tool>", "search", ["binary search in Java"]),
-    ],
-)
-def test_tool_parsing(searchcode_env, action, expected_tool_name, expected_tool_input):
-    # Test the parsing logic and reward logic with dummy input
-    _, tool_name, tool_input = searchcode_env._parse_action(action)
-
-    assert tool_name == expected_tool_name
-    assert tool_input == expected_tool_input
-
-
-@pytest.mark.parametrize(
-    "action, expected_output",
-    [
-        (
-            "<tool><python>print('hello world')</python></tool>",
-            "hello world",
-        ),
-        (
+@pytest.mark.asyncio
+async def test_python_tool_failure_does_not_end_the_task(rollout_session):
+    rollout = await rollout_session(
+        "searchcode",
+        [
+            "<tool><python>raise ValueError('fail')</python></tool>",
             "<tool><python>print(1 + 1)</python></tool>",
-            "2",
-        ),
-    ],
-)
-def test_python_code_execution(searchcode_env, action, expected_output):
-    output = searchcode_env.step(action)
-    observation_content = output["observations"][0]["content"]
+            "<solution>#### 2</solution>",
+        ],
+        {"reward_spec": {"ground_truth": "2"}},
+    )
+    assert "ValueError: fail" in rollout.steps[0].transition.observations[0]["content"]
+    assert rollout.steps[1].transition.observations[0]["content"] == "2"
+    assert [step.transition.reward for step in rollout.steps] == [0.0, 0.0, 1.0]
+    assert rollout.grade.reward == 1.0
+    assert rollout.grade.passed is True
 
-    assert expected_output == observation_content
 
-
-def test_python_code_execution_surfaces_exception_type_and_message(searchcode_env):
-    output = searchcode_env.step("<tool><python>raise ValueError('fail')</python></tool>")
-    observation_content = output["observations"][0]["content"]
-
-    # The tool returns the interpreter's stderr verbatim, whose traceback rendering
-    # differs across Python versions (3.13 echoes the failing source line).
-    assert observation_content.startswith("Error executing Python code: Traceback")
-    assert "ValueError: fail" in observation_content
+@pytest.mark.asyncio
+async def test_searchcode_sends_a_search_action_to_its_configured_service(rollout_session, retrieval_service):
+    url, requests = retrieval_service
+    rollout = await rollout_session(
+        "searchcode",
+        ["<tool><search>France capital</search></tool>", "<solution>#### 2</solution>"],
+        {"reward_spec": {"ground_truth": "2"}},
+        {"search": {"search_url": url, "log_requests": False}},
+    )
+    assert requests == [{"query": "France capital", "topk": 3, "return_scores": True}]
+    assert json.loads(rollout.steps[0].transition.observations[0]["content"]) == {
+        "result": "Doc 1: Paris is the capital of France.\n"
+    }
+    assert rollout.steps[1].transition.reward == 1.0

@@ -10,11 +10,17 @@ Neither metric is a pass rate.
 verifier scores. Each verified result is mapped from its declared native range
 to `[0, 1]`; a verifier without declared bounds uses `[0, 1]`. GenRM declares
 `[1, 5]`. Scores outside the declared range are clipped for these diagnostics.
-Verifier errors and unavailable verdicts contribute zero. Skipped verdicts and
-rows without a verifier result are omitted. The corresponding
+Only verified results enter the average, including verified scores of zero.
+Verifier errors, unavailable or skipped results, and rows without a verifier
+result are omitted. The corresponding
 `verifier_score_coverage` metric reports the fraction of rows that entered the
 average. Training also reports `reward/agent/<agent>/avg_verifier_score` for up
 to 32 verifier agents, using the same normalization.
+
+Evaluation reports `eval/all/num_attempted` for returned trajectory rows,
+including ungraded rows, and `eval/all/num_scored` for verified scores. Returned
+rows with infrastructure failures reduce scored coverage; they do not become
+zero-valued task outcomes.
 
 For a trajectory with multiple scored Gym turns, the terminal verifier score
 is the mean of their individually normalized scores. The trajectory passes

@@ -2,14 +2,14 @@
 uv run --isolated --group dev --extra cpu pytest tests/cpu/test_eval.py
 """
 
+import json
 from unittest.mock import MagicMock
 
 import pytest
 from omegaconf import OmegaConf
-from skyrl_gym.envs.registration import registry
 from skyrl_gym.verification import VerificationResult
 
-from skyrl_train.evaluate import _calculate_eval_metrics, evaluate
+from skyrl_train.evaluate import _calculate_eval_metrics, evaluate, evaluate_step_wise
 from tests.cpu.trajectory_runners.fixture_runner import FixtureRunner
 from skyrl_train.trajectory_runners.types import TrajectoryBatch
 from skyrl_train.trajectory_runners.trajectory_retention import (
@@ -19,11 +19,42 @@ from skyrl_train.trajectory_runners.trajectory_retention import (
 )
 from skyrl_train.trajectory_runners.trajectory_retention_publisher import InlineTrajectoryPublisher
 from tests.cpu.util import example_dummy_config
+from tests.cpu.task_specs import lowered_task, text_task, task_input
+from skyrl_train.rollouts.group_grader import GroupGraderSpec
 
 
 @pytest.fixture
 def dummy_config():
     return example_dummy_config()
+
+
+@pytest.mark.parametrize(
+    "ungraded",
+    [
+        VerificationResult.error("verifier timed out", diagnostics={"exception_type": "VerifierTimeoutError"}),
+        VerificationResult.unavailable("environment failed to start"),
+        VerificationResult.skipped("grading disabled"),
+    ],
+)
+def test_eval_verifier_metrics_exclude_ungraded_results_and_keep_policy_zero(ungraded):
+    batch: TrajectoryBatch = {
+        "response_ids": [[1], [2], [3]],
+        "rewards": [1.0, 0.0, 0.0],
+        "verification_results": [
+            VerificationResult.verified(1.0, passed=True),
+            VerificationResult.verified(0.0, passed=False, diagnostics={"exception_type": "AgentTimeoutError"}),
+            ungraded,
+        ],
+    }
+
+    metrics = _calculate_eval_metrics(batch, ["correct", "policy-failed", "ungraded"], ["bfcl"] * 3, 1)
+
+    assert metrics["eval/all/avg_verifier_score"] == 0.5
+    assert metrics["eval/all/verifier_score_coverage"] == pytest.approx(2 / 3)
+    assert metrics["eval/all/num_attempted"] == 3
+    assert metrics["eval/all/num_scored"] == 2
+    assert metrics["eval/all/avg_score"] == pytest.approx(1 / 3)
+    assert batch["rewards"] == [1.0, 0.0, 0.0]
 
 
 def configure_eval(cfg, tmp_path):
@@ -62,9 +93,9 @@ class DummyRunner(FixtureRunner):
         self.output = output
         self.seen_inputs = []
 
-    async def _run(self, input_batch, disable_tqdm: bool = False):
+    async def _run(self, input_batch):
         self.seen_inputs.append(input_batch)
-        return self.output
+        return {**self.output, "trajectory_ids": list(input_batch.trajectory_ids)}
 
 
 def test_eval_reports_normalized_verifier_score_alongside_raw_reward():
@@ -85,21 +116,26 @@ def test_eval_reports_normalized_verifier_score_alongside_raw_reward():
 
 
 @pytest.mark.asyncio
-async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path, monkeypatch):
-    monkeypatch.setitem(registry, "custom_env", registry["gsm8k"])
+@pytest.mark.parametrize("step_wise", [False, True])
+async def test_evaluate_exports_public_results_and_expected_metrics(dummy_config, tmp_path, step_wise):
     cfg = configure_eval(dummy_config, tmp_path)
+    cfg.trainer.dump_eval_results = True
 
     prompts_batch = [
         {
-            "prompt": [{"role": "user", "content": "question-1"}],
-            "env_class": None,
-            "env_extras": {"data_source": "dataset/a"},
+            "input": task_input(
+                lowered_task(text_task("uid-1", prompt="question-1", source="dataset/a")),
+                metric_class="gsm8k",
+                group_grader=GroupGraderSpec(
+                    name="private-reference", parameters_json='{"api_key":"private-judge-key"}'
+                ),
+            ),
             "uid": "uid-1",
         },
         {
-            "prompt": [{"role": "user", "content": "question-2"}],
-            "env_class": "custom_env",
-            "env_extras": {"data_source": "dataset/b"},
+            "input": task_input(
+                lowered_task(text_task("uid-2", prompt="question-2", source="dataset/b")), metric_class="custom_env"
+            ),
             "uid": "uid-2",
         },
     ]
@@ -114,6 +150,11 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path, monkey
         "rollout_logprobs": None,
         "env_classes": ["gsm8k", "custom_env"],
         "env_metrics": [{"truncated": 1}, {"truncated": 0}],
+        "verification_results": [
+            VerificationResult.verified(1.0, passed=True, diagnostics={"reference": "private-verifier-reference"}),
+            VerificationResult.unavailable("Request timed out.", diagnostics={"api_key": "private-key"}),
+        ],
+        "is_last_step": [True, True],
     }
     runner = DummyRunner(trajectory_batch)
 
@@ -126,7 +167,8 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path, monkey
         publisher=InlineTrajectoryPublisher(execute_publication),
     )
 
-    metrics = await evaluate(
+    evaluation = evaluate_step_wise if step_wise else evaluate
+    metrics = await evaluation(
         eval_dataloader=eval_dataloader,
         trajectory_runner=runner,
         cfg=cfg,
@@ -151,9 +193,34 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path, monkey
     for key, expected_value in expected_metrics.items():
         assert metrics[key] == pytest.approx(expected_value)
 
+    dump = tmp_path / "dumped_evals/global_step_5_evals"
+    saved = "".join(path.read_text() for path in dump.glob("*.jsonl"))
+    assert saved
+    assert "private-reference" not in saved
+    assert "private-judge-key" not in saved
+    assert "private-verifier-reference" not in saved
+    assert "private-key" not in saved
+    records = [json.loads((dump / f"dataset_{name}.jsonl").read_text()) for name in ("a", "b")]
+    assert records[0]["input_prompt"] == records[1]["input_prompt"]
+    assert records[0]["uid"] != records[1]["uid"]
+    assert [record["prompt_token_ids"] for record in records] == [[101], [102]]
+    assert [record["response_token_ids"] for record in records] == [[201], [202]]
+    assert [record["env_metrics"]["truncated"] for record in records] == [1, 0]
+    assert records[0]["verification"] == {
+        "status": "verified",
+        "reason": None,
+        "score": 1.0,
+        "passed": True,
+        "score_min": 0.0,
+        "score_max": 1.0,
+    }
+    assert records[1]["verification"]["reason"] == "Request timed out."
+    assert records[1]["verification"]["status"] == "unavailable"
+    assert records[1]["verification"]["score"] is None
+
     assert len(runner.seen_inputs) == 1
     seen_batch = runner.seen_inputs[0]
-    assert seen_batch["prompts"] == [prompt["prompt"] for prompt in prompts_batch]
-    assert seen_batch["env_classes"] == ["gsm8k", "custom_env"]
-    assert seen_batch["env_extras"] == [prompt["env_extras"] for prompt in prompts_batch]
-    assert seen_batch["batch_metadata"].training_phase == "eval"
+    assert [prompt[0]["content"] for prompt in seen_batch.public_prompts] == ["question-1", "question-2"]
+    assert [row.metric_class for row in seen_batch.metadata] == ["gsm8k", "custom_env"]
+    assert seen_batch.rows == tuple(prompt["input"] for prompt in prompts_batch)
+    assert seen_batch.batch_metadata.training_phase == "eval"

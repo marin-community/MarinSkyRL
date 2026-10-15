@@ -104,6 +104,6 @@ An asynchronous run appears on **RL Post-training (async)**, and its staleness r
 ## The nightly
 
 The scheduled nightly publishes under
-`nightly-gsm8k-h100-<strategy>-<date>-<github run id>-<attempt>`. Its GitHub job summary links to
+the CatCount run ID printed by the task runtime. Its GitHub job summary links to
 its own view and lists which signals arrived, so a blank panel is already explained there -- and
 saying so never fails the run.

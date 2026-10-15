@@ -1,5 +1,8 @@
 # Debug log: TITO alignment metrics on standard generators
 
+This report records the previous generator implementation. Direct task sessions replace that implementation.
+See [Task rollouts](../skyrl-train/docs/tutorials/task_rollouts.rst) for the current execution contract.
+
 ## Reported behavior
 
 Standard SkyRLGym rollouts can carry position-aligned rollout logprobs without emitting the

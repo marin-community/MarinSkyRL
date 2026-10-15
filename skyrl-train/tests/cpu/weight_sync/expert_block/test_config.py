@@ -6,6 +6,7 @@ import sys
 import pytest
 
 from marinskyrl.inference_placement import validate_expert_block_transport
+from skyrl_train import objective  # noqa: F401 - register losses as normal training startup does
 from skyrl_train.utils.utils import validate_cfg
 from tests.cpu.util import example_dummy_config
 

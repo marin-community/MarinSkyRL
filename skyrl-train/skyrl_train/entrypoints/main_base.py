@@ -5,6 +5,11 @@ Main entrypoint for training.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from collections.abc import Callable, Mapping
+
+from rolloutengine.contracts import TaskSession
+from shellbox.machine import Machine
+from rolloutengine.spec import LoweredTaskSpec, TaskSessionSpec
 
 from ray.util.placement_group import placement_group, PlacementGroup
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
@@ -24,17 +29,22 @@ import asyncio
 import multiprocessing as mp
 
 from skyrl_train.inference_engines.chat_template import get_custom_chat_template
-from skyrl_train.dataset.tasks import GymTaskDataset
-from skyrl_train.dataset.nemotron_ultra import NemotronTaskDataset
-from skyrl_train.config.trajectory_runner_capabilities import (
+from skyrl_train.config.rollout_validation import (
     EntrypointOperation,
-    validate_trajectory_runner_capabilities,
+    validate_rollout_launch,
 )
 from marinskyrl.speculative_decoding import (
     STANDARD_TRAINING_ENTRYPOINT,
     parse_speculative_decoding_config,
     runai_model_uri,
 )
+from marinskyrl.runtime_options import (
+    EvaluationRunner,
+    WeightSyncTransport,
+    inference_engines_required,
+    static_preference_pairs_requested,
+)
+from skyrl_train.dataset.preference_pairs import PreferencePairFormat
 
 if TYPE_CHECKING:
     from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -177,8 +187,12 @@ def create_ray_wrapped_inference_engines_from_config(
                 for profile in (callback.get("additional_evaluations") or {}).values()
             )
     requested_logprobs = [
-        value for value in requested_logprobs if isinstance(value, int) and not isinstance(value, bool) and value > 0
+        value + 1
+        for value in requested_logprobs
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0
     ]
+    # Chat capture requests K+1 candidates so the sampled token cannot displace
+    # a token from the natural top K. Reserve the actual request width in vLLM.
 
     role = InferenceEngineRoleConfig(
         pretrain=rollout_model_path,
@@ -208,6 +222,10 @@ def create_ray_wrapped_inference_engines_from_config(
         role,
         engine_init_kwargs=engine_init_kwargs,
     )
+    if cfg.generator.weight_sync_transport == WeightSyncTransport.EXPERT_BLOCK:
+        engine_kwargs["require_verified_placements"] = True
+    if cfg.trainer.strategy == "megatron":
+        engine_kwargs["nccl_buffer_size_bytes"] = cfg.trainer.policy.nccl_buffer_size_bytes
 
     # Conditionally add LoRA parameters if LoRA is enabled
     if cfg.trainer.policy.model.lora.rank > 0:
@@ -265,13 +283,19 @@ def create_remote_inference_engines_from_config(cfg: DictConfig, tokenizer: PreT
 
 
 class BasePPOExp:
-    def __init__(self, cfg: DictConfig):
+    def __init__(
+        self,
+        cfg: DictConfig,
+        *,
+        sessions: Mapping[str, Callable[[LoweredTaskSpec, Machine | None], TaskSession]] | None = None,
+    ):
         """
         Initializes a PPO experiment.
 
         The `cfg` passed here will be the final config from Hydra, including CLI overrides.
         """
         self.cfg = cfg
+        self.sessions = {} if sessions is None else dict(sessions)
         self._configure_log_level()
         self.tokenizer = self.get_tokenizer()
         self.train_dataset = self.get_train_dataset()
@@ -279,10 +303,8 @@ class BasePPOExp:
         self.colocate_pg = self.get_colocate_pg()
         # Reserve the policy/training placement group BEFORE the inference
         # engines (which are created later, in `_setup_trainer`), so that in the
-        # disaggregated no-ref case the policy claims its dedicated whole nodes
-        # first and the inference engines are forced onto the disjoint
-        # remainder. None unless `policy_strict_spread_pg` is enabled for an
-        # eligible (disaggregated, no-ref) run.
+        # disaggregated case the policy (and optional colocated reference)
+        # claims GPU slots before inference engines use the remainder.
         self.policy_pg = self.get_policy_pg()
 
     def create_inference_engine_client(
@@ -290,6 +312,10 @@ class BasePPOExp:
     ) -> InferenceEngineClient:
         """Create the configured local or remote inference-engine client."""
         from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient  # noqa: PLC0415
+
+        if not inference_engines_required(self.cfg):
+            logger.info("Skipping inference engines: preference-pair training reads static completions")
+            return InferenceEngineClient([], self.tokenizer, self.cfg)
 
         engine_mode = "local" if self.cfg.generator.run_engines_locally else "remote"
         logger.info("Starting inference engines: mode={}", engine_mode)
@@ -341,6 +367,17 @@ class BasePPOExp:
         Returns:
             PromptDataset: The training dataset.
         """
+        if static_preference_pairs_requested(self.cfg):
+            from skyrl_train.dataset import PreferencePairDataset  # noqa: PLC0415
+
+            return PreferencePairDataset(
+                tokenizer=self.tokenizer,
+                data_format=PreferencePairFormat(self.cfg.data.preference_pair_format),
+                datasets=self.cfg.data.train_data,
+                max_prompt_length=self.cfg.trainer.max_prompt_length,
+                num_workers=8,
+                max_completion_length=self.cfg.generator.sampling_params.max_generate_length,
+            )
         prompts_dataset = self.task_dataset(self.cfg.data.train_data)
         # make sure the dataset is large enough to train on
         assert len(prompts_dataset) >= self.cfg.trainer.train_batch_size, (
@@ -349,20 +386,22 @@ class BasePPOExp:
         return prompts_dataset
 
     def task_dataset(self, data_files):
+        from skyrl_train.dataset.nemotron_ultra import NemotronTaskDataset  # noqa: PLC0415
+        from skyrl_train.dataset.tasks import SourceTaskDataset  # noqa: PLC0415
         from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings  # noqa: PLC0415 - optional training dependencies
 
         terminal_data = list(self.cfg.data.get("terminal_bench_data", []))
-        dataset_type = NemotronTaskDataset if terminal_data else GymTaskDataset
+        dataset_type = NemotronTaskDataset if terminal_data else SourceTaskDataset
         terminal_options = {}
         if terminal_data:
             terminal_options = {
                 "terminal_bench_data": terminal_data,
-                "verifier_override": HarborTaskSettings.from_config(self.cfg.terminal_bench_config).verifier_override(),
+                "cache_dir": Path(self.cfg.data.task_cache_dir),
+                "grader_override": HarborTaskSettings.from_config(self.cfg.terminal_bench_config).grader_override(),
             }
         return dataset_type(
             datasets=data_files,
-            environment_configs=OmegaConf.to_container(self.cfg.environment.skyrl_gym, resolve=True),
-            cache_dir=Path(self.cfg.data.task_cache_dir),
+            environment_configs=OmegaConf.to_container(self.cfg.environment.task_sessions, resolve=True),
             tokenizer=self.tokenizer,
             max_prompt_length=self.cfg.trainer.max_prompt_length,
             num_workers=8,
@@ -374,8 +413,25 @@ class BasePPOExp:
         probe = self.cfg.trainer.mismatch_probe
         needs_probe_prompts = probe.enabled and probe.reuse_probe is None
         if (self.cfg.trainer.eval_interval > 0 or needs_probe_prompts) and self.cfg.data.val_data:
+            if EvaluationRunner(self.cfg.trainer.evaluation_runner) is EvaluationRunner.HARBOR:
+                return self.harbor_task_dataset(self.cfg.data.val_data)
             return self.task_dataset(self.cfg.data.val_data)
         return None
+
+    def harbor_task_dataset(self, data_files):
+        from skyrl_train.dataset.harbor import HarborTaskDataset  # noqa: PLC0415
+        from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings  # noqa: PLC0415
+
+        return HarborTaskDataset(
+            data_files=data_files,
+            tokenizer=self.tokenizer,
+            max_prompt_length=self.cfg.trainer.max_prompt_length,
+            cache_dir=Path(self.cfg.data.task_cache_dir),
+            session=TaskSessionSpec.model_validate(
+                {**dict(self.cfg.environment.task_sessions.session), "task_session": "shellbox"}
+            ),
+            grader_override=HarborTaskSettings.from_config(self.cfg.terminal_bench_config).grader_override(),
+        )
 
     def get_colocate_pg(self, timeout: int | None = None) -> PlacementGroup:
         """Initializes a placement group for colocated training.
@@ -391,7 +447,7 @@ class BasePPOExp:
         from skyrl_train.utils.utils import get_ray_pg_ready_with_timeout  # noqa: PLC0415
 
         timeout = int(self.cfg.trainer.distributed.placement_group_timeout_seconds) if timeout is None else timeout
-        if self.cfg.trainer.placement.colocate_all:
+        if self.cfg.trainer.placement.colocate_all and inference_engines_required(self.cfg):
             pg = placement_group(
                 [{"GPU": 1, "CPU": 1}]
                 * self.cfg.generator.num_inference_engines
@@ -406,18 +462,15 @@ class BasePPOExp:
             return None
 
     def get_policy_pg(self, timeout: int | None = None):
-        """Reserve a dedicated whole-node placement group for the policy.
+        """Reserve policy GPU slots before starting inference engines.
 
-        Uses STRICT_SPREAD so each policy node gets exactly one bundle holding
-        all of that node's GPUs — guaranteeing the policy occupies a set of
-        whole, dedicated nodes that the (PACK) inference-engine placement group
-        cannot share. Returns None when not eligible (see
-        `policy_strict_spread_eligible`), in which case the legacy lazy-PACK
-        path in `PPORayActorGroup._initiate_actors` is used unchanged.
+        Whole-node bundles use STRICT_SPREAD; per-GPU bundles use PACK. Both
+        reserve the policy footprint before the inference placement group.
+        Returns None when not eligible (see `policy_strict_spread_eligible`),
+        leaving model actors to reserve their placement group lazily.
 
-        When a ref model is present in the disaggregated path, policy and ref
-        share a single placement group built inside `build_models`; that path
-        is left entirely untouched (eligibility requires use_ref_model=False).
+        A colocated reference model shares this group with the policy. Reserving
+        it here prevents inference actors from fragmenting the required nodes.
         """
         from skyrl_train.utils.utils import (
             get_ray_pg_ready_with_timeout,
@@ -459,7 +512,22 @@ class BasePPOExp:
         Returns:
             TrajectoryRunner: The runner.
         """
-        del tokenizer
+        if static_preference_pairs_requested(cfg):
+            from skyrl_train.trajectory_runners.preference_pairs import PreferencePairTrajectoryRunner  # noqa: PLC0415
+
+            if list(cfg.data.get("terminal_bench_data", [])):
+                raise ValueError("preference-pair training cannot mix terminal-bench rows")
+            return PreferencePairTrajectoryRunner(
+                tokenizer,
+                data_format=PreferencePairFormat(cfg.data.preference_pair_format),
+                max_generate_length=cfg.generator.sampling_params.max_generate_length,
+                max_input_length=cfg.generator.max_input_length,
+                generator_config=cfg.generator,
+            )
+        return self.get_task_runner(cfg, inference_engine_client)
+
+    def get_task_runner(self, cfg, inference_engine_client, *, harbor_config=None):
+        """Build the shared task worker pool for training or validation."""
         from skyrl_train.rollouts.workers import RolloutWorkerPool, RolloutWorkerResources  # noqa: PLC0415
         from skyrl_train.rollouts.task_worker import TaskRolloutWorkerSpec  # noqa: PLC0415
 
@@ -471,7 +539,10 @@ class BasePPOExp:
             TaskRolloutWorkerSpec.from_config(
                 cfg,
                 inference_engine_client.engines,
-                harbor_config=cfg.terminal_bench_config if terminal_data else None,
+                harbor_config=harbor_config
+                if harbor_config is not None
+                else (cfg.terminal_bench_config if terminal_data else None),
+                sessions=self.sessions,
             ),
             resources,
         )
@@ -504,6 +575,17 @@ class BasePPOExp:
             eval_dataset=eval_dataset,
             inference_engine_client=inference_engine_client,
             trajectory_runner=trajectory_runner,
+            eval_trajectory_runner=(
+                self.get_task_runner(
+                    cfg,
+                    inference_engine_client,
+                    harbor_config=cfg.terminal_bench_config
+                    if EvaluationRunner(cfg.trainer.evaluation_runner) is EvaluationRunner.HARBOR
+                    else None,
+                )
+                if EvaluationRunner(cfg.trainer.evaluation_runner) is not EvaluationRunner.TRAINING
+                else trajectory_runner
+            ),
             colocate_pg=colocate_pg,
         )
 
@@ -530,23 +612,13 @@ class BasePPOExp:
             config=self.cfg,
         )
 
-    def _setup_trainer(self):
-        """Setup and return the trainer.
-
-        Instantiates the trainer and all the associated models for training.
-
-        Returns:
-            RayPPOTrainer: The trainer.
-        """
+    def _setup_trainer(self, tracker):
+        """Construct the trainer and models with the experiment's active tracker."""
         logger.info(self.get_cfg_as_str(self.cfg))
         os.makedirs(self.cfg.trainer.export_path, exist_ok=True)
         os.makedirs(self.cfg.trainer.ckpt_path, exist_ok=True)
 
         PolicyWorker, CriticWorker, RefWorker = self.get_worker_classes()
-
-        # NOTE (sumanthrh): Instantiate tracker before trainer init.
-        # We have custom validation before this step to give better error messages.
-        tracker = self.get_tracker()
 
         tokenizer = self.tokenizer
         from skyrl_train.teacher_runtime import prepare_distillation_runtime, start_distillation_runtime  # noqa: PLC0415
@@ -567,9 +639,7 @@ class BasePPOExp:
             colocate_pg=self.colocate_pg,
         )
 
-        # Build the models. Pass the pre-reserved dedicated policy placement
-        # group (None unless `policy_strict_spread_pg` is enabled for an
-        # eligible disaggregated no-ref run).
+        # Pass the policy placement group reserved before inference startup.
         logger.info("Starting policy workers: strategy={}", self.cfg.trainer.strategy)
         try:
             trainer.build_models(PolicyWorker, CriticWorker, RefWorker, policy_pg=self.policy_pg)
@@ -621,24 +691,18 @@ class BasePPOExp:
         # See agent_logs/2026-05-29_skyrl_uvloop_integration_and_robustness_research.md
         asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
 
-        trainer = None
-        try:
-            trainer = self._setup_trainer()
-            # Start the training loop
-            asyncio.run(trainer.train())
-        finally:
-            # Clean up any resources that were created, even if _setup_trainer()
-            # or train() failed.  When the skyrl_entrypoint actor dies (e.g. SIGABRT)
-            # and Ray retries it, the original actor's sub-actors (policy, ref,
-            # inference engines) may still hold GPUs.  Cleaning up here ensures
-            # those resources are released before the process exits.
-            if trainer is not None:
-                try:
-                    # train() owns normal teardown. This idempotent fallback covers
-                    # failures around the event-loop boundary.
-                    asyncio.run(trainer.shutdown())
-                except Exception as e:
-                    logger.warning(f"Error shutting down trainer: {e}")
+        with self.get_tracker() as tracker:
+            trainer = None
+            try:
+                trainer = self._setup_trainer(tracker)
+                asyncio.run(trainer.train())
+            finally:
+                # Release GPU actors before a Ray retry can start another attempt.
+                if trainer is not None:
+                    try:
+                        asyncio.run(trainer.shutdown())
+                    except Exception as e:
+                        logger.warning(f"Error shutting down trainer: {e}")
 
 
 @ray.remote(num_cpus=1, max_retries=0)
@@ -670,7 +734,7 @@ def run_ray_driver(
     from skyrl_train.utils.progress import configure_progress  # noqa: PLC0415 - keep launcher imports Torch-free
     from skyrl_train.utils.utils import initialize_ray  # noqa: PLC0415
 
-    validate_trajectory_runner_capabilities(cfg, operation)
+    validate_rollout_launch(cfg, operation)
     if cfg.get("terminal_bench_config") is not None:
         HarborTaskSettings.from_config(cfg.terminal_bench_config)
     validate_cfg(cfg)

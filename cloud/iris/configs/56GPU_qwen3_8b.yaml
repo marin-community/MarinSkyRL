@@ -43,7 +43,6 @@ terminal_bench:
       - ConnectionError
       - RewardFileNotFoundError
       - RewardFileEmptyError
-      - AgentEnvironmentTimeoutError
       - ContextLengthExceededError
     default_error_treatment: zero
     passthrough_exceptions:

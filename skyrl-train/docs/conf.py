@@ -19,10 +19,10 @@ extensions = [
 ]
 
 templates_path = ["_templates"]
-exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
+exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "README.md"]
 
 html_theme = "sphinx_rtd_theme"
-html_static_path = ["_static"]
+html_static_path = []
 
 # Intersphinx mapping
 intersphinx_mapping = {
@@ -46,6 +46,6 @@ napoleon_type_aliases = None
 
 # External links configuration
 extlinks = {
-    "code_link": ("https://github.com/NovaSky-AI/skyrl/blob/main/skyrl-train/%s", "%s"),
-    "skyrl_gym_link": ("https://github.com/NovaSky-AI/skyrl/blob/main/skyrl-gym/%s", "%s"),
+    "code_link": ("https://github.com/marin-community/MarinSkyRL/blob/main/skyrl-train/%s", "%s"),
+    "skyrl_gym_link": ("https://github.com/marin-community/MarinSkyRL/blob/main/skyrl-gym/%s", "%s"),
 }

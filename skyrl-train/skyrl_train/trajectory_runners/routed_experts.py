@@ -23,11 +23,14 @@ def decode_routed_experts(routes: str, expected_rows: int) -> np.ndarray:
 
 
 def normalize_routed_experts(routes: str, prompt_ids: list[int], response_ids: list[int]) -> np.ndarray:
-    """Return response routes, with a sentinel for the final unforwarded token.
+    """Return the routes at positions that predicted each response token.
 
     vLLM's encoded array starts at the first prompt token and ends at the
-    penultimate generated token. The last generated token has no forward pass.
+    penultimate generated token. The last prompt token predicts the first
+    response token, and each later response token is predicted by its predecessor.
     """
+    if not prompt_ids:
+        raise ValueError("routed_experts requires at least one prompt token")
     expected = len(prompt_ids) + len(response_ids) - 1
     rows = decode_routed_experts(routes, expected)
     if (
@@ -39,15 +42,10 @@ def normalize_routed_experts(routes: str, prompt_ids: list[int], response_ids: l
         or np.any(rows > np.iinfo(np.uint32).max)
     ):
         raise ValueError("routed_experts must have [token, layer, expert] nonnegative integer shape")
-    response_rows = rows[len(prompt_ids) :]
+    response_rows = rows[len(prompt_ids) - 1 :]
     dtype = (
         np.uint8
         if not response_rows.size or response_rows.max() <= 255
         else np.min_scalar_type(int(response_rows.max()))
     )
-    result = np.empty((len(response_ids), *rows.shape[1:]), dtype=dtype)
-    if not response_ids:
-        return result
-    result[:-1] = response_rows
-    result[-1] = 0
-    return result
+    return response_rows.astype(dtype, copy=False)

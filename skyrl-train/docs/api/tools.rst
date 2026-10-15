@@ -1,14 +1,16 @@
-Tool API
-========
+Task execution helpers
+======================
 
-.. autoclass:: skyrl_gym.tools.core.ToolGroup
+These concrete helpers use the prepared Shellbox machine.
+
+.. autoclass:: skyrl_gym.python_execution.PythonKernel
    :members:
    :member-order: bysource
-   :undoc-members:
-   :show-inheritance:
 
-.. autoclass:: skyrl_gym.tools.core.tool
+.. autofunction:: skyrl_gym.code_execution.execute_code
+
+.. autofunction:: skyrl_gym.lean_execution.compile_lean
+
+.. autoclass:: skyrl_gym.tools.search.SearchClient
    :members:
    :member-order: bysource
-   :undoc-members:
-   :show-inheritance:

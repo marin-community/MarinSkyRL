@@ -8,6 +8,8 @@ import logging
 import re
 from typing import Any, Dict, List, Optional
 
+from shellbox.machine import ExitReason, Result
+
 LOG = logging.getLogger(__name__)
 
 
@@ -122,21 +124,12 @@ def get_error_str(code: str, errors: List[Dict[str, Any]], error_thres: int = 8)
     return err_str
 
 
-def format_error_feedback(compiler_output: Dict[str, Any], predicted_proof: str) -> str:
-    """Format compiler errors into feedback for self-correction.
+def format_error_feedback(compiler_output: Result, predicted_proof: str) -> str:
+    """Return compiler diagnostics for the next proof attempt."""
+    stdout = compiler_output.stdout.decode(errors="replace")
+    stderr = compiler_output.stderr.decode(errors="replace")
 
-    Args:
-        compiler_output: The compiler output dictionary
-        predicted_proof: The proof code that was compiled
-
-    Returns:
-        Formatted error message string
-    """
-    process_status = compiler_output.get("process_status", "unknown")
-    stdout = compiler_output.get("stdout", "")
-    stderr = compiler_output.get("stderr", "")
-
-    if process_status == "timeout":
+    if compiler_output.reason == ExitReason.TIMED_OUT:
         return "The compilation timed out. Please simplify your proof or use more efficient tactics."
 
     # Parse structured errors from stderr

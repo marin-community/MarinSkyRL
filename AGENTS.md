@@ -22,7 +22,7 @@ lockfiles and virtualenvs.
 | --- | --- | --- |
 | repository root | **primary** | The `marinskyrl` launcher and trainer distribution. Its frozen lock owns the CPU launcher, vLLM, and Megatron closures. |
 | `skyrl-train/` | bundled | Trainer source, examples, and CPU/GPU tests included in the root wheel. |
-| `skyrl-gym/` | bundled + independent | Gymnasium-style RL environments included in the root wheel; its standalone package remains independently testable. |
+| `skyrl-gym/` | bundled + independent | Direct task sessions and graders included in the root wheel. Its standalone package remains independently testable. |
 | `skyrl-tx/` | active | A JAX/Flax inference + fine-tuning engine (`tx`), independent of the trainer. Has its own CI. |
 
 ## Install and test

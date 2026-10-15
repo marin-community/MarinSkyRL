@@ -13,12 +13,7 @@ from skyrl_train.utils.harbor_errors import (
     retry_excluded_exception_types,
 )
 
-from harbor_config.models.trial.config import (
-    EnvironmentConfig,
-    VerifierConfig,
-)
-from harbor_config.models.job.config import RetryConfig
-from harbor_config.models.environment_type import EnvironmentType
+from skyrl_train.rollouts.harbor_settings import EnvironmentConfig, EnvironmentType, RetryConfig, VerifierConfig
 
 
 @dataclass
@@ -58,9 +53,11 @@ ENVIRONMENT_SCHEMA = SectionSchema(
         "override_memory_mb": FieldMapping("override_memory_mb"),
         "override_storage_mb": FieldMapping("override_storage_mb"),
         "override_gpus": FieldMapping("override_gpus"),
-        "environment_type": FieldMapping("type", default="daytona"),
+        "environment_type": FieldMapping("type", default=EnvironmentType.DAYTONA.value),
         "env_network_policy": FieldMapping("network_policy", field_type="kwargs"),
         "ttl_minutes": FieldMapping("ttl_minutes", field_type="kwargs"),
+        "daytona_api_key_env": FieldMapping("api_key_env", field_type="kwargs"),
+        "eval_daytona_api_key_env": FieldMapping("eval_api_key_env", field_type="kwargs"),
     }
 )
 
@@ -81,7 +78,7 @@ TRIAL_SCHEMA = SectionSchema(
     }
 )
 
-# Retry config fields (for QueueOrchestrator)
+# Retry settings for the task worker.
 RETRY_SCHEMA = SectionSchema(
     fields={
         "max_retries": FieldMapping("max_retries", default=2),
@@ -183,7 +180,7 @@ REWARD_SHAPING_SCHEMA = SectionSchema(
 # - "mask" exceptions: Excluded from baseline (neutral - infrastructure failures)
 # - "zero" exceptions: Included in baseline with reward=0 (agent failures)
 #
-# Default classification comes from the pinned harbor-config taxonomy. Lists
+# Default classification comes from SkyRL's Harbor error taxonomy. Lists
 # here are explicit campaign overrides and therefore default empty.
 ERROR_HANDLING_SCHEMA = SectionSchema(
     fields={
@@ -254,7 +251,7 @@ class HarborConfigBuilder:
     """Read task resources, deadlines, retries, and reward settings from SkyRL config."""
 
     def __init__(self, terminal_bench_cfg: DictConfig):
-        unknown = set(terminal_bench_cfg) - {"harbor"}
+        unknown = set(terminal_bench_cfg) - {"harbor", "installed_agent"}
         if unknown:
             raise ValueError(f"Unknown terminal task settings: {sorted(unknown)}")
         self._harbor_cfg = OmegaConf.to_container(terminal_bench_cfg.get("harbor", OmegaConf.create({})), resolve=True)
@@ -380,7 +377,7 @@ class HarborConfigBuilder:
 
     def get_reward_shaping_config(self) -> Dict[str, Any]:
         """
-        Get reward shaping configuration for the Terminal-Bench runner.
+        Get reward shaping configuration for the task worker.
 
         Returns:
             Dict with keys:

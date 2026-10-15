@@ -6,18 +6,9 @@ from omegaconf import DictConfig
 
 from skyrl_train.dataset.tasks import TaskDataset
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, run_ray_driver
-from skyrl_train.rollouts.task_worker import TaskRolloutWorkerSpec
-from skyrl_train.rollouts.workers import RolloutWorkerPool, RolloutWorkerResources
 
 
 class TaskCompendiumExp(BasePPOExp):
-    def get_trajectory_runner(self, cfg, tokenizer, inference_engine_client):
-        del tokenizer
-        return RolloutWorkerPool(
-            TaskRolloutWorkerSpec.from_config(cfg, inference_engine_client.engines),
-            RolloutWorkerResources.from_config(cfg),
-        )
-
     def get_train_dataset(self):
         dataset = TaskDataset(self.cfg.data.train_data, self.tokenizer, self.cfg.trainer.max_prompt_length)
         if len(dataset) < self.cfg.trainer.train_batch_size:

@@ -26,13 +26,18 @@ class ReplayReport:
     mismatched_bytes: int
 
 
-def replay(stream: Stream, version: int) -> ReplayReport:
+REPLAY_COMPARE_CHUNK_BYTES = 16 << 20
+
+
+def replay(stream: Stream, version: int, *, chunk_bytes: int = REPLAY_COMPARE_CHUNK_BYTES) -> ReplayReport:
     """Run the sync's broadcasts again. Receivers compare each transfer with their installed weights."""
+    if chunk_bytes <= 0:
+        raise ValueError("Replay comparison chunks must contain at least one byte")
     with torch.no_grad():
-        return _replay(stream, version)
+        return _replay(stream, version, chunk_bytes)
 
 
-def _replay(stream: Stream, version: int) -> ReplayReport:
+def _replay(stream: Stream, version: int, chunk_bytes: int) -> ReplayReport:
     landings = [(item, landing) for item, landing in stream.transfers() if landing is not None]
     scratch = torch.empty(
         max([landing.nbytes for _, landing in landings] + [0]), dtype=torch.uint8, device=stream.device
@@ -47,7 +52,13 @@ def _replay(stream: Stream, version: int) -> ReplayReport:
         stream.receive(item, wire)
         # The router weight is stored as FP32; compare it in its wire dtype.
         installed = landing.installed.to(landing.wire_dtype)
-        mismatched.add_(wire.view(torch.uint8).ne(installed.view(torch.uint8)).sum())
+        wire_bytes = wire.view(-1).view(torch.uint8)
+        installed_bytes = installed.view(-1).view(torch.uint8)
+        # Summing bool bytes can materialize an int64 input. A vocabulary tensor
+        # otherwise needs eight times its byte size in additional GPU memory.
+        for start in range(0, landing.nbytes, chunk_bytes):
+            count = min(chunk_bytes, landing.nbytes - start)
+            mismatched.add_(wire_bytes.narrow(0, start, count).ne(installed_bytes.narrow(0, start, count)).sum())
         compared += landing.nbytes
     parameter_bytes = 0
     if not stream.trainer:

@@ -21,7 +21,7 @@ from tests.cpu.weight_sync.expert_block.test_schedule import (
     trainers,
 )
 
-MODEL = {"num_experts": NUM_EXPERTS, "hidden_size": 3, "intermediate_size": 2}
+MODEL = {"num_experts": NUM_EXPERTS, "hidden_size": 3, "expert_hidden_size": 3, "intermediate_size": 2}
 
 
 def policy_inventories():

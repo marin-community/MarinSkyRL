@@ -86,6 +86,22 @@ def test_idk_normalization_retains_half_without_a_model(server):
     assert owner.requests == []
 
 
+@pytest.mark.parametrize("response", ["", " \n ", "<think>Working through the question.</think>"])
+def test_empty_abstention_retains_native_not_attempted_reward(server, response):
+    owner, judge = server
+    owner.reply = "C"
+    record = {"question": "What is two plus two?", "answer": "4"}
+    native_reward, native_details = grade_abstention(response, record, judge)
+    owner.requests.clear()
+
+    reward, details = grade_judge_profile_verifyit(response, record, judge, kind="abstention")
+
+    assert reward == native_reward == 0.5
+    assert details["verdict"] == native_details["verdict"] == "abstain"
+    assert details["extracted_answer"].strip() == ""
+    assert owner.requests == []
+
+
 @pytest.mark.parametrize(
     "expected,reply,score",
     [("YES", "[[YES]]", 1.0), ("NO", "[[NO]]", 1.0), ("YES", "[[NO]]", 0.0)],

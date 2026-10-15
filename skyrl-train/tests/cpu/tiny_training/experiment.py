@@ -20,11 +20,9 @@ from pathlib import Path
 
 import ray
 from omegaconf import DictConfig, OmegaConf
-from skyrl_train.config.trajectory_runner_capabilities import (
-    validate_trajectory_runner_capabilities,
-)
+from skyrl_train.config.rollout_validation import validate_rollout_launch
 from skyrl_train.config.utils import get_default_config
-from skyrl_train.dataset.tasks import GymTaskDataset
+from skyrl_train.dataset.tasks import SourceTaskDataset
 from skyrl_train.entrypoints.main_base import BasePPOExp, EntrypointOperation
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import RayWrappedInferenceEngine
@@ -164,6 +162,12 @@ class JsonlTracker:
         with self.path.open("a") as handle:
             handle.write(json.dumps({"step": step, **data}, default=float) + "\n")
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exception):
+        pass
+
 
 def read_metrics(root: Path) -> list[dict]:
     """Return the metrics records an experiment under ``root`` logged, in order."""
@@ -171,15 +175,25 @@ def read_metrics(root: Path) -> list[dict]:
         return [json.loads(line) for line in handle]
 
 
+def cpu_inference_engine_client(cfg: DictConfig, tokenizer) -> InferenceEngineClient:
+    engine_actor = ray.remote(CPUInferenceEngine)
+    engines = [
+        RayWrappedInferenceEngine(
+            engine_actor.options(num_cpus=1).remote(cfg.trainer.policy.model.path, cfg.trainer.seed + index)
+        )
+        for index in range(cfg.generator.num_inference_engines)
+    ]
+    return InferenceEngineClient(engines, tokenizer, cfg)
+
+
 class TinyTrainingExp(BasePPOExp):
     """The standard entrypoint with CPU policy workers and CPU inference engines."""
 
     def get_train_dataset(self):
         # Filtering a few dozen prompts in one process beats spawning preprocessing workers.
-        return GymTaskDataset(
+        return SourceTaskDataset(
             datasets=self.cfg.data.train_data,
-            environment_configs=OmegaConf.to_container(self.cfg.environment.skyrl_gym, resolve=True),
-            cache_dir=Path(self.cfg.trainer.export_path) / "tasks",
+            environment_configs=OmegaConf.to_container(self.cfg.environment.task_sessions, resolve=True),
             tokenizer=self.tokenizer,
             max_prompt_length=self.cfg.trainer.max_prompt_length,
             num_workers=1,
@@ -188,10 +202,9 @@ class TinyTrainingExp(BasePPOExp):
     def get_eval_dataset(self):
         if self.cfg.trainer.eval_interval <= 0 or not self.cfg.data.val_data:
             return None
-        return GymTaskDataset(
+        return SourceTaskDataset(
             datasets=self.cfg.data.val_data,
-            environment_configs=OmegaConf.to_container(self.cfg.environment.skyrl_gym, resolve=True),
-            cache_dir=Path(self.cfg.trainer.export_path) / "eval_tasks",
+            environment_configs=OmegaConf.to_container(self.cfg.environment.task_sessions, resolve=True),
             tokenizer=self.tokenizer,
             max_prompt_length=self.cfg.trainer.max_prompt_length,
             num_workers=1,
@@ -208,22 +221,18 @@ class TinyTrainingExp(BasePPOExp):
     def create_inference_engine_client(
         self, *, operation: EntrypointOperation = EntrypointOperation.TRAIN
     ) -> InferenceEngineClient:
-        engine_actor = ray.remote(CPUInferenceEngine)
-        engines = [
-            RayWrappedInferenceEngine(
-                engine_actor.options(num_cpus=1).remote(
-                    self.cfg.trainer.policy.model.path, self.cfg.trainer.seed + index
-                )
-            )
-            for index in range(self.cfg.generator.num_inference_engines)
-        ]
-        return InferenceEngineClient(engines, self.tokenizer, self.cfg)
+        return cpu_inference_engine_client(self.cfg, self.tokenizer)
 
 
 def run_tiny_training(cfg: DictConfig) -> None:
     """Validate the config as the production driver does, then run in a fresh local Ray session."""
+    run_with_exp(cfg, TinyTrainingExp)
+
+
+def run_with_exp(cfg: DictConfig, make_exp) -> None:
+    """Run one validated experiment class in a fresh local Ray session."""
     validate_cfg(cfg)
-    validate_trajectory_runner_capabilities(cfg, EntrypointOperation.TRAIN)
+    validate_rollout_launch(cfg, EntrypointOperation.TRAIN)
     ray.init(
         num_cpus=LOGICAL_CPUS,
         num_gpus=LOGICAL_GPUS,
@@ -232,7 +241,7 @@ def run_tiny_training(cfg: DictConfig) -> None:
         include_dashboard=False,
     )
     try:
-        TinyTrainingExp(cfg).run()
+        make_exp(cfg).run()
     finally:
         ray.shutdown()
 

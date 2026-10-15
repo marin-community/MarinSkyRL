@@ -91,7 +91,7 @@ def _fake_frozen_runtime(
     )
     _write_module(site_packages, "shellbox/backends/daytona/machine.py", "class DaytonaMachineFactory: pass\n")
     _write_module(site_packages, "shellbox/backends/shellsim/machine.py", "class ShellSimMachineFactory: pass\n")
-    _write_module(site_packages, "rolloutengine/engine.py", "class ShellboxRolloutEngine: pass\n")
+    _write_module(site_packages, "rolloutengine/engine.py", "class RolloutEngine: pass\n")
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()

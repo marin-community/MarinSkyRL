@@ -1,4 +1,5 @@
-from dataclasses import asdict
+from dataclasses import asdict, replace
+import base64
 from skyrl_gym.verification import VerificationResult
 import gzip
 import json
@@ -8,10 +9,20 @@ import threading
 import zipfile
 
 import pytest
+from taskcompendium.models import InlineFile, ResourceGroups, Source, TaskResource
+from skyrl_gym.source_task import source_task
 
 from skyrl_train.config.utils import get_default_config
+from skyrl_train.rollouts.group_grader import GenRMGroupGraderParameters, GroupGraderSpec
+from tests.cpu.task_specs import lowered_task, task_input, text_task
 from tests.cpu.trajectory_runners.fixture_runner import FixtureRunner
-from skyrl_train.trajectory_runners.types import BatchMetadata, TrajectoryRequestBatch, TrajectoryBatch, TrajectoryID
+from skyrl_train.trajectory_runners.types import (
+    BatchMetadata,
+    TrajectoryRequestBatch,
+    TrajectoryBatch,
+    TrajectoryID,
+    TaskRequestBatch,
+)
 from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
 from skyrl_train.trajectory_runners.trajectory_retention import (
     RETENTION_METRIC_PREFIX,
@@ -38,7 +49,7 @@ class _Tokenizer:
 
 
 class _NormalizedRunner(FixtureRunner):
-    async def _run(self, input_batch, disable_tqdm=False):
+    async def _run(self, input_batch):
         return _output()
 
 
@@ -128,22 +139,18 @@ def _never_finishes(_request):
 
 
 def _input(step: int = 7, phase: str = "train") -> TrajectoryRequestBatch:
-    return {
-        "prompts": [
-            [{"role": "user", "content": "first"}],
-            [{"role": "user", "content": "second"}],
-            [{"role": "user", "content": "third"}],
-        ],
-        "env_classes": ["math", "math", "math"],
-        "env_extras": [{"difficulty": 1}, {"difficulty": 2}, {"difficulty": 3}],
-        "sampling_params": {"temperature": 0.7, "max_tokens": 16},
-        "trajectory_ids": [
-            TrajectoryID(instance_id="a", repetition_id=0),
-            TrajectoryID(instance_id="b", repetition_id=0),
-            TrajectoryID(instance_id="c", repetition_id=0),
-        ],
-        "batch_metadata": BatchMetadata(global_step=step, training_phase=phase),
-    }
+    return TaskRequestBatch(
+        rows=tuple(
+            task_input(
+                lowered_task(text_task(uid, prompt=content)),
+                metric_class="math",
+            )
+            for uid, content in zip(("a", "b", "c"), ("first", "second", "third"), strict=True)
+        ),
+        sampling_params={"temperature": 0.7, "max_tokens": 16},
+        trajectory_ids=tuple(TrajectoryID(uid, 0) for uid in ("a", "b", "c")),
+        batch_metadata=BatchMetadata(global_step=step, training_phase=phase),
+    )
 
 
 def _output() -> TrajectoryBatch:
@@ -174,7 +181,6 @@ def _output() -> TrajectoryBatch:
     }
 
 
-_INPUT_BATCH_SEQUENCE_KEYS = ("prompts", "env_classes", "env_extras", "trajectory_ids")
 _OUTPUT_BATCH_SEQUENCE_KEYS = (
     "prompt_token_ids",
     "response_ids",
@@ -195,9 +201,11 @@ _OUTPUT_BATCH_SEQUENCE_KEYS = (
 def _select_batch_rows(indices) -> tuple[TrajectoryRequestBatch, TrajectoryBatch]:
     input_batch = _input()
     output = _output()
-    for key in _INPUT_BATCH_SEQUENCE_KEYS:
-        values = input_batch[key]
-        input_batch[key] = [values[index % len(values)] for index in indices]
+    input_batch = replace(
+        input_batch,
+        rows=tuple(input_batch.rows[index % len(input_batch.rows)] for index in indices),
+        trajectory_ids=tuple(input_batch.trajectory_ids[index % len(input_batch.trajectory_ids)] for index in indices),
+    )
     for key in _OUTPUT_BATCH_SEQUENCE_KEYS:
         values = output[key]
         output[key] = [values[index % len(values)] for index in indices]
@@ -277,12 +285,62 @@ def test_normalized_output_produces_complete_core_trace_schema():
         "metrics",
         "provenance",
     }
-    assert record["prompt"]["messages"] == [{"role": "user", "content": "first"}]
+    assert record["prompt"]["messages"] == _input().public_prompts[0]
     assert record["response"]["text"] == "10 11"
     assert record["verifier"] is None
-    assert record["schema_version"] == 5
+    assert record["schema_version"] == 7
     assert record["disposition"] == {"exception_type": None, "error_treatment": None, "server_error": None}
     assert record["provenance"]["runner"] == "TaskRolloutWorker"
+
+
+def test_retained_trajectory_omits_private_task_resources_and_grader_inputs(tmp_path):
+    private = "private-reference-output"
+    encoded = base64.b64encode(private.encode()).decode()
+    request = _input()
+    task = source_task(
+        request.public_prompts[0],
+        {"reward_spec": {"ground_truth": private}},
+        {},
+        Source(dataset="fixture", revision="1", row="0", importer_revision="1"),
+    ).model_copy(
+        update={
+            "resources": ResourceGroups(
+                verifier=(TaskResource(path="tests/expected.txt", source=InlineFile(content_base64=encoded)),)
+            )
+        }
+    )
+    request = replace(
+        request,
+        rows=(
+            task_input(
+                lowered_task(task),
+                group_grader=GroupGraderSpec(
+                    name="nemotron_genrm",
+                    parameters_json=GenRMGroupGraderParameters(
+                        principle=private, agent="genrm", config={}
+                    ).model_dump_json(),
+                ),
+                data_source="fixture",
+                teacher_route="route-a",
+            ),
+            *request.rows[1:],
+        ),
+    )
+    config = _config(tmp_path / "retained", sample_count_per_step=3)
+    sink = _sink(config)
+    sink.retain(request, _output())
+    sink.close()
+    persisted = _records(tmp_path / "retained")
+    assert len(persisted) == 3
+    serialized = json.dumps(persisted)
+    assert private not in serialized
+    assert encoded not in serialized
+    record = next(record for record in persisted if record["trajectory"]["instance_id"] == "a")
+    assert record["trajectory"]["environment_extras"] == {
+        "data_source": "fixture",
+        "teacher_route": "route-a",
+    }
+    assert record["prompt"]["messages"] == request.public_prompts[0]
 
 
 def test_server_error_identity_is_retained_with_the_masked_row():
@@ -392,15 +450,14 @@ def test_groups_retained_during_a_publication_are_published_after_it(tmp_path):
     assert len(list(tmp_path.rglob("*.zip"))) == 3
 
 
-def test_step_wise_rows_form_one_replayable_trajectory_with_explicit_boundaries():
+def test_step_wise_retention_preserves_context_forks_and_response_boundaries():
     input_batch = _input()
-    for key in ("prompts", "env_classes", "env_extras", "trajectory_ids"):
-        input_batch[key] = [input_batch[key][0]]
-    trajectory_id = input_batch["trajectory_ids"][0]
+    input_batch = replace(input_batch, rows=input_batch.rows[:1], trajectory_ids=input_batch.trajectory_ids[:1])
+    trajectory_id = input_batch.trajectory_ids[0]
     output = _output()
     output.update(
         {
-            "prompt_token_ids": [[1], [1]],
+            "prompt_token_ids": [[1], [99, 98]],
             "response_ids": [[10], [20, 21]],
             "rewards": [0.0, 1.0],
             "unshaped_rewards": [0.0, 1.0],
@@ -426,17 +483,30 @@ def test_step_wise_rows_form_one_replayable_trajectory_with_explicit_boundaries(
 
     assert record["response"]["token_ids"] == [10, 20, 21]
     assert record["response"]["step_boundaries"] == [
-        {"row_index": 0, "token_start": 0, "token_end": 1, "stop_reason": "tool", "is_last_step": False},
-        {"row_index": 1, "token_start": 1, "token_end": 3, "stop_reason": "stop", "is_last_step": True},
+        {
+            "row_index": 0,
+            "prompt_token_ids": [1],
+            "token_start": 0,
+            "token_end": 1,
+            "stop_reason": "tool",
+            "is_last_step": False,
+        },
+        {
+            "row_index": 1,
+            "prompt_token_ids": [99, 98],
+            "token_start": 1,
+            "token_end": 3,
+            "stop_reason": "stop",
+            "is_last_step": True,
+        },
     ]
     assert record["reward"] == {"outcome": 1.0, "shaped": 1.0, "components": None}
 
 
 def test_step_wise_retention_aggregates_final_row_overlong_penalty():
     input_batch = _input()
-    for key in ("prompts", "env_classes", "env_extras", "trajectory_ids"):
-        input_batch[key] = [input_batch[key][0]]
-    trajectory_id = input_batch["trajectory_ids"][0]
+    input_batch = replace(input_batch, rows=input_batch.rows[:1], trajectory_ids=input_batch.trajectory_ids[:1])
+    trajectory_id = input_batch.trajectory_ids[0]
     output = _output()
     output.update(
         {
@@ -532,7 +602,7 @@ def test_retention_is_deterministic_and_enforces_compressed_byte_bound_before_wr
 def test_unlimited_byte_bounds_retain_every_selected_record(tmp_path):
     input_batch, output = _select_batch_rows(range(256))
     trajectory_ids = [TrajectoryID(instance_id=f"sample-{index}", repetition_id=0) for index in range(256)]
-    input_batch["trajectory_ids"] = trajectory_ids
+    input_batch = replace(input_batch, trajectory_ids=tuple(trajectory_ids))
     output["trajectory_ids"] = trajectory_ids
     config = _config(
         tmp_path,
@@ -555,7 +625,7 @@ def test_retention_publishes_a_full_training_batch_as_one_archive(tmp_path):
     batch_size = 256
     input_batch, output = _select_batch_rows(range(batch_size))
     trajectory_ids = [TrajectoryID(instance_id=f"sample-{index}", repetition_id=0) for index in range(batch_size)]
-    input_batch["trajectory_ids"] = trajectory_ids
+    input_batch = replace(input_batch, trajectory_ids=tuple(trajectory_ids))
     output["unshaped_rewards"] = [0.0] * batch_size
     output["trajectory_ids"] = trajectory_ids
     config = _config(tmp_path)

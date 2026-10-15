@@ -1,23 +1,23 @@
-"""Apply task-declared graders to completed rollout groups."""
+"""Apply SkyRL-owned graders to completed rollout groups."""
 
 import asyncio
 from collections.abc import Callable, Mapping, Sequence
-from types import MappingProxyType
 
 from rolloutengine.contracts import RolloutData
 from taskcompendium.models import TaskSpec
-from taskcompendium.importers.skyrl import GENRM_GROUP_VERIFIER
 
 from skyrl_train.rollouts.genrm_grading import grade_genrm_rollouts
+from skyrl_train.rollouts.group_grader import GENRM_GROUP_GRADER, GroupGraderSpec
 from skyrl_train.rollouts.task_projections import rollout_loss_eligible
 from skyrl_train.utils.harbor_errors import ErrorHandlingConfig
 
-GroupGrader = Callable[[TaskSpec, Sequence[RolloutData], Sequence[bool], str], Sequence[RolloutData]]
-GROUP_GRADERS: Mapping[str, GroupGrader] = MappingProxyType({GENRM_GROUP_VERIFIER: grade_genrm_rollouts})
+GroupGrader = Callable[[TaskSpec, GroupGraderSpec, Sequence[RolloutData], Sequence[bool], str], Sequence[RolloutData]]
+GROUP_GRADERS: Mapping[str, GroupGrader] = {GENRM_GROUP_GRADER: grade_genrm_rollouts}
 
 
 async def grade_groups(
     tasks: Sequence[TaskSpec],
+    specifications: Sequence[GroupGraderSpec | None],
     rollouts: Sequence[RolloutData],
     group_ids: Sequence[str],
     graders: Mapping[str, GroupGrader],
@@ -40,18 +40,20 @@ async def grade_groups(
     result = list(rollouts)
     for indices in groups.values():
         task = tasks[indices[0]]
-        if all(tasks[index].group_verifier is None for index in indices):
+        if all(specifications[index] is None for index in indices):
             continue
         if any(tasks[index] != task for index in indices):
             raise ValueError(f"Task group {task.id!r} contains different task definitions")
-        assert task.group_verifier is not None
-        grader = graders[task.group_verifier.name]
+        specification = specifications[indices[0]]
+        if specification is None or any(specifications[index] != specification for index in indices):
+            raise ValueError(f"Task group {task.id!r} contains different group graders")
+        grader = graders[specification.name]
         records = [rollouts[index] for index in indices]
         eligible = [
             rollout_loss_eligible(rollouts[index], error_handling[index], logprobs_required=logprobs_required)
             for index in indices
         ]
-        graded = await asyncio.to_thread(grader, task, records, eligible, phase)
+        graded = await asyncio.to_thread(grader, task, specification, records, eligible, phase)
         for index, record in zip(indices, graded, strict=True):
             if record.task_id != task.id:
                 raise ValueError("Group grader changed a rollout task ID")

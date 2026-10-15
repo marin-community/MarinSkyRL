@@ -84,8 +84,6 @@ def validate_mismatch_probe_config(
     generator = skyrl.get("generator", {})
     if generator.get("backend") != "vllm":
         raise ValueError("trainer.mismatch_probe requires a vLLM generator")
-    if not generator.get("require_exact_chat_transport"):
-        raise ValueError("trainer.mismatch_probe requires exact chat transport without re-tokenization")
     sampling = generator.get("sampling_params") or {}
     validate_behavior_logprob_sampling(sampling)
     if sampling.get("temperature") != 1.0:

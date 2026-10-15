@@ -9,7 +9,9 @@ from omegaconf import OmegaConf
 
 from megatron.core.pipeline_parallel import get_forward_backward_func
 import megatron.core.parallel_state as mpu
+from megatron.core.distributed import DistributedDataParallel as MegatronDDP
 from megatron.core.distributed import finalize_model_grads
+from megatron.core.transformer.module import Float16Module
 
 from skyrl_train.distributed.megatron.model_utils import (
     from_parallel_logits_to_logprobs,
@@ -74,7 +76,7 @@ class RouterReplayTargets:
 
     per_layer: dict[int, torch.Tensor]
     mask: torch.Tensor
-    response_mask: torch.Tensor
+    prediction_mask: torch.Tensor
     probe_positions: Optional[torch.Tensor]
 
 
@@ -96,6 +98,7 @@ class MegatronPolicyMicroBatch:
     ftpo: FTPOTargets | None = None
     correction_weights: Optional[torch.Tensor] = None
     rollout_routed_experts: Optional[torch.Tensor] = None
+    pair_roles: Optional[torch.Tensor] = None
 
 
 class MegatronModelWrapper:
@@ -118,12 +121,8 @@ class MegatronModelWrapper:
         self.actor_optimizer = actor_optimizer
         self.policy_loss_fn = policy_loss_fn
         self.use_sample_packing = self.cfg.trainer.use_sample_packing
-        # Optional sequence-dim chunk size for the vocab-parallel logprob
-        # computation. None => the whole [B, S, vocab//TP] fp32 exp is
-        # materialized at once, which OOMs on long sequences. A non-null value
-        # activates the numerically-exact ChunkedDistributedLogprob path
-        # (per-position log-softmax, chunked along seq), bounding peak memory
-        # regardless of sequence length. Byte-identical when unset.
+        # Bound legacy FP32 temporaries and native TE scoring copies.
+        # TE training uses one full model-dtype gradient buffer.
         #
         # Callers pass this EXPLICITLY (the policy worker its own
         # trainer.policy.megatron_config.logprob_chunk_size, the ref worker its own
@@ -207,12 +206,12 @@ class MegatronModelWrapper:
     ):
         """Build per-layer router targets in the exact token order the routers see.
 
-        Pushes the dense ``[B, S, L, K]`` targets and the replay / response
+        Pushes the dense ``[B, S, L, K]`` targets and the replay / prediction
         masks through the SAME sequence transform the model input takes
         (packing or left-pad removal, with the CP chunk split), flattens
         sequence-major (``s*B + b``, mirroring the router view), and slices to
         this TP rank's contiguous sequence chunk under sequence parallelism.
-        The result contains per-layer targets, replay and response masks, and
+        The result contains per-layer targets, replay and prediction masks, and
         optional probe positions aligned to the model chunk's router rows.
         """
         controller = self.router_replay
@@ -233,16 +232,17 @@ class MegatronModelWrapper:
 
         device = sequences.device
         dense, mask_BS = dense_replay_targets(rollout_routed_experts, batch_size, seq_len, num_actions)
-        response_BS = torch.zeros_like(mask_BS)
-        response_BS[:, seq_len - num_actions :] = True
+        prediction_BS = torch.zeros_like(mask_BS)
+        prediction_window = slice(seq_len - num_actions - 1, seq_len - 1)
+        prediction_BS[:, prediction_window] = True
         probe_positions = None
         if probe_row_indices is not None:
             if probe_row_indices.shape != (batch_size,):
                 raise ValueError("probe row indices must have one entry per sequence")
             # Zero encodes padding through the shared sequence transforms.
             probe_positions = torch.zeros((batch_size, seq_len, 2), dtype=torch.long, device=device)
-            probe_positions[:, seq_len - num_actions :, 0] = probe_row_indices[:, None] + 1
-            probe_positions[:, seq_len - num_actions :, 1] = torch.arange(1, num_actions + 1, device=device)
+            probe_positions[:, prediction_window, 0] = probe_row_indices[:, None] + 1
+            probe_positions[:, prediction_window, 1] = torch.arange(1, num_actions + 1, device=device)
 
         if self.use_sample_packing:
             # The routes tensor is ours, not the pipeline's input: always run the
@@ -250,7 +250,7 @@ class MegatronModelWrapper:
             # derives its own layer targets from the replicated batch.
             dense, _ = preprocess_packed_seqs(dense, attention_mask, pre_process=True)
             mask_BS, _ = preprocess_packed_seqs(mask_BS, attention_mask, pre_process=True)
-            response_BS, _ = preprocess_packed_seqs(response_BS, attention_mask, pre_process=True)
+            prediction_BS, _ = preprocess_packed_seqs(prediction_BS, attention_mask, pre_process=True)
             if probe_positions is not None:
                 probe_positions, _ = preprocess_packed_seqs(probe_positions, attention_mask, pre_process=True)
         else:
@@ -258,7 +258,7 @@ class MegatronModelWrapper:
             position_ids = position_ids.masked_fill(attention_mask == 0, 0)
             dense, _, _ = remove_left_padding(dense, attention_mask, position_ids, pre_process=True)
             mask_BS, _, _ = remove_left_padding(mask_BS, attention_mask, position_ids, pre_process=True)
-            response_BS, _, _ = remove_left_padding(response_BS, attention_mask, position_ids, pre_process=True)
+            prediction_BS, _, _ = remove_left_padding(prediction_BS, attention_mask, position_ids, pre_process=True)
             if probe_positions is not None:
                 probe_positions, _, _ = remove_left_padding(
                     probe_positions, attention_mask, position_ids, pre_process=True
@@ -266,7 +266,7 @@ class MegatronModelWrapper:
 
         flat = sequence_major_flatten(dense)
         mask = sequence_major_flatten(mask_BS)
-        response_mask = sequence_major_flatten(response_BS)
+        prediction_mask = sequence_major_flatten(prediction_BS)
         if probe_positions is not None:
             probe_positions = sequence_major_flatten(probe_positions) - 1
         tp_size = mpu.get_tensor_model_parallel_world_size()
@@ -282,11 +282,11 @@ class MegatronModelWrapper:
             )
             flat = slice_sequence_parallel(flat, **slice_kwargs)
             mask = slice_sequence_parallel(mask, **slice_kwargs)
-            response_mask = slice_sequence_parallel(response_mask, **slice_kwargs)
+            prediction_mask = slice_sequence_parallel(prediction_mask, **slice_kwargs)
             if probe_positions is not None:
                 probe_positions = slice_sequence_parallel(probe_positions, **slice_kwargs)
         per_layer = {idx: flat[:, idx, :].to(device) for idx in layer_indices}
-        return RouterReplayTargets(per_layer, mask.to(device), response_mask.to(device), probe_positions)
+        return RouterReplayTargets(per_layer, mask.to(device), prediction_mask.to(device), probe_positions)
 
     def _forward_micro_batch(
         self,
@@ -322,7 +322,7 @@ class MegatronModelWrapper:
             self.router_replay.begin_forward(
                 targets.per_layer,
                 targets.mask,
-                targets.response_mask,
+                targets.prediction_mask,
                 record_recompute=record_recompute,
                 probe_positions=targets.probe_positions,
             )
@@ -345,12 +345,16 @@ class MegatronModelWrapper:
                 )
                 packed_seq_params = None
 
+            # Only the mixed-precision wrapper consumes the precision kwarg; a raw fp32
+            # module (equivalence experiments) already returns module-precision outputs.
+            inner = model.module if isinstance(model, MegatronDDP) else model
+            precision_kwargs = {"fp32_output": False} if isinstance(inner, Float16Module) else {}
             outputs = model(
                 model_sequences,
                 model_position_ids,
                 model_attention_mask,
                 packed_seq_params=packed_seq_params,
-                fp32_output=False,
+                **precision_kwargs,
             )
             if armed:
                 self.router_replay.end_forward()
@@ -583,6 +587,7 @@ class MegatronModelWrapper:
                 think_token_weight=self.cfg.trainer.algorithm.think_token_weight,
                 teacher=teacher,
                 ftpo=ftpo_inputs,
+                pair_roles=data.pair_roles,
             )
             objective = compute_policy_objective(
                 batch,

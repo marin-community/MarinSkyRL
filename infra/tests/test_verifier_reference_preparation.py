@@ -8,9 +8,11 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
-from omegaconf import OmegaConf
 from infra.rl_data.sources import nemotron_ultra_mopd_source, nemotron_ultra_rlvr1_source, nemotron_ultra_rlvr2_source
-from skyrl_gym.envs.nemotron_ultra.env import NemotronUltraEnv
+from skyrl_gym.envs.instruction_verifyit import grade_nemotron_instructions
+from skyrl_gym.envs.nemotron_ultra.instruction_following import grade_instruction_following
+from skyrl_gym.envs.nemotron_ultra.math_judge_verifyit import grade_math_verifyit
+from skyrl_gym.envs.nemotron_ultra.math_with_judge import grade_math
 from skyrl_gym.envs.nemotron_ultra.judge import OpenAIJudge
 
 @pytest.mark.parametrize(
@@ -21,7 +23,7 @@ from skyrl_gym.envs.nemotron_ultra.judge import OpenAIJudge
         nemotron_ultra_rlvr2_source,
     ],
 )
-def test_preparation_serializes_reference_before_framework_roundtrip(factory):
+def test_preparation_serializes_reference_before_task_grading(factory):
     raw = {
         "uuid": "frozen",
         "agent_ref": {"name": "instruction_following_simple_agent"},
@@ -40,13 +42,8 @@ def test_preparation_serializes_reference_before_framework_roundtrip(factory):
     assert record["kwargs"][0]["keyword"] == "blue"
     for candidate, expected in [("certain permitted sentence", 1.0), ("a blue b", 0.0)]:
         scores = []
-        for enabled in [False, True]:
-            env = NemotronUltraEnv(OmegaConf.create({"verifyit_enabled": enabled}), extras=row)
-            env.init(row["prompt"])
-            try:
-                scores.append(env.step(candidate)["reward"])
-            finally:
-                env.close()
+        for grade in [grade_instruction_following, grade_nemotron_instructions]:
+            scores.append(grade(candidate, record)[0])
         assert scores == [expected, expected]
 
 
@@ -73,13 +70,8 @@ def test_default_source_defects_are_resolved_before_serialization(identity):
         positive = f"{args['keyword1']} {args['keyword2']} {args['keyword2']}"
     for candidate, expected in [(positive, 1.0), ("unrelated content", 0.0)]:
         scores = []
-        for enabled in [False, True]:
-            env = NemotronUltraEnv(OmegaConf.create({"verifyit_enabled": enabled}), extras=row)
-            env.init(row["prompt"])
-            try:
-                scores.append(env.step(candidate)["reward"])
-            finally:
-                env.close()
+        for grade in [grade_instruction_following, grade_nemotron_instructions]:
+            scores.append(grade(candidate, record)[0])
         assert scores == [expected, expected]
 
 
@@ -138,7 +130,7 @@ def judge_server():
 
 @pytest.mark.parametrize("agent", ["math_with_judge_simple_agent", "ns_tools_simple_agent"])
 @pytest.mark.parametrize("label,score", [("[[A=B]]", 1.0), ("[[A!=B]]", 0.0)])
-def test_prepared_semantic_reference_roundtrips_framework(agent, label, score, judge_server):
+def test_prepared_semantic_reference_preserves_grading_and_judge_requests(agent, label, score, judge_server):
 
     server, judge = judge_server
     server.replies = [label]
@@ -156,24 +148,10 @@ def test_prepared_semantic_reference_roundtrips_framework(agent, label, score, j
     candidate = "Move to each nonempty next box and stop when reaching the eighth box."
     results = []
     requests = []
-    for enabled in (False, True):
+    for grade in [grade_math, grade_math_verifyit]:
         server.requests.clear()
-        env = NemotronUltraEnv(
-            OmegaConf.create(
-                {
-                    "verifyit_enabled": enabled,
-                    "judges": {"general": dataclasses.asdict(judge)},
-                }
-            ),
-            extras=row,
-        )
-        env.init(row["prompt"])
-        try:
-            results.append(env.step(candidate)["reward"])
-            requests.append(list(server.requests))
-        finally:
-            env.close()
+        results.append(grade(candidate, serialized, judge=judge)[0])
+        requests.append(list(server.requests))
     assert results == [score, score]
     assert requests[0] == requests[1]
     assert len(requests[1]) == (2 if score else 1)
-

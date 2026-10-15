@@ -8,10 +8,9 @@ onto spare host CPU, TPU hosts included). Only prebuilt-image tasks
 (``[environment] docker_image = ...``) are supported; Dockerfile/compose
 builds are not.
 
-The default ``gvisor`` profile submits CONTAINER_PROFILE_GVISOR, so untrusted
-agent code gets full in-container root behind gVisor's intercepted guest
-kernel instead of the host kernel. The selected Iris cluster must provide the
-``gvisor`` container profile.
+The default ``sandbox`` profile uses gVisor. The sandbox receives no cluster
+credentials, workspace bundle, or controller address. Its network policy
+permits public addresses, not the cluster network.
 
 Usage:
     harbor trials start -p <task-dir> -a oracle \\
@@ -38,6 +37,7 @@ from harbor.trial.errors import EnvironmentStartTimeoutError
 from iris.cli.connect import ControllerEndpoint, connect_controller
 from iris.client import IrisClient, Job
 from iris.cluster.types import Entrypoint, EnvironmentSpec, ResourceSpec
+from iris.resources.state import TaskState
 from iris.rpc import controller_pb2, job_pb2
 from iris.rpc.compression import IRIS_RPC_COMPRESSIONS
 from iris.rpc.controller_connect import ControllerServiceClientSync
@@ -63,12 +63,12 @@ DEFAULT_CPUS = 1
 DEFAULT_MEMORY_MB = 2048
 DEFAULT_STORAGE_MB = 10240
 
-GVISOR_PROFILE = "gvisor"
+SANDBOX_PROFILE = "sandbox"
 _CONTAINER_PROFILES = {
     "restricted": job_pb2.CONTAINER_PROFILE_RESTRICTED,
     "default": job_pb2.CONTAINER_PROFILE_DEFAULT,
     "privileged": job_pb2.CONTAINER_PROFILE_PRIVILEGED,
-    GVISOR_PROFILE: job_pb2.CONTAINER_PROFILE_GVISOR,
+    SANDBOX_PROFILE: job_pb2.CONTAINER_PROFILE_SANDBOX,
 }
 
 _LOCAL_PROTOCOLS = ("", "file", "local")
@@ -125,7 +125,7 @@ class IrisEnvironment(BaseEnvironment):
         cluster: str | None = None,
         controller_url: str | None = None,
         scheduling_timeout: int | str = DEFAULT_SCHEDULING_TIMEOUT,
-        container_profile: str = GVISOR_PROFILE,
+        container_profile: str = SANDBOX_PROFILE,
         sandbox_ttl: int | str = DEFAULT_SANDBOX_TTL,
         **kwargs,
     ):
@@ -139,12 +139,10 @@ class IrisEnvironment(BaseEnvironment):
             scheduling_timeout: Seconds to wait for the sandbox task to be
                 scheduled and reach RUNNING. Accepts str because harbor's
                 --environment-kwarg values arrive as strings.
-            container_profile: "gvisor" (default) runs the task container
-                under the gVisor runtime — full in-container root (apt/setuid)
-                isolated from the host kernel. The cluster must implement the
-                corresponding container profile. "default" drops all
-                capabilities, so setuid commands fail there; "privileged"
-                requires elevated submission rights.
+            container_profile: "sandbox" (default) runs the task container
+                in gVisor without cluster credentials or access to the cluster network.
+                "restricted" and "default" use the host kernel.
+                "privileged" requires elevated submission rights.
             sandbox_ttl: Hard job TTL in seconds after which Iris kills the
                 sandbox even if stop() is never called (leaked-harness safety
                 net). Accepts str like scheduling_timeout.
@@ -246,6 +244,11 @@ class IrisEnvironment(BaseEnvironment):
                 ),
                 task_image=self.task_env_config.docker_image,
                 container_profile=self._container_profile,
+                egress_policy=(
+                    job_pb2.EGRESS_POLICY_INTERNET
+                    if self._container_profile == job_pb2.CONTAINER_PROFILE_SANDBOX
+                    else job_pb2.EGRESS_POLICY_UNSPECIFIED
+                ),
                 scheduling_timeout=Duration.from_seconds(self._scheduling_timeout),
                 timeout=Duration.from_seconds(self._sandbox_ttl),
                 # A restarted sandbox has lost all trial state. Harbor-level
@@ -266,16 +269,16 @@ class IrisEnvironment(BaseEnvironment):
             tasks = self._job.tasks()
             if tasks:
                 status = tasks[0].status()
-                if status.state == job_pb2.TASK_STATE_RUNNING:
+                if status.state == TaskState.RUNNING:
                     return tasks[0].task_id.to_wire()
                 if status.state not in (
-                    job_pb2.TASK_STATE_PENDING,
-                    job_pb2.TASK_STATE_BUILDING,
-                    job_pb2.TASK_STATE_ASSIGNED,
+                    TaskState.PENDING,
+                    TaskState.BUILDING,
+                    TaskState.ASSIGNED,
                 ):
                     raise IrisSandboxError(
                         f"Sandbox task {tasks[0].task_id} entered "
-                        f"{job_pb2.TaskState.Name(status.state)} before running: {status.error or 'no error'}"
+                        f"{status.state} before running: {status.error_message or 'no error'}"
                     )
             time.sleep(2)
         raise EnvironmentStartTimeoutError(
@@ -283,14 +286,14 @@ class IrisEnvironment(BaseEnvironment):
         )
 
     async def stop(self, delete: bool):
-        del delete  # A terminated Iris job cannot be resumed; stop always deletes.
+        del delete  # A canceled Iris job cannot resume.
         await asyncio.to_thread(self._stop_sync)
 
     def _stop_sync(self) -> None:
         try:
             job, self._job = self._job, None
             if job is not None:
-                job.terminate()
+                job.cancel()
         finally:
             self._task_id = None
             self._rpc = None

@@ -44,10 +44,10 @@ uv run --isolated --frozen --extra megatron --extra vllm -m skyrl_train.entrypoi
   generator.sampling_params.top_p=1.0 \
   generator.sampling_params.stop='["</search>", "</answer>"]' \
   environment.env_class="search" \
-  environment.skyrl_gym.max_env_workers=16 \
-  environment.skyrl_gym.search.log_requests=false \
-  environment.skyrl_gym.search.search_url="http://127.0.0.1:8000/retrieve" \
-  environment.skyrl_gym.search.topk=3 \
+  environment.task_sessions.max_verifier_workers=16 \
+  environment.task_sessions.search.log_requests=false \
+  environment.task_sessions.search.search_url="http://127.0.0.1:8000/retrieve" \
+  environment.task_sessions.search.topk=3 \
   trainer.logger="wandb" \
   trainer.project_name="skyrl-search" \
   trainer.run_name="skyrl-search_4turns_maxgeneratelen_500" \
@@ -62,5 +62,4 @@ uv run --isolated --frozen --extra megatron --extra vllm -m skyrl_train.entrypoi
   generator.eval_sampling_params.stop='["</search>", "</answer>"]' \
   trainer.export_path="$HOME/skyrl-search_4turns_maxgeneratelen_500/exports" \
   trainer.eval_interval=50 \
-  $@
-  
+  "$@"

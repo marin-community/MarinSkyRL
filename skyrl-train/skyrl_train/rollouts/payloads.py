@@ -24,7 +24,13 @@ from ray.actor import ActorHandle
 
 from marinskyrl.resource_locator import join_resource_path
 from skyrl_train.io import io
-from skyrl_train.rollouts.buffer import RolloutContentPolicy, RolloutGroup, RolloutLease, RolloutWriter
+from skyrl_train.rollouts.buffer import (
+    PayloadReference,
+    RolloutContentPolicy,
+    RolloutGroup,
+    RolloutLease,
+    RolloutWriter,
+)
 
 PAYLOAD_IO_THREADS = 16
 ROLLOUT_OBJECT_SUFFIX = ".pkl"
@@ -36,8 +42,7 @@ _writes = ThreadPoolExecutor(max_workers=PAYLOAD_IO_THREADS, thread_name_prefix=
 class PayloadStore(Protocol):
     """How rollout payloads are written, read by the trainer, and carried through a checkpoint.
 
-    A ``ReadyRollout.payload`` holds this store's references: at most one, and none for a group whose verdict
-    excludes it from training.
+    A ``ReadyRollout.payload`` holds one reference, or None for a group whose verdict excludes it from training.
     """
 
     @property
@@ -51,12 +56,12 @@ class PayloadStore(Protocol):
 
     async def fetch(self, payloads: Sequence) -> list[RolloutGroup]: ...
 
-    async def checkpoint(self, payloads: Sequence) -> list:
-        """The durable form of ``payloads`` for a checkpoint."""
+    async def checkpoint(self, payload: object | None) -> object | None:
+        """The durable form of one payload for a checkpoint."""
         ...
 
-    def restore(self, payloads: Sequence) -> list:
-        """References for a new buffer from a checkpoint's durable payloads."""
+    def restore(self, payload: object | None) -> object | None:
+        """One reference for a new buffer from a checkpoint's durable payload."""
         ...
 
 
@@ -69,14 +74,13 @@ class MemoryRolloutWriter:
 
     async def write_rollout(self, lease: RolloutLease, group: RolloutGroup) -> None:
         verdict = self.content_policy.verdict(group)
-        payload = []
+        payload = None
         if verdict.trainable:
             # Not ``_owner=self.buffer``: Ray 2.51 can lose its local record of an object that a process put for
             # another owner when that process releases the object while receiving it back, as the synchronous
             # trainer's driver does, and reading it then never completes.
-            payload.append(await asyncio.get_running_loop().run_in_executor(_writes, ray.put, group))
-        # Nested in a list so Ray passes the reference instead of resolving it.
-        await self.buffer.commit.remote(lease.lease_id, group.prompt, verdict, payload)
+            payload = await asyncio.get_running_loop().run_in_executor(_writes, ray.put, group)
+        await self.buffer.commit.remote(lease.lease_id, group.prompt, verdict, PayloadReference(payload))
 
 
 class MemoryPayloads:
@@ -90,11 +94,20 @@ class MemoryPayloads:
     async def fetch(self, payloads: Sequence) -> list[RolloutGroup]:
         return list(await asyncio.gather(*payloads))
 
-    async def checkpoint(self, payloads: Sequence) -> list:
-        return await self.fetch(payloads)
+    async def checkpoint(self, payload: object | None) -> object | None:
+        if payload is None:
+            return None
+        if not isinstance(payload, ray.ObjectRef):
+            raise TypeError(f"memory payload must be a Ray ObjectRef, got {type(payload)}")
+        return await payload
 
-    def restore(self, payloads: Sequence) -> list:
-        return [ray.put(group) for group in payloads]
+    def restore(self, payload: object | None) -> object | None:
+        payload = _unwrap_legacy_checkpoint_payload(payload)
+        if payload is None:
+            return None
+        if not isinstance(payload, RolloutGroup):
+            raise TypeError(f"checkpointed memory payload must be a RolloutGroup, got {type(payload)}")
+        return ray.put(payload)
 
 
 @dataclass(frozen=True)
@@ -107,12 +120,12 @@ class ObjectStoreRolloutWriter:
 
     async def write_rollout(self, lease: RolloutLease, group: RolloutGroup) -> None:
         verdict = self.content_policy.verdict(group)
-        payload = []
+        payload = None
         if verdict.trainable:
             uri = join_resource_path(self.object_store_root, f"{lease.lease_id}{ROLLOUT_OBJECT_SUFFIX}")
             await asyncio.get_running_loop().run_in_executor(_writes, _write_group, uri, group)
-            payload.append(uri)
-        await self.buffer.commit.remote(lease.lease_id, group.prompt, verdict, payload)
+            payload = uri
+        await self.buffer.commit.remote(lease.lease_id, group.prompt, verdict, PayloadReference(payload))
 
 
 @dataclass(frozen=True)
@@ -128,11 +141,20 @@ class ObjectStorePayloads:
         loop = asyncio.get_running_loop()
         return list(await asyncio.gather(*(loop.run_in_executor(_reads, _read_group, uri) for uri in payloads)))
 
-    async def checkpoint(self, payloads: Sequence) -> list:
-        return list(payloads)
+    async def checkpoint(self, payload: object | None) -> object | None:
+        return payload
 
-    def restore(self, payloads: Sequence) -> list:
-        return list(payloads)
+    def restore(self, payload: object | None) -> object | None:
+        return _unwrap_legacy_checkpoint_payload(payload)
+
+
+def _unwrap_legacy_checkpoint_payload(payload: object | None) -> object | None:
+    """Older checkpoints stored each group's zero-or-one payloads in a list."""
+    if isinstance(payload, list):
+        if len(payload) > 1:
+            raise ValueError("checkpointed rollout group has multiple payloads")
+        return next(iter(payload), None)
+    return payload
 
 
 def _write_group(uri: str, group: RolloutGroup) -> None:

@@ -52,8 +52,6 @@ from skyrl_train.hf_export_schema import (
     HFUploadMode,
 )
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-
 
 def _read_hf_export_request(checkpoint_path: str) -> HFExportRequest | None:
     from skyrl_train.hf_export import read_hf_export_request  # noqa: PLC0415 - keep launcher imports Torch-free
@@ -373,7 +371,8 @@ def _run_export(spec: ExportJobSpec, command: list[str]) -> None:
     # The parent launcher's stdout is a single JSON response. A nested export
     # launcher has the same response format, so keep its output with the live
     # diagnostics instead of corrupting the parent's machine-readable stream.
-    exit_code = subprocess.call(command, cwd=str(_REPO_ROOT), stdout=sys.stderr)
+    # Relative cluster paths must retain the parent launch's working directory.
+    exit_code = subprocess.call(command, stdout=sys.stderr)
     if exit_code != 0:
         raise subprocess.CalledProcessError(exit_code, command)
     if not spec.no_wait:

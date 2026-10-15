@@ -7,7 +7,8 @@ from skyrl_gym.verification import VerificationResult
 from skyrl_train.trainer import RayPPOTrainer, _domain_reward_metrics
 from skyrl_train.trajectory_runners.types import TrajectoryBatch
 from skyrl_train.rollouts.finalization import propagate_data_sources
-from skyrl_train.trajectory_runners.types import TrajectoryID
+from skyrl_train.trajectory_runners.types import TrajectoryID, TaskRequestBatch
+from tests.cpu.task_specs import task_input, lowered_task, text_task
 
 
 def make_trainer(n_samples_per_prompt: int = 1) -> RayPPOTrainer:
@@ -77,9 +78,9 @@ def test_training_reports_normalized_composite_scores_by_agent():
     trainer.postprocess_trajectory_batch(batch, ["a", "b", "c"])
 
     assert trainer.all_metrics["reward/avg_raw_reward"] == 2.0
-    assert trainer.all_metrics["reward/avg_verifier_score"] == pytest.approx(2 / 3)
+    assert trainer.all_metrics["reward/avg_verifier_score"] == 1.0
     assert trainer.all_metrics["reward/agent/genrm/avg_verifier_score"] == 1.0
-    assert trainer.all_metrics["reward/agent/mcqa/avg_verifier_score"] == 0.5
+    assert trainer.all_metrics["reward/agent/mcqa/avg_verifier_score"] == 1.0
 
 
 def test_informative_group_fraction_counts_groups_whose_rewards_differ():
@@ -124,10 +125,13 @@ def test_domain_reward_metric_names_do_not_merge_distinct_sources():
 
 
 def test_step_wise_rollout_rows_keep_request_data_sources():
-    request = {
-        "env_extras": [{"extra_info": {"data_source": "math"}}, {"data_source": "tools"}],
-        "trajectory_ids": [TrajectoryID("a", 0), TrajectoryID("b", 0)],
-    }
+    request = TaskRequestBatch(
+        rows=tuple(
+            task_input(lowered_task(text_task(uid)), data_source=source)
+            for uid, source in (("a", "math"), ("b", "tools"))
+        ),
+        trajectory_ids=(TrajectoryID("a", 0), TrajectoryID("b", 0)),
+    )
     output = {
         "response_ids": [[1], [2], [3]],
         "trajectory_ids": [TrajectoryID("a", 0), TrajectoryID("a", 0), TrajectoryID("b", 0)],

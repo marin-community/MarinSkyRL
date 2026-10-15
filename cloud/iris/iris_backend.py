@@ -51,6 +51,7 @@ from marinskyrl.resource_locator import (
     is_cloud_uri,
     join_resource_path,
 )
+from skyrl_train.rollouts.harbor_settings import EnvironmentType
 from cloud.iris.runtime_bundle import build_runtime_bundle
 from marinskyrl.environment_contract import (
     DEBUG_ARTIFACT_DIR_ENV,
@@ -647,8 +648,12 @@ def _rl_config_uses_daytona(config: DictConfig) -> bool:
         RL_ENTRYPOINTS[RLEntrypoint.TERMINAL_BENCH],
         RL_ENTRYPOINTS[RLEntrypoint.TERMINAL_BENCH_GENERATE],
     } or bool(config.skyrl.get("data", {}).get("terminal_bench_data"))
-    backend = OmegaConf.select(config, "skyrl.terminal_bench_config.harbor.environment_type", default="daytona")
-    return uses_harbor and backend == "daytona"
+    backend = OmegaConf.select(
+        config,
+        "skyrl.terminal_bench_config.harbor.environment_type",
+        default=EnvironmentType.DAYTONA.value,
+    )
+    return uses_harbor and backend == EnvironmentType.DAYTONA.value
 
 
 def build_debug_launch_env(args: SimpleNamespace) -> dict[str, str]:
@@ -800,6 +805,7 @@ def launch(args: SimpleNamespace, expected_launcher_commit: str) -> LaunchOutcom
 
     if not _is_checkpoint_export(args) and _rl_config_uses_daytona(args.config):
         daytona_api_key = _resolve_daytona_rl_api_key()
+        os.environ[DAYTONA_RL_SECRET_NAME] = daytona_api_key
         os.environ["DAYTONA_API_KEY"] = daytona_api_key
 
     command = build_config_task_command(args)
@@ -994,6 +1000,14 @@ def launch(args: SimpleNamespace, expected_launcher_commit: str) -> LaunchOutcom
         if v:
             env_vars[k] = v
     env_vars.update(wandb_launch_environment(entity=args.wandb_entity))
+    if not _is_checkpoint_export(args) and _rl_config_uses_daytona(args.config):
+        for field in ("daytona_api_key_env", "eval_daytona_api_key_env"):
+            name = OmegaConf.select(args.config, f"skyrl.terminal_bench_config.harbor.{field}")
+            if name is not None:
+                value = os.environ.get(name)
+                if not value:
+                    raise ValueError(f"Missing Daytona credential environment variable: {name}")
+                env_vars[name] = value
 
     # Load the cluster config (pydantic IrisClusterConfig) and build the provider
     # bundle, then discover + tunnel to the controller. This mirrors the marin

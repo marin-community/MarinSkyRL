@@ -4,7 +4,6 @@ ROLLOUT_FAILURE_FRACTION_METRIC = "generate/failed_trajectory_fraction"
 ENVIRONMENT_METRIC_PREFIX = "environment/"
 IDENTITY_AWARE_REWARD_METRIC_PREFIX = "generate/reward_shaping/identity_aware"
 TASK_ROLLOUT_METRIC_PREFIX = "generate/task_rollout/"
-TOKEN_PROVENANCE_RECONSTRUCTED_FRACTION_METRIC = "generate/token_provenance/reconstructed_fraction"
 TIS_ALIGNED_TOKENS_METRIC = "generate/tis/aligned_tokens"
 TIS_METRIC_PREFIX = TIS_ALIGNED_TOKENS_METRIC.removesuffix("aligned_tokens")
 TIS_EXACT_MATCH_FRACTION_METRIC = "generate/tis/exact_match_fraction"

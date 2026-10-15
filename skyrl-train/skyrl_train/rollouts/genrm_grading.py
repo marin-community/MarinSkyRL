@@ -7,9 +7,11 @@ import requests
 from rolloutengine.contracts import RolloutData
 from skyrl_gym.envs.nemotron_ultra.genrm import grade_genrm_group, response_object
 from skyrl_gym.envs.nemotron_ultra.judge import OpenAIJudge
-from taskcompendium.grading import GradeResult, Outcome
+from taskcompendium.grading_result import GradeResult, Outcome
 from taskcompendium.models import TaskSpec
 from taskcompendium.submission import conversation_messages
+
+from skyrl_train.rollouts.group_grader import GenRMGroupGraderParameters, GroupGraderSpec
 
 
 def _with_grade(rollout: RolloutData, grade: GradeResult, metrics: dict[str, float]) -> RolloutData:
@@ -37,15 +39,14 @@ def _with_grade(rollout: RolloutData, grade: GradeResult, metrics: dict[str, flo
 
 def grade_genrm_rollouts(
     task: TaskSpec,
+    specification: GroupGraderSpec,
     rollouts: Sequence[RolloutData],
     eligible: Sequence[bool],
     phase: str,
 ) -> list[RolloutData]:
     """Replace provisional grades with comparisons among valid peers."""
-    assert task.group_verifier is not None
-    parameters = task.group_verifier.parameters
-    config = parameters["config"]
-    assert isinstance(config, dict)
+    parameters = GenRMGroupGraderParameters.model_validate_json(specification.parameters_json)
+    config = parameters.config
     result = list(rollouts)
     if phase == "eval":
         for index, rollout in enumerate(rollouts):
@@ -62,11 +63,13 @@ def grade_genrm_rollouts(
         return result
     judge_config = config.get("judge")
     if judge_config is None:
-        raise RuntimeError("GenRM tasks require a judge in group_verifier.parameters.config")
+        raise RuntimeError("GenRM tasks require a judge in the group-grader configuration")
     judge = OpenAIJudge(**judge_config)
-    expected_size = int(config.get("num_rollouts_per_prompt", 16))
-    if len(rollouts) != expected_size:
-        raise ValueError(f"GenRM cohort requires {expected_size} rollouts for a prompt, received {len(rollouts)}")
+    for index, (rollout, valid) in enumerate(zip(rollouts, eligible, strict=True)):
+        if not valid and rollout.grade.status == Outcome.GRADED:
+            result[index] = _with_grade(
+                rollout, GradeResult(Outcome.UNAVAILABLE, None, "The rollout is ineligible for GenRM comparison"), {}
+            )
     indices = [
         index
         for index, (rollout, valid) in enumerate(zip(rollouts, eligible, strict=True))
@@ -88,9 +91,9 @@ def grade_genrm_rollouts(
         responses.append(response_object(message))
     try:
         rewards, metrics = grade_genrm_group(
-            conversation_history=conversation_messages(task.context),
+            conversation_history=conversation_messages(task.context.events),
             response_objects=responses,
-            principle=parameters["principle"],
+            principle=parameters.principle,
             judge=judge,
             config=config,
         )
@@ -110,7 +113,7 @@ def grade_genrm_rollouts(
             GradeResult(
                 Outcome.GRADED,
                 reward,
-                diagnostics={"agent": parameters["agent"], "genrm_metrics": metrics},
+                diagnostics={"agent": parameters.agent, "genrm_metrics": metrics},
                 score_min=1.0,
                 score_max=5.0,
             ),

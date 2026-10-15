@@ -57,7 +57,7 @@ dataset builder rather than a distributed rollout worker.
 
 .. code-block:: python
 
-   from skyrl_gym import get_data_contract
+   from skyrl_gym.envs.data_contracts import get_data_contract
 
    contract = get_data_contract("aime")
    ground_truth = contract.validate_example(

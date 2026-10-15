@@ -31,6 +31,9 @@ from skyrl_train.training_batch import TrainingBatchIterator
 from skyrl_train.utils.trainer_utils import ResumeMode
 from skyrl_train.utils.utils import validate_batch_sizes
 from skyrl_train.workers.worker import CriticWorkerBase, PolicyWorkerBase
+from skyrl_train.weight_sync.expert_block.driver import SyncTimings
+from skyrl_train.weight_sync.expert_block.sender import ExpertBlockSender
+from skyrl_train.weight_sync.expert_block.stream import InstallReport
 from tests.cpu.util import example_dummy_config
 
 
@@ -112,10 +115,67 @@ class _ResidencyInferenceClient:
         self.wake_tags.append(tags)
         self.awake = True
 
+    async def pause_generation(self):
+        self.awake = False
+
+    async def resume_generation(self, policy_step=None):
+        self.awake = True
+
+
+class _EmptyBatchPolicyGroup(_ResidencyPolicyGroup):
+    def async_run_ray_method(self, dispatch_type, method_name):
+        assert (dispatch_type, method_name) == ("pass_through", "barrier_all")
+        return []
+
+
+class _VersionedSync:
+    def __init__(self, completed_step):
+        self.sender = ExpertBlockSender(SimpleNamespace(_model_version_step=completed_step), None)
+        self.sender.stream = self
+        self.installed_versions = []
+
+    def run(self, version):
+        self.installed_versions.append(version)
+        return InstallReport(participant=0, version=version, expert_matrices=0, wire_bytes=0, seconds=0.0)
+
+    async def sync(self, version):
+        self.sender.send_weights({"version": version})
+        return SyncTimings(0.0, 0.0, 0.0, 0.0, 0.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("completed_step", [0, 1, 7])
+@pytest.mark.parametrize("colocated", [False, True])
+async def test_empty_ftpo_batch_sync_keeps_last_completed_model_version(completed_step, colocated):
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = get_default_config()
+    trainer.cfg.generator.expert_block_sync.verify = False
+    trainer.colocate_all = colocated
+    trainer.policy_model = _EmptyBatchPolicyGroup()
+    trainer.inference_engine_client = _ResidencyInferenceClient()
+    transport = _VersionedSync(completed_step=completed_step)
+    trainer._expert_block_sync = transport
+    trainer.global_step = completed_step
+    trainer.all_timings = {}
+    trainer.all_startup_timings = {}
+    trainer.all_metrics = {}
+    await trainer._sync_policy_for_rollouts(reason="initial")
+    for step in (completed_step + 1, completed_step + 2):
+        trainer.global_step = step
+        status = await trainer._run_training(
+            {"ftpo_chosen_mask": torch.zeros((2, 3, 2), dtype=torch.bool), "loss_mask": torch.zeros((2, 3))}
+        )
+        assert status["policy_update_steps"] == 0
+        await trainer._sync_policy_for_rollouts(reason="training_step")
+        await trainer._sync_policy_for_rollouts(reason="evaluation")
+    assert transport.installed_versions == [completed_step] * 5
+    assert trainer.inference_engine_client.awake
+
 
 @pytest.mark.parametrize("save_error", [None, RuntimeError("storage of size 0")])
 def test_colocated_checkpoint_temporarily_backloads_policy_and_restores_rollout_residency(save_error, monkeypatch):
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = get_default_config()
     trainer.colocate_all = True
     trainer.policy_model = _ResidencyPolicyGroup()
     trainer.inference_engine_client = _ResidencyInferenceClient()

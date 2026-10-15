@@ -4,70 +4,57 @@ SWE-Gym and SWE-Bench use the shared rollout engine in Marin. The model
 changes repository files through the `shell` tool. The grader applies the Git
 patch in a fresh copy of the task image, then runs the private evaluation script.
 
-The `mini_swe_agent` directory retains the SWE examples. These examples do not
-require Mini-SWE-Agent, LiteLLM, a model HTTP proxy, or a separate inference loop.
-
 ## Prepare task Parquet
 
-For adjacent `marin` and `MarinSkyRL` checkouts, install the task packages in the
-SkyRL environment. Run these commands from `MarinSkyRL/skyrl-train` after the base
-SkyRL environment setup:
-
-```bash
-uv pip install --python ../.venv/bin/python \
-  -e ../../marin/lib/tasktrove-verify \
-  -e '../../marin/lib/shellbox[shellsim]' \
-  -e ../../marin/lib/taskcompendium \
-  -e ../../marin/lib/rolloutengine
-```
-
+The frozen root dependencies include the shared task packages.
+After [installation](../../docs/getting-started/installation.rst), run these commands from `MarinSkyRL/skyrl-train`.
 Materialize the source rows:
 
 ```bash
 uv run --no-sync --project .. examples/mini_swe_agent/preprocess_swegym.py \
   --train_revision TRAIN_DATASET_COMMIT \
   --eval_revision EVAL_DATASET_COMMIT \
+  --image_manifest /path/to/instance-images.json \
+  --max_turns 20 \
+  --command_timeout 180 \
   --output_dir ~/data/swe_gym_subset
 ```
 
 Replace the two revision values with pinned dataset commit IDs. The converter
 reads `SumanthRH/SWE-Gym-Subset` for training and
 `SumanthRH/SWE-bench_Verified` for evaluation. Each output row contains one
-serialized `TaskSpec` in the `task_spec` column. The evaluation script stays in
+serialized `LoweredTaskSpec` in the `lowered_task_spec` column. The evaluation script stays in
 the private verifier fields.
 
-The converter uses each row's `image_name`, when present. Otherwise it derives
-the image name from the dataset and instance ID. Task commands use `/testbed`.
+The image manifest maps every selected instance ID to a prebuilt image reference with its SHA-256 digest.
+Prepare those images before conversion. Image tags and task-specific builds cause rejection.
+The converter does not build or resolve images. Task commands use `/testbed`.
 The task environment permits network access and uses the environment variables
 in `preprocess_swegym.py`. The grader timeout is 3600 seconds.
 
 ## Run training
 
-The Docker factory requires a Docker daemon and Skopeo on each rollout worker.
-It resolves registry images into `trajectory_runner.image_cache` and reuses them
-for task and verifier machines. Set `trajectory_runner.skopeo` to the executable
-path if Skopeo is not on `PATH`.
-rolloutengine, TaskCompendium, and Shellbox must be installed in the worker environment.
-
+The Docker factory requires the Docker CLI and daemon on each rollout worker.
+Docker pulls missing registry images and manages its own image cache for task
+and verifier machines. Skopeo is not required.
 List the task images from the materialized files:
 
 ```bash
 uv run --no-sync --project .. python - <<'PY'
 from pathlib import Path
-from taskcompendium.parquet import read_tasks
+from datasets import Dataset
+from rolloutengine.spec import LoweredTaskSpec
 
 directory = Path("~/data/swe_gym_subset").expanduser()
 images = {
-    task.environment.image.reference
+    LoweredTaskSpec.model_validate_json(row["lowered_task_spec"]).task.environment_requirements.docker_image
     for name in ("train.parquet", "validation.parquet")
-    for task in read_tasks(str(directory / name))
+    for row in Dataset.from_parquet(str(directory / name))
 }
 for image in sorted(images):
     print(image)
 PY
 ```
-
-The worker resolves each listed image when a task first uses it.
 
 ```bash
 bash examples/mini_swe_agent/run_mini_swe_8B.sh
@@ -75,15 +62,24 @@ bash examples/mini_swe_agent/run_mini_swe_8B.sh
 bash examples/mini_swe_agent/run_mini_swe_30B.sh
 ```
 
-The scripts use `skyrl_train.entrypoints.taskcompendium`. Edit `DATA_DIR` and
-`CKPT_PATH` in the selected script for the target workers. The scripts set the command timeout to 180
-seconds. `generator.max_turns` controls the model turn limit.
+The scripts use `skyrl_train.entrypoints.taskcompendium`.
+Edit `DATA_DIR` and `CKPT_PATH` in the script to select task Parquet and checkpoint directories.
+The two-node example requires a Ray cluster with eight GPUs per node.
+See the [cluster setup](../../docs/getting-started/installation.rst#initialize-ray-cluster).
+The materialized session settings control execution limits.
+The preparation command above selects 20 turns and a 180-second command timeout for the 8B example.
+For the 30B example, prepare the data with `--max_turns 50`.
+Each tool turn has a separate 600-second timeout. The cumulative turn deadline is 3600 seconds.
+Final verification has a separate 3600-second deadline. Each cleanup action has a 30-second limit.
+Select turn and command limits with the preparation flags.
+Change the other deadlines in `preprocess_swegym.py` before materialization.
+The launch-time `generator.max_turns` setting does not override a materialized task.
 
-To change task setup, add commands to the task's `environment.setup` during
-materialization. The engine applies the same setup to the fresh grading machine.
-The grader collects staged and unstaged changes, including new files, through
-`git add -A` and `git diff --cached --binary`. It transfers the patch as a file,
-so the patch does not consume shell argument space.
+To change task setup, add commands to `environment_requirements.setup_commands` during materialization.
+The verifier's `environment_requirements` declares setup for its fresh grading machine.
+The task saves the initial Git revision in `refs/taskcompendium/base` before inference.
+The grader collects all changes against that revision, including agent commits and new files.
+It transfers the patch as a file to the grading machine.
 
 A successful evaluation command gives reward `1`. A failed patch application or
 evaluation command gives reward `0`. An evaluation timeout has no grade and

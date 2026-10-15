@@ -33,13 +33,13 @@ Our interface for training data is modelled after `DataProto <https://verl.readt
 Trajectory runner APIs
 ----------------------
 
-.. autoclass:: skyrl_train.trajectory_runners.TrajectoryRequestBatch
+.. autoclass:: skyrl_train.trajectory_runners.types.TrajectoryRequestBatch
    :members:
    :member-order: bysource
    :undoc-members:
    :show-inheritance:
 
-.. autoclass:: skyrl_train.trajectory_runners.TrajectoryBatch
+.. autoclass:: skyrl_train.trajectory_runners.types.TrajectoryBatch
    :members:
    :member-order: bysource
    :undoc-members:

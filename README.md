@@ -30,6 +30,11 @@ MarinSkyRL is maintained as a hard snapshot; no upstream sync or merge-back is p
 The repository root builds one `marinskyrl` wheel containing the typed Iris launcher, `skyrl_train`, and
 `skyrl_gym`. Its base dependency set is CPU-only and supports launcher inspection, validation, and dry runs:
 
+Runtime libraries published from `marin-community/marin` resolve as `marin-*` packages from PyPI. Run
+`uv lock` at the root and `uv lock --project skyrl-gym` when taking a new release; the frozen installs below
+then use those versions. Raise the relevant `marin-*` minimum in `pyproject.toml` when new code needs a
+new release, and commit both lockfiles. The optional `harbor-test` group installs Harbor for its tests.
+
 ```bash
 uv sync --frozen
 uv run --frozen marinskyrl --help
@@ -121,3 +126,6 @@ The script is designed to run on 8 GPUs single-node. If that is not your setup, 
 ```
 
 Verifier setup, opt-in configuration and offline comparison commands are documented in [Unified verification](docs/verifyit.md).
+
+Offline DPO data formats and generated validation are documented in
+[Preference training and task validation](docs/preference-training.md).

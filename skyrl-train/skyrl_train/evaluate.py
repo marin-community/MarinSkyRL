@@ -1,6 +1,6 @@
 import torch
 from skyrl_train.utils.progress import tqdm
-from typing import Any, Dict, List, Protocol
+from typing import Dict, List, Protocol
 from loguru import logger
 from collections import defaultdict
 from dataclasses import dataclass
@@ -44,7 +44,7 @@ from transformers import AutoTokenizer
 class _EvaluationRollouts:
     batch: TrajectoryBatch
     env_classes: List[str]
-    env_extras: List[Dict[str, Any]]
+    data_sources: List[str | None]
     uids: List[str]
     example_prompt: ConversationType
     example_batch: TrajectoryBatch
@@ -52,7 +52,7 @@ class _EvaluationRollouts:
 
 class _EvaluationAccumulator(Protocol):
     env_classes: List[str]
-    env_extras: List[Dict[str, Any]]
+    data_sources: List[str | None]
     uids: List[str]
 
     def record(self, request: TrajectoryRequestBatch, batch: TrajectoryBatch, uids: List[str]) -> None: ...
@@ -67,40 +67,38 @@ def evaluation_dump_dir(export_path: str, global_step: int | None) -> str:
 @dataclass
 class _WholeTrajectoryAccumulator:
     env_classes: List[str]
-    env_extras: List[Dict[str, Any]]
+    data_sources: List[str | None]
     uids: List[str]
 
     def record(self, request: TrajectoryRequestBatch, batch: TrajectoryBatch, uids: List[str]) -> None:
-        validate_trajectory_batch(len(request["prompts"]), batch)
-        self.env_classes.extend(request["env_classes"])
-        self.env_extras.extend(request["env_extras"])
+        validate_trajectory_batch(len(request.metadata), batch)
+        self.env_classes.extend(row.metric_class for row in request.metadata)
+        self.data_sources.extend(row.data_source for row in request.metadata)
         self.uids.extend(uids)
 
 
 @dataclass
 class _StepWiseAccumulator:
     env_classes: List[str]
-    env_extras: List[Dict[str, Any]]
+    data_sources: List[str | None]
     uids: List[str]
 
     def record(self, request: TrajectoryRequestBatch, batch: TrajectoryBatch, uids: List[str]) -> None:
         del uids
-        trajectory_ids = request.get("trajectory_ids")
+        trajectory_ids = request.trajectory_ids
         output_ids = batch.get("trajectory_ids")
         if trajectory_ids is None or output_ids is None:
             raise ValueError("step-wise evaluation requires trajectory IDs")
         inputs_by_id = {
-            trajectory_id.instance_id: (env_class, env_extra)
-            for trajectory_id, env_class, env_extra in zip(
-                trajectory_ids, request["env_classes"], request["env_extras"]
-            )
+            trajectory_id.instance_id: (row.metric_class, row.data_source)
+            for trajectory_id, row in zip(trajectory_ids, request.metadata, strict=True)
         }
         for trajectory_id in output_ids:
             if trajectory_id.instance_id not in inputs_by_id:
                 raise ValueError(f"Trajectory ID {trajectory_id.instance_id} not found in input")
-            env_class, env_extra = inputs_by_id[trajectory_id.instance_id]
+            env_class, data_source = inputs_by_id[trajectory_id.instance_id]
             self.env_classes.append(env_class)
-            self.env_extras.append(env_extra)
+            self.data_sources.append(data_source)
             self.uids.append(trajectory_id.instance_id)
 
 
@@ -133,7 +131,6 @@ async def _collect_evaluation_rollouts(
                 prompts,
                 cfg.generator.eval_n_samples_per_prompt,
                 get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.eval_sampling_params),
-                cfg.environment.env_class,
                 "eval",
                 global_step,
             )
@@ -157,9 +154,9 @@ async def _collect_evaluation_rollouts(
             tis_lcs_alert_threshold=float(cfg.trainer.algorithm.tis_lcs_alert_threshold),
         ),
         env_classes=accumulator.env_classes,
-        env_extras=accumulator.env_extras,
+        data_sources=accumulator.data_sources,
         uids=accumulator.uids,
-        example_prompt=last_request["prompts"][0],
+        example_prompt=last_request.public_prompts[0],
         example_batch=last_batch,
     )
 
@@ -174,6 +171,7 @@ def _calculate_eval_metrics(
     overall_avg_score, overall_pass_at_n = get_metrics_from_trajectory_batch(batch, uids)
     metrics.update(
         {
+            "eval/all/num_attempted": float(len(batch["response_ids"])),
             "eval/all/avg_score": overall_avg_score,
             f"eval/all/pass_at_{samples_per_prompt}": overall_pass_at_n,
         }
@@ -181,6 +179,7 @@ def _calculate_eval_metrics(
     verifier_scores = normalized_verifier_scores(batch)
     if verifier_scores is not None:
         coverage, average = verifier_score_summary(verifier_scores)
+        metrics["eval/all/num_scored"] = float(sum(score is not None for score in verifier_scores))
         metrics["eval/all/verifier_score_coverage"] = coverage
         if average is not None:
             metrics["eval/all/avg_verifier_score"] = average
@@ -207,8 +206,8 @@ def _dump_eval_results(
             rollouts.batch,
             data_sources,
             rollouts.env_classes,
-            rollouts.env_extras,
             metrics,
+            rollouts.uids,
         )
 
 
@@ -246,7 +245,7 @@ async def evaluate(
             eval_dataloader, trajectory_runner, cfg, global_step, active_sink, val_set_name, accumulator
         )
         concatenated_batch = rollouts.batch
-        concat_data_sources = [env_extra.get("data_source") for env_extra in rollouts.env_extras]
+        concat_data_sources = rollouts.data_sources
         vis = tokenizer.decode(rollouts.example_batch["response_ids"][0])
         log_example(
             logger,
@@ -302,7 +301,7 @@ async def evaluate_step_wise(
         eval_dataloader, trajectory_runner, cfg, global_step, trajectory_sink, val_set_name, accumulator
     )
     concatenated_batch = rollouts.batch
-    concat_data_sources = [env_extra.get("data_source") for env_extra in rollouts.env_extras]
+    concat_data_sources = rollouts.data_sources
     vis = tokenizer.decode(rollouts.example_batch["response_ids"][0])
     logger.info(f"Eval output example: {vis}")
 

@@ -28,7 +28,9 @@ MAX_NUMEL = 128
 ROUTER_BIAS = ".mlp.router.expert_bias"
 
 
-def megatron_shapes(layers, experts, *, last_stage: bool) -> dict[str, tuple[int, ...]]:
+def megatron_shapes(
+    layers, experts, *, last_stage: bool, expert_hidden_size: int = HIDDEN
+) -> dict[str, tuple[int, ...]]:
     """Megatron parameter name -> shape, for a rank with these layers and global expert ids."""
     shapes = {}
     for layer in layers:
@@ -41,8 +43,8 @@ def megatron_shapes(layers, experts, *, last_stage: bool) -> dict[str, tuple[int
         shapes[f"{prefix}.mlp.router.expert_bias"] = (NUM_EXPERTS,)
         shapes[f"{prefix}.mlp.shared_experts.linear_fc1.weight"] = (2 * SHARED_INTERMEDIATE, HIDDEN)
         for expert in experts:
-            shapes[f"{prefix}.mlp.experts.linear_fc1.weight{expert}"] = (2 * INTERMEDIATE, HIDDEN)
-            shapes[f"{prefix}.mlp.experts.linear_fc2.weight{expert}"] = (HIDDEN, INTERMEDIATE)
+            shapes[f"{prefix}.mlp.experts.linear_fc1.weight{expert}"] = (2 * INTERMEDIATE, expert_hidden_size)
+            shapes[f"{prefix}.mlp.experts.linear_fc2.weight{expert}"] = (expert_hidden_size, INTERMEDIATE)
     if last_stage:
         shapes["decoder.final_layernorm.weight"] = (HIDDEN,)
         shapes["output_layer.weight"] = (VOCAB, HIDDEN)
@@ -61,8 +63,10 @@ def megatron_parameter(name: str, shape: tuple[int, ...], model_names: list[str]
     return ((MAX_NUMEL + torch.arange(numel)) * 2.0**exponent).to(dtype).reshape(shape)
 
 
-def megatron_parameters(layers, experts, *, last_stage: bool, model_names: list[str]) -> dict[str, torch.Tensor]:
-    shapes = megatron_shapes(layers, experts, last_stage=last_stage)
+def megatron_parameters(
+    layers, experts, *, last_stage: bool, model_names: list[str], expert_hidden_size: int = HIDDEN
+) -> dict[str, torch.Tensor]:
+    shapes = megatron_shapes(layers, experts, last_stage=last_stage, expert_hidden_size=expert_hidden_size)
     return {name: megatron_parameter(name, shape, model_names) for name, shape in shapes.items()}
 
 
@@ -71,7 +75,7 @@ def mapping(kind: str, hf_param, tp_size: int = 1):
     return type(kind, (), {"hf_param": hf_param, "tp_size": tp_size})()
 
 
-def conversion_tasks(parameters: dict[str, torch.Tensor]) -> list:
+def conversion_tasks(parameters: dict[str, torch.Tensor], *, expert_schema="stacked") -> list:
     """The conversion tasks the Grug bridge produces for these parameters."""
     tasks = []
     for name, weight in parameters.items():
@@ -87,13 +91,20 @@ def conversion_tasks(parameters: dict[str, torch.Tensor]) -> list:
             kind = mapping("ReplicatedMapping", f"{hf}.mlp.router.weight")
         elif name.endswith(ROUTER_BIAS):
             kind = mapping("ReplicatedMapping", f"{hf}.mlp.router.bias")
-        elif ".experts.linear_fc1" in name:
-            kind = mapping(
-                "GrugStackedGatedExpertMapping",
-                {part: f"{hf}.mlp.experts.{part}_proj.weight" for part in ("gate", "up")},
-            )
-        elif ".experts.linear_fc2" in name:
-            kind = mapping("GrugStackedExpertMapping", f"{hf}.mlp.experts.down_proj.weight")
+        elif ".experts.linear_fc" in name:
+            prefix = f"{hf}.mlp.experts"
+            if expert_schema == "split":
+                prefix += f".{re.search(r'weight(\d+)$', name)[1]}"
+            if ".linear_fc1" in name:
+                kind = mapping(
+                    "GatedMLPMapping" if expert_schema == "split" else "GrugStackedGatedExpertMapping",
+                    {part: f"{prefix}.{part}_proj.weight" for part in ("gate", "up")},
+                )
+            else:
+                kind = mapping(
+                    "AutoMapping" if expert_schema == "split" else "GrugStackedExpertMapping",
+                    f"{prefix}.down_proj.weight",
+                )
         elif name == "decoder.final_layernorm.weight":
             kind = mapping("ReplicatedMapping", "model.norm.weight")
         else:

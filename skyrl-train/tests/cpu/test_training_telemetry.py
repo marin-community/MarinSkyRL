@@ -18,6 +18,7 @@ from skyrl_train.training_batch import TrainingOutputBatch
 from skyrl_train.timing_observability import STEP_WALL_PHASES
 from tests.cpu.trajectory_runners.fixture_runner import FixtureRunner
 from tests.cpu.util import example_dummy_config
+from tests.cpu.task_specs import task_input, text_task, lowered_task
 
 # Record names and attribute values the async RL dashboard reads (marin
 # infra/grafana/src/async_rl_observability.py).
@@ -75,7 +76,7 @@ class PromptRows(torch.utils.data.Dataset):
 
     def __getitem__(self, index):
         uid = self.uid(index)
-        return {"prompt": [{"role": "user", "content": uid}], "env_class": None, "env_extras": {}, "uid": uid}
+        return {"input": task_input(lowered_task(text_task(uid, prompt=uid))), "uid": uid}
 
     def uid(self, index):
         return PROMPT_UIDS[index]
@@ -90,8 +91,8 @@ class ScriptedRunner(FixtureRunner):
     def __init__(self):
         self.calls = collections.Counter()
 
-    async def _run(self, input_batch, disable_tqdm=False):
-        uid = input_batch["trajectory_ids"][0].instance_id
+    async def _run(self, input_batch):
+        uid = input_batch.trajectory_ids[0].instance_id
         self.calls[uid] += 1
         await asyncio.sleep(0)
         output = {

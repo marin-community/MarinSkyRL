@@ -1,18 +1,19 @@
 """Apply Harbor launch settings to tasks executed by the common rollout engine."""
 
 from dataclasses import dataclass, replace
-from pathlib import Path
+from functools import partial
+import os
 
-from harbor_config.models.job.config import RetryConfig
-from harbor_config.models.trial.config import EnvironmentConfig, VerifierConfig
+from daytona import AsyncDaytona, DaytonaConfig
 from omegaconf import DictConfig
 from shellbox.backends.daytona.machine import DaytonaMachineFactory, DaytonaNetworkMode, DaytonaNetworkPolicy
-from shellbox.backends.docker.machine import DockerMachineFactory
-from shellbox.machine import MachineFactory
-from taskcompendium.environment import EnvironmentSpec, ShellVerifierSpec
-from taskcompendium.models import TaskSpec, VerifierKind, VerifierSpec
-from taskcompendium.grading import GradingFailure, Outcome, skipped_verifier
+from shellbox.machine import Backend, MachineFactory
+from taskcompendium.models import NoGrader
+from rolloutengine.spec import LoweredTaskSpec, MachineRuntimeSpec
+from taskcompendium.grading_result import GradingFailure, Outcome
 from rolloutengine.contracts import RolloutData, RolloutFailure
+
+from skyrl_train.rollouts.harbor_settings import EnvironmentConfig, EnvironmentType, RetryConfig, VerifierConfig
 
 from skyrl_train.trajectory_runners.harbor.configuration import HarborConfigBuilder
 from skyrl_train.trajectory_runners.harbor.identity_aware_reward import (
@@ -20,7 +21,7 @@ from skyrl_train.trajectory_runners.harbor.identity_aware_reward import (
     identity_aware_pass_ratios,
 )
 from skyrl_train.trajectory_runners.harbor.truncation_penalty import apply_truncation_penalty, detect_turn_truncation
-from skyrl_train.trajectory_runners.types import TrajectoryRequestBatch
+from skyrl_train.trajectory_runners.types import RESPONSE_SPAN_TAGS_KEY, TrajectoryRequestBatch
 from skyrl_train.metric_names import IDENTITY_AWARE_REWARD_METRIC_PREFIX
 from skyrl_train.utils.harbor_errors import ErrorHandlingConfig, ErrorTreatment, classify_exception_type
 from skyrl_train.utils.pbs_shaping import compute_pbs_token_shaping
@@ -33,6 +34,9 @@ from skyrl_train.utils.reward_shaping import (
     verifier_test_collection,
 )
 
+HARBOR_MACHINE_BACKEND = "harbor"
+HARBOR_EVAL_MACHINE_BACKEND = "harbor_eval"
+
 
 @dataclass(frozen=True)
 class HarborTaskSettings:
@@ -42,7 +46,7 @@ class HarborTaskSettings:
     max_agent_timeout: float | None
     max_turns: int | None
     timeout_multiplier: float
-    eval_timeout: float
+    eval_timeout: float | None
     concurrent_trials: int
     error_handling: ErrorHandlingConfig
     reward_shaping: dict
@@ -53,19 +57,20 @@ class HarborTaskSettings:
     def from_config(cls, config: DictConfig):
         builder = HarborConfigBuilder(config)
         agent, options = builder.agent_fields()
+        trial = builder.trial_fields()
         return cls(
             builder.environment_config(),
             builder.verifier_config(),
             agent.get("override_timeout_sec"),
             agent.get("max_timeout_sec"),
             options.get("max_turns"),
-            float(builder.trial_fields().get("timeout_multiplier", 1)),
+            float(trial.get("timeout_multiplier", 1)),
             builder.get_eval_timeout_override_sec(),
             builder.get_n_concurrent_trials(),
             builder.get_error_handling_config(),
             builder.get_reward_shaping_config(),
             builder.build_retry_config(),
-            builder.trial_fields().get("trial_attempt_timeout_sec"),
+            trial.get("trial_attempt_timeout_sec"),
         )
 
     def retry_delay(self, failure: RolloutFailure | None, retries: int) -> float | None:
@@ -81,18 +86,22 @@ class HarborTaskSettings:
             return None
         return min(self.retry.min_wait_sec * self.retry.wait_multiplier**retries, self.retry.max_wait_sec)
 
-    def verifier_override(self) -> VerifierSpec | None:
-        return skipped_verifier("Harbor verification is disabled") if self.verifier.disable else None
+    def grader_override(self) -> NoGrader | None:
+        return NoGrader(reason="Harbor verification is disabled") if self.verifier.disable else None
 
-    def machine_factory(self, runner_config: DictConfig) -> MachineFactory:
-        match self.environment.type.value:
-            case "docker":
-                return DockerMachineFactory(
-                    skopeo=Path(runner_config.skopeo), image_cache=Path(runner_config.image_cache).expanduser()
-                )
-            case "daytona":
+    def machine_factory(self, *, phase: str = "train") -> MachineFactory:
+        match self.environment.type:
+            case EnvironmentType.DAYTONA:
                 policy = self.environment.kwargs.get("network_policy")
+                key_env = self.environment.kwargs.get("eval_api_key_env" if phase == "eval" else "api_key_env")
+                client_factory = AsyncDaytona
+                if key_env is not None:
+                    api_key = os.environ.get(key_env)
+                    if not api_key:
+                        raise ValueError(f"Missing Daytona credential environment variable: {key_env}")
+                    client_factory = partial(AsyncDaytona, DaytonaConfig(api_key=api_key))
                 return DaytonaMachineFactory(
+                    client_factory=client_factory,
                     ttl_minutes=self.environment.kwargs.get("ttl_minutes", 360),
                     network_policy=None
                     if policy is None
@@ -104,69 +113,61 @@ class HarborTaskSettings:
             case other:
                 raise ValueError(f"No Shellbox factory is configured for Harbor backend {other!r}")
 
-    def task(self, task: TaskSpec, *, phase: str) -> TaskSpec:
-        """Resolve task resources and deadlines without changing the source specification."""
-        agent_override = self.eval_timeout if phase == "eval" else self.agent_timeout
+    def lowered(self, lowered: LoweredTaskSpec, *, phase: str) -> LoweredTaskSpec:
+        """Apply deployment overrides without changing the task definition."""
+        if self.verifier.disable and not isinstance(lowered.task.grader, NoGrader):
+            raise ValueError("Disabled Harbor verification must be selected before task import")
 
-        def agent_timeout(original):
-            value = original if agent_override is None else agent_override
-            if value is None:
+        def machine(original: MachineRuntimeSpec | None) -> MachineRuntimeSpec | None:
+            if original is None:
                 return None
-            value *= self.timeout_multiplier
-            ceiling = self.max_agent_timeout
-            return value if ceiling is None else min(value, ceiling)
-
-        def environment(original: EnvironmentSpec) -> EnvironmentSpec:
             updates = {
                 name: value
                 for name in ("cpus", "memory_mb", "storage_mb", "gpus")
                 if (value := getattr(self.environment, f"override_{name}")) is not None
             }
+            if original.backend == Backend.DOCKER:
+                updates["backend"] = (
+                    HARBOR_EVAL_MACHINE_BACKEND
+                    if phase == "eval" and self.environment.kwargs.get("eval_api_key_env")
+                    else HARBOR_MACHINE_BACKEND
+                )
             if original.startup_timeout is not None:
                 updates["startup_timeout"] = original.startup_timeout * self.timeout_multiplier
             return original.model_copy(update=updates)
 
-        def verifier(original: VerifierSpec) -> VerifierSpec:
-            override = self.verifier_override()
-            if override is not None and original.kind != VerifierKind.STAGED:
-                return override
-            if original.kind != VerifierKind.SHELL:
-                return original
-            specification = ShellVerifierSpec.model_validate_json(original.parameters_json)
-            timeout = (
-                specification.timeout
-                if self.verifier.override_timeout_sec is None
-                else self.verifier.override_timeout_sec
-            ) * self.timeout_multiplier
-            if self.verifier.max_timeout_sec is not None:
-                timeout = min(timeout, self.verifier.max_timeout_sec)
-            specification = specification.model_copy(
-                update={
-                    "timeout": timeout,
-                    "environment": None
-                    if specification.environment is None
-                    else environment(specification.environment),
-                }
-            )
-            return original.model_copy(update={"parameters_json": specification.model_dump_json()})
+        def timeout(original: float | None, override: float | None, ceiling: float | None) -> float | None:
+            value = original if override is None else override
+            if value is None:
+                return None
+            value *= self.timeout_multiplier
+            return value if ceiling is None else min(value, ceiling)
 
-        return task.model_copy(
+        runtime = lowered.runtime.model_copy(
             update={
-                "environment": environment(task.environment),
-                "agent_timeout": agent_timeout(task.agent_timeout),
-                "attempt_timeout": task.attempt_timeout if self.attempt_timeout is None else self.attempt_timeout,
-                "verifier": verifier(task.verifier),
-                "stages": tuple(
-                    stage.model_copy(
-                        update={
-                            "agent_timeout": agent_timeout(stage.agent_timeout or task.agent_timeout),
-                            "verifier": verifier(stage.verifier),
-                        }
-                    )
-                    for stage in task.stages
-                ),
+                "task_machine": machine(lowered.runtime.task_machine),
+                "verifier_machine": machine(lowered.runtime.verifier_machine),
             }
         )
+        session = lowered.session.model_copy(
+            update={
+                "max_turns": lowered.session.max_turns if self.max_turns is None else self.max_turns,
+                "total_turn_timeout": timeout(
+                    lowered.session.total_turn_timeout,
+                    self.eval_timeout if phase == "eval" else self.agent_timeout,
+                    self.max_agent_timeout,
+                ),
+                "verifier_timeout": timeout(
+                    lowered.session.verifier_timeout,
+                    self.verifier.override_timeout_sec,
+                    self.verifier.max_timeout_sec,
+                ),
+                "attempt_timeout": lowered.session.attempt_timeout
+                if self.attempt_timeout is None
+                else self.attempt_timeout,
+            }
+        )
+        return lowered.model_copy(update={"runtime": runtime, "session": session})
 
 
 _GRADING_FAILURE_TYPES = {
@@ -208,7 +209,8 @@ def shape_harbor_rollouts(
     rewards = [rollout.grade.reward if rollout.grade.status == Outcome.GRADED else 0.0 for rollout in rollouts]
     components = [{} for _ in rollouts]
     collections = [None for _ in rollouts]
-    identifiers = request.get("trajectory_ids")
+    identifiers = request.trajectory_ids
+    metadata = request.batch_metadata
     eligible = [
         harbor and rollout.grade.status == Outcome.GRADED and rollout.failure is None
         for harbor, rollout in zip(harbor_tasks, rollouts, strict=True)
@@ -298,11 +300,11 @@ def shape_harbor_rollouts(
         reward, penalized = apply_truncation_penalty(
             rewards[index], rollout.grade.reward, truncated, config["truncation_penalty"]
         )
-        last = next(
+        last_step = next(
             (
-                index
-                for index in reversed(range(len(rollout.steps)))
-                if rollout.loss_mask[rollout.steps[index].response_end]
+                step_index
+                for step_index in reversed(range(len(rollout.steps)))
+                if rollout.loss_mask[rollout.steps[step_index].response_end]
             ),
             None,
         )
@@ -312,13 +314,12 @@ def shape_harbor_rollouts(
                 step,
                 transition=replace(
                     step.transition,
-                    reward=reward if index == last else 0.0,
-                    reward_components=component_rewards if index == last else {},
+                    reward=reward if step_index == last_step else 0.0,
+                    reward_components=component_rewards if step_index == last_step else {},
                 ),
             )
-            for index, step in enumerate(rollout.steps)
+            for step_index, step in enumerate(rollout.steps)
         )
-        metadata = request.get("batch_metadata")
         if config.get("enable_token_reward_channel") and (metadata is None or metadata.training_phase != "eval"):
             tags = [0] * len(rollout.response_token_ids)
             if config["enable_span_tagging"]:
@@ -345,7 +346,7 @@ def shape_harbor_rollouts(
                 turn = step.turn
                 if config["enable_span_tagging"]:
                     turn = replace(
-                        turn, metadata={**turn.metadata, "response_span_tags": tags[start : step.response_end + 1]}
+                        turn, metadata={**turn.metadata, RESPONSE_SPAN_TAGS_KEY: tags[start : step.response_end + 1]}
                     )
                 annotated.append(
                     replace(

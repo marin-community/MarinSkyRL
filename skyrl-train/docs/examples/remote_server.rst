@@ -106,9 +106,10 @@ To start training, we need to set up our training script. You can find a complet
 
         ... # Other parameters (see `examples/remote_inference_engine/run_remote.sh` for more)
 
-.. tip:: 
+.. tip::
 
-With remote servers, there can be non-trivial HTTP overhead during generation. When running training and inference in the same Ray cluster, it is recommended to use `run_engines_locally=True` to maximize throughput
+   Remote servers add HTTP overhead to generation.
+   Use ``run_engines_locally=True`` when training and inference share one Ray cluster.
 
 Launching Your Training Run
 ---------------------------
@@ -126,4 +127,3 @@ What's Next?
 Now that you've set up training with a remote inference engine, you might want to explore ways of speeding up training:
 
 - :doc:`../tutorials/fully_async`: Letting generation run ahead of training with the rollout buffer
-

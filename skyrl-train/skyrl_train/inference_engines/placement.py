@@ -38,40 +38,42 @@ def inference_worker_placement(
     )
 
 
-def node_local_bundle_nodes(
+def inference_bundle_nodes(
     placement_groups: Sequence[PlacementGroup],
     *,
     data_parallel_size: int,
     node_gpu_capacities: Mapping[str, int],
     pipeline_parallel_size: int = 1,
+    expert_parallel_size: int = 1,
 ) -> list[list[str]]:
-    """Return the node of each stage of each replica, after checking that a stage's bundles share a node.
+    """Return each replica's bundle nodes and check placement completeness and GPU capacity.
 
     Bundle ``dp * PP + pp`` of a replica's group belongs to stage ``pp`` of data-parallel rank ``dp``.
+    Each stage must fit on one node, except TP=PP=1 replicas with EP=DP>1.
     """
-    stage_nodes = []
+    cross_node_ep = pipeline_parallel_size == 1 and expert_parallel_size == data_parallel_size > 1
+    bundle_nodes = []
     per_replica = data_parallel_size * pipeline_parallel_size
     for replica, pg in enumerate(placement_groups):
         bundles = placement_group_table(pg)["bundles_to_node_id"]
         if set(bundles) != set(range(per_replica)):
             raise ValueError(f"Inference replica {replica} has incomplete placement bundles")
-        nodes = []
-        for stage in range(pipeline_parallel_size):
-            on_stage = {bundles[dp * pipeline_parallel_size + stage] for dp in range(data_parallel_size)}
-            if len(on_stage) != 1 or not next(iter(on_stage)):
-                raise ValueError(f"Inference replica {replica} stage {stage} placement spans nodes")
-            nodes.append(next(iter(on_stage)))
-        stage_nodes.append(nodes)
-    for node_id, stage_count in Counter(node for nodes in stage_nodes for node in nodes).items():
-        if stage_count * data_parallel_size > node_gpu_capacities.get(node_id, 0):
+        if not cross_node_ep:
+            for stage in range(pipeline_parallel_size):
+                on_stage = {bundles[dp * pipeline_parallel_size + stage] for dp in range(data_parallel_size)}
+                if len(on_stage) != 1:
+                    raise ValueError(f"Inference replica {replica} stage {stage} placement spans nodes")
+        bundle_nodes.append([bundles[index] for index in range(per_replica)])
+    for node_id, count in Counter(node for nodes in bundle_nodes for node in nodes).items():
+        if not node_id or count > node_gpu_capacities.get(node_id, 0):
             raise ValueError(f"Inference replicas exceed GPU capacity on placement node {node_id}")
-    return stage_nodes
+    return bundle_nodes
 
 
 def verified_inference_replica_placements(
     reports: Sequence[Sequence[Mapping[str, str | int]]],
     *,
-    stage_nodes: Sequence[Sequence[str]],
+    bundle_nodes: Sequence[Sequence[str]],
     node_hosts: Mapping[str, str],
     relative_rank_offsets: Sequence[int],
     data_parallel_size: int,
@@ -82,7 +84,7 @@ def verified_inference_replica_placements(
 
     ``reports`` has one list per data-parallel actor, with one report per worker.
     """
-    if len(reports) != len(stage_nodes) * data_parallel_size or len(reports) != len(relative_rank_offsets):
+    if len(reports) != len(bundle_nodes) * data_parallel_size or len(reports) != len(relative_rank_offsets):
         raise ValueError("Incomplete inference replica reports")
     placements = []
     for index, (report, offset) in enumerate(zip(reports, relative_rank_offsets, strict=True)):
@@ -94,7 +96,7 @@ def verified_inference_replica_placements(
             placements.append(
                 InferenceReplicaPlacement(
                     replica=replica,
-                    node_id=stage_nodes[replica][worker.pp_rank]
+                    node_id=bundle_nodes[replica][dp_rank * pipeline_parallel_size + worker.pp_rank]
                     if 0 <= worker.pp_rank < pipeline_parallel_size
                     else "",
                     bundle_index=dp_rank * pipeline_parallel_size + worker.pp_rank,
@@ -104,7 +106,7 @@ def verified_inference_replica_placements(
             )
     validate_inference_replica_topology(
         placements,
-        num_replicas=len(stage_nodes),
+        num_replicas=len(bundle_nodes),
         data_parallel_size=data_parallel_size,
         expert_parallel_size=expert_parallel_size,
         pipeline_parallel_size=pipeline_parallel_size,

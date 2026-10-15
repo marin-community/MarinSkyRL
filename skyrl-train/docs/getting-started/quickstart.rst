@@ -8,7 +8,7 @@ In this quickstart, we'll walk you through running GRPO training on the GSM8K da
 Dataset Preparation
 -------------------
 
-To download and prepare the GSM8K dataset, run the following script. We provide convenience scripts for GSM8K and several other popular datasets, but you can also use your own custom dataset by following the instructions in the :ref:`dataset-preparation` section.
+Run this script to download and prepare GSM8K. See :doc:`../datasets/dataset-preparation` for custom datasets.
 
 .. code-block:: bash
 
@@ -98,4 +98,3 @@ Now that you've got the basics down, you might want to explore:
 - :doc:`../tutorials/new_env`: Creating a new environment without touching the training loop
 - :doc:`../tutorials/fully_async`: Letting generation run ahead of training with the rollout buffer
 - :doc:`../recipes/overview`: A collection of end-to-end recipes with SkyRL.
-

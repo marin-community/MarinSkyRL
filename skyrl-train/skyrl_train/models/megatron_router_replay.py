@@ -10,7 +10,7 @@ install step that touches real ``TopKRouter`` objects lives in
 Controller lifecycle (per micro-batch forward through mcore's pipeline
 scheduler)::
 
-    controller.begin_forward(per_layer_targets, mask, response_mask)
+    controller.begin_forward(per_layer_targets, mask, prediction_mask)
     out = model(...)                      # each local router fires once
     controller.end_forward()
     ...
@@ -68,13 +68,12 @@ def require_scalar_num_actions(num_actions) -> None:
 def dense_replay_targets(rollout_routed_experts, batch_size, seq_len, num_actions):
     """Build the dense per-position replay target and mask, layout-agnostic.
 
-    ``rollout_routed_experts`` is ``[B, local_response_len, L, K]`` and starts at
-    the beginning of the global ``num_actions`` response window. Returns ``(full, mask)``.
-    ``full`` is a ``[B, seq_len, L, K]`` long tensor sentinel-filled outside the response window and ``mask`` is a
-    ``[B, seq_len]`` bool tensor True only on response positions whose captured
-    row is non-sentinel (a row is sentinel iff all K captured experts equal
-    ``SENTINEL_EXPERT_ID``). Prompt / pad / sentinel rows fall through to
-    native routing.
+    ``rollout_routed_experts`` is ``[B, local_response_len, L, K]``. It starts
+    at the beginning of the global ``num_actions`` response window. Each row
+    belongs on the model position that predicted that response token, beginning
+    with the final prompt token. Returns ``(full, mask)`` where ``full`` is a
+    ``[B, seq_len, L, K]`` long tensor. ``mask`` is True only for captured,
+    non-sentinel prediction positions. Other positions use native routing.
     """
     require_scalar_num_actions(num_actions)
     device = rollout_routed_experts.device
@@ -82,16 +81,19 @@ def dense_replay_targets(rollout_routed_experts, batch_size, seq_len, num_action
     B, response_len, L, K = captured.shape
     assert B == batch_size, f"router_replay batch mismatch: {B} vs {batch_size}"
     assert response_len <= num_actions, f"router_replay response_len {response_len} exceeds num_actions {num_actions}"
+    if num_actions >= seq_len:
+        raise ValueError("router_replay requires a prompt token before the response")
 
     full = torch.full((batch_size, seq_len, L, K), SENTINEL_EXPERT_ID, dtype=torch.long, device=device)
-    full[:, seq_len - num_actions : seq_len - num_actions + response_len, :, :] = captured
+    prediction_start = seq_len - num_actions - 1
+    full[:, prediction_start : prediction_start + response_len, :, :] = captured
 
-    response_pos = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=device)
-    response_pos[:, seq_len - num_actions : seq_len] = True
+    prediction_mask = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=device)
+    prediction_mask[:, prediction_start : seq_len - 1] = True
     # non-sentinel per [B, seq_len, L]; collapse over L: a position is valid
-    # for replay only where every layer carries real data, then AND with response_pos.
+    # for replay only where every layer carries real data, then AND with prediction_mask.
     non_sentinel = (full != SENTINEL_EXPERT_ID).any(dim=-1).all(dim=-1)  # [B, seq_len]
-    return full, response_pos & non_sentinel
+    return full, prediction_mask & non_sentinel
 
 
 # The all-K-sentinel capture convention is only unambiguous when native top-k
@@ -255,7 +257,7 @@ class MegatronRouterReplay:
         self._current: dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
         self._expected: tuple[int, ...] = ()
         self._consumed: set[int] = set()
-        self._response_mask: Optional[torch.Tensor] = None
+        self._prediction_mask: Optional[torch.Tensor] = None
         self._probe_positions: Optional[torch.Tensor] = None
         self._probe_observations: list[dict[str, object]] = []
         self._record_recompute = False
@@ -289,7 +291,7 @@ class MegatronRouterReplay:
         self,
         per_layer_targets: Mapping[int, torch.Tensor],
         mask: torch.Tensor,
-        response_mask: Optional[torch.Tensor] = None,
+        prediction_mask: Optional[torch.Tensor] = None,
         *,
         record_recompute: bool = True,
         probe_positions: Optional[torch.Tensor] = None,
@@ -298,7 +300,7 @@ class MegatronRouterReplay:
 
         ``per_layer_targets`` maps capture index → ``[N, K]`` long targets in
         the router's token order; ``mask`` is the ``[N]`` replay gate.
-        ``response_mask`` (optional, ``[N]``) marks response-window rows before
+        ``prediction_mask`` (optional, ``[N]``) marks the positions that predicted response tokens before
         sentinel exclusion and feeds the ``sentinel_fraction`` metric.
         ``record_recompute`` is true for training forwards whose backward will
         replay activation-checkpointed layers, even when forward runs under no_grad.
@@ -310,7 +312,7 @@ class MegatronRouterReplay:
         self._current = {idx: (targets, mask) for idx, targets in per_layer_targets.items()}
         self._expected = tuple(sorted(per_layer_targets))
         self._consumed = set()
-        self._response_mask = response_mask
+        self._prediction_mask = prediction_mask
         if probe_positions is not None and (probe_positions.ndim != 2 or probe_positions.shape != (mask.numel(), 2)):
             raise ValueError("probe positions must have one (sample, response-position) pair per router row")
         self._probe_positions = probe_positions
@@ -329,7 +331,7 @@ class MegatronRouterReplay:
             )
         self._current = {}
         self._expected = ()
-        self._response_mask = None
+        self._prediction_mask = None
         self._probe_positions = None
         self._record_recompute = False
         self._phase = _Phase.IDLE
@@ -343,7 +345,7 @@ class MegatronRouterReplay:
         self._current = {}
         self._expected = ()
         self._consumed = set()
-        self._response_mask = None
+        self._prediction_mask = None
         self._probe_positions = None
         self._record_recompute = False
         self._phase = _Phase.IDLE
@@ -469,8 +471,8 @@ class MegatronRouterReplay:
         lost = (mask & (targets == SENTINEL_EXPERT_ID).all(dim=-1)).sum().item()
         self._masked_rows += replayed
         self._hit_rows += replayed - lost
-        if self._response_mask is not None:
-            response = self._response_mask.to(device=scores.device)
+        if self._prediction_mask is not None:
+            response = self._prediction_mask.to(device=scores.device)
             self._response_rows += response.sum().item()
             self._sentinel_rows += (response & ~mask).sum().item()
         return probs, idx

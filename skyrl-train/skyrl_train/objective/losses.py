@@ -13,6 +13,7 @@ from omegaconf import DictConfig
 from marinskyrl.runtime_options import PolicyLossType
 from skyrl_train.ftpo import FTPOInputs, ftpo_loss
 from skyrl_train.config.ftpo import ftpo_config
+from skyrl_train.objective.dpo import DPOInputs, dpo_pair_values
 from skyrl_train.tensor_math import masked_mean, safe_exp_delta
 from skyrl_train.utils.algorithm_registry import register_policy_loss
 
@@ -25,6 +26,8 @@ class PolicyLossInputs:
     advantages: torch.Tensor
     loss_mask: torch.Tensor
     ftpo: FTPOInputs | None = None
+    ref_log_probs: torch.Tensor | None = None
+    dpo: DPOInputs | None = None
 
 
 @dataclass(frozen=True)
@@ -255,9 +258,40 @@ def compute_policy_loss_kl_cov(inputs: PolicyLossInputs, config: DictConfig) -> 
 
 @register_policy_loss(PolicyLossType.FTPO)
 def ftpo_policy_loss(inputs: PolicyLossInputs, config: DictConfig) -> TokenLoss:
-    """Optimize chosen alternatives at detected loop boundaries."""
+    """Optimize selected token alternatives and optional verified repair suffixes."""
     params = ftpo_config(config)
     if inputs.ftpo is None or params is None:
         raise ValueError("FTPO requires candidate masks and raw reference logits")
     values, metrics = ftpo_loss(inputs.ftpo, params)
+    repair_mask = inputs.ftpo.targets.repair_mask
+    counts = inputs.ftpo.counts
+    if counts.repair_tokens:
+        if params.repair_sft_weight is None:
+            raise ValueError("Joint closure training requires an explicit repair_sft_weight")
+        # The outer reducer divides by the combined active weights. Undo that
+        # denominator separately for each objective so repair length cannot
+        # dilute the FTPO preference or its reference regularization.
+        total_weight = counts.examples + counts.repair_tokens
+        values = values * (total_weight / (counts.examples or 1.0))
+        if repair_mask is not None:
+            repair_values = torch.where(repair_mask, -inputs.log_probs, 0)
+            values = values + params.repair_sft_weight * repair_values * total_weight / counts.repair_tokens
     return TokenLoss(values, metrics)
+
+
+@register_policy_loss(PolicyLossType.DPO)
+def dpo_policy_loss(inputs: PolicyLossInputs, config: DictConfig) -> TokenLoss:
+    """Optimize adjacent preference pairs against the frozen reference model."""
+    if inputs.dpo is None:
+        raise ValueError("dpo requires pair_roles on every training row")
+    if inputs.ref_log_probs is None:
+        raise ValueError("dpo requires base_action_log_probs from a frozen reference model")
+    values, metrics = dpo_pair_values(
+        inputs.log_probs,
+        inputs.ref_log_probs,
+        inputs.loss_mask,
+        inputs.dpo,
+        config.dpo.beta,
+        config.dpo.label_smoothing,
+    )
+    return _token_loss(values.to(inputs.log_probs.dtype), inputs, metrics)

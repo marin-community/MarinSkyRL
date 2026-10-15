@@ -1,28 +1,17 @@
 """CPU coverage for the Megatron router-replay micro-batch plumbing.
 
-`megatron_model_wrapper` imports `megatron.core` submodules at module load,
-but the replay plumbing only needs the layout helpers and the parallel-state
-predicates, so the CPU CI env stubs the megatron modules via the shared
-tests/cpu/util.py helper (only when megatron is genuinely absent). Everything
-under test — target build, bracket lifecycle, fail-fast, metrics — is real.
+The shared wrapper fixture stubs native Megatron parallel state. Target build,
+layout transforms, bracket lifecycle, fail-fast and metrics use real code.
 """
-
-from types import SimpleNamespace
 
 import pytest
 import torch
-
-from tests.cpu.util import stub_megatron_modules
-
-stub_megatron_modules()
-
-from skyrl_train.models.megatron_router_replay import (  # noqa: E402
+from skyrl_train.models.megatron_router_replay import (
+    SENTINEL_EXPERT_ID,
     LayerReplayHandle,
     MegatronRouterReplay,
+    dense_replay_targets,
 )
-from skyrl_train.models.megatron_router_replay import SENTINEL_EXPERT_ID  # noqa: E402
-from skyrl_train.models.megatron_router_replay import dense_replay_targets  # noqa: E402
-from skyrl_train.workers.megatron import megatron_model_wrapper as mmw  # noqa: E402
 
 BATCH_SIZE = 2
 SEQ_LEN = 8
@@ -45,20 +34,6 @@ def _controller(recompute_enabled: bool = False) -> MegatronRouterReplay:
     return controller
 
 
-def _make_wrapper(monkeypatch, *, packing: bool, controller) -> mmw.MegatronModelWrapper:
-    wrapper = mmw.MegatronModelWrapper.__new__(mmw.MegatronModelWrapper)
-    wrapper.use_sample_packing = packing
-    wrapper.router_replay = controller
-    wrapper.actor_module = [SimpleNamespace(config=SimpleNamespace(num_moe_experts=NUM_EXPERTS))]
-    monkeypatch.setattr(mmw, "get_model_config", lambda _model: wrapper.actor_module[0].config)
-    monkeypatch.setattr(mmw.mpu, "is_pipeline_first_stage", lambda **kwargs: True, raising=False)
-    monkeypatch.setattr(mmw.mpu, "is_pipeline_last_stage", lambda **kwargs: True, raising=False)
-    monkeypatch.setattr(mmw.mpu, "get_context_parallel_world_size", lambda: 1, raising=False)
-    monkeypatch.setattr(mmw.mpu, "get_context_parallel_rank", lambda: 0, raising=False)
-    monkeypatch.setattr(mmw.mpu, "get_tensor_model_parallel_world_size", lambda: 1, raising=False)
-    return wrapper
-
-
 def _routes(*, response_len: int = NUM_ACTIONS, num_layers: int = NUM_LAYERS, sentinel_sample: bool = False):
     generator = torch.Generator().manual_seed(7)
     routes = torch.randint(0, NUM_EXPERTS, (BATCH_SIZE, response_len, num_layers, TOPK), generator=generator)
@@ -78,9 +53,9 @@ def _micro(routes) -> dict:
 
 
 @pytest.mark.parametrize("packing", [False, True], ids=["unpacked", "packed"])
-def test_forward_micro_batch_replays_every_layer_and_reports_metrics(monkeypatch, packing):
+def test_forward_micro_batch_replays_every_layer_and_reports_metrics(megatron_wrapper, packing):
     controller = _controller()
-    wrapper = _make_wrapper(monkeypatch, packing=packing, controller=controller)
+    wrapper = megatron_wrapper(packing=packing, controller=controller, num_experts=NUM_EXPERTS)
     micro = _micro(_routes(sentinel_sample=True))
 
     phases = []
@@ -110,9 +85,9 @@ def test_forward_micro_batch_replays_every_layer_and_reports_metrics(monkeypatch
     assert metrics["sentinel_fraction"] == pytest.approx(0.5)
 
 
-def test_forward_micro_batch_without_routes_fails_fast_when_replay_installed(monkeypatch):
+def test_forward_micro_batch_without_routes_fails_fast_when_replay_installed(megatron_wrapper):
     controller = _controller()
-    wrapper = _make_wrapper(monkeypatch, packing=False, controller=controller)
+    wrapper = megatron_wrapper(packing=False, controller=controller, num_experts=NUM_EXPERTS)
     micro = _micro(None)
     with pytest.raises(ValueError, match="rollout_routed_experts"):
         wrapper._forward_micro_batch(
@@ -125,9 +100,9 @@ def test_forward_micro_batch_without_routes_fails_fast_when_replay_installed(mon
         )
 
 
-def test_routes_present_with_replay_off_leave_the_model_untouched(monkeypatch):
+def test_routes_present_with_replay_off_leave_the_model_untouched(megatron_wrapper):
     controller = _controller()
-    wrapper = _make_wrapper(monkeypatch, packing=False, controller=controller)
+    wrapper = megatron_wrapper(packing=False, controller=controller, num_experts=NUM_EXPERTS)
     wrapper.router_replay = None  # flag off: routes in the batch are ignored
     micro = _micro(_routes())
 
@@ -157,9 +132,9 @@ def test_routes_present_with_replay_off_leave_the_model_untouched(monkeypatch):
     ],
     ids=["layer_count", "response_len"],
 )
-def test_forward_micro_batch_rejects_malformed_routes(monkeypatch, routes_kwargs, match):
+def test_forward_micro_batch_rejects_malformed_routes(megatron_wrapper, routes_kwargs, match):
     controller = _controller()
-    wrapper = _make_wrapper(monkeypatch, packing=False, controller=controller)
+    wrapper = megatron_wrapper(packing=False, controller=controller, num_experts=NUM_EXPERTS)
     micro = _micro(_routes(**routes_kwargs))
     with pytest.raises(ValueError, match=match):
         wrapper._forward_micro_batch(
@@ -183,9 +158,9 @@ def test_short_local_route_window_matches_full_response_padding():
         torch.testing.assert_close(actual, expected)
 
 
-def test_forward_micro_batch_closes_the_bracket_when_the_model_raises(monkeypatch):
+def test_forward_micro_batch_closes_the_bracket_when_the_model_raises(megatron_wrapper):
     controller = _controller()
-    wrapper = _make_wrapper(monkeypatch, packing=False, controller=controller)
+    wrapper = megatron_wrapper(packing=False, controller=controller, num_experts=NUM_EXPERTS)
     micro = _micro(_routes())
 
     def exploding_model(*args, **kwargs):
@@ -203,7 +178,7 @@ def test_forward_micro_batch_closes_the_bracket_when_the_model_raises(monkeypatc
     controller.assert_drained()
 
 
-def test_each_model_chunk_replays_only_its_own_layers(monkeypatch):
+def test_each_model_chunk_replays_only_its_own_layers(megatron_wrapper):
     """Virtual pipeline chunks fire disjoint layer sets inside separate brackets."""
 
     class _Chunk:
@@ -219,7 +194,7 @@ def test_each_model_chunk_replays_only_its_own_layers(monkeypatch):
     controller = _controller()
     chunk_a, chunk_b = _Chunk((0,)), _Chunk((1, 2))
     controller.local_indices_for_module = {id(chunk_a): (0,), id(chunk_b): (1, 2)}
-    wrapper = _make_wrapper(monkeypatch, packing=False, controller=controller)
+    wrapper = megatron_wrapper(packing=False, controller=controller, num_experts=NUM_EXPERTS)
     micro = _micro(_routes())
 
     wrapper._forward_micro_batch(
