@@ -960,6 +960,7 @@ async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key, expert_offs
                     stop_reasons=["abort"],
                     response_logprobs=[[-0.1, -0.2]],
                     routed_experts=[[[[3, 4]], [[5, 6]]]],
+                    response_policy_steps=[[1, 1]],
                 ),
                 # 2) abort with 0 tokens (should be ignored)
                 InferenceEngineOutput(
@@ -975,6 +976,7 @@ async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key, expert_offs
                     stop_reasons=["stop"],
                     response_logprobs=[[-0.3, -0.4]],
                     routed_experts=[np.array([[[7, 8]], [[9, 10]]], dtype=np.uint16) + expert_offset],
+                    response_policy_steps=[[2, 2]],
                 ),
             ]
 
@@ -1024,6 +1026,7 @@ async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key, expert_offs
     assert out["response_ids"] == [expected_final_response_ids]
     assert out["stop_reasons"] == ["stop"]
     assert out["response_logprobs"] == [[-0.1, -0.2, -0.3, -0.4]]
+    assert out["response_policy_steps"] == [[1, 1, 2, 2]]
     np.testing.assert_array_equal(
         out["routed_experts"][0],
         [[[3, 4]], [[5, 6]], [[7 + expert_offset, 8 + expert_offset]], [[9 + expert_offset, 10 + expert_offset]]],
