@@ -80,13 +80,15 @@ def run_clipping_rank(rank, world_size, rendezvous):
                 model.finish_grad_sync()
             assert not optimizer.prepare_grads()
             children = optimizer.chained_optimizers
-            before = [(child, parameter, parameter.grad.clone()) for child in children for parameter in child.get_parameters()]
+            before = [
+                (child, parameter, parameter.grad.clone()) for child in children for parameter in child.get_parameters()
+            ]
             original_norm = torch.linalg.vector_norm(torch.cat([gradient.flatten() for _, _, gradient in before]))
             assert original_norm > 1
-            torch.testing.assert_close(torch.tensor(optimizer.get_grad_norm(), device="cuda"), original_norm)
+            torch.testing.assert_close(torch.tensor(float(optimizer.get_grad_norm()), device="cuda"), original_norm)
             success, reported_norm, _ = optimizer.step()
             assert success
-            torch.testing.assert_close(torch.tensor(reported_norm, device="cuda"), original_norm)
+            torch.testing.assert_close(torch.tensor(float(reported_norm), device="cuda"), original_norm)
             factor = max_grad_norm / original_norm if max_grad_norm else torch.ones_like(original_norm)
             recovered = []
             routes = set()
@@ -117,5 +119,8 @@ def run_clipping_rank(rank, world_size, rendezvous):
 
 def test_grug_muonh_and_adam_share_global_clipping(tmp_path):
     assert torch.cuda.device_count() >= 1, "Run on an allocation with one GPU"
-    print(f"GPU={torch.cuda.get_device_name()} torch={torch.__version__} megatron-core={version('megatron-core')}", flush=True)
+    print(
+        f"GPU={torch.cuda.get_device_name()} torch={torch.__version__} megatron-core={version('megatron-core')}",
+        flush=True,
+    )
     run_distributed_with_deadline(run_clipping_rank, (1, (tmp_path / "clipping").as_uri()), 1)
