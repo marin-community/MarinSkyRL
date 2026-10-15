@@ -32,11 +32,15 @@ class PolicyStepStamps:
         else:
             runs.append([token_count, step])
 
-    def finish(self, request_id: str) -> list[int]:
-        """Pop the stamps of the request's observed tokens."""
+    def finish(self, request_id: str, response_length: int) -> list[int]:
+        """Pop the stamps of the request's first ``response_length`` returned tokens."""
         runs = self._runs.pop(request_id, [])
         steps = np.fromiter((step for _, step in runs), dtype=np.int32, count=len(runs))
-        return np.repeat(steps, [count for count, _ in runs]).tolist()
+        stamps = np.repeat(steps, [count for count, _ in runs])
+        assert len(stamps) >= response_length, (
+            f"request {request_id} returned more tokens than its engine steps sampled"
+        )
+        return stamps[:response_length].tolist()
 
     def forget_unclaimed(self, live_request_ids: Collection[str]) -> None:
         """Forget requests that had already left the engine at the previous call and were not claimed since."""

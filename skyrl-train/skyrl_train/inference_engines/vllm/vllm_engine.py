@@ -1726,7 +1726,7 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         ):
             final_output = request_output
 
-        return final_output, self._response_policy_steps(request_id, len(final_output.outputs[0].token_ids))
+        return final_output, self._policy_steps.finish(request_id, len(final_output.outputs[0].token_ids))
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
         """Generate responses using vLLM's async engine.
@@ -1791,14 +1791,6 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         result = self._postprocess_outputs(list(outputs), self._response_top_k(sampling_params), sampling_params)
         result["response_policy_steps"] = list(policy_steps)
         return result
-
-    def _response_policy_steps(self, request_id: str, response_length: int) -> list[int]:
-        """Pop the stamps of the request's first ``response_length`` returned tokens."""
-        stamps = self._policy_steps.finish(request_id)
-        assert len(stamps) >= response_length, (
-            f"request {request_id} returned more tokens than its engine steps sampled"
-        )
-        return stamps[:response_length]
 
     async def wake_up(self, *args: Any, **kwargs: Any):
         await self.llm.wake_up(tags=kwargs.get("tags", None))
@@ -1993,7 +1985,7 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
                 and len(response["choices"]) == 1
                 and choice.get("token_ids") is not None
             ):
-                choice[CHOICE_POLICY_STEPS_KEY] = self._response_policy_steps(response["id"], len(choice["token_ids"]))
+                choice[CHOICE_POLICY_STEPS_KEY] = self._policy_steps.finish(response["id"], len(choice["token_ids"]))
             return response
 
         except Exception as e:
