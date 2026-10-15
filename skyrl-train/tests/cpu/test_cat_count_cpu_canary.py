@@ -253,6 +253,9 @@ def assert_cpu_learning(positive, root: Path, telemetry):
     training = [row for row in positive if "policy/raw_grad_norm" in row]
     assert len(training) == FAST_STEPS
     assert all(math.isfinite(row["policy/mismatch/pooled/log_ratio_abs_mean"]) for row in training)
+    # The engine stamps every trained token with the step that sampled it, which is no older than its lease.
+    assert all(row["async/staleness_tokens_stamped"] == 1 for row in training)
+    assert all(row["async/staleness_tokens_max"] <= row["async/staleness_max"] for row in training)
     assert all(math.isfinite(row["policy/policy_loss"]) for row in training)
     assert all(0 < row[CORRECTION_WEIGHT_MEAN_METRIC] <= 2 for row in training)
     assert any(row["policy/ppo_clip_ratio"] > 0 for row in training)
@@ -355,6 +358,9 @@ def test_cat_count_async_resumes_and_converges(tmp_path, cat_count_policy, cat_c
     training = [row for row in resumed if "policy/raw_grad_norm" in row]
     assert [row["trainer/global_step"] for row in training] == list(range(1, 101))
     assert any(row["async/staleness_mean"] > 0 for row in training)
+    # Responses in flight across a weight sync carry both steps, and no token is staler than its lease.
+    assert any(row["async/staleness_tokens_spanning"] > 0 for row in training)
+    assert all(row["async/staleness_tokens_max"] <= row["async/staleness_max"] for row in training)
     initial_mean = sum(scores(resumed)[0]) / 2
     assert any(sum(pair) / 2 >= max(0.65, initial_mean + 0.3) for pair in scores(resumed))
     checkpoint = torch.load(root / "ckpts/global_step_100/policy/rank_0.pt", weights_only=False)
