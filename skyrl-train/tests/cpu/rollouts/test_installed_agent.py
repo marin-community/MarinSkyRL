@@ -13,9 +13,11 @@ from tokenizers.models import WordLevel
 from transformers import PreTrainedTokenizerFast
 
 from skyrl_train.inference_engines.inference_engine_client_http_endpoint import create_app, set_global_state
+from skyrl_train.inference_engines.vllm.policy_steps import PolicyStepStamps
 from skyrl_train.rollouts.agent_backend import AgentInferenceBackend, TRIAL_HEADER
 from skyrl_train.rollouts.agent_environment import BorrowedMachineEnvironment
 from skyrl_train.rollouts.installed_agent import run_installed_agent
+from skyrl_train.trajectory_runners.types import RESPONSE_POLICY_STEPS_KEY
 
 
 @pytest.mark.asyncio
@@ -23,6 +25,9 @@ from skyrl_train.rollouts.installed_agent import run_installed_agent
 async def test_installed_agent_routes_http_and_retains_logs_after_execution(tmp_path, outcome):
     tokenizer = PreTrainedTokenizerFast(tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0, "12": 1})))
     generating = asyncio.Event()
+    stamps = PolicyStepStamps()
+    stamps.install(3, 0.0)
+    stamps.observe("turn", 1, 1.0)
 
     async def tokenize(payload):
         return {"tokens": [2], "count": 1, "max_model_len": 32}
@@ -32,7 +37,9 @@ async def test_installed_agent_routes_http_and_retains_logs_after_execution(tmp_
         if outcome == "cancel":
             generating.set()
             await asyncio.Future()
-        return ModelTurn({"role": "assistant", "content": "12"}, (2,), (1,), (-0.25,), "stop")
+        # The turn carries the engine's stamps, as the task worker copies them into its metadata.
+        metadata = {RESPONSE_POLICY_STEPS_KEY: stamps.finish("turn", 1)}
+        return ModelTurn({"role": "assistant", "content": "12"}, (2,), (1,), (-0.25,), "stop", metadata=metadata)
 
     backend = AgentInferenceBackend("model", 32, tokenize, tokenizer)
     set_global_state(backend, None)
@@ -105,6 +112,7 @@ async def test_installed_agent_routes_http_and_retains_logs_after_execution(tmp_
             assert records[1]["turn"]["prompt_token_ids"] == [2]
             assert records[1]["turn"]["response_token_ids"] == [1]
             assert records[1]["turn"]["logprobs"] == [-0.25]
+            assert records[1]["turn"]["metadata"][RESPONSE_POLICY_STEPS_KEY] == [3]
         with pytest.raises(ValueError, match="No active agent session"):
             await backend.chat_completion({"headers": {TRIAL_HEADER: "trial"}, "json": {}})
         result = await machine.run(Command(("cat", "/logs/agent/setup.txt")))

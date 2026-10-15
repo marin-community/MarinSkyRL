@@ -20,7 +20,7 @@ import ray.exceptions
 from jinja2 import TemplateError
 from omegaconf import OmegaConf
 from skyrl_train.config.utils import get_default_config
-from skyrl_train.inference_engines.base import InferenceEngineInput, InferenceEngineOutput
+from skyrl_train.inference_engines.base import CHOICE_POLICY_STEPS_KEY, InferenceEngineInput, InferenceEngineOutput
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.inference_engine_client_http_endpoint import (
     ErrorResponse,
@@ -558,6 +558,7 @@ async def test_chat_completion_retry_accumulates_and_sends_continuations(exact_p
                                 ]
                             },
                             "token_ids": [11],
+                            CHOICE_POLICY_STEPS_KEY: [7],
                         }
                     ],
                     "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6},
@@ -599,6 +600,7 @@ async def test_chat_completion_retry_accumulates_and_sends_continuations(exact_p
                                 ]
                             },
                             "token_ids": [12],
+                            CHOICE_POLICY_STEPS_KEY: [8],
                         }
                     ],
                     "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6},
@@ -674,6 +676,7 @@ async def test_chat_completion_retry_accumulates_and_sends_continuations(exact_p
     assert choice["logprobs"]["content"][0]["token"] == "token_id:11"
     assert choice["logprobs"]["content"][1]["token"] == "token_id:12"
     assert choice["token_ids"] == [11, 12]
+    assert choice[CHOICE_POLICY_STEPS_KEY] == [7, 8]
 
     # usage: prompt_tokens from base (5), completion_tokens summed (2), total 7
     assert out["usage"]["prompt_tokens"] == 5
