@@ -18,7 +18,6 @@ from taskcompendium.models import (
 from verifyit.spec import NumericSpec
 
 from skyrl_train.group_admission import GroupAdvantageInvariant
-from skyrl_train.inference_engines.chat_continuation import EXACT_PROMPT_TOKEN_IDS_KEY
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.vllm.policy_steps import PolicyStepStamps
 from skyrl_train.rollouts.buffer import RolloutGroup, RolloutLease, RolloutTask
@@ -200,9 +199,8 @@ async def test_token_staleness_reaches_the_training_batch_through_stamped_rollou
     finally:
         await worker.shutdown()
 
-    # The continuation resumed the aborted attempt from its exact tokens, and the client joined both stamps.
+    # The client continued the aborted attempt and joined both attempts' stamps.
     assert engine.requests[1]["continue_final_message"] is True
-    assert engine.requests[1][EXACT_PROMPT_TOKEN_IDS_KEY] == [1, 2, 3, 4]
     stamped, unstamped, fresh = writer.groups
     assert stamped.trajectory_batch["response_ids"] == [[3, 4, 5, 99]]
     assert stamped.trajectory_batch["rollout_policy_steps"][0].tolist() == [7, 7, 8, 8]

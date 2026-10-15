@@ -140,7 +140,7 @@ from skyrl_train.telemetry import (
     record_training_metrics,
 )
 from skyrl_train.rollout_observability import async_phase_window, monitor_event_loop_lag
-from skyrl_train.inference_engines.vllm.policy_steps import UNSAMPLED_POLICY_STEP
+from skyrl_train.inference_engines.base import UNSTAMPED_POLICY_STEP
 from skyrl_train.utils.importance_ratio_diagnostics import mismatch_ratio_metrics
 from skyrl_train.timing_observability import StepWallTime, publish_startup_timings, publish_step_timings
 from skyrl_train.hf_export import (
@@ -280,8 +280,8 @@ def _token_staleness_metrics(
         "async/staleness_tokens_spanning": 0.0,
     }
     if policy_steps is not None:
-        stamped = trained & (policy_steps != UNSAMPLED_POLICY_STEP)
-        steps = policy_steps.masked_fill(~stamped, UNSAMPLED_POLICY_STEP)
+        stamped = trained & (policy_steps != UNSTAMPED_POLICY_STEP)
+        steps = policy_steps.masked_fill(~stamped, UNSTAMPED_POLICY_STEP)
         spanning = (stamped & (steps < steps.amax(dim=1, keepdim=True))).any(dim=1)
         metrics["async/staleness_tokens_stamped"] = stamped.count_nonzero().item() / count
         metrics["async/staleness_tokens_spanning"] = spanning.float().mean().item()
@@ -2175,7 +2175,7 @@ class RayPPOTrainer:
             if len(rollout_routed_experts_rows) != len(response_ids):
                 raise ValueError("routed experts must have one row per response")
         distillation_tensors = _validated_distillation_tensors(trajectory_batch, response_masks_tensor)
-        # Every response token starts at its lease's charge; an engine stamp replaces it with the exact charge.
+        # A token takes its lease's staleness unless the engine recorded the policy step that sampled it.
         lease_staleness = torch.tensor(
             rollout_staleness if rollout_staleness is not None else [0] * len(response_ids), dtype=torch.int32
         ).unsqueeze(1)
@@ -2187,7 +2187,7 @@ class RayPPOTrainer:
             expected_lengths=[len(response) for response in response_ids],
         )
         if policy_steps is not None:
-            stamped = (policy_steps != UNSAMPLED_POLICY_STEP) & (response_masks_tensor > 0)
+            stamped = (policy_steps != UNSTAMPED_POLICY_STEP) & (response_masks_tensor > 0)
             rollout_staleness_tensor = torch.where(stamped, self.global_step - policy_steps, rollout_staleness_tensor)
             assert bool(((rollout_staleness_tensor >= 0) & (rollout_staleness_tensor <= lease_staleness)).all()), (
                 "a token's policy step must fall between its lease's step and the training step"

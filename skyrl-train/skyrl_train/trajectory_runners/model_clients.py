@@ -118,7 +118,7 @@ def _assemble_chat_results(results: list[_ChatResult]) -> ModelClientOutput:
         output["behavior_topk_logprobs"] = selected_scores
     if any(result.routed_experts is not None for result in results):
         output["routed_experts"] = [result.routed_experts for result in results]
-    if any(result.policy_steps is not None for result in results):
+    if all(result.policy_steps is not None for result in results):
         output["response_policy_steps"] = [result.policy_steps for result in results]
     return output
 

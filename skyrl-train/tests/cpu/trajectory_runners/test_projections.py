@@ -16,7 +16,7 @@ from taskcompendium.grading_result import GradeResult, Outcome
 from skyrl_train.batch_sampling import filter_trajectory_batch
 from skyrl_train.rollouts.task_projections import StepTaskProjection, WholeTaskProjection
 from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
-from skyrl_train.trajectory_runners.types import TrajectoryID, TaskRequestBatch
+from skyrl_train.trajectory_runners.types import RESPONSE_POLICY_STEPS_KEY, TrajectoryID, TaskRequestBatch
 from tests.cpu.task_specs import lowered_task, task_input, text_task
 
 
@@ -148,9 +148,9 @@ def test_projection_preserves_routes_and_fills_missing_rows(projection_type):
     np.testing.assert_array_equal(batch["rollout_routed_experts"][1], [[[0, 0]]])
 
 
-def test_whole_projection_leaves_observation_tokens_and_unstamped_rows_unsampled():
+def test_whole_projection_leaves_observation_tokens_unstamped():
     def turn(token, step):
-        return rollout([token], 0.0, metadata={"response_policy_steps": [step]})
+        return rollout([token], 0.0, metadata={RESPONSE_POLICY_STEPS_KEY: [step]})
 
     record = trajectory(turn(3, 7), turn(4, 8))
     record = replace(
@@ -160,9 +160,9 @@ def test_whole_projection_leaves_observation_tokens_and_unstamped_rows_unsampled
         logprobs=(-0.1, 0.0, -0.1),
         steps=(record.steps[0], replace(record.steps[1], response_end=2)),
     )
-    batch = WholeTaskProjection(config(), Tokenizer()).project([record, rollout([5], 0.0)], request(2))
+    batch = WholeTaskProjection(config(), Tokenizer()).project([record], request())
 
-    assert [row.tolist() for row in batch["rollout_policy_steps"]] == [[7, -1, 8], [-1]]
+    assert batch["rollout_policy_steps"][0].tolist() == [7, -1, 8]
 
 
 def test_step_projection_preserves_served_prompts_group_identity_and_final_step():

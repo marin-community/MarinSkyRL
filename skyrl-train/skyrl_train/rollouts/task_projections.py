@@ -20,7 +20,7 @@ from rolloutengine.contracts import RolloutContractError, RolloutData
 from skyrl_train.error_treatment import ErrorTreatment
 from skyrl_train.dataset.tasks import TASKCOMPENDIUM_ENVIRONMENT
 from skyrl_train.distillation import INVALID_TOPK_INDEX
-from skyrl_train.inference_engines.vllm.policy_steps import UNSAMPLED_POLICY_STEP
+from skyrl_train.inference_engines.base import UNSTAMPED_POLICY_STEP
 from skyrl_train.metric_names import TASK_ROLLOUT_METRIC_PREFIX
 from skyrl_train.trajectory_runners.trajectory_processing import (
     apply_overlong_filtering,
@@ -30,7 +30,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
 )
 from skyrl_train.trajectory_runners.selected_topk import AlignedStudentTopK, align_student_topk
 from skyrl_train.trajectory_runners.types import (
-    POLICY_STEPS_KEY,
+    RESPONSE_POLICY_STEPS_KEY,
     RESPONSE_SPAN_TAGS_KEY,
     ROUTED_EXPERTS_KEY,
     TrajectoryBatch,
@@ -473,9 +473,11 @@ def _attach_routed_experts(batch: TrajectoryBatch, rollouts: Sequence[RolloutDat
 
 
 def _attach_policy_steps(batch: TrajectoryBatch, rollouts: Sequence[RolloutData]) -> None:
-    if any(step.turn.metadata.get(POLICY_STEPS_KEY) is not None for rollout in rollouts for step in rollout.steps):
+    if any(
+        step.turn.metadata.get(RESPONSE_POLICY_STEPS_KEY) is not None for rollout in rollouts for step in rollout.steps
+    ):
         batch["rollout_policy_steps"] = [
-            _model_channel(rollout, POLICY_STEPS_KEY, len(response), (), np.int32, fill=UNSAMPLED_POLICY_STEP)
+            _model_channel(rollout, RESPONSE_POLICY_STEPS_KEY, len(response), (), np.int32, fill=UNSTAMPED_POLICY_STEP)
             for rollout, response in zip(rollouts, batch["response_ids"], strict=True)
         ]
 

@@ -4,7 +4,7 @@ from collections.abc import Collection
 
 import numpy as np
 
-UNSAMPLED_POLICY_STEP = -1
+from skyrl_train.inference_engines.base import UNSTAMPED_POLICY_STEP
 
 
 class PolicyStepStamps:
@@ -25,7 +25,7 @@ class PolicyStepStamps:
         """Attribute ``token_count`` new tokens to the step installed before the engine sampled them."""
         assert sampled_at <= time.monotonic(), "an engine step cannot be sampled in the future"
         index = bisect.bisect_right(self._installed_at, sampled_at)
-        step = self._steps[index - 1] if index else UNSAMPLED_POLICY_STEP
+        step = self._steps[index - 1] if index else UNSTAMPED_POLICY_STEP
         runs = self._runs.setdefault(request_id, [])
         if runs and runs[-1][1] == step:
             runs[-1][0] += token_count
