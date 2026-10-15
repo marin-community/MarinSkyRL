@@ -696,6 +696,10 @@ def config_task_environment(config: DictConfig) -> dict[str, str]:
             key_env = OmegaConf.select(config, f"skyrl.environment.task_sessions.{backend}.api_key_env")
             if key_env is not None:
                 out[key_env] = os.environ[key_env]
+        for callback in OmegaConf.select(config, "skyrl.trainer.callbacks", default=[]) or []:
+            if callback.get("type") == "harbor_evaluation":
+                key_env = callback["daytona_api_key_env"]
+                out[key_env] = os.environ[key_env]
     return out
 
 

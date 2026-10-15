@@ -251,10 +251,11 @@ class HarborEvaluationCallback(TrainerCallback):
 
     error_behavior = CallbackErrorBehavior.RAISE
 
-    def __init__(self, *, cohorts: list[dict], timeout: float, minimum_coverage: float):
+    def __init__(self, *, cohorts: list[dict], timeout: float, minimum_coverage: float, daytona_api_key_env: str):
         self.cohorts = OmegaConf.to_container(cohorts, resolve=True) if OmegaConf.is_config(cohorts) else cohorts
         self.timeout = timeout
         self.minimum_coverage = minimum_coverage
+        self.daytona_api_key_env = daytona_api_key_env
 
     async def on_evaluate_async(self, state, control, *, metrics, trainer, **kwargs):
         client = trainer.inference_engine_client
@@ -272,7 +273,7 @@ class HarborEvaluationCallback(TrainerCallback):
                     f"http://{client.http_endpoint_host}:{client.http_endpoint_port}/v1"
                 )
         environment = os.environ.copy()
-        environment["DAYTONA_API_KEY"] = environment["DAYTONA_RL_API_KEY"]
+        environment["DAYTONA_API_KEY"] = environment[self.daytona_api_key_env]
         environment["OPENAI_API_KEY"] = "unused-local-inference"
         with tempfile.TemporaryDirectory(prefix="inline-harbor-") as directory:
             spec = Path(directory) / "spec.json"

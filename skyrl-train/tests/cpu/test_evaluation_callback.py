@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -85,6 +86,8 @@ async def test_harbor_scores_join_native_panel_and_incomplete_cohort_cannot_win(
         ),
     )
     monkeypatch.setenv("DAYTONA_RL_API_KEY", "test-rl-credential")
+    monkeypatch.setenv("DAYTONA_API_KEY", "test-rl-credential")
+    monkeypatch.setenv("DAYTONA_EVAL_API_KEY", "test-eval-credential")
     scored = 30
 
     async def launch_worker(*argv, env):
@@ -92,7 +95,7 @@ async def test_harbor_scores_join_native_panel_and_incomplete_cohort_cannot_win(
         agent = spec["cohorts"][0]["job"]["agents"][0]
         assert agent["model_alias"] == "openai/current-policy"
         assert agent["kwargs"]["api_base"] == "http://127.0.0.1:8000/v1"
-        assert env["DAYTONA_API_KEY"] == "test-rl-credential"
+        assert env["DAYTONA_API_KEY"] == "test-eval-credential"
         output = Path(argv[argv.index("--output") + 1])
 
         class Worker:
@@ -121,11 +124,14 @@ async def test_harbor_scores_join_native_panel_and_incomplete_cohort_cannot_win(
         cohorts=OmegaConf.create([{"name": "benchmark", "job": {"agents": [{"name": "terminus-2"}]}}]),
         timeout=10,
         minimum_coverage=0.9,
+        daytona_api_key_env="DAYTONA_EVAL_API_KEY",
     )
     best = BestCheckpointCallback(initial_model_uri="initializer", expected_tasks=1000, minimum_scored_tasks=950)
     for scored, expected_eligible in [(30, 1.0), (20, 0.0)]:
         metrics = {"eval/all/num_attempted": 970, "eval/all/num_scored": 970, "eval/all/avg_verifier_score": 0.5}
         await callback.on_evaluate_async(state, TrainerControl(), metrics=metrics, trainer=trainer)
+        assert os.environ["DAYTONA_API_KEY"] == "test-rl-credential"
+        assert os.environ["DAYTONA_RL_API_KEY"] == "test-rl-credential"
         assert metrics["eval/all/num_attempted"] == 1000
         assert metrics["eval/all/num_scored"] == 970 + scored
         assert metrics["eval/all/avg_verifier_score"] == pytest.approx(500 / (970 + scored))

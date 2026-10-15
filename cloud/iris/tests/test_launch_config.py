@@ -125,6 +125,7 @@ def test_launch_preserves_harbor_dataset_relative_paths(tmp_path):
     raw["skyrl"]["trainer"]["callbacks"] = [
         {
             "type": "harbor_evaluation",
+            "daytona_api_key_env": "DAYTONA_EVAL_API_KEY",
             "cohorts": [{"name": "bfcl_parity", "reward_key": "reward", "job": {"tasks": [task]}}],
             "timeout": 600,
             "minimum_coverage": 0.9,

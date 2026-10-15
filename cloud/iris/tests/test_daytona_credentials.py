@@ -42,6 +42,29 @@ def test_resolve_daytona_rl_api_key_prefers_explicit_rl_key(monkeypatch):
     assert launcher._resolve_daytona_rl_api_key() == "rl-key"
 
 
+def test_inline_validation_forwards_separate_org_credentials_without_serializing_secrets(monkeypatch):
+    config = OmegaConf.create(
+        {
+            "runtime": {"entrypoint": "train", "task_env": {}},
+            "skyrl": {
+                "environment": {"task_sessions": {"daytona": {"api_key_env": "DAYTONA_RL_API_KEY"}}},
+                "trainer": {"callbacks": [{"type": "harbor_evaluation", "daytona_api_key_env": "EVAL_ORG_KEY"}]},
+            },
+        }
+    )
+    serialized = OmegaConf.to_yaml(config)
+    monkeypatch.setenv("DAYTONA_RL_API_KEY", "rl-credential")
+    monkeypatch.setenv("EVAL_ORG_KEY", "eval-credential")
+    assert launcher.config_task_environment(config) == {
+        "DAYTONA_RL_API_KEY": "rl-credential",
+        "EVAL_ORG_KEY": "eval-credential",
+    }
+    assert OmegaConf.to_yaml(config) == serialized
+    monkeypatch.delenv("EVAL_ORG_KEY")
+    with pytest.raises(KeyError, match="EVAL_ORG_KEY"):
+        launcher.config_task_environment(config)
+
+
 def test_resolve_daytona_rl_api_key_rejects_generic_key(monkeypatch):
     monkeypatch.delenv("DAYTONA_RL_API_KEY", raising=False)
     monkeypatch.setenv("DAYTONA_API_KEY", "generic-key")
