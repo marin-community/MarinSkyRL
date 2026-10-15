@@ -68,7 +68,7 @@ from skyrl_train.inference_engines.chat_continuation import EXACT_PROMPT_TOKEN_I
 from marinskyrl.inference_placement import InferenceWorkerPlacement
 from skyrl_train.inference_engines.placement import inference_worker_placement
 from skyrl_train.inference_engines.vllm.numa import set_async_worker_numa_affinity
-from skyrl_train.inference_engines.vllm.policy_steps import PolicyStepStamps
+from skyrl_train.inference_engines.vllm.policy_steps import UNSAMPLED_POLICY_STEP, PolicyStepStamps
 from skyrl_train.weight_sync.expert_block.receiver import ExpertBlockReceiver
 from skyrl_train.weight_sync.weight_loader import WeightLoader
 from skyrl_train.weight_sync.vllm_weight_conversion import load_weights_into_vllm
@@ -1419,6 +1419,10 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
 
         output_processor.process_outputs = stamped_process_outputs
 
+    def _forget_unclaimed_policy_steps(self) -> None:
+        live = {state.external_req_id for state in self.llm.output_processor.request_states.values()}
+        self._policy_steps.forget_unclaimed(live)
+
     def tp_size(self):
         return self._tp_size
 
@@ -1793,6 +1797,8 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
     def _response_policy_steps(self, request_id: str, response_length: int) -> list[int]:
         """Pop the request's stamps, trimmed to the tokens vLLM kept after its stop checks."""
         stamps = self._policy_steps.finish(request_id)
+        if stamps is None:
+            return [UNSAMPLED_POLICY_STEP] * response_length
         assert len(stamps) >= response_length, (
             f"request {request_id} returned more tokens than its engine steps sampled"
         )
@@ -1814,6 +1820,7 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
             )
             unfinished_request_ids = list(output_processor.request_states.keys())
             await engine.abort(unfinished_request_ids)
+        self._forget_unclaimed_policy_steps()
 
         # TODO(team): remove once vllm fixes this
         # otherwise waking it up will output gibberish: https://github.com/vllm-project/vllm/issues/17103
@@ -1986,10 +1993,11 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
             # vLLM generates under the response id for chat and under its first prompt's item id for completions.
             generate_id = response["id"] if endpoint == "/chat/completions" else f"{response['id']}-0"
             choice = response["choices"][0]
-            if choice.get("token_ids") is None:
-                self._policy_steps.discard([generate_id])
-            else:
+            # Parallel samples of one request share its generate id, so only a single-choice response is stamped.
+            if len(response["choices"]) == 1 and choice.get("token_ids") is not None:
                 choice["policy_steps"] = self._response_policy_steps(generate_id, len(choice["token_ids"]))
+            else:
+                self._policy_steps.discard([generate_id])
             return response
 
         except Exception as e:
@@ -2170,6 +2178,7 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         """Release the EngineCore scheduler after the weight reload completes, stamping later tokens with ``policy_step``."""
         if policy_step is not None:
             self._policy_steps.install(policy_step)
+        self._forget_unclaimed_policy_steps()
         await self.llm.resume_generation()
         logger.info("resume_generation() finished, EngineCore scheduler released, policy_step={}", policy_step)
 

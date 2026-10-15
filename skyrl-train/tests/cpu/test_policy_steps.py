@@ -51,9 +51,22 @@ def test_policy_step_stamps_follow_the_step_installed_before_each_engine_step():
 
     assert finished.dtype.name == "int32"
     assert finished.tolist() == [-1, -1, 1, 1, 1, 1, 2, 2]
-    assert stamps.finish("a").tolist() == []
+    assert stamps.finish("a") is None
     stamps.discard(["b"])
-    assert stamps.finish("b").tolist() == []
+    assert stamps.finish("b") is None
+
+
+def test_policy_step_stamps_forget_requests_unclaimed_since_the_previous_sync():
+    stamps = PolicyStepStamps(clock=lambda: 1.0)
+    for request_id in ("streamed", "awaiting", "resident"):
+        stamps.observe(request_id, 2, 0.5)
+
+    stamps.forget_unclaimed({"resident"})
+    assert stamps.finish("awaiting").tolist() == [-1, -1]
+    stamps.forget_unclaimed({"resident"})
+
+    assert stamps.finish("streamed") is None
+    assert stamps.finish("resident").tolist() == [-1, -1]
 
 
 class Tokenizer:
