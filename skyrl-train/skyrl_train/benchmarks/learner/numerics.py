@@ -32,16 +32,17 @@ Calibration procedure:
    tolerances are too loose for that signal.
 4. Compare each candidate with :func:`compare_to_reference`.
 
-Weight-resolution floor: the fingerprint reads the stored (bf16) parameters, so a group's delta is the
-difference of two rounded values. When the update is small next to the weights, which round to a different
-representable value is decided by reduction-order noise in the FP32 masters, and the delta's deviation between
-layouts is of the order of one representable step per element, not of the update. The floor is that step as a
-fraction of the update: ``weight_resolution * ||w|| / ||delta||``, with ``weight_resolution`` the relative
-spacing of the stored dtype (``2**-8`` for bf16, the lower bound of its spacing) and ``||w||`` the group's
-pre-update norm. A group whose update is many steps (a ``||delta||`` far above ``2**-8 * ||w||``) keeps the
-spread-based tolerance; a group whose update is about one step or less cannot be checked at that learning rate
-and the floor says so explicitly. Use a learning rate large enough that the groups that matter move by many
-steps; that also makes the post-update log-probs move measurably.
+Weight-resolution floor: the fingerprint reads the stored (bf16) parameters, so a group's delta is a sum of
+rounding steps. When the update is small next to the weights, most elements move by zero or one representable
+step, and which ones flip is decided by reduction-order noise in the FP32 masters. A layout change re-draws a
+subset of those flips, so the delta norm and sketches carry the shot noise of the flip count: with ``F`` flips
+of about one step each, ``||delta|| ~ sqrt(F) * step`` and the relative noise is ``1 / sqrt(F) = step / ||delta||``.
+The floor is that shot noise times the calibration multiplier: ``multiplier * weight_resolution * rms(w) /
+||delta||``, with ``weight_resolution`` the relative spacing of the stored dtype (``2**-8`` for bf16, the lower
+bound of its spacing) and ``rms(w)`` the group's pre-update RMS. Groups whose update spans many steps keep a
+tight, spread-based tolerance; a group whose update is a handful of flips gets a wide one, which says that it
+cannot be checked at that learning rate. Use a learning rate large enough that the groups that matter flip many
+elements; that also makes the post-update log-probs move measurably.
 """
 
 from __future__ import annotations
@@ -170,7 +171,7 @@ class NumericsRecord:
 
 @dataclass(frozen=True)
 class CalibrationPolicy:
-    """Tolerance = max(multiplier x observed spread, floors[kind], weight-resolution floor for parameter groups).
+    """Tolerance = max(multiplier x observed spread, floors[kind], multiplier x weight-resolution floor).
 
     Attributes:
         weight_resolution: Relative spacing of the stored parameter dtype; see the module docstring.
@@ -392,7 +393,7 @@ def calibrate_reference(runs: Sequence[NumericsRecord], policy: CalibrationPolic
         name: max(
             policy.multiplier * spread,
             policy.floors[first.signals[name].kind],
-            weight_resolution_floor(first.signals, name, policy.weight_resolution),
+            policy.multiplier * weight_resolution_floor(first.signals, name, policy.weight_resolution),
         )
         for name, spread in spreads.items()
     }
@@ -407,19 +408,25 @@ def calibrate_reference(runs: Sequence[NumericsRecord], policy: CalibrationPolic
 
 
 def weight_resolution_floor(signals: Mapping[str, Signal], name: str, weight_resolution: float) -> float:
-    """``weight_resolution * ||w|| / ||delta||`` for a parameter group's delta signals, else 0.
+    """Rounding-flip shot noise ``weight_resolution * rms(w) / ||delta||`` of a parameter delta signal, else 0.
 
-    A group that did not move gets no floor: any candidate movement is then an infinite deviation regardless.
+    The caller scales it by the calibration multiplier. A group that did not move gets no floor: any candidate
+    movement is then an infinite deviation regardless.
     """
     if name == "params/total_delta_norm":
-        weight, delta = signals["params/total_weight_norm"], signals[name]
+        weight_norm = signals["params/total_weight_norm"].values[0]
+        numel = sum(signal.values[0] for key, signal in signals.items() if key.endswith("/numel"))
+        delta_norm = signals[name].values[0]
     elif name.startswith("params/") and name.endswith(("/delta_norm", "/sketch")):
         group = name.removeprefix("params/").rsplit("/", 1)[0]
-        weight, delta = signals[f"params/{group}/weight_norm"], signals[f"params/{group}/delta_norm"]
+        weight_norm = signals[f"params/{group}/weight_norm"].values[0]
+        numel = signals[f"params/{group}/numel"].values[0]
+        delta_norm = signals[f"params/{group}/delta_norm"].values[0]
     else:
         return 0.0
-    (weight_norm,), (delta_norm,) = weight.values, delta.values
-    return weight_resolution * weight_norm / delta_norm if delta_norm > 0 else 0.0
+    if delta_norm == 0 or numel == 0:
+        return 0.0
+    return weight_resolution * weight_norm / math.sqrt(numel) / delta_norm
 
 
 def compare_to_reference(reference: NumericsReference, candidate: NumericsRecord) -> NumericsComparison:
