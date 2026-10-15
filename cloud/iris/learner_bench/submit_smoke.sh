@@ -25,6 +25,6 @@ iris --cluster=marin job run --no-wait --enable-extra-resources \
   -e LB_ENSEMBLE_VERSION "${LB_ENSEMBLE_VERSION:-smoke-gsm8k}" -e LB_ROWS "${LB_ROWS:-128}" \
   -e LB_RUN_NAME "$job_name" -e LB_REVISION "$revision" -e LB_NODES "${LB_NODES:-1}" -e LB_TP "${LB_TP:-1}" -e LB_PP "${LB_PP:-1}" -e LB_EP "${LB_EP:-8}" -e LB_MICRO "${LB_MICRO:-8}" \
   -e LB_WARMUP "${LB_WARMUP:-2}" -e LB_MEASURED "${LB_MEASURED:-5}" -e LB_REFERENCE_CHECK "${LB_REFERENCE_CHECK:-1}" \
-  -e LB_DRIVER_SCRIPT "${LB_DRIVER_SCRIPT:-smoke_driver.sh}" -e LB_ROUTES_CHECKPOINT "${LB_ROUTES_CHECKPOINT:-none}" \
+  -e LB_LR "${LB_LR:-1e-6}" -e LB_DRIVER_SCRIPT "${LB_DRIVER_SCRIPT:-smoke_driver.sh}" -e LB_ROUTES_CHECKPOINT "${LB_ROUTES_CHECKPOINT:-none}" \
   -e WANDB_MODE disabled \
   -- bash cloud/iris/learner_bench/smoke_task.sh

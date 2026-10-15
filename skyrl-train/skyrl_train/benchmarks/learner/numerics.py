@@ -20,8 +20,10 @@ Calibration procedure:
    (TP/EP/PP/CP or micro-batch size), because a layout change reorders bf16 reductions and that noise is
    what a candidate legitimately adds. Runs on one layout can be bitwise identical and underestimate noise.
 2. :func:`calibrate_reference` sets each signal's tolerance to ``multiplier`` times the largest pairwise
-   deviation observed, but never below the floor for the signal's kind. Store it with
-   :func:`write_reference`.
+   deviation observed, but never below the floor for the signal's kind, and, for a parameter group's
+   ``delta_norm`` and ``sketch``, never below the group's weight-resolution floor (below). Store it with
+   :func:`write_reference`. Calibrate on at least three layouts, one of them a micro-batch change: micro-batching
+   reorders gradient accumulation, and two layouts can agree exactly on groups that a third moves.
 3. Run the must-fail controls (:class:`ControlPerturbation`) through the same driver with the reference
    provenance and check that :func:`compare_to_reference` rejects them. ``NEGATE_ADVANTAGES`` must fail the
    loss, sketch, and post-update log-prob signals. ``DOUBLE_ADVANTAGES`` must fail ``policy_loss`` and
@@ -29,6 +31,17 @@ Calibration procedure:
    which is why the train-status scalars are part of the check. A control that passes means the
    tolerances are too loose for that signal.
 4. Compare each candidate with :func:`compare_to_reference`.
+
+Weight-resolution floor: the fingerprint reads the stored (bf16) parameters, so a group's delta is the
+difference of two rounded values. When the update is small next to the weights, which round to a different
+representable value is decided by reduction-order noise in the FP32 masters, and the delta's deviation between
+layouts is of the order of one representable step per element, not of the update. The floor is that step as a
+fraction of the update: ``weight_resolution * ||w|| / ||delta||``, with ``weight_resolution`` the relative
+spacing of the stored dtype (``2**-8`` for bf16, the lower bound of its spacing) and ``||w||`` the group's
+pre-update norm. A group whose update is many steps (a ``||delta||`` far above ``2**-8 * ||w||``) keeps the
+spread-based tolerance; a group whose update is about one step or less cannot be checked at that learning rate
+and the floor says so explicitly. Use a learning rate large enough that the groups that matter move by many
+steps; that also makes the post-update log-probs move measurably.
 """
 
 from __future__ import annotations
@@ -94,6 +107,8 @@ TRAIN_STATUS_SIGNAL_KINDS = {
 REQUIRED_TRAIN_STATUS_KEYS = ("policy_loss", "raw_grad_norm", "policy_update_steps")
 
 LOGPROB_SAMPLE_SIZE = 4096
+# Lower bound of bf16's relative spacing between adjacent representable values (8 significand bits).
+BF16_RELATIVE_SPACING = 2.0**-8
 # Odd 32-bit salt selecting the log-prob sample's hash stream, independent of the fingerprint's sketch salts.
 LOGPROB_SAMPLE_SALT = 0x165667B1
 
@@ -155,16 +170,22 @@ class NumericsRecord:
 
 @dataclass(frozen=True)
 class CalibrationPolicy:
-    """Tolerance = max(multiplier x observed spread, floors[kind])."""
+    """Tolerance = max(multiplier x observed spread, floors[kind], weight-resolution floor for parameter groups).
+
+    Attributes:
+        weight_resolution: Relative spacing of the stored parameter dtype; see the module docstring.
+    """
 
     multiplier: float
     floors: dict[SignalKind, float]
+    weight_resolution: float
 
 
 # A starting point for Hero-scale bf16 runs; check it with the must-fail controls before trusting it.
 RECOMMENDED_CALIBRATION = CalibrationPolicy(
     multiplier=4.0,
     floors={SignalKind.RELATIVE: 1e-3, SignalKind.ABSOLUTE: 1e-4, SignalKind.RELATIVE_L2: 1e-3},
+    weight_resolution=BF16_RELATIVE_SPACING,
 )
 
 
@@ -216,12 +237,17 @@ def parameter_signals(statistics: Mapping[str, ParameterGroupStatistics]) -> dic
     signals = {}
     for group, group_statistics in sorted(statistics.items()):
         signals[f"params/{group}/numel"] = Signal(SignalKind.ABSOLUTE, (group_statistics.numel,))
+        signals[f"params/{group}/weight_norm"] = Signal(
+            SignalKind.RELATIVE, (math.sqrt(group_statistics.before_square_sum),)
+        )
         signals[f"params/{group}/delta_norm"] = Signal(
             SignalKind.RELATIVE, (math.sqrt(group_statistics.delta_square_sum),)
         )
         signals[f"params/{group}/sketch"] = Signal(SignalKind.RELATIVE_L2, group_statistics.sketches)
     total = sum(group_statistics.delta_square_sum for group_statistics in statistics.values())
     signals["params/total_delta_norm"] = Signal(SignalKind.RELATIVE, (math.sqrt(total),))
+    total_weight = sum(group_statistics.before_square_sum for group_statistics in statistics.values())
+    signals["params/total_weight_norm"] = Signal(SignalKind.RELATIVE, (math.sqrt(total_weight),))
     return signals
 
 
@@ -363,7 +389,11 @@ def calibrate_reference(runs: Sequence[NumericsRecord], policy: CalibrationPolic
     if unstable:
         raise ValueError(f"Calibration runs disagree structurally or are non-finite for {unstable}")
     tolerances = {
-        name: max(policy.multiplier * spread, policy.floors[first.signals[name].kind])
+        name: max(
+            policy.multiplier * spread,
+            policy.floors[first.signals[name].kind],
+            weight_resolution_floor(first.signals, name, policy.weight_resolution),
+        )
         for name, spread in spreads.items()
     }
     return NumericsReference(
@@ -374,6 +404,22 @@ def calibrate_reference(runs: Sequence[NumericsRecord], policy: CalibrationPolic
         calibration=policy,
         calibration_layouts=tuple(run.provenance.layout for run in runs),
     )
+
+
+def weight_resolution_floor(signals: Mapping[str, Signal], name: str, weight_resolution: float) -> float:
+    """``weight_resolution * ||w|| / ||delta||`` for a parameter group's delta signals, else 0.
+
+    A group that did not move gets no floor: any candidate movement is then an infinite deviation regardless.
+    """
+    if name == "params/total_delta_norm":
+        weight, delta = signals["params/total_weight_norm"], signals[name]
+    elif name.startswith("params/") and name.endswith(("/delta_norm", "/sketch")):
+        group = name.removeprefix("params/").rsplit("/", 1)[0]
+        weight, delta = signals[f"params/{group}/weight_norm"], signals[f"params/{group}/delta_norm"]
+    else:
+        return 0.0
+    (weight_norm,), (delta_norm,) = weight.values, delta.values
+    return weight_resolution * weight_norm / delta_norm if delta_norm > 0 else 0.0
 
 
 def compare_to_reference(reference: NumericsReference, candidate: NumericsRecord) -> NumericsComparison:
@@ -423,6 +469,7 @@ def reference_json(reference: NumericsReference) -> str:
         "calibration": {
             "multiplier": reference.calibration.multiplier,
             "floors": {str(kind): floor for kind, floor in reference.calibration.floors.items()},
+            "weight_resolution": reference.calibration.weight_resolution,
         },
         "calibration_layouts": list(reference.calibration_layouts),
     }
@@ -442,6 +489,7 @@ def parse_reference(text: str) -> NumericsReference:
         calibration=CalibrationPolicy(
             multiplier=float(calibration["multiplier"]),
             floors={SignalKind(kind): float(floor) for kind, floor in calibration["floors"].items()},
+            weight_resolution=float(calibration["weight_resolution"]),
         ),
         calibration_layouts=tuple(payload["calibration_layouts"]),
     )
@@ -568,7 +616,11 @@ def _record_command(args: argparse.Namespace, driver_argv: Sequence[str]) -> Non
 
 def _calibrate_command(args: argparse.Namespace) -> None:
     runs = [parse_record(io.read_bytes(path).decode()) for path in args.records]
-    policy = CalibrationPolicy(multiplier=args.multiplier, floors=RECOMMENDED_CALIBRATION.floors)
+    policy = CalibrationPolicy(
+        multiplier=args.multiplier,
+        floors=RECOMMENDED_CALIBRATION.floors,
+        weight_resolution=RECOMMENDED_CALIBRATION.weight_resolution,
+    )
     write_reference(args.reference, calibrate_reference(runs, policy))
     logger.info(f"numerics reference from {len(runs)} runs written to {args.reference}")
 

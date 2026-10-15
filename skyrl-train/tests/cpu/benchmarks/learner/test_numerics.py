@@ -27,6 +27,7 @@ from skyrl_train.training_batch import TrainingInputBatch
 POLICY = CalibrationPolicy(
     multiplier=4.0,
     floors={SignalKind.RELATIVE: 1e-3, SignalKind.ABSOLUTE: 1e-4, SignalKind.RELATIVE_L2: 1e-3},
+    weight_resolution=numerics.BF16_RELATIVE_SPACING,
 )
 
 
@@ -60,8 +61,10 @@ def _groups(updates):
 
 
 def test_single_layer_change_and_misplaced_update_fail_only_their_group():
+    # Updates of ~25 bf16 steps per element, well above the weight-resolution floor.
     updates = {
-        f"decoder.layers.{layer}.mlp.linear_fc1.weight": _bf16_update((32, 32), seed=layer) for layer in range(3)
+        f"decoder.layers.{layer}.mlp.linear_fc1.weight": _bf16_update((32, 32), seed=layer, scale=0.1)
+        for layer in range(3)
     }
     reference = calibrate_reference([_record(_groups(updates)), _record(_groups(updates), layout="tp2-ep1")], POLICY)
     assert compare_to_reference(reference, _record(_groups(updates))).passed
@@ -196,3 +199,25 @@ def test_batch_identity_distinguishes_replay_routes_from_native_routing():
 
     assert len({native, replay, rerouted}) == 3
     assert numerics.batch_identity("digest", batch) == rerouted
+
+
+def test_weight_resolution_floor_covers_sub_step_updates_and_not_resolved_ones():
+    def run(layout: str, small_delta: float, large_delta: float) -> NumericsRecord:
+        statistics = {
+            # A norm-like group: weights near 1, update far below one bf16 step (~4e-3 per element).
+            "norm": numerics.ParameterGroupStatistics(
+                numel=4.0, delta_square_sum=small_delta**2, before_square_sum=4.0, sketches=(small_delta,) * 4
+            ),
+            # A matrix group whose update is ~100 bf16 steps.
+            "matrix": numerics.ParameterGroupStatistics(
+                numel=4.0, delta_square_sum=large_delta**2, before_square_sum=1e-4, sketches=(large_delta,) * 4
+            ),
+        }
+        return NumericsRecord(provenance=_provenance(layout), signals=parameter_signals(statistics))
+
+    reference = calibrate_reference([run("a", 1e-4, 4e-3), run("b", 1e-4, 4e-3)], POLICY)
+    # Sub-step noise: the stored-dtype rounding moves the norm group's delta by 40%; within its floor.
+    assert compare_to_reference(reference, run("c", 1.4e-4, 4e-3)).passed
+    # The resolved group still has a tight tolerance: a 10% change fails.
+    failures = {check.name for check in compare_to_reference(reference, run("c", 1e-4, 4.4e-3)).failures}
+    assert "params/matrix/delta_norm" in failures and "params/norm/delta_norm" not in failures
