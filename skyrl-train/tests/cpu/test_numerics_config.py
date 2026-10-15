@@ -11,7 +11,8 @@ def _config(**settings):
     cfg = get_default_config()
     cfg.trainer.logger = "console"
     for path, value in settings.items():
-        OmegaConf.update(cfg, path, value)
+        # engine_init_kwargs holds arbitrary vLLM engine kwargs, so new keys may be added under it.
+        OmegaConf.update(cfg, path, value, force_add=path == "generator.engine_init_kwargs")
     return cfg
 
 
@@ -33,10 +34,27 @@ def test_batch_invariant_numerics_resolve_for_local_vllm_engines():
     assert resolve_numerics(cfg).mode is NumericsMode.BATCH_INVARIANT
 
 
+def test_exact_numerics_resolve_with_snowball_engine_settings():
+    # The Snowball engine settings an exact run keeps: FLASH_ATTN named in the config, Triton MoE kernels, TP 1
+    # engines on their own GPUs.
+    cfg = _config(
+        **{
+            "trainer.numerics.mode": "exact",
+            "trainer.placement.colocate_all": False,
+            "generator.vllm_attention_backend": "FLASH_ATTN",
+            "generator.inference_engine_tensor_parallel_size": 1,
+            "generator.engine_init_kwargs": {"moe_backend": "triton"},
+        }
+    )
+    validate_cfg(cfg)
+
+    assert resolve_numerics(cfg).mode is NumericsMode.EXACT
+
+
 @pytest.mark.parametrize(
     ("settings", "error"),
     [
-        ({"trainer.numerics.mode": "exact"}, "trainer.numerics.mode must be one of"),
+        ({"trainer.numerics.mode": "bitwise"}, "trainer.numerics.mode must be one of"),
         (
             {"trainer.numerics.mode": "batch_invariant", "generator.run_engines_locally": False},
             "remote inference server",

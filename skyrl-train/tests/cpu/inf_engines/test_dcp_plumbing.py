@@ -28,6 +28,10 @@ import skyrl_train.inference_engines.ray_wrapped_inference_engine as rwie
 import skyrl_train.tokenizer as tokenizer_module
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.entrypoints import main_base
+from skyrl_train.inference_engines.vllm.decode_invariant.engine import (
+    DECODE_INVARIANT_ATTENTION_BACKEND,
+    decode_invariant_engine_init_kwargs,
+)
 
 DCP_KEY = "inference_engine_decode_context_parallel_size"
 
@@ -67,6 +71,23 @@ def test_from_config_forwards_vllm_engine_options(monkeypatch):
     main_base.create_ray_wrapped_inference_engines_from_config(cfg2, colocate_pg=None, tokenizer=None)
     assert captured["decode_context_parallel_size"] == 2
     assert captured["vllm_attention_backend"] == "FLASH_ATTN"
+
+    # trainer.numerics.mode=exact builds decode-invariant rollout engines and leaves the config as written.
+    captured.clear()
+    cfg3 = get_default_config()
+    cfg3.trainer.numerics.mode = "exact"
+    cfg3.generator.enforce_eager = False
+    cfg3.generator.inference_engine_tensor_parallel_size = 1
+    cfg3.generator.vllm_attention_backend = "FLASH_ATTN"
+    cfg3.generator.engine_init_kwargs = {"moe_backend": "triton"}
+    main_base.create_ray_wrapped_inference_engines_from_config(cfg3, colocate_pg=None, tokenizer=None)
+    assert captured["vllm_attention_backend"] == DECODE_INVARIANT_ATTENTION_BACKEND
+    assert (
+        captured["engine_init_kwargs"].items()
+        >= {"moe_backend": "triton", **decode_invariant_engine_init_kwargs()}.items()
+    )
+    assert cfg3.generator.vllm_attention_backend == "FLASH_ATTN"
+    assert "model_class_overrides" not in cfg3.generator.engine_init_kwargs
 
     captured.clear()
     main_base.create_ray_wrapped_inference_engines_from_config(
