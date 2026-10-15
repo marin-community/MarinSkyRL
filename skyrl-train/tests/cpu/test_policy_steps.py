@@ -80,11 +80,13 @@ class Tokenizer:
         return "12"
 
 
-# One chat response per call: an attempt aborted by a weight sync, its continuation, then an unstamped response.
+# One chat response per call: an attempt aborted by a weight sync, its continuation, an unstamped response, and a
+# response sampled within one policy step.
 _SCRIPTED_RESPONSES = (
     ("1", [3, 4], [7, 7], "abort"),
     ("2", [5, 99], [8, 8], "stop"),
     ("12", [3, 99], None, "stop"),
+    ("12", [3, 99], [9, 9], "stop"),
 )
 
 
@@ -202,27 +204,30 @@ async def test_token_staleness_reaches_the_training_batch_through_stamped_rollou
         await worker.run_task(
             RolloutTask(RolloutLease("b", policy_step=8, batch_id=9), {"uid": "b"}, _task_request(1)), writer
         )
+        await worker.run_task(
+            RolloutTask(RolloutLease("c", policy_step=9, batch_id=9), {"uid": "c"}, _task_request(2)), writer
+        )
     finally:
         await worker.shutdown()
 
     # The continuation resumed the aborted attempt from its exact tokens, and the client joined both stamps.
     assert engine.requests[1]["continue_final_message"] is True
     assert engine.requests[1][EXACT_PROMPT_TOKEN_IDS_KEY] == [1, 2, 3, 4]
-    stamped, unstamped = writer.groups
+    stamped, unstamped, fresh = writer.groups
     assert stamped.trajectory_batch["response_ids"] == [[3, 4, 5, 99]]
     assert stamped.trajectory_batch["rollout_policy_steps"][0].tolist() == [7, 7, 8, 8]
     assert "rollout_policy_steps" not in unstamped.trajectory_batch
 
     trainer = object.__new__(RayPPOTrainer)
     trainer.cfg = example_dummy_config()
-    trainer.context = SimpleNamespace(config=SimpleNamespace(batch_size=2, max_staleness_steps=2))
+    trainer.context = SimpleNamespace(config=SimpleNamespace(batch_size=3, max_staleness_steps=2))
     trainer.global_step = 9
     trainer.all_metrics = {}
     trainer.all_timings = {}
     trainer.tokenizer = Tokenizer()
     trainer.pad_batch = lambda batch: batch
     trainer.group_advantage_invariant = GroupAdvantageInvariant.no_group_advantage(physical_group_size=1)
-    trainer._training_metrics_enabled = False
+    trainer._training_metrics_enabled = True
     trainer.postprocess_trajectory_batch = lambda batch, uids: {
         **batch,
         "rewards": [
@@ -232,25 +237,25 @@ async def test_token_staleness_reaches_the_training_batch_through_stamped_rollou
     }
     trainer.select_trajectories = lambda batch, uids: (batch, uids)
 
-    training_input = trainer.convert_rollout_groups_to_training_input([stamped, unstamped])
+    training_input = trainer.convert_rollout_groups_to_training_input([stamped, unstamped, fresh])
 
     # Stamped tokens charge their own step; the unstamped row charges its lease; padding is zero.
     assert training_input["rollout_staleness"].dtype == torch.int32
-    assert training_input["rollout_staleness"].tolist() == [[2, 2, 1, 1], [1, 1, 0, 0]]
+    assert training_input["rollout_staleness"].tolist() == [[2, 2, 1, 1], [1, 1, 0, 0], [0, 0, 0, 0]]
     assert {
         name.removeprefix("async/staleness_tokens_"): value
         for name, value in trainer.all_metrics.items()
         if name.startswith("async/staleness_tokens_")
-    } == pytest.approx({"mean": 8 / 6, "max": 2, "ratio": 1.0, "stamped": 4 / 6, "spanning": 0.5})
+    } == pytest.approx({"mean": 1.0, "max": 2, "ratio": 0.75, "stamped": 0.75, "spanning": 1 / 3})
     mismatch = mismatch_ratio_metrics(
         training_input["rollout_logprobs"],
         training_input["rollout_logprobs"],
         training_input["loss_mask"],
         training_input["rollout_staleness"],
     )
-    assert [mismatch[f"policy/mismatch/staleness{bucket}/selected_tokens"] for bucket in (0, 1, 2)] == [0, 4, 2]
+    assert [mismatch[f"policy/mismatch/staleness{bucket}/selected_tokens"] for bucket in (0, 1, 2)] == [2, 4, 2]
 
     # A stamp older than its lease cannot come from the engine that served the lease.
     stale_lease = RolloutGroup(stamped.trajectory_batch, "a", 8, {"uid": "a"})
     with pytest.raises(AssertionError, match="between its lease"):
-        trainer.convert_rollout_groups_to_training_input([stale_lease, unstamped])
+        trainer.convert_rollout_groups_to_training_input([stale_lease, unstamped, fresh])

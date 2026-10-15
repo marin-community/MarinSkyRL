@@ -263,6 +263,31 @@ def consumed_work(training_input: TrainingInputBatch) -> ConsumedWork:
     )
 
 
+def _token_staleness_metrics(
+    staleness: torch.Tensor, loss_mask: torch.Tensor, policy_steps: torch.Tensor | None
+) -> Dict[str, float]:
+    """Staleness of loss-masked response tokens by engine stamp, beside the lease family ``async/staleness_*``."""
+    trained = loss_mask > 0
+    count = trained.count_nonzero().item()
+    if not count:
+        return {}
+    charged = staleness.masked_fill(~trained, 0)
+    metrics = {
+        "async/staleness_tokens_mean": charged.sum().item() / count,
+        "async/staleness_tokens_max": charged.max().item(),
+        "async/staleness_tokens_ratio": charged.count_nonzero().item() / count,
+        "async/staleness_tokens_stamped": 0.0,
+        "async/staleness_tokens_spanning": 0.0,
+    }
+    if policy_steps is not None:
+        stamped = trained & (policy_steps != UNSAMPLED_POLICY_STEP)
+        steps = policy_steps.masked_fill(~stamped, UNSAMPLED_POLICY_STEP)
+        spanning = (stamped & (steps < steps.amax(dim=1, keepdim=True))).any(dim=1)
+        metrics["async/staleness_tokens_stamped"] = stamped.count_nonzero().item() / count
+        metrics["async/staleness_tokens_spanning"] = spanning.float().mean().item()
+    return metrics
+
+
 def _zero_std_group_fraction(uids: Sequence[str], rewards: torch.Tensor) -> float:
     group_rewards: dict[str, list[torch.Tensor]] = {}
     for uid, reward in zip(uids, rewards, strict=True):
@@ -1716,35 +1741,9 @@ class RayPPOTrainer:
 
         with Timer("convert_to_training_input", self.all_timings):
             training_input = self.convert_to_training_input(trajectory_batch, uids, rollout_staleness=rollout_staleness)
-        self.all_metrics.update(self._token_staleness_metrics(trajectory_batch, training_input, len(uids)))
         if self._training_metrics_enabled:
             self._record_consumed_staleness(uids, rollout_staleness, training_input["response_mask"][: len(uids)])
         return training_input
-
-    @staticmethod
-    def _token_staleness_metrics(
-        trajectory_batch: TrajectoryBatch, training_input: TrainingInputBatch, row_count: int
-    ) -> Dict[str, float]:
-        """Staleness of the trained tokens by engine stamp, beside the lease family ``async/staleness_*``."""
-        loss_mask = training_input["loss_mask"][:row_count] > 0
-        if not loss_mask.any():
-            return {}
-        staleness = training_input["rollout_staleness"][:row_count][loss_mask]
-        masks = [np.asarray(mask, dtype=bool) for mask in trajectory_batch["loss_masks"]]
-        stamps = trajectory_batch.get("rollout_policy_steps")
-        if stamps is None:
-            stamps = [np.full(len(mask), UNSAMPLED_POLICY_STEP, dtype=np.int32) for mask in masks]
-        trained_stamps = [row[mask] for row, mask in zip(stamps, masks, strict=True)]
-        return {
-            "async/staleness_tokens_mean": staleness.float().mean().item(),
-            "async/staleness_tokens_max": staleness.max().item(),
-            "async/staleness_tokens_ratio": (staleness > 0).float().mean().item(),
-            "async/staleness_tokens_stamped": float(np.mean(np.concatenate(trained_stamps) != UNSAMPLED_POLICY_STEP)),
-            "async/staleness_tokens_spanning": sum(
-                len(np.unique(row[row != UNSAMPLED_POLICY_STEP])) > 1 for row in trained_stamps
-            )
-            / len(trained_stamps),
-        }
 
     def _record_consumed_staleness(
         self, uids: List[str], rollout_staleness: List[int], response_masks: torch.Tensor
@@ -2179,8 +2178,8 @@ class RayPPOTrainer:
         # Every response token starts at its lease's charge; an engine stamp replaces it with the exact charge.
         lease_staleness = torch.tensor(
             rollout_staleness if rollout_staleness is not None else [0] * len(response_ids), dtype=torch.int32
-        )
-        rollout_staleness_tensor = lease_staleness.unsqueeze(1) * response_masks_tensor.to(torch.int32)
+        ).unsqueeze(1)
+        rollout_staleness_tensor = lease_staleness * response_masks_tensor.to(torch.int32)
         policy_steps = collate_response_token_channel(
             trajectory_batch.get("rollout_policy_steps"),
             response_masks_tensor,
@@ -2189,12 +2188,12 @@ class RayPPOTrainer:
         )
         if policy_steps is not None:
             stamped = (policy_steps != UNSAMPLED_POLICY_STEP) & (response_masks_tensor > 0)
-            rollout_staleness_tensor[stamped] = self.global_step - policy_steps[stamped]
-            assert bool((rollout_staleness_tensor[stamped] >= 0).all()) and bool(
-                (
-                    rollout_staleness_tensor[stamped] <= lease_staleness.unsqueeze(1).expand_as(policy_steps)[stamped]
-                ).all()
-            ), "a token's policy step must fall between its lease's step and the training step"
+            rollout_staleness_tensor = torch.where(stamped, self.global_step - policy_steps, rollout_staleness_tensor)
+            assert bool(((rollout_staleness_tensor >= 0) & (rollout_staleness_tensor <= lease_staleness)).all()), (
+                "a token's policy step must fall between its lease's step and the training step"
+            )
+        if self._training_metrics_enabled:
+            self.all_metrics.update(_token_staleness_metrics(rollout_staleness_tensor, loss_masks_tensor, policy_steps))
         training_input = TrainingInputBatch(
             {
                 "sequences": sequences_tensor,  # Full trajectories (padded and concatenated prompts and responses)

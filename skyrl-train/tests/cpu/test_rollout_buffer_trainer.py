@@ -2,7 +2,6 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-import torch
 
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.rollouts.buffer import BatchPolicy, RolloutBufferConfig, RolloutGroup
@@ -89,12 +88,7 @@ def test_rollout_batch_conversion_reports_staleness_and_stage_timings(monkeypatc
 
     def convert(batch, uids, *, rollout_staleness):
         now[0] += 3.0
-        return {
-            "rewards": batch["rewards"],
-            "uids": uids,
-            "rollout_staleness": torch.tensor(rollout_staleness).unsqueeze(1),
-            "loss_mask": torch.ones(len(uids), 1),
-        }
+        return {"rewards": batch["rewards"], "uids": uids, "rollout_staleness": rollout_staleness}
 
     trainer.postprocess_trajectory_batch = postprocess
     trainer.select_trajectories = select
@@ -102,12 +96,13 @@ def test_rollout_batch_conversion_reports_staleness_and_stage_timings(monkeypatc
 
     result = trainer.convert_rollout_groups_to_training_input([_group("fresh", 10), _group("stale", 8)])
 
-    assert result["rewards"] == [0.0, 1.0, 0.0, 1.0]
-    assert result["uids"] == ["fresh", "fresh", "stale", "stale"]
-    assert result["rollout_staleness"].tolist() == [[0], [0], [2], [2]]
+    assert result == {
+        "rewards": [0.0, 1.0, 0.0, 1.0],
+        "uids": ["fresh", "fresh", "stale", "stale"],
+        "rollout_staleness": [0, 0, 2, 2],
+    }
     assert trainer.all_metrics["async/staleness_max"] == 2
     assert trainer.all_metrics["async/staleness_ratio"] == 0.5
-    assert trainer.all_metrics["async/staleness_tokens_stamped"] == 0.0
     assert trainer.all_timings == {
         "assemble_generation_group_mini_batch": 0.0,
         "postprocess_trajectory_batch": 18.0,
@@ -127,11 +122,7 @@ def test_rollout_batch_conversion_records_domain_reward_metrics():
     trainer.all_timings = {}
     trainer.tokenizer = SimpleNamespace(decode=str)
     trainer.select_trajectories = lambda batch, uids: (batch, uids)
-    trainer.convert_to_training_input = lambda batch, uids, *, rollout_staleness: {
-        **batch,
-        "loss_mask": torch.ones(len(uids), 1),
-        "rollout_staleness": torch.zeros(len(uids), 1),
-    }
+    trainer.convert_to_training_input = lambda batch, uids, *, rollout_staleness: batch
     math = _group("math", 0, rewards=[0.2, 0.6])
     tools = _group("tools", 0, rewards=[0.6, 1.0])
     missing = _group("missing", 0, rewards=[0.4, 0.6])
