@@ -46,8 +46,12 @@ class ExternalPiTeacherEngine:
         if not isinstance(token_ids, list) or not token_ids or any(type(token) is not int for token in token_ids):
             raise ValueError("External Pi teacher must supply sampled token IDs")
         scores = choice.get("logprobs")
-        if not isinstance(scores, dict) or len(scores.get("content") or ()) != len(token_ids):
-            raise ValueError("External Pi teacher must supply aligned sampled logprobs")
+        if scores is not None and (
+            not isinstance(scores, dict)
+            or not isinstance(scores.get("content"), list)
+            or len(scores["content"]) != len(token_ids)
+        ):
+            raise ValueError("External Pi teacher returned incomplete sampled logprobs")
         return result
 
     async def close(self) -> None:

@@ -16,19 +16,20 @@ from harbor.literal.native_api import NativeAPILimits
 from harbor.literal.proxy import RecordProxy
 from harbor.models.task.config import EnvironmentConfig
 from harbor.models.trial.config import AgentConfig
-from marinskyrl.resource_locator import join_resource_path
 from pydantic import BaseModel, ConfigDict, model_validator
 from rolloutengine.contracts import ModelTurn, SessionStart
 from rolloutengine.spec import LoweredTaskSpec
 from shellbox.machine import Machine, NetworkPolicy
 from taskcompendium.submission import conversation_messages
 
+from marinskyrl.resource_locator import join_resource_path
 from skyrl_train.inference_engines.inference_engine_client_http_endpoint import create_app, set_global_state
 from skyrl_train.io import io
 from skyrl_train.rollouts.agent_backend import AgentInferenceBackend
 from skyrl_train.rollouts.agent_endpoint import registered_agent_endpoint
 from skyrl_train.rollouts.agent_environment import BorrowedMachineEnvironment
 from skyrl_train.rollouts.agent_service import serve_agent_app
+from skyrl_train.rollouts.diagnostic_spool import DiagnosticSpool
 from skyrl_train.rollouts.installed_agent import run_installed_agent
 from skyrl_train.rollouts.pi_teacher_binding import PiTeacherBinding
 
@@ -179,8 +180,18 @@ class InstalledAgentRuntime:
         (trial_dir / "identity.json").write_text(
             json.dumps({"session_id": session_id, "attempt_id": attempt_id, "task_id": lowered.task.id})
         )
-        try:
-            return await self._run_trial(
+        spool = (
+            DiagnosticSpool(
+                trial_dir / "engine" / "diagnostics.jsonl",
+                join_resource_path(destination, "engine", "diagnostics.jsonl"),
+            )
+            if io.is_cloud_path(destination)
+            else None
+        )
+        stop_spool = asyncio.Event()
+        spool_task = asyncio.create_task(spool.run(stop_spool)) if spool is not None else None
+        trial_task = asyncio.create_task(
+            self._run_trial(
                 machine,
                 complete,
                 lowered,
@@ -190,13 +201,54 @@ class InstalledAgentRuntime:
                 session_id,
                 policy_step,
             )
+        )
+        primary_error: BaseException | None = None
+        trial_observed = False
+        try:
+            if spool_task is not None:
+                done, _ = await asyncio.wait({trial_task, spool_task}, return_when=asyncio.FIRST_COMPLETED)
+                if trial_task not in done:
+                    await spool_task  # Fail the attempt if its durable diagnostics cannot be published.
+                    raise RuntimeError("Diagnostic spool stopped before the installed-agent attempt")
+            trial_observed = True
+            return await trial_task
+        except BaseException as error:
+            primary_error = error
+            raise
         finally:
+            cancelled_trial_error: BaseException | None = None
+            if not trial_observed:
+                if not trial_task.done():
+                    trial_task.cancel()
+                try:
+                    await trial_task
+                except asyncio.CancelledError:
+                    pass  # Intentional cancellation after spool failure or caller cancellation.
+                except Exception as error:  # noqa: BLE001 - re-raised after publishing failed-attempt artifacts
+                    cancelled_trial_error = error
+            spool_error: BaseException | None = None
+            if spool_task is not None:
+                stop_spool.set()
+                try:
+                    await spool_task
+                except Exception as error:  # noqa: BLE001 - re-raised after final artifact upload
+                    spool_error = error
             # Publish failed/cancelled attempts too. Keep local evidence if upload fails.
             if io.is_cloud_path(destination):
                 await asyncio.to_thread(io.upload_directory, str(trial_dir), destination)
             else:
                 await asyncio.to_thread(shutil.copytree, trial_dir, destination)
             shutil.rmtree(trial_dir)
+            if cancelled_trial_error is not None:
+                if primary_error is not None:
+                    primary_error.add_note(f"Cancelled trial also failed: {type(cancelled_trial_error).__name__}")
+                    raise primary_error from cancelled_trial_error
+                raise cancelled_trial_error
+            if spool_error is not None and spool_error is not primary_error:
+                if primary_error is not None:
+                    primary_error.add_note(f"Diagnostic stream also failed: {type(spool_error).__name__}")
+                    raise primary_error from spool_error
+                raise spool_error
 
     async def _run_trial(
         self,

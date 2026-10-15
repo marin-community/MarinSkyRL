@@ -18,7 +18,8 @@ from skyrl_train.trajectory_runners.model_clients import DirectModelClient
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
-async def test_http_agent_completion_retains_tool_call_and_exact_token_evidence(stream):
+@pytest.mark.parametrize("request_logprobs", [False, True])
+async def test_http_agent_completion_retains_tool_call_and_exact_token_evidence(stream, request_logprobs):
     tokenizer = PreTrainedTokenizerFast(tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0, "tool": 1})))
     requests = []
     message = {
@@ -48,6 +49,7 @@ async def test_http_agent_completion_retains_tool_call_and_exact_token_evidence(
                         "model": "model",
                         "messages": [{"role": "user", "content": "Use shell."}],
                         "stream": stream,
+                        **({"logprobs": True} if request_logprobs else {}),
                         "tool_choice": "auto",
                         "max_tokens": 16,
                     },
@@ -65,7 +67,10 @@ async def test_http_agent_completion_retains_tool_call_and_exact_token_evidence(
         assert wire_message == message
         assert payload["prompt_token_ids"] == [7, 8]
         assert payload["choices"][0]["token_ids"] == [1]
-        assert payload["choices"][0]["logprobs"]["content"][0]["logprob"] == -0.25
+        if request_logprobs:
+            assert payload["choices"][0]["logprobs"]["content"][0]["logprob"] == -0.25
+        else:
+            assert payload["choices"][0]["logprobs"] is None
         assert payload["choices"][0]["finish_reason"] == "tool_calls"
         assert requests[0].options == {"tool_choice": "auto", "max_tokens": 16}
         with pytest.raises(ValueError, match="No active agent session"):
@@ -130,4 +135,5 @@ async def test_agent_chat_tools_reach_serving_without_double_wrapping():
     assert response["choices"][0]["message"]["content"] == "done"
     assert response["prompt_token_ids"] == [7, 8]
     assert response["choices"][0]["token_ids"] == [1]
+    assert response["choices"][0]["logprobs"] is None
     assert [request["tools"] for request in serving_requests] == [tools, tools]

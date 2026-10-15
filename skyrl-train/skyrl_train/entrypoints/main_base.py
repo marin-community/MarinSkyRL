@@ -390,6 +390,8 @@ class BasePPOExp:
         return prompts_dataset
 
     def task_dataset(self, data_files):
+        if OmegaConf.select(self.cfg, "scenario.preset") is not None:
+            return self.harbor_task_dataset(data_files)
         from skyrl_train.dataset.nemotron_ultra import NemotronTaskDataset  # noqa: PLC0415
         from skyrl_train.dataset.tasks import SourceTaskDataset  # noqa: PLC0415
         from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings  # noqa: PLC0415 - optional training dependencies
@@ -537,15 +539,16 @@ class BasePPOExp:
 
         resources = RolloutWorkerResources.from_config(cfg)
         terminal_data = list(cfg.data.get("terminal_bench_data", []))
-        if terminal_data and not cfg.get("terminal_bench_config"):
-            raise ValueError("data.terminal_bench_data requires terminal_bench_config")
+        pi_preset = OmegaConf.select(cfg, "scenario.preset") is not None
+        if (terminal_data or pi_preset) and not cfg.get("terminal_bench_config"):
+            raise ValueError("Harbor tasks require terminal_bench_config")
         return RolloutWorkerPool(
             TaskRolloutWorkerSpec.from_config(
                 cfg,
                 inference_engine_client.engines,
                 harbor_config=harbor_config
                 if harbor_config is not None
-                else (cfg.terminal_bench_config if terminal_data else None),
+                else (cfg.terminal_bench_config if terminal_data or pi_preset else None),
                 sessions=self.sessions,
                 teacher_tokenizer=(
                     self.prepared_pi_teacher.tokenizer

@@ -44,8 +44,12 @@ def runtime_profile_for_strategy(
     raise ValueError(f"Unsupported training strategy: {strategy}")
 
 
-def task_setup_script(commit: str, profile: RuntimeProfile) -> str:
-    """Build the Iris setup script for a frozen SkyRL checkout and dependency profile."""
+def task_setup_script(commit: str, profile: RuntimeProfile, *, fetch_ref: str | None = None) -> str:
+    """Build the Iris setup script for a frozen SkyRL checkout and dependency profile.
+
+    A PR ref can expose a reviewed commit that GitHub will not fetch by SHA;
+    the checked-out commit must still match the immutable launch identity.
+    """
     checkout = MARINSKYRL_TASK_ROOT
     activation_file = MARINSKYRL_ACTIVATION_FILE
     bootstrap_script = f"{checkout}/{MARINSKYRL_BOOTSTRAP_SCRIPT}"
@@ -53,7 +57,7 @@ def task_setup_script(commit: str, profile: RuntimeProfile) -> str:
 checkout={shlex.quote(checkout)}
 git init -q "$checkout"
 git -C "$checkout" remote add origin {shlex.quote(MARINSKYRL_REPOSITORY)}
-git -C "$checkout" fetch --depth=1 origin {shlex.quote(commit)}
+git -C "$checkout" fetch --depth=1 origin {shlex.quote(fetch_ref or commit)}
 git -C "$checkout" checkout -q --detach FETCH_HEAD
 test "$(git -C "$checkout" rev-parse HEAD)" = {shlex.quote(commit)}
 bash {shlex.quote(bootstrap_script)} \

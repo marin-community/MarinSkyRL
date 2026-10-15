@@ -12,15 +12,23 @@ def validate_pi_objective_config(cfg: DictConfig) -> None:
         return
     if not isinstance(scenario, DictConfig) or set(scenario) != {"preset"}:
         raise ValueError("Pi training requires exactly scenario.preset")
-    if not OmegaConf.select(cfg, "data.terminal_bench_data"):
-        raise ValueError("Pi training requires Harbor task data in data.terminal_bench_data")
+    if not OmegaConf.select(cfg, "data.train_data"):
+        raise ValueError("Pi training requires direct Harbor task sources in data.train_data")
+    if OmegaConf.select(cfg, "data.terminal_bench_data"):
+        raise ValueError("Pi training does not use Nemotron terminal-bench reference routing")
     preset = scenario.preset
-    modes = {"verifier_grpo_base": "literal", "teacher_demo_pi_base": "teacher_trace"}
+    modes = {
+        "verifier_grpo_base": "literal",
+        "teacher_demo_pi_base": "teacher_trace",
+        "teacher_demo_pi_verified_base": "teacher_trace",
+    }
     if preset not in modes:
         raise ValueError(f"Pi training preset {preset!r} is not wired to a production objective")
     agent = OmegaConf.select(cfg, "terminal_bench_config.installed_agent.agent")
     if agent is None or agent.get("name") != "pi" or OmegaConf.select(agent, "pi.mode") != modes[preset]:
         raise ValueError(f"{preset} requires an installed Pi agent with pi.mode={modes[preset]}")
+    if not OmegaConf.select(agent, "kwargs.thinking_format"):
+        raise ValueError(f"{preset} requires an explicit Pi thinking_format for the served model")
     if cfg.trainer.step_wise_training:
         raise ValueError("Pi scenarios require whole-trial training, not step-wise training")
     algorithm = cfg.trainer.algorithm
@@ -34,15 +42,15 @@ def validate_pi_objective_config(cfg: DictConfig) -> None:
         or algorithm.advantage_estimator != "uniform"
         or cfg.generator.n_samples_per_prompt != 1
     ):
-        raise ValueError("teacher_demo_pi_base requires SFT, uniform advantages and one trial per prompt")
-    if algorithm.dynamic_sampling.type not in (None, "none"):
+        raise ValueError("Pi teacher trace requires SFT, uniform advantages and one trial per prompt")
+    if algorithm.dynamic_sampling.type is not None:
         raise ValueError("Pi scenarios do not support dynamic reward-based sampling")
 
 
 def validate_pi_training_config(cfg: DictConfig) -> None:
     """Reject unavailable sources before allocating rollout or policy workers."""
     validate_pi_objective_config(cfg)
-    if OmegaConf.select(cfg, "scenario.preset") != "teacher_demo_pi_base":
+    if OmegaConf.select(cfg, "scenario.preset") not in ("teacher_demo_pi_base", "teacher_demo_pi_verified_base"):
         return
     from skyrl_train.rollouts.pi_teacher_binding import PiTeacherBinding
 
@@ -57,7 +65,14 @@ def validate_pi_training_config(cfg: DictConfig) -> None:
         raise ValueError("Pi teacher agent must address the bound teacher alias")
     if teacher.student_model != cfg.trainer.policy.model.path:
         raise ValueError("Pi teacher binding must identify the configured student policy")
-    if cfg.trainer.evaluation_runner != "harbor" or cfg.trainer.eval_interval <= 0 or not cfg.data.val_data:
-        raise ValueError("Pi teacher training requires scheduled student-only Harbor evaluation data")
+    preset = OmegaConf.select(cfg, "scenario.preset")
+    verifier_disabled = OmegaConf.select(cfg, "terminal_bench_config.harbor.verifier_disable") is True
+    if verifier_disabled != (preset == "teacher_demo_pi_base"):
+        raise ValueError("Pi teacher preset must select its reviewed Harbor verification policy")
+    if cfg.trainer.eval_interval > 0:
+        if preset == "teacher_demo_pi_base":
+            raise ValueError("Ungraded Pi teacher SFT requires a separate student evaluation run")
+        if cfg.trainer.evaluation_runner != "harbor" or not cfg.data.val_data:
+            raise ValueError("Scheduled Pi student evaluation requires Harbor validation tasks")
     if teacher.source == "skyrl_managed" and teacher.resources is None:
         raise ValueError("SkyRL-managed Pi teacher requires independent GPU resource allocation")

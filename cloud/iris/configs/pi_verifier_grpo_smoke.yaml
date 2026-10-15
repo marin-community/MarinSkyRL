@@ -11,6 +11,8 @@ context_budget:
   max_turns: 2
 terminal_bench:
   harbor:
+    environment_type: daytona
+    daytona_api_key_env: DAYTONA_API_KEY
     override_timeout_sec: 600
     verifier_override_timeout_sec: 120
     n_concurrent_trials: 2
@@ -20,6 +22,8 @@ terminal_bench:
   installed_agent:
     agent:
       name: pi
+      kwargs:
+        thinking_format: qwen-chat-template
     setup_timeout: 120
     run_timeout: 600
     cleanup_timeout: 60
@@ -80,11 +84,9 @@ generator:
     enable_auto_tool_choice: true
     tool_call_parser: hermes
 data:
-  kind: parquet
+  kind: tasks
   train_data:
-    - ${oc.env:PI_SMOKE_TRAIN_DATA}
-  val_data: []
-  terminal_bench_data:
     - ${oc.env:PI_SMOKE_TASK_DATA}
+  val_data: []
 extra_env:
   PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True

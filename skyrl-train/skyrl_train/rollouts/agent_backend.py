@@ -70,7 +70,7 @@ class AgentInferenceBackend:
             "length" if turn.stop_reason == "length" else "tool_calls" if turn.message.get("tool_calls") else "stop"
         )
         logprobs = None
-        if turn.logprobs is not None:
+        if body.get("logprobs") is True and turn.logprobs is not None:
             logprobs = {
                 "content": [
                     {

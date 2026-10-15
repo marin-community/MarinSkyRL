@@ -6,7 +6,7 @@ trainer:
     policy_loss_type: regular
     advantage_estimator: grpo
     dynamic_sampling:
-      type: none
+      type: null
 generator:
   n_samples_per_prompt: 2
 terminal_bench_config:
