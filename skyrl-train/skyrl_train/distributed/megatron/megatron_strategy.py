@@ -137,7 +137,7 @@ def _muonh_adamh_step(optimizer) -> int:
         int(step.item()) for state, _ in _muonh_adamh_states(optimizer) if (step := state.get("step")) is not None
     }
     if len(local_steps) > 1:
-        raise ValueError(f"Hero AdamH parameters have different steps: {local_steps}")
+        raise ValueError(f"Grug AdamH parameters have different steps: {local_steps}")
     shared_step = torch.tensor(max(local_steps, default=0), device=torch.cuda.current_device())
     dist.all_reduce(shared_step, op=dist.ReduceOp.MAX)
     return int(shared_step.item())
@@ -434,9 +434,9 @@ class MegatronStrategy(DistributedStrategy):
             if optimizer and load_training_state:
                 common_state = dist_checkpointing.load_common_state_dict(read_dir)
                 if muonh and common_state.get("optimizer_recipe") != _MUONH_CHECKPOINT_RECIPE:
-                    raise ValueError("Checkpoint does not contain Hero MuonH optimizer state")
+                    raise ValueError("Checkpoint does not contain Grug MuonH optimizer state")
                 if muonh and "optimizer_recipe_step" not in common_state:
-                    raise ValueError("Checkpoint does not contain Hero AdamH step state")
+                    raise ValueError("Checkpoint does not contain Grug AdamH step state")
                 saved_type = (
                     self.megatron_config.optimizer_checkpoint_sharding_type
                     if muonh
