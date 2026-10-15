@@ -114,6 +114,30 @@ def _raw_config() -> dict[str, Any]:
     }
 
 
+def test_launch_preserves_harbor_dataset_relative_paths(tmp_path):
+    raw = _raw_config()
+    task = {
+        "git_url": "https://example.org/tasks.git",
+        "git_commit_id": "b" * 40,
+        "path": "datasets/bfcl_parity/example-task",
+    }
+    raw["run"]["export_hf"] = False
+    raw["skyrl"]["trainer"]["callbacks"] = [
+        {
+            "type": "harbor_evaluation",
+            "cohorts": [{"name": "bfcl_parity", "reward_key": "reward", "job": {"tasks": [task]}}],
+            "timeout": 600,
+            "minimum_coverage": 0.9,
+        }
+    ]
+    path = tmp_path / "launch.yaml"
+    path.write_text(yaml.safe_dump(raw))
+
+    config = load_launch_config(path)
+    resolved_task = config.skyrl.trainer.callbacks[0].cohorts[0].job.tasks[0]
+    assert OmegaConf.to_container(resolved_task) == task
+
+
 def test_launch_rejects_terminal_export_without_request_callback(tmp_path):
     raw = _raw_config()
     raw["skyrl"]["trainer"].update(export_hf_artifact=True, ckpt_interval=1, hf_save_interval=-1)

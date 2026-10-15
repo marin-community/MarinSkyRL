@@ -34,7 +34,15 @@ from marinskyrl.rollout_grading import validate_nemotron_ultra_grading
 SKYRL_CONFIG_DIR = Path(__file__).parent / "configs"
 RL_CONFIG_TASK_DIR = "/tmp/marin-rl-configs"
 RL_CONFIG_PAYLOAD_ENV = "MARIN_RL_CONFIG_B64"
-TRAINER_NON_PATH_KEYS = frozenset({"policy.model.path", "callbacks.metric_groups", "callbacks.additional_evaluations"})
+TRAINER_NON_PATH_KEYS = frozenset(
+    {
+        "policy.model.path",
+        "callbacks.metric_groups",
+        "callbacks.additional_evaluations",
+        # Harbor resolves task paths against the pinned dataset repository, not the launcher installation.
+        "callbacks.cohorts.job.tasks.path",
+    }
+)
 
 
 class RLEntrypoint(StrEnum):
