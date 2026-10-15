@@ -90,7 +90,6 @@ def session_spec(
         verifier_timeout=5,
         cleanup_timeout=5,
         max_total_tokens=None,
-        tool_output_spill_bytes=None,
     )
     settings.update(limits)
     return TaskSessionSpec(**settings)

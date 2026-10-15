@@ -69,7 +69,6 @@ def task_lowering():
                 verifier_timeout=5,
                 cleanup_timeout=5,
                 max_total_tokens=None,
-                tool_output_spill_bytes=None,
             ),
         )
 

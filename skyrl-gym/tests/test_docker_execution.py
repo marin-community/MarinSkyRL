@@ -245,7 +245,6 @@ async def test_docker_shell_rollout_keeps_timeout_feedback_and_private_grades(py
             verifier_timeout=60,
             cleanup_timeout=30,
             max_total_tokens=None,
-            tool_output_spill_bytes=None,
         ),
     )
     record = await RolloutEngine(complete, {"docker": Factory()}).run(lowered)
