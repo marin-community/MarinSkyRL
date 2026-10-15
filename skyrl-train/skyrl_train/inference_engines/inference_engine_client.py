@@ -37,6 +37,12 @@ from dataclasses import dataclass, field
 from http import HTTPStatus
 from skyrl_train.inference_engines.chat_continuation import EXACT_PROMPT_TOKEN_IDS_KEY
 from skyrl_train.trajectory_runners.routed_experts import decode_routed_experts
+from skyrl_train.trajectory_runners.types import (
+    ENGINE_DP_RANK_KEY,
+    ENGINE_DP_RANKS_KEY,
+    UNKNOWN_ENGINE_DP_RANK,
+    WEIGHT_SYNCS_SPANNED_KEY,
+)
 import base64
 import io
 import numpy as np
@@ -90,6 +96,13 @@ class InferenceEngineClient(InferenceEngineInterface):
             full_config: DictConfig - See ppo_base_config.yaml
         """
         self.engines = engines
+        # create_ray_wrapped_inference_engines lists one local engine per data-parallel rank, in rank order within
+        # each engine group; a remote server's rank is unknown.
+        data_parallel_size = int(full_config.generator.inference_engine_data_parallel_size)
+        self._engine_dp_ranks = [
+            index % data_parallel_size if full_config.generator.run_engines_locally else UNKNOWN_ENGINE_DP_RANK
+            for index in range(len(engines))
+        ]
         self.tokenizer = tokenizer
         # Use served_model_name if configured (for Harbor/LiteLLM compatibility),
         # otherwise fall back to the full model path.
@@ -372,11 +385,14 @@ class InferenceEngineClient(InferenceEngineInterface):
                         per_prompt_sampling_params[j] for j in indices_list[i]
                     ]
                 results[i] = await self.engines[fallback].generate(engine_input)
+                task_engine_idxs[i] = fallback
             elif isinstance(result, BaseException):
                 raise result
 
         # 3. Reconstruct output in original order
         n = len(prompt_token_ids)
+        engine_dp_ranks = [UNKNOWN_ENGINE_DP_RANK] * n
+        weight_syncs_spanned: List[Optional[int]] = [None for _ in range(n)]
         responses: list[str] = [""] * n
         stop_reasons: list[str] = [""] * n
         response_logprobs: List[Optional[List[float]]] = [None for _ in range(n)]
@@ -391,7 +407,12 @@ class InferenceEngineClient(InferenceEngineInterface):
         add_student_topk = False
         add_routed_experts = False
 
-        for indices, result in zip(indices_list, results):
+        for indices, result, engine_idx in zip(indices_list, results, task_engine_idxs, strict=True):
+            spans = result.get(WEIGHT_SYNCS_SPANNED_KEY)
+            for local_idx, original_idx in enumerate(indices):
+                engine_dp_ranks[original_idx] = self._engine_dp_ranks[engine_idx]
+                if spans is not None:
+                    weight_syncs_spanned[original_idx] = spans[local_idx]
             selected_ids = result.get("student_topk_indices")
             selected_scores = result.get("behavior_topk_logprobs")
             if (selected_ids is None) != (selected_scores is None):
@@ -433,7 +454,10 @@ class InferenceEngineClient(InferenceEngineInterface):
             response_ids=response_ids,
             response_logprobs=response_logprobs if add_resp_logprobs else None,
             prompt_logprobs=prompt_logprobs if add_prompt_logprobs else None,
+            engine_dp_ranks=engine_dp_ranks,
         )
+        if all(spans is not None for spans in weight_syncs_spanned):
+            output[WEIGHT_SYNCS_SPANNED_KEY] = [spans for spans in weight_syncs_spanned if spans is not None]
         if add_student_topk:
             if any(row is None for row in student_topk_indices) or any(row is None for row in behavior_topk_logprobs):
                 raise ValueError("Inference engine omitted student top-K evidence for part of the batch")
@@ -524,6 +548,8 @@ class InferenceEngineClient(InferenceEngineInterface):
         # We only use it if generation is completed in one turn to maintain original behavior with no retry.
         text_response: Optional[str] = None
         num_turns = 0
+        # Weight syncs the engine reported across every request of this response; None until one reports them.
+        accum_weight_syncs: Optional[int] = None
 
         # 3. Loop until geneartion is completed.
         while stop_reason == ABORT_FINISH_REASON:
@@ -560,6 +586,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                 accum_student_topk_indices = []
                 accum_behavior_topk_logprobs = []
                 accum_routed_experts = []
+                accum_weight_syncs = None
                 saw_student_topk = None
                 saw_routed_experts = None
                 num_turns = 0
@@ -577,6 +604,9 @@ class InferenceEngineClient(InferenceEngineInterface):
             new_response_logprobs_list: Optional[List[List[float]]] = partial_response.get("response_logprobs", None)
             if new_response_logprobs_list is not None and len(new_response_logprobs_list) > 0:
                 new_response_logprobs = new_response_logprobs_list[0]
+            new_weight_syncs = partial_response.get(WEIGHT_SYNCS_SPANNED_KEY)
+            if new_weight_syncs is not None:
+                accum_weight_syncs = (accum_weight_syncs or 0) + new_weight_syncs[0]
 
             # 3.4 Aborted without generating tokens, so partial_response is useless.
             if stop_reason == ABORT_FINISH_REASON and len(new_response_ids) == 0:
@@ -637,7 +667,10 @@ class InferenceEngineClient(InferenceEngineInterface):
             response_ids=[accum_response_ids],
             response_logprobs=[accum_response_logprobs] if len(accum_response_logprobs) > 0 else None,
             prompt_logprobs=final_prompt_logprobs,
+            engine_dp_ranks=[self._engine_dp_ranks[engine_idx]],
         )
+        if accum_weight_syncs is not None:
+            output[WEIGHT_SYNCS_SPANNED_KEY] = [accum_weight_syncs]
         if saw_student_topk:
             output["student_topk_indices"] = [accum_student_topk_indices]
             output["behavior_topk_logprobs"] = [accum_behavior_topk_logprobs]
@@ -684,6 +717,8 @@ class InferenceEngineClient(InferenceEngineInterface):
         finish_reason: str = ABORT_FINISH_REASON
         stop_reason: Optional[str] = None
         response_role: Optional[str] = None
+        # Weight syncs the engine reported across every request of this response; None until one reports them.
+        accum_weight_syncs: Optional[int] = None
 
         # 1. Loop until the generation is completed.
         while finish_reason == ABORT_FINISH_REASON:
@@ -712,6 +747,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                 engine_idx = fallback
                 # Reset accumulator — new engine has no prior context
                 accum = AccumulatedResponse()
+                accum_weight_syncs = None
                 base_response = None
                 response_role = None
                 finish_reason = ABORT_FINISH_REASON
@@ -759,6 +795,10 @@ class InferenceEngineClient(InferenceEngineInterface):
                 )
             )
 
+            new_weight_syncs = partial_response.get(WEIGHT_SYNCS_SPANNED_KEY)
+            if new_weight_syncs is not None:
+                accum_weight_syncs = (accum_weight_syncs or 0) + new_weight_syncs
+
             # 1.4. Aborted without generating tokens, so partial_response is useless.
             if aborted_without_generating:
                 continue
@@ -770,18 +810,47 @@ class InferenceEngineClient(InferenceEngineInterface):
                 if finish_reason != ABORT_FINISH_REASON:
                     # If we only made one request and it is not aborted, return the partial result directly.
                     # This is the codepath that will hit when we do not use `pause_generation()` or `resume_generation()`.
-                    return partial_response
+                    return self._served_chat_response(partial_response, engine_idx, accum_weight_syncs)
                 # NOTE(Charlie): not doing deepcopy here to avoid copying large logprobs, so be careful when modifying this.
                 base_response = partial_response.copy()
 
         # 2. Build final response by combining fields
         assert base_response is not None, "Expected at least one non-empty response to build final response"
-        return _build_final_response(
+        response = _build_final_response(
             base_response=base_response,
             accum=accum,
             finish_reason=finish_reason,
             stop_reason=stop_reason,
         )
+        return self._served_chat_response(response, engine_idx, accum_weight_syncs)
+
+    def _served_chat_response(
+        self, response: Dict[str, Any], engine_idx: int, weight_syncs_spanned: Optional[int]
+    ) -> Dict[str, Any]:
+        """``response`` with its serving engine's data-parallel rank and, when the engine reported them, the weight
+        syncs its requests spanned in total."""
+        response[ENGINE_DP_RANK_KEY] = self._engine_dp_ranks[engine_idx]
+        if weight_syncs_spanned is None:
+            response.pop(WEIGHT_SYNCS_SPANNED_KEY, None)
+        else:
+            response[WEIGHT_SYNCS_SPANNED_KEY] = weight_syncs_spanned
+        return response
+
+    async def generate_on_live_engines(
+        self, prompt_token_ids: List[int], sampling_params: Dict[str, Any]
+    ) -> List[InferenceEngineOutput]:
+        """One response to ``prompt_token_ids`` from every live engine, each with its engine's data-parallel rank."""
+        live = [index for index in range(len(self.engines)) if index not in self._dead_engines]
+        if not live:
+            raise RuntimeError("All inference engines have died")
+        engine_input = InferenceEngineInput(prompt_token_ids=[prompt_token_ids], sampling_params=sampling_params)
+        outputs = await asyncio.gather(*(self.engines[index].generate(engine_input) for index in live))
+        for index, output in zip(live, outputs, strict=True):
+            output[ENGINE_DP_RANKS_KEY] = [self._engine_dp_ranks[index]]
+            routes = output.get("routed_experts")
+            if routes is not None:
+                output["routed_experts"] = [_route_rows(routes[0], len(output["response_ids"][0]))]
+        return outputs
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         session_id = request_payload["json"].pop("session_id", None)

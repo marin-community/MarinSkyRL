@@ -15,6 +15,8 @@ from omegaconf import OmegaConf
 import skyrl_train.trainer as trainer_module
 from skyrl_train.callbacks.base import TrainerControl
 from skyrl_train.config.utils import get_default_config
+from skyrl_train.config.numerics import NumericsMode, exactness_check_config
+from skyrl_train.exactness_check import ExactnessCheck
 from marinskyrl.distillation import compile_distillation_plan_from_config
 from skyrl_train.distillation import ChosenTokenTeacherInput, TeacherTopKInput, TopKTeacherEvidence
 from skyrl_train.distributed.dispatch import MeshRank
@@ -974,3 +976,57 @@ def test_grpo_reports_one_flat_and_one_varied_reward_group():
     assert trainer.all_metrics["reward/zero_std_group_fraction"] == pytest.approx(0.5)
     assert torch.equal(result["advantages"][:2], torch.zeros(2, 1))
     assert torch.isfinite(result["advantages"]).all()
+
+
+class _CheckInferenceClient(_ResidencyInferenceClient):
+    def __init__(self):
+        super().__init__()
+        self.check_requests = 0
+
+    async def generate_on_live_engines(self, prompt_token_ids, sampling_params):
+        self.check_requests += 1
+        return [{"response_ids": [[7, 8]], "response_logprobs": [[-0.5, -1.0]], "engine_dp_ranks": [0]}]
+
+
+class _CheckPolicyGroup(_ResidencyPolicyGroup):
+    actor_infos = [SimpleNamespace(rank=MeshRank(dp=0, sp=0, tp=0, pp=0, world_size=1, dp_size=1, pp_size=1))]
+
+    def async_run_ray_method(self, dispatch_type, method_name, **kwargs):
+        if method_name == "barrier_all":
+            return []
+        assert method_name == "forward"
+        data = kwargs["data"]
+        output = torch.zeros(len(data["sequences"]), data.metadata["response_length"])
+        return [TrainingOutputBatch({"output": output})]
+
+
+@pytest.mark.asyncio
+async def test_exactness_check_samples_the_engines_after_a_sync_and_scores_them_in_the_next_forward(monkeypatch):
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = get_default_config()
+    trainer.cfg.trainer.numerics.check.every_weight_syncs = 1
+    trainer.colocate_all = False
+    trainer.policy_model = _CheckPolicyGroup()
+    trainer.inference_engine_client = _CheckInferenceClient()
+    trainer.sync_policy_weights_to_inference_engines = AsyncMock()
+    trainer._expert_block_sync = None
+    trainer._resolve_num_experts = lambda: None
+    trainer.tokenizer = SimpleNamespace(pad_token_id=0, encode=lambda text, add_special_tokens: [1, 2, 3])
+    trainer._exactness_check = ExactnessCheck(
+        exactness_check_config(trainer.cfg), NumericsMode.NATIVE, trainer.cfg.generator, trainer.tokenizer
+    )
+    trainer.all_timings, trainer.all_startup_timings, trainer.all_metrics = {}, {}, {}
+    trainer.global_step = 0
+    monkeypatch.setattr(trainer_module.ray, "get", lambda refs: refs)
+
+    await trainer._sync_policy_for_rollouts(reason="initial")
+    trainer.all_metrics.update(await trainer._exactness_check.finish_generation())
+    trainer._score_exactness_check()
+    await trainer._sync_policy_for_rollouts(reason="evaluation")
+    trainer.all_metrics.update(await trainer._exactness_check.finish_generation())
+
+    # The policy scored zeros against the engine's two log-probabilities; the evaluation re-sync took no sample.
+    assert trainer.inference_engine_client.check_requests == 1
+    assert trainer.all_metrics["exactness_check/mismatched_tokens"] == 2
+    assert trainer.all_metrics["exactness_check/engine_0/mismatched_tokens"] == 2
+    assert trainer._exactness_check.pending is None

@@ -29,7 +29,12 @@ from skyrl_train.inference_engines.chat_template import (
 )
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.response_topk import select_chat_response_topk
-from skyrl_train.trajectory_runners.types import TokenProvenance
+from skyrl_train.trajectory_runners.types import (
+    ENGINE_DP_RANK_KEY,
+    ENGINE_DP_RANKS_KEY,
+    WEIGHT_SYNCS_SPANNED_KEY,
+    TokenProvenance,
+)
 from skyrl_train.trajectory_runners.routed_experts import normalize_routed_experts
 from skyrl_train.rollout_observability import rollout_phase
 
@@ -87,6 +92,8 @@ class _ChatResult:
     assistant_message: dict[str, Any]
     generation_token_budget: int | None
     routed_experts: np.ndarray | None = None
+    engine_dp_rank: int | None = None
+    weight_syncs_spanned: int | None = None
 
 
 def _choice_routed_experts(choice: dict[str, Any], prompt_ids: list[int], response_ids: list[int]) -> np.ndarray | None:
@@ -117,6 +124,10 @@ def _assemble_chat_results(results: list[_ChatResult]) -> ModelClientOutput:
         output["behavior_topk_logprobs"] = selected_scores
     if any(result.routed_experts is not None for result in results):
         output["routed_experts"] = [result.routed_experts for result in results]
+    if all(result.engine_dp_rank is not None for result in results):
+        output[ENGINE_DP_RANKS_KEY] = [result.engine_dp_rank for result in results]
+    if all(result.weight_syncs_spanned is not None for result in results):
+        output[WEIGHT_SYNCS_SPANNED_KEY] = [result.weight_syncs_spanned for result in results]
     return output
 
 
@@ -330,6 +341,8 @@ class DirectModelClient:
                 message,
                 token_budget,
                 _choice_routed_experts(choice, prompt_ids, response_ids),
+                engine_dp_rank=response.get(ENGINE_DP_RANK_KEY),
+                weight_syncs_spanned=response.get(WEIGHT_SYNCS_SPANNED_KEY),
             )
 
         results = await asyncio.gather(

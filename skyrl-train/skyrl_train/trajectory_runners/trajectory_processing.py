@@ -5,6 +5,9 @@ import numpy as np
 from skyrl_train.group_admission import group_is_fully_excluded_from_training
 from skyrl_train.task_inputs import TaskInput, PreferenceInput
 from skyrl_train.trajectory_runners.types import (
+    ROLLOUT_ENGINE_DP_RANKS_KEY,
+    ROLLOUT_WEIGHT_SYNCS_SPANNED_KEY,
+    UNKNOWN_ENGINE_DP_RANK,
     TrajectoryBatch,
     TrajectoryRequestBatch,
     TrajectoryID,
@@ -226,6 +229,16 @@ def _concatenate_environment_metrics(result: TrajectoryBatch, batches: List[Traj
         ]
 
 
+def _concatenate_row_values(trajectory_batches: List[TrajectoryBatch], key: str, missing: int) -> List[int] | None:
+    """One ``key`` value per row across ``trajectory_batches``, ``missing`` for batches without the key; None when no
+    batch has it."""
+    if all(output.get(key) is None for output in trajectory_batches):
+        return None
+    return [
+        value for output in trajectory_batches for value in (output.get(key) or [missing] * len(output["response_ids"]))
+    ]
+
+
 def concatenate_trajectory_batches(
     trajectory_batches: List[TrajectoryBatch],
     *,
@@ -336,6 +349,11 @@ def concatenate_trajectory_batches(
                 for response_ids in output["response_ids"]:
                     rollout_routed_experts_concat.append(_re_sentinel_rows(len(response_ids), _concat_sentinel_row))
 
+    engine_dp_ranks_concat = _concatenate_row_values(
+        trajectory_batches, ROLLOUT_ENGINE_DP_RANKS_KEY, UNKNOWN_ENGINE_DP_RANK
+    )
+    weight_syncs_spanned_concat = _concatenate_row_values(trajectory_batches, ROLLOUT_WEIGHT_SYNCS_SPANNED_KEY, 0)
+
     # Loop-behavior reward shaping (Stage B / F5 + F4): mix the per-token shaping
     # channel + span tags the same way as routed_experts — sentinel-fill (zeros)
     # any batch that lacks them so the concatenated list stays 1:1 with
@@ -382,6 +400,10 @@ def concatenate_trajectory_batches(
     }
     if rollout_routed_experts_concat is not None:
         result["rollout_routed_experts"] = rollout_routed_experts_concat
+    if engine_dp_ranks_concat is not None:
+        result[ROLLOUT_ENGINE_DP_RANKS_KEY] = engine_dp_ranks_concat
+    if weight_syncs_spanned_concat is not None:
+        result[ROLLOUT_WEIGHT_SYNCS_SPANNED_KEY] = weight_syncs_spanned_concat
     if selected_topk_concat is not None:
         result["student_topk_indices"] = selected_topk_concat
         result["behavior_topk_logprobs"] = behavior_topk_concat

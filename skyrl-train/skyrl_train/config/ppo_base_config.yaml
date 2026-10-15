@@ -178,8 +178,18 @@ trainer:
       scheduler: "constant_with_warmup"
       optimizer_kwargs: {}
     sequence_parallel_size: 1
+  numerics:
+    # native: each side runs its own kernels. batch_invariant: trainer and vLLM engines run vLLM's batch-invariant
+    # kernels (local vLLM engines only).
+    mode: native
+    # Online check that the trainer reproduces the engines' log-probabilities: after qualifying weight syncs each
+    # live engine generates one fixed short response and the trainer's next policy forward scores it.
+    check:
+      # 0 disables the check. N runs it after the first weight sync, after a checkpoint-restore sync and after
+      # every N-th training-step sync.
+      every_weight_syncs: 0
+      on_failure: log # log | stop (raise when any token's log-probability differs)
   algorithm:
-    batch_invariant: false
     advantage_estimator: "grpo"
     group_advantage_min_size: null
     resolved_group_advantage:

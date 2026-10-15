@@ -66,6 +66,7 @@ from skyrl_train.inference_engines.base import (
 )
 from skyrl_train.inference_engines.response_topk import select_response_topk
 from skyrl_train.inference_engines.chat_continuation import EXACT_PROMPT_TOKEN_IDS_KEY
+from skyrl_train.trajectory_runners.types import WEIGHT_SYNCS_SPANNED_KEY
 from marinskyrl.inference_placement import InferenceWorkerPlacement
 from skyrl_train.inference_engines.placement import inference_worker_placement
 from skyrl_train.inference_engines.vllm.numa import set_async_worker_numa_affinity
@@ -1208,6 +1209,8 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         self._stats_attributes: Dict[str, str] = {}
         self._rendezvous_port_reservation = kwargs.pop("rendezvous_port_reservation", None)
         self._weight_sync_pause_policy: WeightSyncPausePolicy = kwargs.pop("weight_sync_pause_policy")
+        # Weight syncs this engine has resumed from; a request reports the count change between its start and end.
+        self._weight_syncs = 0
         setup_envvars_for_vllm(kwargs, bundle_indices)
         vllm_v1_disable_multiproc = kwargs.pop("vllm_v1_disable_multiproc", False)
         logger.info(
@@ -1544,6 +1547,7 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         if session_ids is not None and len(session_ids) != len(prompt_token_ids):
             raise ValueError("session_ids must align one-for-one with prompt_token_ids")
 
+        started_weight_syncs = self._weight_syncs
         tasks = []
         request_ids: list[str] = []
         per_prompt = sampling_params if isinstance(sampling_params, list) else [sampling_params] * len(prompt_token_ids)
@@ -1581,7 +1585,9 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
                 )
             raise
 
-        return self._postprocess_outputs(outputs, self._response_top_k(sampling_params), sampling_params)
+        output = self._postprocess_outputs(outputs, self._response_top_k(sampling_params), sampling_params)
+        output[WEIGHT_SYNCS_SPANNED_KEY] = [self._weight_syncs - started_weight_syncs] * len(prompt_token_ids)
+        return output
 
     async def wake_up(self, *args: Any, **kwargs: Any):
         await self.llm.wake_up(tags=kwargs.get("tags", None))
@@ -1748,6 +1754,7 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
             return _build_error_response(str(e), HTTPStatus.BAD_REQUEST.phrase, HTTPStatus.BAD_REQUEST.value)
 
         # 2. Call vllm engine
+        started_weight_syncs = self._weight_syncs
         try:
             # Create a minimal request-like object with attributes used by vLLM
             minimal_request = _MinimalRequest(headers)
@@ -1766,6 +1773,8 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
             if isinstance(generator, ErrorResponse):
                 response["request_id"] = request_id
                 response["error_category"] = "server_error"
+            elif endpoint == "/chat/completions":
+                response[WEIGHT_SYNCS_SPANNED_KEY] = self._weight_syncs - started_weight_syncs
             return response
 
         except Exception as e:
@@ -1931,6 +1940,7 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
 
     async def resume_generation(self) -> None:
         """Release the EngineCore scheduler after the weight reload completes."""
+        self._weight_syncs += 1
         await self.llm.resume_generation()
         logger.info("resume_generation() finished, EngineCore scheduler released")
 

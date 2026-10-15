@@ -29,8 +29,13 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
 )
 from skyrl_train.trajectory_runners.selected_topk import AlignedStudentTopK, align_student_topk
 from skyrl_train.trajectory_runners.types import (
+    ENGINE_DP_RANK_KEY,
     RESPONSE_SPAN_TAGS_KEY,
+    ROLLOUT_ENGINE_DP_RANKS_KEY,
+    ROLLOUT_WEIGHT_SYNCS_SPANNED_KEY,
     ROUTED_EXPERTS_KEY,
+    UNKNOWN_ENGINE_DP_RANK,
+    WEIGHT_SYNCS_SPANNED_KEY,
     TrajectoryBatch,
     TaskRequestBatch,
 )
@@ -356,6 +361,8 @@ def _training_batch(
     _attach_failure_channels(batch, decisions)
     _attach_student_topk(batch, rollouts)
     _attach_routed_experts(batch, rollouts)
+    _attach_engine_dp_ranks(batch, rollouts)
+    _attach_weight_syncs_spanned(batch, rollouts)
     _attach_span_tags(batch, rollouts)
     metrics = None
     if env_metric_classes is not None:
@@ -461,6 +468,28 @@ def _attach_routed_experts(batch: TrajectoryBatch, rollouts: Sequence[RolloutDat
         batch["rollout_routed_experts"] = [
             _model_channel(rollout, ROUTED_EXPERTS_KEY, len(response), route_template.shape[1:], route_template.dtype)
             for rollout, response in zip(rollouts, batch["response_ids"], strict=True)
+        ]
+
+
+def _row_engine_dp_rank(rollout: RolloutData) -> int:
+    ranks = {
+        step.turn.metadata[ENGINE_DP_RANK_KEY] for step in rollout.steps if ENGINE_DP_RANK_KEY in step.turn.metadata
+    }
+    if len(ranks) != 1:
+        return UNKNOWN_ENGINE_DP_RANK
+    return int(ranks.pop())
+
+
+def _attach_engine_dp_ranks(batch: TrajectoryBatch, rollouts: Sequence[RolloutData]) -> None:
+    if any(ENGINE_DP_RANK_KEY in step.turn.metadata for rollout in rollouts for step in rollout.steps):
+        batch[ROLLOUT_ENGINE_DP_RANKS_KEY] = [_row_engine_dp_rank(rollout) for rollout in rollouts]
+
+
+def _attach_weight_syncs_spanned(batch: TrajectoryBatch, rollouts: Sequence[RolloutData]) -> None:
+    if any(WEIGHT_SYNCS_SPANNED_KEY in step.turn.metadata for rollout in rollouts for step in rollout.steps):
+        batch[ROLLOUT_WEIGHT_SYNCS_SPANNED_KEY] = [
+            sum(int(step.turn.metadata.get(WEIGHT_SYNCS_SPANNED_KEY, 0)) for step in rollout.steps)
+            for rollout in rollouts
         ]
 
 

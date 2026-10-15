@@ -25,6 +25,8 @@ from collections import defaultdict, deque
 import numpy as np
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
+from skyrl_train.config.numerics import NumericsResolution, exactness_check_config, resolve_numerics
+from skyrl_train.exactness_check import ExactnessCheck
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.rollouts.buffer import RolloutGroup
 from skyrl_train.rollouts.context import TrainingContext, TrainingContextState
@@ -33,6 +35,7 @@ from skyrl_train.trajectory_runners.base import (
     TrajectoryBatch,
     TrajectoryRunner,
 )
+from skyrl_train.trajectory_runners.types import ROLLOUT_ENGINE_DP_RANKS_KEY, ROLLOUT_WEIGHT_SYNCS_SPANNED_KEY
 import copy
 from skyrl_train.batch_sampling import RowOwnership, filter_trajectory_batch
 from skyrl_train.trajectory_runners.trajectory_processing import (
@@ -287,6 +290,9 @@ class RayPPOTrainer:
 
     # Set at startup when generator.weight_sync_transport is expert_block.
     _expert_block_sync: ExpertBlockSync | None = None
+    _numerics: NumericsResolution
+    # Set at construction when trainer.numerics.check.every_weight_syncs is above 0.
+    _exactness_check: ExactnessCheck | None = None
     _policy_version_step: int | None = None
 
     _training_metrics_enabled: bool = False
@@ -317,6 +323,10 @@ class RayPPOTrainer:
         self.colocate_all = cfg.trainer.placement.colocate_all
         self.tracker = tracker
         self.tokenizer = tokenizer
+        self._numerics = resolve_numerics(cfg)
+        check_config = exactness_check_config(cfg)
+        if check_config.enabled:
+            self._exactness_check = ExactnessCheck(check_config, self._numerics.mode, cfg.generator, tokenizer)
         self.train_dataset = train_dataset
         self.eval_dataset = eval_dataset
         self.inference_engine_client = inference_engine_client
@@ -1168,6 +1178,20 @@ class RayPPOTrainer:
                     await self.inference_engine_client.resume_generation()
         self._log_weight_update_completed(reason=reason, duration_seconds=update_timer.duration)
         self._inference_policy_step = self.policy_version_step
+        if self._exactness_check is not None and self._exactness_check.count_sync(reason):
+            self._exactness_check.start_generation(self.inference_engine_client)
+
+    def _score_exactness_check(self) -> None:
+        """Score the engines' exactness-check responses with the policy, which holds the weights they last received."""
+        check = self._exactness_check
+        if check is None or check.pending is None:
+            return
+        batch = check.batch(self.policy_model.actor_infos[0].rank.dp_size, self._resolve_num_experts())
+        batch.metadata["global_step"] = self.global_step
+        started = time.monotonic()
+        outputs = ray.get(self.policy_model.async_run_ray_method("mesh", "forward", data=batch))
+        logprobs = concatenate_outputs_after_mesh_dispatch(self.policy_model.actor_infos, outputs)["output"]
+        self.all_metrics.update(check.compare(logprobs, time.monotonic() - started))
 
     @property
     def policy_version_step(self) -> int:
@@ -1283,6 +1307,7 @@ class RayPPOTrainer:
             return
 
         self._log_startup_timings()
+        logger.info("Numerics mode {}", self._numerics.mode)
         self._record_run_configuration()
 
         if self.cfg.trainer.algorithm.use_kl_in_reward:
@@ -1582,6 +1607,8 @@ class RayPPOTrainer:
             self.all_metrics["policy/policy_update_steps"] = 0.0
             self.all_metrics["ftpo/empty_batch"] = 1.0
             return {"policy_update_steps": 0.0}
+        if self._exactness_check is not None:
+            self.all_metrics.update(await self._exactness_check.finish_generation())
         # The drain after the last weight sync can go stale while the rollout buffer fills, so align the
         # policy actor loops immediately before every forward.
         await self._drain_policy_event_loops()
@@ -1707,6 +1734,16 @@ class RayPPOTrainer:
                     "async/staleness_ratio": sum(1 for s in stalenesses if s > 0) / len(stalenesses),
                 }
             )
+            spans = trajectory_batch.get(ROLLOUT_WEIGHT_SYNCS_SPANNED_KEY)
+            if spans is not None:
+                # Rows whose model turns were generated across a weight sync, by more than one policy version.
+                spanning = sum(1 for count in spans if count > 0)
+                self.all_metrics.update(
+                    {
+                        "async/responses_spanning_weight_sync": spanning,
+                        "async/responses_spanning_weight_sync_fraction": spanning / len(spans),
+                    }
+                )
 
         with Timer("postprocess_trajectory_batch", self.all_timings):
             trajectory_batch = self.postprocess_trajectory_batch(trajectory_batch, uids)
@@ -2167,6 +2204,11 @@ class RayPPOTrainer:
                 "is_last_step": (
                     torch.tensor(trajectory_batch["is_last_step"], dtype=torch.bool)
                     if trajectory_batch.get("is_last_step", None) is not None
+                    else None
+                ),
+                ROLLOUT_ENGINE_DP_RANKS_KEY: (
+                    torch.tensor(trajectory_batch[ROLLOUT_ENGINE_DP_RANKS_KEY], dtype=torch.long)
+                    if trajectory_batch.get(ROLLOUT_ENGINE_DP_RANKS_KEY) is not None
                     else None
                 ),
             },
@@ -2780,6 +2822,7 @@ class RayPPOTrainer:
         if self.colocate_all:
             all_rank_action_log_probs: List[TrainingOutputBatch] = ray.get(action_log_probs_refs)
             action_log_probs = collect_results(self.policy_model.actor_infos, all_rank_action_log_probs, key="output")
+            self._score_exactness_check()
             self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
 
         # wait all models done
@@ -2805,6 +2848,8 @@ class RayPPOTrainer:
 
             all_rank_action_log_probs: List[TrainingOutputBatch] = ray.get(action_log_probs_refs)
             action_log_probs = collect_results(self.policy_model.actor_infos, all_rank_action_log_probs, key="output")
+            # The step's forward has finished on every policy rank before the check's forward starts.
+            self._score_exactness_check()
 
         if not self.colocate_all:
             empty_cache_refs = self.policy_model.async_run_ray_method("pass_through", "empty_cache")

@@ -60,6 +60,8 @@ def _make_min_cfg():
                 "http_endpoint_host": "127.0.0.1",
                 "http_endpoint_port": 0,
                 "weight_sync_pause_timeout_seconds": 30.0,
+                "inference_engine_data_parallel_size": 1,
+                "run_engines_locally": True,
             },
         }
     )
@@ -847,7 +849,7 @@ async def test_chat_completion_retry_resends_original_when_no_tokens_generated_y
 
     # Since finish_reason != abort on the second call and base_response was None,
     # client should return the second response directly (no accumulation)
-    assert out == engines[0].responses[1]
+    assert out == {**engines[0].responses[1], "engine_dp_rank": 0}
 
 
 @pytest.mark.asyncio
@@ -888,7 +890,7 @@ async def test_chat_completion_accepts_tool_call_response_without_text_content()
         "headers": {},
     }
 
-    assert await client.chat_completion(request) == response
+    assert await client.chat_completion(request) == {**response, "engine_dp_rank": 0}
 
 
 # -------------------------------------------
@@ -1129,7 +1131,7 @@ async def test_generate_retry_no_gen_finish():
     assert first_call["sampling_params"]["max_tokens"] == 16
     assert second_call["sampling_params"]["max_tokens"] == 16
 
-    assert out == {**engines[0].responses[1], "prompt_logprobs": None}
+    assert out == {**engines[0].responses[1], "prompt_logprobs": None, "engine_dp_ranks": [0]}
 
 
 # -------------------------------------------
@@ -1641,3 +1643,54 @@ def test_resume_wakes_a_request_parked_on_another_event_loop():
 
     assert engines[0].entered.is_set()
     assert any("[DONE]" in chunk for chunk in chunks)
+
+
+class _SyncCountingEngine(_MockGenerateEngine):
+    """Engine that counts the weight syncs it resumed from and reports how many each request spanned, the way
+    VLLMInferenceEngine does; its request stays in flight until the test releases it."""
+
+    def __init__(self):
+        super().__init__()
+        self.release = asyncio.Event()
+        self.weight_syncs = 0
+
+    async def generate(self, request):
+        started = self.weight_syncs
+        self.entered.set()
+        await self.release.wait()
+        return InferenceEngineOutput(
+            responses=["answer"],
+            response_ids=[[21, 22, 23]],
+            stop_reasons=["stop"],
+            response_logprobs=[[-0.1]],
+            weight_syncs_spanned=[self.weight_syncs - started],
+        )
+
+    async def resume_generation(self):
+        self.weight_syncs += 1
+        self.scheduler_paused = False
+
+
+@pytest.mark.asyncio
+async def test_a_response_kept_across_another_clients_weight_sync_reports_the_syncs_it_spanned():
+    """Rollout workers and the trainer hold separate clients over the same engines; only the trainer's pauses them."""
+    engines = [_SyncCountingEngine(), _SyncCountingEngine()]
+    cfg = _make_min_cfg()
+    cfg.generator.inference_engine_data_parallel_size = 2
+    rollout_client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=cfg)
+    trainer_client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=cfg)
+    session_id = next(sid for sid in ("trial-0", "trial-1") if hash_with_sha256(sid) % 2 == 1)
+    request = InferenceEngineInput(
+        prompt_token_ids=[[1, 2, 3]], sampling_params={"max_tokens": 5}, session_ids=[session_id]
+    )
+
+    kept = asyncio.create_task(rollout_client.generate(request))
+    await asyncio.wait_for(engines[1].entered.wait(), timeout=5)
+    await trainer_client.pause_generation()
+    await trainer_client.resume_generation()
+    engines[1].release.set()
+    output = await asyncio.wait_for(kept, timeout=5)
+
+    assert output["weight_syncs_spanned"] == [1]
+    assert output["engine_dp_ranks"] == [1]
+    assert (await asyncio.wait_for(rollout_client.generate(request), timeout=5))["weight_syncs_spanned"] == [0]

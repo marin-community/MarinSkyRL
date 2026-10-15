@@ -2,6 +2,7 @@
 
 import json
 from dataclasses import dataclass, field, replace
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -45,9 +46,19 @@ from skyrl_train.rollouts.buffer import (
 from skyrl_train.dataset.tasks import LOWERED_TASK_COLUMN
 from skyrl_train.rollouts.task_projections import WholeTaskProjection
 from skyrl_train.rollouts.task_worker import TaskRolloutWorker
+from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.trajectory_runners.model_clients import ModelServerError
-from skyrl_train.trajectory_runners.types import TokenProvenance, TrajectoryID, TaskRequestBatch
-from skyrl_train.trajectory_runners.trajectory_processing import prepare_trajectory_request
+from skyrl_train.trajectory_runners.types import (
+    ROLLOUT_ENGINE_DP_RANKS_KEY,
+    TokenProvenance,
+    TrajectoryID,
+    TaskRequestBatch,
+)
+from skyrl_train.trajectory_runners.trajectory_processing import (
+    concatenate_trajectory_batches,
+    prepare_trajectory_request,
+    scalar_reward_token_credit,
+)
 from tests.cpu.task_specs import task_input
 
 FIXTURE_IMAGE = "fixture@sha256:" + "0" * 64
@@ -87,6 +98,8 @@ class ReplayClient:
             "student_topk_indices": [[[tokens[0], 50]]],
             "behavior_topk_logprobs": [[[-0.5, -2.0]]],
             "routed_experts": [np.asarray([[[index + 1, 2]]], dtype=np.uint8)],
+            "engine_dp_ranks": [1 - index % 2],
+            "weight_syncs_spanned": [index],
         }
 
 
@@ -241,10 +254,40 @@ async def test_native_answer_returns_trainable_grade_and_exact_evidence(answer, 
     np.testing.assert_allclose(output["rollout_logprobs"][0], [-0.5])
     np.testing.assert_array_equal(output["student_topk_indices"][0], [[20, 50]])
     np.testing.assert_array_equal(output["rollout_routed_experts"][0], [[[1, 2]]])
+    assert output["rollout_engine_dp_ranks"] == [1]
+    assert output["rollout_weight_syncs_spanned"] == [0]
     assert output["trajectory_ids"] == [TrajectoryID("task", 0)]
     assert output["teacher_route_keys"] == ["math"]
     assert output["data_sources"] == ["fixture"]
     assert "12" not in json.dumps(client.requests[0]["prompts"])
+
+
+async def test_native_rows_carry_their_serving_engine_rank_into_the_training_batch():
+    record = lowered(answer_task())
+    client = ReplayClient([{"role": "assistant", "content": answer} for answer in ("12", "13")])
+    rows = TaskRequestBatch(
+        rows=(task_input(record, teacher_route="math"),) * 2,
+        sampling_params={"logprobs": True},
+        trajectory_ids=(TrajectoryID("task", 0), TrajectoryID("task", 1)),
+    )
+    output = await runner(client).run(rows)
+    trajectory_batch = concatenate_trajectory_batches([output], tis_lcs_alert_threshold=0.0)
+    # The trainer's reward postprocessing spreads each scalar reward over its response before conversion.
+    trajectory_batch["rewards"] = [
+        scalar_reward_token_credit(reward, response)
+        for reward, response in zip(trajectory_batch["rewards"], trajectory_batch["response_ids"], strict=True)
+    ]
+
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = get_default_config()
+    trainer.group_advantage_invariant = GroupAdvantageInvariant.no_group_advantage(physical_group_size=1)
+    trainer.tokenizer = SimpleNamespace(pad_token_id=0)
+    trainer.pad_batch = lambda batch: batch
+    batch = trainer.convert_to_training_input(trajectory_batch, ["a", "b"])
+
+    assert output["rollout_engine_dp_ranks"] == [1, 0]
+    assert output["rollout_weight_syncs_spanned"] == [0, 1]
+    assert batch[ROLLOUT_ENGINE_DP_RANKS_KEY].tolist() == [1, 0]
 
 
 async def test_native_tool_turn_keeps_private_grading_and_masks_observations():

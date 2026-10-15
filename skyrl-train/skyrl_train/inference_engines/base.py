@@ -64,6 +64,10 @@ class InferenceEngineOutput(TypedDict):
     # One [response token, MoE layer, topk] array per sample. Row i describes
     # the pass that predicted response_ids[i], starting at the final prompt token.
     routed_experts: NotRequired[List[np.ndarray | None]]
+    # The data-parallel rank of the engine that served each row (set by InferenceEngineClient) and the number of
+    # weight syncs that engine resumed from while generating it (set by the engine).
+    engine_dp_ranks: NotRequired[List[int]]
+    weight_syncs_spanned: NotRequired[List[int]]
 
 
 class NamedWeightsUpdateRequest(TypedDict):
