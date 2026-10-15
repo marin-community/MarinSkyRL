@@ -2192,18 +2192,19 @@ class RayPPOTrainer:
                 raise ValueError("routed experts must have one row per response")
         distillation_tensors = _validated_distillation_tensors(trajectory_batch, response_masks_tensor)
         # Policy steps are bounded by leases, so a batch without leases keeps zero staleness.
-        policy_steps = collate_response_token_channel(
-            trajectory_batch.get("rollout_policy_steps") if rollout_staleness is not None else None,
-            response_masks_tensor,
-            dtype=torch.int32,
-            expected_lengths=[len(response) for response in response_ids],
-        )
-        rollout_staleness_tensor = _token_staleness(
-            [0] * len(response_ids) if rollout_staleness is None else rollout_staleness,
-            policy_steps,
-            response_masks_tensor,
-            self.global_step,
-        )
+        policy_steps = None
+        if rollout_staleness is None:
+            rollout_staleness_tensor = torch.zeros_like(response_masks_tensor, dtype=torch.int32)
+        else:
+            policy_steps = collate_response_token_channel(
+                trajectory_batch.get("rollout_policy_steps"),
+                response_masks_tensor,
+                dtype=torch.int32,
+                expected_lengths=[len(response) for response in response_ids],
+            )
+            rollout_staleness_tensor = _token_staleness(
+                rollout_staleness, policy_steps, response_masks_tensor, self.global_step
+            )
         if self._training_metrics_enabled:
             self.all_metrics.update(_token_staleness_metrics(rollout_staleness_tensor, loss_masks_tensor, policy_steps))
         training_input = TrainingInputBatch(
