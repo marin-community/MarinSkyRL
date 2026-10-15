@@ -23,9 +23,9 @@ from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.group_admission import GroupAdvantageInvariant
 from skyrl_train.rollouts.context import TrainingContextState
 from skyrl_train.rollouts.loader import PromptLoaderState
-from skyrl_train.trainer import CheckpointSnapshot, RayPPOTrainer
+from skyrl_train.trainer import CheckpointSnapshot, RayPPOTrainer, policy_forward_keys
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
-from skyrl_train.trajectory_runners.types import TrajectoryID
+from skyrl_train.trajectory_runners.types import ROLLOUT_ENGINE_DP_RANKS_KEY, TrajectoryID
 from skyrl_train.objective.losses import PolicyLossInputs, ppo_policy_loss
 from skyrl_train.config.objective_spec import LossReduction
 from skyrl_train.objective.reduction import reduce_to_step, step_counts
@@ -1030,3 +1030,19 @@ async def test_exactness_check_samples_the_engines_after_a_sync_and_scores_them_
     assert trainer.all_metrics["exactness_check/mismatched_tokens"] == 2
     assert trainer.all_metrics["exactness_check/engine_0/mismatched_tokens"] == 2
     assert trainer._exactness_check.pending is None
+
+
+def test_policy_forward_batch_carries_each_rows_serving_engine_rank():
+    ranks = torch.tensor([3, 0])
+    batch = TrainingInputBatch(
+        {
+            "sequences": torch.tensor([[1, 2, 3], [4, 5, 6]]),
+            "attention_mask": torch.ones((2, 3), dtype=torch.bool),
+            ROLLOUT_ENGINE_DP_RANKS_KEY: ranks,
+        }
+    )
+    batch.metadata = {"response_length": 2}
+
+    forward = batch.select(keys=policy_forward_keys(batch), metadata_keys=["response_length"])
+
+    torch.testing.assert_close(forward[ROLLOUT_ENGINE_DP_RANKS_KEY], ranks)

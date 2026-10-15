@@ -15,8 +15,8 @@ REWARD_SHAPING_COMPONENT_NAMES = ("passthrough", "non_termination", "overlong", 
 ROUTED_EXPERTS_KEY = "routed_experts"
 # The data-parallel rank of the inference engine that served a model turn: the ModelTurn.metadata key, the batched
 # engine-output key and the trajectory and training batch key. Under expert parallelism an engine adds the experts'
-# partial outputs in an order that depends on its rank, so the Grug exact trainer (the next PR in this stack) reads
-# the rank from the training batch to add them in the engine's order, and the exactness check reports mismatches per
+# partial outputs in an order that depends on its rank, so the Grug exact trainer (``models/grug_exact``) reads the
+# rank from the training batch to add them in the engine's order, and the exactness check reports mismatches per
 # engine rank. Under native numerics only the check reads it.
 ENGINE_DP_RANK_KEY = "engine_dp_rank"
 ENGINE_DP_RANKS_KEY = "engine_dp_ranks"

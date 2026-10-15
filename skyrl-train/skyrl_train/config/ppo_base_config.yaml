@@ -180,8 +180,8 @@ trainer:
     sequence_parallel_size: 1
   numerics:
     # native: each side runs its own kernels. batch_invariant: trainer and vLLM engines run vLLM's batch-invariant
-    # kernels (local vLLM engines only). exact: the policy rollout engines are decode-invariant vLLM engines (local,
-    # tensor parallel 1, Triton MoE kernels) and the trainer runs its own kernels.
+    # kernels (local vLLM engines only). exact: decode-invariant vLLM engines and a Grug trainer that computes their
+    # log-probabilities bit for bit (local vLLM engines, a Snowball-shaped Grug policy; other policies run native).
     mode: native
     # Online check that the trainer reproduces the engines' log-probabilities: after qualifying weight syncs each
     # live engine generates one fixed short response and the trainer's next policy forward scores it.

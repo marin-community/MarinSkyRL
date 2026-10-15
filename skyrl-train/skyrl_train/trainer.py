@@ -25,7 +25,7 @@ from collections import defaultdict, deque
 import numpy as np
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
-from skyrl_train.config.numerics import NumericsResolution, exactness_check_config, resolve_numerics
+from skyrl_train.config.numerics import NumericsResolution, exactness_check_config, read_numerics
 from skyrl_train.exactness_check import ExactnessCheck
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.rollouts.buffer import RolloutGroup
@@ -278,6 +278,17 @@ def _zero_std_group_fraction(uids: Sequence[str], rewards: torch.Tensor) -> floa
     return flat_groups / len(group_rewards)
 
 
+def policy_forward_keys(training_input: TrainingInputBatch) -> list[str]:
+    """The training batch fields the pre-update policy, reference and critic forwards receive: the tokens, the
+    replayed routes when the batch carries them, and each row's serving engine rank when the batch carries it."""
+    keys = ["sequences", "attention_mask"]
+    if training_input.routed_experts is not None:
+        keys.append("rollout_routed_experts")
+    if training_input.get(ROLLOUT_ENGINE_DP_RANKS_KEY) is not None:
+        keys.append(ROLLOUT_ENGINE_DP_RANKS_KEY)
+    return keys
+
+
 class RayPPOTrainer:
     """The rollout-buffer training loop.
 
@@ -323,7 +334,7 @@ class RayPPOTrainer:
         self.colocate_all = cfg.trainer.placement.colocate_all
         self.tracker = tracker
         self.tokenizer = tokenizer
-        self._numerics = resolve_numerics(cfg)
+        self._numerics = read_numerics(cfg)
         check_config = exactness_check_config(cfg)
         if check_config.enabled:
             self._exactness_check = ExactnessCheck(check_config, self._numerics.mode, cfg.generator, tokenizer)
@@ -1308,6 +1319,12 @@ class RayPPOTrainer:
 
         self._log_startup_timings()
         logger.info("Numerics mode {}", self._numerics.mode)
+        if self._numerics.fallback_reasons:
+            logger.warning(
+                "trainer.numerics.mode=exact resolved to native, so trainer and rollout log-probabilities will "
+                "differ: {}",
+                "; ".join(self._numerics.fallback_reasons),
+            )
         self._record_run_configuration()
 
         if self.cfg.trainer.algorithm.use_kl_in_reward:
@@ -2766,9 +2783,7 @@ class RayPPOTrainer:
         # identical (replay) path so step 1 is genuinely on-policy (log_ratio ~ 0).
         # Gated on presence: flag-off (8B / no router-replay) batches keep the
         # original forward inputs. Compact routes are carried as a side field.
-        fwd_keys = ["sequences", "attention_mask"]
-        if training_input.routed_experts is not None:
-            fwd_keys.append("rollout_routed_experts")
+        fwd_keys = policy_forward_keys(training_input)
         data_fwd_pass = training_input.select(keys=fwd_keys, metadata_keys=["response_length"])
         data_fwd_pass.metadata["global_step"] = self.global_step
 

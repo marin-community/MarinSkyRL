@@ -32,12 +32,13 @@ from skyrl_train.inference_engines.vllm.decode_invariant.engine import (
     DECODE_INVARIANT_ATTENTION_BACKEND,
     decode_invariant_engine_init_kwargs,
 )
+from skyrl_train.models.grug_moe import GrugMoeConfig
 
 DCP_KEY = "inference_engine_decode_context_parallel_size"
 
 
 # ===================================================================== seam / G5
-def test_from_config_forwards_vllm_engine_options(monkeypatch):
+def test_from_config_forwards_vllm_engine_options(monkeypatch, tmp_path):
     """The config-assembly seam forwards typed vLLM engine options.
 
     Covers both entrypoints (BasePPOExp + TerminalBenchExp) since they share this seam.
@@ -72,10 +73,13 @@ def test_from_config_forwards_vllm_engine_options(monkeypatch):
     assert captured["decode_context_parallel_size"] == 2
     assert captured["vllm_attention_backend"] == "FLASH_ATTN"
 
-    # trainer.numerics.mode=exact builds decode-invariant rollout engines and leaves the config as written.
+    # trainer.numerics.mode=exact with a Snowball-shaped Grug policy builds decode-invariant rollout engines and
+    # leaves the config as written.
     captured.clear()
     cfg3 = get_default_config()
     cfg3.trainer.numerics.mode = "exact"
+    GrugMoeConfig().save_pretrained(tmp_path / "policy")
+    cfg3.trainer.policy.model.path = str(tmp_path / "policy")
     cfg3.generator.enforce_eager = False
     cfg3.generator.inference_engine_tensor_parallel_size = 1
     cfg3.generator.vllm_attention_backend = "FLASH_ATTN"

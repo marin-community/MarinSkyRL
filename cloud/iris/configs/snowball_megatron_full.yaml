@@ -24,6 +24,7 @@ trainer:
     advantage_estimator: grpo
     use_kl_loss: true
   numerics:
+    mode: exact
     check:
       every_weight_syncs: 10
   epochs: 1
@@ -50,10 +51,11 @@ trainer:
       context_parallel_size: 1
       expert_model_parallel_size: 8
       expert_tensor_parallel_size: 1
+      moe_router_replay: true
       optimizer_checkpoint_sharding_type: dp_reshardable
       ddp_config:
         overlap_grad_reduce: true
-        overlap_param_gather: true
+        overlap_param_gather: false
         grad_reduce_in_fp32: false
   ref:
     megatron_config:
@@ -80,6 +82,9 @@ generator:
   enforce_eager: false
   run_engines_locally: true
   weight_sync_backend: nccl
+  engine_init_kwargs:
+    moe_backend: triton
+    enable_return_routed_experts: true
   sampling_params:
     temperature: 1.0
     top_p: 1.0
