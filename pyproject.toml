@@ -35,7 +35,7 @@ dependencies = [
     "marin-iris>=0.2.144.dev37540375919",
     "marin-iris-native",
     "marin-rigging[secrets]>=0.2.144.dev37540375919",
-    "marin-rolloutengine>=0.2.171.dev38477406391",
+    "marin-rolloutengine>=0.2.189.dev38821401502",
     "marin-shellbox[daytona,shellsim]",
     "ninja",
     "nvidia-ml-py",

@@ -118,7 +118,7 @@ async def test_openenv_actions_retain_server_state_and_turn_rewards(openenv_sess
     assert "counter: 1" in first.observations[0]["content"]
     final = await session.advance(model_turn(f"<action>{action}</action>"))
     assert final.done and final.reward == 0.75
-    assert (await session.grade((), stop_reason="stop")).reward == 0.5
+    assert (await session.grade((), stop_reason="stop", outputs={})).reward == 0.5
     requests = [json.loads(line) for line in case.log.read_text().splitlines()]
     assert requests[0] == {"path": "/reset", "body": {}}
     assert requests[1] == {"path": "/step", "body": {"action": payload, "timeout_s": 30}}
@@ -153,7 +153,7 @@ async def test_openenv_server_failure_is_not_a_candidate_penalty(openenv_session
     await session.prepare()
     with pytest.raises(RuntimeError):
         await session.advance(model_turn(f"<action>{response}</action>"))
-    assert (await session.grade((), stop_reason="stop")).reward is None
+    assert (await session.grade((), stop_reason="stop", outputs={})).reward is None
 
 
 @pytest.mark.asyncio
@@ -216,4 +216,4 @@ async def test_openenv_failed_server_startup_releases_process(openenv_session):
     session = openenv_session(command=[sys.executable, "-c", "raise SystemExit(3)"]).session
     with pytest.raises(RuntimeError):
         await session.prepare()
-    assert (await session.grade((), stop_reason="stop")).reward is None
+    assert (await session.grade((), stop_reason="stop", outputs={})).reward is None

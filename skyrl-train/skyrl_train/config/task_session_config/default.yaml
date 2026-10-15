@@ -10,6 +10,8 @@ session:
   attempt_timeout: null
   verifier_timeout: null
   cleanup_timeout: ${trajectory_runner.cleanup_timeout}
+  max_total_tokens: null
+  tool_output_spill_bytes: null
 
 lcb:
   machine: &python_machine

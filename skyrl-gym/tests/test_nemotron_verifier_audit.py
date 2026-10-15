@@ -316,7 +316,7 @@ async def test_lost_python_process_ends_the_task_without_a_replacement_namespace
     assert lost.grade.reward == 0.0 and lost.grade.passed is False
     assert lost.observations
     assert lost.metrics["candidate_failure"] == ExitReason.EXITED.value
-    assert (await session.grade((), stop_reason="stop")).status is Outcome.GRADED
+    assert (await session.grade((), stop_reason="stop", outputs={})).status is Outcome.GRADED
 
 
 @pytest.mark.asyncio

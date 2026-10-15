@@ -688,7 +688,7 @@ async def test_ns_tools_executes_structured_python_calls_with_stateful_session(
     assert result.observations == ({"role": "tool", "tool_call_id": "call-1", "content": "42"},)
     final = await session.advance(model_turn(r"\boxed{42}"))
     assert final.done and final.grade.reward == 1.0
-    assert (await session.grade((), stop_reason="stop")).reward == 1.0
+    assert (await session.grade((), stop_reason="stop", outputs={})).reward == 1.0
 
 
 @pytest.mark.asyncio
@@ -717,7 +717,7 @@ async def test_ns_tools_does_not_execute_a_length_stopped_call(nemotron_session,
 
     assert not marker.exists()
     assert result.done and result.grade.status is Outcome.UNAVAILABLE
-    assert (await session.grade((), stop_reason="stop")).reward is None
+    assert (await session.grade((), stop_reason="stop", outputs={})).reward is None
 
 
 @pytest.mark.asyncio
