@@ -255,6 +255,14 @@ async def test_token_staleness_reaches_the_training_batch_through_stamped_rollou
     )
     assert [mismatch[f"policy/mismatch/staleness{bucket}/selected_tokens"] for bucket in (0, 1, 2)] == [2, 4, 2]
 
+    # The mismatch probe converts its own rollouts without leases, before training passes their stamped step.
+    trainer.global_step = 7
+    probe = trainer.convert_to_training_input(
+        trainer.postprocess_trajectory_batch(stamped.trajectory_batch, ["a"]), ["a"]
+    )
+    assert not probe["rollout_staleness"].any()
+    trainer.global_step = 9
+
     # A stamp older than its lease cannot come from the engine that served the lease.
     stale_lease = RolloutGroup(stamped.trajectory_batch, "a", 8, {"uid": "a"})
     with pytest.raises(AssertionError, match="between its lease"):

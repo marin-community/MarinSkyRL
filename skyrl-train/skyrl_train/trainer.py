@@ -2181,7 +2181,7 @@ class RayPPOTrainer:
         ).unsqueeze(1)
         rollout_staleness_tensor = lease_staleness * response_masks_tensor.to(torch.int32)
         policy_steps = collate_response_token_channel(
-            trajectory_batch.get("rollout_policy_steps"),
+            trajectory_batch.get("rollout_policy_steps") if rollout_staleness is not None else None,
             response_masks_tensor,
             dtype=torch.int32,
             expected_lengths=[len(response) for response in response_ids],
