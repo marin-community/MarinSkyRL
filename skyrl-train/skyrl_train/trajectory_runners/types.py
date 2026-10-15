@@ -120,6 +120,7 @@ class TrajectoryBatch(TypedDict):
     evidence_messages: List[Optional[list[dict[str, Any]]]]
     verifier_tests: Optional[List[Optional[VerifierTestCollection]]]
     loss_masks: List[List[int]]
+    token_sources: NotRequired[List[List[int]]]
     stop_reasons: Optional[List[str]]
     exception_types: Optional[List[Optional[str]]]
     error_treatments: Optional[List[Optional[str]]]

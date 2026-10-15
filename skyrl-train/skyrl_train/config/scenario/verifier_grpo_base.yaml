@@ -1,0 +1,17 @@
+# @package _global_
+scenario:
+  preset: verifier_grpo_base
+trainer:
+  algorithm:
+    policy_loss_type: regular
+    advantage_estimator: grpo
+    dynamic_sampling:
+      type: none
+generator:
+  n_samples_per_prompt: 2
+terminal_bench_config:
+  installed_agent:
+    agent:
+      name: pi
+      pi:
+        mode: literal
