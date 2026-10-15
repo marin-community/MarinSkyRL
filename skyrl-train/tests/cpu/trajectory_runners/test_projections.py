@@ -150,7 +150,7 @@ def test_projection_preserves_routes_and_fills_missing_rows(projection_type):
 
 def test_whole_projection_leaves_observation_tokens_and_unstamped_rows_unsampled():
     def turn(token, step):
-        return rollout([token], 0.0, metadata={"response_policy_steps": np.asarray([step], dtype=np.int32)})
+        return rollout([token], 0.0, metadata={"response_policy_steps": [step]})
 
     record = trajectory(turn(3, 7), turn(4, 8))
     record = replace(

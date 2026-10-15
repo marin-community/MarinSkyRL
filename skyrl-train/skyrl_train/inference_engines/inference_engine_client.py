@@ -385,7 +385,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         prompt_logprobs: List[Optional[Any]] = [None for _ in range(n)]
         student_topk_indices: List[Optional[List[List[int]]]] = [None for _ in range(n)]
         behavior_topk_logprobs: List[Optional[List[List[float]]]] = [None for _ in range(n)]
-        response_policy_steps: List[Optional[np.ndarray]] = [None for _ in range(n)]
+        response_policy_steps: List[Optional[List[int]]] = [None for _ in range(n)]
         # a bit hacky for now
         add_resp_logprobs = False
         add_prompt_logprobs = False
@@ -524,7 +524,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         accum_student_topk_indices: List[List[int]] = []
         accum_behavior_topk_logprobs: List[List[float]] = []
         accum_routed_experts: List[np.ndarray] = []
-        accum_policy_steps: List[np.ndarray] = []
+        accum_policy_steps: List[int] = []
         saw_student_topk: Optional[bool] = None
         saw_routed_experts: Optional[bool] = None
         stop_reason: str = ABORT_FINISH_REASON
@@ -629,7 +629,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             if new_response_logprobs is not None:
                 accum_response_logprobs.extend(new_response_logprobs)
             if partial_response.get("response_policy_steps") is not None:
-                accum_policy_steps.append(partial_response["response_policy_steps"][0])
+                accum_policy_steps.extend(partial_response["response_policy_steps"][0])
             num_turns += 1
 
         # 4. Build the final response and return.
@@ -659,7 +659,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                 else np.empty((0, 0, 0), dtype=np.uint8)
             ]
         if accum_policy_steps:
-            output["response_policy_steps"] = [np.concatenate(accum_policy_steps)]
+            output["response_policy_steps"] = [accum_policy_steps]
         return output
 
     async def _chat_completion_with_retry(

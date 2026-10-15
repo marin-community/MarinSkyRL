@@ -421,7 +421,7 @@ def test_policy_step_stamps_split_responses_at_the_weight_sync_pause(ray_init_fi
     chat_choice = chat_response["choices"][0]
     stamped = {
         "chat": (chat_choice["token_ids"], chat_choice["policy_steps"]),
-        "tokens": (token_output["response_ids"][0], token_output["response_policy_steps"][0].tolist()),
+        "tokens": (token_output["response_ids"][0], token_output["response_policy_steps"][0]),
     }
     for token_ids, steps in stamped.values():
         assert len(token_ids) == len(steps) == sampling_params["max_tokens"]

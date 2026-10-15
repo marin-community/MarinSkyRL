@@ -1790,13 +1790,13 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         ]
         return result
 
-    def _response_policy_steps(self, request_id: str, response_length: int) -> np.ndarray:
+    def _response_policy_steps(self, request_id: str, response_length: int) -> list[int]:
         """Pop the request's stamps, trimmed to the tokens vLLM kept after its stop checks."""
         stamps = self._policy_steps.finish(request_id)
         assert len(stamps) >= response_length, (
             f"request {request_id} returned more tokens than its engine steps sampled"
         )
-        return stamps[:response_length]
+        return stamps[:response_length].tolist()
 
     async def wake_up(self, *args: Any, **kwargs: Any):
         await self.llm.wake_up(tags=kwargs.get("tags", None))
@@ -1989,7 +1989,7 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
             if choice.get("token_ids") is None:
                 self._policy_steps.discard([generate_id])
             else:
-                choice["policy_steps"] = self._response_policy_steps(generate_id, len(choice["token_ids"])).tolist()
+                choice["policy_steps"] = self._response_policy_steps(generate_id, len(choice["token_ids"]))
             return response
 
         except Exception as e:

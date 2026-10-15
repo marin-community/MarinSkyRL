@@ -87,7 +87,7 @@ class _ChatResult:
     assistant_message: dict[str, Any]
     generation_token_budget: int | None
     routed_experts: np.ndarray | None = None
-    policy_steps: np.ndarray | None = None
+    policy_steps: list[int] | None = None
 
 
 def _choice_routed_experts(choice: dict[str, Any], prompt_ids: list[int], response_ids: list[int]) -> np.ndarray | None:
@@ -333,7 +333,7 @@ class DirectModelClient:
                 message,
                 token_budget,
                 _choice_routed_experts(choice, prompt_ids, response_ids),
-                None if choice.get("policy_steps") is None else np.asarray(choice["policy_steps"], dtype=np.int32),
+                choice.get("policy_steps"),
             )
 
         results = await asyncio.gather(

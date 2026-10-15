@@ -64,7 +64,7 @@ class InferenceEngineOutput(TypedDict):
     # One [response token, MoE layer, topk] array per sample. Row i describes
     # the pass that predicted response_ids[i], starting at the final prompt token.
     routed_experts: NotRequired[List[np.ndarray | None]]
-    response_policy_steps: NotRequired[List[np.ndarray]]
+    response_policy_steps: NotRequired[List[List[int]]]
 
 
 class NamedWeightsUpdateRequest(TypedDict):

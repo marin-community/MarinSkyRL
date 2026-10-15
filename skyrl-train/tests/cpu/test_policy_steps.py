@@ -1,4 +1,5 @@
-from dataclasses import dataclass, field
+import json
+from dataclasses import asdict, dataclass, field
 from types import SimpleNamespace
 
 import pytest
@@ -124,8 +125,7 @@ def _task_request(repetition: int) -> TaskRequestBatch:
     )
 
 
-@pytest.mark.asyncio
-async def test_token_staleness_reaches_the_training_batch_through_stamped_rollouts():
+def _worker(engine: StampingEngine) -> TaskRolloutWorker:
     runner_config = OmegaConf.create(
         {
             "backend": "vllm",
@@ -155,14 +155,32 @@ async def test_token_staleness_reaches_the_training_batch_through_stamped_rollou
         }
     )
     tokenizer = Tokenizer()
-    engine = StampingEngine()
-    worker = TaskRolloutWorker(
+    return TaskRolloutWorker(
         runner_config,
         WholeTaskProjection(runner_config, tokenizer),
         DirectModelClient(InferenceEngineClient([engine], tokenizer, client_config)),
         {},
         shutdown_timeout=30,
     )
+
+
+@pytest.mark.asyncio
+async def test_stamped_turns_serialize_for_installed_agent_traces():
+    worker = _worker(StampingEngine())
+    try:
+        (rollout,) = await worker.generate(_task_request(0))
+    finally:
+        await worker.shutdown()
+
+    # Installed agents append every turn to their evidence trace as JSON.
+    (step,) = rollout.steps
+    assert json.loads(json.dumps(asdict(step.turn)))["metadata"]["response_policy_steps"] == [7, 7, 8, 8]
+
+
+@pytest.mark.asyncio
+async def test_token_staleness_reaches_the_training_batch_through_stamped_rollouts():
+    engine = StampingEngine()
+    worker = _worker(engine)
     writer = Writer()
     try:
         await worker.run_task(
@@ -188,7 +206,7 @@ async def test_token_staleness_reaches_the_training_batch_through_stamped_rollou
     trainer.global_step = 9
     trainer.all_metrics = {}
     trainer.all_timings = {}
-    trainer.tokenizer = tokenizer
+    trainer.tokenizer = Tokenizer()
     trainer.pad_batch = lambda batch: batch
     trainer.group_advantage_invariant = GroupAdvantageInvariant.no_group_advantage(physical_group_size=1)
     trainer._training_metrics_enabled = False
