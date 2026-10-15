@@ -31,6 +31,7 @@ class PiScenario(StrEnum):
     VERIFIER_GRPO = "verifier_grpo_base"
     RLAIF = "rlaif_pi_base"
     TEACHER_TRACE = "teacher_demo_pi_base"
+    TEACHER_TRACE_VERIFIED = "teacher_demo_pi_verified_base"
     DAGGER_MIXTURE = "dagger_pi_turn_mixture_base"
     DAGGER_TAKEOVER = "dagger_pi_prefix_takeover_base"
     CRITIQUE_REVISION = "critique_revision_pi_base"
@@ -63,7 +64,7 @@ class ModelEvidence(_Evidence):
     assistant: dict[str, Any]
     prompt_token_ids: tuple[int, ...]
     response_token_ids: tuple[int, ...]
-    logprobs: tuple[float, ...]
+    logprobs: tuple[float, ...] | None
 
     @model_validator(mode="after")
     def complete(self) -> "ModelEvidence":
@@ -75,11 +76,13 @@ class ModelEvidence(_Evidence):
             or set(self.chat_template_kwargs) & {"tools", "tokenize", "add_generation_prompt", "messages"}
             or not self.prompt_token_ids
             or not self.response_token_ids
-            or len(self.response_token_ids) != len(self.logprobs)
+            or (self.logprobs is not None and len(self.response_token_ids) != len(self.logprobs))
             or any(type(value) is not int or value < 0 for value in (*self.prompt_token_ids, *self.response_token_ids))
-            or any(not math.isfinite(value) for value in self.logprobs)
+            or (self.logprobs is not None and any(not math.isfinite(value) for value in self.logprobs))
         ):
-            raise ValueError("Pi model evidence requires exact sampled tokens, logprobs and an assistant response")
+            raise ValueError(
+                "Pi model evidence needs exact sampled tokens and an assistant response; present logprobs must align"
+            )
         return self
 
 
@@ -99,6 +102,8 @@ class PiTurn(_Evidence):
 
     @model_validator(mode="after")
     def check_observations(self) -> "PiTurn":
+        if self.actor != "teacher" and self.executed.logprobs is None:
+            raise ValueError("Pi student and revision behavior requires exact sampled logprobs")
         if not same_pi_assistant(self.executed.assistant, self.executed_assistant):
             raise ValueError("Pi executed assistant differs from the sampled model action")
         calls = self.executed_assistant.get("tool_calls") or []
@@ -179,20 +184,19 @@ class HydratedPiTrial(_Evidence):
     critique_feedback: str | None = None
     critique: CritiqueEvidence | None = None
     judge: JudgeEvidence | None = None
-    verifier_status: Literal["graded", "submission_failure"]
-    verifier_reward: float
+    verifier_status: Literal["graded", "submission_failure", "skipped"]
+    verifier_reward: float | None
     verifier_passed: bool | None
 
     @model_validator(mode="after")
     def check_continuation(self) -> "HydratedPiTrial":
-        if (
-            not self.trial_id
-            or type(self.policy_step) is not int
-            or self.policy_step < 0
-            or not self.turns
-            or not math.isfinite(self.verifier_reward)
-        ):
-            raise ValueError("Pi trial requires a trial ID, policy step, turns and Harbor verifier outcome")
+        if not self.trial_id or type(self.policy_step) is not int or self.policy_step < 0 or not self.turns:
+            raise ValueError("Pi trial requires a trial ID, policy step and turns")
+        if self.verifier_status == "skipped":
+            if self.verifier_reward is not None or self.verifier_passed is not None:
+                raise ValueError("Skipped Pi verification cannot carry a verifier verdict")
+        elif self.verifier_reward is None or not math.isfinite(self.verifier_reward):
+            raise ValueError("Graded Pi trial requires a finite verifier reward")
         request_ids: set[str] = set()
         for index, turn in enumerate(self.turns):
             if turn.index != index or turn.executed.request_id in request_ids:
@@ -267,7 +271,7 @@ class TrainingRow(_Evidence):
     loss_mask: tuple[int, ...]
     token_sources: tuple[TokenSource, ...]
     optimization_reward: float
-    verifier_reward: float
+    verifier_reward: float | None
     behavior_logprobs: tuple[float, ...] | None = None
 
     @model_validator(mode="after")
@@ -289,13 +293,13 @@ class TrainingRows(_Evidence):
     trial_id: str
     scenario: PiScenario
     rows: tuple[TrainingRow, ...]
-    verifier_reward: float
+    verifier_reward: float | None
     verifier_passed: bool | None
     evidence_messages: tuple[dict[str, Any], ...]
     judge_score: int | None = None
 
 
-def _teacher_row(label: ModelEvidence, tokenizer: Any, reward: float) -> TrainingRow:
+def _teacher_row(label: ModelEvidence, tokenizer: Any, reward: float | None) -> TrainingRow:
     options = {"tokenize": True, "tools": list(label.tools), **label.chat_template_kwargs}
     prefix = _token_ids(tokenizer.apply_chat_template(list(label.messages), add_generation_prompt=True, **options))
     full = _token_ids(
@@ -309,12 +313,12 @@ def _teacher_row(label: ModelEvidence, tokenizer: Any, reward: float) -> Trainin
         response_ids=response,
         loss_mask=(1,) * len(response),
         token_sources=(TokenSource.TEACHER,) * len(response),
-        optimization_reward=reward,
+        optimization_reward=0.0 if reward is None else reward,
         verifier_reward=reward,
     )
 
 
-def _teacher_trajectory_row(turns: tuple[PiTurn, ...], tokenizer: Any, reward: float) -> TrainingRow:
+def _teacher_trajectory_row(turns: tuple[PiTurn, ...], tokenizer: Any, reward: float | None) -> TrainingRow:
     """Keep one physical SFT row per trial; mask tool/user context between labels."""
     # Pi may canonicalize tool-call JSON before execution. Train SFT on the
     # validated executed rendering so each label matches the next visited
@@ -341,13 +345,15 @@ def _teacher_trajectory_row(turns: tuple[PiTurn, ...], tokenizer: Any, reward: f
         response_ids=tuple(response),
         loss_mask=tuple(mask),
         token_sources=tuple(sources),
-        optimization_reward=reward,
+        optimization_reward=0.0 if reward is None else reward,
         verifier_reward=reward,
     )
 
 
 def _student_row(turn: PiTurn, reward: float, verifier_reward: float, source: TokenSource) -> TrainingRow:
     sampled = turn.executed
+    if sampled.logprobs is None:
+        raise ValueError("Pi student behavior needs exact sampled logprobs")
     return TrainingRow(
         prompt_token_ids=sampled.prompt_token_ids,
         response_ids=sampled.response_token_ids,
@@ -369,6 +375,8 @@ def _student_trajectory_row(turns: tuple[PiTurn, ...], reward: float, verifier_r
     logprobs: list[float] = []
     for turn in turns:
         sampled = turn.executed
+        if sampled.logprobs is None:
+            raise ValueError("Pi student behavior needs exact sampled logprobs")
         if sampled.prompt_token_ids[: len(tokens)] != tokens:
             raise ValueError("Pi GRPO cannot assemble a continuous served token prefix")
         context = sampled.prompt_token_ids[len(tokens) :]
@@ -401,7 +409,10 @@ def scenario_training_rows(
         raise ValueError("Pi trial does not match its leased identity and policy step")
     turns = trial.turns
     rows: list[TrainingRow]
+    if trial.verifier_status == "skipped" and scenario is not PiScenario.TEACHER_TRACE:
+        raise ValueError("Only unfiltered Pi teacher SFT can skip verification")
     if scenario in (PiScenario.DAGGER_MIXTURE, PiScenario.DAGGER_TAKEOVER):
+        assert trial.verifier_reward is not None
         if trial.judge is not None or trial.critique_feedback is not None:
             raise ValueError("Pi DAgger cannot contain judge or critique evidence")
         expected = "turn_mixture" if scenario is PiScenario.DAGGER_MIXTURE else "prefix_takeover"
@@ -419,7 +430,11 @@ def scenario_training_rows(
             for turn in turns
             if scenario is PiScenario.DAGGER_MIXTURE or turn.actor == "teacher"
         ]
-    elif scenario is PiScenario.TEACHER_TRACE:
+    elif scenario in (PiScenario.TEACHER_TRACE, PiScenario.TEACHER_TRACE_VERIFIED):
+        if scenario is PiScenario.TEACHER_TRACE_VERIFIED and (
+            trial.verifier_status != "graded" or trial.verifier_passed is None
+        ):
+            raise ValueError("Verified Pi teacher SFT needs an explicit graded pass/fail verdict")
         if trial.judge is not None or trial.critique_feedback is not None:
             raise ValueError("Teacher trace cannot contain judge or critique evidence")
         if trial.planned_executors is not None or any(
@@ -428,6 +443,7 @@ def scenario_training_rows(
             raise ValueError("Teacher trace requires only executed teacher actions, no DAgger labels")
         rows = [_teacher_trajectory_row(turns, student_tokenizer, trial.verifier_reward)]
     elif scenario is PiScenario.CRITIQUE_REVISION:
+        assert trial.verifier_reward is not None
         if (
             len(turns) != 2
             or [turn.actor for turn in turns] != ["student", "revision"]
@@ -444,6 +460,7 @@ def scenario_training_rows(
             )
         rows = [_student_row(turns[-1], trial.verifier_reward, trial.verifier_reward, TokenSource.REVISION)]
     else:
+        assert trial.verifier_reward is not None
         if (
             any(turn.actor != "student" or turn.teacher_label is not None for turn in turns)
             or trial.planned_executors is not None
@@ -485,16 +502,25 @@ def training_rows_to_batch(result: TrainingRows) -> TrajectoryBatch:
     with_behavior = [row.behavior_logprobs is not None for row in rows]
     if any(with_behavior) and not all(with_behavior):
         raise ValueError("Pi training rows cannot mix behavior-policy and teacher SFT tokens")
-    verifier = VerificationResult.verified(result.verifier_reward, passed=result.verifier_passed)
+    verifier = (
+        VerificationResult.skipped("Pi teacher trace verification skipped")
+        if result.verifier_reward is None
+        else VerificationResult.verified(result.verifier_reward, passed=result.verifier_passed)
+    )
     return TrajectoryBatch(
         prompt_token_ids=[list(row.prompt_token_ids) for row in rows],
         response_ids=[list(row.response_ids) for row in rows],
         rewards=[[0.0] * (len(row.response_ids) - 1) + [row.optimization_reward] for row in rows],
-        unshaped_rewards=[row.verifier_reward for row in rows],
-        unshaped_reward_available=[True] * len(rows),
+        unshaped_rewards=[0.0 if row.verifier_reward is None else row.verifier_reward for row in rows],
+        unshaped_reward_available=[row.verifier_reward is not None for row in rows],
         verification_results=[verifier] * len(rows),
         evidence_messages=[list(result.evidence_messages) for _ in rows],
-        loss_masks=[list(row.loss_mask) for row in rows],
+        loss_masks=[
+            [0] * len(row.loss_mask)
+            if result.scenario is PiScenario.TEACHER_TRACE_VERIFIED and result.verifier_passed is False
+            else list(row.loss_mask)
+            for row in rows
+        ],
         token_sources=[[int(source) for source in row.token_sources] for row in rows],
         rollout_logprobs=(
             [np.asarray(row.behavior_logprobs, dtype=np.float32) for row in rows] if all(with_behavior) else None

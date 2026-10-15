@@ -91,7 +91,7 @@ class AgentInferenceBackend:
             else "stop"
         )
         logprobs = None
-        if turn.logprobs is not None:
+        if body.get("logprobs") is True and turn.logprobs is not None:
             logprobs = {
                 "content": [
                     {

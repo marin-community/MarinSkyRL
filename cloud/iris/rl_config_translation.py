@@ -546,7 +546,7 @@ def parse_rl_config(
             raise ValueError("RL scenarios require exactly scenario.preset")
         if "scenario" in config_groups or "algorithm_recipe" in config_groups:
             raise ValueError("Select a scenario once, with scenario.preset; do not combine it with an algorithm recipe")
-        if scenario["preset"] not in ("verifier_grpo_base", "teacher_demo_pi_base"):
+        if scenario["preset"] not in ("verifier_grpo_base", "teacher_demo_pi_base", "teacher_demo_pi_verified_base"):
             raise ValueError(f"Scenario {scenario['preset']!r} has no launchable shared-engine objective")
         config_groups["scenario"] = scenario["preset"]
     elif "scenario" in config_groups:

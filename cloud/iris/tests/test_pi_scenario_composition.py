@@ -1,0 +1,137 @@
+"""The Iris composer selects reviewed shared-worker Pi behavior, not the retired runner."""
+
+from pathlib import Path
+
+import pytest
+import yaml
+
+from cloud.iris.launch_config import LaunchTopology
+from cloud.iris.rl_config_translation import compose_skyrl_config, parse_rl_config
+from cloud.iris.role_plan import ModelRoleKind, RoleExecution, derive_num_nodes, derive_role_plan
+from omegaconf import OmegaConf
+
+
+BASE_CONFIG = Path(__file__).resolve().parents[1] / "configs/qwen_megatron_smoke.yaml"
+
+
+def _recipe(tmp_path, preset):
+    raw = yaml.safe_load(BASE_CONFIG.read_text())
+    raw["scenario"] = {"preset": preset}
+    raw["data"]["kind"] = "tasks"
+    raw["data"]["train_data"] = ["fixture-task"]
+    raw["data"]["terminal_bench_data"] = []
+    raw["generator"]["trajectory_retention"] = {"output_path": str(tmp_path / "trials")}
+    raw["terminal_bench"] = {
+        "installed_agent": {
+            "agent": {"model_name": "hosted_vllm/teacher", "kwargs": {"thinking_format": "qwen-chat-template"}}
+        }
+    }
+    path = tmp_path / "pi.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    return raw, path
+
+
+def _compose(path):
+    return compose_skyrl_config(
+        parse_rl_config(str(path)), {}, LaunchTopology(num_nodes=1, gpus_per_node=8, gpu_variant="H100")
+    ).config
+
+
+def test_verifier_preset_selects_pi_grpo_without_manual_objective(tmp_path):
+    _, path = _recipe(tmp_path, "verifier_grpo_base")
+    cfg = _compose(path)
+    assert set(cfg.scenario) == {"preset"}
+    assert cfg.scenario.preset == "verifier_grpo_base"
+    assert cfg.terminal_bench_config.installed_agent.agent.pi.mode == "literal"
+    assert cfg.trainer.algorithm.policy_loss_type == "regular"
+    assert cfg.generator.n_samples_per_prompt == 2
+    assert cfg.trainer.algorithm.dynamic_sampling.type is None
+
+
+def test_teacher_preset_selects_ungraded_sft_and_independent_source(tmp_path):
+    raw, path = _recipe(tmp_path, "teacher_demo_pi_base")
+    del raw["generator"]["n_samples_per_prompt"]
+    del raw["trainer"]["algorithm"]["advantage_estimator"]
+    raw["trainer"]["eval_interval"] = -1
+    raw["data"]["val_data"] = []
+    raw["terminal_bench"]["installed_agent"]["teacher"] = {
+        "source": "skyrl_managed",
+        "model": "teacher",
+        "model_path": "Qwen/independent-teacher",
+        "revision": "pinned-revision",
+        "student_model": "Qwen/Qwen2.5-1.5B-Instruct",
+        "max_context_tokens": 4096,
+        "resources": {"backend": "vllm", "num_engines": 1, "tensor_parallel_size": 1},
+    }
+    path.write_text(yaml.safe_dump(raw))
+    cfg = _compose(path)
+    assert cfg.scenario.preset == "teacher_demo_pi_base"
+    assert cfg.trainer.algorithm.policy_loss_type == "sft"
+    assert cfg.terminal_bench_config.harbor.verifier_disable is True
+    assert cfg.trainer.eval_interval == -1
+    assert cfg.generator.n_samples_per_prompt == 1
+    assert cfg.trainer.algorithm.dynamic_sampling.type is None
+    assert cfg.terminal_bench_config.installed_agent.teacher.source == "skyrl_managed"
+    plan = derive_role_plan(OmegaConf.to_container(cfg, resolve=True))
+    teacher = plan.claim("teacher:pi_trace")
+    assert teacher.kind is ModelRoleKind.TEACHER
+    assert teacher.execution is RoleExecution.LOCAL
+    assert teacher.colocation_group == "teacher:pi_trace"
+    assert teacher.num_nodes == 1
+    assert derive_num_nodes(plan) == 2
+
+
+def test_pi_preset_rejects_missing_served_thinking_format(tmp_path):
+    raw, path = _recipe(tmp_path, "verifier_grpo_base")
+    del raw["terminal_bench"]["installed_agent"]["agent"]["kwargs"]
+    path.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ValueError, match="thinking_format"):
+        _compose(path)
+
+
+def test_external_teacher_uses_remote_role_without_extra_gpu_node(tmp_path):
+    raw, path = _recipe(tmp_path, "teacher_demo_pi_verified_base")
+    del raw["generator"]["n_samples_per_prompt"]
+    del raw["trainer"]["algorithm"]["advantage_estimator"]
+    raw["trainer"]["eval_interval"] = -1
+    raw["data"]["val_data"] = []
+    raw["terminal_bench"]["installed_agent"]["teacher"] = {
+        "source": "external_vllm",
+        "model": "teacher",
+        "model_path": "Qwen/independent-teacher",
+        "revision": "pinned-revision",
+        "student_model": "Qwen/Qwen2.5-1.5B-Instruct",
+        "max_context_tokens": 4096,
+        "endpoint": "https://teacher.example/v1",
+        "auth": "env:PI_TEACHER_TOKEN",
+    }
+    path.write_text(yaml.safe_dump(raw))
+    cfg = _compose(path)
+    plan = derive_role_plan(OmegaConf.to_container(cfg, resolve=True))
+    assert cfg.trainer.algorithm.dynamic_sampling.type is None
+    assert plan.claim("teacher:pi_trace").execution is RoleExecution.REMOTE
+    assert derive_num_nodes(plan) == 1
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        {"preset": "unreviewed"},
+        {"kind": "verifier_grpo"},
+        {"preset": "verifier_grpo_base", "plugin_path": "arbitrary"},
+    ],
+)
+def test_unreviewed_or_ambiguous_scenario_fails_before_composition(tmp_path, scenario):
+    raw, path = _recipe(tmp_path, "verifier_grpo_base")
+    raw["scenario"] = scenario
+    path.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ValueError, match="scenario|Scenario"):
+        parse_rl_config(str(path))
+
+
+def test_scenario_conflicting_with_algorithm_recipe_fails(tmp_path):
+    raw, path = _recipe(tmp_path, "verifier_grpo_base")
+    raw["config_groups"] = {"algorithm_recipe": "grpo"}
+    path.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ValueError, match="do not combine"):
+        parse_rl_config(str(path))

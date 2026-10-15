@@ -289,6 +289,7 @@ def _iris_submission_state(config_path: Path, config: DictConfig) -> SimpleNames
         cluster=iris["cluster"],
         cluster_config=iris["cluster_config"],
         runtime_commit=runtime["launcher_commit"],
+        runtime_fetch_ref=runtime.get("fetch_ref"),
         runtime_profile=RuntimeProfile(runtime["profile"]),
         job_name=iris["job_name"],
         priority=iris["priority"],
@@ -644,10 +645,15 @@ def _effective_gdn_backend(args: SimpleNamespace) -> str:
 
 def _rl_config_uses_daytona(config: DictConfig) -> bool:
     """Return whether the configured task backend requires Daytona credentials."""
-    uses_harbor = str(config.runtime.entrypoint) in {
-        RL_ENTRYPOINTS[RLEntrypoint.TERMINAL_BENCH],
-        RL_ENTRYPOINTS[RLEntrypoint.TERMINAL_BENCH_GENERATE],
-    } or bool(config.skyrl.get("data", {}).get("terminal_bench_data"))
+    uses_harbor = (
+        str(config.runtime.entrypoint)
+        in {
+            RL_ENTRYPOINTS[RLEntrypoint.TERMINAL_BENCH],
+            RL_ENTRYPOINTS[RLEntrypoint.TERMINAL_BENCH_GENERATE],
+        }
+        or bool(config.skyrl.get("data", {}).get("terminal_bench_data"))
+        or bool(OmegaConf.select(config, "skyrl.scenario.preset"))
+    )
     backend = OmegaConf.select(
         config,
         "skyrl.terminal_bench_config.harbor.environment_type",
@@ -1098,7 +1104,9 @@ def launch(args: SimpleNamespace, expected_launcher_commit: str) -> LaunchOutcom
             environment=EnvironmentSpec(
                 env_vars=env_vars,
                 extras=["gpu"],
-                setup_scripts=[task_setup_script(args.runtime_commit, args.runtime_profile)],
+                setup_scripts=[
+                    task_setup_script(args.runtime_commit, args.runtime_profile, fetch_ref=args.runtime_fetch_ref)
+                ],
             ),
             constraints=constraints or None,
             coscheduling=coscheduling,
