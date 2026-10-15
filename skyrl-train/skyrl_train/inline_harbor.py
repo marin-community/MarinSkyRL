@@ -1,4 +1,4 @@
-"""Run pinned Harbor validation jobs against a paused trainer's live HTTP endpoint."""
+"""Run pinned Harbor validation jobs from the trainer's installed runtime."""
 
 import argparse
 import asyncio

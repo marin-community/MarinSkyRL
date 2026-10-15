@@ -281,7 +281,7 @@ class HarborEvaluationCallback(TrainerCallback):
             process = await asyncio.create_subprocess_exec(
                 sys.executable,
                 "-m",
-                "marinskyrl.inline_harbor",
+                "skyrl_train.inline_harbor",
                 "--spec",
                 str(spec),
                 "--output",
