@@ -1,4 +1,5 @@
 from skyrl_train.inference_engines.base import (
+    CHOICE_POLICY_STEPS_KEY,
     InferenceEngineInterface,
     InferenceEngineInput,
     InferenceEngineOutput,
@@ -1408,8 +1409,8 @@ def _parse_partial_response_and_inplace_update_accum(
             accum.logprobs_content.extend(logprobs["content"])
         if choice.get("token_ids") is not None:
             accum.token_ids.extend(choice["token_ids"])
-        if choice.get("policy_steps") is not None:
-            accum.policy_steps.extend(choice["policy_steps"])
+        if choice.get(CHOICE_POLICY_STEPS_KEY) is not None:
+            accum.policy_steps.extend(choice[CHOICE_POLICY_STEPS_KEY])
         accum.completion_tokens += new_completion_tokens
 
     return finish_reason, stop_reason, response_role, aborted_without_generating
@@ -1441,8 +1442,8 @@ def _build_final_response(
         final_choice["logprobs"]["content"] = accum.logprobs_content
     if final_choice.get("token_ids", None) is not None:
         final_choice["token_ids"] = accum.token_ids
-    if final_choice.get("policy_steps") is not None:
-        final_choice["policy_steps"] = accum.policy_steps
+    if final_choice.get(CHOICE_POLICY_STEPS_KEY) is not None:
+        final_choice[CHOICE_POLICY_STEPS_KEY] = accum.policy_steps
     if accum.routed_experts is not None:
         route_buffer = io.BytesIO()
         np.save(route_buffer, accum.routed_experts)

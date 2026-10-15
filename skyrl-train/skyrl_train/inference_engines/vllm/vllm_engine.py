@@ -56,6 +56,7 @@ from contextvars import ContextVar
 
 
 from skyrl_train.inference_engines.base import (
+    CHOICE_POLICY_STEPS_KEY,
     InferenceEngineInterface,
     InferenceEngineInput,
     InferenceEngineOutput,
@@ -1992,7 +1993,7 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
                 and len(response["choices"]) == 1
                 and choice.get("token_ids") is not None
             ):
-                choice["policy_steps"] = self._response_policy_steps(response["id"], len(choice["token_ids"]))
+                choice[CHOICE_POLICY_STEPS_KEY] = self._response_policy_steps(response["id"], len(choice["token_ids"]))
             return response
 
         except Exception as e:

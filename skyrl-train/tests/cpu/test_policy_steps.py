@@ -18,6 +18,7 @@ from taskcompendium.models import (
 from verifyit.spec import NumericSpec
 
 from skyrl_train.group_admission import GroupAdvantageInvariant
+from skyrl_train.inference_engines.base import CHOICE_POLICY_STEPS_KEY
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.vllm.policy_steps import PolicyStepStamps
 from skyrl_train.rollouts.buffer import RolloutGroup, RolloutLease, RolloutTask
@@ -97,7 +98,7 @@ class StampingEngine:
             "logprobs": {"content": [{"logprob": -0.5} for _ in token_ids]},
         }
         if policy_steps is not None:
-            choice["policy_steps"] = policy_steps
+            choice[CHOICE_POLICY_STEPS_KEY] = policy_steps
         return {
             "id": f"chatcmpl-{len(self.requests)}",
             "choices": [choice],

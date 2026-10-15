@@ -9,7 +9,7 @@ import asyncio
 import ray
 from tests.gpu.gpu_ci.test_inference_engine_client_http_endpoint import get_test_actor_config
 from tests.gpu.utils import get_test_prompts, init_inference_engines, init_worker_with_type
-from skyrl_train.inference_engines.base import ConversationType
+from skyrl_train.inference_engines.base import CHOICE_POLICY_STEPS_KEY, ConversationType
 from transformers import AutoTokenizer
 from typing import List
 from skyrl_train.inference_engines.inference_engine_client_http_endpoint import (
@@ -420,7 +420,7 @@ def test_policy_step_stamps_split_responses_at_the_weight_sync_pause(ray_init_fi
 
     chat_choice = chat_response["choices"][0]
     stamped = {
-        "chat": (chat_choice["token_ids"], chat_choice["policy_steps"]),
+        "chat": (chat_choice["token_ids"], chat_choice[CHOICE_POLICY_STEPS_KEY]),
         "tokens": (token_output["response_ids"][0], token_output["response_policy_steps"][0]),
     }
     for token_ids, steps in stamped.values():
@@ -430,7 +430,7 @@ def test_policy_step_stamps_split_responses_at_the_weight_sync_pause(ray_init_fi
     if pause_mode == "keep":
         assert len(output_tokens_at_pause) == 3
         assert stamped["chat"][1].index(2) == output_tokens_at_pause[chat_response["id"]]
-        assert direct_choice["policy_steps"].index(2) == output_tokens_at_pause[direct_response["id"]]
+        assert direct_choice[CHOICE_POLICY_STEPS_KEY].index(2) == output_tokens_at_pause[direct_response["id"]]
         (token_split,) = (
             count
             for request_id, count in output_tokens_at_pause.items()
@@ -442,7 +442,7 @@ def test_policy_step_stamps_split_responses_at_the_weight_sync_pause(ray_init_fi
         assert output_tokens_at_pause == {}
         assert direct_choice["finish_reason"] == "abort"
         assert 0 < direct_response["usage"]["completion_tokens"] < sampling_params["max_tokens"]
-        assert direct_choice["policy_steps"] == [1] * direct_response["usage"]["completion_tokens"]
+        assert direct_choice[CHOICE_POLICY_STEPS_KEY] == [1] * direct_response["usage"]["completion_tokens"]
         assert len(direct_choice["token_ids"]) == direct_response["usage"]["completion_tokens"]
 
 

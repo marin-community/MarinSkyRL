@@ -472,24 +472,28 @@ def _attach_routed_experts(batch: TrajectoryBatch, rollouts: Sequence[RolloutDat
         ]
 
 
+def _token_channels(
+    batch: TrajectoryBatch, rollouts: Sequence[RolloutData], key: str, dtype: type[np.generic], fill: int = 0
+) -> list[np.ndarray] | None:
+    """One scalar per response token from each turn's ``key`` metadata, or None when no turn carries it."""
+    if all(step.turn.metadata.get(key) is None for rollout in rollouts for step in rollout.steps):
+        return None
+    return [
+        _model_channel(rollout, key, len(response), (), dtype, fill)
+        for rollout, response in zip(rollouts, batch["response_ids"], strict=True)
+    ]
+
+
 def _attach_policy_steps(batch: TrajectoryBatch, rollouts: Sequence[RolloutData]) -> None:
-    if any(
-        step.turn.metadata.get(RESPONSE_POLICY_STEPS_KEY) is not None for rollout in rollouts for step in rollout.steps
-    ):
-        batch["rollout_policy_steps"] = [
-            _model_channel(rollout, RESPONSE_POLICY_STEPS_KEY, len(response), (), np.int32, fill=UNSTAMPED_POLICY_STEP)
-            for rollout, response in zip(rollouts, batch["response_ids"], strict=True)
-        ]
+    steps = _token_channels(batch, rollouts, RESPONSE_POLICY_STEPS_KEY, np.int32, fill=UNSTAMPED_POLICY_STEP)
+    if steps is not None:
+        batch["rollout_policy_steps"] = steps
 
 
 def _attach_span_tags(batch: TrajectoryBatch, rollouts: Sequence[RolloutData]) -> None:
-    if any(
-        step.turn.metadata.get(RESPONSE_SPAN_TAGS_KEY) is not None for rollout in rollouts for step in rollout.steps
-    ):
-        batch["response_span_tags"] = [
-            _model_channel(rollout, RESPONSE_SPAN_TAGS_KEY, len(response), (), np.int64).tolist()
-            for rollout, response in zip(rollouts, batch["response_ids"], strict=True)
-        ]
+    tags = _token_channels(batch, rollouts, RESPONSE_SPAN_TAGS_KEY, np.int64)
+    if tags is not None:
+        batch["response_span_tags"] = [row.tolist() for row in tags]
 
 
 def _task_error_policies(

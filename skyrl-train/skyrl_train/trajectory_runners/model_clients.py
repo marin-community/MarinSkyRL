@@ -12,6 +12,7 @@ import numpy as np
 from skyrl_gym.envs.nemotron_ultra.answer_extraction import REASONING_DELIMITERS, final_answer_text
 
 from skyrl_train.inference_engines.base import (
+    CHOICE_POLICY_STEPS_KEY,
     SESSION_ID_HEADER,
     ChatContinuation,
     InferenceEngineInput,
@@ -333,7 +334,7 @@ class DirectModelClient:
                 message,
                 token_budget,
                 _choice_routed_experts(choice, prompt_ids, response_ids),
-                choice.get("policy_steps"),
+                choice.get(CHOICE_POLICY_STEPS_KEY),
             )
 
         results = await asyncio.gather(

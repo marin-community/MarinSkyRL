@@ -263,6 +263,22 @@ def consumed_work(training_input: TrainingInputBatch) -> ConsumedWork:
     )
 
 
+def _token_staleness(
+    lease_staleness: Sequence[int], policy_steps: torch.Tensor | None, response_mask: torch.Tensor, global_step: int
+) -> torch.Tensor:
+    """Each response token's staleness: its lease's, unless the engine recorded the policy step that sampled it."""
+    lease = torch.tensor(lease_staleness, dtype=torch.int32).unsqueeze(1)
+    staleness = lease * response_mask.to(torch.int32)
+    if policy_steps is None:
+        return staleness
+    stamped = (policy_steps != UNSTAMPED_POLICY_STEP) & (response_mask > 0)
+    staleness = torch.where(stamped, global_step - policy_steps, staleness)
+    assert bool(((staleness >= 0) & (staleness <= lease)).all()), (
+        "a token's policy step must fall between its lease's step and the training step"
+    )
+    return staleness
+
+
 def _token_staleness_metrics(
     staleness: torch.Tensor, loss_mask: torch.Tensor, policy_steps: torch.Tensor | None
 ) -> Dict[str, float]:
@@ -2175,23 +2191,19 @@ class RayPPOTrainer:
             if len(rollout_routed_experts_rows) != len(response_ids):
                 raise ValueError("routed experts must have one row per response")
         distillation_tensors = _validated_distillation_tensors(trajectory_batch, response_masks_tensor)
-        # A token takes its lease's staleness unless the engine recorded the policy step that sampled it.
-        lease_staleness = torch.tensor(
-            rollout_staleness if rollout_staleness is not None else [0] * len(response_ids), dtype=torch.int32
-        ).unsqueeze(1)
-        rollout_staleness_tensor = lease_staleness * response_masks_tensor.to(torch.int32)
+        # Policy steps are bounded by leases, so a batch without leases keeps zero staleness.
         policy_steps = collate_response_token_channel(
             trajectory_batch.get("rollout_policy_steps") if rollout_staleness is not None else None,
             response_masks_tensor,
             dtype=torch.int32,
             expected_lengths=[len(response) for response in response_ids],
         )
-        if policy_steps is not None:
-            stamped = (policy_steps != UNSTAMPED_POLICY_STEP) & (response_masks_tensor > 0)
-            rollout_staleness_tensor = torch.where(stamped, self.global_step - policy_steps, rollout_staleness_tensor)
-            assert bool(((rollout_staleness_tensor >= 0) & (rollout_staleness_tensor <= lease_staleness)).all()), (
-                "a token's policy step must fall between its lease's step and the training step"
-            )
+        rollout_staleness_tensor = _token_staleness(
+            [0] * len(response_ids) if rollout_staleness is None else rollout_staleness,
+            policy_steps,
+            response_masks_tensor,
+            self.global_step,
+        )
         if self._training_metrics_enabled:
             self.all_metrics.update(_token_staleness_metrics(rollout_staleness_tensor, loss_masks_tensor, policy_steps))
         training_input = TrainingInputBatch(
