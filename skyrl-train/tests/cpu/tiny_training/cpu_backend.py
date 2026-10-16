@@ -24,7 +24,7 @@ from skyrl_train.inference_engines.base import (
     NamedWeightsUpdateRequest,
 )
 from skyrl_train.inference_engines.chat_continuation import EXACT_PROMPT_TOKEN_IDS_KEY
-from skyrl_train.inference_engines.vllm.policy_steps import PolicyStepStamps
+from skyrl_train.inference_engines.policy_steps import PolicyStepStamps
 from skyrl_train.io import io
 from skyrl_train.utils.torch_utils import chunked_entropy_from_logits, logprobs_from_logits
 from skyrl_train.workers.worker import PolicyWorkerBase

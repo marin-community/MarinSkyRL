@@ -1,5 +1,5 @@
 from skyrl_train.inference_engines.base import UNSTAMPED_POLICY_STEP
-from skyrl_train.inference_engines.vllm.policy_steps import PolicyStepStamps
+from skyrl_train.inference_engines.policy_steps import PolicyStepStamps
 
 
 def test_policy_step_stamps_follow_the_step_installed_before_each_engine_step():

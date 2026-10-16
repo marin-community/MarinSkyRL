@@ -69,7 +69,7 @@ from skyrl_train.inference_engines.chat_continuation import EXACT_PROMPT_TOKEN_I
 from marinskyrl.inference_placement import InferenceWorkerPlacement
 from skyrl_train.inference_engines.placement import inference_worker_placement
 from skyrl_train.inference_engines.vllm.numa import set_async_worker_numa_affinity
-from skyrl_train.inference_engines.vllm.policy_steps import PolicyStepStamps
+from skyrl_train.inference_engines.policy_steps import PolicyStepStamps
 from skyrl_train.weight_sync.expert_block.receiver import ExpertBlockReceiver
 from skyrl_train.weight_sync.weight_loader import WeightLoader
 from skyrl_train.weight_sync.vllm_weight_conversion import load_weights_into_vllm
