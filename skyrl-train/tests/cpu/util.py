@@ -5,7 +5,6 @@ import importlib.util
 import os
 import sys
 import types
-from types import SimpleNamespace
 from contextlib import contextmanager
 from datetime import timedelta
 from unittest.mock import patch
@@ -135,26 +134,14 @@ def stub_megatron_modules() -> None:
         "megatron.core.transformer": {},
         "megatron.core.transformer.module": {"Float16Module": type("Float16Module", (), {})},
         "megatron.core.optimizer": {
-            "OptimizerConfig": SimpleNamespace,
-            "ParamKey": type("ParamKey", (), {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)}),
-            "ParamWithNamePredicate": SimpleNamespace,
-            "get_standard_config_overrides": lambda config: {},
-            "get_megatron_optimizer": lambda **kwargs: None,
             "ChainedOptimizer": type("ChainedOptimizer", (), {}),
             "DistributedOptimizer": type("DistributedOptimizer", (), {}),
-        },
-        "megatron.core.optimizer.emerging_optimizers": {
-            "EmergingOptimizerEntry": SimpleNamespace,
-            "_EMERGING_OPTIMIZERS": {},
         },
         "megatron.core.optimizer.cpu_offloading": {
             "HybridDeviceOptimizer": type("HybridDeviceOptimizer", (), {}),
         },
         "megatron.core.optimizer.clip_grads": {"clip_grad_by_total_norm_fp32": lambda *args, **kwargs: None},
-        "megatron.core.utils": {
-            "get_attr_wrapped_model": lambda *args, **kwargs: None,
-            "get_model_config": lambda model: model.config,
-        },
+        "megatron.core.utils": {"get_attr_wrapped_model": lambda *args, **kwargs: None},
         "megatron.core.packed_seq_params": {
             "PackedSeqParams": type(
                 "PackedSeqParams", (), {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)}

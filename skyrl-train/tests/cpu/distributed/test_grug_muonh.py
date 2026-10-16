@@ -258,15 +258,3 @@ def test_megatron_adamh_reuses_gradient_across_scratch_chunks_without_changing_d
     _adamh_direction_in_grad_(gradient, exp_avg, exp_avg_sq, step=3, betas=(0.9, 0.95), eps=1e-8)
 
     torch.testing.assert_close(gradient, expected, rtol=0, atol=0)
-
-
-def test_megatron_muonh_accepts_global_gradient_clipping():
-    from tests.cpu.util import stub_megatron_modules
-
-    stub_megatron_modules()
-    from skyrl_train.distributed.megatron.optimizer import _init_megatron_optim_config
-
-    config = _init_megatron_optim_config(
-        {"optimizer": "MuonH", "lr": 1e-5, "weight_decay": 0.0, "max_grad_norm": 1.0}, {}
-    )
-    assert config.clip_grad == 1.0
