@@ -19,15 +19,20 @@ from types import SimpleNamespace
 import pytest
 import ray
 import torch
+from megatron.bridge import AutoBridge
+from megatron.core import parallel_state, tensor_parallel
+from megatron.core.transformer.module import Float16Module
 from ray.util.placement_group import placement_group
 from transformers import AutoTokenizer
 
+import skyrl_train.models.grug_megatron_bridge  # noqa: F401  # registers the Grug bridge
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.distributed.megatron.grug_muonh import MegatronGrugMuonH, _offloaded_muon_direction_in_grad_
 from skyrl_train.distributed.megatron.megatron_utils import load_megatron_optimizer, offload_megatron_optimizer
 from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl_train.models.grug_moe import GrugMoeForCausalLM
+from skyrl_train.models.grug_moe import GrugMoeConfig, GrugMoeForCausalLM
+from skyrl_train.workers.megatron.bridge_provider_config import configure_bridge_provider
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.utils import initialize_ray
 from skyrl_train.utils.torch_utils import logprobs_from_logits
@@ -78,6 +83,80 @@ SNOWBALL_LIKE_SHAPE = dict(
 # Snowball's width with few experts, so each expert sees as many tokens per micro-batch
 # as it does at full scale (about 700 for 2700-token rows across two EP ranks).
 SNOWBALL_LIKE_DENSE_EXPERTS_SHAPE = {**SNOWBALL_LIKE_SHAPE, "num_local_experts": 32}
+
+
+@pytest.fixture(params=[torch.float32, torch.bfloat16])
+def embedding_preprocess_model(request, tmp_path):
+    require_hoppers(1)
+    torch.cuda.set_device(0)
+    torch.distributed.init_process_group("nccl", init_method=f"file://{tmp_path / 'rendezvous'}", rank=0, world_size=1)
+    try:
+        parallel_state.initialize_model_parallel()
+        tensor_parallel.model_parallel_cuda_manual_seed(19)
+        config = GrugMoeConfig(
+            vocab_size=1024,
+            num_experts_per_tok=2,
+            max_position_embeddings=128,
+            **{**TOY_SHAPE, "num_hidden_layers": 2},
+        )
+        provider = AutoBridge.from_hf_config(config).to_megatron_provider(load_weights=False)
+        provider.params_dtype = request.param
+        provider.bf16 = request.param == torch.bfloat16
+        provider.fp16 = False
+        configure_bridge_provider(
+            provider,
+            tensor_model_parallel_size=1,
+            pipeline_model_parallel_size=1,
+            context_parallel_size=1,
+            expert_model_parallel_size=1,
+            expert_tensor_parallel_size=1,
+            bf16=provider.bf16,
+            attention_backend="fused" if provider.bf16 else "unfused",
+        )
+        provider.recompute_granularity = "full"
+        provider.recompute_method = "uniform"
+        provider.recompute_num_layers = 1
+        provider.finalize()
+        chunk = provider.provide_distributed_model(wrap_with_ddp=False, bf16=provider.bf16)[0]
+        model = chunk.module if isinstance(chunk, Float16Module) else chunk
+        yield model
+    finally:
+        parallel_state.destroy_model_parallel()
+        torch.distributed.destroy_process_group()
+
+
+@pytest.mark.parametrize("freeze_embeddings", [False, True])
+def test_grug_embedding_recompute_preserves_gradients_and_reduces_saved_activations(
+    embedding_preprocess_model, freeze_embeddings
+):
+    model = embedding_preprocess_model.train()
+    model.embedding.word_embeddings.weight.requires_grad_(not freeze_embeddings)
+    tokens = torch.arange(32, device="cuda").reshape(1, 32)
+    parameters = [p for module in (model.embedding, model.embed_norm) for p in module.parameters() if p.requires_grad]
+    parameter_storages = {p.untyped_storage().data_ptr() for p in model.parameters()}
+    results = []
+    saved_bytes = []
+    for recompute in (None, "full"):
+        model.config.recompute_granularity = recompute
+        model.zero_grad(set_to_none=True)
+        saved = {}
+
+        def pack(value):
+            storage = value.untyped_storage()
+            if storage.data_ptr() not in parameter_storages:
+                saved[storage.data_ptr()] = storage.nbytes()
+            return value
+
+        with torch.autograd.graph.saved_tensors_hooks(pack, lambda value: value):
+            output = model._preprocess(tokens, tokens)[0]
+        saved_bytes.append(sum(saved.values()))
+        output.float().square().mean().backward()
+        gradients = [p.grad for p in parameters]
+        assert all(gradient is not None and bool(torch.isfinite(gradient).all()) for gradient in gradients)
+        results.append((output.detach(), [gradient.clone() for gradient in gradients]))
+    torch.testing.assert_close(results[1], results[0], rtol=1e-5, atol=1e-5)
+    if not freeze_embeddings:
+        assert saved_bytes[1] < saved_bytes[0], saved_bytes
 
 
 def _config(model_path: str, *, world_size: int, pp: int, ep: int):
