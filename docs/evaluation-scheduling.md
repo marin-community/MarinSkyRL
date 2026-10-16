@@ -17,8 +17,9 @@ the next block of validation rows.
 
 Each Harbor cohort's `job.n_concurrent_trials` is a source cap inside the global pool.
 Idle slots are available to other sources. A single subprocess receives admitted
-trials over a private socket, keeping the evaluation Daytona credential out of the
-training process environment. It runs the upstream Harbor `Job` lifecycle for each
+trials over a private socket. The trainer reads the named evaluation credential and
+sets `DAYTONA_API_KEY` only in the child environment; it does not replace the training
+process's `DAYTONA_API_KEY`. It runs the upstream Harbor `Job` lifecycle for each
 task, including retries, verification and artifact publication. Per-task job names
 append `-task-00000`, `-task-00001`, etc. to the step/cohort job name. The callback
 aggregates their results into the original cohort metrics.

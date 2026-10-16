@@ -210,10 +210,6 @@ class SourceTaskDataset(TaskDataset):
             ),
         )
 
-    @staticmethod
-    def prompt_token_count(tokenizer: PreTrainedTokenizerBase, row: dict, prompt_key: str) -> int:
-        return task_prompt_token_count(tokenizer, row, prompt_key)
-
     def _map_task_rows(self, dataset: Dataset, mapper: Callable[[dict, int], dict]) -> Dataset:
         return dataset.map(
             mapper,

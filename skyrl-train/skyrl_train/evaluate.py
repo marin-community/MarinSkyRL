@@ -1,5 +1,5 @@
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 import torch
 from skyrl_train.utils.progress import tqdm
 from typing import Dict, List, Protocol
@@ -114,7 +114,7 @@ async def _collect_evaluation_rollouts(
     accumulator: _EvaluationAccumulator,
     pool: EvaluationPool,
 ) -> _EvaluationRollouts:
-    """Own the common evaluation session and trajectory collection lifecycle."""
+    """Collect every selected row and repetition within the shared evaluation pool."""
     trajectory_batches: List[TrajectoryBatch] = []
     last_request = None
     last_batch = None
@@ -273,21 +273,16 @@ async def evaluate(
     owns_sink = trajectory_sink is None
     active_sink = trajectory_sink or make_trajectory_sink(cfg.generator, tokenizer)
     try:
-        if evaluation_pool is None:
-            async with evaluation_session(trajectory_runner, cfg, global_step, active_sink) as pool:
-                return await evaluate(
-                    eval_dataloader, trajectory_runner, cfg, global_step, tokenizer, val_set_name, active_sink, pool
-                )
         accumulator = _WholeTrajectoryAccumulator([], [], [])
-        rollouts = await _collect_evaluation_rollouts(
-            eval_dataloader,
-            trajectory_runner,
-            cfg,
-            global_step,
-            val_set_name,
-            accumulator,
-            evaluation_pool,
+        session = (
+            nullcontext(evaluation_pool)
+            if evaluation_pool is not None
+            else evaluation_session(trajectory_runner, cfg, global_step, active_sink)
         )
+        async with session as pool:
+            rollouts = await _collect_evaluation_rollouts(
+                eval_dataloader, trajectory_runner, cfg, global_step, val_set_name, accumulator, pool
+            )
         concatenated_batch = rollouts.batch
         concat_data_sources = rollouts.data_sources
         vis = tokenizer.decode(rollouts.example_batch["response_ids"][0])
@@ -341,21 +336,16 @@ async def evaluate_step_wise(
     Returns:
         Dict[str, float]: evaluation metrics
     """
-    if evaluation_pool is None:
-        async with evaluation_session(trajectory_runner, cfg, global_step, trajectory_sink) as pool:
-            return await evaluate_step_wise(
-                eval_dataloader, trajectory_runner, cfg, global_step, tokenizer, trajectory_sink, val_set_name, pool
-            )
     accumulator = _StepWiseAccumulator([], [], [])
-    rollouts = await _collect_evaluation_rollouts(
-        eval_dataloader,
-        trajectory_runner,
-        cfg,
-        global_step,
-        val_set_name,
-        accumulator,
-        evaluation_pool,
+    session = (
+        nullcontext(evaluation_pool)
+        if evaluation_pool is not None
+        else evaluation_session(trajectory_runner, cfg, global_step, trajectory_sink)
     )
+    async with session as pool:
+        rollouts = await _collect_evaluation_rollouts(
+            eval_dataloader, trajectory_runner, cfg, global_step, val_set_name, accumulator, pool
+        )
     concatenated_batch = rollouts.batch
     concat_data_sources = rollouts.data_sources
     vis = tokenizer.decode(rollouts.example_batch["response_ids"][0])

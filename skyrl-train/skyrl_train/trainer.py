@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import replace
 import io as stdlib_io
 import json
@@ -487,32 +488,18 @@ class RayPPOTrainer:
         for key, value in (sampling_params or {}).items():
             OmegaConf.update(cfg, f"generator.eval_sampling_params.{key}", value, force_add=True)
         evaluator = evaluate_step_wise if cfg.trainer.step_wise_training else evaluate
-        if evaluation_pool is None:
-            try:
-                await self.context.pause_and_drain()
-                async with evaluation_session(
-                    self.eval_trajectory_runner, cfg, self.global_step, self.eval_trajectory_sink
-                ) as pool:
-                    if self._inference_engines_configured() and self._inference_policy_step != self.policy_version_step:
-                        await self._sync_policy_for_rollouts(reason="evaluation")
-                    return await self.eval(
-                        sampling_params=sampling_params,
-                        n_samples_per_prompt=n_samples_per_prompt,
-                        val_set_name=val_set_name,
-                        evaluation_pool=pool,
-                    )
-            finally:
-                self.context.resume()
-        return await evaluator(
-            eval_dataloader=self.eval_dataloader,
-            trajectory_runner=self.eval_trajectory_runner,
-            cfg=cfg,
-            global_step=self.global_step,
-            tokenizer=self.tokenizer,
-            trajectory_sink=self.eval_trajectory_sink,
-            val_set_name=val_set_name,
-            evaluation_pool=evaluation_pool,
-        )
+        session = nullcontext(evaluation_pool) if evaluation_pool is not None else self._evaluation_session()
+        async with session as pool:
+            return await evaluator(
+                eval_dataloader=self.eval_dataloader,
+                trajectory_runner=self.eval_trajectory_runner,
+                cfg=cfg,
+                global_step=self.global_step,
+                tokenizer=self.tokenizer,
+                trajectory_sink=self.eval_trajectory_sink,
+                val_set_name=val_set_name,
+                evaluation_pool=pool,
+            )
 
     # ------------------------------------------------------------------
     # Teardown helpers
@@ -1581,7 +1568,8 @@ class RayPPOTrainer:
             with Timer("update_ref_with_policy", self.all_timings):
                 await asyncio.to_thread(self.update_ref_with_policy)
 
-    async def _evaluate_and_log(self, state: TrainerState, *, commit: bool) -> None:
+    @asynccontextmanager
+    async def _evaluation_session(self):
         try:
             with Timer("eval_drain", self.all_timings if self.global_step else None):
                 await self.context.pause_and_drain()
@@ -1590,17 +1578,21 @@ class RayPPOTrainer:
             ) as pool:
                 if self._inference_engines_configured() and self._inference_policy_step != self.policy_version_step:
                     await self._sync_policy_for_rollouts(reason="evaluation")
-                async with asyncio.TaskGroup() as tasks:
-                    native = tasks.create_task(self.eval(evaluation_pool=pool))
-                    additional = [
-                        tasks.create_task(callback.collect_evaluation(state, trainer=self, pool=pool))
-                        for callback in self.callback_handler.callbacks
-                    ]
-                eval_metrics = native.result()
-                for task in additional:
-                    eval_metrics.update(task.result())
+                yield pool
         finally:
             self.context.resume()
+
+    async def _evaluate_and_log(self, state: TrainerState, *, commit: bool) -> None:
+        async with self._evaluation_session() as pool:
+            async with asyncio.TaskGroup() as tasks:
+                native = tasks.create_task(self.eval(evaluation_pool=pool))
+                additional = [
+                    tasks.create_task(callback.collect_evaluation(state, trainer=self, pool=pool))
+                    for callback in self.callback_handler.callbacks
+                ]
+            eval_metrics = native.result()
+            for task in additional:
+                eval_metrics.update(task.result())
         self._control = await self.callback_handler.call_event_async(
             "on_evaluate", state, self._control, metrics=eval_metrics, trainer=self
         )

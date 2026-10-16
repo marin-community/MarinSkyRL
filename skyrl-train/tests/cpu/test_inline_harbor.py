@@ -1,8 +1,5 @@
 import asyncio
-import json
 import os
-import subprocess
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -18,27 +15,19 @@ from skyrl_train.inline_harbor import validation_metrics
 from skyrl_train.inline_harbor_client import HarborTrialClient
 
 
-def test_worker_runs_outside_checkout_with_launcher_package_shadowed(tmp_path):
+@pytest.mark.asyncio
+async def test_worker_runs_outside_checkout_with_launcher_package_shadowed(tmp_path, monkeypatch):
     # The task image can supply an older launcher while the trainer comes from
     # the pinned source overlay. The worker must use that same trainer package.
     launcher = tmp_path / "marinskyrl"
     launcher.mkdir()
     (launcher / "__init__.py").write_text("")
-    spec = tmp_path / "spec.json"
-    output = tmp_path / "metrics.json"
-    spec.write_text(json.dumps({"cohorts": []}))
     environment = os.environ.copy()
     environment["PYTHONPATH"] = os.pathsep.join([str(tmp_path), str(Path(__file__).resolve().parents[2])])
-    subprocess.run(
-        [sys.executable, "-m", "skyrl_train.inline_harbor", "--spec", str(spec), "--output", str(output)],
-        cwd=tmp_path,
-        env=environment,
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    assert json.loads(output.read_text()) == {}
+    monkeypatch.chdir(tmp_path)
+    async with asyncio.timeout(60), HarborTrialClient(environment) as client:
+        with pytest.raises(RuntimeError, match="explicit tasks"):
+            await client.run({"job": {"tasks": []}, "reward_key": "reward"}, 0)
 
 
 def test_validation_scores_preserve_infrastructure_missingness():

@@ -7,6 +7,8 @@ import sys
 
 from skyrl_train.evaluation_pool import EvaluationPool
 
+CONTROL_MESSAGE_LIMIT = 16 * 1024 * 1024
+
 
 class HarborTrialClient:
     """Multiplex trial requests over one private socket to one Harbor subprocess."""
@@ -36,7 +38,7 @@ class HarborTrialClient:
         finally:
             child.close()
         try:
-            self.reader, self.writer = await asyncio.open_connection(sock=parent, limit=16 * 1024 * 1024)
+            self.reader, self.writer = await asyncio.open_connection(sock=parent, limit=CONTROL_MESSAGE_LIMIT)
         except BaseException:
             parent.close()
             await self._stop_process()

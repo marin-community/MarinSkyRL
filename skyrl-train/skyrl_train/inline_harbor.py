@@ -4,17 +4,14 @@ import argparse
 import asyncio
 import json
 import math
-import os
 import signal
 import socket
 import traceback
-from pathlib import Path
 
 from harbor.job import Job
 from harbor.models.job.config import JobConfig
 from harbor.models.job.result import JobResult
-from skyrl_train.evaluation_pool import EvaluationPool
-from skyrl_train.inline_harbor_client import collect_harbor
+from skyrl_train.inline_harbor_client import CONTROL_MESSAGE_LIMIT
 
 
 def validation_metrics(result: JobResult, config: JobConfig, reward_key: str) -> dict[str, float]:
@@ -44,28 +41,11 @@ def validation_metrics(result: JobResult, config: JobConfig, reward_key: str) ->
     }
 
 
-async def run_validation(spec: dict) -> dict[str, dict[str, float]]:
-    """Persist full Harbor traces at each job's configured durable jobs_dir."""
-    concurrency = max(1, sum(cohort["job"]["n_concurrent_trials"] for cohort in spec["cohorts"]))
-    async with EvaluationPool(concurrency) as pool:
-        return await collect_harbor(spec["cohorts"], pool, os.environ.copy())
-
-
-async def run_cancellable_validation(spec: dict) -> dict[str, dict[str, float]]:
-    loop = asyncio.get_running_loop()
-    task = asyncio.create_task(run_validation(spec))
-    loop.add_signal_handler(signal.SIGTERM, task.cancel)
-    try:
-        return await task
-    finally:
-        loop.remove_signal_handler(signal.SIGTERM)
-
-
 async def serve_trials(control_fd: int) -> None:
     """Execute only trials admitted by the parent; stdout remains available for Harbor logs."""
     connection = socket.socket(fileno=control_fd)
     connection.setblocking(False)
-    reader, writer = await asyncio.open_connection(sock=connection, limit=16 * 1024 * 1024)
+    reader, writer = await asyncio.open_connection(sock=connection, limit=CONTROL_MESSAGE_LIMIT)
     current = asyncio.current_task()
     loop = asyncio.get_running_loop()
     loop.add_signal_handler(signal.SIGTERM, current.cancel)
@@ -109,17 +89,9 @@ async def serve_trials(control_fd: int) -> None:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--spec", type=Path)
-    parser.add_argument("--output", type=Path)
-    parser.add_argument("--control-fd", type=int)
+    parser.add_argument("--control-fd", type=int, required=True)
     args = parser.parse_args()
-    if args.control_fd is not None:
-        asyncio.run(serve_trials(args.control_fd))
-        return
-    if args.spec is None or args.output is None:
-        parser.error("--spec and --output are required without --control-fd")
-    metrics = asyncio.run(run_cancellable_validation(json.loads(args.spec.read_text())))
-    args.output.write_text(json.dumps(metrics, indent=2, allow_nan=False) + "\n")
+    asyncio.run(serve_trials(args.control_fd))
 
 
 if __name__ == "__main__":
