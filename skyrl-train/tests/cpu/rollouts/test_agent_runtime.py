@@ -81,7 +81,7 @@ async def test_original_trial_mints_capability_for_container_setup_and_agent_run
             )
 
     @asynccontextmanager
-    async def endpoint(port):
+    async def endpoint(_port):
         yield AgentEndpoint("/trial", Controller())
 
     monkeypatch.setattr("skyrl_train.rollouts.agent_runtime.registered_agent_endpoint", endpoint)
@@ -120,7 +120,7 @@ async def test_original_trial_mints_capability_for_container_setup_and_agent_run
     )
     tokenizer = PreTrainedTokenizerFast(tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0})))
 
-    async def unexpected_request(payload):
+    async def unexpected_request(_payload):
         raise AssertionError("The environment fails before inference")
 
     runtime = InstalledAgentRuntime(
