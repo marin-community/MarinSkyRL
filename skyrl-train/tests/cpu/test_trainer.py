@@ -118,7 +118,7 @@ class _ResidencyInferenceClient:
     async def pause_generation(self):
         self.awake = False
 
-    async def resume_generation(self, policy_step=None):
+    async def resume_generation(self, policy_step):
         self.awake = True
 
 

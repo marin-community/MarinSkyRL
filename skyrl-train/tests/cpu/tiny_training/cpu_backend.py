@@ -380,9 +380,8 @@ class CPUInferenceEngine(InferenceEngineInterface):
     async def pause_generation(self) -> None:
         self._resumed.clear()
 
-    async def resume_generation(self, policy_step: int | None = None) -> None:
-        if policy_step is not None:
-            self._policy_steps.install(policy_step, time.monotonic())
+    async def resume_generation(self, policy_step: int) -> None:
+        self._policy_steps.install(policy_step, time.monotonic())
         self._policy_steps.forget_unclaimed(self._live_requests)
         self._resumed.set()
 

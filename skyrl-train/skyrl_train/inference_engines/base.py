@@ -188,7 +188,7 @@ class InferenceEngineInterface(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    async def resume_generation(self, policy_step: int | None = None) -> None:
+    async def resume_generation(self, policy_step: int) -> None:
         """Resume the scheduler after a weight update; ``policy_step`` stamps the tokens the new weights sample."""
         raise NotImplementedError()
 

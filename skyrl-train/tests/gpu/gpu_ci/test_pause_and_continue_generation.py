@@ -107,11 +107,11 @@ def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture):
 
         # Pause then resume while requests are in-flight
         asyncio.run(client.pause_generation())
-        asyncio.run(client.resume_generation())
+        asyncio.run(client.resume_generation(policy_step=1))
         # Run for another two seconds, then pause and resume again
         asyncio.run(asyncio.sleep(2))
         asyncio.run(client.pause_generation())
-        asyncio.run(client.resume_generation())
+        asyncio.run(client.resume_generation(policy_step=2))
 
         # Wait for all requests to finish
         for t in threads:
@@ -232,11 +232,11 @@ def test_continue_generation_generate_vllm_engine_generation(ray_init_fixture):
         await asyncio.sleep(1)
         # Pause then resume while requests are in-flight
         await client.pause_generation()
-        await client.resume_generation()
+        await client.resume_generation(policy_step=1)
         # Run for another two seconds, then pause and resume again
         await asyncio.sleep(2)
         await client.pause_generation()
-        await client.resume_generation()
+        await client.resume_generation(policy_step=2)
         return await asyncio.gather(*tasks)
 
     outputs = asyncio.run(run_requests_then_pause())
@@ -354,7 +354,7 @@ def test_pause_generation_vllm_engine(ray_init_fixture):
         )
 
         # Unpause for the next API run
-        asyncio.run(client.resume_generation())
+        asyncio.run(client.resume_generation(policy_step=1))
 
 
 @pytest.mark.vllm
@@ -493,7 +493,7 @@ def test_weight_sync_with_inflight_decodes_keeps_engine_alive(ray_init_fixture):
             refs = policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client)
             await asyncio.to_thread(ray.get, refs)
         finally:
-            await client.resume_generation()
+            await client.resume_generation(policy_step=1)
         return await asyncio.gather(*tasks)
 
     outputs = asyncio.run(decode_during_weight_sync())

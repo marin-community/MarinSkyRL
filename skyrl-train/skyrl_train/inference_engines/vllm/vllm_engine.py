@@ -2162,10 +2162,9 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
             outstanding_requests,
         )
 
-    async def resume_generation(self, policy_step: int | None = None) -> None:
+    async def resume_generation(self, policy_step: int) -> None:
         """Release the EngineCore scheduler after the weight reload completes, stamping later tokens with ``policy_step``."""
-        if policy_step is not None:
-            self._policy_steps.install(policy_step, time.monotonic())
+        self._policy_steps.install(policy_step, time.monotonic())
         self._forget_unclaimed_policy_steps()
         await self.llm.resume_generation()
         logger.info("resume_generation() finished, EngineCore scheduler released, policy_step={}", policy_step)

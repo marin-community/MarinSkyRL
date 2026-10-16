@@ -1236,7 +1236,7 @@ class _MockStreamEngine:
     async def pause_generation(self):
         pass
 
-    async def resume_generation(self, policy_step=None):
+    async def resume_generation(self, policy_step):
         pass
 
     async def chat_completion_stream(self, request_payload):
@@ -1260,7 +1260,7 @@ class _MockWeightSyncEngine:
             raise RuntimeError("reshape_and_cache_flash attempted to run with Meta tensors")
         self.reloads += 1
 
-    async def resume_generation(self, policy_step=None):
+    async def resume_generation(self, policy_step):
         self.scheduler_paused = False
 
 
@@ -1276,7 +1276,7 @@ async def test_weight_sync_pauses_loaded_scheduler_until_reload_finishes():
     assert engine.outstanding_requests == 0
     assert engine.reloads == 1
 
-    await client.resume_generation()
+    await client.resume_generation(policy_step=1)
     assert not engine.scheduler_paused
 
 
@@ -1311,7 +1311,7 @@ async def test_chat_completion_stream_blocks_while_paused_then_resumes():
     assert not task.done()
 
     # Resume -> the stream should now proceed to the engine and complete.
-    await client.resume_generation()
+    await client.resume_generation(policy_step=1)
     chunks = await asyncio.wait_for(task, timeout=5)
     assert engines[0].entered.is_set()
     assert any("[DONE]" in c for c in chunks)
@@ -1341,7 +1341,7 @@ class _MockCompletionEngine:
     async def pause_generation(self):
         pass
 
-    async def resume_generation(self, policy_step=None):
+    async def resume_generation(self, policy_step):
         pass
 
 
@@ -1411,7 +1411,7 @@ async def test_completion_single_prompt_blocks_while_paused_then_resumes(prompt)
     assert not engines[0].entered.is_set(), "request reached the engine while generation was paused"
     assert not task.done()
 
-    await client.resume_generation()
+    await client.resume_generation(policy_step=1)
     result = await asyncio.wait_for(task, timeout=5)
 
     assert result["choices"][0]["text"] == "done"
@@ -1462,7 +1462,7 @@ async def test_completion_single_prompt_reissue_waits_for_a_pause_that_is_still_
     assert len(engine.calls) == 1, "the retry entered the engine while generation was paused"
     assert not task.done()
 
-    await client.resume_generation()
+    await client.resume_generation(policy_step=1)
     result = await asyncio.wait_for(task, timeout=5)
 
     assert result["choices"][0]["finish_reason"] == "stop"
@@ -1570,7 +1570,7 @@ class _MockGenerateEngine:
     async def pause_generation(self):
         self.scheduler_paused = True
 
-    async def resume_generation(self, policy_step=None):
+    async def resume_generation(self, policy_step):
         self.scheduler_paused = False
 
 
@@ -1596,7 +1596,7 @@ async def test_generate_single_prompt_waits_for_resume_then_reaches_engine():
     assert not task.done(), "generate() returned or raised while generation was paused"
     assert engine.requests == []
 
-    await client.resume_generation()
+    await client.resume_generation(policy_step=1)
     output = await asyncio.wait_for(task, timeout=5)
 
     assert engine.requests == [
@@ -1653,7 +1653,7 @@ async def test_weight_sync_pause_skips_an_engine_that_already_died():
 
     await client.pause_generation()
     assert live.scheduler_paused
-    await client.resume_generation()
+    await client.resume_generation(policy_step=1)
     assert not live.scheduler_paused
 
 
@@ -1723,7 +1723,7 @@ def test_resume_wakes_a_request_parked_on_another_event_loop():
         assert not request.done()
         assert not engines[0].entered.is_set(), "request reached the engine while generation was paused"
 
-        trainer_loop.run_until_complete(client.resume_generation())
+        trainer_loop.run_until_complete(client.resume_generation(policy_step=1))
         chunks = server_loop.run_until_complete(asyncio.wait_for(request, timeout=5))
     finally:
         server_loop.close()

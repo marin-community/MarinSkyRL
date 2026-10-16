@@ -1153,7 +1153,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         self.generation_paused_event.set()
         await self._run_on_all_engines_before_deadline("pause_generation")
 
-    async def resume_generation(self, policy_step: int | None = None) -> None:
+    async def resume_generation(self, policy_step: int) -> None:
         """
         Resumes generation for all engines, intended for in-flight weight updates and partial rollouts.
 
