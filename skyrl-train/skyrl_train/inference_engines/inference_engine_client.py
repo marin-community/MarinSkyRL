@@ -397,9 +397,6 @@ class InferenceEngineClient(InferenceEngineInterface):
 
         for indices, result in zip(indices_list, results):
             policy_steps = result.get("response_policy_steps")
-            if policy_steps is not None:
-                for local_idx, original_idx in enumerate(indices):
-                    response_policy_steps[original_idx] = policy_steps[local_idx]
             selected_ids = result.get("student_topk_indices")
             selected_scores = result.get("behavior_topk_logprobs")
             if (selected_ids is None) != (selected_scores is None):
@@ -421,6 +418,8 @@ class InferenceEngineClient(InferenceEngineInterface):
                     routed_experts[original_idx] = _route_rows(
                         captured_routes[local_idx], len(response_ids[original_idx])
                     )
+                if policy_steps is not None:
+                    response_policy_steps[original_idx] = policy_steps[local_idx]
                 if result.get("response_logprobs", None):
                     add_resp_logprobs = True
                     response_logprobs[original_idx] = result["response_logprobs"][local_idx]
