@@ -26,7 +26,7 @@ async def run(config_path: Path) -> None:
     harbor = HarborTaskSettings.from_config(OmegaConf.create({"harbor": config["harbor"]}))
     tokenizer = PreTrainedTokenizerFast(tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0, "canary": 1})))
 
-    async def tokenize(payload):
+    async def tokenize(_payload):
         return {"tokens": [1], "count": 1, "max_model_len": config["max_model_len"]}
 
     runtime = InstalledAgentRuntime(

@@ -38,6 +38,15 @@ from skyrl_train.rollouts.harbor_trial_session import HarborTrialSession, run_ha
 from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
 
 
+async def publish_attempt(evidence: Path, destination: str) -> None:
+    """Publish attempt evidence and retain the local copy if publication fails."""
+    if io.is_cloud_path(destination):
+        await asyncio.to_thread(io.upload_directory, str(evidence), destination)
+    else:
+        await asyncio.to_thread(shutil.copytree, evidence, destination)
+    shutil.rmtree(evidence)
+
+
 class InstalledAgentSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -105,12 +114,7 @@ class InstalledAgentRuntime:
         try:
             await self._run_trial(machine, complete, lowered, trial_dir, messages[0]["content"], attempt_id)
         finally:
-            # Publish failed/cancelled attempts too. Keep local evidence if upload fails.
-            if io.is_cloud_path(destination):
-                await asyncio.to_thread(io.upload_directory, str(trial_dir), destination)
-            else:
-                await asyncio.to_thread(shutil.copytree, trial_dir, destination)
-            shutil.rmtree(trial_dir)
+            await publish_attempt(trial_dir, destination)
 
     def original_session(
         self, lowered: LoweredTaskSpec, session_id: str, settings: HarborTaskSettings, phase: str
@@ -199,11 +203,7 @@ class InstalledAgentRuntime:
                 result = await run_harbor_trial(trial, self.backend, complete, evidence / "engine")
                 return result.model_copy(update={"trial_uri": join_resource_path(destination, "trials", attempt_id)})
         finally:
-            if io.is_cloud_path(destination):
-                await asyncio.to_thread(io.upload_directory, str(evidence), destination)
-            else:
-                await asyncio.to_thread(shutil.copytree, evidence, destination)
-            shutil.rmtree(evidence)
+            await publish_attempt(evidence, destination)
 
     @asynccontextmanager
     async def _served_agent(
