@@ -634,6 +634,7 @@ def test_replace_mode_rejects_batch_without_teacher_evidence(ray_init, dummy_con
             "attention_mask": torch.ones(1, 3, dtype=torch.long),
             "loss_mask": torch.ones(1, 2),
             "rollout_logprobs": None,
+            "rollout_staleness": torch.zeros(1, 2, dtype=torch.int32),
         }
     )
     batch.metadata = {"response_length": 2}
