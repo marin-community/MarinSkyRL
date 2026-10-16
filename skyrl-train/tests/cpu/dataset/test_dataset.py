@@ -261,10 +261,10 @@ def test_mixed_original_harbor_and_source_tasks_collate_without_source_metadata_
     inputs = dataset.collate_fn(list(dataset))
 
     assert [row["input"].lowered for row in inputs] == tasks
-    by_session = {row["input"].metadata.metric_class: row["input"] for row in inputs}
-    assert by_session["gsm8k"].metadata.teacher_route == "math"
-    assert by_session[HARBOR_TRIAL_SESSION].metadata.teacher_route is None
-    assert by_session[HARBOR_TRIAL_SESSION].group_grader is None
+    by_metric_class = {row["input"].metadata.metric_class: row["input"] for row in inputs}
+    assert by_metric_class["gsm8k"].metadata.teacher_route == "math"
+    assert by_metric_class[HARBOR_TRIAL_SESSION].metadata.teacher_route is None
+    assert by_metric_class[HARBOR_TRIAL_SESSION].group_grader is None
 
 
 @pytest.mark.parametrize(
