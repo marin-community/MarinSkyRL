@@ -160,6 +160,7 @@ class BenchmarkSpec:
             with router replay off.
         memory_breakdown: After the last update, record each rank's parameter, gradient, FP32 master and
             optimizer-state bytes by optimizer route (MuonH only).
+        num_sequences: Benchmark only the ensemble batches with this many sequences, or every batch if ``None``.
     """
 
     run_name: str
@@ -184,6 +185,7 @@ class BenchmarkSpec:
     wandb_project: str | None
     megatron_overrides: tuple[str, ...] = ()
     memory_breakdown: bool = False
+    num_sequences: int | None = None
 
 
 @dataclass(frozen=True)
@@ -602,13 +604,23 @@ def worker_observation(outputs: Sequence[Any], peaks: Sequence[Mapping[str, Any]
     )
 
 
+def select_entries(
+    entries: Sequence[EnsembleEntry], profiles: Sequence[LengthProfile], num_sequences: int | None
+) -> list[EnsembleEntry]:
+    """Keep the entries of ``profiles`` and, if ``num_sequences`` is set, of that sequence count."""
+    return [
+        entry
+        for entry in entries
+        if entry.profile in profiles and (num_sequences is None or entry.num_sequences == num_sequences)
+    ]
+
+
 def ensemble_entries(spec: BenchmarkSpec) -> list[EnsembleEntry]:
     entries = []
     for path in list_ensemble(spec.ensemble_root, spec.ensemble_version):
         manifest = read_manifest(path)
-        if manifest.profile in spec.profiles:
-            entries.append(EnsembleEntry(path, manifest.profile, manifest.batch_index, manifest.num_sequences))
-    return entries
+        entries.append(EnsembleEntry(path, manifest.profile, manifest.batch_index, manifest.num_sequences))
+    return select_entries(entries, spec.profiles, spec.num_sequences)
 
 
 def source_num_layers(model_path: str, model_num_layers: int) -> int:
@@ -797,6 +809,7 @@ def parse_spec(argv: Sequence[str] | None = None) -> BenchmarkSpec:
     parser.add_argument("--ensemble-version", required=True)
     parser.add_argument("--profiles", nargs="+", choices=[profile.value for profile in LengthProfile], required=True)
     parser.add_argument("--routes-checkpoint", help="replay these stored routes; omit to route natively")
+    parser.add_argument("--num-sequences", type=int, help="benchmark only the batches with this many sequences")
     parser.add_argument("--warmup-updates", type=int, required=True)
     parser.add_argument("--measured-updates", type=int, required=True)
     parser.add_argument("--score-old-logprobs", action="store_true")
@@ -849,6 +862,7 @@ def parse_spec(argv: Sequence[str] | None = None) -> BenchmarkSpec:
         wandb_project=args.wandb_project,
         megatron_overrides=tuple(args.override),
         memory_breakdown=args.memory_breakdown,
+        num_sequences=args.num_sequences,
     )
 
 

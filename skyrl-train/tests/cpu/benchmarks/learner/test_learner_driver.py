@@ -24,6 +24,7 @@ from skyrl_train.benchmarks.learner.driver import (
     build_policy_cfg,
     compose_base_config,
     parse_spec,
+    select_entries,
     replay_routes,
     result_json,
     rows_per_update,
@@ -103,6 +104,13 @@ def test_schedule_interleaves_profiles_and_cycles_each_profile():
     ]
     assert [u.warmup for u in schedule] == [True, True, False, False, False, False]
     assert [u.profiled for u in schedule] == [False, False, True, False, False, False]
+
+
+def test_select_entries_filters_by_profile_and_sequence_count():
+    entries = [*_entries(), EnsembleEntry("root/v0/short/batch_2", SHORT, 2, 128)]
+    assert [e.path for e in select_entries(entries, (SHORT,), 128)] == ["root/v0/short/batch_2"]
+    assert len(select_entries(entries, (SHORT, LONG), None)) == 4
+    assert select_entries(entries, (LONG,), 128) == []
 
 
 def test_schedule_rejects_a_profile_without_batches():
