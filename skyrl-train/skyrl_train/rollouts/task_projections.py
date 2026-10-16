@@ -20,6 +20,7 @@ from rolloutengine.contracts import RolloutContractError, RolloutData
 from skyrl_train.error_treatment import ErrorTreatment
 from skyrl_train.dataset.tasks import TASKCOMPENDIUM_ENVIRONMENT
 from skyrl_train.distillation import INVALID_TOPK_INDEX
+from skyrl_train.inference_engines.base import UNSTAMPED_POLICY_STEP
 from skyrl_train.metric_names import TASK_ROLLOUT_METRIC_PREFIX
 from skyrl_train.trajectory_runners.trajectory_processing import (
     apply_overlong_filtering,
@@ -29,6 +30,7 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
 )
 from skyrl_train.trajectory_runners.selected_topk import AlignedStudentTopK, align_student_topk
 from skyrl_train.trajectory_runners.types import (
+    RESPONSE_POLICY_STEPS_KEY,
     RESPONSE_SPAN_TAGS_KEY,
     ROUTED_EXPERTS_KEY,
     TrajectoryBatch,
@@ -356,6 +358,7 @@ def _training_batch(
     _attach_failure_channels(batch, decisions)
     _attach_student_topk(batch, rollouts)
     _attach_routed_experts(batch, rollouts)
+    _attach_policy_steps(batch, rollouts)
     _attach_span_tags(batch, rollouts)
     metrics = None
     if env_metric_classes is not None:
@@ -441,9 +444,14 @@ def _attach_student_topk(batch: TrajectoryBatch, rollouts: Sequence[RolloutData]
 
 
 def _model_channel(
-    rollout: RolloutData, key: str, length: int, trailing_shape: tuple[int, ...], dtype: np.dtype | type[np.generic]
+    rollout: RolloutData,
+    key: str,
+    length: int,
+    trailing_shape: tuple[int, ...],
+    dtype: np.dtype | type[np.generic],
+    fill: int = 0,
 ) -> np.ndarray:
-    values = np.zeros((length, *trailing_shape), dtype=dtype)
+    values = np.full((length, *trailing_shape), fill, dtype=dtype)
     for step in rollout.steps:
         captured = step.turn.metadata.get(key)
         if captured is None:
@@ -464,14 +472,28 @@ def _attach_routed_experts(batch: TrajectoryBatch, rollouts: Sequence[RolloutDat
         ]
 
 
+def _token_channels(
+    batch: TrajectoryBatch, rollouts: Sequence[RolloutData], key: str, dtype: type[np.generic], fill: int = 0
+) -> list[np.ndarray] | None:
+    """One scalar per response token from each turn's ``key`` metadata, or None when no turn carries it."""
+    if all(step.turn.metadata.get(key) is None for rollout in rollouts for step in rollout.steps):
+        return None
+    return [
+        _model_channel(rollout, key, len(response), (), dtype, fill)
+        for rollout, response in zip(rollouts, batch["response_ids"], strict=True)
+    ]
+
+
+def _attach_policy_steps(batch: TrajectoryBatch, rollouts: Sequence[RolloutData]) -> None:
+    steps = _token_channels(batch, rollouts, RESPONSE_POLICY_STEPS_KEY, np.int32, fill=UNSTAMPED_POLICY_STEP)
+    if steps is not None:
+        batch["rollout_policy_steps"] = steps
+
+
 def _attach_span_tags(batch: TrajectoryBatch, rollouts: Sequence[RolloutData]) -> None:
-    if any(
-        step.turn.metadata.get(RESPONSE_SPAN_TAGS_KEY) is not None for rollout in rollouts for step in rollout.steps
-    ):
-        batch["response_span_tags"] = [
-            _model_channel(rollout, RESPONSE_SPAN_TAGS_KEY, len(response), (), np.int64).tolist()
-            for rollout, response in zip(rollouts, batch["response_ids"], strict=True)
-        ]
+    tags = _token_channels(batch, rollouts, RESPONSE_SPAN_TAGS_KEY, np.int64)
+    if tags is not None:
+        batch["response_span_tags"] = [row.tolist() for row in tags]
 
 
 def _task_error_policies(

@@ -55,6 +55,7 @@ _ERROR_CATEGORIES: Mapping[str, ErrorCategory] = MappingProxyType(
         "SandboxDiskFullError": ErrorCategory.INFRASTRUCTURE,
         "Tau3RuntimeInfrastructureError": ErrorCategory.INFRASTRUCTURE,
         "AgentTimeoutError": ErrorCategory.AGENT,
+        "ModelInitiatedTmuxFailure": ErrorCategory.AGENT,
         "AgentDiskFullError": ErrorCategory.AGENT,
         "ContextLengthExceededError": ErrorCategory.AGENT,
         "NonZeroAgentExitCodeError": ErrorCategory.AGENT,

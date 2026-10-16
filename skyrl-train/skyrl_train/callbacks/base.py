@@ -408,6 +408,10 @@ class TrainerCallback(ABC):
         """Async version of on_step_end. Defaults to calling sync version."""
         return self.on_step_end(state, control, **kwargs)
 
+    async def collect_evaluation(self, state, *, trainer, pool) -> Dict[str, float]:
+        """Collect additional sources within the trainer's frozen evaluation session."""
+        return {}
+
     async def on_evaluate_async(
         self,
         state: TrainerState,

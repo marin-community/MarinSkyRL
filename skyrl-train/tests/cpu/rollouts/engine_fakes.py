@@ -10,7 +10,7 @@ from skyrl_train.trajectory_runners.types import TokenProvenance
 class Tokenizer:
     eos_token_id = 99
 
-    def apply_chat_template(self, messages, add_generation_prompt):
+    def apply_chat_template(self, messages, add_generation_prompt, **template_options):
         return [1, 2]
 
 

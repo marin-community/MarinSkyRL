@@ -23,7 +23,9 @@ from skyrl_train.ftpo import FTPOTargets, FTPOInputs, boundary_values, compact_b
 from skyrl_train.distillation import TopKEvidence, student_topk_logprobs
 from skyrl_train.models.megatron_router_replay import MegatronRouterReplay
 from skyrl_train.config.objective_spec import topk_loss_params
+from skyrl_train.config.ftpo import ftpo_config
 from skyrl_train.objective.objective import (
+    FTPOAuxiliaryBatch,
     TopKTeacherBatch,
     build_objective_micro_batch,
     compute_policy_objective,
@@ -559,6 +561,16 @@ class MegatronModelWrapper:
 
             action_log_probs = token_logprobs[:, -num_actions:]
 
+            structural = None
+            if data.ftpo is not None and data.ftpo.weights is not None:
+                params = ftpo_config(self.cfg.trainer.algorithm)
+                if params is None or params.auxiliary_weight is None or ftpo_inputs is None:
+                    raise ValueError("Separate structural weights require configured auxiliary FTPO")
+                structural = FTPOAuxiliaryBatch(
+                    ftpo_inputs, data.ftpo.weights, action_log_probs, params, params.auxiliary_weight
+                )
+                ftpo_inputs = None
+
             sparse_student_logprobs = self._distillation_student_logprobs(logits, data)
 
             # Without an entropy loss the entropy is a metric only. Computing it under no_grad
@@ -587,6 +599,7 @@ class MegatronModelWrapper:
                 think_token_weight=self.cfg.trainer.algorithm.think_token_weight,
                 teacher=teacher,
                 ftpo=ftpo_inputs,
+                structural=structural,
                 pair_roles=data.pair_roles,
             )
             objective = compute_policy_objective(

@@ -13,6 +13,7 @@ from skyrl_train.task_inputs import TaskInput, TrajectoryMetadata, task_messages
 TrainingPhase = Literal["train", "eval"]
 REWARD_SHAPING_COMPONENT_NAMES = ("passthrough", "non_termination", "overlong", "successful_length")
 ROUTED_EXPERTS_KEY = "routed_experts"
+RESPONSE_POLICY_STEPS_KEY = "response_policy_steps"
 RESPONSE_SPAN_TAGS_KEY = "response_span_tags"
 
 
@@ -131,6 +132,7 @@ class TrajectoryBatch(TypedDict):
     student_topk_indices: Optional[List[np.ndarray]]
     behavior_topk_logprobs: Optional[List[np.ndarray]]
     rollout_routed_experts: Optional[List[np.ndarray]]
+    rollout_policy_steps: Optional[List[np.ndarray]]
     teacher_evidence: Optional[TeacherEvidenceBatch]
     distillation: Optional[PreparedTeacherInput]
     token_level_shaping: Optional[List[List[float]]]

@@ -606,6 +606,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 if len(micro_buffer) == micro_batches_per_mini_batch:
                     if experience.ftpo is not None:
                         active = torch.stack([micro.loss_mask.sum() for micro in micro_buffer]).sum()
+                        for micro in micro_buffer:
+                            if micro.ftpo.weights is not None:
+                                active = active + micro.ftpo.weights.sum()
                         torch.distributed.all_reduce(
                             active, group=mpu.get_data_parallel_group(with_context_parallel=False)
                         )

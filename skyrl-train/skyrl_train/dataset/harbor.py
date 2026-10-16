@@ -19,7 +19,13 @@ from taskcompendium.models import NoGrader, ScriptGrader, Source, TaskSpec, Veri
 from marinskyrl.packed_tasks import PackedTaskMaterializer, PackedTaskReference, select_task_references
 from marinskyrl.task_sources import DirectoryDataSource, TaskTroveParquetSource, data_source
 from skyrl_train.dataset.tasks import LOWERED_TASK_COLUMN, TaskDataset, cache_tasks
-from skyrl_train.dataset.harbor_import import EnvironmentConfig, TaskConfig, harbor_task
+from skyrl_train.dataset.harbor_import import (
+    HARBOR_TRIAL_SESSION,
+    EnvironmentConfig,
+    TaskConfig,
+    harbor_task,
+    harbor_trial_task,
+)
 
 MATERIALIZATION_BATCH_SIZE = 64
 HARBOR_ID_PREFIX = "harbor-id:"
@@ -141,6 +147,13 @@ def lower_harbor_task(directory: Path, task: TaskSpec, *, session: TaskSessionSp
     """Use package machine settings and phase deadlines, with other limits from the caller."""
     config = TaskConfig.model_validate_toml((directory / "task.toml").read_text())
 
+    if session.task_session == HARBOR_TRIAL_SESSION:
+        return LoweredTaskSpec(
+            task=task,
+            runtime=TaskRuntimeSpec(task_machine=None, verifier_machine=None),
+            session=session,
+        )
+
     task_machine = harbor_machine(config.environment, config.agent.user)
     verifier_machine = (
         harbor_machine(config.verifier.environment or config.environment, config.verifier.user)
@@ -189,7 +202,8 @@ def materialize_harbor_tasks(
                         directory = directories[item]
                         data_source = item.stable_uri()
                         uid = item.uid()
-                    task = harbor_task(
+                    importer = harbor_trial_task if session.task_session == HARBOR_TRIAL_SESSION else harbor_task
+                    task = importer(
                         directory,
                         source=Source(
                             dataset=data_source,
@@ -199,6 +213,10 @@ def materialize_harbor_tasks(
                         ),
                     )
                     if grader_override is not None:
+                        if session.task_session == HARBOR_TRIAL_SESSION:
+                            raise ValueError(
+                                "Full Harbor trials configure verification through Harbor, not grader overrides"
+                            )
                         task = task.model_copy(
                             update={
                                 "grader": grader_override,

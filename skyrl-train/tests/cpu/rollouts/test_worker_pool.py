@@ -1,12 +1,15 @@
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 import ray
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, open_dict
 
 from skyrl_train.rollout_observability import measure_rollout, observe_rollout_call, rollout_wait
+from skyrl_train.config.utils import get_default_config
+from skyrl_train.entrypoints.taskcompendium import TaskCompendiumExp
 from skyrl_train.rollouts.buffer import RolloutLease, RolloutTask
 from skyrl_train.rollouts.workers import (
     RolloutWorkerPool,
@@ -37,6 +40,41 @@ class _RemoteMethod:
 
     def remote(self, *args, **kwargs):
         return self._call(*args, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_preconverted_tasks_send_harbor_settings_to_worker_process(monkeypatch):
+    """Already-lowered Harbor rows have no terminal-bench directory sidechannel."""
+    transmitted = []
+
+    async def ready():
+        pass
+
+    def remote(spec, _shard, _sink, _executor_threads):
+        transmitted.append(spec.harbor_config)
+        return SimpleNamespace(startup=_RemoteMethod(ready), shutdown=_RemoteMethod(ready))
+
+    # Observe the Ray actor construction payload, without starting Ray or model engines.
+    monkeypatch.setattr(
+        "skyrl_train.rollouts.workers.RolloutWorker",
+        SimpleNamespace(options=lambda **_kwargs: SimpleNamespace(remote=remote)),
+    )
+    node_id = ray.NodeID.from_random().hex()
+    monkeypatch.setattr(ray, "get_runtime_context", lambda: SimpleNamespace(get_node_id=lambda: node_id))
+    monkeypatch.setattr(ray, "kill", lambda _actor: None)
+    config = get_default_config()
+    with open_dict(config):
+        config.terminal_bench_config = {"harbor": {"max_retries": 0}}
+    config.trajectory_runner.rollout_workers.num_workers = 1
+    config.trajectory_runner.rollout_workers.start_interval_seconds = 0
+    experiment = object.__new__(TaskCompendiumExp)
+    experiment.sessions = {}
+    pool = experiment.get_task_runner(config, SimpleNamespace(engines=[]))
+    await pool.startup()
+    try:
+        assert transmitted == [config.terminal_bench_config]
+    finally:
+        await pool.shutdown()
 
 
 class _Worker:
@@ -129,7 +167,7 @@ def _pool(workers: list[object], spec: _Spec, *, timeout: float = 1) -> RolloutW
 
 
 @pytest.mark.asyncio
-async def test_training_tasks_avoid_the_eval_worker(spec):
+async def test_training_tasks_wait_for_all_eval_workers(spec):
     calls: list[tuple[str, str]] = []
     pool = _pool(
         [_SessionWorker("eval", calls), _SessionWorker("train", calls)],
@@ -138,10 +176,17 @@ async def test_training_tasks_avoid_the_eval_worker(spec):
     task = RolloutTask(RolloutLease("lease", 1, 1), {"uid": "a"}, _request([TrajectoryID("a", 0)], "train"))
 
     await pool.start_eval_session(run_name="run", eval_step=0)
-    await pool.run_task(task, writer=None)
+    training = asyncio.create_task(pool.run_task(task, writer=None))
     await pool.stop_eval_session()
+    await training
 
-    assert calls == [("eval", "start_eval"), ("train", "task a"), ("eval", "stop_eval")]
+    assert calls == [
+        ("eval", "start_eval"),
+        ("train", "start_eval"),
+        ("eval", "stop_eval"),
+        ("train", "stop_eval"),
+        ("eval", "task a"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -154,14 +199,17 @@ async def test_pool_isolates_eval_from_concurrent_training(spec):
 
     await pool.start_eval_session(run_name="run", eval_step=0)
     await pool.run(_request([TrajectoryID("heldout", 0)], "eval"))
-    await pool.run(_request([TrajectoryID("training", 0)], "train"))
+    training = asyncio.create_task(pool.run(_request([TrajectoryID("training", 0)], "train")))
     await pool.stop_eval_session()
+    await training
 
     assert calls == [
         ("eval", "start_eval"),
+        ("train", "start_eval"),
         ("eval", "eval"),
-        ("train", "train"),
         ("eval", "stop_eval"),
+        ("train", "stop_eval"),
+        ("eval", "train"),
     ]
 
 
@@ -178,6 +226,36 @@ async def test_a_single_worker_defers_training_until_the_eval_session_ends(spec)
     await training
 
     assert calls == [("only", "start_eval"), ("only", "eval"), ("only", "stop_eval"), ("only", "task a")]
+
+
+@pytest.mark.asyncio
+async def test_evaluation_uses_every_worker_without_writing_training_groups(spec):
+    calls = []
+    pool = _pool([_SessionWorker("left", calls), _SessionWorker("right", calls)], spec)
+    await pool.start_eval_session(run_name="run", eval_step=2)
+    results = await asyncio.gather(*(pool.run(_request([TrajectoryID(name, 0)], "eval")) for name in ("a", "b")))
+    await pool.stop_eval_session()
+    assert {name for name, action in calls if action == "eval"} == {"left", "right"}
+    assert all(not action.startswith("task ") for _, action in calls)
+    assert [result["response_ids"] for result in results] == [[[0]], [[100]]]
+
+
+@pytest.mark.asyncio
+async def test_failed_session_start_releases_every_worker_for_training(spec):
+    calls = []
+    left, right = _SessionWorker("left", calls), _SessionWorker("right", calls)
+
+    async def fail(**kwargs):
+        raise ConnectionError("session initialization failed")
+
+    right.start_eval_session = _RemoteMethod(fail)
+    pool = _pool([left, right], spec)
+    with pytest.raises(ExceptionGroup) as failure:
+        await pool.start_eval_session(run_name="run", eval_step=2)
+    assert isinstance(failure.value.exceptions[0], ConnectionError)
+    output = await pool.run(_request([TrajectoryID("a", 0)], "train"))
+    assert output["response_ids"] == [[0]]
+    assert {name for name, action in calls if action == "stop_eval"} == {"left", "right"}
 
 
 @pytest.mark.asyncio

@@ -7,6 +7,9 @@ MessageType = Dict[str, str]
 ConversationType = List[MessageType]
 OnlineEagleResult = Dict[str, Any] | List[Dict[str, Any]]
 SESSION_ID_HEADER = "x-skyrl-session-id"
+UNSTAMPED_POLICY_STEP = -1
+# Chat-completion choice field with one policy step per token in ``token_ids``.
+CHOICE_POLICY_STEPS_KEY = "policy_steps"
 
 
 class PromptSamplingOverride(TypedDict, total=False):
@@ -64,6 +67,8 @@ class InferenceEngineOutput(TypedDict):
     # One [response token, MoE layer, topk] array per sample. Row i describes
     # the pass that predicted response_ids[i], starting at the final prompt token.
     routed_experts: NotRequired[List[np.ndarray | None]]
+    # The policy step whose weights sampled each response token, or UNSTAMPED_POLICY_STEP.
+    response_policy_steps: NotRequired[List[List[int]]]
 
 
 class NamedWeightsUpdateRequest(TypedDict):
@@ -183,8 +188,8 @@ class InferenceEngineInterface(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    async def resume_generation(self) -> None:
-        """Resume the scheduler after a weight update."""
+    async def resume_generation(self, policy_step: int) -> None:
+        """Resume the scheduler after a weight update; ``policy_step`` stamps the tokens the new weights sample."""
         raise NotImplementedError()
 
     async def begin_online_eagle_capture(self, config: Dict[str, Any]) -> OnlineEagleResult:

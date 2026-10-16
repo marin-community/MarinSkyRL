@@ -31,6 +31,7 @@ from ci.marin_nightly.gate import parse_metrics
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.callbacks.base import CallbackHandler, TrainerControl
 from skyrl_train.callbacks.builtin import EvaluationCallback
+from tests.cpu.evaluation_fakes import EvaluationLifecycle
 
 
 # ---------------------------------------------------------------------------
@@ -60,10 +61,17 @@ def _make_bare_trainer(global_step: int, total_training_steps: int, colocate_all
     # epochs is read from cfg in _handle_resume_at_max_steps
     cfg = MagicMock()
     cfg.trainer.epochs = 1
+    cfg.trajectory_runner.max_concurrent_tasks = 2
     trainer.cfg = cfg
 
     trainer.context = MagicMock(name="context")
     trainer.context.state_dict = AsyncMock(name="state_dict")
+    lifecycle = EvaluationLifecycle()
+    trainer.context.pause_and_drain = lifecycle.pause_and_drain
+    trainer.context.resume = lifecycle.resume
+    trainer.eval_trajectory_runner = lifecycle
+    trainer.eval_trajectory_sink = None
+    trainer._inference_engines_configured = lambda: False
 
     trainer._snapshot_checkpoint = MagicMock(name="snapshot_checkpoint")
     trainer._finish_checkpoint_upload = AsyncMock(name="finish_checkpoint_upload", return_value=(0.0, 0.0))
@@ -81,6 +89,7 @@ class _RecordingCallbackHandler:
     """Minimal async callback handler that records events and applies a control delta."""
 
     def __init__(self, on_train_end_control: TrainerControl):
+        self.callbacks = []
         self.events = []
         self.states = []
         self._on_train_end_control = on_train_end_control
@@ -132,7 +141,7 @@ def test_train_end_runs_and_logs_the_requested_evaluation(
     trainer.tracker = SimpleNamespace(log=lambda metrics, **kwargs: tracked.append((dict(metrics), kwargs)))
     scores = iter([0.75, 0.5, 0.25])
 
-    async def evaluate():
+    async def evaluate(**_kwargs):
         return {"eval/accuracy": next(scores)}
 
     trainer.eval = evaluate
@@ -173,8 +182,11 @@ def test_train_end_still_saves_when_the_final_evaluation_fails():
     trainer.callback_handler = _RecordingCallbackHandler(requested)
     trainer.eval.side_effect = RuntimeError("evaluation failed")
 
-    with pytest.raises(RuntimeError, match="evaluation failed"):
+    with pytest.raises(ExceptionGroup) as failure:
         asyncio.run(trainer._finalize_training(completed_step=16, epoch=0))
+    assert isinstance(failure.value.exceptions[0], RuntimeError)
+    assert str(failure.value.exceptions[0]) == "evaluation failed"
+    assert trainer.eval_trajectory_runner.events == ["drained", "started", "stopped", "resumed"]
 
     trainer._snapshot_checkpoint.assert_called_once()
     assert trainer.callback_handler.events == ["on_train_end", "on_save"]

@@ -41,7 +41,7 @@ class ThreeTurnSession:
         self.max_turns = lowered.session.max_turns
 
     async def prepare(self):
-        return session_start(self.task, shell_tool=None)
+        return session_start(self.task, shell_tool=None, provider_tools=())
 
     async def advance(self, turn):
         self.turns += 1
@@ -53,7 +53,7 @@ class ThreeTurnSession:
             grade=GradeResult(Outcome.GRADED, 0.0),
         )
 
-    async def grade(self, messages, *, stop_reason):
+    async def grade(self, messages, *, stop_reason, outputs):
         return GradeResult(Outcome.GRADED, 0.0)
 
     async def close(self):

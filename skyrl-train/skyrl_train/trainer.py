@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import replace
 import io as stdlib_io
 import json
@@ -71,8 +72,13 @@ from marinskyrl.distillation import (
 from skyrl_train.objective.teacher import teacher_advantages
 from skyrl_train.objective.correction import compute_correction
 from skyrl_train.config.objective_spec import off_policy_correction
-from skyrl_train.config.ftpo import ftpo_config
-from skyrl_train.closure_training import closure_target_metrics, closure_training_targets
+from skyrl_train.config.ftpo import FTPOBoundary, ftpo_config
+from skyrl_train.closure_training import (
+    boundary_route_metrics,
+    closure_target_metrics,
+    closure_training_targets,
+    mixed_boundary_modes,
+)
 from skyrl_train.ftpo import select_ftpo_candidates
 from skyrl_train.distillation_adapters import collate_student_selected_rollout
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import parse_trajectory_reward_shaping_config
@@ -126,7 +132,8 @@ from skyrl_train.utils.utils import (
 
 from skyrl_train.config.objective_spec import rollout_logprobs_required
 from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
-from skyrl_train.evaluate import evaluate, evaluate_step_wise
+from skyrl_train.evaluate import evaluate, evaluate_step_wise, evaluation_session
+from skyrl_train.evaluation_pool import EvaluationPool
 from skyrl_train.callbacks.base import TrainerCallback, TrainerState, TrainerControl, CallbackHandler
 from skyrl_train.callbacks.builtin import DefaultCallbackHandler, RefModelUpdateCallback
 from skyrl_train.telemetry import (
@@ -140,6 +147,7 @@ from skyrl_train.telemetry import (
     record_training_metrics,
 )
 from skyrl_train.rollout_observability import async_phase_window, monitor_event_loop_lag
+from skyrl_train.inference_engines.base import UNSTAMPED_POLICY_STEP
 from skyrl_train.utils.importance_ratio_diagnostics import mismatch_ratio_metrics
 from skyrl_train.timing_observability import StepWallTime, publish_startup_timings, publish_step_timings
 from skyrl_train.hf_export import (
@@ -260,6 +268,47 @@ def consumed_work(training_input: TrainingInputBatch) -> ConsumedWork:
         response_tokens=int(training_input["response_mask"][:real_rows].sum().item()),
         loss_tokens=int(training_input["loss_mask"][:real_rows].sum().item()),
     )
+
+
+def _token_staleness(
+    lease_staleness: Sequence[int], policy_steps: torch.Tensor | None, response_mask: torch.Tensor, global_step: int
+) -> torch.Tensor:
+    """Each response token's staleness: its lease's, unless the engine recorded the policy step that sampled it."""
+    lease = torch.tensor(lease_staleness, dtype=torch.int32).unsqueeze(1)
+    staleness = lease * response_mask.to(torch.int32)
+    if policy_steps is None:
+        return staleness
+    stamped = (policy_steps != UNSTAMPED_POLICY_STEP) & (response_mask > 0)
+    staleness = torch.where(stamped, global_step - policy_steps, staleness)
+    assert bool(((staleness >= 0) & (staleness <= lease)).all()), (
+        "a token's policy step must fall between its lease's step and the training step"
+    )
+    return staleness
+
+
+def _token_staleness_metrics(
+    staleness: torch.Tensor, loss_mask: torch.Tensor, policy_steps: torch.Tensor | None
+) -> Dict[str, float]:
+    """Staleness of loss-masked response tokens by engine stamp, beside the lease family ``async/staleness_*``."""
+    trained = loss_mask > 0
+    count = trained.count_nonzero().item()
+    if not count:
+        return {}
+    charged = staleness.masked_fill(~trained, 0)
+    metrics = {
+        "async/staleness_tokens_mean": charged.sum().item() / count,
+        "async/staleness_tokens_max": charged.max().item(),
+        "async/staleness_tokens_ratio": charged.count_nonzero().item() / count,
+        "async/staleness_tokens_stamped": 0.0,
+        "async/staleness_tokens_spanning": 0.0,
+    }
+    if policy_steps is not None:
+        stamped = trained & (policy_steps != UNSTAMPED_POLICY_STEP)
+        steps = policy_steps.masked_fill(~stamped, UNSTAMPED_POLICY_STEP)
+        spanning = (stamped & (steps < steps.amax(dim=1, keepdim=True))).any(dim=1)
+        metrics["async/staleness_tokens_stamped"] = stamped.count_nonzero().item() / count
+        metrics["async/staleness_tokens_spanning"] = spanning.float().mean().item()
+    return metrics
 
 
 def _zero_std_group_fraction(uids: Sequence[str], rewards: torch.Tensor) -> float:
@@ -469,6 +518,7 @@ class RayPPOTrainer:
         sampling_params: Dict[str, Any] | None = None,
         n_samples_per_prompt: int | None = None,
         val_set_name: str | None = None,
+        evaluation_pool: EvaluationPool | None = None,
     ) -> Dict[str, float]:
         """Evaluate the current policy with optional sampling overrides and a named output directory."""
         overrides = {"generator": {}, "trainer": {}}
@@ -480,17 +530,18 @@ class RayPPOTrainer:
         for key, value in (sampling_params or {}).items():
             OmegaConf.update(cfg, f"generator.eval_sampling_params.{key}", value, force_add=True)
         evaluator = evaluate_step_wise if cfg.trainer.step_wise_training else evaluate
-        if self._inference_engines_configured() and self._inference_policy_step != self.policy_version_step:
-            await self._sync_policy_for_rollouts(reason="evaluation")
-        return await evaluator(
-            eval_dataloader=self.eval_dataloader,
-            trajectory_runner=self.eval_trajectory_runner,
-            cfg=cfg,
-            global_step=self.global_step,
-            tokenizer=self.tokenizer,
-            trajectory_sink=self.eval_trajectory_sink,
-            val_set_name=val_set_name,
-        )
+        session = nullcontext(evaluation_pool) if evaluation_pool is not None else self._evaluation_session()
+        async with session as pool:
+            return await evaluator(
+                eval_dataloader=self.eval_dataloader,
+                trajectory_runner=self.eval_trajectory_runner,
+                cfg=cfg,
+                global_step=self.global_step,
+                tokenizer=self.tokenizer,
+                trajectory_sink=self.eval_trajectory_sink,
+                val_set_name=val_set_name,
+                evaluation_pool=pool,
+            )
 
     # ------------------------------------------------------------------
     # Teardown helpers
@@ -1154,18 +1205,15 @@ class RayPPOTrainer:
                 await asyncio.to_thread(self.policy_model.offload_to_cpu, offload_optimizer=False, offload_model=True)
                 await self.inference_engine_client.wake_up(tags=["kv_cache"])
             else:
-                # Expert-block sync writes into live engine parameters, so the initial sync pauses generation too.
-                pause = reason != "initial" or self._expert_block_sync is not None
-                if pause:
-                    await self.inference_engine_client.pause_generation()
+                await self.inference_engine_client.pause_generation()
                 # Training backloads the optimizer before every step. Offload it after every update, including
                 # the initial sync, so Megatron gradient buffers are not resized while still on the GPU.
                 await asyncio.to_thread(
                     self._offload_policy_optimizer, timings, timer_label="offload_policy_optimizer_to_cpu"
                 )
                 await self.sync_policy_weights_to_inference_engines()
-                if pause:
-                    await self.inference_engine_client.resume_generation()
+                # The synced weights serve the leases that `_publish` opens next, under the same step number.
+                await self.inference_engine_client.resume_generation(policy_step=self.global_step + 1)
         self._log_weight_update_completed(reason=reason, duration_seconds=update_timer.duration)
         self._inference_policy_step = self.policy_version_step
 
@@ -1559,8 +1607,31 @@ class RayPPOTrainer:
             with Timer("update_ref_with_policy", self.all_timings):
                 await asyncio.to_thread(self.update_ref_with_policy)
 
+    @asynccontextmanager
+    async def _evaluation_session(self):
+        try:
+            with Timer("eval_drain", self.all_timings if self.global_step else None):
+                await self.context.pause_and_drain()
+            async with evaluation_session(
+                self.eval_trajectory_runner, self.cfg, self.global_step, self.eval_trajectory_sink
+            ) as pool:
+                if self._inference_engines_configured() and self._inference_policy_step != self.policy_version_step:
+                    await self._sync_policy_for_rollouts(reason="evaluation")
+                yield pool
+        finally:
+            self.context.resume()
+
     async def _evaluate_and_log(self, state: TrainerState, *, commit: bool) -> None:
-        eval_metrics = await self.eval()
+        async with self._evaluation_session() as pool:
+            async with asyncio.TaskGroup() as tasks:
+                native = tasks.create_task(self.eval(evaluation_pool=pool))
+                additional = [
+                    tasks.create_task(callback.collect_evaluation(state, trainer=self, pool=pool))
+                    for callback in self.callback_handler.callbacks
+                ]
+            eval_metrics = native.result()
+            for task in additional:
+                eval_metrics.update(task.result())
         self._control = await self.callback_handler.call_event_async(
             "on_evaluate", state, self._control, metrics=eval_metrics, trainer=self
         )
@@ -1577,7 +1648,11 @@ class RayPPOTrainer:
         self.tracker.log(startup_eval, step=self.global_step, commit=False)
 
     async def _run_training(self, training_input: TrainingInputBatch, *, step_wall: StepWallTime | None = None):
-        if "ftpo_chosen_mask" in training_input and not training_input["loss_mask"].any():
+        if (
+            "ftpo_chosen_mask" in training_input
+            and not training_input["loss_mask"].any()
+            and not training_input.get("ftpo_weights", training_input["loss_mask"]).any()
+        ):
             self.all_timings["train_critic_and_policy"] = 0.0
             self.all_metrics["policy/policy_update_steps"] = 0.0
             self.all_metrics["ftpo/empty_batch"] = 1.0
@@ -2152,6 +2227,22 @@ class RayPPOTrainer:
             if len(rollout_routed_experts_rows) != len(response_ids):
                 raise ValueError("routed experts must have one row per response")
         distillation_tensors = _validated_distillation_tensors(trajectory_batch, response_masks_tensor)
+        # Policy steps are bounded by leases, so a batch without leases keeps zero staleness.
+        policy_steps = None
+        if rollout_staleness is None:
+            rollout_staleness_tensor = torch.zeros_like(response_masks_tensor, dtype=torch.int32)
+        else:
+            policy_steps = collate_response_token_channel(
+                trajectory_batch.get("rollout_policy_steps"),
+                response_masks_tensor,
+                dtype=torch.int32,
+                expected_lengths=[len(response) for response in response_ids],
+            )
+            rollout_staleness_tensor = _token_staleness(
+                rollout_staleness, policy_steps, response_masks_tensor, self.global_step
+            )
+        if self._training_metrics_enabled:
+            self.all_metrics.update(_token_staleness_metrics(rollout_staleness_tensor, loss_masks_tensor, policy_steps))
         training_input = TrainingInputBatch(
             {
                 "sequences": sequences_tensor,  # Full trajectories (padded and concatenated prompts and responses)
@@ -2160,10 +2251,7 @@ class RayPPOTrainer:
                 "rewards": rewards_tensor,
                 "loss_mask": loss_masks_tensor,
                 "rollout_logprobs": rollout_logprobs_tensor,
-                "rollout_staleness": torch.tensor(
-                    rollout_staleness if rollout_staleness is not None else [0] * len(response_ids),
-                    dtype=torch.int32,
-                ),
+                "rollout_staleness": rollout_staleness_tensor,
                 "is_last_step": (
                     torch.tensor(trajectory_batch["is_last_step"], dtype=torch.bool)
                     if trajectory_batch.get("is_last_step", None) is not None
@@ -2209,6 +2297,15 @@ class RayPPOTrainer:
                     else frozenset({self.tokenizer.eos_token_id}),
                 )
                 verified_boundaries = closure_targets.boundaries
+            boundary_modes = None
+            if ftpo.boundary == FTPOBoundary.MIXED:
+                boundary_modes = mixed_boundary_modes(
+                    prompt_ids,
+                    response_ids,
+                    loss_masks,
+                    trajectory_batch["verification_results"],
+                    self.tokenizer.decode,
+                )
             chosen, weights = select_ftpo_candidates(
                 response_ids,
                 loss_masks,
@@ -2221,7 +2318,18 @@ class RayPPOTrainer:
                 seed=self.cfg.trainer.seed + self.global_step,
                 eligible=eligible,
                 verified_boundaries=verified_boundaries,
+                boundary_modes=boundary_modes,
             )
+            structural_only = [False] * len(response_ids)
+            if ftpo.auxiliary_weight is not None and closure_targets is not None:
+                structural_only = [
+                    verification is not None and "closure" in verification.diagnostics
+                    for verification in trajectory_batch["verification_results"]
+                ]
+                for row, synthetic in enumerate(structural_only):
+                    if synthetic:
+                        training_input["loss_mask"][row] = 0
+                        training_input["rewards"][row] = 0
             if closure_targets is not None and any(closure_targets.repairs):
                 if ftpo.repair_sft_weight is None:
                     raise ValueError("Verified suffix repairs require an explicit repair_sft_weight")
@@ -2243,17 +2351,32 @@ class RayPPOTrainer:
                     attention_masks_tensor,
                     response_masks_tensor,
                     rewards_tensor,
-                    _,
-                    _,
+                    learner_loss_masks,
+                    learner_logprobs,
                     _,
                     _,
                 ) = convert_prompts_responses_to_batch_tensors(
                     self.tokenizer,
                     prompt_ids,
                     response_ids,
-                    [[0.0] * len(response) for response in response_ids],
-                    [[1] * len(response) for response in response_ids],
-                    None,
+                    [
+                        rewards[row]
+                        if ftpo.auxiliary_weight is not None and not structural_only[row]
+                        else [0.0] * len(response)
+                        for row, response in enumerate(response_ids)
+                    ],
+                    [
+                        loss_masks[row]
+                        if ftpo.auxiliary_weight is not None and not structural_only[row]
+                        else [0] * len(response)
+                        for row, response in enumerate(response_ids)
+                    ],
+                    None
+                    if ftpo.auxiliary_weight is None or logprobs is None
+                    else [
+                        logprobs[row] if not structural_only[row] else np.zeros(len(response), dtype=np.float32)
+                        for row, response in enumerate(response_ids)
+                    ],
                     None,
                     None,
                 )
@@ -2261,12 +2384,16 @@ class RayPPOTrainer:
                 candidates = candidates[:, :width]
                 chosen = chosen[:, :width]
                 weights = weights[:, :width]
+                rollout_staleness_tensor = rollout_staleness_tensor[:, :width]
                 extra = width - weights.shape[1]
                 candidates = torch.cat(
                     (candidates, candidates.new_full((len(response_ids), extra, candidates.shape[-1]), -1)), dim=1
                 )
                 chosen = torch.cat((chosen, chosen.new_zeros((len(response_ids), extra, chosen.shape[-1]))), dim=1)
                 weights = torch.cat((weights, weights.new_zeros((len(response_ids), extra))), dim=1)
+                rollout_staleness_tensor = torch.cat(
+                    (rollout_staleness_tensor, rollout_staleness_tensor.new_zeros((len(response_ids), extra))), dim=1
+                )
                 repair_mask = torch.zeros_like(weights, dtype=torch.bool)
                 for row, repair in enumerate(closure_targets.repairs):
                     if repair is not None:
@@ -2279,16 +2406,27 @@ class RayPPOTrainer:
                         "attention_mask": attention_masks_tensor,
                         "response_mask": response_masks_tensor,
                         "rewards": rewards_tensor,
-                        "rollout_logprobs": None,
+                        "rollout_logprobs": learner_logprobs,
+                        "loss_mask": learner_loss_masks,
+                        "rollout_staleness": rollout_staleness_tensor,
                         "ftpo_repair_mask": repair_mask,
                     }
                 )
                 self.all_metrics["closure/repair_tokens"] = float(repair_mask.sum())
             training_input["student_topk_indices"] = candidates
             training_input["ftpo_chosen_mask"] = chosen
-            training_input["loss_mask"] = weights
+            if ftpo.auxiliary_weight is None:
+                training_input["loss_mask"] = weights
+            else:
+                training_input["ftpo_weights"] = weights
             self.all_metrics["ftpo/selected_boundaries"] = float(chosen.any(-1).sum())
             self.all_metrics["ftpo/chosen_candidates"] = float(chosen.sum())
+            if boundary_modes is not None:
+                self.all_metrics.update(
+                    boundary_route_metrics(
+                        boundary_modes, eligible, chosen, weights, training_input.get("ftpo_repair_mask")
+                    )
+                )
             if closure_targets is not None:
                 self.all_metrics.update(
                     closure_target_metrics(
@@ -2666,7 +2804,7 @@ class RayPPOTrainer:
 
                 if key == "is_last_step":
                     padding_tensor = torch.ones(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
-                elif key == "loss_mask":
+                elif key in ("loss_mask", "ftpo_weights"):
                     # ensures that padding tensors don't count towards the loss
                     padding_tensor = torch.zeros(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
                 else:
@@ -2830,13 +2968,15 @@ class RayPPOTrainer:
         training_input["action_log_probs"] = action_log_probs
         training_input["values"] = values
 
+        # Only the mismatch statistics read token staleness, so the workers never receive it.
+        rollout_staleness = training_input.pop("rollout_staleness")
         if self._training_metrics_enabled and training_input.get("rollout_logprobs") is not None:
             self.all_metrics.update(
                 mismatch_ratio_metrics(
                     action_log_probs,
                     training_input["rollout_logprobs"],
                     training_input["loss_mask"],
-                    training_input["rollout_staleness"],
+                    rollout_staleness,
                     eps_clip_low=self.cfg.trainer.algorithm.eps_clip_low,
                     eps_clip_high=self.cfg.trainer.algorithm.eps_clip_high,
                 )

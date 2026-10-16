@@ -56,6 +56,7 @@ from contextvars import ContextVar
 
 
 from skyrl_train.inference_engines.base import (
+    CHOICE_POLICY_STEPS_KEY,
     InferenceEngineInterface,
     InferenceEngineInput,
     InferenceEngineOutput,
@@ -68,6 +69,7 @@ from skyrl_train.inference_engines.chat_continuation import EXACT_PROMPT_TOKEN_I
 from marinskyrl.inference_placement import InferenceWorkerPlacement
 from skyrl_train.inference_engines.placement import inference_worker_placement
 from skyrl_train.inference_engines.vllm.numa import set_async_worker_numa_affinity
+from skyrl_train.inference_engines.policy_steps import PolicyStepStamps
 from skyrl_train.weight_sync.expert_block.receiver import ExpertBlockReceiver
 from skyrl_train.weight_sync.weight_loader import WeightLoader
 from skyrl_train.weight_sync.vllm_weight_conversion import load_weights_into_vllm
@@ -1400,6 +1402,27 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
             kwargs.pop("rope_scaling")
         self.llm = self._create_engine(*args, **kwargs)
         self._weight_loader = VLLMWeightLoader(self.llm)
+        self._policy_steps = PolicyStepStamps()
+        self._stamp_engine_steps()
+
+    def _stamp_engine_steps(self) -> None:
+        """Stamp every request's new tokens with the policy step installed before the EngineCore's step timestamp."""
+        output_processor = self.llm.output_processor
+        process_outputs = output_processor.process_outputs
+
+        def stamped_process_outputs(engine_core_outputs, engine_core_timestamp, iteration_stats):
+            for output in engine_core_outputs:
+                # vLLM keys its state by an internal id and drops outputs of requests it already aborted.
+                state = output_processor.request_states.get(output.request_id)
+                if state is not None:
+                    self._policy_steps.observe(state.external_req_id, len(output.new_token_ids), engine_core_timestamp)
+            return process_outputs(engine_core_outputs, engine_core_timestamp, iteration_stats)
+
+        output_processor.process_outputs = stamped_process_outputs
+
+    def _forget_unclaimed_policy_steps(self) -> None:
+        live = {state.external_req_id for state in self.llm.output_processor.request_states.values()}
+        self._policy_steps.forget_unclaimed(live)
 
     def tp_size(self):
         return self._tp_size
@@ -1681,7 +1704,7 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         return result
 
     async def _collect_outputs(self, prompt_token_ids, request_id: str, sampling_params: SamplingParams):
-        """Collect outputs for a single prompt."""
+        """Collect a single prompt's final output and the policy steps of its tokens."""
         # Check if LoRA is enabled and create LoRA request
         final_output = None
         lora_request = None
@@ -1703,7 +1726,7 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         ):
             final_output = request_output
 
-        return final_output
+        return final_output, self._policy_steps.finish(request_id, len(final_output.outputs[0].token_ids))
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
         """Generate responses using vLLM's async engine.
@@ -1741,7 +1764,7 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
             task = asyncio.create_task(self._collect_outputs(prompt, request_id, row_sampling_params))
             tasks.append(task)
         try:
-            outputs = await asyncio.gather(*tasks)
+            collected = await asyncio.gather(*tasks)
         except BaseException as e:
             # Cancel any sibling asyncio tasks still in flight.
             for t in tasks:
@@ -1764,7 +1787,10 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
                 )
             raise
 
-        return self._postprocess_outputs(outputs, self._response_top_k(sampling_params), sampling_params)
+        outputs, policy_steps = zip(*collected)
+        result = self._postprocess_outputs(list(outputs), self._response_top_k(sampling_params), sampling_params)
+        result["response_policy_steps"] = list(policy_steps)
+        return result
 
     async def wake_up(self, *args: Any, **kwargs: Any):
         await self.llm.wake_up(tags=kwargs.get("tags", None))
@@ -1782,6 +1808,7 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
             )
             unfinished_request_ids = list(output_processor.request_states.keys())
             await engine.abort(unfinished_request_ids)
+        self._forget_unclaimed_policy_steps()
 
         # TODO(team): remove once vllm fixes this
         # otherwise waking it up will output gibberish: https://github.com/vllm-project/vllm/issues/17103
@@ -1950,6 +1977,15 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
             if isinstance(generator, ErrorResponse):
                 response["request_id"] = request_id
                 response["error_category"] = "server_error"
+                return response
+            choice = response["choices"][0]
+            # vLLM generates a chat completion under its response id, which parallel samples share.
+            if (
+                endpoint == "/chat/completions"
+                and len(response["choices"]) == 1
+                and choice.get("token_ids") is not None
+            ):
+                choice[CHOICE_POLICY_STEPS_KEY] = self._policy_steps.finish(response["id"], len(choice["token_ids"]))
             return response
 
         except Exception as e:
@@ -2126,10 +2162,12 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
             outstanding_requests,
         )
 
-    async def resume_generation(self) -> None:
-        """Release the EngineCore scheduler after the weight reload completes."""
+    async def resume_generation(self, policy_step: int) -> None:
+        """Release the EngineCore scheduler after the weight reload completes, stamping later tokens with ``policy_step``."""
+        self._policy_steps.install(policy_step, time.monotonic())
+        self._forget_unclaimed_policy_steps()
         await self.llm.resume_generation()
-        logger.info("resume_generation() finished, EngineCore scheduler released")
+        logger.info("resume_generation() finished, EngineCore scheduler released, policy_step={}", policy_step)
 
 
 class _MinimalRequest:

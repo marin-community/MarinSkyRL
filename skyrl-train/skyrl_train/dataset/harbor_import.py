@@ -1,8 +1,9 @@
 # Copyright The Marin Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Convert single-stage Harbor packages with prebuilt images to TaskSpec."""
+"""Represent Harbor packages as task specs for native or original-trial execution."""
 
+import os
 import tomllib
 from enum import StrEnum
 from pathlib import Path
@@ -23,13 +24,14 @@ from taskcompendium.models import (
     RewardFile,
     RewardFileFormat,
     ScriptGrader,
+    SessionGrader,
     Source,
     TaskResource,
     TaskSpec,
     TextMessage,
     VerifierArtifact,
 )
-from taskcompendium.runtime.resources import inline_resource
+from taskcompendium.runtime.resources import inline_resource, resource_bytes
 
 
 class TaskOS(StrEnum):
@@ -102,6 +104,7 @@ REWARD_PATH = "/logs/verifier"
 AGENT_LOG_PATH = "/logs/agent"
 GRADER_DIRECTORY = "/tests"
 GRADER_PATH = f"{GRADER_DIRECTORY}/test.sh"
+HARBOR_TRIAL_SESSION = "harbor_trial"
 
 
 def _directory_resources(directory: Path, prefix: str = "") -> tuple[TaskResource, ...]:
@@ -137,6 +140,40 @@ def _environment(config: EnvironmentConfig, *, capabilities: tuple[str, ...] = (
         working_directory=config.workdir,
         environment_variables=config.env,
     )
+
+
+def harbor_trial_task(directory: Path, *, source: Source) -> TaskSpec:
+    """Keep an original package host-private for execution and grading by Harbor."""
+    resources = tuple(
+        resource.model_copy(update={"mtime_ns": (directory / resource.path).stat().st_mtime_ns})
+        for resource in _directory_resources(directory)
+    )
+    return TaskSpec(
+        id=f"{source.dataset}:{source.row}",
+        context=ConversationInput(
+            events=(TextMessage(role="user", content=(directory / "instruction.md").read_text()),)
+        ),
+        environment_requirements=EnvironmentRequirements(),
+        answer_type=AnswerType.WORKSPACE_STATE,
+        answer_format=PlainText(),
+        grader=SessionGrader(),
+        resources=ResourceGroups(verifier=resources),
+        source=source,
+        tags=("harbor",),
+    )
+
+
+def restore_harbor_trial_task(task: TaskSpec, directory: Path) -> None:
+    """Restore a package into a fresh host directory, never an agent workspace."""
+    directory.mkdir(parents=True, exist_ok=False)
+    for resource in task.resources.verifier:
+        path = directory / resource.path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(resource_bytes(resource))
+        if resource.mode is not None:
+            path.chmod(int(resource.mode, 8))
+        if resource.mtime_ns is not None:
+            os.utime(path, ns=(resource.mtime_ns, resource.mtime_ns))
 
 
 def harbor_task(directory: Path, *, source: Source) -> TaskSpec:

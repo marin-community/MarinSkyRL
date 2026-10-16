@@ -56,7 +56,7 @@ class ClosureReplaySession:
 
     async def prepare(self) -> SessionStart:
         return replace(
-            session_start(self.task, shell_tool=None),
+            session_start(self.task, shell_tool=None, provider_tools=()),
             prompt_token_ids=self.prompt.prompt_token_ids,
             options={"skip_special_tokens": False},
         )
@@ -85,7 +85,9 @@ class ClosureReplaySession:
             metrics={f"{metric}/{name}": float(value) for name, value in asdict(score).items()},
         )
 
-    async def grade(self, messages: tuple[dict[str, Any], ...], *, stop_reason: str) -> GradeResult:
+    async def grade(
+        self, messages: tuple[dict[str, Any], ...], *, stop_reason: str, outputs: dict[str, bytes]
+    ) -> GradeResult:
         return self.result
 
     async def close(self) -> None:

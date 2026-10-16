@@ -2,6 +2,7 @@
 
 import asyncio
 import math
+import os
 import shutil
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -12,13 +13,16 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from jinja2 import TemplateError
+from daytona import AsyncDaytona, DaytonaConfig, DaytonaError
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from shellbox.backends.docker.machine import DockerMachineFactory
+from shellbox.backends.daytona.machine import DaytonaMachineFactory
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
 from shellbox.machine import Backend, Machine, MachineFactory
 from taskcompendium.grading_result import Outcome
 from taskcompendium.models import NoGrader
+from verifyit.modes.grade_judge import JudgeConnection
 from rolloutengine.agent_session import AgentTaskSession
 from rolloutengine.contracts import (
     GenerationLimitReached,
@@ -38,6 +42,7 @@ from rolloutengine.engine import RolloutEngine
 from rolloutengine.spec import LoweredTaskSpec
 from rolloutengine.lowering import SHELLBOX_SESSION, validate_lowered_task
 from skyrl_train.config.utils import generation_context_limit
+from skyrl_train.dataset.harbor_import import HARBOR_TRIAL_SESSION
 from skyrl_gym.task_factories import adapt_self_grading_session, session_factories
 from skyrl_gym.task_records import fold_grades, skipped_grade
 from skyrl_gym.verification import VERIFIER_RUNTIME_ERROR
@@ -73,17 +78,44 @@ from skyrl_train.rollouts.task_projections import (
 )
 from skyrl_train.utils.harbor_errors import ErrorHandlingConfig
 from skyrl_train.trajectory_runners.types import (
+    RESPONSE_POLICY_STEPS_KEY,
     ROUTED_EXPERTS_KEY,
     TokenProvenance,
     TrajectoryBatch,
     TaskRequestBatch,
 )
 
+DAYTONA_DIAGNOSTIC_CALLS = frozenset(
+    {
+        ("daytona._async.daytona", "create"),
+        ("daytona._async.daytona", "_create"),
+        ("daytona._async.daytona", "delete"),
+        ("daytona._async.snapshot", "get"),
+        ("daytona._async.snapshot", "create"),
+        ("daytona._async.sandbox", "wait_for_sandbox_start"),
+        ("daytona._async.process", "exec"),
+        ("daytona._async.filesystem", "upload_file_stream"),
+        ("daytona._async.filesystem", "download_file"),
+        ("daytona_api_client_async.api.sandbox_api", "create_sandbox"),
+        ("daytona_api_client_async.api.sandbox_api", "get_toolbox_proxy_url"),
+        ("daytona_api_client_async.api.sandbox_api", "get_sandbox"),
+    }
+)
+DAYTONA_RATE_LIMIT_HEADERS = frozenset(
+    f"{prefix}-{throttler}"
+    for prefix in ("x-ratelimit-limit", "x-ratelimit-remaining", "x-ratelimit-reset", "retry-after")
+    for throttler in ("anonymous", "authenticated", "sandbox-create", "sandbox-lifecycle")
+) | {"retry-after"}
+
 
 class InstalledAgentWorker(Protocol):
     async def startup(self) -> None: ...
 
     async def shutdown(self) -> None: ...
+
+    def original_session(
+        self, lowered: LoweredTaskSpec, session_id: str, settings: HarborTaskSettings, phase: str
+    ) -> TaskSession: ...
 
     async def run(
         self,
@@ -177,7 +209,12 @@ async def _model_turn(
         metadata={
             **{
                 name: output[name][0]
-                for name in ("student_topk_indices", "behavior_topk_logprobs", ROUTED_EXPERTS_KEY)
+                for name in (
+                    "student_topk_indices",
+                    "behavior_topk_logprobs",
+                    ROUTED_EXPERTS_KEY,
+                    RESPONSE_POLICY_STEPS_KEY,
+                )
                 if output.get(name) is not None
             },
             "generation_token_budget": (output.get("generation_token_budgets") or [None])[0],
@@ -203,6 +240,37 @@ def _failed_rollout(
     diagnostics = {"operation": interruption.operation.value, "timed_out": isinstance(error, TimeoutError)}
     if isinstance(error, TaskMachineError) and error.__cause__ is not None:
         diagnostics["cause_error_type"] = type(error.__cause__).__name__
+        diagnostics["machine_operation"] = error.operation.value
+        provider_error = error.__cause__
+        if isinstance(provider_error, DaytonaError):
+            if type(provider_error.status_code) is int and 100 <= provider_error.status_code <= 599:
+                diagnostics["provider_status_code"] = provider_error.status_code
+            rate_limits = {
+                name.lower(): int(value)
+                for name, value in (provider_error.headers or {}).items()
+                if name.lower() in DAYTONA_RATE_LIMIT_HEADERS
+                and isinstance(value, str)
+                and value.isascii()
+                and value.isdecimal()
+                and len(value) <= 12
+            }
+            if rate_limits:
+                diagnostics["provider_rate_limits"] = rate_limits
+            # This identifies an SDK call, not the HTTP phase of a compound operation.
+            diagnostics["provider_sdk_call"] = "unknown"
+            nested_error: BaseException | None = provider_error
+            seen = set()
+            while nested_error is not None and id(nested_error) not in seen:
+                seen.add(id(nested_error))
+                traceback = nested_error.__traceback__
+                while traceback is not None:
+                    frame = traceback.tb_frame
+                    call = (frame.f_globals.get("__name__"), frame.f_code.co_name)
+                    if call in DAYTONA_DIAGNOSTIC_CALLS:
+                        diagnostics["provider_sdk_call"] = ".".join(call)
+                    traceback = traceback.tb_next
+                # The SDK translates HTTP errors with `raise ... from None`.
+                nested_error = nested_error.__cause__ or nested_error.__context__
     if isinstance(error, TimeoutError):
         exception_type = {
             RolloutOperation.ATTEMPT: "TrialTimeoutError",
@@ -255,6 +323,16 @@ def _failed_rollout(
     )
 
 
+@dataclass(frozen=True)
+class RemoteJudgeSettings:
+    base_url: str
+    api_key_env: str
+
+    def connection(self) -> JudgeConnection:
+        """Resolve the judge credential on the rollout worker, outside task data."""
+        return JudgeConnection(self.base_url, os.environ[self.api_key_env])
+
+
 class TaskRolloutWorker:
     """Run canonical task rollouts and submit complete groups to the buffer."""
 
@@ -274,9 +352,11 @@ class TaskRolloutWorker:
         *,
         shutdown_timeout: float,
         installed_agents: InstalledAgentWorker | None = None,
+        judge_connection: JudgeConnection | None = None,
     ):
         self.trajectory_runner_cfg = trajectory_runner_cfg
         self.model_client = model_client
+        self.judge_connection = judge_connection
         self.factories = {name: OwnedMachineFactory(factory, name) for name, factory in factories.items()}
         self.active_requests: set[asyncio.Task] = set()
         self.closing = False
@@ -327,10 +407,19 @@ class TaskRolloutWorker:
             self.active_requests.discard(task)
 
     def _configured_task_and_sessions(
-        self, lowered: LoweredTaskSpec, harbor: HarborTaskSettings | None, session_id: str
+        self, lowered: LoweredTaskSpec, harbor: HarborTaskSettings | None, session_id: str, phase: str
     ) -> tuple[LoweredTaskSpec, Mapping[str, TaskSessionFactory]]:
         sessions = self.sessions
-        if harbor is not None and self.installed_agents is not None:
+        if lowered.session.task_session == HARBOR_TRIAL_SESSION:
+            if harbor is None or self.installed_agents is None:
+                raise ValueError("Full Harbor trials require Harbor and installed-agent settings")
+            sessions = {
+                **self.sessions,
+                HARBOR_TRIAL_SESSION: lambda context: self.installed_agents.original_session(
+                    context.lowered, session_id, harbor, phase
+                ),
+            }
+        elif harbor is not None and self.installed_agents is not None:
             if lowered.session.task_session != SHELLBOX_SESSION:
                 raise ValueError("SkyRL agents require a Shellbox task grader")
             lowered = lowered.model_copy(
@@ -340,7 +429,7 @@ class TaskRolloutWorker:
                 **self.sessions,
                 SKYRL_AGENT_SESSION: partial(_agent_session_factory, self.installed_agents, session_id),
             }
-        validate_lowered_task(lowered, factories=self.factories, sessions=sessions)
+        validate_lowered_task(lowered, factories=self.factories, sessions=sessions, providers={})
         return lowered, sessions
 
     async def generate(self, request: TaskRequestBatch) -> list[RolloutData]:
@@ -365,7 +454,9 @@ class TaskRolloutWorker:
         ]
         selected_sessions: list[Mapping[str, TaskSessionFactory]] = []
         for index, lowered in enumerate(lowered_tasks):
-            lowered, sessions = self._configured_task_and_sessions(lowered, harbor_settings[index], session_ids[index])
+            lowered, sessions = self._configured_task_and_sessions(
+                lowered, harbor_settings[index], session_ids[index], phase
+            )
             lowered_tasks[index] = lowered
             selected_sessions.append(sessions)
         tasks = [item.task for item in lowered_tasks]
@@ -397,6 +488,7 @@ class TaskRolloutWorker:
                 model,
                 self.factories,
                 sessions=selected_sessions[index],
+                judge_connection=self.judge_connection,
             )
             harbor_slots = (
                 nullcontext()
@@ -542,6 +634,8 @@ class TaskRolloutWorkerSpec:
         )
 
     def build(self, tokenizer, shard: WorkerShard) -> TaskRolloutWorker:
+        judge_config = self.config.environment.task_sessions.get("remote_judge")
+        judge = None if judge_config is None else RemoteJudgeSettings(**dict(judge_config)).connection()
         harbor = None if self.harbor_config is None else HarborTaskSettings.from_config(self.harbor_config)
         runner_config = self.config.generator
         client_config = OmegaConf.merge(self.config, {"generator": {"enable_http_endpoint": False}})
@@ -564,6 +658,12 @@ class TaskRolloutWorkerSpec:
                 int(runner_config.sampling_params.max_generate_length),
             )
         factories: dict[str, MachineFactory] = {"shellsim": ShellSimMachineFactory()}
+        daytona = self.config.environment.task_sessions.get("daytona")
+        if daytona is not None:
+            factories[Backend.DAYTONA] = DaytonaMachineFactory(
+                client_factory=partial(AsyncDaytona, DaytonaConfig(api_key=os.environ[daytona.api_key_env])),
+                ttl_minutes=int(daytona.ttl_minutes),
+            )
         if shutil.which("docker") is not None:
             factories[Backend.DOCKER] = DockerMachineFactory()
         if harbor is not None:
@@ -589,4 +689,5 @@ class TaskRolloutWorkerSpec:
             sessions=self.sessions,
             shutdown_timeout=float(self.config.trajectory_runner.shutdown_timeout),
             installed_agents=installed_agents,
+            judge_connection=judge,
         )

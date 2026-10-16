@@ -5,6 +5,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+HARBOR_EXCEPTION = "harbor_exception_type"
+
 
 class EnvironmentType(StrEnum):
     DOCKER = "docker"

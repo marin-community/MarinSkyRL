@@ -14,11 +14,13 @@ import pyarrow.parquet as pq
 from datasets import Dataset
 from rolloutengine.spec import LoweredTaskSpec, MachineRuntimeSpec, TaskRuntimeSpec, TaskSessionSpec
 from rolloutengine.lowering import SHELLBOX_SESSION
+from rolloutengine.task_session import session_start
 from skyrl_gym.source_task import session_parameters, source_task
 from taskcompendium.models import EnvironmentRequirements, SessionGrader, Source
+from taskcompendium.runtime.shell import resolve_shell_tool
 from transformers import PreTrainedTokenizerBase
 
-from skyrl_train.dataset.dataset import PromptDataset
+from skyrl_train.dataset.dataset import PromptDataset, _prompt_token_count
 from skyrl_train.rollouts.group_grader import task_group_grader
 from skyrl_train.task_inputs import TaskInput, TrajectoryMetadata, task_messages
 
@@ -45,7 +47,11 @@ class TaskDataset(PromptDataset):
     """Render public conversation fields and retain private lowered tasks for workers."""
 
     def prepare_dataset(self, dataset):
-        return dataset.map(_stored_task_prompt, num_proc=self.num_workers)
+        return dataset.map(_stored_task_prompt, num_proc=self.num_workers).with_transform(_restore_task_prompts)
+
+    @staticmethod
+    def prompt_token_count(tokenizer: PreTrainedTokenizerBase, row: dict, prompt_key: str) -> int:
+        return task_prompt_token_count(tokenizer, row, prompt_key)
 
     def collate_fn(self, rows) -> list[dict]:
         inputs = []
@@ -80,7 +86,28 @@ class TaskDataset(PromptDataset):
 
 
 def _stored_task_prompt(row: dict) -> dict:
-    return task_prompt(LoweredTaskSpec.model_validate_json(row[LOWERED_TASK_COLUMN]))
+    prepared = task_prompt(LoweredTaskSpec.model_validate_json(row[LOWERED_TASK_COLUMN]))
+    # Session-specific extras stay in the serialized task: mixed task families
+    # do not share an Arrow schema. Restore them when yielding a training row.
+    stored = {key: prepared[key] for key in (LOWERED_TASK_COLUMN, "env_class", "data_source")}
+    # Message fields vary across tasks. JSON preserves missing fields and nested
+    # values without inferring a different Arrow struct in each map worker.
+    stored["prompt"] = json.dumps(prepared["prompt"], ensure_ascii=False)
+    return stored
+
+
+def _restore_task_prompts(batch: dict) -> dict:
+    return {**batch, "prompt": [json.loads(prompt) for prompt in batch["prompt"]]}
+
+
+def task_prompt_token_count(tokenizer: PreTrainedTokenizerBase, row: dict, prompt_key: str) -> int:
+    """Include native task tools in the initial prompt's length budget."""
+    lowered = LoweredTaskSpec.model_validate_json(row[LOWERED_TASK_COLUMN])
+    if lowered.session.task_session != SHELLBOX_SESSION:
+        return _prompt_token_count(tokenizer, row[prompt_key])
+    shell_tool = resolve_shell_tool(lowered.task, lowered.session.shell_tool)
+    start = session_start(lowered.task, shell_tool, ())
+    return _prompt_token_count(tokenizer, list(start.messages), **start.options)
 
 
 def source_row_task(

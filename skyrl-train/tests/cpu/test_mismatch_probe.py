@@ -117,6 +117,7 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
     trainer.critic_model = trainer.ref_model = None
     trainer.all_metrics = {}
     trainer._num_experts_cache = 8
+    trainer.global_step = 7
     routes = np.asarray([[[1, 2]], [[0, 0]], [[1, 2]], [[0, 0]]], dtype=np.int32)
     trajectory = {
         "prompt_token_ids": [[3, 4], [5], [6, 7, 8]],
@@ -125,6 +126,8 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
         "loss_masks": [[1] * 4 for _ in range(3)],
         "rollout_logprobs": [np.asarray([-0.125, -2.75, -1.5, -0.5], dtype=np.float32) for _ in range(3)],
         "rollout_routed_experts": [routes.copy() for _ in range(3)],
+        # The probe samples after the initial sync installs the next step, ahead of the trainer's step.
+        "rollout_policy_steps": [np.full(4, 8, dtype=np.int32) for _ in range(3)],
     }
     prompt_ids = [f"prompt-{i}" for i in range(3)]
     sample_ids = [f"sample-{i}" for i in range(3)]
@@ -192,7 +195,6 @@ async def test_reuse_reads_completed_frozen_tokens_and_generation_scores(tmp_pat
     cfg.trainer.mismatch_probe.archive_uri = str(tmp_path / "reused")
     cfg.trainer.mismatch_probe.updates = 2
     trainer.total_training_steps = 9
-    trainer.global_step = 7
     trainer.colocate_all = False
     trainer.all_timings = {}
     cfg.trainer.mismatch_probe.enabled = True

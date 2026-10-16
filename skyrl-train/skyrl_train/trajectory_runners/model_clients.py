@@ -12,6 +12,7 @@ import numpy as np
 from skyrl_gym.envs.nemotron_ultra.answer_extraction import REASONING_DELIMITERS, final_answer_text
 
 from skyrl_train.inference_engines.base import (
+    CHOICE_POLICY_STEPS_KEY,
     SESSION_ID_HEADER,
     ChatContinuation,
     InferenceEngineInput,
@@ -87,6 +88,7 @@ class _ChatResult:
     assistant_message: dict[str, Any]
     generation_token_budget: int | None
     routed_experts: np.ndarray | None = None
+    policy_steps: list[int] | None = None
 
 
 def _choice_routed_experts(choice: dict[str, Any], prompt_ids: list[int], response_ids: list[int]) -> np.ndarray | None:
@@ -117,6 +119,8 @@ def _assemble_chat_results(results: list[_ChatResult]) -> ModelClientOutput:
         output["behavior_topk_logprobs"] = selected_scores
     if any(result.routed_experts is not None for result in results):
         output["routed_experts"] = [result.routed_experts for result in results]
+    if all(result.policy_steps is not None for result in results):
+        output["response_policy_steps"] = [result.policy_steps for result in results]
     return output
 
 
@@ -246,7 +250,6 @@ class DirectModelClient:
                 "session_id": session_id,
                 **{key: value for key, value in sampling_params.items() if key not in _CHAT_SAMPLING_EXCLUSIONS},
                 **chat_options,
-                "return_token_ids": True,
                 "include_stop_str_in_output": True,
             }
             body[EXACT_PROMPT_TOKEN_IDS_KEY] = prompt_ids
@@ -330,6 +333,7 @@ class DirectModelClient:
                 message,
                 token_budget,
                 _choice_routed_experts(choice, prompt_ids, response_ids),
+                choice.get(CHOICE_POLICY_STEPS_KEY),
             )
 
         results = await asyncio.gather(

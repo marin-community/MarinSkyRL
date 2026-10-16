@@ -1,4 +1,6 @@
 from skyrl_train.inference_engines.base import (
+    CHOICE_POLICY_STEPS_KEY,
+    SESSION_ID_HEADER,
     InferenceEngineInterface,
     InferenceEngineInput,
     InferenceEngineOutput,
@@ -19,6 +21,7 @@ from skyrl_train.inference_engines.inference_engine_client_http_endpoint import 
 from skyrl_train.inference_engines.chat_template import template_error_from_exception
 from transformers import PreTrainedTokenizerBase
 import asyncio
+from copy import deepcopy
 from typing import List, Any, Optional, Dict, Union, Hashable
 from skyrl_train.inference_engines.utils import (
     route_prompts_to_engines,
@@ -256,11 +259,11 @@ class InferenceEngineClient(InferenceEngineInterface):
         awaitables = [getattr(engine, method_name)(*args, **kwargs) for engine in live_engines]
         return await asyncio.gather(*awaitables)
 
-    async def _run_on_all_engines_before_deadline(self, method_name: str):
+    async def _run_on_all_engines_before_deadline(self, method_name: str, *args):
         """Fan out a weight-sync pause or resume, failing loudly if an engine never answers."""
         try:
             async with asyncio.timeout(self.weight_sync_pause_timeout):
-                return await self._run_on_all_engines(method_name)
+                return await self._run_on_all_engines(method_name, *args)
         except TimeoutError:
             raise TimeoutError(
                 f"{method_name} did not complete on every engine within "
@@ -385,6 +388,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         prompt_logprobs: List[Optional[Any]] = [None for _ in range(n)]
         student_topk_indices: List[Optional[List[List[int]]]] = [None for _ in range(n)]
         behavior_topk_logprobs: List[Optional[List[List[float]]]] = [None for _ in range(n)]
+        response_policy_steps: List[Optional[List[int]]] = [None for _ in range(n)]
         # a bit hacky for now
         add_resp_logprobs = False
         add_prompt_logprobs = False
@@ -392,6 +396,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         add_routed_experts = False
 
         for indices, result in zip(indices_list, results):
+            policy_steps = result.get("response_policy_steps")
             selected_ids = result.get("student_topk_indices")
             selected_scores = result.get("behavior_topk_logprobs")
             if (selected_ids is None) != (selected_scores is None):
@@ -413,6 +418,8 @@ class InferenceEngineClient(InferenceEngineInterface):
                     routed_experts[original_idx] = _route_rows(
                         captured_routes[local_idx], len(response_ids[original_idx])
                     )
+                if policy_steps is not None:
+                    response_policy_steps[original_idx] = policy_steps[local_idx]
                 if result.get("response_logprobs", None):
                     add_resp_logprobs = True
                     response_logprobs[original_idx] = result["response_logprobs"][local_idx]
@@ -443,6 +450,8 @@ class InferenceEngineClient(InferenceEngineInterface):
             if any(routes is None for routes in routed_experts):
                 raise ValueError("Inference engine omitted routed experts for part of a batch")
             output["routed_experts"] = [routes for routes in routed_experts if routes is not None]
+        if all(row is not None for row in response_policy_steps):
+            output["response_policy_steps"] = response_policy_steps
         return output
 
     async def begin_online_eagle_capture(self, config: Dict[str, Any]) -> List[OnlineEagleResult]:
@@ -517,6 +526,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         accum_student_topk_indices: List[List[int]] = []
         accum_behavior_topk_logprobs: List[List[float]] = []
         accum_routed_experts: List[np.ndarray] = []
+        accum_policy_steps: List[int] = []
         saw_student_topk: Optional[bool] = None
         saw_routed_experts: Optional[bool] = None
         stop_reason: str = ABORT_FINISH_REASON
@@ -560,6 +570,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                 accum_student_topk_indices = []
                 accum_behavior_topk_logprobs = []
                 accum_routed_experts = []
+                accum_policy_steps = []
                 saw_student_topk = None
                 saw_routed_experts = None
                 num_turns = 0
@@ -619,6 +630,8 @@ class InferenceEngineClient(InferenceEngineInterface):
             accum_response_ids.extend(new_response_ids)
             if new_response_logprobs is not None:
                 accum_response_logprobs.extend(new_response_logprobs)
+            if partial_response.get("response_policy_steps") is not None:
+                accum_policy_steps.extend(partial_response["response_policy_steps"][0])
             num_turns += 1
 
         # 4. Build the final response and return.
@@ -647,6 +660,8 @@ class InferenceEngineClient(InferenceEngineInterface):
                 if accum_routed_experts
                 else np.empty((0, 0, 0), dtype=np.uint8)
             ]
+        if accum_policy_steps:
+            output["response_policy_steps"] = [accum_policy_steps]
         return output
 
     async def _chat_completion_with_retry(
@@ -783,8 +798,16 @@ class InferenceEngineClient(InferenceEngineInterface):
             stop_reason=stop_reason,
         )
 
-    async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _chat_request(self, request_payload: Dict[str, Any]) -> tuple[int, Dict[str, Any]]:
+        """Prepare the common direct, HTTP, and streaming chat request boundary."""
+        request_payload = deepcopy(request_payload)
+        # Route capture is a server capability, independent of the caller's transport.
+        # Retry assembly needs exact IDs even for ordinary OpenAI clients that never
+        # request training metadata. Do not reconstruct these IDs from decoded text.
+        request_payload["json"]["return_token_ids"] = True
         session_id = request_payload["json"].pop("session_id", None)
+        if session_id is None:
+            session_id = request_payload.get("headers", {}).get(SESSION_ID_HEADER)
         if session_id is None:
             engine_idx = self._resolve_engine_idx(random.randint(0, len(self.engines) - 1))
         else:
@@ -793,6 +816,11 @@ class InferenceEngineClient(InferenceEngineInterface):
             # per-engine outstanding load); every later turn of the same session is
             # sticky to that engine to preserve prefix-cache reuse.
             engine_idx = self._route_session(session_id)
+
+        return engine_idx, request_payload
+
+    async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        engine_idx, request_payload = self._chat_request(request_payload)
 
         # Track outstanding load so concurrent sessions balance across engines instead of
         # hash-pinning onto one. Attributed to the initially chosen engine; the retry loop
@@ -839,11 +867,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         # during the reload or hold an engine slot while blocked.
         await self._wait_for_generation_to_resume()
 
-        session_id = request_payload["json"].pop("session_id", None)
-        if session_id is None:
-            engine_idx = self._resolve_engine_idx(random.randint(0, len(self.engines) - 1))
-        else:
-            engine_idx = self._route_session(session_id)
+        engine_idx, request_payload = self._chat_request(request_payload)
 
         self._inc_inflight(engine_idx)
         try:
@@ -1128,16 +1152,16 @@ class InferenceEngineClient(InferenceEngineInterface):
         self.generation_paused_event.set()
         await self._run_on_all_engines_before_deadline("pause_generation")
 
-    async def resume_generation(self) -> None:
+    async def resume_generation(self, policy_step: int) -> None:
         """
         Resumes generation for all engines, intended for in-flight weight updates and partial rollouts.
 
         Resume all in-flight requests with the previously-generated tokens, and unblock incoming requests
-        that were blocked by `pause_generation()`.
+        that were blocked by `pause_generation()`. ``policy_step`` stamps the tokens the engines sample next.
         """
         if not self.generation_paused_event.is_set():
             raise RuntimeError("Generation is not paused, cannot resume.")
-        await self._run_on_all_engines_before_deadline("resume_generation")
+        await self._run_on_all_engines_before_deadline("resume_generation", policy_step)
         self._release_generation_waiters()
 
     # ----------------------------
@@ -1264,6 +1288,7 @@ class AccumulatedResponse:
     content: str = ""
     logprobs_content: List[Any] = field(default_factory=list)
     token_ids: List[int] = field(default_factory=list)
+    policy_steps: List[int] = field(default_factory=list)
     completion_tokens: int = 0
     routed_experts: np.ndarray | None = None
     route_prompt_ids: List[int] | None = None
@@ -1394,6 +1419,8 @@ def _parse_partial_response_and_inplace_update_accum(
             accum.logprobs_content.extend(logprobs["content"])
         if choice.get("token_ids") is not None:
             accum.token_ids.extend(choice["token_ids"])
+        if choice.get(CHOICE_POLICY_STEPS_KEY) is not None:
+            accum.policy_steps.extend(choice[CHOICE_POLICY_STEPS_KEY])
         accum.completion_tokens += new_completion_tokens
 
     return finish_reason, stop_reason, response_role, aborted_without_generating
@@ -1425,6 +1452,8 @@ def _build_final_response(
         final_choice["logprobs"]["content"] = accum.logprobs_content
     if final_choice.get("token_ids", None) is not None:
         final_choice["token_ids"] = accum.token_ids
+    if final_choice.get(CHOICE_POLICY_STEPS_KEY) is not None:
+        final_choice[CHOICE_POLICY_STEPS_KEY] = accum.policy_steps
     if accum.routed_experts is not None:
         route_buffer = io.BytesIO()
         np.save(route_buffer, accum.routed_experts)

@@ -6,7 +6,9 @@ trajectory runners, and weight-sync protocol can run end to end on a tiny Huggin
 
 import asyncio
 import hashlib
+import itertools
 import os
+import time
 from typing import Any
 
 import torch
@@ -14,6 +16,7 @@ import torch.distributed as dist
 from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl_train.inference_engines.base import (
+    CHOICE_POLICY_STEPS_KEY,
     SESSION_ID_HEADER,
     InferenceEngineInput,
     InferenceEngineInterface,
@@ -21,6 +24,7 @@ from skyrl_train.inference_engines.base import (
     NamedWeightsUpdateRequest,
 )
 from skyrl_train.inference_engines.chat_continuation import EXACT_PROMPT_TOKEN_IDS_KEY
+from skyrl_train.inference_engines.policy_steps import PolicyStepStamps
 from skyrl_train.io import io
 from skyrl_train.utils.torch_utils import chunked_entropy_from_logits, logprobs_from_logits
 from skyrl_train.workers.worker import PolicyWorkerBase
@@ -218,7 +222,8 @@ class CPUInferenceEngine(InferenceEngineInterface):
     """Sample from a Hugging Face causal LM with vLLM's pause, abort, and weight-update semantics.
 
     Pausing preserves in-flight requests at their next token, matching the production keep policy;
-    requests that arrive while paused wait for the resume.
+    requests that arrive while paused wait for the resume. Like the vLLM engine, each token carries the
+    policy step installed when it was sampled.
     """
 
     def __init__(self, model_path: str, seed: int):
@@ -234,6 +239,9 @@ class CPUInferenceEngine(InferenceEngineInterface):
         self._decoder = None
         self._resumed = asyncio.Event()
         self._resumed.set()
+        self._policy_steps = PolicyStepStamps()
+        self._request_ids = itertools.count()
+        self._live_requests: set[str] = set()
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
         await self._resumed.wait()
@@ -247,14 +255,14 @@ class CPUInferenceEngine(InferenceEngineInterface):
                 for prompt_ids, session_id in zip(prompts, session_ids, strict=True)
             )
         )
+        response_ids, response_logprobs, stop_reasons, policy_steps = map(list, zip(*results, strict=True))
         return InferenceEngineOutput(
-            responses=[self.tokenizer.decode(ids, skip_special_tokens=True) for ids, _, _ in results],
-            response_ids=[ids for ids, _, _ in results],
-            stop_reasons=[stop_reason for _, _, stop_reason in results],
-            response_logprobs=(
-                [logprobs for _, logprobs, _ in results] if sampling_params.get("logprobs") is not None else None
-            ),
+            responses=[self.tokenizer.decode(ids, skip_special_tokens=True) for ids in response_ids],
+            response_ids=response_ids,
+            stop_reasons=stop_reasons,
+            response_logprobs=response_logprobs if sampling_params.get("logprobs") is not None else None,
             prompt_logprobs=None,
+            response_policy_steps=policy_steps,
         )
 
     async def _generate_one(self, prompt_ids, sampling_params, session_id):
@@ -269,9 +277,15 @@ class CPUInferenceEngine(InferenceEngineInterface):
             seed = self.seed
         identity = repr((seed, session_id, list(prompt_ids))).encode()
         generator = torch.Generator().manual_seed(int.from_bytes(hashlib.sha256(identity).digest()[:8], "big"))
-        self._pending.append((list(prompt_ids), dict(sampling_params), future, generator))
+        request_id = str(next(self._request_ids))
+        self._live_requests.add(request_id)
+        self._pending.append((list(prompt_ids), dict(sampling_params), future, generator, request_id))
         self._wake.set()
-        return await future
+        try:
+            response_ids, logprobs, stop_reason = await future
+        finally:
+            self._live_requests.discard(request_id)
+        return response_ids, logprobs, stop_reason, self._policy_steps.finish(request_id, len(response_ids))
 
     async def _decode_loop(self):
         while True:
@@ -292,23 +306,24 @@ class CPUInferenceEngine(InferenceEngineInterface):
             for (temperature, min_tokens), items in groups.items():
                 try:
                     results = await self._decode_batch(items, temperature, min_tokens)
-                    for (_, _, future, _), result in zip(items, results):
+                    for (_, _, future, _, _), result in zip(items, results):
                         if not future.done():
                             future.set_result(result)
                 except Exception as error:  # noqa: BLE001
-                    for _, _, future, _ in items:
+                    for _, _, future, _, _ in items:
                         if not future.done():
                             future.set_exception(error)
 
     async def _decode_batch(self, items, temperature, min_tokens):
         batch_size = len(items)
-        max_response_tokens = [int(sampling_params["max_tokens"]) for _, sampling_params, _, _ in items]
-        prompt_lengths = [len(prompt_ids) for prompt_ids, _, _, _ in items]
+        max_response_tokens = [int(sampling_params["max_tokens"]) for _, sampling_params, _, _, _ in items]
+        prompt_lengths = [len(prompt_ids) for prompt_ids, _, _, _, _ in items]
+        request_ids = [request_id for _, _, _, _, request_id in items]
         prompt_width = max(prompt_lengths)
         pad_token_id = self.model.config.pad_token_id or 0
         input_ids = torch.full((batch_size, prompt_width), pad_token_id, dtype=torch.long)
         attention_mask = torch.zeros((batch_size, prompt_width), dtype=torch.long)
-        for index, (prompt_ids, _, _, _) in enumerate(items):
+        for index, (prompt_ids, _, _, _, _) in enumerate(items):
             input_ids[index, prompt_width - len(prompt_ids) :] = torch.tensor(prompt_ids)
             attention_mask[index, prompt_width - len(prompt_ids) :] = 1
         response_ids = [[] for _ in range(batch_size)]
@@ -320,6 +335,7 @@ class CPUInferenceEngine(InferenceEngineInterface):
         position_ids = (attention_mask.cumsum(-1) - 1).clamp(min=0)
         for token_index in range(max(max_response_tokens)):
             await self._resumed.wait()
+            sampled_at = time.monotonic()
             with torch.no_grad(), torch.autocast(device_type="cpu", dtype=torch.bfloat16, enabled=True):
                 output = self.model(
                     input_tokens,
@@ -338,7 +354,7 @@ class CPUInferenceEngine(InferenceEngineInterface):
             else:
                 log_probs = torch.log_softmax(logits / temperature, -1)
                 token_ids = torch.full((batch_size,), pad_token_id, dtype=torch.long)
-                for index, (_, _, _, generator) in enumerate(items):
+                for index, (_, _, _, generator, _) in enumerate(items):
                     if live_sequences[index]:
                         token_ids[index] = torch.multinomial(log_probs[index].exp(), 1, generator=generator)[0]
             token_logprobs = log_probs.gather(-1, token_ids[:, None]).squeeze(-1)
@@ -347,6 +363,7 @@ class CPUInferenceEngine(InferenceEngineInterface):
                     continue
                 response_ids[index].append(int(token_ids[index]))
                 response_logprobs[index].append(float(token_logprobs[index]))
+                self._policy_steps.observe(request_ids[index], 1, sampled_at)
                 if int(token_ids[index]) == self.eos_token_id:
                     stop_reasons[index] = "stop"
                     live_sequences[index] = False
@@ -363,7 +380,9 @@ class CPUInferenceEngine(InferenceEngineInterface):
     async def pause_generation(self) -> None:
         self._resumed.clear()
 
-    async def resume_generation(self) -> None:
+    async def resume_generation(self, policy_step: int) -> None:
+        self._policy_steps.install(policy_step, time.monotonic())
+        self._policy_steps.forget_unclaimed(self._live_requests)
         self._resumed.set()
 
     async def update_named_weights(self, request: NamedWeightsUpdateRequest):
@@ -401,6 +420,7 @@ class CPUInferenceEngine(InferenceEngineInterface):
                     "index": 0,
                     "message": {"role": "assistant", "content": result["responses"][0]},
                     "token_ids": tokens,
+                    CHOICE_POLICY_STEPS_KEY: result["response_policy_steps"][0],
                     "finish_reason": result["stop_reasons"][0],
                     "logprobs": None
                     if logprobs is None

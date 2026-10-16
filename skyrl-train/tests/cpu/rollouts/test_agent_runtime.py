@@ -8,22 +8,141 @@ import httpx
 import pytest
 from omegaconf import OmegaConf
 from harbor.agents.installed.base import BaseInstalledAgent
-from harbor.models.trial.config import AgentConfig
+from harbor.environments.base import BaseEnvironment
+from harbor.environments.capabilities import EnvironmentCapabilities
+from harbor.models.trial.config import AgentConfig, TrialConfig, TaskConfig
 from rolloutengine.contracts import ModelTurn
+from rolloutengine.spec import LoweredTaskSpec, TaskRuntimeSpec
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
 from shellbox.machine import MachineSpec, PackageSpec
-from taskcompendium.models import ConversationInput, TextMessage
+from shellbox.image import RegistryImage, image_source_key
+from taskcompendium.models import ConversationInput, TextMessage, Source
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from transformers import PreTrainedTokenizerFast
 
 from skyrl_train.rollouts.agent_backend import AgentInferenceBackend, TRIAL_HEADER
 from skyrl_train.rollouts.agent_runtime import InstalledAgentRuntime, InstalledAgentSettings
+from skyrl_train.rollouts.agent_endpoint import AgentEndpoint
+from skyrl_train.dataset.harbor_import import harbor_trial_task
 from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
 from skyrl_train.rollouts.task_worker import TaskRolloutWorker
 from skyrl_train.rollouts.task_projections import WholeTaskProjection
 from tests.cpu.rollouts.engine_fakes import InferenceClient, Tokenizer as ProjectionTokenizer
 from tests.cpu.task_specs import SHELL_ENVIRONMENT, lowered_task, task_input
+
+
+class UnavailableEnvironment(BaseEnvironment):
+    """External container service fails before any agent command can run."""
+
+    @staticmethod
+    def type():
+        return "docker"
+
+    @property
+    def capabilities(self):
+        return EnvironmentCapabilities(mounted=True)
+
+    def _validate_definition(self):
+        pass
+
+    async def start(self, force_build):
+        raise RuntimeError("container service unavailable")
+
+    async def stop(self, delete):
+        pass
+
+    async def upload_file(self, source_path, target_path):
+        raise AssertionError("No transfers before startup")
+
+    async def upload_dir(self, source_dir, target_dir):
+        raise AssertionError("No transfers before startup")
+
+    async def download_file(self, source_path, target_path):
+        raise AssertionError("Logs use host mounts")
+
+    async def download_dir(self, source_dir, target_dir):
+        raise AssertionError("Logs use host mounts")
+
+    async def exec(self, command, cwd=None, env=None, timeout_sec=None):
+        raise AssertionError("No commands before startup")
+
+
+@pytest.mark.asyncio
+async def test_original_trial_mints_capability_for_container_setup_and_agent_run(tmp_path, monkeypatch, task_inputs):
+    requested = []
+
+    class Controller:
+        def mint_endpoint_token(self, name, *, ttl):
+            requested.append(ttl.to_seconds())
+            return SimpleNamespace(
+                capability_url="http://localhost/capability",
+                expires_at=SimpleNamespace(epoch_ms=(1000 + ttl.to_seconds()) * 1000),
+            )
+
+    @asynccontextmanager
+    async def endpoint(_port):
+        yield AgentEndpoint("/trial", Controller())
+
+    monkeypatch.setattr("skyrl_train.rollouts.agent_runtime.registered_agent_endpoint", endpoint)
+    monkeypatch.setattr("skyrl_train.rollouts.agent_endpoint.time.time", lambda: 1000)
+    package = tmp_path / "task"
+    package.mkdir()
+    (package / "instruction.md").write_text("Solve the task")
+    (package / "task.toml").write_text('[environment]\ndocker_image = "python:3.12"\n')
+    (package / "tests").mkdir()
+    (package / "tests/test.sh").write_text("exit 1\n")
+    task = harbor_trial_task(package, source=Source(dataset="fixture", revision="1", row="task", importer_revision="1"))
+    session = (
+        task_inputs[1]
+        .rows[0]
+        .lowered.session.model_copy(
+            update={"attempt_timeout": 3000, "cleanup_timeout": 120, "total_turn_timeout": None}
+        )
+    )
+    lowered = LoweredTaskSpec(
+        task=task, runtime=TaskRuntimeSpec(task_machine=None, verifier_machine=None), session=session
+    )
+    settings = InstalledAgentSettings(
+        agent=AgentConfig(
+            name="mini-swe-agent",
+            kwargs={"version": "2.1.0"},
+            override_timeout_sec=1800,
+            override_setup_timeout_sec=300,
+        ),
+        output_path=str(tmp_path / "published"),
+        setup_timeout=300,
+        run_timeout=1800,
+        cleanup_timeout=120,
+        service_startup_timeout=5,
+        service_shutdown_timeout=5,
+        environment_snapshots={image_source_key(RegistryImage("python:3.12")): "approved"},
+    )
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0})))
+
+    async def unexpected_request(_payload):
+        raise AssertionError("The environment fails before inference")
+
+    runtime = InstalledAgentRuntime(
+        settings, AgentInferenceBackend("model", 32768, unexpected_request, tokenizer), 8192
+    )
+    config = TrialConfig(
+        task=TaskConfig(path=package),
+        agent=settings.agent,
+        environment={"import_path": f"{__name__}:UnavailableEnvironment"},
+        trial_attempt_timeout_sec=3000,
+        trial_cleanup_grace_sec=120,
+    )
+    await runtime.startup()
+    try:
+        result = await runtime.run_original_trial(
+            unexpected_request, lowered=lowered, session_id="trial", config=config
+        )
+        assert result.exception_info.exception_message == "container service unavailable"
+        # The token is minted before container setup, whose allowance is 600 seconds.
+        assert requested[0] > 600 + 300 + 1800 + 120
+    finally:
+        await runtime.shutdown()
 
 
 class HttpFixtureAgent(BaseInstalledAgent):

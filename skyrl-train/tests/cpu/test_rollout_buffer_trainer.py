@@ -31,7 +31,7 @@ def test_weight_sync_respects_optimizer_offload_policy(reason, offload_enabled):
     trainer.cfg = get_default_config()
     trainer.cfg.trainer.offload_optimizer_during_rollouts = offload_enabled
     trainer.colocate_all = False
-    trainer.global_step = 0
+    trainer.global_step = 4
     trainer.all_startup_timings = {}
     trainer.all_timings = {}
     events = []
@@ -48,9 +48,9 @@ def test_weight_sync_respects_optimizer_offload_policy(reason, offload_enabled):
         async def pause_generation(self):
             events.append("pause")
 
-        async def resume_generation(self):
+        async def resume_generation(self, policy_step):
             assert trainer.policy_model.optimizer_on_gpu != offload_enabled
-            events.append("resume")
+            events.append(("resume", policy_step))
 
     async def sync_weights():
         events.append("sync")
@@ -62,10 +62,8 @@ def test_weight_sync_respects_optimizer_offload_policy(reason, offload_enabled):
     asyncio.run(trainer._sync_policy_for_rollouts(reason=reason))
 
     assert trainer.policy_model.optimizer_on_gpu != offload_enabled
-    paused = reason == "training_step"
-    assert events == (["pause"] if paused else []) + (["offload"] if offload_enabled else []) + ["sync"] + (
-        ["resume"] if paused else []
-    )
+    # Every sync pauses, and the resume installs the step whose leases the synced weights serve.
+    assert events == ["pause"] + (["offload"] if offload_enabled else []) + ["sync", ("resume", 5)]
 
 
 def test_rollout_batch_conversion_reports_staleness_and_stage_timings(monkeypatch):

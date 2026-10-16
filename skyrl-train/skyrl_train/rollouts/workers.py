@@ -141,8 +141,8 @@ class RolloutWorkerPool:
     """Rollout worker actors that the trainer uses as its trajectory runner.
 
     Each training task or ``run`` request goes whole to the least-loaded worker; training tasks write their groups
-    straight to the rollout buffer. An evaluation session reserves worker 0. Evaluation requests run there, and
-    training continues on the other workers, or waits when there is only one. A request fails with
+    straight to the rollout buffer. Evaluation drains training requests and uses the same entire pool;
+    new training submissions wait until evaluation finishes. A request fails with
     ``RolloutWorkerStalledError`` when its worker completes nothing for the progress timeout.
 
     Workers run on the driver's node beside the rollout buffer actor.
@@ -220,24 +220,34 @@ class RolloutWorkerPool:
         eval_step: int,
         val_set_name: str | None = None,
     ) -> None:
-        """Reserve worker 0 once its training requests finish, and start the evaluation session on it."""
+        """Give evaluation priority, drain every worker, and begin one frozen session."""
         async with self._routing:
             if self._eval_session_active:
                 raise RuntimeError("an eval session is already active")
             self._eval_session_active = True
-            await self._routing.wait_for(lambda: self._pending[0] == 0)
-        try:
-            await self._actors[0].start_eval_session.remote(
-                run_name=run_name, eval_step=eval_step, val_set_name=val_set_name
+            self._eval_dispatch_counts = [0] * len(self._actors)
+            logger.info(
+                "Evaluation session requested: run={} step={} workers={}", run_name, eval_step, len(self._actors)
             )
+        try:
+            async with self._routing:
+                await self._routing.wait_for(lambda: not any(self._pending))
+
+            async def start(actor):
+                await actor.start_eval_session.remote(run_name=run_name, eval_step=eval_step, val_set_name=val_set_name)
+
+            async with asyncio.TaskGroup() as tasks:
+                for actor in self._actors:
+                    tasks.create_task(start(actor))
         except BaseException:
-            await self._release_eval_worker()
+            await self.stop_eval_session()
             raise
 
     async def stop_eval_session(self) -> None:
         try:
-            await self._actors[0].stop_eval_session.remote()
+            await asyncio.gather(*(actor.stop_eval_session.remote() for actor in self._actors))
         finally:
+            logger.info("Evaluation worker dispatch counts: {}", self._eval_dispatch_counts)
             await self._release_eval_worker()
 
     async def _release_eval_worker(self) -> None:
@@ -247,9 +257,9 @@ class RolloutWorkerPool:
 
     def _training_worker(self) -> int | None:
         """The least-loaded worker that may take training work now, if any."""
-        reserved = {0} if self._eval_session_active else set()
-        eligible = [index for index in range(len(self._actors)) if index not in reserved]
-        return min(eligible, key=self._pending.__getitem__, default=None)
+        if self._eval_session_active:
+            return None
+        return min(range(len(self._actors)), key=self._pending.__getitem__, default=None)
 
     async def _observed(
         self,
@@ -271,7 +281,8 @@ class RolloutWorkerPool:
             if phase == "eval":
                 if not self._eval_session_active:
                     raise RuntimeError("evaluation request received without an active eval session")
-                index = 0
+                index = min(range(len(self._actors)), key=self._pending.__getitem__)
+                self._eval_dispatch_counts[index] += 1
             else:
                 await self._routing.wait_for(lambda: self._training_worker() is not None)
                 index = self._training_worker()

@@ -15,16 +15,20 @@ from http import HTTPStatus
 from unittest.mock import patch
 
 import numpy as np
+import httpx
 import pytest
 import ray.exceptions
 from jinja2 import TemplateError
 from omegaconf import OmegaConf
 from skyrl_train.config.utils import get_default_config
-from skyrl_train.inference_engines.base import InferenceEngineInput, InferenceEngineOutput
+from skyrl_train.inference_engines.base import CHOICE_POLICY_STEPS_KEY, InferenceEngineInput, InferenceEngineOutput
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.inference_engine_client_http_endpoint import (
     ErrorResponse,
+    create_app,
+    set_global_state,
 )
+from skyrl_train.trajectory_runners.model_clients import DirectModelClient
 from skyrl_train.inference_engines.utils import (
     _RENDEZVOUS_PORT_START,
     _RENDEZVOUS_PORT_STOP,
@@ -489,6 +493,86 @@ def test_route_prompts_to_engines_with_session_ids_grouping_and_partition():
 # --------------------------------------------
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["http", "direct"])
+@pytest.mark.parametrize("interrupted", [False, True])
+async def test_chat_transports_preserve_route_tokens(transport, interrupted):
+    """Ordinary Harbor requests must work when the server captures expert routes."""
+
+    class Tokenizer:
+        eos_token_id = 99
+
+        def decode(self, ids, **kwargs):
+            return "".join({11: "A", 12: "B"}[token] for token in ids)
+
+    class Engine:
+        def __init__(self):
+            self.requests = []
+
+        async def tokenize(self, request):
+            return {"tokens": [1, 2]}
+
+        async def chat_completion(self, request):
+            self.requests.append(deepcopy(request))
+            body = request["json"]
+            continuation = body.get("continue_final_message", False)
+            prompt_ids = body.get("_skyrl_exact_prompt_token_ids", [1, 2])
+            response_ids = [12] if continuation else [11] if interrupted else [11, 12]
+            values = [1, 2, 3] if continuation or not interrupted else [1, 2]
+            buffer = io.BytesIO()
+            np.save(buffer, np.asarray(values, dtype=np.uint8).reshape(-1, 1, 1))
+            choice = {
+                "message": {"role": "assistant", "content": Tokenizer().decode(response_ids)},
+                "finish_reason": "abort" if interrupted and not continuation else "stop",
+                "routed_experts": base64.b64encode(buffer.getvalue()).decode("ascii"),
+            }
+            response = {
+                "choices": [choice],
+                "usage": {
+                    "prompt_tokens": len(prompt_ids),
+                    "completion_tokens": len(response_ids),
+                    "total_tokens": len(prompt_ids) + len(response_ids),
+                },
+            }
+            # vLLM returns IDs only when requested, even when route capture is enabled.
+            if body.get("return_token_ids"):
+                response["prompt_token_ids"] = prompt_ids
+                choice["token_ids"] = response_ids
+            return response
+
+    engine = Engine()
+    backend = InferenceEngineClient([engine], Tokenizer(), _make_min_cfg())
+    messages = [{"role": "user", "content": "Hi"}]
+    if transport == "http":
+        set_global_state(backend, None)
+        payload = {"model": "dummy-model", "messages": messages, "max_tokens": 2}
+        try:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=create_app()), base_url="http://test"
+            ) as client:
+                response = await client.post("/v1/chat/completions", json=payload)
+            assert response.status_code == 200, response.text
+            result = response.json()
+            choice = result["choices"][0]
+            assert choice["message"]["content"] == "AB"
+            assert result["prompt_token_ids"] == [1, 2]
+            assert choice["token_ids"] == [11, 12]
+            routes = normalize_routed_experts(choice["routed_experts"], [1, 2], [11, 12])
+        finally:
+            set_global_state(None, None)
+    else:
+        result = await DirectModelClient(backend).generate(
+            {"prompts": [messages], "chat_completion_params": [{}], "sampling_params": {"max_tokens": 2}}
+        )
+        assert result["responses"] == ["AB"]
+        assert result["prompt_ids"] == [[1, 2]]
+        assert result["response_ids"] == [[11, 12]]
+        routes = result["routed_experts"][0]
+    np.testing.assert_array_equal(routes, [[[2]], [[3]]])
+    if interrupted:
+        assert engine.requests[-1]["json"]["_skyrl_exact_prompt_token_ids"] == [1, 2, 11]
+
+
 class _DraftUpdateEngine:
     def __init__(self, result):
         self.result = result
@@ -558,6 +642,7 @@ async def test_chat_completion_retry_accumulates_and_sends_continuations(exact_p
                                 ]
                             },
                             "token_ids": [11],
+                            CHOICE_POLICY_STEPS_KEY: [7],
                         }
                     ],
                     "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6},
@@ -599,6 +684,7 @@ async def test_chat_completion_retry_accumulates_and_sends_continuations(exact_p
                                 ]
                             },
                             "token_ids": [12],
+                            CHOICE_POLICY_STEPS_KEY: [8],
                         }
                     ],
                     "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6},
@@ -639,7 +725,7 @@ async def test_chat_completion_retry_accumulates_and_sends_continuations(exact_p
     third_call = engines[0].calls[2]
 
     # First call should be identical to original json (no continuation flags)
-    assert first_call["json"] == original["json"]
+    assert first_call["json"] == {**original["json"], "return_token_ids": True}
     assert first_call["headers"] == original["headers"]
     assert first_call["json"].get("continue_final_message") is None
     assert first_call["json"].get("add_generation_prompt") is None
@@ -674,6 +760,7 @@ async def test_chat_completion_retry_accumulates_and_sends_continuations(exact_p
     assert choice["logprobs"]["content"][0]["token"] == "token_id:11"
     assert choice["logprobs"]["content"][1]["token"] == "token_id:12"
     assert choice["token_ids"] == [11, 12]
+    assert choice[CHOICE_POLICY_STEPS_KEY] == [7, 8]
 
     # usage: prompt_tokens from base (5), completion_tokens summed (2), total 7
     assert out["usage"]["prompt_tokens"] == 5
@@ -837,8 +924,8 @@ async def test_chat_completion_retry_resends_original_when_no_tokens_generated_y
     second_call = engines[0].calls[1]
 
     # After 0-token abort, the next call should resend the original unchanged
-    assert first_call["json"] == original["json"]
-    assert second_call["json"] == original["json"]
+    assert first_call["json"] == {**original["json"], "return_token_ids": True}
+    assert second_call["json"] == first_call["json"]
     assert first_call["headers"] == original["headers"]
     assert second_call["headers"] == original["headers"]
     # No continuation flags should appear
@@ -960,6 +1047,7 @@ async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key, expert_offs
                     stop_reasons=["abort"],
                     response_logprobs=[[-0.1, -0.2]],
                     routed_experts=[[[[3, 4]], [[5, 6]]]],
+                    response_policy_steps=[[1, 1]],
                 ),
                 # 2) abort with 0 tokens (should be ignored)
                 InferenceEngineOutput(
@@ -975,6 +1063,7 @@ async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key, expert_offs
                     stop_reasons=["stop"],
                     response_logprobs=[[-0.3, -0.4]],
                     routed_experts=[np.array([[[7, 8]], [[9, 10]]], dtype=np.uint16) + expert_offset],
+                    response_policy_steps=[[2, 2]],
                 ),
             ]
 
@@ -1024,6 +1113,7 @@ async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key, expert_offs
     assert out["response_ids"] == [expected_final_response_ids]
     assert out["stop_reasons"] == ["stop"]
     assert out["response_logprobs"] == [[-0.1, -0.2, -0.3, -0.4]]
+    assert out["response_policy_steps"] == [[1, 1, 2, 2]]
     np.testing.assert_array_equal(
         out["routed_experts"][0],
         [[[3, 4]], [[5, 6]], [[7 + expert_offset, 8 + expert_offset]], [[9 + expert_offset, 10 + expert_offset]]],
@@ -1146,7 +1236,7 @@ class _MockStreamEngine:
     async def pause_generation(self):
         pass
 
-    async def resume_generation(self):
+    async def resume_generation(self, policy_step):
         pass
 
     async def chat_completion_stream(self, request_payload):
@@ -1170,7 +1260,7 @@ class _MockWeightSyncEngine:
             raise RuntimeError("reshape_and_cache_flash attempted to run with Meta tensors")
         self.reloads += 1
 
-    async def resume_generation(self):
+    async def resume_generation(self, policy_step):
         self.scheduler_paused = False
 
 
@@ -1186,7 +1276,7 @@ async def test_weight_sync_pauses_loaded_scheduler_until_reload_finishes():
     assert engine.outstanding_requests == 0
     assert engine.reloads == 1
 
-    await client.resume_generation()
+    await client.resume_generation(policy_step=1)
     assert not engine.scheduler_paused
 
 
@@ -1221,7 +1311,7 @@ async def test_chat_completion_stream_blocks_while_paused_then_resumes():
     assert not task.done()
 
     # Resume -> the stream should now proceed to the engine and complete.
-    await client.resume_generation()
+    await client.resume_generation(policy_step=1)
     chunks = await asyncio.wait_for(task, timeout=5)
     assert engines[0].entered.is_set()
     assert any("[DONE]" in c for c in chunks)
@@ -1251,7 +1341,7 @@ class _MockCompletionEngine:
     async def pause_generation(self):
         pass
 
-    async def resume_generation(self):
+    async def resume_generation(self, policy_step):
         pass
 
 
@@ -1321,7 +1411,7 @@ async def test_completion_single_prompt_blocks_while_paused_then_resumes(prompt)
     assert not engines[0].entered.is_set(), "request reached the engine while generation was paused"
     assert not task.done()
 
-    await client.resume_generation()
+    await client.resume_generation(policy_step=1)
     result = await asyncio.wait_for(task, timeout=5)
 
     assert result["choices"][0]["text"] == "done"
@@ -1372,7 +1462,7 @@ async def test_completion_single_prompt_reissue_waits_for_a_pause_that_is_still_
     assert len(engine.calls) == 1, "the retry entered the engine while generation was paused"
     assert not task.done()
 
-    await client.resume_generation()
+    await client.resume_generation(policy_step=1)
     result = await asyncio.wait_for(task, timeout=5)
 
     assert result["choices"][0]["finish_reason"] == "stop"
@@ -1480,7 +1570,7 @@ class _MockGenerateEngine:
     async def pause_generation(self):
         self.scheduler_paused = True
 
-    async def resume_generation(self):
+    async def resume_generation(self, policy_step):
         self.scheduler_paused = False
 
 
@@ -1506,7 +1596,7 @@ async def test_generate_single_prompt_waits_for_resume_then_reaches_engine():
     assert not task.done(), "generate() returned or raised while generation was paused"
     assert engine.requests == []
 
-    await client.resume_generation()
+    await client.resume_generation(policy_step=1)
     output = await asyncio.wait_for(task, timeout=5)
 
     assert engine.requests == [
@@ -1563,7 +1653,7 @@ async def test_weight_sync_pause_skips_an_engine_that_already_died():
 
     await client.pause_generation()
     assert live.scheduler_paused
-    await client.resume_generation()
+    await client.resume_generation(policy_step=1)
     assert not live.scheduler_paused
 
 
@@ -1633,7 +1723,7 @@ def test_resume_wakes_a_request_parked_on_another_event_loop():
         assert not request.done()
         assert not engines[0].entered.is_set(), "request reached the engine while generation was paused"
 
-        trainer_loop.run_until_complete(client.resume_generation())
+        trainer_loop.run_until_complete(client.resume_generation(policy_step=1))
         chunks = server_loop.run_until_complete(asyncio.wait_for(request, timeout=5))
     finally:
         server_loop.close()

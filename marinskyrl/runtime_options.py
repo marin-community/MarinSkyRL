@@ -65,12 +65,20 @@ class EvaluationRunner(StrEnum):
     HARBOR = "harbor"
 
 
+def ftpo_requested(algorithm: Mapping[str, Any]) -> bool:
+    """Return whether standalone or auxiliary FTPO is configured."""
+    return (
+        algorithm.get("policy_loss_type") == PolicyLossType.FTPO
+        or algorithm.get("ftpo", {}).get("auxiliary_weight") is not None
+    )
+
+
 def reference_model_required(algorithm: Mapping[str, Any]) -> bool:
     """Return whether the objective needs a frozen reference actor."""
     return bool(
         algorithm.get("use_kl_loss")
         or algorithm.get("use_kl_in_reward")
-        or algorithm.get("policy_loss_type") == PolicyLossType.FTPO
+        or ftpo_requested(algorithm)
         or algorithm.get("policy_loss_type") == PolicyLossType.DPO
     )
 

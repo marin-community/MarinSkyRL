@@ -224,7 +224,7 @@ def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flippe
             timings[f"install_{version}"] = install
             timings[f"verify_{version}"] = await sync.verify(version)
             timings[f"paused_{version}"] = time.perf_counter() - started
-            await client.resume_generation()
+            await client.resume_generation(policy_step=version)
 
         asyncio.run(prepare_and_sync(1))
         assert_engine_weights(client, HERO_SYNC_NAMES if hero else SYNC_NAMES, trained, bias_names, expert_names)
@@ -237,7 +237,7 @@ def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flippe
                 with pytest.raises(RuntimeError, match=r"1 of \d+ replayed bytes differ"):
                     await sync.verify(1)
             finally:
-                await client.resume_generation()
+                await client.resume_generation(policy_step=1)
 
         asyncio.run(corrupt_and_verify())
 

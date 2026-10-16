@@ -142,18 +142,16 @@ def mismatch_ratio_metrics(
     eps_clip_low: float = 0.2,
     eps_clip_high: float = 0.2,
 ) -> dict[str, float]:
-    """Trainer-minus-vLLM log-ratio statistics by staleness bucket and response position."""
+    """Trainer-minus-vLLM log-ratio statistics by per-token staleness bucket and response position."""
     mask = loss_mask.detach().cpu() > 0
     staleness = rollout_staleness.detach().cpu()
-    row_bucket = torch.zeros(mask.shape[0], dtype=torch.uint8)
+    bucket = torch.zeros(mask.shape, dtype=torch.uint8)
     for index, (_, lower) in enumerate(MISMATCH_STALENESS_BUCKETS):
-        row_bucket[staleness >= lower] = index
+        bucket[staleness >= lower] = index
     first, last = _position_masks(mask)
     # A token's group is its staleness bucket times four plus its position class:
     # 1 in the first window, 2 in the last window, 3 in both and 0 in neither.
-    groups = torch.masked_select(
-        4 * row_bucket.unsqueeze(1) + first.to(torch.uint8) + 2 * last.to(torch.uint8), mask
-    ).long()
+    groups = torch.masked_select(4 * bucket + first.to(torch.uint8) + 2 * last.to(torch.uint8), mask).long()
     # CPU float64 and masking before subtraction avoid padded NaNs.
     values = (
         torch.masked_select(learner_logprobs.detach().cpu(), mask).double()

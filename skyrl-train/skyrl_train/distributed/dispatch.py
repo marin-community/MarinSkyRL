@@ -372,34 +372,12 @@ class MeshDispatch(Dispatch):
         log_dispatch = method == "forward"
         dispatched_ranks = [] if log_dispatch else None
 
-        # R3 by-value forward-arg spill fix (part 2 — the CORE fix). At 131k the
-        # per-dp chunk can carry multi-GB routed-expert targets. With `dp_size` data-parallel groups each replicated across
-        # `world//dp_size` actors (here dp_size=2, 16 actors/group), the naive loop
-        # below calls `method.remote(data_chunks[dp])` once PER actor. Each call
-        # passes a FRESH Python object (`data_chunks[dp]` is the same object within
-        # a group, but `.remote()` re-considers each arg): Ray re-serializes /
-        # auto-`ray.put`s the multi-GB chunk PER actor, so a dp-group materializes
-        # ~16 redundant copies into the object store -> spill -> the peer dp-group's
-        # `forward` arg never materializes -> the FR-proven 32-rank forward wedge.
-        #
-        # Fix: `ray.put` each DISTINCT dp-chunk EXACTLY ONCE and pass the resulting
-        # ObjectRef to every actor in that dp-group. Ray dedups by ObjectRef
-        # identity — one store entry per dp-group, fetched once per node, NOT
-        # re-serialized per actor. Ray auto-derefs an ObjectRef positional arg, so
-        # the worker `forward(data)` / `ppo_train(data)` signature is UNCHANGED and
-        # the resident chunk is byte-identical to today's by-value chunk (same
-        # `data.chunk` rows) — so ALL existing row/dp/CP/micro-batch alignment is
-        # inherited unchanged (NO new slicing path; satisfies the #6335 guardrail).
-        # ``r3_transport=by_value`` retains the per-actor dispatch path.
-        # Only engage the resident-put when the batch carries R3 routes, either
-        # as compact rows or a tensor. Runs without routes keep the exact
-        # per-actor by-value dispatch. `data.chunk` slices the route field with
-        # the tensors, so probing chunk 0 answers for all chunks.
-        resident = (
-            settings.r3_transport is not R3Transport.BY_VALUE
-            and len(data_chunks) > 0
-            and data_chunks[0].routed_experts is not None
-        )
+        # Serialize each DP chunk once and share its ObjectRef across the actors
+        # processing those rows. Passing the same Python batch by value still
+        # serializes a new object per actor, including batches without R3 routes.
+        # Ray dereferences positional ObjectRefs before calling the worker, so
+        # slicing and worker signatures stay the same. BY_VALUE is the opt-out.
+        resident = settings.r3_transport is not R3Transport.BY_VALUE and len(data_chunks) > 0
         # Bound on each per-dp-group `ray.put()` below (see `_ray_put_bounded` /
         # `DispatchPutTimeoutError` docstrings for the full incident writeup). Default
         # 600s is generous relative to observed local put durations for a single
@@ -412,7 +390,9 @@ class MeshDispatch(Dispatch):
         # driver plasma. Only meaningful alongside `resident` (it is the R3
         # transport that overflows the head). See the module-level block above.
         # ``resident`` retains the centralized driver-put behavior for diagnostics.
-        decentral = resident and settings.r3_transport is R3Transport.DECENTRAL
+        decentral = (
+            resident and data_chunks[0].routed_experts is not None and settings.r3_transport is R3Transport.DECENTRAL
+        )
         chunk_refs: List[Optional[ObjectRef]] = [None] * len(data_chunks)
         for actor_info in actor_infos:
             # index into tensordict to get the correct data to send
@@ -454,7 +434,10 @@ class MeshDispatch(Dispatch):
                         # UNGATED per-dp-group marker so we can SEE the resident set
                         # install (target: one line per dp-group, on every step) and
                         # confirm the R3 bytes are put once, not per-actor.
-                        logger.info(f"R3_RESIDENT_SET method={method} dp={dp} nbytes={nbytes} dtype={dtype}")
+                        if _r3 is not None:
+                            logger.info(f"R3_RESIDENT_SET method={method} dp={dp} nbytes={nbytes} dtype={dtype}")
+                        else:
+                            logger.info(f"BATCH_RESIDENT_SET method={method} dp={dp}")
                 data_to_send = chunk_refs[dp]
             else:
                 data_to_send = data_chunks[dp]

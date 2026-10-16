@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 from omegaconf import DictConfig, OmegaConf
 from rigging.secrets import is_secret_reference
 
-from marinskyrl.runtime_options import PolicyLossType
+from marinskyrl.runtime_options import ftpo_requested
 
 
 class DistillationObjectiveKind(StrEnum):
@@ -727,7 +727,7 @@ def validate_generation_logprobs(cfg: DictConfig) -> None:
     if logprobs is None:
         return
     assert isinstance(logprobs, int)
-    if logprobs > 0 and cfg.get("trainer", {}).get("algorithm", {}).get("policy_loss_type") != PolicyLossType.FTPO:
+    if logprobs > 0 and not ftpo_requested(cfg.get("trainer", {}).get("algorithm", {})):
         plan = compile_distillation_plan_from_config(cfg)
         widths = {teacher.top_k for teacher in plan.teachers} if plan is not None else set()
         if (
