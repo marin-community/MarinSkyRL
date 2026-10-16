@@ -2384,12 +2384,16 @@ class RayPPOTrainer:
                 candidates = candidates[:, :width]
                 chosen = chosen[:, :width]
                 weights = weights[:, :width]
+                rollout_staleness_tensor = rollout_staleness_tensor[:, :width]
                 extra = width - weights.shape[1]
                 candidates = torch.cat(
                     (candidates, candidates.new_full((len(response_ids), extra, candidates.shape[-1]), -1)), dim=1
                 )
                 chosen = torch.cat((chosen, chosen.new_zeros((len(response_ids), extra, chosen.shape[-1]))), dim=1)
                 weights = torch.cat((weights, weights.new_zeros((len(response_ids), extra))), dim=1)
+                rollout_staleness_tensor = torch.cat(
+                    (rollout_staleness_tensor, rollout_staleness_tensor.new_zeros((len(response_ids), extra))), dim=1
+                )
                 repair_mask = torch.zeros_like(weights, dtype=torch.bool)
                 for row, repair in enumerate(closure_targets.repairs):
                     if repair is not None:
@@ -2404,8 +2408,7 @@ class RayPPOTrainer:
                         "rewards": rewards_tensor,
                         "rollout_logprobs": learner_logprobs,
                         "loss_mask": learner_loss_masks,
-                        # The learner log probabilities come from the current policy.
-                        "rollout_staleness": torch.zeros_like(learner_loss_masks, dtype=torch.int32),
+                        "rollout_staleness": rollout_staleness_tensor,
                         "ftpo_repair_mask": repair_mask,
                     }
                 )

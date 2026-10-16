@@ -708,7 +708,7 @@ def test_verified_closure_trainer_preserves_rollouts_and_trains_verified_repairs
     # A wholly unavailable group is rejected before conversion. Exercise an
     # unavailable repetition within an otherwise admitted prompt group.
     uids = ["a", "b", "b" if auxiliary and not task_available else "c", "d"]
-    batch = trainer.convert_to_training_input(trajectory, uids)
+    batch = trainer.convert_to_training_input(trajectory, uids, rollout_staleness=[2, 2, 2, 2])
     target_weights = batch["ftpo_weights"] if auxiliary else batch["loss_mask"]
     assert target_weights.nonzero().tolist() == [[0, 1], [1, 1], [1, 2]]
     assert batch["ftpo_repair_mask"].nonzero().tolist() == [[1, 1], [1, 2]]
@@ -726,11 +726,11 @@ def test_verified_closure_trainer_preserves_rollouts_and_trains_verified_repairs
         )
         unchanged = batch["sequences"][2][batch["attention_mask"][2].bool()].tolist()
         assert unchanged == prompt + original_responses[2]
-        # The repaired batch still feeds the trainer-versus-vLLM mismatch statistics.
+        # The trained row keeps its lease staleness through the closure repair.
         mismatch = mismatch_ratio_metrics(
             batch["rollout_logprobs"], batch["rollout_logprobs"], batch["loss_mask"], batch["rollout_staleness"]
         )
-        assert mismatch["policy/mismatch/staleness0/selected_tokens"] == batch["loss_mask"].sum()
+        assert mismatch["policy/mismatch/staleness2/selected_tokens"] == batch["loss_mask"].sum()
     else:
         assert batch["rollout_logprobs"] is None
     assert batch["student_topk_indices"][batch["ftpo_chosen_mask"]].tolist() == [candidates[1]]
