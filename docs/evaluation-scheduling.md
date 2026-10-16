@@ -50,8 +50,13 @@ sources were active simultaneously. These summaries contain no task content.
 
 Per-task evaluation JSON records retain failure categories and safe fields under
 `verification.diagnostics`: `operation`, `machine_operation`, `timed_out`,
-`provider_status_code`, and `provider_sdk_call`. The last field identifies an
-allowlisted Daytona SDK method name when available. It does not identify the HTTP phase inside a compound
-operation. Raw provider messages, headers, arbitrary error codes, and verifier
+`provider_status_code`, `provider_sdk_call`, and `provider_rate_limits`. SDK method
+names are allowlisted, including generated request methods that distinguish sandbox
+creation from toolbox URL lookup. A compound SDK method alone does not identify
+its failing HTTP request. Rate-limit diagnostics retain only nonnegative integer
+values from named Daytona limit, remaining, reset, and retry-after headers, without
+unit conversion. `DAYTONA_RATE_LIMIT_HEADERS` in
+[the task worker](../skyrl-train/skyrl_train/rollouts/task_worker.py) lists the retained keys.
+Raw provider messages, other headers, arbitrary error codes, and verifier
 references are excluded. An unscored task remains unscored even when its failure can
 be classified; diagnostic fields do not supply a reward or change retry behavior.

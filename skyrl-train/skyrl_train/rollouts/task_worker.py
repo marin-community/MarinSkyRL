@@ -94,8 +94,16 @@ DAYTONA_DIAGNOSTIC_CALLS = frozenset(
         ("daytona._async.process", "exec"),
         ("daytona._async.filesystem", "upload_file_stream"),
         ("daytona._async.filesystem", "download_file"),
+        ("daytona_api_client_async.api.sandbox_api", "create_sandbox"),
+        ("daytona_api_client_async.api.sandbox_api", "get_toolbox_proxy_url"),
+        ("daytona_api_client_async.api.sandbox_api", "get_sandbox"),
     }
 )
+DAYTONA_RATE_LIMIT_HEADERS = frozenset(
+    f"{prefix}-{throttler}"
+    for prefix in ("x-ratelimit-limit", "x-ratelimit-remaining", "x-ratelimit-reset", "retry-after")
+    for throttler in ("anonymous", "authenticated", "sandbox-create", "sandbox-lifecycle")
+) | {"retry-after"}
 
 
 class InstalledAgentWorker(Protocol):
@@ -226,6 +234,17 @@ def _failed_rollout(
         if isinstance(provider_error, DaytonaError):
             if type(provider_error.status_code) is int and 100 <= provider_error.status_code <= 599:
                 diagnostics["provider_status_code"] = provider_error.status_code
+            rate_limits = {
+                name.lower(): int(value)
+                for name, value in (provider_error.headers or {}).items()
+                if name.lower() in DAYTONA_RATE_LIMIT_HEADERS
+                and isinstance(value, str)
+                and value.isascii()
+                and value.isdecimal()
+                and len(value) <= 12
+            }
+            if rate_limits:
+                diagnostics["provider_rate_limits"] = rate_limits
             # This identifies an SDK call, not the HTTP phase of a compound operation.
             diagnostics["provider_sdk_call"] = "unknown"
             nested_error: BaseException | None = provider_error

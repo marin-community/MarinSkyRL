@@ -160,7 +160,8 @@ async def test_evaluate_exports_public_results_and_expected_metrics(dummy_config
                     "operation": "grade",
                     "machine_operation": "run",
                     "provider_status_code": 429,
-                    "provider_sdk_call": "daytona._async.api_client.SandboxesApi.create_sandbox",
+                    "provider_sdk_call": "daytona_api_client_async.api.sandbox_api.create_sandbox",
+                    "provider_rate_limits": {"retry-after-sandbox-create": 5},
                     "provider_error_code": "private-error-code",
                 },
             ),
@@ -242,7 +243,8 @@ async def test_evaluate_exports_public_results_and_expected_metrics(dummy_config
         "operation": "grade",
         "machine_operation": "run",
         "provider_status_code": 429,
-        "provider_sdk_call": "daytona._async.api_client.SandboxesApi.create_sandbox",
+        "provider_sdk_call": "daytona_api_client_async.api.sandbox_api.create_sandbox",
+        "provider_rate_limits": {"retry-after-sandbox-create": 5},
     }
 
     assert [prompt[0]["content"] for batch in runner.seen_inputs for prompt in batch.public_prompts] == [

@@ -10,7 +10,7 @@ import httpx
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from daytona import AsyncDaytona, DaytonaConfig, DaytonaRateLimitError
+from daytona import AsyncDaytona, CreateSandboxFromSnapshotParams, DaytonaConfig, DaytonaRateLimitError
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 from omegaconf import OmegaConf
@@ -798,36 +798,68 @@ async def test_source_machine_selection_controls_tool_results(task_inputs, task_
 @pytest.mark.asyncio
 @pytest.mark.parametrize("projection_type", [WholeTaskProjection, StepTaskProjection])
 @pytest.mark.parametrize(
-    "session,operation,cause_type",
+    "session,operation,cause_type,provider_call",
     [
-        ("searchcode", "prepare", "RuntimeError"),
-        ("nemotron_ultra", "prepare", "RuntimeError"),
-        ("searchcode", "start", "UnsupportedMachineSpec"),
-        ("searchcode", "start", "RuntimeError"),
-        ("searchcode", "start", "DaytonaRateLimitError"),
+        ("searchcode", "prepare", "RuntimeError", None),
+        ("nemotron_ultra", "prepare", "RuntimeError", None),
+        ("searchcode", "start", "UnsupportedMachineSpec", None),
+        ("searchcode", "start", "RuntimeError", None),
+        ("searchcode", "start", "DaytonaRateLimitError", "snapshot"),
+        ("searchcode", "start", "DaytonaRateLimitError", "create_sandbox"),
+        ("searchcode", "start", "DaytonaRateLimitError", "get_toolbox_proxy_url"),
     ],
 )
 async def test_python_startup_failure_is_masked_without_losing_its_graded_peer(
-    task_inputs, task_machine, projection_type, session, operation, cause_type
+    task_inputs, task_machine, projection_type, session, operation, cause_type, provider_call
 ):
     if operation == "start":
         if cause_type == "DaytonaRateLimitError":
 
             async def rate_limit(request):
+                if request.method == "POST" and provider_call == "get_toolbox_proxy_url":
+                    return web.json_response(
+                        {
+                            "id": "fixture",
+                            "organizationId": "fixture",
+                            "name": "fixture",
+                            "user": "root",
+                            "env": {},
+                            "labels": {},
+                            "public": False,
+                            "networkBlockAll": False,
+                            "target": "us",
+                            "cpu": 2,
+                            "gpu": 0,
+                            "memory": 4,
+                            "disk": 10,
+                            "state": "started",
+                            "toolboxProxyUrl": "",
+                        }
+                    )
                 return web.json_response(
                     {"message": "secret response body", "code": "secret-code"},
                     status=429,
-                    headers={"X-Private-Header": "secret-key"},
+                    headers={
+                        "X-Private-Header": "secret-key",
+                        "X-RateLimit-Limit-sandbox-create": "300",
+                        "X-RateLimit-Remaining-sandbox-create": "0",
+                        "Retry-After-sandbox-create": "17",
+                        "X-RateLimit-Reset-sandbox-create": "secret-key",
+                        "Retry-After-authenticated": "-1",
+                    },
                 )
 
             app = web.Application()
-            app.router.add_get("/{path:.*}", rate_limit)
+            app.router.add_route("*", "/{path:.*}", rate_limit)
             async with TestServer(app) as server:
                 async with AsyncDaytona(
                     DaytonaConfig(api_key="secret-key", api_url=str(server.make_url("")).rstrip("/"))
                 ) as client:
                     with pytest.raises(DaytonaRateLimitError) as provider_failure:
-                        await client.snapshot.get("fixture")
+                        if provider_call == "snapshot":
+                            await client.snapshot.get("fixture")
+                        else:
+                            await client.create(CreateSandboxFromSnapshotParams(snapshot="fixture"))
             startup_error = provider_failure.value
         else:
             startup_error_type = UnsupportedMachineSpec if cause_type == "UnsupportedMachineSpec" else RuntimeError
@@ -894,7 +926,17 @@ async def test_python_startup_failure_is_masked_without_losing_its_graded_peer(
     if cause_type == "DaytonaRateLimitError":
         assert failed_result.diagnostics["machine_operation"] == "create"
         assert failed_result.diagnostics["provider_status_code"] == 429
-        assert failed_result.diagnostics["provider_sdk_call"] == "daytona._async.snapshot.get"
+        expected_call = (
+            "daytona._async.snapshot.get"
+            if provider_call == "snapshot"
+            else f"daytona_api_client_async.api.sandbox_api.{provider_call}"
+        )
+        assert failed_result.diagnostics["provider_sdk_call"] == expected_call
+        assert failed_result.diagnostics["provider_rate_limits"] == {
+            "x-ratelimit-limit-sandbox-create": 300,
+            "x-ratelimit-remaining-sandbox-create": 0,
+            "retry-after-sandbox-create": 17,
+        }
         assert "secret" not in json.dumps(failed_result.diagnostics)
     assert peer_result.status is VerificationStatus.VERIFIED
     assert peer_result.score == 1.0
