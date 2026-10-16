@@ -101,6 +101,7 @@ class _Workers:
         self._failing = failing
         self._masked_once = set(masked_once)
         self.started: list[str] = []
+        self.started_events: defaultdict[str, asyncio.Event] = defaultdict(asyncio.Event)
         # Rows started while any blocked row was still waiting.
         self.started_while_blocked: list[str] = []
         self.unblocked: defaultdict[str, asyncio.Event] = defaultdict(asyncio.Event)
@@ -109,6 +110,7 @@ class _Workers:
     async def run_task(self, task: RolloutTask, writer: RolloutWriter) -> int:
         uid = task.prompt["uid"]
         self.started.append(uid)
+        self.started_events[uid].set()
         if not all(self.unblocked[blocked].is_set() for blocked in self._blocked):
             self.started_while_blocked.append(uid)
         if uid in self._blocked:
@@ -236,6 +238,35 @@ async def _ignore(groups: list[RolloutGroup]) -> None:
 async def _next_uids(context: TrainingContext) -> list[str]:
     groups, _ = await context.next_batch(stall_timeout=STALL_TIMEOUT, on_admitted=_ignore)
     return [group.uid for group in groups]
+
+
+@pytest.mark.asyncio
+async def test_evaluation_pause_drains_generation_and_preserves_next_training_batch(start_buffer):
+    workers = _Workers(blocked=frozenset({"a"}))
+    context = _context(["a", "b", "c"], workers, start_buffer, batch_size=1, max_in_flight=1)
+    context.start()
+    try:
+        await context.publish(1)
+        await workers.started_events["a"].wait()
+        pause_started = asyncio.Event()
+
+        async def drain():
+            pause_started.set()
+            await context.pause_and_drain()
+
+        draining = asyncio.create_task(drain())
+        await pause_started.wait()
+        assert not draining.done()
+        workers.unblocked["a"].set()
+        await draining
+        assert workers.started == ["a"]
+        assert await _next_uids(context) == ["a"]
+        await context.publish(2)
+        assert workers.started == ["a"]
+        context.resume()
+        assert await _next_uids(context) == ["b"]
+    finally:
+        await context.close()
 
 
 @pytest.mark.asyncio

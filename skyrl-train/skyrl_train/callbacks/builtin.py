@@ -23,10 +23,7 @@ import contextlib
 import json
 import math
 import os
-import sys
-import tempfile
 from copy import deepcopy
-from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Type
 
@@ -37,6 +34,7 @@ from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_exp
 from skyrl_train.distillation import DISTILLATION_SCORED_TOKENS_METRIC
 from skyrl_train.json_serialization import to_jsonable
 from skyrl_train.io import io
+from skyrl_train.inline_harbor_client import collect_harbor
 from marinskyrl.checkpoint_paths import BEST_CHECKPOINT_FILENAME, POLICY_CHECKPOINT_SUBDIRECTORY
 from marinskyrl.resource_locator import join_resource_path
 from skyrl_train.inference_engines.vllm.stats import VLLM_NUM_ENGINES_METRIC, IntervalReadMode
@@ -257,7 +255,7 @@ class HarborEvaluationCallback(TrainerCallback):
         self.minimum_coverage = minimum_coverage
         self.daytona_api_key_env = daytona_api_key_env
 
-    async def on_evaluate_async(self, state, control, *, metrics, trainer, **kwargs):
+    async def collect_evaluation(self, state, *, trainer, pool):
         client = trainer.inference_engine_client
         if not client.enable_http_endpoint:
             raise ValueError("Harbor validation requires generator.enable_http_endpoint")
@@ -275,40 +273,19 @@ class HarborEvaluationCallback(TrainerCallback):
         environment = os.environ.copy()
         environment["DAYTONA_API_KEY"] = environment[self.daytona_api_key_env]
         environment["OPENAI_API_KEY"] = "unused-local-inference"
-        with tempfile.TemporaryDirectory(prefix="inline-harbor-") as directory:
-            spec = Path(directory) / "spec.json"
-            output = Path(directory) / "metrics.json"
-            spec.write_text(json.dumps({"cohorts": cohorts}))
-            process = await asyncio.create_subprocess_exec(
-                sys.executable,
-                "-m",
-                "skyrl_train.inline_harbor",
-                "--spec",
-                str(spec),
-                "--output",
-                str(output),
-                env=environment,
-            )
-            try:
-                async with asyncio.timeout(self.timeout):
-                    returncode = await process.wait()
-            finally:
-                if process.returncode is None:
-                    process.terminate()
-                    try:
-                        await asyncio.wait_for(process.wait(), timeout=30)
-                    except TimeoutError:
-                        process.kill()
-                        await process.wait()
-            if returncode:
-                raise RuntimeError(f"Inline Harbor validation exited with status {returncode}")
-            results = json.loads(output.read_text())
+        async with asyncio.timeout(self.timeout):
+            results = await collect_harbor(cohorts, pool, environment)
+        return {f"eval/harbor/{name}/{key}": value for name, result in results.items() for key, value in result.items()}
+
+    async def on_evaluate_async(self, state, control, *, metrics, trainer, **kwargs):
         attempted = metrics["eval/all/num_attempted"]
         scored = metrics["eval/all/num_scored"]
-        reward_sum = metrics["eval/all/avg_verifier_score"] * scored
+        reward_sum = metrics["eval/all/avg_verifier_score"] * scored if scored else 0.0
         metrics["eval/selection_eligible"] = 1.0
-        for name, result in results.items():
-            metrics.update({f"eval/harbor/{name}/{key}": value for key, value in result.items()})
+        for cohort in self.cohorts:
+            name = cohort["name"]
+            prefix = f"eval/harbor/{name}/"
+            result = {key.removeprefix(prefix): value for key, value in metrics.items() if key.startswith(prefix)}
             if result["num_scored"] < self.minimum_coverage * result["num_attempted"]:
                 metrics["eval/selection_eligible"] = 0.0
                 logger.warning("Insufficient inline Harbor scoring coverage for {}: {}", name, result)
@@ -317,7 +294,10 @@ class HarborEvaluationCallback(TrainerCallback):
             reward_sum += result["reward_sum"]
         metrics["eval/all/num_attempted"] = attempted
         metrics["eval/all/num_scored"] = scored
-        metrics["eval/all/avg_verifier_score"] = reward_sum / scored
+        if scored:
+            metrics["eval/all/avg_verifier_score"] = reward_sum / scored
+        else:
+            metrics.pop("eval/all/avg_verifier_score", None)
         return control
 
 
@@ -360,16 +340,26 @@ class EvaluationCallback(TrainerCallback):
         if any(not keys for keys in self.metric_groups.values()):
             raise ValueError("evaluation metric groups must be nonempty")
 
-    async def on_evaluate_async(
-        self, state: TrainerState, control: TrainerControl, *, metrics: Dict[str, float], trainer, **kwargs
-    ) -> TrainerControl:
-        for name, parameters in self.additional_evaluations.items():
+    async def collect_evaluation(self, state, *, trainer, pool):
+        metrics = {}
+
+        async def collect(name, parameters):
             additional = await trainer.eval(
                 val_set_name=name,
                 sampling_params=parameters.sampling_params,
                 n_samples_per_prompt=parameters.n_samples_per_prompt,
+                evaluation_pool=pool,
             )
             metrics.update({key.replace("eval/", f"eval/{name}/", 1): value for key, value in additional.items()})
+
+        async with asyncio.TaskGroup() as tasks:
+            for name, parameters in self.additional_evaluations.items():
+                tasks.create_task(collect(name, parameters))
+        return metrics
+
+    async def on_evaluate_async(
+        self, state: TrainerState, control: TrainerControl, *, metrics: Dict[str, float], trainer, **kwargs
+    ) -> TrainerControl:
         for name, members in self.metric_groups.items():
             metrics[name] = math.fsum(metrics[member] / len(members) for member in members)
             if not math.isfinite(metrics[name]):

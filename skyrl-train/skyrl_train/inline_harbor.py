@@ -4,12 +4,17 @@ import argparse
 import asyncio
 import json
 import math
+import os
 import signal
+import socket
+import traceback
 from pathlib import Path
 
 from harbor.job import Job
 from harbor.models.job.config import JobConfig
 from harbor.models.job.result import JobResult
+from skyrl_train.evaluation_pool import EvaluationPool
+from skyrl_train.inline_harbor_client import collect_harbor
 
 
 def validation_metrics(result: JobResult, config: JobConfig, reward_key: str) -> dict[str, float]:
@@ -41,20 +46,9 @@ def validation_metrics(result: JobResult, config: JobConfig, reward_key: str) ->
 
 async def run_validation(spec: dict) -> dict[str, dict[str, float]]:
     """Persist full Harbor traces at each job's configured durable jobs_dir."""
-    metrics = {}
-    for cohort in spec["cohorts"]:
-        config = JobConfig.model_validate(cohort["job"])
-        if config.datasets or not config.tasks or len(config.agents) != 1:
-            raise ValueError("Inline validation requires explicit pinned tasks and exactly one agent")
-        if any(not task.git_url or not task.git_commit_id for task in config.tasks):
-            raise ValueError("Inline validation task sources must have immutable Git revisions")
-        name = cohort["name"]
-        if name in metrics:
-            raise ValueError(f"Duplicate validation cohort: {name}")
-        job = await Job.create(config)
-        result = await job.run()
-        metrics[name] = validation_metrics(result, config, cohort["reward_key"])
-    return metrics
+    concurrency = max(1, sum(cohort["job"]["n_concurrent_trials"] for cohort in spec["cohorts"]))
+    async with EvaluationPool(concurrency) as pool:
+        return await collect_harbor(spec["cohorts"], pool, os.environ.copy())
 
 
 async def run_cancellable_validation(spec: dict) -> dict[str, dict[str, float]]:
@@ -67,11 +61,63 @@ async def run_cancellable_validation(spec: dict) -> dict[str, dict[str, float]]:
         loop.remove_signal_handler(signal.SIGTERM)
 
 
+async def serve_trials(control_fd: int) -> None:
+    """Execute only trials admitted by the parent; stdout remains available for Harbor logs."""
+    connection = socket.socket(fileno=control_fd)
+    connection.setblocking(False)
+    reader, writer = await asyncio.open_connection(sock=connection, limit=16 * 1024 * 1024)
+    current = asyncio.current_task()
+    loop = asyncio.get_running_loop()
+    loop.add_signal_handler(signal.SIGTERM, current.cancel)
+
+    async def execute(message):
+        try:
+            cohort = message["cohort"]
+            config = JobConfig.model_validate(cohort["job"])
+            if config.datasets or not config.tasks or len(config.agents) != 1 or config.n_attempts != 1:
+                raise ValueError("Inline validation requires explicit tasks, one agent and one attempt")
+            task_ids = [str(task.get_task_id()) for task in config.tasks]
+            if len(task_ids) != len(set(task_ids)):
+                raise ValueError("duplicate validation tasks")
+            if any(not task.git_url or not task.git_commit_id for task in config.tasks):
+                raise ValueError("Inline validation task sources must have immutable Git revisions")
+            index = message["index"]
+            config = config.model_copy(
+                update={
+                    "tasks": [config.tasks[index]],
+                    "n_concurrent_trials": 1,
+                    "job_name": f"{config.job_name}-task-{index:05d}",
+                }
+            )
+            job = await Job.create(config)
+            result = await job.run()
+            response = {"id": message["id"], "metrics": validation_metrics(result, config, cohort["reward_key"])}
+        except Exception:
+            response = {"id": message["id"], "error": traceback.format_exc()}
+        writer.write((json.dumps(response) + "\n").encode())
+        await writer.drain()
+
+    try:
+        async with asyncio.TaskGroup() as tasks:
+            while line := await reader.readline():
+                tasks.create_task(execute(json.loads(line)))
+    finally:
+        loop.remove_signal_handler(signal.SIGTERM)
+        writer.close()
+        await writer.wait_closed()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--spec", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--spec", type=Path)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--control-fd", type=int)
     args = parser.parse_args()
+    if args.control_fd is not None:
+        asyncio.run(serve_trials(args.control_fd))
+        return
+    if args.spec is None or args.output is None:
+        parser.error("--spec and --output are required without --control-fd")
     metrics = asyncio.run(run_cancellable_validation(json.loads(args.spec.read_text())))
     args.output.write_text(json.dumps(metrics, indent=2, allow_nan=False) + "\n")
 

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import subprocess
@@ -14,6 +15,7 @@ from harbor.models.trial.result import AgentInfo, ExceptionInfo, TrialResult
 from harbor.models.verifier.result import VerifierResult
 
 from skyrl_train.inline_harbor import validation_metrics
+from skyrl_train.inline_harbor_client import HarborTrialClient
 
 
 def test_worker_runs_outside_checkout_with_launcher_package_shadowed(tmp_path):
@@ -78,3 +80,20 @@ def test_validation_scores_preserve_infrastructure_missingness():
     result.trial_results = trials[:-1] + [trials[0]]
     with pytest.raises(ValueError, match="duplicate"):
         validation_metrics(result, config, "reward")
+
+
+@pytest.mark.asyncio
+async def test_control_socket_multiplexes_errors_without_parsing_harbor_stdout():
+    async with HarborTrialClient(os.environ.copy()) as client:
+        results = await asyncio.gather(
+            client.run({"job": {"tasks": []}, "reward_key": "reward"}, 0),
+            client.run({"job": {"tasks": []}, "reward_key": "reward"}, 1),
+            return_exceptions=True,
+        )
+        client.process.terminate()
+        await client.process.wait()
+        async with asyncio.timeout(5):
+            with pytest.raises(RuntimeError):
+                await client.run({"job": {"tasks": []}, "reward_key": "reward"}, 2)
+    assert len(results) == 2
+    assert all(isinstance(result, RuntimeError) and "explicit tasks" in str(result) for result in results)

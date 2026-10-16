@@ -131,7 +131,8 @@ from skyrl_train.utils.utils import (
 
 from skyrl_train.config.objective_spec import rollout_logprobs_required
 from skyrl_train.utils.algorithm_registry import PolicyLossRegistry
-from skyrl_train.evaluate import evaluate, evaluate_step_wise
+from skyrl_train.evaluate import evaluate, evaluate_step_wise, evaluation_session
+from skyrl_train.evaluation_pool import EvaluationPool
 from skyrl_train.callbacks.base import TrainerCallback, TrainerState, TrainerControl, CallbackHandler
 from skyrl_train.callbacks.builtin import DefaultCallbackHandler, RefModelUpdateCallback
 from skyrl_train.telemetry import (
@@ -474,6 +475,7 @@ class RayPPOTrainer:
         sampling_params: Dict[str, Any] | None = None,
         n_samples_per_prompt: int | None = None,
         val_set_name: str | None = None,
+        evaluation_pool: EvaluationPool | None = None,
     ) -> Dict[str, float]:
         """Evaluate the current policy with optional sampling overrides and a named output directory."""
         overrides = {"generator": {}, "trainer": {}}
@@ -485,8 +487,22 @@ class RayPPOTrainer:
         for key, value in (sampling_params or {}).items():
             OmegaConf.update(cfg, f"generator.eval_sampling_params.{key}", value, force_add=True)
         evaluator = evaluate_step_wise if cfg.trainer.step_wise_training else evaluate
-        if self._inference_engines_configured() and self._inference_policy_step != self.policy_version_step:
-            await self._sync_policy_for_rollouts(reason="evaluation")
+        if evaluation_pool is None:
+            try:
+                await self.context.pause_and_drain()
+                async with evaluation_session(
+                    self.eval_trajectory_runner, cfg, self.global_step, self.eval_trajectory_sink
+                ) as pool:
+                    if self._inference_engines_configured() and self._inference_policy_step != self.policy_version_step:
+                        await self._sync_policy_for_rollouts(reason="evaluation")
+                    return await self.eval(
+                        sampling_params=sampling_params,
+                        n_samples_per_prompt=n_samples_per_prompt,
+                        val_set_name=val_set_name,
+                        evaluation_pool=pool,
+                    )
+            finally:
+                self.context.resume()
         return await evaluator(
             eval_dataloader=self.eval_dataloader,
             trajectory_runner=self.eval_trajectory_runner,
@@ -495,6 +511,7 @@ class RayPPOTrainer:
             tokenizer=self.tokenizer,
             trajectory_sink=self.eval_trajectory_sink,
             val_set_name=val_set_name,
+            evaluation_pool=evaluation_pool,
         )
 
     # ------------------------------------------------------------------
@@ -1565,7 +1582,25 @@ class RayPPOTrainer:
                 await asyncio.to_thread(self.update_ref_with_policy)
 
     async def _evaluate_and_log(self, state: TrainerState, *, commit: bool) -> None:
-        eval_metrics = await self.eval()
+        try:
+            with Timer("eval_drain", self.all_timings if self.global_step else None):
+                await self.context.pause_and_drain()
+            async with evaluation_session(
+                self.eval_trajectory_runner, self.cfg, self.global_step, self.eval_trajectory_sink
+            ) as pool:
+                if self._inference_engines_configured() and self._inference_policy_step != self.policy_version_step:
+                    await self._sync_policy_for_rollouts(reason="evaluation")
+                async with asyncio.TaskGroup() as tasks:
+                    native = tasks.create_task(self.eval(evaluation_pool=pool))
+                    additional = [
+                        tasks.create_task(callback.collect_evaluation(state, trainer=self, pool=pool))
+                        for callback in self.callback_handler.callbacks
+                    ]
+                eval_metrics = native.result()
+                for task in additional:
+                    eval_metrics.update(task.result())
+        finally:
+            self.context.resume()
         self._control = await self.callback_handler.call_event_async(
             "on_evaluate", state, self._control, metrics=eval_metrics, trainer=self
         )

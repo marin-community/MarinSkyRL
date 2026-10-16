@@ -90,36 +90,6 @@ async def test_harbor_scores_join_native_panel_and_incomplete_cohort_cannot_win(
     monkeypatch.setenv("DAYTONA_EVAL_API_KEY", "test-eval-credential")
     scored = 30
 
-    async def launch_worker(*argv, env):
-        spec = json.loads(Path(argv[argv.index("--spec") + 1]).read_text())
-        agent = spec["cohorts"][0]["job"]["agents"][0]
-        assert agent["model_alias"] == "openai/current-policy"
-        assert agent["kwargs"]["api_base"] == "http://127.0.0.1:8000/v1"
-        assert env["DAYTONA_API_KEY"] == "test-eval-credential"
-        output = Path(argv[argv.index("--output") + 1])
-
-        class Worker:
-            returncode = None
-
-            async def wait(self):
-                output.write_text(
-                    json.dumps(
-                        {
-                            "benchmark": {
-                                "num_attempted": 30,
-                                "num_scored": scored,
-                                "reward_sum": 15,
-                                "avg_verifier_score": 15 / scored,
-                            }
-                        }
-                    )
-                )
-                self.returncode = 0
-                return 0
-
-        return Worker()
-
-    monkeypatch.setattr("asyncio.create_subprocess_exec", launch_worker)
     callback = HarborEvaluationCallback(
         cohorts=OmegaConf.create([{"name": "benchmark", "job": {"agents": [{"name": "terminus-2"}]}}]),
         timeout=10,
@@ -129,6 +99,14 @@ async def test_harbor_scores_join_native_panel_and_incomplete_cohort_cannot_win(
     best = BestCheckpointCallback(initial_model_uri="initializer", expected_tasks=1000, minimum_scored_tasks=950)
     for scored, expected_eligible in [(30, 1.0), (20, 0.0)]:
         metrics = {"eval/all/num_attempted": 970, "eval/all/num_scored": 970, "eval/all/avg_verifier_score": 0.5}
+        metrics.update(
+            {
+                "eval/harbor/benchmark/num_attempted": 30,
+                "eval/harbor/benchmark/num_scored": scored,
+                "eval/harbor/benchmark/reward_sum": 15,
+                "eval/harbor/benchmark/avg_verifier_score": 15 / scored,
+            }
+        )
         await callback.on_evaluate_async(state, TrainerControl(), metrics=metrics, trainer=trainer)
         assert os.environ["DAYTONA_API_KEY"] == "test-rl-credential"
         assert os.environ["DAYTONA_RL_API_KEY"] == "test-rl-credential"
@@ -138,3 +116,26 @@ async def test_harbor_scores_join_native_panel_and_incomplete_cohort_cannot_win(
         assert metrics["eval/selection_eligible"] == expected_eligible
         await best.on_evaluate_async(state, TrainerControl(), metrics=metrics, trainer=trainer)
         assert json.loads((tmp_path / "best_checkpoint.json").read_text())["accuracy"] == 0.5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("harbor_scored", [0, 2])
+async def test_harbor_panel_preserves_missing_native_scores(harbor_scored):
+    callback = HarborEvaluationCallback(
+        cohorts=[{"name": "benchmark"}], timeout=10, minimum_coverage=0.9, daytona_api_key_env="unused"
+    )
+    metrics = {
+        "eval/all/num_attempted": 4,
+        "eval/all/num_scored": 0,
+        "eval/harbor/benchmark/num_attempted": 2,
+        "eval/harbor/benchmark/num_scored": harbor_scored,
+        "eval/harbor/benchmark/reward_sum": harbor_scored / 2,
+    }
+    await callback.on_evaluate_async(None, TrainerControl(), metrics=metrics, trainer=None)
+    assert metrics["eval/all/num_attempted"] == 6
+    assert metrics["eval/all/num_scored"] == harbor_scored
+    if harbor_scored:
+        assert metrics["eval/all/avg_verifier_score"] == 0.5
+    else:
+        assert "eval/all/avg_verifier_score" not in metrics
+        assert metrics["eval/selection_eligible"] == 0.0

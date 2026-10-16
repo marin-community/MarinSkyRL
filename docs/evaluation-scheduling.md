@@ -1,0 +1,44 @@
+# Evaluation scheduling
+
+An evaluation sweep pauses the training producer and drains its submitted generation
+requests. It then reserves every rollout worker and synchronizes the policy weights.
+The optimizer cannot advance until the sweep returns. Queued training groups remain
+in the training buffer; draining does not consume them or perform optimizer updates.
+Training submissions resume when the evaluation session exits, including on errors.
+
+Native validation rows, named sampling profiles, and inline Harbor trials enter one
+bounded evaluation pool. Its total capacity is `trajectory_runner.max_concurrent_tasks`,
+the individual-task execution capacity. Training's `max_in_flight` counts multi-sample
+prompt groups and independently bounds training prefetch. Free slots are filled
+continuously, round-robin across sources with pending work. Native requests use the
+least-loaded rollout worker, just as training requests do. `trainer.eval_batch_size`
+controls dataloader reads, not a generation barrier. A slow task no longer holds up
+the next block of validation rows.
+
+Each Harbor cohort's `job.n_concurrent_trials` is a source cap inside the global pool.
+Idle slots are available to other sources. A single subprocess receives admitted
+trials over a private socket, keeping the evaluation Daytona credential out of the
+training process environment. It runs the upstream Harbor `Job` lifecycle for each
+task, including retries, verification and artifact publication. Per-task job names
+append `-task-00000`, `-task-00001`, etc. to the step/cohort job name. The callback
+aggregates their results into the original cohort metrics.
+
+Evaluation runs every selected row and repetition without training admission filters
+or reward-based replacement. Trace instance IDs include the evaluation step and a
+length-prefixed sampling-profile name; named profiles cannot overwrite each other's
+traces. Metrics still group repetitions by the original task UID within each profile.
+Failed and unscored trials remain in attempted counts;
+coverage determines checkpoint-selection eligibility. Native batches never enter the
+training buffer. Harbor configurations require unique pinned tasks, one agent, and
+one attempt per task. Retries remain explicitly configured Harbor infrastructure
+retries. The full sweep, including all cohorts, uses one policy version.
+
+Callbacks that add evaluation sources implement `collect_evaluation(state, trainer,
+pool)` and admit each unit of work with `pool.run(source, run, limit=...)`. They return
+metrics after all requests complete. `on_evaluate` remains the ordered reduction and
+checkpoint-selection phase, after source collection has finished. Exceptions in
+collection fail the sweep and cancel remaining work rather than reporting partial
+results as a successful evaluation.
+
+The trainer reports `timing/eval_drain` separately from evaluation collection so a
+long tail in outstanding training generation can be distinguished from slow evals.
