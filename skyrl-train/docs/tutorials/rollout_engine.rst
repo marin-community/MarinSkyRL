@@ -104,6 +104,9 @@ The task worker uses SkyRL's model client, worker pool, training projection,
 reward shaping, retained trajectory records, and leased rollout buffer. Exact served
 tokens and behavior logprobs remain aligned. Tool observation tokens have zero
 loss masks. Reconstructed model tokens cause a transport-contract error.
+Continuation prompts preserve the exact token prefix served to the model.
+The assistant turn's rendered closer and each new observation extend that prefix.
+The closer search stays within that assistant turn, after the shared history and header.
 
 Correct and wrong answers train with their verifier grades. Invalid task records
 fail before execution.

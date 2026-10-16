@@ -457,10 +457,11 @@ async def test_direct_chat_continuation_preserves_sampled_tool_call_tokens():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stop_string", [False, True])
 @pytest.mark.parametrize("enable_thinking", [False, True])
 @pytest.mark.parametrize("observation_role", ["tool", "user"])
 async def test_qwen_continuation_preserves_served_tokens_after_template_rewrites(
-    load_tokenizer, enable_thinking, observation_role
+    load_tokenizer, enable_thinking, observation_role, stop_string
 ):
     tokenizer = load_tokenizer("Qwen/Qwen3-0.6B", revision="c1899de")
     history = [{"role": "user", "content": "Write 20 to a file."}]
@@ -474,7 +475,9 @@ async def test_qwen_continuation_preserves_served_tokens_after_template_rewrites
         history, tokenize=False, add_generation_prompt=True, enable_thinking=enable_thinking
     )
     # The sampled JSON has different whitespace from the template's tool-call rendering.
-    sampled = '<tool_call>\n{"name":"shell","arguments":{"command":"echo 20"}}\n</tool_call><|im_end|>'
+    sampled = '<tool_call>\n{"name":"shell","arguments":{"command":"echo 20"}}\n</tool_call>'
+    if not stop_string:
+        sampled += "<|im_end|>"
     if enable_thinking:
         messages[1]["content"] = "<think>\nWrite the value.\n</think>\n\n"
         sampled = messages[1]["content"] + sampled
@@ -497,6 +500,7 @@ async def test_qwen_continuation_preserves_served_tokens_after_template_rewrites
         },
         assistant_message_index=1,
         served_prefix_token_ids=served,
+        decode=lambda ids: tokenizer.decode(ids, skip_special_tokens=False, clean_up_tokenization_spaces=False),
     )
     observation = "Read the file."
     if observation_role == "tool":
@@ -504,7 +508,142 @@ async def test_qwen_continuation_preserves_served_tokens_after_template_rewrites
     suffix = f"\n<|im_start|>user\n{observation}<|im_end|>\n<|im_start|>assistant\n"
     if not enable_thinking:
         suffix += "<think>\n\n</think>\n\n"
+    if stop_string:
+        suffix = "<|im_end|>" + suffix
     assert actual == [*served, *tokenizer.encode(suffix, add_special_tokens=False)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model,revision",
+    [
+        pytest.param(
+            "open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.11",
+            "50a201b16de975505e981a9e186b1f8aa5f53c91",
+            id="snowball",
+        ),
+        pytest.param(
+            "marin-community/marin-tokenizer", "a5ca45f2feb6c959bd87b81689aa7279b5bdcaa2", id="marin-tokenizer"
+        ),
+    ],
+)
+@pytest.mark.parametrize("tool_call", [False, True])
+@pytest.mark.parametrize("stop_string", [False, True])
+async def test_grug_chat_continuation_keeps_served_tokens(load_tokenizer, model, revision, tool_call, stop_string):
+    tokenizer = load_tokenizer(model, revision=revision)
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "shell",
+                "description": "Run a command",
+                "parameters": {"type": "object", "properties": {"command": {"type": "string"}}},
+            },
+        }
+    ]
+    history = [{"role": "user", "content": "List files."}]
+    assistant = {"role": "assistant", "content": "Paris"}
+    observation = {"role": "user", "content": "Why?"}
+    sampled = "Paris"
+    if tool_call:
+        assistant = {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "shell", "arguments": '{"command":"ls"}'}}
+            ],
+        }
+        observation = {"role": "tool", "tool_call_id": "c1", "content": "a.txt"}
+        sampled = '{"name":"shell","arguments":{"command":"ls"}}'
+        if model.startswith("open-athena/"):
+            sampled = "<tool_call>\n" + sampled + "\n</tool_call>"
+    if not stop_string:
+        sampled += "<|eot_id|>"
+    prompt = tokenizer.apply_chat_template(history, tools=tools, tokenize=False, add_generation_prompt=True)
+    served = tokenizer.encode(prompt + sampled, add_special_tokens=False)
+
+    async def tokenize(payload):
+        body = dict(payload["json"])
+        text = tokenizer.apply_chat_template(body.pop("messages"), tokenize=False, **body)
+        return {"tokens": tokenizer.encode(text, add_special_tokens=False)}
+
+    response_ids = tokenizer.encode("Done.<|eot_id|>", add_special_tokens=False)
+    engine = AsyncMock()
+    engine.model_name = model
+    engine.tokenizer = tokenizer
+    engine.tokenize.side_effect = tokenize
+    engine.chat_completion.return_value = {
+        "choices": [
+            {"message": {"role": "assistant", "content": "Done."}, "finish_reason": "stop", "token_ids": response_ids}
+        ]
+    }
+    result = await DirectModelClient(engine).generate(
+        {
+            "prompts": [[*history, assistant, observation]],
+            "chat_completion_params": [{"tools": tools}],
+            "chat_continuations": [{"assistant_message_index": 1, "served_prefix_token_ids": served}],
+        }
+    )
+
+    suffix = "<|eot_id|>" if stop_string else ""
+    if tool_call:
+        suffix += '\n<|start_header_id|>tool<|end_header_id|>\n<tool_response id="c1">a.txt</tool_response><|eot_id|>\n'
+    else:
+        suffix += "<|start_header_id|>user<|end_header_id|>\nWhy?<|eot_id|>\n"
+    suffix += "<|start_header_id|>assistant<|end_header_id|>\n"
+    assert result["prompt_ids"] == [[*served, *tokenizer.encode(suffix, add_special_tokens=False)]]
+    assert result["response_ids"] == [response_ids]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("template_case", ["eom", "eom-with-literal", "omitted-tool-turn"])
+@pytest.mark.parametrize("stop_string", [False, True])
+async def test_chat_continuation_rejects_closers_outside_the_assistant_boundary(
+    load_tokenizer, stop_string, template_case
+):
+    tokenizer = load_tokenizer(
+        "open-athena/Grug-67B-A2B-Datakit-SFT-262K-2026.09.11", revision="50a201b16de975505e981a9e186b1f8aa5f53c91"
+    )
+    template = tokenizer.chat_template.replace(
+        "{%- endfor %}<|eot_id|>\n{% endgeneration %}", "{%- endfor %}<|eom_id|>{% endgeneration %}"
+    )
+    command = "ls"
+    if template_case == "eom-with-literal":
+        command = "echo <|eot_id|>"
+    elif template_case == "omitted-tool-turn":
+        template = tokenizer.chat_template.replace("{% elif has_tool_calls -%}", "{% elif has_tool_calls and false -%}")
+    history = [{"role": "user", "content": "List files."}]
+    messages = [
+        *history,
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"type": "function", "function": {"name": "shell", "arguments": '{"command":"' + command + '"}'}}
+            ],
+        },
+        {"role": "tool", "content": "a.txt"},
+    ]
+    prompt = tokenizer.apply_chat_template(history, tokenize=False, chat_template=template, add_generation_prompt=True)
+    sampled = '<tool_call>\n{"name":"shell","arguments":{"command":"' + command + '"} }\n</tool_call>'
+    if not stop_string:
+        sampled += "<|eot_id|>" if template_case == "omitted-tool-turn" else "<|eom_id|>"
+    served = tokenizer.encode(prompt + sampled, add_special_tokens=False)
+
+    async def tokenize(payload):
+        body = dict(payload["json"])
+        text = tokenizer.apply_chat_template(body.pop("messages"), tokenize=False, **body)
+        return {"tokens": tokenizer.encode(text, add_special_tokens=False)}
+
+    result = await render_exact_chat_continuation(
+        tokenize,
+        {"json": {"messages": messages, "chat_template": template, "add_generation_prompt": True}},
+        assistant_message_index=1,
+        served_prefix_token_ids=served,
+        decode=lambda ids: tokenizer.decode(ids, skip_special_tokens=False, clean_up_tokenization_spaces=False),
+    )
+
+    assert result is None
 
 
 @pytest.mark.asyncio
