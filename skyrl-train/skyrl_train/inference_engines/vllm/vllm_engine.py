@@ -1410,7 +1410,7 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         output_processor = self.llm.output_processor
         process_outputs = output_processor.process_outputs
 
-        def stamped_process_outputs(engine_core_outputs, engine_core_timestamp=None, iteration_stats=None):
+        def stamped_process_outputs(engine_core_outputs, engine_core_timestamp, iteration_stats):
             for output in engine_core_outputs:
                 # vLLM keys its state by an internal id and drops outputs of requests it already aborted.
                 state = output_processor.request_states.get(output.request_id)

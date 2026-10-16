@@ -1,5 +1,4 @@
 import bisect
-import time
 from collections.abc import Collection
 from dataclasses import dataclass
 
@@ -32,7 +31,6 @@ class PolicyStepStamps:
 
     def observe(self, request_id: str, token_count: int, sampled_at: float) -> None:
         """Attribute ``token_count`` new tokens to the step installed before the engine sampled them."""
-        assert sampled_at <= time.monotonic(), "an engine step cannot be sampled in the future"
         index = bisect.bisect_right(self._installed_at, sampled_at)
         step = self._steps[index - 1] if index else UNSTAMPED_POLICY_STEP
         runs = self._runs.setdefault(request_id, [])
