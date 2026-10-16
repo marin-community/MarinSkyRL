@@ -36,6 +36,7 @@ from skyrl_train.objective.losses import ftpo_policy_loss
 from skyrl_train.objective.objective import build_objective_micro_batch, compute_policy_objective
 from skyrl_train.objective.reduction import step_counts
 from skyrl_train.trajectory_runners.trajectory_reward_shaping import LoopCreditConfig, tail_loop
+from skyrl_train.utils.importance_ratio_diagnostics import mismatch_ratio_metrics
 from skyrl_gym.verification import VerificationResult
 
 
@@ -725,6 +726,11 @@ def test_verified_closure_trainer_preserves_rollouts_and_trains_verified_repairs
         )
         unchanged = batch["sequences"][2][batch["attention_mask"][2].bool()].tolist()
         assert unchanged == prompt + original_responses[2]
+        # The repaired batch still feeds the trainer-versus-vLLM mismatch statistics.
+        mismatch = mismatch_ratio_metrics(
+            batch["rollout_logprobs"], batch["rollout_logprobs"], batch["loss_mask"], batch["rollout_staleness"]
+        )
+        assert mismatch["policy/mismatch/staleness0/selected_tokens"] == batch["loss_mask"].sum()
     else:
         assert batch["rollout_logprobs"] is None
     assert batch["student_topk_indices"][batch["ftpo_chosen_mask"]].tolist() == [candidates[1]]

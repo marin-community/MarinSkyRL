@@ -2404,7 +2404,8 @@ class RayPPOTrainer:
                         "rewards": rewards_tensor,
                         "rollout_logprobs": learner_logprobs,
                         "loss_mask": learner_loss_masks,
-                        "rollout_staleness": None,
+                        # The learner log probabilities come from the current policy.
+                        "rollout_staleness": torch.zeros_like(learner_loss_masks, dtype=torch.int32),
                         "ftpo_repair_mask": repair_mask,
                     }
                 )
