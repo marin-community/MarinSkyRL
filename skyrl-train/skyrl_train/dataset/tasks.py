@@ -21,6 +21,7 @@ from taskcompendium.runtime.shell import resolve_shell_tool
 from transformers import PreTrainedTokenizerBase
 
 from skyrl_train.dataset.dataset import PromptDataset, _prompt_token_count
+from skyrl_train.dataset.harbor_import import HARBOR_TRIAL_SESSION
 from skyrl_train.rollouts.group_grader import task_group_grader
 from skyrl_train.task_inputs import TaskInput, TrajectoryMetadata, task_messages
 
@@ -57,7 +58,7 @@ class TaskDataset(PromptDataset):
         inputs = []
         for _, environment, extras, uid in rows:
             lowered = LoweredTaskSpec.model_validate_json(extras[LOWERED_TASK_COLUMN])
-            if isinstance(lowered.task.grader, SessionGrader):
+            if isinstance(lowered.task.grader, SessionGrader) and lowered.session.task_session != HARBOR_TRIAL_SESSION:
                 extras = {**session_parameters(lowered.task).extras, **extras}
             extra_info = extras.get("extra_info") or {}
             ultra = extra_info.get("nemotron_ultra")
