@@ -41,6 +41,27 @@ from skyrl_train.trajectory_runners.model_clients import ModelServerError
 from tests.cpu.rollouts.engine_fakes import ConversationClient, FixtureImageFactory, InferenceClient, Tokenizer, Writer
 
 
+def test_explicit_null_eval_timeout_preserves_full_trial_deadlines(task_inputs):
+    _, request = task_inputs
+    original = request.rows[0].lowered
+    original = original.model_copy(
+        update={
+            "session": original.session.model_copy(
+                update={
+                    "total_turn_timeout": None,
+                    "attempt_timeout": 3000,
+                    "verifier_timeout": 600,
+                }
+            )
+        }
+    )
+    settings = HarborTaskSettings.from_config(OmegaConf.create({"harbor": {"eval_timeout_override_sec": None}}))
+    configured = settings.lowered(original, phase="eval")
+    assert configured.session.total_turn_timeout is None
+    assert configured.session.attempt_timeout == 3000
+    assert configured.session.verifier_timeout == 600
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["train", "eval"])
 async def test_mixed_harbor_and_native_tasks_keep_separate_providers_and_machine_specs(task_inputs, phase):

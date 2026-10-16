@@ -494,19 +494,7 @@ class HarborConfigBuilder:
 
         return ErrorHandlingConfig.from_mapping(config)
 
-    def get_eval_timeout_override_sec(self, default: int = 900) -> int:
-        """
-        Get the timeout override for evaluation runs.
-
-        Args:
-            default: Default timeout if not specified in config.
-
-        Returns:
-            Timeout in seconds for eval runs.
-        """
-        mapping = EVAL_SCHEMA.fields.get("eval_timeout_override_sec")
-        if mapping:
-            value = self._get_field_value("eval_timeout_override_sec", mapping)
-            if value is not None:
-                return int(value)
-        return default
+    def get_eval_timeout_override_sec(self) -> int | None:
+        """Return the eval override, preserving explicit null as no override."""
+        value = self._get_field_value("eval_timeout_override_sec", EVAL_SCHEMA.fields["eval_timeout_override_sec"])
+        return None if value is None else int(value)
