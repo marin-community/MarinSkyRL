@@ -246,7 +246,6 @@ class DirectModelClient:
                 "session_id": session_id,
                 **{key: value for key, value in sampling_params.items() if key not in _CHAT_SAMPLING_EXCLUSIONS},
                 **chat_options,
-                "return_token_ids": True,
                 "include_stop_str_in_output": True,
             }
             body[EXACT_PROMPT_TOKEN_IDS_KEY] = prompt_ids

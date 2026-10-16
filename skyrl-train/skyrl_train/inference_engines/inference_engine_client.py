@@ -1,4 +1,5 @@
 from skyrl_train.inference_engines.base import (
+    SESSION_ID_HEADER,
     InferenceEngineInterface,
     InferenceEngineInput,
     InferenceEngineOutput,
@@ -19,6 +20,7 @@ from skyrl_train.inference_engines.inference_engine_client_http_endpoint import 
 from skyrl_train.inference_engines.chat_template import template_error_from_exception
 from transformers import PreTrainedTokenizerBase
 import asyncio
+from copy import deepcopy
 from typing import List, Any, Optional, Dict, Union, Hashable
 from skyrl_train.inference_engines.utils import (
     route_prompts_to_engines,
@@ -783,8 +785,16 @@ class InferenceEngineClient(InferenceEngineInterface):
             stop_reason=stop_reason,
         )
 
-    async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _chat_request(self, request_payload: Dict[str, Any]) -> tuple[int, Dict[str, Any]]:
+        """Prepare the common direct, HTTP, and streaming chat request boundary."""
+        request_payload = deepcopy(request_payload)
+        # Route capture is a server capability, independent of the caller's transport.
+        # Retry assembly needs exact IDs even for ordinary OpenAI clients that never
+        # request training metadata. Do not reconstruct these IDs from decoded text.
+        request_payload["json"]["return_token_ids"] = True
         session_id = request_payload["json"].pop("session_id", None)
+        if session_id is None:
+            session_id = request_payload.get("headers", {}).get(SESSION_ID_HEADER)
         if session_id is None:
             engine_idx = self._resolve_engine_idx(random.randint(0, len(self.engines) - 1))
         else:
@@ -793,6 +803,11 @@ class InferenceEngineClient(InferenceEngineInterface):
             # per-engine outstanding load); every later turn of the same session is
             # sticky to that engine to preserve prefix-cache reuse.
             engine_idx = self._route_session(session_id)
+
+        return engine_idx, request_payload
+
+    async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        engine_idx, request_payload = self._chat_request(request_payload)
 
         # Track outstanding load so concurrent sessions balance across engines instead of
         # hash-pinning onto one. Attributed to the initially chosen engine; the retry loop
@@ -839,11 +854,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         # during the reload or hold an engine slot while blocked.
         await self._wait_for_generation_to_resume()
 
-        session_id = request_payload["json"].pop("session_id", None)
-        if session_id is None:
-            engine_idx = self._resolve_engine_idx(random.randint(0, len(self.engines) - 1))
-        else:
-            engine_idx = self._route_session(session_id)
+        engine_idx, request_payload = self._chat_request(request_payload)
 
         self._inc_inflight(engine_idx)
         try:

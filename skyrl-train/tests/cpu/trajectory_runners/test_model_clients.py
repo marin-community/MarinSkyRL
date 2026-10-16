@@ -216,7 +216,6 @@ async def test_direct_model_client_uses_vllm_chat_rendering_for_row_request_opti
         "tools": expected_tools,
         "parallel_tool_calls": False,
         "max_completion_tokens": 128,
-        "return_token_ids": True,
         "include_stop_str_in_output": True,
         "logprobs": True,
     }
