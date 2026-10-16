@@ -541,9 +541,7 @@ class BasePPOExp:
             TaskRolloutWorkerSpec.from_config(
                 cfg,
                 inference_engine_client.engines,
-                harbor_config=harbor_config
-                if harbor_config is not None
-                else (cfg.terminal_bench_config if terminal_data else None),
+                harbor_config=harbor_config if harbor_config is not None else cfg.get("terminal_bench_config"),
                 sessions=self.sessions,
             ),
             resources,

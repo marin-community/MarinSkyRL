@@ -1,12 +1,15 @@
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 import ray
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, open_dict
 
 from skyrl_train.rollout_observability import measure_rollout, observe_rollout_call, rollout_wait
+from skyrl_train.config.utils import get_default_config
+from skyrl_train.entrypoints.taskcompendium import TaskCompendiumExp
 from skyrl_train.rollouts.buffer import RolloutLease, RolloutTask
 from skyrl_train.rollouts.workers import (
     RolloutWorkerPool,
@@ -37,6 +40,41 @@ class _RemoteMethod:
 
     def remote(self, *args, **kwargs):
         return self._call(*args, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_preconverted_tasks_send_harbor_settings_to_worker_process(monkeypatch):
+    """Already-lowered Harbor rows have no terminal-bench directory sidechannel."""
+    transmitted = []
+
+    async def ready():
+        pass
+
+    def remote(spec, _shard, _sink, _executor_threads):
+        transmitted.append(spec.harbor_config)
+        return SimpleNamespace(startup=_RemoteMethod(ready), shutdown=_RemoteMethod(ready))
+
+    # Observe the Ray actor construction payload, without starting Ray or model engines.
+    monkeypatch.setattr(
+        "skyrl_train.rollouts.workers.RolloutWorker",
+        SimpleNamespace(options=lambda **_kwargs: SimpleNamespace(remote=remote)),
+    )
+    node_id = ray.NodeID.from_random().hex()
+    monkeypatch.setattr(ray, "get_runtime_context", lambda: SimpleNamespace(get_node_id=lambda: node_id))
+    monkeypatch.setattr(ray, "kill", lambda _actor: None)
+    config = get_default_config()
+    with open_dict(config):
+        config.terminal_bench_config = {"harbor": {"max_retries": 0}}
+    config.trajectory_runner.rollout_workers.num_workers = 1
+    config.trajectory_runner.rollout_workers.start_interval_seconds = 0
+    experiment = object.__new__(TaskCompendiumExp)
+    experiment.sessions = {}
+    pool = experiment.get_task_runner(config, SimpleNamespace(engines=[]))
+    await pool.startup()
+    try:
+        assert transmitted == [config.terminal_bench_config]
+    finally:
+        await pool.shutdown()
 
 
 class _Worker:
