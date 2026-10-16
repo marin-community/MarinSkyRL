@@ -120,6 +120,8 @@ class InstalledAgentRuntime:
         self, lowered: LoweredTaskSpec, session_id: str, settings: HarborTaskSettings, phase: str
     ) -> HarborTrialSession:
         """Bind a full Harbor trial to the phase's deadlines and environment settings."""
+        if lowered.session.attempt_timeout is None:
+            raise ValueError("Full Harbor trials require a finite attempt timeout for the inference capability")
         kwargs = dict(settings.environment.kwargs)
         key_env = kwargs.pop("eval_api_key_env" if phase == "eval" else "api_key_env", None)
         kwargs.pop("api_key_env", None)
@@ -188,7 +190,13 @@ class InstalledAgentRuntime:
                 }
             )
             run_timeout = lowered.session.total_turn_timeout or self.settings.run_timeout
-            async with self._served_agent(evidence, run_timeout, agent=config.agent) as agent_config:
+            assert config.trial_attempt_timeout_sec is not None
+            async with self._served_agent(
+                evidence,
+                run_timeout,
+                capability_lifetime=config.trial_attempt_timeout_sec + lowered.session.cleanup_timeout,
+                agent=config.agent,
+            ) as agent_config:
                 trial_config = TrialConfig.model_validate(
                     {
                         **config.model_dump(),
@@ -207,7 +215,7 @@ class InstalledAgentRuntime:
 
     @asynccontextmanager
     async def _served_agent(
-        self, trial_dir: Path, run_timeout: float, *, agent: AgentConfig | None = None
+        self, trial_dir: Path, run_timeout: float, *, capability_lifetime: float, agent: AgentConfig | None = None
     ) -> AsyncIterator[AgentConfig]:
         proxy = RecordProxy(
             f"http://127.0.0.1:{self.port}", trial_dir / "engine" / "literal.jsonl", timeout=run_timeout
@@ -222,9 +230,7 @@ class InstalledAgentRuntime:
             ) as port,
             registered_agent_endpoint(port) as endpoint,
         ):
-            api_base = await endpoint.api_base(
-                required_lifetime=self.settings.setup_timeout + run_timeout + self.settings.cleanup_timeout
-            )
+            api_base = await endpoint.api_base(required_lifetime=capability_lifetime)
             source = self.settings.agent if agent is None else agent
             yield source.model_copy(
                 update={
@@ -253,7 +259,11 @@ class InstalledAgentRuntime:
         attempt_id: str,
     ) -> None:
         run_timeout = lowered.session.total_turn_timeout or self.settings.run_timeout
-        async with self._served_agent(trial_dir, run_timeout) as config:
+        async with self._served_agent(
+            trial_dir,
+            run_timeout,
+            capability_lifetime=self.settings.setup_timeout + run_timeout + self.settings.cleanup_timeout,
+        ) as config:
             agent = AgentFactory.create_agent_from_config(config, logs_dir=trial_dir / "agent")
             if not isinstance(agent, BaseInstalledAgent):
                 raise ValueError("The selected agent must be an installed Harbor agent")
