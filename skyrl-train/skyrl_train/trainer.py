@@ -2968,13 +2968,15 @@ class RayPPOTrainer:
         training_input["action_log_probs"] = action_log_probs
         training_input["values"] = values
 
+        # Only the mismatch statistics read token staleness, so the workers never receive it.
+        rollout_staleness = training_input.pop("rollout_staleness")
         if self._training_metrics_enabled and training_input.get("rollout_logprobs") is not None:
             self.all_metrics.update(
                 mismatch_ratio_metrics(
                     action_log_probs,
                     training_input["rollout_logprobs"],
                     training_input["loss_mask"],
-                    training_input["rollout_staleness"],
+                    rollout_staleness,
                     eps_clip_low=self.cfg.trainer.algorithm.eps_clip_low,
                     eps_clip_high=self.cfg.trainer.algorithm.eps_clip_high,
                 )
