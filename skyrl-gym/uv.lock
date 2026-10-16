@@ -1140,7 +1140,7 @@ wheels = [
 
 [[package]]
 name = "marin-rigging"
-version = "0.2.171.dev38477406391"
+version = "0.2.191.dev38826191626"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiobotocore" },
@@ -1161,40 +1161,41 @@ dependencies = [
     { name = "starlette" },
     { name = "zstandard" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/29/39/c84ff6fcce7e3d22fc3b1888a92dfe69d07f50a179b883262ff6b6e364ec/marin_rigging-0.2.171.dev38477406391.tar.gz", hash = "sha256:e6f27efa888a1ce38e205d11c9c1c82fd0c900bbabdb1e43a10cca38568f710e", size = 227061, upload-time = "2026-10-13T22:25:47.521Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/56/15/104d68a77b21cd66aa8fc965e59a0d2500c364e0dda978233103d5b1640c/marin_rigging-0.2.191.dev38826191626.tar.gz", hash = "sha256:7c4b1bba0e1f52041de94566da3f29541654743097257c3b2e20becbe5b2356e", size = 227149, upload-time = "2026-10-15T23:54:42.246Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f8/f8/3bc3184266903daaade4c210d22ff24e740a98412f29fc033d61187dfdee/marin_rigging-0.2.171.dev38477406391-py3-none-any.whl", hash = "sha256:b0fa6cfd95966c8675b8e700f045012de0024569c33bf3e3113c7b710bd473d8", size = 541477, upload-time = "2026-10-13T22:25:30.395Z" },
+    { url = "https://files.pythonhosted.org/packages/97/d7/fd505a7119d8e653794835fb58548c712fda24b3e57cd3c39f194a690720/marin_rigging-0.2.191.dev38826191626-py3-none-any.whl", hash = "sha256:9a30c834fb3bb051a2ffb4ff0c5a2363260d8617b221817162d5717e1557a3c5", size = 554118, upload-time = "2026-10-15T23:54:25.765Z" },
 ]
 
 [[package]]
 name = "marin-rolloutengine"
-version = "0.2.171.dev38477406391"
+version = "0.2.191.dev38826191626"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "marin-shellbox" },
     { name = "marin-taskcompendium" },
     { name = "pydantic" },
 ]
+sdist = { url = "https://files.pythonhosted.org/packages/3a/d1/26799f1221212c5d08b729edb75ebfc3ff15d944a30dea85fc31dc564681/marin_rolloutengine-0.2.191.dev38826191626.tar.gz", hash = "sha256:c392bd9673072045f68d32e6c47d1d1ce61a8e7eb37d574b3651a8e8da61e7d1", size = 43962, upload-time = "2026-10-15T23:54:43.37Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a5/85/9d4356380700d9da6e9e3b16aaa2dc1779e3b79407f6e7dfab23ffab2bee/marin_rolloutengine-0.2.171.dev38477406391-py3-none-any.whl", hash = "sha256:d4555f464a8c231d68ebc29fb9202952913f598d534772e649713b52cd09f9fc", size = 18380, upload-time = "2026-10-13T22:25:32.641Z" },
+    { url = "https://files.pythonhosted.org/packages/de/59/ede373e3e6f58167fddee6078433d02dd50b74489092d3055a8cdf5f67ab/marin_rolloutengine-0.2.191.dev38826191626-py3-none-any.whl", hash = "sha256:c54099245362f1921ee2bf60742536a7160b2b17cb15801038e9b4098fa6c798", size = 26142, upload-time = "2026-10-15T23:54:27.587Z" },
 ]
 
 [[package]]
 name = "marin-shellbox"
-version = "0.2.171.dev38477406391"
+version = "0.2.191.dev38826191626"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "bubblewrap-bin", marker = "sys_platform == 'linux'" },
     { name = "httpx" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/b0/50/20397ea632e48a43cc1fd85048ca5f89fec18d0dcd3ee0e1b65d54d82ef5/marin_shellbox-0.2.171.dev38477406391.tar.gz", hash = "sha256:7bf6381d7c1f1e0c731ffd319932bf6ffb5d751d62b6d5ce649a4f3109a6b1d0", size = 103100, upload-time = "2026-10-13T22:25:49.501Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c5/5c/9ba5862dd48b6727e6803a949ddc05b5d58aaa223bfe2b0021ea42a987da/marin_shellbox-0.2.191.dev38826191626.tar.gz", hash = "sha256:18988ff5b8ecfc0114b450bc51b03b9485ce7fab64435074f0e2adcdfc44b631", size = 108837, upload-time = "2026-10-15T23:54:44.267Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/19/e3/46368ccb685797282898436430cf5c3e84ec29b7c0eeaa2907c39f188a96/marin_shellbox-0.2.171.dev38477406391-py3-none-any.whl", hash = "sha256:2032aa6493a80ed5e34706554fe200dfdaefda14164a302f1c3ffbe24b4a6ebc", size = 75381, upload-time = "2026-10-13T22:25:34.133Z" },
+    { url = "https://files.pythonhosted.org/packages/d0/8b/da016d0fe626d66f4dda57dbc13c945430325299bb7a627d9a029cb470ac/marin_shellbox-0.2.191.dev38826191626-py3-none-any.whl", hash = "sha256:9b37ece60a2f5c1ad3c7f18e3aac8340dc123b2ccc79f80df7d2d9ac28c5cb65", size = 78281, upload-time = "2026-10-15T23:54:28.824Z" },
 ]
 
 [[package]]
 name = "marin-taskcompendium"
-version = "0.2.171.dev38477406391"
+version = "0.2.191.dev38826191626"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "marin-rigging" },
@@ -1203,21 +1204,21 @@ dependencies = [
     { name = "pydantic" },
     { name = "tomlkit" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/24/d1/1a042190babbf32c5db18af95825f78672e1113b416766815f49f43106b7/marin_taskcompendium-0.2.171.dev38477406391.tar.gz", hash = "sha256:e03226d9f89dd806bc3b8ca4cfe83b1f167eec2af4c87621811d146e6ba56773", size = 210857, upload-time = "2026-10-13T22:25:50.598Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/67/49/4ad382b4969ccc433535e39c1444512a46b743daacd02299ac640404f0ab/marin_taskcompendium-0.2.191.dev38826191626.tar.gz", hash = "sha256:606dba6b8bfcf68816a1e7a61af26426882ae8f37a494c587980beafea26133c", size = 248810, upload-time = "2026-10-15T23:54:45.304Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/0c/66/c8c8e9e0796c88dafb23484303888d25288305aa2c0a31ecde34f51c5030/marin_taskcompendium-0.2.171.dev38477406391-py3-none-any.whl", hash = "sha256:78753c4522badada3b02d1bc2049f6fe15004ac293cce63dddf771a79e60a6a3", size = 149496, upload-time = "2026-10-13T22:25:35.562Z" },
+    { url = "https://files.pythonhosted.org/packages/bb/7a/200ef779861ae732c3bb6b0ffa85fcacd38dc993bc9bcecb8ffc59c49df7/marin_taskcompendium-0.2.191.dev38826191626-py3-none-any.whl", hash = "sha256:2cdc4cf7cdc57462de50615072cf56e3b4330b171d953188d1f4ad040eed8bd9", size = 180922, upload-time = "2026-10-15T23:54:30.151Z" },
 ]
 
 [[package]]
 name = "marin-verifyit"
-version = "0.2.171.dev38477406391"
+version = "0.2.191.dev38826191626"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "tomli-w" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/2d/ba/0684616c2e3d92eb767c4c82db7c057f55694b7084463b82b37f11c30fc2/marin_verifyit-0.2.171.dev38477406391.tar.gz", hash = "sha256:d196f4d71750a0d1098a4cfa223f9f7754e5b0a36dcdc7dd45d4e927a9568811", size = 109453, upload-time = "2026-10-13T22:25:51.778Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/14/45/18546617b453e05af508b7bf0fe618618b80a658408c0b63d1730c2602fe/marin_verifyit-0.2.191.dev38826191626.tar.gz", hash = "sha256:13b310afbc0bac55aecb80bf62d1ee5fbf2e85751523804b4f017b8ff22a10a4", size = 110075, upload-time = "2026-10-15T23:54:46.55Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/89/7b/5be6dbb89b5b3eabb70edb76f66d4a5f296d9f42cdf9d806f4846aae7288/marin_verifyit-0.2.171.dev38477406391-py3-none-any.whl", hash = "sha256:943836791b20664f5efdb7efd6538c1efa42c87add5c4218d70b9451c6503421", size = 146648, upload-time = "2026-10-13T22:25:36.874Z" },
+    { url = "https://files.pythonhosted.org/packages/e3/ca/4f0bb56e086f8ad35b43c3b3353bdcee8a09998b062846ab7637db4da1c1/marin_verifyit-0.2.191.dev38826191626-py3-none-any.whl", hash = "sha256:439eb76c529748d53d7c1fa4433acd36b908611c7540fd21577f62790457d019", size = 147046, upload-time = "2026-10-15T23:54:31.849Z" },
 ]
 
 [package.optional-dependencies]
@@ -2250,7 +2251,7 @@ requires-dist = [
     { name = "func-timeout" },
     { name = "ipython", marker = "extra == 'dev'", specifier = "==9.6.0" },
     { name = "loguru" },
-    { name = "marin-rolloutengine", specifier = ">=0.2.171.dev38477406391" },
+    { name = "marin-rolloutengine", specifier = ">=0.2.191.dev38826191626" },
     { name = "marin-shellbox" },
     { name = "marin-taskcompendium" },
     { name = "marin-verifyit", extras = ["math", "schema", "reasoning-gym", "judge"], specifier = ">=0.2.171.dev38477406391" },

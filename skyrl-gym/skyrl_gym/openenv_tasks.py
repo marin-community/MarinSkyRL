@@ -131,7 +131,7 @@ class OpenEnvTaskSession:
             raise RuntimeError(f"OpenEnv startup failed: {result.stderr.decode(errors='replace')}")
         self.started = True
         initial = await self._request("reset", {})
-        start = session_start(self.task, shell_tool=None)
+        start = session_start(self.task, shell_tool=None, provider_tools=())
         return SessionStart(
             (*start.messages, {"role": "user", "content": serialize_observation(initial["observation"])}), start.options
         )
@@ -161,7 +161,9 @@ class OpenEnvTaskSession:
             metrics=metrics,
         )
 
-    async def grade(self, messages: tuple[dict[str, Any], ...], *, stop_reason: str) -> GradeResult:
+    async def grade(
+        self, messages: tuple[dict[str, Any], ...], *, stop_reason: str, outputs: dict[str, bytes]
+    ) -> GradeResult:
         return fold_grades(self.grades)
 
     async def close(self) -> None:

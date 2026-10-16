@@ -89,13 +89,13 @@ class DummyStatefulDataLoader:
 
 
 class DummyRunner(FixtureRunner):
-    def __init__(self, output: TrajectoryBatch):
-        self.output = output
+    def __init__(self, outputs: dict[str, TrajectoryBatch]):
+        self.outputs = outputs
         self.seen_inputs = []
 
     async def _run(self, input_batch):
         self.seen_inputs.append(input_batch)
-        return {**self.output, "trajectory_ids": list(input_batch.trajectory_ids)}
+        return {**self.outputs[input_batch.metadata[0].uid], "trajectory_ids": list(input_batch.trajectory_ids)}
 
 
 def test_eval_reports_normalized_verifier_score_alongside_raw_reward():
@@ -156,7 +156,14 @@ async def test_evaluate_exports_public_results_and_expected_metrics(dummy_config
         ],
         "is_last_step": [True, True],
     }
-    runner = DummyRunner(trajectory_batch)
+    runner = DummyRunner(
+        {
+            row["uid"]: {
+                key: [value[index]] if isinstance(value, list) else value for key, value in trajectory_batch.items()
+            }
+            for index, row in enumerate(prompts_batch)
+        }
+    )
 
     tokenizer = MagicMock()
     tokenizer.decode.side_effect = lambda tokens: "decoded"
@@ -218,9 +225,12 @@ async def test_evaluate_exports_public_results_and_expected_metrics(dummy_config
     assert records[1]["verification"]["status"] == "unavailable"
     assert records[1]["verification"]["score"] is None
 
-    assert len(runner.seen_inputs) == 1
-    seen_batch = runner.seen_inputs[0]
-    assert [prompt[0]["content"] for prompt in seen_batch.public_prompts] == ["question-1", "question-2"]
-    assert [row.metric_class for row in seen_batch.metadata] == ["gsm8k", "custom_env"]
-    assert seen_batch.rows == tuple(prompt["input"] for prompt in prompts_batch)
-    assert seen_batch.batch_metadata.training_phase == "eval"
+    assert [prompt[0]["content"] for batch in runner.seen_inputs for prompt in batch.public_prompts] == [
+        "question-1",
+        "question-2",
+    ]
+    assert [row.metric_class for batch in runner.seen_inputs for row in batch.metadata] == ["gsm8k", "custom_env"]
+    assert tuple(row for batch in runner.seen_inputs for row in batch.rows) == tuple(
+        prompt["input"] for prompt in prompts_batch
+    )
+    assert all(batch.batch_metadata.training_phase == "eval" for batch in runner.seen_inputs)

@@ -188,7 +188,7 @@ class SeededSQLTaskSession:
                 "Invalid SQL task",
                 diagnostics={"verifier_error": "invalid reward_model.ground_truth"},
             )
-            return session_start(self.task, shell_tool=None)
+            return session_start(self.task, shell_tool=None, provider_tools=())
         assert self.machine is not None
         root = Path(self.local_files.enter_context(TemporaryDirectory(prefix="skyrl-sql-reference-")))
         try:
@@ -198,7 +198,7 @@ class SeededSQLTaskSession:
         else:
             self.directory = await _upload_queries(self.machine, [path for path, _ in cases])
             self.cases = [(path.name, reference) for path, reference in cases]
-        return session_start(self.task, shell_tool=None)
+        return session_start(self.task, shell_tool=None, provider_tools=())
 
     async def advance(self, turn: ModelTurn) -> Transition:
         if self.result.status != Outcome.UNAVAILABLE:
@@ -221,7 +221,9 @@ class SeededSQLTaskSession:
         self.result = GradeResult(Outcome.GRADED, reward, diagnostics={"detail": detail})
         return Transition(done=True, reward=reward, grade=self.result, metrics={"detail": detail})
 
-    async def grade(self, messages: tuple[dict[str, Any], ...], *, stop_reason: str) -> GradeResult:
+    async def grade(
+        self, messages: tuple[dict[str, Any], ...], *, stop_reason: str, outputs: dict[str, bytes]
+    ) -> GradeResult:
         return self.result
 
     async def close(self) -> None:
@@ -268,7 +270,7 @@ class SQLTaskSession:
             self.failure = _reference_failure(error)
         else:
             self.directory = await _upload_queries(self.machine, [root / QUERY_DATABASE_FILENAME])
-        return session_start(self.task, shell_tool=None)
+        return session_start(self.task, shell_tool=None, provider_tools=())
 
     async def advance(self, turn: ModelTurn) -> Transition:
         if self.failure is not None:
@@ -313,7 +315,9 @@ class SQLTaskSession:
         self.grades.append(grade)
         return Transition(done=False, reward=0.0, grade=grade, observations=({"role": "user", "content": observation},))
 
-    async def grade(self, messages: tuple[dict[str, Any], ...], *, stop_reason: str) -> GradeResult:
+    async def grade(
+        self, messages: tuple[dict[str, Any], ...], *, stop_reason: str, outputs: dict[str, bytes]
+    ) -> GradeResult:
         return terminal_grade(self.grades)
 
     async def close(self) -> None:

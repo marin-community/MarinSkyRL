@@ -176,7 +176,7 @@ async def test_custom_session_settings_reach_private_grading_through_the_launch_
             ModelTurn({"role": "assistant", "content": text}, (), (1,), None, "stop", text)
         )
         assert transition.done and transition.grade.reward == reward
-        assert (await session.grade((), stop_reason="stop")).reward == reward
+        assert (await session.grade((), stop_reason="stop", outputs={})).reward == reward
         assert start.messages == ({"role": "user", "content": "What is six plus six?"},)
     finally:
         await session.close()

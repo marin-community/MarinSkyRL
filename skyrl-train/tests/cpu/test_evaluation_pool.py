@@ -75,6 +75,28 @@ async def test_pool_reports_failures_and_releases_capacity():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_task", [False, True])
+async def test_provider_cancellation_fails_the_sweep_without_losing_a_pool_worker(cancel_task):
+    async def cancelled_provider():
+        if cancel_task:
+            asyncio.current_task().cancel()
+            await asyncio.Event().wait()
+        raise asyncio.CancelledError
+
+    async def success():
+        return "scored"
+
+    async with EvaluationPool(1) as pool:
+        with pytest.raises(ExceptionGroup) as failure:
+            async with asyncio.TaskGroup() as tasks:
+                tasks.create_task(pool.run("native", cancelled_provider))
+                tasks.create_task(pool.run("harbor", success))
+        assert isinstance(failure.value.exceptions[0], RuntimeError)
+        async with asyncio.timeout(5):
+            assert await pool.run("native", success) == "scored"
+
+
+@pytest.mark.asyncio
 async def test_native_evaluation_preserves_every_row_and_repetition_without_batch_barriers():
     seen = []
     later_batch_started = asyncio.Event()

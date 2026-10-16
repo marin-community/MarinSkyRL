@@ -42,7 +42,7 @@ overrides = [
     { name = "flashinfer-cubin", marker = "sys_platform == 'linux'", specifier = "==0.6.18.post1", index = "https://flashinfer.ai/whl" },
     { name = "flashinfer-python", marker = "sys_platform == 'linux'", specifier = "==0.6.18.post1" },
     { name = "fsspec", specifier = "==2026.4.0" },
-    { name = "marin-rigging", extras = ["secrets", "prometheus"], specifier = "==0.2.171.dev38477406391" },
+    { name = "marin-rigging", extras = ["secrets", "prometheus"], specifier = "==0.2.191.dev38826191626" },
     { name = "nvidia-resiliency-ext", marker = "sys_platform == 'never'" },
     { name = "opentelemetry-api", marker = "sys_platform != 'linux'" },
     { name = "opentelemetry-api", marker = "sys_platform == 'linux'", specifier = "==1.44.0" },
@@ -2795,21 +2795,21 @@ wheels = [
 
 [[package]]
 name = "marin-finestore"
-version = "0.2.171.dev38477406391"
+version = "0.2.191.dev38826191626"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "marin-rigging", extra = ["prometheus", "secrets"] },
     { name = "pyarrow" },
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/4b/6c/6bff1afd3ebd076a7897bf0cdc6d5fc8b24ad9d8499e1c96f6b6e7c13181/marin_finestore-0.2.171.dev38477406391.tar.gz", hash = "sha256:5ee43a20eca49c211f0c0ae1581c256463f7890027803878b0b5ff936a531777", size = 61143, upload-time = "2026-10-13T22:25:41.004Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/9b/48/13ce11d8dcd3147d17d62392ca124bcbe6f046b9ab180c0adc7806255b23/marin_finestore-0.2.191.dev38826191626.tar.gz", hash = "sha256:ea12fa2c066a3935f0b4ff99138d506e65f3cad4422316726b3ffacfbf2b6094", size = 67164, upload-time = "2026-10-15T23:54:35.921Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5a/7a/5cf67a36d0845c268107573f58b871af299678a5ec08c80f667d03a54d52/marin_finestore-0.2.171.dev38477406391-py3-none-any.whl", hash = "sha256:eaec74d90c402fbd2b3fc9909828a5b1b54a04d24985a52faef62f389a75a04f", size = 47596, upload-time = "2026-10-13T22:25:21.556Z" },
+    { url = "https://files.pythonhosted.org/packages/37/cd/bb259974312665dd925726921619dbb9284a21559c79246f7da34e9bfd59/marin_finestore-0.2.191.dev38826191626-py3-none-any.whl", hash = "sha256:f1a1b996a124f84f79849b115bb550132c0331c3eb3fd276dd3cdfba09c5cfa3", size = 51492, upload-time = "2026-10-15T23:54:17.142Z" },
 ]
 
 [[package]]
 name = "marin-iris"
-version = "0.2.171.dev38477406391"
+version = "0.2.191.dev38826191626"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
@@ -2840,9 +2840,9 @@ dependencies = [
     { name = "uvicorn", extra = ["standard"] },
     { name = "zstandard" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/b8/8b/23719421116effbbc36f8899df35dc122ffd4d6b935434ebd2889ed640a2/marin_iris-0.2.171.dev38477406391.tar.gz", hash = "sha256:1c486292233be9c7a60dfa3911621c4a9fe4ee1495b128b55fb6ff9b579b03e1", size = 953540, upload-time = "2026-10-13T22:25:44.603Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/92/fb/9c81aed68ce023c154d1956dae2ce07c9baaaaee29eb2d429e6199400757/marin_iris-0.2.191.dev38826191626.tar.gz", hash = "sha256:2c19248fd05eee0308fec90cd316c97df388e4541fa1e6e938a34e0ce0e51a1e", size = 953551, upload-time = "2026-10-15T23:54:39.616Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/8b/75/4170e4fe8bc604809c55083fdb794c2d317dfc968e8c4733c805dede610e/marin_iris-0.2.171.dev38477406391-py3-none-any.whl", hash = "sha256:dc50609907d28e5c4d5634a1c171af0b18dd320349c58088e078fb66ccbe2a57", size = 1151443, upload-time = "2026-10-13T22:25:26.429Z" },
+    { url = "https://files.pythonhosted.org/packages/a8/a1/c8492c8325429dd66a6e8f98ea4c4837823edaec5303213431437ecd9265/marin_iris-0.2.191.dev38826191626-py3-none-any.whl", hash = "sha256:e4dc882b22b900bc009a407ba77252da964e12522db0acc20e2e0721c496998d", size = 1151472, upload-time = "2026-10-15T23:54:21.635Z" },
 ]
 
 [[package]]
@@ -2859,7 +2859,7 @@ wheels = [
 
 [[package]]
 name = "marin-rigging"
-version = "0.2.171.dev38477406391"
+version = "0.2.191.dev38826191626"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiobotocore", version = "3.7.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux' or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
@@ -2881,9 +2881,9 @@ dependencies = [
     { name = "starlette" },
     { name = "zstandard" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/29/39/c84ff6fcce7e3d22fc3b1888a92dfe69d07f50a179b883262ff6b6e364ec/marin_rigging-0.2.171.dev38477406391.tar.gz", hash = "sha256:e6f27efa888a1ce38e205d11c9c1c82fd0c900bbabdb1e43a10cca38568f710e", size = 227061, upload-time = "2026-10-13T22:25:47.521Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/56/15/104d68a77b21cd66aa8fc965e59a0d2500c364e0dda978233103d5b1640c/marin_rigging-0.2.191.dev38826191626.tar.gz", hash = "sha256:7c4b1bba0e1f52041de94566da3f29541654743097257c3b2e20becbe5b2356e", size = 227149, upload-time = "2026-10-15T23:54:42.246Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f8/f8/3bc3184266903daaade4c210d22ff24e740a98412f29fc033d61187dfdee/marin_rigging-0.2.171.dev38477406391-py3-none-any.whl", hash = "sha256:b0fa6cfd95966c8675b8e700f045012de0024569c33bf3e3113c7b710bd473d8", size = 541477, upload-time = "2026-10-13T22:25:30.395Z" },
+    { url = "https://files.pythonhosted.org/packages/97/d7/fd505a7119d8e653794835fb58548c712fda24b3e57cd3c39f194a690720/marin_rigging-0.2.191.dev38826191626-py3-none-any.whl", hash = "sha256:9a30c834fb3bb051a2ffb4ff0c5a2363260d8617b221817162d5717e1557a3c5", size = 554118, upload-time = "2026-10-15T23:54:25.765Z" },
 ]
 
 [package.optional-dependencies]
@@ -2897,7 +2897,7 @@ secrets = [
 [[package]]
 name = "marin-rolloutengine"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frolloutengine&rev=c3e1bccd3a574d0329e337950d6004bc491ff125#c3e1bccd3a574d0329e337950d6004bc491ff125" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frolloutengine&rev=cdb87be31fce26ee6a078e3b207f34362d080831#cdb87be31fce26ee6a078e3b207f34362d080831" }
 dependencies = [
     { name = "marin-shellbox" },
     { name = "marin-taskcompendium" },
@@ -2908,7 +2908,7 @@ dependencies = [
 [[package]]
 name = "marin-shellbox"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fshellbox&rev=c3e1bccd3a574d0329e337950d6004bc491ff125#c3e1bccd3a574d0329e337950d6004bc491ff125" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fshellbox&rev=cdb87be31fce26ee6a078e3b207f34362d080831#cdb87be31fce26ee6a078e3b207f34362d080831" }
 dependencies = [
     { name = "bubblewrap-bin", marker = "sys_platform == 'linux' or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-cuda') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-megatron') or (extra == 'extra-10-marinskyrl-cpu' and extra == 'extra-10-marinskyrl-vllm')" },
     { name = "httpx" },
@@ -2938,7 +2938,7 @@ dependencies = [
 [[package]]
 name = "marin-taskcompendium"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=c3e1bccd3a574d0329e337950d6004bc491ff125#c3e1bccd3a574d0329e337950d6004bc491ff125" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=cdb87be31fce26ee6a078e3b207f34362d080831#cdb87be31fce26ee6a078e3b207f34362d080831" }
 dependencies = [
     { name = "marin-rigging", extra = ["prometheus", "secrets"] },
     { name = "marin-shellbox" },
@@ -2950,7 +2950,7 @@ dependencies = [
 [[package]]
 name = "marin-verifyit"
 version = "0.1.0"
-source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fverifyit&rev=c3e1bccd3a574d0329e337950d6004bc491ff125#c3e1bccd3a574d0329e337950d6004bc491ff125" }
+source = { git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fverifyit&rev=cdb87be31fce26ee6a078e3b207f34362d080831#cdb87be31fce26ee6a078e3b207f34362d080831" }
 dependencies = [
     { name = "tomli-w" },
 ]
@@ -3175,10 +3175,10 @@ requires-dist = [
     { name = "marin-iris-native" },
     { name = "marin-rigging", extras = ["prometheus"], marker = "extra == 'telemetry'" },
     { name = "marin-rigging", extras = ["secrets"], specifier = ">=0.2.144.dev37540375919" },
-    { name = "marin-rolloutengine", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frolloutengine&rev=c3e1bccd3a574d0329e337950d6004bc491ff125" },
-    { name = "marin-shellbox", extras = ["daytona", "shellsim"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fshellbox&rev=c3e1bccd3a574d0329e337950d6004bc491ff125" },
-    { name = "marin-taskcompendium", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=c3e1bccd3a574d0329e337950d6004bc491ff125" },
-    { name = "marin-verifyit", extras = ["math", "schema", "reasoning-gym", "judge"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fverifyit&rev=c3e1bccd3a574d0329e337950d6004bc491ff125" },
+    { name = "marin-rolloutengine", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Frolloutengine&rev=cdb87be31fce26ee6a078e3b207f34362d080831" },
+    { name = "marin-shellbox", extras = ["daytona", "shellsim"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fshellbox&rev=cdb87be31fce26ee6a078e3b207f34362d080831" },
+    { name = "marin-taskcompendium", git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Ftaskcompendium&rev=cdb87be31fce26ee6a078e3b207f34362d080831" },
+    { name = "marin-verifyit", extras = ["math", "schema", "reasoning-gym", "judge"], git = "https://github.com/marin-community/marin.git?subdirectory=lib%2Fverifyit&rev=cdb87be31fce26ee6a078e3b207f34362d080831" },
     { name = "math-verify", specifier = "==0.9.0" },
     { name = "megatron-bridge", marker = "sys_platform == 'linux' and extra == 'megatron'", specifier = "==0.6.0" },
     { name = "megatron-core", marker = "sys_platform == 'linux' and extra == 'megatron'", specifier = "==0.18.0" },
@@ -6188,16 +6188,16 @@ wheels = [
 
 [[package]]
 name = "shellsim"
-version = "0.1.35"
+version = "0.1.38"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "packaging" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/17/0b/e3183524d062d6d3673bf5111fcb954b36463b2521c57d1aec508ad9314b/shellsim-0.1.35.tar.gz", hash = "sha256:7b16f666a0a40fd4b62246cb1fb41cb369792739a243ed9b342afafe3d5f8284", size = 2696302, upload-time = "2026-10-12T21:02:53.131Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f5/a0/0a6f774e1f3ab8d685a548ca02a2ade499aed3372bd7ca35c62e950fefa7/shellsim-0.1.38.tar.gz", hash = "sha256:e5c1ab11626bccf2c73628dd22c47a07aec8e8955719418c36a9b07958aa9b2a", size = 1769304, upload-time = "2026-10-15T16:22:00.279Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5e/74/859a83bf9adb21a5f1d908dad307a98029cbdeae8653d5813c297a6e9376/shellsim-0.1.35-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:9d44033316694408c977c735aa7205db7c65f81399ca64d94d1125dde89528d8", size = 5799979, upload-time = "2026-10-12T21:02:46.81Z" },
-    { url = "https://files.pythonhosted.org/packages/75/a3/93050cff9a8d62ffd97a28dd10e4035d4061ce3687d10a53b12e398dba8b/shellsim-0.1.35-cp39-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:12096492ac7e66d1a86c272bcd5d4cb2a0c3b28ec606e728d98203e19e134dfa", size = 6405099, upload-time = "2026-10-12T21:02:49.396Z" },
-    { url = "https://files.pythonhosted.org/packages/6c/a9/97d1ce8e723b63888d6b1b66d822c393b612003e19d40b6261501dd27c5d/shellsim-0.1.35-cp39-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:660180fab7245ae66c3421bade2db239f4024764342afda752b0d798db88a805", size = 6698641, upload-time = "2026-10-12T21:02:51.239Z" },
+    { url = "https://files.pythonhosted.org/packages/10/a2/518503faa0662dd519e8d1126b5fc59c77e2750e2c08e911a6c2034138ce/shellsim-0.1.38-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:da8a793f13eb5998ea14fb7e12e19952302a310144d50c5990bbf55c83bd4d78", size = 4396151, upload-time = "2026-10-15T16:21:55.088Z" },
+    { url = "https://files.pythonhosted.org/packages/51/95/ed8ff22dc616aed4a444c7bea2ccd5700c56de7a00372d31e733cc35a221/shellsim-0.1.38-cp39-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:b603afc9bd7e71a47c82a0cfa162b69564179bebd3f48b6f650231c0d18b4dd4", size = 4881484, upload-time = "2026-10-15T16:21:57.072Z" },
+    { url = "https://files.pythonhosted.org/packages/35/be/b9f2b7ad2bfbd4024b833e10b9695534b580f32b66c7701b5a5091cb760f/shellsim-0.1.38-cp39-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:b8bd9e59858b1adb09a8d9533fdadbacbceed9c88a9b74cd119da6711ae7c248", size = 5191203, upload-time = "2026-10-15T16:21:58.703Z" },
 ]
 
 [package.optional-dependencies]

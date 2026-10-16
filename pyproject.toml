@@ -11,7 +11,7 @@ version = "0.1.0"
 description = "Marin's typed launcher and RL training runtime"
 requires-python = "==3.12.*"
 dependencies = [
-"marin-verifyit[math,schema,reasoning-gym,judge] @ git+https://github.com/marin-community/marin.git@c3e1bccd3a574d0329e337950d6004bc491ff125#subdirectory=lib/verifyit",
+    "marin-verifyit[math,schema,reasoning-gym,judge] @ git+https://github.com/marin-community/marin.git@cdb87be31fce26ee6a078e3b207f34362d080831#subdirectory=lib/verifyit",
     "aiohttp>=3.13.3",
     "boto3",
     "datasets>=4.0.0",
@@ -35,8 +35,8 @@ dependencies = [
     "marin-iris>=0.2.144.dev37540375919",
     "marin-iris-native",
     "marin-rigging[secrets]>=0.2.144.dev37540375919",
-    "marin-rolloutengine @ git+https://github.com/marin-community/marin.git@c3e1bccd3a574d0329e337950d6004bc491ff125#subdirectory=lib/rolloutengine",
-    "marin-shellbox[daytona,shellsim] @ git+https://github.com/marin-community/marin.git@c3e1bccd3a574d0329e337950d6004bc491ff125#subdirectory=lib/shellbox",
+    "marin-rolloutengine @ git+https://github.com/marin-community/marin.git@cdb87be31fce26ee6a078e3b207f34362d080831#subdirectory=lib/rolloutengine",
+    "marin-shellbox[daytona,shellsim] @ git+https://github.com/marin-community/marin.git@cdb87be31fce26ee6a078e3b207f34362d080831#subdirectory=lib/shellbox",
     "ninja",
     "nvidia-ml-py",
     "omegaconf",
@@ -53,7 +53,7 @@ dependencies = [
     "s3fs",
     "smart_open",
     "tensorboard",
-    "marin-taskcompendium @ git+https://github.com/marin-community/marin.git@c3e1bccd3a574d0329e337950d6004bc491ff125#subdirectory=lib/taskcompendium",
+    "marin-taskcompendium @ git+https://github.com/marin-community/marin.git@cdb87be31fce26ee6a078e3b207f34362d080831#subdirectory=lib/taskcompendium",
     "tqdm>=4.66",
     "tokenizers==0.23.1",
     "transformers==5.16.1",
@@ -183,8 +183,7 @@ no-build-isolation-package = [
     "transformer-engine-torch",
 ]
 override-dependencies = [
-    # Git-pinned task packages must not select Rigging's workspace development version.
-    "marin-rigging[secrets,prometheus]==0.2.171.dev38477406391",
+    "marin-rigging[secrets,prometheus]==0.2.191.dev38826191626",
     # Megatron Bridge declares this native extension but does not import or use it.
     "fast-hadamard-transform ; sys_platform == 'never'",
     "nvidia-resiliency-ext ; sys_platform == 'never'",

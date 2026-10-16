@@ -42,3 +42,7 @@ results as a successful evaluation.
 
 The trainer reports `timing/eval_drain` separately from evaluation collection so a
 long tail in outstanding training generation can be distinguished from slow evals.
+Session logs report dispatched request counts for every rollout worker. The admission
+summary records each source's started and finished counts and first-start/last-finish
+offsets in seconds, peak total active requests, and whether requests from different
+sources were active simultaneously. These summaries contain no task content.

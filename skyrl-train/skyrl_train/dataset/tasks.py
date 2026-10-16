@@ -106,7 +106,7 @@ def task_prompt_token_count(tokenizer: PreTrainedTokenizerBase, row: dict, promp
     if lowered.session.task_session != SHELLBOX_SESSION:
         return _prompt_token_count(tokenizer, row[prompt_key])
     shell_tool = resolve_shell_tool(lowered.task, lowered.session.shell_tool)
-    start = session_start(lowered.task, shell_tool)
+    start = session_start(lowered.task, shell_tool, ())
     return _prompt_token_count(tokenizer, list(start.messages), **start.options)
 
 

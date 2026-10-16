@@ -225,6 +225,10 @@ class RolloutWorkerPool:
             if self._eval_session_active:
                 raise RuntimeError("an eval session is already active")
             self._eval_session_active = True
+            self._eval_dispatch_counts = [0] * len(self._actors)
+            logger.info(
+                "Evaluation session requested: run={} step={} workers={}", run_name, eval_step, len(self._actors)
+            )
         try:
             async with self._routing:
                 await self._routing.wait_for(lambda: not any(self._pending))
@@ -243,6 +247,7 @@ class RolloutWorkerPool:
         try:
             await asyncio.gather(*(actor.stop_eval_session.remote() for actor in self._actors))
         finally:
+            logger.info("Evaluation worker dispatch counts: {}", self._eval_dispatch_counts)
             await self._release_eval_worker()
 
     async def _release_eval_worker(self) -> None:
@@ -277,6 +282,7 @@ class RolloutWorkerPool:
                 if not self._eval_session_active:
                     raise RuntimeError("evaluation request received without an active eval session")
                 index = min(range(len(self._actors)), key=self._pending.__getitem__)
+                self._eval_dispatch_counts[index] += 1
             else:
                 await self._routing.wait_for(lambda: self._training_worker() is not None)
                 index = self._training_worker()

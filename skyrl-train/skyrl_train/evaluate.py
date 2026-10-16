@@ -161,6 +161,8 @@ async def _collect_evaluation_rollouts(
 
     if last_request is None or last_batch is None:
         raise ValueError("evaluation dataloader produced no batches")
+    if len(trajectory_batches) != len(rows) * cfg.generator.eval_n_samples_per_prompt:
+        raise RuntimeError("evaluation did not return every selected row and repetition")
     return _EvaluationRollouts(
         batch=concatenate_trajectory_batches(
             trajectory_batches,

@@ -123,8 +123,11 @@ async def collect_harbor(cohorts: list[dict], pool: EvaluationPool, environment:
                 for index in range(len(cohort["job"]["tasks"])):
                     tasks.create_task(collect(cohort, index))
     aggregates = {}
+    expected = {cohort["name"]: len(cohort["job"]["tasks"]) for cohort in cohorts}
     for name, trials in results.items():
         totals = {key: sum(trial[key] for trial in trials) for key in ("num_attempted", "num_scored", "reward_sum")}
+        if len(trials) != expected[name] or totals["num_attempted"] != expected[name]:
+            raise RuntimeError(f"Harbor evaluation did not return every selected task for {name}")
         totals["avg_verifier_score"] = totals["reward_sum"] / totals["num_scored"] if totals["num_scored"] else 0.0
         aggregates[name] = totals
     return aggregates

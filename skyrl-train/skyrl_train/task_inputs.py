@@ -41,4 +41,4 @@ def task_messages(lowered: LoweredTaskSpec) -> ConversationType:
         if lowered.session.task_session == SHELLBOX_SESSION
         else None
     )
-    return list(session_start(lowered.task, tool).messages)
+    return list(session_start(lowered.task, tool, ()).messages)

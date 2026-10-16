@@ -53,6 +53,7 @@ This example writes one machine-free arithmetic task:
            attempt_timeout=90,
            verifier_timeout=30,
            cleanup_timeout=10,
+           max_total_tokens=None,
        ),
    )
    row = {

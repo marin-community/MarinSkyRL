@@ -356,7 +356,7 @@ class TaskRolloutWorker:
                 **self.sessions,
                 SKYRL_AGENT_SESSION: partial(_agent_session_factory, self.installed_agents, session_id),
             }
-        validate_lowered_task(lowered, factories=self.factories, sessions=sessions)
+        validate_lowered_task(lowered, factories=self.factories, sessions=sessions, providers={})
         return lowered, sessions
 
     async def generate(self, request: TaskRequestBatch) -> list[RolloutData]:

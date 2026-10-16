@@ -29,7 +29,7 @@ class ToolProtocolReplaySession:
         self.result = GradeResult(Outcome.UNAVAILABLE, None, "No model continuation was completed")
 
     async def prepare(self) -> SessionStart:
-        start = session_start(self.task, shell_tool=None)
+        start = session_start(self.task, shell_tool=None, provider_tools=())
         return replace(
             start,
             prompt_token_ids=self.prompt.prompt_token_ids,
@@ -49,7 +49,9 @@ class ToolProtocolReplaySession:
             done=True, reward=float(passed), grade=self.result, metrics={f"tool_protocol/{status.value}": 1.0}
         )
 
-    async def grade(self, messages: tuple[dict[str, Any], ...], *, stop_reason: str) -> GradeResult:
+    async def grade(
+        self, messages: tuple[dict[str, Any], ...], *, stop_reason: str, outputs: dict[str, bytes]
+    ) -> GradeResult:
         return self.result
 
     async def close(self) -> None:

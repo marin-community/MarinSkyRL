@@ -87,6 +87,7 @@ def main() -> None:
         attempt_timeout=None,
         verifier_timeout=3600,
         cleanup_timeout=30,
+        max_total_tokens=None,
     )
     materialize(
         TRAIN_DATASET,
