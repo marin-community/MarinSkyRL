@@ -13,7 +13,13 @@ from rolloutengine.spec import LoweredTaskSpec, MachineRuntimeSpec
 from taskcompendium.grading_result import GradingFailure, Outcome
 from rolloutengine.contracts import RolloutData, RolloutFailure
 
-from skyrl_train.rollouts.harbor_settings import EnvironmentConfig, EnvironmentType, RetryConfig, VerifierConfig
+from skyrl_train.rollouts.harbor_settings import (
+    HARBOR_EXCEPTION,
+    EnvironmentConfig,
+    EnvironmentType,
+    RetryConfig,
+    VerifierConfig,
+)
 
 from skyrl_train.trajectory_runners.harbor.configuration import HarborConfigBuilder
 from skyrl_train.trajectory_runners.harbor.identity_aware_reward import (
@@ -181,7 +187,15 @@ _GRADING_FAILURE_TYPES = {
 
 def harbor_grading_failure(rollout: RolloutData) -> RolloutData:
     """Translate structured verifier failures to the configured Harbor error policy."""
-    if rollout.failure is not None or rollout.grade.status != Outcome.INFRA_ERROR:
+    if rollout.failure is not None:
+        return rollout
+    exception_type = rollout.grade.diagnostics.get(HARBOR_EXCEPTION)
+    if exception_type is not None:
+        return replace(
+            rollout,
+            failure=RolloutFailure(exception_type, diagnostics={"timed_out": exception_type == "AgentTimeoutError"}),
+        )
+    if rollout.grade.status != Outcome.INFRA_ERROR:
         return rollout
     return replace(
         rollout,

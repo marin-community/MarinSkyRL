@@ -42,6 +42,7 @@ from rolloutengine.engine import RolloutEngine
 from rolloutengine.spec import LoweredTaskSpec
 from rolloutengine.lowering import SHELLBOX_SESSION, validate_lowered_task
 from skyrl_train.config.utils import generation_context_limit
+from skyrl_train.dataset.harbor_import import HARBOR_TRIAL_SESSION
 from skyrl_gym.task_factories import adapt_self_grading_session, session_factories
 from skyrl_gym.task_records import fold_grades, skipped_grade
 from skyrl_gym.verification import VERIFIER_RUNTIME_ERROR
@@ -110,6 +111,10 @@ class InstalledAgentWorker(Protocol):
     async def startup(self) -> None: ...
 
     async def shutdown(self) -> None: ...
+
+    def original_session(
+        self, lowered: LoweredTaskSpec, session_id: str, settings: HarborTaskSettings, phase: str
+    ) -> TaskSession: ...
 
     async def run(
         self,
@@ -396,10 +401,19 @@ class TaskRolloutWorker:
             self.active_requests.discard(task)
 
     def _configured_task_and_sessions(
-        self, lowered: LoweredTaskSpec, harbor: HarborTaskSettings | None, session_id: str
+        self, lowered: LoweredTaskSpec, harbor: HarborTaskSettings | None, session_id: str, phase: str
     ) -> tuple[LoweredTaskSpec, Mapping[str, TaskSessionFactory]]:
         sessions = self.sessions
-        if harbor is not None and self.installed_agents is not None:
+        if lowered.session.task_session == HARBOR_TRIAL_SESSION:
+            if harbor is None or self.installed_agents is None:
+                raise ValueError("Full Harbor trials require Harbor and installed-agent settings")
+            sessions = {
+                **self.sessions,
+                HARBOR_TRIAL_SESSION: lambda context: self.installed_agents.original_session(
+                    context.lowered, session_id, harbor, phase
+                ),
+            }
+        elif harbor is not None and self.installed_agents is not None:
             if lowered.session.task_session != SHELLBOX_SESSION:
                 raise ValueError("SkyRL agents require a Shellbox task grader")
             lowered = lowered.model_copy(
@@ -434,7 +448,9 @@ class TaskRolloutWorker:
         ]
         selected_sessions: list[Mapping[str, TaskSessionFactory]] = []
         for index, lowered in enumerate(lowered_tasks):
-            lowered, sessions = self._configured_task_and_sessions(lowered, harbor_settings[index], session_ids[index])
+            lowered, sessions = self._configured_task_and_sessions(
+                lowered, harbor_settings[index], session_ids[index], phase
+            )
             lowered_tasks[index] = lowered
             selected_sessions.append(sessions)
         tasks = [item.task for item in lowered_tasks]
