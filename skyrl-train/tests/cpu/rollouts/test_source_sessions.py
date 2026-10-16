@@ -10,6 +10,7 @@ import httpx
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from daytona import AsyncDaytona, DaytonaConfig, DaytonaRateLimitError
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 from omegaconf import OmegaConf
@@ -803,14 +804,35 @@ async def test_source_machine_selection_controls_tool_results(task_inputs, task_
         ("nemotron_ultra", "prepare", "RuntimeError"),
         ("searchcode", "start", "UnsupportedMachineSpec"),
         ("searchcode", "start", "RuntimeError"),
+        ("searchcode", "start", "DaytonaRateLimitError"),
     ],
 )
 async def test_python_startup_failure_is_masked_without_losing_its_graded_peer(
     task_inputs, task_machine, projection_type, session, operation, cause_type
 ):
     if operation == "start":
-        startup_error = UnsupportedMachineSpec if cause_type == "UnsupportedMachineSpec" else RuntimeError
-        task_machine.create = AsyncMock(side_effect=startup_error("The task provider did not start the machine"))
+        if cause_type == "DaytonaRateLimitError":
+
+            async def rate_limit(request):
+                return web.json_response(
+                    {"message": "secret response body", "code": "secret-code"},
+                    status=429,
+                    headers={"X-Private-Header": "secret-key"},
+                )
+
+            app = web.Application()
+            app.router.add_get("/{path:.*}", rate_limit)
+            async with TestServer(app) as server:
+                async with AsyncDaytona(
+                    DaytonaConfig(api_key="secret-key", api_url=str(server.make_url("")).rstrip("/"))
+                ) as client:
+                    with pytest.raises(DaytonaRateLimitError) as provider_failure:
+                        await client.snapshot.get("fixture")
+            startup_error = provider_failure.value
+        else:
+            startup_error_type = UnsupportedMachineSpec if cause_type == "UnsupportedMachineSpec" else RuntimeError
+            startup_error = startup_error_type("The task provider did not start the machine")
+        task_machine.create = AsyncMock(side_effect=startup_error)
     task_machine.run = AsyncMock(
         return_value=Result(1, b"", b"ModuleNotFoundError: No module named 'IPython'", False, False, ExitReason.EXITED)
     )
@@ -858,7 +880,9 @@ async def test_python_startup_failure_is_masked_without_losing_its_graded_peer(
     assert batch["loss_masks"] == [[0], [1, 1]]
     assert batch["exclude_from_baseline"] == [True, False]
     assert batch["exception_types"] == [
-        "TaskMachineError" if operation == "start" and cause_type == "RuntimeError" else "VerifierRuntimeError",
+        "TaskMachineError"
+        if operation == "start" and cause_type in {"RuntimeError", "DaytonaRateLimitError"}
+        else "VerifierRuntimeError",
         None,
     ]
     assert batch["error_treatments"] == ["mask", None]
@@ -867,6 +891,11 @@ async def test_python_startup_failure_is_masked_without_losing_its_graded_peer(
     assert failed_result.status is VerificationStatus.ERROR
     assert failed_result.diagnostics["operation"] == operation
     assert failed_result.diagnostics["cause_error_type"] == cause_type
+    if cause_type == "DaytonaRateLimitError":
+        assert failed_result.diagnostics["machine_operation"] == "create"
+        assert failed_result.diagnostics["provider_status_code"] == 429
+        assert failed_result.diagnostics["provider_sdk_call"] == "daytona._async.snapshot.get"
+        assert "secret" not in json.dumps(failed_result.diagnostics)
     assert peer_result.status is VerificationStatus.VERIFIED
     assert peer_result.score == 1.0
     if operation == "prepare":

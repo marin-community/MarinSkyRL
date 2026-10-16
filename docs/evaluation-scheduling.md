@@ -47,3 +47,11 @@ Session logs report dispatched request counts for every rollout worker. The admi
 summary records each source's started and finished counts and first-start/last-finish
 offsets in seconds, peak total active requests, and whether requests from different
 sources were active simultaneously. These summaries contain no task content.
+
+Per-task evaluation JSON records retain failure categories and safe fields under
+`verification.diagnostics`: `operation`, `machine_operation`, `timed_out`,
+`provider_status_code`, and `provider_sdk_call`. The last field identifies an
+allowlisted Daytona SDK method name when available. It does not identify the HTTP phase inside a compound
+operation. Raw provider messages, headers, arbitrary error codes, and verifier
+references are excluded. An unscored task remains unscored even when its failure can
+be classified; diagnostic fields do not supply a reward or change retry behavior.

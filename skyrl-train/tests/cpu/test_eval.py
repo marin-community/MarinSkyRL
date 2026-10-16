@@ -152,7 +152,18 @@ async def test_evaluate_exports_public_results_and_expected_metrics(dummy_config
         "env_metrics": [{"truncated": 1}, {"truncated": 0}],
         "verification_results": [
             VerificationResult.verified(1.0, passed=True, diagnostics={"reference": "private-verifier-reference"}),
-            VerificationResult.unavailable("Request timed out.", diagnostics={"api_key": "private-key"}),
+            VerificationResult.unavailable(
+                "Request timed out.",
+                diagnostics={
+                    "api_key": "private-key",
+                    "cause_error_type": "DaytonaRateLimitError",
+                    "operation": "grade",
+                    "machine_operation": "run",
+                    "provider_status_code": 429,
+                    "provider_sdk_call": "daytona._async.api_client.SandboxesApi.create_sandbox",
+                    "provider_error_code": "private-error-code",
+                },
+            ),
         ],
         "is_last_step": [True, True],
     }
@@ -207,6 +218,7 @@ async def test_evaluate_exports_public_results_and_expected_metrics(dummy_config
     assert "private-judge-key" not in saved
     assert "private-verifier-reference" not in saved
     assert "private-key" not in saved
+    assert "private-error-code" not in saved
     records = [json.loads((dump / f"dataset_{name}.jsonl").read_text()) for name in ("a", "b")]
     assert records[0]["input_prompt"] == records[1]["input_prompt"]
     assert records[0]["uid"] != records[1]["uid"]
@@ -220,10 +232,18 @@ async def test_evaluate_exports_public_results_and_expected_metrics(dummy_config
         "passed": True,
         "score_min": 0.0,
         "score_max": 1.0,
+        "diagnostics": {},
     }
     assert records[1]["verification"]["reason"] == "Request timed out."
     assert records[1]["verification"]["status"] == "unavailable"
     assert records[1]["verification"]["score"] is None
+    assert records[1]["verification"]["diagnostics"] == {
+        "cause_error_type": "DaytonaRateLimitError",
+        "operation": "grade",
+        "machine_operation": "run",
+        "provider_status_code": 429,
+        "provider_sdk_call": "daytona._async.api_client.SandboxesApi.create_sandbox",
+    }
 
     assert [prompt[0]["content"] for batch in runner.seen_inputs for prompt in batch.public_prompts] == [
         "question-1",

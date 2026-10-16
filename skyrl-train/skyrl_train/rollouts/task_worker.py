@@ -13,7 +13,7 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from jinja2 import TemplateError
-from daytona import AsyncDaytona, DaytonaConfig
+from daytona import AsyncDaytona, DaytonaConfig, DaytonaError
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from shellbox.backends.docker.machine import DockerMachineFactory
@@ -81,6 +81,20 @@ from skyrl_train.trajectory_runners.types import (
     TokenProvenance,
     TrajectoryBatch,
     TaskRequestBatch,
+)
+
+DAYTONA_DIAGNOSTIC_CALLS = frozenset(
+    {
+        ("daytona._async.daytona", "create"),
+        ("daytona._async.daytona", "_create"),
+        ("daytona._async.daytona", "delete"),
+        ("daytona._async.snapshot", "get"),
+        ("daytona._async.snapshot", "create"),
+        ("daytona._async.sandbox", "wait_for_sandbox_start"),
+        ("daytona._async.process", "exec"),
+        ("daytona._async.filesystem", "upload_file_stream"),
+        ("daytona._async.filesystem", "download_file"),
+    }
 )
 
 
@@ -207,6 +221,26 @@ def _failed_rollout(
     diagnostics = {"operation": interruption.operation.value, "timed_out": isinstance(error, TimeoutError)}
     if isinstance(error, TaskMachineError) and error.__cause__ is not None:
         diagnostics["cause_error_type"] = type(error.__cause__).__name__
+        diagnostics["machine_operation"] = error.operation.value
+        provider_error = error.__cause__
+        if isinstance(provider_error, DaytonaError):
+            if type(provider_error.status_code) is int and 100 <= provider_error.status_code <= 599:
+                diagnostics["provider_status_code"] = provider_error.status_code
+            # This identifies an SDK call, not the HTTP phase of a compound operation.
+            diagnostics["provider_sdk_call"] = "unknown"
+            nested_error: BaseException | None = provider_error
+            seen = set()
+            while nested_error is not None and id(nested_error) not in seen:
+                seen.add(id(nested_error))
+                traceback = nested_error.__traceback__
+                while traceback is not None:
+                    frame = traceback.tb_frame
+                    call = (frame.f_globals.get("__name__"), frame.f_code.co_name)
+                    if call in DAYTONA_DIAGNOSTIC_CALLS:
+                        diagnostics["provider_sdk_call"] = ".".join(call)
+                    traceback = traceback.tb_next
+                # The SDK translates HTTP errors with `raise ... from None`.
+                nested_error = nested_error.__cause__ or nested_error.__context__
     if isinstance(error, TimeoutError):
         exception_type = {
             RolloutOperation.ATTEMPT: "TrialTimeoutError",
