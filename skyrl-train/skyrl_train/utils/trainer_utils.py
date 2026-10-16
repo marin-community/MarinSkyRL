@@ -26,6 +26,18 @@ from skyrl_train.dataset import PromptDataset
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 BasicType = Union[int, float, str, bool, type(None)]
+EVAL_DIAGNOSTIC_FIELDS = frozenset(
+    {
+        "exception_type",
+        "cause_error_type",
+        "operation",
+        "timed_out",
+        "machine_operation",
+        "provider_status_code",
+        "provider_sdk_call",
+        "provider_rate_limits",
+    }
+)
 
 
 class ResumeMode(Enum):
@@ -362,7 +374,7 @@ def dump_per_dataset_eval_results(
                     "env_class": concat_all_envs[i],
                     "data_source": data_source,
                     "env_metrics": (trajectory_batch.get("env_metrics") or [{}] * len(input_prompts))[i],
-                    # Full diagnostics stay in private retained trajectories.
+                    # Keep operational categories, not arbitrary verifier references or credentials.
                     "verification": None
                     if verification is None
                     else {
@@ -372,6 +384,11 @@ def dump_per_dataset_eval_results(
                         "passed": verification.passed,
                         "score_min": verification.score_min,
                         "score_max": verification.score_max,
+                        "diagnostics": {
+                            key: value
+                            for key, value in verification.diagnostics.items()
+                            if key in EVAL_DIAGNOSTIC_FIELDS
+                        },
                     },
                 }
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")

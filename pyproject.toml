@@ -11,7 +11,7 @@ version = "0.1.0"
 description = "Marin's typed launcher and RL training runtime"
 requires-python = "==3.12.*"
 dependencies = [
-    "marin-verifyit[math,schema,reasoning-gym,judge]>=0.2.171.dev38477406391",
+    "marin-verifyit[math,schema,reasoning-gym,judge] @ git+https://github.com/marin-community/marin.git@23a7a6c2fd95841f9daf7a36f3a22f5350c60a94#subdirectory=lib/verifyit",
     "aiohttp>=3.13.3",
     "boto3",
     "datasets>=4.0.0",
@@ -35,8 +35,8 @@ dependencies = [
     "marin-iris>=0.2.144.dev37540375919",
     "marin-iris-native",
     "marin-rigging[secrets]>=0.2.144.dev37540375919",
-    "marin-rolloutengine>=0.2.171.dev38477406391",
-    "marin-shellbox[daytona,shellsim]",
+    "marin-rolloutengine @ git+https://github.com/marin-community/marin.git@23a7a6c2fd95841f9daf7a36f3a22f5350c60a94#subdirectory=lib/rolloutengine",
+    "marin-shellbox[daytona,shellsim] @ git+https://github.com/marin-community/marin.git@23a7a6c2fd95841f9daf7a36f3a22f5350c60a94#subdirectory=lib/shellbox",
     "ninja",
     "nvidia-ml-py",
     "omegaconf",
@@ -53,7 +53,7 @@ dependencies = [
     "s3fs",
     "smart_open",
     "tensorboard",
-    "marin-taskcompendium",
+    "marin-taskcompendium @ git+https://github.com/marin-community/marin.git@23a7a6c2fd95841f9daf7a36f3a22f5350c60a94#subdirectory=lib/taskcompendium",
     "tqdm>=4.66",
     "tokenizers==0.23.1",
     "transformers==5.16.1",
@@ -183,6 +183,7 @@ no-build-isolation-package = [
     "transformer-engine-torch",
 ]
 override-dependencies = [
+    "marin-rigging[secrets,prometheus]==0.2.191.dev38826191626",
     # Megatron Bridge declares this native extension but does not import or use it.
     "fast-hadamard-transform ; sys_platform == 'never'",
     "nvidia-resiliency-ext ; sys_platform == 'never'",
@@ -215,7 +216,7 @@ flash-attn = [
     { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-fa283-20260920/flash_attn-2.8.3-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
     { url = "https://github.com/marin-community/MarinSkyRL/releases/download/native-cu132-fa283-20260920/flash_attn-2.8.3-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
 ]
-harbor = { git = "https://github.com/marin-community/harbor.git", rev = "aee476676983dfa62f5d824538193302ef46e3f9" }
+harbor = { git = "https://github.com/marin-community/harbor.git", rev = "5c747d21c6cac9d9fe47b8ccb2594ceeb23610ba" }
 hs-connectors = { git = "https://github.com/lukedhlee/speculators.git", rev = "6496b4db007de00dd4741349643d23b23e29dce8", subdirectory = "hs_connectors" }
 speculators = { git = "https://github.com/lukedhlee/speculators.git", rev = "6496b4db007de00dd4741349643d23b23e29dce8" }
 torch = [

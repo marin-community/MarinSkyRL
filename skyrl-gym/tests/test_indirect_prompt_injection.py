@@ -51,6 +51,7 @@ def session():
                 attempt_timeout=None,
                 verifier_timeout=120,
                 cleanup_timeout=5,
+                max_total_tokens=None,
             ),
         ),
         None,

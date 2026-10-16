@@ -92,7 +92,7 @@ class AnswerTaskSession:
         self.result = GradeResult(Outcome.UNAVAILABLE, None, "The task has no completed turn")
 
     async def prepare(self) -> SessionStart:
-        return session_start(self.task, shell_tool=None)
+        return session_start(self.task, shell_tool=None, provider_tools=())
 
     async def advance(self, turn: ModelTurn) -> Transition:
         transition = await self.blocking.run(self.grader, turn, self.config, self.extras)
@@ -100,7 +100,9 @@ class AnswerTaskSession:
         self.result = transition.grade
         return transition
 
-    async def grade(self, messages: tuple[dict[str, Any], ...], *, stop_reason: str) -> GradeResult:
+    async def grade(
+        self, messages: tuple[dict[str, Any], ...], *, stop_reason: str, outputs: dict[str, bytes]
+    ) -> GradeResult:
         return self.result
 
     async def close(self) -> None:
@@ -119,7 +121,7 @@ class MathTaskSession:
         self.grades: list[GradeResult] = []
 
     async def prepare(self) -> SessionStart:
-        return session_start(self.task, shell_tool=None)
+        return session_start(self.task, shell_tool=None, provider_tools=())
 
     async def advance(self, turn: ModelTurn) -> Transition:
         reward = math_score(turn.text, self.expected, method="strict", format_score=0.2 / self.max_turns)
@@ -141,7 +143,9 @@ class MathTaskSession:
             done=done, observations=observations, reward=reward, grade=grade, metrics={"steps": len(self.grades)}
         )
 
-    async def grade(self, messages: tuple[dict[str, Any], ...], *, stop_reason: str) -> GradeResult:
+    async def grade(
+        self, messages: tuple[dict[str, Any], ...], *, stop_reason: str, outputs: dict[str, bytes]
+    ) -> GradeResult:
         return terminal_grade(self.grades)
 
     async def close(self) -> None:
@@ -164,7 +168,7 @@ class SearchTaskSession:
         self.grades: list[GradeResult] = []
 
     async def prepare(self) -> SessionStart:
-        return session_start(self.task, shell_tool=None)
+        return session_start(self.task, shell_tool=None, provider_tools=())
 
     async def advance(self, turn: ModelTurn) -> Transition:
         for tag in ("</search>", "</answer>"):
@@ -194,7 +198,9 @@ class SearchTaskSession:
             metrics={"tool_name": "search", "tool_input": [query]},
         )
 
-    async def grade(self, messages: tuple[dict[str, Any], ...], *, stop_reason: str) -> GradeResult:
+    async def grade(
+        self, messages: tuple[dict[str, Any], ...], *, stop_reason: str, outputs: dict[str, bytes]
+    ) -> GradeResult:
         return terminal_grade(self.grades)
 
     async def close(self) -> None:
@@ -226,7 +232,7 @@ class CodeTaskSession:
         self.result = GradeResult(Outcome.UNAVAILABLE, None, "The task has no completed turn")
 
     async def prepare(self) -> SessionStart:
-        return session_start(self.task, shell_tool=None)
+        return session_start(self.task, shell_tool=None, provider_tools=())
 
     async def advance(self, turn: ModelTurn) -> Transition:
         code = extract_code_from_model(turn.text)
@@ -253,7 +259,9 @@ class CodeTaskSession:
         self.result = GradeResult(Outcome.GRADED, reward)
         return Transition(done=True, reward=reward, grade=self.result, metrics={"parsed_code": code, **details})
 
-    async def grade(self, messages: tuple[dict[str, Any], ...], *, stop_reason: str) -> GradeResult:
+    async def grade(
+        self, messages: tuple[dict[str, Any], ...], *, stop_reason: str, outputs: dict[str, bytes]
+    ) -> GradeResult:
         return self.result
 
     async def close(self) -> None:
@@ -281,7 +289,7 @@ class SearchCodeTaskSession:
 
     async def prepare(self) -> SessionStart:
         await self.python.start()
-        return session_start(self.task, shell_tool=None)
+        return session_start(self.task, shell_tool=None, provider_tools=())
 
     async def advance(self, turn: ModelTurn) -> Transition:
         self.transcript.append(turn.text)
@@ -321,7 +329,9 @@ class SearchCodeTaskSession:
             grade=grade,
         )
 
-    async def grade(self, messages: tuple[dict[str, Any], ...], *, stop_reason: str) -> GradeResult:
+    async def grade(
+        self, messages: tuple[dict[str, Any], ...], *, stop_reason: str, outputs: dict[str, bytes]
+    ) -> GradeResult:
         return terminal_grade(self.grades)
 
     async def close(self) -> None:

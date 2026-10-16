@@ -63,6 +63,7 @@ def task(name, extras, config=None):
             attempt_timeout=None,
             verifier_timeout=5,
             cleanup_timeout=5,
+            max_total_tokens=None,
         ),
     )
 
@@ -275,7 +276,7 @@ async def test_lcb_machine_failure_reports_infrastructure_without_a_grade(machin
         "error_type": "OSError",
         "error_message": "Machine transport disconnected",
     }
-    assert await session.grade((), stop_reason="stop") == transition.grade
+    assert await session.grade((), stop_reason="stop", outputs={}) == transition.grade
 
 
 @pytest.mark.asyncio

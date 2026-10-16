@@ -72,7 +72,7 @@ def test_terminal_bench_generate_builds_complete_evaluation_request(tmp_path):
         (source / "tests/test.sh").write_text("echo 1 > /logs/verifier/reward.txt\n")
 
     class Tokenizer:
-        def apply_chat_template(self, messages, add_generation_prompt):
+        def apply_chat_template(self, messages, add_generation_prompt, **template_options):
             return [1, 2]
 
     experiment.tokenizer = Tokenizer()

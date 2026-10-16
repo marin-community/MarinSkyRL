@@ -37,7 +37,7 @@ async def test_lean_session_retains_compiler_status_and_correction(
         assert proof in result.reset_conversation[0]["content"]
         corrected = await session.advance(model_turn("```lean4\nby\n  trivial\n```"))
         assert corrected.done and corrected.grade.reward == 1.0
-        assert (await session.grade((), stop_reason="stop")).reward == 1.0
+        assert (await session.grade((), stop_reason="stop", outputs={})).reward == 1.0
 
 
 @pytest.mark.asyncio
@@ -96,7 +96,7 @@ async def test_lean_session_malformed_declaration_allows_correction(
     assert generation in result.reset_conversation[0]["content"]
     corrected = await session.advance(model_turn("```lean4\nby\n  trivial\n```"))
     assert corrected.done and corrected.grade.reward == 1.0
-    assert (await session.grade((), stop_reason="stop")).reward == 1.0
+    assert (await session.grade((), stop_reason="stop", outputs={})).reward == 1.0
 
 
 @pytest.mark.asyncio

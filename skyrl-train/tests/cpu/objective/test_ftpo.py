@@ -20,11 +20,12 @@ from cloud.iris.tests.test_launch_config import _raw_config
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.group_admission import GroupAdvantageInvariant
 from skyrl_train.training_batch import TrainingBatchIterator
-from skyrl_train.config.ftpo import FTPOConfig, ftpo_config, validate_ftpo
+from skyrl_train.config.ftpo import FTPOBoundary, FTPOConfig, ftpo_config, validate_ftpo
 from skyrl_train.utils.utils import validate_cfg
 from skyrl_train.ftpo import (
     FTPOInputs,
     FTPOTargets,
+    VerifiedFTPOBoundary,
     boundary_values,
     compact_boundary_logits,
     ftpo_counts,
@@ -56,6 +57,36 @@ def config():
 
 def _surface(ids):
     return {0: "Wait", 1: " So", 2: " Therefore", 3: "Done", 4: "\n", 5: "WAIT"}[ids[0]]
+
+
+def test_ftpo_mixed_batch_preserves_each_boundary_contract():
+    surfaces = {0: "Wait", 1: "<|end_think|>", 2: "<tool_call>", 3: "{", 4: "}", 5: "Done"}
+    responses = [[0] * 8, [1, 2, 2], [0, 0], [0] * 8]
+    candidates = torch.tensor([0, 3, 4, 5]).expand(4, 8, 4)
+    scores = torch.tensor([0.4, 0.3, 0.2, 0.1]).log().expand_as(candidates)
+    chosen, weights = select_ftpo_candidates(
+        responses,
+        [[1] * len(response) for response in responses],
+        candidates,
+        scores,
+        prompt_ids=[[]] * 4,
+        decode=lambda tokens: "".join(surfaces[token] for token in tokens),
+        loop=LoopCreditConfig(),
+        config=replace(FTPOConfig(), chosen_balance_strength=0, rejected_balance_strength=0),
+        seed=42,
+        eligible=[True] * 4,
+        verified_boundaries=[None, None, VerifiedFTPOBoundary(1, (4,)), None],
+        boundary_modes=[
+            FTPOBoundary.TAIL_LOOP,
+            FTPOBoundary.REPEATED_TOOL_OPENER,
+            FTPOBoundary.VERIFIED_CLOSURE_AND_CONTINUATION,
+            FTPOBoundary.VERIFIED_CLOSURE,
+        ],
+    )
+    assert chosen.nonzero().tolist() == [[0, 1, 1], [0, 1, 2], [0, 1, 3], [1, 2, 1], [2, 1, 2]]
+    assert weights.nonzero().tolist() == [[0, 1], [1, 2], [2, 1]]
+    # A closure row without proof must not silently fall back to its detectable loop.
+    assert not chosen[3].any()
 
 
 def test_ftpo_launch_selects_protocol_boundary_from_recipe(tmp_path: Path) -> None:
@@ -481,12 +512,19 @@ def test_ftpo_recipe_accepts_greedy_capture_and_rejects_unsupported_geometry(con
             validate_ftpo(changed)
 
 
-@pytest.mark.parametrize("boundary", ["tail_loop", "repeated_tool_opener"])
-def test_ftpo_rollout_payload_survives_padding_serialization_and_microbatching(config, tmp_path, boundary):
-    config.trainer.algorithm.ftpo = {"boundary": boundary}
+@pytest.mark.parametrize("boundary", ["tail_loop", "repeated_tool_opener", "mixed"])
+@pytest.mark.parametrize("auxiliary", [False, True])
+def test_ftpo_rollout_payload_survives_padding_serialization_and_microbatching(config, tmp_path, boundary, auxiliary):
+    config.trainer.algorithm.ftpo = {"boundary": boundary, "repair_sft_weight": 0.7}
+    if auxiliary:
+        config.trainer.algorithm.policy_loss_type = "regular"
+        config.trainer.algorithm.advantage_estimator = "rloo_n"
+        config.trainer.algorithm.ftpo = {"boundary": boundary, "auxiliary_weight": 0.25, "repair_sft_weight": 0.7}
+        config.generator.sampling_params.temperature = 1
+        validate_ftpo(config)
     words = (
         ["Wait", "So", "Therefore", "Done", "[PAD]"]
-        if boundary == "tail_loop"
+        if boundary != "repeated_tool_opener"
         else ["<tool_call>", "{", "<|end_think|>", "Done", "[PAD]"]
     )
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
@@ -514,10 +552,22 @@ def test_ftpo_rollout_payload_survives_padding_serialization_and_microbatching(c
         ],
         "is_last_step": [True, True, True],
         "exclude_from_baseline": [False, False, True],
+        "verification_results": [VerificationResult.verified(0)] * 3,
     }
     batch = trainer.convert_to_training_input(trajectory, ["a", "b", "c"])
     assert batch.batch_size == 4
-    assert batch["loss_mask"].nonzero().tolist() == [[0, 2]]
+    structural_weights = batch["ftpo_weights"] if auxiliary else batch["loss_mask"]
+    assert structural_weights.nonzero().tolist() == [[0, 2]]
+    if boundary == "mixed":
+        assert trainer.all_metrics["ftpo/routes/tail_loop/rows"] == 3
+        assert trainer.all_metrics["ftpo/routes/tail_loop/eligible_rows"] == 2
+        assert trainer.all_metrics["ftpo/routes/tail_loop/selected_boundaries"] == 1
+        assert trainer.all_metrics["ftpo/routes/tail_loop/target_weight"] == float(structural_weights.sum())
+        assert trainer.all_metrics["ftpo/routes/repeated_tool_opener/selected_boundaries"] == 0
+        assert trainer.all_metrics["ftpo/routes/verified_closure_and_continuation/repair_tokens"] == 0
+    if auxiliary:
+        assert batch["loss_mask"][0].sum() == 8
+        assert batch["loss_mask"][1].sum() == 2
     # The model sees compacted tokens; boundary logits must still refer to the
     # prefix just before the second copy of the loop, despite unequal prompts.
     compact_logits = torch.arange(4 * 10 * 5).reshape(4, 10, 5).float()
@@ -532,8 +582,16 @@ def test_ftpo_rollout_payload_survives_padding_serialization_and_microbatching(c
     experiences = list(TrainingBatchIterator(restored, sample_batch_size=1))
     assert [bool(experience.ftpo.chosen_mask.any()) for experience in experiences] == [True, False, False, False]
     torch.testing.assert_close(experiences[0].ftpo.reference_logits, boundary_logits[:1])
-    expected_candidates = [1, 2, 3] if boundary == "tail_loop" else [1]
+    expected_candidates = [1] if boundary == "repeated_tool_opener" else [1, 2, 3]
     assert experiences[0].ftpo.candidate_ids[experiences[0].ftpo.chosen_mask].tolist() == expected_candidates
+    if auxiliary:
+        torch.testing.assert_close(experiences[0].ftpo.to("cpu").weights, structural_weights[:1])
+        counts = ftpo_counts(
+            [experience.ftpo for experience in experiences],
+            [experience.loss_mask for experience in experiences],
+            lambda value: value,
+        )
+        assert counts.examples == float(structural_weights.sum())
 
 
 @pytest.mark.asyncio
@@ -555,16 +613,32 @@ async def test_ftpo_empty_rollout_batch_skips_training(config):
 
 @pytest.mark.parametrize("terminal_eos", [False, True])
 @pytest.mark.parametrize("repair_response", [" ", ' ,"other":2'])
-@pytest.mark.parametrize("boundary", ["verified_closure", "verified_closure_and_continuation"])
+@pytest.mark.parametrize(
+    ("boundary", "auxiliary", "task_available"),
+    [
+        ("verified_closure", False, False),
+        ("verified_closure_and_continuation", False, False),
+        ("mixed", False, False),
+        ("mixed", True, True),
+        ("mixed", True, False),
+    ],
+)
 def test_verified_closure_trainer_preserves_rollouts_and_trains_verified_repairs(
-    config, tmp_path, terminal_eos, repair_response, boundary
+    config, tmp_path, terminal_eos, repair_response, boundary, auxiliary, task_available
 ):
     config.trainer.algorithm.ftpo = {
         "boundary": boundary,
         "chosen_balance_strength": 0,
         "repair_sft_weight": 0.7,
+        "auxiliary_weight": 0.25 if auxiliary else None,
     }
-    validate_cfg(config)
+    if auxiliary:
+        config.trainer.algorithm.policy_loss_type = "regular"
+        config.trainer.algorithm.advantage_estimator = "rloo_n"
+        config.generator.sampling_params.temperature = 1
+        validate_ftpo(config)
+    else:
+        validate_cfg(config)
     backend = Tokenizer(models.BPE())
     backend.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
     backend.decoder = decoders.ByteLevel()
@@ -621,15 +695,48 @@ def test_verified_closure_trainer_preserves_rollouts_and_trains_verified_repairs
         "is_last_step": [True] * 4,
         "exclude_from_baseline": [False, False, False, True],
     }
-    batch = trainer.convert_to_training_input(trajectory, ["a", "b", "c", "d"])
-    assert batch["loss_mask"].nonzero().tolist() == [[0, 1], [1, 1], [1, 2]]
+    if auxiliary:
+        if task_available:
+            trajectory["verification_results"][2] = VerificationResult.verified(1)
+            trajectory["rewards"][2][-1] = 1.0
+        else:
+            # The rollout projection excludes unavailable grading before conversion.
+            trajectory["loss_masks"][2] = [0] * len(responses[2])
+            trajectory["exclude_from_baseline"][2] = True
+        trajectory["rollout_logprobs"] = [np.full(len(row), -0.8, dtype=np.float32) for row in responses]
+    # A wholly unavailable group is rejected before conversion. Exercise an
+    # unavailable repetition within an otherwise admitted prompt group.
+    uids = ["a", "b", "b" if auxiliary and not task_available else "c", "d"]
+    batch = trainer.convert_to_training_input(trajectory, uids)
+    target_weights = batch["ftpo_weights"] if auxiliary else batch["loss_mask"]
+    assert target_weights.nonzero().tolist() == [[0, 1], [1, 1], [1, 2]]
     assert batch["ftpo_repair_mask"].nonzero().tolist() == [[1, 1], [1, 2]]
     assert trajectory["response_ids"] == original_responses
     repaired = batch["sequences"][1][batch["attention_mask"][1].bool()].tolist()
     assert tokenizer.decode(repaired, clean_up_tokenization_spaces=False) == 'assistant [{"a":1 }]'
-    assert batch["rollout_logprobs"] is None
+    if auxiliary:
+        assert batch["loss_mask"].sum() == (len(responses[2]) if task_available else 0)
+        assert batch["loss_mask"][2].sum() == (len(responses[2]) if task_available else 0)
+        assert batch["rewards"].sum() == int(task_available)
+        assert batch["rewards"][2, len(responses[2]) - 1] == int(task_available)
+        assert batch.metadata["exclude_from_baseline"][2] == (not task_available)
+        torch.testing.assert_close(
+            batch["rollout_logprobs"][2, : len(responses[2])], torch.full((len(responses[2]),), -0.8)
+        )
+        unchanged = batch["sequences"][2][batch["attention_mask"][2].bool()].tolist()
+        assert unchanged == prompt + original_responses[2]
+    else:
+        assert batch["rollout_logprobs"] is None
     assert batch["student_topk_indices"][batch["ftpo_chosen_mask"]].tolist() == [candidates[1]]
     assert trainer.all_metrics["ftpo/selected_boundaries"] == 1
+    if boundary == "mixed":
+        prefix = "ftpo/routes/verified_closure_and_continuation"
+        assert trainer.all_metrics[f"{prefix}/rows"] == 3
+        assert trainer.all_metrics[f"{prefix}/eligible_rows"] == 2
+        assert trainer.all_metrics[f"{prefix}/selected_boundaries"] == 1
+        assert trainer.all_metrics[f"{prefix}/repair_tokens"] == 2
+        assert trainer.all_metrics[f"{prefix}/target_weight"] == float(target_weights.sum())
+        assert trainer.all_metrics["ftpo/routes/tail_loop/selected_boundaries"] == 0
     batch["ftpo_reference_logits"] = torch.zeros(4, len(tokenizer))
     for key in ("action_log_probs", "base_action_log_probs", "values", "returns", "advantages"):
         batch[key] = torch.zeros_like(batch["loss_mask"])

@@ -23,6 +23,7 @@ from cloud.iris.rl_config_translation import (
 )
 from skyrl_train.distributed.step_policy import NonfiniteStepPolicy, nonfinite_step_policy
 from skyrl_train.dataset.tasks import source_row_task
+from marinskyrl.runtime_options import reference_model_required
 
 
 def _raw_config() -> dict[str, Any]:
@@ -113,6 +114,31 @@ def _raw_config() -> dict[str, Any]:
     }
 
 
+def test_launch_preserves_harbor_dataset_relative_paths(tmp_path):
+    raw = _raw_config()
+    task = {
+        "git_url": "https://example.org/tasks.git",
+        "git_commit_id": "b" * 40,
+        "path": "datasets/bfcl_parity/example-task",
+    }
+    raw["run"]["export_hf"] = False
+    raw["skyrl"]["trainer"]["callbacks"] = [
+        {
+            "type": "harbor_evaluation",
+            "daytona_api_key_env": "DAYTONA_EVAL_API_KEY",
+            "cohorts": [{"name": "bfcl_parity", "reward_key": "reward", "job": {"tasks": [task]}}],
+            "timeout": 600,
+            "minimum_coverage": 0.9,
+        }
+    ]
+    path = tmp_path / "launch.yaml"
+    path.write_text(yaml.safe_dump(raw))
+
+    config = load_launch_config(path)
+    resolved_task = config.skyrl.trainer.callbacks[0].cohorts[0].job.tasks[0]
+    assert OmegaConf.to_container(resolved_task) == task
+
+
 def test_launch_rejects_terminal_export_without_request_callback(tmp_path):
     raw = _raw_config()
     raw["skyrl"]["trainer"].update(export_hf_artifact=True, ckpt_interval=1, hf_save_interval=-1)
@@ -150,7 +176,7 @@ async def test_custom_session_settings_reach_private_grading_through_the_launch_
             ModelTurn({"role": "assistant", "content": text}, (), (1,), None, "stop", text)
         )
         assert transition.done and transition.grade.reward == reward
-        assert (await session.grade((), stop_reason="stop")).reward == reward
+        assert (await session.grade((), stop_reason="stop", outputs={})).reward == reward
         assert start.messages == ({"role": "user", "content": "What is six plus six?"},)
     finally:
         await session.close()
@@ -198,6 +224,22 @@ def test_launch_config_composes_and_loads_as_structured_hydra(
         path.write_text(yaml.safe_dump(raw, sort_keys=False))
         with pytest.raises(ValueError, match="gspo requires trainer.algorithm.loss_reduction=sequence_mean"):
             load_launch_config(path)
+
+
+def test_auxiliary_ftpo_launch_retains_task_objective_and_topk(tmp_path: Path) -> None:
+    # Smartie's mixed objective previously failed the launcher's distillation-only top-K gate.
+    raw = _raw_config()
+    raw["skyrl"]["trainer"]["use_sample_packing"] = False
+    raw["skyrl"]["trainer"]["algorithm"].update(policy_loss_type="regular", ftpo={"auxiliary_weight": 0.1})
+    raw["skyrl"]["generator"]["sampling_params"] = {"temperature": 1.0, "logprobs": 32}
+    path = tmp_path / "joint-launch.yaml"
+    path.write_text(yaml.safe_dump(raw))
+
+    config = load_launch_config(path)
+
+    assert config.skyrl.trainer.algorithm.policy_loss_type == "regular"
+    assert config.skyrl.generator.sampling_params.logprobs == 32
+    assert reference_model_required(config.skyrl.trainer.algorithm)
 
 
 @pytest.mark.parametrize("switch", ["use_abs_kl", "use_kl_estimator_k3"])

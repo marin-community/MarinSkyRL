@@ -162,6 +162,8 @@ class TrainingContext:
         self._running: set[asyncio.Task] = set()
         self._dispatcher: asyncio.Task | None = None
         self._failure: asyncio.Future | None = None
+        self._submission_allowed = asyncio.Event()
+        self._submission_allowed.set()
 
     @classmethod
     def from_config(cls, config: DictConfig, dataset: PromptGroupDataset, workers: RolloutWorkers) -> TrainingContext:
@@ -222,6 +224,15 @@ class TrainingContext:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         ray.kill(self._buffer)
+
+    async def pause_and_drain(self) -> None:
+        """Stop dispatching new generation and finish already submitted groups."""
+        self._submission_allowed.clear()
+        if self._running:
+            await self._until_failure(asyncio.gather(*self._running))
+
+    def resume(self) -> None:
+        self._submission_allowed.set()
 
     async def publish(self, policy_step: int) -> None:
         """Acknowledge the previous batch and lease rollouts at ``policy_step``, whose weights are now live."""
@@ -369,12 +380,16 @@ class TrainingContext:
     async def _dispatch(self) -> None:
         try:
             while True:
+                await self._submission_allowed.wait()
                 with self._wait("slot"):
                     lease = await self._buffer.acquire_lease.remote()
                 with self._wait("prompt"):
                     async with self._uids_released:
                         prompt = await self._uids_released.wait_for(lambda: self.loader.next_prompt(self._live_uids))
                         self._live_uids[prompt["uid"]] += 1
+                # A lease or prompt wait may span an evaluation boundary. Keep the
+                # single acquired lease, but do not submit its generation yet.
+                await self._submission_allowed.wait()
                 task = RolloutTask(lease, prompt, self._request_spec.request(prompt, lease.policy_step))
                 self._in_flight[lease.lease_id] = task
                 running = asyncio.create_task(self._run(task))

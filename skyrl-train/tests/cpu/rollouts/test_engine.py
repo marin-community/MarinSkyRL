@@ -277,7 +277,7 @@ async def test_task_programming_failure_does_not_commit_a_masked_group(task_inpu
                 raise error_type("Invalid session implementation")
             return Transition(done=True, reward=1.0, grade=GradeResult(Outcome.GRADED, 1.0))
 
-        async def grade(self, messages, *, stop_reason):
+        async def grade(self, messages, *, stop_reason, outputs):
             if operation == "grade":
                 raise error_type("Invalid session implementation")
             return GradeResult(Outcome.GRADED, 1.0)
@@ -396,7 +396,7 @@ async def test_interrupted_tasks_keep_verified_turns_and_apply_training_policy(
                 done=False, observations=({"role": "user", "content": "Continue"},), reward=1.0, grade=grade
             )
 
-        async def grade(self, messages, *, stop_reason):
+        async def grade(self, messages, *, stop_reason, outputs):
             return fold_grades(self.grades)
 
         async def close(self):
@@ -571,7 +571,7 @@ async def test_native_rewards_and_credit_remain_aligned_across_tool_observations
                 reward_components={"penalty": -0.5 * self.turn},
             )
 
-        async def grade(self, messages, *, stop_reason):
+        async def grade(self, messages, *, stop_reason, outputs):
             return fold_grades(self.grades)
 
         async def close(self):

@@ -540,9 +540,10 @@ class TrainingBatchIterator(Iterator[Experience]):
             ),
             ftpo=FTPOTargets(
                 batch["student_topk_indices"],
-                batch["ftpo_chosen_mask"] & (batch["loss_mask"] > 0).unsqueeze(-1),
+                batch["ftpo_chosen_mask"] & (batch.get("ftpo_weights", batch["loss_mask"]) > 0).unsqueeze(-1),
                 batch["ftpo_reference_logits"],
                 batch.get("ftpo_repair_mask"),
+                batch.get("ftpo_weights"),
             )
             if "ftpo_chosen_mask" in batch
             else None,

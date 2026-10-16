@@ -203,7 +203,8 @@ trainer:
     advantage_batch_normalize: false
     value_head_prefix: "value_head"
     policy_loss_type: "regular"
-    # FTPOConfig owns the defaults; set policy_loss_type=ftpo to activate.
+    # FTPOConfig owns the defaults. policy_loss_type=ftpo selects standalone
+    # supervision; ftpo.auxiliary_weight adds it to a task-reward policy loss.
     ftpo: {}
     # DPO pairing parameters; set policy_loss_type=dpo (and loss_reduction=pair_mean,
     # environment.env_class=preference_pair) to activate.

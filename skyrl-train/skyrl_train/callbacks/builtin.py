@@ -23,16 +23,18 @@ import contextlib
 import json
 import math
 import os
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Type
 
 from loguru import logger
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_export_enabled
 from skyrl_train.distillation import DISTILLATION_SCORED_TOKENS_METRIC
 from skyrl_train.json_serialization import to_jsonable
 from skyrl_train.io import io
+from skyrl_train.inline_harbor_client import collect_harbor
 from marinskyrl.checkpoint_paths import BEST_CHECKPOINT_FILENAME, POLICY_CHECKPOINT_SUBDIRECTORY
 from marinskyrl.resource_locator import join_resource_path
 from skyrl_train.inference_engines.vllm.stats import VLLM_NUM_ENGINES_METRIC, IntervalReadMode
@@ -207,7 +209,11 @@ class BestCheckpointCallback(TrainerCallback):
                 self.best_score = json.load(stream)["accuracy"]
         attempted = metrics["eval/all/num_attempted"]
         scored = metrics["eval/all/num_scored"]
-        if attempted != self.expected_tasks or scored < self.minimum_scored_tasks:
+        if (
+            attempted != self.expected_tasks
+            or scored < self.minimum_scored_tasks
+            or not metrics.get("eval/selection_eligible", 1.0)
+        ):
             return control
         score = metrics["eval/all/avg_verifier_score"]
         if not math.isfinite(score) or not 0 <= score <= 1:
@@ -234,6 +240,64 @@ class BestCheckpointCallback(TrainerCallback):
         io.makedirs(root, exist_ok=True)
         io.write_bytes_atomic(best_path, json.dumps(payload).encode())
         self.best_score = score
+        return control
+
+
+@register_callback("harbor_evaluation")
+class HarborEvaluationCallback(TrainerCallback):
+    """Evaluate frozen policy weights through Harbor before checkpoint selection."""
+
+    error_behavior = CallbackErrorBehavior.RAISE
+
+    def __init__(self, *, cohorts: list[dict], timeout: float, minimum_coverage: float, daytona_api_key_env: str):
+        self.cohorts = OmegaConf.to_container(cohorts, resolve=True) if OmegaConf.is_config(cohorts) else cohorts
+        self.timeout = timeout
+        self.minimum_coverage = minimum_coverage
+        self.daytona_api_key_env = daytona_api_key_env
+
+    async def collect_evaluation(self, state, *, trainer, pool):
+        client = trainer.inference_engine_client
+        if not client.enable_http_endpoint:
+            raise ValueError("Harbor validation requires generator.enable_http_endpoint")
+        cohorts = deepcopy(self.cohorts)
+        for cohort in cohorts:
+            job = cohort["job"]
+            job["job_name"] = f"step-{state.global_step}-{cohort['name']}"
+            job["jobs_dir"] = join_resource_path(trainer.cfg.trainer.export_path, "inline_harbor")
+            for agent in job["agents"]:
+                agent["model_name"] = f"openai/{trainer.cfg.trainer.export_path}/step-{state.global_step}"
+                agent["model_alias"] = f"openai/{client.model_name}"
+                agent.setdefault("kwargs", {})["api_base"] = (
+                    f"http://{client.http_endpoint_host}:{client.http_endpoint_port}/v1"
+                )
+        environment = os.environ.copy()
+        environment["DAYTONA_API_KEY"] = environment[self.daytona_api_key_env]
+        environment["OPENAI_API_KEY"] = "unused-local-inference"
+        async with asyncio.timeout(self.timeout):
+            results = await collect_harbor(cohorts, pool, environment)
+        return {f"eval/harbor/{name}/{key}": value for name, result in results.items() for key, value in result.items()}
+
+    async def on_evaluate_async(self, state, control, *, metrics, trainer, **kwargs):
+        attempted = metrics["eval/all/num_attempted"]
+        scored = metrics["eval/all/num_scored"]
+        reward_sum = metrics["eval/all/avg_verifier_score"] * scored if scored else 0.0
+        metrics["eval/selection_eligible"] = 1.0
+        for cohort in self.cohorts:
+            name = cohort["name"]
+            prefix = f"eval/harbor/{name}/"
+            result = {key.removeprefix(prefix): value for key, value in metrics.items() if key.startswith(prefix)}
+            if result["num_scored"] < self.minimum_coverage * result["num_attempted"]:
+                metrics["eval/selection_eligible"] = 0.0
+                logger.warning("Insufficient inline Harbor scoring coverage for {}: {}", name, result)
+            attempted += result["num_attempted"]
+            scored += result["num_scored"]
+            reward_sum += result["reward_sum"]
+        metrics["eval/all/num_attempted"] = attempted
+        metrics["eval/all/num_scored"] = scored
+        if scored:
+            metrics["eval/all/avg_verifier_score"] = reward_sum / scored
+        else:
+            metrics.pop("eval/all/avg_verifier_score", None)
         return control
 
 
@@ -276,16 +340,26 @@ class EvaluationCallback(TrainerCallback):
         if any(not keys for keys in self.metric_groups.values()):
             raise ValueError("evaluation metric groups must be nonempty")
 
-    async def on_evaluate_async(
-        self, state: TrainerState, control: TrainerControl, *, metrics: Dict[str, float], trainer, **kwargs
-    ) -> TrainerControl:
-        for name, parameters in self.additional_evaluations.items():
+    async def collect_evaluation(self, state, *, trainer, pool):
+        metrics = {}
+
+        async def collect(name, parameters):
             additional = await trainer.eval(
                 val_set_name=name,
                 sampling_params=parameters.sampling_params,
                 n_samples_per_prompt=parameters.n_samples_per_prompt,
+                evaluation_pool=pool,
             )
             metrics.update({key.replace("eval/", f"eval/{name}/", 1): value for key, value in additional.items()})
+
+        async with asyncio.TaskGroup() as tasks:
+            for name, parameters in self.additional_evaluations.items():
+                tasks.create_task(collect(name, parameters))
+        return metrics
+
+    async def on_evaluate_async(
+        self, state: TrainerState, control: TrainerControl, *, metrics: Dict[str, float], trainer, **kwargs
+    ) -> TrainerControl:
         for name, members in self.metric_groups.items():
             metrics[name] = math.fsum(metrics[member] / len(members) for member in members)
             if not math.isfinite(metrics[name]):

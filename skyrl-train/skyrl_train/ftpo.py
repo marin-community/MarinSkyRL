@@ -35,6 +35,7 @@ class FTPOTargets:
     chosen_mask: torch.Tensor
     reference_logits: torch.Tensor
     repair_mask: torch.Tensor | None = None
+    weights: torch.Tensor | None = None
 
     def to(self, device: torch.device) -> "FTPOTargets":
         return FTPOTargets(
@@ -42,6 +43,7 @@ class FTPOTargets:
             self.chosen_mask.to(device),
             self.reference_logits.to(device),
             None if self.repair_mask is None else self.repair_mask.to(device),
+            None if self.weights is None else self.weights.to(device),
         )
 
     def pin_memory(self) -> "FTPOTargets":
@@ -50,6 +52,7 @@ class FTPOTargets:
             self.chosen_mask.pin_memory(),
             self.reference_logits.pin_memory(),
             None if self.repair_mask is None else self.repair_mask.pin_memory(),
+            None if self.weights is None else self.weights.pin_memory(),
         )
 
 
@@ -167,6 +170,7 @@ def select_ftpo_candidates(
     seed: int,
     eligible: Sequence[bool],
     verified_boundaries: Sequence[VerifiedFTPOBoundary | None] | None = None,
+    boundary_modes: Sequence[FTPOBoundary] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Select detected or verified boundary alternatives and balance the batch.
 
@@ -177,20 +181,23 @@ def select_ftpo_candidates(
     weights = torch.zeros(candidate_ids.shape[:2], dtype=torch.float32)
     surfaces: dict[int, str] = {}
     rejected_by_row = {}
-    if config.boundary.uses_verified_boundaries:
+    modes = [config.boundary] * len(response_ids) if boundary_modes is None else boundary_modes
+    if len(modes) != len(response_ids):
+        raise ValueError("FTPO requires one boundary mode per response")
+    if any(mode.uses_verified_boundaries for mode in modes):
         if verified_boundaries is None or len(verified_boundaries) != len(response_ids):
             raise ValueError("Verified closure FTPO requires one verified boundary entry per response")
-    for row, (prompt, response, mask, allowed) in enumerate(
-        zip(prompt_ids, response_ids, loss_masks, eligible, strict=True)
+    for row, (prompt, response, mask, allowed, mode) in enumerate(
+        zip(prompt_ids, response_ids, loss_masks, eligible, modes, strict=True)
     ):
         if not allowed:
             continue
         verified = None
-        if config.boundary.uses_verified_boundaries:
+        if mode.uses_verified_boundaries:
             assert verified_boundaries is not None
             verified = verified_boundaries[row]
             position = None if verified is None else verified.response_position
-        elif config.boundary == FTPOBoundary.REPEATED_TOOL_OPENER:
+        elif mode == FTPOBoundary.REPEATED_TOOL_OPENER:
             position = repeated_tool_opener_boundary(prompt, response, mask, decode)
         else:
             hit = tail_loop(response, mask, loop)
@@ -214,7 +221,7 @@ def select_ftpo_candidates(
             if token not in surfaces:
                 surfaces[token] = decode([token])
             surface = surfaces[token]
-            if config.boundary == FTPOBoundary.REPEATED_TOOL_OPENER and surface.strip() != "{":
+            if mode == FTPOBoundary.REPEATED_TOOL_OPENER and surface.strip() != "{":
                 continue
             if token == rejected or surface.lower() == rejected_surface:
                 continue
@@ -262,6 +269,8 @@ def ftpo_counts(
     """Count weighted examples and vocabulary entries across the optimizer step."""
     counts = torch.zeros(4, dtype=torch.float64, device=weights[0].device)
     for target, weight in zip(targets, weights, strict=True):
+        if target.weights is not None:
+            weight = target.weights
         active_weights = weight * target.chosen_mask.any(-1)
         target_count = target.chosen_mask.sum(-1) + 1  # chosen IDs and the rejected ID
         counts[0] += active_weights.sum()

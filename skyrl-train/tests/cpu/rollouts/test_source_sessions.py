@@ -6,19 +6,26 @@ import shutil
 from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
+import httpx
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from daytona import AsyncDaytona, CreateSandboxFromSnapshotParams, DaytonaConfig, DaytonaRateLimitError
+from aiohttp import web
+from aiohttp.test_utils import TestServer
 from omegaconf import OmegaConf
 from skyrl_gym.verification import VerificationStatus
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
 from shellbox.machine import Backend, ExitReason, Result, PackageSpec, UnsupportedMachineSpec
 from taskcompendium.models import Source
+from taskcompendium.grader import verifyit_package
+from verifyit.spec import JudgeSpec
 from skyrl_train.rollouts.task_projections import StepTaskProjection, WholeTaskProjection
 from skyrl_train.dataset.tasks import SourceTaskDataset, source_row_task
 from skyrl_train.dataset.nemotron_ultra import NemotronTaskDataset
 from skyrl_train.rollouts.buffer import RolloutLease, RolloutTask
-from skyrl_train.rollouts.task_worker import TaskRolloutWorker
+from skyrl_train.rollouts.task_worker import RemoteJudgeSettings, TaskRolloutWorker, TaskRolloutWorkerSpec
+from skyrl_train.rollouts.workers import WorkerShard
 from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
 from skyrl_gym.source_task import source_task
 from skyrl_train.config.utils import get_default_config
@@ -28,7 +35,90 @@ from skyrl_train.trajectory_runners.types import TrajectoryID
 from skyrl_train.trajectory_runners.trajectory_processing import prepare_trajectory_request, validate_trajectory_batch
 from skyrl_train.trajectory_runners.model_clients import DirectModelClient, ModelServerError
 from skyrl_train.rollout_observability import observe_rollout_call
-from tests.cpu.rollouts.engine_fakes import ConversationClient, InferenceClient, Tokenizer, Writer
+from tests.cpu.rollouts.engine_fakes import ConversationClient, FixtureImageFactory, InferenceClient, Tokenizer, Writer
+
+
+@pytest.mark.asyncio
+async def test_native_daytona_worker_uses_explicit_account_at_http_boundary(monkeypatch):
+    received = []
+
+    async def inventory(request):
+        received.append(request.headers["Authorization"])
+        return web.json_response({"items": [], "nextCursor": None})
+
+    app = web.Application()
+    app.router.add_get("/{path:.*}", inventory)
+    monkeypatch.setenv("TEST_NATIVE_DAYTONA_KEY", "native-training-key")
+    monkeypatch.setenv("DAYTONA_API_KEY", "wrong-ambient-key")
+    config = get_default_config()
+    config.environment.task_sessions.daytona = {"api_key_env": "TEST_NATIVE_DAYTONA_KEY", "ttl_minutes": 60}
+    async with TestServer(app) as server:
+        monkeypatch.setenv("DAYTONA_API_URL", str(server.make_url("")).rstrip("/"))
+        worker = TaskRolloutWorkerSpec.from_config(config, []).build(Tokenizer(), WorkerShard(0, 1))
+        try:
+            async with worker.factories[Backend.DAYTONA].factory.client_factory() as client:
+                assert [sandbox async for sandbox in client.list()] == []
+        finally:
+            await worker.shutdown()
+    assert received == ["Bearer native-training-key"]
+    assert "native-training-key" not in OmegaConf.to_yaml(config)
+
+
+@pytest.mark.asyncio
+async def test_worker_remote_judge_uses_runtime_secret_and_emits_training_reward(task_inputs, monkeypatch):
+    config, request = task_inputs
+    task = request.rows[0].lowered
+    grader = verifyit_package(
+        JudgeSpec(
+            rubric="labels",
+            model="fixture-judge",
+            references=("12",),
+            system_prompt="Grade the answer",
+            prompt_template="{reference}\n{candidate}",
+            label_scores={"PASS": 1.0, "FAIL": 0.0},
+        ),
+        environment=NATIVE_ENVIRONMENT,
+    ).grader
+    task = lowered_task(task.task.model_copy(update={"grader": grader}), verifier_backend="docker")
+    request = replace(request, rows=(replace(request.rows[0], lowered=task),))
+    monkeypatch.setenv("TEST_ROLLOUT_JUDGE_KEY", "worker-only-secret")
+    settings = RemoteJudgeSettings("https://judge.invalid/v1", "TEST_ROLLOUT_JUDGE_KEY")
+    observed = []
+
+    def send(client, outbound, **kwargs):
+        observed.append(outbound)
+        return httpx.Response(
+            200,
+            request=outbound,
+            json={
+                "id": "judge",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "fixture-judge",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "PASS"}, "finish_reason": "stop"}],
+            },
+        )
+
+    monkeypatch.setattr(httpx.Client, "send", send)
+    worker = TaskRolloutWorker(
+        config,
+        WholeTaskProjection(config, Tokenizer()),
+        InferenceClient(),
+        {"docker": FixtureImageFactory()},
+        shutdown_timeout=30,
+        judge_connection=settings.connection(),
+    )
+    writer = Writer()
+    try:
+        await worker.run_task(RolloutTask(RolloutLease("judge", 0, 1), {"uid": task.task.id}, request), writer)
+    finally:
+        await worker.shutdown()
+    batch = writer.groups[0][1].trajectory_batch
+    assert batch["rewards"] == [1.0]
+    assert batch["loss_masks"] == [[1, 1]]
+    assert observed[0].headers["authorization"] == "Bearer worker-only-secret"
+    assert "worker-only-secret" not in repr(request)
+    assert "worker-only-secret" not in repr(settings)
 
 
 @pytest.mark.asyncio
@@ -708,20 +798,73 @@ async def test_source_machine_selection_controls_tool_results(task_inputs, task_
 @pytest.mark.asyncio
 @pytest.mark.parametrize("projection_type", [WholeTaskProjection, StepTaskProjection])
 @pytest.mark.parametrize(
-    "session,operation,cause_type",
+    "session,operation,cause_type,provider_call",
     [
-        ("searchcode", "prepare", "RuntimeError"),
-        ("nemotron_ultra", "prepare", "RuntimeError"),
-        ("searchcode", "start", "UnsupportedMachineSpec"),
-        ("searchcode", "start", "RuntimeError"),
+        ("searchcode", "prepare", "RuntimeError", None),
+        ("nemotron_ultra", "prepare", "RuntimeError", None),
+        ("searchcode", "start", "UnsupportedMachineSpec", None),
+        ("searchcode", "start", "RuntimeError", None),
+        ("searchcode", "start", "DaytonaRateLimitError", "snapshot"),
+        ("searchcode", "start", "DaytonaRateLimitError", "create_sandbox"),
+        ("searchcode", "start", "DaytonaRateLimitError", "get_toolbox_proxy_url"),
     ],
 )
 async def test_python_startup_failure_is_masked_without_losing_its_graded_peer(
-    task_inputs, task_machine, projection_type, session, operation, cause_type
+    task_inputs, task_machine, projection_type, session, operation, cause_type, provider_call
 ):
     if operation == "start":
-        startup_error = UnsupportedMachineSpec if cause_type == "UnsupportedMachineSpec" else RuntimeError
-        task_machine.create = AsyncMock(side_effect=startup_error("The task provider did not start the machine"))
+        if cause_type == "DaytonaRateLimitError":
+
+            async def rate_limit(request):
+                if request.method == "POST" and provider_call == "get_toolbox_proxy_url":
+                    return web.json_response(
+                        {
+                            "id": "fixture",
+                            "organizationId": "fixture",
+                            "name": "fixture",
+                            "user": "root",
+                            "env": {},
+                            "labels": {},
+                            "public": False,
+                            "networkBlockAll": False,
+                            "target": "us",
+                            "cpu": 2,
+                            "gpu": 0,
+                            "memory": 4,
+                            "disk": 10,
+                            "state": "started",
+                            "toolboxProxyUrl": "",
+                        }
+                    )
+                return web.json_response(
+                    {"message": "secret response body", "code": "secret-code"},
+                    status=429,
+                    headers={
+                        "X-Private-Header": "secret-key",
+                        "X-RateLimit-Limit-sandbox-create": "300",
+                        "X-RateLimit-Remaining-sandbox-create": "0",
+                        "Retry-After-sandbox-create": "17",
+                        "X-RateLimit-Reset-sandbox-create": "secret-key",
+                        "Retry-After-authenticated": "-1",
+                    },
+                )
+
+            app = web.Application()
+            app.router.add_route("*", "/{path:.*}", rate_limit)
+            async with TestServer(app) as server:
+                async with AsyncDaytona(
+                    DaytonaConfig(api_key="secret-key", api_url=str(server.make_url("")).rstrip("/"))
+                ) as client:
+                    with pytest.raises(DaytonaRateLimitError) as provider_failure:
+                        if provider_call == "snapshot":
+                            await client.snapshot.get("fixture")
+                        else:
+                            await client.create(CreateSandboxFromSnapshotParams(snapshot="fixture"))
+            startup_error = provider_failure.value
+        else:
+            startup_error_type = UnsupportedMachineSpec if cause_type == "UnsupportedMachineSpec" else RuntimeError
+            startup_error = startup_error_type("The task provider did not start the machine")
+        task_machine.create = AsyncMock(side_effect=startup_error)
     task_machine.run = AsyncMock(
         return_value=Result(1, b"", b"ModuleNotFoundError: No module named 'IPython'", False, False, ExitReason.EXITED)
     )
@@ -769,7 +912,9 @@ async def test_python_startup_failure_is_masked_without_losing_its_graded_peer(
     assert batch["loss_masks"] == [[0], [1, 1]]
     assert batch["exclude_from_baseline"] == [True, False]
     assert batch["exception_types"] == [
-        "TaskMachineError" if operation == "start" and cause_type == "RuntimeError" else "VerifierRuntimeError",
+        "TaskMachineError"
+        if operation == "start" and cause_type in {"RuntimeError", "DaytonaRateLimitError"}
+        else "VerifierRuntimeError",
         None,
     ]
     assert batch["error_treatments"] == ["mask", None]
@@ -778,6 +923,21 @@ async def test_python_startup_failure_is_masked_without_losing_its_graded_peer(
     assert failed_result.status is VerificationStatus.ERROR
     assert failed_result.diagnostics["operation"] == operation
     assert failed_result.diagnostics["cause_error_type"] == cause_type
+    if cause_type == "DaytonaRateLimitError":
+        assert failed_result.diagnostics["machine_operation"] == "create"
+        assert failed_result.diagnostics["provider_status_code"] == 429
+        expected_call = (
+            "daytona._async.snapshot.get"
+            if provider_call == "snapshot"
+            else f"daytona_api_client_async.api.sandbox_api.{provider_call}"
+        )
+        assert failed_result.diagnostics["provider_sdk_call"] == expected_call
+        assert failed_result.diagnostics["provider_rate_limits"] == {
+            "x-ratelimit-limit-sandbox-create": 300,
+            "x-ratelimit-remaining-sandbox-create": 0,
+            "retry-after-sandbox-create": 17,
+        }
+        assert "secret" not in json.dumps(failed_result.diagnostics)
     assert peer_result.status is VerificationStatus.VERIFIED
     assert peer_result.score == 1.0
     if operation == "prepare":

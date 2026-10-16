@@ -1,6 +1,7 @@
 from taskcompendium.submission import conversation_messages
 
 import asyncio
+import pickle
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from functools import partial
@@ -81,6 +82,10 @@ async def test_owned_machine_preserves_fault_categories(tmp_path, operation, err
                 await machine.download("/artifact", tmp_path / "artifact")
         if error_type is OSError:
             assert isinstance(failure.value.__cause__, OSError)
+            assert failure.value.operation == operation
+            restored = pickle.loads(pickle.dumps(failure.value))
+            assert restored.operation == operation
+            assert str(restored) == str(failure.value)
     finally:
         await factory.close(asyncio.get_running_loop().time() + 5)
 

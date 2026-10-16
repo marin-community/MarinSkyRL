@@ -3,13 +3,64 @@ import json
 import pytest
 from unittest.mock import patch
 from datasets import Dataset
-from transformers import BatchEncoding
+from transformers import BatchEncoding, PreTrainedTokenizerFast
+from tokenizers import Tokenizer, models, pre_tokenizers
+from taskcompendium.models import AnswerType, FinalAction, FunctionDefinition, NoGrader
 from omegaconf import OmegaConf
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.dataset.tasks import SourceTaskDataset, TaskDataset, source_row_task, write_tasks
 from skyrl_train.entrypoints.main_base import BasePPOExp
 from skyrl_train.task_inputs import task_messages
+
+
+@pytest.mark.parametrize("num_workers", [1, 2])
+def test_native_task_filter_counts_tool_definitions(tmp_path, num_workers):
+    backend = Tokenizer(models.WordLevel({"[UNK]": 0}, unk_token="[UNK]"))
+    backend.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
+    tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=backend,
+        unk_token="[UNK]",
+        chat_template="{% for m in messages %}{{ m.content }} {% endfor %}"
+        "{% for tool in tools or [] %}{{ tool.function.description }} {% endfor %}",
+    )
+    configs = OmegaConf.to_container(get_default_config().environment.task_sessions, resolve=True)
+    base = source_row_task(
+        {
+            "prompt": [{"role": "user", "content": "Choose a tool"}],
+            "env_class": "gsm8k",
+            "reward_spec": {"ground_truth": "1"},
+        },
+        0,
+        source_name="tool-budget",
+        environment_configs=configs,
+    )
+    tasks = []
+    for name, description in (("short", "Find a value"), ("long", "word " * 100)):
+        task = base.task.model_copy(
+            update={
+                "id": name,
+                "answer_type": AnswerType.NATIVE_ACTION,
+                "answer_format": FinalAction(require_call=True, max_calls=1),
+                "grader": NoGrader(reason="Loader-only test"),
+                "final_tools": (
+                    FunctionDefinition(name="lookup", description=description, parameters={"type": "object"}),
+                ),
+            }
+        )
+        tasks.append(
+            base.model_copy(
+                update={
+                    "task": task,
+                    "session": base.session.model_copy(update={"task_session": "shellbox"}),
+                }
+            )
+        )
+    path = tmp_path / "tools.parquet"
+    write_tasks(path, tasks)
+    dataset = TaskDataset([str(path)], tokenizer, 30, num_workers=num_workers)
+    admitted = [row["input"].lowered.task.id for row in dataset.collate_fn(list(dataset))]
+    assert admitted == ["short"]
 
 
 class _StubTokenizer:
@@ -134,7 +185,17 @@ def test_prompt_dataset_filtering_counts_batch_encoding_input_ids(mock_load_data
 def test_native_tasks_with_different_extras_preserve_each_row(tmp_path, num_workers, reverse):
     rows = [
         {
-            "prompt": [{"role": "user", "content": "First question"}],
+            "prompt": [
+                {"role": "user", "content": "First question"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"id": "call-1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}
+                    ],
+                },
+                {"role": "tool", "content": "Result", "tool_call_id": "call-1"},
+            ],
             "env_class": "gsm8k",
             "reward_spec": {"ground_truth": "1"},
             "prompt_token_ids": [17, 23],

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from email.parser import Parser
 from pathlib import Path
 import subprocess
+import re
 import tomllib
 import zipfile
 
@@ -68,7 +69,20 @@ def test_training_extras_publish_hardware_policy_and_rollout_requirements(built_
     assert {"marin-rolloutengine", "marin-shellbox", "marin-taskcompendium", "marin-verifyit"} <= {
         requirement.name for requirement in base_requirements
     }
-    assert all(requirement.url is None for requirement in base_requirements if requirement.name.startswith("marin-"))
+    task_packages = {"marin-rolloutengine", "marin-shellbox", "marin-taskcompendium", "marin-verifyit"}
+    revisions = set()
+    for requirement in base_requirements:
+        if requirement.name in task_packages:
+            subdirectory = requirement.name.removeprefix("marin-")
+            match = re.fullmatch(
+                rf"git\+https://github.com/marin-community/marin.git@([0-9a-f]{{40}})#subdirectory=lib/{subdirectory}",
+                requirement.url or "",
+            )
+            assert match is not None, f"Task runtime must use an immutable Marin source revision: {requirement}"
+            revisions.add(match.group(1))
+        elif requirement.name.startswith("marin-"):
+            assert requirement.url is None
+    assert len(revisions) == 1, "Task runtime packages must share one source revision"
     assert any(requirement.startswith("torch==") and "extra == 'vllm'" in requirement for requirement in requirements)
     assert any(requirement.startswith("memray") and "extra == 'telemetry'" in requirement for requirement in requirements)
     assert any(

@@ -133,7 +133,7 @@ class NemotronTaskSession:
         if self.python is not None:
             await self.python.start()
         options = {key: value for key, value in self.request.items() if key != "input"}
-        start = session_start(self.task, shell_tool=None)
+        start = session_start(self.task, shell_tool=None, provider_tools=())
         return SessionStart(start.messages, {**start.options, **options})
 
     async def advance(self, turn: ModelTurn) -> Transition:
@@ -460,7 +460,9 @@ class NemotronTaskSession:
             "execution_output": execution,
         }
 
-    async def grade(self, messages: tuple[dict[str, Any], ...], *, stop_reason: str) -> GradeResult:
+    async def grade(
+        self, messages: tuple[dict[str, Any], ...], *, stop_reason: str, outputs: dict[str, bytes]
+    ) -> GradeResult:
         return fold_grades(self.grades)
 
     async def close(self) -> None:

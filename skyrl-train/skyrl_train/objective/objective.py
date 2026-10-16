@@ -6,7 +6,8 @@ from marinskyrl.distillation import DistillationRewardMode
 from omegaconf import DictConfig, OmegaConf
 
 from skyrl_train.config.objective_spec import LossReduction, TopKLossParams
-from skyrl_train.ftpo import FTPOInputs
+from skyrl_train.config.ftpo import FTPOConfig
+from skyrl_train.ftpo import FTPOInputs, ftpo_loss
 from skyrl_train.objective.dpo import DPOInputs
 from skyrl_train.objective.losses import PolicyLoss, PolicyLossInputs, TokenLoss, complete_clip_metrics
 from skyrl_train.objective.reduction import StepCounts, policy_data_weights, reduce_to_step
@@ -23,6 +24,17 @@ class TopKTeacherBatch:
 
 
 @dataclass(frozen=True)
+class FTPOAuxiliaryBatch:
+    """Structural supervision with counts and masks independent of task rewards."""
+
+    inputs: FTPOInputs
+    weights: torch.Tensor
+    repair_log_probs: torch.Tensor
+    params: FTPOConfig
+    coefficient: float
+
+
+@dataclass(frozen=True)
 class ObjectiveMicroBatch:
     policy: PolicyLossInputs
     policy_data_weights: torch.Tensor
@@ -30,6 +42,7 @@ class ObjectiveMicroBatch:
     token_entropy: torch.Tensor
     teacher: TopKTeacherBatch | None
     correction_weights: torch.Tensor | None = None
+    structural: FTPOAuxiliaryBatch | None = None
 
 
 @dataclass(frozen=True)
@@ -38,6 +51,7 @@ class ObjectiveRows:
     kl: torch.Tensor
     entropy: torch.Tensor
     teacher: torch.Tensor | None
+    structural: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -62,6 +76,7 @@ def build_objective_micro_batch(
     ftpo: FTPOInputs | None = None,
     pair_roles: torch.Tensor | None = None,
     correction_weights: torch.Tensor | None = None,
+    structural: FTPOAuxiliaryBatch | None = None,
 ) -> ObjectiveMicroBatch:
     """Prepare finite values at masked positions before objective formulas run."""
     valid = loss_mask > 0
@@ -93,6 +108,7 @@ def build_objective_micro_batch(
         token_entropy=sanitize(token_entropy),
         teacher=teacher,
         correction_weights=None if correction_weights is None else sanitize(correction_weights).detach(),
+        structural=structural,
     )
 
 
@@ -137,6 +153,27 @@ def compute_policy_objective(
     if config.use_entropy_loss:
         combined = combined - config.entropy_loss_coef * entropy
     metrics = complete_clip_metrics(policy.metrics)
+    structural_row = None
+    if batch.structural is not None:
+        structural = batch.structural
+        if batch.policy.ftpo is not None:
+            raise ValueError("FTPO cannot be both the policy objective and an auxiliary objective")
+        values, structural_metrics = ftpo_loss(structural.inputs, structural.params)
+        weights = structural.weights
+        assert values.shape == weights.shape == structural.repair_log_probs.shape
+        active = structural.inputs.targets.chosen_mask.any(-1)
+        structural_row = (torch.where(active, values, 0) * weights).sum() / (structural.inputs.counts.examples or 1.0)
+        repair_mask = structural.inputs.targets.repair_mask
+        if repair_mask is not None:
+            if structural.params.repair_sft_weight is None:
+                raise ValueError("Structural repair supervision requires an explicit repair_sft_weight")
+            repair = torch.where(repair_mask, -structural.repair_log_probs, 0) * weights
+            structural_row = structural_row + structural.params.repair_sft_weight * repair.sum() / (
+                structural.inputs.counts.repair_tokens or 1.0
+            )
+        combined = combined + structural.coefficient * structural_row
+        metrics.update(structural_metrics)
+        metrics["structural_loss"] = (structural_row.detach() * report_scale).item()
     teacher_row = None
     if batch.teacher is not None:
         teacher = batch.teacher
@@ -165,6 +202,7 @@ def compute_policy_objective(
             kl=kl * report_scale,
             entropy=entropy * report_scale,
             teacher=None if teacher_row is None else teacher_row * report_scale,
+            structural=None if structural_row is None else structural_row * report_scale,
         ),
         metrics=metrics,
     )
