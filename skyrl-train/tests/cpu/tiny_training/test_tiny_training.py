@@ -2,18 +2,26 @@
 
 import multiprocessing
 import json
+import os
+import random
 import sys
 from multiprocessing.context import BaseContext
 from pathlib import Path
 
+from loguru import logger
 import pytest
 import torch
+import numpy as np
 from transformers import AutoModelForCausalLM
 from omegaconf import OmegaConf
 from skyrl_train.callbacks.base import TrainerCallback
 from skyrl_train.callbacks.builtin import register_callback
+from skyrl_train.callbacks.types import CallbackErrorBehavior
 
 from marinskyrl.checkpoint_paths import POLICY_CHECKPOINT_SUBDIRECTORY
+from skyrl_train.checkpoint_generation import COMMIT_FILENAME, resolve_checkpoint_payload
+from skyrl_train.hf_export_schema import TRAINER_STATE_FILENAME
+from tests.checkpoint_parity_state import assert_state_equal, snapshot_value
 from tests.cpu.tiny_training.cpu_backend import CHECKPOINT_FILE_TEMPLATE, CausalLMPolicy
 from tests.cpu.tiny_training.fixed_batch import fixed_training_batch, run_fixed_update
 from skyrl_train.rollouts.payloads import ROLLOUT_OBJECT_SUFFIX
@@ -39,12 +47,16 @@ RESUMED_STEP = 1
 # A run takes under half a minute on an idle host. The margin absorbs slower CI hosts and concurrent pytest-xdist
 # workers, and stays above the experiment's admission stall timeout so a stall reports its own error.
 RUN_TIMEOUT_SECONDS = 300
+CHECKPOINT_OBSERVATIONS_FILENAME = "checkpoint_observations.jsonl"
 
 
 @register_callback("test_step_limit")
 class _StepLimit(TrainerCallback):
-    def __init__(self, limit: int):
+    error_behavior = CallbackErrorBehavior.RAISE
+
+    def __init__(self, limit: int, action: str = "continue"):
         self.limit = limit
+        self.action = action
 
     def on_train_begin(self, state, control, **kwargs):
         control.step_limit = self.limit
@@ -52,20 +64,63 @@ class _StepLimit(TrainerCallback):
         path = Path(trainer.cfg.trainer.export_path) / f"start-{state.global_step}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"checkpoint_path": trainer.loaded_checkpoint_path}))
+        if self.action == "storage_failure":
+            logger.add(
+                Path(trainer.cfg.trainer.export_path) / CHECKPOINT_OBSERVATIONS_FILENAME,
+                format="{message}",
+                filter=lambda record: record["message"].startswith("checkpoint_observation "),
+            )
+        if self.action == "callback_stop" and trainer.loaded_checkpoint_path is not None:
+            random.random()
+            np.random.random()
+            torch.rand(1)
+            control.should_training_stop = True
+        return control
+
+    def on_step_end(self, state, control, **kwargs):
+        if self.action == "ftpo_stop":
+            kwargs["trainer"]._ftpo_stopped = True
+            control.should_training_stop = True
+        return control
+
+    def on_save(self, state, control, **kwargs):
+        if self.action == "save_stop":
+            control.should_training_stop = True
+        if self.action == "save_failure":
+            raise OSError("injected checkpoint callback storage failure")
         return control
 
 
-def _run_limited_training(root: Path, model: Path, limits: tuple[int, ...]) -> None:
+def _run_limited_training(root: Path, model: Path, limits: tuple[int, ...], action: str) -> None:
     cfg = experiment.tiny_training_config(
         root, model, TrainingMode.SYNC, RolloutShape.SINGLE_TURN, max_steps=1, checkpoint_interval=1
     )
     OmegaConf.update(
         cfg,
         "trainer.callbacks",
-        [{"type": "test_step_limit", "limit": limit} for limit in limits] + [{"type": "checkpoint", "save_steps": 1}],
+        [{"type": "test_step_limit", "limit": limit, "action": action} for limit in limits]
+        + [{"type": "checkpoint", "save_steps": 1}],
         force_add=True,
     )
-    experiment.run_tiny_training(cfg)
+    with pytest.MonkeyPatch.context() as patch:
+        if action == "storage_failure":
+            replace = os.replace
+            failed = False
+            commit_path = root / "ckpts" / "global_step_1" / COMMIT_FILENAME
+
+            def fail_first_commit(source, destination):
+                nonlocal failed
+                if not failed and Path(destination) == commit_path:
+                    failed = True
+                    raise OSError("injected commit storage failure")
+                return replace(source, destination)
+
+            patch.setattr(os, "replace", fail_first_commit)
+        if action == "save_failure":
+            with pytest.raises(OSError, match="injected checkpoint callback storage failure"):
+                experiment.run_tiny_training(cfg)
+        else:
+            experiment.run_tiny_training(cfg)
 
 
 @pytest.fixture(scope="module")
@@ -173,7 +228,8 @@ def test_async_training_resumes_with_committed_groups(runs: BaseContext, tmp_pat
     # The first two batches' leases open together, so the second batch's groups commit while the first trains
     # and its checkpoint holds them. A later step's leases open only when its batch is taken, and whether they
     # commit before that step's checkpoint is a race.
-    state = torch.load(tmp_path / "ckpts" / f"global_step_{RESUMED_STEP}" / "data.pt", weights_only=False)
+    step_path = tmp_path / "ckpts" / f"global_step_{RESUMED_STEP}"
+    state = torch.load(Path(resolve_checkpoint_payload(str(step_path))) / "data.pt", weights_only=False)
     assert state.ready
 
     _train(runs, tmp_path, tiny_policy, mode, shape, steps=NUM_STEPS, checkpoint_interval=1)
@@ -181,9 +237,21 @@ def test_async_training_resumes_with_committed_groups(runs: BaseContext, tmp_pat
     _assert_trained_to_max_steps(tmp_path, mode, shape)
 
 
-def test_callback_limits_resume_at_max_steps_and_keep_the_smallest_limit(runs, tmp_path, tiny_policy):
-    for limits in ((1,), (3, 4), (3,)):
-        run = runs.Process(target=_run_limited_training, args=(tmp_path, tiny_policy, limits))
+@pytest.mark.parametrize(
+    ("action", "phases", "expected_steps"),
+    [
+        ("continue", ((1,), (3, 4), (3,)), [1, 2, 3]),
+        ("ftpo_stop", ((1,), (3, 4)), [1]),
+        ("callback_stop", ((1,), (3, 4)), [1]),
+        ("save_stop", ((3,),), [1]),
+        ("save_failure", ((1,),), None),
+        ("storage_failure", ((1,),), [1]),
+    ],
+)
+def test_checkpointed_training_obeys_callback_controls(runs, tmp_path, tiny_policy, action, phases, expected_steps):
+    rng_states = []
+    for limits in phases:
+        run = runs.Process(target=_run_limited_training, args=(tmp_path, tiny_policy, limits, action))
         run.start()
         run.join(RUN_TIMEOUT_SECONDS)
         if run.exitcode is None:
@@ -191,12 +259,36 @@ def test_callback_limits_resume_at_max_steps_and_keep_the_smallest_limit(runs, t
             run.join()
             pytest.fail("callback-limited training did not finish")
         assert run.exitcode == 0
-    assert [record["trainer/global_step"] for record in _trained_steps(tmp_path)] == [1, 2, 3]
-    checkpoint = tmp_path / "ckpts" / "global_step_3" / "trainer_state.pt"
-    assert checkpoint.exists()
-    for step in (1, 3):
-        provenance = json.loads((tmp_path / "exports" / f"start-{step}.json").read_text())
-        assert provenance["checkpoint_path"] == str(tmp_path / "ckpts" / f"global_step_{step}")
+        if action == "save_failure":
+            assert not (tmp_path / "ckpts" / "latest_ckpt_global_step.txt").exists()
+            return
+        latest = int((tmp_path / "ckpts" / "latest_ckpt_global_step.txt").read_text())
+        payload = Path(resolve_checkpoint_payload(str(tmp_path / "ckpts" / f"global_step_{latest}"), verify_files=True))
+        rng_states.append(snapshot_value(torch.load(payload / "driver_rng_state.pt", weights_only=False)))
+    assert [record["trainer/global_step"] for record in _trained_steps(tmp_path)] == expected_steps
+    assert all("timing/save_checkpoints" in record for record in _trained_steps(tmp_path))
+    if action in ("ftpo_stop", "callback_stop"):
+        assert_state_equal(rng_states[0], rng_states[1])
+    if action == "continue":
+        for step in (1, 3):
+            provenance = json.loads((tmp_path / "exports" / f"start-{step}.json").read_text())
+            state = torch.load(Path(provenance["checkpoint_path"]) / TRAINER_STATE_FILENAME, weights_only=False)
+            assert state["global_step"] == step
+    checkpoint_metrics = [row for row in read_metrics(tmp_path) if "timing/save_checkpoints" in row]
+    assert checkpoint_metrics
+    for row in checkpoint_metrics:
+        assert row["timing/step_wall/checkpoint_work"] >= row["timing/save_checkpoints"] > 0
+        assert row["timing/step"] >= row["timing/step_wall/checkpoint_work"]
+    if action == "storage_failure":
+        observations = [
+            json.loads(line.partition(" ")[2])
+            for line in (tmp_path / "exports" / CHECKPOINT_OBSERVATIONS_FILENAME).read_text().splitlines()
+        ]
+        assert [row["outcome"] for row in observations if row["phase"] == "checkpoint_foreground_pause"] == [
+            "failure",
+            "success",
+        ]
+        assert any(row.get("trainer/checkpoint_save_failures") == 1 for row in checkpoint_metrics)
 
 
 def test_one_step_is_independent_of_micro_batch_size(runs: BaseContext, tmp_path: Path, tiny_policy: Path):

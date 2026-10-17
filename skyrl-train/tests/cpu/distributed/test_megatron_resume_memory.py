@@ -79,6 +79,28 @@ def test_resume_rebuilds_the_optimizer_state_with_the_gradients_off_the_device(m
     assert grads.resident, "training needs its gradient buffers back after the optimizer state is restored"
 
 
+def test_rank_rng_selection_preserves_exact_rank_and_maps_resized_dp(monkeypatch):
+    rank_states = [
+        {"coordinates": (0, 0, 0, 0, 0, 0), "generic": "dp0"},
+        {"coordinates": (0, 0, 0, 0, 0, 1), "generic": "dp1"},
+    ]
+    monkeypatch.setattr(megatron_strategy.dist, "get_world_size", lambda: 2)
+    monkeypatch.setattr(megatron_strategy, "_rng_parallel_coordinates", lambda: (0, 0, 0, 0, 0, 1))
+    assert megatron_strategy._select_rank_rng_state(rank_states, 1)["generic"] == "dp1"
+
+    monkeypatch.setattr(megatron_strategy.dist, "get_world_size", lambda: 3)
+    monkeypatch.setattr(megatron_strategy, "_rng_parallel_coordinates", lambda: (0, 0, 0, 0, 0, 2))
+    assert megatron_strategy._select_rank_rng_state(rank_states, 2)["generic"] == "dp0"
+
+
+def test_rank_rng_selection_keeps_common_state_for_changed_model_parallel_slice(monkeypatch):
+    monkeypatch.setattr(megatron_strategy.dist, "get_world_size", lambda: 3)
+    monkeypatch.setattr(megatron_strategy, "_rng_parallel_coordinates", lambda: (0, 1, 0, 0, 0, 0))
+    assert (
+        megatron_strategy._select_rank_rng_state([{"coordinates": (0, 0, 0, 0, 0, 0), "generic": "saved"}], 0) is None
+    )
+
+
 class _CheckpointOptimizer:
     """CPU boundary for Megatron's wrapper around a real lazy-state optimizer."""
 
@@ -127,14 +149,24 @@ def test_save_before_first_update_initializes_missing_moments_without_changing_w
         torch.save(kwargs["sharded_state_dict"], tmp_path / "state.pt")
 
     monkeypatch.setattr(megatron_strategy.dist, "barrier", lambda: None)
+    monkeypatch.setattr(megatron_strategy.dist, "get_world_size", lambda: 1)
+    monkeypatch.setattr(megatron_strategy.dist, "all_gather_object", lambda states, state: states.__setitem__(0, state))
+    for dimension in ("tensor_model", "pipeline_model", "context", "expert_model", "expert_tensor", "data"):
+        monkeypatch.setattr(megatron_strategy.mpu, f"get_{dimension}_parallel_rank", lambda: 0, raising=False)
+    monkeypatch.setattr(
+        megatron_strategy.tensor_parallel,
+        "get_cuda_rng_tracker",
+        lambda: SimpleNamespace(get_states=lambda: {}),
+        raising=False,
+    )
     monkeypatch.setattr(megatron_strategy.dist_checkpointing, "save", save)
     monkeypatch.setattr(megatron_strategy, "get_default_save_sharded_strategy", lambda name: None)
     monkeypatch.setattr(megatron_strategy, "FullyParallelSaveStrategyWrapper", lambda strategy, group: strategy)
     monkeypatch.setattr(megatron_strategy.mpu, "get_data_parallel_group", lambda **kwargs: None, raising=False)
-    monkeypatch.setattr(megatron_strategy.ckpt_base, "async_calls", SimpleNamespace(close=lambda: None), raising=False)
-    strategy = megatron_strategy.MegatronStrategy.__new__(megatron_strategy.MegatronStrategy)
-    strategy.optimizer_config = None
-    strategy.megatron_config = SimpleNamespace(optimizer_checkpoint_sharding_type="fully_reshardable")
+    strategy = megatron_strategy.MegatronStrategy(
+        SimpleNamespace(optimizer_checkpoint_sharding_type="fully_reshardable")
+    )
+    monkeypatch.setattr(megatron_strategy.ckpt_base, "async_calls", SimpleNamespace(close=lambda: None))
     monkeypatch.setattr(strategy, "get_rng_state", lambda: {})
     monkeypatch.setattr(strategy, "is_rank_0", lambda: False)
     monkeypatch.setattr(strategy, "log", lambda *args: None)

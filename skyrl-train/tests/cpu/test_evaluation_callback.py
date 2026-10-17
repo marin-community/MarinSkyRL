@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 from omegaconf import OmegaConf
 
+from skyrl_train.checkpoint_generation import commit_attempt, new_attempt_path
 from skyrl_train.callbacks.base import TrainerControl, TrainerState
 from skyrl_train.callbacks.builtin import BestCheckpointCallback, EvaluationCallback, HarborEvaluationCallback
 
@@ -34,16 +35,22 @@ async def test_evaluation_stops_at_the_first_qualifying_score(requirement):
 
 
 @pytest.mark.asyncio
-async def test_best_checkpoint_keeps_initial_ties_and_skips_invalid_coverage(tmp_path):
+@pytest.mark.parametrize("committed_attempt", [False, True])
+async def test_best_checkpoint_keeps_initial_ties_and_skips_invalid_coverage(tmp_path, committed_attempt):
     state = TrainerState(global_step=0, epoch=0, total_steps=12, num_steps_per_epoch=12)
 
     class CheckpointWriter:
         cfg = SimpleNamespace(trainer=SimpleNamespace(ckpt_path=str(tmp_path)))
 
         async def save_checkpoints(self):
-            destination = tmp_path / f"global_step_{state.global_step}" / "policy"
+            step = tmp_path / f"global_step_{state.global_step}"
+            payload = Path(new_attempt_path(str(step))) if committed_attempt else step
+            destination = payload / "policy"
             destination.mkdir(parents=True)
             (destination / "complete").write_text("saved")
+            (payload / "trainer_state.pt").write_bytes(b"trainer state")
+            if committed_attempt:
+                commit_attempt(str(step), str(payload), required_files={"trainer_state.pt", "policy/complete"})
 
     trainer = CheckpointWriter()
     callback = BestCheckpointCallback(initial_model_uri="initial-model", expected_tasks=123, minimum_scored_tasks=111)

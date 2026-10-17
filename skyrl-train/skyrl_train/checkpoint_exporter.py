@@ -13,6 +13,7 @@ from ray.util.placement_group import PlacementGroup, placement_group, remove_pla
 from transformers import PreTrainedTokenizerBase
 
 from marinskyrl.checkpoint_paths import POLICY_CHECKPOINT_SUBDIRECTORY, policy_export_path
+from skyrl_train.checkpoint_generation import resolve_checkpoint_payload
 from skyrl_train import hf_model_io
 from skyrl_train.hf_export_schema import (
     DEFAULT_HF_HUB_REVISION,
@@ -40,10 +41,6 @@ class CheckpointExportPlan:
     checkpoint_path: str
     export_root: str
     model_path: str
-
-    @property
-    def policy_checkpoint_path(self) -> str:
-        return os.path.join(self.checkpoint_path, POLICY_CHECKPOINT_SUBDIRECTORY)
 
     @property
     def policy_export_path(self) -> str:
@@ -123,8 +120,9 @@ class CheckpointExporter:
         self._tokenizer = tokenizer
         self._publisher = publisher
 
-    def _validate_checkpoint(self) -> None:
-        trainer_state_path = os.path.join(self._plan.checkpoint_path, TRAINER_STATE_FILENAME)
+    def _validate_checkpoint(self) -> str:
+        payload_path = resolve_checkpoint_payload(self._plan.checkpoint_path, verify_files=True)
+        trainer_state_path = os.path.join(payload_path, TRAINER_STATE_FILENAME)
         if not io.exists(trainer_state_path):
             raise FileNotFoundError(f"completed checkpoint marker not found: {trainer_state_path}")
         with io.open_file(trainer_state_path, "rb") as source:
@@ -134,14 +132,16 @@ class CheckpointExporter:
             raise ValueError(
                 f"checkpoint step mismatch: requested global_step_{self._plan.step}, marker records {saved_step!r}"
             )
-        if not io.exists(self._plan.policy_checkpoint_path):
-            raise FileNotFoundError(f"policy checkpoint not found: {self._plan.policy_checkpoint_path}")
+        policy_path = os.path.join(payload_path, POLICY_CHECKPOINT_SUBDIRECTORY)
+        if not io.exists(policy_path):
+            raise FileNotFoundError(f"policy checkpoint not found: {policy_path}")
+        return policy_path
 
     def run(self) -> CheckpointExportResult:
         try:
-            self._validate_checkpoint()
+            policy_path = self._validate_checkpoint()
             self._workers.initialize(self._plan.model_path)
-            self._workers.load_model_checkpoint(self._plan.policy_checkpoint_path)
+            self._workers.load_model_checkpoint(policy_path)
             self._workers.save_hf_model(self._plan.policy_export_path, self._tokenizer)
             hf_model_io.verify_hf_model_export(self._plan.policy_export_path)
             if self._publisher is not None:

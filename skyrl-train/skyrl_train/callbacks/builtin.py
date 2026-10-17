@@ -31,6 +31,7 @@ from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 
 from skyrl_train.config.callbacks import has_explicit_callbacks, interval_hf_export_enabled
+from skyrl_train.checkpoint_generation import resolve_checkpoint_payload
 from skyrl_train.distillation import DISTILLATION_SCORED_TOKENS_METRIC
 from skyrl_train.json_serialization import to_jsonable
 from skyrl_train.io import io
@@ -224,9 +225,8 @@ class BestCheckpointCallback(TrainerCallback):
         model_format = "hf"
         if state.global_step:
             await trainer.save_checkpoints()
-            model_uri = join_resource_path(
-                trainer.cfg.trainer.ckpt_path, f"global_step_{state.global_step}", POLICY_CHECKPOINT_SUBDIRECTORY
-            )
+            checkpoint_path = join_resource_path(trainer.cfg.trainer.ckpt_path, f"global_step_{state.global_step}")
+            model_uri = join_resource_path(resolve_checkpoint_payload(checkpoint_path), POLICY_CHECKPOINT_SUBDIRECTORY)
             model_format = "native"
         payload = {
             "step": state.global_step,

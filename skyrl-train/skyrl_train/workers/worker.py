@@ -1284,7 +1284,7 @@ class PolicyWorkerBase(Worker):
         _phase_diagnostics.log_phase(_phase_diagnostics.CollectivePhase.TRAINING_STEP_EXIT)
         return status
 
-    def save_checkpoint(self, ckpt_dir: Path, tokenizer=None):
+    def save_checkpoint(self, ckpt_dir: Path, tokenizer=None) -> None:
         upload = self.strategy.save_checkpoint(
             model=self.model,
             optimizer=self.optimizer,
@@ -1503,7 +1503,7 @@ class CriticWorkerBase(Worker):
             status["raw_grad_norm"] = grad_norm
         return status
 
-    def save_checkpoint(self, ckpt_dir: str, tokenizer=None):
+    def save_checkpoint(self, ckpt_dir: str, tokenizer=None) -> None:
         upload = self.strategy.save_checkpoint(
             model=self.model,
             optimizer=self.optimizer,
