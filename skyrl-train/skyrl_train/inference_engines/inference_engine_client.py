@@ -1,3 +1,4 @@
+from skyrl_train.inference_engines.ray_wrapped_inference_engine import RayWrappedInferenceEngine
 from skyrl_train.inference_engines.base import (
     CHOICE_POLICY_STEPS_KEY,
     SESSION_ID_HEADER,
@@ -134,9 +135,23 @@ class InferenceEngineClient(InferenceEngineInterface):
         self._http_bridge_stats = HTTPBridgeStatsAccumulator()
 
         if self.enable_http_endpoint:
-            self._spin_up_http_endpoint()
+            try:
+                self._spin_up_http_endpoint()
+            except BaseException:
+                self.discard_engines()
+                raise
 
         logger.info(f"InferenceEngineClient initialized with {len(engines)} engines.")
+
+    def discard_engines(self) -> None:
+        """Close the HTTP endpoint and terminate the client's local Ray engines."""
+        self.shutdown_http_endpoint()
+        for engine in self.engines:
+            if isinstance(engine, RayWrappedInferenceEngine):
+                try:
+                    ray.kill(engine.inference_engine_actor, no_restart=True)
+                except Exception as error:
+                    logger.warning("Error killing inference engine actor: {}", error)
 
     def _mark_engine_dead(self, engine_idx: int, error: Exception) -> None:
         """Mark an engine as dead and log a warning."""
