@@ -87,7 +87,8 @@ def test_idk_normalization_retains_half_without_a_model(server):
 
 
 @pytest.mark.parametrize("response", ["", " \n ", "<think>Working through the question.</think>"])
-def test_empty_abstention_retains_native_not_attempted_reward(server, response):
+@pytest.mark.asyncio
+async def test_empty_abstention_retains_native_not_attempted_reward(server, response, nemotron_session, model_turn):
     owner, judge = server
     owner.reply = "C"
     record = {"question": "What is two plus two?", "answer": "4"}
@@ -100,6 +101,19 @@ def test_empty_abstention_retains_native_not_attempted_reward(server, response):
     assert details["verdict"] == native_details["verdict"] == "abstain"
     assert details["extracted_answer"].strip() == ""
     assert owner.requests == []
+    for verifyit_enabled in [False, True]:
+        for stop_reason, expected in [("stop", 0.5), ("length", 0.0)]:
+            session = await nemotron_session(
+                "abstention_simple_agent",
+                record,
+                {
+                    "verifyit_enabled": verifyit_enabled,
+                    "judges": {"general": {"base_url": judge.base_url, "model": judge.model, "api_key": "test"}},
+                },
+            )
+            result = await session.advance(model_turn(response, stop_reason=stop_reason))
+            assert result.done
+            assert result.reward == result.grade.reward == expected
 
 
 @pytest.mark.parametrize(

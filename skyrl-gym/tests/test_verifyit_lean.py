@@ -69,18 +69,21 @@ async def test_lean_session_keeps_the_source_theorem_and_replaces_its_placeholde
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "generation,stop_reason",
+    "generation,stop_reason,proof_status",
     [
-        ("```lean4\ntheorem generated : True\n```", "length"),
-        ("An attempted proof:\nexample unfinished", "stop"),
+        ("```lean4\ntheorem generated : True\n```", "length", "failed"),
+        ("An attempted proof:\nexample unfinished", "stop", "failed"),
+        ("", "stop", "empty_generation"),
+        ("", "length", "empty_generation"),
     ],
 )
-async def test_lean_session_malformed_declaration_allows_correction(
+async def test_lean_session_missing_or_malformed_proof_allows_correction(
     nemotron_session,
     model_turn,
     lean_compiler,
     generation,
     stop_reason,
+    proof_status,
 ):
     session = await nemotron_session(
         "math_formal_lean_refinement_agent",
@@ -90,10 +93,11 @@ async def test_lean_session_malformed_declaration_allows_correction(
     result = await session.advance(model_turn(generation, stop_reason=stop_reason))
     assert not result.done and result.reward == 0.0
     assert result.grade.status is Outcome.UNAVAILABLE
-    assert result.metrics["proof_status"] == "failed"
-    assert result.metrics["compiler_output"]["exit_code"] == 1
+    assert result.metrics["proof_status"] == proof_status
     assert result.reset_conversation[0]["role"] == "user"
-    assert generation in result.reset_conversation[0]["content"]
+    if generation:
+        assert result.metrics["compiler_output"]["exit_code"] == 1
+        assert generation in result.reset_conversation[0]["content"]
     corrected = await session.advance(model_turn("```lean4\nby\n  trivial\n```"))
     assert corrected.done and corrected.grade.reward == 1.0
     assert (await session.grade((), stop_reason="stop", outputs={})).reward == 1.0

@@ -30,23 +30,33 @@ from skyrl_gym.envs.nemotron_ultra.tool_call import grade_expected_action
 
 
 @pytest.mark.asyncio
-async def test_genrm_session_returns_pending_cohort_reward(nemotron_session, model_turn):
+@pytest.mark.parametrize("text,stop_reason", [("candidate answer", "stop"), ("", "stop"), ("<think>partial", "length")])
+async def test_genrm_session_returns_pending_cohort_reward(nemotron_session, model_turn, text, stop_reason):
     session = await nemotron_session("genrm_simple_agent", {}, {"genrm": {"default_score": 3.5}})
-    result = await session.advance(model_turn("candidate answer"))
+    result = await session.advance(model_turn(text, stop_reason=stop_reason))
     assert result.done
     assert result.reward == 3.5
     assert result.metrics["cohort_reward_pending"] is True
 
 
 @pytest.mark.asyncio
-async def test_judge_backed_row_requires_a_judge_unless_grading_is_skipped(nemotron_session, model_turn):
-    session = await nemotron_session("multichallenge_simple_agent", {})
-    graded = await session.advance(model_turn("final answer"))
-    assert graded.grade.status is Outcome.INFRA_ERROR
-    assert graded.grade.reward is None
+@pytest.mark.parametrize("agent", ["multichallenge_simple_agent", "jailbreak_hard_refusal_no_redirection"])
+@pytest.mark.parametrize("text", ["final answer", ""])
+@pytest.mark.parametrize("verifyit_enabled", [False, True])
+async def test_judge_backed_rows_handle_missing_answers_and_unavailable_judges(
+    nemotron_session, model_turn, agent, text, verifyit_enabled
+):
+    session = await nemotron_session(agent, {}, {"verifyit_enabled": verifyit_enabled})
+    graded = await session.advance(model_turn(text))
+    if text:
+        assert graded.grade.status is Outcome.INFRA_ERROR
+        assert graded.grade.reward is None
+    else:
+        assert graded.grade.status is Outcome.GRADED
+        assert graded.reward == graded.grade.reward == 0.0
 
-    session = await nemotron_session("multichallenge_simple_agent", {}, {"grading": "skip"})
-    result = await session.advance(model_turn("final answer"))
+    session = await nemotron_session(agent, {}, {"grading": "skip", "verifyit_enabled": verifyit_enabled})
+    result = await session.advance(model_turn(text))
     assert result.done and result.reward == 0.0
     assert grade_skipped(result.grade)
     assert result.metrics["graded"] == 0.0
@@ -725,3 +735,30 @@ async def test_calendar_session_accepts_no_changes_when_the_calendar_is_empty(ne
     session = await nemotron_session("calendar_simple_agent", {"exp_cal_state": {}})
     result = await session.advance(model_turn("No calendar changes are necessary."))
     assert result.grade.reward == 1.0
+
+
+@pytest.mark.parametrize("verifyit_enabled", [False, True])
+@pytest.mark.parametrize(
+    "agent,text,stop_reason",
+    [
+        ("instruction_following_simple_agent", "", "stop"),
+        ("instruction_following_simple_agent", "<think>B or C?</think>", "stop"),
+        ("instruction_following_simple_agent", "<|start_think|>B or C?", "length"),
+        ("mcqa_simple_agent", r"\boxed{C}", "length"),
+        ("mcqa_simple_agent", r"<think>hmm</think>\boxed{C} and further", "length"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_unanswered_or_length_stopped_ultra_response_scores_zero(
+    nemotron_session, model_turn, agent, text, stop_reason, verifyit_enabled
+):
+    record = (
+        {"instruction_id_list": ["keywords:forbidden_words"], "kwargs": [{"forbidden_words": ["banana"]}]}
+        if agent == "instruction_following_simple_agent"
+        else {"expected_answer": "C", "options": [{"A": "one"}, {"B": "two"}, {"C": "three"}]}
+    )
+    session = await nemotron_session(agent, record, {"verifyit_enabled": verifyit_enabled})
+    result = await session.advance(model_turn(text, stop_reason=stop_reason))
+    assert result.done and result.grade.status is Outcome.GRADED
+    assert result.reward == result.grade.reward == 0.0
+    assert result.metrics["graded"] == 1.0
