@@ -532,6 +532,10 @@ def parse_rl_config(
     raw = OmegaConf.to_container(load_rl_recipe(str(path)), resolve=False) or {}
     if not isinstance(raw, dict):
         raise ValueError(f"{path}: RL config must contain a mapping at the document root")
+    if "terminal_bench_config" in raw:
+        raise ValueError(
+            f"{path}: terminal_bench_config is a resolved-config key; use terminal_bench in source recipes"
+        )
 
     config_groups = raw.get("config_groups", {})
     if "algorithm_recipe" in config_groups:
