@@ -85,13 +85,19 @@ class InferenceEngineClient(InferenceEngineInterface):
     """
 
     def __init__(
-        self, engines: List[InferenceEngineInterface], tokenizer: PreTrainedTokenizerBase, full_config: DictConfig
+        self,
+        engines: List[InferenceEngineInterface],
+        tokenizer: PreTrainedTokenizerBase,
+        full_config: DictConfig,
+        *,
+        pause_before_serving: bool = False,
     ):
         """
         Args:
             engines: List[InferenceEngineInterface] - The inference engines, remote or local.
             tokenizer: PreTrainedTokenizerBase - The tokenizer to use.
             full_config: DictConfig - See ppo_base_config.yaml
+            pause_before_serving: Block generation until the caller calls resume_generation.
         """
         self.engines = engines
         self.tokenizer = tokenizer
@@ -108,6 +114,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         self.http_endpoint_host = full_config.generator.http_endpoint_host
         self.http_endpoint_port = full_config.generator.http_endpoint_port
         self.generation_paused_event = threading.Event()
+        self._server_thread: threading.Thread | None = None
         # One wake-up event per event loop that has passed the pause barrier since the last
         # release: the trainer's loop and, with the HTTP endpoint, the server thread's loop.
         self._resume_events: dict[asyncio.AbstractEventLoop, asyncio.Event] = {}
@@ -134,12 +141,14 @@ class InferenceEngineClient(InferenceEngineInterface):
         self._routing_lock = threading.Lock()
         self._http_bridge_stats = HTTPBridgeStatsAccumulator()
 
-        if self.enable_http_endpoint:
-            try:
+        try:
+            if pause_before_serving:
+                asyncio.run(self.pause_generation())
+            if self.enable_http_endpoint:
                 self._spin_up_http_endpoint()
-            except BaseException:
-                self.discard_engines()
-                raise
+        except BaseException:
+            self.discard_engines()
+            raise
 
         logger.info(f"InferenceEngineClient initialized with {len(engines)} engines.")
 

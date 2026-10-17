@@ -234,6 +234,7 @@ async def test_local_teacher_runtime_scores_admitted_groups_and_owns_engine(monk
     monkeypatch.setattr(runtime_module, "create_tokenizer", lambda *_args, **_kwargs: tokenizer)
     monkeypatch.setattr(runtime_module, "create_ray_wrapped_inference_engines", create_engine)
     cfg = _config()
+    cfg.generator.engine_init_kwargs.load_format = "dummy"
     cfg.teachers.primary.resources.max_num_batched_tokens = 64
     cfg.teachers.primary.resources.gpu_memory_utilization = 0.6
     prepared = prepare_distillation_runtime(cfg, tokenizer)
@@ -258,6 +259,7 @@ async def test_local_teacher_runtime_scores_admitted_groups_and_owns_engine(monk
     torch.testing.assert_close(training_input["distillation_loss_weights"], torch.tensor([[0.5, 0.5]]))
     assert engine_kwargs["max_num_batched_tokens"] == 64
     assert engine_kwargs["gpu_memory_utilization"] == 0.6
+    assert "load_format" not in engine_kwargs["engine_init_kwargs"]
     assert engine.teardown_count == 1
 
 

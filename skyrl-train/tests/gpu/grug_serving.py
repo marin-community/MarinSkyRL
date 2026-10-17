@@ -6,6 +6,7 @@ import ray
 import torch
 from transformers import AutoTokenizer
 
+from skyrl_train.config.dummy_engine_weights import dummy_engine_weights_requested
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 from skyrl_train.training_batch import TrainingInputBatch
@@ -51,7 +52,7 @@ def grug_engine_client(
 ) -> InferenceEngineClient:
     """Start vLLM engines for a tiny Grug checkpoint."""
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    engine_init_kwargs = {"max_model_len": MAX_MODEL_LEN}
+    engine_init_kwargs = {**cfg.generator.engine_init_kwargs, "max_model_len": MAX_MODEL_LEN}
     if moe_backend is not None:
         engine_init_kwargs["kernel_config"] = {"moe_backend": moe_backend}
     engines = create_ray_wrapped_inference_engines(
@@ -75,7 +76,12 @@ def grug_engine_client(
         backend="vllm",
         engine_init_kwargs=engine_init_kwargs,
     )
-    return InferenceEngineClient(engines, tokenizer, cfg)
+    return InferenceEngineClient(
+        engines,
+        tokenizer,
+        cfg,
+        pause_before_serving=dummy_engine_weights_requested(engine_init_kwargs.get("load_format")),
+    )
 
 
 def rollout_training_batch(prompts: list[list[int]], rollout) -> TrainingInputBatch:

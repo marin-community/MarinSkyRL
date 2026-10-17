@@ -24,9 +24,11 @@ import pytest
 import ray
 import torch
 from safetensors.torch import load_file, save_file
+from omegaconf import OmegaConf
 from transformers import AutoTokenizer
 
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.config.dummy_engine_weights import dummy_engine_weights_requested
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 from skyrl_train.models.grug_moe import GrugMoeConfig
 from skyrl_train.utils import initialize_ray
@@ -49,9 +51,8 @@ from tests.gpu.test_grug_megatron import (
     _init_policy,
     _padded_batch,
     _train_step,
-    _write_tiny_checkpoint,
 )
-from tests.gpu.test_hero_megatron import write_tiny_hero_checkpoint
+from tests.gpu.grug_tiny_checkpoint import write_tiny_checkpoint, write_tiny_hero_checkpoint
 
 # Tensors the transport slices out of fused trainer parameters (interleaved QKV, [gate;up]). The
 # trainer snapshot exports them with Megatron-Bridge, which shares no code with the transport.
@@ -142,9 +143,14 @@ def engine_client(cfg, model_path: str, geometry: Geometry) -> InferenceEngineCl
         tokenizer=tokenizer,
         backend="vllm",
         require_verified_placements=True,
-        engine_init_kwargs={"max_model_len": MAX_MODEL_LEN},
+        engine_init_kwargs={**cfg.generator.engine_init_kwargs, "max_model_len": MAX_MODEL_LEN},
     )
-    return InferenceEngineClient(engines, tokenizer, cfg)
+    return InferenceEngineClient(
+        engines,
+        tokenizer,
+        cfg,
+        pause_before_serving=dummy_engine_weights_requested(cfg.generator.engine_init_kwargs.get("load_format")),
+    )
 
 
 def remove_shortconv_from_tiny_hero_checkpoint(model_path):
@@ -159,15 +165,16 @@ def remove_shortconv_from_tiny_hero_checkpoint(model_path):
 
 @pytest.mark.vllm
 @pytest.mark.parametrize(
-    "name,hero",
+    "name,hero,load_format,keep_shortconv",
     [
-        *(pytest.param(name, False, id=name) for name in GEOMETRIES),
-        pytest.param("equal-ep", True, id="hero-split-experts"),
-        pytest.param("single-serving-ep", True, id="hero-split-experts-single-serving"),
+        *(pytest.param(name, False, "auto", False, id=name) for name in GEOMETRIES),
+        pytest.param("equal-ep", True, "auto", False, id="hero-split-experts"),
+        pytest.param("single-serving-ep", True, "auto", False, id="hero-split-experts-single-serving"),
+        pytest.param("single-serving-ep", True, "dummy", True, id="hero-dummy-shortconv"),
     ],
 )
 def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flipped_one(
-    tmp_path, name, hero, monkeypatch
+    tmp_path, name, hero, load_format, keep_shortconv, monkeypatch
 ):
     geometry = HERO_SINGLE_SERVING_GEOMETRY if name == "single-serving-ep" else GEOMETRIES[name]
     require_hoppers(geometry.gpus)
@@ -183,22 +190,35 @@ def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flippe
     model_path.mkdir()
     if hero:
         write_tiny_hero_checkpoint(model_path)
-        remove_shortconv_from_tiny_hero_checkpoint(model_path)
+        if not keep_shortconv:
+            remove_shortconv_from_tiny_hero_checkpoint(model_path)
     else:
-        _write_tiny_checkpoint(model_path)
+        write_tiny_checkpoint(model_path)
     cfg = _config(str(model_path), world_size=geometry.policy_gpus, pp=geometry.policy_pp, ep=geometry.policy_ep)
     cfg.generator.num_inference_engines = geometry.engines
     cfg.generator.inference_engine_data_parallel_size = geometry.engine_dp
     cfg.generator.inference_engine_expert_parallel_size = geometry.engine_dp
     cfg.generator.inference_engine_pipeline_parallel_size = geometry.engine_pp
     cfg.generator.weight_sync_transport = "expert_block"
+    OmegaConf.update(cfg, "generator.engine_init_kwargs.load_format", load_format, force_add=True)
+    if keep_shortconv:
+        OmegaConf.update(cfg, "generator.engine_init_kwargs.enable_flashinfer_autotune", False, force_add=True)
     cfg.generator.expert_block_sync.verify = True
     tokenizer = AutoTokenizer.from_pretrained(str(model_path))
     initialize_ray(cfg)
     try:
         client = engine_client(cfg, str(model_path), geometry)
+        assert client.generation_paused_event.is_set() == (load_format == "dummy")
         policy = _init_policy(cfg, geometry.policy_gpus)
-        names = HERO_SYNC_NAMES if hero else [*PARAMETER_NAMES, *BIAS_NAMES, GATED_NORM_NAME, *SLICED_NAMES]
+        sync_names = HERO_SYNC_NAMES if hero else SYNC_NAMES
+        if keep_shortconv:
+            sync_names = [
+                *sync_names,
+                "model.layers.0.sconv_mlp.weight",
+                "model.layers.0.self_attn.sconv_k.weight",
+                "model.layers.0.sconv_attn.weight",
+            ]
+        names = sync_names if hero else [*PARAMETER_NAMES, *BIAS_NAMES, GATED_NORM_NAME, *SLICED_NAMES]
         bias_names = HERO_BIAS_NAMES if hero else BIAS_NAMES
         expert_names = HERO_EXPERTS if hero else SERVING_EXPERT_INDEX_BY_NAME
         before = rank0_validation_snapshot(policy, names)
@@ -218,7 +238,8 @@ def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flippe
                 timings["free_bytes_after_prepare"] = [
                     torch.cuda.mem_get_info(index)[0] for index in range(torch.cuda.device_count())
                 ]
-            await client.pause_generation()
+            if not client.generation_paused_event.is_set():
+                await client.pause_generation()
             started = time.perf_counter()
             install = await sync.sync(version)
             timings[f"install_{version}"] = install
@@ -227,7 +248,7 @@ def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flippe
             await client.resume_generation(policy_step=version)
 
         asyncio.run(prepare_and_sync(1))
-        assert_engine_weights(client, HERO_SYNC_NAMES if hero else SYNC_NAMES, trained, bias_names, expert_names)
+        assert_engine_weights(client, sync_names, trained, bias_names, expert_names)
 
         async def corrupt_and_verify():
             flipped = await client.engines[-1].inference_engine_actor.flip_installed_byte.remote()
@@ -247,7 +268,7 @@ def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flippe
         trained_again = rank0_validation_snapshot(policy, names)
         assert any(not torch.equal(trained_again[key], trained[key]) for key in changed_names)
         asyncio.run(prepare_and_sync(2))
-        assert_engine_weights(client, HERO_SYNC_NAMES if hero else SYNC_NAMES, trained_again, bias_names, expert_names)
+        assert_engine_weights(client, sync_names, trained_again, bias_names, expert_names)
         asyncio.run(sync.close())
         print(
             f"EXPERT_BLOCK_VERIFY_PASS geometry={name} policy_gpus={geometry.policy_gpus} policy_pp={geometry.policy_pp} "

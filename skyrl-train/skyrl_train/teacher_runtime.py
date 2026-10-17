@@ -153,6 +153,7 @@ async def _start_local_teacher_pool(
     max_logprobs = teacher.top_k if teacher.top_k is not None else 1
     engine_init_kwargs = dict(OmegaConf.to_container(cfg.generator.engine_init_kwargs, resolve=True))
     engine_init_kwargs.pop("openai_sampling_params", None)
+    engine_init_kwargs.pop("load_format", None)
     engine_init_kwargs["revision"] = teacher.model.revision
     engine_init_kwargs["served_model_name"] = teacher.model.path
     if "max_model_len" in engine_init_kwargs:

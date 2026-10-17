@@ -10,6 +10,8 @@ import asyncio
 import base64
 import io
 import socket
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from http import HTTPStatus
 from unittest.mock import patch
@@ -18,6 +20,7 @@ import numpy as np
 import httpx
 import pytest
 import ray.exceptions
+import requests
 from jinja2 import TemplateError
 from omegaconf import OmegaConf
 from skyrl_train.config.utils import get_default_config
@@ -1572,6 +1575,51 @@ class _MockGenerateEngine:
 
     async def resume_generation(self, policy_step):
         self.scheduler_paused = False
+
+
+@pytest.mark.parametrize("pause_fails", [False, True])
+def test_client_serves_http_only_after_engines_acknowledge_startup_pause(unused_tcp_port, pause_fails):
+    entered = threading.Event()
+    release = threading.Event()
+    pause_error = RuntimeError("engine startup pause failed")
+
+    class DelayedPauseEngine(_MockGenerateEngine):
+        async def pause_generation(self):
+            entered.set()
+            assert release.wait(10), "Engine pause acknowledgment was not released"
+            if pause_fails:
+                raise pause_error
+            await super().pause_generation()
+
+    engine = DelayedPauseEngine()
+    cfg = get_default_config()
+    cfg.generator.enable_http_endpoint = True
+    cfg.generator.http_endpoint_port = unused_tcp_port
+    url = f"http://127.0.0.1:{unused_tcp_port}/v1/models"
+    client = None
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(InferenceEngineClient, [engine], object(), cfg, pause_before_serving=True)
+        try:
+            assert entered.wait(10), "The client did not request an engine pause"
+            with pytest.raises(requests.ConnectionError):
+                requests.get(url, timeout=1)
+            release.set()
+            if pause_fails:
+                with pytest.raises(RuntimeError) as failure:
+                    future.result(timeout=10)
+                assert failure.value is pause_error
+            else:
+                client = future.result(timeout=10)
+                assert requests.get(url, timeout=1).status_code == HTTPStatus.OK
+        finally:
+            release.set()
+            try:
+                client = future.result(timeout=10)
+            except RuntimeError:
+                if not pause_fails:
+                    raise
+            else:
+                client.shutdown_http_endpoint()
 
 
 @pytest.mark.asyncio
