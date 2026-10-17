@@ -24,6 +24,9 @@ terminal_bench:
     enable_reward_shaping: false
     enable_error_classification: true
     default_error_treatment: zero
+    mask_exceptions:
+      - VerifierTimeoutError
+      - ModelServerError
 trainer:
   strategy: megatron
   seed: 42

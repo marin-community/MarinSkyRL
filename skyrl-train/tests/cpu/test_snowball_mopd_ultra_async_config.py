@@ -4,11 +4,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from omegaconf import OmegaConf
+import pytest
 
 
 from cloud.iris.rl_config_translation import compose_skyrl_config, load_rl_recipe, parse_rl_config
 from cloud.iris.role_plan import derive_role_plan
 from skyrl_train.rollouts.harbor_tasks import HarborTaskSettings
+from skyrl_train.utils.harbor_errors import ErrorTreatment, classify_exception_type
 import skyrl_train.objective.losses  # noqa: F401  (registers policy losses for validate_cfg)
 from skyrl_train.utils import validate_cfg
 
@@ -18,19 +20,31 @@ SYNC_CONFIG = CONFIGS / "snowball_mopd_ultra_smoke.yaml"
 STUDENT = "open-athena/Snowball-67B-A2B-10T-Mixed-RLVR-Sync-Step92"
 
 
-def test_snowball_mopd_32k_recipe_composes_against_the_base_config():
-    """Reject retired Harbor options before the trainer starts workers."""
-    parsed = parse_rl_config(str(CONFIGS / "snowball_mopd_ultra_32k.yaml"), model_override=STUDENT)
+@pytest.mark.parametrize(
+    "recipe",
+    [
+        "snowball_mopd_ultra_32k",
+        "snowball_ultra_rlvr1_split64",
+        "snowball_ultra_rlvr1_colocated64",
+        "snowball_ultra_rlvr2_split64",
+        "snowball_ultra_rlvr2_colocated64",
+    ],
+)
+def test_snowball_ultra_recipes_mask_infrastructure_failures(recipe):
+    parsed = parse_rl_config(str(CONFIGS / (recipe + ".yaml")), model_override=STUDENT)
     cfg = compose_skyrl_config(
         parsed,
         {"job_name": "mopd-32k-test", "experiments_dir": "/tmp/exp", "num_nodes": 9},
         SimpleNamespace(gpus_per_node=8),
     ).config
 
-    assert cfg.trainer.policy.megatron_config.context_parallel_size == 1
-    assert cfg.environment.task_sessions.nemotron_ultra.grading == "skip"
+    if recipe == "snowball_mopd_ultra_32k":
+        assert cfg.trainer.policy.megatron_config.context_parallel_size == 1
+        assert cfg.environment.task_sessions.nemotron_ultra.grading == "skip"
     settings = HarborTaskSettings.from_config(cfg.terminal_bench_config)
     assert settings.agent_timeout == cfg.terminal_bench_config.harbor.override_timeout_sec
+    for name in ("VerifierTimeoutError", "ModelServerError"):
+        assert classify_exception_type(name, settings.error_handling) is ErrorTreatment.MASK
 
 
 def test_async_smoke_runs_the_in_process_async_trainer_and_passes_trainer_validation():

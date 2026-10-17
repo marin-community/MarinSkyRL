@@ -245,7 +245,9 @@ async def test_disabled_harbor_verification_keeps_tokens_but_masks_training(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure_stage", ["startup", "model", "verifier", "attempt", "cancel", "cancel_model"])
+@pytest.mark.parametrize(
+    "failure_stage", ["startup", "model", "model_zero", "verifier", "attempt", "cancel", "cancel_model"]
+)
 async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected_result(task_inputs, failure_stage):
     config, request = task_inputs
     task = request.rows[0].lowered.task
@@ -304,10 +306,10 @@ async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected
                 await asyncio.Future()
             if failure_stage == "attempt" and attempts < 3:
                 await asyncio.Future()
-            if failure_stage == "model" and continuation is not None and attempts < 3:
+            if failure_stage in {"model", "model_zero"} and continuation is not None and attempts < 3:
                 raise ModelServerError("unavailable", "request-1", 503)
             message = {"role": "assistant", "content": "Done"}
-            if failure_stage == "model" and continuation is None:
+            if failure_stage in {"model", "model_zero"} and continuation is None:
                 message = {
                     "role": "assistant",
                     "tool_calls": [
@@ -373,7 +375,7 @@ async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected
                     ],
                     "trial_attempt_timeout_sec": 1 if failure_stage == "attempt" else None,
                     "enable_error_classification": True,
-                    "default_error_treatment": "mask",
+                    "default_error_treatment": "zero" if failure_stage == "model_zero" else "mask",
                 }
             }
         )
@@ -407,13 +409,19 @@ async def test_harbor_retries_close_failed_attempts_and_commit_only_the_selected
         await worker.shutdown()
         return
     await operation
-    assert waits == [1, 1.5]
-    assert attempts == 3
+    zero = failure_stage == "model_zero"
+    assert waits == ([] if zero else [1, 1.5])
+    assert attempts == (1 if zero else 3)
     assert len(writer.groups) == 1
     batch = writer.groups[0][1].trajectory_batch
     assert batch["unshaped_rewards"] == [1.0]
-    assert batch["rollout_metrics"]["rollout_retries"] == 2
-    if failure_stage == "model":
+    assert batch["rollout_metrics"]["rollout_retries"] == (0 if zero else 2)
+    if zero:
+        assert np.asarray(batch["rewards"]).sum() == 0.0
+        assert batch["response_ids"] == [[13, 14]]
+        assert batch["loss_masks"] == [[1, 1]]
+        assert batch["exclude_from_baseline"] == [False]
+    elif failure_stage == "model":
         assert batch["response_ids"] == [[33, 34, 90, 91, 35, 36]]
         assert batch["loss_masks"] == [[1, 1, 0, 0, 1, 1]]
     else:

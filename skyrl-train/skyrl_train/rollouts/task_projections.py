@@ -39,7 +39,7 @@ from skyrl_train.trajectory_runners.types import (
 from skyrl_train.utils.harbor_errors import (
     DEFAULT_ERROR_HANDLING_CONFIG,
     ErrorHandlingConfig,
-    classify_exception_type,
+    resolve_error_treatment,
     passthrough_logprob_error_type,
     treatment_excludes_from_baseline,
 )
@@ -98,11 +98,7 @@ def _failure_policy(
     logprobs_required: bool,
 ) -> tuple[ErrorTreatment, str | None]:
     assert rollout.failure is not None
-    treatment = (
-        classify_exception_type(rollout.failure.exception_type, error_handling)
-        if error_handling.enable_error_classification
-        else ErrorTreatment.MASK
-    )
+    treatment = resolve_error_treatment(rollout.failure.exception_type, error_handling)
     return (
         treatment,
         passthrough_logprob_error_type(
