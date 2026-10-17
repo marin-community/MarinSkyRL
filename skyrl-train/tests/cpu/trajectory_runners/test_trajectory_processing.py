@@ -20,52 +20,23 @@ from skyrl_train.trajectory_runners.trajectory_processing import (
 
 
 @pytest.mark.parametrize(
-    "loss_masks,response_ids,eos_token_id,expected_masks",
+    "loss_masks,stop_reasons,expected_masks",
     [
-        (
-            [[1, 1, 0, 1], [0, 1, 1, 1], [1, 0, 1]],
-            [[1, 2, 3, 4], [5, 6, 7, 4], [8, 9, 4]],
-            4,
-            [[1, 1, 0, 1], [0, 1, 1, 1], [1, 0, 1]],
-        ),
-        (
-            [[1, 1, 0, 1], [0, 1, 1, 1], [1, 0, 1]],
-            [[1, 2, 3, 5], [5, 6, 7, 8], [8, 9, 10]],
-            4,
-            [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0]],
-        ),
-        (
-            [[1, 1, 0, 1], [0, 1, 1, 1], [1, 0, 1, 0, 1]],
-            [[1, 2, 3, 4], [5, 6, 7, 8], [8, 9, 10, 11, 4]],
-            4,
-            [[1, 1, 0, 1], [0, 0, 0, 0], [1, 0, 1, 0, 1]],
-        ),
-        (
-            [[1, 1], [1, 0, 1], [0, 1, 1, 1]],
-            [[], [1, 2, 3], [4, 5, 6, 7]],
-            4,
-            [[0, 0], [0, 0, 0], [0, 0, 0, 0]],
-        ),
-        ([], [], 4, []),
-        (
-            [[1, 1], [1, 0, 1], [0, 1, 1, 1]],
-            [[1, 2], [3, 4, 99], [5, 6, 7, 99]],
-            99,
-            [[0, 0], [1, 0, 1], [0, 1, 1, 1]],
-        ),
+        ([[1, 1, 0], [0, 1], [1]], ["stop", "eos", "end_turn"], [[1, 1, 0], [0, 1], [1]]),
+        ([[1, 1], [0, 1]], ["length", "length"], [[0, 0], [0, 0]]),
+        ([[1, 0], [1, 1], [0, 1]], ["stop", "length", "complete"], [[1, 0], [0, 0], [0, 1]]),
+        ([[], [0, 0]], ["length", "length"], [[], [0, 0]]),
+        ([], [], []),
+        ([[1, 1], [1, 0], [0, 1]], [None, "stop", "length"], [[1, 1], [1, 0], [0, 0]]),
     ],
-    ids=["all-eos", "none-eos", "mixed", "empty-response", "empty-batch", "other-eos-id"],
+    ids=["completed", "length", "mixed", "empty-masks", "empty-batch", "unknown-reason"],
 )
-def test_apply_overlong_filtering_zeros_masks_of_truncated_responses(
-    loss_masks, response_ids, eos_token_id, expected_masks
-):
-    """DAPO overlong filtering zeros every mask whose response does not end in EOS, without mutating inputs."""
+def test_apply_overlong_filtering_zeros_masks_of_truncated_responses(loss_masks, stop_reasons, expected_masks):
     original_loss_masks = copy.deepcopy(loss_masks)
-    original_response_ids = copy.deepcopy(response_ids)
-
-    assert apply_overlong_filtering(loss_masks, response_ids, eos_token_id) == expected_masks
+    original_stop_reasons = list(stop_reasons)
+    assert apply_overlong_filtering(loss_masks, stop_reasons) == expected_masks
     assert loss_masks == original_loss_masks
-    assert response_ids == original_response_ids
+    assert stop_reasons == original_stop_reasons
 
 
 @pytest.mark.parametrize(

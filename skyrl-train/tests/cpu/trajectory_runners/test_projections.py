@@ -106,6 +106,25 @@ def test_whole_projection_preserves_tokens_rewards_and_tool_masks():
     assert "trajectory_ids" not in batch
 
 
+@pytest.mark.parametrize("projection_type", [WholeTaskProjection, StepTaskProjection])
+@pytest.mark.parametrize(
+    "stop_reason,response_ids,expected_mask",
+    [("stop", [3, 128009], [1, 1]), ("length", [3, Tokenizer.eos_token_id], [0, 0])],
+)
+def test_overlong_filtering_uses_the_served_stop_reason(projection_type, stop_reason, response_ids, expected_mask):
+    cfg = config()
+    cfg.apply_overlong_filtering = True
+    record = rollout(response_ids, 1.0)
+    record = replace(
+        record,
+        stop_reason=stop_reason,
+        steps=(replace(record.steps[0], turn=replace(record.steps[0].turn, stop_reason=stop_reason)),),
+    )
+    batch = projection_type(cfg, Tokenizer()).project([record], request())
+    assert batch["response_ids"] == [response_ids]
+    assert batch["loss_masks"] == [expected_mask]
+
+
 def test_projection_retains_the_verifier_reason_when_harbor_classifies_it_as_a_failure():
     record = replace(
         rollout([3, 4], 0.0, grade=GradeResult(Outcome.INFRA_ERROR, None, error="Request timed out.")),
@@ -148,18 +167,48 @@ def test_projection_preserves_routes_and_fills_missing_rows(projection_type):
     np.testing.assert_array_equal(batch["rollout_routed_experts"][1], [[[0, 0]]])
 
 
-def test_step_projection_preserves_served_prompts_group_identity_and_final_step():
-    first = rollout([3], [1.0])
+@pytest.mark.parametrize("terminal_stop_reason", ["stop", "length"])
+def test_step_projection_preserves_served_prompts_group_identity_and_final_step(terminal_stop_reason):
+    first = rollout([3], [0.0], grade=GradeResult(Outcome.UNAVAILABLE, None))
+    tool_message = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {"id": "call-1", "type": "function", "function": {"name": "shell", "arguments": '{"command":"pwd"}'}}
+        ],
+    }
+    observation = {"role": "tool", "tool_call_id": "call-1", "content": "/workspace"}
+    first = replace(
+        first,
+        messages=(tool_message, observation),
+        steps=(
+            replace(
+                first.steps[0],
+                turn=replace(first.steps[0].turn, message=tool_message),
+                transition=replace(first.steps[0].transition, done=False, observations=(observation,)),
+                messages=(tool_message, observation),
+            ),
+        ),
+    )
     second = rollout([4, 5], [0.0, 2.0])
     second = replace(
-        second, steps=(replace(second.steps[0], turn=replace(second.steps[0].turn, prompt_token_ids=(8, 9))),)
+        second,
+        stop_reason=terminal_stop_reason,
+        steps=(
+            replace(
+                second.steps[0],
+                turn=replace(second.steps[0].turn, prompt_token_ids=(8, 9), stop_reason=terminal_stop_reason),
+            ),
+        ),
     )
-    batch = StepTaskProjection(config(), Tokenizer()).project([trajectory(first, second)], request())
+    cfg = config()
+    cfg.apply_overlong_filtering = True
+    batch = StepTaskProjection(cfg, Tokenizer()).project([trajectory(first, second)], request())
 
     assert batch["prompt_token_ids"] == [[1, 2], [8, 9]]
     assert batch["response_ids"] == [[3], [4, 5]]
-    assert batch["rewards"] == [[1.0], [0.0, 2.0]]
-    assert batch["loss_masks"] == [[1], [1, 1]]
+    assert batch["rewards"] == [[0.0], [0.0, 2.0]]
+    assert batch["loss_masks"] == [[1], [0, 0] if terminal_stop_reason == "length" else [1, 1]]
     np.testing.assert_allclose(batch["rollout_logprobs"][0], [-0.1])
     np.testing.assert_allclose(batch["rollout_logprobs"][1], [-0.1, -0.1])
     assert [(item.instance_id, item.repetition_id, item.step) for item in batch["trajectory_ids"]] == [

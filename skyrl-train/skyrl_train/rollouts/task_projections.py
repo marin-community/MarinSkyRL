@@ -250,7 +250,6 @@ class WholeTaskProjection:
             decisions,
             required,
             self.runner_config,
-            self.tokenizer,
             [row.metadata.metric_class for row in request.rows],
         )
         _merge_task_metrics(batch, rollouts, request)
@@ -296,7 +295,7 @@ class StepTaskProjection:
                 projected_id.step = index
                 projected_ids.append(projected_id)
                 final_steps.append(last)
-        batch = _training_batch(samples, decisions, required, self.runner_config, self.tokenizer, None)
+        batch = _training_batch(samples, decisions, required, self.runner_config, None)
         batch["trajectory_ids"] = projected_ids
         batch["is_last_step"] = final_steps
         _merge_task_metrics(batch, rollouts, request)
@@ -315,7 +314,6 @@ def _training_batch(
     decisions: Sequence[_TrainingDecision],
     logprobs_required: bool,
     runner_config: DictConfig,
-    tokenizer: PreTrainedTokenizerBase,
     env_metric_classes: Sequence[str] | None,
 ) -> TrajectoryBatch:
     responses = [list(rollout.response_token_ids) or [MASKED_TOKEN_ID] for rollout in rollouts]
@@ -332,7 +330,7 @@ def _training_batch(
         for rollout, decision, response in zip(rollouts, decisions, responses, strict=True)
     ]
     if runner_config.apply_overlong_filtering:
-        masks = apply_overlong_filtering(masks, responses, tokenizer.eos_token_id)
+        masks = apply_overlong_filtering(masks, [rollout.stop_reason for rollout in rollouts])
     logprobs = [
         _row_logprobs(rollout, decision, logprobs_required)
         for rollout, decision in zip(rollouts, decisions, strict=True)

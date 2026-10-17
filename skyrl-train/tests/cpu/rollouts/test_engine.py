@@ -521,9 +521,9 @@ async def test_invalid_model_evidence_aborts_the_group_even_with_error_masking(t
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "stop_reason,last_token,mask", [("length", 4, [0, 0]), ("stop", 99, [1, 1]), ("stop", 4, [0, 0])]
+    "stop_reason,last_token,mask", [("length", 4, [0, 0]), ("stop", 99, [1, 1]), ("stop", 4, [1, 1])]
 )
-async def test_overlong_filter_uses_sampled_end_tokens(task_inputs, stop_reason, last_token, mask):
+async def test_overlong_filter_uses_served_stop_reason(task_inputs, stop_reason, last_token, mask):
     class StoppedClient(InferenceClient):
         async def generate(self, request):
             output = await super().generate(request)
