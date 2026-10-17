@@ -1,6 +1,5 @@
 """Run original Harbor trials through the engine's exact model-request contract."""
 
-import json
 import math
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -9,11 +8,10 @@ from harbor.agents.installed.base import BaseInstalledAgent
 from harbor.models.trial.result import TrialResult
 from harbor.trial.trial import Trial
 from rolloutengine.agent_session import AgentCompletion, AgentTaskSession
-from rolloutengine.contracts import ModelTurn, SessionStart
 from taskcompendium.grading_result import GradeResult, GradingFailure, Outcome
 
-from skyrl_train.json_serialization import to_jsonable
 from skyrl_train.rollouts.agent_backend import AgentInferenceBackend
+from skyrl_train.rollouts.agent_trace import recorded_completion
 from skyrl_train.rollouts.harbor_settings import HARBOR_EXCEPTION
 
 
@@ -57,20 +55,7 @@ async def run_harbor_trial(
         raise ValueError("Harbor training requires rollout capture to be enabled")
     evidence_dir.mkdir(parents=True, exist_ok=True)
     trace_path = evidence_dir / "turns.jsonl"
-    request_index = 0
-
-    async def recorded_complete(request: SessionStart) -> ModelTurn:
-        nonlocal request_index
-        index = request_index
-        request_index += 1
-        with trace_path.open("a") as trace:
-            trace.write(json.dumps({"schema_version": 1, "index": index, "request": to_jsonable(request)}) + "\n")
-        turn = await complete(request)
-        with trace_path.open("a") as trace:
-            trace.write(json.dumps({"schema_version": 1, "index": index, "turn": to_jsonable(turn)}) + "\n")
-        return turn
-
-    with backend.session(correlation_id, recorded_complete):
+    with backend.session(correlation_id, recorded_completion(complete, trace_path)):
         return await trial.run()
 
 
