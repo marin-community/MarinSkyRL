@@ -5,12 +5,12 @@ import json
 import math
 import shlex
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict
 
 from harbor.agents.installed.base import BaseInstalledAgent
 from harbor.models.agent.context import AgentContext
 from rolloutengine.contracts import ModelTurn, SessionStart
 
+from skyrl_train.json_serialization import to_jsonable
 from skyrl_train.rollouts.agent_backend import AgentInferenceBackend
 from skyrl_train.rollouts.agent_environment import BorrowedMachineEnvironment
 
@@ -48,10 +48,10 @@ async def run_installed_agent(
         index = request_index
         request_index += 1
         with trace_path.open("a") as trace:
-            trace.write(json.dumps({"schema_version": 1, "index": index, "request": asdict(request)}) + "\n")
+            trace.write(json.dumps({"schema_version": 1, "index": index, "request": to_jsonable(request)}) + "\n")
         turn = await complete(request)
         with trace_path.open("a") as trace:
-            trace.write(json.dumps({"schema_version": 1, "index": index, "turn": asdict(turn)}) + "\n")
+            trace.write(json.dumps({"schema_version": 1, "index": index, "turn": to_jsonable(turn)}) + "\n")
         return turn
 
     with backend.session(trial_id, recorded_complete):

@@ -1,18 +1,80 @@
 import asyncio
+import json
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
+import numpy as np
 import pytest
+from harbor.agents.installed.base import BaseInstalledAgent
 from harbor.models.trial.config import TaskConfig, TrialConfig
 from harbor.models.trial.result import AgentInfo, ExceptionInfo, TrialResult
 from harbor.models.verifier.result import VerifierResult
 from rolloutengine.contracts import ModelTurn, RolloutData, SessionStart
 from taskcompendium.grading_result import Outcome
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from transformers import PreTrainedTokenizerFast
 
+from skyrl_train.rollouts.agent_backend import AgentInferenceBackend, TRIAL_HEADER
 from skyrl_train.rollouts.harbor_settings import HARBOR_EXCEPTION
 from skyrl_train.rollouts.harbor_tasks import harbor_grading_failure
-from skyrl_train.rollouts.harbor_trial_session import HarborTrialSession, trial_grade
+from skyrl_train.rollouts.harbor_trial_session import HarborTrialSession, run_harbor_trial, trial_grade
 from skyrl_train.rollouts.task_projections import rollout_loss_eligible
 from skyrl_train.utils.harbor_errors import ErrorHandlingConfig
+
+
+@pytest.mark.asyncio
+async def test_harbor_trial_delivers_completion_and_retains_numeric_router_evidence(tmp_path):
+    class Agent(BaseInstalledAgent):
+        rollout_correlation_id = "trial"
+
+        @staticmethod
+        def name():
+            return "fixture"
+
+        async def install(self, environment):
+            raise AssertionError("No remote installation in this test")
+
+        async def run(self, instruction, environment, context):
+            raise AssertionError("The trial fixture drives model requests directly")
+
+    async def tokenize(payload):
+        return {"tokens": [2], "count": 1, "max_model_len": 32}
+
+    routes = np.array([[[3, 7]]], dtype=np.int32)
+    turn = ModelTurn(
+        {"role": "assistant", "content": "done"},
+        (2,),
+        (1,),
+        (-0.25,),
+        "stop",
+        metadata={"routed_experts": routes, "count": np.int64(1)},
+    )
+
+    async def complete(request):
+        return turn
+
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0})))
+    backend = AgentInferenceBackend("model", 32, tokenize, tokenizer)
+    result = completed_trial(1.0)
+
+    async def run():
+        response = await backend.chat_completion(
+            {
+                "headers": {TRIAL_HEADER: "trial"},
+                "json": {"model": "model", "messages": [{"role": "user", "content": "Task"}]},
+            }
+        )
+        assert response["choices"][0]["message"]["content"] == "done"
+        return result
+
+    # Replace the remote trial boundary; exercise the real request recorder and backend.
+    trial = SimpleNamespace(agent=Agent(logs_dir=tmp_path / "agent", version="fixture"), run=run)
+    assert await run_harbor_trial(trial, backend, complete, tmp_path / "engine") is result
+    records = [json.loads(line) for line in (tmp_path / "engine" / "turns.jsonl").read_text().splitlines()]
+    assert records[0]["request"]["messages"] == [{"role": "user", "content": "Task"}]
+    assert records[1]["turn"]["metadata"] == {"routed_experts": [[[3, 7]]], "count": 1}
+    assert turn.metadata["routed_experts"] is routes
 
 
 def completed_trial(score, exception_type=None):
