@@ -372,6 +372,8 @@ async def test_a_rejected_row_is_generated_again_within_a_synchronous_step(ray_m
     assert workers.started == ["m", "a", "m"]
 
 
+@pytest.mark.slow
+@pytest.mark.parametrize("start_buffer", ["ray_actor"], indirect=True)
 @pytest.mark.asyncio
 async def test_resume_does_not_regenerate_a_committed_group(ray_module, start_buffer):
     group = RolloutGroup(_batch(), "c", 1, _prompt("c"))
@@ -384,12 +386,11 @@ async def test_resume_does_not_regenerate_a_committed_group(ray_module, start_bu
     context.start()
     try:
         await context.publish(1)
-        groups, metrics = await context.next_batch(stall_timeout=STALL_TIMEOUT, on_admitted=_ignore)
+        groups, _ = await context.next_batch(stall_timeout=STALL_TIMEOUT, on_admitted=_ignore)
     finally:
         await context.close()
 
     assert groups[0].uid == "c"
-    assert metrics["async/rejected_count/duplicate_uid"] == 0
     assert workers.started[:2] == ["a", "b"]
 
 

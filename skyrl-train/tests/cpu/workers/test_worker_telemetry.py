@@ -23,10 +23,11 @@ _WORKER_CONFIG = OmegaConf.create(
 
 
 @pytest.fixture(autouse=True)
-def _isolated_rendezvous_environment(monkeypatch):
-    # DistributedTorchRayActor writes the rendezvous variables into os.environ; keep them out of other tests.
-    for name in ("MASTER_ADDR", "MASTER_PORT", "WORLD_SIZE", "RANK", "LOCAL_RANK"):
-        monkeypatch.delenv(name, raising=False)
+def _isolated_rank_environment(monkeypatch):
+    # Register absent variables for restoration after worker construction creates them.
+    for name in ("WORLD_SIZE", "RANK", "LOCAL_RANK"):
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
 
 
 def _build_worker() -> Worker:
@@ -35,8 +36,6 @@ def _build_worker() -> Worker:
         world_size=1,
         rank=0,
         local_rank=0,
-        master_addr="localhost",
-        master_port=12345,
         sequence_parallel_size=1,
     )
 

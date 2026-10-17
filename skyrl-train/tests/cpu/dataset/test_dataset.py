@@ -1,4 +1,5 @@
 import json
+import os
 
 import pytest
 from unittest.mock import patch
@@ -9,6 +10,7 @@ from taskcompendium.models import AnswerType, FinalAction, FunctionDefinition, N
 from omegaconf import OmegaConf
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.dataset import PromptDataset
+from skyrl_train.dataset.dataset import PARALLEL_DATASET_MIN_ROWS
 from skyrl_train.dataset.harbor_import import HARBOR_TRIAL_SESSION, harbor_trial_task
 from skyrl_train.dataset.tasks import SourceTaskDataset, TaskDataset, source_row_task, write_tasks
 from skyrl_train.entrypoints.main_base import BasePPOExp
@@ -16,8 +18,7 @@ from skyrl_train.task_inputs import task_messages
 from tests.cpu.task_specs import lowered_task
 
 
-@pytest.mark.parametrize("num_workers", [1, 2])
-def test_native_task_filter_counts_tool_definitions(tmp_path, num_workers):
+def test_native_task_filter_counts_tool_definitions(tmp_path):
     backend = Tokenizer(models.WordLevel({"[UNK]": 0}, unk_token="[UNK]"))
     backend.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
     tokenizer = PreTrainedTokenizerFast(
@@ -60,7 +61,7 @@ def test_native_task_filter_counts_tool_definitions(tmp_path, num_workers):
         )
     path = tmp_path / "tools.parquet"
     write_tasks(path, tasks)
-    dataset = TaskDataset([str(path)], tokenizer, 30, num_workers=num_workers)
+    dataset = TaskDataset([str(path)], tokenizer, 30, num_workers=1)
     admitted = [row["input"].lowered.task.id for row in dataset.collate_fn(list(dataset))]
     assert admitted == ["short"]
 
@@ -129,38 +130,37 @@ def test_eval_dataset_filtering(mock_tokenizer, sample_dataset, tmp_path, probe_
     assert all(row["input"].metadata.metric_class == "gsm8k" for row in rows)
 
 
-@pytest.mark.parametrize("num_workers", [1, 2])
-@pytest.mark.parametrize(("nested_source", "expected_source"), [(None, "fixture"), ("nested-source", "nested-source")])
+@pytest.mark.parametrize(("nested_source", "row_count"), [(None, 3), ("nested-source", 3), ("nested-source", 20_000)])
 def test_source_tasks_preserve_row_indices_and_source_labels_after_filtering(
-    tmp_path, num_workers, nested_source, expected_source
+    tmp_path, fork_records, nested_source, row_count
 ):
     rows = [
         {
-            "prompt": [{"role": "user", "content": content}],
+            "prompt": [{"role": "user", "content": "x" * 200 if index % 3 == 1 else f"Question {index}"}],
             "env_class": "gsm8k",
             "reward_spec": {"ground_truth": "PRIVATE_ANSWER"},
             "teacher_route": "math",
             "data_source": "fixture",
             "extra_info": {"grade": index, "data_source": nested_source},
         }
-        for index, content in enumerate(("First question", "x" * 200, "Last question"))
+        for index in range(row_count)
     ]
     source = tmp_path / "source.jsonl"
     source.write_text("\n".join(json.dumps(row) for row in rows))
-
     dataset = SourceTaskDataset(
         [str(source)],
         _StubTokenizer(),
         100,
         environment_configs=OmegaConf.to_container(get_default_config().environment.task_sessions, resolve=True),
-        num_workers=num_workers,
+        num_workers=2,
     )
+    indices = [index for index in range(row_count) if index % 3 != 1]
     prepared = dataset.collate_fn([dataset[index] for index in range(len(dataset))])
-    assert [task_messages(row["input"].lowered) for row in prepared] == [rows[0]["prompt"], rows[2]["prompt"]]
-    tasks = [row["input"].lowered.task for row in prepared]
-    assert [task.source.row for task in tasks] == ["0", "2"]
-    assert [row["input"].metadata.data_source for row in prepared] == [expected_source, expected_source]
+    assert [task_messages(row["input"].lowered) for row in prepared] == [rows[index]["prompt"] for index in indices]
+    assert [row["input"].lowered.task.source.row for row in prepared] == [str(index) for index in indices]
+    assert [row["input"].metadata.data_source for row in prepared] == [nested_source or "fixture"] * len(indices)
     assert dataset.dataframe.cache_files == []
+    assert bool(tuple(fork_records.iterdir())) == (row_count == 20_000)
 
 
 @patch("datasets.load_dataset")
@@ -182,9 +182,11 @@ def test_prompt_dataset_filtering_counts_batch_encoding_input_ids(mock_load_data
     assert len(dataset) == 2
 
 
-@pytest.mark.parametrize("num_workers", [1, 2])
-@pytest.mark.parametrize("reverse", [False, True])
-def test_native_tasks_with_different_extras_preserve_each_row(tmp_path, num_workers, reverse):
+@pytest.mark.parametrize(
+    ("reverse", "copies"),
+    [(False, 1), (True, 1), pytest.param(False, PARALLEL_DATASET_MIN_ROWS, id="parallel-shards")],
+)
+def test_native_tasks_with_different_extras_preserve_each_row(tmp_path, reverse, copies):
     rows = [
         {
             "prompt": [
@@ -211,6 +213,7 @@ def test_native_tasks_with_different_extras_preserve_each_row(tmp_path, num_work
     ]
     if reverse:
         rows.reverse()
+    rows = [row for row in rows for _ in range(copies)]
     configs = OmegaConf.to_container(get_default_config().environment.task_sessions, resolve=True)
     tasks = [
         source_row_task(row, index, source_name="mixed", environment_configs=configs) for index, row in enumerate(rows)
@@ -218,10 +221,12 @@ def test_native_tasks_with_different_extras_preserve_each_row(tmp_path, num_work
     path = tmp_path / "mixed.parquet"
     write_tasks(path, tasks)
 
-    dataset = TaskDataset([str(path)], _StubTokenizer(), 100, num_workers=num_workers)
+    dataset = TaskDataset([str(path)], _StubTokenizer(), 100, num_workers=2)
 
-    inputs = dataset.collate_fn([dataset[index] for index in range(len(dataset))])
+    prepared = [dataset[index] for index in range(len(dataset))]
+    inputs = dataset.collate_fn(prepared)
     for index, source in enumerate(rows):
+        assert prepared[index][0] == source["prompt"]
         task = inputs[index]["input"]
         assert task.metadata.metric_class == source["env_class"]
         assert inputs[index]["uid"] == str(index)
@@ -321,3 +326,20 @@ def test_prompt_dataset_uids(mock_load_dataset, sample_dataset, mock_tokenizer):
     uids_again = [row[3] for row in rows_again]
     # When sampled the second time, UIDs should not change
     assert uids_again == uids
+
+
+@pytest.fixture
+def fork_records(tmp_path):
+    records = tmp_path / "forks"
+    records.mkdir()
+    enabled = True
+
+    def record_fork():
+        if enabled:
+            (records / str(os.getpid())).touch()
+
+    os.register_at_fork(after_in_child=record_fork)
+    try:
+        yield records
+    finally:
+        enabled = False

@@ -46,6 +46,7 @@ import uuid
 from typing import Any, Protocol
 
 from omegaconf import DictConfig, OmegaConf
+from rigging.timing import RateLimiter
 
 from cloud.iris.artifacts import ArtifactSource, atomic_directory_update, file_inventory, fs_and_path, materialize
 from cloud.iris.hf_model_cache import (
@@ -192,6 +193,8 @@ def _ray_bin() -> str:
 DEFAULT_RENDEZVOUS_TIMEOUT = 1800
 DEFAULT_CLUSTER_JOIN_TIMEOUT = 1800
 POLL_INTERVAL = 5
+STARTUP_POLL_INTERVAL = 1.0
+RENDEZVOUS_REFRESH_INTERVAL = 5.0
 # Tolerates clock skew between nodes and the time rank-0 needs to start Ray.
 RENDEZVOUS_FRESHNESS_SLACK = 60
 # Bound the rank-0 rendezvous PutObject: unbounded fsspec/s3fs put can wedge the
@@ -382,8 +385,10 @@ def _copy_tokenizer_metadata(source: Path, destination: Path) -> None:
         shutil.copy2(metadata_file, destination / metadata_file.name)
 
 
-def prepare_policy_tokenizer(args: argparse.Namespace) -> PreparedPolicyTokenizer | None:
-    """Stage the requested tokenizer independently from the policy weights."""
+def prepare_policy_tokenizer(
+    args: argparse.Namespace, *, policy_config_path: Path | None
+) -> PreparedPolicyTokenizer | None:
+    """Stage the requested tokenizer with model metadata for config resolution."""
     tokenizer_path = args.policy_tokenizer
     if not tokenizer_path:
         return None
@@ -391,13 +396,13 @@ def prepare_policy_tokenizer(args: argparse.Namespace) -> PreparedPolicyTokenize
     revision = args.policy_tokenizer_revision
     local_path = _metadata_path(tokenizer_path, revision or "main")
     target = Path(local_path)
-    if is_cloud_uri(tokenizer_path):
-        manifest = load_model_manifest(tokenizer_path)
-        stage_model_metadata(tokenizer_path, manifest, local_path)
-        _require_tokenizer_metadata(target, tokenizer_path)
-        (target / MODEL_MANIFEST_FILENAME).unlink(missing_ok=True)
-    else:
-        with atomic_directory_update(target, staging_prefix=f".{target.name}.tokenizer-") as staging:
+    with atomic_directory_update(target, staging_prefix=f".{target.name}.tokenizer-") as staging:
+        if is_cloud_uri(tokenizer_path):
+            manifest = load_model_manifest(tokenizer_path)
+            stage_model_metadata(tokenizer_path, manifest, str(staging))
+            _require_tokenizer_metadata(staging, tokenizer_path)
+            (staging / MODEL_MANIFEST_FILENAME).unlink(missing_ok=True)
+        else:
             staging.mkdir()
             if os.path.isdir(tokenizer_path):
                 _copy_tokenizer_metadata(Path(tokenizer_path), staging)
@@ -412,6 +417,8 @@ def prepare_policy_tokenizer(args: argparse.Namespace) -> PreparedPolicyTokenize
                 _require_tokenizer_metadata(staging, tokenizer_path)
             else:
                 raise ValueError(f"Unsupported policy tokenizer source: {tokenizer_path!r}")
+        if policy_config_path is not None and not (staging / "config.json").exists():
+            shutil.copy2(policy_config_path, staging / "config.json")
 
     return PreparedPolicyTokenizer(local_path)
 
@@ -958,7 +965,7 @@ def poll_rendezvous(
             raise
         except Exception as exc:  # transient object-store hiccup
             _log(f"rendezvous poll error (will retry): {exc}")
-        time.sleep(POLL_INTERVAL)
+        time.sleep(STARTUP_POLL_INTERVAL)
     raise TimeoutError(
         f"Worker rank {_rank()} timed out after {timeout}s waiting for "
         f"rank-0 rendezvous at {uri}. Did the head task fail to start?"
@@ -1183,12 +1190,12 @@ def ray_stop() -> None:
 def wait_for_nodes(ray_address: str, expected_nodes: int, timeout: int, rewrite_cb=None) -> None:
     """Block until the Ray cluster reports ``expected_nodes`` alive nodes.
 
-    ``rewrite_cb`` (head only): a no-arg callable invoked on every poll to RE-PUBLISH
-    the rendezvous so its ``written_at`` stays fresh. A worker pod on a cold node can
+    ``rewrite_cb`` (head only): a no-arg callable invoked on every poll to refresh
+    the rendezvous on its own schedule so its ``written_at`` stays fresh. A worker pod on a cold node can
     start >RENDEZVOUS_FRESHNESS_SLACK (60s) after the head wrote the rendezvous; its
     ``poll_rendezvous(min_written_at=worker_start)`` would then reject the head's
     one-shot rendezvous as "stale" and wait forever while the head waits for that node —
-    a mutual deadlock. Rewriting each poll keeps the timestamp ahead of any late worker's
+    a mutual deadlock. Refreshing within the slack keeps the timestamp ahead of any late worker's
     freshness threshold without weakening the prior-ATTEMPT protection (a stale file from
     a dead PRIOR attempt is still never refreshed).
     """
@@ -1213,7 +1220,7 @@ def wait_for_nodes(ray_address: str, expected_nodes: int, timeout: int, rewrite_
             if count >= expected_nodes:
                 _log(f"All {expected_nodes} Ray node(s) joined. Resources: {ray.cluster_resources()}")
                 return
-            time.sleep(POLL_INTERVAL)
+            time.sleep(STARTUP_POLL_INTERVAL)
         raise TimeoutError(f"Only {last_count}/{expected_nodes} Ray nodes joined within {timeout}s.")
     finally:
         ray.shutdown()
@@ -1866,14 +1873,19 @@ def run_head(
         _log(
             f"[task-runtime] Ray head subprocess returned; writing rendezvous -> {_rendezvous_uri(args.rendezvous_dir)}"
         )
+        rewrite_limiter = RateLimiter(RENDEZVOUS_REFRESH_INTERVAL)
         write_rendezvous(args.rendezvous_dir, head_ip, ray_port, gang_epoch)
-        # Re-publish the rendezvous each poll so a late cold-node worker never sees it
-        # as "stale" (see wait_for_nodes docstring — prevents the freshness deadlock).
+        rewrite_limiter.mark_run()
+
+        def refresh_rendezvous():
+            if rewrite_limiter.should_run():
+                write_rendezvous(args.rendezvous_dir, head_ip, ray_port, gang_epoch)
+
         wait_for_nodes(
             ray_address,
             num_tasks,
             args.cluster_join_timeout,
-            rewrite_cb=lambda: write_rendezvous(args.rendezvous_dir, head_ip, ray_port, gang_epoch),
+            rewrite_cb=refresh_rendezvous,
         )
     else:
         _log("Single-node slice: skipping rendezvous and multi-node wait.")
@@ -2223,7 +2235,9 @@ def main() -> None:
         stage_task_data(args.terminal_bench_data, role="terminal-bench sidechannel")
     policy_model = prepare_policy_model(args)
     policy_local_path = policy_model.local_path if policy_model is not None else None
-    policy_tokenizer = prepare_policy_tokenizer(args)
+    policy_tokenizer = prepare_policy_tokenizer(
+        args, policy_config_path=Path(policy_local_path) / "config.json" if policy_local_path is not None else None
+    )
     if args.prestage_model:
         stage_model(
             args.prestage_model,

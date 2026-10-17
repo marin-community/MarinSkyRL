@@ -1,5 +1,6 @@
 from argparse import Namespace
 import hashlib
+import json
 from pathlib import Path
 
 import fsspec
@@ -131,22 +132,32 @@ def test_hugging_face_draft_mirror_uses_the_policy_tokenizer(tmp_path, monkeypat
     assert manifest.tokenizer_mode == "policy"
 
 
-def test_requested_local_policy_tokenizer_is_staged_independently(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("tokenizer_has_config", [False, True])
+def test_requested_local_policy_tokenizer_uses_own_or_fallback_config(
+    tmp_path, monkeypatch, tokenizer_has_config
+) -> None:
     tokenizer_source = tmp_path / "tokenizer-source"
     tokenizer_source.mkdir()
     (tokenizer_source / "tokenizer.json").write_text('{"identity": "requested"}')
     (tokenizer_source / "tokenizer_config.json").write_text('{"chat_template": "requested"}')
-    destination = tmp_path / "prepared-tokenizer"
-    monkeypatch.setattr(task_runtime, "_metadata_path", lambda _uri, _revision: str(destination))
+    policy_config = tmp_path / "config.json"
+    policy_config.write_text('{"model_type": "llama"}')
+    if tokenizer_has_config:
+        (tokenizer_source / "config.json").write_text('{"model_type": "qwen2"}')
+    monkeypatch.setattr(task_runtime.tempfile, "gettempdir", lambda: str(tmp_path))
 
     prepared = prepare_policy_tokenizer(
-        Namespace(policy_tokenizer=str(tokenizer_source), policy_tokenizer_revision="tokenizer-commit")
+        Namespace(policy_tokenizer=str(tokenizer_source), policy_tokenizer_revision="tokenizer-commit"),
+        policy_config_path=policy_config,
     )
 
     assert prepared is not None
-    assert prepared.local_path == str(destination)
+    destination = Path(prepared.local_path)
+    assert destination.is_relative_to(tmp_path)
     assert (destination / "tokenizer.json").read_text() == '{"identity": "requested"}'
     assert (destination / "tokenizer_config.json").read_text() == '{"chat_template": "requested"}'
+    expected_model_type = "qwen2" if tokenizer_has_config else "llama"
+    assert json.loads((destination / "config.json").read_text()) == {"model_type": expected_model_type}
 
 
 def test_staged_models_are_written_as_structured_config(tmp_path, monkeypatch) -> None:
