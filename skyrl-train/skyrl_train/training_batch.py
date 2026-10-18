@@ -550,6 +550,7 @@ class TrainingBatchIterator(Iterator[Experience]):
             if "ftpo_chosen_mask" in batch
             else None,
             rollout_routed_experts=batch.routed_experts_tensor(),
+            rollout_engine_dp_ranks=batch.get("rollout_engine_dp_ranks"),
             response_span_tags=batch.get("response_span_tags"),
             pair_roles=batch.get("pair_roles"),
             info={},

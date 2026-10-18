@@ -25,7 +25,9 @@ from skyrl_train.rollouts.context import TrainingContextState
 from skyrl_train.rollouts.loader import PromptLoaderState
 from skyrl_train.trainer import CheckpointSnapshot, RayPPOTrainer
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
-from skyrl_train.trajectory_runners.types import TrajectoryID
+from skyrl_train.inference_engines.base import UNKNOWN_ENGINE_DP_RANK
+from skyrl_train.trajectory_runners.trajectory_processing import concatenate_trajectory_batches
+from skyrl_train.trajectory_runners.types import ROLLOUT_ENGINE_DP_RANKS_KEY, TrajectoryID
 from skyrl_train.objective.losses import PolicyLossInputs, ppo_policy_loss
 from skyrl_train.config.objective_spec import LossReduction
 from skyrl_train.objective.reduction import reduce_to_step, step_counts
@@ -1095,3 +1097,50 @@ async def test_exactness_check_scores_the_engines_after_qualifying_syncs_in_the_
         "dp_rank_0/mismatched_tokens": 1.0,
     }
     assert reported == [scored, {}, {}, {"generate_failures": 1.0}, scored]
+
+
+class _RecordingForwardPolicyGroup(_ForwardPolicyGroup):
+    def __init__(self):
+        self.forward_batches = []
+
+    def async_run_ray_method(self, dispatch_type, method_name, **kwargs):
+        if method_name == "forward":
+            self.forward_batches.append(kwargs["data"])
+        return super().async_run_ray_method(dispatch_type, method_name, **kwargs)
+
+
+def _trajectory_rows(prompts, responses, **channels):
+    return {
+        "prompt_token_ids": prompts,
+        "response_ids": responses,
+        "rewards": [[0.0] * len(response) for response in responses],
+        "loss_masks": [[1] * len(response) for response in responses],
+        "rollout_logprobs": None,
+        **channels,
+    }
+
+
+def test_the_pre_update_policy_forward_receives_each_rows_serving_engine_rank(ray_init, dummy_config, dummy_tokenizer):
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = dummy_config
+    trainer.group_advantage_invariant = GroupAdvantageInvariant.no_group_advantage(physical_group_size=1)
+    trainer.tokenizer = dummy_tokenizer
+    trainer.pad_batch = lambda batch: batch
+    trainer.policy_model = _RecordingForwardPolicyGroup()
+    trainer.ref_model = None
+    trainer.critic_model = None
+    trainer.colocate_all = False
+    trainer.global_step = 1
+    # A batch whose model turns report no serving rank fills its rows with UNKNOWN_ENGINE_DP_RANK.
+    trajectory_batch = concatenate_trajectory_batches(
+        [
+            _trajectory_rows([[1, 2], [3]], [[4, 5, 6], [7]], **{ROLLOUT_ENGINE_DP_RANKS_KEY: [3, 0]}),
+            _trajectory_rows([[8]], [[9, 10]]),
+        ],
+        tis_lcs_alert_threshold=0.0,
+    )
+
+    trainer.fwd_logprobs_values_reward(trainer.convert_to_training_input(trajectory_batch, ["a", "b", "c"]))
+
+    [forward] = trainer.policy_model.forward_batches
+    assert forward[ROLLOUT_ENGINE_DP_RANKS_KEY].tolist() == [3, 0, UNKNOWN_ENGINE_DP_RANK]

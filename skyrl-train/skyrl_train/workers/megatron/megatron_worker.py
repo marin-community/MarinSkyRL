@@ -33,9 +33,14 @@ from skyrl_train.distributed.megatron.optimizer import (
 )
 from skyrl_train.distributed.megatron.remote_model import install_remote_hf_state
 from skyrl_train.distributed.utils import init_worker_process_group_with_device
+from skyrl_train.config.numerics import NumericsMode
 from skyrl_train.mismatch_probe.modes import TRAINER_MODES
+from skyrl_train.models.grug_exact.engine_regions import set_compile_rows
+from skyrl_train.models.grug_exact.support import resolve_exact_numerics
+from skyrl_train.models.grug_exact.vllm_kernels import require_hopper_gpu
 from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE, validate_grug_training_strategy
 from skyrl_train.timing_observability import PhaseBreakdown
+from skyrl_train.trajectory_runners.types import ROLLOUT_ENGINE_DP_RANKS_KEY
 from marinskyrl.runtime_options import PolicyLossType
 from skyrl_train.training_batch import (
     TrainingBatchIterator,
@@ -111,16 +116,20 @@ class MegatronWorker:
         transformer_config_kwargs,
         tokenizer_path: str,
         tokenizer_revision: str | None,
+        numerics: NumericsMode,
         bf16=True,
         flash_attn=False,
         model_revision: str | None = None,
         model_source_uri: str | None = None,
     ):
         """
-        Initialize the Megatron-Bridge bridge and provider objects + hf_config and tokenizer
+        Initialize the Megatron-Bridge bridge and provider objects + hf_config and tokenizer, and set
+        ``self.numerics`` to the mode the configured ``numerics`` resolves to for this model.
         """
         hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True, revision=model_revision)
         validate_grug_training_strategy(getattr(hf_config, "model_type", None), "megatron")
+        # Resolved against the model config as written, before the overrides below, as the driver resolves it.
+        self.numerics = resolve_exact_numerics(hf_config).mode if numerics is NumericsMode.EXACT else numerics
         tokenizer = AutoTokenizer.from_pretrained(
             tokenizer_path,
             trust_remote_code=True,
@@ -161,6 +170,10 @@ class MegatronWorker:
 
         for k, v in transformer_config_kwargs.items():
             setattr(provider, k, v)
+        if self.numerics is NumericsMode.EXACT:
+            require_hopper_gpu()
+            set_compile_rows(self.cfg.generator.max_num_batched_tokens)
+            provider.grug_numerics = self.numerics
         provider.finalize()
 
         self.provider = provider
@@ -219,6 +232,8 @@ class MegatronWorker:
                     num_actions=num_actions,
                     ftpo_chosen_mask=micro.get("ftpo_chosen_mask"),
                     rollout_routed_experts=micro.routed_experts_tensor(),
+                    rollout_engine_dp_ranks=micro.get(ROLLOUT_ENGINE_DP_RANKS_KEY),
+                    loss_mask=micro.get("loss_mask"),
                     probe_row_indices=micro.get("probe_row_indices"),
                 )
             )
@@ -437,6 +452,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             model_source_uri=self.cfg.trainer.policy.model.get("source_uri"),
             tokenizer_path=self.cfg.trainer.policy.model.get("tokenizer_path"),
             tokenizer_revision=self.cfg.trainer.policy.model.get("tokenizer_revision"),
+            numerics=NumericsMode(self.cfg.trainer.numerics.mode),
         )
 
         ddp_config = self.cfg.trainer.policy.megatron_config.ddp_config if for_training else None
@@ -500,6 +516,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             logprob_chunk_size=OmegaConf.select(
                 self.cfg, "trainer.policy.megatron_config.logprob_chunk_size", default=None
             ),
+            numerics=self.numerics,
         )
         self._maybe_install_router_replay("policy")
 
@@ -532,6 +549,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             logprob_chunk_size=OmegaConf.select(
                 self.cfg, "trainer.policy.megatron_config.logprob_chunk_size", default=None
             ),
+            numerics=self.numerics,
         )
 
     def _ppo_train_impl(self, train_data, timing: PhaseBreakdown) -> "TrainingOutputBatch":
@@ -585,6 +603,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         distillation=experience.distillation,
                         ftpo=experience.ftpo,
                         rollout_routed_experts=experience.rollout_routed_experts,
+                        rollout_engine_dp_ranks=experience.rollout_engine_dp_ranks,
                         pair_roles=experience.pair_roles,
                     )
                 )
@@ -944,6 +963,7 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             model_source_uri=self.cfg.trainer.ref.model.get("source_uri"),
             tokenizer_path=self.cfg.trainer.ref.model.get("tokenizer_path"),
             tokenizer_revision=self.cfg.trainer.ref.model.get("tokenizer_revision"),
+            numerics=NumericsMode.NATIVE,
         )
 
         self.actor_module = self.make_megatron_module(
