@@ -980,9 +980,16 @@ def test_grpo_reports_one_flat_and_one_varied_reward_group():
     assert torch.isfinite(result["advantages"]).all()
 
 
+# The two live engines' responses to the check prompt and their log-probabilities, by data-parallel rank.
+_CHECK_RESPONSES = {1: ([7, 8, 9], [-0.5, -1.25, -2.0]), 0: ([5, 6], [-0.75, -3.5])}
+_CHECK_LOGPROBS = {
+    token: value for ids, values in _CHECK_RESPONSES.values() for token, value in zip(ids, values, strict=True)
+}
+
+
 class _CheckInferenceClient(_ResidencyInferenceClient):
-    """Engines that answer the exactness check's prompt with two log-probabilities; an engine dies during the check
-    requests numbered in ``failing`` (from 1)."""
+    """Two live engines, data-parallel ranks 1 and 0, that answer the exactness check's prompt with
+    ``_CHECK_RESPONSES``; an engine dies during the check requests numbered in ``failing`` (from 1)."""
 
     def __init__(self, failing):
         super().__init__()
@@ -993,7 +1000,33 @@ class _CheckInferenceClient(_ResidencyInferenceClient):
         self.check_requests += 1
         if self.check_requests in self.failing:
             raise ray.exceptions.ActorDiedError()
-        return [(0, {"response_ids": [[7, 8]], "response_logprobs": [[-0.5, -1.0]]})]
+        return [
+            (rank, {"response_ids": [ids], "response_logprobs": [values]})
+            for rank, (ids, values) in _CHECK_RESPONSES.items()
+        ]
+
+
+class _CheckScoringPolicyGroup:
+    """A policy of four data-parallel ranks that scores each response token with its engine log-probability (0 for a
+    token no engine sampled), except the second token of the fourth row, which it scores one float32 ulp toward
+    zero."""
+
+    actor_infos = [
+        SimpleNamespace(rank=MeshRank(dp=dp, sp=0, tp=0, pp=0, world_size=4, dp_size=4, pp_size=1)) for dp in range(4)
+    ]
+
+    def async_run_ray_method(self, dispatch_type, method_name, **kwargs):
+        if method_name == "barrier_all":
+            return [ray.put(None)]
+        if method_name == "empty_cache":
+            return []
+        assert method_name == "forward", method_name
+        data = kwargs["data"]
+        responses = data["sequences"][:, -data.metadata["response_length"] :].tolist()
+        output = torch.tensor([[_CHECK_LOGPROBS.get(token, 0.0) for token in row] for row in responses])
+        if len(output) == 4:
+            output[3, 1] = torch.nextafter(output[3, 1], torch.tensor(0.0))
+        return [ray.put(TrainingOutputBatch({"output": shard})) for shard in output.tensor_split(4)]
 
 
 def _one_row_batch() -> TrainingInputBatch:
@@ -1015,7 +1048,7 @@ async def test_exactness_check_scores_the_engines_after_qualifying_syncs_in_the_
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
     trainer.cfg = get_default_config()
     trainer.colocate_all = False
-    trainer.policy_model = _ForwardPolicyGroup()
+    trainer.policy_model = _CheckScoringPolicyGroup()
     trainer.ref_model = None
     trainer.critic_model = None
     trainer.inference_engine_client = _CheckInferenceClient(failing={2})
@@ -1045,16 +1078,17 @@ async def test_exactness_check_scores_the_engines_after_qualifying_syncs_in_the_
             }
         )
 
-    # The policy scores zeros against the engine's two log-probabilities. The check follows the first sync, every
-    # second training sync and the checkpoint re-sync; the generation an engine died during is counted, and its
-    # forward scores none.
+    # The check follows the first sync, every second training sync and the checkpoint re-sync; the generation an engine
+    # died during is counted, and its forward scores none. Its rows repeat to the policy's four data-parallel ranks,
+    # each counted at the rank of the engine that served it; the one value a float32 ulp off is one mismatch, at rank 0.
     scored = {
-        "engines": 1.0,
-        "tokens": 2.0,
-        "mismatched_tokens": 2.0,
-        "log_ratio_abs_max": 1.0,
-        "dp_rank_0/tokens": 2.0,
-        "dp_rank_0/mismatched_tokens": 2.0,
+        "engines": 2.0,
+        "tokens": 10.0,
+        "mismatched_tokens": 1.0,
+        "log_ratio_abs_max": 2.0**-22,
+        "dp_rank_1/tokens": 6.0,
+        "dp_rank_1/mismatched_tokens": 0.0,
+        "dp_rank_0/tokens": 4.0,
+        "dp_rank_0/mismatched_tokens": 1.0,
     }
     assert reported == [scored, {}, {}, {"generate_failures": 1.0}, scored]
-    assert trainer.inference_engine_client.check_requests == 3
