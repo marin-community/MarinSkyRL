@@ -121,7 +121,7 @@ class BenchmarkRequestSpec:
                 "max_tokens": limit,
                 "ignore_eos": True,
                 "seed": seed,
-                "flat_logprobs": self.flat,
+                "flat_logprobs": self.flat and (request.sampling_params.get("logprobs") or 0) > 0,
             },
         )
 
