@@ -715,7 +715,9 @@ def skyrl_entrypoint(cfg: DictConfig):
     # through), NOT here -- terminal_bench and other entrypoints use their own
     # skyrl_entrypoint wrappers, so the fix must be on run(). See run() above.
     # make sure that the training loop is not run on the head node.
-    exp = BasePPOExp(cfg)
+    from skyrl_train.entrypoints.score_centering_performance import PerformanceExp
+
+    exp = PerformanceExp(cfg)
     exp.run()
 
 
