@@ -136,6 +136,29 @@ The measurements use `cloud/iris/configs/snowball_megatron_full.yaml`, which
 overlaps gradient reduction and parameter gathering with compute and reduces
 gradients in bf16. Generation takes about 70% of the step.
 
+## Training communication
+
+Batch-invariant workers inherit vLLM's one-channel NCCL limit. Megatron policies
+with TP1 and expert TP1 can set a separate training limit:
+
+```text
+trainer.algorithm.batch_invariant=true
+trainer.policy.megatron_config.tensor_model_parallel_size=1
+trainer.policy.megatron_config.expert_tensor_parallel_size=1
+trainer.policy.megatron_config.nccl_max_channels=32
+```
+
+The limit applies before training process groups are created. Weight transfers
+to vLLM keep the serving channel limit on both ends. Leave `NCCL_MAX_CTAS` unset
+or at that serving limit; other values override the transfer limit and are
+rejected. The default `nccl_max_channels=null` keeps the existing behavior.
+
+The [Hero 65K channel study](https://marin-us-east-02a.cwobject.com/marin/users/romain/hero-learner-bottlenecks-01a13c0f/reports/HERO65K-LEARNER-BOTTLENECKS.md)
+records the tested layout, precision, memory costs and numerical checks. Its
+full-Hero measurements carry [#1000](https://github.com/marin-community/MarinSkyRL/pull/1000)
+equally in every arm. They measure learner scoring and updates; rollout and
+weight-transfer throughput require separate measurements.
+
 ## Query bias
 
 Only the frozen query-bias mode is supported. The bias steers expert
