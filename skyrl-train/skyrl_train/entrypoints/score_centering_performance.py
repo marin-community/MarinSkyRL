@@ -736,7 +736,9 @@ class PerformanceTrainer(RayPPOTrainer):
         self._performance_masked_uid = fixed.uid(0)
         self.context = TrainingContext.from_config(self.cfg, fixed, self.trajectory_runner)
         self.context.start()
-        limits = [8, 24, 64, 128] if short else [64, 256, 1024, 4096]
+        # The first group is probed with the retained sequential prompt order.
+        # Put the longest Snowball response there to bound full capture cost.
+        limits = [8, 24, 64, 128] if short else [4096, 256, 1024, 64]
         placements = {fixed.uid(index): (limits[index % 4], 1701 + index) for index in range(groups)}
         expected_lengths = sorted(limit for index in range(groups) for limit in [limits[index % 4]] * 4)
         self._performance_fixed_advantages = True
@@ -774,6 +776,9 @@ class PerformanceTrainer(RayPPOTrainer):
                 assert sorted(result["response_lengths"]) == expected_lengths
                 if name == "probe":
                     assert result["metrics"]["score_centering_probe/sampled_tokens"] > 0
+                    if not short:
+                        assert len(result["probe_capture"]) == 4
+                        assert all(row["response_tokens"] == 4096 for row in result["probe_capture"])
                 if compact_reference:
                     references = await asyncio.to_thread(
                         ray.get,
