@@ -38,4 +38,7 @@ def merge_adjacent_checkpoint_shards(
             return fallback(shards)
         offset += shard.numel()
         rows += shard.shape[0]
-    return first.as_strided((rows, *first.shape[1:]), first.stride())
+    # The factory creates these views under no_grad from parameters that require grad, and DCP writes into them, so
+    # autograd rejects another view of them in grad mode. The restore needs only the storage alias, as cat's
+    # untracked result would be.
+    return first.detach().as_strided((rows, *first.shape[1:]), first.stride())
