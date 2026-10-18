@@ -438,6 +438,12 @@ async def test_resume_regenerates_uncommitted_prompts_and_keeps_committed_groups
 
     assert [rollout.verdict.uid for rollout in state.ready] == ["c"]
     assert [prompt["uid"] for prompt in state.loader.retries] == ["b"]
+    facts = state.ready[0].verdict.row_facts
+    np.testing.assert_array_equal(facts.prompt_len, [1, 1])
+    np.testing.assert_array_equal(facts.response_len, [1, 1])
+    np.testing.assert_array_equal(facts.score, [0.0, 1.0])
+    assert facts.rewards.optimization == (0.0, 1.0)
+    assert facts.rollout_passes == (False, True)
 
     resumed_workers = _Workers()
     resumed = _context(["a", "b", "c"], resumed_workers, start_buffer, batch_size=1, max_in_flight=2, payloads=payloads)

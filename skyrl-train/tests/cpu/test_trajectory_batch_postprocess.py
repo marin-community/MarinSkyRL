@@ -4,7 +4,8 @@ import pytest
 from omegaconf import OmegaConf
 from skyrl_gym.verification import VerificationResult
 
-from skyrl_train.trainer import RayPPOTrainer, _domain_reward_metrics
+from skyrl_train.trainer import RayPPOTrainer
+from skyrl_train.batch_metrics import domain_reward_metrics
 from skyrl_train.trajectory_runners.types import TrajectoryBatch
 from skyrl_train.rollouts.finalization import propagate_data_sources
 from skyrl_train.trajectory_runners.types import TrajectoryID, TaskRequestBatch
@@ -66,6 +67,8 @@ def test_pass_at_k_uses_unshaped_outcomes():
 def test_training_reports_normalized_composite_scores_by_agent():
     trainer = make_trainer()
     batch: TrajectoryBatch = {
+        "prompt_token_ids": [[0], [0], [0]],
+        "loss_masks": [[1], [1], [1]],
         "response_ids": [[1], [2], [3]],
         "rewards": [5.0, 1.0, 0.0],
         "verification_results": [
@@ -87,27 +90,33 @@ def test_informative_group_fraction_counts_groups_whose_rewards_differ():
     trainer = make_trainer()
     # Group a has reward spread; group b is a tie and carries no advantage signal.
     trainer.postprocess_trajectory_batch(
-        {"response_ids": [[1], [2], [3], [4]], "rewards": [1.0, 0.0, 0.5, 0.5]}, ["a", "a", "b", "b"]
+        {
+            "prompt_token_ids": [[0]] * 4,
+            "loss_masks": [[1]] * 4,
+            "response_ids": [[1], [2], [3], [4]],
+            "rewards": [1.0, 0.0, 0.5, 0.5],
+        },
+        ["a", "a", "b", "b"],
     )
     assert trainer.all_metrics["reward/informative_group_fraction"] == 0.5
 
 
 def test_domain_reward_metrics_aggregate_and_bound_metric_keys():
-    metrics = _domain_reward_metrics(["alpha", "alpha", None, "zeta"], [0.0, 1.0, 0.5, 0.0])
+    metrics = domain_reward_metrics(["alpha", "alpha", None, "zeta"], [0.0, 1.0, 0.5, 0.0])
     assert metrics == {
         "reward/domain/alpha/avg_raw_reward": 0.5,
         "reward/domain/_missing/avg_raw_reward": 0.5,
         "reward/domain/zeta/avg_raw_reward": 0.0,
     }
 
-    overflow_metrics = _domain_reward_metrics(["__other__", *[f"domain-{i:02}" for i in range(40)]], [0.0] + [1.0] * 40)
+    overflow_metrics = domain_reward_metrics(["__other__", *[f"domain-{i:02}" for i in range(40)]], [0.0] + [1.0] * 40)
     assert len(overflow_metrics) == 33
     assert overflow_metrics["reward/domain/__other__/avg_raw_reward"] == 0.0
     assert overflow_metrics["reward/domain_overflow/avg_raw_reward"] == 1.0
 
 
 def test_domain_reward_metric_names_do_not_merge_distinct_sources():
-    metrics = _domain_reward_metrics(
+    metrics = domain_reward_metrics(
         ["a/b", "a_b", None, "unknown", "_missing", "_source_a_2fb", "Math", "math"],
         [0.0, 1.0, 0.25, 0.75, 0.5, 0.6, 0.3, 0.9],
     )
