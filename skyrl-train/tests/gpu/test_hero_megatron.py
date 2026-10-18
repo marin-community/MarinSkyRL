@@ -6,6 +6,8 @@ import posixpath
 from uuid import uuid4
 
 from omegaconf import open_dict
+from cloud.iris.hf_model_cache import stage_model_metadata
+from marinskyrl.model_manifest import snapshot_model_manifest
 import pytest
 import ray
 import torch
@@ -35,20 +37,23 @@ def _train_step(policy, batch):
 
 
 @pytest.mark.parametrize(
-    "tp,pp,ep,cp,packing,optimizer_offload,muonh",
+    "tp,pp,ep,cp,packing,optimizer_offload,muonh,remote_read_mode",
     [
-        (1, 1, 1, 1, False, None, False),
-        (1, 2, 1, 1, False, None, False),
-        (1, 1, 2, 1, True, None, False),
-        (1, 1, 1, 2, True, None, False),
-        (2, 1, 1, 1, True, None, False),
-        pytest.param(1, 1, 2, 1, True, 0.0, False, id="precision-aware-gpu"),
-        pytest.param(1, 1, 2, 1, True, 0.5, False, id="half-offloaded-adamw"),
-        pytest.param(1, 1, 2, 1, True, 1.0, False, id="cpu-adamw"),
-        pytest.param(1, 2, 2, 1, False, None, True, id="pp2-ep2-muonh-cpu-momentum"),
+        pytest.param(1, 1, 1, 1, False, None, False, "default", id="remote-default-prefetch"),
+        (1, 2, 1, 1, False, None, False, None),
+        (1, 1, 2, 1, True, None, False, None),
+        (1, 1, 1, 2, True, None, False, None),
+        (2, 1, 1, 1, True, None, False, None),
+        pytest.param(1, 1, 2, 1, True, 0.0, False, None, id="precision-aware-gpu"),
+        pytest.param(1, 1, 2, 1, True, 0.5, False, None, id="half-offloaded-adamw"),
+        pytest.param(1, 1, 2, 1, True, 1.0, False, None, id="cpu-adamw"),
+        pytest.param(1, 2, 2, 1, False, None, True, None, id="pp2-ep2-muonh-cpu-momentum"),
+        pytest.param(1, 1, 1, 1, False, None, False, "per_key", id="remote-per-key"),
     ],
 )
-def test_hero_worker_repeated_updates(tmp_path, monkeypatch, tp, pp, ep, cp, packing, optimizer_offload, muonh):
+def test_hero_worker_repeated_updates(
+    tmp_path, monkeypatch, request, tp, pp, ep, cp, packing, optimizer_offload, muonh, remote_read_mode
+):
     world_size = tp * pp * ep * cp
     require_hoppers(world_size)
     checkpoint_prefix = os.environ.get("MARIN_TEMP_PREFIX", os.environ.get("MARIN_PREFIX", ""))
@@ -58,7 +63,22 @@ def test_hero_worker_repeated_updates(tmp_path, monkeypatch, tp, pp, ep, cp, pac
     model_path = tmp_path / "model"
     model_path.mkdir()
     original = write_tiny_hero_checkpoint(model_path)
-    cfg = _config(str(model_path), world_size=world_size, pp=pp, ep=ep)
+    source_uri = (
+        posixpath.join(checkpoint_prefix, "tests", "hero-source", uuid4().hex) if remote_read_mode is not None else None
+    )
+    if source_uri is not None:
+        request.addfinalizer(lambda: io.remove(source_uri) if io.exists(source_uri) else None)
+    policy_path = model_path
+    if source_uri is not None:
+        manifest = snapshot_model_manifest(model_path, model_id="tiny-hero", revision="fixture")
+        io.upload_directory(str(model_path), source_uri)
+        policy_path = tmp_path / "metadata"
+        stage_model_metadata(source_uri, manifest, str(policy_path))
+    cfg = _config(str(policy_path), world_size=world_size, pp=pp, ep=ep)
+    if source_uri is not None:
+        cfg.trainer.policy.model.source_uri = source_uri
+    if remote_read_mode == "per_key":
+        cfg.trainer.policy.model.remote_read_mode = remote_read_mode
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
     cfg.trainer.policy.megatron_config.context_parallel_size = cp
     if muonh:
