@@ -145,7 +145,7 @@ with TP1 and expert TP1 can set a separate training limit:
 trainer.algorithm.batch_invariant=true
 trainer.policy.megatron_config.tensor_model_parallel_size=1
 trainer.policy.megatron_config.expert_tensor_parallel_size=1
-trainer.policy.megatron_config.nccl_max_channels=32
+trainer.policy.megatron_config.nccl_max_channels=8
 ```
 
 The limit applies before training process groups are created. Weight transfers
