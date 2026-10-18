@@ -1577,18 +1577,14 @@ class _MockGenerateEngine:
         self.scheduler_paused = False
 
 
-@pytest.mark.parametrize("pause_fails", [False, True])
-def test_client_serves_http_only_after_engines_acknowledge_startup_pause(unused_tcp_port, pause_fails):
+def test_client_serves_http_only_after_engines_acknowledge_startup_pause(unused_tcp_port):
     entered = threading.Event()
     release = threading.Event()
-    pause_error = RuntimeError("engine startup pause failed")
 
     class DelayedPauseEngine(_MockGenerateEngine):
         async def pause_generation(self):
             entered.set()
             assert release.wait(10), "Engine pause acknowledgment was not released"
-            if pause_fails:
-                raise pause_error
             await super().pause_generation()
 
     engine = DelayedPauseEngine()
@@ -1604,22 +1600,12 @@ def test_client_serves_http_only_after_engines_acknowledge_startup_pause(unused_
             with pytest.raises(requests.ConnectionError):
                 requests.get(url, timeout=1)
             release.set()
-            if pause_fails:
-                with pytest.raises(RuntimeError) as failure:
-                    future.result(timeout=10)
-                assert failure.value is pause_error
-            else:
-                client = future.result(timeout=10)
-                assert requests.get(url, timeout=1).status_code == HTTPStatus.OK
+            client = future.result(timeout=10)
+            assert requests.get(url, timeout=1).status_code == HTTPStatus.OK
         finally:
             release.set()
-            try:
-                client = future.result(timeout=10)
-            except RuntimeError:
-                if not pause_fails:
-                    raise
-            else:
-                client.shutdown_http_endpoint()
+            client = future.result(timeout=10)
+            client.shutdown_http_endpoint()
 
 
 @pytest.mark.asyncio

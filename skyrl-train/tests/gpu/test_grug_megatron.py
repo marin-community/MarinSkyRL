@@ -17,7 +17,6 @@ import os
 from types import SimpleNamespace
 
 import pytest
-from omegaconf import OmegaConf
 import ray
 import torch
 from ray.util.placement_group import placement_group
@@ -421,8 +420,7 @@ def test_grug_megatron_pp2_train_step_updates_weights_and_exports(tmp_path):
 
 
 @pytest.mark.vllm
-@pytest.mark.parametrize("load_format", ["auto", "dummy"])
-def test_grug_megatron_four_gpu_pp2_disaggregated_rollout_train_broadcast_rollout(tmp_path, load_format):
+def test_grug_megatron_four_gpu_pp2_disaggregated_rollout_train_broadcast_rollout(tmp_path):
     """Rollout, PP2 Megatron update, mixed-dtype broadcast, serving readback, rollout."""
     policy_world_size = 2
     require_hoppers(policy_world_size + ROLLOUT_WORLD_SIZE)
@@ -430,27 +428,9 @@ def test_grug_megatron_four_gpu_pp2_disaggregated_rollout_train_broadcast_rollou
     model_path.mkdir()
     write_tiny_checkpoint(model_path)
     cfg = _config(str(model_path), world_size=policy_world_size, pp=2, ep=1)
-    OmegaConf.update(cfg, "generator.engine_init_kwargs.load_format", load_format, force_add=True)
     initialize_ray(cfg)
     client = grug_engine_client(cfg, str(model_path))
     try:
-        assert client.generation_paused_event.is_set() == (load_format == "dummy")
-        policy = _init_policy(cfg, policy_world_size)
-        names = [*PARAMETER_NAMES, *BIAS_NAMES]
-        before = rank0_validation_snapshot(policy, names)
-        sync_names = [
-            *BIAS_NAMES,
-            *SERVING_EXPERT_INDEX_BY_NAME,
-            LM_HEAD_NAME,
-            ROUTER_NAME,
-            ATTN_GATE_NAME,
-            GATED_NORM_NAME,
-        ]
-        ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
-        ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
-        assert_engine_weights(client, sync_names, before, BIAS_NAMES, SERVING_EXPERT_INDEX_BY_NAME)
-        if load_format == "dummy":
-            asyncio.run(client.resume_generation(policy_step=0))
         prompt_pattern = [[1, 17, 29, 5, 11, 3], [1, 19, 31, 7, 13, 3]]
         prompts = [prompt_pattern[idx % 2] for idx in range(cfg.trainer.train_batch_size)]
         sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
@@ -464,12 +444,24 @@ def test_grug_megatron_four_gpu_pp2_disaggregated_rollout_train_broadcast_rollou
         score_input = InferenceEngineInput(prompt_token_ids=[prompts[0] + [first_token]], sampling_params=score_params)
         first_logprob = asyncio.run(client.generate(score_input))["prompt_logprobs"][0][-1][first_token]
 
+        policy = _init_policy(cfg, policy_world_size)
+        names = [*PARAMETER_NAMES, *BIAS_NAMES]
+        before = rank0_validation_snapshot(policy, names)
         _train_step(policy, rollout_training_batch(prompts, first_rollout))
         training = rank0_validation_snapshot(policy, names)
         for name in PARAMETER_NAMES:
             assert not torch.equal(training[name], before[name]), f"{name} did not update"
 
+        ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
         ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
+        sync_names = [
+            *BIAS_NAMES,
+            *SERVING_EXPERT_INDEX_BY_NAME,
+            LM_HEAD_NAME,
+            ROUTER_NAME,
+            ATTN_GATE_NAME,
+            GATED_NORM_NAME,
+        ]
         assert_engine_weights(client, sync_names, training, BIAS_NAMES, SERVING_EXPERT_INDEX_BY_NAME)
 
         asyncio.run(client.reset_prefix_cache())

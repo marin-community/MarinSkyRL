@@ -141,14 +141,10 @@ class InferenceEngineClient(InferenceEngineInterface):
         self._routing_lock = threading.Lock()
         self._http_bridge_stats = HTTPBridgeStatsAccumulator()
 
-        try:
-            if pause_before_serving:
-                asyncio.run(self.pause_generation())
-            if self.enable_http_endpoint:
-                self._spin_up_http_endpoint()
-        except BaseException:
-            self.discard_engines()
-            raise
+        if pause_before_serving:
+            asyncio.run(self.pause_generation())
+        if self.enable_http_endpoint:
+            self._spin_up_http_endpoint()
 
         logger.info(f"InferenceEngineClient initialized with {len(engines)} engines.")
 

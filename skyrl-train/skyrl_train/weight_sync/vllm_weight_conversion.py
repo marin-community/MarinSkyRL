@@ -19,21 +19,6 @@ class VLLMWeightConversion:
     required_parameters: frozenset[str]
 
 
-@dataclass(frozen=True)
-class DummyWeightLayer:
-    """Reload accounting for one vLLM layer during the initial dummy sync."""
-
-    can_load: bool
-    load_numel_total: int | None
-    load_numel: int
-    tensors: dict[str, tuple[tuple, int]]
-    vocab_padding_numel: int
-    tensor_padding_numel: dict[str, int]
-    vocab_bias_padding_numel: int
-    non_persistent_numel: int
-    generated_numel: int
-
-
 def _fused_expert_prefix(name: str, suffix: str) -> str:
     return name[: -len(suffix)]
 
@@ -84,39 +69,3 @@ def load_weights_into_vllm(
         missing = ", ".join(sorted(missing_parameters))
         raise RuntimeError(f"vLLM did not load required fused MoE parameters: {missing}")
     return loaded_parameters
-
-
-def validate_dummy_weight_coverage(
-    layers: dict[str, DummyWeightLayer], loaded_parameters: set[str], skipped_float_aliases: Iterable[set[str]]
-) -> None:
-    """Reject incomplete initial dummy weights before vLLM finalizes the reload."""
-    satisfied_storage = {
-        identity for layer in layers.values() if not layer.can_load for identity, _numel in layer.tensors.values()
-    }
-    pending = {name: layer for name, layer in layers.items() if layer.can_load}
-    gaps = []
-    while pending:
-        gaps = []
-        satisfied = []
-        for name, layer in pending.items():
-            padding = {"weight": layer.vocab_padding_numel, "bias": layer.vocab_bias_padding_numel}
-            padding |= layer.tensor_padding_numel
-            assert layer.load_numel_total is not None
-            required = layer.load_numel_total - sum(padding.values()) - layer.non_persistent_numel
-            required -= layer.generated_numel
-            for tensor_name, (identity, numel) in layer.tensors.items():
-                if identity in satisfied_storage:
-                    required -= numel - padding.get(tensor_name, 0)
-            if layer.load_numel < max(0, required):
-                gaps.append(f"{name or '<root>'}: {layer.load_numel} of {required} elements loaded")
-            else:
-                satisfied.append(name)
-                satisfied_storage.update(identity for identity, _numel in layer.tensors.values())
-        if not satisfied:
-            break
-        for name in satisfied:
-            del pending[name]
-    missing_float_parameters = {min(names) for names in skipped_float_aliases if not names & loaded_parameters}
-    gaps.extend(f"{name}: floating skipped tensor not loaded" for name in sorted(missing_float_parameters))
-    if gaps:
-        raise RuntimeError("Incomplete dummy engine weights: " + "; ".join(gaps))

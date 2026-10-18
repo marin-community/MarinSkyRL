@@ -157,7 +157,7 @@ class _VersionedSync:
     ("completed_step", "colocated", "dummy"),
     [(step, colocated, False) for step in (0, 1, 7) for colocated in (False, True)] + [(0, False, True)],
 )
-async def test_empty_ftpo_batch_sync_keeps_last_completed_model_version(completed_step, colocated, dummy):
+async def test_empty_ftpo_sync_keeps_model_version_and_verifies_initial_dummy_weights(completed_step, colocated, dummy):
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
     trainer.cfg = get_default_config()
     trainer.cfg.generator.expert_block_sync.verify = False

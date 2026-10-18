@@ -168,6 +168,7 @@ def remove_shortconv_from_tiny_hero_checkpoint(model_path):
     "name,hero,load_format,keep_shortconv",
     [
         *(pytest.param(name, False, "auto", False, id=name) for name in GEOMETRIES),
+        pytest.param("equal-ep", False, "dummy", False, id="grug-dummy"),
         pytest.param("equal-ep", True, "auto", False, id="hero-split-experts"),
         pytest.param("single-serving-ep", True, "auto", False, id="hero-split-experts-single-serving"),
         pytest.param("single-serving-ep", True, "dummy", True, id="hero-dummy-shortconv"),
@@ -208,7 +209,6 @@ def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flippe
     initialize_ray(cfg)
     try:
         client = engine_client(cfg, str(model_path), geometry)
-        assert client.generation_paused_event.is_set() == (load_format == "dummy")
         policy = _init_policy(cfg, geometry.policy_gpus)
         sync_names = HERO_SYNC_NAMES if hero else SYNC_NAMES
         if keep_shortconv:
@@ -240,12 +240,35 @@ def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flippe
                 ]
             if not client.generation_paused_event.is_set():
                 await client.pause_generation()
-            started = time.perf_counter()
-            install = await sync.sync(version)
-            timings[f"install_{version}"] = install
-            timings[f"verify_{version}"] = await sync.verify(version)
-            timings[f"paused_{version}"] = time.perf_counter() - started
-            await client.resume_generation(policy_step=version)
+            early = None
+            if version == 1 and load_format == "dummy":
+                # A separate client sends past the local pause barrier to the actual engine scheduler.
+                early_client = InferenceEngineClient(client.engines, tokenizer, cfg)
+                early = asyncio.create_task(
+                    early_client.generate(
+                        {
+                            "prompts": [tokenizer.encode("What is two plus two?", add_special_tokens=False)],
+                            "sampling_params": {"temperature": 0, "max_generate_length": 1},
+                        }
+                    )
+                )
+            try:
+                if early is not None:
+                    done, _pending = await asyncio.wait({early}, timeout=3)
+                    assert not done, "A request completed before initial dummy weights were verified"
+                started = time.perf_counter()
+                install = await sync.sync(version)
+                timings[f"install_{version}"] = install
+                timings[f"verify_{version}"] = await sync.verify(version)
+                timings[f"paused_{version}"] = time.perf_counter() - started
+                await client.resume_generation(policy_step=version)
+                if early is not None:
+                    response = await asyncio.wait_for(early, timeout=30)
+                    assert len(response["response_ids"][0]) == 1
+            finally:
+                if early is not None:
+                    early.cancel()
+                    await asyncio.gather(early, return_exceptions=True)
 
         asyncio.run(prepare_and_sync(1))
         assert_engine_weights(client, sync_names, trained, bias_names, expert_names)

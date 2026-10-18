@@ -200,8 +200,6 @@ def create_ray_wrapped_inference_engines_from_config(
     )
     rollout_model_path = runai_model_uri(policy_source_uri) if stream_policy_model else cfg.trainer.policy.model.path
     if stream_policy_model:
-        if load_format is not None:
-            raise ValueError("Object-store policies accept only an explicit dummy load_format")
         engine_init_kwargs["load_format"] = "runai_streamer"
         model_loader_extra_config = engine_init_kwargs.setdefault("model_loader_extra_config", {})
         model_loader_extra_config.setdefault("distributed", True)
@@ -377,9 +375,8 @@ class BasePPOExp:
             inference_engines,
             self.tokenizer,
             self.cfg,
-            pause_before_serving=(
-                operation is EntrypointOperation.TRAIN
-                and dummy_engine_weights_requested(self.cfg.generator.engine_init_kwargs.get("load_format"))
+            pause_before_serving=dummy_engine_weights_requested(
+                self.cfg.generator.engine_init_kwargs.get("load_format")
             ),
         )
 

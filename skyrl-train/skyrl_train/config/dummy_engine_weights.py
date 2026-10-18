@@ -2,7 +2,7 @@ from omegaconf import DictConfig
 
 
 def dummy_engine_weights_requested(load_format: str | None) -> bool:
-    return load_format is not None and load_format.lower() == "dummy"
+    return load_format == "dummy"
 
 
 def validate_dummy_engine_weights(cfg: DictConfig) -> None:
@@ -11,6 +11,8 @@ def validate_dummy_engine_weights(cfg: DictConfig) -> None:
         engine_kwargs["load_format"] = engine_kwargs["load_format"].lower()
     if dummy_engine_weights_requested(engine_kwargs.get("load_format")):
         failures = []
+        if cfg.generator.weight_sync_transport != "expert_block":
+            failures.append("generator.weight_sync_transport=expert_block")
         if cfg.generator.backend != "vllm":
             failures.append("generator.backend=vllm")
         if not cfg.generator.run_engines_locally:
