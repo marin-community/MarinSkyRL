@@ -383,8 +383,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             if not isinstance(channels, int) or isinstance(channels, bool) or channels < 1:
                 raise ValueError("nccl_max_channels must be a positive integer")
             publication_channels = BATCH_INVARIANT_NCCL_ENV["NCCL_MAX_NCHANNELS"]
-            if os.environ.get("NCCL_MAX_CTAS") not in (None, publication_channels):
-                raise ValueError("NCCL_MAX_CTAS overrides the channel limit needed for weight publication")
+            if os.environ.get("NCCL_MAX_CTAS") is not None:
+                raise ValueError(
+                    "Unset NCCL_MAX_CTAS when using nccl_max_channels so training and weight transfers can use separate limits"
+                )
             # Training can use more channels. Keep weight publication at vLLM's
             # limit so sender and receiver use the same broadcast layout.
             os.environ["NCCL_MAX_NCHANNELS"] = str(channels)
