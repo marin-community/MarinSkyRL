@@ -455,6 +455,16 @@ class PerformanceTrainer(RayPPOTrainer):
 
     def postprocess_trajectory_batch(self, trajectory_batch, uids):
         result = super().postprocess_trajectory_batch(trajectory_batch, uids)
+        if "score_probe_positions" in result:
+            self._performance_probe_rows = [
+                {
+                    "uid": uids[row],
+                    "response_tokens": len(result["response_ids"][row]),
+                    "exported_positions_before_trainer_masks": len(positions),
+                }
+                for row, positions in enumerate(result["score_probe_positions"])
+                if positions is not None
+            ]
         if self._performance_fixed_advantages:
             masked_row = uids.index(self._performance_masked_uid)
             result["loss_masks"] = [
@@ -507,6 +517,7 @@ class PerformanceTrainer(RayPPOTrainer):
 
     async def native_window(self, phase):
         self._performance_phase = phase
+        self._performance_probe_rows = []
         await self.inference_memory(reset=True)
         self.all_metrics, self.all_timings = {}, {}
         started = time.perf_counter()
@@ -538,6 +549,7 @@ class PerformanceTrainer(RayPPOTrainer):
             "response_lengths": data["response_mask"].sum(-1).int().tolist(),
             "sequence_sha256": hashlib.sha256(data["sequences"].numpy().tobytes()).hexdigest(),
             "uids": data.metadata.get("uids"),
+            "probe_capture": self._performance_probe_rows,
             "metrics": dict(self.all_metrics),
             "timings": dict(self.all_timings),
             "inference_memory": await self.inference_memory(),
