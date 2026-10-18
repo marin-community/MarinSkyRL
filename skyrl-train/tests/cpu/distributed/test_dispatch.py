@@ -37,6 +37,11 @@ class RayActor:
         data["a"] += self.rank
         return data
 
+    def consume_batch(self, data: TrainingInputBatch):
+        data["a"].add_(self.rank)
+        data.metadata["consumer_ranks"].append(self.rank)
+        return data
+
     def get_ray_node_id(self):
         # Mirror skyrl_train.workers.worker.Worker.get_ray_node_id so the
         # Decentralized R3 transport resolves the consumer actor's node id.
@@ -71,6 +76,28 @@ class RayActorGroup:
             )
             for i, actor in enumerate(self.actors)
         ]
+
+
+@pytest.mark.parametrize("transport", list(R3Transport))
+def test_mesh_dispatch_without_routes_preserves_rows_and_consumer_isolation(transport):
+    group = RayActorGroup(4)
+    # Each DP chunk exceeds Ray's inline argument limit.
+    values = torch.arange(8 * 65536, dtype=torch.float32).reshape(8, 65536)
+    batch = TrainingInputBatch({"a": values.clone()})
+    batch.metadata = {"global_step": 7, "response_length": 32, "consumer_ranks": []}
+    refs = MeshDispatch.dispatch(group.actor_infos, "consume_batch", batch, settings=_dispatch_settings(transport))
+    outputs = ray.get(refs, timeout=30)
+
+    for rank, output in enumerate(outputs):
+        first_row = (rank % 2) * 4
+        torch.testing.assert_close(output["a"], values[first_row : first_row + 4] + rank, rtol=0, atol=0)
+        assert output.metadata == {
+            "global_step": 7,
+            "response_length": 32,
+            "consumer_ranks": [rank],
+        }
+    torch.testing.assert_close(batch["a"], values, rtol=0, atol=0)
+    assert batch.metadata == {"global_step": 7, "response_length": 32, "consumer_ranks": []}
 
 
 @pytest.mark.parametrize("failure_method", ["raise_oom", "exit_process"])

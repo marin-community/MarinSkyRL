@@ -361,6 +361,16 @@ def test_evaluation_metric_names_survive_iris_path_resolution(tmp_path: Path) ->
     assert config.trainer.callbacks[0].additional_evaluations == profiles
 
 
+def test_source_recipe_rejects_resolved_harbor_key_before_discarding_agent_settings(tmp_path: Path) -> None:
+    raw = _raw_config()
+    raw["skyrl"]["terminal_bench_config"] = {"installed_agent": {"agent": {"name": "pi"}}}
+    path = tmp_path / "launch.yaml"
+    path.write_text(yaml.safe_dump(raw))
+
+    with pytest.raises(ValueError, match="terminal_bench_config.*terminal_bench"):
+        load_launch_config(path)
+
+
 def test_installed_agent_artifacts_follow_launch_attempt_and_survive_reload(tmp_path: Path) -> None:
     raw = _raw_config()
     raw["skyrl"]["config_groups"] = {"terminal_bench_config": "terminal_bench"}

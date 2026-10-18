@@ -3,11 +3,17 @@ from dataclasses import asdict, is_dataclass
 import json
 from typing import Any
 
+import numpy as np
+
 
 def to_jsonable(value: Any) -> Any:
     """Convert nested configs, dataclasses, and containers to JSON-compatible values."""
     if is_dataclass(value) and not isinstance(value, type):
         return to_jsonable(asdict(value))
+    if isinstance(value, np.ndarray):
+        return to_jsonable(value.tolist())
+    if isinstance(value, np.generic):
+        return to_jsonable(value.item())
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, Mapping):

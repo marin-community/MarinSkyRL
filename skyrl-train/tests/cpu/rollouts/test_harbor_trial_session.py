@@ -1,18 +1,82 @@
 import asyncio
+import json
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
+import numpy as np
+import httpx
 import pytest
+from harbor.agents.installed.base import BaseInstalledAgent
 from harbor.models.trial.config import TaskConfig, TrialConfig
 from harbor.models.trial.result import AgentInfo, ExceptionInfo, TrialResult
 from harbor.models.verifier.result import VerifierResult
 from rolloutengine.contracts import ModelTurn, RolloutData, SessionStart
 from taskcompendium.grading_result import Outcome
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from transformers import PreTrainedTokenizerFast
 
+from skyrl_train.rollouts.agent_backend import AgentInferenceBackend, TRIAL_HEADER
+from skyrl_train.inference_engines.inference_engine_client_http_endpoint import create_app, set_global_state
 from skyrl_train.rollouts.harbor_settings import HARBOR_EXCEPTION
 from skyrl_train.rollouts.harbor_tasks import harbor_grading_failure
-from skyrl_train.rollouts.harbor_trial_session import HarborTrialSession, trial_grade
+from skyrl_train.rollouts.harbor_trial_session import HarborTrialSession, run_harbor_trial, trial_grade
 from skyrl_train.rollouts.task_projections import rollout_loss_eligible
 from skyrl_train.utils.harbor_errors import ErrorHandlingConfig
+
+
+@pytest.mark.asyncio
+async def test_harbor_trial_delivers_completion_and_retains_numeric_router_evidence(tmp_path):
+    class Agent(BaseInstalledAgent):
+        rollout_correlation_id = "trial"
+
+        @staticmethod
+        def name():
+            return "fixture"
+
+        async def install(self, environment):
+            raise AssertionError("No remote installation in this test")
+
+        async def run(self, instruction, environment, context):
+            raise AssertionError("The trial fixture drives model requests directly")
+
+    async def tokenize(payload):
+        return {"tokens": [2], "count": 1, "max_model_len": 32}
+
+    routes = np.array([[[3, 7]]], dtype=np.int32)
+    turn = ModelTurn(
+        {"role": "assistant", "content": "done"},
+        (2,),
+        (1,),
+        (-0.25,),
+        "stop",
+        metadata={"routed_experts": routes, "count": np.int64(1)},
+    )
+
+    async def complete(request):
+        return turn
+
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0})))
+    backend = AgentInferenceBackend("model", 32, tokenize, tokenizer)
+    result = completed_trial(1.0)
+
+    async def run():
+        response = await backend.chat_completion(
+            {
+                "headers": {TRIAL_HEADER: "trial"},
+                "json": {"model": "model", "messages": [{"role": "user", "content": "Task"}]},
+            }
+        )
+        assert response["choices"][0]["message"]["content"] == "done"
+        return result
+
+    # Replace the remote trial boundary; exercise the real request recorder and backend.
+    trial = SimpleNamespace(agent=Agent(logs_dir=tmp_path / "agent", version="fixture"), run=run)
+    assert await run_harbor_trial(trial, backend, complete, tmp_path / "engine") is result
+    records = [json.loads(line) for line in (tmp_path / "engine" / "turns.jsonl").read_text().splitlines()]
+    assert records[0]["request"]["messages"] == [{"role": "user", "content": "Task"}]
+    assert records[1]["turn"]["metadata"] == {"routed_experts": [[[3, 7]]], "count": 1}
+    assert turn.metadata["routed_experts"] is routes
 
 
 def completed_trial(score, exception_type=None):
@@ -129,3 +193,60 @@ async def test_trial_session_cancellation_finishes_trial_cleanup():
     assert cleaned.is_set()
     grade = await session.grade((), stop_reason="cancelled", outputs={})
     assert grade.status == Outcome.UNAVAILABLE and grade.reward is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_trial_session_context_limit_releases_request_and_preserves_verification(stream):
+    async def tokenize(_payload):
+        return {"tokens": [2], "count": 1, "max_model_len": 32}
+
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0})))
+    backend = AgentInferenceBackend("model", 32, tokenize, tokenizer)
+    responses = []
+    set_global_state(backend, None)
+
+    async def run(complete):
+        with backend.session("trial", complete):
+            payload = {
+                "headers": {TRIAL_HEADER: "trial"},
+                "json": {"model": "model", "messages": [{"role": "user", "content": "Task"}]},
+            }
+            await backend.chat_completion(payload)
+            # A real installed agent receives the failed API request, exits, and
+            # lets Harbor verify the filesystem. A retry must also terminate.
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=create_app()), base_url="http://test"
+            ) as client:
+                for _ in range(2):
+                    response = await client.post(
+                        "/v1/chat/completions", headers=payload["headers"], json={**payload["json"], "stream": stream}
+                    )
+                    if stream:
+                        assert response.status_code == 200
+                        chunks = [
+                            line.removeprefix("data: ")
+                            for line in response.text.splitlines()
+                            if line.startswith("data: ")
+                        ]
+                        assert chunks[-1] == "[DONE]"
+                        responses.append(json.loads(chunks[0]))
+                    else:
+                        assert response.status_code == 400
+                        responses.append(response.json())
+        return completed_trial(1.0, "ContextLengthExceededError")
+
+    session = HarborTrialSession(run, "reward")
+    try:
+        await session.prepare()
+        turn = ModelTurn({"role": "assistant", "content": "edit"}, (2,), (3,), (-0.2,), "stop")
+        assert not (await session.advance(turn)).done
+        async with asyncio.timeout(5):
+            grade = await session.grade((), stop_reason="length", outputs={})
+        assert grade.status == Outcome.GRADED and grade.reward == 1.0
+        assert len(responses) == 2
+        assert all(response["error"]["code"] == 400 for response in responses)
+        assert all(response["error"]["type"] == "context_length_exceeded" for response in responses)
+    finally:
+        await session.close()
+        set_global_state(None, None)

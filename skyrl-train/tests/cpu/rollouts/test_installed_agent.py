@@ -2,6 +2,7 @@ import asyncio
 import json
 
 import httpx
+import numpy as np
 import pytest
 from harbor.agents.installed.base import BaseInstalledAgent
 from harbor.models.task.config import EnvironmentConfig
@@ -32,7 +33,14 @@ async def test_installed_agent_routes_http_and_retains_logs_after_execution(tmp_
         if outcome == "cancel":
             generating.set()
             await asyncio.Future()
-        return ModelTurn({"role": "assistant", "content": "12"}, (2,), (1,), (-0.25,), "stop")
+        return ModelTurn(
+            {"role": "assistant", "content": "12"},
+            (2,),
+            (1,),
+            (-0.25,),
+            "stop",
+            metadata={"routed_experts": np.array([[[3, 7]]], dtype=np.int32)},
+        )
 
     backend = AgentInferenceBackend("model", 32, tokenize, tokenizer)
     set_global_state(backend, None)
@@ -105,6 +113,7 @@ async def test_installed_agent_routes_http_and_retains_logs_after_execution(tmp_
             assert records[1]["turn"]["prompt_token_ids"] == [2]
             assert records[1]["turn"]["response_token_ids"] == [1]
             assert records[1]["turn"]["logprobs"] == [-0.25]
+            assert records[1]["turn"]["metadata"]["routed_experts"] == [[[3, 7]]]
         with pytest.raises(ValueError, match="No active agent session"):
             await backend.chat_completion({"headers": {TRIAL_HEADER: "trial"}, "json": {}})
         result = await machine.run(Command(("cat", "/logs/agent/setup.txt")))

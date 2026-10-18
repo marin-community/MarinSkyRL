@@ -461,7 +461,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if for_training and str(self.cfg.trainer.policy.optimizer_config.optimizer).lower() == "muonh":
             ddp_config = dict(ddp_config)
             if ddp_config.get("use_distributed_optimizer", False):
-                raise ValueError("Hero MuonH needs unsharded Megatron DDP gradient buffers")
+                raise ValueError("Grug MuonH needs unsharded Megatron DDP gradient buffers")
             ddp_config["use_distributed_optimizer"] = False
             ddp_config["overlap_param_gather"] = False
 
@@ -837,7 +837,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     def grug_optimizer_route_snapshot(self):
         """Return this rank and the optimizer route for each named parameter."""
         if str(self.cfg.trainer.policy.optimizer_config.optimizer).lower() != "muonh":
-            raise ValueError("Optimizer route snapshot requires Hero MuonH")
+            raise ValueError("Optimizer route snapshot requires Grug MuonH")
         names = {id(parameter): name for chunk in self.actor_module for name, parameter in chunk.named_parameters()}
         optimizers = (
             self.optimizer.chained_optimizers if isinstance(self.optimizer, ChainedOptimizer) else [self.optimizer]

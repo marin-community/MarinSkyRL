@@ -5,13 +5,15 @@ from unittest.mock import patch
 from datasets import Dataset
 from transformers import BatchEncoding, PreTrainedTokenizerFast
 from tokenizers import Tokenizer, models, pre_tokenizers
-from taskcompendium.models import AnswerType, FinalAction, FunctionDefinition, NoGrader
+from taskcompendium.models import AnswerType, FinalAction, FunctionDefinition, NoGrader, Source
 from omegaconf import OmegaConf
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.dataset import PromptDataset
+from skyrl_train.dataset.harbor_import import HARBOR_TRIAL_SESSION, harbor_trial_task
 from skyrl_train.dataset.tasks import SourceTaskDataset, TaskDataset, source_row_task, write_tasks
 from skyrl_train.entrypoints.main_base import BasePPOExp
 from skyrl_train.task_inputs import task_messages
+from tests.cpu.task_specs import lowered_task
 
 
 @pytest.mark.parametrize("num_workers", [1, 2])
@@ -225,6 +227,44 @@ def test_native_tasks_with_different_extras_preserve_each_row(tmp_path, num_work
         assert inputs[index]["uid"] == str(index)
         assert task.lowered == tasks[index]
         assert task.metadata.teacher_route == source.get("teacher_route")
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_mixed_original_harbor_and_source_tasks_collate_without_source_metadata_assumption(tmp_path, reverse):
+    package = tmp_path / "harbor-task"
+    package.mkdir()
+    (package / "instruction.md").write_text("Repair the program.")
+    (package / "task.toml").write_text('[verifier]\nenvironment_mode = "shared"\n')
+    harbor = lowered_task(
+        harbor_trial_task(package, source=Source(dataset="harbor", revision="1", row="0", importer_revision="1")),
+        HARBOR_TRIAL_SESSION,
+    )
+    configs = OmegaConf.to_container(get_default_config().environment.task_sessions, resolve=True)
+    source = source_row_task(
+        {
+            "prompt": [{"role": "user", "content": "What is one plus one?"}],
+            "env_class": "gsm8k",
+            "reward_spec": {"ground_truth": "2"},
+            "teacher_route": "math",
+        },
+        0,
+        source_name="math",
+        environment_configs=configs,
+    )
+    tasks = [harbor, source]
+    if reverse:
+        tasks.reverse()
+    path = tmp_path / "mixed-harbor.parquet"
+    write_tasks(path, tasks)
+    dataset = TaskDataset([str(path)], _StubTokenizer(), 100, num_workers=1)
+
+    inputs = dataset.collate_fn(list(dataset))
+
+    assert [row["input"].lowered for row in inputs] == tasks
+    by_metric_class = {row["input"].metadata.metric_class: row["input"] for row in inputs}
+    assert by_metric_class["gsm8k"].metadata.teacher_route == "math"
+    assert by_metric_class[HARBOR_TRIAL_SESSION].metadata.teacher_route is None
+    assert by_metric_class[HARBOR_TRIAL_SESSION].group_grader is None
 
 
 @pytest.mark.parametrize(

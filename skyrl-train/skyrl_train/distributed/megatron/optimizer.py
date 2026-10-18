@@ -50,7 +50,7 @@ def _grug_muonh_extra(optim_config: Mapping) -> dict:
 
 
 def _register_grug_muonh(optim_config: Mapping) -> None:
-    """Register Hero's recipe with the optimizer factory pinned at MCore 0.18."""
+    """Register the Grug recipe with the optimizer factory pinned at MCore 0.18."""
     extra = _grug_muonh_extra(optim_config)
     adam_lr = float(extra.get("adam_lr", optim_config["lr"]))
     muon_eps = float(extra.get("muon_epsilon", 1e-8))
@@ -68,12 +68,12 @@ def _register_grug_muonh(optim_config: Mapping) -> None:
     def config_to_kwargs(config, model_chunks, pg_collection):
         model_config = get_model_config(model_chunks[0])
         if model_config.tensor_model_parallel_size != 1:
-            raise ValueError("Hero MuonH fused-matrix updates currently require tensor parallel size 1")
+            raise ValueError("Grug MuonH fused-matrix updates currently require tensor parallel size 1")
         expert_tp_size = model_config.expert_tensor_parallel_size
         if expert_tp_size is None:
             expert_tp_size = model_config.tensor_model_parallel_size
         if expert_tp_size != 1:
-            raise ValueError("Hero MuonH whole-matrix updates require expert tensor parallel size 1")
+            raise ValueError("Grug MuonH whole-matrix updates require expert tensor parallel size 1")
         kv_rows = model_config.kv_channels
         query_rows = model_config.num_attention_heads // model_config.num_query_groups * kv_rows
         return {
@@ -141,14 +141,12 @@ def _init_megatron_optim_config(optim_config: Mapping, optimizer_config_kwargs: 
         extra = _grug_muonh_extra(optim_config)
         if float(optim_args["weight_decay"]) != 0.0:
             raise ValueError("MuonH requires weight_decay=0, including Megatron overrides")
-        if optim_args["clip_grad"] is None or float(optim_args["clip_grad"]) != 0.0:
-            raise ValueError("Hero MuonH requires max_grad_norm=0.0 (unclipped gradients)")
         if optimizer_config_kwargs.get("use_distributed_optimizer", False):
-            raise ValueError("Hero MuonH uses Megatron's full-matrix optimizer path")
+            raise ValueError("Grug MuonH uses Megatron's full-matrix optimizer path")
         if optim_args.get("optimizer_cpu_offload", False) or optim_args.get("optimizer_offload_fraction", 0.0):
-            raise ValueError("Hero MuonH does not support Megatron's AdamW CPU optimizer offload")
+            raise ValueError("Grug MuonH does not support Megatron's AdamW CPU optimizer offload")
         if optim_args.get("use_precision_aware_optimizer", False):
-            raise ValueError("Hero MuonH requires FP32 master parameters")
+            raise ValueError("Grug MuonH requires FP32 master parameters")
         betas = tuple(float(beta) for beta in optim_config.get("adam_betas", (0.9, 0.95)))
         if len(betas) != 2:
             raise ValueError("MuonH adam_betas must contain two values")
@@ -174,7 +172,7 @@ def get_megatron_optimizer(
 ):
     """Build the native optimizer from one policy recipe and its Megatron overrides.
 
-    Hero-specific routing and state options stay paired with the normalized
+    Grug routing and state options stay paired with the normalized
     configuration. Megatron owns parameter groups, FP32 masters and checkpoints.
     """
     config = _init_megatron_optim_config(optim_config, optimizer_config_kwargs)

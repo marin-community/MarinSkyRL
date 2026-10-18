@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Hero's MuonH and AdamH updates for Megatron's FP32 master parameters.
+"""Grug MuonH and AdamH updates for Megatron's FP32 master parameters.
 
 The BF16 Newton--Schulz transform is adapted from NVIDIA NeMo
 Emerging-Optimizers at 6ef41445b246d2c64c2e6f82cc56fbc9c9c07937.
@@ -74,7 +74,7 @@ def _matrix_step_(
 
 
 def megatron_grug_route(name: str, parameter: Tensor) -> MegatronGrugRoute:
-    """Classify Megatron's fused parameter names using the Hero recipe."""
+    """Classify Megatron's fused parameter names using the Grug recipe."""
     lower = name.lower()
     if "gated_norm" in lower:
         return "grug_muonh"
@@ -280,15 +280,15 @@ class MegatronGrugMuonH(Optimizer):
         for group in self.param_groups:
             route = group.get("optimizer", "grug_muonh")
             if route not in ("grug_muonh", "grug_muonh_qkv", "grug_muonh_gate_up", "grug_adamh"):
-                raise ValueError(f"Unsupported Hero Megatron optimizer route: {route}")
+                raise ValueError(f"Unsupported Grug Megatron optimizer route: {route}")
             for parameter in group["params"]:
                 gradient = parameter.grad
                 if gradient is None:
                     continue
                 if gradient.is_sparse:
-                    raise RuntimeError("Hero MuonH/AdamH does not support sparse gradients")
+                    raise RuntimeError("Grug MuonH/AdamH does not support sparse gradients")
                 if parameter.ndim not in (2, 3):
-                    raise RuntimeError(f"Hero MuonH/AdamH received rank-{parameter.ndim} parameter")
+                    raise RuntimeError(f"Grug MuonH/AdamH received rank-{parameter.ndim} parameter")
                 state = self.state[parameter]
                 if not state:
                     self.initialize_state()
