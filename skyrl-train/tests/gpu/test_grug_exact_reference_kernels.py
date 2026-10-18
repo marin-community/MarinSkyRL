@@ -2,10 +2,10 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from skyrl_train.models.grug_exact.inductor_kernels import COMPILED_MODEL
-from skyrl_train.models.grug_exact.inductor_regions import HEAD_DIM, HEADS, HIDDEN, KV_HEADS, ROTARY_DIM
 from skyrl_train.models.grug_exact.kernel_values import kernel_value
 from skyrl_train.models.grug_exact.reference_kernels import (
+    HEAD_DIM,
+    ROTARY_DIM,
     gated_product_value,
     hybrid_input_norm_value,
     logits_value,
@@ -13,12 +13,18 @@ from skyrl_train.models.grug_exact.reference_kernels import (
     swiglu_value,
     xsa_head_gate_value,
 )
-from skyrl_train.models.grug_moe import GRUG_ATTN_GATE_SCALE, GRUG_QK_RMS_NORM_EPS, GRUG_XSA_EPS, GrugMoeConfig
+from skyrl_train.models.grug_exact.support import VERIFIED_MODEL
+from skyrl_train.models.grug_moe import GRUG_ATTN_GATE_SCALE, GRUG_QK_RMS_NORM_EPS, GRUG_XSA_EPS
 from tests.gpu.grug_gpu_gates import require_hoppers
 
 # 3,328 rows put every non-NaN bf16 bit pattern into the head-gate logits ([rows, 1, 20]).
 ROWS = 3328
-EXPERTS = GrugMoeConfig().num_local_experts
+EXPERTS = VERIFIED_MODEL.num_local_experts
+HIDDEN, HEADS, KV_HEADS = (
+    VERIFIED_MODEL.hidden_size,
+    VERIFIED_MODEL.num_attention_heads,
+    VERIFIED_MODEL.num_key_value_heads,
+)
 
 
 def _swiglu_chain(fc1_output):
@@ -179,7 +185,7 @@ def _query_key(generator, rope: bool):
     raw_key = _activations((ROWS, 1, KV_HEADS, HEAD_DIM), generator)
     query_grad = _activations((ROWS, 1, HEADS, HEAD_DIM), generator)
     key_grad = _activations((ROWS, 1, KV_HEADS, HEAD_DIM), generator)
-    multiplier = COMPILED_MODEL["qk_mult"]
+    multiplier = VERIFIED_MODEL.qk_mult
     inverse = 1.0 / (10000.0 ** (torch.arange(0, ROTARY_DIM, 2, dtype=torch.float32) / ROTARY_DIM))
     angles = torch.outer(torch.arange(ROWS, dtype=torch.float32), inverse).cuda() if rope else None
     freqs = torch.cat((angles, angles), dim=-1).view(ROWS, 1, 1, ROTARY_DIM) if rope else None

@@ -8,8 +8,12 @@ import triton
 import triton.language as tl
 from triton.language.extra import libdevice
 
-from skyrl_train.models.grug_exact.inductor_regions import HEAD_DIM, ROTARY_DIM
+from skyrl_train.models.grug_exact.support import VERIFIED_MODEL
 from skyrl_train.models.grug_moe import GRUG_ATTN_GATE_SCALE, GRUG_QK_RMS_NORM_EPS, GRUG_XSA_EPS
+
+HEAD_DIM = VERIFIED_MODEL.head_dim
+# Grug rotates half of each head.
+ROTARY_DIM = HEAD_DIM // 2
 
 _BLOCK = 1024
 # Neither implicit fused multiply-adds nor flushed subnormals, as in PyTorch's elementwise kernels; the kernels call

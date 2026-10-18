@@ -35,6 +35,7 @@ from skyrl_train.distributed.megatron.remote_model import install_remote_hf_stat
 from skyrl_train.distributed.utils import init_worker_process_group_with_device
 from skyrl_train.config.numerics import NumericsMode
 from skyrl_train.mismatch_probe.modes import TRAINER_MODES
+from skyrl_train.models.grug_exact.engine_regions import set_compile_rows
 from skyrl_train.models.grug_exact.support import resolve_exact_numerics
 from skyrl_train.models.grug_exact.vllm_kernels import require_hopper_gpu
 from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE, validate_grug_training_strategy
@@ -171,6 +172,7 @@ class MegatronWorker:
             setattr(provider, k, v)
         if self.numerics is NumericsMode.EXACT:
             require_hopper_gpu()
+            set_compile_rows(self.cfg.generator.max_num_batched_tokens)
             provider.grug_numerics = self.numerics
         provider.finalize()
 

@@ -5,7 +5,6 @@ from transformers import PretrainedConfig
 
 from skyrl_train.config.numerics import NumericsMode, NumericsResolution
 from skyrl_train.config.weight_sync_pause import resolve_weight_sync_pause_policy
-from skyrl_train.models.grug_exact.inductor_kernels import COMPILED_MODEL
 from skyrl_train.models.grug_moe import GRUG_MOE_MODEL_TYPE, GrugMoeConfig
 
 ALLTOALL_DISPATCHER = "alltoall"
@@ -33,6 +32,19 @@ MODEL_CONFIG_TRANSFORMER_SETTINGS = (
     "grug_qk_mult",
     "grug_qk_mult_long_scale",
 )
+# The Grug model the exact trainer's GPU tests verify: ``GrugMoeConfig``'s defaults, Snowball's shape, in these fields.
+VERIFIED_MODEL = GrugMoeConfig()
+VERIFIED_MODEL_FIELDS = (
+    "hidden_size",
+    "num_attention_heads",
+    "num_key_value_heads",
+    "head_dim",
+    "shared_expert_intermediate_size",
+    "qk_mult",
+    "qk_mult_long_scale",
+    "rms_norm_eps",
+    "max_position_embeddings",
+)
 
 
 def policy_model_config(cfg: DictConfig) -> PretrainedConfig:
@@ -44,14 +56,14 @@ def policy_model_config(cfg: DictConfig) -> PretrainedConfig:
 
 
 def exact_model_problems(model_config: PretrainedConfig) -> list[str]:
-    """Why the exact trainer's kernels do not compute this policy: they compute Grug at the compiled shapes without
-    Hero layers, ShortConv or latent experts."""
+    """Why the exact trainer does not compute this policy: it is verified on ``VERIFIED_MODEL`` without Hero layers,
+    ShortConv or latent experts."""
     if model_config.model_type != GRUG_MOE_MODEL_TYPE:
         return [f"the policy is {model_config.model_type}, not Grug"]
     problems = [
-        f"the policy's {name} is {getattr(model_config, name)}, not the compiled kernels' {value}"
-        for name, value in COMPILED_MODEL.items()
-        if getattr(model_config, name) != value
+        f"the policy's {name} is {getattr(model_config, name)}, not the verified {getattr(VERIFIED_MODEL, name)}"
+        for name in VERIFIED_MODEL_FIELDS
+        if getattr(model_config, name) != getattr(VERIFIED_MODEL, name)
     ]
     if model_config.uses_hero_architecture:
         problems.append("the policy uses Hero layers, ShortConv or latent experts")
@@ -80,6 +92,8 @@ def exact_trainer_problems(cfg: DictConfig) -> list[str]:
             not generator.get("rope_scaling") and generator.get("rope_theta") is None
         ),
         "generator.sampling_params.temperature=1": generator.sampling_params.temperature == 1.0,
+        # The trainer compiles its regions at the row count the engines compile theirs at.
+        "generator.max_num_batched_tokens set": generator.get("max_num_batched_tokens") is not None,
         "generator.weight_sync_pause.clear_cache=true": resolve_weight_sync_pause_policy(generator).clear_cache,
         "trainer.use_sample_packing=false": not trainer.use_sample_packing,
         "trainer.flash_attn=false": not trainer.flash_attn,

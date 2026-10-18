@@ -14,7 +14,7 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_layer import TransformerLayer
 
 from skyrl_train.inference_engines.vllm.decode_invariant.gemm import invariant_gemm
-from skyrl_train.models.grug_exact import inductor_regions as regions
+from skyrl_train.models.grug_exact import engine_regions as regions
 from skyrl_train.models.grug_exact.context import ExactForward, ResidualSum
 from skyrl_train.models.grug_exact.ep_combine import ep_combine
 from skyrl_train.models.grug_exact.kernel_values import kernel_value, residual_sum_value
@@ -74,7 +74,7 @@ class _ExactGatedNorm(GrugGatedRMSNorm):
     def gated(self, normalized: torch.Tensor) -> torch.Tensor:
         """``normalized * sigmoid(gate)`` from the engine's kernel, differentiated as the fp32 product rounded once."""
         gate = self.gate_logits(normalized)
-        product = regions.gated_product(normalized, gate).view_as(normalized)
+        product = regions.gated_product(normalized, gate)
         return gated_product_value(product, normalized, gate)
 
 
@@ -82,7 +82,7 @@ class ExactGatedNorm(_ExactGatedNorm):
     """The gated norm after the attention: the engine's RMSNorm of the stored bf16 hidden states."""
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        value = regions.rms_norm(hidden_states, self.norm.weight).view_as(hidden_states)
+        value = regions.rms_norm(hidden_states, self.norm.weight, self.eps)
         return self.gated(kernel_value(value, lambda: self.norm(hidden_states)))
 
 
@@ -92,7 +92,7 @@ class ExactInputGatedNorm(_ExactGatedNorm):
 
     def forward(self, hidden_states: torch.Tensor, statistic: torch.Tensor) -> torch.Tensor:
         weight = self.norm.weight
-        value = regions.rms_norm_from_square_sum(hidden_states, statistic, weight).view_as(hidden_states)
+        value = regions.rms_norm_from_square_sum(hidden_states, statistic, weight, self.eps)
         variance = (statistic / hidden_states.shape[-1]).view(*hidden_states.shape[:-1], 1)
         return self.gated(hybrid_input_norm_value(value, hidden_states, variance, weight, self.eps))
 
@@ -109,7 +109,7 @@ class ExactFinalGatedNorm(_ExactGatedNorm):
             unrounded = (parts.residual.float() + parts.mlp.float()) + (residual - residual.detach())
             return _rms_norm_single_rounding(unrounded, weight, self.eps)
 
-        value = regions.final_norm(parts.residual, parts.mlp, weight).view_as(hidden_states)
+        value = regions.final_norm(parts.residual, parts.mlp, weight, self.eps)
         return self.gated(kernel_value(value, reference))
 
 
@@ -117,11 +117,11 @@ class ExactEmbeddingGatedNorm(_ExactGatedNorm):
     """The embedding gated norm; returns its output and layer 0's input-norm statistic of the unrounded product."""
 
     def forward(self, embeddings: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        value = regions.embedding_norm(embeddings, self.norm.weight).view_as(embeddings)
+        value = regions.rms_norm(embeddings, self.norm.weight, self.eps)
         normalized = kernel_value(value, lambda: self.norm(embeddings))
         gate = self.gate_logits(normalized)
         product, statistic = regions.gated_product_square_sum(normalized, gate)
-        return gated_product_value(product.view_as(normalized), normalized, gate), statistic
+        return gated_product_value(product, normalized, gate), statistic
 
 
 class ExactSelfAttention(GrugSelfAttention):
@@ -164,7 +164,7 @@ class ExactSelfAttention(GrugSelfAttention):
         # The engine reads the fp32 gate logits as they are: Inductor fuses the sigmoid into the XSA kernel.
         gate = invariant_gemm(rows, self.attn_gate.weight).view(*hidden_states.shape[:-1], -1)
         gate = logits_value(gate, hidden_states, self.attn_gate.weight)
-        xsa = regions.xsa_head_gate(attention, value, gate).view_as(attention)
+        xsa = regions.xsa_head_gate(attention, value.flatten(-2), gate, head_dim)
         gated = xsa_head_gate_value(xsa, attention, value, gate, head_dim)
         width = hidden_states.shape[-1]
         output = torch.addmm(residual.reshape(-1, width), gated.reshape(-1, width), self.linear_proj.weight.t())
@@ -173,14 +173,15 @@ class ExactSelfAttention(GrugSelfAttention):
     def _query_key(self, query: torch.Tensor, key: torch.Tensor, rotary_pos_emb) -> tuple[torch.Tensor, torch.Tensor]:
         """The engine's q/k norm, RoPE and query scale on the raw ``[S, B, heads, dim]`` projections, differentiated
         as ``rounded_query_key(qk_norm_fp32(query), qk_norm_fp32(key), ...)``."""
-        rotary = rotary_pos_emb is not None and not self.skip_rope
-        if rotary:
-            engine_query, engine_key = regions.query_key_rope(query, key, query.shape[0], self.config.rotary_base)
-        else:
-            engine_query, engine_key = regions.query_key_full(query, key)
+        projections = (query.flatten(-2), key.flatten(-2), query.shape[-1], self.qk_mult, self.qk_mult_scale)
         freqs = None
-        if rotary:
+        if rotary_pos_emb is not None and not self.skip_rope:
+            engine_query, engine_key = regions.query_key_rope(
+                *projections, self.config.rotary_base, self.config.seq_length
+            )
             freqs = rotary_pos_emb if isinstance(rotary_pos_emb, tuple) else (rotary_pos_emb,) * 2
+        else:
+            engine_query, engine_key = regions.query_key(*projections)
         return query_key_values(
             engine_query.view_as(query), engine_key.view_as(key), query, key, freqs, self.qk_mult, self.qk_mult_scale
         )
@@ -215,7 +216,7 @@ class ExactSharedExpertMLP(SharedExpertMLP):
         """``routed + shared_expert(hidden_states)``, the sum formed in the down projection's epilogue."""
         gate_weight, up_weight = self.linear_fc1.weight.chunk(2, dim=0)
         gate, up = F.linear(hidden_states, gate_weight), F.linear(hidden_states, up_weight)
-        value = regions.shared_activation(gate, up).view_as(gate)
+        value = regions.shared_activation(gate, up)
         activation = swiglu_value(value, torch.cat((gate, up), dim=-1))
         width = routed.shape[-1]
         output = torch.addmm(
@@ -289,5 +290,5 @@ class ExactTransformerLayer(TransformerLayer):
             context.attention[self.layer_number] = attention
         mlp = self.mlp(self.pre_mlp_layernorm(hidden_states), context, recompute=kept is not None)
         output, square_sum = regions.residual_square_sum(hidden_states, mlp)
-        output = residual_sum_value(output.view_as(hidden_states), hidden_states, mlp)
+        output = residual_sum_value(output, hidden_states, mlp)
         return output, square_sum, ResidualSum(hidden_states.detach(), mlp.detach())

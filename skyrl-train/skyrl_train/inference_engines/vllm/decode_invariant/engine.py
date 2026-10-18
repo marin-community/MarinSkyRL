@@ -17,9 +17,6 @@ INDUCTOR_COMPILE_CONFIG = {"deterministic": True, "force_shape_pad": True, "comb
 # differently than in a step of two or more.
 CUDA_GRAPH_MODE = "FULL_AND_PIECEWISE"
 CUDA_GRAPH_CAPTURE_SIZES = (2, 4, *range(8, 256, 8), *range(256, 513, 16))
-# The fused-MoE and expert-parallel all2all backends of a decode-invariant engine.
-MOE_BACKEND = "triton"
-ALL2ALL_BACKEND = "allgather_reducescatter"
 # Without NVLink SHARP or NCCL symmetric memory, vLLM's expert-parallel combine runs NCCL's ring reduce-scatter.
 DECODE_INVARIANT_ENGINE_ENVIRONMENT = {"NCCL_NVLS_ENABLE": "0", "VLLM_USE_NCCL_SYMM_MEM": "0"}
 
