@@ -124,7 +124,7 @@ def cleanup_old_checkpoints(
     checkpoint_dirs.sort(key=extract_step_from_path)
 
     protected_steps = set(protected_steps or ())
-    latest_path = os.path.join(checkpoint_base_path, LATEST_CHECKPOINT_FILE)
+    latest_path = join_resource_path(checkpoint_base_path, LATEST_CHECKPOINT_FILE)
     if io.exists(latest_path):
         protected_steps.add(int(io.read_bytes(latest_path)))
     recent = set(checkpoint_dirs[-max_checkpoints:]) if max_checkpoints > 0 else set()

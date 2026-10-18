@@ -1,5 +1,6 @@
 import asyncio
-from contextlib import asynccontextmanager, nullcontext
+from contextlib import asynccontextmanager, contextmanager, nullcontext
+from collections.abc import Iterator
 from dataclasses import replace
 import io as stdlib_io
 import json
@@ -17,6 +18,7 @@ from pathlib import Path
 import ray
 from ray import ObjectRef
 import torch
+from torch.distributed.checkpoint.api import CheckpointException
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from ray.util.placement_group import PlacementGroup, placement_group
@@ -159,7 +161,11 @@ from skyrl_train.hf_export import (
     read_hf_export_request,
     write_hf_export_request,
 )
-from marinskyrl.checkpoint_paths import POLICY_CHECKPOINT_SUBDIRECTORY, policy_export_path
+from marinskyrl.checkpoint_paths import (
+    CRITIC_CHECKPOINT_SUBDIRECTORY,
+    POLICY_CHECKPOINT_SUBDIRECTORY,
+    policy_export_path,
+)
 from marinskyrl.runtime_options import WeightSyncTransport
 from skyrl_train.utils.logging_utils import log_exception_as_text
 from skyrl_train.weight_sync.expert_block.driver import ExpertBlockSync
@@ -198,9 +204,11 @@ def _restore_driver_rng_state(state: dict[str, Any]) -> None:
     torch.set_rng_state(state["torch_cpu"])
 
 
-def _is_checkpoint_storage_error(error: Exception) -> bool:
+def _is_checkpoint_storage_error(error: BaseException) -> bool:
     if isinstance(error, ray.exceptions.RayTaskError):
-        error = error.as_instanceof_cause()
+        error = error.cause
+    if isinstance(error, CheckpointException):
+        return bool(error.failures) and all(_is_checkpoint_storage_error(cause) for cause, _ in error.failures.values())
     return isinstance(error, OSError)
 
 
@@ -854,6 +862,15 @@ class RayPPOTrainer:
             and not bool(self.cfg.generator.get("enable_http_endpoint", False))
         )
 
+    @contextmanager
+    def _preserve_checkpoint_driver_rng(self) -> Iterator[dict[str, Any] | None]:
+        state = _driver_rng_state() if self._can_replay_driver_rng() else None
+        try:
+            yield state
+        finally:
+            if state is not None:
+                _restore_driver_rng_state(state)
+
     def _restore_loaded_driver_rng(self) -> None:
         if self._loaded_driver_rng_state is not None:
             _restore_driver_rng_state(self._loaded_driver_rng_state)
@@ -910,7 +927,9 @@ class RayPPOTrainer:
                 self.policy_model.offload_to_cpu()
                 self.critic_model.backload_to_gpu()
             try:
-                required.update(self._save_megatron_component("critic", self.critic_model, attempt_path))
+                required.update(
+                    self._save_megatron_component(CRITIC_CHECKPOINT_SUBDIRECTORY, self.critic_model, attempt_path)
+                )
             finally:
                 if self.colocate_all:
                     self.critic_model.offload_to_cpu()
@@ -975,14 +994,10 @@ class RayPPOTrainer:
             await self.callback_handler.call_event_async("on_save", state, self._control, trainer=self)
             try:
                 rollout_state = await self._rollout_state()
-                rng_state = _driver_rng_state() if self._can_replay_driver_rng() else None
-                try:
+                with self._preserve_checkpoint_driver_rng() as rng_state:
                     await asyncio.to_thread(
                         self._commit_megatron_attempt, step, attempt_path, required, rollout_state, rng_state
                     )
-                finally:
-                    if rng_state is not None:
-                        _restore_driver_rng_state(rng_state)
             except (OSError, ray.exceptions.RayTaskError) as error:
                 self._handle_checkpoint_save_error(state, error)
                 phase.outcome = "failure"
@@ -1622,15 +1637,11 @@ class RayPPOTrainer:
                             if key.startswith(("timing/", "async/performance/", "trainer/checkpoint_save_failures"))
                         },
                     }
-                    rng_state = _driver_rng_state() if self._can_replay_driver_rng() else None
-                    try:
+                    with self._preserve_checkpoint_driver_rng():
                         self._log_metrics_stdout(metrics, step=self.global_step, kind="checkpoint")
                         self.tracker.log(
                             metrics, step=self.global_step, commit=self.cfg.trainer.tracker_commit_each_step
                         )
-                    finally:
-                        if rng_state is not None:
-                            _restore_driver_rng_state(rng_state)
             self._log_training_step_completed(epoch=epoch, duration_seconds=self.all_timings["step"])
             self._step_time_history.append(self.all_timings["step"])
             self.all_metrics = {}
@@ -3402,7 +3413,7 @@ class RayPPOTrainer:
         step = self.global_step
         global_step_folder = os.path.join(self.cfg.trainer.ckpt_path, f"global_step_{step}")
         policy_save_dir = os.path.join(global_step_folder, POLICY_CHECKPOINT_SUBDIRECTORY)
-        critic_save_dir = os.path.join(global_step_folder, "critic")
+        critic_save_dir = os.path.join(global_step_folder, CRITIC_CHECKPOINT_SUBDIRECTORY)
 
         io.makedirs(global_step_folder, exist_ok=True)
 
@@ -3556,7 +3567,7 @@ class RayPPOTrainer:
 
         # Define paths for different checkpoint components
         policy_ckpt_dir = os.path.join(checkpoint_path, POLICY_CHECKPOINT_SUBDIRECTORY)
-        critic_ckpt_dir = os.path.join(checkpoint_path, "critic")
+        critic_ckpt_dir = os.path.join(checkpoint_path, CRITIC_CHECKPOINT_SUBDIRECTORY)
         trainer_state_path = os.path.join(checkpoint_path, TRAINER_STATE_FILENAME)
         rollout_state_path = os.path.join(checkpoint_path, _ROLLOUT_STATE_FILENAME)
 

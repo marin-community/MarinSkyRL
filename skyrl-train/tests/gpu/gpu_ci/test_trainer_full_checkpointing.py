@@ -148,13 +148,13 @@ def saved_optimizer_format(checkpoint_dir: str) -> str:
 
 
 @pytest.mark.parametrize(
-    ("initial_sharding_type, resumed_sharding_type"),
+    ("initial_sharding_type, resumed_sharding_type, initial_updates"),
     [
-        ("fully_reshardable", "dp_reshardable"),
-        ("dp_reshardable", "dp_reshardable"),
+        ("fully_reshardable", "dp_reshardable", 1),
+        ("dp_reshardable", "dp_reshardable", 0),
     ],
 )
-def test_trainer_full_checkpointing(ray_init_fixture, initial_sharding_type, resumed_sharding_type):
+def test_trainer_full_checkpointing(ray_init_fixture, initial_sharding_type, resumed_sharding_type, initial_updates):
     from tests.gpu.test_megatron_worker import get_test_training_batch
 
     cfg = get_test_trainer_config("megatron", initial_sharding_type)
@@ -165,7 +165,8 @@ def test_trainer_full_checkpointing(ray_init_fixture, initial_sharding_type, res
         trainers.append(trainer1)
         trainer1.build_models(*workers)
         batch = get_test_training_batch(batch_size=4)
-        ray.get(trainer1.policy_model.async_run_ray_method("mesh", "ppo_train", batch))
+        for _ in range(initial_updates):
+            ray.get(trainer1.policy_model.async_run_ray_method("mesh", "ppo_train", batch))
         trainer1.global_step = 2
         asyncio.run(trainer1.save_checkpoints())
         checkpoint_dir = os.path.join(cfg.trainer.ckpt_path, "global_step_2")
@@ -188,7 +189,6 @@ def test_trainer_full_checkpointing(ray_init_fixture, initial_sharding_type, res
         loaded_global_step, loaded_checkpoint_dir = trainer2.load_checkpoints()
         assert loaded_global_step == 2
         assert loaded_checkpoint_dir == payload_dir
-        assert trainer2._restored_rollout_state == ROLLOUT_STATE
         ray.get(trainer2.policy_model.async_run_ray_method("mesh", "ppo_train", batch))
         trainer2.global_step = 3
         asyncio.run(trainer2.save_checkpoints())

@@ -9,6 +9,7 @@ LATEST_CHECKPOINT_FILE = "latest_ckpt_global_step.txt"
 HF_EXPORT_REQUEST_FILENAME = "hf_export_request.json"
 BEST_CHECKPOINT_FILENAME = "best_checkpoint.json"
 POLICY_CHECKPOINT_SUBDIRECTORY = "policy"
+CRITIC_CHECKPOINT_SUBDIRECTORY = "critic"
 MEGATRON_EXTRA_STATE_FILENAME = "extra_state.pt"
 
 

@@ -77,11 +77,13 @@ def test_megatron_muonh_matches_independent_jax_steps_after_own_state_resume(tmp
             return hero_optimizer, adam_optimizer
 
         hero_optimizer, adam_optimizer = optimizers(parameters)
+        hero_optimizer.initialize_state()
         for step in range(1, int(fixture["metadata_steps"]) + 1):
             for key, parameter in parameters.items():
                 parameter.grad = _tensor(fixture[f"gradient_{step}__{key}"])
             hero_optimizer.step()
             adam_optimizer.step()
+            hero_optimizer.initialize_state()
 
             for key, parameter in parameters.items():
                 _assert_close(parameter, fixture[f"parameter_{step}__{key}"], muon_bf16=routes[key] == "muonh")

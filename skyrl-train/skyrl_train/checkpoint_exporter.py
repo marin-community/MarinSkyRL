@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Callable, Protocol, Sequence
 
@@ -13,6 +12,7 @@ from ray.util.placement_group import PlacementGroup, placement_group, remove_pla
 from transformers import PreTrainedTokenizerBase
 
 from marinskyrl.checkpoint_paths import POLICY_CHECKPOINT_SUBDIRECTORY, policy_export_path
+from marinskyrl.resource_locator import join_resource_path
 from skyrl_train.checkpoint_generation import resolve_checkpoint_payload
 from skyrl_train import hf_model_io
 from skyrl_train.hf_export_schema import (
@@ -122,7 +122,7 @@ class CheckpointExporter:
 
     def _validate_checkpoint(self) -> str:
         payload_path = resolve_checkpoint_payload(self._plan.checkpoint_path, verify_files=True)
-        trainer_state_path = os.path.join(payload_path, TRAINER_STATE_FILENAME)
+        trainer_state_path = join_resource_path(payload_path, TRAINER_STATE_FILENAME)
         if not io.exists(trainer_state_path):
             raise FileNotFoundError(f"completed checkpoint marker not found: {trainer_state_path}")
         with io.open_file(trainer_state_path, "rb") as source:
@@ -132,7 +132,7 @@ class CheckpointExporter:
             raise ValueError(
                 f"checkpoint step mismatch: requested global_step_{self._plan.step}, marker records {saved_step!r}"
             )
-        policy_path = os.path.join(payload_path, POLICY_CHECKPOINT_SUBDIRECTORY)
+        policy_path = join_resource_path(payload_path, POLICY_CHECKPOINT_SUBDIRECTORY)
         if not io.exists(policy_path):
             raise FileNotFoundError(f"policy checkpoint not found: {policy_path}")
         return policy_path
