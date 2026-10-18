@@ -10,8 +10,8 @@ from omegaconf import OmegaConf
 from harbor.agents.installed.base import BaseInstalledAgent
 from harbor.environments.base import BaseEnvironment
 from harbor.environments.capabilities import EnvironmentCapabilities
-from harbor.models.trial.config import AgentConfig, TrialConfig, TaskConfig
-from rolloutengine.contracts import ModelTurn
+from harbor.models.trial.config import AgentConfig, EnvironmentConfig
+from rolloutengine.contracts import ModelTurn, RolloutContractError
 from rolloutengine.spec import LoweredTaskSpec, TaskRuntimeSpec
 from shellbox.backends.shellsim.machine import ShellSimMachineFactory
 from shellbox.machine import MachineSpec, PackageSpec
@@ -81,7 +81,7 @@ async def test_original_trial_mints_capability_for_container_setup_and_agent_run
             )
 
     @asynccontextmanager
-    async def endpoint(_port):
+    async def endpoint(_port, *, request_timeout):
         yield AgentEndpoint("/trial", Controller())
 
     monkeypatch.setattr("skyrl_train.rollouts.agent_runtime.registered_agent_endpoint", endpoint)
@@ -97,7 +97,7 @@ async def test_original_trial_mints_capability_for_container_setup_and_agent_run
         task_inputs[1]
         .rows[0]
         .lowered.session.model_copy(
-            update={"attempt_timeout": 3000, "cleanup_timeout": 120, "total_turn_timeout": None}
+            update={"attempt_timeout": 3000, "cleanup_timeout": 120, "total_turn_timeout": None, "max_turns": 999999}
         )
     )
     lowered = LoweredTaskSpec(
@@ -106,7 +106,7 @@ async def test_original_trial_mints_capability_for_container_setup_and_agent_run
     settings = InstalledAgentSettings(
         agent=AgentConfig(
             name="mini-swe-agent",
-            kwargs={"version": "2.1.0"},
+            kwargs={"version": "2.1.0", "max_turns": 32},
             override_timeout_sec=1800,
             override_setup_timeout_sec=300,
         ),
@@ -126,22 +126,24 @@ async def test_original_trial_mints_capability_for_container_setup_and_agent_run
     runtime = InstalledAgentRuntime(
         settings, AgentInferenceBackend("model", 32768, unexpected_request, tokenizer), 8192
     )
-    config = TrialConfig(
-        task=TaskConfig(path=package),
-        agent=settings.agent,
-        environment={"import_path": f"{__name__}:UnavailableEnvironment"},
-        trial_attempt_timeout_sec=3000,
-        trial_cleanup_grace_sec=120,
+    harbor = HarborTaskSettings.from_config(OmegaConf.create({"harbor": {"max_retries": 0}}))
+    harbor = replace(
+        harbor,
+        environment=EnvironmentConfig(import_path=f"{__name__}:UnavailableEnvironment"),
     )
     await runtime.startup()
+    original = runtime.original_session(lowered, "trial", harbor, "train")
     try:
-        result = await runtime.run_original_trial(
-            unexpected_request, lowered=lowered, session_id="trial", config=config
-        )
-        assert result.exception_info.exception_message == "container service unavailable"
+        with pytest.raises(RolloutContractError, match="exited before requesting"):
+            await original.prepare()
+        results = list((tmp_path / "published").glob("*/trials/*/result.json"))
+        result = json.loads(results[0].read_text())
+        assert result["exception_info"]["exception_message"] == "container service unavailable"
+        assert result["config"]["agent"]["kwargs"]["max_turns"] == 32
         # The token is minted before container setup, whose allowance is 600 seconds.
         assert requested[0] > 600 + 300 + 1800 + 120
     finally:
+        await original.close()
         await runtime.shutdown()
 
 
@@ -180,7 +182,7 @@ async def test_native_runtime_routes_through_proxy_and_publishes_failed_attempts
     tmp_path, monkeypatch, task_inputs, path, fail
 ):
     @asynccontextmanager
-    async def local_endpoint(port):
+    async def local_endpoint(port, *, request_timeout):
         async def api_base(*, required_lifetime):
             return f"http://127.0.0.1:{port}/v1"
 

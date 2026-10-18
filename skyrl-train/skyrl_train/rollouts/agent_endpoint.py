@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from iris.client.client import IrisClient, iris_ctx
 from iris.cluster.client.job_info import get_job_info
-from iris.cluster.types import EndpointAccess
+from iris.cluster.types import PROXY_TIMEOUT_METADATA_KEY, EndpointAccess
 from rigging.timing import Duration
 
 
@@ -33,7 +33,7 @@ class AgentEndpoint:
 
 
 @asynccontextmanager
-async def registered_agent_endpoint(port: int) -> AsyncIterator[AgentEndpoint]:
+async def registered_agent_endpoint(port: int, *, request_timeout: float) -> AsyncIterator[AgentEndpoint]:
     """Keep the controller route renewed until the HTTP service stops."""
     context = iris_ctx()
     info = get_job_info()
@@ -48,6 +48,7 @@ async def registered_agent_endpoint(port: int) -> AsyncIterator[AgentEndpoint]:
             registry.register,
             name,
             f"http://{info.advertise_host}:{port}",
+            metadata={PROXY_TIMEOUT_METADATA_KEY: str(request_timeout)},
             access=EndpointAccess.ENDPOINT_ACCESS_LINK,
         )
     )
