@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Mapping
-from typing import Any, Protocol
+from typing import Any, NamedTuple, Protocol
 
 import numpy as np
 
@@ -17,13 +17,19 @@ class FlatResponseLogprobs(Protocol):
     logprobs: list[float]
 
 
+class ResponseTopK(NamedTuple):
+    sampled_logprobs: list[float]
+    topk_indices: np.ndarray
+    topk_logprobs: np.ndarray
+
+
 def select_flat_response_topk(
     flat: FlatResponseLogprobs,
     response_ids: list[int],
     top_k: int,
     requested_ids: list[int] | None = None,
-) -> tuple[list[float], np.ndarray, np.ndarray]:
-    """Read the pinned vLLM flat layout without constructing token dictionaries.
+) -> ResponseTopK:
+    """Select chosen-token and top-K full-vocabulary log probabilities.
 
     Each row contains the sampled token followed by the requested candidates.
     The sampled token may duplicate a head entry. Preserve the dictionary
@@ -58,7 +64,7 @@ def select_flat_response_topk(
         head_ids = np.take_along_axis(ids, order, axis=1)
         head_scores = np.take_along_axis(scores, order, axis=1)
     dtype = np.int32 if ids.size == 0 or ids.max() <= np.iinfo(np.int32).max else np.int64
-    return sampled, np.ascontiguousarray(head_ids, dtype=dtype), np.ascontiguousarray(head_scores)
+    return ResponseTopK(sampled, np.ascontiguousarray(head_ids, dtype=dtype), np.ascontiguousarray(head_scores))
 
 
 def select_response_topk(logprobs: Mapping[int, float], top_k: int) -> tuple[list[int], list[float]]:
