@@ -16,6 +16,9 @@ from collections.abc import Callable
 
 import torch
 import torch.nn.functional as F
+from torch._dynamo.source import LocalSource, Source, TensorProperty, TensorPropertySource
+from torch._inductor.compile_fx import compile_fx, compile_fx_inner
+from torch._inductor.output_code import OutputCode
 
 from skyrl_train.inference_engines.vllm.decode_invariant.engine import INDUCTOR_COMPILE_CONFIG
 from skyrl_train.models.grug_moe import GRUG_ATTN_GATE_SCALE, GRUG_QK_RMS_NORM_EPS, GRUG_XSA_EPS
@@ -38,35 +41,104 @@ def set_compile_rows(rows: int) -> None:
 class _Region:
     """A region compiled at its first call and run without autograd. Its first ``row_inputs`` inputs hold the rows of
     the first input's leading dimensions, each row a vector or one value, and go in as contiguous ``[rows, width]`` or
-    ``[rows]``, as the engine's regions read theirs; the outputs come back with those leading dimensions. The first
-    call marks the rows dynamic with the engines' row count as their size hint; a call that would compile the region
-    again raises instead."""
+    ``[rows]``, as the engine's regions read theirs; the outputs come back with those leading dimensions.
+
+    The first call compiles the region with ``torch.compile``, its rows marked dynamic with the engines' row count as
+    their size hint, and keeps the guards Dynamo built and the graph Inductor compiled. Every later call evaluates
+    those guards and runs the compiled graph on the call's tensors and row count, without Dynamo's and AOTAutograd's
+    per-call wrappers; a call whose inputs fail a guard, which Dynamo would compile again, raises."""
 
     def __init__(self, function: Callable, row_inputs: int):
         self._function = function
         self._row_inputs = row_inputs
-        self._compiled: Callable | None = None
+        code = function.__code__
+        self._parameters = code.co_varnames[: code.co_argcount]
+        self._guards = None
+        self._graph: OutputCode | None = None
+        # Inductor's generated function of the compiled graph: graph inputs in a list, outputs in a tuple.
+        self._run: Callable | None = None
+        # Each graph input: the index of the argument it is, or None for the row count.
+        self._graph_inputs: tuple[int | None, ...] = ()
+        self._returns_tuple = False
 
     def __call__(self, *inputs):
+        leading = inputs[0].shape[:-1]
+        rows = leading.numel()
+        start = len(leading)
+        count = self._row_inputs
+        arguments = [value.detach().reshape(rows, *value.shape[start:]).contiguous() for value in inputs[:count]]
+        arguments.extend([value.detach() if isinstance(value, torch.Tensor) else value for value in inputs[count:]])
+        if self._guards is None:
+            with torch.no_grad():
+                outputs = self._compile(arguments)
+        else:
+            grad = torch.is_grad_enabled()
+            torch._C._set_grad_enabled(False)
+            try:
+                named = dict(zip(self._parameters, arguments))
+                if not self._guards.check(named):
+                    reason = self._guards.check_verbose(named).verbose_code_parts
+                    raise RuntimeError(f"{self._function.__name__} would compile again: {reason}")
+                outputs = self._run([rows if index is None else arguments[index] for index in self._graph_inputs])
+            finally:
+                torch._C._set_grad_enabled(grad)
+        if self._returns_tuple:
+            return tuple(value.view(*leading, *value.shape[1:]) for value in outputs)
+        return outputs[0].view(*leading, *outputs[0].shape[1:])
+
+    def _compile(self, arguments: list) -> tuple[torch.Tensor, ...]:
+        """The first call's outputs; keeps the compiled graph, where its inputs come from and the guards."""
         if _compile_rows is None:
             raise RuntimeError("set_compile_rows sets the engines' row count before a region compiles")
-        leading = inputs[0].shape[:-1]
-        rows = [
-            value.detach().reshape(leading.numel(), *value.shape[len(leading) :]).contiguous()
-            for value in inputs[: self._row_inputs]
-        ]
-        others = [value.detach() if isinstance(value, torch.Tensor) else value for value in inputs[self._row_inputs :]]
-        compiled = self._compiled
-        if compiled is None:
-            compiled = torch.compile(self._function, fullgraph=True, options=dict(INDUCTOR_COMPILE_CONFIG))
-            for tensor in rows:
-                torch._dynamo.mark_dynamic(tensor, 0, hint_override=_compile_rows)
-        with torch.no_grad(), torch.compiler.set_stance("default" if self._compiled is None else "fail_on_recompile"):
-            output = compiled(*rows, *others)
-        self._compiled = compiled
-        if isinstance(output, tuple):
-            return tuple(value.view(*leading, *value.shape[1:]) for value in output)
-        return output.view(*leading, *output.shape[1:])
+        for tensor in arguments[: self._row_inputs]:
+            torch._dynamo.mark_dynamic(tensor, 0, hint_override=_compile_rows)
+        output = torch.compile(self._function, fullgraph=True, backend=self._inductor)(*arguments)
+        (entry,) = torch._dynamo.eval_frame._debug_get_cache_entry_list(self._function.__code__)
+        self._returns_tuple = isinstance(output, tuple)
+        outputs = output if self._returns_tuple else (output,)
+        rows = arguments[0].shape[0]
+        self._run = self._graph.current_callable
+        graph_outputs = self._run([rows if index is None else arguments[index] for index in self._graph_inputs])
+        if len(graph_outputs) != len(outputs) or not all(
+            torch.equal(value.view(torch.uint8), graph_value.view(torch.uint8))
+            for value, graph_value in zip(outputs, graph_outputs, strict=False)
+        ):
+            raise RuntimeError(f"{self._function.__name__}'s compiled graph does not return the region's values")
+        self._guards = entry.guard_manager
+        return outputs
+
+    def _inductor(self, graph: torch.fx.GraphModule, example_inputs: list) -> Callable:
+        """Dynamo's backend: Inductor's ``compile_fx`` under the engines' settings, as ``torch.compile`` with
+        ``options=INDUCTOR_COMPILE_CONFIG`` calls it. Keeps where each graph input comes from and the compiled graph
+        ``compile_fx_inner`` returns; the AOTAutograd cache is off, so that a cached compile also reaches it."""
+        sources = [node.meta["grapharg"].source for node in graph.graph.find_nodes(op="placeholder")]
+        self._graph_inputs = tuple(self._graph_input(source) for source in sources)
+        compiled: list[OutputCode] = []
+
+        def inner_compile(*args, **kwargs) -> OutputCode:
+            compiled.append(compile_fx_inner(*args, **kwargs))
+            return compiled[-1]
+
+        with torch._functorch.config.patch(enable_autograd_cache=False):
+            function = compile_fx(
+                graph, example_inputs, inner_compile=inner_compile, config_patches=dict(INDUCTOR_COMPILE_CONFIG)
+            )
+        (self._graph,) = compiled
+        return function
+
+    def _graph_input(self, source: Source) -> int | None:
+        """The index of the argument that graph input ``source`` is, or None for a row input's row count."""
+        if isinstance(source, LocalSource):
+            return self._parameters.index(source.local_name)
+        if (
+            isinstance(source, TensorPropertySource)
+            and source.prop is TensorProperty.SIZE
+            and source.idx == 0
+            and isinstance(source.base, LocalSource)
+            and self._parameters.index(source.base.local_name) < self._row_inputs
+        ):
+            return None
+        raise ValueError(f"{self._function.__name__}'s graph reads {source.name}, not an argument or its row count")
 
 
 def _rms_norm(x, weight, epsilon):
@@ -202,10 +274,15 @@ def _rotary_table(device: int, base: float, positions: int, rotary_dim: int) -> 
         return torch.cat((freqs.cos(), freqs.sin()), dim=-1).to(torch.bfloat16)
 
 
+@functools.lru_cache(maxsize=16)
+def _token_positions(sequence: int, batch: int, device: torch.device) -> torch.Tensor:
+    """The position in its sequence of each token of ``[sequence, batch]`` tokens, in that order."""
+    return torch.arange(sequence, device=device).repeat_interleave(batch)
+
+
 def query_key_rope(q, k, head_dim: int, qk_mult: float, qk_mult_scale: float, base: float, positions: int):
     """``query_key`` on a RoPE layer of ``base`` and a ``positions``-row table for ``[S, B, width]`` q and k, each
     token at its position in its sequence."""
     sequence, batch = q.shape[:2]
-    token_positions = torch.arange(sequence, device=q.device).repeat_interleave(batch)
     table = _rotary_table(q.device.index, base, positions, head_dim // 2)
-    return _QUERY_KEY_ROPE(q, k, token_positions, table, head_dim, qk_mult, qk_mult_scale)
+    return _QUERY_KEY_ROPE(q, k, _token_positions(sequence, batch, q.device), table, head_dim, qk_mult, qk_mult_scale)
