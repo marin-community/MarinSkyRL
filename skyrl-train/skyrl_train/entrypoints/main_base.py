@@ -328,8 +328,7 @@ class BasePPOExp:
         # engines (which are created later, in `_setup_trainer`), so that in the
         # disaggregated case the policy (and optional colocated reference)
         # claims GPU slots before inference engines use the remainder.
-        with Timer("placement/policy_pg", self.startup_timings):
-            self.policy_pg = self.get_policy_pg()
+        self.policy_pg = self.get_policy_pg()
 
     def create_inference_engine_client(
         self, *, operation: EntrypointOperation = EntrypointOperation.TRAIN
