@@ -226,12 +226,15 @@ def aggregate_completion_usage_info(
         raise ValueError(f"Unsupported backend: {backend}")
 
 
-_RENDEZVOUS_PORT_START = 20_000
-_RENDEZVOUS_PORT_STOP = 30_000
+# CoreWeave's host-network ephemeral pool starts at 10240. Holding a socket
+# protects initial allocation, but the port must remain outside that pool
+# when the reservation is released and vLLM starts its listener.
+_RENDEZVOUS_PORT_START = 2_000
+_RENDEZVOUS_PORT_STOP = 10_000
 
 
 def _find_available_rendezvous_port(excluded_ports: Collection[int] = ()) -> int:
-    """Choose a listener port outside Linux's default ephemeral client range."""
+    """Choose a listener port below CoreWeave and Linux ephemeral client ranges."""
 
     excluded = set(excluded_ports)
     candidates = list(range(_RENDEZVOUS_PORT_START, _RENDEZVOUS_PORT_STOP))
