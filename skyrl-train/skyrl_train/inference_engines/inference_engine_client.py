@@ -386,8 +386,8 @@ class InferenceEngineClient(InferenceEngineInterface):
         response_ids: List[List[int]] = [[] for _ in range(n)]
         routed_experts: List[Optional[np.ndarray]] = [None for _ in range(n)]
         prompt_logprobs: List[Optional[Any]] = [None for _ in range(n)]
-        student_topk_indices: List[Optional[List[List[int]]]] = [None for _ in range(n)]
-        behavior_topk_logprobs: List[Optional[List[List[float]]]] = [None for _ in range(n)]
+        student_topk_indices: list[np.ndarray | None] = [None for _ in range(n)]
+        behavior_topk_logprobs: list[np.ndarray | None] = [None for _ in range(n)]
         response_policy_steps: List[Optional[List[int]]] = [None for _ in range(n)]
         # a bit hacky for now
         add_resp_logprobs = False
@@ -431,8 +431,8 @@ class InferenceEngineClient(InferenceEngineInterface):
                         selected_scores[local_idx]
                     ) != len(response_ids[original_idx]):
                         raise ValueError("Inference engine student top-K tokens must align with response tokens")
-                    student_topk_indices[original_idx] = selected_ids[local_idx]
-                    behavior_topk_logprobs[original_idx] = selected_scores[local_idx]
+                    student_topk_indices[original_idx] = np.asarray(selected_ids[local_idx])
+                    behavior_topk_logprobs[original_idx] = np.asarray(selected_scores[local_idx], dtype=np.float32)
 
         output = InferenceEngineOutput(
             responses=responses,
@@ -523,8 +523,8 @@ class InferenceEngineClient(InferenceEngineInterface):
         # 2. Initialize fields we want to accumulate or update in each loop iteration
         accum_response_ids: List[int] = []
         accum_response_logprobs: List[float] = []
-        accum_student_topk_indices: List[List[int]] = []
-        accum_behavior_topk_logprobs: List[List[float]] = []
+        accum_student_topk_indices: list[np.ndarray] = []
+        accum_behavior_topk_logprobs: list[np.ndarray] = []
         accum_routed_experts: List[np.ndarray] = []
         accum_policy_steps: List[int] = []
         saw_student_topk: Optional[bool] = None
@@ -609,8 +609,8 @@ class InferenceEngineClient(InferenceEngineInterface):
                     or len(selected_scores[0]) != len(new_response_ids)
                 ):
                     raise ValueError("Inference engine student top-K tokens must align with response tokens")
-                accum_student_topk_indices.extend(selected_ids[0])
-                accum_behavior_topk_logprobs.extend(selected_scores[0])
+                accum_student_topk_indices.append(np.asarray(selected_ids[0]))
+                accum_behavior_topk_logprobs.append(np.asarray(selected_scores[0], dtype=np.float32))
 
             captured_routes = partial_response.get("routed_experts")
             has_routes = captured_routes is not None
@@ -652,8 +652,16 @@ class InferenceEngineClient(InferenceEngineInterface):
             prompt_logprobs=final_prompt_logprobs,
         )
         if saw_student_topk:
-            output["student_topk_indices"] = [accum_student_topk_indices]
-            output["behavior_topk_logprobs"] = [accum_behavior_topk_logprobs]
+            output["student_topk_indices"] = [
+                accum_student_topk_indices[0]
+                if len(accum_student_topk_indices) == 1
+                else np.concatenate(accum_student_topk_indices)
+            ]
+            output["behavior_topk_logprobs"] = [
+                accum_behavior_topk_logprobs[0]
+                if len(accum_behavior_topk_logprobs) == 1
+                else np.concatenate(accum_behavior_topk_logprobs)
+            ]
         if saw_routed_experts:
             output["routed_experts"] = [
                 np.concatenate(accum_routed_experts, axis=0)

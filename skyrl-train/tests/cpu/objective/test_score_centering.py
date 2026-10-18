@@ -3,9 +3,17 @@
 import numpy as np
 import pytest
 import torch
+from omegaconf import OmegaConf
 
-from skyrl_train.objective.score_centering import collate_score_centering, score_centering_diagnostics
+from skyrl_train.objective.score_centering import (
+    collate_score_centering,
+    collate_score_probe,
+    hypothetical_score_probe,
+    score_centering_diagnostics,
+)
 from skyrl_train.training_batch import TrainingBatchIterator, TrainingInputBatch
+from skyrl_train.trainer import RayPPOTrainer
+from skyrl_train.objective.losses import PolicyLossInputs, ppo_policy_loss
 
 
 def test_score_evidence_survives_collation_serialization_and_microbatching(tmp_path):
@@ -76,3 +84,146 @@ def test_sampled_loss_diagnostics_exclude_masked_tokens_and_bound_the_sample():
     assert metrics["score_centering/sampled_behavior_omitted_mass"] == pytest.approx(0.35)
     assert metrics["score_centering/sampled_current_behavior_log_ratio_mean"] == pytest.approx(-0.1)
     assert metrics["score_centering/sampled_current_behavior_log_ratio_abs_mean"] == pytest.approx(0.3)
+
+
+def test_hypothetical_probe_reports_nonzero_tis_correction_and_source_strata():
+    head = torch.tensor([[[0.6, 0.2]] * 4]).log()
+    behavior_head = torch.tensor([[[0.1, 0.1]] * 4]).log()
+    advantages = torch.tensor([[2.0, -1.0, 1.0, 1000.0]])
+    valid = torch.tensor([[True, True, True, False]])
+    sampled = torch.full((1, 4), 0.6).log()
+    behavior_sampled = torch.full((1, 4), 0.1).log()
+    metrics = hypothetical_score_probe(
+        head,
+        behavior_head,
+        sampled,
+        behavior_sampled,
+        advantages,
+        valid,
+        torch.tensor([[7, 4, -1, 0]]),
+        training_step=7,
+        loss_tokens=1000,
+        tis_cap=2.0,
+        eps_clip_low=0.2,
+        eps_clip_high=0.2,
+    )
+    # At p=o, the head's effective mass is min(p, cap*q). The modeled tail
+    # contributes alpha*p with alpha=min(1, cap*q_tail/p_tail)=1 here.
+    reference = (
+        advantages[0, :3]
+        * (
+            (torch.minimum(torch.tensor([0.6, 0.2]), 2 * torch.tensor([0.1, 0.1])) - torch.tensor([0.6, 0.2]))
+            * torch.tensor([0.6, 0.2]).log()
+        ).sum()
+    )
+    assert metrics["score_centering_probe/hypothetical_loss_mean"] == pytest.approx(float(reference.mean()), abs=1e-7)
+    assert metrics["score_centering_probe/hypothetical_loss_abs_mean"] == pytest.approx(
+        float(reference.abs().mean()), abs=1e-7
+    )
+    assert metrics["score_centering_probe/current_retained_mass_mean"] == pytest.approx(0.8)
+    assert metrics["score_centering_probe/behavior_omitted_mass_mean"] == pytest.approx(0.8)
+    assert metrics["score_centering_probe/fresh_source_tokens"] == 1
+    assert metrics["score_centering_probe/stale_source_tokens"] == 1
+    assert metrics["score_centering_probe/unknown_source_tokens"] == 1
+    assert metrics["score_centering_probe/source_age_max"] == 3
+    assert metrics["score_centering_probe/coverage"] == 0.003
+    assert metrics["score_centering_probe/sampled_tis_clipped_fraction"] == 1.0
+    assert metrics["score_centering_probe/current_equals_old"] == 1.0
+
+
+def test_compact_probe_collation_keeps_only_requested_valid_positions_and_missing_rows():
+    trajectory = {
+        "loss_masks": [[1, 0, 1, 1], [1, 1], [0]],
+        "score_probe_positions": [np.array([0, 3]), None, np.empty(0, dtype=np.int32)],
+        "score_probe_indices": [np.array([[3, 7], [6, 8]], dtype=np.int32), None, None],
+        "score_probe_logprobs": [np.array([[-0.8, -1.8], [-0.9, -1.9]], dtype=np.float32), None, None],
+    }
+    output = collate_score_probe(
+        trajectory,
+        [[3, 4, 5, 6], [9, 10], [11]],
+        2,
+        sampled_logprobs=torch.tensor([[-0.8, 0, -1.0, -0.9], [-1.0, -2.0, 0, 0], [0, 0, 0, 0]]),
+    )
+    assert output["score_topk_indices"].shape == (3, 2, 2)
+    torch.testing.assert_close(output["score_probe_positions"], torch.tensor([[0, 3], [0, 0], [0, 0]]))
+    torch.testing.assert_close(output["score_topk_indices"][0], torch.tensor([[3, 7], [6, 8]]))
+    assert (output["score_topk_indices"][1:] == -1).all()
+    assert torch.isnan(output["score_behavior_logprobs"][1:]).all()
+    trajectory["loss_masks"][0][0] = 0
+    filtered = collate_score_probe(
+        trajectory,
+        [[3, 4, 5, 6], [9, 10], [11]],
+        2,
+        sampled_logprobs=torch.tensor([[-0.8, 0, -1.0, -0.9], [-1.0, -2.0, 0, 0], [0, 0, 0, 0]]),
+    )
+    torch.testing.assert_close(filtered["score_probe_positions"], torch.tensor([[3], [0], [0]]))
+    torch.testing.assert_close(filtered["score_topk_indices"][0], torch.tensor([[6, 8]]))
+
+
+def test_sc_off_optimizer_is_identical_after_hypothetical_probe_consumes_its_evidence():
+    config = OmegaConf.create(
+        {
+            "trainer": {
+                "algorithm": {
+                    "off_policy_correction": "custom",
+                    "off_policy_correction_rules": [{"kind": "token", "action": "truncate", "high": 2.0}],
+                    "eps_clip_low": 0.2,
+                    "eps_clip_high": 0.2,
+                }
+            }
+        }
+    )
+    results = []
+    for enabled in (False, True):
+        parameters = torch.nn.Parameter(torch.tensor([0.6, 0.2, 0.2]).log())
+        optimizer = torch.optim.SGD([parameters], lr=0.1, momentum=0.9)
+        logprobs = parameters.log_softmax(-1)
+        response = torch.tensor([[0, 1, 2, 0]])
+        old = logprobs.detach()[response]
+        rollout = torch.tensor([0.1, 0.1, 0.8]).log()[response]
+        batch = TrainingInputBatch(
+            {
+                "action_log_probs": old.clone(),
+                "rollout_logprobs": rollout,
+                "advantages": torch.tensor([[2.0, -1.0, 0.0, 1.0]]),
+                "loss_mask": torch.tensor([[1, 1, 0, 1]]),
+                "correction_weights": (old - rollout).exp().clamp(max=2.0),
+            }
+        )
+        trainer = object.__new__(RayPPOTrainer)
+        trainer.cfg, trainer.all_metrics, trainer._last_score_probe_time, trainer.global_step = config, {}, None, 4
+        if enabled:
+            batch.update(
+                {
+                    "score_probe_positions": torch.tensor([[0, 3]]),
+                    "score_probe_source_steps": torch.tensor([[4, 1]]),
+                    "score_topk_indices": torch.tensor([[[0, 1], [0, 1]]]),
+                    "score_old_logprobs": logprobs.detach()[:2].expand(1, 2, 2).clone(),
+                    "score_behavior_logprobs": torch.tensor([0.1, 0.1]).log().expand(1, 2, 2).clone(),
+                }
+            )
+            trainer._finish_score_probe(batch)
+            assert trainer.all_metrics["score_centering_probe/hypothetical_loss_abs_mean"] > 0
+            assert not any(key.startswith("score_") for key in batch)
+        loss = ppo_policy_loss(
+            PolicyLossInputs(
+                logprobs[response],
+                batch["action_log_probs"],
+                batch["rollout_logprobs"],
+                batch["advantages"],
+                batch["loss_mask"],
+            ),
+            config.trainer.algorithm,
+        ).values
+        loss = (loss * batch["correction_weights"] * batch["loss_mask"]).sum() / batch["loss_mask"].sum()
+        loss.backward()
+        optimizer.step()
+        results.append(
+            (
+                parameters.detach().clone(),
+                parameters.grad.clone(),
+                optimizer.state[parameters]["momentum_buffer"].clone(),
+            )
+        )
+    for baseline, observed in zip(results[0], results[1], strict=True):
+        torch.testing.assert_close(observed, baseline, atol=0, rtol=0)

@@ -179,6 +179,40 @@ def score_centering_tis_cap(algorithm: DictConfig) -> float:
     return float(rules[0].high)
 
 
+def score_centering_probe_unavailable_reason(cfg: DictConfig) -> str | None:
+    """Explain why periodic hypothetical probes cannot run in this configuration."""
+    algorithm = cfg.trainer.algorithm
+    probe = algorithm.get("score_centering_probe")
+    if probe is None or not probe.interval:
+        return "disabled (score_centering_probe.interval=0)"
+    if algorithm.get("score_centering_topk", 0):
+        return "continuous SC capture is configured; its sampled loss diagnostics use score_centering_diagnostic_tokens"
+    if (
+        algorithm.policy_loss_type != PolicyLossType.REGULAR
+        or compile_distillation_plan_from_config(cfg) is not None
+        or ftpo_requested(algorithm)
+    ):
+        return "requires regular PPO without distillation or auxiliary FTPO"
+    try:
+        score_centering_tis_cap(algorithm)
+    except ValueError as error:
+        return str(error)
+    policy = cfg.trainer.policy
+    if (
+        cfg.trainer.strategy != "megatron"
+        or cfg.trainer.use_sample_packing
+        or policy.sequence_parallel_size != 1
+        or policy.megatron_config.tensor_model_parallel_size != 1
+        or policy.megatron_config.context_parallel_size != 1
+    ):
+        return "requires unpacked Megatron with TP/CP/SP=1"
+    if cfg.generator.backend != "vllm" or not cfg.generator.run_engines_locally:
+        return "requires local vLLM"
+    if cfg.generator.sampling_params.logprobs not in (None, 0):
+        return "requires ordinary sampled-token logprobs"
+    return None
+
+
 @dataclass(frozen=True)
 class TopKLossParams:
     objective: DistillationObjectiveKind
@@ -334,6 +368,14 @@ def validate_objective(cfg: DictConfig, *, loss_spec: LossSpec | None = None) ->
     diagnostic_tokens = algorithm.get("score_centering_diagnostic_tokens", 0)
     if isinstance(diagnostic_tokens, bool) or not isinstance(diagnostic_tokens, int) or diagnostic_tokens < 0:
         raise ValueError("trainer.algorithm.score_centering_diagnostic_tokens must be a nonnegative integer")
+    probe = algorithm.get("score_centering_probe")
+    if probe is not None:
+        for name in ("interval", "topk", "tokens_per_response"):
+            value = probe[name]
+            if isinstance(value, bool) or not isinstance(value, int) or value < (0 if name == "interval" else 1):
+                raise ValueError(
+                    f"score_centering_probe.{name} must be {'nonnegative' if name == 'interval' else 'positive'} integer"
+                )
     if not centering_width and (algorithm.get("score_centering_enabled", False) or diagnostic_tokens):
         raise ValueError("score centering and its sampled diagnostics require score_centering_topk > 0")
     if centering_width:

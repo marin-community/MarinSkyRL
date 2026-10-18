@@ -84,11 +84,15 @@ def test_pipeline_two_row_outputs_construct_before_collection(monkeypatch, megat
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_selected_response_reuses_sampled_normalizer_without_full_float_logits(dtype, megatron_wrapper):
+@pytest.mark.parametrize("compact", [False, True])
+def test_selected_response_reuses_sampled_normalizer_without_full_float_logits(dtype, compact, megatron_wrapper):
     attention_mask = torch.tensor([[0, 1, 1, 1, 1, 1, 1], [0, 0, 1, 1, 1, 0, 0]])
     sequences = torch.tensor([[0, 0, 1, 2, 3, 4, 5], [0, 0, 0, 1, 2, 0, 0]])
     selected_ids = torch.tensor([[[1, 3], [2, 4], [0, 5]], [[6, 1], [-1, -1], [-1, -1]]])
     sampled_ids = torch.tensor([[3, 4, 5], [2, 0, 0]])
+    candidate_positions = torch.tensor([[0, 2], [0, 1]]) if compact else None
+    if compact:
+        selected_ids = selected_ids.gather(1, candidate_positions.unsqueeze(-1).expand(-1, -1, 2))
     torch.manual_seed(91)
     base_logits = torch.randn((2, 6, 7), dtype=dtype, requires_grad=True)
     logits = base_logits / 0.7
@@ -104,13 +108,21 @@ def test_selected_response_reuses_sampled_normalizer_without_full_float_logits(d
         return tensor
 
     with torch.autograd.graph.saved_tensors_hooks(save, lambda tensor: tensor):
-        response = megatron_wrapper._response_logprobs(logits, sequences, attention_mask, 3, None, selected_ids)
+        response = megatron_wrapper._response_logprobs(
+            logits, sequences, attention_mask, 3, None, selected_ids, candidate_positions
+        )
     selected = response.selected_logprobs
 
     valid = selected_ids >= 0
-    expected = normalized[torch.arange(2)[:, None, None], compact_positions[:, :, None], selected_ids.clamp_min(0)]
+    score_positions = compact_positions.gather(1, candidate_positions) if compact else compact_positions
+    expected = normalized[torch.arange(2)[:, None, None], score_positions[:, :, None], selected_ids.clamp_min(0)]
     torch.testing.assert_close(selected[valid], expected[valid], atol=1e-5, rtol=1e-5)
-    torch.testing.assert_close(response.scores[valid.any(-1)], expected_chosen[valid.any(-1)], atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(
+        response.scores[attention_mask[:, -3:].bool()],
+        expected_chosen[attention_mask[:, -3:].bool()],
+        atol=1e-5,
+        rtol=1e-5,
+    )
     assert torch.isnan(selected[~valid]).all()
     if dtype == torch.bfloat16:
         assert (logits.shape, torch.float32) not in saved_tensors

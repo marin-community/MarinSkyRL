@@ -362,8 +362,13 @@ async def test_generate_preserves_response_topk_across_engine_routing(num_engine
         InferenceEngineInput(prompt_token_ids=[[base] for base in range(num_prompts)], sampling_params={"logprobs": 2})
     )
 
-    assert output["student_topk_indices"] == [[[base, base + 2], [base + 1, base + 3]] for base in range(num_prompts)]
-    assert output["behavior_topk_logprobs"] == [[[-0.1, -1.1], [-0.2, -1.2]] for _ in range(num_prompts)]
+    np.testing.assert_array_equal(
+        output["student_topk_indices"], [[[base, base + 2], [base + 1, base + 3]] for base in range(num_prompts)]
+    )
+    np.testing.assert_array_equal(
+        output["behavior_topk_logprobs"],
+        np.asarray([[[-0.1, -1.1], [-0.2, -1.2]] for _ in range(num_prompts)], dtype=np.float32),
+    )
 
 
 @pytest.mark.parametrize(("num_engines", "num_prompts", "with_session_id"), ROUTING_CASES)

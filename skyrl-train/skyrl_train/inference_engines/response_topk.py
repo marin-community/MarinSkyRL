@@ -5,7 +5,60 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Protocol
+
+import numpy as np
+
+
+class FlatResponseLogprobs(Protocol):
+    start_indices: list[int]
+    end_indices: list[int]
+    token_ids: list[int]
+    logprobs: list[float]
+
+
+def select_flat_response_topk(
+    flat: FlatResponseLogprobs,
+    response_ids: list[int],
+    top_k: int,
+    requested_ids: list[int] | None = None,
+) -> tuple[list[float], np.ndarray, np.ndarray]:
+    """Read the pinned vLLM flat layout without constructing token dictionaries.
+
+    Each row contains the sampled token followed by the requested candidates.
+    The sampled token may duplicate a head entry. Preserve the dictionary
+    path's ordering for tied probabilities, including a tied sampled token.
+    """
+    stride = top_k + 1
+    starts = np.arange(len(response_ids), dtype=np.int64) * stride
+    if (
+        top_k <= 0
+        or len(flat.token_ids) != len(response_ids) * stride
+        or len(flat.logprobs) != len(flat.token_ids)
+        or not np.array_equal(flat.start_indices, starts)
+        or not np.array_equal(flat.end_indices, starts + stride)
+    ):
+        raise ValueError("vLLM flat response logprobs do not match the requested candidate width")
+    ids = np.asarray(flat.token_ids, dtype=np.int64).reshape(-1, stride)
+    scores = np.asarray(flat.logprobs, dtype=np.float32).reshape(-1, stride)
+    if not np.array_equal(ids[:, 0], response_ids):
+        raise ValueError("vLLM flat sampled token IDs do not match the response")
+    if np.any(ids < 0) or not np.isfinite(scores).all() or np.any(scores > 0):
+        raise ValueError("vLLM flat response requires nonnegative IDs and finite nonpositive logprobs")
+    sampled = scores[:, 0].tolist()
+    if requested_ids is not None:
+        if len(requested_ids) != top_k or not np.all(ids[:, 1:] == np.asarray(requested_ids)):
+            raise ValueError("vLLM flat response omitted requested token IDs or changed their order")
+        head_ids, head_scores = ids[:, 1:], scores[:, 1:]
+    else:
+        # Deduplicate only the extra sampled entry; the exact top-K itself is unique.
+        order_scores = scores.copy()
+        order_scores[:, 0] = np.where(np.any(ids[:, :1] == ids[:, 1:], axis=1), -np.inf, scores[:, 0])
+        order = np.lexsort((ids, -order_scores), axis=-1)[:, :top_k]
+        head_ids = np.take_along_axis(ids, order, axis=1)
+        head_scores = np.take_along_axis(scores, order, axis=1)
+    dtype = np.int32 if ids.size == 0 or ids.max() <= np.iinfo(np.int32).max else np.int64
+    return sampled, np.ascontiguousarray(head_ids, dtype=dtype), np.ascontiguousarray(head_scores)
 
 
 def select_response_topk(logprobs: Mapping[int, float], top_k: int) -> tuple[list[int], list[float]]:

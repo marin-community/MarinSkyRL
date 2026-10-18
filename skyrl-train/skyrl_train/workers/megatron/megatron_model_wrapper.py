@@ -72,6 +72,7 @@ class MegatronForwardMicroBatch:
     ftpo_chosen_mask: torch.Tensor | None = None
     probe_row_indices: Optional[torch.Tensor] = None
     score_topk_indices: Optional[torch.Tensor] = None
+    score_probe_positions: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -207,6 +208,7 @@ class MegatronModelWrapper:
         num_actions: int,
         packed_seq_params,
         candidate_ids: torch.Tensor | None = None,
+        candidate_positions: torch.Tensor | None = None,
     ) -> MegatronForwardResult:
         """Score response actions and candidates with the same differentiable normalizer.
 
@@ -216,27 +218,41 @@ class MegatronModelWrapper:
         chosen = self._token_logprobs(logits, sequences, attention_mask.to(bool), packed_seq_params)[:, -num_actions:]
         selected = None
         if candidate_ids is not None:
-            if candidate_ids.ndim != 3 or candidate_ids.shape[:2] != chosen.shape:
+            if candidate_ids.ndim != 3 or candidate_ids.shape[0] != chosen.shape[0]:
                 raise ValueError("selected response IDs must align with chosen logprobs")
+            if candidate_positions is None:
+                if candidate_ids.shape[:2] != chosen.shape:
+                    raise ValueError("selected response IDs must align with chosen logprobs")
+                response_positions = torch.arange(num_actions, device=logits.device).expand(chosen.shape[0], -1)
+            else:
+                if candidate_positions.shape != candidate_ids.shape[:2]:
+                    raise ValueError("compact selected response positions must align with candidate IDs")
+                response_positions = candidate_positions.long()
+                if torch.any(response_positions < 0) or torch.any(response_positions >= num_actions):
+                    raise ValueError("compact selected positions are outside the response")
             query_start = attention_mask.shape[1] - num_actions - 1
             if query_start < 0:
                 raise ValueError("selected response IDs require at least one prompt token")
-            queries = torch.arange(query_start, query_start + num_actions, device=logits.device)
-            positions = attention_mask.long().cumsum(1)[:, queries] - 1
+            queries = query_start + response_positions
+            positions = attention_mask.long().cumsum(1).gather(1, queries) - 1
             valid = candidate_ids != INVALID_TOPK_INDEX
             valid_rows = valid.any(-1)
-            if torch.any(valid_rows & ~(attention_mask[:, queries].bool() & attention_mask[:, queries + 1].bool())):
+            if torch.any(
+                valid_rows & ~(attention_mask.gather(1, queries).bool() & attention_mask.gather(1, queries + 1).bool())
+            ):
                 raise ValueError("selected response IDs refer to padded prompt or response positions")
             if torch.any(candidate_ids < INVALID_TOPK_INDEX) or torch.any(candidate_ids[valid] >= logits.shape[-1]):
                 raise ValueError("selected token IDs are outside the student vocabulary")
             positions = positions.masked_fill(~valid_rows, 0)
             rows = torch.arange(logits.shape[0], device=logits.device)[:, None]
             head_logits = logits[rows[:, :, None], positions[:, :, None], candidate_ids.masked_fill(~valid, 0).long()]
-            chosen_logits = logits[rows, positions, sequences[:, -num_actions:]]
+            chosen_logits = logits[rows, positions, sequences[:, -num_actions:].gather(1, response_positions)]
             # Reuse the differentiable chosen normalizer; save no second FP32 vocabulary tensor.
-            selected = (chosen.unsqueeze(-1) + head_logits.float() - chosen_logits.float().unsqueeze(-1)).masked_fill(
-                ~valid, torch.nan
-            )
+            selected = (
+                chosen.gather(1, response_positions).unsqueeze(-1)
+                + head_logits.float()
+                - chosen_logits.float().unsqueeze(-1)
+            ).masked_fill(~valid, torch.nan)
         return MegatronForwardResult(chosen, selected)
 
     def _token_entropies(self, logits: torch.Tensor, attention_mask: torch.Tensor, packed_seq_params) -> torch.Tensor:
@@ -456,7 +472,13 @@ class MegatronModelWrapper:
                 logits.div_(temperature)
 
             response = self._response_logprobs(
-                logits, sequences, data.attention_mask, data.num_actions, packed_seq_params, data.score_topk_indices
+                logits,
+                sequences,
+                data.attention_mask,
+                data.num_actions,
+                packed_seq_params,
+                data.score_topk_indices,
+                data.score_probe_positions,
             )
             result = {"scores": response.scores}
             if response.selected_logprobs is not None:

@@ -28,6 +28,7 @@ def pair_trajectory_batch():
 
 def test_pair_roles_survive_conversion_into_experience():
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.all_metrics = {}
     trainer.cfg = dpo_test_config()
     trainer.tokenizer = SimpleNamespace(pad_token_id=0)
     trainer.pad_batch = lambda batch: batch
