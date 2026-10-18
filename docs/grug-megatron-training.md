@@ -149,7 +149,9 @@ trainer.policy.megatron_config.nccl_max_channels=32
 ```
 
 The limit applies before training process groups are created. Weight transfers
-to vLLM keep the serving channel limit on both ends. Leave `NCCL_MAX_CTAS` unset
+using `generator.weight_sync_transport=broadcast` keep the serving channel limit
+on both ends. The `expert_block` transport uses separate groups and requires
+`nccl_max_channels=null` or `1`. Leave `NCCL_MAX_CTAS` unset
 or at that serving limit; other values override the transfer limit and are
 rejected. The default `nccl_max_channels=null` keeps the existing behavior.
 
