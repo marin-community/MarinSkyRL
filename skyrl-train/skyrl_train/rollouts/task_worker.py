@@ -76,7 +76,7 @@ from skyrl_train.rollouts.task_projections import (
     WholeTaskProjection,
     logprobs_requested,
 )
-from skyrl_train.utils.harbor_errors import ErrorHandlingConfig
+from skyrl_train.utils.harbor_errors import ErrorHandlingConfig, HarborAgentStartupError
 from skyrl_train.trajectory_runners.types import (
     RESPONSE_POLICY_STEPS_KEY,
     ROUTED_EXPERTS_KEY,
@@ -284,6 +284,10 @@ def _failed_rollout(
         diagnostics["cause_error_type"] = type(error).__name__
     elif isinstance(error, TaskMachineError):
         exception_type = "TaskMachineError"
+    elif isinstance(error, HarborAgentStartupError):
+        exception_type = error.exception_type
+        diagnostics["harbor_trial_uri"] = error.trial_uri
+        diagnostics["cause_error_type"] = type(error).__name__
     elif interruption.operation in {RolloutOperation.START, RolloutOperation.PREPARE}:
         exception_type = VERIFIER_RUNTIME_ERROR
         diagnostics.setdefault("cause_error_type", type(error).__name__)

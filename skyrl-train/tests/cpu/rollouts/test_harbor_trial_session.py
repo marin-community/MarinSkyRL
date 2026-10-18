@@ -1,6 +1,7 @@
 import asyncio
 import json
 from datetime import datetime, timezone
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -20,9 +21,18 @@ from skyrl_train.rollouts.agent_backend import AgentInferenceBackend, TRIAL_HEAD
 from skyrl_train.inference_engines.inference_engine_client_http_endpoint import create_app, set_global_state
 from skyrl_train.rollouts.harbor_settings import HARBOR_EXCEPTION
 from skyrl_train.rollouts.harbor_tasks import harbor_grading_failure
-from skyrl_train.rollouts.harbor_trial_session import HarborTrialSession, run_harbor_trial, trial_grade
+from skyrl_train.rollouts.harbor_trial_session import (
+    HarborTrialSession,
+    run_harbor_trial,
+    trial_grade,
+)
 from skyrl_train.rollouts.task_projections import rollout_loss_eligible
-from skyrl_train.utils.harbor_errors import ErrorHandlingConfig
+from skyrl_train.rollouts.task_projections import WholeTaskProjection
+from skyrl_train.rollouts.task_worker import TaskRolloutWorker
+from skyrl_train.rollouts.buffer import RolloutLease, RolloutTask
+from skyrl_train.utils.harbor_errors import ErrorHandlingConfig, HarborAgentStartupError
+from tests.cpu.rollouts.engine_fakes import ConversationClient, Tokenizer as FixtureTokenizer, Writer
+from tests.cpu.task_specs import lowered_task, task_input
 
 
 @pytest.mark.asyncio
@@ -143,6 +153,56 @@ def test_trial_failure_policy_preserves_grades_and_masks_infrastructure(
     assert rollout.grade.reward == score
     assert rollout.failure.exception_type == exception_type
     assert rollout_loss_eligible(rollout, policy, logprobs_required=True) == eligible
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("score", [None, 0.0, 1.0])
+async def test_trial_without_inference_preserves_startup_failure_instead_of_a_grade(score):
+    async def run(complete):
+        result = completed_trial(score, "NonZeroAgentExitCodeError")
+        result.exception_info.exception_message = "private endpoint credential"
+        return result
+
+    session = HarborTrialSession(run, "reward")
+    try:
+        with pytest.raises(HarborAgentStartupError) as raised:
+            await session.prepare()
+        assert raised.value.exception_type == "NonZeroAgentExitCodeError"
+        assert raised.value.trial_uri == "/tmp/attempt"
+        assert "private" not in str(raised.value)
+    finally:
+        with pytest.raises(HarborAgentStartupError):
+            await session.close()
+
+
+@pytest.mark.asyncio
+async def test_harbor_startup_failure_is_ungraded_and_excluded_from_training(task_inputs):
+    config, request = task_inputs
+    task = request.rows[0].lowered.task
+
+    async def run(complete):
+        return completed_trial(0.0, "NonZeroAgentExitCodeError")
+
+    request = replace(request, rows=(task_input(lowered_task(task, "startup_failure")),))
+    client = ConversationClient([])
+    worker = TaskRolloutWorker(
+        config,
+        WholeTaskProjection(config, FixtureTokenizer()),
+        client,
+        {},
+        sessions={"startup_failure": lambda task, machine: HarborTrialSession(run, "reward")},
+        shutdown_timeout=30,
+    )
+    writer = Writer()
+    await worker.run_task(RolloutTask(RolloutLease("lease", 0, 1), {"uid": task.id}, request), writer)
+    batch = writer.groups[0][1].trajectory_batch
+    assert client.requests == []
+    assert batch["exception_types"] == ["NonZeroAgentExitCodeError"]
+    assert batch["exclude_from_baseline"] == [True]
+    assert batch["loss_masks"] == [[0]]
+    verification = batch["verification_results"][0]
+    assert verification.score is None
+    assert verification.diagnostics["harbor_trial_uri"] == "/tmp/attempt"
 
 
 @pytest.mark.asyncio
