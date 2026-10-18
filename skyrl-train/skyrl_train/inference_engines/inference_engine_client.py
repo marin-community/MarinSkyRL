@@ -135,11 +135,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         self._http_bridge_stats = HTTPBridgeStatsAccumulator()
 
         if self.enable_http_endpoint:
-            try:
-                self._spin_up_http_endpoint()
-            except BaseException:
-                self.discard_engines()
-                raise
+            self._spin_up_http_endpoint()
 
         logger.info(f"InferenceEngineClient initialized with {len(engines)} engines.")
 

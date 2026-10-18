@@ -17,7 +17,7 @@ class _UnpickleableError(RuntimeError):
         raise pickle.PicklingError("exception cannot be pickled")
 
 
-def test_model_initialization_timeout_respects_the_shared_deadline(monkeypatch):
+def test_model_initialization_phase_waits_only_for_remaining_budget(monkeypatch):
     waits = []
 
     def get(refs, timeout):
@@ -34,7 +34,7 @@ def test_model_initialization_timeout_respects_the_shared_deadline(monkeypatch):
             phase="policy/ref/critic model initialization",
         )
 
-    # The phase waits only for the budget left before the shared deadline.
+    # The phase waits only for the remaining budget.
     assert waits == [1000.0]
 
 
