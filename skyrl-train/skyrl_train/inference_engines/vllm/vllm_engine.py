@@ -328,6 +328,11 @@ def setup_envvars_for_vllm(kwargs, bundle_indices):
 
 
 class WorkerWrap:
+    def performance_memory(self, reset=False):
+        from skyrl_train.entrypoints.score_centering_performance import memory_stats
+
+        return memory_stats(reset)
+
     def set_numa_affinity(self):
         """Set CPU affinity to match this worker's GPU NUMA node.
 
@@ -1905,6 +1910,26 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         if method == "receive_weights" and not await engine.is_paused():
             raise RuntimeError("Expert-block sync installs weights only while generation is paused")
         return list(await engine.collective_rpc("expert_block_rpc", args=(method, *args)))
+
+    async def performance_memory(self, reset=False):
+        from skyrl_train.entrypoints.score_centering_performance import host_memory
+
+        return {
+            "gpu_workers": await self.llm.collective_rpc("performance_memory", args=(reset,)),
+            "frontend_host": host_memory(),
+        }
+
+    async def performance_profile_start(self):
+        from skyrl_train.entrypoints.score_centering_performance import cProfile
+
+        self._performance_frontend_profile = cProfile.Profile()
+        self._performance_frontend_profile.enable()
+
+    async def performance_profile_stop(self):
+        from skyrl_train.entrypoints.score_centering_performance import profile_summary
+
+        self._performance_frontend_profile.disable()
+        return profile_summary(self._performance_frontend_profile)
 
     async def begin_weight_reload(self):
         """#1685 fix: open the layerwise-reload bracket on every engine worker so the
