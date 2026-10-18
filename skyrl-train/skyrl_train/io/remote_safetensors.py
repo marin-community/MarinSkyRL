@@ -11,7 +11,7 @@ import json
 import math
 import time
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO, Iterable
+from typing import BinaryIO, Iterable, NamedTuple
 
 import torch
 from fsspec.utils import merge_offset_ranges
@@ -44,6 +44,12 @@ _PREFETCH_MAX_GAP = 1024**2
 _PREFETCH_BATCH_SIZE = 16
 
 
+def lazy_first_dim_patterns_for_bridge(bridge: object) -> tuple[str, ...]:
+    """Return remote slice patterns from an AutoBridge's registered model bridge."""
+    registered_bridge = getattr(bridge, "_model_bridge", bridge)
+    return tuple(getattr(registered_bridge, "REMOTE_FIRST_DIM_SLICE_PATTERNS", ()))
+
+
 def _safe_relative_path(value: str) -> str:
     path = PurePosixPath(value)
     if path.is_absolute() or ".." in path.parts:
@@ -64,14 +70,12 @@ class ReadStats:
     prefetch_unused: int = 0
 
 
-class _CountingReader:
-    def __init__(self, source: BinaryIO):
-        self.source = source
-        self.reads = 0
-
-    def read(self, size: int) -> bytes:
-        self.reads += 1
-        return self.source.read(size)
+class _PrefetchItem(NamedTuple):
+    key: str
+    index: int | None
+    shard: str
+    start: int
+    end: int
 
 
 class RemoteSafetensorsTensorStore:
@@ -127,7 +131,7 @@ class RemoteSafetensorsTensorStore:
         return frozenset(self._lazy_first_dim_keys)
 
     def plan_prefetch(self, items: Iterable[tuple[str, int | None]]) -> None:
-        """Fetch requested tensor ranges in bounded windows as the reader consumes them."""
+        """Plan requested tensor ranges in consumption order for bounded prefetch windows."""
         self._prefetch_plan = deque(dict.fromkeys(item for item in items if item[0] in self._weight_map))
 
     @property
@@ -139,7 +143,7 @@ class RemoteSafetensorsTensorStore:
             self._read_seconds,
             self._gets,
             self._prefetch_misses,
-            self._prefetch_unused,
+            self._prefetch_unused + len(self._prefetched) + len(self._prefetch_plan or ()),
         )
 
     def _handle(self, shard: str) -> BinaryIO:
@@ -155,20 +159,13 @@ class RemoteSafetensorsTensorStore:
             self._read_seconds += time.monotonic() - started
         return source
 
-    def _take_prefetch_window(self) -> list[tuple[str, int | None, str, int, int]]:
+    def _take_prefetch_window(self) -> list[_PrefetchItem]:
         items = []
         budget = 0
         while self._prefetch_plan:
             key, index = self._prefetch_plan[0]
             shard = self._weight_map[key]
-            offset, header = self._header(shard)
-            dtype, shape, start, end = self._tensor_descriptor(key, shard, header)
-            if index is not None:
-                if not shape or index < 0 or index >= shape[0]:
-                    raise IndexError(f"Invalid prefetch expert index {index} for {key!r} with shape {shape}")
-                slice_size = math.prod(shape[1:]) * torch.empty((), dtype=dtype).element_size()
-                start += index * slice_size
-                end = start + slice_size
+            _dtype, _shape, start, end = self._tensor_range(key, index)
             cost = end - start + _PREFETCH_MAX_GAP
             if cost > _PREFETCH_WINDOW_BYTES:
                 self._prefetch_plan.popleft()
@@ -177,14 +174,14 @@ class RemoteSafetensorsTensorStore:
                 break
             self._prefetch_plan.popleft()
             budget += cost
-            items.append((key, index, shard, offset + start, offset + end))
+            items.append(_PrefetchItem(key, index, shard, start, end))
         return items
 
     def _fill_window(self) -> None:
         items = self._take_prefetch_window()
         if not items:
             return
-        filesystem = self._locations[items[0][2]][0]
+        filesystem = self._locations[items[0].shard][0]
         paths, starts, ends = [], [], []
         for _key, _index, shard, start, end in items:
             path = self._locations[shard][1]
@@ -212,15 +209,30 @@ class RemoteSafetensorsTensorStore:
             for part_start in range(start, end, _PREFETCH_MAX_BLOCK):
                 part_end = min(part_start + _PREFETCH_MAX_BLOCK, end)
                 block = bisect_right(fetched, part_start, key=lambda entry: entry[0]) - 1
-                if block < 0:
-                    raise ValueError(f"Prefetch did not cover {key!r}")
                 low, high, payload = fetched[block]
-                if not low <= part_start < part_end <= high:
+                if block < 0 or not low <= part_start < part_end <= high:
                     raise ValueError(f"Prefetch did not cover {key!r}")
                 value.extend(payload[part_start - low : part_end - low])
             self._prefetched[key, index] = value
 
-    def _read(self, key: str, shard: str, start: int, end: int, index: int | None = None) -> bytearray:
+    def _tensor_range(self, key: str, index: int | None) -> tuple[torch.dtype, tuple[int, ...], int, int]:
+        shard = self._weight_map[key]
+        offset, header = self._header(shard)
+        dtype, shape, start, end = self._tensor_descriptor(key, shard, header)
+        if index is not None:
+            if not shape:
+                raise IndexError(f"Cannot slice scalar safetensors tensor {key!r}")
+            index = index + shape[0] if index < 0 else index
+            if index < 0 or index >= shape[0]:
+                raise IndexError(f"First-dimension index {index} is out of bounds for {key!r} with shape {shape}")
+            shape = shape[1:]
+            size = math.prod(shape) * torch.empty((), dtype=dtype).element_size()
+            start += index * size
+            end = start + size
+        return dtype, shape, offset + start, offset + end
+
+    def _read(self, key: str, index: int | None = None) -> torch.Tensor:
+        dtype, shape, start, end = self._tensor_range(key, index)
         payload = None
         if self._prefetch_plan is not None:
             if not self._prefetched:
@@ -230,12 +242,14 @@ class RemoteSafetensorsTensorStore:
                 self._prefetch_misses += 1
         started = time.monotonic()
         if payload is None:
-            source = self._handle(shard)
+            source = self._handle(self._weight_map[key])
             source.seek(start)
             payload = bytearray(source.read(end - start))
             self._gets += 1
         self._record_read(len(payload), started)
-        return payload
+        if len(payload) != end - start:
+            raise ValueError(f"Truncated tensor {key!r} in {self.source_uri}")
+        return torch.frombuffer(payload, dtype=dtype).reshape(shape)
 
     def close(self) -> None:
         """Release buffered ranges and source handles, recording unconsumed plan items."""
@@ -255,10 +269,8 @@ class RemoteSafetensorsTensorStore:
         source = self._handle(shard)
         source.seek(0)
         started = time.monotonic()
-        reader = _CountingReader(source)
-        header_bytes, _keys = read_safetensors_header(reader, join_resource_path(self.source_uri, shard))
+        header_bytes, _keys = read_safetensors_header(source, join_resource_path(self.source_uri, shard))
         self._record_read(len(header_bytes), started)
-        self._gets += reader.reads
         cached = len(header_bytes), json.loads(header_bytes[SAFETENSORS_LENGTH_PREFIX_BYTES:])
         self._headers[shard] = cached
         return cached
@@ -291,47 +303,16 @@ class RemoteSafetensorsTensorStore:
 
     def load_first_dim_slice(self, key: str, index: int) -> torch.Tensor:
         """Read one contiguous first-dimension slice of a stacked tensor."""
-        if key not in self._weight_map:
-            raise KeyError(f"Tensor is absent from the safetensors index: {key!r}")
-        shard = self._weight_map[key]
-        shard_uri = join_resource_path(self.source_uri, shard)
-        data_offset, header = self._header(shard)
-        dtype, shape, start, _end = self._tensor_descriptor(key, shard, header)
-        if not shape:
-            raise IndexError(f"Cannot slice scalar safetensors tensor {key!r}")
-        normalized_index = index + shape[0] if index < 0 else index
-        if normalized_index < 0 or normalized_index >= shape[0]:
-            raise IndexError(f"First-dimension index {index} is out of bounds for {key!r} with shape {shape}")
-        slice_shape = shape[1:]
-        slice_size = math.prod(slice_shape) * torch.empty((), dtype=dtype).element_size()
-        slice_start = data_offset + start + normalized_index * slice_size
-        payload = self._read(key, shard, slice_start, slice_start + slice_size, normalized_index)
-        if len(payload) != slice_size:
-            raise ValueError(f"Truncated tensor slice {key!r}[{index}] in {shard_uri}")
-        return torch.frombuffer(payload, dtype=dtype).reshape(slice_shape)
+        return self._read(key, index)
 
     def load_tensors(self, keys: list[str]) -> dict[str, torch.Tensor]:
         missing = [key for key in keys if key not in self._weight_map]
         if missing:
             raise KeyError(f"Tensors are absent from the safetensors index: {missing}")
-        tensors: dict[str, torch.Tensor] = {
-            key: _LazyFirstDimensionTensor(self, key) for key in keys if key in self._lazy_first_dim_keys
+        return {
+            key: _LazyFirstDimensionTensor(self, key) if key in self._lazy_first_dim_keys else self._read(key)
+            for key in keys
         }
-        by_shard: dict[str, list[str]] = defaultdict(list)
-        for key in keys:
-            if key not in self._lazy_first_dim_keys:
-                by_shard[self._weight_map[key]].append(key)
-
-        for shard, shard_keys in by_shard.items():
-            shard_uri = join_resource_path(self.source_uri, shard)
-            data_offset, header = self._header(shard)
-            for key in shard_keys:
-                dtype, shape, start, end = self._tensor_descriptor(key, shard, header)
-                payload = self._read(key, shard, data_offset + start, data_offset + end)
-                if len(payload) != end - start:
-                    raise ValueError(f"Truncated tensor {key!r} in {shard_uri}")
-                tensors[key] = torch.frombuffer(payload, dtype=dtype).reshape(shape)
-        return tensors
 
 
 class _LazyFirstDimensionTensor:

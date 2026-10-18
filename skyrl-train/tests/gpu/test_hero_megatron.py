@@ -1,7 +1,6 @@
 """Hero architecture through the actual Megatron worker, with split-expert checkpoints."""
 
 import math
-from contextlib import ExitStack
 import os
 import posixpath
 from pathlib import Path
@@ -114,7 +113,7 @@ def write_tiny_hero_checkpoint(path: Path):
     ],
 )
 def test_hero_worker_repeated_updates(
-    tmp_path, monkeypatch, tp, pp, ep, cp, packing, optimizer_offload, muonh, remote_read_mode
+    tmp_path, monkeypatch, request, tp, pp, ep, cp, packing, optimizer_offload, muonh, remote_read_mode
 ):
     world_size = tp * pp * ep * cp
     require_hoppers(world_size)
@@ -128,118 +127,115 @@ def test_hero_worker_repeated_updates(
     source_uri = (
         posixpath.join(checkpoint_prefix, "tests", "hero-source", uuid4().hex) if remote_read_mode is not None else None
     )
-    with ExitStack() as cleanup:
-        for path in (checkpoint, source_uri):
-            if path is not None:
-                cleanup.callback(lambda path=path: io.remove(path) if io.exists(path) else None)
-        cleanup.callback(ray.shutdown)
-        policy_path = model_path
-        if source_uri is not None:
-            manifest = snapshot_model_manifest(model_path, model_id="tiny-hero", revision="fixture")
-            io.upload_directory(str(model_path), source_uri)
-            policy_path = tmp_path / "metadata"
-            stage_model_metadata(source_uri, manifest, str(policy_path))
-        cfg = _config(str(policy_path), world_size=world_size, pp=pp, ep=ep)
-        if source_uri is not None:
-            cfg.trainer.policy.model.source_uri = source_uri
-        if remote_read_mode == "per_key":
-            cfg.trainer.policy.model.remote_read_mode = remote_read_mode
-        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
-        cfg.trainer.policy.megatron_config.context_parallel_size = cp
-        if muonh:
-            cfg.trainer.policy.optimizer_config.optimizer = "MuonH"
-            cfg.trainer.policy.optimizer_config.weight_decay = 0.0
-            cfg.trainer.policy.optimizer_config.adam_betas = [0.9, 0.95]
-            cfg.trainer.policy.optimizer_config.optimizer_kwargs = {"adam_lr": 2.0e-2, "offload_momentum": True}
-            cfg.trainer.policy.megatron_config.optimizer_checkpoint_sharding_type = "dp_reshardable"
-        if optimizer_offload is not None:
-            monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "0")
-            cfg.trainer.flash_attn = True
-            megatron = cfg.trainer.policy.megatron_config
-            megatron.ddp_config.overlap_param_gather = True
-            megatron.ddp_config.grad_reduce_in_fp32 = False
-            megatron.optimizer_checkpoint_sharding_type = "dp_reshardable"
-            with open_dict(megatron.transformer_config_kwargs), open_dict(megatron.optimizer_config_kwargs):
-                megatron.transformer_config_kwargs.deterministic_mode = True
-                megatron.optimizer_config_kwargs.use_precision_aware_optimizer = True
-                megatron.optimizer_config_kwargs.store_param_remainders = False
-                megatron.optimizer_config_kwargs.optimizer_cpu_offload = optimizer_offload > 0
-                megatron.optimizer_config_kwargs.optimizer_offload_fraction = optimizer_offload
-                megatron.optimizer_config_kwargs.overlap_cpu_optimizer_d2h_h2d = False
-        cfg.trainer.use_sample_packing = packing
-        tokenizer = AutoTokenizer.from_pretrained(model_path)
-        batch = _padded_batch(tokenizer.pad_token_id, prompt_length=48, response_length=48, variable_lengths=True)
-        validate_cfg(cfg)
-        initialize_ray(cfg)
-        policy = _init_policy(cfg, world_size)
-        if muonh:
-            snapshots = ray.get(policy.async_run_ray_method("pass_through", "grug_optimizer_route_snapshot"))
-            routes = {name: route for snapshot in snapshots for name, route in snapshot["routes"].items()}
-            for name_fragment, expected_route in (
-                ("self_attention.linear_qkv.weight", "grug_muonh_qkv"),
-                ("mlp.experts.linear_fc1.weight", "grug_muonh_gate_up"),
-                ("output_layer.weight", "grug_adamh"),
-                ("self_attention.sconv_k.weight", "adam"),
-                ("mlp.router.weight", "adam"),
-            ):
-                assert any(name_fragment in name and route == expected_route for name, route in routes.items()), (
-                    name_fragment,
-                    expected_route,
-                )
-        names = list(original)
-        before = rank0_validation_snapshot(policy, names)
-        for name in names:
-            expected = original[name] if name.endswith("router.bias") else original[name].to(torch.bfloat16).float()
-            torch.testing.assert_close(before[name], expected, rtol=0, atol=0)
-        selected_names = [
-            "model.layers.0.mlp.experts.3.gate_proj.weight",
-            "model.layers.0.mlp.experts.15.down_proj.weight",
-        ]
-        selected = rank0_validation_snapshot(policy, selected_names)
-        assert set(selected) == set(selected_names)
-        for name in selected_names:
-            torch.testing.assert_close(selected[name], before[name], rtol=0, atol=0)
-        initial_scores = _megatron_response_logprobs(policy, batch)
-        assert torch.isfinite(initial_scores).all()
-        repeated_scores = _megatron_response_logprobs(policy, batch)
-        torch.testing.assert_close(initial_scores, repeated_scores, rtol=0, atol=0)
-        for _ in range(3):
-            scores = _megatron_response_logprobs(policy, batch)
-            batch["action_log_probs"] = (scores * batch["response_mask"]).float()
-            status = _train_step(policy, batch)
-            assert status["log_ratio_abs_max"] < 1e-3, status
-        after = rank0_validation_snapshot(policy, names)
-        for name in names:
-            if name.endswith("router.bias"):
-                torch.testing.assert_close(after[name], before[name], rtol=0, atol=0)
-            assert torch.isfinite(after[name]).all(), name
-        for name in (
-            "model.layers.0.mlp.latent_down_proj.weight",
-            "model.layers.0.sconv_mlp.weight",
-            "model.layers.0.self_attn.sconv_k.weight",
-            "model.layers.0.shared_experts.1.up_proj.weight",
+    for path in (checkpoint, source_uri):
+        if path is not None:
+            request.addfinalizer(lambda path=path: io.remove(path) if io.exists(path) else None)
+    request.addfinalizer(ray.shutdown)
+    policy_path = model_path
+    if source_uri is not None:
+        manifest = snapshot_model_manifest(model_path, model_id="tiny-hero", revision="fixture")
+        io.upload_directory(str(model_path), source_uri)
+        policy_path = tmp_path / "metadata"
+        stage_model_metadata(source_uri, manifest, str(policy_path))
+    cfg = _config(str(policy_path), world_size=world_size, pp=pp, ep=ep)
+    if source_uri is not None:
+        cfg.trainer.policy.model.source_uri = source_uri
+    if remote_read_mode == "per_key":
+        cfg.trainer.policy.model.remote_read_mode = remote_read_mode
+    cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
+    cfg.trainer.policy.megatron_config.context_parallel_size = cp
+    if muonh:
+        cfg.trainer.policy.optimizer_config.optimizer = "MuonH"
+        cfg.trainer.policy.optimizer_config.weight_decay = 0.0
+        cfg.trainer.policy.optimizer_config.adam_betas = [0.9, 0.95]
+        cfg.trainer.policy.optimizer_config.optimizer_kwargs = {"adam_lr": 2.0e-2, "offload_momentum": True}
+        cfg.trainer.policy.megatron_config.optimizer_checkpoint_sharding_type = "dp_reshardable"
+    if optimizer_offload is not None:
+        monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "0")
+        cfg.trainer.flash_attn = True
+        megatron = cfg.trainer.policy.megatron_config
+        megatron.ddp_config.overlap_param_gather = True
+        megatron.ddp_config.grad_reduce_in_fp32 = False
+        megatron.optimizer_checkpoint_sharding_type = "dp_reshardable"
+        with open_dict(megatron.transformer_config_kwargs), open_dict(megatron.optimizer_config_kwargs):
+            megatron.transformer_config_kwargs.deterministic_mode = True
+            megatron.optimizer_config_kwargs.use_precision_aware_optimizer = True
+            megatron.optimizer_config_kwargs.store_param_remainders = False
+            megatron.optimizer_config_kwargs.optimizer_cpu_offload = optimizer_offload > 0
+            megatron.optimizer_config_kwargs.optimizer_offload_fraction = optimizer_offload
+            megatron.optimizer_config_kwargs.overlap_cpu_optimizer_d2h_h2d = False
+    cfg.trainer.use_sample_packing = packing
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    batch = _padded_batch(tokenizer.pad_token_id, prompt_length=48, response_length=48, variable_lengths=True)
+    validate_cfg(cfg)
+    initialize_ray(cfg)
+    policy = _init_policy(cfg, world_size)
+    if muonh:
+        snapshots = ray.get(policy.async_run_ray_method("pass_through", "grug_optimizer_route_snapshot"))
+        routes = {name: route for snapshot in snapshots for name, route in snapshot["routes"].items()}
+        for name_fragment, expected_route in (
+            ("self_attention.linear_qkv.weight", "grug_muonh_qkv"),
+            ("mlp.experts.linear_fc1.weight", "grug_muonh_gate_up"),
+            ("output_layer.weight", "grug_adamh"),
+            ("self_attention.sconv_k.weight", "adam"),
+            ("mlp.router.weight", "adam"),
         ):
-            assert not torch.equal(before[name], after[name]), name
-        final_scores = _megatron_response_logprobs(policy, batch)
-        assert torch.isfinite(final_scores).all()
-        assert not torch.equal(initial_scores, final_scores)
-        batch["action_log_probs"] = (final_scores * batch["response_mask"]).float()
-        ray.get(
-            policy.async_run_ray_method("pass_through", "save_checkpoint", ckpt_dir=checkpoint, tokenizer=tokenizer)
-        )
-        # The second update catches a restored step counter reset on every step.
-        continued = []
-        for _ in range(2):
-            _train_step(policy, batch)
-            continued.append(rank0_validation_snapshot(policy, names))
-        ray.get(policy.async_run_ray_method("pass_through", "load_checkpoint", ckpt_dir=checkpoint))
-        restored = rank0_validation_snapshot(policy, names)
+            assert any(name_fragment in name and route == expected_route for name, route in routes.items()), (
+                name_fragment,
+                expected_route,
+            )
+    names = list(original)
+    before = rank0_validation_snapshot(policy, names)
+    for name in names:
+        expected = original[name] if name.endswith("router.bias") else original[name].to(torch.bfloat16).float()
+        torch.testing.assert_close(before[name], expected, rtol=0, atol=0)
+    selected_names = [
+        "model.layers.0.mlp.experts.3.gate_proj.weight",
+        "model.layers.0.mlp.experts.15.down_proj.weight",
+    ]
+    selected = rank0_validation_snapshot(policy, selected_names)
+    assert set(selected) == set(selected_names)
+    for name in selected_names:
+        torch.testing.assert_close(selected[name], before[name], rtol=0, atol=0)
+    initial_scores = _megatron_response_logprobs(policy, batch)
+    assert torch.isfinite(initial_scores).all()
+    repeated_scores = _megatron_response_logprobs(policy, batch)
+    torch.testing.assert_close(initial_scores, repeated_scores, rtol=0, atol=0)
+    for _ in range(3):
+        scores = _megatron_response_logprobs(policy, batch)
+        batch["action_log_probs"] = (scores * batch["response_mask"]).float()
+        status = _train_step(policy, batch)
+        assert status["log_ratio_abs_max"] < 1e-3, status
+    after = rank0_validation_snapshot(policy, names)
+    for name in names:
+        if name.endswith("router.bias"):
+            torch.testing.assert_close(after[name], before[name], rtol=0, atol=0)
+        assert torch.isfinite(after[name]).all(), name
+    for name in (
+        "model.layers.0.mlp.latent_down_proj.weight",
+        "model.layers.0.sconv_mlp.weight",
+        "model.layers.0.self_attn.sconv_k.weight",
+        "model.layers.0.shared_experts.1.up_proj.weight",
+    ):
+        assert not torch.equal(before[name], after[name]), name
+    final_scores = _megatron_response_logprobs(policy, batch)
+    assert torch.isfinite(final_scores).all()
+    assert not torch.equal(initial_scores, final_scores)
+    batch["action_log_probs"] = (final_scores * batch["response_mask"]).float()
+    ray.get(policy.async_run_ray_method("pass_through", "save_checkpoint", ckpt_dir=checkpoint, tokenizer=tokenizer))
+    # The second update catches a restored step counter reset on every step.
+    continued = []
+    for _ in range(2):
+        _train_step(policy, batch)
+        continued.append(rank0_validation_snapshot(policy, names))
+    ray.get(policy.async_run_ray_method("pass_through", "load_checkpoint", ckpt_dir=checkpoint))
+    restored = rank0_validation_snapshot(policy, names)
+    for name in names:
+        torch.testing.assert_close(restored[name], after[name], rtol=0, atol=0)
+    restored_scores = _megatron_response_logprobs(policy, batch)
+    torch.testing.assert_close(restored_scores, final_scores, rtol=0, atol=0)
+    for expected in continued:
+        _train_step(policy, batch)
+        resumed = rank0_validation_snapshot(policy, names)
         for name in names:
-            torch.testing.assert_close(restored[name], after[name], rtol=0, atol=0)
-        restored_scores = _megatron_response_logprobs(policy, batch)
-        torch.testing.assert_close(restored_scores, final_scores, rtol=0, atol=0)
-        for expected in continued:
-            _train_step(policy, batch)
-            resumed = rank0_validation_snapshot(policy, names)
-            for name in names:
-                torch.testing.assert_close(resumed[name], expected[name], rtol=0, atol=0)
+            torch.testing.assert_close(resumed[name], expected[name], rtol=0, atol=0)

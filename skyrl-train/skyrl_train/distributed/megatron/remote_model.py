@@ -3,11 +3,8 @@
 from megatron.bridge import AutoBridge
 from megatron.bridge.utils.common_utils import extract_expert_number_from_param
 from megatron.bridge.models.hf_pretrained.state import StateDict, StateSource
-from skyrl_train.io.remote_safetensors import RemoteSafetensorsTensorStore
-from skyrl_train.distributed.megatron.remote_weight_tasks import (
-    lazy_first_dim_patterns_for_bridge,
-    prefetch_items_from_tasks,
-)
+from skyrl_train.io.remote_safetensors import RemoteSafetensorsTensorStore, lazy_first_dim_patterns_for_bridge
+from skyrl_train.distributed.megatron.remote_weight_tasks import prefetch_items_from_tasks
 
 
 class RemoteSafetensorsStateSource(StateSource):

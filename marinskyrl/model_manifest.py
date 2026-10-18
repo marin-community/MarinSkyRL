@@ -6,7 +6,7 @@ import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import struct
-from typing import Literal, Protocol, Self
+from typing import BinaryIO, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator, model_validator
 
@@ -130,11 +130,7 @@ def _manifest_identity(
 SAFETENSORS_LENGTH_PREFIX_BYTES = 8
 
 
-class _HeaderReader(Protocol):
-    def read(self, size: int, /) -> bytes: ...
-
-
-def read_safetensors_header(source: _HeaderReader, source_name: str) -> tuple[bytes, tuple[str, ...]]:
+def read_safetensors_header(source: BinaryIO, source_name: str) -> tuple[bytes, tuple[str, ...]]:
     """Consume and validate one safetensors header, returning its bytes and tensor keys."""
 
     def read_exact(size: int) -> bytes:

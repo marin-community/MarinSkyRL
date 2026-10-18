@@ -16,9 +16,3 @@ def prefetch_items_from_tasks(
             [task.mapping.hf_param] if isinstance(task.mapping.hf_param, str) else task.mapping.hf_param.values()
         )
     ]
-
-
-def lazy_first_dim_patterns_for_bridge(bridge: object) -> tuple[str, ...]:
-    """Return remote slice patterns from an AutoBridge's registered model bridge."""
-    registered_bridge = getattr(bridge, "_model_bridge", bridge)
-    return tuple(getattr(registered_bridge, "REMOTE_FIRST_DIM_SLICE_PATTERNS", ()))

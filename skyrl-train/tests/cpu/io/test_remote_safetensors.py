@@ -12,13 +12,10 @@ from cloud.iris.hf_model_cache import stage_model_metadata
 from marinskyrl.model_manifest import snapshot_model_manifest
 from skyrl_train.io import io
 from skyrl_train.models.grug_moe import GRUG_STACKED_EXPERT_SLICE_PATTERNS
-from skyrl_train.distributed.megatron.remote_weight_tasks import (
-    lazy_first_dim_patterns_for_bridge,
-    prefetch_items_from_tasks,
-)
+from skyrl_train.distributed.megatron.remote_weight_tasks import prefetch_items_from_tasks
 from skyrl_train.config.remote_read import RemoteReadMode
 import skyrl_train.io.remote_safetensors as remote_safetensors
-from skyrl_train.io.remote_safetensors import RemoteSafetensorsTensorStore
+from skyrl_train.io.remote_safetensors import RemoteSafetensorsTensorStore, lazy_first_dim_patterns_for_bridge
 
 
 class CountingFileSystem(AbstractFileSystem):
@@ -52,6 +49,13 @@ class CountingFileSystem(AbstractFileSystem):
         payload = self.shards.get(path, self.payload)[start:end]
         self.fetched_bytes += len(payload)
         return payload
+
+
+def _task(hf_param, megatron_param="dense", owned=True):
+    return SimpleNamespace(
+        megatron_module=object() if owned else None,
+        mapping=SimpleNamespace(hf_param=hf_param, megatron_param=megatron_param),
+    )
 
 
 def _write_index(metadata_dir: Path, weight_map: dict[str, str]) -> None:
@@ -107,33 +111,19 @@ def test_single_key_and_expert_slice_reads_fetch_only_requested_bytes(
             lazy_first_dim_patterns=GRUG_STACKED_EXPERT_SLICE_PATTERNS,
         )
         tasks = [
-            SimpleNamespace(
-                megatron_module=object(),
-                mapping=SimpleNamespace(
-                    hf_param={"left": "layer.2.weight", "right": "layer.0.weight"}, megatron_param="dense"
-                ),
-            ),
-            SimpleNamespace(
-                megatron_module=object(), mapping=SimpleNamespace(hf_param="layer.1.weight", megatron_param="dense")
-            ),
+            _task({"left": "layer.2.weight", "right": "layer.0.weight"}),
+            _task("layer.1.weight"),
             *[
-                SimpleNamespace(
-                    megatron_module=object(),
-                    mapping=SimpleNamespace(
-                        hf_param=expert_key
-                        if expert_layout == "stacked"
-                        else f"model.layers.0.mlp.experts.{index}.down_proj.weight",
-                        megatron_param=str(index),
-                    ),
+                _task(
+                    expert_key
+                    if expert_layout == "stacked"
+                    else f"model.layers.0.mlp.experts.{index}.down_proj.weight",
+                    str(index),
                 )
                 for index in (2, 0, 1)
             ],
-            SimpleNamespace(
-                megatron_module=None, mapping=SimpleNamespace(hf_param="unrequested.weight", megatron_param="other")
-            ),
-            SimpleNamespace(
-                megatron_module=object(), mapping=SimpleNamespace(hf_param="missing.weight", megatron_param="dense")
-            ),
+            _task("unrequested.weight", owned=False),
+            _task("missing.weight"),
         ]
         if mode == RemoteReadMode.PREFETCH:
             store.plan_prefetch(prefetch_items_from_tasks(tasks, store.lazy_first_dim_keys, int))
@@ -188,9 +178,13 @@ def test_twelve_rank_simulation_records_bounded_remote_reads_and_local_disk(tmp_
     remote.mkdir()
     shard_name = "model-00001-of-00001.safetensors"
     rank_count = 12
-    stacked_key = "model.layers.0.mlp.experts.down_proj.weight"
+    stacked_keys = ["model.layers.0.mlp.experts.gate_proj.weight", "model.layers.0.mlp.experts.up_proj.weight"]
+    tensors = {
+        key: torch.arange(rank_count * 100_000, dtype=torch.float32).reshape(rank_count, 100_000) + index
+        for index, key in enumerate(stacked_keys)
+    }
     save_file(
-        {stacked_key: torch.arange(rank_count * 100_000, dtype=torch.float32).reshape(rank_count, 100_000)},
+        tensors,
         remote / shard_name,
     )
     (remote / "config.json").write_text("{}")
@@ -209,11 +203,12 @@ def test_twelve_rank_simulation_records_bounded_remote_reads_and_local_disk(tmp_
         for metadata in metadata_dirs
     ]
     for rank, store in enumerate(stores):
-        stacked = store.load_tensors([stacked_key])[stacked_key]
-        torch.testing.assert_close(
-            stacked[rank],
-            torch.arange(rank * 100_000, (rank + 1) * 100_000, dtype=torch.float32),
-        )
+        store.plan_prefetch((key, rank) for key in stacked_keys)
+        for key in stacked_keys:
+            stacked = store.load_tensors([key])[key]
+            torch.testing.assert_close(stacked[rank], tensors[key][rank], rtol=0, atol=0)
+        assert store.read_stats.prefetch_misses == store.read_stats.prefetch_unused == 0
+        store.close()
 
     artifact_bytes = (remote / shard_name).stat().st_size
     s3_bytes_read = sum(store.read_stats.bytes_read for store in stores)
@@ -226,10 +221,18 @@ def test_twelve_rank_simulation_records_bounded_remote_reads_and_local_disk(tmp_
     assert not tuple(tmp_path.glob("rank-*/*.safetensors"))
 
 
-@pytest.mark.parametrize("window_bytes", [16, 7], ids=["split-ranges", "oversized-fallback"])
+@pytest.mark.parametrize("window_bytes", [16, 9], ids=["split-ranges", "oversized-fallback"])
 def test_prefetch_bounded_ranges_and_unplanned_reads_preserve_tensors(tmp_path, monkeypatch, window_bytes):
     tensors = {str(index): torch.arange(12, dtype=torch.uint8) + index for index in range(3)}
-    tensors["outside"] = torch.arange(4, dtype=torch.uint8)
+    tensors.update({str(index): torch.tensor([index, index + 1], dtype=torch.uint8) for index in range(3, 7)})
+    tensors.update(
+        {
+            "3_gap": torch.ones(3, dtype=torch.uint8),
+            "4_gap": torch.ones(3, dtype=torch.uint8),
+            "5_gap": torch.ones(1, dtype=torch.uint8),
+            "outside": torch.arange(4, dtype=torch.uint8),
+        }
+    )
     shard = tmp_path / "model.safetensors"
     save_file(tensors, shard)
     metadata = tmp_path / "metadata"
@@ -237,32 +240,40 @@ def test_prefetch_bounded_ranges_and_unplanned_reads_preserve_tensors(tmp_path, 
     filesystem = CountingFileSystem(shard.read_bytes())
     monkeypatch.setattr(io, "filesystem_and_path", lambda path: (filesystem, path.removeprefix("s3://")))
     monkeypatch.setattr(remote_safetensors, "_PREFETCH_MAX_BLOCK", 8)
-    monkeypatch.setattr(remote_safetensors, "_PREFETCH_MAX_GAP", 0)
+    monkeypatch.setattr(remote_safetensors, "_PREFETCH_MAX_GAP", 2)
     monkeypatch.setattr(remote_safetensors, "_PREFETCH_WINDOW_BYTES", window_bytes)
-    cat_file = filesystem.cat_file
     payload_start = 8 + int.from_bytes(filesystem.payload[:8], "little")
-
-    def bounded_fetch(path, start=None, end=None, **kwargs):
-        if window_bytes == 16 and start is not None and start >= payload_start:
-            assert end - start <= 8
-        return cat_file(path, start=start, end=end, **kwargs)
-
-    monkeypatch.setattr(filesystem, "cat_file", bounded_fetch)
+    header = json.loads(filesystem.payload[8:payload_start])
     cat_ranges = filesystem.cat_ranges
+    requested = []
 
     def bounded_ranges(paths, starts, ends, **kwargs):
         sizes = [end - start for start, end in zip(starts, ends, strict=True)]
         assert sum(sizes) <= window_bytes
         assert max(sizes) <= 8
+        requested.extend(zip(starts, ends, strict=True))
         return cat_ranges(paths, starts, ends, **kwargs)
 
     monkeypatch.setattr(filesystem, "cat_ranges", bounded_ranges)
     store = RemoteSafetensorsTensorStore("s3://bucket/policy", metadata)
-    store.plan_prefetch((key, None) for key in ("0", "1", "2"))
+    store.plan_prefetch((key, None) for key in map(str, range(7)))
     try:
-        for key in ("outside", "0", "1", "2"):
+        for key in ("outside", *map(str, range(7))):
             torch.testing.assert_close(store.load_tensors([key])[key], tensors[key], rtol=0, atol=0)
+        assert store.read_stats.prefetch_unused == 0
     finally:
         store.close()
-    assert filesystem.fetched_bytes == len(filesystem.payload)
-    assert store.read_stats.prefetch_unused == 0
+    expected = []
+    if window_bytes == 16:
+        for key in ("0", "1", "2"):
+            start = payload_start + header[key]["data_offsets"][0]
+            expected.extend([(start, start + 8), (start + 8, start + 12)])
+    expected.extend(
+        [
+            tuple(payload_start + value for value in header["3"]["data_offsets"]),
+            tuple(payload_start + value for value in header["4"]["data_offsets"]),
+            (payload_start + header["5"]["data_offsets"][0], payload_start + header["6"]["data_offsets"][1]),
+        ]
+    )
+    assert requested == expected
+    assert filesystem.fetched_bytes == payload_start + 36 + 8 + 4 + 1
