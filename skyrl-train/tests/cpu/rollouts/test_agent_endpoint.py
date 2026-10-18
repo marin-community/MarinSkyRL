@@ -3,7 +3,7 @@ import time
 import pytest
 from iris.client.client import IrisClient, IrisContext, iris_ctx_scope
 from iris.cluster.client.job_info import JobInfo, get_job_info, set_job_info
-from iris.cluster.types import EndpointAccess, JobName
+from iris.cluster.types import PROXY_TIMEOUT_METADATA_KEY, EndpointAccess, JobName
 from iris.rpc import controller_pb2
 
 from skyrl_train.rollouts.agent_endpoint import registered_agent_endpoint
@@ -16,6 +16,8 @@ async def test_agent_endpoint_removes_registration_after_trial_or_token_failure(
 
     class Cluster:
         def register_endpoint(self, *, name, address, task_attempt, metadata, access):
+            # Iris consumes this wire metadata; an omitted value imposes its 120-second default.
+            assert float(metadata[PROXY_TIMEOUT_METADATA_KEY]) == 1800
             endpoints[name] = (address, task_attempt, access)
             return name
 
@@ -35,7 +37,7 @@ async def test_agent_endpoint_removes_registration_after_trial_or_token_failure(
     set_job_info(info)
     try:
         with iris_ctx_scope(IrisContext.from_job_info(info, IrisClient(Cluster()))):
-            async with registered_agent_endpoint(8080) as endpoint:
+            async with registered_agent_endpoint(8080, request_timeout=1800) as endpoint:
                 assert endpoints[endpoint.name] == (
                     "http://10.0.0.2:8080",
                     info.task_attempt,

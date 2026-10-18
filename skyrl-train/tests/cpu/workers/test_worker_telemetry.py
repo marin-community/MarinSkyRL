@@ -42,7 +42,7 @@ def _build_worker() -> Worker:
 
 
 @pytest.mark.parametrize("endpoint", [True, False])
-def test_a_worker_reports_its_lifecycle_only_with_an_endpoint(telemetry_endpoint, monkeypatch, endpoint):
+def test_a_worker_reports_its_lifecycle_only_with_an_endpoint(ray_init, telemetry_endpoint, monkeypatch, endpoint):
     if not endpoint:
         monkeypatch.delenv("SKYRL_TELEMETRY_ENDPOINT")
     worker = _build_worker()

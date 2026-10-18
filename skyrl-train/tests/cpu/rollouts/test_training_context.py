@@ -241,7 +241,7 @@ async def _next_uids(context: TrainingContext) -> list[str]:
 
 
 @pytest.mark.asyncio
-async def test_evaluation_pause_drains_generation_and_preserves_next_training_batch(start_buffer):
+async def test_evaluation_pause_drains_generation_and_preserves_next_training_batch(ray_module, start_buffer):
     workers = _Workers(blocked=frozenset({"a"}))
     context = _context(["a", "b", "c"], workers, start_buffer, batch_size=1, max_in_flight=1)
     context.start()
