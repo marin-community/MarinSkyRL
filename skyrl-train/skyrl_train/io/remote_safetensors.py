@@ -61,7 +61,7 @@ class ReadStats:
 
 
 class RemoteSafetensorsTensorStore:
-    """Load requested tensors with object-store range reads and no weight files on disk."""
+    """Load requested tensors through one single-threaded handle per shard without local weight files."""
 
     def __init__(
         self,
@@ -106,14 +106,13 @@ class RemoteSafetensorsTensorStore:
     def read_stats(self) -> ReadStats:
         return ReadStats(self._opens, self._reads, self._bytes_read, self._read_seconds)
 
-    def _source(self, shard: str) -> BinaryIO:
+    def _handle(self, shard: str) -> BinaryIO:
         source = self._handles.get(shard)
         if source is None:
             started = time.monotonic()
             uri = join_resource_path(self.source_uri, shard)
             filesystem, path = io.filesystem_and_path(uri)
-            options = {"cache_type": "none"} if io.is_cloud_path(uri) else {}
-            source = filesystem.open(path, "rb", **options)
+            source = filesystem.open(path, "rb", cache_type="none")
             self._handles[shard] = source
             self._opens += 1
             self._read_seconds += time.monotonic() - started
@@ -123,7 +122,7 @@ class RemoteSafetensorsTensorStore:
         cached = self._headers.get(shard)
         if cached is not None:
             return cached
-        source = self._source(shard)
+        source = self._handle(shard)
         source.seek(0)
         started = time.monotonic()
         header_bytes, _keys = read_safetensors_header(source, join_resource_path(self.source_uri, shard))
@@ -165,7 +164,7 @@ class RemoteSafetensorsTensorStore:
         shard = self._weight_map[key]
         shard_uri = join_resource_path(self.source_uri, shard)
         data_offset, header = self._header(shard)
-        source = self._source(shard)
+        source = self._handle(shard)
         dtype, shape, start, _end = self._tensor_descriptor(key, shard, header)
         if not shape:
             raise IndexError(f"Cannot slice scalar safetensors tensor {key!r}")
@@ -198,7 +197,7 @@ class RemoteSafetensorsTensorStore:
         for shard, shard_keys in by_shard.items():
             shard_uri = join_resource_path(self.source_uri, shard)
             data_offset, header = self._header(shard)
-            source = self._source(shard)
+            source = self._handle(shard)
             for key in shard_keys:
                 dtype, shape, start, end = self._tensor_descriptor(key, shard, header)
                 source.seek(data_offset + start)
