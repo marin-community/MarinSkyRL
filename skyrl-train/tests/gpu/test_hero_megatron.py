@@ -127,10 +127,8 @@ def test_hero_worker_repeated_updates(
     source_uri = (
         posixpath.join(checkpoint_prefix, "tests", "hero-source", uuid4().hex) if remote_read_mode is not None else None
     )
-    for path in (checkpoint, source_uri):
-        if path is not None:
-            request.addfinalizer(lambda path=path: io.remove(path) if io.exists(path) else None)
-    request.addfinalizer(ray.shutdown)
+    if source_uri is not None:
+        request.addfinalizer(lambda: io.remove(source_uri) if io.exists(source_uri) else None)
     policy_path = model_path
     if source_uri is not None:
         manifest = snapshot_model_manifest(model_path, model_id="tiny-hero", revision="fixture")
@@ -169,73 +167,80 @@ def test_hero_worker_repeated_updates(
     batch = _padded_batch(tokenizer.pad_token_id, prompt_length=48, response_length=48, variable_lengths=True)
     validate_cfg(cfg)
     initialize_ray(cfg)
-    policy = _init_policy(cfg, world_size)
-    if muonh:
-        snapshots = ray.get(policy.async_run_ray_method("pass_through", "grug_optimizer_route_snapshot"))
-        routes = {name: route for snapshot in snapshots for name, route in snapshot["routes"].items()}
-        for name_fragment, expected_route in (
-            ("self_attention.linear_qkv.weight", "grug_muonh_qkv"),
-            ("mlp.experts.linear_fc1.weight", "grug_muonh_gate_up"),
-            ("output_layer.weight", "grug_adamh"),
-            ("self_attention.sconv_k.weight", "adam"),
-            ("mlp.router.weight", "adam"),
-        ):
-            assert any(name_fragment in name and route == expected_route for name, route in routes.items()), (
-                name_fragment,
-                expected_route,
-            )
-    names = list(original)
-    before = rank0_validation_snapshot(policy, names)
-    for name in names:
-        expected = original[name] if name.endswith("router.bias") else original[name].to(torch.bfloat16).float()
-        torch.testing.assert_close(before[name], expected, rtol=0, atol=0)
-    selected_names = [
-        "model.layers.0.mlp.experts.3.gate_proj.weight",
-        "model.layers.0.mlp.experts.15.down_proj.weight",
-    ]
-    selected = rank0_validation_snapshot(policy, selected_names)
-    assert set(selected) == set(selected_names)
-    for name in selected_names:
-        torch.testing.assert_close(selected[name], before[name], rtol=0, atol=0)
-    initial_scores = _megatron_response_logprobs(policy, batch)
-    assert torch.isfinite(initial_scores).all()
-    repeated_scores = _megatron_response_logprobs(policy, batch)
-    torch.testing.assert_close(initial_scores, repeated_scores, rtol=0, atol=0)
-    for _ in range(3):
-        scores = _megatron_response_logprobs(policy, batch)
-        batch["action_log_probs"] = (scores * batch["response_mask"]).float()
-        status = _train_step(policy, batch)
-        assert status["log_ratio_abs_max"] < 1e-3, status
-    after = rank0_validation_snapshot(policy, names)
-    for name in names:
-        if name.endswith("router.bias"):
-            torch.testing.assert_close(after[name], before[name], rtol=0, atol=0)
-        assert torch.isfinite(after[name]).all(), name
-    for name in (
-        "model.layers.0.mlp.latent_down_proj.weight",
-        "model.layers.0.sconv_mlp.weight",
-        "model.layers.0.self_attn.sconv_k.weight",
-        "model.layers.0.shared_experts.1.up_proj.weight",
-    ):
-        assert not torch.equal(before[name], after[name]), name
-    final_scores = _megatron_response_logprobs(policy, batch)
-    assert torch.isfinite(final_scores).all()
-    assert not torch.equal(initial_scores, final_scores)
-    batch["action_log_probs"] = (final_scores * batch["response_mask"]).float()
-    ray.get(policy.async_run_ray_method("pass_through", "save_checkpoint", ckpt_dir=checkpoint, tokenizer=tokenizer))
-    # The second update catches a restored step counter reset on every step.
-    continued = []
-    for _ in range(2):
-        _train_step(policy, batch)
-        continued.append(rank0_validation_snapshot(policy, names))
-    ray.get(policy.async_run_ray_method("pass_through", "load_checkpoint", ckpt_dir=checkpoint))
-    restored = rank0_validation_snapshot(policy, names)
-    for name in names:
-        torch.testing.assert_close(restored[name], after[name], rtol=0, atol=0)
-    restored_scores = _megatron_response_logprobs(policy, batch)
-    torch.testing.assert_close(restored_scores, final_scores, rtol=0, atol=0)
-    for expected in continued:
-        _train_step(policy, batch)
-        resumed = rank0_validation_snapshot(policy, names)
+    try:
+        policy = _init_policy(cfg, world_size)
+        if muonh:
+            snapshots = ray.get(policy.async_run_ray_method("pass_through", "grug_optimizer_route_snapshot"))
+            routes = {name: route for snapshot in snapshots for name, route in snapshot["routes"].items()}
+            for name_fragment, expected_route in (
+                ("self_attention.linear_qkv.weight", "grug_muonh_qkv"),
+                ("mlp.experts.linear_fc1.weight", "grug_muonh_gate_up"),
+                ("output_layer.weight", "grug_adamh"),
+                ("self_attention.sconv_k.weight", "adam"),
+                ("mlp.router.weight", "adam"),
+            ):
+                assert any(name_fragment in name and route == expected_route for name, route in routes.items()), (
+                    name_fragment,
+                    expected_route,
+                )
+        names = list(original)
+        before = rank0_validation_snapshot(policy, names)
         for name in names:
-            torch.testing.assert_close(resumed[name], expected[name], rtol=0, atol=0)
+            expected = original[name] if name.endswith("router.bias") else original[name].to(torch.bfloat16).float()
+            torch.testing.assert_close(before[name], expected, rtol=0, atol=0)
+        selected_names = [
+            "model.layers.0.mlp.experts.3.gate_proj.weight",
+            "model.layers.0.mlp.experts.15.down_proj.weight",
+        ]
+        selected = rank0_validation_snapshot(policy, selected_names)
+        assert set(selected) == set(selected_names)
+        for name in selected_names:
+            torch.testing.assert_close(selected[name], before[name], rtol=0, atol=0)
+        initial_scores = _megatron_response_logprobs(policy, batch)
+        assert torch.isfinite(initial_scores).all()
+        repeated_scores = _megatron_response_logprobs(policy, batch)
+        torch.testing.assert_close(initial_scores, repeated_scores, rtol=0, atol=0)
+        for _ in range(3):
+            scores = _megatron_response_logprobs(policy, batch)
+            batch["action_log_probs"] = (scores * batch["response_mask"]).float()
+            status = _train_step(policy, batch)
+            assert status["log_ratio_abs_max"] < 1e-3, status
+        after = rank0_validation_snapshot(policy, names)
+        for name in names:
+            if name.endswith("router.bias"):
+                torch.testing.assert_close(after[name], before[name], rtol=0, atol=0)
+            assert torch.isfinite(after[name]).all(), name
+        for name in (
+            "model.layers.0.mlp.latent_down_proj.weight",
+            "model.layers.0.sconv_mlp.weight",
+            "model.layers.0.self_attn.sconv_k.weight",
+            "model.layers.0.shared_experts.1.up_proj.weight",
+        ):
+            assert not torch.equal(before[name], after[name]), name
+        final_scores = _megatron_response_logprobs(policy, batch)
+        assert torch.isfinite(final_scores).all()
+        assert not torch.equal(initial_scores, final_scores)
+        batch["action_log_probs"] = (final_scores * batch["response_mask"]).float()
+        ray.get(
+            policy.async_run_ray_method("pass_through", "save_checkpoint", ckpt_dir=checkpoint, tokenizer=tokenizer)
+        )
+        # The second update catches a restored step counter reset on every step.
+        continued = []
+        for _ in range(2):
+            _train_step(policy, batch)
+            continued.append(rank0_validation_snapshot(policy, names))
+        ray.get(policy.async_run_ray_method("pass_through", "load_checkpoint", ckpt_dir=checkpoint))
+        restored = rank0_validation_snapshot(policy, names)
+        for name in names:
+            torch.testing.assert_close(restored[name], after[name], rtol=0, atol=0)
+        restored_scores = _megatron_response_logprobs(policy, batch)
+        torch.testing.assert_close(restored_scores, final_scores, rtol=0, atol=0)
+        for expected in continued:
+            _train_step(policy, batch)
+            resumed = rank0_validation_snapshot(policy, names)
+            for name in names:
+                torch.testing.assert_close(resumed[name], expected[name], rtol=0, atol=0)
+    finally:
+        ray.shutdown()
+        if io.exists(checkpoint):
+            io.remove(checkpoint)
