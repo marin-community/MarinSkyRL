@@ -82,11 +82,8 @@ run_check() {
   shift
   (
     started=$SECONDS
-    if "$@"; then
-      status=0
-    else
-      status=$?
-    fi
+    status=0
+    "$@" || status=$?
     printf '[rl-iris] bootstrap check %s: %ss\n' "$name" "$((SECONDS - started))"
     exit "$status"
   ) >"$workdir/check-$name.log" 2>&1 &
@@ -95,9 +92,7 @@ run_check() {
 }
 
 run_check flash-attention "$python" -c "import flash_attn, flash_attn_2_cuda"
-if [[ "$profile" == megatron || "$profile" == megatron-export ]]; then
-  run_check megatron "$python" -c "import transformer_engine.common; from megatron.bridge import AutoBridge"
-fi
+run_check megatron "$python" -c "import transformer_engine.common; from megatron.bridge import AutoBridge"
 if [[ "$profile" == *-export ]]; then
   run_check export "$python" -c "import ray, torch; from skyrl_train.checkpoint_exporter import CheckpointExporter"
 else

@@ -385,10 +385,8 @@ def _copy_tokenizer_metadata(source: Path, destination: Path) -> None:
         shutil.copy2(metadata_file, destination / metadata_file.name)
 
 
-def prepare_policy_tokenizer(
-    args: argparse.Namespace, *, policy_config_path: Path | None
-) -> PreparedPolicyTokenizer | None:
-    """Stage the requested tokenizer with model metadata for config resolution."""
+def prepare_policy_tokenizer(args: argparse.Namespace) -> PreparedPolicyTokenizer | None:
+    """Stage the requested tokenizer independently from the policy weights."""
     tokenizer_path = args.policy_tokenizer
     if not tokenizer_path:
         return None
@@ -396,13 +394,13 @@ def prepare_policy_tokenizer(
     revision = args.policy_tokenizer_revision
     local_path = _metadata_path(tokenizer_path, revision or "main")
     target = Path(local_path)
-    with atomic_directory_update(target, staging_prefix=f".{target.name}.tokenizer-") as staging:
-        if is_cloud_uri(tokenizer_path):
-            manifest = load_model_manifest(tokenizer_path)
-            stage_model_metadata(tokenizer_path, manifest, str(staging))
-            _require_tokenizer_metadata(staging, tokenizer_path)
-            (staging / MODEL_MANIFEST_FILENAME).unlink(missing_ok=True)
-        else:
+    if is_cloud_uri(tokenizer_path):
+        manifest = load_model_manifest(tokenizer_path)
+        stage_model_metadata(tokenizer_path, manifest, local_path)
+        _require_tokenizer_metadata(target, tokenizer_path)
+        (target / MODEL_MANIFEST_FILENAME).unlink(missing_ok=True)
+    else:
+        with atomic_directory_update(target, staging_prefix=f".{target.name}.tokenizer-") as staging:
             staging.mkdir()
             if os.path.isdir(tokenizer_path):
                 _copy_tokenizer_metadata(Path(tokenizer_path), staging)
@@ -417,8 +415,6 @@ def prepare_policy_tokenizer(
                 _require_tokenizer_metadata(staging, tokenizer_path)
             else:
                 raise ValueError(f"Unsupported policy tokenizer source: {tokenizer_path!r}")
-        if policy_config_path is not None and not (staging / "config.json").exists():
-            shutil.copy2(policy_config_path, staging / "config.json")
 
     return PreparedPolicyTokenizer(local_path)
 
@@ -1873,12 +1869,12 @@ def run_head(
         _log(
             f"[task-runtime] Ray head subprocess returned; writing rendezvous -> {_rendezvous_uri(args.rendezvous_dir)}"
         )
-        rewrite_limiter = RateLimiter(RENDEZVOUS_REFRESH_INTERVAL)
+        refresh_limiter = RateLimiter(RENDEZVOUS_REFRESH_INTERVAL)
         write_rendezvous(args.rendezvous_dir, head_ip, ray_port, gang_epoch)
-        rewrite_limiter.mark_run()
+        refresh_limiter.mark_run()
 
         def refresh_rendezvous():
-            if rewrite_limiter.should_run():
+            if refresh_limiter.should_run():
                 write_rendezvous(args.rendezvous_dir, head_ip, ray_port, gang_epoch)
 
         wait_for_nodes(
@@ -2235,9 +2231,7 @@ def main() -> None:
         stage_task_data(args.terminal_bench_data, role="terminal-bench sidechannel")
     policy_model = prepare_policy_model(args)
     policy_local_path = policy_model.local_path if policy_model is not None else None
-    policy_tokenizer = prepare_policy_tokenizer(
-        args, policy_config_path=Path(policy_local_path) / "config.json" if policy_local_path is not None else None
-    )
+    policy_tokenizer = prepare_policy_tokenizer(args)
     if args.prestage_model:
         stage_model(
             args.prestage_model,

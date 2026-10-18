@@ -75,7 +75,7 @@ class _CountingReader:
 
 
 class RemoteSafetensorsTensorStore:
-    """Load requested tensors with object-store range reads and no weight files on disk."""
+    """Load requested tensors through one single-threaded handle per shard without local weight files."""
 
     def __init__(
         self,
@@ -142,15 +142,14 @@ class RemoteSafetensorsTensorStore:
             self._prefetch_unused,
         )
 
-    def _source(self, shard: str) -> BinaryIO:
+    def _handle(self, shard: str) -> BinaryIO:
         source = self._handles.get(shard)
         if source is None:
             started = time.monotonic()
             uri = join_resource_path(self.source_uri, shard)
             filesystem, path = io.filesystem_and_path(uri)
             self._locations[shard] = filesystem, path
-            options = {"cache_type": "none"} if io.is_cloud_path(uri) else {}
-            source = filesystem.open(path, "rb", **options)
+            source = filesystem.open(path, "rb", cache_type="none")
             self._handles[shard] = source
             self._opens += 1
             self._read_seconds += time.monotonic() - started
@@ -231,7 +230,7 @@ class RemoteSafetensorsTensorStore:
                 self._prefetch_misses += 1
         started = time.monotonic()
         if payload is None:
-            source = self._source(shard)
+            source = self._handle(shard)
             source.seek(start)
             payload = bytearray(source.read(end - start))
             self._gets += 1
@@ -253,7 +252,7 @@ class RemoteSafetensorsTensorStore:
         cached = self._headers.get(shard)
         if cached is not None:
             return cached
-        source = self._source(shard)
+        source = self._handle(shard)
         source.seek(0)
         started = time.monotonic()
         reader = _CountingReader(source)

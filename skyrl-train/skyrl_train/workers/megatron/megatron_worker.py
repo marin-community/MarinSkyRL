@@ -47,7 +47,6 @@ from skyrl_train.utils.metrics import policy_progress_metrics, policy_training_m
 from skyrl_train.utils.profiler import Profiler
 from skyrl_train.utils.progress import tqdm
 from skyrl_train.utils.utils import (
-    Timer,
     get_physical_gpu_id,
     moe_router_replay_requested,
     str_to_torch_dtype,
@@ -469,12 +468,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             ddp_config["use_distributed_optimizer"] = False
             ddp_config["overlap_param_gather"] = False
 
-        with Timer("megatron/make_megatron_module"):
-            self.actor_module = self.make_megatron_module(
-                wrap_with_ddp=for_training,
-                ddp_config=ddp_config,
-                bf16=self.cfg.trainer.bf16,
-            )
+        self.actor_module = self.make_megatron_module(
+            wrap_with_ddp=for_training,
+            ddp_config=ddp_config,
+            bf16=self.cfg.trainer.bf16,
+        )
 
         self._download_hf_snapshot_if_needed(model_path, self.cfg.trainer.policy.model)
         torch.distributed.barrier()
@@ -983,12 +981,11 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             tokenizer_revision=self.cfg.trainer.ref.model.get("tokenizer_revision"),
         )
 
-        with Timer("megatron/make_megatron_module"):
-            self.actor_module = self.make_megatron_module(
-                wrap_with_ddp=False,
-                ddp_config=None,
-                bf16=self.cfg.trainer.bf16,
-            )
+        self.actor_module = self.make_megatron_module(
+            wrap_with_ddp=False,
+            ddp_config=None,
+            bf16=self.cfg.trainer.bf16,
+        )
         if self.remote_hf_state is not None:
             self.remote_hf_state.store.close()
 
