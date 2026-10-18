@@ -44,6 +44,8 @@ VERIFIED_MODEL_FIELDS = (
     "qk_mult_long_scale",
     "rms_norm_eps",
     "max_position_embeddings",
+    # The regions and reference kernels compute NeoX RoPE only.
+    "rope_fused",
 )
 
 

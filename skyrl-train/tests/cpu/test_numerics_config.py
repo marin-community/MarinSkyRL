@@ -22,9 +22,10 @@ def _config(**settings):
     [
         (LlamaConfig(num_hidden_layers=1), "not Grug"),
         (GrugMoeConfig(num_key_value_heads=4), "num_key_value_heads"),
+        (GrugMoeConfig(rope_fused=True), "rope_fused"),
         (GrugMoeConfig(sconv=True, grugmoe_artifact_schema_version=2), "Hero"),
     ],
-    ids=["another model family", "another Grug shape", "Hero"],
+    ids=["another model family", "another Grug shape", "fused RoPE", "Hero"],
 )
 def test_exact_numerics_resolve_to_native_for_policies_the_kernels_do_not_cover(tmp_path, model_config, reason):
     model_config.save_pretrained(tmp_path)
