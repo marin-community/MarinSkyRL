@@ -17,10 +17,23 @@ class NumericsMode(StrEnum):
     BATCH_INVARIANT = "batch_invariant"
     EXACT = "exact"
 
+    @property
+    def bit_identical(self) -> bool:
+        """True for a mode that promises the trainer the engines' log-probabilities bit for bit; no mode does yet."""
+        return False
+
+
+class CheckFailure(StrEnum):
+    """What the exactness check does when a token's log-probability differs: log it and continue, or stop the run."""
+
+    LOG = "log"
+    STOP = "stop"
+
 
 def validate_numerics_config(cfg: DictConfig) -> None:
     """Accept a known mode, ``batch_invariant`` and ``exact`` only with local vLLM engines, ``exact`` only with engine
-    settings a decode-invariant engine runs on, and a check interval of at least 0."""
+    settings a decode-invariant engine runs on, a check interval of at least 0, and ``on_failure=stop`` only for a
+    bit-identical mode."""
     numerics = cfg.trainer.numerics
     if numerics.mode not in set(NumericsMode):
         raise ValueError(f"{NUMERICS_KEY}.mode must be one of {', '.join(NumericsMode)}; got {numerics.mode!r}")
@@ -34,6 +47,15 @@ def validate_numerics_config(cfg: DictConfig) -> None:
     if numerics.check.every_weight_syncs < 0:
         raise ValueError(
             f"{NUMERICS_KEY}.check.every_weight_syncs must be at least 0; got {numerics.check.every_weight_syncs}"
+        )
+    if numerics.check.on_failure not in set(CheckFailure):
+        raise ValueError(
+            f"{NUMERICS_KEY}.check.on_failure must be one of {', '.join(CheckFailure)}; got {numerics.check.on_failure!r}"
+        )
+    if numerics.check.on_failure == CheckFailure.STOP and not NumericsMode(numerics.mode).bit_identical:
+        raise ValueError(
+            f"{NUMERICS_KEY}.check.on_failure=stop requires a numerics mode that promises bit-identical "
+            f"log-probabilities; {NUMERICS_KEY}.mode={numerics.mode} does not"
         )
 
 

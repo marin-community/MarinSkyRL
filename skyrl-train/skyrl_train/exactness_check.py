@@ -19,6 +19,7 @@ from loguru import logger
 from omegaconf import DictConfig
 from transformers import PreTrainedTokenizerBase
 
+from skyrl_train.config.numerics import CheckFailure, NumericsMode
 from skyrl_train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
 from skyrl_train.dataset.routed_expert_batch import RoutedExpertRows
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -48,8 +49,17 @@ class EngineSample:
 class ExactnessCheck:
     """Engine samples taken after a weight sync, and their comparison with the trainer's scores."""
 
-    def __init__(self, every_weight_syncs: int, sampling_params: DictConfig, tokenizer: PreTrainedTokenizerBase):
+    def __init__(
+        self,
+        every_weight_syncs: int,
+        on_failure: CheckFailure,
+        mode: NumericsMode,
+        sampling_params: DictConfig,
+        tokenizer: PreTrainedTokenizerBase,
+    ):
         self.every_weight_syncs = every_weight_syncs
+        self.on_failure = on_failure
+        self.mode = mode
         self.tokenizer = tokenizer
         self.prompt_token_ids = tokenizer.encode(CHECK_TEXT, add_special_tokens=False)
         self.sampling_params = {
@@ -82,14 +92,16 @@ class ExactnessCheck:
         self._generation = asyncio.create_task(self._generate(client))
 
     async def finish_generation(self) -> dict[str, float]:
-        """Wait for the started generation and keep its samples for ``batch``. A generation during which an engine
-        died is skipped and counted in ``exactness_check/generate_failures``."""
+        """Wait for the started generation and keep its samples for ``batch``. Under ``on_failure=log``, a generation
+        during which an engine died is skipped and counted in ``exactness_check/generate_failures``."""
         if self._generation is None:
             return {}
         generation, self._generation = self._generation, None
         try:
             self.pending = await generation
         except ray.exceptions.RayActorError as error:
+            if self.on_failure is CheckFailure.STOP:
+                raise
             self.generate_failures += 1
             logger.warning("Exactness check skipped: an engine died while generating the check responses: {}", error)
             return {f"{METRIC_PREFIX}/generate_failures": float(self.generate_failures)}
@@ -138,7 +150,8 @@ class ExactnessCheck:
 
     def compare(self, logprobs: torch.Tensor, score_seconds: float) -> dict[str, float]:
         """The check's metrics from the trainer's ``[rows, response_length]`` scores of ``batch()``, in total and per
-        engine data-parallel rank. A token matches when its score has the engine's float32 bits."""
+        engine data-parallel rank. A token matches when its score has the engine's float32 bits; under
+        ``on_failure=stop`` a mismatch raises."""
         samples, self.pending = self.pending, None
         tokens: Counter[int] = Counter()
         mismatched: Counter[int] = Counter()
@@ -162,12 +175,15 @@ class ExactnessCheck:
             metrics[f"{METRIC_PREFIX}/dp_rank_{rank}/tokens"] = float(count)
             metrics[f"{METRIC_PREFIX}/dp_rank_{rank}/mismatched_tokens"] = float(mismatched[rank])
         if mismatched.total():
-            logger.info(
-                "Exactness check: {} of {} log-probabilities the trainer computed for {} engines' check responses "
-                "differ from the engines' (log_ratio_abs_max {:.3g})",
-                mismatched.total(),
-                tokens.total(),
-                len(samples),
-                largest,
+            message = (
+                f"Exactness check: {mismatched.total()} of {tokens.total()} log-probabilities the trainer computed for "
+                f"{len(samples)} engines' check responses differ from the engines' (log_ratio_abs_max {largest:.3g})"
             )
+            if self.on_failure is CheckFailure.STOP:
+                raise RuntimeError(message)
+            # A mode that promises bit-identical results has a defect; the others measure their expected mismatch.
+            if self.mode.bit_identical:
+                logger.error(message)
+            else:
+                logger.info(message)
         return metrics
