@@ -23,11 +23,10 @@ _WORKER_CONFIG = OmegaConf.create(
 
 
 @pytest.fixture(autouse=True)
-def _isolated_rank_environment(monkeypatch):
-    # Register absent variables for restoration after worker construction creates them.
+def _isolated_rendezvous_environment(monkeypatch):
+    # DistributedTorchRayActor writes the rendezvous variables into os.environ; keep them out of other tests.
     for name in ("WORLD_SIZE", "RANK", "LOCAL_RANK"):
-        monkeypatch.setenv(name, "")
-        monkeypatch.delenv(name)
+        monkeypatch.delenv(name, raising=False)
 
 
 def _build_worker() -> Worker:

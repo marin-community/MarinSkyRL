@@ -10,7 +10,6 @@ from taskcompendium.models import AnswerType, FinalAction, FunctionDefinition, N
 from omegaconf import OmegaConf
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.dataset import PromptDataset
-from skyrl_train.dataset.dataset import PARALLEL_DATASET_MIN_ROWS
 from skyrl_train.dataset.harbor_import import HARBOR_TRIAL_SESSION, harbor_trial_task
 from skyrl_train.dataset.tasks import SourceTaskDataset, TaskDataset, source_row_task, write_tasks
 from skyrl_train.entrypoints.main_base import BasePPOExp
@@ -130,10 +129,11 @@ def test_eval_dataset_filtering(mock_tokenizer, sample_dataset, tmp_path, probe_
     assert all(row["input"].metadata.metric_class == "gsm8k" for row in rows)
 
 
-@pytest.mark.parametrize(("nested_source", "row_count"), [(None, 3), ("nested-source", 3), ("nested-source", 20_000)])
+@pytest.mark.parametrize(("nested_source", "row_count"), [(None, 3), ("nested-source", 3), ("nested-source", 8)])
 def test_source_tasks_preserve_row_indices_and_source_labels_after_filtering(
-    tmp_path, fork_records, nested_source, row_count
+    tmp_path, monkeypatch, fork_records, nested_source, row_count
 ):
+    monkeypatch.setattr("skyrl_train.dataset.dataset.PARALLEL_DATASET_MIN_ROWS", 4)
     rows = [
         {
             "prompt": [{"role": "user", "content": "x" * 200 if index % 3 == 1 else f"Question {index}"}],
@@ -160,7 +160,7 @@ def test_source_tasks_preserve_row_indices_and_source_labels_after_filtering(
     assert [row["input"].lowered.task.source.row for row in prepared] == [str(index) for index in indices]
     assert [row["input"].metadata.data_source for row in prepared] == [nested_source or "fixture"] * len(indices)
     assert dataset.dataframe.cache_files == []
-    assert bool(tuple(fork_records.iterdir())) == (row_count == 20_000)
+    assert bool(tuple(fork_records.iterdir())) == (row_count == 8)
 
 
 @patch("datasets.load_dataset")
@@ -184,9 +184,10 @@ def test_prompt_dataset_filtering_counts_batch_encoding_input_ids(mock_load_data
 
 @pytest.mark.parametrize(
     ("reverse", "copies"),
-    [(False, 1), (True, 1), pytest.param(False, PARALLEL_DATASET_MIN_ROWS, id="parallel-shards")],
+    [(False, 1), (True, 1), pytest.param(False, 4, id="parallel-shards")],
 )
-def test_native_tasks_with_different_extras_preserve_each_row(tmp_path, reverse, copies):
+def test_native_tasks_with_different_extras_preserve_each_row(tmp_path, monkeypatch, fork_records, reverse, copies):
+    monkeypatch.setattr("skyrl_train.dataset.dataset.PARALLEL_DATASET_MIN_ROWS", 4)
     rows = [
         {
             "prompt": [
@@ -223,6 +224,7 @@ def test_native_tasks_with_different_extras_preserve_each_row(tmp_path, reverse,
 
     dataset = TaskDataset([str(path)], _StubTokenizer(), 100, num_workers=2)
 
+    assert bool(tuple(fork_records.iterdir())) == (copies == 4)
     prepared = [dataset[index] for index in range(len(dataset))]
     inputs = dataset.collate_fn(prepared)
     for index, source in enumerate(rows):
