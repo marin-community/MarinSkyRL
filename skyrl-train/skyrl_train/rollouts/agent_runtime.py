@@ -132,7 +132,6 @@ class InstalledAgentRuntime:
         agent = self.settings.agent.model_copy(
             update={
                 "override_timeout_sec": lowered.session.total_turn_timeout or self.settings.run_timeout,
-                "kwargs": {**self.settings.agent.kwargs, "max_turns": lowered.session.max_turns},
             }
         )
         config = TrialConfig(
@@ -228,7 +227,7 @@ class InstalledAgentRuntime:
                 startup_timeout=self.settings.service_startup_timeout,
                 shutdown_timeout=self.settings.service_shutdown_timeout,
             ) as port,
-            registered_agent_endpoint(port) as endpoint,
+            registered_agent_endpoint(port, request_timeout=run_timeout) as endpoint,
         ):
             api_base = await endpoint.api_base(required_lifetime=capability_lifetime)
             source = self.settings.agent if agent is None else agent
