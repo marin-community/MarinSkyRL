@@ -700,6 +700,14 @@ class PerformanceTrainer(RayPPOTrainer):
         assert self.probe["qualification"]["stale_prefix_replay"]["policy_steps"] == [1]
         self.save_probe()
 
+        # Calibration deliberately kept the sampler frozen. The native loop's
+        # first lease must use the latest weights, just as subsequent leases do
+        # after _train_step's normal end-of-step sync.
+        native_sync_started = time.perf_counter()
+        await self._sync_policy_for_rollouts(reason="performance_start")
+        self.probe["qualification"]["native_initial_sync_seconds"] = time.perf_counter() - native_sync_started
+        self.save_probe()
+
         # Use the actual rollout coordinator, task workers, object store, old
         # scoring and optimizer path. Only response lengths, signed advantages
         # and masks are controlled for the serialized cost comparison.
