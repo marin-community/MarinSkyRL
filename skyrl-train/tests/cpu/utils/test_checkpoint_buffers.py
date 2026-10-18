@@ -15,9 +15,11 @@ def test_checkpoint_restore_joins_gate_and_up_without_another_buffer(tmp_path, d
         warnings.simplefilter("ignore", UserWarning)
         checkpoint.save({"gate": expected[:6], "up": expected[6:]}, checkpoint_id=tmp_path)
 
-    allocation = torch.full((offset + expected.numel() + 7,), -1, dtype=dtype)
+    # Megatron's SwiGLU factory chunks a model parameter under no_grad; Core merges the loaded chunks in grad mode.
+    allocation = torch.nn.Parameter(torch.full((offset + expected.numel() + 7,), -1, dtype=dtype))
     destination = allocation[offset : offset + expected.numel()].view_as(expected)
-    gate, up = destination.chunk(2)
+    with torch.no_grad():
+        gate, up = destination.chunk(2)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         checkpoint.load({"gate": gate, "up": up}, checkpoint_id=tmp_path)
