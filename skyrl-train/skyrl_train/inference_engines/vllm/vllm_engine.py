@@ -1488,8 +1488,8 @@ class AsyncVLLMInferenceEngine(InferenceEngineInterface):
         stop_reasons: List[str] = []
         response_ids: List[List[int]] = []
         response_logprobs: Optional[List[List[float]]] = []
-        student_topk_indices: List[List[List[int]]] = []
-        behavior_topk_logprobs: List[List[List[float]]] = []
+        student_topk_indices: List[np.ndarray | List[List[int]]] = []
+        behavior_topk_logprobs: List[np.ndarray | List[List[float]]] = []
         routed_experts_rows: list[np.ndarray | None] = []
         all_prompt_logprobs: Optional[List] = None
         params_by_prompt = sampling_params if isinstance(sampling_params, list) else [sampling_params] * len(outputs)
