@@ -175,7 +175,8 @@ def collate_score_centering(
         trajectory_batch, response_token_ids, response_mask, top_k, index_dtype=index_dtype
     )
     ids, scores = indices[selected], behavior[selected]
-    ordered = ids.sort(dim=-1).values
+    # This CPU check needs no per-entry int64 sort permutation.
+    ordered = torch.from_numpy(np.sort(ids.numpy(), axis=-1))
     if torch.any(ids < 0) or torch.any(ordered[:, 1:] == ordered[:, :-1]):
         raise ValueError("trainable behavior top-k token IDs must be nonnegative and unique")
     if not torch.isfinite(scores).all() or torch.any(scores > 0):
