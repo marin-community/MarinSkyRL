@@ -179,6 +179,17 @@ def score_centering_tis_cap(algorithm: DictConfig) -> float:
     return float(rules[0].high)
 
 
+def _score_centering_megatron_supported(cfg: DictConfig) -> bool:
+    policy = cfg.trainer.policy
+    return (
+        cfg.trainer.strategy == "megatron"
+        and not cfg.trainer.use_sample_packing
+        and policy.sequence_parallel_size == 1
+        and policy.megatron_config.tensor_model_parallel_size == 1
+        and policy.megatron_config.context_parallel_size == 1
+    )
+
+
 def score_centering_probe_unavailable_reason(cfg: DictConfig) -> str | None:
     """Explain why periodic hypothetical probes cannot run in this configuration."""
     algorithm = cfg.trainer.algorithm
@@ -197,14 +208,7 @@ def score_centering_probe_unavailable_reason(cfg: DictConfig) -> str | None:
         score_centering_tis_cap(algorithm)
     except ValueError as error:
         return str(error)
-    policy = cfg.trainer.policy
-    if (
-        cfg.trainer.strategy != "megatron"
-        or cfg.trainer.use_sample_packing
-        or policy.sequence_parallel_size != 1
-        or policy.megatron_config.tensor_model_parallel_size != 1
-        or policy.megatron_config.context_parallel_size != 1
-    ):
+    if not _score_centering_megatron_supported(cfg):
         return "requires unpacked Megatron with TP/CP/SP=1"
     if cfg.generator.backend != "vllm" or not cfg.generator.run_engines_locally:
         return "requires local vLLM"
@@ -382,14 +386,7 @@ def validate_objective(cfg: DictConfig, *, loss_spec: LossSpec | None = None) ->
         score_centering_tis_cap(algorithm)
         if algorithm.policy_loss_type != PolicyLossType.REGULAR or plan is not None or ftpo_requested(algorithm):
             raise ValueError("score centering requires regular PPO without distillation or auxiliary FTPO")
-        policy = cfg.trainer.policy
-        if (
-            cfg.trainer.strategy != "megatron"
-            or cfg.trainer.use_sample_packing
-            or policy.sequence_parallel_size != 1
-            or policy.megatron_config.tensor_model_parallel_size != 1
-            or policy.megatron_config.context_parallel_size != 1
-        ):
+        if not _score_centering_megatron_supported(cfg):
             raise ValueError(
                 "score centering requires unpacked Megatron with tensor, context, and sequence parallel size one"
             )
