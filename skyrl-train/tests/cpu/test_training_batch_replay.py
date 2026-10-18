@@ -8,6 +8,7 @@ import torch
 from omegaconf import OmegaConf
 
 from skyrl_train.dataset.routed_expert_batch import RoutedExpertRows
+from skyrl_train.batch_source import DriverBatchSource, batch_lifetime
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.training_batch import TrainingInputBatch
 from tests.training_batch_replay import (
@@ -59,6 +60,8 @@ def _bare_trainer(trainer_type):
         }
     )
     trainer.all_timings = {}
+    trainer.all_metrics = {}
+    trainer.context = None
     events = []
 
     async def drain_policy_event_loops(_self):
@@ -175,7 +178,10 @@ async def test_capture_survives_a_subsequent_forward_failure(tmp_path: Path):
     trainer.fwd_logprobs_values_reward = MethodType(fwd_logprobs_values_reward, trainer)
 
     with pytest.raises(torch.OutOfMemoryError, match="injected forward OOM"):
-        await trainer._run_training(_batch())
+        source = DriverBatchSource(trainer, trainer.context)
+        async with batch_lifetime(source):
+            source.prepare_from_batch(_batch())
+            await trainer._run_training(source)
 
     assert events == ["drain", "forward"]
     restored = load_training_batch_artifact(
