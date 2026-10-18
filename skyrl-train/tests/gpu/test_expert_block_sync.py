@@ -247,8 +247,8 @@ def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flippe
                 early = asyncio.create_task(
                     early_client.generate(
                         {
-                            "prompts": [tokenizer.encode("What is two plus two?", add_special_tokens=False)],
-                            "sampling_params": {"temperature": 0, "max_generate_length": 1},
+                            "prompts": [[{"role": "user", "content": "What is two plus two?"}]],
+                            "sampling_params": {"temperature": 0.0, "max_tokens": 1, "logprobs": 0},
                         }
                     )
                 )
@@ -264,7 +264,7 @@ def test_expert_block_sync_installs_every_byte_and_verification_catches_a_flippe
                 await client.resume_generation(policy_step=version)
                 if early is not None:
                     response = await asyncio.wait_for(early, timeout=30)
-                    assert len(response["response_ids"][0]) == 1
+                    assert len(response["response_ids"]) == 1
             finally:
                 if early is not None:
                     early.cancel()
