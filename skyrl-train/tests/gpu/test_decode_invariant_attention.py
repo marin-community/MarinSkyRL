@@ -8,15 +8,9 @@ from skyrl_train.inference_engines.vllm.decode_invariant.attention_backend impor
     DecodeInvariantAttentionImpl,
     DecodeInvariantMetadata,
 )
-from skyrl_train.inference_engines.vllm.decode_invariant.fa3 import (
-    FA3_DYNAMIC_SPLIT_MAX_BATCH,
-    FA3_INVARIANT_SPLITS,
-    fa3_fixed_split_metadata,
-)
 from tests.gpu.grug_gpu_gates import require_hoppers
 
 HEADS, KV_HEADS, HEAD_DIM, BLOCK, WINDOW = 20, 5, 128, 16, 2048
-GROUP = HEADS // KV_HEADS
 SCALE = HEAD_DIM**-0.5
 LENGTHS = (700, 2049, 3100)
 CACHED_PREFIX = 16
@@ -38,8 +32,8 @@ def _step(query_start, key_lengths, block_table) -> DecodeInvariantMetadata:
         cu_prefix_query_lens=None,
         prefix_kv_lens=None,
         suffix_kv_lens=None,
-        scheduler_metadata=fa3_fixed_split_metadata(query_start_loc, GROUP, KV_HEADS),
-        max_num_splits=FA3_INVARIANT_SPLITS,
+        scheduler_metadata=None,
+        max_num_splits=1,
     )
 
 
@@ -51,20 +45,10 @@ def _attend(impl, query, kv_cache, query_start, key_lengths, block_table):
 
 
 def _decoded_alone(impl, query, kv_cache, table):
-    """Each row of ``query`` as a one-row request of a step of at most ``FA3_DYNAMIC_SPLIT_MAX_BATCH`` requests, run
-    by vLLM's stock FA3 forward."""
-    output = torch.empty_like(query)
-    for begin in range(0, len(query), FA3_DYNAMIC_SPLIT_MAX_BATCH):
-        end = min(begin + FA3_DYNAMIC_SPLIT_MAX_BATCH, len(query))
-        output[begin:end] = _attend(
-            impl,
-            query[begin:end],
-            kv_cache,
-            list(range(end - begin + 1)),
-            list(range(begin + 1, end + 1)),
-            table.repeat(end - begin, 1),
-        )
-    return output
+    """Each row of ``query`` as the one request of a one-row step, run by vLLM's stock FA3 forward."""
+    return torch.cat(
+        [_attend(impl, query[row : row + 1], kv_cache, [0, 1], [row + 1], table) for row in range(len(query))]
+    )
 
 
 def _sequences(generator):
@@ -102,8 +86,8 @@ def test_engine_decode_and_prefill_rows_equal_rows_decoded_alone(window):
         table = table[None]
         decoded = _decoded_alone(stock, query, kv_cache, table)
 
-        # Decode steps of every row, of the last FA3_DYNAMIC_SPLIT_MAX_BATCH rows, of four rows and of one row.
-        for first in (0, max(length - FA3_DYNAMIC_SPLIT_MAX_BATCH, 0), length - 4, length - 1):
+        # Decode steps of every row, of four rows and of one row.
+        for first in (0, length - 4, length - 1):
             count = length - first
             step = (list(range(count + 1)), list(range(first + 1, length + 1)), table.repeat(count, 1))
             assert _same_rows(_attend(invariant, query[first:], kv_cache, *step), decoded[first:])
