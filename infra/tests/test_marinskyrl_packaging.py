@@ -42,7 +42,7 @@ VERIFIED_GPU_WORKAROUND_INPUTS = {
     "transformer-engine": "2.20.2",
     "transformer-engine-torch": "2.20.2",
     # Serving ABI/metadata departures and the CPU audio exception.
-    "vllm": "0.0.0.dev20261013+marin.ac3b5ea5e851.cu132",
+    "vllm": "0.0.0.dev20261018+marin.dd722ded424f.cu132",
     "torchvision": "0.29.1+cu132",
     "torchaudio": "2.11.0+cpu",
     # Native 0.30 bounds allow this version; both GPU architectures installed it.
