@@ -525,6 +525,10 @@ class PerformanceTrainer(RayPPOTrainer):
         self.global_step += 1
         wall = StepWallTime(OmegaConf.to_container(self.cfg.trainer.step_phase_budgets))
         data = await self._train_step(0, wall)
+        core_seconds = time.perf_counter() - started
+        payload = {**self.all_metrics, **{f"timing/{key}": value for key, value in self.all_timings.items()}}
+        self._log_metrics_stdout(payload, step=self.global_step, kind="train")
+        self.tracker.log(payload, step=self.global_step, commit=self.cfg.trainer.tracker_commit_each_step)
         elapsed = time.perf_counter() - started
         assert self.all_metrics["policy/policy_update_steps"] == 1
         assert self.all_metrics["policy/skipped_steps"] == 0
@@ -535,6 +539,8 @@ class PerformanceTrainer(RayPPOTrainer):
         result = {
             "phase": phase,
             "total_seconds": elapsed,
+            "core_seconds": core_seconds,
+            "metric_emission_seconds": elapsed - core_seconds,
             "tokens": int(data["response_mask"].sum()),
             "loss_tokens": int(data["loss_mask"].bool().sum()),
             "sequence_shape": list(data["sequences"].shape),
