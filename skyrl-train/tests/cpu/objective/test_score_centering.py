@@ -129,6 +129,27 @@ def test_hypothetical_probe_reports_nonzero_tis_correction_and_source_strata():
     assert metrics["score_centering_probe/coverage"] == 0.003
     assert metrics["score_centering_probe/sampled_tis_clipped_fraction"] == 1.0
     assert metrics["score_centering_probe/current_equals_old"] == 1.0
+    flat_rewards = hypothetical_score_probe(
+        head,
+        behavior_head,
+        sampled,
+        behavior_sampled,
+        torch.zeros_like(advantages),
+        valid,
+        torch.tensor([[7, 4, -1, 0]]),
+        training_step=7,
+        loss_tokens=1000,
+        tis_cap=2.0,
+        eps_clip_low=0.2,
+        eps_clip_high=0.2,
+    )
+    assert flat_rewards["score_centering_probe/hypothetical_loss_abs_mean"] == 0
+    assert flat_rewards["score_centering_probe/zero_advantage_fraction"] == 1
+    assert (
+        flat_rewards["score_centering_probe/unit_advantage_loss_abs_mean"]
+        == metrics["score_centering_probe/unit_advantage_loss_abs_mean"]
+    )
+    assert flat_rewards["score_centering_probe/unit_advantage_loss_abs_mean"] > 0
 
 
 def test_compact_probe_collation_keeps_only_requested_valid_positions_and_missing_rows():

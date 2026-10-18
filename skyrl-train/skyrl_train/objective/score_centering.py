@@ -291,6 +291,16 @@ def hypothetical_score_probe(
     }
     if not count:
         return {f"score_centering_probe/{name}": value for name, value in metrics.items()}
+    unit_advantage = ppo_tis_score_centering_correction(
+        head,
+        head,
+        behavior_head,
+        torch.ones_like(advantages),
+        valid,
+        tis_cap=tis_cap,
+        eps_clip_low=eps_clip_low,
+        eps_clip_high=eps_clip_high,
+    )[valid]
     current_mass = head[valid].float().exp().sum(-1)
     behavior_mass = behavior_head[valid].float().exp().sum(-1)
     delta = (sampled - behavior_sampled)[valid]
@@ -304,6 +314,8 @@ def hypothetical_score_probe(
         {
             "hypothetical_loss_mean": float(values.mean()),
             "hypothetical_loss_abs_mean": float(values.abs().mean()),
+            "unit_advantage_loss_mean": float(unit_advantage.mean()),
+            "unit_advantage_loss_abs_mean": float(unit_advantage.abs().mean()),
             "ordinary_loss_abs_mean": float(ordinary.abs().mean()),
             "current_retained_mass_mean": float(current_mass.mean()),
             "behavior_retained_mass_mean": float(behavior_mass.mean()),
