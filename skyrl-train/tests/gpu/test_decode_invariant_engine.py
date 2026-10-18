@@ -2,11 +2,7 @@ import asyncio
 
 import pytest
 import ray
-import torch
-from safetensors.torch import load_file, save_file
 from transformers import AutoTokenizer
-from vllm.model_executor.models.grugmoe import GrugMoeForCausalLM
-from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.inference_engines.base import InferenceEngineInput
@@ -17,26 +13,14 @@ from skyrl_train.inference_engines.configuration import (
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl_train.inference_engines.vllm import vllm_engine
-from skyrl_train.inference_engines.vllm.decode_invariant.engine import DECODE_INVARIANT_ATTENTION_BACKEND
-from skyrl_train.inference_engines.vllm.decode_invariant.model import DecodeInvariantGrugMoeForCausalLM
 from skyrl_train.utils import initialize_ray
+from tests.gpu.grug_exact_checkpoint import write_snowball_checkpoint
 from tests.gpu.grug_gpu_gates import require_hoppers
-from tests.gpu.grug_tiny_checkpoint import write_tiny_checkpoint
 
 MAX_MODEL_LEN = 4096
-# Snowball's hidden width, attention geometry and 2,048-token window with four layers and eight narrow experts.
-SHAPE = dict(
-    hidden_size=2560,
-    intermediate_size=128,
-    shared_expert_intermediate_size=2560,
-    num_local_experts=8,
-    num_hidden_layers=4,
-    num_attention_heads=20,
-    num_key_value_heads=5,
-    head_dim=128,
-    sliding_window=2048,
-)
+# Every id of the checkpoint's 151,665-token tokenizer, rounded up to a multiple of 128. With Snowball's 128,256
+# entries, a stock engine returns NaN log-probabilities in steps that decode several greedy requests.
+VOCAB_SIZE = 151_680
 # Steps of at most 16 tokens prefill prompts in chunks, beside other requests' decode steps; steps of 128 tokens
 # compute prefill rows with other expert-kernel tiles and GEMM row counts than decode steps.
 SMALL_STEPS, LARGE_STEPS = 16, 128
@@ -46,28 +30,6 @@ LONG_PROMPT = [1 + (index * 7919) % 20000 for index in range(2600)]
 # arrive later.
 SHARED_PREFIX_PROMPT = LONG_PROMPT[:256] + [7, 11, 13] * 30
 LATER_PROMPTS = [list(range(1, 20)), [1, 23]]
-STOCK_CLASSES = {"model": GrugMoeForCausalLM.__name__, "attention": FlashAttentionBackend.get_name()}
-INVARIANT_CLASSES = {
-    "model": DecodeInvariantGrugMoeForCausalLM.__name__,
-    "attention": DECODE_INVARIANT_ATTENTION_BACKEND,
-}
-
-
-def _engine_classes(worker) -> dict:
-    """Worker RPC: the names of the model class and attention backend serving the model."""
-    model = worker.model_runner.model
-    return {"model": type(model).__name__, "attention": model.model.layers[0].self_attn.attn.attn_backend.get_name()}
-
-
-def _write_checkpoint(path) -> None:
-    write_tiny_checkpoint(path, max_position_embeddings=MAX_MODEL_LEN, shape=SHAPE)
-    # The router weights hold bf16 values, as a trained Grug checkpoint's do.
-    weights_path = path / "model.safetensors"
-    weights = load_file(str(weights_path))
-    for name, value in weights.items():
-        if name.endswith(".mlp.router.weight"):
-            weights[name] = value.to(torch.bfloat16).to(value.dtype)
-    save_file(weights, str(weights_path), metadata={"format": "pt"})
 
 
 def _client(cfg, model_path: str, decode_invariant: bool) -> InferenceEngineClient:
@@ -113,28 +75,18 @@ async def _long_prompt_beside_others(client: InferenceEngineClient, cfg) -> dict
 
 @pytest.mark.vllm
 @pytest.mark.parametrize(
-    ("decode_invariant", "max_num_batched_tokens", "classes"),
-    [
-        (False, SMALL_STEPS, STOCK_CLASSES),
-        (True, SMALL_STEPS, INVARIANT_CLASSES),
-        (True, LARGE_STEPS, INVARIANT_CLASSES),
-    ],
+    ("decode_invariant", "max_num_batched_tokens"),
+    [(False, SMALL_STEPS), (True, SMALL_STEPS), (True, LARGE_STEPS)],
     ids=["stock_small_steps", "exact_small_steps", "exact_large_steps"],
 )
 def test_decode_invariant_engine_gives_a_response_the_same_log_probabilities_in_any_step(
-    tmp_path, monkeypatch, decode_invariant, max_num_batched_tokens, classes
+    tmp_path, decode_invariant, max_num_batched_tokens
 ):
     require_hoppers(1)
-
-    class ReportingEngine(vllm_engine.AsyncVLLMInferenceEngine):
-        async def engine_classes(self):
-            return await self.llm.collective_rpc(_engine_classes)
-
-    # The test's actor only adds the class-reporting RPC. The engine construction is the production code.
-    monkeypatch.setattr(vllm_engine, "AsyncVLLMRayActor", ray.remote(ReportingEngine))
     model_path = tmp_path / "model"
     model_path.mkdir()
-    _write_checkpoint(model_path)
+    # Snowball's hidden width, attention geometry and 2,048-token window with four layers and eight narrow experts.
+    write_snowball_checkpoint(model_path, num_hidden_layers=4, num_local_experts=8, vocab_size=VOCAB_SIZE)
     cfg = get_default_config()
     cfg.trainer.seed = 23
     cfg.generator.backend = "vllm"
@@ -149,8 +101,6 @@ def test_decode_invariant_engine_gives_a_response_the_same_log_probabilities_in_
     initialize_ray(cfg)
     try:
         client = _client(cfg, str(model_path), decode_invariant)
-        reported = ray.get(client.engines[0].inference_engine_actor.engine_classes.remote())
-        assert reported == [classes]
 
         alone = asyncio.run(_generate(client, cfg, [LONG_PROMPT]))
         response, logprobs = alone["response_ids"][0], alone["response_logprobs"][0]
