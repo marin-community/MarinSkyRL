@@ -1590,6 +1590,7 @@ def test_client_serves_http_only_after_engines_acknowledge_startup_pause(unused_
 
     engine = DelayedPauseEngine()
     cfg = get_default_config()
+    cfg.trainer.placement.colocate_all = False
     cfg.generator.enable_http_endpoint = True
     cfg.generator.http_endpoint_port = unused_tcp_port
     OmegaConf.update(cfg, "generator.engine_init_kwargs.load_format", "dummy", force_add=True)

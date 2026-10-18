@@ -159,6 +159,7 @@ def test_from_config_selects_weight_load_mode_for_object_store_policy(monkeypatc
     captured = {}
     monkeypatch.setattr(rwie, "create_ray_wrapped_inference_engines", lambda **kwargs: captured.update(kwargs) or [])
     cfg = get_default_config()
+    cfg.trainer.placement.colocate_all = False
     cfg.trainer.policy.model.path = "/tmp/model-metadata"
     cfg.trainer.policy.model.source_uri = "s3://models/policy"
     cfg.trainer.policy.model.source_identity = "sha256:" + "a" * 64
