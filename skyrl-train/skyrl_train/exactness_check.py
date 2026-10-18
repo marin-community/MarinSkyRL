@@ -24,6 +24,7 @@ from skyrl_train.dataset.routed_expert_batch import RoutedExpertRows
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.utils import get_vllm_sampling_params
 from skyrl_train.training_batch import TrainingInputBatch
+from skyrl_train.trajectory_runners.types import ROLLOUT_ENGINE_DP_RANKS_KEY
 from skyrl_train.weight_sync.base import WeightSyncReason
 
 # The fixed prompt and response length of every check: a few decode steps on each engine.
@@ -109,8 +110,8 @@ class ExactnessCheck:
         ]
 
     def batch(self, dp_size: int, num_experts: int | None) -> TrainingInputBatch:
-        """The pending responses as a policy forward batch, repeated to a multiple of ``dp_size`` rows, with their
-        expert routes when the engines returned them."""
+        """The pending responses as a policy forward batch, repeated to a multiple of ``dp_size`` rows, with each row's
+        engine data-parallel rank and, when the engines returned them, its expert routes."""
         samples = self.pending
         rows = [samples[index % len(samples)] for index in range(-(-len(samples) // dp_size) * dp_size)]
         responses = [row.response_token_ids for row in rows]
@@ -123,7 +124,11 @@ class ExactnessCheck:
         )
         routes = tuple(row.routed_experts for row in rows)
         batch = TrainingInputBatch(
-            {"sequences": sequences, "attention_mask": attention_mask},
+            {
+                "sequences": sequences,
+                "attention_mask": attention_mask,
+                ROLLOUT_ENGINE_DP_RANKS_KEY: torch.tensor([row.engine_dp_rank for row in rows], dtype=torch.long),
+            },
             routed_expert_rows=(
                 None if routes[0] is None else RoutedExpertRows(routes, action_mask.shape[1], num_experts)
             ),

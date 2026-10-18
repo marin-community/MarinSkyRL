@@ -35,6 +35,7 @@ from skyrl_train.trajectory_runners.base import (
     TrajectoryBatch,
     TrajectoryRunner,
 )
+from skyrl_train.trajectory_runners.types import ROLLOUT_ENGINE_DP_RANKS_KEY
 import copy
 from skyrl_train.batch_sampling import RowOwnership, filter_trajectory_batch
 from skyrl_train.trajectory_runners.trajectory_processing import (
@@ -2278,6 +2279,11 @@ class RayPPOTrainer:
                 "is_last_step": (
                     torch.tensor(trajectory_batch["is_last_step"], dtype=torch.bool)
                     if trajectory_batch.get("is_last_step", None) is not None
+                    else None
+                ),
+                ROLLOUT_ENGINE_DP_RANKS_KEY: (
+                    torch.tensor(trajectory_batch[ROLLOUT_ENGINE_DP_RANKS_KEY], dtype=torch.long)
+                    if trajectory_batch.get(ROLLOUT_ENGINE_DP_RANKS_KEY) is not None
                     else None
                 ),
             },
