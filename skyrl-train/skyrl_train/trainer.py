@@ -10,7 +10,7 @@ import shutil
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 from jaxtyping import Float
 from pathlib import Path
 import ray
@@ -336,15 +336,6 @@ def _training_schedule(cfg, dataset_size: int) -> tuple[int, int]:
     if max_steps is not None and max_steps > 0:
         total_steps = min(total_steps, max_steps)
     return steps_per_epoch, total_steps
-
-
-def discard_model_actors(models: Iterable[PPORayActorGroup | None]) -> None:
-    for model in models:
-        if model is not None:
-            try:
-                model.kill_actors()
-            except Exception as error:
-                logger.warning("Error killing model actors: {}", error)
 
 
 def build_models(
@@ -859,7 +850,17 @@ class RayPPOTrainer:
         inference engine actors (vLLM / SGLang workers) that would otherwise
         keep running until the node dies.
         """
-        discard_model_actors((self.policy_model, self.critic_model, self.ref_model))
+        for model_name, model in [
+            ("policy_model", self.policy_model),
+            ("critic_model", self.critic_model),
+            ("ref_model", self.ref_model),
+        ]:
+            if model is not None:
+                try:
+                    logger.info(f"Killing {model_name} actors...")
+                    model.kill_actors()
+                except Exception as e:
+                    logger.warning(f"Error killing {model_name} actors: {e}")
 
         if getattr(self, "_draft_trainer", None) is not None:
             try:
@@ -869,7 +870,21 @@ class RayPPOTrainer:
                 logger.warning("Error killing DraftTrainer actor: {}", error)
             self._draft_trainer = None
 
-        self.inference_engine_client.discard_engines()
+        # Kill inference engine actors.  These are not covered by the model
+        # actor groups above.
+        if self.inference_engine_client is not None:
+            from skyrl_train.inference_engines.ray_wrapped_inference_engine import RayWrappedInferenceEngine
+
+            n_killed = 0
+            for engine in self.inference_engine_client.engines:
+                if isinstance(engine, RayWrappedInferenceEngine):
+                    try:
+                        ray.kill(engine.inference_engine_actor, no_restart=True)
+                        n_killed += 1
+                    except Exception:
+                        pass  # Actor may already be dead
+            if n_killed:
+                logger.info(f"Killed {n_killed} inference engine actor(s)")
 
     async def _teardown(self) -> None:
         """Release trainer resources within cooperative and process deadlines.
@@ -887,10 +902,11 @@ class RayPPOTrainer:
             )
         if self._distillation_runtime is not None:
             await self._guarded_async(self._distillation_runtime.close(), timeout=30, label="Teacher oracle shutdown")
-        self._guarded_sync(
-            self.inference_engine_client.shutdown_http_endpoint,
-            label="HTTP endpoint shutdown",
-        )
+        if self.inference_engine_client is not None:
+            self._guarded_sync(
+                self.inference_engine_client.shutdown_http_endpoint,
+                label="HTTP endpoint shutdown",
+            )
         await self._guarded_async(
             self.trajectory_runner.shutdown(),
             timeout=60,
