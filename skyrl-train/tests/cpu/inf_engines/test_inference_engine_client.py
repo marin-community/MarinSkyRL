@@ -24,6 +24,7 @@ import requests
 from jinja2 import TemplateError
 from omegaconf import OmegaConf
 from skyrl_train.config.utils import get_default_config
+from skyrl_train.entrypoints import main_base
 from skyrl_train.inference_engines.base import CHOICE_POLICY_STEPS_KEY, InferenceEngineInput, InferenceEngineOutput
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.inference_engine_client_http_endpoint import (
@@ -1577,7 +1578,7 @@ class _MockGenerateEngine:
         self.scheduler_paused = False
 
 
-def test_client_serves_http_only_after_engines_acknowledge_startup_pause(unused_tcp_port):
+def test_client_serves_http_only_after_engines_acknowledge_startup_pause(unused_tcp_port, monkeypatch):
     entered = threading.Event()
     release = threading.Event()
 
@@ -1591,10 +1592,15 @@ def test_client_serves_http_only_after_engines_acknowledge_startup_pause(unused_
     cfg = get_default_config()
     cfg.generator.enable_http_endpoint = True
     cfg.generator.http_endpoint_port = unused_tcp_port
+    OmegaConf.update(cfg, "generator.engine_init_kwargs.load_format", "dummy", force_add=True)
+    cfg.generator.weight_sync_transport = "expert_block"
+    experiment = main_base.BasePPOExp.__new__(main_base.BasePPOExp)
+    experiment.cfg, experiment.tokenizer, experiment.colocate_pg = cfg, object(), None
+    monkeypatch.setattr(main_base, "create_ray_wrapped_inference_engines_from_config", lambda *args, **kwargs: [engine])
     url = f"http://127.0.0.1:{unused_tcp_port}/v1/models"
     client = None
     with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(InferenceEngineClient, [engine], object(), cfg, pause_before_serving=True)
+        future = executor.submit(experiment.create_inference_engine_client)
         try:
             assert entered.wait(10), "The client did not request an engine pause"
             with pytest.raises(requests.ConnectionError):
