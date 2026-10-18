@@ -1,6 +1,14 @@
 """End-to-end CPU training through the production entrypoints on a tiny policy."""
 
 import multiprocessing
+import asyncio
+import os
+import signal
+import threading
+import time
+import psutil
+import ray
+from multiprocessing.connection import Connection
 import json
 import sys
 from multiprocessing.context import BaseContext
@@ -14,7 +22,7 @@ from skyrl_train.callbacks.base import TrainerCallback
 from skyrl_train.callbacks.builtin import register_callback
 
 from marinskyrl.checkpoint_paths import POLICY_CHECKPOINT_SUBDIRECTORY
-from tests.cpu.tiny_training.cpu_backend import CHECKPOINT_FILE_TEMPLATE, CausalLMPolicy
+from tests.cpu.tiny_training.cpu_backend import CHECKPOINT_FILE_TEMPLATE, CausalLMPolicy, CPUPolicyWorker
 from tests.cpu.tiny_training.fixed_batch import fixed_training_batch, run_fixed_update
 from skyrl_train.rollouts.payloads import ROLLOUT_OBJECT_SUFFIX
 from skyrl_train.training_batch import TrainingInputBatch
@@ -239,3 +247,245 @@ def test_one_step_is_independent_of_micro_batch_size(runs: BaseContext, tmp_path
         ]
         for key, tensor in states[0]["model"].items():
             torch.testing.assert_close(tensor, states[1]["model"][key], rtol=1e-5, atol=1e-6, msg=key)
+
+
+# Every remaining metric key must have a producer in both source implementations.
+# The driver publishes exact p95/p999; workers publish the shared histogram p99.
+_SOURCE_METRIC_KEY_DIFFERENCES = frozenset(
+    {
+        "policy/mismatch/pooled/log_ratio_abs_p95",
+        "policy/mismatch/pooled/log_ratio_abs_p999",
+        "policy/mismatch/staleness0/log_ratio_abs_p95",
+        "policy/mismatch/staleness0/log_ratio_abs_p999",
+        "timing/assemble_generation_group_mini_batch",
+        "timing/postprocess_trajectory_batch",
+        "timing/convert_to_training_input",
+        "timing/dump_data_batch",
+        "timing/load_worker_batch",
+        "timing/verify_driver_preparation",
+        "timing/verify_driver_forward",
+        "timing/verify_driver_finalization",
+        "timing/compute_advantages_and_returns",
+        "timing/prepare_worker_training_input",
+    }
+)
+
+
+def _worker_batch_config(root: Path, tiny_policy: Path, builder: str, estimator: str = "rloo_n"):
+    cfg = experiment.tiny_training_config(
+        root,
+        tiny_policy,
+        TrainingMode.SYNC,
+        RolloutShape.SINGLE_TURN,
+        max_steps=2,
+        checkpoint_interval=-1,
+        dp_size=2,
+        micro_batch_size=3,
+        dump_data_batch=builder != "worker",
+    )
+    cfg.trainer.batch_builder = builder
+    cfg.trainer.train_batch_size = cfg.trainer.policy_mini_batch_size = 3
+    cfg.trainer.training_metrics = True
+    cfg.trainer.algorithm.advantage_estimator = estimator
+    cfg.trainer.algorithm.group_advantage_min_size = 2 if estimator == "rloo_n" else None
+    cfg.generator.trajectory_reward_shaping.enabled = True
+    cfg.generator.trajectory_reward_shaping.overlong.penalty_scale = 0.0
+    return cfg
+
+
+def _run_worker_batch_case(runs: BaseContext, cfg):
+    run = runs.Process(target=experiment.run_tiny_training, args=(cfg,))
+    run.start()
+    run.join(RUN_TIMEOUT_SECONDS)
+    if run.exitcode is None:
+        run.kill()
+        run.join()
+        pytest.fail("worker verification did not finish")
+    assert run.exitcode == 0
+
+
+@pytest.fixture(scope="module")
+def driver_batch_metrics(runs, tmp_path_factory, tiny_policy):
+    baselines = {}
+
+    def for_estimator(estimator):
+        if estimator not in baselines:
+            root = tmp_path_factory.mktemp(f"driver_batch_metrics_{estimator}")
+            _run_worker_batch_case(runs, _worker_batch_config(root, tiny_policy, "driver", estimator))
+            baselines[estimator] = _trained_steps(root)
+        return baselines[estimator]
+
+    return for_estimator
+
+
+@pytest.mark.parametrize(
+    ("builder", "estimator"),
+    [("verify", "rloo_n"), ("worker", "rloo_n"), ("verify", "grpo")],
+    ids=["verify", "worker", "verify-grpo"],
+)
+def test_worker_batches_verify_two_tis_steps_with_a_group_split_between_dp_ranks(
+    runs: BaseContext, tmp_path: Path, tiny_policy: Path, builder: str, estimator: str, driver_batch_metrics
+):
+    _run_worker_batch_case(runs, _worker_batch_config(tmp_path, tiny_policy, builder, estimator))
+    steps = _trained_steps(tmp_path)
+    baseline = driver_batch_metrics(estimator)
+    assert [record["trainer/global_step"] for record in steps] == [1, 2]
+    assert all(record["policy/raw_grad_norm"] > 0 for record in steps)
+    assert [set(record) - _SOURCE_METRIC_KEY_DIFFERENCES for record in steps] == [
+        set(record) - _SOURCE_METRIC_KEY_DIFFERENCES for record in baseline
+    ]
+    if estimator == "grpo":
+        assert [record["reward/zero_std_group_fraction"] for record in steps] == [
+            record["reward/zero_std_group_fraction"] for record in baseline
+        ]
+    if builder == "worker":
+        assert all(record["generate/avg_num_tokens"] > 0 for record in steps)
+        return
+    for step in (1, 2):
+        batch = TrainingInputBatch().load(tmp_path / f"exports/dumped_data/global_step_{step}_training_input.pkl")
+        assert batch.batch_size == 12
+        lengths = batch["response_mask"].sum(-1)
+        assert torch.unique(lengths).numel() > 1
+        assert torch.unique(batch["advantages"]).numel() > 2
+        eligible = batch["loss_mask"].bool()
+        expected = torch.zeros_like(batch["action_log_probs"], dtype=torch.float32)
+        expected[eligible] = (
+            (batch["action_log_probs"][eligible] - batch["rollout_logprobs"][eligible]).exp().clamp(max=2)
+        )
+        torch.testing.assert_close(batch["correction_weights"], expected, rtol=0, atol=0)
+        assert (expected[eligible] != 1).any()
+
+
+_FORWARD_GATE_NAME = "tiny_training_forward_gate"
+
+
+class ForwardFailure(RuntimeError):
+    pass
+
+
+class _ForwardGate:
+    def __init__(self):
+        self.ranks = set()
+        self.both_entered = asyncio.Event()
+        self.released = asyncio.Event()
+
+    async def enter(self, rank: int):
+        self.ranks.add(rank)
+        if self.ranks == {0, 1}:
+            self.both_entered.set()
+        await self.both_entered.wait()
+
+    async def wait_for_both(self):
+        await self.both_entered.wait()
+        return tuple(sorted(self.ranks))
+
+    async def withhold(self):
+        await self.released.wait()
+
+    async def release(self):
+        self.released.set()
+
+
+class _FailedForwardWorker(CPUPolicyWorker):
+    def forward_loaded(self, batch_id):
+        gate = ray.get_actor(_FORWARD_GATE_NAME)
+        ray.get(gate.enter.remote(self.mesh_rank.dp))
+        if self.mesh_rank.dp == 0:
+            raise ForwardFailure("injected policy forward failure")
+        # A synchronous hold prevents this actor from servicing queued cleanup RPCs.
+        ray.get(gate.withhold.remote())
+        return super().forward_loaded(batch_id)
+
+
+class _FailedForwardExp(experiment.TinyTrainingExp):
+    def get_worker_classes(self):
+        return ray.remote(num_gpus=1)(_FailedForwardWorker), None, None
+
+    def get_trainer(self, *args, **kwargs):
+        self.trainer = super().get_trainer(*args, **kwargs)
+        return self.trainer
+
+
+def _run_failed_forward(cfg, ready: Connection, log: Path):
+    os.setsid()
+    ready.send(("session", os.getpid()))
+    with log.open("w") as output:
+        os.dup2(output.fileno(), 1)
+        os.dup2(output.fileno(), 2)
+        experiment.validate_cfg(cfg)
+        experiment.validate_rollout_launch(cfg, experiment.EntrypointOperation.TRAIN)
+        gate = None
+        try:
+            ray.init(
+                num_cpus=experiment.LOGICAL_CPUS,
+                num_gpus=experiment.LOGICAL_GPUS,
+                runtime_env={"env_vars": experiment.WORKER_ENV_VARS},
+                include_dashboard=False,
+            )
+            gate = ray.remote(num_cpus=0)(_ForwardGate).options(name=_FORWARD_GATE_NAME).remote()
+
+            def report_ready():
+                ready.send(("forward_ranks", ray.get(gate.wait_for_both.remote())))
+
+            threading.Thread(target=report_ready, daemon=True).start()
+            exp = _FailedForwardExp(cfg)
+            with pytest.raises(ray.exceptions.RayTaskError) as raised:
+                exp.run()
+            assert isinstance(raised.value.as_instanceof_cause(), ForwardFailure)
+            assert len(exp.trainer.policy_model.actor_infos) == 2
+            for actor in exp.trainer.policy_model.actor_infos:
+                with pytest.raises(ray.exceptions.RayActorError):
+                    ray.get(actor.handle.get_mesh_rank.remote(), timeout=10)
+            metrics = Path(cfg.trainer.export_path) / experiment.METRICS_FILE
+            assert not metrics.exists() or not _trained_steps(metrics.parent.parent)
+        finally:
+            try:
+                if gate is not None:
+                    ray.get(gate.release.remote(), timeout=10)
+            finally:
+                ray.shutdown()
+                ready.close()
+
+
+def test_worker_forward_failure_preserves_error_and_stops_policy_actors(runs, tmp_path, tiny_policy):
+    cfg = _worker_batch_config(tmp_path, tiny_policy, "worker")
+    cfg.trainer.max_steps = 1
+    log = tmp_path / "failed-forward.log"
+    ready, child_ready = runs.Pipe(duplex=False)
+    run = runs.Process(target=_run_failed_forward, args=(cfg, child_ready, log))
+    run.start()
+    child_ready.close()
+    session_started = False
+    descendants = set()
+    setup_deadline = time.monotonic() + RUN_TIMEOUT_SECONDS
+    try:
+        assert ready.poll(RUN_TIMEOUT_SECONDS), "failed-forward child did not start"
+        assert ready.recv() == ("session", run.pid)
+        session_started = True
+        assert ready.poll(max(0, setup_deadline - time.monotonic())), "policy ranks did not reach forward"
+        assert ready.recv() == ("forward_ranks", (0, 1))
+        descendants.update(psutil.Process(run.pid).children(recursive=True))
+        run.join(RUN_TIMEOUT_SECONDS)
+        assert run.exitcode == 0, f"failed-forward training did not finish cleanly; exitcode={run.exitcode}"
+    finally:
+        if run.exitcode != 0:
+            if run.is_alive():
+                try:
+                    descendants.update(psutil.Process(run.pid).children(recursive=True))
+                    if session_started:
+                        os.killpg(run.pid, signal.SIGKILL)
+                    else:
+                        run.kill()
+                except (ProcessLookupError, psutil.NoSuchProcess):
+                    pass
+            for process in descendants:
+                try:
+                    process.kill()
+                except psutil.NoSuchProcess:
+                    pass
+            _, alive = psutil.wait_procs(descendants, timeout=10)
+            run.join(10)
+            assert not alive and not run.is_alive(), "failed-forward child processes survived cleanup"
+        ready.close()
+        if run.exitcode != 0 and log.exists():
+            print(log.read_text()[-16000:])
