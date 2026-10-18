@@ -6,7 +6,6 @@ import hydra
 from omegaconf import DictConfig
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
 from skyrl_train.utils import initialize_ray
-from skyrl_train.rollouts.context import TrainingContext
 import ray
 from .trainer_full_ctx import FullCtxTrainer
 
@@ -24,7 +23,6 @@ class FullCtxPPOExp(BasePPOExp):
         models,
     ):
         return FullCtxTrainer(
-            context=TrainingContext.from_config(cfg, train_dataset, trajectory_runner),
             cfg=cfg,
             tracker=tracker,
             tokenizer=tokenizer,

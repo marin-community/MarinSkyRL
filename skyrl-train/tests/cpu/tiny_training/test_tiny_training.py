@@ -1,11 +1,9 @@
 """End-to-end CPU training through the production entrypoints on a tiny policy."""
 
-import errno
 import multiprocessing
 import select
 from contextlib import ExitStack
 import os
-import socket
 import json
 import sys
 from multiprocessing.context import BaseContext
@@ -13,7 +11,6 @@ from pathlib import Path
 
 import pytest
 import ray
-from rigging.timing import retry_with_backoff
 import torch
 from transformers import AutoModelForCausalLM
 from omegaconf import OmegaConf
@@ -25,7 +22,6 @@ from tests.cpu.tiny_training.cpu_backend import CHECKPOINT_FILE_TEMPLATE, Causal
 from tests.cpu.tiny_training.fixed_batch import fixed_training_batch, run_fixed_update
 from skyrl_train.rollouts.payloads import ROLLOUT_OBJECT_SUFFIX
 from skyrl_train.training_batch import TrainingInputBatch
-from skyrl_train.utils.utils import get_free_port
 from tests.cpu.tiny_training import experiment
 from tests.cpu.tiny_training.experiment import (
     MAX_STALENESS_STEPS,
@@ -269,7 +265,6 @@ def test_one_step_is_independent_of_micro_batch_size(runs: BaseContext, tmp_path
 
 ENGINE_START_FIFO = "engine-start"
 POLICY_READY_FIFO = "policy-ready"
-ENGINE_RETURN_FIFO = "engine-return"
 
 
 class _PolicyReadyWorker(CPUPolicyWorker):
@@ -298,64 +293,6 @@ class _OverlappingTinyTrainingExp(experiment.TinyTrainingExp):
         return super().create_inference_engine_client(operation=operation)
 
 
-@ray.remote
-def _claim_all_resources():
-    return True
-
-
-def _assert_resources_released():
-    # Scheduling one task with the entire cluster's resources waits for both actors and reservations to leave.
-    resources = ray.cluster_resources()
-    claim = _claim_all_resources.options(num_cpus=resources["CPU"], num_gpus=resources["GPU"]).remote()
-    assert ray.get(claim, timeout=30)
-
-
-class _FailingEngineTinyTrainingExp(experiment.TinyTrainingExp):
-    def create_inference_engine_client(self, *, operation=experiment.EntrypointOperation.TRAIN):
-        self.engine_error = RuntimeError("engine startup failed")
-        raise self.engine_error
-
-    def run(self):
-        with pytest.raises(RuntimeError, match="engine startup failed") as failure:
-            super().run()
-        assert failure.value is self.engine_error
-        _assert_resources_released()
-
-
-class _FailingPolicyWorker(_PolicyReadyWorker):
-    def init_model(self, model_path, num_training_steps=None):
-        super().init_model(model_path, num_training_steps)
-        raise RuntimeError("policy initialization failed")
-
-
-class _LateInferenceTinyTrainingExp(_OverlappingTinyTrainingExp):
-    def get_worker_classes(self):
-        return ray.remote(num_gpus=1)(_FailingPolicyWorker), None, None
-
-    def create_inference_engine_client(self, *, operation=experiment.EntrypointOperation.TRAIN):
-        client = super().create_inference_engine_client(operation=operation)
-        with (Path(self.cfg.trainer.export_path) / ENGINE_RETURN_FIFO).open("rb", buffering=0) as gate:
-            assert gate.read(1) == b"r"
-        return client
-
-    def run(self):
-        self.cfg.generator.enable_http_endpoint = True
-        self.cfg.generator.http_endpoint_port = get_free_port()
-        with pytest.raises(ray.exceptions.RayTaskError, match="policy initialization failed"):
-            super().run()
-        # Return the client after the entrypoint's failure cleanup has already run.
-        with (Path(self.cfg.trainer.export_path) / ENGINE_RETURN_FIFO).open("wb", buffering=0) as gate:
-            gate.write(b"r")
-        _assert_resources_released()
-        with socket.socket() as endpoint:
-            endpoint.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            retry_with_backoff(
-                lambda: endpoint.bind((self.cfg.generator.http_endpoint_host, self.cfg.generator.http_endpoint_port)),
-                retryable=lambda error: isinstance(error, OSError) and error.errno == errno.EADDRINUSE,
-                max_elapsed=30,
-            )
-
-
 def _run_startup_case(
     root: Path, model: Path, experiment_class, mode=TrainingMode.ASYNC, shape=RolloutShape.SINGLE_TURN
 ):
@@ -371,17 +308,9 @@ def _run_startup_case(
     cfg.trainer.placement.overlap_init = True
     control_root = Path(cfg.trainer.export_path)
     control_root.mkdir(parents=True, exist_ok=True)
-    for name in (ENGINE_START_FIFO, POLICY_READY_FIFO, ENGINE_RETURN_FIFO):
+    for name in (ENGINE_START_FIFO, POLICY_READY_FIFO):
         os.mkfifo(control_root / name)
     with ExitStack() as gates:
-        for name in (ENGINE_START_FIFO, POLICY_READY_FIFO, ENGINE_RETURN_FIFO):
+        for name in (ENGINE_START_FIFO, POLICY_READY_FIFO):
             gates.callback(os.close, os.open(control_root / name, os.O_RDWR | os.O_NONBLOCK))
         experiment.run_with_exp(cfg, experiment_class)
-
-
-def test_engine_startup_failure_releases_policy_resources(runs, tmp_path, tiny_policy):
-    _run_in_process(runs, _run_startup_case, tmp_path, tiny_policy, _FailingEngineTinyTrainingExp)
-
-
-def test_policy_startup_failure_closes_late_inference_endpoint(runs, tmp_path, tiny_policy):
-    _run_in_process(runs, _run_startup_case, tmp_path, tiny_policy, _LateInferenceTinyTrainingExp)

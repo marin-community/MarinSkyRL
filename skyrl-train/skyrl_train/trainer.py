@@ -361,167 +361,161 @@ def build_models(
     """Return policy, critic and reference actors before constructing their trainer."""
     _, total_training_steps = _training_schedule(cfg, len(train_dataset))
     policy_model = critic_model = ref_model = None
-    try:
-        pg = None
+    pg = None
 
-        use_ref_model = reference_model_required(cfg.trainer.algorithm)
-        policy_actor_env_vars = None
-        if cfg.trainer.strategy == "megatron" and cfg.trainer.policy.nccl_buffer_size_bytes is not None:
-            policy_actor_env_vars = {NCCL_BUFFER_SIZE_ENV_VAR: str(cfg.trainer.policy.nccl_buffer_size_bytes)}
-        ref_actor_env_vars = None
-        if (
-            use_ref_model
-            and cfg.trainer.strategy == "megatron"
-            and (cfg.trainer.placement.colocate_all or cfg.trainer.placement.colocate_policy_ref)
-            and cfg.trainer.ref.nccl_buffer_size_bytes is not None
-        ):
-            ref_actor_env_vars = {NCCL_BUFFER_SIZE_ENV_VAR: str(cfg.trainer.ref.nccl_buffer_size_bytes)}
+    use_ref_model = reference_model_required(cfg.trainer.algorithm)
+    policy_actor_env_vars = None
+    if cfg.trainer.strategy == "megatron" and cfg.trainer.policy.nccl_buffer_size_bytes is not None:
+        policy_actor_env_vars = {NCCL_BUFFER_SIZE_ENV_VAR: str(cfg.trainer.policy.nccl_buffer_size_bytes)}
+    ref_actor_env_vars = None
+    if (
+        use_ref_model
+        and cfg.trainer.strategy == "megatron"
+        and (cfg.trainer.placement.colocate_all or cfg.trainer.placement.colocate_policy_ref)
+        and cfg.trainer.ref.nccl_buffer_size_bytes is not None
+    ):
+        ref_actor_env_vars = {NCCL_BUFFER_SIZE_ENV_VAR: str(cfg.trainer.ref.nccl_buffer_size_bytes)}
 
-        if cfg.trainer.placement.colocate_all:
-            num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
-            num_critic_gpus = cfg.trainer.placement.critic_num_gpus_per_node * cfg.trainer.placement.critic_num_nodes
-            num_ref_gpus = cfg.trainer.placement.ref_num_gpus_per_node * cfg.trainer.placement.ref_num_nodes
-            num_rollout_gpus = (
-                cfg.generator.num_inference_engines
-                * cfg.generator.inference_engine_tensor_parallel_size
-                * cfg.generator.inference_engine_pipeline_parallel_size
-                * cfg.generator.inference_engine_data_parallel_size
+    if cfg.trainer.placement.colocate_all:
+        num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
+        num_critic_gpus = cfg.trainer.placement.critic_num_gpus_per_node * cfg.trainer.placement.critic_num_nodes
+        num_ref_gpus = cfg.trainer.placement.ref_num_gpus_per_node * cfg.trainer.placement.ref_num_nodes
+        num_rollout_gpus = (
+            cfg.generator.num_inference_engines
+            * cfg.generator.inference_engine_tensor_parallel_size
+            * cfg.generator.inference_engine_pipeline_parallel_size
+            * cfg.generator.inference_engine_data_parallel_size
+        )
+        assert num_policy_gpus == num_rollout_gpus, (
+            "num_policy_gpus and num_rollout_gpus must be the same when colocating all models"
+        )
+        pg = colocate_pg
+
+        policy_model = PPORayActorGroup(
+            cfg,
+            cfg.trainer.placement.policy_num_nodes,
+            cfg.trainer.placement.policy_num_gpus_per_node,
+            PolicyWorker,
+            pg=pg,
+            num_gpus_per_actor=0.2 if pg else 1,
+            colocate_all=True,
+            sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,
+            record_memory=cfg.trainer.policy.record_memory,
+            actor_env_vars=policy_actor_env_vars,
+        )
+        if use_ref_model:
+            assert num_policy_gpus == num_ref_gpus, (
+                "num_policy_gpus and num_ref_gpus must be the same when colocating policy and ref model"
             )
-            assert num_policy_gpus == num_rollout_gpus, (
-                "num_policy_gpus and num_rollout_gpus must be the same when colocating all models"
-            )
-            pg = colocate_pg
-
-            policy_model = PPORayActorGroup(
+            ref_model = PPORayActorGroup(
                 cfg,
-                cfg.trainer.placement.policy_num_nodes,
-                cfg.trainer.placement.policy_num_gpus_per_node,
-                PolicyWorker,
+                cfg.trainer.placement.ref_num_nodes,
+                cfg.trainer.placement.ref_num_gpus_per_node,
+                RefWorker,
                 pg=pg,
                 num_gpus_per_actor=0.2 if pg else 1,
                 colocate_all=True,
-                sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,
-                record_memory=cfg.trainer.policy.record_memory,
-                actor_env_vars=policy_actor_env_vars,
+                sequence_parallel_size=cfg.trainer.ref.sequence_parallel_size,
+                actor_env_vars=ref_actor_env_vars,
             )
-            if use_ref_model:
-                assert num_policy_gpus == num_ref_gpus, (
-                    "num_policy_gpus and num_ref_gpus must be the same when colocating policy and ref model"
-                )
-                ref_model = PPORayActorGroup(
-                    cfg,
-                    cfg.trainer.placement.ref_num_nodes,
-                    cfg.trainer.placement.ref_num_gpus_per_node,
-                    RefWorker,
-                    pg=pg,
-                    num_gpus_per_actor=0.2 if pg else 1,
-                    colocate_all=True,
-                    sequence_parallel_size=cfg.trainer.ref.sequence_parallel_size,
-                    actor_env_vars=ref_actor_env_vars,
-                )
-            else:
-                ref_model = None
-
-            if cfg.trainer.critic.model.path:
-                assert num_policy_gpus == num_critic_gpus, (
-                    "num_policy_gpus and num_critic_gpus must be the same when colocating policy and critic model"
-                )
-                critic_model = PPORayActorGroup(
-                    cfg,
-                    cfg.trainer.placement.critic_num_nodes,
-                    cfg.trainer.placement.critic_num_gpus_per_node,
-                    CriticWorker,
-                    pg=pg,
-                    num_gpus_per_actor=0.2,
-                    colocate_all=True,
-                    sequence_parallel_size=cfg.trainer.critic.sequence_parallel_size,
-                )
-            else:
-                critic_model = None
-
         else:
-            if cfg.trainer.placement.colocate_policy_ref and use_ref_model:
-                assert (
-                    cfg.trainer.placement.policy_num_nodes == cfg.trainer.placement.ref_num_nodes
-                    and cfg.trainer.placement.policy_num_gpus_per_node == cfg.trainer.placement.ref_num_gpus_per_node
-                ), "num_nodes and num_gpus_per_node must be the same when colocate policy and ref model."
+            ref_model = None
 
-                bundles = [
-                    {
-                        "GPU": cfg.trainer.placement.policy_num_gpus_per_node,
-                        "CPU": cfg.trainer.placement.policy_num_gpus_per_node,
-                    }
-                    for _ in range(cfg.trainer.placement.policy_num_nodes)
-                ]
-                if policy_pg is None:
-                    pg = placement_group(bundles, strategy="PACK")
-                    get_ray_pg_ready_with_timeout(
-                        pg, timeout=int(cfg.trainer.distributed.placement_group_timeout_seconds)
-                    )
-                else:
-                    pg = policy_pg
+        if cfg.trainer.critic.model.path:
+            assert num_policy_gpus == num_critic_gpus, (
+                "num_policy_gpus and num_critic_gpus must be the same when colocating policy and critic model"
+            )
+            critic_model = PPORayActorGroup(
+                cfg,
+                cfg.trainer.placement.critic_num_nodes,
+                cfg.trainer.placement.critic_num_gpus_per_node,
+                CriticWorker,
+                pg=pg,
+                num_gpus_per_actor=0.2,
+                colocate_all=True,
+                sequence_parallel_size=cfg.trainer.critic.sequence_parallel_size,
+            )
+        else:
+            critic_model = None
 
-            # The no-reference policy also uses the group reserved before inference.
-            if pg is None:
+    else:
+        if cfg.trainer.placement.colocate_policy_ref and use_ref_model:
+            assert (
+                cfg.trainer.placement.policy_num_nodes == cfg.trainer.placement.ref_num_nodes
+                and cfg.trainer.placement.policy_num_gpus_per_node == cfg.trainer.placement.ref_num_gpus_per_node
+            ), "num_nodes and num_gpus_per_node must be the same when colocate policy and ref model."
+
+            bundles = [
+                {
+                    "GPU": cfg.trainer.placement.policy_num_gpus_per_node,
+                    "CPU": cfg.trainer.placement.policy_num_gpus_per_node,
+                }
+                for _ in range(cfg.trainer.placement.policy_num_nodes)
+            ]
+            if policy_pg is None:
+                pg = placement_group(bundles, strategy="PACK")
+                get_ray_pg_ready_with_timeout(pg, timeout=int(cfg.trainer.distributed.placement_group_timeout_seconds))
+            else:
                 pg = policy_pg
 
-            # Pin each policy actor to its Ray-assigned physical GPU only when
-            # the dedicated policy PG uses per-GPU {GPU:1} bundles (each actor
-            # then owns one bundle == one GPU, so ray.get_gpu_ids()[0] is a
-            # distinct, reliable physical id even when the SIF Ray leaves
-            # CUDA_VISIBLE_DEVICES unmasked).
-            _policy_pin_to_ray_gpu_id = policy_pg is not None and policy_per_gpu_bundles_enabled(cfg)
-            # Deterministic forced-CVD-mask pin (opt-in; default false). Only
-            # meaningful alongside the per-GPU-bundle pin. Masks each policy
-            # actor to its single physical GPU before any CUDA/EP-mesh init.
-            _policy_force_cvd_mask = _policy_pin_to_ray_gpu_id and policy_force_cvd_mask_enabled(cfg)
-            policy_model = PPORayActorGroup(
+        # The no-reference policy also uses the group reserved before inference.
+        if pg is None:
+            pg = policy_pg
+
+        # Pin each policy actor to its Ray-assigned physical GPU only when
+        # the dedicated policy PG uses per-GPU {GPU:1} bundles (each actor
+        # then owns one bundle == one GPU, so ray.get_gpu_ids()[0] is a
+        # distinct, reliable physical id even when the SIF Ray leaves
+        # CUDA_VISIBLE_DEVICES unmasked).
+        _policy_pin_to_ray_gpu_id = policy_pg is not None and policy_per_gpu_bundles_enabled(cfg)
+        # Deterministic forced-CVD-mask pin (opt-in; default false). Only
+        # meaningful alongside the per-GPU-bundle pin. Masks each policy
+        # actor to its single physical GPU before any CUDA/EP-mesh init.
+        _policy_force_cvd_mask = _policy_pin_to_ray_gpu_id and policy_force_cvd_mask_enabled(cfg)
+        policy_model = PPORayActorGroup(
+            cfg,
+            cfg.trainer.placement.policy_num_nodes,
+            cfg.trainer.placement.policy_num_gpus_per_node,
+            PolicyWorker,
+            pg=pg,
+            num_gpus_per_actor=0.75 if use_ref_model and pg else 1,
+            colocate_all=False,
+            sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,
+            pin_to_ray_gpu_id=_policy_pin_to_ray_gpu_id,
+            force_cvd_mask=_policy_force_cvd_mask,
+            actor_env_vars=policy_actor_env_vars,
+        )
+        if use_ref_model:
+            ref_model = PPORayActorGroup(
                 cfg,
-                cfg.trainer.placement.policy_num_nodes,
-                cfg.trainer.placement.policy_num_gpus_per_node,
-                PolicyWorker,
+                cfg.trainer.placement.ref_num_nodes,
+                cfg.trainer.placement.ref_num_gpus_per_node,
+                RefWorker,
                 pg=pg,
-                num_gpus_per_actor=0.75 if use_ref_model and pg else 1,
+                num_gpus_per_actor=0.25 if pg else 1,
                 colocate_all=False,
-                sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,
-                pin_to_ray_gpu_id=_policy_pin_to_ray_gpu_id,
-                force_cvd_mask=_policy_force_cvd_mask,
-                actor_env_vars=policy_actor_env_vars,
+                sequence_parallel_size=cfg.trainer.ref.sequence_parallel_size,
+                actor_env_vars=ref_actor_env_vars,
             )
-            if use_ref_model:
-                ref_model = PPORayActorGroup(
-                    cfg,
-                    cfg.trainer.placement.ref_num_nodes,
-                    cfg.trainer.placement.ref_num_gpus_per_node,
-                    RefWorker,
-                    pg=pg,
-                    num_gpus_per_actor=0.25 if pg else 1,
-                    colocate_all=False,
-                    sequence_parallel_size=cfg.trainer.ref.sequence_parallel_size,
-                    actor_env_vars=ref_actor_env_vars,
-                )
-            else:
-                ref_model = None
+        else:
+            ref_model = None
 
-            if cfg.trainer.critic.model.path:
-                critic_model = PPORayActorGroup(
-                    cfg,
-                    cfg.trainer.placement.critic_num_nodes,
-                    cfg.trainer.placement.critic_num_gpus_per_node,
-                    CriticWorker,
-                    num_gpus_per_actor=1,
-                    colocate_all=False,
-                    sequence_parallel_size=cfg.trainer.critic.sequence_parallel_size,
-                )
-            else:
-                critic_model = None
+        if cfg.trainer.critic.model.path:
+            critic_model = PPORayActorGroup(
+                cfg,
+                cfg.trainer.placement.critic_num_nodes,
+                cfg.trainer.placement.critic_num_gpus_per_node,
+                CriticWorker,
+                num_gpus_per_actor=1,
+                colocate_all=False,
+                sequence_parallel_size=cfg.trainer.critic.sequence_parallel_size,
+            )
+        else:
+            critic_model = None
 
-        _initialize_model_actors(cfg, tokenizer, total_training_steps, policy_model, critic_model, ref_model)
-        logger.info("init policy/ref/critic models done")
-        return policy_model, critic_model, ref_model
-    except BaseException:
-        discard_model_actors((policy_model, critic_model, ref_model))
-        raise
+    _initialize_model_actors(cfg, tokenizer, total_training_steps, policy_model, critic_model, ref_model)
+    logger.info("init policy/ref/critic models done")
+    return policy_model, critic_model, ref_model
 
 
 def _initialize_model_actors(
@@ -853,6 +847,10 @@ class RayPPOTrainer:
             logger.info(f"{label} complete")
         except Exception as e:
             logger.warning(f"{label} error (non-fatal): {e}")
+
+    def cleanup_ray_actors(self):
+        """Public alias for :meth:`_kill_ray_actors` (used by entrypoints)."""
+        return self._kill_ray_actors()
 
     def _kill_ray_actors(self):
         """Kill all managed Ray actors (models + inference engines).

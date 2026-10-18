@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 from collections.abc import Callable, Mapping
-from concurrent.futures import Future
+from concurrent.futures import Future, wait
 from threading import Thread
 
 from rolloutengine.contracts import TaskSession
@@ -75,13 +75,6 @@ def _start_in_daemon_thread(fn: Callable[[], InferenceEngineClient], name: str) 
 
     Thread(target=_run, name=name, daemon=True).start()
     return future
-
-
-def _discard_started_engines(future: Future[InferenceEngineClient]) -> None:
-    try:
-        future.result().discard_engines()
-    except BaseException as error:
-        logger.warning("Engine startup cleanup: {}", error)
 
 
 def resolve_entrypoint_node_id(node_ip: str) -> str:
@@ -344,8 +337,7 @@ class BasePPOExp:
         # engines (which are created later, in `_setup_trainer`), so that in the
         # disaggregated case the policy (and optional colocated reference)
         # claims GPU slots before inference engines use the remainder.
-        with Timer("placement/policy_pg", self.startup_timings):
-            self.policy_pg = self.get_policy_pg()
+        self.policy_pg = self.get_policy_pg()
 
     def create_inference_engine_client(
         self, *, operation: EntrypointOperation = EntrypointOperation.TRAIN
@@ -659,76 +651,67 @@ class BasePPOExp:
 
     def _setup_trainer(self, tracker):
         """Build models and engines, then construct one trainer with complete workers."""
-        from skyrl_train.trainer import build_models, discard_model_actors  # noqa: PLC0415
+        from skyrl_train.trainer import build_models  # noqa: PLC0415
         from skyrl_train.utils.utils import Timer, configure_ray_worker_logging  # noqa: PLC0415
-        from skyrl_train.teacher_runtime import prepare_distillation_runtime, start_distillation_runtime  # noqa: PLC0415
 
         logger.info(self.get_cfg_as_str(self.cfg))
         os.makedirs(self.cfg.trainer.export_path, exist_ok=True)
         os.makedirs(self.cfg.trainer.ckpt_path, exist_ok=True)
         with Timer("driver/worker_classes", self.startup_timings):
             PolicyWorker, CriticWorker, RefWorker = self.get_worker_classes()
-        prepared_distillation = prepare_distillation_runtime(self.cfg, self.tokenizer)
+        tokenizer = self.tokenizer
+        from skyrl_train.teacher_runtime import prepare_distillation_runtime, start_distillation_runtime  # noqa: PLC0415
+
+        prepared_distillation = prepare_distillation_runtime(self.cfg, tokenizer)
 
         def create_client():
             with Timer("engines/create", self.startup_timings):
                 return self.create_inference_engine_client()
 
-        configure_ray_worker_logging()
         future: Future[InferenceEngineClient] = Future()
-        models = None
-        trainer = None
-        try:
-            if self.cfg.trainer.placement.overlap_init:
-                future = _start_in_daemon_thread(create_client, "engine-startup")
-            else:
-                future.set_result(create_client())
-            with Timer("policy/build_models", self.startup_timings):
-                models = build_models(
-                    self.cfg,
-                    self.tokenizer,
-                    self.train_dataset,
-                    PolicyWorker,
-                    CriticWorker,
-                    RefWorker,
-                    colocate_pg=self.colocate_pg,
-                    policy_pg=self.policy_pg,
-                )
-            client = future.result()
-            runner = self.get_trajectory_runner(self.cfg, self.tokenizer, client)
-            trainer = self.get_trainer(
-                cfg=self.cfg,
-                tracker=tracker,
-                tokenizer=self.tokenizer,
-                train_dataset=self.train_dataset,
-                eval_dataset=self.eval_dataset,
-                inference_engine_client=client,
-                trajectory_runner=runner,
-                models=models,
+        if self.cfg.trainer.placement.overlap_init:
+            configure_ray_worker_logging()
+            future = _start_in_daemon_thread(create_client, "engine-startup")
+        else:
+            future.set_result(create_client())
+        logger.info("Starting policy workers: strategy={}", self.cfg.trainer.strategy)
+        with Timer("policy/build_models", self.startup_timings):
+            models = build_models(
+                self.cfg,
+                self.tokenizer,
+                self.train_dataset,
+                PolicyWorker,
+                CriticWorker,
+                RefWorker,
+                colocate_pg=self.colocate_pg,
+                policy_pg=self.policy_pg,
             )
-            self.startup_timings.update(
-                {f"policy/{name}": duration for name, duration in trainer.policy_model.startup_timings.items()}
-            )
-            trainer.all_startup_timings.update(self.startup_timings)
-            logger.info(
-                "Policy workers ready: strategy={} count={}",
-                self.cfg.trainer.strategy,
-                len(trainer.policy_model.actor_infos),
-            )
-            runtime = asyncio.run(start_distillation_runtime(self.cfg, prepared_distillation))
-            if runtime is not None:
-                trainer.configure_distillation(runtime)
-        except BaseException:
-            if trainer is not None:
-                asyncio.run(trainer.shutdown())
-            else:
-                # A failed policy build can finish before the daemon creates its client.
-                future.add_done_callback(_discard_started_engines)
-                if models is not None:
-                    discard_model_actors(models)
-            if self.policy_pg is not None:
-                ray.util.remove_placement_group(self.policy_pg)
-            raise
+        while not future.done():
+            wait([future], timeout=1)
+        client = future.result()
+        runner = self.get_trajectory_runner(self.cfg, self.tokenizer, client)
+        trainer = self.get_trainer(
+            cfg=self.cfg,
+            tracker=tracker,
+            tokenizer=self.tokenizer,
+            train_dataset=self.train_dataset,
+            eval_dataset=self.eval_dataset,
+            inference_engine_client=client,
+            trajectory_runner=runner,
+            models=models,
+        )
+        self.startup_timings.update(
+            {f"policy/{name}": duration for name, duration in trainer.policy_model.startup_timings.items()}
+        )
+        trainer.all_startup_timings.update(self.startup_timings)
+        logger.info(
+            "Policy workers ready: strategy={} count={}",
+            self.cfg.trainer.strategy,
+            len(trainer.policy_model.actor_infos),
+        )
+        distillation_runtime = asyncio.run(start_distillation_runtime(self.cfg, prepared_distillation))
+        if distillation_runtime is not None:
+            trainer.configure_distillation(distillation_runtime)
         return trainer
 
     def run(self):
