@@ -1,8 +1,5 @@
 import subprocess
 from collections import Counter
-from pathlib import Path
-
-import yaml
 
 import infra.check_env_var_contract as env_contract
 from marinskyrl.environment_contract import (
@@ -15,6 +12,7 @@ from marinskyrl.environment_contract import (
     EnvVarManager,
 )
 from omegaconf import OmegaConf
+from skyrl_train.config.utils import get_default_config
 
 
 def test_no_new_environment_variable_definition_sites(monkeypatch):
@@ -83,7 +81,7 @@ def test_managed_names_have_one_owner_and_config_control():
     names = [spec.name for spec in ENV_VAR_SPECS]
     assert len(names) == len(set(names))
 
-    config = yaml.safe_load(Path("skyrl-train/skyrl_train/config/ppo_base_config.yaml").read_text())
+    config = get_default_config()
     for spec in ENV_VAR_SPECS:
         if spec.source not in {EnvVarSource.CONFIG, EnvVarSource.DERIVED}:
             continue
