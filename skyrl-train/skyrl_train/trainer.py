@@ -956,8 +956,7 @@ class RayPPOTrainer:
                 await self._distillation_runtime.start()
             await self._startup_trajectory_runner()
             if self.eval_trajectory_runner is not self.trajectory_runner:
-                with Timer("eval_rollout_workers/startup", self.all_startup_timings):
-                    await self.eval_trajectory_runner.startup()
+                await self.eval_trajectory_runner.startup()
             await self._train_loop()
         except Exception as error:
             log_exception_as_text(f"Train loop failed at global_step {self.global_step}", error)

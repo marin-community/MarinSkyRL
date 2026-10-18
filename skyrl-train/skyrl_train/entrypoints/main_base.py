@@ -330,8 +330,7 @@ class BasePPOExp:
             self.train_dataset = self.get_train_dataset()
         with Timer("driver/eval_dataset", self.startup_timings):
             self.eval_dataset = self.get_eval_dataset()
-        with Timer("placement/colocate_pg", self.startup_timings):
-            self.colocate_pg = self.get_colocate_pg()
+        self.colocate_pg = self.get_colocate_pg()
         # Reserve the policy/training placement group BEFORE the inference
         # engines (which are created later, in `_setup_trainer`), so that in the
         # disaggregated case the policy (and optional colocated reference)
@@ -681,17 +680,16 @@ class BasePPOExp:
                 )
             client = future.result()
             runner = self.get_trajectory_runner(self.cfg, self.tokenizer, client)
-            with Timer("driver/get_trainer", self.startup_timings):
-                trainer = self.get_trainer(
-                    cfg=self.cfg,
-                    tracker=tracker,
-                    tokenizer=self.tokenizer,
-                    train_dataset=self.train_dataset,
-                    eval_dataset=self.eval_dataset,
-                    inference_engine_client=client,
-                    trajectory_runner=runner,
-                    models=models,
-                )
+            trainer = self.get_trainer(
+                cfg=self.cfg,
+                tracker=tracker,
+                tokenizer=self.tokenizer,
+                train_dataset=self.train_dataset,
+                eval_dataset=self.eval_dataset,
+                inference_engine_client=client,
+                trajectory_runner=runner,
+                models=models,
+            )
             self.startup_timings.update(
                 {f"policy/{name}": duration for name, duration in trainer.policy_model.startup_timings.items()}
             )
