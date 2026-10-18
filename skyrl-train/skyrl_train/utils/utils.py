@@ -569,8 +569,12 @@ def validate_cfg(cfg: DictConfig):
 
     cfg.trainer.algorithm = algorithm_config
 
-    behavior_logprobs_required = rollout_logprobs_required(cfg.trainer.algorithm, loss_spec=spec) or bool(
-        cfg.trainer.mismatch_probe.get("enabled", False)
+    # The exactness check compares the engines' log-probabilities with the trainer's, so they must be the processed
+    # ones the trainer computes.
+    behavior_logprobs_required = (
+        rollout_logprobs_required(cfg.trainer.algorithm, loss_spec=spec)
+        or bool(cfg.trainer.mismatch_probe.get("enabled", False))
+        or cfg.trainer.numerics.check.every_weight_syncs > 0
     )
     if behavior_logprobs_required:
         if cfg.generator.sampling_params.logprobs is None:

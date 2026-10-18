@@ -23,6 +23,9 @@ trainer:
   algorithm:
     advantage_estimator: grpo
     use_kl_loss: true
+  numerics:
+    check:
+      every_weight_syncs: 10
   epochs: 1
   max_steps: 3
   update_epochs_per_batch: 1

@@ -16,7 +16,7 @@ class NumericsMode(StrEnum):
 
 
 def validate_numerics_config(cfg: DictConfig) -> None:
-    """Accept a known mode, and ``batch_invariant`` only with local vLLM engines."""
+    """Accept a known mode, ``batch_invariant`` only with local vLLM engines, and a check interval of at least 0."""
     numerics = cfg.trainer.numerics
     if numerics.mode not in set(NumericsMode):
         raise ValueError(f"{NUMERICS_KEY}.mode must be one of {', '.join(NumericsMode)}; got {numerics.mode!r}")
@@ -24,4 +24,8 @@ def validate_numerics_config(cfg: DictConfig) -> None:
         raise ValueError(
             f"{NUMERICS_KEY}.mode=batch_invariant cannot configure a remote inference server; run the vLLM "
             "engines locally so both rollout and trainer activation is guaranteed"
+        )
+    if numerics.check.every_weight_syncs < 0:
+        raise ValueError(
+            f"{NUMERICS_KEY}.check.every_weight_syncs must be at least 0; got {numerics.check.every_weight_syncs}"
         )

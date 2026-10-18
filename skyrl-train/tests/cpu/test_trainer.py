@@ -15,6 +15,7 @@ from omegaconf import OmegaConf
 import skyrl_train.trainer as trainer_module
 from skyrl_train.callbacks.base import TrainerControl
 from skyrl_train.config.utils import get_default_config
+from skyrl_train.exactness_check import ExactnessCheck
 from marinskyrl.distillation import compile_distillation_plan_from_config
 from skyrl_train.distillation import ChosenTokenTeacherInput, TeacherTopKInput, TopKTeacherEvidence
 from skyrl_train.distributed.dispatch import MeshRank
@@ -34,7 +35,9 @@ from skyrl_train.workers.worker import CriticWorkerBase, PolicyWorkerBase
 from skyrl_train.weight_sync.expert_block.driver import SyncTimings
 from skyrl_train.weight_sync.expert_block.sender import ExpertBlockSender
 from skyrl_train.weight_sync.expert_block.stream import InstallReport
+from skyrl_train.weight_sync.base import WeightSyncReason
 from tests.cpu.util import example_dummy_config
+from tests.training_batch_replay import replay_policy_forward
 
 
 @pytest.fixture
@@ -975,3 +978,83 @@ def test_grpo_reports_one_flat_and_one_varied_reward_group():
     assert trainer.all_metrics["reward/zero_std_group_fraction"] == pytest.approx(0.5)
     assert torch.equal(result["advantages"][:2], torch.zeros(2, 1))
     assert torch.isfinite(result["advantages"]).all()
+
+
+class _CheckInferenceClient(_ResidencyInferenceClient):
+    """Engines that answer the exactness check's prompt with two log-probabilities; an engine dies during the check
+    requests numbered in ``failing`` (from 1)."""
+
+    def __init__(self, failing):
+        super().__init__()
+        self.check_requests = 0
+        self.failing = failing
+
+    async def generate_on_live_engines(self, prompt_token_ids, sampling_params):
+        self.check_requests += 1
+        if self.check_requests in self.failing:
+            raise ray.exceptions.ActorDiedError()
+        return [(0, {"response_ids": [[7, 8]], "response_logprobs": [[-0.5, -1.0]]})]
+
+
+def _one_row_batch() -> TrainingInputBatch:
+    batch = TrainingInputBatch(
+        {
+            "sequences": torch.tensor([[1, 2, 3]]),
+            "attention_mask": torch.ones(1, 3, dtype=torch.long),
+            "loss_mask": torch.ones(1, 2),
+            "rollout_logprobs": None,
+            "rollout_staleness": torch.zeros(1, 2, dtype=torch.int32),
+        }
+    )
+    batch.metadata = {"response_length": 2}
+    return batch
+
+
+@pytest.mark.asyncio
+async def test_exactness_check_scores_the_engines_after_qualifying_syncs_in_the_next_training_forward(ray_init):
+    trainer = RayPPOTrainer.__new__(RayPPOTrainer)
+    trainer.cfg = get_default_config()
+    trainer.colocate_all = False
+    trainer.policy_model = _ForwardPolicyGroup()
+    trainer.ref_model = None
+    trainer.critic_model = None
+    trainer.inference_engine_client = _CheckInferenceClient(failing={2})
+    trainer.sync_policy_weights_to_inference_engines = AsyncMock()
+    trainer._resolve_num_experts = lambda: None
+    trainer.tokenizer = SimpleNamespace(pad_token_id=0, encode=lambda text, add_special_tokens: [1, 2, 3])
+    trainer._exactness_check = ExactnessCheck(2, trainer.cfg.generator.sampling_params, trainer.tokenizer)
+    trainer.all_timings, trainer.all_startup_timings = {}, {}
+    trainer.global_step = 0
+
+    reported = []
+    for reason in (
+        WeightSyncReason.INITIAL,
+        WeightSyncReason.TRAINING_STEP,
+        WeightSyncReason.EVALUATION,
+        WeightSyncReason.TRAINING_STEP,
+        WeightSyncReason.CHECKPOINT_RESTORE,
+    ):
+        trainer.all_metrics = {}
+        await trainer._sync_policy_for_rollouts(reason=reason)
+        await replay_policy_forward(trainer, _one_row_batch())
+        reported.append(
+            {
+                name.removeprefix("exactness_check/"): value
+                for name, value in trainer.all_metrics.items()
+                if name.startswith("exactness_check/") and not name.endswith("_seconds")
+            }
+        )
+
+    # The policy scores zeros against the engine's two log-probabilities. The check follows the first sync, every
+    # second training sync and the checkpoint re-sync; the generation an engine died during is counted, and its
+    # forward scores none.
+    scored = {
+        "engines": 1.0,
+        "tokens": 2.0,
+        "mismatched_tokens": 2.0,
+        "log_ratio_abs_max": 1.0,
+        "dp_rank_0/tokens": 2.0,
+        "dp_rank_0/mismatched_tokens": 2.0,
+    }
+    assert reported == [scored, {}, {}, {"generate_failures": 1.0}, scored]
+    assert trainer.inference_engine_client.check_requests == 3

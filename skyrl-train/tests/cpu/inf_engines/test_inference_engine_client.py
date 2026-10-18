@@ -64,6 +64,8 @@ def _make_min_cfg():
                 "http_endpoint_host": "127.0.0.1",
                 "http_endpoint_port": 0,
                 "weight_sync_pause_timeout_seconds": 30.0,
+                "inference_engine_data_parallel_size": 1,
+                "run_engines_locally": True,
             },
         }
     )
@@ -1644,10 +1646,14 @@ async def _fail_over_engine_zero(client: InferenceEngineClient) -> None:
 
 
 @pytest.mark.asyncio
-async def test_weight_sync_pause_skips_an_engine_that_already_died():
-    """A pause must not wait on, or fail because of, an engine the client already knows is dead."""
+async def test_weight_sync_pause_and_exactness_check_skip_an_engine_that_already_died():
+    """A pause and the exactness check's generation must not wait on, or fail because of, an engine the client
+    already knows is dead."""
     dead, live = _DeadEngine(), _MockGenerateEngine()
-    client = InferenceEngineClient(engines=[dead, live], tokenizer=object(), full_config=_make_min_cfg())
+    cfg = _make_min_cfg()
+    # Engines list each data-parallel rank of every engine group in order, so the live second engine is rank 1.
+    cfg.generator.inference_engine_data_parallel_size = 2
+    client = InferenceEngineClient(engines=[dead, live], tokenizer=object(), full_config=cfg)
     await _fail_over_engine_zero(client)
     assert len(live.requests) == 1
 
@@ -1655,6 +1661,9 @@ async def test_weight_sync_pause_skips_an_engine_that_already_died():
     assert live.scheduler_paused
     await client.resume_generation(policy_step=1)
     assert not live.scheduler_paused
+
+    outputs = await client.generate_on_live_engines([1, 2, 3], {"max_tokens": 5})
+    assert [rank for rank, _ in outputs] == [1]
 
 
 class _DraftGenerateEngine(_MockGenerateEngine):
