@@ -6,7 +6,7 @@ import pytest
 
 from skyrl_train import rollout_observability as rollout
 from skyrl_train.telemetry import record_training_metrics
-from skyrl_train.utils.trainer_utils import consumed_stop_metrics
+from skyrl_train.batch_metrics import consumed_stop_metrics
 
 
 @pytest.mark.parametrize(("reasons", "count"), [(["length", "stop", None], 3), (None, 3), ([], 0)])

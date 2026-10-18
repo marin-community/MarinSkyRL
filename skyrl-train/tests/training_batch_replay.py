@@ -15,6 +15,7 @@ from typing import Any, TypedDict
 from omegaconf import DictConfig, OmegaConf
 
 from skyrl_train.timing_observability import StepWallTime
+from skyrl_train.batch_source import DriverBatchSource, batch_lifetime
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.training_batch import TrainingInputBatch
 
@@ -201,14 +202,14 @@ class CapturingRayPPOTrainer(RayPPOTrainer):
         self.capture_provenance = capture_provenance
         super().__init__(*args, **kwargs)
 
-    async def _run_training(self, training_input: TrainingInputBatch, *, step_wall: StepWallTime | None = None):
+    async def _run_training(self, source: DriverBatchSource, *, step_wall: StepWallTime | None = None):
         if self.global_step == self.capture_provenance.target_step:
             save_training_batch_artifact(
                 self.capture_artifact_path,
-                training_input,
+                source.batch,
                 self.capture_provenance,
             )
-        return await super()._run_training(training_input, step_wall=step_wall)
+        return await super()._run_training(source, step_wall=step_wall)
 
 
 class _PolicyForwardComplete(Exception):
@@ -226,7 +227,10 @@ async def replay_policy_forward(trainer: RayPPOTrainer, training_input: Training
 
     trainer.fwd_logprobs_values_reward = stop_after_forward
     try:
-        await trainer._run_training(training_input)
+        source = DriverBatchSource(trainer, trainer.context)
+        async with batch_lifetime(source):
+            source.prepare_from_batch(training_input)
+            await trainer._run_training(source)
     except _PolicyForwardComplete as complete:
         return complete.result
     finally:
