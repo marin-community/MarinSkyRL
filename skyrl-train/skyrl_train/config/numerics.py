@@ -6,7 +6,7 @@ from omegaconf import DictConfig, OmegaConf
 
 NUMERICS_KEY = "trainer.numerics"
 # Engine kwargs a decode-invariant engine sets itself.
-DECODE_INVARIANT_ENGINE_KWARGS = ("attention_backend", "compilation_config", "model_class_overrides")
+DECODE_INVARIANT_ENGINE_KWARGS = ("additional_config", "attention_backend", "compilation_config")
 
 
 class NumericsMode(StrEnum):

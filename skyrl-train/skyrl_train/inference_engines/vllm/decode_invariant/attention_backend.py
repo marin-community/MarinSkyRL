@@ -7,6 +7,7 @@ from dataclasses import dataclass, field, fields, replace
 from typing import ClassVar
 
 import torch
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionType, CommonAttentionMetadata
@@ -17,6 +18,7 @@ from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 from skyrl_train.inference_engines.vllm.decode_invariant.fa3 import (
     FA3_HEAD_DIM,
@@ -38,6 +40,22 @@ class DecodeInvariantMetadata(FlashAttentionMetadata):
 class DecodeInvariantMetadataBuilder(FlashAttentionMetadataBuilder):
     # Full CUDA graphs cover one-row decode steps; a step with longer requests runs attention eagerly.
     _cudagraph_support = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+
+    def __init__(
+        self, kv_cache_spec: AttentionSpec, layer_names: list[str], vllm_config: VllmConfig, device: torch.device
+    ) -> None:
+        if not vllm_config.use_v2_model_runner:
+            raise ValueError(
+                "a decode-invariant engine runs vLLM's model runner V2, whose log-probability kernel the exact "
+                "trainer runs; vLLM chose the V1 runner"
+            )
+        compilation = vllm_config.compilation_config
+        if compilation.cudagraph_mode == CUDAGraphMode.NONE or 1 in compilation.cudagraph_capture_sizes:
+            raise ValueError(
+                "a decode-invariant engine runs every one-token step padded in a CUDA graph; vLLM chose "
+                f"cudagraph_mode={compilation.cudagraph_mode.name} and capture sizes {compilation.cudagraph_capture_sizes}"
+            )
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
 
     def build(
         self, common_prefix_len: int, common_attn_metadata: CommonAttentionMetadata, fast_build: bool = False

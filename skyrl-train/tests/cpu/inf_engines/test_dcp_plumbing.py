@@ -90,7 +90,7 @@ def test_from_config_forwards_vllm_engine_options(monkeypatch):
         >= {"moe_backend": "triton", **decode_invariant_engine_init_kwargs()}.items()
     )
     assert cfg3.generator.vllm_attention_backend == "FLASH_ATTN"
-    assert "model_class_overrides" not in cfg3.generator.engine_init_kwargs
+    assert "additional_config" not in cfg3.generator.engine_init_kwargs
 
     captured.clear()
     main_base.create_ray_wrapped_inference_engines_from_config(
