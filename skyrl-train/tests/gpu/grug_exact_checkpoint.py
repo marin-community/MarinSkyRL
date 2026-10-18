@@ -1,10 +1,14 @@
 from pathlib import Path
 
+import ray
 import torch
 from omegaconf import DictConfig
 from transformers import AutoTokenizer
 
+from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.models.grug_moe import GrugMoeConfig, GrugMoeForCausalLM, GrugMoeGatedNorm
+from skyrl_train.training_batch import TrainingInputBatch
+from skyrl_train.workers.worker import PPORayActorGroup
 from tests.gpu.utils import get_test_actor_config
 
 TOKENIZER = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -86,3 +90,10 @@ def exact_numerics_config(
     cfg.generator.sampling_params.top_p = 1.0
     cfg.generator.sampling_params.top_k = -1
     return cfg
+
+
+def policy_logprobs(policy: PPORayActorGroup, batch: TrainingInputBatch) -> torch.Tensor:
+    """The ``[rows, response_length]`` float32 log-probabilities of ``batch``'s responses under ``policy``'s scoring
+    forward, on the CPU."""
+    outputs = ray.get(policy.async_run_ray_method("mesh", "forward", data=batch))
+    return concatenate_outputs_after_mesh_dispatch(policy.actor_infos, outputs)["output"].float().cpu()

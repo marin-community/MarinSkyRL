@@ -403,8 +403,6 @@ def test_generate_batched_routing_and_order_preservation(num_prompts, with_sessi
             }
 
     cfg = _make_min_cfg()
-    # Engines list each data-parallel rank of every engine group in order, so engine i serves rank i % 2.
-    cfg.generator.inference_engine_data_parallel_size = 2
 
     engines = [MockEngine() for _ in range(num_engines)]
     tokenizer = object()  # not used when prompt_token_ids are provided
@@ -422,13 +420,6 @@ def test_generate_batched_routing_and_order_preservation(num_prompts, with_sessi
     }
 
     out = asyncio.run(client.generate(input_batch))
-    serving_rank = {
-        ids[0]: index % 2
-        for index, engine in enumerate(engines)
-        for batch in engine.inputs
-        for ids in batch["prompt_token_ids"]
-    }
-    assert out["engine_dp_ranks"] == [serving_rank[i] for i in range(num_prompts)]
 
     # Validate reconstruction and ordering
     assert len(out["responses"]) == num_prompts

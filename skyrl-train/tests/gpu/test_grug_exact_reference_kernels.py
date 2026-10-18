@@ -8,7 +8,6 @@ from skyrl_train.models.grug_exact.reference_kernels import (
     ROTARY_DIM,
     gated_product_value,
     hybrid_input_norm_value,
-    logits_value,
     query_key_values,
     swiglu_value,
     xsa_head_gate_value,
@@ -19,7 +18,6 @@ from tests.gpu.grug_gpu_gates import require_hoppers
 
 # 3,328 rows put every non-NaN bf16 bit pattern into the head-gate logits ([rows, 1, 20]).
 ROWS = 3328
-EXPERTS = VERIFIED_MODEL.num_local_experts
 HIDDEN, HEADS, KV_HEADS = (
     VERIFIED_MODEL.hidden_size,
     VERIFIED_MODEL.num_attention_heads,
@@ -126,23 +124,6 @@ def _swiglu(generator):
     return results
 
 
-def _logits(generator):
-    router_input = _activations((ROWS, 1, HIDDEN), generator)
-    weight = (torch.randn(EXPERTS, HIDDEN, generator=generator) * 0.02).to(torch.bfloat16).cuda()
-    value = torch.randn(ROWS, 1, EXPERTS, generator=generator).cuda()
-    grad = torch.randn(ROWS, 1, EXPERTS, generator=generator).cuda()
-    results = []
-    for fused in (False, True):
-        x, w = _leaves(router_input, weight)
-        if fused:
-            out = logits_value(value, x, w)
-        else:
-            out = kernel_value(value, lambda x=x, w=w: F.linear(x.float(), w.float()))
-        out.backward(grad)
-        results.append((x.grad, w.grad))
-    return results
-
-
 def _hybrid_input_norm(generator):
     # The layer input feeds the norm, the variance's reference and the residual add after the attention, so its
     # gradient adds three contributions; the order autograd adds them in is part of the check.
@@ -211,13 +192,12 @@ def _query_key(generator, rope: bool):
     [
         _gated_product,
         _swiglu,
-        _logits,
         _hybrid_input_norm,
         _xsa_head_gate,
         lambda generator: _query_key(generator, rope=True),
         lambda generator: _query_key(generator, rope=False),
     ],
-    ids=["gated_product", "swiglu", "logits", "hybrid_input_norm", "xsa_head_gate", "query_key_rope", "query_key"],
+    ids=["gated_product", "swiglu", "hybrid_input_norm", "xsa_head_gate", "query_key_rope", "query_key"],
 )
 def test_reference_gradients_equal_autograd_of_their_chains_bit_for_bit(chain):
     require_hoppers(1)

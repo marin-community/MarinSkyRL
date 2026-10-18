@@ -9,7 +9,6 @@ from transformers import AutoTokenizer
 
 from skyrl_train.config.numerics import CheckFailure, NumericsMode, read_numerics
 from skyrl_train.dataset.routed_expert_batch import RoutedExpertRows
-from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.entrypoints.main_base import create_ray_wrapped_inference_engines_from_config
 from skyrl_train.exactness_check import ExactnessCheck
 from skyrl_train.inference_engines.base import UNKNOWN_ENGINE_DP_RANK, InferenceEngineInput, InferenceEngineOutput
@@ -19,7 +18,7 @@ from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.trajectory_runners.types import ENGINE_DP_RANKS_KEY, ROLLOUT_ENGINE_DP_RANKS_KEY
 from skyrl_train.utils import initialize_ray
 from skyrl_train.utils.utils import validate_cfg
-from tests.gpu.grug_exact_checkpoint import exact_numerics_config, write_snowball_checkpoint
+from tests.gpu.grug_exact_checkpoint import exact_numerics_config, policy_logprobs, write_snowball_checkpoint
 from tests.gpu.grug_gpu_gates import require_hoppers
 from tests.gpu.utils import init_worker_with_type
 
@@ -145,14 +144,6 @@ def _batch(
     return batch
 
 
-def _trainer_logprobs(policy, batch: TrainingInputBatch) -> torch.Tensor:
-    started = time.monotonic()
-    outputs = ray.get(policy.async_run_ray_method("mesh", "forward", data=batch))
-    logprobs = concatenate_outputs_after_mesh_dispatch(policy.actor_infos, outputs)["output"].float().cpu()
-    print(f"scored {batch.batch_size} rows in {time.monotonic() - started:.1f}s")
-    return logprobs
-
-
 def _mismatches(name: str, trainer: torch.Tensor, rollout: InferenceEngineOutput) -> int:
     """How many of the rollout's log-probabilities the trainer's rows (the rollout's rows first) do not reproduce bit
     for bit."""
@@ -208,10 +199,10 @@ def test_exact_trainer_reproduces_decode_invariant_engine_logprobs_across_a_weig
             "policy", shared_pg=None, colocate_all=False, num_gpus_per_node=POLICY_GPUS, num_nodes=1, cfg=cfg
         )
         batch = _batch(prompts, first, num_experts)
-        logprobs = _trainer_logprobs(policy, batch)
+        logprobs = policy_logprobs(policy, batch)
         assert _mismatches("initial weights", logprobs, first) == 0
         if router_replay:
-            shifted = _trainer_logprobs(policy, _batch(prompts, first, num_experts, route_shift=1))
+            shifted = policy_logprobs(policy, _batch(prompts, first, num_experts, route_shift=1))
             assert _mismatches("routes moved by one position", shifted, first) > 0
         check = ExactnessCheck(
             cfg.trainer.numerics.check.every_weight_syncs,
@@ -222,7 +213,7 @@ def test_exact_trainer_reproduces_decode_invariant_engine_logprobs_across_a_weig
         )
         _run_check(check, client)
         check_batch = check.batch(policy.actor_infos[0].rank.dp_size, num_experts)
-        metrics = check.compare(_trainer_logprobs(policy, check_batch), score_seconds=0.0)
+        metrics = check.compare(policy_logprobs(policy, check_batch), score_seconds=0.0)
         assert metrics["exactness_check/tokens"] > 0 and metrics["exactness_check/mismatched_tokens"] == 0
 
         batch["action_log_probs"] = logprobs * batch["loss_mask"]
@@ -235,8 +226,7 @@ def test_exact_trainer_reproduces_decode_invariant_engine_logprobs_across_a_weig
         updated = _generate(client, prompts, sampling_params)
         assert updated["response_ids"] != first["response_ids"]
         assert (
-            _mismatches("updated weights", _trainer_logprobs(policy, _batch(prompts, updated, num_experts)), updated)
-            == 0
+            _mismatches("updated weights", policy_logprobs(policy, _batch(prompts, updated, num_experts)), updated) == 0
         )
     finally:
         ray.shutdown()

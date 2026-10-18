@@ -1098,6 +1098,14 @@ async def test_exactness_check_scores_the_engines_after_qualifying_syncs_in_the_
     }
     assert reported == [scored, {}, {}, {"generate_failures": 1.0}, scored]
 
+    # A mode that promises bit-identical log-probabilities stops the run on that one bit under on_failure=stop.
+    trainer._exactness_check = ExactnessCheck(
+        2, CheckFailure.STOP, NumericsMode.EXACT, trainer.cfg.generator.sampling_params, trainer.tokenizer
+    )
+    await trainer._sync_policy_for_rollouts(reason=WeightSyncReason.INITIAL)
+    with pytest.raises(RuntimeError):
+        await replay_policy_forward(trainer, _one_row_batch())
+
 
 class _RecordingForwardPolicyGroup(_ForwardPolicyGroup):
     def __init__(self):
