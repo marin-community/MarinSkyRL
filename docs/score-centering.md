@@ -1,7 +1,8 @@
 # Optional PPO/TIS score centering
 
 Score centering adds a loss term to regular PPO with tokenwise truncated importance sampling (TIS).
-SC and its sampled diagnostics are disabled by default. Keep TIS enabled when enabling SC.
+SC is disabled by default. Occasional bounded probes are enabled in the supported configuration, so ordinary
+TIS can report a hypothetical correction before opting into SC. Keep TIS enabled when enabling SC.
 The [design](https://echo.oa.dev/wiki/608) describes the correction derived from the
 [score-centering paper](https://arxiv.org/html/2609.20807v1).
 
@@ -46,7 +47,8 @@ probability-changing filters cannot supply these behavior probabilities.
 Set `score_centering_enabled: false` with positive `score_centering_topk` to measure a matched control.
 It retains head capture and old/current rescoring while skipping the correction kernel. Ordinary TIS uses
 `score_centering_topk: 0`, `score_centering_enabled: false` and `generator.sampling_params.logprobs: 0`.
-It collects only the chosen token's behavior probability and performs no head rescoring.
+Between periodic probes it collects only the chosen token's behavior probability and performs no head rescoring.
+Set `trainer.algorithm.score_centering_probe.interval: 0` for the probes-disabled timing control.
 
 The sampled action's TIS weight applies to the PPO row. The additive SC row already integrates TIS and is
 reduced separately with the same whole-step counts. Multiplying it by that action's TIS weight again changes
@@ -55,6 +57,46 @@ current policy, preserving each distribution's measured omitted mass. Small omit
 bound parameter-gradient error or establish a learning benefit.
 
 ## Diagnostics
+
+### Periodic probes with SC off
+
+`trainer.algorithm.score_centering_probe` controls three bounds: `interval` in learner policy steps,
+`topk` (128), and `tokens_per_response` (32). The first eligible prompt group is probed at startup, then
+at most one group is selected after each interval. Other groups keep chosen-token-only capture.
+The selected group captures its full response heads in vLLM; the task worker then exports at most 32
+evenly spaced valid positions per response. The trainer rescores those positions in its existing old-policy
+forward. It computes the hypothetical correction with the finalized training advantages and removes all
+probe head tensors before the optimizer. SC-off optimizer inputs and updates are unchanged.
+
+Availability is logged at startup and reported as `score_centering_probe/available`. Probes require regular
+PPO, one tokenwise TIS truncation rule, local vLLM and unpacked Megatron with TP/CP/SP1. Distillation, FTPO,
+other objectives or backends, and an explicitly configured continuous head make periodic probes unavailable.
+Continuous capture can use the sampled loss diagnostics below. A selected group may be rejected by normal
+admission or lose all trainable positions; a scheduling interval does not guarantee an observation.
+`observed`, `sampled_tokens`, `sampled_responses`, `loss_tokens`, `coverage` and `seconds_since_previous`
+describe the evidence actually consumed. Coverage is sampled positions divided by this batch's loss tokens;
+the sample is one prompt group, so it is not an unbiased population estimate.
+
+Metrics under `score_centering_probe/` include:
+
+- `hypothetical_loss_mean` and `hypothetical_loss_abs_mean`: the actual would-be scalar correction at the
+  pre-update snapshot, using this batch's advantages. `ordinary_loss_abs_mean` supplies a scalar scale.
+- `unit_advantage_loss_*` and `zero_advantage_fraction`: a separate unit-advantage correction remains
+  interpretable when flat-reward groups give zero actual advantages. It is not the correction applied to training.
+- `current_retained_mass_mean`, `behavior_retained_mass_mean` and their omitted-mass counterparts:
+  full-vocabulary mass in and outside the captured K128 head. `tail_floor_fraction` identifies the tail-floor regime.
+- `old_behavior_log_ratio_*`, `sampled_tis_clipped_fraction`, source-age and source-policy-step bounds:
+  chosen-token mismatch and the ages of the generating weights. Fresh and stale counts and means are separate;
+  unstamped tokens remain unknown rather than being assigned the lease's version.
+
+At this snapshot current and old trainer probabilities are equal (`current_equals_old: 1`). Fresh-source
+disagreement with behavior measures engine mismatch at matching weights. Stale-source disagreement mixes
+engine mismatch with weight drift; it does not isolate either. These probes do not measure later PPO
+minibatches' current/old divergence. Scalar correction size and retained mass do not measure parameter-gradient
+change or predict a learning gain. Repeated correction or mismatch across prompt groups can justify a small
+matched TIS-versus-SC learning comparison; the comparison must establish any benefit.
+
+### Routine metrics and continuous-head diagnostics
 
 Ordinary `trainer.training_metrics` uses already available chosen-token probabilities and policy-step tags.
 `policy/mismatch/*` compares the trainer's pre-update probabilities with the actual generating policy.
