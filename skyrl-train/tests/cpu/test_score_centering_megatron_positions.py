@@ -85,7 +85,10 @@ def test_pipeline_two_row_outputs_construct_before_collection(monkeypatch, megat
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("compact", [False, True])
-def test_selected_response_reuses_sampled_normalizer_without_full_float_logits(dtype, compact, megatron_wrapper):
+@pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
+def test_selected_response_reuses_sampled_normalizer_without_full_float_logits(
+    dtype, compact, index_dtype, megatron_wrapper
+):
     attention_mask = torch.tensor([[0, 1, 1, 1, 1, 1, 1], [0, 0, 1, 1, 1, 0, 0]])
     sequences = torch.tensor([[0, 0, 1, 2, 3, 4, 5], [0, 0, 0, 1, 2, 0, 0]])
     selected_ids = torch.tensor([[[1, 3], [2, 4], [0, 5]], [[6, 1], [-1, -1], [-1, -1]]])
@@ -93,6 +96,7 @@ def test_selected_response_reuses_sampled_normalizer_without_full_float_logits(d
     candidate_positions = torch.tensor([[0, 2], [0, 1]]) if compact else None
     if compact:
         selected_ids = selected_ids.gather(1, candidate_positions.unsqueeze(-1).expand(-1, -1, 2))
+    selected_ids = selected_ids.to(index_dtype)
     torch.manual_seed(91)
     base_logits = torch.randn((2, 6, 7), dtype=dtype, requires_grad=True)
     logits = base_logits / 0.7

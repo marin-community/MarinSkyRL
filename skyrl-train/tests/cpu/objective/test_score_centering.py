@@ -167,7 +167,7 @@ def test_compact_probe_collation_keeps_only_requested_valid_positions_and_missin
     )
     assert output["score_topk_indices"].shape == (3, 2, 2)
     torch.testing.assert_close(output["score_probe_positions"], torch.tensor([[0, 3], [0, 0], [0, 0]]))
-    torch.testing.assert_close(output["score_topk_indices"][0], torch.tensor([[3, 7], [6, 8]]))
+    torch.testing.assert_close(output["score_topk_indices"][0], torch.tensor([[3, 7], [6, 8]], dtype=torch.int32))
     assert (output["score_topk_indices"][1:] == -1).all()
     assert torch.isnan(output["score_behavior_logprobs"][1:]).all()
     trajectory["loss_masks"][0][0] = 0
@@ -178,7 +178,7 @@ def test_compact_probe_collation_keeps_only_requested_valid_positions_and_missin
         sampled_logprobs=torch.tensor([[-0.8, 0, -1.0, -0.9], [-1.0, -2.0, 0, 0], [0, 0, 0, 0]]),
     )
     torch.testing.assert_close(filtered["score_probe_positions"], torch.tensor([[3], [0], [0]]))
-    torch.testing.assert_close(filtered["score_topk_indices"][0], torch.tensor([[6, 8]]))
+    torch.testing.assert_close(filtered["score_topk_indices"][0], torch.tensor([[6, 8]], dtype=torch.int32))
 
 
 def test_sc_off_optimizer_is_identical_after_hypothetical_probe_consumes_its_evidence():

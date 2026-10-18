@@ -167,8 +167,12 @@ def collate_score_centering(
             raise ValueError("behavior top-k evidence must align with response rows")
         if any(row.shape != (len(response), top_k) for row, response in zip(rows, response_token_ids, strict=True)):
             raise ValueError("behavior top-k width must match the configured capture width")
+    index_rows = trajectory_batch["student_topk_indices"]
+    index_dtype = (
+        torch.int32 if all(np.can_cast(row.dtype, np.int32, casting="safe") for row in index_rows) else torch.long
+    )
     indices, behavior, selected = collate_student_selected_rollout(
-        trajectory_batch, response_token_ids, response_mask, top_k
+        trajectory_batch, response_token_ids, response_mask, top_k, index_dtype=index_dtype
     )
     ids, scores = indices[selected], behavior[selected]
     ordered = ids.sort(dim=-1).values
