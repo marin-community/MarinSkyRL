@@ -8,13 +8,6 @@ from collections.abc import Sequence
 
 import torch
 
-from skyrl_train.inference_engines.vllm.decode_invariant.fa3 import (
-    FA3_DYNAMIC_SPLIT_MAX_BATCH,
-    FA3_INVARIANT_SPLITS,
-    fa3_causal_varlen,
-    fa3_fixed_split_metadata,
-)
-
 HOPPER_COMPUTE_CAPABILITY_MAJOR = 9
 # ``expert_outputs`` addresses each expert's weights in units of this many elements from the lowest-addressed one, a
 # stride that Triton specializes as divisible by 16, as it does the stride of vLLM's own stacked expert weights.
@@ -28,21 +21,73 @@ def require_hopper_gpu() -> None:
         raise RuntimeError(f"exact numerics run on Hopper GPUs (FA3); this process has {name}")
 
 
+def _fa3_causal_varlen(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    out: torch.Tensor,
+    *,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    seqused_k: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    softmax_scale: float,
+) -> torch.Tensor:
+    """FA3's causal varlen forward into ``out`` at one split, through the op ``_vllm_fa3_C.fwd``, which takes
+    ``cu_seqlens_k`` and ``seqused_k`` together."""
+    torch.ops._vllm_fa3_C.fwd(
+        query,
+        key,
+        value,
+        None,  # k_new
+        None,  # v_new
+        None,  # q_v
+        out,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        None,  # cu_seqlens_k_new
+        None,  # seqused_q
+        seqused_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        None,  # page_table
+        None,  # kv_batch_idx
+        None,  # leftpad_k
+        None,  # rotary_cos
+        None,  # rotary_sin
+        None,  # seqlens_rotary
+        None,  # q_descale
+        None,  # k_descale
+        None,  # v_descale
+        softmax_scale,
+        True,  # is_causal
+        -1,  # window_size_left
+        -1,  # window_size_right
+        0.0,  # softcap
+        True,  # is_rotary_interleaved
+        None,  # scheduler_metadata
+        1,  # num_splits
+        None,  # pack_gqa
+        0,  # sm_margin
+        None,  # s_aux
+        1,  # cp_world_size
+        0,  # cp_rank
+        None,  # cp_tot_seqused_k
+    )
+    return out
+
+
 @functools.lru_cache(maxsize=64)
-def _uniform_requests(rows: int, requests: int, query_heads_per_kv_head: int, kv_heads: int, device: torch.device):
-    """``requests`` varlen requests of ``rows`` rows each: their query starts and their fixed-split metadata."""
-    query_start = torch.arange(0, (requests + 1) * rows, rows, dtype=torch.int32, device=device)
-    return query_start, fa3_fixed_split_metadata(query_start, query_heads_per_kv_head, kv_heads)
+def _uniform_query_start(rows: int, requests: int, device: torch.device) -> torch.Tensor:
+    return torch.arange(0, (requests + 1) * rows, rows, dtype=torch.int32, device=device)
 
 
 def _fa3_forward(query, key, value, *, rows: int, requests: int, window: int | None, scale: float, out=None):
-    """FA3 over ``requests`` sequences of ``rows`` rows, each one varlen request from position 0 with
-    ``FA3_INVARIANT_SPLITS`` splits."""
+    """FA3 over ``requests`` sequences of ``rows`` rows, each one varlen request from position 0, at one split."""
     from vllm.vllm_flash_attn import flash_attn_varlen_func  # noqa: PLC0415 - vLLM is a GPU-only extra
 
-    query_start, metadata = _uniform_requests(
-        rows, requests, query.shape[1] // key.shape[1], key.shape[1], query.device
-    )
+    query_start = _uniform_query_start(rows, requests, query.device)
     return flash_attn_varlen_func(
         q=query,
         k=key,
@@ -55,8 +100,7 @@ def _fa3_forward(query, key, value, *, rows: int, requests: int, window: int | N
         causal=True,
         window_size=None if window is None else [window - 1, 0],
         fa_version=3,
-        num_splits=FA3_INVARIANT_SPLITS,
-        scheduler_metadata=metadata,
+        num_splits=1,
         out=out,
     )
 
@@ -70,7 +114,6 @@ def _fa3_window_rows_forward(query, key, value, *, rows: int, requests: int, win
     """Sliding-window FA3 over ``requests`` sequences of ``rows`` rows, each row computed as a decode-invariant engine
     computes it: the rows before the window's end as one request, each later row as a request over its window."""
     device = query.device
-    group, kv_heads = query.shape[1] // key.shape[1], key.shape[1]
     output = torch.empty_like(query)
     later = rows - window
     for index in range(requests):
@@ -85,26 +128,21 @@ def _fa3_window_rows_forward(query, key, value, *, rows: int, requests: int, win
             scale=scale,
             out=output[first : first + window],
         )
-        for begin in range(0, later, FA3_DYNAMIC_SPLIT_MAX_BATCH):
-            count = min(FA3_DYNAMIC_SPLIT_MAX_BATCH, later - begin)
-            query_start, metadata = _uniform_requests(1, count, group, kv_heads, device)
-            # Row p's keys are rows p - window + 1 .. p of the same sequence.
-            window_starts = torch.arange(first + begin + 1, first + begin + count + 2, dtype=torch.int32, device=device)
-            rows_out = slice(first + window + begin, first + window + begin + count)
-            fa3_causal_varlen(
-                query[rows_out],
-                key,
-                value,
-                output[rows_out],
-                cu_seqlens_q=query_start,  # one row per request
-                cu_seqlens_k=window_starts,  # each request's first key
-                seqused_k=_window_lengths(count, window, device),
-                max_seqlen_q=2,  # at 1, FA3 runs the requests non-causal, which blocks the keys differently
-                max_seqlen_k=window,
-                softmax_scale=scale,
-                scheduler_metadata=metadata,
-                num_splits=FA3_INVARIANT_SPLITS,
-            )
+        # Row p's keys are rows p - window + 1 .. p of the same sequence.
+        window_starts = torch.arange(first + 1, first + later + 2, dtype=torch.int32, device=device)
+        rows_out = slice(first + window, first + rows)
+        _fa3_causal_varlen(
+            query[rows_out],
+            key,
+            value,
+            output[rows_out],
+            cu_seqlens_q=_uniform_query_start(1, later, device),  # one row per request
+            cu_seqlens_k=window_starts,  # each request's first key
+            seqused_k=_window_lengths(later, window, device),
+            max_seqlen_q=2,  # at 1, FA3 runs the requests non-causal, which blocks the keys differently
+            max_seqlen_k=window,
+            softmax_scale=scale,
+        )
     return output
 
 
