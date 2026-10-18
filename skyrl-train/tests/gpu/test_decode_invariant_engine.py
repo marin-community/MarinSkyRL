@@ -24,9 +24,8 @@ from skyrl_train.utils import initialize_ray
 from tests.gpu.grug_gpu_gates import require_hoppers
 from tests.gpu.grug_tiny_checkpoint import write_tiny_checkpoint
 
-MAX_MODEL_LEN = 1024
-# Snowball's hidden width and attention geometry with four layers and eight narrow experts; a window shorter than the
-# prompts.
+MAX_MODEL_LEN = 4096
+# Snowball's hidden width, attention geometry and 2,048-token window with four layers and eight narrow experts.
 SHAPE = dict(
     hidden_size=2560,
     intermediate_size=128,
@@ -36,13 +35,13 @@ SHAPE = dict(
     num_attention_heads=20,
     num_key_value_heads=5,
     head_dim=128,
-    sliding_window=128,
+    sliding_window=2048,
 )
 # Steps of at most 16 tokens prefill prompts in chunks, beside other requests' decode steps; steps of 128 tokens
 # compute prefill rows with other expert-kernel tiles and GEMM row counts than decode steps.
 SMALL_STEPS, LARGE_STEPS = 16, 128
 RESPONSE_TOKENS = 24
-LONG_PROMPT = [1 + (index * 7919) % 20000 for index in range(500)]
+LONG_PROMPT = [1 + (index * 7919) % 20000 for index in range(2600)]
 # The prompt that runs beside the long one shares its first 256 tokens, which the prefix cache holds; two short ones
 # arrive later.
 SHARED_PREFIX_PROMPT = LONG_PROMPT[:256] + [7, 11, 13] * 30
@@ -156,7 +155,7 @@ def test_decode_invariant_engine_gives_a_response_the_same_log_probabilities_in_
         alone = asyncio.run(_generate(client, cfg, [LONG_PROMPT]))
         response, logprobs = alone["response_ids"][0], alone["response_logprobs"][0]
         beside = asyncio.run(_long_prompt_beside_others(client, cfg))
-        # The prompt and its response read back as one prompt of more than 512 tokens, in prefill chunks.
+        # The prompt and its response read back as one prompt past the window, in prefill chunks.
         reread = asyncio.run(_generate(client, cfg, [LONG_PROMPT + response], max_tokens=1, prompt_logprobs=0))
         reread_logprobs = [
             reread["prompt_logprobs"][0][len(LONG_PROMPT) + index][token] for index, token in enumerate(response)
