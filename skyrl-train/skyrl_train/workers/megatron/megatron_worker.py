@@ -1,5 +1,7 @@
 import asyncio
 import copy
+import json
+import math
 import os
 import time
 from collections import defaultdict
@@ -16,6 +18,7 @@ from huggingface_hub import snapshot_download
 from loguru import logger
 from megatron.bridge import AutoBridge
 from megatron.core.optimizer import ChainedOptimizer, DistributedOptimizer
+from megatron.core.distributed import finalize_model_grads
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 from megatron.core.tensor_parallel.random import get_cuda_rng_tracker
 from omegaconf import OmegaConf
@@ -497,6 +500,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         )
 
         self._normalize_mini_batch_size()
+        self._probe_open = False
 
         # create scheduler
         self.scheduler = get_megatron_optimizer_param_scheduler(
@@ -548,6 +552,198 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 self.cfg, "trainer.policy.megatron_config.logprob_chunk_size", default=None
             ),
         )
+
+    def ppo_begin(self, step: int, verify: bool) -> None:
+        """Open one streamed optimizer window with empty gradient buffers."""
+        assert not self._probe_open
+        self._probe_open = True
+        self._probe_step = step
+        self._probe_verify = verify
+        self._probe_tokens = 0.0
+        self._probe_chunks = 0
+        self._probe_metrics = defaultdict(list)
+        self._probe_timing = PhaseBreakdown("ppo_train", enabled=True)
+        self.optimizer.zero_grad()
+        for module in self.actor_module:
+            module.zero_grad_buffer()
+        torch.cuda.reset_peak_memory_stats()
+
+    def _probe_micro_batches(self, data):
+        micros = []
+        for experience in TrainingBatchIterator(data, self.cfg.trainer.micro_train_batch_size_per_gpu):
+            experience.to_device(torch.cuda.current_device())
+            position_ids = experience.attention_mask.long().cumsum(-1) - 1
+            position_ids.masked_fill_(experience.attention_mask == 0, 0)
+            micros.append(
+                MegatronPolicyMicroBatch(
+                    sequences=experience.sequences,
+                    attention_mask=experience.attention_mask,
+                    position_ids=position_ids,
+                    num_actions=experience.num_actions,
+                    old_action_log_probs=experience.action_log_probs,
+                    base_action_log_probs=experience.base_action_log_probs,
+                    advantages=experience.advantages,
+                    loss_mask=experience.loss_mask,
+                    rollout_action_logprobs=experience.rollout_logprobs,
+                    correction_weights=experience.correction_weights,
+                    response_span_tags=experience.response_span_tags,
+                    distillation=experience.distillation,
+                    ftpo=experience.ftpo,
+                    rollout_routed_experts=experience.rollout_routed_experts,
+                    pair_roles=experience.pair_roles,
+                )
+            )
+        return micros
+
+    def _probe_backward(self, data, *, streaming: bool) -> float:
+        micros = self._probe_micro_batches(data)
+        self.model.train()
+        config = get_model_config(self.actor_module[0])
+        original_finalize = config.finalize_model_grads_func
+        if streaming:
+            config.finalize_model_grads_func = None
+        try:
+            metrics = self.model.forward_backward_mini_batch(
+                micro_batches=micros,
+                seq_len=micros[0].sequences.shape[1],
+                micro_batch_size=micros[0].sequences.shape[0],
+                temperature=self.scoring_temperature,
+                timings=self._probe_timing,
+                defer_token_normalization=streaming and not self.cfg.trainer.gradient_streaming.mutate_normalizer,
+            )
+        finally:
+            config.finalize_model_grads_func = original_finalize
+        if streaming:
+            for metric in metrics:
+                for key, value in metric.items():
+                    self._probe_metrics[key].append(value)
+        return self.model.probe_policy_tokens
+
+    def ppo_accumulate(self, data) -> None:
+        """Add one chunk's unnormalized policy gradient without reduction or an optimizer step."""
+        assert self._probe_open and data.metadata["global_step"] == self._probe_step
+        self._probe_tokens += self._probe_backward(data, streaming=True)
+        self._probe_chunks += 1
+
+    def _probe_parameters_and_snapshot(self):
+        assert not self.optimizer.prepare_grads(), "Nonfinite probe gradient"
+        parameters = [p for p in self.optimizer.get_parameters() if p.grad is not None]
+        assert all(p.grad.dtype == torch.float32 for p in parameters)
+        norm = float(self.optimizer.get_grad_norm())
+        return parameters, [p.grad.detach().to("cpu", copy=True) for p in parameters], norm
+
+    @torch.no_grad()
+    def _probe_difference_norm(self, left, right) -> float:
+        assert len(self._probe_parameters) == len(left) == len(right)
+        for param, a, b in zip(self._probe_parameters, left, right, strict=True):
+            param.grad.copy_((a - b).to(param.grad.device))
+        return float(self.optimizer.get_grad_norm())
+
+    def _probe_apply_optimizer(self):
+        with self._probe_timing.span("megatron_optimizer_step"):
+            result = self.strategy.optimizer_step(
+                self.optimizer,
+                self.model,
+                self.scheduler,
+                name="actor",
+                consecutive_nonfinite_steps=self._consecutive_nonfinite_steps,
+                max_consecutive_nonfinite_steps=self.cfg.trainer.policy.max_consecutive_nonfinite_steps,
+            )
+        assert result.applied, "Probe optimizer update was skipped"
+        self._consecutive_nonfinite_steps = 0
+        self._model_version_step = self._probe_step
+        self._probe_open = False
+        status = policy_training_metrics(self._probe_metrics, 1)
+        status["raw_grad_norm"] = result.grad_norm
+        status["policy_lr"] = self.optimizer.param_groups[0]["lr"]
+        status.update({f"probe/{key}": value for key, value in self._probe_timing.durations().items()})
+        status["probe/peak_allocated_bytes"] = torch.cuda.max_memory_allocated()
+        status["probe/loss_tokens"] = self._probe_tokens
+        status["probe/chunks"] = self._probe_chunks
+        output = TrainingOutputBatch()
+        output.metadata = {"train_status": status}
+        return output
+
+    def ppo_finish(self, expected_tokens: int):
+        """Normalize and reduce the accumulated gradient, then verify or apply its optimizer update."""
+        assert self._probe_open and self._probe_tokens > 0
+        assert self._probe_tokens == expected_tokens, (
+            f"THUNDERSYNC_N_MISMATCH stream={self._probe_tokens} batch_mask={expected_tokens}"
+        )
+        if not self.cfg.trainer.gradient_streaming.mutate_normalizer:
+            for module in self.actor_module:
+                module.scale_gradients(1.0 / self._probe_tokens)
+        with self._probe_timing.span("megatron_finalize_model_grads"):
+            finalize_model_grads(self.actor_module)
+        if self._probe_verify:
+            self._probe_parameters, self._probe_streamed, self._probe_streamed_norm = (
+                self._probe_parameters_and_snapshot()
+            )
+            return None
+        return self._probe_apply_optimizer()
+
+    def ppo_reference(self, data):
+        """Compare a prepared full-batch gradient with the streamed gradient and commit the batch update."""
+        assert self._probe_open and self._probe_verify
+        self.optimizer.zero_grad()
+        for module in self.actor_module:
+            module.zero_grad_buffer()
+        tokens = self._probe_backward(data, streaming=False)
+        assert tokens == self._probe_tokens, f"THUNDERSYNC_N_MISMATCH stream={self._probe_tokens} batch={tokens}"
+        parameters, snapshot, norm = self._probe_parameters_and_snapshot()
+        assert len(parameters) == len(self._probe_parameters)
+        self._probe_parameters = parameters
+        if data.metadata["probe_reference"] == "batch":
+            self._probe_batch = snapshot
+            self._probe_batch_norm = norm
+            return None
+        noise = self._probe_difference_norm(snapshot, self._probe_batch)
+        difference = self._probe_difference_norm(self._probe_streamed, self._probe_batch)
+        batch_norm = self._probe_batch_norm
+        assert batch_norm > 0 and math.isfinite(batch_norm), "Exactness check requires a nonzero finite batch gradient"
+        relative = difference / batch_norm
+        relative_noise = noise / batch_norm
+        cosine = (
+            (self._probe_streamed_norm**2 + batch_norm**2 - difference**2)
+            / (2 * self._probe_streamed_norm * batch_norm)
+            if self._probe_streamed_norm > 0
+            else 0.0
+        )
+        cosine = min(1.0, max(-1.0, cosine))
+        passed = relative <= max(3 * relative_noise, 1e-5) and cosine >= 0.9999
+        verification = {
+            "step": self._probe_step,
+            "rank": self._rank,
+            "pass": passed,
+            "relative_l2": relative,
+            "layout_noise": relative_noise,
+            "cosine": cosine,
+            "streamed_norm": self._probe_streamed_norm,
+            "batch_norm": batch_norm,
+            "perturbed_norm": norm,
+            "streamed_tokens": self._probe_tokens,
+            "batch_tokens": tokens,
+            "chunks": self._probe_chunks,
+            "ppo_ratio_exact_unit_fraction": policy_training_metrics(self._probe_metrics, 0).get(
+                "ppo_ratio_exact_unit_fraction"
+            ),
+            "mutation": bool(self.cfg.trainer.gradient_streaming.mutate_normalizer),
+        }
+        if self._rank == 0:
+            logger.info("thundersync_probe_exactness {}", json.dumps(verification))
+        if not passed and (
+            self.cfg.trainer.gradient_streaming.mutate_normalizer
+            or not self.cfg.trainer.gradient_streaming.allow_unresolved_exactness
+        ):
+            raise RuntimeError(f"THUNDERSYNC_EXACTNESS_FAIL {json.dumps(verification)}")
+        with torch.no_grad():
+            for param, grad in zip(self._probe_parameters, self._probe_batch, strict=True):
+                param.grad.copy_(grad.to(param.grad.device))
+        self._probe_batch = None
+        self._probe_streamed = None
+        output = self._probe_apply_optimizer()
+        output.metadata["verification"] = verification
+        return output
 
     def probe_forward_calls(self, data):
         """Measure whole-batch and eight split forwards while preserving model mode and RNG state."""

@@ -1,5 +1,5 @@
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import Any, Callable, List, Optional
 
@@ -480,6 +480,7 @@ class MegatronModelWrapper:
         temperature: float = 1.0,
         timings: PhaseBreakdown | None = None,
         profiler: Profiler | None = None,
+        defer_token_normalization: bool = False,
     ) -> List[dict]:
         """
         Run forward-backward over a full mini-batch consisting of multiple micro-batches.
@@ -521,6 +522,9 @@ class MegatronModelWrapper:
             self.cfg.trainer.algorithm.max_seq_len,
             sum_data_parallel,
         )
+        self.probe_policy_tokens = counts.policy.tokens
+        if defer_token_normalization:
+            counts = replace(counts, policy=replace(counts.policy, tokens=1.0))
         ftpo_normalization = None
         if micro_batches[0].ftpo is not None:
             ftpo_normalization = ftpo_counts(

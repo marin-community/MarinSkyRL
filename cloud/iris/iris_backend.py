@@ -1104,6 +1104,7 @@ def launch(args: SimpleNamespace, expected_launcher_commit: str) -> LaunchOutcom
             coscheduling=coscheduling,
             replicas=replicas,
             max_retries_failure=args.max_retries,
+            max_retries_preemption=args.max_retries,
             max_task_failures=args.max_retries,
             priority_band=priority_band,
             timeout=None if args.timeout == 0 else _seconds_to_duration(args.timeout),

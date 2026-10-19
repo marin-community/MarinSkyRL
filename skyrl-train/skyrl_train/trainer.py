@@ -364,6 +364,7 @@ class RayPPOTrainer:
             cfg.trainer.algorithm.resolved_group_advantage
         )
         self.colocate_all = cfg.trainer.placement.colocate_all
+        self._validate_gradient_streaming_config()
         self.tracker = tracker
         self.tokenizer = tokenizer
         self.train_dataset = train_dataset
@@ -1391,7 +1392,10 @@ class RayPPOTrainer:
                 json.dumps(
                     {
                         "step": self.global_step,
-                        "arm": "A",
+                        "arm": self._thundersync_arm,
+                        "exactness": "exactness unresolved"
+                        if self.cfg.trainer.gradient_streaming.allow_unresolved_exactness
+                        else "gate required",
                         "arrivals": arrivals,
                         "last_arrival": arrivals[-1]["time"] if arrivals else None,
                         "exposed_learner": step_timer.duration
@@ -1538,10 +1542,88 @@ class RayPPOTrainer:
         await self._begin_speculator_capture(step)
         await self.context.publish(step)
 
+    def _validate_gradient_streaming_config(self) -> None:
+        trainer = self.cfg.trainer
+        probe = trainer.gradient_streaming
+        if probe.chunk_groups is None:
+            return
+        algorithm = trainer.algorithm
+        assert trainer.strategy == "megatron" and not self.colocate_all
+        assert algorithm.advantage_estimator == "grpo" and not algorithm.advantage_batch_normalize
+        assert algorithm.policy_loss_type == "regular" and algorithm.loss_reduction == "token_mean"
+        assert not reference_model_required(algorithm) and not algorithm.use_entropy_loss
+        assert algorithm.off_policy_correction == "none" and algorithm.think_token_weight == 1
+        assert not algorithm.dynamic_sampling.type and not trainer.trajectory_selector.type
+        assert trainer.update_epochs_per_batch == 1
+        assert trainer.train_batch_size == trainer.policy_mini_batch_size
+        assert trainer.rollout_buffer.max_staleness_steps == 0
+        assert not trainer.offload_optimizer_during_rollouts and self.distillation_plan is None
+        megatron = trainer.policy.megatron_config
+        assert not megatron.ddp_config.overlap_grad_reduce and megatron.ddp_config.average_in_collective
+        assert not megatron.moe_router_replay and trainer.policy.grug_query_bias_update_mode == "frozen"
+        dp = (
+            trainer.placement.policy_num_nodes
+            * trainer.placement.policy_num_gpus_per_node
+            // (
+                megatron.tensor_model_parallel_size
+                * megatron.pipeline_model_parallel_size
+                * megatron.context_parallel_size
+            )
+        )
+        assert isinstance(probe.chunk_groups, int) and probe.chunk_groups > 0
+        assert probe.chunk_groups * self.cfg.generator.n_samples_per_prompt % dp == 0
+        assert probe.arm_order and set(probe.arm_order) <= {"A", "B"}
+
+    async def _probe_actor_call(self, dispatch: str, method: str, *args):
+        refs = self.policy_model.async_run_ray_method(dispatch, method, *args)
+        return await asyncio.to_thread(collect_actor_results, self.policy_model.actor_infos, refs, operation=method)
+
+    async def _consume_policy_chunks(self, queue, verify: bool) -> None:
+        assert self.critic_model is None and self.ref_model is None
+        await self._probe_actor_call("pass_through", "ppo_begin", self.global_step, verify)
+        pending = []
+        consumed = set()
+        chunk_groups = self.cfg.trainer.gradient_streaming.chunk_groups
+
+        async def accumulate(groups):
+            uids = {group.uid for group in groups}
+            assert len(uids) == len(groups) and not (consumed & uids), "Duplicated streamed group"
+            consumed.update(uids)
+            data = await asyncio.to_thread(
+                self.convert_rollout_groups_to_training_input, groups, expected_group_count=len(groups)
+            )
+            data = await self._prepare_policy_training_input(data)
+            data.metadata["global_step"] = self.global_step
+            with Timer("train_critic_and_policy", self.all_timings), Timer("policy_train", self.all_timings):
+                await self._probe_actor_call("mesh", "ppo_accumulate", data)
+
+        with Timer("run_training", self.all_timings):
+            while True:
+                groups = await queue.get()
+                if groups is None:
+                    break
+                pending.extend(groups)
+                while len(pending) >= chunk_groups:
+                    chunk, pending = pending[:chunk_groups], pending[chunk_groups:]
+                    await accumulate(chunk)
+            if pending:
+                await accumulate(pending)
+        assert len(consumed) == self.context.config.batch_size, "Missing streamed group"
+
     async def _train_step(self, epoch: int, step_wall: StepWallTime) -> TrainingInputBatch:
         """Read this step's batch from the rollout buffer, train on it, sync the new weights, and return the batch."""
         self._thundersync_arrivals = []
         probe_started = time.perf_counter()
+        probe = self.cfg.trainer.gradient_streaming
+        verify = self.global_step in probe.verify_steps
+        self._thundersync_arm = (
+            "A"
+            if probe.chunk_groups is None
+            else ("B" if verify else probe.arm_order[max(self.global_step - 3, 0) % len(probe.arm_order)])
+        )
+        streaming = self._thundersync_arm == "B"
+        queue = asyncio.Queue() if streaming else None
+        consumer = asyncio.create_task(self._consume_policy_chunks(queue, verify)) if streaming else None
 
         async def admitted(groups):
             elapsed = time.perf_counter() - probe_started
@@ -1555,7 +1637,10 @@ class RayPPOTrainer:
                         "samples": len(responses),
                     }
                 )
-            await self._submit_admitted_groups_for_teacher_scoring(groups)
+            if streaming:
+                queue.put_nowait(groups)
+            else:
+                await self._submit_admitted_groups_for_teacher_scoring(groups)
 
         step_wall.start("group_admission")
         logger.info(
@@ -1586,17 +1671,45 @@ class RayPPOTrainer:
                 scored_distillation = await self._await_admitted_teacher_evidence(groups)
 
         step_wall.start("batch_assembly")
+        if streaming:
+            queue.put_nowait(None)
+            await consumer
         training_input = await asyncio.to_thread(self.convert_rollout_groups_to_training_input, groups)
         if scored_distillation is not None:
             self._attach_teacher_evidence(training_input, scored_distillation)
         self._log_rollout_batch_completed(groups, duration_seconds=rollout_wait_timer.duration)
 
         step_wall.start("training_preparation")
-        with (
-            Timer("run_training", self.all_timings),
-            async_phase_window("training", step=self.global_step, enabled=self._rollout_spans_enabled),
-        ):
-            status = await self._run_training(training_input, step_wall=step_wall)
+        if streaming:
+            with Timer("train_critic_and_policy", self.all_timings), Timer("policy_train", self.all_timings):
+                expected_tokens = int(training_input["loss_mask"].sum().item())
+                statuses = await self._probe_actor_call("pass_through", "ppo_finish", expected_tokens)
+            if verify:
+                reference = await self._prepare_policy_training_input(training_input)
+                reference.metadata["global_step"] = self.global_step
+                reference.metadata["probe_reference"] = "batch"
+                await self._probe_actor_call("mesh", "ppo_reference", reference)
+                generator = torch.Generator().manual_seed(int(self.cfg.trainer.seed) + self.global_step)
+                order = torch.randperm(len(reference), generator=generator)
+                perturbed = TrainingInputBatch(
+                    {key: value[order] if value is not None else None for key, value in reference.items()}
+                )
+                perturbed.metadata = dict(reference.metadata)
+                perturbed.metadata["probe_reference"] = "perturbed"
+                for key in ("sequences", "attention_mask"):
+                    perturbed[key] = torch.nn.functional.pad(perturbed[key], (1, 0))
+                statuses = await self._probe_actor_call("mesh", "ppo_reference", perturbed)
+                verification = statuses[0].metadata["verification"]
+                logger.info("thundersync_probe_exactness {}", json.dumps(verification))
+            status = statuses[0].metadata["train_status"]
+            self.all_metrics.update({f"policy/{key}": value for key, value in status.items()})
+            self._policy_version_step = self.global_step
+        else:
+            with (
+                Timer("run_training", self.all_timings),
+                async_phase_window("training", step=self.global_step, enabled=self._rollout_spans_enabled),
+            ):
+                status = await self._run_training(training_input, step_wall=step_wall)
         step_wall.start("group_bookkeeping")
         self._log_optimizer_step_completed(
             epoch=epoch,
@@ -1697,16 +1810,9 @@ class RayPPOTrainer:
         self._log_metrics_stdout(startup_eval, step=self.global_step, kind="startup")
         self.tracker.log(startup_eval, step=self.global_step, commit=False)
 
-    async def _run_training(self, training_input: TrainingInputBatch, *, step_wall: StepWallTime | None = None):
-        if (
-            "ftpo_chosen_mask" in training_input
-            and not training_input["loss_mask"].any()
-            and not training_input.get("ftpo_weights", training_input["loss_mask"]).any()
-        ):
-            self.all_timings["train_critic_and_policy"] = 0.0
-            self.all_metrics["policy/policy_update_steps"] = 0.0
-            self.all_metrics["ftpo/empty_batch"] = 1.0
-            return {"policy_update_steps": 0.0}
+    async def _prepare_policy_training_input(
+        self, training_input: TrainingInputBatch, *, step_wall: StepWallTime | None = None
+    ) -> TrainingInputBatch:
         # The drain after the last weight sync can go stale while the rollout buffer fills, so align the
         # policy actor loops immediately before every forward.
         await self._drain_policy_event_loops()
@@ -1745,6 +1851,20 @@ class RayPPOTrainer:
                 step_wall.start("training_preparation")
             with Timer("dump_data_batch", self.all_timings):
                 self.dump_data(training_input, file_name=f"global_step_{self.global_step}_training_input")
+
+        return training_input
+
+    async def _run_training(self, training_input: TrainingInputBatch, *, step_wall: StepWallTime | None = None):
+        if (
+            "ftpo_chosen_mask" in training_input
+            and not training_input["loss_mask"].any()
+            and not training_input.get("ftpo_weights", training_input["loss_mask"]).any()
+        ):
+            self.all_timings["train_critic_and_policy"] = 0.0
+            self.all_metrics["policy/policy_update_steps"] = 0.0
+            self.all_metrics["ftpo/empty_batch"] = 1.0
+            return {"policy_update_steps": 0.0}
+        training_input = await self._prepare_policy_training_input(training_input, step_wall=step_wall)
 
         if step_wall is not None:
             step_wall.start("policy_training")
@@ -1800,9 +1920,11 @@ class RayPPOTrainer:
             del self._distillation_tickets[group.uid]
         return scored
 
-    def convert_rollout_groups_to_training_input(self, groups: List[RolloutGroup]) -> TrainingInputBatch:
+    def convert_rollout_groups_to_training_input(
+        self, groups: List[RolloutGroup], *, expected_group_count: int | None = None
+    ) -> TrainingInputBatch:
         """Concatenate one batch of admitted groups and convert it to a training batch."""
-        batch_size = self.context.config.batch_size
+        batch_size = self.context.config.batch_size if expected_group_count is None else expected_group_count
         max_staleness_steps = self.context.config.max_staleness_steps
         assert len(groups) == batch_size, f"Expected {batch_size} groups, got {len(groups)}"
         with Timer("assemble_generation_group_mini_batch", self.all_timings):
