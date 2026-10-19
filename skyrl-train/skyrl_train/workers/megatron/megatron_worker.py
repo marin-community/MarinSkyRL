@@ -373,6 +373,63 @@ class MegatronWorker:
 
 
 class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
+    def performance_settings(self, width, enabled, diagnostic_tokens, temperature):
+        self.cfg.trainer.algorithm.score_centering_topk = width
+        self.cfg.trainer.algorithm.score_centering_enabled = enabled
+        self.cfg.trainer.algorithm.score_centering_diagnostic_tokens = diagnostic_tokens
+        self.cfg.generator.sampling_params.temperature = temperature
+        self.cfg.generator.sampling_params.logprobs = width
+        assert self.model.cfg is self.cfg
+        return self.performance_memory(reset=True)
+
+    def performance_memory(self, reset=False):
+        from skyrl_train.entrypoints.score_centering_performance import memory_stats
+
+        return {"rank": self._rank, **memory_stats(reset)}
+
+    def performance_reference(self, data):
+        from skyrl_train.entrypoints.score_centering_performance import reference_forward
+
+        return reference_forward(self, data)
+
+    def performance_check_positions(self, enabled):
+        from skyrl_train.entrypoints.score_centering_performance import checked_response_logprobs
+
+        if enabled:
+            self._performance_response_original = self.model._response_logprobs
+            self._performance_reference_stats = {"positions": 0, "chosen_max_error": 0.0, "head_max_error": 0.0}
+            self.model._response_logprobs = checked_response_logprobs(
+                self._performance_response_original, self._performance_reference_stats
+            )
+            return None
+        self.model._response_logprobs = self._performance_response_original
+        return dict(self._performance_reference_stats)
+
+    def performance_profile(self, enabled):
+        from skyrl_train.entrypoints.score_centering_performance import cProfile, profile_summary
+
+        if enabled:
+            self._performance_profile_originals = {}
+            self._performance_profile_results = []
+
+            def wrapped(name, original):
+                def profile(*args, **kwargs):
+                    profiler = cProfile.Profile()
+                    result = profiler.runcall(original, *args, **kwargs)
+                    self._performance_profile_results.append({"phase": name, **profile_summary(profiler)})
+                    return result
+
+                return profile
+
+            for name in ("forward", "forward_backward_mini_batch"):
+                original = getattr(self.model, name)
+                self._performance_profile_originals[name] = original
+                setattr(self.model, name, wrapped(name, original))
+            return None
+        for name, original in self._performance_profile_originals.items():
+            setattr(self.model, name, original)
+        return {"rank": self._rank, "profiles": self._performance_profile_results}
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.model: MegatronModelWrapper = None
