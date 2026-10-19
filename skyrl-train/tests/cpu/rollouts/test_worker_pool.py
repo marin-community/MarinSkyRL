@@ -459,7 +459,6 @@ async def test_shutdown_kills_every_worker_after_startup_failure(
             start_interval_seconds=start_interval_seconds,
         ),
     )
-    # The caller can retain the startup error while shutting down its worker pool.
     startup_error = ray.exceptions.RayActorError if failure_phase == "constructor" else ray.exceptions.RayTaskError
     with pytest.raises(startup_error, match="runner (build|startup) failed"):
         await asyncio.wait_for(pool.startup(), timeout=120)

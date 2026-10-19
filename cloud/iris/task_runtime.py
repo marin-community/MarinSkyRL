@@ -1207,7 +1207,7 @@ def wait_for_nodes(ray_address: str, expected_nodes: int, timeout: int, refresh=
                 try:
                     refresh()
                 except Exception as exc:
-                    _log(f"Warning: rendezvous rewrite failed (will retry): {exc}")
+                    _log(f"Warning: rendezvous refresh failed (will retry): {exc}")
             alive = [n for n in ray.nodes() if n.get("Alive")]
             count = len(alive)
             if count != last_count:
