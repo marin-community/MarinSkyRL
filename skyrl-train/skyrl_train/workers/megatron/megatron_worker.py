@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import os
+import time
 from collections import defaultdict
 from datetime import timedelta
 from enum import StrEnum
@@ -548,8 +549,34 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             ),
         )
 
+    def probe_forward_calls(self, data):
+        """Measure whole-batch and eight split forwards while preserving model mode and RNG state."""
+        was_training = self.actor_module[0].training
+        rng_states = get_cuda_rng_tracker().get_states()
+        chunks = list(data.chunk(4))
+        assert len(chunks) == 8, f"Expected eight local four-row chunks, got {len(chunks)}"
+
+        def measured(batch):
+            torch.cuda.synchronize()
+            started = time.perf_counter()
+            self.forward(batch)
+            torch.cuda.synchronize()
+            return time.perf_counter() - started
+
+        try:
+            with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
+                whole = measured(data)
+                split = [measured(chunk) for chunk in chunks]
+        finally:
+            get_cuda_rng_tracker().set_states(rng_states)
+            self.model.train() if was_training else self.model.eval()
+        output = TrainingOutputBatch()
+        output.metadata = {"calibration": {"rank": self._rank, "whole": whole, "split": split}}
+        return output
+
     def _ppo_train_impl(self, train_data, timing: PhaseBreakdown) -> "TrainingOutputBatch":
         """Train through Megatron Core's pipeline scheduler."""
+        torch.cuda.reset_peak_memory_stats()
         self._drain_r3_decentral_stagger(train_data)
         if self.model.router_replay is not None and train_data.routed_experts is None:
             raise ValueError("moe_router_replay is on but the batch carries no rollout_routed_experts")
@@ -708,6 +735,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             self._warned_exact_unit_policy_ratio = True
 
         output = TrainingOutputBatch()
+        status_mean.update({f"probe/{key}": value for key, value in timing.durations().items()})
+        status_mean["probe/peak_allocated_bytes"] = torch.cuda.max_memory_allocated()
         output.metadata = {"train_status": status_mean}
         return output
 

@@ -1385,6 +1385,39 @@ class RayPPOTrainer:
             self.all_metrics.update(
                 step_wall.finish(step_timer.duration, ended_at=step_timer.start_time + step_timer.duration)
             )
+            arrivals = self._thundersync_arrivals
+            logger.info(
+                "thundersync_probe_step {}",
+                json.dumps(
+                    {
+                        "step": self.global_step,
+                        "arm": "A",
+                        "arrivals": arrivals,
+                        "last_arrival": arrivals[-1]["time"] if arrivals else None,
+                        "exposed_learner": step_timer.duration
+                        - arrivals[-1]["time"]
+                        - self.all_timings.get("sync_weights", 0.0)
+                        if arrivals
+                        else None,
+                        "timers": dict(self.all_timings),
+                        "policy_metrics": {k: v for k, v in self.all_metrics.items() if k.startswith("policy/")},
+                    }
+                ),
+            )
+            if self.cfg.trainer.gradient_streaming.measure_call_overhead and self.global_step >= 3:
+                refs = self.policy_model.async_run_ray_method("mesh", "probe_forward_calls", training_input)
+                results = await asyncio.to_thread(
+                    collect_actor_results, self.policy_model.actor_infos, refs, operation="probe forward calibration"
+                )
+                logger.info(
+                    "thundersync_probe_calibration {}",
+                    json.dumps(
+                        {
+                            "step": self.global_step,
+                            "ranks": [r.metadata["calibration"] for r in results],
+                        }
+                    ),
+                )
             self._update_step_performance_metrics(
                 training_input, core_seconds=core_seconds, cycle_started=cycle_started
             )
@@ -1507,6 +1540,23 @@ class RayPPOTrainer:
 
     async def _train_step(self, epoch: int, step_wall: StepWallTime) -> TrainingInputBatch:
         """Read this step's batch from the rollout buffer, train on it, sync the new weights, and return the batch."""
+        self._thundersync_arrivals = []
+        probe_started = time.perf_counter()
+
+        async def admitted(groups):
+            elapsed = time.perf_counter() - probe_started
+            for group in groups:
+                responses = group.trajectory_batch["response_ids"]
+                self._thundersync_arrivals.append(
+                    {
+                        "uid": group.uid,
+                        "time": elapsed,
+                        "tokens": sum(len(row) for row in responses),
+                        "samples": len(responses),
+                    }
+                )
+            await self._submit_admitted_groups_for_teacher_scoring(groups)
+
         step_wall.start("group_admission")
         logger.info(
             "Rollout batch started: step={} required_groups={}", self.global_step, self.context.config.batch_size
@@ -1521,7 +1571,7 @@ class RayPPOTrainer:
                     recent_step_times=self._step_time_history,
                     timeout_override=self.group_admission_stall_timeout,
                 ),
-                on_admitted=self._submit_admitted_groups_for_teacher_scoring,
+                on_admitted=admitted,
             )
         self.all_metrics.update(selection_metrics)
         await self._seal_speculator_capture()

@@ -651,16 +651,27 @@ class MegatronModelWrapper:
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.actor_module))
 
         timing = timings or PhaseBreakdown("ppo_train", enabled=False)
-        with timing.span("megatron_forward_backward_scheduler"):
-            metrics_list = forward_backward_func(
-                forward_step_func=forward_step,
-                data_iterator=batch_generator,
-                model=self.actor_module,
-                num_microbatches=len(micro_batches),
-                seq_length=seq_len,
-                micro_batch_size=micro_batch_size,
-                forward_only=False,
-            )
+        model_config = get_model_config(self.actor_module[0])
+        original_finalize = model_config.finalize_model_grads_func
+
+        def timed_finalize(*args, **kwargs):
+            with timing.span("megatron_finalize_model_grads"):
+                return original_finalize(*args, **kwargs)
+
+        model_config.finalize_model_grads_func = timed_finalize if original_finalize is not None else None
+        try:
+            with timing.span("megatron_forward_backward_scheduler"):
+                metrics_list = forward_backward_func(
+                    forward_step_func=forward_step,
+                    data_iterator=batch_generator,
+                    model=self.actor_module,
+                    num_microbatches=len(micro_batches),
+                    seq_length=seq_len,
+                    micro_batch_size=micro_batch_size,
+                    forward_only=False,
+                )
+        finally:
+            model_config.finalize_model_grads_func = original_finalize
 
         if self.router_replay is not None:
             # Fail before the optimizer step: a non-empty FIFO or a masked row
