@@ -14,8 +14,10 @@ import ray
 
 from skyrl_train.entrypoints.main_base import config_dir, run_ray_driver
 from skyrl_train.rollouts.context import TrainingContext
+from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.checkpoint_listing import extract_step_from_path
 from skyrl_train.utils.trainer_utils import ResumeMode
+from tests.gpu.utils import import_worker
 from tests.training_batch_replay import (
     BatchReplayProvenance,
     CapturingRayPPOTrainer,
@@ -25,7 +27,6 @@ from tests.training_batch_replay import (
     replay_policy_forward,
     validate_artifact_destination,
 )
-from tests.gpu.utils import import_worker
 
 
 class Mode(StrEnum):
@@ -125,17 +126,20 @@ def _replay_experiment_class():
     TerminalBenchExp = _terminal_bench_experiment_class()
 
     class ReplayTerminalBenchExp(TerminalBenchExp):
-        """Build training actors only; never construct rollout/inference engines."""
+        """Build model actors and a training context for one saved policy forward."""
 
         def _setup_replay_trainer(self):
+            client_cfg = OmegaConf.merge(self.cfg, {"generator": {"enable_http_endpoint": False}})
+            client = InferenceEngineClient([], self.tokenizer, client_cfg)
+            runner = self.get_trajectory_runner(self.cfg, self.tokenizer, client)
             trainer = self.get_trainer(
                 cfg=self.cfg,
                 tracker=None,
                 tokenizer=self.tokenizer,
                 train_dataset=self.train_dataset,
                 eval_dataset=self.eval_dataset,
-                inference_engine_client=None,
-                trajectory_runner=None,
+                inference_engine_client=client,
+                trajectory_runner=runner,
                 colocate_pg=self.colocate_pg,
             )
             strategy = str(self.cfg.trainer.strategy)
@@ -167,7 +171,7 @@ def _replay_experiment_class():
                 shapes = {key: list(value.shape) for key, value in result.items() if value is not None}
                 logger.info(f"TRAINING_BATCH_REPLAY_OK target_step={provenance.target_step} tensors={shapes}")
             finally:
-                trainer.cleanup_ray_actors()
+                asyncio.run(trainer.shutdown())
 
     return ReplayTerminalBenchExp
 

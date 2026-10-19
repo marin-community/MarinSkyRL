@@ -45,9 +45,11 @@ For replay, submit the same config and overrides with only:
 +batch_replay.mode=replay
 ```
 
-Replay validates the artifact, source, resolved config, and checkpoint before initialization. It then creates only
-the policy/ref/critic actors, loads the checkpoint, performs the production policy-event-loop drain, and invokes
-`fwd_logprobs_values_reward`. Success is the log marker:
+Replay validates the artifact, source, resolved config, and checkpoint before initialization. It builds the
+policy/ref/critic actors and a training context, loads the checkpoint, performs the production policy-event-loop
+drain, and invokes `fwd_logprobs_values_reward`. The context owns a rollout buffer, and enabled trajectory retention
+starts a sink. An empty inference client and an unstarted rollout pool satisfy the trainer's worker interface.
+Full shutdown releases the model actors, buffer and retention resources. Success is the log marker:
 
 ```text
 TRAINING_BATCH_REPLAY_OK target_step=<N+1> tensors=...

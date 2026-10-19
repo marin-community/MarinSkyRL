@@ -19,12 +19,12 @@ from skyrl_train.utils import initialize_ray
 from skyrl_train.utils.utils import validate_cfg
 from tests.gpu.grug_gpu_gates import require_hoppers
 from tests.gpu.grug_serving import rank0_validation_snapshot
+from tests.gpu.grug_tiny_checkpoint import write_tiny_checkpoint
 from tests.gpu.test_grug_megatron import (
     _config,
     _init_policy,
     _megatron_response_logprobs,
     _padded_batch,
-    _write_tiny_checkpoint,
 )
 
 
@@ -50,7 +50,7 @@ def write_tiny_hero_checkpoint(path: Path):
         head_dim=16,
         sliding_window=8,
     )
-    _write_tiny_checkpoint(path, shape=shape, num_experts_per_tok=8)
+    write_tiny_checkpoint(path, shape=shape, num_experts_per_tok=8)
     config = GrugMoeConfig.from_pretrained(path)
     state = load_file(str(path / "model.safetensors"))
     torch.manual_seed(23)
