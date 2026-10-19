@@ -217,11 +217,19 @@ window and a 2,048-token per-turn output cap in
 `cloud/iris/configs/pi_{teacher_trace,verifier_grpo}_smoke.yaml`. Their derived
 trainer and agent input allowance is 6,144 tokens; the previous 2,048-token
 window left only 564 slots after the observed 1,484-token first prompt. This
-change has **not** been exercised in a new evaluation or GPU optimizer job.
-Do not reuse the old 256-/512-token launch YAMLs or their attempt IDs/output
-prefixes; ensure fresh launch configs inherit the preset budget without a
-smaller ad-hoc override. The larger budget does not repair corrupt in-memory
-evidence, separate-verifier timeouts, or all-zero GRPO advantage.
+change has **not** reached a successful evaluation or GPU optimizer job.
+A fresh 8,192/2,048 step-1 eval (`eval-attempt-23-step1`, Iris job
+`/zack/pi-beta-student-eval-step1-20261019-r4`) failed before graded results:
+Harbor rejected a malformed numbered in-memory Pi evidence chunk. Do not
+count it as an evaluation. A separate disposable Daytona/CPU check under the
+same nominal limits completed one scripted 1,401-token student response with
+sampled logprobs and valid capture; it does not establish multi-turn GPU
+transport reliability. The matched step-0 GPU eval was **not** launched after
+this failure. Do not reuse the old 256-/512-token launch YAMLs or any spent
+attempt IDs/output prefixes; ensure fresh launch configs inherit the preset
+budget without a smaller ad-hoc override. The larger budget does not repair
+corrupt in-memory evidence, separate-verifier timeouts, or all-zero GRPO
+advantage.
 
 Next smoke gates, in order:
 
