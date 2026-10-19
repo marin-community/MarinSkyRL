@@ -133,7 +133,7 @@ def _align_kv_heads(value, num_q_heads):
 
 def _xsa_head_gate(attn_output, value_states, gate_logits, head_dim):
     """``GrugMoeAttention.apply_xsa`` (``grugmoe.py:971-990``) after the head gate's GEMM, whose fp32 output the
-    engine's ``InvariantLinear`` rounds to bf16 (``decode_invariant/model.py:27``)."""
+    engine's ``GrugRowInvariantLinearMethod.apply`` rounds to bf16."""
     num_tokens, num_heads = gate_logits.shape
     value_heads = value_states.view(num_tokens, -1, head_dim)
     aligned_value = _align_kv_heads(value_heads, num_heads)

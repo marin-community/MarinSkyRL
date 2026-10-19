@@ -1,5 +1,5 @@
-"""vLLM's attention, fused-MoE, expert-selection and log-probability kernels, called as a decode-invariant engine
-calls them."""
+"""vLLM's attention, gate GEMM, fused-MoE, expert-selection and log-probability kernels, called as a
+decode-invariant engine calls them."""
 
 from __future__ import annotations
 
@@ -12,6 +12,9 @@ HOPPER_COMPUTE_CAPABILITY_MAJOR = 9
 # ``expert_outputs`` addresses each expert's weights in units of this many elements from the lowest-addressed one, a
 # stride that Triton specializes as divisible by 16, as it does the stride of vLLM's own stacked expert weights.
 EXPERT_OFFSET_ELEMENTS = 16
+# The fused-MoE tile of ``expert_outputs``. A decode-invariant engine runs vLLM's default tile for each step; at Grug's
+# expert shapes on H100, every tile tested gives the same values.
+EXPERT_TILE = {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 8, "SPLIT_K": 1}
 
 
 def require_hopper_gpu() -> None:
@@ -169,6 +172,14 @@ def topk_experts(biased_logits: torch.Tensor, top_k: int) -> torch.Tensor:
     return torch.topk(biased_logits, k=top_k + 1, dim=-1).indices[:, :top_k]
 
 
+def row_invariant_gemm(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """vLLM GrugMoE's router and head-gate GEMM: ``x @ weight.T`` in fp32, each row's result depending on that row
+    and ``weight`` alone."""
+    from vllm.model_executor.models.grugmoe import grug_row_invariant_gemm  # noqa: PLC0415 - GPU-only extra
+
+    return grug_row_invariant_gemm(x, weight)
+
+
 def token_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Tensor:
     """Model runner V2's log-probability (``compute_token_logprobs``) of ``token_ids[i]`` under row ``i`` of the
     ``[rows, vocab]`` ``logits``; each row's value depends on that row alone."""
@@ -268,10 +279,6 @@ def expert_outputs(
         moe_align_block_size,
     )
 
-    from skyrl_train.inference_engines.vllm.decode_invariant.model import (  # noqa: PLC0415 - GPU-only extra
-        INVARIANT_MOE_CONFIG,
-    )
-
     rows, width = hidden.shape
     experts = len(fc1_weights)
     gate_up_width = fc1_weights[0].shape[0]
@@ -282,7 +289,7 @@ def expert_outputs(
     output = hidden.new_empty(rows, width)
     if rows == 0:
         return output
-    config = INVARIANT_MOE_CONFIG
+    config = EXPERT_TILE
     counts = torch.as_tensor(tokens_per_expert, dtype=torch.long, device="cpu")
     expert_of_row = torch.repeat_interleave(torch.arange(experts, dtype=torch.int32), counts)
     expert_of_row = expert_of_row.pin_memory().to(hidden.device, non_blocking=True).view(rows, 1)

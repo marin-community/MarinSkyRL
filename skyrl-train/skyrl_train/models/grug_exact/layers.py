@@ -13,7 +13,6 @@ from megatron.core.transformer.moe.shared_experts import SharedExpertMLP
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_layer import TransformerLayer
 
-from skyrl_train.inference_engines.vllm.decode_invariant.gemm import invariant_gemm
 from skyrl_train.models.grug_exact import engine_regions as regions
 from skyrl_train.models.grug_exact.context import ExactForward, ResidualSum
 from skyrl_train.models.grug_exact.ep_combine import ep_combine
@@ -26,7 +25,12 @@ from skyrl_train.models.grug_exact.reference_kernels import (
     swiglu_value,
     xsa_head_gate_value,
 )
-from skyrl_train.models.grug_exact.vllm_kernels import expert_outputs, fa3_attention_sbhd, topk_experts
+from skyrl_train.models.grug_exact.vllm_kernels import (
+    expert_outputs,
+    fa3_attention_sbhd,
+    row_invariant_gemm,
+    topk_experts,
+)
 from skyrl_train.models.grug_megatron import GrugGatedRMSNorm, GrugSelfAttention, GrugTopKRouter
 
 
@@ -162,7 +166,7 @@ class ExactSelfAttention(GrugSelfAttention):
         )
         rows = hidden_states.reshape(-1, hidden_states.shape[-1])
         # The engine reads the fp32 gate logits as they are: Inductor fuses the sigmoid into the XSA kernel.
-        gate = invariant_gemm(rows, self.attn_gate.weight).view(*hidden_states.shape[:-1], -1)
+        gate = row_invariant_gemm(rows, self.attn_gate.weight).view(*hidden_states.shape[:-1], -1)
         gate = logits_value(gate, hidden_states, self.attn_gate.weight)
         xsa = regions.xsa_head_gate(attention, value.flatten(-2), gate, head_dim)
         gated = xsa_head_gate_value(xsa, attention, value, gate, head_dim)
@@ -197,7 +201,7 @@ class ExactTopKRouter(GrugTopKRouter):
             raise ValueError("the invariant router GEMM multiplies the bf16 router input by the bf16 router weight")
 
     def gating(self, input: torch.Tensor) -> torch.Tensor:
-        value = invariant_gemm(input.reshape(-1, input.shape[-1]), self.weight)
+        value = row_invariant_gemm(input.reshape(-1, input.shape[-1]), self.weight)
         return logits_value(value.view(*input.shape[:-1], value.shape[-1]), input, self.weight)
 
     def select_topk(self, biased_logits: torch.Tensor) -> torch.Tensor:
