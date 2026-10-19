@@ -163,6 +163,23 @@ teacher-trace SFT optimizer step**, not student improvement, separate student
 evaluation, live DAgger or a physical verifier GRPO group. No W&B URL appeared
 in the run logs; don't infer a logged W&B run from this smoke.
 
+Student evaluation preparation (Oct 19): a separate four-GPU checkpoint-export job
+`/zack/pi-beta-sft-export-20261019-n` completed and saved the step-1 HF
+weights **and tokenizer** at
+`s3://marin-us-east-02a/MarinFold/pi-scenarios-shared-smoke-20261015/output/eval-attempt-14/exports/global_step_1/policy/`
+(manifest identity `sha256:82f44ae265ddbe8185d6a5343f65e7e9131710719a0b8b248642a315bcef087e`).
+A separate eight-task `heldout-eval-v2` graded pack was staged under the same
+regional bucket; none of its task IDs occurs in the SFT training pack.
+The first student-only evaluation used an unsupported shared shell-verifier
+mode and failed. The next step-1 evaluation (`eval-attempt-17-step1`) reported
+Iris success and processed eight rows, **but all eight trials failed before
+Pi sampled a token**: the evaluation-only runner supplied `global_step=None`
+to the installed-agent policy-step lease. The paired step-0 job was canceled.
+Do not report the all-zero aggregate as student accuracy or learning. The
+follow-up uses the standard evaluation runner's step-0 lease, explicit
+sampled-token logprobs in evaluation sampling, and a fail-closed scored-coverage
+check. Fresh job IDs and output prefixes are required to retry both models.
+
 Next smoke gates, in order:
 
 1. Independently load the saved step-1 student checkpoint and run student-only

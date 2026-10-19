@@ -1,5 +1,7 @@
 """Fail-closed Pi preset, installed-agent and training-objective binding."""
 
+from collections.abc import Mapping
+
 from omegaconf import DictConfig, OmegaConf
 
 from marinskyrl.distillation import (
@@ -44,6 +46,8 @@ def validate_pi_objective_config(cfg: DictConfig) -> None:
             raise ValueError("Pi student execution must identify the served student model")
         if cfg.generator.sampling_params.logprobs != 0:
             raise ValueError("Pi student execution requires sampled-token logprobs from the local inference engine")
+    if cfg.trainer.eval_interval > 0 and cfg.generator.eval_sampling_params.logprobs != 0:
+        raise ValueError("Pi student evaluation requires sampled-token logprobs from the local inference engine")
     if cfg.trainer.step_wise_training:
         raise ValueError("Pi scenarios require whole-trial training, not step-wise training")
     algorithm = cfg.trainer.algorithm
@@ -86,6 +90,15 @@ def validate_pi_objective_config(cfg: DictConfig) -> None:
             raise ValueError("Pi student distillation requires a separate graded task-verifier outcome")
     if algorithm.dynamic_sampling.type is not None:
         raise ValueError("Pi scenarios do not support dynamic reward-based sampling")
+
+
+def validate_pi_evaluation_results(cfg: DictConfig, metrics: Mapping[str, float]) -> None:
+    """Reject a Pi evaluation when any physical task lacks a verifier result."""
+    if OmegaConf.select(cfg, "scenario.preset") is None:
+        return
+    attempted = metrics.get("eval/all/num_attempted")
+    if not attempted or metrics.get("eval/all/num_scored") != attempted:
+        raise ValueError("Pi student evaluation requires a task-verifier score for every attempted trial")
 
 
 def validate_pi_training_config(cfg: DictConfig) -> None:

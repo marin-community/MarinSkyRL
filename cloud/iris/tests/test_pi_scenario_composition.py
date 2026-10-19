@@ -9,6 +9,7 @@ from cloud.iris.launch_config import LaunchTopology
 from cloud.iris.rl_config_translation import compose_skyrl_config, parse_rl_config
 from cloud.iris.role_plan import ModelRoleKind, RoleExecution, derive_num_nodes, derive_role_plan
 from omegaconf import OmegaConf
+from skyrl_train.config.pi_training import validate_pi_evaluation_results
 
 
 BASE_CONFIG = Path(__file__).resolve().parents[1] / "configs/qwen_megatron_smoke.yaml"
@@ -56,6 +57,28 @@ def test_pi_student_preset_rejects_missing_sampled_vllm_scores(tmp_path):
     path.write_text(yaml.safe_dump(raw))
     with pytest.raises(ValueError, match="sampled-token logprobs"):
         _compose(path)
+
+
+def test_pi_student_evaluation_requires_sampled_vllm_scores(tmp_path):
+    raw, path = _recipe(tmp_path, "verifier_grpo_base")
+    raw["trainer"].update(eval_interval=1, evaluation_runner="harbor")
+    raw["data"]["val_data"] = ["/tmp/pi-eval-tasks"]
+    raw["generator"]["eval_sampling_params"] = {"logprobs": 0}
+    path.write_text(yaml.safe_dump(raw))
+    assert _compose(path).generator.eval_sampling_params.logprobs == 0
+
+    raw["generator"]["eval_sampling_params"]["logprobs"] = None
+    path.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ValueError, match="student evaluation requires sampled-token logprobs"):
+        _compose(path)
+
+
+def test_pi_student_evaluation_rejects_missing_verifier_outcomes(tmp_path):
+    _, path = _recipe(tmp_path, "verifier_grpo_base")
+    cfg = _compose(path)
+    with pytest.raises(ValueError, match="score for every attempted trial"):
+        validate_pi_evaluation_results(cfg, {"eval/all/num_attempted": 8.0, "eval/all/num_scored": 0.0})
+    validate_pi_evaluation_results(cfg, {"eval/all/num_attempted": 8.0, "eval/all/num_scored": 8.0})
 
 
 def test_teacher_preset_selects_ungraded_sft_and_independent_source(tmp_path):
