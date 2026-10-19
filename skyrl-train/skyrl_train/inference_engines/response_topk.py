@@ -12,6 +12,7 @@ import numpy as np
 # These fields travel only over the native Python/Ray chat boundary.
 CHAT_TOPK_WIDTH_KEY = "response_topk_width"
 CHOICE_TOPK_KEY = "response_topk"
+CHAT_LOGPROB_FLOOR = -9999.0
 
 
 class FlatResponseLogprobs(Protocol):
@@ -27,7 +28,9 @@ class ResponseTopK(NamedTuple):
     topk_logprobs: np.ndarray
 
 
-def _flat_response_arrays(flat: FlatResponseLogprobs, response_ids: list[int], top_k: int):
+def _flat_response_arrays(
+    flat: FlatResponseLogprobs, response_ids: list[int], top_k: int, *, minimum_logprob: float | None = None
+):
     stride = top_k + 1
     starts = np.arange(len(response_ids), dtype=np.int64) * stride
     if (
@@ -40,6 +43,8 @@ def _flat_response_arrays(flat: FlatResponseLogprobs, response_ids: list[int], t
         raise ValueError("vLLM flat response logprobs do not match the requested candidate width")
     ids = np.asarray(flat.token_ids, dtype=np.int64).reshape(-1, stride)
     scores = np.asarray(flat.logprobs, dtype=np.float32).reshape(-1, stride)
+    if minimum_logprob is not None:
+        scores = np.maximum(scores, minimum_logprob)
     if not np.array_equal(ids[:, 0], response_ids):
         raise ValueError("vLLM flat sampled token IDs do not match the response")
     if np.any(ids < 0) or not np.isfinite(scores).all() or np.any(scores > 0):
@@ -88,7 +93,9 @@ def select_flat_chat_response_topk(flat: FlatResponseLogprobs, response_ids: lis
     entries, including the sampled token. When that token is outside the
     head, the final natural candidate occupies the hidden display slot.
     """
-    ids, scores = _flat_response_arrays(flat, response_ids, top_k + 1)
+    # The pinned chat formatter floors both sampled and head scores before
+    # our native client sorts them. Flooring can create token-ID ties.
+    ids, scores = _flat_response_arrays(flat, response_ids, top_k + 1, minimum_logprob=CHAT_LOGPROB_FLOOR)
     duplicate = np.any(ids[:, :1] == ids[:, 1:], axis=1)
     order_scores = scores.copy()
     order_scores[:, 0] = np.where(duplicate, -np.inf, scores[:, 0])

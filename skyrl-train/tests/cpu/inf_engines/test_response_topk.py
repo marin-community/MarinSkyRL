@@ -31,6 +31,23 @@ def test_flat_chat_head_matches_display_limit_for_ties_and_outside_sampled_token
         assert selected.sampled_logprobs[index] == values[0]
 
 
+@pytest.mark.parametrize("low", [-10000.0, float("-inf")])
+def test_flat_chat_head_preserves_display_floor_and_its_token_id_ties(low):
+    # A distribution concentrated on token 1 can have zero-probability head
+    # entries. Chat floors these scores before the native client orders ties.
+    flat = SimpleNamespace(
+        start_indices=[0],
+        end_indices=[4],
+        token_ids=[1, 1, 8, 4],
+        logprobs=[0.0, 0.0, low, low - 1],
+    )
+    selected = select_flat_chat_response_topk(flat, [1], 2)
+    assert selected.sampled_logprobs == [0.0]
+    np.testing.assert_array_equal(selected.topk_indices, [[1, 4]])
+    np.testing.assert_array_equal(selected.topk_logprobs, [[0.0, -9999.0]])
+    assert flat.logprobs == [0.0, 0.0, low, low - 1]
+
+
 def test_flat_capture_matches_dictionary_reference_with_duplicates_and_ties():
     ids = [[9, 2, 3, 4], [3, 2, 3, 4], [1, 8, 4, 6], [6, 8, 4, 6]]
     scores = [[-7, -0.2, -1.2, -2.2], [-1.2, -0.2, -1.2, -2.2], [-2, -2, -2, -2], [-2, -2, -2, -2]]
