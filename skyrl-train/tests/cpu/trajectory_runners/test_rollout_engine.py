@@ -87,6 +87,7 @@ class ReplayClient:
             "student_topk_indices": [[[tokens[0], 50]]],
             "behavior_topk_logprobs": [[[-0.5, -2.0]]],
             "routed_experts": [np.asarray([[[index + 1, 2]]], dtype=np.uint8)],
+            "engine_dp_ranks": [1 - index % 2],
         }
 
 
@@ -242,6 +243,7 @@ async def test_native_answer_returns_trainable_grade_and_exact_evidence(answer, 
     np.testing.assert_allclose(output["rollout_logprobs"][0], [-0.5])
     np.testing.assert_array_equal(output["student_topk_indices"][0], [[20, 50]])
     np.testing.assert_array_equal(output["rollout_routed_experts"][0], [[[1, 2]]])
+    assert output["rollout_engine_dp_ranks"] == [1]
     assert output["trajectory_ids"] == [TrajectoryID("task", 0)]
     assert output["teacher_route_keys"] == ["math"]
     assert output["data_sources"] == ["fixture"]

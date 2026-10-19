@@ -936,7 +936,7 @@ async def test_chat_completion_retry_resends_original_when_no_tokens_generated_y
 
     # Since finish_reason != abort on the second call and base_response was None,
     # client should return the second response directly (no accumulation)
-    assert out == engines[0].responses[1]
+    assert out == {**engines[0].responses[1], "engine_dp_rank": 0}
 
 
 @pytest.mark.asyncio
@@ -977,7 +977,7 @@ async def test_chat_completion_accepts_tool_call_response_without_text_content()
         "headers": {},
     }
 
-    assert await client.chat_completion(request) == response
+    assert await client.chat_completion(request) == {**response, "engine_dp_rank": 0}
 
 
 # -------------------------------------------
@@ -1221,7 +1221,7 @@ async def test_generate_retry_no_gen_finish():
     assert first_call["sampling_params"]["max_tokens"] == 16
     assert second_call["sampling_params"]["max_tokens"] == 16
 
-    assert out == {**engines[0].responses[1], "prompt_logprobs": None}
+    assert out == {**engines[0].responses[1], "prompt_logprobs": None, "engine_dp_ranks": [0]}
 
 
 # -------------------------------------------
