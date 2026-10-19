@@ -26,10 +26,8 @@ from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.utils import initialize_ray
 from tests.gpu.grug_serving import rank0_validation_snapshot
 from tests.gpu.router_replay_fixtures import random_unique_routes
+from tests.gpu.grug_tiny_checkpoint import TOY_SHAPE, write_tiny_checkpoint
 from tests.gpu.test_grug_megatron import (
-    NUM_EXPERTS,
-    NUM_LAYERS,
-    _write_tiny_checkpoint,
     RESPONSE_LENGTH,
     _config,
     _padded_batch,
@@ -49,7 +47,7 @@ PARAMETER_NAMES = [
 def _replay_config(tmp_path, *, packing: bool):
     model_path = tmp_path / "model"
     model_path.mkdir()
-    _write_tiny_checkpoint(model_path, num_experts_per_tok=TOPK)
+    write_tiny_checkpoint(model_path, num_experts_per_tok=TOPK)
     cfg = _config(str(model_path), world_size=1, pp=1, ep=1)
     cfg.trainer.use_sample_packing = packing
     cfg.trainer.policy.megatron_config.moe_router_replay = True
@@ -59,19 +57,21 @@ def _replay_config(tmp_path, *, packing: bool):
 def _routed_batch(pad_token_id: int, *, routes: str = "random", seed: int = 29) -> TrainingInputBatch:
     batch = _padded_batch(pad_token_id)
     generator = torch.Generator().manual_seed(seed)
-    shape = (batch["sequences"].shape[0], RESPONSE_LENGTH, NUM_LAYERS, TOPK)
+    shape = (batch["sequences"].shape[0], RESPONSE_LENGTH, TOY_SHAPE["num_hidden_layers"], TOPK)
 
     if routes == "random":
-        rollout_routed_experts = random_unique_routes(shape, NUM_EXPERTS, generator=generator)
+        rollout_routed_experts = random_unique_routes(shape, TOY_SHAPE["num_local_experts"], generator=generator)
         rollout_routed_experts[1] = 0  # one sample with fully-lost capture routes natively
     elif routes == "sentinel":
         rollout_routed_experts = torch.zeros(shape, dtype=torch.long)
     elif routes == "wrong_layers":
         rollout_routed_experts = random_unique_routes(
-            (*shape[:2], NUM_LAYERS - 1, TOPK), NUM_EXPERTS, generator=generator
+            (*shape[:2], TOY_SHAPE["num_hidden_layers"] - 1, TOPK), TOY_SHAPE["num_local_experts"], generator=generator
         )
     elif routes == "wrong_response":
-        rollout_routed_experts = random_unique_routes(shape, NUM_EXPERTS, generator=generator)[:, :-1]
+        rollout_routed_experts = random_unique_routes(shape, TOY_SHAPE["num_local_experts"], generator=generator)[
+            :, :-1
+        ]
     else:
         raise ValueError(routes)
     batch["rollout_routed_experts"] = rollout_routed_experts.to(torch.int32)
