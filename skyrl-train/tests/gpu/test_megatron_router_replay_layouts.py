@@ -45,10 +45,8 @@ from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.utils import initialize_ray
 from tests.gpu.grug_gpu_gates import require_hoppers
 from tests.gpu.router_replay_fixtures import random_unique_routes
+from tests.gpu.grug_tiny_checkpoint import TOY_SHAPE, write_tiny_checkpoint
 from tests.gpu.test_grug_megatron import (
-    NUM_EXPERTS,
-    NUM_LAYERS,
-    _write_tiny_checkpoint,
     RESPONSE_LENGTH,
     _config,
     _padded_batch,
@@ -56,6 +54,8 @@ from tests.gpu.test_grug_megatron import (
 )
 from tests.gpu.utils import get_available_gpus, init_worker_with_type
 
+NUM_EXPERTS = TOY_SHAPE["num_local_experts"]
+NUM_LAYERS = TOY_SHAPE["num_hidden_layers"]
 TOPK = 2
 LOGPROB_MAX_ABS_TOLERANCE = 2e-1
 LOGPROB_MEAN_ABS_TOLERANCE = 3e-2
@@ -75,7 +75,7 @@ def _layout_config(tmp_path, layout) -> tuple:
     _, world_size, tp, pp, ep, cp, packing = layout
     model_path = tmp_path / "model"
     model_path.mkdir(parents=True)
-    _write_tiny_checkpoint(model_path, num_experts_per_tok=TOPK, vocab_size_multiple=2)
+    write_tiny_checkpoint(model_path, num_experts_per_tok=TOPK, vocab_size_multiple=2)
     cfg = _config(str(model_path), world_size=world_size, pp=pp, ep=ep)
     cfg.trainer.use_sample_packing = packing
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
