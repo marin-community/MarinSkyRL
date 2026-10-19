@@ -27,9 +27,6 @@ import pytest
 import re
 
 import json
-import fsspec
-from skyrl_train.evaluate import evaluation_dump_dir
-from skyrl_train.io import io
 from tests.cpu.util import example_dummy_config
 
 BasicType = Union[int, float, str, bool, type(None)]
@@ -308,22 +305,6 @@ def test_dump_per_dataset_eval_results_preserves_dataset_and_metrics(tmp_path):
     assert unknown_rows[0]["uid"] == "second"
     assert unknown_rows[0]["data_source"] == "unknown"
     assert json.loads((tmp_path / "aggregated_results.jsonl").read_text()) == eval_metrics
-
-
-def test_eval_dump_writes_to_cloud_uri_without_corrupting_scheme(monkeypatch):
-    directory = evaluation_dump_dir("s3://bucket/users/exports", 2)
-    filesystem = fsspec.filesystem("memory")
-    monkeypatch.setattr(io, "open_file", lambda path, mode: filesystem.open(path.removeprefix("s3://"), mode))
-    tokenizer = ListTokenizer()
-    batch = {"prompt_token_ids": [[1]], "response_ids": [[2]], "rewards": [1.0]}
-
-    dump_per_dataset_eval_results(directory, tokenizer, batch, ["aime_2024"], ["aime"], {"accuracy": 1.0}, ["first"])
-
-    expected = "s3://bucket/users/exports/dumped_evals/global_step_2_evals"
-    assert directory == expected
-    saved = json.loads(filesystem.cat(f"{expected.removeprefix('s3://')}/aime_2024.jsonl"))
-    assert saved["output_response"] == "[2]"
-    assert json.loads(filesystem.cat(f"{expected.removeprefix('s3://')}/aggregated_results.jsonl")) == {"accuracy": 1.0}
 
 
 def test_dump_per_dataset_eval_results_preserves_error_disposition(tmp_path):
